@@ -1,0 +1,213 @@
+# ADOS Drone Agent Configuration
+# Copy to /etc/ados/config.yaml and customize
+
+# =============================================================================
+# Agent Identity
+# =============================================================================
+agent:
+  # Unique device ID (auto-generated on first boot if empty)
+  device_id: ""
+  # Human-readable name for this drone
+  name: "my-drone"
+  # DroneNet tier (auto-detected from hardware if "auto")
+  # Options: auto, tier1, tier2, tier3, tier4
+  tier: "auto"
+
+# =============================================================================
+# Flight Controller Connection
+# =============================================================================
+mavlink:
+  # Serial port for FC connection (auto-detected if empty)
+  # Common: /dev/ttyAMA0 (Pi UART), /dev/ttyACM0 (USB), /dev/ttyS0
+  serial_port: ""
+  baud_rate: 57600
+  # MAVLink system ID for this companion computer
+  system_id: 1
+  component_id: 191
+  # Enable MAVLink 2 signing (recommended for production)
+  signing:
+    enabled: false
+    key: ""
+  # Forwarding endpoints (GCS, cloud, custom)
+  endpoints:
+    - type: websocket
+      port: 8765
+      enabled: true
+    - type: udp
+      host: "127.0.0.1"
+      port: 14550
+      enabled: false
+
+# =============================================================================
+# Video Pipeline
+# =============================================================================
+video:
+  # Video link mode: wfb (WFB-ng), rtsp, disabled
+  mode: "wfb"
+  wfb:
+    # WiFi adapter interface (auto-detected if empty)
+    interface: ""
+    # Channel (1-14 for 2.4GHz, 36-165 for 5GHz)
+    channel: 149
+    # TX power in dBm (check local regulations)
+    tx_power: 25
+    # FEC ratio (data:recovery)
+    fec_k: 8
+    fec_n: 12
+  camera:
+    # Camera source: csi, usb, rtsp_url
+    source: "csi"
+    # Encoding: h264, h265 (h265 requires hardware support)
+    codec: "h264"
+    width: 1280
+    height: 720
+    fps: 30
+    bitrate_kbps: 4000
+  recording:
+    enabled: false
+    path: "/var/ados/recordings"
+    max_duration_minutes: 30
+
+# =============================================================================
+# Network and Connectivity
+# =============================================================================
+network:
+  # WiFi client mode (connect to existing network)
+  wifi_client:
+    enabled: false
+    ssid: ""
+    password: ""
+  # Cellular modem
+  cellular:
+    enabled: false
+    apn: ""
+  # Hotspot mode (create access point for direct GCS connection)
+  hotspot:
+    enabled: true
+    ssid: "ADOS-{device_id}"
+    password: "ados1234"
+    channel: 6
+
+# =============================================================================
+# Server Connection
+# =============================================================================
+server:
+  # Deployment model: cloud, self_hosted, hybrid
+  mode: "cloud"
+  # Altnautica cloud (default)
+  cloud:
+    url: "https://api.altnautica.com"
+    mqtt_broker: "mqtt.altnautica.com"
+    mqtt_port: 8883
+  # Self-hosted server (set mode to "self_hosted" or "hybrid")
+  self_hosted:
+    url: ""
+    mqtt_broker: ""
+    mqtt_port: 8883
+    api_key: ""
+  # Telemetry publish rate (Hz)
+  telemetry_rate: 2
+  # Heartbeat interval (seconds)
+  heartbeat_interval: 5
+
+# =============================================================================
+# Security
+# =============================================================================
+security:
+  # TLS for all connections
+  tls:
+    enabled: true
+    # Path to device certificate (auto-generated at enrollment)
+    cert_path: "/etc/ados/certs/device.crt"
+    key_path: "/etc/ados/certs/device.key"
+    ca_path: "/etc/ados/certs/ca.crt"
+  # WireGuard tunnel for remote management
+  wireguard:
+    enabled: false
+    config_path: "/etc/wireguard/ados.conf"
+  # REST API authentication
+  api:
+    # API key for local REST API access
+    api_key: ""
+    # Enable CORS for browser access
+    cors_enabled: true
+    cors_origins: ["http://localhost:3000", "https://command.altnautica.com"]
+
+# =============================================================================
+# Suite Runtime
+# =============================================================================
+suites:
+  # Directory for installed suite manifests
+  manifest_dir: "/etc/ados/suites"
+  # Active suite (empty for none)
+  active: ""
+  # ROS2 workspace path
+  ros2_workspace: "/opt/ados/ros2_ws"
+
+# =============================================================================
+# Scripting
+# =============================================================================
+scripting:
+  # Text command protocol
+  text_commands:
+    enabled: true
+    udp_port: 8889
+    websocket_port: 8890
+  # Python script executor
+  scripts:
+    enabled: true
+    script_dir: "/var/ados/scripts"
+    max_concurrent: 3
+  # REST API
+  rest_api:
+    enabled: true
+    host: "0.0.0.0"
+    port: 8080
+
+# =============================================================================
+# OTA Updates
+# =============================================================================
+ota:
+  # Update channel: stable, beta, nightly
+  channel: "stable"
+  # Auto-check interval (hours, 0 to disable)
+  check_interval: 24
+  # Auto-install updates
+  auto_install: false
+  # Update server URL
+  server: "https://updates.altnautica.com"
+
+# =============================================================================
+# Logging
+# =============================================================================
+logging:
+  # Log level: debug, info, warning, error
+  level: "info"
+  # Max log size before rotation (MB)
+  max_size_mb: 50
+  # Number of rotated logs to keep
+  keep_count: 5
+  # Flight log directory
+  flight_log_dir: "/var/ados/logs/flights"
+
+# =============================================================================
+# Swarm (Tier 4 only)
+# =============================================================================
+swarm:
+  enabled: false
+  # Mesh radio interface (LoRa)
+  lora:
+    interface: ""
+    frequency: 915000000
+    bandwidth: 125000
+    spreading_factor: 7
+  # WiFi Direct for high-bandwidth peer data
+  wifi_direct:
+    enabled: false
+    interface: ""
+  # Swarm role: auto, leader, follower
+  role: "auto"
+  # Formation default: line, v, grid, circle
+  default_formation: "line"
+  # Default spacing (meters)
+  default_spacing: 10
