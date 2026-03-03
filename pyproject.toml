@@ -1,0 +1,79 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "ados-drone-agent"
+version = "0.1.0"
+description = "ADOS Drone Agent — Software-defined drone network agent"
+readme = "README.md"
+license = "GPL-3.0-or-later"
+requires-python = ">=3.11"
+authors = [
+    { name = "Altnautica", email = "engineering@altnautica.com" }
+]
+keywords = ["drone", "mavlink", "ardupilot", "companion-computer", "fleet-management"]
+classifiers = [
+    "Development Status :: 1 - Planning",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering",
+]
+
+dependencies = [
+    # MAVLink
+    # "pymavlink>=2.4.41",
+
+    # REST API
+    # "fastapi>=0.109.0",
+    # "uvicorn[standard]>=0.27.0",
+
+    # MQTT
+    # "paho-mqtt>=2.0.0",
+
+    # ROS2 (installed via system package manager, not pip)
+    # "rclpy",
+
+    # Utilities
+    # "pyyaml>=6.0",
+    # "pydantic>=2.5.0",
+    # "click>=8.1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4.0",
+    "pytest-asyncio>=0.23.0",
+    "ruff>=0.2.0",
+    "mypy>=1.8.0",
+    "black>=24.1.0",
+]
+
+[project.urls]
+Homepage = "https://altnautica.com/drone-agent"
+Repository = "https://github.com/altnautica/ADOSDroneAgent"
+Documentation = "https://docs.altnautica.com/drone-agent"
+Issues = "https://github.com/altnautica/ADOSDroneAgent/issues"
+
+[project.scripts]
+ados-agent = "ados.core.main:main"
+
+[project.entry-points."ados.plugins"]
+# Plugin entry points will be registered here
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
