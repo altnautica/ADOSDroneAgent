@@ -51,8 +51,8 @@ def auto_detect_baud(port: str) -> int:
             if msg:
                 log.info("baud_detected", baud=baud, port=port)
                 return baud
-        except Exception:
-            pass
+        except Exception as e:
+            log.debug("baud_probe_failed", baud=baud, port=port, error=str(e))
     log.warning("baud_detection_failed", port=port, fallback=57600)
     return 57600
 
