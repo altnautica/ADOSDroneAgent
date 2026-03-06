@@ -5,6 +5,52 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
+from pymavlink import mavutil
+
+# ArduCopter custom_mode -> mode name mapping
+_COPTER_MODES: dict[int, str] = {
+    0: "STABILIZE", 1: "ACRO", 2: "ALT_HOLD", 3: "AUTO",
+    4: "GUIDED", 5: "LOITER", 6: "RTL", 7: "CIRCLE",
+    9: "LAND", 11: "DRIFT", 13: "SPORT", 14: "FLIP",
+    15: "AUTOTUNE", 16: "POSHOLD", 17: "BRAKE", 18: "THROW",
+    19: "AVOID_ADSB", 20: "GUIDED_NOGPS", 21: "SMART_RTL",
+    22: "FLOWHOLD", 23: "FOLLOW", 24: "ZIGZAG", 25: "SYSTEMID",
+    26: "AUTOROTATE", 27: "AUTO_RTL",
+}
+
+# ArduPlane custom_mode -> mode name mapping
+_PLANE_MODES: dict[int, str] = {
+    0: "MANUAL", 1: "CIRCLE", 2: "STABILIZE", 3: "TRAINING",
+    4: "ACRO", 5: "FBWA", 6: "FBWB", 7: "CRUISE",
+    8: "AUTOTUNE", 10: "AUTO", 11: "RTL", 12: "LOITER",
+    14: "AVOID_ADSB", 15: "GUIDED", 17: "QSTABILIZE",
+    18: "QHOVER", 19: "QLOITER", 20: "QLAND", 21: "QRTL",
+    22: "QAUTOTUNE", 23: "QACRO", 24: "THERMAL",
+    25: "LOITER_ALT_QLAND",
+}
+
+# ArduRover custom_mode -> mode name mapping
+_ROVER_MODES: dict[int, str] = {
+    0: "MANUAL", 1: "ACRO", 3: "STEERING", 4: "HOLD",
+    5: "LOITER", 6: "FOLLOW", 7: "SIMPLE",
+    10: "AUTO", 11: "RTL", 12: "SMART_RTL", 15: "GUIDED",
+}
+
+# MAV_TYPE -> mode map
+_MODE_MAPS: dict[int, dict[int, str]] = {
+    mavutil.mavlink.MAV_TYPE_QUADROTOR: _COPTER_MODES,
+    mavutil.mavlink.MAV_TYPE_HEXAROTOR: _COPTER_MODES,
+    mavutil.mavlink.MAV_TYPE_OCTOROTOR: _COPTER_MODES,
+    mavutil.mavlink.MAV_TYPE_HELICOPTER: _COPTER_MODES,
+    mavutil.mavlink.MAV_TYPE_TRICOPTER: _COPTER_MODES,
+    mavutil.mavlink.MAV_TYPE_COAXIAL: _COPTER_MODES,
+    mavutil.mavlink.MAV_TYPE_FIXED_WING: _PLANE_MODES,
+    mavutil.mavlink.MAV_TYPE_VTOL_FIXEDWING: _PLANE_MODES,
+    mavutil.mavlink.MAV_TYPE_VTOL_TAILSITTER: _PLANE_MODES,
+    mavutil.mavlink.MAV_TYPE_GROUND_ROVER: _ROVER_MODES,
+    mavutil.mavlink.MAV_TYPE_SURFACE_BOAT: _ROVER_MODES,
+}
+
 
 @dataclass
 class VehicleState:
@@ -85,6 +131,9 @@ class VehicleState:
             self.system_status = msg.system_status
             self.armed = bool(msg.base_mode & 128)
             self.last_heartbeat = now
+            # Map custom_mode to human-readable mode name
+            mode_map = _MODE_MAPS.get(msg.type, {})
+            self.mode = mode_map.get(msg.custom_mode, f"MODE_{msg.custom_mode}")
 
         elif msg_type == "GLOBAL_POSITION_INT":
             self.lat = msg.lat / 1e7
