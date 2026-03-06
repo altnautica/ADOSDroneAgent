@@ -5,7 +5,7 @@ from __future__ import annotations
 from fastapi import APIRouter
 
 from ados import __version__
-from ados.api.server import get_agent_app
+from ados.api.deps import get_agent_app
 
 router = APIRouter()
 

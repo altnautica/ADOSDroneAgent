@@ -5,7 +5,7 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from ados.api.server import get_agent_app
+from ados.api.deps import get_agent_app
 from ados.core.logging import get_logger
 
 log = get_logger("api.commands")

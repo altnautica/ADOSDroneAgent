@@ -75,10 +75,21 @@ async def test_proxy_client_to_fc(mock_fc):
     # Simulate incoming client data
     test_data = b"\xfd\x00\x01"
 
-    # Mock WebSocket that yields one message then closes
-    mock_ws = AsyncMock()
-    mock_ws.remote_address = ("127.0.0.1", 54321)
-    mock_ws.__aiter__ = AsyncMock(return_value=iter([test_data]))
+    # Mock WebSocket with proper async iterator
+    class FakeWs:
+        remote_address = ("127.0.0.1", 54321)
+        def __aiter__(self):
+            return self
+        def __init__(self):
+            self._items = [test_data]
+            self._idx = 0
+        async def __anext__(self):
+            if self._idx >= len(self._items):
+                raise StopAsyncIteration
+            val = self._items[self._idx]
+            self._idx += 1
+            return val
 
+    mock_ws = FakeWs()
     await proxy._handle_client(mock_ws)
     fc.send_bytes.assert_called_with(test_data)
