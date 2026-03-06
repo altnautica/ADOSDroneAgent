@@ -10,25 +10,16 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from ados import __version__
+from ados.api.deps import set_agent_app
 from ados.api.routes import commands, config, logs, params, services, status
 
 if TYPE_CHECKING:
     from ados.core.main import AgentApp
 
-# Module-level reference set by create_app
-_agent_app: AgentApp | None = None
-
-
-def get_agent_app() -> AgentApp:
-    """Get the global AgentApp instance."""
-    assert _agent_app is not None, "AgentApp not initialized"
-    return _agent_app
-
 
 def create_app(agent: AgentApp) -> FastAPI:
     """Create and configure the FastAPI application."""
-    global _agent_app
-    _agent_app = agent
+    set_agent_app(agent)
 
     app = FastAPI(
         title="ADOS Drone Agent",
