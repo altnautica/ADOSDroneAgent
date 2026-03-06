@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException
 
-from ados.api.server import get_agent_app
+from ados.api.deps import get_agent_app
 
 router = APIRouter()
 
