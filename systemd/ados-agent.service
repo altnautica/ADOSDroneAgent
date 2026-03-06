@@ -1,0 +1,34 @@
+[Unit]
+Description=ADOS Drone Agent
+Documentation=https://github.com/altnautica/ADOSDroneAgent
+After=network.target
+Wants=network.target
+
+[Service]
+Type=notify
+User=root
+Group=root
+EnvironmentFile=-/etc/ados/env
+ExecStart=/opt/ados/venv/bin/ados-agent
+WorkingDirectory=/opt/ados
+
+Restart=on-failure
+RestartSec=5
+WatchdogSec=30
+
+# Security hardening
+ProtectSystem=strict
+ReadWritePaths=/var/ados /etc/ados /dev
+ProtectHome=yes
+NoNewPrivileges=yes
+
+# Resource limits
+MemoryMax=512M
+CPUQuota=80%
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ados-agent
+
+[Install]
+WantedBy=multi-user.target
