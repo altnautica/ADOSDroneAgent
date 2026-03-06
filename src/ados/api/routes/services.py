@@ -6,7 +6,7 @@ import asyncio
 
 from fastapi import APIRouter
 
-from ados.api.server import get_agent_app
+from ados.api.deps import get_agent_app
 
 router = APIRouter()
 
