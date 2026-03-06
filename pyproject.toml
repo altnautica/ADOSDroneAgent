@@ -23,23 +23,19 @@ classifiers = [
 ]
 
 dependencies = [
-    # MAVLink
-    # "pymavlink>=2.4.41",
-
-    # REST API
-    # "fastapi>=0.109.0",
-    # "uvicorn[standard]>=0.27.0",
-
-    # MQTT
-    # "paho-mqtt>=2.0.0",
-
-    # ROS2 (installed via system package manager, not pip)
-    # "rclpy",
-
-    # Utilities
-    # "pyyaml>=6.0",
-    # "pydantic>=2.5.0",
-    # "click>=8.1.0",
+    "pymavlink>=2.4.41",
+    "fastapi>=0.109.0",
+    "uvicorn[standard]>=0.27.0",
+    "paho-mqtt>=2.0.0",
+    "pyyaml>=6.0",
+    "pydantic>=2.5.0",
+    "click>=8.1.0",
+    "websockets>=12.0",
+    "structlog>=24.0.0",
+    "pyserial>=3.5",
+    "textual>=0.89.0",
+    "psutil>=5.9.0",
+    "httpx>=0.27.0",
 ]
 
 [project.optional-dependencies]
@@ -58,6 +54,7 @@ Documentation = "https://docs.altnautica.com/drone-agent"
 Issues = "https://github.com/altnautica/ADOSDroneAgent/issues"
 
 [project.scripts]
+ados = "ados.cli.main:cli"
 ados-agent = "ados.core.main:main"
 
 [project.entry-points."ados.plugins"]

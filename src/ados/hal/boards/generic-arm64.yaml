@@ -1,0 +1,9 @@
+name: "generic-arm64"
+model_patterns: []
+default_tier: 2
+gpio_pins: []
+uart_paths:
+  - /dev/ttyACM0
+  - /dev/ttyUSB0
+  - /dev/ttyAMA0
+  - /dev/ttyS0
