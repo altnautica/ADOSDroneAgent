@@ -1,0 +1,88 @@
+"""ADOS Drone Agent TUI — Textual-based dashboard."""
+
+from __future__ import annotations
+
+from textual.app import App, ComposeResult
+from textual.binding import Binding
+from textual.widgets import Footer, Header
+
+from ados import __version__
+from ados.tui.screens.config_editor import ConfigScreen
+from ados.tui.screens.dashboard import DashboardScreen
+from ados.tui.screens.logs import LogsScreen
+from ados.tui.screens.mavlink import MavlinkScreen
+from ados.tui.screens.telemetry import TelemetryScreen
+
+
+class ADOSTui(App):
+    """ADOS Drone Agent Terminal User Interface."""
+
+    TITLE = f"ADOS Drone Agent v{__version__}"
+    CSS = """
+    Screen {
+        background: #0a0a0f;
+        color: #e0e0e0;
+    }
+    Header {
+        background: #111118;
+        color: #3a82ff;
+    }
+    Footer {
+        background: #111118;
+    }
+    DataTable {
+        background: #0f0f18;
+    }
+    DataTable > .datatable--header {
+        background: #1a1a28;
+        color: #3a82ff;
+    }
+    Static {
+        background: #0f0f18;
+        padding: 1;
+        margin: 0 1;
+    }
+    .panel-title {
+        color: #3a82ff;
+        text-style: bold;
+    }
+    .value-good {
+        color: #dff140;
+    }
+    .value-warn {
+        color: #ffaa00;
+    }
+    .value-bad {
+        color: #ff4444;
+    }
+    """
+
+    BINDINGS = [
+        Binding("d", "switch_screen('dashboard')", "Dashboard"),
+        Binding("t", "switch_screen('telemetry')", "Telemetry"),
+        Binding("m", "switch_screen('mavlink')", "MAVLink"),
+        Binding("c", "switch_screen('config')", "Config"),
+        Binding("l", "switch_screen('logs')", "Logs"),
+        Binding("q", "quit", "Quit"),
+    ]
+
+    SCREENS = {
+        "dashboard": DashboardScreen,
+        "telemetry": TelemetryScreen,
+        "mavlink": MavlinkScreen,
+        "config": ConfigScreen,
+        "logs": LogsScreen,
+    }
+
+    def compose(self) -> ComposeResult:
+        yield Header()
+        yield Footer()
+
+    def on_mount(self) -> None:
+        self.push_screen("dashboard")
+
+    def action_switch_screen(self, screen_name: str) -> None:
+        # Pop current screen and push new one
+        if self.screen_stack:
+            self.pop_screen()
+        self.push_screen(screen_name)

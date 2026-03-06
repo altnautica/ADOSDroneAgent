@@ -1,0 +1,14 @@
+name: "Raspberry Pi CM4"
+model_patterns:
+  - "Raspberry Pi Compute Module 4"
+  - "Raspberry Pi CM4"
+default_tier: 3
+gpio_pins:
+  - 2   # SDA1
+  - 3   # SCL1
+  - 14  # UART TX
+  - 15  # UART RX
+  - 18  # PWM0
+uart_paths:
+  - /dev/ttyAMA0
+  - /dev/ttyS0
