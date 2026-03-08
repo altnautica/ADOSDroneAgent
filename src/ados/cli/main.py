@@ -195,8 +195,12 @@ def wfb_status() -> None:
         click.echo(f"RSSI:     {data.get('rssi_dbm', -100)} dBm")
         click.echo(f"SNR:      {data.get('snr_db', 0):.1f} dB")
         click.echo(f"Channel:  {data.get('channel', '?')}")
-        click.echo(f"Packets:  {data.get('packets_received', 0)} rx, {data.get('packets_lost', 0)} lost")
-        click.echo(f"FEC:      {data.get('fec_recovered', 0)} recovered, {data.get('fec_failed', 0)} failed")
+        rx = data.get('packets_received', 0)
+        lost = data.get('packets_lost', 0)
+        click.echo(f"Packets:  {rx} rx, {lost} lost")
+        fec_r = data.get('fec_recovered', 0)
+        fec_f = data.get('fec_failed', 0)
+        click.echo(f"FEC:      {fec_r} recovered, {fec_f} failed")
         click.echo(f"Bitrate:  {data.get('bitrate_kbps', 0)} kbps")
 
 
@@ -215,7 +219,9 @@ def script_list() -> None:
             click.echo("No scripts running.")
             return
         for s in scripts:
-            click.echo(f"  [{s.get('state', '?')}] {s.get('script_id', '?')}: {s.get('filename', '?')}")
+            sid = s.get('script_id', '?')
+            fname = s.get('filename', '?')
+            click.echo(f"  [{s.get('state', '?')}] {sid}: {fname}")
 
 
 @script.command("run")
