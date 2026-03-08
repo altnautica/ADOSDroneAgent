@@ -1,0 +1,24 @@
+name: "NVIDIA Jetson Orin Nano"
+vendor: "NVIDIA"
+soc: "Tegra Orin"
+arch: "aarch64"
+model_patterns:
+  - "NVIDIA Jetson Orin Nano"
+  - "NVIDIA Orin Nano"
+  - "jetson-orin-nano"
+default_tier: 4
+gpio_pins:
+  - 7   # GPIO4
+  - 11  # GPIO17
+  - 12  # GPIO18
+  - 13  # GPIO27
+  - 15  # GPIO22
+uart_paths:
+  - /dev/ttyTHS0
+  - /dev/ttyTHS1
+hw_video_codecs:
+  - h264_enc
+  - h264_dec
+  - h265_enc
+  - h265_dec
+  - av1_dec
