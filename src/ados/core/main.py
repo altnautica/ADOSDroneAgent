@@ -178,17 +178,17 @@ class AgentApp:
         # Start Video Pipeline
         if self.demo:
             from ados.services.video.demo import DemoVideoPipeline
-            self._video_pipeline = DemoVideoPipeline(self.config.video)
+            self._video_pipeline = DemoVideoPipeline()
             self._start_service("video-pipeline", self._video_pipeline.run())
         else:
             from ados.services.video.pipeline import VideoPipeline
-            self._video_pipeline = VideoPipeline(self.config.video, self._vehicle_state)
+            self._video_pipeline = VideoPipeline(self.config.video)
             self._start_service("video-pipeline", self._video_pipeline.run())
 
         # Start WFB-ng Link Manager
         if self.demo:
             from ados.services.wfb.demo import DemoWfbManager
-            self._wfb_manager = DemoWfbManager(self.config.video.wfb)
+            self._wfb_manager = DemoWfbManager()
             self._start_service("wfb-link", self._wfb_manager.run())
         else:
             from ados.services.wfb.manager import WfbManager
@@ -199,12 +199,12 @@ class AgentApp:
         if self.demo:
             from ados.services.scripting.demo import DemoScriptingEngine
             self._demo_scripting = DemoScriptingEngine()
-            self._start_service("scripting", self._demo_scripting.run())
+            log.info("scripting_demo_mode", msg="Demo scripting engine active")
         else:
-            from ados.services.scripting.safety import SafetyLimits, SafetyValidator
             from ados.services.scripting.executor import CommandExecutor
-            from ados.services.scripting.text_listener import TextCommandListener
+            from ados.services.scripting.safety import SafetyLimits, SafetyValidator
             from ados.services.scripting.script_runner import ScriptRunner
+            from ados.services.scripting.text_listener import TextCommandListener
 
             safety = SafetyValidator(SafetyLimits(), self._vehicle_state)
             self._command_executor = CommandExecutor(
@@ -222,11 +222,19 @@ class AgentApp:
         # Start OTA Updater
         if self.demo:
             from ados.services.ota.demo import DemoOtaUpdater
-            self.ota_updater = DemoOtaUpdater(self.config.ota)
+            self.ota_updater = DemoOtaUpdater()
             self._start_service("ota-updater", self.ota_updater.run())
         else:
+            from ados.services.ota.checker import UpdateChecker
+            from ados.services.ota.downloader import UpdateDownloader
+            from ados.services.ota.rollback import RollbackManager
             from ados.services.ota.updater import OtaUpdater
-            self.ota_updater = OtaUpdater(self.config.ota)
+            checker = UpdateChecker(self.config.ota)
+            downloader = UpdateDownloader()
+            rollback = RollbackManager()
+            self.ota_updater = OtaUpdater(
+                self.config.ota, checker, downloader, rollback,
+            )
             self._start_service("ota-updater", self.ota_updater.run())
 
         # Health monitor loop
