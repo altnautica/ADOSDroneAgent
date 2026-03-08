@@ -45,8 +45,8 @@ _MODE_MAPS: dict[int, dict[int, str]] = {
     mavutil.mavlink.MAV_TYPE_TRICOPTER: _COPTER_MODES,
     mavutil.mavlink.MAV_TYPE_COAXIAL: _COPTER_MODES,
     mavutil.mavlink.MAV_TYPE_FIXED_WING: _PLANE_MODES,
-    mavutil.mavlink.MAV_TYPE_VTOL_FIXEDWING: _PLANE_MODES,
-    mavutil.mavlink.MAV_TYPE_VTOL_TAILSITTER: _PLANE_MODES,
+    mavutil.mavlink.MAV_TYPE_VTOL_QUADROTOR: _PLANE_MODES,
+    mavutil.mavlink.MAV_TYPE_VTOL_TILTROTOR: _PLANE_MODES,
     mavutil.mavlink.MAV_TYPE_GROUND_ROVER: _ROVER_MODES,
     mavutil.mavlink.MAV_TYPE_SURFACE_BOAT: _ROVER_MODES,
 }
