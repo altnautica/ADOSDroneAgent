@@ -113,9 +113,12 @@ class VehicleState:
     last_heartbeat: str = ""
     last_update: str = ""
 
-    # Param cache
+    # Param cache (in-memory)
     params: dict[str, float] = field(default_factory=dict)
     param_count: int = 0
+
+    # Optional persistent param cache (set externally by AgentApp)
+    param_cache: object = field(default=None, repr=False)
 
     def update_from_message(self, msg) -> None:
         """Update state from a pymavlink message."""
@@ -188,8 +191,12 @@ class VehicleState:
             self.rc_rssi = msg.rssi
 
         elif msg_type == "PARAM_VALUE":
-            self.params[msg.param_id.rstrip("\x00")] = msg.param_value
+            param_name = msg.param_id.rstrip("\x00")
+            self.params[param_name] = msg.param_value
             self.param_count = msg.param_count
+            # Persist to ParamCache if wired
+            if self.param_cache is not None:
+                self.param_cache.set(param_name, msg.param_value, getattr(msg, "param_type", 0))
 
     def to_dict(self) -> dict:
         """Serialize to dictionary for REST API."""
