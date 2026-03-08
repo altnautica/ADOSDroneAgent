@@ -21,6 +21,8 @@ SERIAL_PATTERNS = [
     "/dev/ttyAMA*",
     "/dev/ttyUSB*",
     "/dev/ttyS*",
+    "/dev/tty.usbmodem*",   # macOS
+    "/dev/tty.usbserial*",  # macOS
 ]
 
 BAUD_CANDIDATES = [921600, 115200, 57600]

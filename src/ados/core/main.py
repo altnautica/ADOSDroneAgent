@@ -17,8 +17,9 @@ log = get_logger("main")
 class AgentApp:
     """Main application orchestrator. Runs all services as asyncio tasks."""
 
-    def __init__(self, config: ADOSConfig) -> None:
+    def __init__(self, config: ADOSConfig, demo: bool = False) -> None:
         self.config = config
+        self.demo = demo
         self.health = HealthMonitor()
         self._shutdown = asyncio.Event()
         self._start_time = time.monotonic()
@@ -52,14 +53,19 @@ class AgentApp:
             self.config.agent.tier = f"tier{board.tier}"
 
         # Initialize MAVLink connection
-        from ados.services.mavlink.connection import FCConnection
         from ados.services.mavlink.state import VehicleState
-
         self._vehicle_state = VehicleState()
-        self._fc_connection = FCConnection(
-            self.config.mavlink,
-            self._vehicle_state,
-        )
+
+        if self.demo:
+            log.info("demo_mode", msg="DEMO MODE — simulated telemetry, no real FC")
+            from ados.services.mavlink.demo import DemoFCConnection
+            self._fc_connection = DemoFCConnection(self._vehicle_state)
+        else:
+            from ados.services.mavlink.connection import FCConnection
+            self._fc_connection = FCConnection(
+                self.config.mavlink,
+                self._vehicle_state,
+            )
 
         # Start FC connection task
         self._tasks.append(asyncio.create_task(
@@ -175,7 +181,6 @@ def main() -> None:
         loop.run_until_complete(app.start())
     except KeyboardInterrupt:
         app.request_shutdown()
-        loop.run_until_complete(app.start())
     finally:
         loop.close()
 

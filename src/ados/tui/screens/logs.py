@@ -62,6 +62,16 @@ class LogsScreen(Screen):
             async with httpx.AsyncClient(timeout=3.0) as client:
                 resp = await client.get(f"{API}/api/logs", params=params)
                 data = resp.json()
+        except httpx.ConnectError:
+            log_widget = self.query_one("#log-output", RichLog)
+            if self._seen_count == 0:
+                log_widget.write(
+                    "Agent not running.\n"
+                    "Start with: ados demo    (simulated)\n"
+                    "       or:  ados start   (real FC)"
+                )
+                self._seen_count = -1  # prevent repeat
+            return
         except Exception:
             return
 

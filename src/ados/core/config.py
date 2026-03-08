@@ -293,14 +293,17 @@ def load_config(path: str | Path | None = None) -> ADOSConfig:
                     raw = loaded
             break
 
-    # Load defaults.yaml if it exists
-    defaults_path = Path(__file__).parent.parent.parent.parent / "configs" / "defaults.yaml"
+    # Load defaults.yaml from package data
+    import importlib.resources
     defaults: dict[str, Any] = {}
-    if defaults_path.is_file():
-        with open(defaults_path) as f:
-            loaded = yaml.safe_load(f)
-            if isinstance(loaded, dict):
-                defaults = loaded
+    try:
+        defaults_ref = importlib.resources.files("ados.core").joinpath("defaults.yaml")
+        defaults_text = defaults_ref.read_text(encoding="utf-8")
+        loaded = yaml.safe_load(defaults_text)
+        if isinstance(loaded, dict):
+            defaults = loaded
+    except (FileNotFoundError, TypeError):
+        pass
 
     merged = _deep_merge(defaults, raw)
     return ADOSConfig(**merged)
