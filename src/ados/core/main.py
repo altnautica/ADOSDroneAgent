@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import signal
 import time
-from enum import Enum
+from enum import StrEnum
 
 from ados import __version__
 from ados.core.config import ADOSConfig, load_config
@@ -15,7 +15,7 @@ from ados.core.logging import configure_logging, get_logger
 log = get_logger("main")
 
 
-class ServiceState(str, Enum):
+class ServiceState(StrEnum):
     """Lifecycle states for managed services."""
 
     STOPPED = "stopped"
@@ -42,7 +42,12 @@ class ServiceTracker:
         self._transitions[name].append((time.monotonic(), state))
 
         if prev != state:
-            log.info("service_state_change", service=name, from_state=str(prev), to_state=state.value)
+            log.info(
+                "service_state_change",
+                service=name,
+                from_state=str(prev),
+                to_state=state.value,
+            )
 
     def get_state(self, name: str) -> ServiceState:
         """Get the current state of a service."""

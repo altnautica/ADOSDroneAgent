@@ -339,7 +339,8 @@ def diag() -> None:
         os_pretty = _safe_read("/etc/os-release")
         for line in os_pretty.splitlines():
             if line.startswith("PRETTY_NAME="):
-                click.echo(f"  Distro:        {line.split('=', 1)[1].strip('\"')}")
+                distro_name = line.split("=", 1)[1].strip('"')
+                click.echo(f"  Distro:        {distro_name}")
                 break
     click.echo(f"  Kernel:        {platform.release()}")
     click.echo(f"  Python:        {platform.python_version()}")
