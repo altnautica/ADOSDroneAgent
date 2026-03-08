@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 from datetime import datetime, timezone
 
@@ -53,6 +54,11 @@ class DemoScriptingEngine:
         # Keep last 100 entries
         if len(self._command_log) > 100:
             self._command_log = self._command_log[-100:]
+
+    async def run(self) -> None:
+        """Service loop — keeps the demo scripting engine registered as a running service."""
+        while True:
+            await asyncio.sleep(3600)
 
     async def execute(self, cmd: ParsedCommand, source: str = "text") -> str:
         """Process a command and return a Tello-style response."""

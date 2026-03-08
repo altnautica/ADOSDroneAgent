@@ -98,6 +98,11 @@ class TextCommandListener:
             except websockets.exceptions.ConnectionClosed:
                 log.info("ws_client_disconnected")
 
-        async with websockets.serve(handler, "0.0.0.0", self._config.websocket_port):
-            log.info("ws_listener_started", port=self._config.websocket_port)
+        server = await websockets.serve(handler, "0.0.0.0", self._config.websocket_port)
+        log.info("ws_listener_started", port=self._config.websocket_port)
+        try:
             await asyncio.Future()  # run forever
+        finally:
+            server.close()
+            await server.wait_closed()
+            log.info("ws_listener_stopped")

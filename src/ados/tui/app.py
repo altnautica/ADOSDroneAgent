@@ -17,6 +17,8 @@ from ados.tui.screens.telemetry import TelemetryScreen
 from ados.tui.screens.updates import UpdatesScreen
 from ados.tui.screens.video import VideoScreen
 
+_DEFAULT_API_URL = "http://localhost:8080"
+
 
 class ADOSTui(App):
     """ADOS Drone Agent Terminal User Interface."""
@@ -85,6 +87,20 @@ class ADOSTui(App):
         "config": ConfigScreen,
         "logs": LogsScreen,
     }
+
+    def __init__(self, api_url: str | None = None) -> None:
+        super().__init__()
+        if api_url is not None:
+            self.api_url = api_url
+        else:
+            # Try reading from config
+            try:
+                from ados.core.config import load_config
+                cfg = load_config()
+                port = cfg.scripting.rest_api.port
+                self.api_url = f"http://localhost:{port}"
+            except Exception:
+                self.api_url = _DEFAULT_API_URL
 
     def compose(self) -> ComposeResult:
         yield Header()

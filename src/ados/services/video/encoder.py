@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+import shlex
 import shutil
 from dataclasses import dataclass
 from enum import StrEnum
@@ -47,6 +49,26 @@ def detect_available_encoder() -> EncoderType | None:
     return None
 
 
+# Allowlist pattern for camera source paths: alphanumeric, slashes, dots, hyphens, underscores, colons
+_SAFE_SOURCE_PATTERN = re.compile(r"^[a-zA-Z0-9/_.\-:]+$")
+
+
+def _validate_source(source: str) -> str:
+    """Validate and sanitize a camera source path.
+
+    Raises:
+        ValueError: If the source contains disallowed characters.
+    """
+    if source == "-":
+        return source
+    if not _SAFE_SOURCE_PATTERN.match(source):
+        raise ValueError(
+            f"Invalid source path: {source!r}. "
+            "Only alphanumeric characters, slashes, dots, hyphens, underscores, and colons are allowed."
+        )
+    return source
+
+
 def build_encoder_command(
     config: EncoderConfig,
     source: str,
@@ -61,7 +83,12 @@ def build_encoder_command(
 
     Returns:
         Command list suitable for ``subprocess.Popen`` or ``asyncio.create_subprocess_exec``.
+
+    Raises:
+        ValueError: If the source path contains disallowed characters.
     """
+    source = _validate_source(source)
+    output = _validate_source(output)
     if config.type == EncoderType.RPICAM_VID:
         return _build_rpicam_command(config, source, output)
     if config.type == EncoderType.FFMPEG:
@@ -130,12 +157,14 @@ def _build_gstreamer_command(
 ) -> list[str]:
     """GStreamer pipeline command."""
     encoder_element = "x264enc" if config.codec in ("h264", "H264") else "x265enc"
+    safe_source = shlex.quote(source)
+    safe_output = shlex.quote(output)
     pipeline = (
-        f"v4l2src device={source} ! "
+        f"v4l2src device={safe_source} ! "
         f"video/x-raw,width={config.width},height={config.height},"
         f"framerate={config.fps}/1 ! "
         f"videoconvert ! {encoder_element} bitrate={config.bitrate_kbps} "
         f"tune=zerolatency ! "
-        f"filesink location={output}"
+        f"filesink location={safe_output}"
     )
     return ["gst-launch-1.0", "-e", *pipeline.split()]

@@ -277,11 +277,19 @@ class WfbManager:
             if self._rx_proc is not None and self._rx_proc.returncode is None:
                 tasks.append(asyncio.create_task(self._rx_proc.wait()))
 
-            if tasks:
-                done, _pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
-                # A process exited or output ended
-                for task in done:
-                    task.result()  # Propagate exceptions
+            try:
+                if tasks:
+                    done, _pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+                    # A process exited or output ended
+                    for task in done:
+                        task.result()  # Propagate exceptions
+            finally:
+                # Cancel all spawned monitoring tasks to prevent orphans
+                for task in tasks:
+                    if not task.done():
+                        task.cancel()
+                # Await cancellation so tasks clean up properly
+                await asyncio.gather(*tasks, return_exceptions=True)
 
             if not self._running:
                 break
