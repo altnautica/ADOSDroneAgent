@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import httpx
+import structlog
 from textual.app import ComposeResult
 from textual.containers import Vertical
 from textual.screen import Screen
 from textual.widgets import Static
 
-API = "http://localhost:8080"
+log = structlog.get_logger("tui.updates")
 
 
 class UpdatesScreen(Screen):
@@ -27,12 +28,17 @@ class UpdatesScreen(Screen):
         self.set_interval(5.0, self._refresh)
 
     async def _refresh(self) -> None:
+        api = self.app.api_url  # type: ignore[attr-defined]
         try:
             async with httpx.AsyncClient(timeout=3.0) as client:
-                resp = await client.get(f"{API}/api/ota")
+                resp = await client.get(f"{api}/api/ota")
                 data = resp.json()
-        except Exception:
+        except httpx.ConnectError:
             self.query_one("#version-panel", Static).update("Agent not running")
+            return
+        except Exception as exc:
+            log.warning("updates_refresh_failed", error=str(exc))
+            self.query_one("#version-panel", Static).update("Error loading data")
             return
 
         # Version and state

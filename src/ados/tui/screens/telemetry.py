@@ -5,12 +5,13 @@ from __future__ import annotations
 import math
 
 import httpx
+import structlog
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.screen import Screen
 from textual.widgets import Sparkline, Static
 
-API = "http://localhost:8080"
+log = structlog.get_logger("tui.telemetry")
 
 
 class TelemetryScreen(Screen):
@@ -42,9 +43,10 @@ class TelemetryScreen(Screen):
         self.set_interval(0.5, self._refresh)
 
     async def _refresh(self) -> None:
+        api = self.app.api_url  # type: ignore[attr-defined]
         try:
             async with httpx.AsyncClient(timeout=3.0) as client:
-                resp = await client.get(f"{API}/api/telemetry")
+                resp = await client.get(f"{api}/api/telemetry")
                 data = resp.json()
         except httpx.ConnectError:
             self.query_one("#attitude-panel", Static).update(
@@ -53,7 +55,9 @@ class TelemetryScreen(Screen):
                 "       or:  ados start   (real FC)"
             )
             return
-        except Exception:
+        except Exception as exc:
+            log.warning("telemetry_refresh_failed", error=str(exc))
+            self.query_one("#attitude-panel", Static).update("Error loading data")
             return
 
         # Attitude

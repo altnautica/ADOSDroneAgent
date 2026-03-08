@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import httpx
+import structlog
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.screen import Screen
 from textual.widgets import DataTable, Static
 
-API = "http://localhost:8080"
+log = structlog.get_logger("tui.video")
 
 
 class VideoScreen(Screen):
@@ -35,12 +36,17 @@ class VideoScreen(Screen):
         self.set_interval(2.0, self._refresh)
 
     async def _refresh(self) -> None:
+        api = self.app.api_url  # type: ignore[attr-defined]
         try:
             async with httpx.AsyncClient(timeout=3.0) as client:
-                resp = await client.get(f"{API}/api/video")
+                resp = await client.get(f"{api}/api/video")
                 data = resp.json()
-        except Exception:
+        except httpx.ConnectError:
             self.query_one("#pipeline-panel", Static).update("Agent not running")
+            return
+        except Exception as exc:
+            log.warning("video_refresh_failed", error=str(exc))
+            self.query_one("#pipeline-panel", Static).update("Error loading data")
             return
 
         # Camera table

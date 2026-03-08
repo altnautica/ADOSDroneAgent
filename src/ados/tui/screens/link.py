@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import httpx
+import structlog
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.screen import Screen
 from textual.widgets import Static
 
-API = "http://localhost:8080"
+log = structlog.get_logger("tui.link")
 
 # RSSI thresholds for color coding
 _RSSI_EXCELLENT = -50
@@ -85,13 +86,20 @@ class LinkScreen(Screen):
         self.set_interval(1.0, self._refresh)
 
     async def _refresh(self) -> None:
+        api = self.app.api_url  # type: ignore[attr-defined]
         try:
             async with httpx.AsyncClient(timeout=3.0) as client:
-                resp = await client.get(f"{API}/api/wfb")
+                resp = await client.get(f"{api}/api/wfb")
                 data = resp.json()
-        except Exception:
+        except httpx.ConnectError:
             self.query_one("#link-state", Static).update(
                 "[red]Agent not running[/red]"
+            )
+            return
+        except Exception as exc:
+            log.warning("link_refresh_failed", error=str(exc))
+            self.query_one("#link-state", Static).update(
+                "[red]Error loading data[/red]"
             )
             return
 

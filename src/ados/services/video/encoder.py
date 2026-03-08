@@ -49,7 +49,7 @@ def detect_available_encoder() -> EncoderType | None:
     return None
 
 
-# Allowlist pattern for camera source paths: alphanumeric, slashes, dots, hyphens, underscores, colons
+# Allowlist: alphanumeric, slashes, dots, hyphens, underscores, colons
 _SAFE_SOURCE_PATTERN = re.compile(r"^[a-zA-Z0-9/_.\-:]+$")
 
 
@@ -64,7 +64,8 @@ def _validate_source(source: str) -> str:
     if not _SAFE_SOURCE_PATTERN.match(source):
         raise ValueError(
             f"Invalid source path: {source!r}. "
-            "Only alphanumeric characters, slashes, dots, hyphens, underscores, and colons are allowed."
+            "Only alphanumeric, slashes, dots, hyphens,"
+            " underscores, and colons are allowed."
         )
     return source
 
