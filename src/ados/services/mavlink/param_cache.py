@@ -26,6 +26,11 @@ class ParamCache:
 
     Provides fast get/set access to FC parameters and persists them to disk
     so they survive agent restarts.
+
+    Thread-safety note: This class is designed for use within a single-threaded
+    asyncio event loop. Dict mutations (get/set) are safe under CPython's GIL,
+    and all callers (load, set, save) run on the same event loop thread. If this
+    class is ever used from multiple OS threads, a threading.Lock must be added.
     """
 
     def __init__(self, path: str | Path = DEFAULT_CACHE_PATH) -> None:

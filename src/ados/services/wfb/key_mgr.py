@@ -96,12 +96,18 @@ def _generate_with_cryptography(output_dir: Path) -> tuple[str, str]:
     tx_key = os.urandom(WFB_KEY_SIZE)
     rx_key = os.urandom(WFB_KEY_SIZE)
 
-    tx_path.write_bytes(tx_key)
-    rx_path.write_bytes(rx_key)
-
-    # Set restrictive permissions
-    tx_path.chmod(0o600)
-    rx_path.chmod(0o600)
+    # Write key files with restrictive permissions from creation (no race window).
+    # os.open with O_CREAT|O_WRONLY and mode 0o600 sets permissions atomically.
+    for key_path, key_data in [(tx_path, tx_key), (rx_path, rx_key)]:
+        fd = os.open(
+            str(key_path),
+            os.O_CREAT | os.O_WRONLY | os.O_TRUNC,
+            0o600,
+        )
+        try:
+            os.write(fd, key_data)
+        finally:
+            os.close(fd)
 
     return str(tx_path), str(rx_path)
 

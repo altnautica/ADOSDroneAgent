@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import httpx
+import structlog
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.screen import Screen
 from textual.widgets import DataTable, Static
 
-API = "http://localhost:8080"
+log = structlog.get_logger("tui.dashboard")
 
 
 class DashboardScreen(Screen):
@@ -33,18 +34,23 @@ class DashboardScreen(Screen):
         self.set_interval(1.0, self._refresh)
 
     async def _refresh(self) -> None:
+        api = self.app.api_url  # type: ignore[attr-defined]
         try:
             async with httpx.AsyncClient(timeout=3.0) as client:
-                status_resp = await client.get(f"{API}/api/status")
+                status_resp = await client.get(f"{api}/api/status")
                 status = status_resp.json()
 
-                services_resp = await client.get(f"{API}/api/services")
+                services_resp = await client.get(f"{api}/api/services")
                 services = services_resp.json()
 
-                logs_resp = await client.get(f"{API}/api/logs?limit=10")
+                logs_resp = await client.get(f"{api}/api/logs?limit=10")
                 logs = logs_resp.json()
-        except Exception:
+        except httpx.ConnectError:
             self.query_one("#health-panel", Static).update("Agent not running")
+            return
+        except Exception as exc:
+            log.warning("dashboard_refresh_failed", error=str(exc))
+            self.query_one("#health-panel", Static).update("Error loading data")
             return
 
         # Health

@@ -50,6 +50,7 @@ class VideoRecorder:
         self._current_path: str = ""
         self._recording = False
         self._start_time: float = 0.0
+        self._storage_task: asyncio.Task | None = None
 
     @property
     def recording(self) -> bool:
@@ -106,12 +107,33 @@ class VideoRecorder:
             self._current_path = filepath
             self._recording = True
             self._start_time = time.monotonic()
+            self._storage_task = asyncio.create_task(self._periodic_storage_check())
             log.info("recording_started", path=filepath)
         except FileNotFoundError:
             log.error("ffmpeg_not_found", msg="ffmpeg required for recording")
             return ""
 
         return filepath
+
+    async def _periodic_storage_check(self) -> None:
+        """Check disk usage every 30s during recording; stop if space is low."""
+        while self._recording:
+            await asyncio.sleep(30)
+            if not self._recording:
+                break
+            try:
+                usage = shutil.disk_usage(str(self._dir))
+                used_pct = (usage.used / usage.total) * 100.0
+                if used_pct > _DISK_USAGE_THRESHOLD:
+                    log.warning(
+                        "recording_storage_low",
+                        used_pct=round(used_pct, 1),
+                        threshold=_DISK_USAGE_THRESHOLD,
+                    )
+                    await self.stop_recording()
+                    break
+            except OSError:
+                pass
 
     async def stop_recording(self) -> str:
         """Stop the current recording and return the file path."""
@@ -120,6 +142,11 @@ class VideoRecorder:
             return ""
 
         filepath = self._current_path
+
+        # Cancel periodic storage check
+        if self._storage_task is not None and not self._storage_task.done():
+            self._storage_task.cancel()
+            self._storage_task = None
 
         # Send 'q' to ffmpeg stdin to trigger graceful shutdown
         if self._process.stdin:
