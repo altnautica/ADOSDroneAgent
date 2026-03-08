@@ -14,10 +14,11 @@ authors = [
 ]
 keywords = ["drone", "mavlink", "ardupilot", "companion-computer", "fleet-management"]
 classifiers = [
-    "Development Status :: 1 - Planning",
+    "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Scientific/Engineering",
 ]
 
@@ -58,6 +59,13 @@ ados-agent = "ados.core.main:main"
 
 [project.entry-points."ados.plugins"]
 # Plugin entry points will be registered here
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"ados.hal" = ["boards/*.yaml"]
+"ados.core" = ["defaults.yaml"]
 
 [tool.ruff]
 target-version = "py311"

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import platform
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -98,11 +99,19 @@ def detect_board() -> BoardInfo:
                 log.info("board_detected", board=board.name, tier=board.tier, ram_mb=ram_mb)
                 return board
 
-    # Fallback to generic
+    # Fallback — use platform info for a sensible name
     tier = detect_tier(ram_mb)
+    system = platform.system()
+    machine = platform.machine()
+    if system == "Darwin":
+        fallback_name = "macOS (dev)"
+    elif machine in ("x86_64", "AMD64"):
+        fallback_name = "generic-x86_64"
+    else:
+        fallback_name = f"generic-{machine}"
     board = BoardInfo(
-        name="generic-arm64",
-        model=model_string or "unknown",
+        name=fallback_name,
+        model=model_string or f"{system} {machine}",
         tier=tier,
         ram_mb=ram_mb,
         cpu_cores=cpu_cores,

@@ -1,0 +1,58 @@
+agent:
+  device_id: ""
+  name: "my-drone"
+  tier: "auto"
+
+mavlink:
+  serial_port: ""
+  baud_rate: 57600
+  system_id: 1
+  component_id: 191
+  signing:
+    enabled: false
+    key: ""
+  endpoints:
+    - type: websocket
+      port: 8765
+      enabled: true
+
+video:
+  mode: "disabled"
+
+network:
+  hotspot:
+    enabled: true
+
+server:
+  mode: "cloud"
+  telemetry_rate: 2
+  heartbeat_interval: 5
+
+security:
+  tls:
+    enabled: false
+  api:
+    cors_enabled: true
+
+suites:
+  manifest_dir: "/etc/ados/suites"
+  active: ""
+
+scripting:
+  rest_api:
+    enabled: true
+    host: "0.0.0.0"
+    port: 8080
+
+ota:
+  channel: "stable"
+  check_interval: 24
+  auto_install: false
+
+logging:
+  level: "info"
+  max_size_mb: 50
+  keep_count: 5
+
+swarm:
+  enabled: false
