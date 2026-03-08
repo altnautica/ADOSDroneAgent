@@ -59,6 +59,47 @@ def auto_detect_baud(port: str) -> int:
     return 57600
 
 
+def scan_for_fc(ports: list[str] | None = None, timeout: float = 3.0) -> str | None:
+    """Probe serial ports for a MAVLink heartbeat and return the first responding port.
+
+    If no ports are given, auto-discovers from SERIAL_PATTERNS. Each port is
+    tried at common baud rates (921600, 115200, 57600). Returns the first
+    port+baud combination that responds with a HEARTBEAT within `timeout` seconds,
+    or None if nothing responds.
+    """
+    if ports is None:
+        ports = []
+        for pattern in SERIAL_PATTERNS:
+            ports.extend(sorted(glob.glob(pattern)))
+
+    if not ports:
+        log.info("scan_no_ports_found")
+        return None
+
+    for port in ports:
+        for baud in BAUD_CANDIDATES:
+            try:
+                conn = mavutil.mavlink_connection(
+                    port, baud=baud, autoreconnect=False,
+                )
+                # Send our heartbeat to prompt a response
+                conn.mav.heartbeat_send(
+                    mavutil.mavlink.MAV_TYPE_ONBOARD_CONTROLLER,
+                    mavutil.mavlink.MAV_AUTOPILOT_INVALID,
+                    0, 0, 0,
+                )
+                msg = conn.recv_match(type="HEARTBEAT", blocking=True, timeout=timeout)
+                conn.close()
+                if msg:
+                    log.info("fc_scan_found", port=port, baud=baud)
+                    return port
+            except Exception as e:
+                log.debug("fc_scan_probe_failed", port=port, baud=baud, error=str(e))
+
+    log.info("fc_scan_no_response", ports_tried=len(ports))
+    return None
+
+
 class FCConnection:
     """Manages the MAVLink connection to the flight controller."""
 
