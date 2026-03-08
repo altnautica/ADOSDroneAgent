@@ -6,14 +6,14 @@ import platform
 import re
 import subprocess
 from dataclasses import dataclass
-from enum import Enum
+from enum import StrEnum
 
 from ados.core.logging import get_logger
 
 log = get_logger("hal.usb")
 
 
-class UsbCategory(str, Enum):
+class UsbCategory(StrEnum):
     FC = "fc"
     RADIO = "radio"
     CAMERA = "camera"
