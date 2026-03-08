@@ -48,6 +48,12 @@ def create_app(agent: AgentApp) -> FastAPI:
             allow_headers=["*"],
         )
 
+    # Rate limiting middleware — added immediately after CORS.
+    # FastAPI/Starlette executes middleware in reverse order of add_middleware() calls,
+    # so this runs BEFORE CORS (rate-limit first, then CORS headers on the response).
+    from ados.security.rate_limit import RateLimitMiddleware
+    app.add_middleware(RateLimitMiddleware, rate=10.0, burst=20)
+
     # Health check
     @app.get("/")
     async def health_check():
@@ -64,10 +70,6 @@ def create_app(agent: AgentApp) -> FastAPI:
     app.include_router(wfb.router, prefix="/api")
     app.include_router(scripts.router, prefix="/api")
     app.include_router(ota.router, prefix="/api")
-
-    # Rate limiting middleware
-    from ados.security.rate_limit import RateLimitMiddleware
-    app.add_middleware(RateLimitMiddleware, rate=10.0, burst=20)
 
     return app
 

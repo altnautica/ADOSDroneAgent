@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import platform
+import re
 import subprocess
 from dataclasses import dataclass, field
 
@@ -91,8 +92,25 @@ def _parse_phy_info(output: str) -> dict[str, list[str]]:
     return result
 
 
+_VALID_INTERFACE_RE = re.compile(r"^[a-zA-Z0-9_-]+$")
+
+
+def _validate_interface_name(interface: str) -> None:
+    """Validate that an interface name contains only safe characters.
+
+    Raises:
+        ValueError: If the interface name contains disallowed characters.
+    """
+    if not _VALID_INTERFACE_RE.match(interface):
+        raise ValueError(
+            f"Invalid interface name: {interface!r}. "
+            "Only alphanumeric characters, hyphens, and underscores are allowed."
+        )
+
+
 def _get_driver_for_interface(interface: str) -> str:
     """Get the kernel driver name for a network interface on Linux."""
+    _validate_interface_name(interface)
     try:
         result = subprocess.run(
             ["readlink", f"/sys/class/net/{interface}/device/driver"],
@@ -230,6 +248,8 @@ def set_monitor_mode(interface: str) -> bool:
         log.warning("monitor_mode_unsupported", platform=system)
         return False
 
+    _validate_interface_name(interface)
+
     commands = [
         ["ip", "link", "set", interface, "down"],
         ["iw", interface, "set", "monitor", "none"],
@@ -272,6 +292,8 @@ def set_managed_mode(interface: str) -> bool:
     if system != "Linux":
         log.warning("managed_mode_unsupported", platform=system)
         return False
+
+    _validate_interface_name(interface)
 
     commands = [
         ["ip", "link", "set", interface, "down"],

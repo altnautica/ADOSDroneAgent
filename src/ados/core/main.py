@@ -87,7 +87,7 @@ class AgentApp:
         self._start_time = time.monotonic()
         self._tasks: list[asyncio.Task] = []
 
-        # Lazily-initialized service references
+        # Lazily-initialized service references (private — internal only)
         self._fc_connection = None
         self._mavlink_proxy = None
         self._vehicle_state = None
@@ -97,6 +97,7 @@ class AgentApp:
         self._command_executor = None
         self._script_runner = None
         self._demo_scripting = None
+        # Public attribute: accessed by OTA API routes via get_agent_app().ota_updater
         self.ota_updater = None
 
     @property
@@ -199,6 +200,7 @@ class AgentApp:
         if self.demo:
             from ados.services.scripting.demo import DemoScriptingEngine
             self._demo_scripting = DemoScriptingEngine()
+            self._start_service("scripting", self._demo_scripting.run())
             log.info("scripting_demo_mode", msg="Demo scripting engine active")
         else:
             from ados.services.scripting.executor import CommandExecutor

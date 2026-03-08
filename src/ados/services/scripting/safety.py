@@ -21,8 +21,8 @@ class SafetyLimits:
     max_distance_m: float = 500.0
     min_battery_pct: int = 20
     geofence_radius_m: float = 500.0
-    geofence_center_lat: float = 0.0
-    geofence_center_lon: float = 0.0
+    geofence_center_lat: float | None = None
+    geofence_center_lon: float | None = None
 
 
 # Commands that bypass all safety checks
@@ -103,10 +103,10 @@ class SafetyValidator:
                     f" (limit {self.limits.min_altitude_m}m)"
                 )
 
-        # Geofence check (only if center is set, i.e. not 0/0)
+        # Geofence check (only if center coordinates have been explicitly set)
         geofence_active = (
-            self.limits.geofence_center_lat != 0.0
-            or self.limits.geofence_center_lon != 0.0
+            self.limits.geofence_center_lat is not None
+            and self.limits.geofence_center_lon is not None
         )
         if geofence_active:
             dist = _haversine_m(
