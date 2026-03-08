@@ -9,9 +9,13 @@ from textual.widgets import Footer, Header
 from ados import __version__
 from ados.tui.screens.config_editor import ConfigScreen
 from ados.tui.screens.dashboard import DashboardScreen
+from ados.tui.screens.link import LinkScreen
 from ados.tui.screens.logs import LogsScreen
 from ados.tui.screens.mavlink import MavlinkScreen
+from ados.tui.screens.scripting import ScriptingScreen
 from ados.tui.screens.telemetry import TelemetryScreen
+from ados.tui.screens.updates import UpdatesScreen
+from ados.tui.screens.video import VideoScreen
 
 
 class ADOSTui(App):
@@ -61,6 +65,10 @@ class ADOSTui(App):
         Binding("d", "switch_screen('dashboard')", "Dashboard"),
         Binding("t", "switch_screen('telemetry')", "Telemetry"),
         Binding("m", "switch_screen('mavlink')", "MAVLink"),
+        Binding("v", "switch_screen('video')", "Video"),
+        Binding("w", "switch_screen('link')", "Link"),
+        Binding("s", "switch_screen('scripting')", "Script"),
+        Binding("u", "switch_screen('updates')", "Updates"),
         Binding("c", "switch_screen('config')", "Config"),
         Binding("l", "switch_screen('logs')", "Logs"),
         Binding("q", "quit", "Quit"),
@@ -70,6 +78,10 @@ class ADOSTui(App):
         "dashboard": DashboardScreen,
         "telemetry": TelemetryScreen,
         "mavlink": MavlinkScreen,
+        "video": VideoScreen,
+        "link": LinkScreen,
+        "scripting": ScriptingScreen,
+        "updates": UpdatesScreen,
         "config": ConfigScreen,
         "logs": LogsScreen,
     }
