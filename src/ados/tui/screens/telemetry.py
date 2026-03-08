@@ -8,7 +8,7 @@ import httpx
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.screen import Screen
-from textual.widgets import ProgressBar, Sparkline, Static
+from textual.widgets import Sparkline, Static
 
 API = "http://localhost:8080"
 

@@ -1,0 +1,24 @@
+name: "Orange Pi 5"
+vendor: "Xunlong"
+soc: "RK3588S"
+arch: "aarch64"
+model_patterns:
+  - "Orange Pi 5"
+  - "Orangepi 5"
+default_tier: 4
+gpio_pins:
+  - 3   # SDA
+  - 5   # SCL
+  - 8   # UART TX
+  - 10  # UART RX
+  - 12  # PWM
+uart_paths:
+  - /dev/ttyS0
+  - /dev/ttyS1
+hw_video_codecs:
+  - h264_enc
+  - h264_dec
+  - h265_enc
+  - h265_dec
+  - av1_dec
+  - vp9_dec

@@ -1,0 +1,22 @@
+name: "NVIDIA Jetson Nano"
+vendor: "NVIDIA"
+soc: "Tegra X1"
+arch: "aarch64"
+model_patterns:
+  - "NVIDIA Jetson Nano"
+  - "jetson-nano"
+default_tier: 3
+gpio_pins:
+  - 7   # GPIO4
+  - 11  # GPIO17
+  - 12  # GPIO18
+  - 13  # GPIO27
+  - 15  # GPIO22
+uart_paths:
+  - /dev/ttyTHS1
+  - /dev/ttyS0
+hw_video_codecs:
+  - h264_enc
+  - h264_dec
+  - h265_enc
+  - h265_dec

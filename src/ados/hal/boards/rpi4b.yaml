@@ -1,0 +1,21 @@
+name: "Raspberry Pi 4B"
+vendor: "Raspberry Pi"
+soc: "BCM2711"
+arch: "aarch64"
+model_patterns:
+  - "Raspberry Pi 4 Model B"
+  - "Raspberry Pi 4B"
+default_tier: 3
+gpio_pins:
+  - 2   # SDA1
+  - 3   # SCL1
+  - 14  # UART TX
+  - 15  # UART RX
+  - 18  # PWM0
+uart_paths:
+  - /dev/ttyAMA0
+  - /dev/ttyS0
+hw_video_codecs:
+  - h264_enc
+  - h264_dec
+  - h265_dec

@@ -1,0 +1,21 @@
+name: "Raspberry Pi 5"
+vendor: "Raspberry Pi"
+soc: "BCM2712"
+arch: "aarch64"
+model_patterns:
+  - "Raspberry Pi 5 Model B"
+  - "Raspberry Pi 5"
+default_tier: 4
+gpio_pins:
+  - 2   # SDA1
+  - 3   # SCL1
+  - 14  # UART TX
+  - 15  # UART RX
+  - 18  # PWM0
+uart_paths:
+  - /dev/ttyAMA0
+  - /dev/ttyS0
+hw_video_codecs:
+  - h264_dec
+  - h265_enc
+  - h265_dec

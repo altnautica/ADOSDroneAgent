@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import math
 import time
-from datetime import datetime, timezone
+from datetime import datetime
 
 from ados.core.logging import get_logger
 from ados.services.mavlink.state import VehicleState
@@ -75,7 +75,7 @@ class DemoFCConnection:
         while True:
             elapsed = time.monotonic() - t0
             angle = (2.0 * math.pi * elapsed) / _REVOLUTION_PERIOD
-            now = datetime.now(timezone.utc).isoformat()
+            now = datetime.now(datetime.UTC).isoformat()
 
             s = self._state
 

@@ -215,9 +215,10 @@ class FCConnection:
                         except asyncio.QueueFull:
                             pass  # Drop if subscriber is slow
 
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 # No message received, check if still connected
-                if self._conn and not self._conn.port.closed if hasattr(self._conn, 'port') else True:
+                has_port = hasattr(self._conn, 'port')
+                if self._conn and (not self._conn.port.closed if has_port else True):
                     continue
                 self._connected = False
             except Exception as e:

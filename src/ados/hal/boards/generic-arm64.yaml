@@ -1,4 +1,7 @@
 name: "generic-arm64"
+vendor: "unknown"
+soc: "unknown"
+arch: "aarch64"
 model_patterns: []
 default_tier: 2
 gpio_pins: []
@@ -7,3 +10,4 @@ uart_paths:
   - /dev/ttyUSB0
   - /dev/ttyAMA0
   - /dev/ttyS0
+hw_video_codecs: []
