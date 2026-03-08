@@ -29,7 +29,8 @@ class TestUdpProtocol:
         proto = _UdpProtocol(mock_executor)
         assert proto._executor is mock_executor
 
-    def test_connection_made(self, mock_executor):
+    @pytest.mark.asyncio
+    async def test_connection_made(self, mock_executor):
         proto = _UdpProtocol(mock_executor)
         transport = MagicMock()
         proto.connection_made(transport)

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import math
 from typing import TYPE_CHECKING
 
 from pymavlink import mavutil
@@ -169,7 +168,6 @@ def translate_command(cmd: ParsedCommand, state: VehicleState) -> bytes | None:
         deg = cmd.args[0] if cmd.args else 0.0
         if ct == CommandType.CCW:
             deg = -deg
-        target_yaw = (state.heading + deg) % 360.0
         return _cmd_long_bytes(
             mavutil.mavlink.MAV_CMD_CONDITION_YAW,
             abs(deg), 25, 1 if deg >= 0 else -1, 0,
