@@ -23,17 +23,31 @@ from ados import __version__
 API_BASE = "http://localhost:8080"
 
 
-def _api_get(path: str) -> dict | None:
-    """Make a GET request to the local agent REST API."""
+def _api_get(path: str, *, raw: bool = False) -> dict | None:
+    """Make a GET request to the local agent REST API.
+
+    Args:
+        path: API endpoint path (e.g. "/api/status").
+        raw: If True, return the raw JSON dict even on error status.
+
+    Returns:
+        Parsed JSON dict, or None on connection/HTTP error.
+    """
     try:
         resp = httpx.get(f"{API_BASE}{path}", timeout=5.0)
         resp.raise_for_status()
         return resp.json()
     except httpx.ConnectError:
-        click.echo("Error: Agent is not running. Start it with 'ados start'.", err=True)
-        return None
-    except httpx.HTTPStatusError as e:
-        click.echo(f"Error: API returned {e.response.status_code}", err=True)
+        click.echo(
+            "Error: Agent is not running. Start with 'ados start' or 'ados demo'.",
+            err=True,
+        )
+        sys.exit(1)
+    except (httpx.HTTPStatusError, httpx.HTTPError) as e:
+        if isinstance(e, httpx.HTTPStatusError):
+            click.echo(f"Error: API returned {e.response.status_code}", err=True)
+        else:
+            click.echo(f"Error: {e}", err=True)
         return None
 
 
@@ -50,10 +64,14 @@ def version() -> None:
 
 
 @cli.command()
-def status() -> None:
+@click.option("--json", "as_json", is_flag=True, help="Output raw JSON for scripting.")
+def status(as_json: bool) -> None:
     """Show agent status."""
     data = _api_get("/api/status")
     if data:
+        if as_json:
+            click.echo(json.dumps(data, indent=2))
+            return
         click.echo(f"Version:    {data.get('version', '?')}")
         click.echo(f"Uptime:     {data.get('uptime_seconds', 0):.0f}s")
         click.echo(f"Board:      {data.get('board', {}).get('name', '?')}")
@@ -63,10 +81,14 @@ def status() -> None:
 
 
 @cli.command()
-def health() -> None:
+@click.option("--json", "as_json", is_flag=True, help="Output raw JSON for scripting.")
+def health(as_json: bool) -> None:
     """Show system health."""
     data = _api_get("/api/status")
     if data:
+        if as_json:
+            click.echo(json.dumps(data.get("health", {}), indent=2))
+            return
         h = data.get("health", {})
         click.echo(f"CPU:    {h.get('cpu_percent', 0):.1f}%")
         click.echo(f"Memory: {h.get('memory_percent', 0):.1f}%")
@@ -124,9 +146,16 @@ def config_set(key: str, value: str) -> None:
         resp.raise_for_status()
         click.echo(f"Set {key} = {value}")
     except httpx.ConnectError:
-        click.echo("Error: Agent is not running.", err=True)
-    except httpx.HTTPStatusError as e:
-        click.echo(f"Error: {e.response.status_code}", err=True)
+        click.echo(
+            "Error: Agent is not running. Start with 'ados start' or 'ados demo'.",
+            err=True,
+        )
+        sys.exit(1)
+    except httpx.HTTPError as e:
+        if isinstance(e, httpx.HTTPStatusError):
+            click.echo(f"Error: {e.response.status_code}", err=True)
+        else:
+            click.echo(f"Error: {e}", err=True)
 
 
 @cli.group()
@@ -151,10 +180,14 @@ def video() -> None:
 
 
 @video.command("status")
-def video_status() -> None:
+@click.option("--json", "as_json", is_flag=True, help="Output raw JSON for scripting.")
+def video_status(as_json: bool) -> None:
     """Show video pipeline status."""
     data = _api_get("/api/video")
     if data:
+        if as_json:
+            click.echo(json.dumps(data, indent=2))
+            return
         click.echo(f"State:     {data.get('state', '?')}")
         cameras = data.get("cameras", {}).get("cameras", [])
         click.echo(f"Cameras:   {len(cameras)}")
@@ -178,7 +211,13 @@ def video_snapshot() -> None:
         else:
             click.echo(f"Snapshot saved: {data.get('path', '?')}")
     except httpx.ConnectError:
-        click.echo("Error: Agent is not running.", err=True)
+        click.echo(
+            "Error: Agent is not running. Start with 'ados start' or 'ados demo'.",
+            err=True,
+        )
+        sys.exit(1)
+    except httpx.HTTPError as e:
+        click.echo(f"Error: {e}", err=True)
 
 
 @cli.group()
@@ -187,10 +226,14 @@ def wfb() -> None:
 
 
 @wfb.command("status")
-def wfb_status() -> None:
+@click.option("--json", "as_json", is_flag=True, help="Output raw JSON for scripting.")
+def wfb_status(as_json: bool) -> None:
     """Show WFB-ng link status."""
     data = _api_get("/api/wfb")
     if data:
+        if as_json:
+            click.echo(json.dumps(data, indent=2))
+            return
         click.echo(f"State:    {data.get('state', '?')}")
         click.echo(f"RSSI:     {data.get('rssi_dbm', -100)} dBm")
         click.echo(f"SNR:      {data.get('snr_db', 0):.1f} dB")
@@ -210,10 +253,14 @@ def script() -> None:
 
 
 @script.command("list")
-def script_list() -> None:
+@click.option("--json", "as_json", is_flag=True, help="Output raw JSON for scripting.")
+def script_list(as_json: bool) -> None:
     """List running scripts."""
     data = _api_get("/api/scripts")
     if data:
+        if as_json:
+            click.echo(json.dumps(data, indent=2))
+            return
         scripts = data.get("scripts", [])
         if not scripts:
             click.echo("No scripts running.")
@@ -234,9 +281,16 @@ def script_run(path: str) -> None:
         data = resp.json()
         click.echo(f"Started: {data.get('script_id', '?')}")
     except httpx.ConnectError:
-        click.echo("Error: Agent is not running.", err=True)
-    except httpx.HTTPStatusError as e:
-        click.echo(f"Error: {e.response.status_code} - {e.response.text}", err=True)
+        click.echo(
+            "Error: Agent is not running. Start with 'ados start' or 'ados demo'.",
+            err=True,
+        )
+        sys.exit(1)
+    except httpx.HTTPError as e:
+        if isinstance(e, httpx.HTTPStatusError):
+            click.echo(f"Error: {e.response.status_code} - {e.response.text}", err=True)
+        else:
+            click.echo(f"Error: {e}", err=True)
 
 
 @script.command("send")
@@ -253,9 +307,16 @@ def script_send(command: str) -> None:
         data = resp.json()
         click.echo(data.get("result", "ok"))
     except httpx.ConnectError:
-        click.echo("Error: Agent is not running.", err=True)
-    except httpx.HTTPStatusError as e:
-        click.echo(f"Error: {e.response.status_code}", err=True)
+        click.echo(
+            "Error: Agent is not running. Start with 'ados start' or 'ados demo'.",
+            err=True,
+        )
+        sys.exit(1)
+    except httpx.HTTPError as e:
+        if isinstance(e, httpx.HTTPStatusError):
+            click.echo(f"Error: {e.response.status_code}", err=True)
+        else:
+            click.echo(f"Error: {e}", err=True)
 
 
 @cli.group()
@@ -264,10 +325,14 @@ def update() -> None:
 
 
 @update.command("status")
-def update_status() -> None:
+@click.option("--json", "as_json", is_flag=True, help="Output raw JSON for scripting.")
+def update_status(as_json: bool) -> None:
     """Show OTA update status."""
     data = _api_get("/api/ota")
     if data:
+        if as_json:
+            click.echo(json.dumps(data, indent=2))
+            return
         click.echo(f"Version:  {data.get('current_version', '?')}")
         click.echo(f"State:    {data.get('state', '?')}")
         click.echo(f"Channel:  {data.get('channel', '?')}")
@@ -286,14 +351,21 @@ def update_check() -> None:
         resp = httpx.post(f"{API_BASE}/api/ota/check", timeout=30.0)
         resp.raise_for_status()
         data = resp.json()
-        if data.get("update_available"):
-            click.echo(f"Update available: v{data['manifest']['version']}")
+        if data.get("status") == "update_available":
+            click.echo(f"Update available: v{data.get('version', '?')}")
         else:
             click.echo("No updates available.")
     except httpx.ConnectError:
-        click.echo("Error: Agent is not running.", err=True)
-    except httpx.HTTPStatusError as e:
-        click.echo(f"Error: {e.response.status_code}", err=True)
+        click.echo(
+            "Error: Agent is not running. Start with 'ados start' or 'ados demo'.",
+            err=True,
+        )
+        sys.exit(1)
+    except httpx.HTTPError as e:
+        if isinstance(e, httpx.HTTPStatusError):
+            click.echo(f"Error: {e.response.status_code}", err=True)
+        else:
+            click.echo(f"Error: {e}", err=True)
 
 
 @cli.command()

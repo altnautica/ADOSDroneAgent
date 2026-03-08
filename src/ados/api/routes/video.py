@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
+from pathlib import Path
+
 from fastapi import APIRouter
 
 from ados.api.deps import get_agent_app
@@ -44,8 +47,15 @@ async def trigger_snapshot():
 
     # For demo pipelines, use the demo capture method
     if hasattr(pipeline, "capture_snapshot"):
-        path = pipeline.capture_snapshot()
-        return {"path": path, "status": "captured"}
+        result = pipeline.capture_snapshot()
+        # Handle both sync and async capture methods
+        if asyncio.iscoroutine(result):
+            path = await result
+        else:
+            path = result
+        if path:
+            return {"path": path, "status": "captured"}
+        return {"error": "capture failed", "path": ""}
 
     # For real pipelines, use the snapshot module
     cam_mgr = pipeline.camera_manager
@@ -64,9 +74,9 @@ async def trigger_snapshot():
     snapshot_dir = recording_dir.rstrip("/") + "/snapshots"
 
     path = await capture_snapshot(primary, snapshot_dir, gps_lat, gps_lon)
-    if path:
+    if path and Path(path).is_file():
         return {"path": path, "status": "captured"}
-    return {"error": "capture failed", "path": ""}
+    return {"error": "capture failed or file not found", "path": str(path or "")}
 
 
 @router.post("/video/record/start")

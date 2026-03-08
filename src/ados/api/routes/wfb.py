@@ -19,7 +19,7 @@ class ChannelRequest(BaseModel):
 
 @router.get("/wfb")
 async def get_wfb_status():
-    """Current WFB-ng link status: state, RSSI, channel, packet stats."""
+    """Current WFB-ng link status: state, RSSI, channel, packet stats, adapter info."""
     app = get_agent_app()
     wfb = getattr(app, "_wfb_manager", None)
     if wfb is None:
@@ -27,6 +27,13 @@ async def get_wfb_status():
             "state": "disabled",
             "interface": "",
             "channel": 0,
+            "frequency_mhz": 0,
+            "bandwidth_mhz": 0,
+            "adapter": {
+                "driver": "",
+                "chipset": "",
+                "supports_monitor": False,
+            },
             "rssi_dbm": -100.0,
             "noise_dbm": -95.0,
             "snr_db": 0.0,
@@ -39,7 +46,42 @@ async def get_wfb_status():
             "restart_count": 0,
             "samples": 0,
         }
-    return wfb.get_status()
+    status = wfb.get_status()
+
+    # Enrich with channel frequency info
+    ch_info = get_channel(status.get("channel", 0))
+    if ch_info:
+        status["frequency_mhz"] = ch_info.frequency_mhz
+        status["bandwidth_mhz"] = ch_info.bandwidth_mhz
+    else:
+        status["frequency_mhz"] = 0
+        status["bandwidth_mhz"] = 0
+
+    # Enrich with adapter details if available
+    adapter_info: dict[str, object] = {
+        "driver": "",
+        "chipset": "",
+        "supports_monitor": False,
+    }
+    try:
+        from ados.services.wfb.adapter import detect_wfb_adapters
+
+        interface_name = status.get("interface", "")
+        if interface_name:
+            adapters = detect_wfb_adapters()
+            for adapter in adapters:
+                if adapter.interface_name == interface_name:
+                    adapter_info = {
+                        "driver": adapter.driver,
+                        "chipset": adapter.chipset,
+                        "supports_monitor": adapter.supports_monitor,
+                    }
+                    break
+    except Exception:
+        pass
+
+    status["adapter"] = adapter_info
+    return status
 
 
 @router.get("/wfb/history")
