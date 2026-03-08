@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 
 from pymavlink import mavutil
 
@@ -123,7 +123,7 @@ class VehicleState:
     def update_from_message(self, msg) -> None:
         """Update state from a pymavlink message."""
         msg_type = msg.get_type()
-        now = datetime.now(datetime.UTC).isoformat()
+        now = datetime.now(UTC).isoformat()
         self.last_update = now
 
         if msg_type == "HEARTBEAT":
