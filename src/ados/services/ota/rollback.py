@@ -151,12 +151,18 @@ class RollbackManager:
     def rollback(self) -> bool:
         """Switch the active slot to the standby slot.
 
-        Returns True if rollback was performed, False if standby is unbootable.
+        Returns True if rollback was performed, False if standby is not in BOOTABLE state.
+        Only slots explicitly marked as BOOTABLE (via prepare_standby) are safe to boot into.
         """
         standby = self.get_standby_slot()
 
-        if standby.status == SlotStatus.UNBOOTABLE:
-            log.error("rollback_failed", reason="standby_unbootable", slot=standby.slot_name)
+        if standby.status != SlotStatus.BOOTABLE:
+            log.error(
+                "rollback_failed",
+                reason="standby_not_bootable",
+                slot=standby.slot_name,
+                status=standby.status,
+            )
             return False
 
         if not standby.version:

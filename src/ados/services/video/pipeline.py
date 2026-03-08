@@ -174,18 +174,33 @@ class VideoPipeline:
         return True
 
     async def run(self) -> None:
-        """Main service loop — monitors pipeline health and restarts on failure."""
+        """Main service loop — monitors pipeline health and restarts on failure.
+
+        On cancellation, ensures the encoder subprocess is terminated and not
+        orphaned (A-07).
+        """
         log.info("video_pipeline_service_start")
 
-        while True:
-            if self._state == PipelineState.RUNNING:
-                if not self._check_health():
-                    log.warning("pipeline_health_check_failed", msg="restarting")
-                    self._state = PipelineState.STOPPED
-                    self._encoder_process = None
-                    await self.start_stream()
+        try:
+            while True:
+                if self._state == PipelineState.RUNNING:
+                    if not self._check_health():
+                        log.warning("pipeline_health_check_failed", msg="restarting")
+                        self._state = PipelineState.STOPPED
+                        self._encoder_process = None
+                        await self.start_stream()
 
-            await asyncio.sleep(_HEALTH_CHECK_INTERVAL)
+                await asyncio.sleep(_HEALTH_CHECK_INTERVAL)
+        finally:
+            # Kill encoder subprocess on shutdown/cancellation to prevent orphans
+            if self._encoder_process is not None and self._encoder_process.returncode is None:
+                self._encoder_process.terminate()
+                try:
+                    await asyncio.wait_for(self._encoder_process.wait(), timeout=5.0)
+                except (TimeoutError, asyncio.CancelledError):
+                    self._encoder_process.kill()
+                log.info("encoder_process_cleaned_up")
+            await self._mediamtx.stop()
 
     def get_status(self) -> dict:
         """Return current pipeline status for API responses."""

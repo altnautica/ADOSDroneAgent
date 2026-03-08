@@ -86,18 +86,31 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
     Uses client IP address as the bucket key.
     """
 
-    def __init__(self, app: object, rate: float = 10.0, burst: int = 20) -> None:
+    def __init__(
+        self,
+        app: object,
+        rate: float = 10.0,
+        burst: int = 20,
+        trusted_proxies: list[str] | None = None,
+    ) -> None:
         super().__init__(app)  # type: ignore[arg-type]
         self._limiter = RateLimiter(rate=rate, burst=burst)
+        self._trusted_proxies: frozenset[str] = frozenset(trusted_proxies or [])
 
     def _get_client_ip(self, request: Request) -> str:
-        """Extract client IP from request, checking X-Forwarded-For first."""
-        forwarded = request.headers.get("x-forwarded-for")
-        if forwarded:
-            return forwarded.split(",")[0].strip()
-        if request.client:
-            return request.client.host
-        return "unknown"
+        """Extract client IP from request.
+
+        Uses request.client.host as the primary identifier. Only trusts
+        X-Forwarded-For if the direct client IP is in the trusted_proxies list.
+        """
+        direct_ip = request.client.host if request.client else "unknown"
+
+        if self._trusted_proxies and direct_ip in self._trusted_proxies:
+            forwarded = request.headers.get("x-forwarded-for")
+            if forwarded:
+                return forwarded.split(",")[0].strip()
+
+        return direct_ip
 
     async def dispatch(self, request: Request, call_next: Callable) -> Response:  # type: ignore[type-arg]
         client_ip = self._get_client_ip(request)

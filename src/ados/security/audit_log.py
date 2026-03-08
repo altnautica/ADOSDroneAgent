@@ -1,8 +1,13 @@
-"""Append-only security event audit log."""
+"""Append-only security event audit log.
+
+Log rotation is the deployer's responsibility. This module creates log files
+with 0o640 permissions (owner read/write, group read) for security.
+"""
 
 from __future__ import annotations
 
 import json
+import os
 import shutil
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
@@ -78,7 +83,14 @@ class AuditLogger:
 
         line = event.to_json() + "\n"
         try:
-            with open(self._log_path, "a") as f:
+            # Open with restricted permissions (0o640: owner rw, group r).
+            # O_APPEND ensures atomic appends; O_CREAT creates if missing.
+            fd = os.open(
+                str(self._log_path),
+                os.O_WRONLY | os.O_APPEND | os.O_CREAT,
+                0o640,
+            )
+            with os.fdopen(fd, "a") as f:
                 f.write(line)
         except OSError as exc:
             log.error("audit_write_failed", error=str(exc))
