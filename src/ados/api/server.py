@@ -10,7 +10,18 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from ados import __version__
 from ados.api.deps import set_agent_app
-from ados.api.routes import commands, config, logs, ota, params, scripts, services, status, video, wfb
+from ados.api.routes import (
+    commands,
+    config,
+    logs,
+    ota,
+    params,
+    scripts,
+    services,
+    status,
+    video,
+    wfb,
+)
 
 if TYPE_CHECKING:
     from ados.core.main import AgentApp
