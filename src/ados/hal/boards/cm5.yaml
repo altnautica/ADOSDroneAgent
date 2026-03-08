@@ -1,4 +1,7 @@
 name: "Raspberry Pi CM5"
+vendor: "Raspberry Pi"
+soc: "BCM2712"
+arch: "aarch64"
 model_patterns:
   - "Raspberry Pi Compute Module 5"
   - "Raspberry Pi CM5"
@@ -12,3 +15,7 @@ gpio_pins:
 uart_paths:
   - /dev/ttyAMA0
   - /dev/ttyS0
+hw_video_codecs:
+  - h264_dec
+  - h265_enc
+  - h265_dec

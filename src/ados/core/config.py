@@ -8,7 +8,6 @@ from typing import Any
 import yaml
 from pydantic import BaseModel, Field, model_validator
 
-
 # --- Agent ---
 
 class AgentConfig(BaseModel):

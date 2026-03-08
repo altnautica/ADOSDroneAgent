@@ -52,15 +52,22 @@ class MavlinkScreen(Screen):
             return
 
         # Build pseudo message table from telemetry
+        pos = data.get("position", {})
+        att = data.get("attitude", {})
+        batt = data.get("battery", {})
+        gps = data.get("gps", {})
+        vel = data.get("velocity", {})
+        rc = data.get("rc", {})
+        ch = rc.get("channels", [0])
         messages = {
             "HEARTBEAT": f"armed={data.get('armed', '?')}, mode={data.get('mode', '?')}",
-            "GLOBAL_POSITION_INT": f"lat={data.get('position', {}).get('lat', 0):.5f}, lon={data.get('position', {}).get('lon', 0):.5f}",
-            "ATTITUDE": f"roll={data.get('attitude', {}).get('roll', 0):.2f}, pitch={data.get('attitude', {}).get('pitch', 0):.2f}",
-            "SYS_STATUS": f"batt={data.get('battery', {}).get('voltage', 0):.1f}V",
-            "GPS_RAW_INT": f"fix={data.get('gps', {}).get('fix_type', 0)}, sats={data.get('gps', {}).get('satellites', 0)}",
-            "VFR_HUD": f"gs={data.get('velocity', {}).get('groundspeed', 0):.1f}, throttle={data.get('throttle', 0)}",
-            "BATTERY_STATUS": f"remaining={data.get('battery', {}).get('remaining', -1)}%",
-            "RC_CHANNELS": f"ch1={data.get('rc', {}).get('channels', [0])[0] if data.get('rc', {}).get('channels') else 0}",
+            "GLOBAL_POSITION_INT": f"lat={pos.get('lat', 0):.5f}, lon={pos.get('lon', 0):.5f}",
+            "ATTITUDE": f"roll={att.get('roll', 0):.2f}, pitch={att.get('pitch', 0):.2f}",
+            "SYS_STATUS": f"batt={batt.get('voltage', 0):.1f}V",
+            "GPS_RAW_INT": f"fix={gps.get('fix_type', 0)}, sats={gps.get('satellites', 0)}",
+            "VFR_HUD": f"gs={vel.get('groundspeed', 0):.1f}, throttle={data.get('throttle', 0)}",
+            "BATTERY_STATUS": f"remaining={batt.get('remaining', -1)}%",
+            "RC_CHANNELS": f"ch1={ch[0] if ch else 0}",
         }
 
         for name in messages:

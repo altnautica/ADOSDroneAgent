@@ -1,0 +1,23 @@
+name: "Radxa CM3"
+vendor: "Radxa"
+soc: "RK3566"
+arch: "aarch64"
+model_patterns:
+  - "Radxa CM3"
+  - "Radxa Compute Module 3"
+  - "ROCK 3 Compute Module"
+default_tier: 3
+gpio_pins:
+  - 3   # SDA
+  - 5   # SCL
+  - 8   # UART TX
+  - 10  # UART RX
+  - 12  # PWM
+uart_paths:
+  - /dev/ttyS0
+  - /dev/ttyS2
+hw_video_codecs:
+  - h264_enc
+  - h264_dec
+  - h265_enc
+  - h265_dec

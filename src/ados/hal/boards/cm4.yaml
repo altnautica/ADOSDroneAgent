@@ -1,4 +1,7 @@
 name: "Raspberry Pi CM4"
+vendor: "Raspberry Pi"
+soc: "BCM2711"
+arch: "aarch64"
 model_patterns:
   - "Raspberry Pi Compute Module 4"
   - "Raspberry Pi CM4"
@@ -12,3 +15,7 @@ gpio_pins:
 uart_paths:
   - /dev/ttyAMA0
   - /dev/ttyS0
+hw_video_codecs:
+  - h264_enc
+  - h264_dec
+  - h265_dec

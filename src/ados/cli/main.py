@@ -144,7 +144,10 @@ def tui() -> None:
         app = ADOSTui()
         app.run()
     except ImportError:
-        click.echo("Error: TUI dependencies not installed. Install with: pip install textual", err=True)
+        click.echo(
+            "Error: TUI deps not installed. Install with: pip install textual",
+            err=True,
+        )
         sys.exit(1)
 
 
@@ -160,6 +163,7 @@ def start() -> None:
 def demo(port: int) -> None:
     """Start in demo mode with simulated telemetry."""
     import asyncio
+
     from ados.core.config import load_config
     from ados.core.logging import configure_logging
     from ados.core.main import AgentApp
