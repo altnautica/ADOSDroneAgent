@@ -66,7 +66,9 @@ class ScriptRunner:
 
     def _active_count(self) -> int:
         return sum(
-            1 for s in self._scripts.values() if s.state == ScriptState.RUNNING
+            1
+            for s in self._scripts.values()
+            if s.state in (ScriptState.QUEUED, ScriptState.RUNNING)
         )
 
     def start_script(self, path: str) -> str:
