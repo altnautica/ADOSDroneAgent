@@ -92,6 +92,12 @@ class AgentApp:
         self._mavlink_proxy = None
         self._vehicle_state = None
         self._param_cache = None
+        self._video_pipeline = None
+        self._wfb_manager = None
+        self._command_executor = None
+        self._script_runner = None
+        self._demo_scripting = None
+        self.ota_updater = None
 
     @property
     def uptime_seconds(self) -> float:
@@ -168,6 +174,60 @@ class AgentApp:
             from ados.services.mqtt.gateway import MqttGateway
             mqtt = MqttGateway(self.config, self._vehicle_state)
             self._start_service("mqtt-gateway", mqtt.run(self._shutdown))
+
+        # Start Video Pipeline
+        if self.demo:
+            from ados.services.video.demo import DemoVideoPipeline
+            self._video_pipeline = DemoVideoPipeline(self.config.video)
+            self._start_service("video-pipeline", self._video_pipeline.run())
+        else:
+            from ados.services.video.pipeline import VideoPipeline
+            self._video_pipeline = VideoPipeline(self.config.video, self._vehicle_state)
+            self._start_service("video-pipeline", self._video_pipeline.run())
+
+        # Start WFB-ng Link Manager
+        if self.demo:
+            from ados.services.wfb.demo import DemoWfbManager
+            self._wfb_manager = DemoWfbManager(self.config.video.wfb)
+            self._start_service("wfb-link", self._wfb_manager.run())
+        else:
+            from ados.services.wfb.manager import WfbManager
+            self._wfb_manager = WfbManager(self.config.video.wfb)
+            self._start_service("wfb-link", self._wfb_manager.run())
+
+        # Start Scripting Engine
+        if self.demo:
+            from ados.services.scripting.demo import DemoScriptingEngine
+            self._demo_scripting = DemoScriptingEngine()
+            self._start_service("scripting", self._demo_scripting.run())
+        else:
+            from ados.services.scripting.safety import SafetyLimits, SafetyValidator
+            from ados.services.scripting.executor import CommandExecutor
+            from ados.services.scripting.text_listener import TextCommandListener
+            from ados.services.scripting.script_runner import ScriptRunner
+
+            safety = SafetyValidator(SafetyLimits(), self._vehicle_state)
+            self._command_executor = CommandExecutor(
+                self._fc_connection, self._vehicle_state, safety,
+            )
+            listener = TextCommandListener(
+                self.config.scripting.text_commands, self._command_executor,
+            )
+            self._start_service("text-commands", listener.run())
+
+            self._script_runner = ScriptRunner(
+                self.config.scripting.scripts, self._command_executor,
+            )
+
+        # Start OTA Updater
+        if self.demo:
+            from ados.services.ota.demo import DemoOtaUpdater
+            self.ota_updater = DemoOtaUpdater(self.config.ota)
+            self._start_service("ota-updater", self.ota_updater.run())
+        else:
+            from ados.services.ota.updater import OtaUpdater
+            self.ota_updater = OtaUpdater(self.config.ota)
+            self._start_service("ota-updater", self.ota_updater.run())
 
         # Health monitor loop
         self._start_service("health-monitor", self._health_loop())

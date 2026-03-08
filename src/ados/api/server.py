@@ -10,7 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from ados import __version__
 from ados.api.deps import set_agent_app
-from ados.api.routes import commands, config, logs, params, services, status, video, wfb
+from ados.api.routes import commands, config, logs, ota, params, scripts, services, status, video, wfb
 
 if TYPE_CHECKING:
     from ados.core.main import AgentApp
@@ -51,6 +51,12 @@ def create_app(agent: AgentApp) -> FastAPI:
     app.include_router(logs.router, prefix="/api")
     app.include_router(video.router, prefix="/api")
     app.include_router(wfb.router, prefix="/api")
+    app.include_router(scripts.router, prefix="/api")
+    app.include_router(ota.router, prefix="/api")
+
+    # Rate limiting middleware
+    from ados.security.rate_limit import RateLimitMiddleware
+    app.add_middleware(RateLimitMiddleware, rate=10.0, burst=20)
 
     return app
 
