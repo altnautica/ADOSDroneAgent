@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import httpx
+import structlog
 from textual.app import ComposeResult
 from textual.containers import Vertical
 from textual.screen import Screen
 from textual.widgets import DataTable, Input, Static
 
-API = "http://localhost:8080"
+log = structlog.get_logger("tui.mavlink")
 
 
 class MavlinkScreen(Screen):
@@ -37,9 +38,10 @@ class MavlinkScreen(Screen):
             self._filter = event.value.upper()
 
     async def _refresh(self) -> None:
+        api = self.app.api_url  # type: ignore[attr-defined]
         try:
             async with httpx.AsyncClient(timeout=3.0) as client:
-                resp = await client.get(f"{API}/api/telemetry")
+                resp = await client.get(f"{api}/api/telemetry")
                 data = resp.json()
         except httpx.ConnectError:
             self.query_one("#mav-stats", Static).update(
@@ -48,7 +50,9 @@ class MavlinkScreen(Screen):
                 "       or:  ados start   (real FC)"
             )
             return
-        except Exception:
+        except Exception as exc:
+            log.warning("mavlink_refresh_failed", error=str(exc))
+            self.query_one("#mav-stats", Static).update("Error loading data")
             return
 
         # Build pseudo message table from telemetry
