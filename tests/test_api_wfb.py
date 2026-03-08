@@ -14,7 +14,8 @@ from ados.core.health import HealthMonitor
 from ados.core.main import ServiceTracker
 from ados.services.mavlink.state import VehicleState
 from ados.services.wfb.demo import DemoWfbManager
-from ados.services.wfb.link_quality import LinkQualityMonitor, LinkStats
+from ados.services.wfb.link_quality import LinkStats
+from ados.services.wfb.manager import LinkState
 
 
 @pytest.fixture
@@ -56,7 +57,7 @@ def test_wfb_status_no_manager(client):
 def test_wfb_status_with_demo(agent_app):
     """GET /api/wfb returns demo data when demo manager is set."""
     demo = DemoWfbManager()
-    demo._state = "connected"
+    demo._state = LinkState.CONNECTED
     stats = LinkStats(rssi_dbm=-55.0, packets_received=1000, loss_percent=0.5)
     demo._monitor._latest = stats
     agent_app._wfb_manager = demo
