@@ -86,6 +86,7 @@ class AgentApp:
         self._fc_connection = None
         self._mavlink_proxy = None
         self._vehicle_state = None
+        self._param_cache = None
 
     @property
     def uptime_seconds(self) -> float:
@@ -113,6 +114,12 @@ class AgentApp:
         from ados.services.mavlink.state import VehicleState
         self._vehicle_state = VehicleState()
 
+        # Initialize parameter cache and wire into VehicleState
+        from ados.services.mavlink.param_cache import ParamCache
+        self._param_cache = ParamCache()
+        self._param_cache.load()
+        self._vehicle_state.param_cache = self._param_cache
+
         if self.demo:
             log.info("demo_mode", msg="DEMO MODE — simulated telemetry, no real FC")
             from ados.services.mavlink.demo import DemoFCConnection
@@ -125,9 +132,7 @@ class AgentApp:
             )
 
         # Start FC connection task
-        self._tasks.append(asyncio.create_task(
-            self._fc_connection.run(), name="fc-connection"
-        ))
+        self._start_service("fc-connection", self._fc_connection.run())
 
         # Start MAVLink WebSocket proxy
         from ados.services.mavlink.proxy import MavlinkProxy
@@ -135,47 +140,35 @@ class AgentApp:
             self.config.mavlink,
             self._fc_connection,
         )
-        self._tasks.append(asyncio.create_task(
-            self._mavlink_proxy.run(), name="mavlink-ws-proxy"
-        ))
+        self._start_service("mavlink-ws-proxy", self._mavlink_proxy.run())
 
         # Start TCP proxy
         from ados.services.mavlink.tcp_proxy import TcpProxy
         tcp_proxy = TcpProxy(self._fc_connection, port=5760)
-        self._tasks.append(asyncio.create_task(
-            tcp_proxy.run(), name="mavlink-tcp-proxy"
-        ))
+        self._start_service("mavlink-tcp-proxy", tcp_proxy.run())
 
         # Start UDP proxy
         from ados.services.mavlink.udp_proxy import UdpProxy
         for udp_port in (14550, 14551):
             udp_proxy = UdpProxy(self._fc_connection, port=udp_port)
-            self._tasks.append(asyncio.create_task(
-                udp_proxy.run(), name=f"mavlink-udp-{udp_port}"
-            ))
+            self._start_service(f"mavlink-udp-{udp_port}", udp_proxy.run())
 
         # Start REST API
         from ados.api.server import create_api_task
         api_task = create_api_task(self)
-        self._tasks.append(asyncio.create_task(api_task, name="rest-api"))
+        self._start_service("rest-api", api_task)
 
         # Start MQTT gateway if enabled
         if self.config.server.mode != "disabled":
             from ados.services.mqtt.gateway import MqttGateway
             mqtt = MqttGateway(self.config, self._vehicle_state)
-            self._tasks.append(asyncio.create_task(
-                mqtt.run(self._shutdown), name="mqtt-gateway"
-            ))
+            self._start_service("mqtt-gateway", mqtt.run(self._shutdown))
 
         # Health monitor loop
-        self._tasks.append(asyncio.create_task(
-            self._health_loop(), name="health-monitor"
-        ))
+        self._start_service("health-monitor", self._health_loop())
 
         # Agent heartbeat to FC
-        self._tasks.append(asyncio.create_task(
-            self._heartbeat_loop(), name="agent-heartbeat"
-        ))
+        self._start_service("agent-heartbeat", self._heartbeat_loop())
 
         # Notify systemd
         self.health.sd_notify_ready()
@@ -185,6 +178,24 @@ class AgentApp:
         # Wait for shutdown signal
         await self._shutdown.wait()
         await self._stop()
+
+    def _start_service(self, name: str, coro) -> None:
+        """Create a tracked asyncio task for a service."""
+        self.services.set_state(name, ServiceState.STARTING)
+
+        async def _wrapper():
+            try:
+                self.services.set_state(name, ServiceState.RUNNING)
+                await coro
+            except asyncio.CancelledError:
+                self.services.set_state(name, ServiceState.STOPPED)
+                raise
+            except Exception as exc:
+                log.error("service_failed", service=name, error=str(exc))
+                self.services.set_state(name, ServiceState.FAILED)
+
+        task = asyncio.create_task(_wrapper(), name=name)
+        self._tasks.append(task)
 
     async def _health_loop(self) -> None:
         """Periodically check system health."""
@@ -207,6 +218,8 @@ class AgentApp:
         """Gracefully stop all services."""
         log.info("agent_stopping")
         for task in self._tasks:
+            name = task.get_name()
+            self.services.set_state(name, ServiceState.STOPPED)
             task.cancel()
         await asyncio.gather(*self._tasks, return_exceptions=True)
         log.info("agent_stopped")
