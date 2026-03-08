@@ -145,6 +145,151 @@ def mavlink_status() -> None:
         click.echo(f"Baud:      {data.get('fc_baud', 'N/A')}")
 
 
+@cli.group()
+def video() -> None:
+    """Video pipeline commands."""
+
+
+@video.command("status")
+def video_status() -> None:
+    """Show video pipeline status."""
+    data = _api_get("/api/video")
+    if data:
+        click.echo(f"State:     {data.get('state', '?')}")
+        cameras = data.get("cameras", {}).get("cameras", [])
+        click.echo(f"Cameras:   {len(cameras)}")
+        for cam in cameras:
+            click.echo(f"  - {cam.get('name', '?')} ({cam.get('type', '?')})")
+        recorder = data.get("recorder", {})
+        click.echo(f"Recording: {recorder.get('recording', False)}")
+        mtx = data.get("mediamtx", {})
+        click.echo(f"MediaMTX:  {'running' if mtx.get('running') else 'stopped'}")
+
+
+@video.command("snapshot")
+def video_snapshot() -> None:
+    """Capture a JPEG snapshot."""
+    try:
+        resp = httpx.post(f"{API_BASE}/api/video/snapshot", timeout=10.0)
+        resp.raise_for_status()
+        data = resp.json()
+        if data.get("error"):
+            click.echo(f"Error: {data['error']}", err=True)
+        else:
+            click.echo(f"Snapshot saved: {data.get('path', '?')}")
+    except httpx.ConnectError:
+        click.echo("Error: Agent is not running.", err=True)
+
+
+@cli.group()
+def wfb() -> None:
+    """WFB-ng link commands."""
+
+
+@wfb.command("status")
+def wfb_status() -> None:
+    """Show WFB-ng link status."""
+    data = _api_get("/api/wfb")
+    if data:
+        click.echo(f"State:    {data.get('state', '?')}")
+        click.echo(f"RSSI:     {data.get('rssi_dbm', -100)} dBm")
+        click.echo(f"SNR:      {data.get('snr_db', 0):.1f} dB")
+        click.echo(f"Channel:  {data.get('channel', '?')}")
+        click.echo(f"Packets:  {data.get('packets_received', 0)} rx, {data.get('packets_lost', 0)} lost")
+        click.echo(f"FEC:      {data.get('fec_recovered', 0)} recovered, {data.get('fec_failed', 0)} failed")
+        click.echo(f"Bitrate:  {data.get('bitrate_kbps', 0)} kbps")
+
+
+@cli.group()
+def script() -> None:
+    """Scripting engine commands."""
+
+
+@script.command("list")
+def script_list() -> None:
+    """List running scripts."""
+    data = _api_get("/api/scripts")
+    if data:
+        scripts = data.get("scripts", [])
+        if not scripts:
+            click.echo("No scripts running.")
+            return
+        for s in scripts:
+            click.echo(f"  [{s.get('state', '?')}] {s.get('script_id', '?')}: {s.get('filename', '?')}")
+
+
+@script.command("run")
+@click.argument("path")
+def script_run(path: str) -> None:
+    """Run a Python script."""
+    try:
+        resp = httpx.post(f"{API_BASE}/api/scripts/run", json={"path": path}, timeout=5.0)
+        resp.raise_for_status()
+        data = resp.json()
+        click.echo(f"Started: {data.get('script_id', '?')}")
+    except httpx.ConnectError:
+        click.echo("Error: Agent is not running.", err=True)
+    except httpx.HTTPStatusError as e:
+        click.echo(f"Error: {e.response.status_code} - {e.response.text}", err=True)
+
+
+@script.command("send")
+@click.argument("command")
+def script_send(command: str) -> None:
+    """Send a text command to the scripting engine."""
+    try:
+        resp = httpx.post(
+            f"{API_BASE}/api/scripting/command",
+            json={"command": command},
+            timeout=5.0,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        click.echo(data.get("result", "ok"))
+    except httpx.ConnectError:
+        click.echo("Error: Agent is not running.", err=True)
+    except httpx.HTTPStatusError as e:
+        click.echo(f"Error: {e.response.status_code}", err=True)
+
+
+@cli.group()
+def update() -> None:
+    """OTA update commands."""
+
+
+@update.command("status")
+def update_status() -> None:
+    """Show OTA update status."""
+    data = _api_get("/api/ota")
+    if data:
+        click.echo(f"Version:  {data.get('current_version', '?')}")
+        click.echo(f"State:    {data.get('state', '?')}")
+        click.echo(f"Channel:  {data.get('channel', '?')}")
+        slot = data.get("active_slot", {})
+        if slot:
+            click.echo(f"Slot:     {slot.get('slot_name', '?')} ({slot.get('status', '?')})")
+        available = data.get("available_update")
+        if available:
+            click.echo(f"Update:   {available.get('version', '?')} available")
+
+
+@update.command("check")
+def update_check() -> None:
+    """Check for available updates."""
+    try:
+        resp = httpx.post(f"{API_BASE}/api/ota/check", timeout=30.0)
+        resp.raise_for_status()
+        data = resp.json()
+        if data.get("update_available"):
+            click.echo(f"Update available: v{data['manifest']['version']}")
+        else:
+            click.echo("No updates available.")
+    except httpx.ConnectError:
+        click.echo("Error: Agent is not running.", err=True)
+    except httpx.HTTPStatusError as e:
+        click.echo(f"Error: {e.response.status_code}", err=True)
+
+
 @cli.command()
 def tui() -> None:
     """Launch the TUI dashboard."""
