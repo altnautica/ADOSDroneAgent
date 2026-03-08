@@ -5,12 +5,13 @@ from __future__ import annotations
 import re
 
 import httpx
+import structlog
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.screen import Screen
 from textual.widgets import Button, Input, RichLog, Static
 
-API = "http://localhost:8080"
+_log = structlog.get_logger("tui.logs")
 
 
 class LogsScreen(Screen):
@@ -55,12 +56,13 @@ class LogsScreen(Screen):
             self._search_pattern = event.value
 
     async def _refresh(self) -> None:
+        api = self.app.api_url  # type: ignore[attr-defined]
         try:
-            params = {"limit": 100, "offset": self._seen_count}
+            params: dict[str, int | str] = {"limit": 100, "offset": self._seen_count}
             if self._level_filter:
                 params["level"] = self._level_filter
             async with httpx.AsyncClient(timeout=3.0) as client:
-                resp = await client.get(f"{API}/api/logs", params=params)
+                resp = await client.get(f"{api}/api/logs", params=params)
                 data = resp.json()
         except httpx.ConnectError:
             log_widget = self.query_one("#log-output", RichLog)
@@ -72,7 +74,8 @@ class LogsScreen(Screen):
                 )
                 self._seen_count = -1  # prevent repeat
             return
-        except Exception:
+        except Exception as exc:
+            _log.warning("logs_refresh_failed", error=str(exc))
             return
 
         log_widget = self.query_one("#log-output", RichLog)
