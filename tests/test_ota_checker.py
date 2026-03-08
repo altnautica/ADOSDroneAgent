@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -45,9 +45,9 @@ async def test_check_update_available():
     config = OtaConfig(server="https://test.example.com")
     checker = UpdateChecker(config)
 
-    mock_resp = AsyncMock()
+    mock_resp = MagicMock()
     mock_resp.json.return_value = _make_manifest()
-    mock_resp.raise_for_status = lambda: None
+    mock_resp.raise_for_status = MagicMock()
 
     with patch("ados.services.ota.checker.httpx.AsyncClient") as mock_client_cls:
         mock_client = AsyncMock()
@@ -68,9 +68,9 @@ async def test_check_no_update_when_current():
     config = OtaConfig()
     checker = UpdateChecker(config)
 
-    mock_resp = AsyncMock()
+    mock_resp = MagicMock()
     mock_resp.json.return_value = _make_manifest(version="0.1.0")
-    mock_resp.raise_for_status = lambda: None
+    mock_resp.raise_for_status = MagicMock()
 
     with patch("ados.services.ota.checker.httpx.AsyncClient") as mock_client_cls:
         mock_client = AsyncMock()
@@ -89,9 +89,9 @@ async def test_check_rejects_min_version():
     config = OtaConfig()
     checker = UpdateChecker(config)
 
-    mock_resp = AsyncMock()
+    mock_resp = MagicMock()
     mock_resp.json.return_value = _make_manifest(version="2.0.0", min_version="1.0.0")
-    mock_resp.raise_for_status = lambda: None
+    mock_resp.raise_for_status = MagicMock()
 
     with patch("ados.services.ota.checker.httpx.AsyncClient") as mock_client_cls:
         mock_client = AsyncMock()
@@ -111,9 +111,9 @@ async def test_check_callback_fires():
     found = []
     checker = UpdateChecker(config, on_update_found=lambda m: found.append(m))
 
-    mock_resp = AsyncMock()
+    mock_resp = MagicMock()
     mock_resp.json.return_value = _make_manifest()
-    mock_resp.raise_for_status = lambda: None
+    mock_resp.raise_for_status = MagicMock()
 
     with patch("ados.services.ota.checker.httpx.AsyncClient") as mock_client_cls:
         mock_client = AsyncMock()

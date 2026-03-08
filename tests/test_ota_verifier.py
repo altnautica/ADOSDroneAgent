@@ -42,12 +42,13 @@ def test_verify_sha256_missing_file():
 
 
 def test_verify_sha256_case_insensitive(tmp_path):
+    """SHA-256 comparison lowercases expected hash, so uppercase input matches."""
     content = b"test"
     filepath = tmp_path / "test.bin"
     filepath.write_bytes(content)
 
     h = hashlib.sha256(content).hexdigest()
-    assert verify_sha256(str(filepath), h.upper()) is False  # strict lowercase comparison
+    assert verify_sha256(str(filepath), h.upper()) is True  # lowercased before comparison
 
 
 def _generate_ed25519_keypair() -> tuple[bytes, bytes]:

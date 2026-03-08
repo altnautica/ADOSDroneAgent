@@ -7,8 +7,8 @@ from enum import StrEnum
 from typing import TYPE_CHECKING
 
 from ados.core.logging import get_logger
-from ados.hal.camera import CameraInfo, discover_cameras
-from ados.services.video.camera_mgr import CameraManager, CameraRole
+from ados.hal.camera import discover_cameras
+from ados.services.video.camera_mgr import CameraManager
 from ados.services.video.encoder import (
     EncoderConfig,
     EncoderType,

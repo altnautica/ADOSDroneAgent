@@ -32,8 +32,7 @@ def test_valid_manifest():
 
 
 def test_manifest_all_fields_present():
-    m = UpdateManifest(**_sample_data())
-    fields = set(m.model_fields.keys())
+    fields = set(UpdateManifest.model_fields.keys())
     expected = {
         "version", "channel", "release_date", "download_url",
         "file_size", "sha256", "signature", "min_version",
