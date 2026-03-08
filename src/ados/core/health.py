@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime
 
 import psutil
 
@@ -18,7 +18,7 @@ class SystemHealth:
     memory_percent: float = 0.0
     disk_percent: float = 0.0
     temperature: float | None = None
-    timestamp: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    timestamp: str = field(default_factory=lambda: datetime.now(datetime.UTC).isoformat())
 
     def to_dict(self) -> dict:
         return {
