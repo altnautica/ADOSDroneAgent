@@ -6,7 +6,7 @@ import asyncio
 
 from ados.core.logging import get_logger
 from ados.hal.camera import CameraInfo, CameraType
-from ados.services.video.camera_mgr import CameraManager, CameraRole
+from ados.services.video.camera_mgr import CameraManager
 
 log = get_logger("video.demo")
 
