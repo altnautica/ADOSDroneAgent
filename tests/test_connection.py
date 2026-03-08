@@ -37,6 +37,18 @@ def test_auto_detect_port_none(mock_glob):
     assert port is None
 
 
+@patch("glob.glob")
+def test_auto_detect_port_macos_usbmodem(mock_glob):
+    """Should find macOS /dev/tty.usbmodem* ports."""
+    def side_effect(pattern):
+        if "usbmodem" in pattern:
+            return ["/dev/tty.usbmodem14101"]
+        return []
+    mock_glob.side_effect = side_effect
+    port = auto_detect_port()
+    assert port == "/dev/tty.usbmodem14101"
+
+
 def test_fc_connection_init():
     """FCConnection should initialize with config."""
     from ados.core.config import MavlinkConfig
