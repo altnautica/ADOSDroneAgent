@@ -41,6 +41,13 @@ class MavlinkScreen(Screen):
             async with httpx.AsyncClient(timeout=3.0) as client:
                 resp = await client.get(f"{API}/api/telemetry")
                 data = resp.json()
+        except httpx.ConnectError:
+            self.query_one("#mav-stats", Static).update(
+                "Agent not running.\n"
+                "Start with: ados demo    (simulated)\n"
+                "       or:  ados start   (real FC)"
+            )
+            return
         except Exception:
             return
 

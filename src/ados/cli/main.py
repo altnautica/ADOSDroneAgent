@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import signal
 import sys
 
 import click
@@ -152,6 +153,40 @@ def start() -> None:
     """Start the ADOS Drone Agent."""
     from ados.core.main import main as agent_main
     agent_main()
+
+
+@cli.command()
+@click.option("--port", default=8080, help="REST API port")
+def demo(port: int) -> None:
+    """Start in demo mode with simulated telemetry."""
+    import asyncio
+    from ados.core.config import load_config
+    from ados.core.logging import configure_logging
+    from ados.core.main import AgentApp
+
+    config = load_config()
+    config.server.mode = "disabled"
+    config.scripting.rest_api.port = port
+    configure_logging(
+        level=config.logging.level,
+        drone_name=config.agent.name,
+        device_id=config.agent.device_id,
+    )
+
+    app = AgentApp(config, demo=True)
+
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        loop.add_signal_handler(sig, app.request_shutdown)
+
+    try:
+        loop.run_until_complete(app.start())
+    except KeyboardInterrupt:
+        app.request_shutdown()
+    finally:
+        loop.close()
 
 
 if __name__ == "__main__":
