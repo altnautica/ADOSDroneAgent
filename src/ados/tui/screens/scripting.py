@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import httpx
+import structlog
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.screen import Screen
 from textual.widgets import DataTable, Static
 
-API = "http://localhost:8080"
+log = structlog.get_logger("tui.scripting")
 
 
 class ScriptingScreen(Screen):
@@ -31,15 +32,20 @@ class ScriptingScreen(Screen):
         self.set_interval(1.0, self._refresh)
 
     async def _refresh(self) -> None:
+        api = self.app.api_url  # type: ignore[attr-defined]
         try:
             async with httpx.AsyncClient(timeout=3.0) as client:
-                scripts_resp = await client.get(f"{API}/api/scripts")
+                scripts_resp = await client.get(f"{api}/api/scripts")
                 scripts_data = scripts_resp.json()
 
-                status_resp = await client.get(f"{API}/api/scripting/status")
+                status_resp = await client.get(f"{api}/api/scripting/status")
                 status_data = status_resp.json()
-        except Exception:
+        except httpx.ConnectError:
             self.query_one("#status-panel", Static).update("Agent not running")
+            return
+        except Exception as exc:
+            log.warning("scripting_refresh_failed", error=str(exc))
+            self.query_one("#status-panel", Static).update("Error loading data")
             return
 
         # Scripts table

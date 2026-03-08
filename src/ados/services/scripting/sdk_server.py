@@ -23,9 +23,16 @@ class SdkServer:
     Response: {"status": "ok"} or {"status": "error", "message": "reason"}
     """
 
-    def __init__(self, executor: CommandExecutor, port: int = 8892) -> None:
+    def __init__(
+        self,
+        executor: CommandExecutor,
+        port: int = 8892,
+        max_connections: int = 5,
+    ) -> None:
         self._executor = executor
         self._port = port
+        self._max_connections = max_connections
+        self._active_connections = 0
         self._server: asyncio.Server | None = None
 
     async def run(self) -> None:
@@ -35,7 +42,7 @@ class SdkServer:
             "0.0.0.0",
             self._port,
         )
-        log.info("sdk_server_started", port=self._port)
+        log.info("sdk_server_started", port=self._port, max_connections=self._max_connections)
         async with self._server:
             await self._server.serve_forever()
 
@@ -45,7 +52,19 @@ class SdkServer:
         writer: asyncio.StreamWriter,
     ) -> None:
         addr = writer.get_extra_info("peername")
-        log.info("sdk_client_connected", addr=addr)
+
+        # Reject connections beyond the limit to avoid exhausting file descriptors
+        if self._active_connections >= self._max_connections:
+            log.warning("sdk_connection_rejected", addr=addr, active=self._active_connections)
+            writer.close()
+            try:
+                await writer.wait_closed()
+            except (ConnectionError, BrokenPipeError):
+                pass
+            return
+
+        self._active_connections += 1
+        log.info("sdk_client_connected", addr=addr, active=self._active_connections)
         try:
             while True:
                 line = await reader.readline()
@@ -60,7 +79,8 @@ class SdkServer:
         except (ConnectionError, asyncio.CancelledError):
             pass
         finally:
-            log.info("sdk_client_disconnected", addr=addr)
+            self._active_connections -= 1
+            log.info("sdk_client_disconnected", addr=addr, active=self._active_connections)
             writer.close()
             try:
                 await writer.wait_closed()

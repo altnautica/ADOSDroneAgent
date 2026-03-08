@@ -74,6 +74,7 @@ class UpdateDownloader:
         tmp_file = target_path / (filename + ".tmp")
 
         existing_bytes = 0
+        etag_path = target_path / (filename + ".etag")
         if tmp_file.exists():
             existing_bytes = tmp_file.stat().st_size
 
@@ -94,11 +95,42 @@ class UpdateDownloader:
         headers: dict[str, str] = {}
         if existing_bytes > 0:
             headers["Range"] = f"bytes={existing_bytes}-"
+            # Send If-Range so server returns 200 (full file) if content changed
+            if etag_path.exists():
+                saved_validator = etag_path.read_text().strip()
+                if saved_validator:
+                    headers["If-Range"] = saved_validator
 
         try:
             async with httpx.AsyncClient(timeout=300.0) as client:
                 async with client.stream("GET", manifest.download_url, headers=headers) as resp:
                     resp.raise_for_status()
+
+                    # If server returned 200 instead of 206, the file changed.
+                    # Discard partial content and restart from scratch.
+                    status_code = getattr(resp, "status_code", 206)
+                    if existing_bytes > 0 and status_code == 200:
+                        log.warning(
+                            "download_resume_invalidated",
+                            msg="server returned 200, restarting download",
+                        )
+                        existing_bytes = 0
+                        self._progress.bytes_downloaded = 0
+
+                    # Save ETag or Last-Modified for future resume validation
+                    resp_headers = getattr(resp, "headers", {})
+                    if isinstance(resp_headers, dict):
+                        etag = resp_headers.get("ETag") or resp_headers.get("Last-Modified", "")
+                    else:
+                        # httpx Headers object (or similar mapping)
+                        try:
+                            etag = resp_headers.get("ETag") or resp_headers.get("Last-Modified", "")
+                            if not isinstance(etag, str):
+                                etag = ""
+                        except Exception:
+                            etag = ""
+                    if etag:
+                        etag_path.write_text(etag)
 
                     mode = "ab" if existing_bytes > 0 else "wb"
                     with open(tmp_file, mode) as f:
@@ -136,6 +168,10 @@ class UpdateDownloader:
 
         # Atomic rename from .tmp to final
         os.replace(str(tmp_file), str(final_file))
+
+        # Clean up the etag file used for resume validation
+        if etag_path.exists():
+            etag_path.unlink(missing_ok=True)
 
         self._progress.state = DownloadState.COMPLETED
         self._progress.speed_bps = 0.0

@@ -54,14 +54,20 @@ def _write_exif(path: str, gps_lat: float, gps_lon: float) -> bool:
         return False
 
     def _to_dms(coord: float) -> tuple[tuple[int, int], tuple[int, int], tuple[int, int]]:
-        """Convert decimal degrees to degrees/minutes/seconds as rational tuples."""
+        """Convert decimal degrees to degrees/minutes/seconds as rational tuples.
+
+        Uses a denominator of 1,000,000 for seconds to preserve sub-arcsecond
+        precision (~0.03mm at the equator), avoiding float-to-int truncation
+        that would otherwise lose significant digits.
+        """
         abs_coord = abs(coord)
         deg = int(abs_coord)
         min_float = (abs_coord - deg) * 60
         minutes = int(min_float)
         sec_float = (min_float - minutes) * 60
-        seconds = int(sec_float * 10000)
-        return ((deg, 1), (minutes, 1), (seconds, 10000))
+        # Use 1,000,000 denominator for sub-arcsecond precision
+        seconds = round(sec_float * 1_000_000)
+        return ((deg, 1), (minutes, 1), (seconds, 1_000_000))
 
     lat_ref = b"N" if gps_lat >= 0 else b"S"
     lon_ref = b"E" if gps_lon >= 0 else b"W"
