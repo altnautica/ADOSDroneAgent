@@ -41,7 +41,7 @@ def generate_self_signed_cert(
         x509.NameAttribute(NameOID.COMMON_NAME, common_name),
     ])
 
-    now = datetime.datetime.now(datetime.UTC)
+    now = datetime.datetime.now(datetime.timezone.utc)
     cert = (
         x509.CertificateBuilder()
         .subject_name(subject)
