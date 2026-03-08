@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 from ados.api.server import create_app
 from ados.core.config import ADOSConfig
 from ados.core.health import HealthMonitor
+from ados.core.main import ServiceTracker
 from ados.services.mavlink.state import VehicleState
 
 
@@ -21,6 +22,7 @@ def agent_app():
     app = MagicMock()
     app.config = ADOSConfig()
     app.health = HealthMonitor()
+    app.services = ServiceTracker()
     app._start_time = time.monotonic()
     app.uptime_seconds = 42.0
     app._vehicle_state = VehicleState()
@@ -29,6 +31,7 @@ def agent_app():
     app._fc_connection.port = ""
     app._fc_connection.baud = 0
     app._tasks = []
+    app._param_cache = None
     return app
 
 
