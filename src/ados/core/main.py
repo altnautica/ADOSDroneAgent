@@ -100,6 +100,12 @@ class AgentApp:
         # Public attribute: accessed by OTA API routes via get_agent_app().ota_updater
         self.ota_updater = None
 
+        # Pairing and discovery (public — accessed by API routes)
+        from ados.core.pairing import PairingManager
+        self.pairing_manager = PairingManager(state_path=config.pairing.state_path)
+        self.discovery_service = None
+        self.board_name = "unknown"
+
     @property
     def uptime_seconds(self) -> float:
         return time.monotonic() - self._start_time
@@ -116,6 +122,7 @@ class AgentApp:
         # Detect board
         from ados.hal.detect import detect_board
         board = detect_board()
+        self.board_name = board.name
         log.info("board_info", name=board.name, tier=board.tier, ram_mb=board.ram_mb)
 
         # Set tier from detection if auto
@@ -245,6 +252,30 @@ class AgentApp:
         # Agent heartbeat to FC
         self._start_service("agent-heartbeat", self._heartbeat_loop())
 
+        # mDNS discovery registration
+        if self.config.discovery.mdns_enabled:
+            from ados.services.discovery import DiscoveryService
+            api_port = self.config.scripting.rest_api.port
+            self.discovery_service = DiscoveryService(
+                device_id=self.config.agent.device_id,
+                port=api_port,
+                name=self.config.agent.name,
+                version=__version__,
+                board=self.board_name,
+            )
+            pm = self.pairing_manager
+            await self.discovery_service.register(
+                paired=pm.is_paired,
+                code=pm.get_or_create_code() if not pm.is_paired else None,
+                owner=pm.owner_id,
+            )
+
+        # Cloud pairing beacon (when unpaired, POST code to Convex)
+        self._start_service("pairing-beacon", self._cloud_beacon_loop())
+
+        # Cloud heartbeat (when paired, POST status to Convex)
+        self._start_service("pairing-heartbeat", self._cloud_heartbeat_loop())
+
         # Notify systemd
         self.health.sd_notify_ready()
 
@@ -289,9 +320,88 @@ class AgentApp:
                     log.debug("heartbeat_send_failed")
             await asyncio.sleep(1)
 
+    async def _cloud_beacon_loop(self) -> None:
+        """When unpaired, periodically POST pairing code to Convex for cloud discovery."""
+        import httpx
+
+        interval = self.config.pairing.beacon_interval
+        convex_url = self.config.pairing.convex_url
+
+        while not self._shutdown.is_set():
+            if not self.pairing_manager.is_paired and convex_url:
+                try:
+                    code = self.pairing_manager.get_or_create_code()
+                    mdns_host = ""
+                    local_ip = "127.0.0.1"
+                    if self.discovery_service:
+                        mdns_host = self.discovery_service.mdns_hostname
+                        local_ip = self.discovery_service._get_local_ip()
+
+                    api_key = self.pairing_manager.generate_api_key()
+                    async with httpx.AsyncClient(timeout=10.0) as client:
+                        await client.post(
+                            f"{convex_url}/pairing/register",
+                            json={
+                                "deviceId": self.config.agent.device_id,
+                                "pairingCode": code,
+                                "apiKey": api_key,
+                                "name": self.config.agent.name,
+                                "version": __version__,
+                                "board": self.board_name,
+                                "mdnsHost": mdns_host,
+                                "localIp": local_ip,
+                            },
+                        )
+                    log.debug("pairing_beacon_sent", code=code)
+                except Exception:
+                    log.debug("pairing_beacon_failed")
+            await asyncio.sleep(interval)
+
+    async def _cloud_heartbeat_loop(self) -> None:
+        """When paired, periodically POST heartbeat to Convex."""
+        import httpx
+
+        interval = self.config.pairing.heartbeat_interval
+        convex_url = self.config.pairing.convex_url
+
+        while not self._shutdown.is_set():
+            if self.pairing_manager.is_paired and convex_url:
+                try:
+                    mdns_host = ""
+                    local_ip = "127.0.0.1"
+                    if self.discovery_service:
+                        mdns_host = self.discovery_service.mdns_hostname
+                        local_ip = self.discovery_service._get_local_ip()
+
+                    fc_connected = False
+                    if self._fc_connection:
+                        fc_connected = getattr(self._fc_connection, "connected", False)
+
+                    async with httpx.AsyncClient(timeout=10.0) as client:
+                        await client.post(
+                            f"{convex_url}/heartbeat",
+                            json={
+                                "deviceId": self.config.agent.device_id,
+                                "apiKey": self.pairing_manager.api_key,
+                                "lastIp": local_ip,
+                                "mdnsHost": mdns_host,
+                                "fcConnected": fc_connected,
+                                "agentVersion": __version__,
+                            },
+                        )
+                    log.debug("pairing_heartbeat_sent")
+                except Exception:
+                    log.debug("pairing_heartbeat_failed")
+            await asyncio.sleep(interval)
+
     async def _stop(self) -> None:
         """Gracefully stop all services."""
         log.info("agent_stopping")
+
+        # Unregister mDNS before cancelling tasks
+        if self.discovery_service:
+            await self.discovery_service.unregister()
+
         for task in self._tasks:
             name = task.get_name()
             self.services.set_state(name, ServiceState.STOPPED)
