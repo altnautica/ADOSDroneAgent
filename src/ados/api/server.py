@@ -10,11 +10,13 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from ados import __version__
 from ados.api.deps import set_agent_app
+from ados.api.middleware.auth import ApiKeyAuthMiddleware
 from ados.api.routes import (
     commands,
     config,
     logs,
     ota,
+    pairing,
     params,
     scripts,
     services,
@@ -48,9 +50,13 @@ def create_app(agent: AgentApp) -> FastAPI:
             allow_headers=["*"],
         )
 
-    # Rate limiting middleware — added immediately after CORS.
+    # Auth middleware — added after CORS.
     # FastAPI/Starlette executes middleware in reverse order of add_middleware() calls,
-    # so this runs BEFORE CORS (rate-limit first, then CORS headers on the response).
+    # so auth runs AFTER CORS headers are added but BEFORE rate limiting.
+    app.add_middleware(ApiKeyAuthMiddleware)
+
+    # Rate limiting middleware — added after auth.
+    # Execution order: CORS → Auth → Rate Limit → Route handler.
     from ados.security.rate_limit import RateLimitMiddleware
     app.add_middleware(RateLimitMiddleware, rate=10.0, burst=20)
 
@@ -70,6 +76,7 @@ def create_app(agent: AgentApp) -> FastAPI:
     app.include_router(wfb.router, prefix="/api")
     app.include_router(scripts.router, prefix="/api")
     app.include_router(ota.router, prefix="/api")
+    app.include_router(pairing.router, prefix="/api")
 
     return app
 

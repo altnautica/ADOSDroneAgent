@@ -54,5 +54,16 @@ logging:
   max_size_mb: 50
   keep_count: 5
 
+pairing:
+  state_path: "/etc/ados/pairing.json"
+  convex_url: ""
+  beacon_interval: 30
+  heartbeat_interval: 60
+  code_ttl: 900
+
+discovery:
+  mdns_enabled: true
+  service_type: "_ados._tcp.local."
+
 swarm:
   enabled: false

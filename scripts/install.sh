@@ -80,10 +80,40 @@ do_uninstall() {
     exit 0
 }
 
-# Handle --uninstall flag
-if [ "${1:-}" = "--uninstall" ]; then
-    do_uninstall
-fi
+# ─── Flag Parsing ────────────────────────────────────────────────────────────
+
+PAIR_CODE=""
+DRONE_NAME=""
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --uninstall)
+            do_uninstall
+            ;;
+        --pair)
+            shift
+            PAIR_CODE="${1:-}"
+            if [ -z "$PAIR_CODE" ]; then
+                error "--pair requires a CODE argument"
+                exit 1
+            fi
+            shift
+            ;;
+        --name)
+            shift
+            DRONE_NAME="${1:-}"
+            if [ -z "$DRONE_NAME" ]; then
+                error "--name requires a NAME argument"
+                exit 1
+            fi
+            shift
+            ;;
+        *)
+            warn "Unknown option: $1"
+            shift
+            ;;
+    esac
+done
 
 # ─── Architecture Detection ─────────────────────────────────────────────────
 
@@ -161,6 +191,7 @@ install_system_deps() {
         build-essential \
         git \
         curl \
+        avahi-daemon \
         2>/dev/null
 
     info "System dependencies installed."
@@ -207,6 +238,9 @@ generate_default_config() {
     fi
     local short_id="${device_id:0:8}"
 
+    # Use custom name if provided via --name flag
+    local agent_name="${DRONE_NAME:-ados-${short_id}}"
+
     # Auto-detect FC serial port
     local fc_port=""
     for pattern in /dev/ttyACM* /dev/ttyAMA* /dev/ttyUSB*; do
@@ -229,7 +263,7 @@ generate_default_config() {
 
 agent:
   device_id: "${short_id}"
-  name: "ados-${short_id}"
+  name: "${agent_name}"
   tier: "auto"
 
 mavlink:
@@ -254,6 +288,14 @@ scripting:
     enabled: true
     host: "0.0.0.0"
     port: 8080
+
+pairing:
+  convex_url: "https://watchful-trout-699.convex.site"
+  beacon_interval: 30
+  heartbeat_interval: 60
+
+discovery:
+  mdns_enabled: true
 CFGEOF
 
     chmod 644 "$config_file"
@@ -303,7 +345,8 @@ ENVEOF
 
     systemctl daemon-reload
     systemctl enable "${SERVICE_NAME}"
-    info "Service installed and enabled."
+    systemctl start "${SERVICE_NAME}"
+    info "Service installed, enabled, and started."
 }
 
 # ─── Print Status Summary ───────────────────────────────────────────────────
@@ -463,8 +506,36 @@ generate_device_id
 # Generate default config (idempotent, skips if exists)
 generate_default_config
 
+# Write pairing state if --pair was provided
+PAIRING_FILE="${CONFIG_DIR}/pairing.json"
+if [ -n "$PAIR_CODE" ]; then
+    info "Setting pairing code: ${PAIR_CODE}"
+    PAIR_CODE_UPPER=$(echo "$PAIR_CODE" | tr '[:lower:]' '[:upper:]')
+    cat > "$PAIRING_FILE" <<PAIREOF
+{
+  "pairing_code": "${PAIR_CODE_UPPER}",
+  "code_created_at": $(date +%s)
+}
+PAIREOF
+    chmod 644 "$PAIRING_FILE"
+fi
+
 # Install systemd service
 install_systemd_service
 
 # Print summary
 print_status
+
+# Print pairing code
+if [ -f "$PAIRING_FILE" ]; then
+    DISPLAY_CODE=$(python3 -c "import json; print(json.load(open('${PAIRING_FILE}')).get('pairing_code', '------'))" 2>/dev/null || echo "------")
+    if [ "$DISPLAY_CODE" != "------" ] && [ -n "$DISPLAY_CODE" ]; then
+        echo ""
+        echo -e "  ${BOLD}+----------+${NC}"
+        echo -e "  ${BOLD}|  ${DISPLAY_CODE}  |${NC}  Pairing Code"
+        echo -e "  ${BOLD}+----------+${NC}"
+        echo ""
+        echo "  Enter this code in ADOS Mission Control to pair with this drone."
+        echo ""
+    fi
+fi

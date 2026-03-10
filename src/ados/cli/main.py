@@ -368,6 +368,81 @@ def update_check() -> None:
             click.echo(f"Error: {e}", err=True)
 
 
+@cli.group()
+def pair() -> None:
+    """Pairing and discovery commands."""
+
+
+@pair.command("show")
+def pair_show() -> None:
+    """Show current pairing code."""
+    data = _api_get("/api/pairing/info")
+    if data:
+        if data.get("paired"):
+            click.echo("Agent is already paired.")
+            click.echo(f"Owner: {data.get('owner_id', '?')}")
+        else:
+            code = data.get("pairing_code", "?")
+            click.echo("")
+            click.echo("  +--------+")
+            click.echo(f"  | {code} |")
+            click.echo("  +--------+")
+            click.echo("")
+            click.echo("Enter this code in ADOS Mission Control to pair.")
+
+
+@pair.command("status")
+@click.option("--json", "as_json", is_flag=True, help="Output raw JSON for scripting.")
+def pair_status(as_json: bool) -> None:
+    """Show pairing status."""
+    data = _api_get("/api/pairing/info")
+    if data:
+        if as_json:
+            click.echo(json.dumps(data, indent=2))
+            return
+        click.echo(f"Paired:     {data.get('paired', False)}")
+        click.echo(f"Device ID:  {data.get('device_id', '?')}")
+        click.echo(f"Name:       {data.get('name', '?')}")
+        click.echo(f"Board:      {data.get('board', '?')}")
+        click.echo(f"mDNS:       {data.get('mdns_host', '?')}")
+        if data.get("paired"):
+            click.echo(f"Owner:      {data.get('owner_id', '?')}")
+            paired_at = data.get("paired_at")
+            if paired_at:
+                import datetime
+                ts = datetime.datetime.fromtimestamp(paired_at).isoformat()
+                click.echo(f"Paired at:  {ts}")
+        else:
+            click.echo(f"Code:       {data.get('pairing_code', '?')}")
+
+
+@pair.command("reset")
+@click.confirmation_option(prompt="This will unpair the agent. Continue?")
+def pair_reset() -> None:
+    """Unpair the agent and generate a new pairing code."""
+    try:
+        resp = httpx.post(f"{API_BASE}/api/pairing/unpair", timeout=5.0)
+        if resp.status_code == 409:
+            click.echo("Agent is not currently paired.")
+            return
+        resp.raise_for_status()
+        data = resp.json()
+        new_code = data.get("new_code", "?")
+        click.echo("Agent unpaired successfully.")
+        click.echo(f"New pairing code: {new_code}")
+    except httpx.ConnectError:
+        click.echo(
+            "Error: Agent is not running. Start with 'ados start' or 'ados demo'.",
+            err=True,
+        )
+        sys.exit(1)
+    except httpx.HTTPError as e:
+        if isinstance(e, httpx.HTTPStatusError):
+            click.echo(f"Error: {e.response.status_code}", err=True)
+        else:
+            click.echo(f"Error: {e}", err=True)
+
+
 @cli.command()
 def tui() -> None:
     """Launch the TUI dashboard."""

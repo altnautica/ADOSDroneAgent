@@ -202,6 +202,23 @@ class LoggingConfig(BaseModel):
     flight_log_dir: str = "/var/ados/logs/flights"
 
 
+# --- Pairing ---
+
+class PairingConfig(BaseModel):
+    state_path: str = "/etc/ados/pairing.json"
+    convex_url: str = ""  # Convex HTTP endpoint for cloud pairing
+    beacon_interval: int = 30  # seconds
+    heartbeat_interval: int = 60  # seconds
+    code_ttl: int = 900  # 15 minutes
+
+
+# --- Discovery ---
+
+class DiscoveryConfig(BaseModel):
+    mdns_enabled: bool = True
+    service_type: str = "_ados._tcp.local."
+
+
 # --- Swarm ---
 
 class LoraConfig(BaseModel):
@@ -238,6 +255,8 @@ class ADOSConfig(BaseModel):
     scripting: ScriptingConfig = ScriptingConfig()
     ota: OtaConfig = OtaConfig()
     logging: LoggingConfig = LoggingConfig()
+    pairing: PairingConfig = PairingConfig()
+    discovery: DiscoveryConfig = DiscoveryConfig()
     swarm: SwarmConfig = SwarmConfig()
 
     model_config = {"extra": "ignore"}
