@@ -16,6 +16,7 @@ class DashboardScreen(Screen):
     """Main dashboard with service table, system health, FC info."""
 
     def compose(self) -> ComposeResult:
+        yield Static("Loading...", id="pairing-banner")
         with Horizontal():
             with Vertical(id="left-col"):
                 yield Static("[b]Services[/b]", classes="panel-title")
@@ -45,6 +46,9 @@ class DashboardScreen(Screen):
 
                 logs_resp = await client.get(f"{api}/api/logs?limit=10")
                 logs = logs_resp.json()
+
+                pairing_resp = await client.get(f"{api}/api/pairing/info")
+                pairing = pairing_resp.json()
         except httpx.ConnectError:
             self.query_one("#health-panel", Static).update("Agent not running")
             return
@@ -52,6 +56,19 @@ class DashboardScreen(Screen):
             log.warning("dashboard_refresh_failed", error=str(exc))
             self.query_one("#health-panel", Static).update("Error loading data")
             return
+
+        # Pairing banner
+        banner = self.query_one("#pairing-banner", Static)
+        if pairing.get("paired"):
+            owner = pairing.get("owner_id", "?")
+            banner.update(f"[green bold]PAIRED[/] to {owner}")
+        else:
+            code = pairing.get("pairing_code", "??????")
+            banner.update(
+                f"[yellow bold]UNPAIRED[/]  "
+                f"Pairing code: [bold white on blue] {code} [/]  "
+                f"Enter in ADOS Mission Control to pair."
+            )
 
         # Health
         h = status.get("health", {})
