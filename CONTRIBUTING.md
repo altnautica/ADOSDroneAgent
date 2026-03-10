@@ -97,5 +97,5 @@ By contributing, you agree that your contributions will be licensed under the GP
 ## Community
 
 - GitHub Issues: [altnautica/ADOSDroneAgent/issues](https://github.com/altnautica/ADOSDroneAgent/issues)
-- ADOS Mission Control community: [command.altnautica.com/community](https://command.altnautica.com/community)
+- Discord: [discord.gg/uxbvuD4d5q](https://discord.gg/uxbvuD4d5q)
 - ArduPilot Discuss: [discuss.ardupilot.org](https://discuss.ardupilot.org/)
