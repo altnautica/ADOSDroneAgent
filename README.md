@@ -225,5 +225,5 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for code style, PR process, and architect
 ## Community
 
 - Issues: [github.com/altnautica/ADOSDroneAgent/issues](https://github.com/altnautica/ADOSDroneAgent/issues)
-- Community hub: [command.altnautica.com/community](https://command.altnautica.com/community)
+- Discord: [discord.gg/uxbvuD4d5q](https://discord.gg/uxbvuD4d5q)
 - Website: [altnautica.com](https://altnautica.com)
