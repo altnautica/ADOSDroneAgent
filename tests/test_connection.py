@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 from ados.services.mavlink.connection import auto_detect_port
 
@@ -67,9 +67,10 @@ def test_fc_connection_init():
 def test_fc_connection_subscribe():
     """subscribe() should return an asyncio Queue."""
     import asyncio
+
     from ados.core.config import MavlinkConfig
-    from ados.services.mavlink.state import VehicleState
     from ados.services.mavlink.connection import FCConnection
+    from ados.services.mavlink.state import VehicleState
 
     config = MavlinkConfig()
     state = VehicleState()

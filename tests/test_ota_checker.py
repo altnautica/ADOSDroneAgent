@@ -8,7 +8,6 @@ import pytest
 
 from ados.core.config import OtaConfig
 from ados.services.ota.checker import UpdateChecker, _version_tuple
-from ados.services.ota.manifest import UpdateManifest
 
 
 def _make_manifest(**overrides) -> dict:
