@@ -31,6 +31,8 @@ def agent_app():
     app._fc_connection.baud = 0
     app._tasks = []
     app._param_cache = None
+    # Auth middleware skips auth when unpaired
+    app.pairing_manager.is_paired = False
     return app
 
 
