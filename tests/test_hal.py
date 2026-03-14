@@ -3,8 +3,7 @@
 from __future__ import annotations
 
 import platform
-from pathlib import Path
-from unittest.mock import patch, PropertyMock
+from unittest.mock import patch
 
 import pytest
 
@@ -14,12 +13,9 @@ from ados.hal.detect import (
     BoardProfile,
     _load_board_profiles,
     _match_profile,
-    _read_board_override,
-    _read_cpuinfo_model,
     detect_board,
     detect_tier,
 )
-
 
 # ---------------------------------------------------------------------------
 # All 9 YAML profile filenames

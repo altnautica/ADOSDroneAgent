@@ -6,7 +6,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from ados.core.config import ADOSConfig, load_config
+from ados.core.config import ADOSConfig
 from ados.services.mavlink.state import VehicleState
 
 

@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-import shutil
 import tempfile
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -19,7 +18,8 @@ from ados.services.video.snapshot import (
 class TestBuildCaptureCommand:
     def test_csi_with_rpicam(self):
         cam = CameraInfo(name="CSI-0", type=CameraType.CSI, device_path="/dev/video0")
-        with patch("ados.services.video.snapshot.shutil.which", return_value="/usr/bin/rpicam-still"):
+        mock_target = "ados.services.video.snapshot.shutil.which"
+        with patch(mock_target, return_value="/usr/bin/rpicam-still"):
             cmd = _build_capture_command(cam, "/tmp/snap.jpg")
             assert cmd[0] == "rpicam-still"
             assert "/tmp/snap.jpg" in cmd

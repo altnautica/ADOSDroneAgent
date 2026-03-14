@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import time
-
 from ados.core.main import ServiceState, ServiceTracker
 
 

@@ -2,13 +2,9 @@
 
 from __future__ import annotations
 
-import json
-
 import pytest
 
 from ados.services.ota.rollback import (
-    BootSlot,
-    BootState,
     RollbackManager,
     SlotStatus,
 )
