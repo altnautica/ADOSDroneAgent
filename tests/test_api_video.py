@@ -33,6 +33,8 @@ def agent_app_with_video():
     app._tasks = []
     app._param_cache = None
     app._video_pipeline = DemoVideoPipeline()
+    # Auth middleware skips auth when unpaired
+    app.pairing_manager.is_paired = False
     return app
 
 
@@ -54,6 +56,8 @@ def agent_app_no_video():
     app._param_cache = None
     # Explicitly no _video_pipeline attribute
     del app._video_pipeline
+    # Auth middleware skips auth when unpaired
+    app.pairing_manager.is_paired = False
     return app
 
 
