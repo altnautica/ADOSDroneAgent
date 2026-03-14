@@ -5,8 +5,6 @@ from __future__ import annotations
 import subprocess
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 from ados.hal.modem import (
     ModemInfo,
     _extract_field,
@@ -15,7 +13,6 @@ from ados.hal.modem import (
     detect_modem,
     get_modem_status,
 )
-
 
 SAMPLE_MMCLI_M_OUTPUT = """\
   -------------------------

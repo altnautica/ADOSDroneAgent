@@ -5,14 +5,12 @@ from __future__ import annotations
 from unittest.mock import MagicMock, patch
 
 from ados.services.wfb.adapter import (
-    WifiAdapterInfo,
     _parse_iw_dev,
     _parse_phy_info,
     detect_wfb_adapters,
     set_managed_mode,
     set_monitor_mode,
 )
-
 
 # --- iw dev parsing ---
 

@@ -6,7 +6,6 @@ import json
 import secrets
 import time
 from pathlib import Path
-from typing import Optional
 
 from ados.core.logging import get_logger
 
@@ -60,11 +59,11 @@ class PairingManager:
         return self._state.get("paired", False)
 
     @property
-    def api_key(self) -> Optional[str]:
+    def api_key(self) -> str | None:
         return self._state.get("api_key") if self.is_paired else None
 
     @property
-    def owner_id(self) -> Optional[str]:
+    def owner_id(self) -> str | None:
         return self._state.get("owner_id") if self.is_paired else None
 
     def get_or_create_code(self) -> str:
@@ -89,7 +88,7 @@ class PairingManager:
         self._save_state()
         log.info("pairing_code_set", code=code.upper())
 
-    def claim(self, user_id: str, api_key: Optional[str] = None) -> str:
+    def claim(self, user_id: str, api_key: str | None = None) -> str:
         """Claim this agent for a user. Returns API key."""
         if self.is_paired:
             raise ValueError("Already paired. Unpair first.")

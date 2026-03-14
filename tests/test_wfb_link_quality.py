@@ -2,10 +2,7 @@
 
 from __future__ import annotations
 
-import time
-
 from ados.services.wfb.link_quality import LinkQualityMonitor, LinkStats, parse_wfb_rx_line
-
 
 # --- parse_wfb_rx_line ---
 

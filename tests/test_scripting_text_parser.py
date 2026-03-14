@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import pytest
-
-from ados.services.scripting.text_parser import CommandType, ParsedCommand, parse_text_command
+from ados.services.scripting.text_parser import CommandType, parse_text_command
 
 
 class TestParseTextCommand:
