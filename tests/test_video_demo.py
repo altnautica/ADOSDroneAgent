@@ -6,7 +6,6 @@ import asyncio
 
 import pytest
 
-from ados.services.video.camera_mgr import CameraRole
 from ados.services.video.demo import DemoVideoPipeline
 
 

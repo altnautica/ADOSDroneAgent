@@ -6,13 +6,11 @@ from unittest.mock import patch
 
 from ados.hal.usb import (
     UsbCategory,
-    UsbDevice,
     _parse_lsusb_output,
     _parse_macos_usb_output,
     categorize_device,
     discover_usb_devices,
 )
-
 
 # --- categorize_device ---
 

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import platform
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -96,7 +95,6 @@ def test_generate_keypair_not_linux(wg_manager):
 
 
 def test_command_binary_not_found(wg_manager):
-    import subprocess
 
     with patch("ados.security.wireguard.platform.system", return_value="Linux"), \
          patch("subprocess.run", side_effect=FileNotFoundError):

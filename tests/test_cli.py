@@ -2,13 +2,11 @@
 
 from __future__ import annotations
 
-import platform
 from unittest.mock import MagicMock, patch
 
 from click.testing import CliRunner
 
 from ados.cli.main import cli
-
 
 runner = CliRunner()
 

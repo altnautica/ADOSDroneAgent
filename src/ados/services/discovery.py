@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import asyncio
 import socket
-from typing import Optional
 
 from ados.core.logging import get_logger
 
@@ -51,8 +49,8 @@ class DiscoveryService:
     def _build_txt_records(
         self,
         paired: bool = False,
-        code: Optional[str] = None,
-        owner: Optional[str] = None,
+        code: str | None = None,
+        owner: str | None = None,
     ) -> dict:
         records = {
             "device_id": self._device_id,
@@ -70,8 +68,8 @@ class DiscoveryService:
     async def register(
         self,
         paired: bool = False,
-        code: Optional[str] = None,
-        owner: Optional[str] = None,
+        code: str | None = None,
+        owner: str | None = None,
     ) -> None:
         """Register mDNS service on the local network."""
         try:
@@ -109,8 +107,8 @@ class DiscoveryService:
     async def update_txt(
         self,
         paired: bool = False,
-        code: Optional[str] = None,
-        owner: Optional[str] = None,
+        code: str | None = None,
+        owner: str | None = None,
     ) -> None:
         """Update TXT records (e.g., after pairing state changes)."""
         if not self._zeroconf or not self._info:
