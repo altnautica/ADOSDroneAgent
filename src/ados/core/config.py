@@ -121,9 +121,9 @@ class ServerConfig(BaseModel):
     self_hosted: SelfHostedServerConfig = SelfHostedServerConfig()
     telemetry_rate: int = 2
     heartbeat_interval: int = 5
-    mqtt_transport: str = "tcp"  # "tcp" or "websockets"
-    mqtt_username: str = ""
-    mqtt_password: str = ""
+    mqtt_transport: str = "websockets"  # "tcp" or "websockets" — cloud uses websockets via Cloudflare Tunnel
+    mqtt_username: str = "ados"
+    mqtt_password: str = ""  # Auto-filled from API key in cloud mode
 
 
 # --- Security ---
