@@ -103,9 +103,9 @@ class NetworkConfig(BaseModel):
 # --- Server ---
 
 class CloudServerConfig(BaseModel):
-    url: str = "https://api.altnautica.com"
+    url: str = "https://convex-site.altnautica.com"
     mqtt_broker: str = "mqtt.altnautica.com"
-    mqtt_port: int = 8883
+    mqtt_port: int = 443
 
 
 class SelfHostedServerConfig(BaseModel):
