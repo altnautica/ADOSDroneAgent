@@ -2,31 +2,100 @@
 
 from __future__ import annotations
 
+import os
+import time
+
 from fastapi import APIRouter
 
 from ados.api.deps import get_agent_app
 
 router = APIRouter()
 
+# Cache process metrics (psutil is expensive to call per-request)
+_proc_cache: dict = {"cpu": 0.0, "rss_mb": 0.0, "pid": 0, "ts": 0.0}
+
+
+def _get_process_metrics() -> dict:
+    """Get current process CPU% and RSS memory. Cached for 2 seconds."""
+    now = time.monotonic()
+    if now - _proc_cache["ts"] < 2.0 and _proc_cache["pid"] == os.getpid():
+        return _proc_cache
+    try:
+        import psutil
+        proc = psutil.Process(os.getpid())
+        _proc_cache["cpu"] = proc.cpu_percent(interval=0)
+        _proc_cache["rss_mb"] = proc.memory_info().rss / (1024 * 1024)
+        _proc_cache["pid"] = os.getpid()
+        _proc_cache["ts"] = now
+    except Exception:
+        pass
+    return _proc_cache
+
+
+def _infer_service_state(app, name: str, tracker_state: str, task_done: bool) -> str:
+    """Infer true operational state from observable conditions.
+
+    The tracker only knows running/stopped/failed, but many services
+    are technically running (asyncio task alive) while functionally
+    degraded (e.g. no FC connected, no camera, no WFB adapter).
+    """
+    if task_done or tracker_state in ("stopped", "failed"):
+        return tracker_state
+
+    # FC connection — degraded if no serial port / not connected
+    if name == "fc-connection":
+        fc = getattr(app, "_fc_connection", None)
+        if fc and not getattr(fc, "connected", False):
+            return "degraded"
+
+    # Video pipeline — degraded if mode is disabled or no camera
+    if name == "video-pipeline":
+        if getattr(app.config.video, "mode", "disabled") == "disabled":
+            return "stopped"
+
+    # WFB link — degraded if no compatible adapter found
+    if name == "wfb-link":
+        wfb = getattr(app, "_wfb_manager", None)
+        if wfb and not getattr(wfb, "has_adapter", False):
+            return "degraded"
+
+    # Pairing beacon — idle when already paired
+    if name == "pairing-beacon":
+        if app.pairing_manager.is_paired:
+            return "stopped"
+
+    return tracker_state
+
 
 @router.get("/services")
 async def list_services():
-    """List all running services with state machine info."""
+    """List all running services with state machine info and process metrics."""
     app = get_agent_app()
 
     # Get state machine data from ServiceTracker
     tracker_data = app.services.to_dict()
 
+    # Get process-level metrics (all services share one process)
+    proc = _get_process_metrics()
+    pid = proc["pid"]
+    total_cpu = proc["cpu"]
+    total_rss_mb = proc["rss_mb"]
+
     # Merge with asyncio task status for runtime info
     services = []
     task_names = {t.get_name() for t in app._tasks}
+    running_count = 0
 
     for task in app._tasks:
         name = task.get_name()
         tracked = tracker_data.get(name, {})
+        raw_state = tracked.get("state", "running" if not task.done() else "stopped")
+        state = _infer_service_state(app, name, raw_state, task.done())
+        if state == "running":
+            running_count += 1
         services.append({
             "name": name,
-            "state": tracked.get("state", "running" if not task.done() else "stopped"),
+            "state": state,
             "task_done": task.done(),
             "cancelled": task.cancelled(),
             "last_transition": tracked.get("last_transition", 0),
@@ -36,16 +105,40 @@ async def list_services():
     # Include tracked services that might not have an active task
     for name, info in tracker_data.items():
         if name not in task_names:
+            state = _infer_service_state(app, name, info["state"], True)
+            if state == "running":
+                running_count += 1
             services.append({
                 "name": name,
-                "state": info["state"],
+                "state": state,
                 "task_done": True,
                 "cancelled": False,
                 "last_transition": info["last_transition"],
                 "transition_count": info["transition_count"],
             })
 
-    return {"services": services}
+    # Distribute process metrics evenly across running services.
+    per_svc_cpu = total_cpu / running_count if running_count > 0 else 0.0
+    per_svc_rss = total_rss_mb / running_count if running_count > 0 else 0.0
+
+    for svc in services:
+        if svc["state"] == "running":
+            svc["pid"] = pid
+            svc["cpuPercent"] = round(per_svc_cpu, 1)
+            svc["memoryMb"] = round(per_svc_rss, 1)
+        else:
+            svc["pid"] = None
+            svc["cpuPercent"] = 0.0
+            svc["memoryMb"] = 0.0
+
+    return {
+        "services": services,
+        "process": {
+            "pid": pid,
+            "cpu_percent": round(total_cpu, 1),
+            "memory_mb": round(total_rss_mb, 1),
+        },
+    }
 
 
 @router.post("/services/{name}/restart")
