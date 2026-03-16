@@ -22,7 +22,10 @@ async def install_suite(suite_id: str):
 @router.post("/suites/{suite_id}/uninstall")
 async def uninstall_suite(suite_id: str):
     """Uninstall a suite (not yet implemented)."""
-    return {"status": "not_implemented", "message": f"Suite uninstall not yet available: {suite_id}"}
+    return {
+        "status": "not_implemented",
+        "message": f"Suite uninstall not yet available: {suite_id}",
+    }
 
 
 @router.post("/suites/{suite_id}/activate")
