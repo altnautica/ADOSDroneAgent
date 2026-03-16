@@ -18,11 +18,12 @@ log = get_logger("mqtt")
 class MqttGateway:
     """MQTT client that bridges vehicle state to cloud/self-hosted broker."""
 
-    def __init__(self, config: ADOSConfig, state: VehicleState) -> None:
+    def __init__(self, config: ADOSConfig, state: VehicleState, api_key: str | None = None) -> None:
         self.config = config
         self.state = state
         self._client = None
         self._device_id = config.agent.device_id
+        self._api_key = api_key  # From pairing, used as MQTT password in cloud mode
 
     def _get_broker_config(self) -> tuple[str, int]:
         """Get broker host and port based on server mode."""
@@ -61,12 +62,14 @@ class MqttGateway:
         if transport == "websockets":
             client.ws_set_options(path="/mqtt")
 
-        # Username/password auth
-        if self.config.server.mqtt_username:
-            client.username_pw_set(
-                self.config.server.mqtt_username,
-                self.config.server.mqtt_password,
-            )
+        # Username/password auth — in cloud mode, auto-use deviceId + apiKey
+        mqtt_user = self.config.server.mqtt_username
+        mqtt_pass = self.config.server.mqtt_password
+        if self.config.server.mode == "cloud" and self._api_key:
+            mqtt_user = mqtt_user or f"ados-{self._device_id}"
+            mqtt_pass = mqtt_pass or self._api_key
+        if mqtt_user:
+            client.username_pw_set(mqtt_user, mqtt_pass)
 
         # TLS for secure connections
         if self.config.security.tls.enabled or transport == "websockets":
