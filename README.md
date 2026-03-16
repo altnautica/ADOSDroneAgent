@@ -154,6 +154,30 @@ scripts/              # install.sh (Linux + macOS)
 .github/workflows/    # CI (ci.yml) + PyPI publish (publish.yml)
 ```
 
+## Cloud Connectivity
+
+The agent can report status and receive commands through cloud relay when paired with an ADOS Mission Control instance.
+
+**Convex HTTP heartbeat.** Every 5 seconds, the agent POSTs full status (board info, health, FC connection, services) to `/agent/status`. When the GCS enqueues commands via Convex, the agent polls `/agent/commands` and ACKs results back.
+
+**MQTT telemetry.** When `server.mode` is set to `cloud` or `self_hosted`, the agent publishes to two MQTT topics:
+- `ados/{deviceId}/status` (QoS 1) — armed state, FC connected, tier
+- `ados/{deviceId}/telemetry` (QoS 0) — full vehicle state at configured rate
+
+**RTSP video push.** The video pipeline can push an RTSP stream to a cloud relay server, which converts it to fMP4-over-WebSocket for browser playback.
+
+**Config fields:**
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `server.mode` | `disabled` | `disabled`, `cloud`, or `self_hosted` |
+| `server.mqtt_transport` | `tcp` | `tcp` or `websockets` (use `websockets` for Cloudflare Tunnel) |
+| `server.mqtt_username` | — | MQTT broker username |
+| `server.mqtt_password` | — | MQTT broker password |
+| `video.cloud_relay_url` | — | RTSP relay server URL for cloud video streaming |
+
+---
+
 ## What's Implemented vs Planned
 
 | Feature | Status | Notes |
@@ -169,6 +193,7 @@ scripts/              # install.sh (Linux + macOS)
 | Structured logging | **Working** | structlog, JSON output, configurable level |
 | MQTT gateway | **Working** | paho-mqtt, optional (disabled in demo) |
 | Board profiles | **Working** | CM4, CM5, generic ARM64 |
+| Cloud relay (Convex HTTP + MQTT) | **Working** | Heartbeat, command polling, MQTT telemetry |
 | Video pipeline (WFB-ng) | Planned | HD video link management |
 | Suite runtime | Planned | YAML manifest execution, ROS2 integration |
 | Script executor | Planned | Text commands, Python SDK |
