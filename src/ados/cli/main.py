@@ -444,6 +444,160 @@ def pair_reset() -> None:
 
 
 @cli.command()
+@click.option("--keep-config", is_flag=True, default=True, help="Keep /etc/ados config (default: yes)")
+@click.option("--purge", is_flag=True, default=False, help="Remove everything including config")
+@click.option("--yes", "-y", is_flag=True, default=False, help="Skip confirmation prompt")
+def uninstall(keep_config: bool, purge: bool, yes: bool) -> None:
+    """Uninstall the ADOS Drone Agent from this system."""
+    is_linux = platform.system() == "Linux"
+    is_mac = platform.system() == "Darwin"
+
+    if not is_linux and not is_mac:
+        click.echo(f"Unsupported platform: {platform.system()}", err=True)
+        sys.exit(1)
+
+    # macOS: pip/pipx/uv uninstall
+    if is_mac:
+        if not yes:
+            click.confirm("Uninstall ados-drone-agent from this system?", abort=True)
+
+        pkg = "ados-drone-agent"
+        # Detect installer: pipx > uv > pip
+        installer = None
+        try:
+            result = subprocess.run(
+                ["pipx", "list", "--short"],
+                capture_output=True, text=True, timeout=10,
+            )
+            if result.returncode == 0 and pkg in result.stdout:
+                installer = "pipx"
+        except FileNotFoundError:
+            pass
+
+        if installer is None:
+            try:
+                result = subprocess.run(
+                    ["uv", "tool", "list"],
+                    capture_output=True, text=True, timeout=10,
+                )
+                if result.returncode == 0 and pkg in result.stdout:
+                    installer = "uv"
+            except FileNotFoundError:
+                pass
+
+        if installer is None:
+            installer = "pip"
+
+        click.echo(f"Detected installer: {installer}")
+
+        if installer == "pipx":
+            cmd = ["pipx", "uninstall", pkg]
+        elif installer == "uv":
+            cmd = ["uv", "tool", "uninstall", pkg]
+        else:
+            cmd = [sys.executable, "-m", "pip", "uninstall", "-y", pkg]
+
+        click.echo(f"Running: {' '.join(cmd)}")
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode == 0:
+            click.echo("Uninstalled successfully.")
+        else:
+            click.echo(f"Uninstall failed: {result.stderr.strip()}", err=True)
+            sys.exit(1)
+        return
+
+    # Linux: full system uninstall
+    INSTALL_DIR = Path("/opt/ados")
+    CONFIG_DIR = Path("/etc/ados")
+    DATA_DIR = Path("/var/ados")
+    SERVICE_NAME = "ados-agent"
+    SERVICE_FILE = Path("/etc/systemd/system/ados-agent.service")
+    SYMLINKS = [Path("/usr/local/bin/ados"), Path("/usr/local/bin/ados-agent")]
+
+    if os.geteuid() != 0:
+        click.echo("Error: Uninstall requires root. Run with sudo.", err=True)
+        sys.exit(1)
+
+    # Show what will be removed
+    items = []
+    if SERVICE_FILE.exists():
+        items.append(f"  systemd service: {SERVICE_NAME}")
+    for sym in SYMLINKS:
+        if sym.exists() or sym.is_symlink():
+            items.append(f"  symlink: {sym}")
+    if INSTALL_DIR.exists():
+        items.append(f"  install dir: {INSTALL_DIR}")
+    if DATA_DIR.exists():
+        items.append(f"  data dir: {DATA_DIR}")
+    if purge and CONFIG_DIR.exists():
+        items.append(f"  config dir: {CONFIG_DIR}")
+
+    if not items:
+        click.echo("Nothing to uninstall. ADOS Drone Agent is not installed.")
+        return
+
+    click.echo("The following will be removed:")
+    for item in items:
+        click.echo(item)
+    if not purge and CONFIG_DIR.exists():
+        click.echo(f"  (keeping config: {CONFIG_DIR})")
+    click.echo("")
+
+    if not yes:
+        click.confirm("Proceed with uninstall?", abort=True)
+
+    # 1. Stop and disable systemd service
+    if SERVICE_FILE.exists():
+        click.echo(f"Stopping {SERVICE_NAME}...")
+        subprocess.run(
+            ["systemctl", "stop", SERVICE_NAME],
+            capture_output=True, timeout=30,
+        )
+        subprocess.run(
+            ["systemctl", "disable", SERVICE_NAME],
+            capture_output=True, timeout=10,
+        )
+        try:
+            SERVICE_FILE.unlink()
+            click.echo(f"Removed {SERVICE_FILE}")
+        except OSError:
+            pass
+        subprocess.run(
+            ["systemctl", "daemon-reload"],
+            capture_output=True, timeout=10,
+        )
+
+    # 2. Remove symlinks
+    for sym in SYMLINKS:
+        try:
+            if sym.exists() or sym.is_symlink():
+                sym.unlink()
+                click.echo(f"Removed {sym}")
+        except OSError:
+            pass
+
+    # 3. Remove install dir
+    if INSTALL_DIR.exists():
+        shutil.rmtree(INSTALL_DIR, ignore_errors=True)
+        click.echo(f"Removed {INSTALL_DIR}")
+
+    # 4. Remove data dir
+    if DATA_DIR.exists():
+        shutil.rmtree(DATA_DIR, ignore_errors=True)
+        click.echo(f"Removed {DATA_DIR}")
+
+    # 5. Config dir
+    if purge and CONFIG_DIR.exists():
+        shutil.rmtree(CONFIG_DIR, ignore_errors=True)
+        click.echo(f"Removed {CONFIG_DIR}")
+    elif CONFIG_DIR.exists():
+        click.echo(f"Config preserved at {CONFIG_DIR}. Use --purge to remove.")
+
+    click.echo("")
+    click.echo("ADOS Drone Agent uninstalled successfully.")
+
+
+@cli.command()
 def tui() -> None:
     """Launch the TUI dashboard."""
     try:
