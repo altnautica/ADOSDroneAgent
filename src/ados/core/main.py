@@ -484,18 +484,32 @@ class AgentApp:
                             try:
                                 if command == "restart_service":
                                     svc_name = args.get("name", "") if args else ""
-                                    result = {"success": True, "message": f"Service '{svc_name}' restart requested"}
+                                    msg = f"Service '{svc_name}' restart requested"
+                                    result = {"success": True, "message": msg}
                                 elif command == "send_command":
                                     cmd_text = args.get("cmd", "") if args else ""
                                     if self._command_executor:
-                                        exec_result = await self._command_executor.execute(cmd_text)
-                                        result = {"success": True, "message": str(exec_result)}
+                                        exec_result = await asyncio.wait_for(
+                                            self._command_executor.execute(cmd_text),
+                                            timeout=10.0,
+                                        )
+                                        result = {
+                                            "success": True,
+                                            "message": str(exec_result),
+                                        }
                                     else:
-                                        result = {"success": False, "message": "Command executor not available"}
+                                        result = {
+                                            "success": False,
+                                            "message": "Command executor not available",
+                                        }
                                 elif command == "scan_peripherals":
-                                    result = {"success": True, "message": "Peripheral scan complete"}
+                                    result = {
+                                        "success": True,
+                                        "message": "Peripheral scan complete",
+                                    }
                                 else:
-                                    result = {"success": False, "message": f"Unknown command: {command}"}
+                                    msg = f"Unknown command: {command}"
+                                    result = {"success": False, "message": msg}
                             except Exception as exc:
                                 result = {"success": False, "message": str(exc)}
 

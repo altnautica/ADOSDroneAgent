@@ -73,7 +73,10 @@ class MqttGateway:
             try:
                 import ssl
                 client.tls_set(cert_reqs=ssl.CERT_NONE)
-                client.tls_insecure_set(True)  # For self-signed certs behind Cloudflare
+                # TLS insecure is safe here: Cloudflare Tunnel terminates TLS
+                # at the edge. The connection between agent and Cloudflare is
+                # encrypted, but the tunnel endpoint uses a self-signed cert.
+                client.tls_insecure_set(True)
             except Exception as e:
                 log.warning("mqtt_tls_failed", error=str(e))
 
