@@ -18,7 +18,7 @@ VENV_DIR="${INSTALL_DIR}/venv"
 SERVICE_NAME="ados-agent"
 SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
 DEVICE_ID_FILE="${CONFIG_DIR}/device-id"
-CONVEX_URL="https://convex.altnautica.com"
+CONVEX_URL="https://convex-site.altnautica.com"
 
 # Color helpers (degrade gracefully if not a terminal)
 if [ -t 1 ]; then
@@ -43,17 +43,6 @@ is_installed() {
 
 get_installed_version() {
     "${VENV_DIR}/bin/ados" version 2>/dev/null | awk '{print $NF}' || echo "unknown"
-}
-
-# ─── Stale Config Migration ─────────────────────────────────────────────────
-
-migrate_stale_config() {
-    local config_file="${CONFIG_DIR}/config.yaml"
-    if [ -f "$config_file" ] && grep -q "watchful-trout-699\|agile-koala-64\|\.convex\.cloud\|\.convex\.site" "$config_file"; then
-        info "Migrating stale Convex URL to ${CONVEX_URL}..."
-        sed -i "s|https://[a-z-]*[a-z0-9]*\.convex\.\(cloud\|site\)|${CONVEX_URL}|g" "$config_file"
-        info "Config migrated."
-    fi
 }
 
 # ─── Uninstall ───────────────────────────────────────────────────────────────
@@ -567,7 +556,6 @@ esac
 if is_installed && [ -n "$PAIR_CODE" ] && ! $DO_FORCE; then
     info "Agent already installed ($(get_installed_version)). Fast path: updating pairing code only."
     mkdir -p "${CONFIG_DIR}"
-    migrate_stale_config
     write_pairing "$PAIR_CODE"
     systemctl restart "${SERVICE_NAME}" 2>/dev/null || true
     print_pairing_code
@@ -616,9 +604,6 @@ if is_installed && $DO_UPGRADE && ! $DO_FORCE; then
     else
         info "Upgraded: ${local_ver} -> ${new_ver}"
     fi
-
-    # Migrate stale Convex URLs in existing config
-    migrate_stale_config
 
     # Update service file if needed and restart
     install_systemd_service
@@ -688,9 +673,6 @@ generate_device_id
 
 # Generate default config (idempotent, skips if exists)
 generate_default_config
-
-# Migrate stale Convex URLs if config existed before this install
-migrate_stale_config
 
 # Write pairing state if code was provided
 if [ -n "$PAIR_CODE" ]; then
