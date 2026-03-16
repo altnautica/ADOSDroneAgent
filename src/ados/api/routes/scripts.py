@@ -65,6 +65,38 @@ async def list_scripts():
     return {"scripts": scripts, "command_log": command_log}
 
 
+class SaveScriptRequest(BaseModel):
+    name: str
+    content: str
+    suite: str | None = None
+
+
+@router.post("/scripts")
+async def save_script(req: SaveScriptRequest):
+    """Save a new script (stub)."""
+    return {"status": "not_implemented", "message": f"Script save not yet available: {req.name}"}
+
+
+@router.delete("/scripts/{script_id}")
+async def delete_script(script_id: str):
+    """Delete a script by ID (stub)."""
+    return {"status": "not_implemented", "message": f"Script delete not yet available: {script_id}"}
+
+
+@router.post("/scripts/{script_id}/run")
+async def run_script_by_id(script_id: str):
+    """Run a script by ID."""
+    app = get_agent_app()
+    runner = getattr(app, "_script_runner", None)
+    if runner is None:
+        raise HTTPException(status_code=503, detail="Script runner not available")
+    try:
+        sid = runner.start_script(script_id)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"status": "ok", "script_id": sid}
+
+
 @router.post("/scripts/run")
 async def run_script(req: RunScriptRequest):
     """Start a Python script."""
