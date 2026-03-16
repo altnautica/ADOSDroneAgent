@@ -408,22 +408,46 @@ class AgentApp:
                     disk_percent = getattr(health, "disk_percent", 0.0)
                     temperature = getattr(health, "temperature", None)
 
-                    # Service states with process-level metrics
+                    # Service states with accurate operational status
                     service_list = []
                     all_services = self.services.get_all()
-                    running_count = sum(1 for s in all_services.values() if s.value == "running")
 
-                    # Get process metrics for distribution across services
+                    # Infer true state from runtime conditions
+                    def _svc_state(name: str, state: ServiceState) -> str:
+                        s = state.value
+                        if s != "running":
+                            return s
+                        if name == "fc-connection":
+                            fc = getattr(self, "_fc_connection", None)
+                            if fc and not getattr(fc, "connected", False):
+                                return "degraded"
+                        elif name == "video-pipeline":
+                            if getattr(self.config.video, "mode", "disabled") == "disabled":
+                                return "stopped"
+                        elif name == "wfb-link":
+                            wfb = getattr(self, "_wfb_manager", None)
+                            if wfb and not getattr(wfb, "has_adapter", False):
+                                return "degraded"
+                        elif name == "pairing-beacon":
+                            if self.pairing_manager.is_paired:
+                                return "stopped"
+                        return s
+
+                    running_count = 0
+                    for svc_name, svc_state in all_services.items():
+                        real_state = _svc_state(svc_name, svc_state)
+                        if real_state == "running":
+                            running_count += 1
+
+                    # Get process metrics for distribution across running services
                     proc_cpu = 0.0
                     proc_rss_mb = 0.0
-                    proc_pid = 0
                     try:
                         import psutil as _psutil
                         import os as _os
                         _proc = _psutil.Process(_os.getpid())
                         proc_cpu = _proc.cpu_percent(interval=0)
                         proc_rss_mb = _proc.memory_info().rss / (1024 * 1024)
-                        proc_pid = _os.getpid()
                     except Exception:
                         pass
 
@@ -431,10 +455,11 @@ class AgentApp:
                     per_svc_rss = proc_rss_mb / running_count if running_count > 0 else 0.0
 
                     for svc_name, svc_state in all_services.items():
-                        is_running = svc_state.value == "running"
+                        real_state = _svc_state(svc_name, svc_state)
+                        is_running = real_state == "running"
                         service_list.append({
                             "name": svc_name,
-                            "status": svc_state.value,
+                            "status": real_state,
                             "cpuPercent": round(per_svc_cpu, 1) if is_running else 0,
                             "memoryMb": round(per_svc_rss, 1) if is_running else 0,
                         })
