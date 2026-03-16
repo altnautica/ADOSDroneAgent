@@ -434,6 +434,8 @@ print_pairing_code() {
             echo -e "  ${BOLD}+----------+${NC}"
             echo ""
             echo "  Enter this code in ADOS Mission Control to pair with this drone."
+            echo "  The agent is beaconing this code to the cloud."
+            echo "  If your GCS is open, pairing should complete automatically within 30 seconds."
             echo ""
         fi
     fi

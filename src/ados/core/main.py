@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import signal
+import socket
 import time
 from enum import StrEnum
 
@@ -13,6 +14,18 @@ from ados.core.health import HealthMonitor
 from ados.core.logging import configure_logging, get_logger
 
 log = get_logger("main")
+
+
+def _get_local_ip() -> str:
+    """Detect local IP via UDP socket probe (works without mDNS)."""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except OSError:
+        return "127.0.0.1"
 
 
 class ServiceState(StrEnum):
@@ -331,11 +344,10 @@ class AgentApp:
             if not self.pairing_manager.is_paired and convex_url:
                 try:
                     code = self.pairing_manager.get_or_create_code()
+                    local_ip = _get_local_ip()
                     mdns_host = ""
-                    local_ip = "127.0.0.1"
                     if self.discovery_service:
                         mdns_host = self.discovery_service.mdns_hostname
-                        local_ip = self.discovery_service._get_local_ip()
 
                     api_key = self.pairing_manager.generate_api_key()
                     async with httpx.AsyncClient(timeout=10.0) as client:
@@ -367,11 +379,10 @@ class AgentApp:
         while not self._shutdown.is_set():
             if self.pairing_manager.is_paired and convex_url:
                 try:
+                    local_ip = _get_local_ip()
                     mdns_host = ""
-                    local_ip = "127.0.0.1"
                     if self.discovery_service:
                         mdns_host = self.discovery_service.mdns_hostname
-                        local_ip = self.discovery_service._get_local_ip()
 
                     fc_connected = False
                     if self._fc_connection:

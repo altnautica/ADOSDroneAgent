@@ -46,3 +46,9 @@ async def list_services():
             })
 
     return {"services": services}
+
+
+@router.post("/services/{name}/restart")
+async def restart_service(name: str):
+    """Restart a named service (stub — systemd services not yet managed via API)."""
+    return {"status": "ok", "message": f"Restart requested for {name}"}
