@@ -48,6 +48,7 @@ class VideoPipeline:
         self._mediamtx = MediamtxManager()
         self._encoder_process: asyncio.subprocess.Process | None = None
         self._encoder_type: EncoderType | None = None
+        self._cloud_push_process: asyncio.subprocess.Process | None = None
 
     @property
     def state(self) -> PipelineState:
@@ -142,8 +143,56 @@ class VideoPipeline:
             self._state = PipelineState.ERROR
             return False
 
+    async def start_cloud_push(self) -> bool:
+        """Push local RTSP stream to cloud video relay for remote viewing.
+
+        Spawns an ffmpeg process that reads from local mediamtx RTSP
+        and pushes to the cloud relay RTSP endpoint.
+        """
+        cloud_url = self._config.cloud_relay_url
+        if not cloud_url:
+            log.info("cloud_push_disabled", reason="no cloud_relay_url configured")
+            return False
+
+        if self._state != PipelineState.RUNNING:
+            log.warning("cloud_push_skipped", reason="pipeline not running")
+            return False
+
+        local_rtsp = f"rtsp://localhost:{self._mediamtx.rtsp_port}/main"
+        push_url = f"{cloud_url}/main"
+
+        try:
+            self._cloud_push_process = await asyncio.create_subprocess_exec(
+                "ffmpeg",
+                "-i", local_rtsp,
+                "-c", "copy",
+                "-f", "rtsp",
+                push_url,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            log.info("cloud_push_started", destination=push_url)
+            return True
+        except FileNotFoundError:
+            log.error("cloud_push_ffmpeg_not_found")
+            return False
+
+    async def stop_cloud_push(self) -> None:
+        """Stop the cloud RTSP push."""
+        proc = self._cloud_push_process
+        if proc is not None and proc.returncode is None:
+            proc.terminate()
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=5.0)
+            except (TimeoutError, asyncio.CancelledError):
+                proc.kill()
+            self._cloud_push_process = None
+            log.info("cloud_push_stopped")
+
     async def stop_stream(self) -> None:
         """Stop the encoding pipeline and mediamtx."""
+        await self.stop_cloud_push()
+
         if self._encoder_process is not None:
             self._encoder_process.terminate()
             try:
@@ -192,6 +241,16 @@ class VideoPipeline:
 
                 await asyncio.sleep(_HEALTH_CHECK_INTERVAL)
         finally:
+            # Kill cloud push subprocess on shutdown/cancellation
+            if self._cloud_push_process is not None and self._cloud_push_process.returncode is None:
+                self._cloud_push_process.terminate()
+                try:
+                    await asyncio.wait_for(self._cloud_push_process.wait(), timeout=5.0)
+                except (TimeoutError, asyncio.CancelledError):
+                    self._cloud_push_process.kill()
+                self._cloud_push_process = None
+                log.info("cloud_push_process_cleaned_up")
+
             # Kill encoder subprocess on shutdown/cancellation to prevent orphans
             if self._encoder_process is not None and self._encoder_process.returncode is None:
                 self._encoder_process.terminate()
@@ -204,10 +263,15 @@ class VideoPipeline:
 
     def get_status(self) -> dict:
         """Return current pipeline status for API responses."""
+        cloud_push = (
+            self._cloud_push_process is not None
+            and self._cloud_push_process.returncode is None
+        )
         return {
             "state": self._state.value,
             "encoder": self._encoder_type.value if self._encoder_type else None,
             "cameras": self._camera_mgr.to_dict(),
             "recorder": self._recorder.to_dict(),
             "mediamtx": self._mediamtx.to_dict(),
+            "cloud_push": cloud_push,
         }
