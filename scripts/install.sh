@@ -2,9 +2,11 @@
 # =============================================================================
 # ADOS Drone Agent — Installation Script
 # Supports: Raspberry Pi OS (Bookworm), Ubuntu 22.04+, Armbian, macOS (dev)
-# Usage: sudo ./install.sh          (install)
-#        sudo ./install.sh --uninstall (remove)
-# Idempotent: safe to re-run at any time.
+# Usage: sudo ./install.sh [CODE]        (install + pair)
+#        sudo ./install.sh --upgrade     (upgrade only)
+#        sudo ./install.sh --force       (full reinstall)
+#        sudo ./install.sh --uninstall   (remove)
+# Idempotent: re-runs skip completed steps. --pair is a fast path (<5s).
 # =============================================================================
 set -euo pipefail
 
@@ -16,6 +18,7 @@ VENV_DIR="${INSTALL_DIR}/venv"
 SERVICE_NAME="ados-agent"
 SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
 DEVICE_ID_FILE="${CONFIG_DIR}/device-id"
+CONVEX_URL="https://convex.altnautica.com"
 
 # Color helpers (degrade gracefully if not a terminal)
 if [ -t 1 ]; then
@@ -31,6 +34,27 @@ fi
 info()  { echo -e "${GREEN}[INFO]${NC}  $*"; }
 warn()  { echo -e "${YELLOW}[WARN]${NC}  $*"; }
 error() { echo -e "${RED}[ERROR]${NC} $*"; }
+
+# ─── Installation Detection ─────────────────────────────────────────────────
+
+is_installed() {
+    [ -x "${VENV_DIR}/bin/ados" ] && "${VENV_DIR}/bin/ados" version &>/dev/null
+}
+
+get_installed_version() {
+    "${VENV_DIR}/bin/ados" version 2>/dev/null | awk '{print $NF}' || echo "unknown"
+}
+
+# ─── Stale Config Migration ─────────────────────────────────────────────────
+
+migrate_stale_config() {
+    local config_file="${CONFIG_DIR}/config.yaml"
+    if [ -f "$config_file" ] && grep -q "watchful-trout-699\|agile-koala-64\|\.convex\.cloud\|\.convex\.site" "$config_file"; then
+        info "Migrating stale Convex URL to ${CONVEX_URL}..."
+        sed -i "s|https://[a-z-]*[a-z0-9]*\.convex\.\(cloud\|site\)|${CONVEX_URL}|g" "$config_file"
+        info "Config migrated."
+    fi
+}
 
 # ─── Uninstall ───────────────────────────────────────────────────────────────
 
@@ -84,6 +108,14 @@ do_uninstall() {
 
 PAIR_CODE=""
 DRONE_NAME=""
+DO_FORCE=false
+DO_UPGRADE=false
+
+# Positional pairing code: first non-flag arg that looks like a 4-8 char alphanumeric code
+if [ $# -gt 0 ] && [[ "$1" =~ ^[A-Za-z0-9]{4,8}$ ]]; then
+    PAIR_CODE="$1"
+    shift
+fi
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -106,6 +138,14 @@ while [ $# -gt 0 ]; do
                 error "--name requires a NAME argument"
                 exit 1
             fi
+            shift
+            ;;
+        --force)
+            DO_FORCE=true
+            shift
+            ;;
+        --upgrade)
+            DO_UPGRADE=true
             shift
             ;;
         *)
@@ -290,7 +330,7 @@ scripting:
     port: 8080
 
 pairing:
-  convex_url: "https://watchful-trout-699.convex.site"
+  convex_url: "${CONVEX_URL}"
   beacon_interval: 30
   heartbeat_interval: 60
 
@@ -307,7 +347,10 @@ CFGEOF
 install_systemd_service() {
     info "Installing systemd service..."
 
-    cat > "${SERVICE_FILE}" <<SVCEOF
+    local new_service
+    new_service=$(mktemp)
+
+    cat > "$new_service" <<SVCEOF
 [Unit]
 Description=ADOS Drone Agent
 After=network-online.target
@@ -332,6 +375,16 @@ PrivateTmp=yes
 WantedBy=multi-user.target
 SVCEOF
 
+    # Only rewrite if changed
+    if [ -f "${SERVICE_FILE}" ] && diff -q "$new_service" "${SERVICE_FILE}" &>/dev/null; then
+        info "Service file unchanged, skipping rewrite."
+        rm "$new_service"
+    else
+        mv "$new_service" "${SERVICE_FILE}"
+        systemctl daemon-reload
+        info "Service file written."
+    fi
+
     # Write environment file
     local device_id=""
     if [ -f "${DEVICE_ID_FILE}" ]; then
@@ -343,10 +396,46 @@ ADOS_DEVICE_ID=${device_id}
 ADOS_CONFIG=${CONFIG_DIR}/config.yaml
 ENVEOF
 
-    systemctl daemon-reload
-    systemctl enable "${SERVICE_NAME}"
-    systemctl start "${SERVICE_NAME}"
-    info "Service installed, enabled, and started."
+    systemctl enable "${SERVICE_NAME}" 2>/dev/null
+    systemctl restart "${SERVICE_NAME}"
+    info "Service enabled and restarted."
+}
+
+# ─── Write Pairing State ────────────────────────────────────────────────────
+
+write_pairing() {
+    local code="$1"
+    local pairing_file="${CONFIG_DIR}/pairing.json"
+    local code_upper
+    code_upper=$(echo "$code" | tr '[:lower:]' '[:upper:]')
+
+    info "Setting pairing code: ${code_upper}"
+    cat > "$pairing_file" <<PAIREOF
+{
+  "pairing_code": "${code_upper}",
+  "code_created_at": $(date +%s)
+}
+PAIREOF
+    chmod 644 "$pairing_file"
+}
+
+# ─── Print Pairing Code Box ─────────────────────────────────────────────────
+
+print_pairing_code() {
+    local pairing_file="${CONFIG_DIR}/pairing.json"
+    if [ -f "$pairing_file" ]; then
+        local display_code
+        display_code=$(python3 -c "import json; print(json.load(open('${pairing_file}')).get('pairing_code', '------'))" 2>/dev/null || echo "------")
+        if [ "$display_code" != "------" ] && [ -n "$display_code" ]; then
+            echo ""
+            echo -e "  ${BOLD}+----------+${NC}"
+            echo -e "  ${BOLD}|  ${display_code}  |${NC}  Pairing Code"
+            echo -e "  ${BOLD}+----------+${NC}"
+            echo ""
+            echo "  Enter this code in ADOS Mission Control to pair with this drone."
+            echo ""
+        fi
+    fi
 }
 
 # ─── Print Status Summary ───────────────────────────────────────────────────
@@ -461,6 +550,81 @@ case "$ARCH" in
         warn "Unexpected architecture '${ARCH}'. Proceeding." ;;
 esac
 
+# ─── Fast Path: Pair-only (already installed, --pair/positional code) ────────
+
+if is_installed && [ -n "$PAIR_CODE" ] && ! $DO_FORCE; then
+    info "Agent already installed ($(get_installed_version)). Fast path: updating pairing code only."
+    mkdir -p "${CONFIG_DIR}"
+    migrate_stale_config
+    write_pairing "$PAIR_CODE"
+    systemctl restart "${SERVICE_NAME}" 2>/dev/null || true
+    print_pairing_code
+    info "Done. Service restarted with new pairing code."
+    exit 0
+fi
+
+# ─── Fast Path: Already installed, no flags ──────────────────────────────────
+
+if is_installed && ! $DO_FORCE && ! $DO_UPGRADE; then
+    local_ver=$(get_installed_version)
+    echo ""
+    info "ADOS Drone Agent already installed (v${local_ver})."
+    echo ""
+    echo "  Status:    sudo systemctl status ${SERVICE_NAME}"
+    echo "  CLI:       ${VENV_DIR}/bin/ados status"
+    echo ""
+    echo "  Re-run with:"
+    echo "    --upgrade    Update to latest version (skip apt, skip venv rebuild)"
+    echo "    --force      Full reinstall from scratch"
+    echo "    --pair CODE  Update pairing code only (<5s)"
+    echo "    CODE         Same as --pair CODE (positional)"
+    echo ""
+    print_pairing_code
+    exit 0
+fi
+
+# ─── Upgrade Path (skip apt, skip venv creation) ────────────────────────────
+
+if is_installed && $DO_UPGRADE && ! $DO_FORCE; then
+    info "Upgrading ADOS Drone Agent..."
+    local_ver=$(get_installed_version)
+    info "Current version: ${local_ver}"
+
+    # Upgrade the pip package
+    info "Upgrading pip package..."
+    "${VENV_DIR}/bin/pip" install --upgrade "git+${REPO_URL}" --quiet
+
+    new_ver=$(get_installed_version)
+    if [ "$local_ver" = "$new_ver" ]; then
+        info "Already on latest version (${new_ver})."
+    else
+        info "Upgraded: ${local_ver} -> ${new_ver}"
+    fi
+
+    # Migrate stale Convex URLs in existing config
+    migrate_stale_config
+
+    # Update service file if needed and restart
+    install_systemd_service
+
+    # Handle pairing code if provided alongside --upgrade
+    if [ -n "$PAIR_CODE" ]; then
+        write_pairing "$PAIR_CODE"
+    fi
+
+    echo ""
+    info "Upgrade complete."
+    print_pairing_code
+    exit 0
+fi
+
+# ─── Full Install (first time or --force) ───────────────────────────────────
+
+if $DO_FORCE && is_installed; then
+    info "Force reinstall requested. Removing existing venv..."
+    rm -rf "${VENV_DIR}"
+fi
+
 # Check or install Python
 PYTHON=$(find_python)
 if [ -z "$PYTHON" ]; then
@@ -506,18 +670,12 @@ generate_device_id
 # Generate default config (idempotent, skips if exists)
 generate_default_config
 
-# Write pairing state if --pair was provided
-PAIRING_FILE="${CONFIG_DIR}/pairing.json"
+# Migrate stale Convex URLs if config existed before this install
+migrate_stale_config
+
+# Write pairing state if code was provided
 if [ -n "$PAIR_CODE" ]; then
-    info "Setting pairing code: ${PAIR_CODE}"
-    PAIR_CODE_UPPER=$(echo "$PAIR_CODE" | tr '[:lower:]' '[:upper:]')
-    cat > "$PAIRING_FILE" <<PAIREOF
-{
-  "pairing_code": "${PAIR_CODE_UPPER}",
-  "code_created_at": $(date +%s)
-}
-PAIREOF
-    chmod 644 "$PAIRING_FILE"
+    write_pairing "$PAIR_CODE"
 fi
 
 # Install systemd service
@@ -525,17 +683,4 @@ install_systemd_service
 
 # Print summary
 print_status
-
-# Print pairing code
-if [ -f "$PAIRING_FILE" ]; then
-    DISPLAY_CODE=$(python3 -c "import json; print(json.load(open('${PAIRING_FILE}')).get('pairing_code', '------'))" 2>/dev/null || echo "------")
-    if [ "$DISPLAY_CODE" != "------" ] && [ -n "$DISPLAY_CODE" ]; then
-        echo ""
-        echo -e "  ${BOLD}+----------+${NC}"
-        echo -e "  ${BOLD}|  ${DISPLAY_CODE}  |${NC}  Pairing Code"
-        echo -e "  ${BOLD}+----------+${NC}"
-        echo ""
-        echo "  Enter this code in ADOS Mission Control to pair with this drone."
-        echo ""
-    fi
-fi
+print_pairing_code
