@@ -444,7 +444,10 @@ def pair_reset() -> None:
 
 
 @cli.command()
-@click.option("--keep-config", is_flag=True, default=True, help="Keep /etc/ados config (default: yes)")
+@click.option(
+    "--keep-config", is_flag=True, default=True,
+    help="Keep /etc/ados config (default: yes)",
+)
 @click.option("--purge", is_flag=True, default=False, help="Remove everything including config")
 @click.option("--yes", "-y", is_flag=True, default=False, help="Skip confirmation prompt")
 def uninstall(keep_config: bool, purge: bool, yes: bool) -> None:
@@ -507,12 +510,12 @@ def uninstall(keep_config: bool, purge: bool, yes: bool) -> None:
         return
 
     # Linux: full system uninstall
-    INSTALL_DIR = Path("/opt/ados")
-    CONFIG_DIR = Path("/etc/ados")
-    DATA_DIR = Path("/var/ados")
-    SERVICE_NAME = "ados-agent"
-    SERVICE_FILE = Path("/etc/systemd/system/ados-agent.service")
-    SYMLINKS = [Path("/usr/local/bin/ados"), Path("/usr/local/bin/ados-agent")]
+    install_dir = Path("/opt/ados")
+    config_dir = Path("/etc/ados")
+    data_dir = Path("/var/ados")
+    service_name = "ados-agent"
+    service_file = Path("/etc/systemd/system/ados-agent.service")
+    symlinks = [Path("/usr/local/bin/ados"), Path("/usr/local/bin/ados-agent")]
 
     if os.geteuid() != 0:
         click.echo("Error: Uninstall requires root. Run with sudo.", err=True)
@@ -520,17 +523,17 @@ def uninstall(keep_config: bool, purge: bool, yes: bool) -> None:
 
     # Show what will be removed
     items = []
-    if SERVICE_FILE.exists():
-        items.append(f"  systemd service: {SERVICE_NAME}")
-    for sym in SYMLINKS:
+    if service_file.exists():
+        items.append(f"  systemd service: {service_name}")
+    for sym in symlinks:
         if sym.exists() or sym.is_symlink():
             items.append(f"  symlink: {sym}")
-    if INSTALL_DIR.exists():
-        items.append(f"  install dir: {INSTALL_DIR}")
-    if DATA_DIR.exists():
-        items.append(f"  data dir: {DATA_DIR}")
-    if purge and CONFIG_DIR.exists():
-        items.append(f"  config dir: {CONFIG_DIR}")
+    if install_dir.exists():
+        items.append(f"  install dir: {install_dir}")
+    if data_dir.exists():
+        items.append(f"  data dir: {data_dir}")
+    if purge and config_dir.exists():
+        items.append(f"  config dir: {config_dir}")
 
     if not items:
         click.echo("Nothing to uninstall. ADOS Drone Agent is not installed.")
@@ -539,27 +542,27 @@ def uninstall(keep_config: bool, purge: bool, yes: bool) -> None:
     click.echo("The following will be removed:")
     for item in items:
         click.echo(item)
-    if not purge and CONFIG_DIR.exists():
-        click.echo(f"  (keeping config: {CONFIG_DIR})")
+    if not purge and config_dir.exists():
+        click.echo(f"  (keeping config: {config_dir})")
     click.echo("")
 
     if not yes:
         click.confirm("Proceed with uninstall?", abort=True)
 
     # 1. Stop and disable systemd service
-    if SERVICE_FILE.exists():
-        click.echo(f"Stopping {SERVICE_NAME}...")
+    if service_file.exists():
+        click.echo(f"Stopping {service_name}...")
         subprocess.run(
-            ["systemctl", "stop", SERVICE_NAME],
+            ["systemctl", "stop", service_name],
             capture_output=True, timeout=30,
         )
         subprocess.run(
-            ["systemctl", "disable", SERVICE_NAME],
+            ["systemctl", "disable", service_name],
             capture_output=True, timeout=10,
         )
         try:
-            SERVICE_FILE.unlink()
-            click.echo(f"Removed {SERVICE_FILE}")
+            service_file.unlink()
+            click.echo(f"Removed {service_file}")
         except OSError:
             pass
         subprocess.run(
@@ -568,7 +571,7 @@ def uninstall(keep_config: bool, purge: bool, yes: bool) -> None:
         )
 
     # 2. Remove symlinks
-    for sym in SYMLINKS:
+    for sym in symlinks:
         try:
             if sym.exists() or sym.is_symlink():
                 sym.unlink()
@@ -577,21 +580,21 @@ def uninstall(keep_config: bool, purge: bool, yes: bool) -> None:
             pass
 
     # 3. Remove install dir
-    if INSTALL_DIR.exists():
-        shutil.rmtree(INSTALL_DIR, ignore_errors=True)
-        click.echo(f"Removed {INSTALL_DIR}")
+    if install_dir.exists():
+        shutil.rmtree(install_dir, ignore_errors=True)
+        click.echo(f"Removed {install_dir}")
 
     # 4. Remove data dir
-    if DATA_DIR.exists():
-        shutil.rmtree(DATA_DIR, ignore_errors=True)
-        click.echo(f"Removed {DATA_DIR}")
+    if data_dir.exists():
+        shutil.rmtree(data_dir, ignore_errors=True)
+        click.echo(f"Removed {data_dir}")
 
     # 5. Config dir
-    if purge and CONFIG_DIR.exists():
-        shutil.rmtree(CONFIG_DIR, ignore_errors=True)
-        click.echo(f"Removed {CONFIG_DIR}")
-    elif CONFIG_DIR.exists():
-        click.echo(f"Config preserved at {CONFIG_DIR}. Use --purge to remove.")
+    if purge and config_dir.exists():
+        shutil.rmtree(config_dir, ignore_errors=True)
+        click.echo(f"Removed {config_dir}")
+    elif config_dir.exists():
+        click.echo(f"Config preserved at {config_dir}. Use --purge to remove.")
 
     click.echo("")
     click.echo("ADOS Drone Agent uninstalled successfully.")
