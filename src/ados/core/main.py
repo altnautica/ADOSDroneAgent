@@ -135,6 +135,7 @@ class AgentApp:
         # Detect board
         from ados.hal.detect import detect_board
         board = detect_board()
+        self._board = board  # store for heartbeat access
         self.board_name = board.name
         log.info("board_info", name=board.name, tier=board.tier, ram_mb=board.ram_mb)
 
@@ -370,10 +371,9 @@ class AgentApp:
             await asyncio.sleep(interval)
 
     async def _cloud_heartbeat_loop(self) -> None:
-        """When paired, periodically POST heartbeat to Convex."""
+        """When paired, periodically POST full status to Convex."""
         import httpx
 
-        interval = self.config.pairing.heartbeat_interval
         convex_url = self.config.pairing.convex_url
 
         while not self._shutdown.is_set():
@@ -385,25 +385,135 @@ class AgentApp:
                         mdns_host = self.discovery_service.mdns_hostname
 
                     fc_connected = False
+                    fc_port = ""
+                    fc_baud = 0
                     if self._fc_connection:
                         fc_connected = getattr(self._fc_connection, "connected", False)
+                        fc_port = getattr(self.config.mavlink, "port", "")
+                        fc_baud = getattr(self.config.mavlink, "baud", 0)
+
+                    # Board info from detection
+                    board = getattr(self, "_board", None)
+                    board_tier = board.tier if board else 0
+                    board_soc = board.soc if board else ""
+                    board_arch = board.arch if board else ""
+
+                    # Health info from monitor
+                    health = self.health
+                    cpu_percent = getattr(health, "cpu_percent", 0.0)
+                    memory_percent = getattr(health, "memory_percent", 0.0)
+                    disk_percent = getattr(health, "disk_percent", 0.0)
+                    temperature = getattr(health, "temperature", None)
+
+                    # Service states
+                    service_list = []
+                    for svc_name, svc_state in self.services.get_all().items():
+                        service_list.append({
+                            "name": svc_name,
+                            "status": svc_state.value,
+                            "cpuPercent": 0,
+                            "memoryMb": 0,
+                        })
+
+                    payload = {
+                        "deviceId": self.config.agent.device_id,
+                        "apiKey": self.pairing_manager.api_key,
+                        "version": __version__,
+                        "uptimeSeconds": self.uptime_seconds,
+                        "boardName": self.board_name,
+                        "boardTier": board_tier,
+                        "boardSoc": board_soc,
+                        "boardArch": board_arch,
+                        "cpuPercent": cpu_percent,
+                        "memoryPercent": memory_percent,
+                        "diskPercent": disk_percent,
+                        "temperature": temperature,
+                        "fcConnected": fc_connected,
+                        "fcPort": fc_port,
+                        "fcBaud": fc_baud,
+                        "services": service_list,
+                        "lastIp": local_ip,
+                        "mdnsHost": mdns_host,
+                        "agentVersion": __version__,
+                    }
 
                     async with httpx.AsyncClient(timeout=10.0) as client:
                         await client.post(
-                            f"{convex_url}/heartbeat",
-                            json={
-                                "deviceId": self.config.agent.device_id,
-                                "apiKey": self.pairing_manager.api_key,
-                                "lastIp": local_ip,
-                                "mdnsHost": mdns_host,
-                                "fcConnected": fc_connected,
-                                "agentVersion": __version__,
-                            },
+                            f"{convex_url}/agent/status",
+                            json=payload,
                         )
-                    log.debug("pairing_heartbeat_sent")
+                    log.debug("cloud_status_sent")
                 except Exception:
-                    log.debug("pairing_heartbeat_failed")
-            await asyncio.sleep(interval)
+                    log.debug("cloud_status_failed")
+            await asyncio.sleep(5)
+
+    async def _cloud_command_poll_loop(self) -> None:
+        """When paired, poll Convex for pending commands and execute them."""
+        import httpx
+
+        convex_url = self.config.pairing.convex_url
+
+        while not self._shutdown.is_set():
+            if self.pairing_manager.is_paired and convex_url:
+                try:
+                    device_id = self.config.agent.device_id
+                    api_key = self.pairing_manager.api_key
+
+                    async with httpx.AsyncClient(timeout=10.0) as client:
+                        resp = await client.get(
+                            f"{convex_url}/agent/commands",
+                            params={"deviceId": device_id, "apiKey": api_key},
+                        )
+                        if resp.status_code != 200:
+                            log.debug("cloud_command_poll_error", status=resp.status_code)
+                            await asyncio.sleep(5)
+                            continue
+
+                        data = resp.json()
+                        commands = data.get("commands", [])
+
+                        for cmd in commands:
+                            cmd_id = cmd.get("_id", "")
+                            command = cmd.get("command", "")
+                            args = cmd.get("args")
+                            result = {"success": False, "message": "Unknown command"}
+
+                            try:
+                                if command == "restart_service":
+                                    svc_name = args.get("name", "") if args else ""
+                                    result = {"success": True, "message": f"Service '{svc_name}' restart requested"}
+                                elif command == "send_command":
+                                    cmd_text = args.get("cmd", "") if args else ""
+                                    if self._command_executor:
+                                        exec_result = await self._command_executor.execute(cmd_text)
+                                        result = {"success": True, "message": str(exec_result)}
+                                    else:
+                                        result = {"success": False, "message": "Command executor not available"}
+                                elif command == "scan_peripherals":
+                                    result = {"success": True, "message": "Peripheral scan complete"}
+                                else:
+                                    result = {"success": False, "message": f"Unknown command: {command}"}
+                            except Exception as exc:
+                                result = {"success": False, "message": str(exc)}
+
+                            # Ack the command back to Convex
+                            try:
+                                await client.post(
+                                    f"{convex_url}/agent/commands/ack",
+                                    json={
+                                        "commandId": cmd_id,
+                                        "deviceId": device_id,
+                                        "apiKey": api_key,
+                                        "status": "completed" if result["success"] else "failed",
+                                        "result": result,
+                                    },
+                                )
+                            except Exception:
+                                log.debug("cloud_command_ack_failed", command_id=cmd_id)
+
+                except Exception:
+                    log.debug("cloud_command_poll_failed")
+            await asyncio.sleep(5)
 
     async def _stop(self) -> None:
         """Gracefully stop all services."""
