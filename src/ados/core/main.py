@@ -290,6 +290,9 @@ class AgentApp:
         # Cloud heartbeat (when paired, POST status to Convex)
         self._start_service("pairing-heartbeat", self._cloud_heartbeat_loop())
 
+        # Cloud command polling (when paired, poll Convex for commands)
+        self._start_service("cloud-command-poll", self._cloud_command_poll_loop())
+
         # Notify systemd
         self.health.sd_notify_ready()
 

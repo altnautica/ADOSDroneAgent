@@ -49,21 +49,37 @@ class MqttGateway:
             log.warning("mqtt_unavailable", reason="paho-mqtt not installed")
             return
 
+        # Configure transport
+        transport = self.config.server.mqtt_transport
         client = mqtt.Client(
             client_id=f"ados-{self._device_id}",
             callback_api_version=mqtt.CallbackAPIVersion.VERSION2,
+            transport=transport,
         )
 
-        # TLS if enabled
-        if self.config.security.tls.enabled:
+        # WebSocket path (Mosquitto default)
+        if transport == "websockets":
+            client.ws_set_options(path="/mqtt")
+
+        # Username/password auth
+        if self.config.server.mqtt_username:
+            client.username_pw_set(
+                self.config.server.mqtt_username,
+                self.config.server.mqtt_password,
+            )
+
+        # TLS for secure connections
+        if self.config.security.tls.enabled or transport == "websockets":
             try:
-                client.tls_set(
-                    ca_certs=self.config.security.tls.ca_path,
-                    certfile=self.config.security.tls.cert_path,
-                    keyfile=self.config.security.tls.key_path,
-                )
+                import ssl
+                client.tls_set(cert_reqs=ssl.CERT_NONE)
+                client.tls_insecure_set(True)  # For self-signed certs behind Cloudflare
             except Exception as e:
                 log.warning("mqtt_tls_failed", error=str(e))
+
+        # Use port 443 for WebSocket (through Cloudflare Tunnel)
+        if transport == "websockets" and port == 8883:
+            port = 443
 
         # Command handler
         def on_message(client, userdata, msg):
