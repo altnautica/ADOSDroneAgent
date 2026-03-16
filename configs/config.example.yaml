@@ -96,9 +96,9 @@ server:
   mode: "cloud"
   # Altnautica cloud (default)
   cloud:
-    url: "https://api.altnautica.com"
+    url: "https://convex-site.altnautica.com"
     mqtt_broker: "mqtt.altnautica.com"
-    mqtt_port: 8883
+    mqtt_port: 443
   # Self-hosted server (set mode to "self_hosted" or "hybrid")
   self_hosted:
     url: ""
@@ -109,6 +109,11 @@ server:
   telemetry_rate: 2
   # Heartbeat interval (seconds)
   heartbeat_interval: 5
+  # MQTT transport: "tcp" for direct, "websockets" for Cloudflare Tunnel
+  mqtt_transport: "websockets"
+  # MQTT auth (required for cloud broker)
+  mqtt_username: "ados"
+  mqtt_password: ""
 
 # =============================================================================
 # Security
@@ -131,7 +136,7 @@ security:
     api_key: ""
     # Enable CORS for browser access
     cors_enabled: true
-    cors_origins: ["http://localhost:3000", "https://command.altnautica.com"]
+    cors_origins: ["*"]
 
 # =============================================================================
 # Suite Runtime
