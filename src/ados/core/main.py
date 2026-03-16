@@ -194,7 +194,7 @@ class AgentApp:
         # Start MQTT gateway if enabled
         if self.config.server.mode != "disabled":
             from ados.services.mqtt.gateway import MqttGateway
-            mqtt = MqttGateway(self.config, self._vehicle_state)
+            mqtt = MqttGateway(self.config, self._vehicle_state, api_key=self.pairing_manager.api_key)
             self._start_service("mqtt-gateway", mqtt.run(self._shutdown))
 
         # Start Video Pipeline
