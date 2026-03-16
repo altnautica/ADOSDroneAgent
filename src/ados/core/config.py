@@ -140,7 +140,7 @@ class ApiSecurityConfig(BaseModel):
     api_key: str = ""
     cors_enabled: bool = True
     cors_origins: list[str] = Field(
-        default_factory=lambda: ["http://localhost:3000", "https://command.altnautica.com"]
+        default_factory=lambda: ["*"]
     )
 
 
