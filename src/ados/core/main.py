@@ -408,14 +408,35 @@ class AgentApp:
                     disk_percent = getattr(health, "disk_percent", 0.0)
                     temperature = getattr(health, "temperature", None)
 
-                    # Service states
+                    # Service states with process-level metrics
                     service_list = []
-                    for svc_name, svc_state in self.services.get_all().items():
+                    all_services = self.services.get_all()
+                    running_count = sum(1 for s in all_services.values() if s.value == "running")
+
+                    # Get process metrics for distribution across services
+                    proc_cpu = 0.0
+                    proc_rss_mb = 0.0
+                    proc_pid = 0
+                    try:
+                        import psutil as _psutil
+                        import os as _os
+                        _proc = _psutil.Process(_os.getpid())
+                        proc_cpu = _proc.cpu_percent(interval=0)
+                        proc_rss_mb = _proc.memory_info().rss / (1024 * 1024)
+                        proc_pid = _os.getpid()
+                    except Exception:
+                        pass
+
+                    per_svc_cpu = proc_cpu / running_count if running_count > 0 else 0.0
+                    per_svc_rss = proc_rss_mb / running_count if running_count > 0 else 0.0
+
+                    for svc_name, svc_state in all_services.items():
+                        is_running = svc_state.value == "running"
                         service_list.append({
                             "name": svc_name,
                             "status": svc_state.value,
-                            "cpuPercent": 0,
-                            "memoryMb": 0,
+                            "cpuPercent": round(per_svc_cpu, 1) if is_running else 0,
+                            "memoryMb": round(per_svc_rss, 1) if is_running else 0,
                         })
 
                     payload = {
