@@ -71,6 +71,7 @@ class VideoConfig(BaseModel):
     wfb: WfbConfig = WfbConfig()
     camera: CameraConfig = CameraConfig()
     recording: RecordingConfig = RecordingConfig()
+    cloud_relay_url: str = ""  # e.g. rtsp://video.altnautica.com:8554
 
 
 # --- Network ---
@@ -120,6 +121,9 @@ class ServerConfig(BaseModel):
     self_hosted: SelfHostedServerConfig = SelfHostedServerConfig()
     telemetry_rate: int = 2
     heartbeat_interval: int = 5
+    mqtt_transport: str = "tcp"  # "tcp" or "websockets"
+    mqtt_username: str = ""
+    mqtt_password: str = ""
 
 
 # --- Security ---
