@@ -14,13 +14,17 @@ from ados.api.middleware.auth import ApiKeyAuthMiddleware
 from ados.api.routes import (
     commands,
     config,
+    fleet,
     logs,
     ota,
     pairing,
     params,
+    peripherals,
     scripts,
     services,
     status,
+    suites,
+    system,
     video,
     wfb,
 )
@@ -77,6 +81,10 @@ def create_app(agent: AgentApp) -> FastAPI:
     app.include_router(scripts.router, prefix="/api")
     app.include_router(ota.router, prefix="/api")
     app.include_router(pairing.router, prefix="/api")
+    app.include_router(system.router, prefix="/api")
+    app.include_router(peripherals.router, prefix="/api")
+    app.include_router(suites.router, prefix="/api")
+    app.include_router(fleet.router, prefix="/api")
 
     return app
 
