@@ -69,6 +69,10 @@ do_uninstall() {
         exit 1
     fi
 
+    # Remove global symlinks
+    rm -f /usr/local/bin/ados /usr/local/bin/ados-agent
+    info "Global symlinks removed."
+
     # Stop and disable systemd service
     if [ -f "${SERVICE_FILE}" ]; then
         info "Stopping and disabling ${SERVICE_NAME} service..."
@@ -401,6 +405,14 @@ ENVEOF
     info "Service enabled and restarted."
 }
 
+# ─── Global Symlinks ──────────────────────────────────────────────────────
+
+install_global_symlinks() {
+    ln -sf "${VENV_DIR}/bin/ados" /usr/local/bin/ados
+    ln -sf "${VENV_DIR}/bin/ados-agent" /usr/local/bin/ados-agent
+    info "Global commands installed: ados, ados-agent"
+}
+
 # ─── Write Pairing State ────────────────────────────────────────────────────
 
 write_pairing() {
@@ -459,9 +471,9 @@ print_status() {
     echo "  Start:        sudo systemctl start ${SERVICE_NAME}"
     echo "  Status:       sudo systemctl status ${SERVICE_NAME}"
     echo "  Logs:         journalctl -u ${SERVICE_NAME} -f"
-    echo "  CLI:          ${VENV_DIR}/bin/ados status"
-    echo "  TUI:          ${VENV_DIR}/bin/ados tui"
-    echo "  Diagnostics:  ${VENV_DIR}/bin/ados diag"
+    echo "  CLI:          ados status"
+    echo "  TUI:          ados tui"
+    echo "  Diagnostics:  ados diag"
     echo ""
 
     # Quick version check
@@ -567,11 +579,15 @@ fi
 
 if is_installed && ! $DO_FORCE && ! $DO_UPGRADE; then
     local_ver=$(get_installed_version)
+
+    # Ensure global symlinks exist (fixes installs from before symlink support)
+    install_global_symlinks
+
     echo ""
     info "ADOS Drone Agent already installed (v${local_ver})."
     echo ""
     echo "  Status:    sudo systemctl status ${SERVICE_NAME}"
-    echo "  CLI:       ${VENV_DIR}/bin/ados status"
+    echo "  CLI:       ados status"
     echo ""
     echo "  Re-run with:"
     echo "    --upgrade    Update to latest version (skip apt, skip venv rebuild)"
@@ -606,6 +622,9 @@ if is_installed && $DO_UPGRADE && ! $DO_FORCE; then
 
     # Update service file if needed and restart
     install_systemd_service
+
+    # Ensure global symlinks point to current venv
+    install_global_symlinks
 
     # Handle pairing code if provided alongside --upgrade
     if [ -n "$PAIR_CODE" ]; then
@@ -680,6 +699,9 @@ fi
 
 # Install systemd service
 install_systemd_service
+
+# Install global symlinks (ados, ados-agent → /usr/local/bin/)
+install_global_symlinks
 
 # Print summary
 print_status
