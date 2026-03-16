@@ -315,6 +315,13 @@ server:
   mode: "cloud"
   telemetry_rate: 2
   heartbeat_interval: 5
+  mqtt_transport: "websockets"
+  mqtt_username: "ados"
+  mqtt_password: ""
+
+security:
+  api:
+    cors_enabled: true
 
 scripting:
   rest_api:
