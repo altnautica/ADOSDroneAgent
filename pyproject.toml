@@ -68,6 +68,7 @@ where = ["src"]
 [tool.setuptools.package-data]
 "ados.hal" = ["boards/*.yaml"]
 "ados.core" = ["defaults.yaml"]
+"ados.tui" = ["*.tcss"]
 
 [tool.ruff]
 target-version = "py311"
