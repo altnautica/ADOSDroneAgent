@@ -1,0 +1,173 @@
+/* ADOS Drone Agent TUI Theme */
+/* Design tokens: bg #000000, text #fafafa, blue #3a82ff, lime #dff140 */
+
+Screen {
+    background: #000000;
+    color: #fafafa;
+}
+
+Header {
+    background: #000000;
+    color: #3a82ff;
+    text-style: bold;
+}
+
+Footer {
+    background: #0a0a0a;
+    color: #666666;
+}
+
+DataTable {
+    background: #0a0a0a;
+}
+
+DataTable > .datatable--header {
+    background: #0a0a0a;
+    color: #3a82ff;
+    text-style: bold;
+}
+
+Static {
+    background: transparent;
+}
+
+/* Status utility classes */
+.ok {
+    color: #22c55e;
+}
+
+.warn {
+    color: #f59e0b;
+}
+
+.error {
+    color: #ef4444;
+}
+
+.accent {
+    color: #3a82ff;
+}
+
+.lime {
+    color: #dff140;
+}
+
+.dim {
+    color: #666666;
+}
+
+/* Panel styling */
+.info-panel {
+    border: solid #1a1a2e;
+    padding: 1;
+    margin: 0 1 1 0;
+    background: #0a0a0a;
+}
+
+.info-panel-title {
+    color: #3a82ff;
+    text-style: bold;
+    padding: 0;
+    margin: 0;
+    background: transparent;
+}
+
+.panel-title {
+    color: #3a82ff;
+    text-style: bold;
+}
+
+/* Layout helpers */
+.top-banner {
+    height: 3;
+    padding: 0 1;
+    background: #0a0a0f;
+    border-bottom: solid #1a1a2e;
+}
+
+.grid-row {
+    height: 1fr;
+}
+
+.col {
+    width: 1fr;
+}
+
+.events-panel {
+    height: auto;
+    max-height: 12;
+    margin: 0 1;
+}
+
+/* Sparkline theming */
+Sparkline {
+    margin: 0;
+    padding: 0;
+}
+
+Sparkline > .sparkline--max-color {
+    color: #3a82ff;
+}
+
+Sparkline > .sparkline--min-color {
+    color: #1a4080;
+}
+
+/* RichLog */
+RichLog {
+    background: #0a0a0a;
+    border: solid #1a1a2e;
+    padding: 0 1;
+    max-height: 12;
+}
+
+/* Agent status bar */
+.agent-status-bar {
+    dock: bottom;
+    height: 1;
+    background: #0a0a0f;
+    color: #666666;
+    padding: 0 1;
+}
+
+/* ASCII header */
+.ascii-header {
+    height: auto;
+    padding: 0;
+    margin: 0;
+    background: transparent;
+    text-align: center;
+}
+
+/* Gauge bar */
+.gauge-bar {
+    height: 1;
+    padding: 0;
+    margin: 0;
+    background: transparent;
+}
+
+/* Attitude indicator */
+.attitude-indicator {
+    height: 13;
+    width: 30;
+    padding: 0;
+    margin: 0 1;
+    background: transparent;
+}
+
+/* Status dot */
+.status-dot {
+    height: 1;
+    padding: 0;
+    margin: 0;
+    background: transparent;
+}
+
+/* Satellite bar */
+.satellite-bar {
+    height: 1;
+    padding: 0;
+    margin: 0;
+    background: transparent;
+}
