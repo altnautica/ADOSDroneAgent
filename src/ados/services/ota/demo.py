@@ -14,14 +14,12 @@ log = get_logger("ota-demo")
 FAKE_MANIFEST = UpdateManifest(
     version="99.0.0",
     channel="demo",
-    release_date="2099-01-01T00:00:00Z",
-    download_url="https://updates.altnautica.com/demo/ados-99.0.0.bin",
+    published_at="2099-01-01T00:00:00Z",
+    download_url="https://github.com/altnautica/ADOSDroneAgent/releases/download/v99.0.0/ados_drone_agent-99.0.0-py3-none-any.whl",
     file_size=52_428_800,
     sha256="0" * 64,
-    signature="",
-    min_version="0.1.0",
     changelog="Demo update: this is a simulated update for testing.",
-    requires_reboot=False,
+    release_url="https://github.com/altnautica/ADOSDroneAgent/releases/tag/v99.0.0",
 )
 
 
@@ -112,6 +110,11 @@ class DemoOtaUpdater:
             "state": self._state.value,
             "demo_mode": True,
             "current_version": "0.1.0",
+            "channel": "demo",
+            "github_repo": "altnautica/ADOSDroneAgent",
+            "last_check": "",
+            "previous_version": "",
+            "error": "",
         }
 
         if self._manifest:
@@ -119,6 +122,7 @@ class DemoOtaUpdater:
                 "version": self._manifest.version,
                 "channel": self._manifest.channel,
                 "changelog": self._manifest.changelog,
+                "release_url": self._manifest.release_url,
             }
 
         result["download"] = {
@@ -126,6 +130,8 @@ class DemoOtaUpdater:
             "percent": round(self._progress.percent(), 1),
             "bytes_downloaded": self._progress.bytes_downloaded,
             "total_bytes": self._progress.total_bytes,
+            "speed_bps": 0,
+            "eta_seconds": 0,
         }
 
         return result

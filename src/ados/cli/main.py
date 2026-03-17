@@ -325,15 +325,18 @@ def update(as_json: bool) -> None:
         if as_json:
             click.echo(json.dumps(data, indent=2))
             return
-        click.echo(f"Version:  {data.get('current_version', '?')}")
-        click.echo(f"State:    {data.get('state', '?')}")
-        click.echo(f"Channel:  {data.get('channel', '?')}")
-        slot = data.get("active_slot", {})
-        if slot:
-            click.echo(f"Slot:     {slot.get('slot_name', '?')} ({slot.get('status', '?')})")
-        available = data.get("available_update")
-        if available:
-            click.echo(f"Update:   {available.get('version', '?')} available")
+        click.echo(f"Version:    {data.get('current_version', '?')}")
+        click.echo(f"State:      {data.get('state', '?')}")
+        click.echo(f"Channel:    {data.get('channel', '?')}")
+        click.echo(f"Repo:       {data.get('github_repo', '?')}")
+        last_check = data.get("last_check", "")
+        click.echo(f"Last check: {last_check or 'never'}")
+        prev = data.get("previous_version", "")
+        if prev:
+            click.echo(f"Previous:   {prev}")
+        pending = data.get("pending_update")
+        if pending:
+            click.echo(f"Update:     v{pending.get('version', '?')} available")
 
 
 @cli.command()
@@ -345,8 +348,97 @@ def check() -> None:
         data = resp.json()
         if data.get("status") == "update_available":
             click.echo(f"Update available: v{data.get('version', '?')}")
+            changelog = data.get("changelog", "")
+            if changelog:
+                click.echo(f"Changelog: {changelog[:200]}")
         else:
             click.echo("No updates available.")
+    except httpx.ConnectError:
+        click.echo(
+            "Error: Agent is not running. Start with 'ados start' or 'ados demo'.",
+            err=True,
+        )
+        sys.exit(1)
+    except httpx.HTTPError as e:
+        if isinstance(e, httpx.HTTPStatusError):
+            click.echo(f"Error: {e.response.status_code}", err=True)
+        else:
+            click.echo(f"Error: {e}", err=True)
+
+
+@cli.command()
+@click.option("--yes", "-y", is_flag=True, default=False, help="Skip confirmation prompt")
+def upgrade(yes: bool) -> None:
+    """One-step check, download, install, and restart."""
+    # Check
+    click.echo("Checking for updates...")
+    try:
+        resp = httpx.post(f"{API_BASE}/api/ota/check", timeout=30.0)
+        resp.raise_for_status()
+        data = resp.json()
+    except httpx.ConnectError:
+        click.echo(
+            "Error: Agent is not running. Start with 'ados start' or 'ados demo'.",
+            err=True,
+        )
+        sys.exit(1)
+    except httpx.HTTPError as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
+
+    if data.get("status") != "update_available":
+        click.echo("Already up to date.")
+        return
+
+    new_version = data.get("version", "?")
+    click.echo(f"Update available: v{new_version}")
+
+    if not yes:
+        click.confirm(f"Install v{new_version}?", abort=True)
+
+    # Install
+    click.echo("Downloading and installing...")
+    try:
+        resp = httpx.post(f"{API_BASE}/api/ota/install", timeout=300.0)
+        resp.raise_for_status()
+        result = resp.json()
+    except httpx.HTTPError as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
+
+    if result.get("status") == "error":
+        click.echo(f"Failed: {result.get('message', '?')}", err=True)
+        sys.exit(1)
+
+    click.echo(f"Installed v{new_version}")
+
+    # Restart
+    click.echo("Restarting service...")
+    try:
+        resp = httpx.post(f"{API_BASE}/api/ota/restart", timeout=30.0)
+        resp.raise_for_status()
+        result = resp.json()
+        click.echo(result.get("message", "Done."))
+    except httpx.HTTPError:
+        click.echo("Restart request sent. Service may already be restarting.")
+
+
+@cli.command("rollback")
+@click.argument("version", required=False, default=None)
+def rollback_cmd(version: str | None) -> None:
+    """Rollback to a previous version (from PyPI)."""
+    try:
+        params = {}
+        if version:
+            params["version"] = version
+        resp = httpx.post(f"{API_BASE}/api/ota/rollback", params=params, timeout=120.0)
+        resp.raise_for_status()
+        data = resp.json()
+        if data.get("status") == "rolled_back":
+            click.echo(data.get("message", "Rollback complete."))
+        else:
+            click.echo(f"Failed: {data.get('message', '?')}", err=True)
+            sys.exit(1)
     except httpx.ConnectError:
         click.echo(
             "Error: Agent is not running. Start with 'ados start' or 'ados demo'.",

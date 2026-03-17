@@ -14,17 +14,15 @@ log = structlog.get_logger("tui.updates")
 
 
 class UpdatesScreen(Screen):
-    """Displays OTA update status, active/standby slot info, and download progress."""
+    """Displays OTA update status, update info, and download progress."""
 
     def compose(self) -> ComposeResult:
         with Vertical():
             with InfoPanel("VERSION"):
                 yield StatusDot("OTA", "unknown", id="ota-state-dot")
                 yield Static("", id="version-detail")
-            with InfoPanel("PARTITION SLOTS"):
-                yield StatusDot("Active", "unknown", id="active-slot-dot")
-                yield StatusDot("Standby", "unknown", id="standby-slot-dot")
-                yield Static("", id="slots-detail")
+            with InfoPanel("UPDATE INFO"):
+                yield Static("", id="update-info-detail")
             with InfoPanel("DOWNLOAD"):
                 yield GaugeBar(
                     label="DL",
@@ -57,8 +55,9 @@ class UpdatesScreen(Screen):
             "idle": "ok",
             "checking": "connecting",
             "downloading": "warning",
-            "ready": "ready",
+            "verifying": "connecting",
             "installing": "warning",
+            "restarting": "warning",
             "completed": "ok",
             "failed": "error",
         }
@@ -79,31 +78,19 @@ class UpdatesScreen(Screen):
 
         self.query_one("#version-detail", Static).update("\n".join(version_lines))
 
-        # Slots
-        slots = data.get("slots", {})
-        active = slots.get("active_slot", {})
-        standby = slots.get("standby_slot", {})
+        # Update info
+        channel = data.get("channel", "?")
+        repo = data.get("github_repo", "?")
+        last_check = data.get("last_check", "") or "never"
+        prev_version = data.get("previous_version", "") or "none"
 
-        self.query_one("#active-slot-dot", StatusDot).set_state("active")
-        standby_status = standby.get("status", "unknown")
-        standby_state_map = {
-            "valid": "ok",
-            "empty": "idle",
-            "invalid": "error",
-            "pending": "ready",
-        }
-        self.query_one("#standby-slot-dot", StatusDot).set_state(
-            standby_state_map.get(standby_status, "unknown")
-        )
-
-        slots_lines = [
-            f"Active:   slot-{active.get('slot_name', '?')}  v{active.get('version', '?')}  boots={active.get('boot_count', 0)}",
-            f"Standby:  slot-{standby.get('slot_name', '?')}  v{standby.get('version', '?')}  status={standby_status}",
+        info_lines = [
+            f"Channel:  {channel}",
+            f"Repo:     {repo}",
+            f"Last check: {last_check}",
+            f"Previous: {prev_version}",
         ]
-        if slots.get("should_rollback"):
-            slots_lines.append("[red]WARNING: Boot failures detected, rollback recommended[/red]")
-
-        self.query_one("#slots-detail", Static).update("\n".join(slots_lines))
+        self.query_one("#update-info-detail", Static).update("\n".join(info_lines))
 
         # Download
         dl = data.get("download", {})
