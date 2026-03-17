@@ -69,7 +69,7 @@ class UpdateDownloader:
         target_path = Path(target_dir)
         target_path.mkdir(parents=True, exist_ok=True)
 
-        filename = f"ados-{manifest.version}.bin"
+        filename = manifest.download_url.rsplit("/", 1)[-1]
         final_file = target_path / filename
         tmp_file = target_path / (filename + ".tmp")
 
