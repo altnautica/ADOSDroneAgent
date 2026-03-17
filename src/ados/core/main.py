@@ -250,13 +250,12 @@ class AgentApp:
         else:
             from ados.services.ota.checker import UpdateChecker
             from ados.services.ota.downloader import UpdateDownloader
-            from ados.services.ota.rollback import RollbackManager
             from ados.services.ota.updater import OtaUpdater
             checker = UpdateChecker(self.config.ota)
             downloader = UpdateDownloader()
-            rollback = RollbackManager()
             self.ota_updater = OtaUpdater(
-                self.config.ota, checker, downloader, rollback,
+                self.config.ota, checker, downloader,
+                current_version=__version__,
             )
             self._start_service("ota-updater", self.ota_updater.run())
 
