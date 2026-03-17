@@ -1,9 +1,12 @@
-"""OTA update orchestrator: check, download, verify, install."""
+"""OTA update orchestrator: check, download, verify, install via pip."""
 
 from __future__ import annotations
 
 import asyncio
-import shutil
+import json
+import platform
+import subprocess
+from datetime import datetime, timezone
 from enum import StrEnum
 from pathlib import Path
 
@@ -12,14 +15,12 @@ from ados.core.logging import get_logger
 from ados.services.ota.checker import UpdateChecker
 from ados.services.ota.downloader import DownloadProgress, UpdateDownloader
 from ados.services.ota.manifest import UpdateManifest
-from ados.services.ota.rollback import RollbackManager
 from ados.services.ota.verifier import verify_sha256
 
 log = get_logger("ota-updater")
 
-SLOT_A_PATH = "/ados/slot-a"
-SLOT_B_PATH = "/ados/slot-b"
 DOWNLOAD_DIR = "/var/ados/downloads"
+STATE_FILE = "/var/ados/ota-state.json"
 
 
 class UpdateState(StrEnum):
@@ -30,30 +31,30 @@ class UpdateState(StrEnum):
     DOWNLOADING = "downloading"
     VERIFYING = "verifying"
     INSTALLING = "installing"
-    REBOOTING = "rebooting"
+    RESTARTING = "restarting"
     FAILED = "failed"
 
 
 class OtaUpdater:
-    """Orchestrates the full OTA update pipeline."""
+    """Orchestrates the full OTA update pipeline using pip install."""
 
     def __init__(
         self,
         config: OtaConfig,
         checker: UpdateChecker,
         downloader: UpdateDownloader,
-        rollback: RollbackManager,
         current_version: str = "0.1.0",
     ) -> None:
         self._config = config
         self._checker = checker
         self._downloader = downloader
-        self._rollback = rollback
         self._current_version = current_version
         self._state = UpdateState.IDLE
         self._error: str = ""
         self._pending_manifest: UpdateManifest | None = None
         self._downloaded_path: str = ""
+        self._last_check: str = ""
+        self._previous_version: str = self._load_previous_version()
 
     @property
     def state(self) -> UpdateState:
@@ -71,6 +72,26 @@ class OtaUpdater:
     def download_progress(self) -> DownloadProgress:
         return self._downloader.progress
 
+    def _load_previous_version(self) -> str:
+        """Load previous version from OTA state file."""
+        try:
+            state_path = Path(STATE_FILE)
+            if state_path.exists():
+                data = json.loads(state_path.read_text())
+                return data.get("previous_version", "")
+        except (json.JSONDecodeError, OSError):
+            pass
+        return ""
+
+    def _save_state(self, previous_version: str) -> None:
+        """Write pre-update state to disk for rollback tracking."""
+        state_path = Path(STATE_FILE)
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        state_path.write_text(json.dumps({
+            "previous_version": previous_version,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }))
+
     async def check(self) -> UpdateManifest | None:
         """Manually trigger an update check."""
         self._state = UpdateState.CHECKING
@@ -78,6 +99,8 @@ class OtaUpdater:
         log.info("manual_check_triggered")
 
         manifest = await self._checker.check_for_update(self._current_version)
+        self._last_check = datetime.now(timezone.utc).isoformat()
+
         if manifest:
             self._pending_manifest = manifest
             log.info("update_found", version=manifest.version)
@@ -107,13 +130,21 @@ class OtaUpdater:
             log.error("download_failed", error=str(exc))
             return False
 
-        # Verify hash
+        # Verify hash (skip if no SHA256 was available)
         self._state = UpdateState.VERIFYING
-        if not verify_sha256(filepath, manifest.sha256):
-            self._state = UpdateState.FAILED
-            self._error = "SHA-256 verification failed"
-            log.error("verification_failed")
-            return False
+        if manifest.sha256:
+            if not verify_sha256(filepath, manifest.sha256):
+                self._state = UpdateState.FAILED
+                self._error = "SHA-256 verification failed"
+                log.error("verification_failed")
+                # Clean up bad download
+                try:
+                    Path(filepath).unlink(missing_ok=True)
+                except OSError:
+                    pass
+                return False
+        else:
+            log.warning("skipping_hash_verification", msg="no SHA256 in manifest")
 
         self._downloaded_path = filepath
         self._state = UpdateState.IDLE
@@ -121,7 +152,7 @@ class OtaUpdater:
         return True
 
     async def install(self) -> bool:
-        """Install a downloaded and verified update to the standby partition."""
+        """Install the downloaded wheel via pip."""
         if not self._downloaded_path:
             self._error = "No verified download to install"
             log.warning("install_no_download")
@@ -135,57 +166,128 @@ class OtaUpdater:
         self._error = ""
         manifest = self._pending_manifest
 
-        # Determine standby partition path
-        active_slot = self._rollback.get_active_slot()
-        if active_slot.slot_name == "a":
-            standby_path = Path(SLOT_B_PATH)
-        else:
-            standby_path = Path(SLOT_A_PATH)
+        log.info("installing_update", version=manifest.version, wheel=self._downloaded_path)
 
-        log.info(
-            "installing_update",
-            version=manifest.version,
-            target=str(standby_path),
-        )
+        # Save pre-update state for rollback
+        self._save_state(self._current_version)
 
+        # pip install the wheel
+        pip_path = self._config.pip_path
         try:
-            # In a real system, this would extract the update bundle
-            # to the standby partition. Here we simulate the process.
-            standby_path.mkdir(parents=True, exist_ok=True)
+            loop = asyncio.get_running_loop()
+            result = await loop.run_in_executor(
+                None,
+                lambda: subprocess.run(
+                    [pip_path, "install", "--no-deps", self._downloaded_path],
+                    capture_output=True,
+                    text=True,
+                    timeout=120,
+                ),
+            )
 
-            # Copy update bundle to standby
-            target_file = standby_path / "update.bin"
-            shutil.copy2(self._downloaded_path, str(target_file))
+            if result.returncode != 0:
+                self._state = UpdateState.FAILED
+                self._error = f"pip install failed: {result.stderr.strip()}"
+                log.error("pip_install_failed", stderr=result.stderr.strip())
+                return False
 
-            # Migrate config from active slot
-            active_path = Path(SLOT_A_PATH if active_slot.slot_name == "a" else SLOT_B_PATH)
-            active_config = active_path / "config.yaml"
-            if active_config.exists():
-                shutil.copy2(str(active_config), str(standby_path / "config.yaml"))
-
-        except OSError as exc:
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
             self._state = UpdateState.FAILED
             self._error = f"Installation failed: {exc}"
             log.error("install_failed", error=str(exc))
             return False
 
-        # Mark standby as bootable
-        self._rollback.prepare_standby(manifest.version)
+        # Clean up the downloaded wheel
+        try:
+            Path(self._downloaded_path).unlink(missing_ok=True)
+        except OSError:
+            pass
 
+        self._previous_version = self._current_version
+        self._current_version = manifest.version
+        self._downloaded_path = ""
+        self._pending_manifest = None
         self._state = UpdateState.IDLE
         log.info("install_complete", version=manifest.version)
         return True
 
-    async def activate(self) -> bool:
-        """Activate the standby partition for next boot."""
-        success = self._rollback.activate_standby()
-        if success:
-            self._state = UpdateState.REBOOTING
-            log.info("update_activated, reboot required")
-        else:
-            self._error = "Failed to activate standby slot"
+    async def restart_service(self) -> bool:
+        """Restart the agent systemd service. On macOS, just log a message."""
+        if platform.system() != "Linux":
+            log.info("restart_skipped", msg="not on Linux, restart the agent manually")
+            return False
+
+        self._state = UpdateState.RESTARTING
+        service = self._config.service_name
+        log.info("restarting_service", service=service)
+
+        try:
+            loop = asyncio.get_running_loop()
+            result = await loop.run_in_executor(
+                None,
+                lambda: subprocess.run(
+                    ["systemctl", "restart", service],
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                ),
+            )
+
+            if result.returncode != 0:
+                log.warning("restart_failed", stderr=result.stderr.strip())
+                return False
+
+            return True
+
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
+            log.warning("restart_error", error=str(exc))
+            return False
+
+    async def rollback(self, version: str | None = None) -> bool:
+        """Rollback to a previous version by installing from PyPI."""
+        target = version or self._previous_version
+        if not target:
+            self._error = "No previous version to rollback to"
+            log.warning("rollback_no_version")
+            return False
+
+        self._state = UpdateState.INSTALLING
+        self._error = ""
+        log.info("rolling_back", target_version=target)
+
+        pip_path = self._config.pip_path
+        try:
+            loop = asyncio.get_running_loop()
+            result = await loop.run_in_executor(
+                None,
+                lambda: subprocess.run(
+                    [pip_path, "install", f"ados-drone-agent=={target}"],
+                    capture_output=True,
+                    text=True,
+                    timeout=120,
+                ),
+            )
+
+            if result.returncode != 0:
+                self._state = UpdateState.FAILED
+                self._error = f"Rollback failed: {result.stderr.strip()}"
+                log.error("rollback_pip_failed", stderr=result.stderr.strip())
+                return False
+
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
             self._state = UpdateState.FAILED
-        return success
+            self._error = f"Rollback failed: {exc}"
+            log.error("rollback_failed", error=str(exc))
+            return False
+
+        self._previous_version = self._current_version
+        self._current_version = target
+        self._state = UpdateState.IDLE
+        log.info("rollback_complete", version=target)
+
+        # Restart service after rollback
+        await self.restart_service()
+        return True
 
     async def run(self) -> None:
         """Main service loop: periodic check, auto-install if configured."""
@@ -199,7 +301,9 @@ class OtaUpdater:
                 log.info("auto_install_enabled, starting download")
                 ok = await self.download_and_verify()
                 if ok:
-                    await self.install()
+                    installed = await self.install()
+                    if installed:
+                        await self.restart_service()
 
             await asyncio.sleep(interval)
 
@@ -208,6 +312,10 @@ class OtaUpdater:
         result: dict = {
             "state": self._state.value,
             "current_version": self._current_version,
+            "channel": self._config.channel,
+            "github_repo": self._config.github_repo,
+            "last_check": self._last_check,
+            "previous_version": self._previous_version,
             "error": self._error,
         }
 
@@ -217,7 +325,7 @@ class OtaUpdater:
                 "channel": self._pending_manifest.channel,
                 "file_size": self._pending_manifest.file_size,
                 "changelog": self._pending_manifest.changelog,
-                "requires_reboot": self._pending_manifest.requires_reboot,
+                "release_url": self._pending_manifest.release_url,
             }
 
         progress = self._downloader.progress
@@ -229,7 +337,5 @@ class OtaUpdater:
             "speed_bps": round(progress.speed_bps, 0),
             "eta_seconds": round(progress.eta_seconds, 0),
         }
-
-        result["slots"] = self._rollback.get_status()
 
         return result
