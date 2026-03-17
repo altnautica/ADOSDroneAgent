@@ -194,7 +194,9 @@ class OtaConfig(BaseModel):
     channel: str = "stable"
     check_interval: int = 24
     auto_install: bool = False
-    server: str = "https://updates.altnautica.com"
+    github_repo: str = "altnautica/ADOSDroneAgent"
+    pip_path: str = "/opt/ados/venv/bin/pip"
+    service_name: str = "ados-agent"
 
 
 # --- Logging ---
