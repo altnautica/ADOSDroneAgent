@@ -2,7 +2,7 @@
 /* Design tokens: bg #000000, text #fafafa, blue #3a82ff, lime #dff140 */
 
 Screen {
-    background: #000000;
+    background: #0a0a0f;
     color: #fafafa;
 }
 

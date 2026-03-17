@@ -47,17 +47,20 @@ class DashboardScreen(Screen):
     }
     #dash-grid {
         height: 1fr;
+        background: #0a0a0f;
     }
     .dash-row {
         height: 1fr;
     }
     .dash-col {
         width: 1fr;
+        height: 1fr;
     }
     #dash-events {
         height: auto;
         max-height: 12;
         margin: 0 1;
+        background: #0a0a0f;
     }
     """
 
