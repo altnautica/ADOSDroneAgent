@@ -52,6 +52,7 @@ ota:
   channel: "stable"
   check_interval: 24
   auto_install: false
+  github_repo: "altnautica/ADOSDroneAgent"
 
 logging:
   level: "info"
