@@ -16,8 +16,7 @@ log = structlog.get_logger("tui.config_editor")
 
 CONFIG_PATHS = [
     Path("/etc/ados/config.yaml"),
-    Path("config.yaml"),
-    Path("configs/config.example.yaml"),
+    Path.home() / ".ados" / "config.yaml",
 ]
 
 
