@@ -51,10 +51,16 @@ def _api_get(path: str, *, raw: bool = False) -> dict | None:
         return None
 
 
-@click.group()
-def cli() -> None:
+@click.group(invoke_without_command=True)
+@click.pass_context
+def cli(ctx: click.Context) -> None:
     """ADOS Drone Agent CLI."""
-    pass
+    if ctx.invoked_subcommand is None:
+        from ados.cli.help_display import show_help
+        show_help()
+
+
+# ─── INFO ───────────────────────────────────────────────────────────────────
 
 
 @cli.command()
@@ -83,7 +89,7 @@ def status(as_json: bool) -> None:
 @cli.command()
 @click.option("--json", "as_json", is_flag=True, help="Output raw JSON for scripting.")
 def health(as_json: bool) -> None:
-    """Show system health."""
+    """Show system health (CPU, RAM, disk, temperature)."""
     data = _api_get("/api/status")
     if data:
         if as_json:
@@ -97,26 +103,29 @@ def health(as_json: bool) -> None:
         click.echo(f"Temp:   {temp:.1f}C" if temp else "Temp:   N/A")
 
 
-@cli.group()
-def config() -> None:
-    """Configuration commands."""
-    pass
+@cli.command("help")
+def help_cmd() -> None:
+    """Show the rich CLI cheatsheet."""
+    from ados.cli.help_display import show_help
+    show_help()
 
 
-@config.command("show")
-def config_show() -> None:
-    """Print current configuration."""
-    data = _api_get("/api/config")
-    if data:
-        click.echo(json.dumps(data, indent=2))
+# ─── CONFIG ─────────────────────────────────────────────────────────────────
 
 
-@config.command("get")
-@click.argument("key")
-def config_get(key: str) -> None:
-    """Get a specific config value (dot-separated path)."""
+@cli.command()
+@click.argument("key", required=False, default=None)
+def config(key: str | None) -> None:
+    """Show config, or get a specific value by dot-path key.
+
+    With no arguments, prints the full configuration.
+    With a key (e.g. mavlink.baud), prints that specific value.
+    """
     data = _api_get("/api/config")
     if not data:
+        return
+    if key is None:
+        click.echo(json.dumps(data, indent=2))
         return
     parts = key.split(".")
     val = data
@@ -132,10 +141,10 @@ def config_get(key: str) -> None:
         click.echo(val)
 
 
-@config.command("set")
+@cli.command("set")
 @click.argument("key")
 @click.argument("value")
-def config_set(key: str, value: str) -> None:
+def set_config(key: str, value: str) -> None:
     """Set a config value (dot-separated path)."""
     try:
         resp = httpx.put(
@@ -158,15 +167,12 @@ def config_set(key: str, value: str) -> None:
             click.echo(f"Error: {e}", err=True)
 
 
-@cli.group()
+# ─── FLIGHT ─────────────────────────────────────────────────────────────────
+
+
+@cli.command()
 def mavlink() -> None:
-    """MAVLink commands."""
-    pass
-
-
-@mavlink.command("status")
-def mavlink_status() -> None:
-    """Show MAVLink connection status."""
+    """Show MAVLink/FC connection status."""
     data = _api_get("/api/status")
     if data:
         click.echo(f"Connected: {data.get('fc_connected', False)}")
@@ -174,14 +180,9 @@ def mavlink_status() -> None:
         click.echo(f"Baud:      {data.get('fc_baud', 'N/A')}")
 
 
-@cli.group()
-def video() -> None:
-    """Video pipeline commands."""
-
-
-@video.command("status")
+@cli.command()
 @click.option("--json", "as_json", is_flag=True, help="Output raw JSON for scripting.")
-def video_status(as_json: bool) -> None:
+def video(as_json: bool) -> None:
     """Show video pipeline status."""
     data = _api_get("/api/video")
     if data:
@@ -199,9 +200,9 @@ def video_status(as_json: bool) -> None:
         click.echo(f"MediaMTX:  {'running' if mtx.get('running') else 'stopped'}")
 
 
-@video.command("snapshot")
-def video_snapshot() -> None:
-    """Capture a JPEG snapshot."""
+@cli.command()
+def snap() -> None:
+    """Capture a JPEG snapshot from the video pipeline."""
     try:
         resp = httpx.post(f"{API_BASE}/api/video/snapshot", timeout=10.0)
         resp.raise_for_status()
@@ -220,15 +221,10 @@ def video_snapshot() -> None:
         click.echo(f"Error: {e}", err=True)
 
 
-@cli.group()
-def wfb() -> None:
-    """WFB-ng link commands."""
-
-
-@wfb.command("status")
+@cli.command()
 @click.option("--json", "as_json", is_flag=True, help="Output raw JSON for scripting.")
-def wfb_status(as_json: bool) -> None:
-    """Show WFB-ng link status."""
+def link(as_json: bool) -> None:
+    """Show WFB-ng video link status."""
     data = _api_get("/api/wfb")
     if data:
         if as_json:
@@ -247,34 +243,32 @@ def wfb_status(as_json: bool) -> None:
         click.echo(f"Bitrate:  {data.get('bitrate_kbps', 0)} kbps")
 
 
-@cli.group()
-def script() -> None:
-    """Scripting engine commands."""
+# ─── SCRIPTING ──────────────────────────────────────────────────────────────
 
 
-@script.command("list")
+@cli.command()
 @click.option("--json", "as_json", is_flag=True, help="Output raw JSON for scripting.")
-def script_list(as_json: bool) -> None:
+def scripts(as_json: bool) -> None:
     """List running scripts."""
     data = _api_get("/api/scripts")
     if data:
         if as_json:
             click.echo(json.dumps(data, indent=2))
             return
-        scripts = data.get("scripts", [])
-        if not scripts:
+        script_list = data.get("scripts", [])
+        if not script_list:
             click.echo("No scripts running.")
             return
-        for s in scripts:
+        for s in script_list:
             sid = s.get('script_id', '?')
             fname = s.get('filename', '?')
             click.echo(f"  [{s.get('state', '?')}] {sid}: {fname}")
 
 
-@script.command("run")
+@cli.command()
 @click.argument("path")
-def script_run(path: str) -> None:
-    """Run a Python script."""
+def run(path: str) -> None:
+    """Run a Python script on the agent."""
     try:
         resp = httpx.post(f"{API_BASE}/api/scripts/run", json={"path": path}, timeout=5.0)
         resp.raise_for_status()
@@ -293,9 +287,9 @@ def script_run(path: str) -> None:
             click.echo(f"Error: {e}", err=True)
 
 
-@script.command("send")
+@cli.command()
 @click.argument("command")
-def script_send(command: str) -> None:
+def send(command: str) -> None:
     """Send a text command to the scripting engine."""
     try:
         resp = httpx.post(
@@ -319,14 +313,12 @@ def script_send(command: str) -> None:
             click.echo(f"Error: {e}", err=True)
 
 
-@cli.group()
-def update() -> None:
-    """OTA update commands."""
+# ─── OTA ────────────────────────────────────────────────────────────────────
 
 
-@update.command("status")
+@cli.command()
 @click.option("--json", "as_json", is_flag=True, help="Output raw JSON for scripting.")
-def update_status(as_json: bool) -> None:
+def update(as_json: bool) -> None:
     """Show OTA update status."""
     data = _api_get("/api/ota")
     if data:
@@ -344,9 +336,9 @@ def update_status(as_json: bool) -> None:
             click.echo(f"Update:   {available.get('version', '?')} available")
 
 
-@update.command("check")
-def update_check() -> None:
-    """Check for available updates."""
+@cli.command()
+def check() -> None:
+    """Check for available OTA updates."""
     try:
         resp = httpx.post(f"{API_BASE}/api/ota/check", timeout=30.0)
         resp.raise_for_status()
@@ -368,33 +360,16 @@ def update_check() -> None:
             click.echo(f"Error: {e}", err=True)
 
 
-@cli.group()
-def pair() -> None:
-    """Pairing and discovery commands."""
+# ─── PAIRING ───────────────────────────────────────────────────────────────
 
 
-@pair.command("show")
-def pair_show() -> None:
-    """Show current pairing code."""
-    data = _api_get("/api/pairing/info")
-    if data:
-        if data.get("paired"):
-            click.echo("Agent is already paired.")
-            click.echo(f"Owner: {data.get('owner_id', '?')}")
-        else:
-            code = data.get("pairing_code", "?")
-            click.echo("")
-            click.echo("  +--------+")
-            click.echo(f"  | {code} |")
-            click.echo("  +--------+")
-            click.echo("")
-            click.echo("Enter this code in ADOS Mission Control to pair.")
-
-
-@pair.command("status")
+@cli.command()
 @click.option("--json", "as_json", is_flag=True, help="Output raw JSON for scripting.")
-def pair_status(as_json: bool) -> None:
-    """Show pairing status."""
+def pair(as_json: bool) -> None:
+    """Show pairing status and code.
+
+    Displays the pairing code box when unpaired, or owner info when paired.
+    """
     data = _api_get("/api/pairing/info")
     if data:
         if as_json:
@@ -413,12 +388,18 @@ def pair_status(as_json: bool) -> None:
                 ts = datetime.datetime.fromtimestamp(paired_at).isoformat()
                 click.echo(f"Paired at:  {ts}")
         else:
-            click.echo(f"Code:       {data.get('pairing_code', '?')}")
+            code = data.get("pairing_code", "?")
+            click.echo("")
+            click.echo("  +--------+")
+            click.echo(f"  | {code} |")
+            click.echo("  +--------+")
+            click.echo("")
+            click.echo("Enter this code in ADOS Mission Control to pair.")
 
 
-@pair.command("reset")
+@cli.command()
 @click.confirmation_option(prompt="This will unpair the agent. Continue?")
-def pair_reset() -> None:
+def unpair() -> None:
     """Unpair the agent and generate a new pairing code."""
     try:
         resp = httpx.post(f"{API_BASE}/api/pairing/unpair", timeout=5.0)
@@ -441,6 +422,66 @@ def pair_reset() -> None:
             click.echo(f"Error: {e.response.status_code}", err=True)
         else:
             click.echo(f"Error: {e}", err=True)
+
+
+# ─── TOOLS ──────────────────────────────────────────────────────────────────
+
+
+@cli.command()
+def tui() -> None:
+    """Launch the TUI dashboard."""
+    try:
+        from ados.tui.app import ADOSTui
+        app = ADOSTui()
+        app.run()
+    except ImportError:
+        click.echo(
+            "Error: TUI deps not installed. Install with: pip install textual",
+            err=True,
+        )
+        sys.exit(1)
+
+
+@cli.command()
+def start() -> None:
+    """Start the ADOS Drone Agent."""
+    from ados.core.main import main as agent_main
+    agent_main()
+
+
+@cli.command()
+@click.option("--port", default=8080, help="REST API port")
+def demo(port: int) -> None:
+    """Start in demo mode with simulated telemetry."""
+    import asyncio
+
+    from ados.core.config import load_config
+    from ados.core.logging import configure_logging
+    from ados.core.main import AgentApp
+
+    config = load_config()
+    config.server.mode = "disabled"
+    config.scripting.rest_api.port = port
+    configure_logging(
+        level=config.logging.level,
+        drone_name=config.agent.name,
+        device_id=config.agent.device_id,
+    )
+
+    app = AgentApp(config, demo=True)
+
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        loop.add_signal_handler(sig, app.request_shutdown)
+
+    try:
+        loop.run_until_complete(app.start())
+    except KeyboardInterrupt:
+        app.request_shutdown()
+    finally:
+        loop.close()
 
 
 @cli.command()
@@ -598,63 +639,6 @@ def uninstall(keep_config: bool, purge: bool, yes: bool) -> None:
 
     click.echo("")
     click.echo("ADOS Drone Agent uninstalled successfully.")
-
-
-@cli.command()
-def tui() -> None:
-    """Launch the TUI dashboard."""
-    try:
-        from ados.tui.app import ADOSTui
-        app = ADOSTui()
-        app.run()
-    except ImportError:
-        click.echo(
-            "Error: TUI deps not installed. Install with: pip install textual",
-            err=True,
-        )
-        sys.exit(1)
-
-
-@cli.command()
-def start() -> None:
-    """Start the ADOS Drone Agent."""
-    from ados.core.main import main as agent_main
-    agent_main()
-
-
-@cli.command()
-@click.option("--port", default=8080, help="REST API port")
-def demo(port: int) -> None:
-    """Start in demo mode with simulated telemetry."""
-    import asyncio
-
-    from ados.core.config import load_config
-    from ados.core.logging import configure_logging
-    from ados.core.main import AgentApp
-
-    config = load_config()
-    config.server.mode = "disabled"
-    config.scripting.rest_api.port = port
-    configure_logging(
-        level=config.logging.level,
-        drone_name=config.agent.name,
-        device_id=config.agent.device_id,
-    )
-
-    app = AgentApp(config, demo=True)
-
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-
-    for sig in (signal.SIGTERM, signal.SIGINT):
-        loop.add_signal_handler(sig, app.request_shutdown)
-
-    try:
-        loop.run_until_complete(app.start())
-    except KeyboardInterrupt:
-        app.request_shutdown()
-    finally:
-        loop.close()
 
 
 # ─── Diagnostics helpers ────────────────────────────────────────────────────
@@ -878,12 +862,15 @@ def diag() -> None:
     click.echo("")
 
 
+# ─── SYSTEM ─────────────────────────────────────────────────────────────────
+
+
 @cli.command()
 @click.option("--lines", "-n", default=50, help="Number of log lines to show.")
 @click.option("--follow", "-f", is_flag=True, help="Follow log output (tail -f).")
 @click.option("--since", "-s", default=None, help="Show logs since (e.g. '1h ago', '2024-01-01').")
 def logs(lines: int, follow: bool, since: str | None) -> None:
-    """Show agent logs (journalctl wrapper)."""
+    """Show agent logs (journalctl wrapper on Linux, file tail on macOS)."""
     if platform.system() == "Darwin":
         # macOS has no systemd. Try reading from log files instead.
         log_paths = [
