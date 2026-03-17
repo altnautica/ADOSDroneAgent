@@ -6,6 +6,7 @@ on:
 
 permissions:
   id-token: write
+  contents: write
 
 jobs:
   publish:
@@ -25,6 +26,16 @@ jobs:
 
       - name: Build package
         run: python -m build
+
+      - name: Compute SHA256
+        run: cd dist && sha256sum *.whl > SHA256SUMS
+
+      - name: Upload release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.whl
+            dist/SHA256SUMS
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
