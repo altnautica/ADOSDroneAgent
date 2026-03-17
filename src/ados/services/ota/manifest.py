@@ -6,15 +6,13 @@ from pydantic import BaseModel
 
 
 class UpdateManifest(BaseModel):
-    """Represents an available firmware/software update."""
+    """Represents an available software update from GitHub Releases."""
 
     version: str
     channel: str
-    release_date: str
+    published_at: str
     download_url: str
     file_size: int
     sha256: str
-    signature: str
-    min_version: str
     changelog: str
-    requires_reboot: bool
+    release_url: str
