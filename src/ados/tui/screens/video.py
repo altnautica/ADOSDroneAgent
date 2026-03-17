@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-import httpx
 import structlog
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.screen import Screen
 from textual.widgets import DataTable, Static
+
+from ados.tui.widgets import GaugeBar, InfoPanel, StatusDot
 
 log = structlog.get_logger("tui.video")
 
@@ -18,17 +19,26 @@ class VideoScreen(Screen):
     def compose(self) -> ComposeResult:
         with Horizontal():
             with Vertical(id="video-left"):
-                yield Static("[b]Cameras[/b]", classes="panel-title")
-                yield DataTable(id="camera-table")
-                yield Static("[b]Role Assignments[/b]", classes="panel-title")
-                yield Static("Loading...", id="roles-panel")
+                with InfoPanel("CAMERAS"):
+                    yield DataTable(id="camera-table")
+                with InfoPanel("ROLE ASSIGNMENTS"):
+                    yield Static("Loading...", id="roles-panel")
             with Vertical(id="video-right"):
-                yield Static("[b]Pipeline Status[/b]", classes="panel-title")
-                yield Static("Loading...", id="pipeline-panel")
-                yield Static("[b]Recording[/b]", classes="panel-title")
-                yield Static("Loading...", id="recording-panel")
-                yield Static("[b]MediaMTX[/b]", classes="panel-title")
-                yield Static("Loading...", id="mediamtx-panel")
+                with InfoPanel("PIPELINE"):
+                    yield StatusDot("Pipeline", "unknown", id="pipeline-dot")
+                    yield Static("", id="pipeline-detail")
+                with InfoPanel("RECORDING"):
+                    yield StatusDot("Recording", "idle", id="rec-dot")
+                    yield Static("", id="recording-detail")
+                    yield GaugeBar(
+                        label="Disk",
+                        value=0,
+                        thresholds=(70.0, 90.0),
+                        id="disk-gauge",
+                    )
+                with InfoPanel("MEDIAMTX"):
+                    yield StatusDot("MediaMTX", "unknown", id="mtx-dot")
+                    yield Static("", id="mediamtx-detail")
 
     def on_mount(self) -> None:
         table = self.query_one("#camera-table", DataTable)
@@ -36,17 +46,11 @@ class VideoScreen(Screen):
         self.set_interval(2.0, self._refresh)
 
     async def _refresh(self) -> None:
-        api = self.app.api_url  # type: ignore[attr-defined]
-        try:
-            async with httpx.AsyncClient(timeout=3.0) as client:
-                resp = await client.get(f"{api}/api/video")
-                data = resp.json()
-        except httpx.ConnectError:
-            self.query_one("#pipeline-panel", Static).update("Agent not running")
-            return
-        except Exception as exc:
-            log.warning("video_refresh_failed", error=str(exc))
-            self.query_one("#pipeline-panel", Static).update("Error loading data")
+        fetcher = self.app.fetcher  # type: ignore[attr-defined]
+        data = await fetcher.get_video()
+
+        if data is None:
+            self.query_one("#pipeline-dot", StatusDot).set_state("disconnected")
             return
 
         # Camera table
@@ -79,31 +83,48 @@ class VideoScreen(Screen):
         state = data.get("state", "unknown")
         encoder = data.get("encoder", "none")
         is_demo = data.get("demo", False)
-        pipeline_text = (
-            f"State:   {state}\n"
+
+        # Map state to StatusDot states
+        state_map = {
+            "streaming": "running",
+            "running": "running",
+            "active": "active",
+            "stopped": "stopped",
+            "error": "error",
+            "idle": "idle",
+        }
+        self.query_one("#pipeline-dot", StatusDot).set_state(
+            state_map.get(state, "unknown")
+        )
+        self.query_one("#pipeline-detail", Static).update(
             f"Encoder: {encoder}\n"
             f"Demo:    {'yes' if is_demo else 'no'}"
         )
-        self.query_one("#pipeline-panel", Static).update(pipeline_text)
 
         # Recording
         rec = data.get("recorder", {})
         rec_active = rec.get("recording", False)
         rec_path = rec.get("current_path", "")
         rec_dir = rec.get("recordings_dir", "")
-        recording_text = (
-            f"Active:  {'yes' if rec_active else 'no'}\n"
+        self.query_one("#rec-dot", StatusDot).set_state(
+            "active" if rec_active else "idle"
+        )
+        self.query_one("#recording-detail", Static).update(
             f"Path:    {rec_path or 'N/A'}\n"
             f"Dir:     {rec_dir or 'N/A'}"
         )
-        self.query_one("#recording-panel", Static).update(recording_text)
+
+        # Disk usage gauge (if available in recorder data)
+        disk_pct = rec.get("disk_usage_percent", 0)
+        self.query_one("#disk-gauge", GaugeBar).update_value(disk_pct)
 
         # MediaMTX
         mtx = data.get("mediamtx", {})
         mtx_running = mtx.get("running", False)
-        mtx_text = (
-            f"Running: {'yes' if mtx_running else 'no'}\n"
+        self.query_one("#mtx-dot", StatusDot).set_state(
+            "running" if mtx_running else "stopped"
+        )
+        self.query_one("#mediamtx-detail", Static).update(
             f"RTSP:    :{mtx.get('rtsp_port', 'N/A')}\n"
             f"WebRTC:  :{mtx.get('webrtc_port', 'N/A')}"
         )
-        self.query_one("#mediamtx-panel", Static).update(mtx_text)

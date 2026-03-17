@@ -2,14 +2,27 @@
 
 from __future__ import annotations
 
-import httpx
 import structlog
 from textual.app import ComposeResult
-from textual.containers import Vertical
+from textual.containers import Horizontal, Vertical
 from textual.screen import Screen
 from textual.widgets import DataTable, Input, Static
 
+from ados.tui.widgets import InfoPanel, StatusDot
+
 log = structlog.get_logger("tui.mavlink")
+
+# Approximate rates (Hz) for common MAVLink messages in ArduPilot defaults
+_DEFAULT_RATES: dict[str, float] = {
+    "HEARTBEAT": 1.0,
+    "GLOBAL_POSITION_INT": 5.0,
+    "ATTITUDE": 10.0,
+    "SYS_STATUS": 2.0,
+    "GPS_RAW_INT": 5.0,
+    "VFR_HUD": 4.0,
+    "BATTERY_STATUS": 2.0,
+    "RC_CHANNELS": 4.0,
+}
 
 
 class MavlinkScreen(Screen):
@@ -20,17 +33,24 @@ class MavlinkScreen(Screen):
         self._msg_counts: dict[str, int] = {}
         self._msg_last: dict[str, str] = {}
         self._filter: str = ""
+        self._tick: int = 0
 
     def compose(self) -> ComposeResult:
         with Vertical():
-            yield Static("[b]MAVLink Inspector[/b]", classes="panel-title")
-            yield Input(placeholder="Filter by message name...", id="mav-filter")
-            yield DataTable(id="mav-table")
-            yield Static("", id="mav-stats")
+            with InfoPanel("MAVLINK INSPECTOR"):
+                with Horizontal():
+                    yield StatusDot("Stream", "disconnected", id="mav-stream-dot")
+                    yield Static("  ", classes="spacer")
+                    yield Static("0 msg/s", id="mav-rate")
+                    yield Static("  ", classes="spacer")
+                    yield Static("0 total", id="mav-total")
+                yield Input(placeholder="Filter by message name...", id="mav-filter")
+            with InfoPanel("MESSAGES"):
+                yield DataTable(id="mav-table")
 
     def on_mount(self) -> None:
         table = self.query_one("#mav-table", DataTable)
-        table.add_columns("Message", "Count", "Last Value")
+        table.add_columns("Message", "Count", "Hz", "Last Value")
         self.set_interval(1.0, self._refresh)
 
     def on_input_changed(self, event: Input.Changed) -> None:
@@ -38,22 +58,17 @@ class MavlinkScreen(Screen):
             self._filter = event.value.upper()
 
     async def _refresh(self) -> None:
-        api = self.app.api_url  # type: ignore[attr-defined]
-        try:
-            async with httpx.AsyncClient(timeout=3.0) as client:
-                resp = await client.get(f"{api}/api/telemetry")
-                data = resp.json()
-        except httpx.ConnectError:
-            self.query_one("#mav-stats", Static).update(
-                "Agent not running.\n"
-                "Start with: ados demo    (simulated)\n"
-                "       or:  ados start   (real FC)"
-            )
+        fetcher = self.app.fetcher  # type: ignore[attr-defined]
+        data = await fetcher.get_telemetry()
+
+        stream_dot = self.query_one("#mav-stream-dot", StatusDot)
+
+        if data is None:
+            stream_dot.set_state("disconnected")
+            self.query_one("#mav-rate", Static).update("-- msg/s")
             return
-        except Exception as exc:
-            log.warning("mavlink_refresh_failed", error=str(exc))
-            self.query_one("#mav-stats", Static).update("Error loading data")
-            return
+
+        stream_dot.set_state("connected")
 
         # Build pseudo message table from telemetry
         pos = data.get("position", {})
@@ -74,19 +89,34 @@ class MavlinkScreen(Screen):
             "RC_CHANNELS": f"ch1={ch[0] if ch else 0}",
         }
 
+        prev_total = sum(self._msg_counts.values())
+
         for name in messages:
             self._msg_counts[name] = self._msg_counts.get(name, 0) + 1
             self._msg_last[name] = messages[name]
 
+        new_total = sum(self._msg_counts.values())
+        rate = new_total - prev_total
+
+        self._tick += 1
+
+        # Update header stats
+        self.query_one("#mav-rate", Static).update(f"{rate} msg/s")
+        self.query_one("#mav-total", Static).update(f"{new_total} total")
+
+        # Rebuild table
         table = self.query_one("#mav-table", DataTable)
         table.clear()
 
-        total_msgs = 0
         for name, count in sorted(self._msg_counts.items()):
             if self._filter and self._filter not in name:
                 continue
-            total_msgs += count
-            table.add_row(name, str(count), self._msg_last.get(name, ""))
-
-        stats = f"Messages: {len(self._msg_counts)} types, {total_msgs} total"
-        self.query_one("#mav-stats", Static).update(stats)
+            hz = _DEFAULT_RATES.get(name, 0.0)
+            # Color-code by rate: >10 Hz = lime, >1 Hz = blue, else dim
+            if hz > 10:
+                styled_name = f"[#dff140]{name}[/#dff140]"
+            elif hz > 1:
+                styled_name = f"[#3a82ff]{name}[/#3a82ff]"
+            else:
+                styled_name = f"[#666666]{name}[/#666666]"
+            table.add_row(styled_name, str(count), f"{hz:.0f}", self._msg_last.get(name, ""))
