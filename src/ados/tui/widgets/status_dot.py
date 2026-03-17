@@ -58,14 +58,14 @@ class StatusDot(Static):
         super().__init__("", name=name, id=id, classes=classes)
         self._label = label
         self._state = state
-        self._render()
+        self._refresh_display()
 
     def set_state(self, state: str) -> None:
         """Update the dot state and re-render."""
         self._state = state
-        self._render()
+        self._refresh_display()
 
-    def _render(self) -> None:
+    def _refresh_display(self) -> None:
         color = _STATE_COLORS.get(self._state, "#666666")
         dot = "\u25cf"  # ●
         self.update(f"[{color}]{dot}[/{color}] {self._label}: [{color}]{self._state}[/{color}]")
