@@ -65,7 +65,7 @@ class UpdateChecker:
             headers["If-None-Match"] = self._etag
 
         try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
+            async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
                 resp = await client.get(url, headers=headers)
 
                 # ETag cache hit: no new data
@@ -166,7 +166,7 @@ class UpdateChecker:
             return ""
 
         try:
-            async with httpx.AsyncClient(timeout=15.0) as client:
+            async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
                 resp = await client.get(url)
                 resp.raise_for_status()
                 text = resp.text

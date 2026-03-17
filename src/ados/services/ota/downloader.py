@@ -102,7 +102,7 @@ class UpdateDownloader:
                     headers["If-Range"] = saved_validator
 
         try:
-            async with httpx.AsyncClient(timeout=300.0) as client:
+            async with httpx.AsyncClient(timeout=300.0, follow_redirects=True) as client:
                 async with client.stream("GET", manifest.download_url, headers=headers) as resp:
                     resp.raise_for_status()
 
