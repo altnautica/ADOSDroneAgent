@@ -72,7 +72,8 @@ class UpdateChecker:
                 if resp.status_code == 304:
                     log.info("github_cache_hit", msg="no changes since last check")
                     if self._cached_manifest:
-                        if _version_tuple(self._cached_manifest.version) > _version_tuple(current_version):
+                        cached_ver = self._cached_manifest.version
+                        if _version_tuple(cached_ver) > _version_tuple(current_version):
                             return self._cached_manifest
                         return None
                     return None
