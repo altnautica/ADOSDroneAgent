@@ -317,7 +317,12 @@ class DashboardScreen(Screen):
             except Exception:
                 pass
 
-            state_color = "#22c55e" if state == "connected" else "#f59e0b" if state == "connecting" else "#ef4444"
+            if state == "connected":
+                state_color = "#22c55e"
+            elif state == "connecting":
+                state_color = "#f59e0b"
+            else:
+                state_color = "#ef4444"
             link_text = (
                 f"[{state_color}]{state.upper()}[/{state_color}]  "
                 f"SNR: [#fafafa]{snr:.1f}dB[/#fafafa]  "
