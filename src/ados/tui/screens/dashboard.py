@@ -80,7 +80,10 @@ class DashboardScreen(Screen):
                     yield GaugeBar("CPU", id="gauge-cpu")
                     yield GaugeBar("RAM", id="gauge-ram")
                     yield GaugeBar("Disk", id="gauge-disk")
-                    yield GaugeBar("Temp", id="gauge-temp", thresholds=(65.0, 80.0), suffix="\u00b0C")
+                    yield GaugeBar(
+                        "Temp", id="gauge-temp",
+                        thresholds=(65.0, 80.0), suffix="\u00b0C",
+                    )
 
                 # Flight Controller
                 with InfoPanel("FLIGHT CONTROLLER", id="panel-fc", classes="dash-col"):
@@ -158,7 +161,6 @@ class DashboardScreen(Screen):
                 except Exception:
                     pass
             else:
-                code = pairing.get("pairing_code", "??????")
                 try:
                     dot = self.query_one("#banner-pairing", StatusDot)
                     dot.set_state("unpaired")
@@ -276,7 +278,10 @@ class DashboardScreen(Screen):
             fix = gps.get("fix_type", 0)
             sats = gps.get("satellites", 0)
 
-            fix_labels = {0: "No GPS", 1: "No Fix", 2: "2D", 3: "3D", 4: "DGPS", 5: "RTK Float", 6: "RTK Fix"}
+            fix_labels = {
+                0: "No GPS", 1: "No Fix", 2: "2D", 3: "3D",
+                4: "DGPS", 5: "RTK Float", 6: "RTK Fix",
+            }
             fix_label = fix_labels.get(fix, f"Type {fix}")
 
             gps_text = (

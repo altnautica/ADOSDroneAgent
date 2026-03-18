@@ -12,9 +12,9 @@ def show_help() -> None:
     """Render the ADOS CLI cheatsheet with Rich formatting."""
     console = Console()
 
-    BLUE = "#3A82FF"
-    LIME = "#DFF140"
-    DIM = "#A0A0A0"
+    blue = "#3A82FF"
+    lime = "#DFF140"
+    dim = "#A0A0A0"
 
     # ASCII art logo
     logo = Text()
@@ -24,32 +24,32 @@ def show_help() -> None:
         "  / _ \\ | | | | | | \\___ \\\n"
         " / ___ \\| |_| | |_| |___) |\n"
         "/_/   \\_\\____/ \\___/|____/\n",
-        style=f"bold {BLUE}",
+        style=f"bold {blue}",
     )
     console.print(logo, highlight=False)
 
     subtitle = Text()
-    subtitle.append("  D R O N E   A G E N T", style=f"bold {BLUE}")
-    subtitle.append(f"   v{__version__}\n", style=f"{DIM}")
+    subtitle.append("  D R O N E   A G E N T", style=f"bold {blue}")
+    subtitle.append(f"   v{__version__}\n", style=f"{dim}")
     console.print(subtitle, highlight=False)
 
     def _header(label: str) -> Text:
         t = Text()
-        t.append(f"  {label}", style=f"bold {LIME}")
+        t.append(f"  {label}", style=f"bold {lime}")
         return t
 
     def _cmd(name: str, desc: str, pad: int = 14) -> Text:
         t = Text()
         t.append(f"    {name:<{pad}}", style="bold white")
-        t.append(desc, style=DIM)
+        t.append(desc, style=dim)
         return t
 
     # Row 1: INFO + FLIGHT
     console.print(
         Text.assemble(
-            ("  INFO", f"bold {LIME}"),
+            ("  INFO", f"bold {lime}"),
             (" " * 28, ""),
-            ("FLIGHT", f"bold {LIME}"),
+            ("FLIGHT", f"bold {lime}"),
         ),
         highlight=False,
     )
@@ -62,9 +62,9 @@ def show_help() -> None:
     for left_cmd, left_desc, right_cmd, right_desc in pairs:
         t = Text()
         t.append(f"    {left_cmd:<14}", style="bold white")
-        t.append(f"{left_desc:<20}", style=DIM)
+        t.append(f"{left_desc:<20}", style=dim)
         t.append(f"  {right_cmd:<14}", style="bold white")
-        t.append(right_desc, style=DIM)
+        t.append(right_desc, style=dim)
         console.print(t, highlight=False)
 
     console.print()
@@ -72,9 +72,9 @@ def show_help() -> None:
     # Row 2: SCRIPTING + CONFIG
     console.print(
         Text.assemble(
-            ("  SCRIPTING", f"bold {LIME}"),
+            ("  SCRIPTING", f"bold {lime}"),
             (" " * 23, ""),
-            ("CONFIG", f"bold {LIME}"),
+            ("CONFIG", f"bold {lime}"),
         ),
         highlight=False,
     )
@@ -86,9 +86,9 @@ def show_help() -> None:
     for left_cmd, left_desc, right_cmd, right_desc in pairs2:
         t = Text()
         t.append(f"    {left_cmd:<14}", style="bold white")
-        t.append(f"{left_desc:<20}", style=DIM)
+        t.append(f"{left_desc:<20}", style=dim)
         t.append(f"  {right_cmd:<14}", style="bold white")
-        t.append(right_desc, style=DIM)
+        t.append(right_desc, style=dim)
         console.print(t, highlight=False)
 
     console.print()
@@ -96,28 +96,12 @@ def show_help() -> None:
     # Row 3: TOOLS + PAIRING
     console.print(
         Text.assemble(
-            ("  TOOLS", f"bold {LIME}"),
+            ("  TOOLS", f"bold {lime}"),
             (" " * 27, ""),
-            ("PAIRING", f"bold {LIME}"),
+            ("PAIRING", f"bold {lime}"),
         ),
         highlight=False,
     )
-    pairs3_left = [
-        ("tui", "Launch dashboard"),
-        ("start", "Start agent"),
-        ("demo", "Demo mode"),
-        ("update", "OTA status"),
-        ("check", "Check updates"),
-        ("help", "This screen"),
-    ]
-    pairs3_right = [
-        ("pair", "Show status/code"),
-        ("unpair", "Reset pairing"),
-        ("", ""),
-        ("", ""),
-        ("", ""),
-        ("", ""),
-    ]
     # Merge into TOOLS left + PAIRING right, then SYSTEM below right
     tools_pairing = [
         ("tui", "Launch dashboard", "pair", "Show status/code"),
@@ -133,9 +117,9 @@ def show_help() -> None:
             # Insert SYSTEM header on right
             t = Text()
             t.append(f"    {lc:<14}", style="bold white")
-            t.append(f"{ld:<20}", style=DIM)
+            t.append(f"{ld:<20}", style=dim)
             t.append("  ", style="")
-            t.append("SYSTEM", style=f"bold {LIME}")
+            t.append("SYSTEM", style=f"bold {lime}")
             console.print(t, highlight=False)
             continue
         if i == 4:
@@ -144,10 +128,10 @@ def show_help() -> None:
             rc, rd = "uninstall", "Remove agent"
         t = Text()
         t.append(f"    {lc:<14}", style="bold white")
-        t.append(f"{ld:<20}", style=DIM)
+        t.append(f"{ld:<20}", style=dim)
         if rc:
             t.append(f"  {rc:<14}", style="bold white")
-            t.append(rd, style=DIM)
+            t.append(rd, style=dim)
         console.print(t, highlight=False)
 
     console.print()
@@ -160,8 +144,8 @@ def show_help() -> None:
     ]
     for label, detail in hints:
         t = Text()
-        t.append(label, style=f"bold {LIME}")
-        t.append(detail, style=DIM)
+        t.append(label, style=f"bold {lime}")
+        t.append(detail, style=dim)
         console.print(t, highlight=False)
 
     console.print()

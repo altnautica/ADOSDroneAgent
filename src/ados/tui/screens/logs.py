@@ -9,7 +9,7 @@ import structlog
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.screen import Screen
-from textual.widgets import Button, Input, RichLog, Static
+from textual.widgets import Button, Input, RichLog
 
 from ados.tui.widgets import InfoPanel
 
