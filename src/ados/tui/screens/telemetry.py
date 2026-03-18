@@ -225,7 +225,10 @@ class TelemetryScreen(Screen):
         hdop = gps.get("hdop", 0)
         vz = vel.get("climb", 0) if "climb" in vel else 0
 
-        fix_labels = {0: "No GPS", 1: "No Fix", 2: "2D", 3: "3D", 4: "DGPS", 5: "RTK Float", 6: "RTK Fix"}
+        fix_labels = {
+            0: "No GPS", 1: "No Fix", 2: "2D", 3: "3D",
+            4: "DGPS", 5: "RTK Float", 6: "RTK Fix",
+        }
         fix_label = fix_labels.get(fix, f"Type {fix}")
 
         gps_text = (

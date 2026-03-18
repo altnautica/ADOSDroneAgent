@@ -70,7 +70,10 @@ class LinkScreen(Screen):
                 with InfoPanel("SIGNAL"):
                     yield GaugeBar("RSSI", id="link-rssi-gauge", thresholds=(40.0, 70.0))
                     yield Static("", id="link-noise-info")
-                    yield GaugeBar("SNR", id="link-snr-gauge", thresholds=(999.0, 999.0), suffix="dB")
+                    yield GaugeBar(
+                        "SNR", id="link-snr-gauge",
+                        thresholds=(999.0, 999.0), suffix="dB",
+                    )
 
             with Vertical(id="link-mid-right"):
                 yield SparklinePanel(

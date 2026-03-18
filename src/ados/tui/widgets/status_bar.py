@@ -52,7 +52,10 @@ class AgentStatusBar(Static):
         self._render_bar()
 
     def _render_bar(self) -> None:
-        ver = f"[#3a82ff]ADOS[/#3a82ff] {self._version}" if self._version else "[#3a82ff]ADOS[/#3a82ff]"
+        if self._version:
+            ver = f"[#3a82ff]ADOS[/#3a82ff] {self._version}"
+        else:
+            ver = "[#3a82ff]ADOS[/#3a82ff]"
 
         # FC state
         fc_color = "#22c55e" if self._fc_state not in ("N/A", "disconnected") else "#666666"
