@@ -194,7 +194,10 @@ class AgentApp:
         # Start MQTT gateway if enabled
         if self.config.server.mode != "disabled":
             from ados.services.mqtt.gateway import MqttGateway
-            mqtt = MqttGateway(self.config, self._vehicle_state, api_key=self.pairing_manager.api_key)
+            mqtt = MqttGateway(
+                self.config, self._vehicle_state,
+                api_key=self.pairing_manager.api_key,
+            )
             self._start_service("mqtt-gateway", mqtt.run(self._shutdown))
 
         # Start Video Pipeline
@@ -442,8 +445,9 @@ class AgentApp:
                     proc_cpu = 0.0
                     proc_rss_mb = 0.0
                     try:
-                        import psutil as _psutil
                         import os as _os
+
+                        import psutil as _psutil
                         _proc = _psutil.Process(_os.getpid())
                         proc_cpu = _proc.cpu_percent(interval=0)
                         proc_rss_mb = _proc.memory_info().rss / (1024 * 1024)

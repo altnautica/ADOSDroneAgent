@@ -72,7 +72,9 @@ class UpdateChecker:
                 if resp.status_code == 304:
                     log.info("github_cache_hit", msg="no changes since last check")
                     if self._cached_manifest:
-                        return self._cached_manifest if _version_tuple(self._cached_manifest.version) > _version_tuple(current_version) else None
+                        if _version_tuple(self._cached_manifest.version) > _version_tuple(current_version):
+                            return self._cached_manifest
+                        return None
                     return None
 
                 if resp.status_code == 403:
@@ -136,7 +138,11 @@ class UpdateChecker:
             sha256_hex = await self._fetch_sha256(sha256_asset, wheel_asset["name"])
 
         if not sha256_hex:
-            log.warning("no_sha256_available", version=release_version, msg="update will skip hash verification")
+            log.warning(
+                "no_sha256_available",
+                version=release_version,
+                msg="update will skip hash verification",
+            )
 
         manifest = UpdateManifest(
             version=release_version,
