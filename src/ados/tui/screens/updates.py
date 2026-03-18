@@ -70,7 +70,10 @@ class UpdatesScreen(Screen):
         pending = data.get("pending_update")
         if pending:
             version_lines.append("")
-            version_lines.append(f"[#dff140]Update Available: v{pending.get('version', '?')}[/#dff140]")
+            ver = pending.get('version', '?')
+            version_lines.append(
+                f"[#dff140]Update Available: v{ver}[/#dff140]",
+            )
             version_lines.append(f"Channel: {pending.get('channel', '?')}")
             changelog = pending.get("changelog", "")[:120]
             if changelog:
