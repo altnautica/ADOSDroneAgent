@@ -1,10 +1,48 @@
 # ADOS Drone Agent
 
-**Open-source onboard agent for autonomous drones. Runs on any companion computer, connects to your flight controller, exposes a REST API and TUI dashboard.**
+**Open-source onboard agent for software-defined drones. 50km data link. HD video. Full remote control.**
 
-ADOS Drone Agent sits between your flight controller and the network. It runs on a Raspberry Pi CM4/CM5, Jetson, or any Linux SBC (and macOS for development). It proxies MAVLink from the FC serial port to WebSocket, TCP, and UDP endpoints so multiple ground stations can connect at once. It also provides a REST API for remote management, a terminal dashboard for quick monitoring, and a CLI for scripting and automation.
+![License: GPL-3.0](https://img.shields.io/badge/License-GPL--3.0-green.svg) ![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-blue.svg) ![Status: Alpha](https://img.shields.io/badge/Status-Alpha-orange.svg) [![Discord](https://img.shields.io/badge/Discord-Join-5865F2.svg)](https://discord.gg/uxbvuD4d5q)
 
-> **Status: Alpha** (3,000+ LOC Python, actively developed)
+ADOS Drone Agent is the onboard intelligence layer for software-defined drones. It runs on your companion computer, proxies MAVLink from the flight controller to WebSocket and TCP, handles the 50km data link, streams HD video, and gives you full remote control from ADOS Mission Control or any HTTP client.
+
+> **Pairs with [ADOS Mission Control](https://github.com/altnautica/ADOSMissionControl)** — open-source browser GCS with AI PID tuning, mission planning, 3D simulation, live ADS-B, and gamepad flight control at 50Hz.
+
+<p align="center">
+  <strong><a href="https://github.com/altnautica/ADOSMissionControl">ADOS Mission Control</a></strong> |
+  <strong><a href="https://altnautica.com">Website</a></strong> |
+  <strong><a href="https://discord.gg/uxbvuD4d5q">Discord</a></strong> |
+  <strong><a href="https://github.com/altnautica/ADOSDroneAgent/issues">Issues</a></strong>
+</p>
+
+---
+
+<table>
+  <tr>
+    <td width="50%">
+      <img src="https://placehold.co/800x450/111827/3A82FF?text=TUI+Dashboard" alt="TUI Dashboard" height="220" width="100%"><br>
+      <sub>Terminal dashboard — system health, FC status, live telemetry (<code>ados tui</code>)</sub>
+    </td>
+    <td width="50%">
+      <img src="https://placehold.co/800x450/111827/3A82FF?text=REST+API+%2F+Swagger" alt="REST API" height="220" width="100%"><br>
+      <sub>FastAPI REST API with auto-generated Swagger docs at <code>:8080/docs</code></sub>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%">
+      <img src="https://placehold.co/800x450/111827/3A82FF?text=Cloud+Relay+Connected" alt="Cloud Relay" height="220" width="100%"><br>
+      <sub>Cloud relay — agent paired with ADOS Mission Control over MQTT</sub>
+    </td>
+    <td width="50%">
+      <img src="https://placehold.co/800x450/111827/3A82FF?text=Demo+Mode" alt="Demo Mode" height="220" width="100%"><br>
+      <sub>Demo mode — simulated telemetry with no hardware required (<code>ados demo</code>)</sub>
+    </td>
+  </tr>
+</table>
+
+> Real screenshots coming. Run `ados tui` or `ados demo` to see it live.
+
+---
 
 ## Quick Start
 
@@ -12,109 +50,38 @@ ADOS Drone Agent sits between your flight controller and the network. It runs on
 git clone https://github.com/altnautica/ADOSDroneAgent.git
 cd ADOSDroneAgent
 pip install -e ".[dev]"
-ados demo    # runs simulated drone telemetry, no hardware needed
+ados demo    # simulated drone telemetry, no hardware needed
 ```
 
-## Architecture
-
-```
-┌──────────┐  ┌──────────┐
-│   CLI    │  │   TUI    │   User interfaces
-└────┬─────┘  └────┬─────┘
-     │             │
-     ▼             ▼
-┌──────────────────────────┐
-│       REST API           │   FastAPI :8080
-│  (status, telemetry,     │
-│   params, commands,      │
-│   config, logs,          │
-│   services)              │
-└────────────┬─────────────┘
-             │
-             ▼
-┌──────────────────────────┐
-│       AgentApp           │   Core process manager
-│  ┌────────┐ ┌─────────┐ │
-│  │ Health │ │ Config  │ │
-│  └────────┘ └─────────┘ │
-└──┬──────────────┬────────┘
-   │              │
-   ▼              ▼
-┌──────────┐  ┌──────────┐
-│ MAVLink  │  │  MQTT    │   Services
-│  Proxy   │  │ Gateway  │
-│ (serial  │  │(optional)│
-│  → WS,   │  └──────────┘
-│  TCP,UDP)│
-└──────────┘
-   │
-   ▼
-┌──────────┐
-│   FC     │   Flight controller (serial/USB)
-└──────────┘
-```
-
-## CLI Reference
-
-| Command | Description |
-|---------|-------------|
-| `ados version` | Print agent version |
-| `ados status` | Show agent and FC connection status |
-| `ados health` | Show system health (CPU, RAM, disk, temp) |
-| `ados start` | Start the agent (connects to FC, starts API) |
-| `ados demo` | Start with simulated drone telemetry (no FC needed) |
-| `ados tui` | Launch the terminal dashboard |
-| `ados config show` | Print current configuration |
-| `ados config get <key>` | Get a specific config value |
-| `ados config set <key> <val>` | Set a config value |
-| `ados mavlink status` | Show MAVLink proxy status and connected clients |
-
-## TUI Dashboard
-
-Launch with `ados tui`. Five screens, switch with number keys:
-
-| Screen | Key | What it shows |
-|--------|-----|---------------|
-| Dashboard | `1` | System overview: FC status, GPS, battery, mode, armed state |
-| Telemetry | `2` | Live attitude, position, velocity, battery cells |
-| MAVLink Inspector | `3` | Raw MAVLink message stream with filtering |
-| Logs | `4` | Agent log viewer with level filtering |
-| Config Editor | `5` | Browse and edit YAML config in the terminal |
-
-## REST API
-
-FastAPI server runs at `:8080`. All endpoints return JSON.
-
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/api/status` | GET | Agent status, uptime, FC connection state |
-| `/api/telemetry` | GET | Current telemetry snapshot (attitude, GPS, battery) |
-| `/api/config` | GET | Current agent configuration |
-| `/api/config` | PUT | Update configuration values |
-| `/api/logs` | GET | Recent log entries (supports level filter) |
-| `/api/services` | GET | Running services and their status |
-| `/api/params` | GET | FC parameters (cached) |
-| `/api/params` | PUT | Set FC parameter value |
-| `/api/commands` | POST | Send MAVLink command to FC |
-
-Example:
+Deploy to a companion computer (Raspberry Pi, Jetson, etc.):
 
 ```bash
-# Get agent status
-curl http://localhost:8080/api/status
-
-# Get current telemetry
-curl http://localhost:8080/api/telemetry
-
-# Send a command
-curl -X POST http://localhost:8080/api/commands \
-  -H "Content-Type: application/json" \
-  -d '{"command": "arm"}'
+curl -sSL https://raw.githubusercontent.com/altnautica/ADOSDroneAgent/main/scripts/install.sh | bash
 ```
 
-## Hardware Support
+The script detects your OS, installs Python 3.11, auto-detects the FC serial port, and configures systemd services.
 
-The agent auto-detects hardware at boot and enables services based on available resources.
+---
+
+## What It Does
+
+**MAVLink proxy.** Reads the FC serial port and routes MAVLink to WebSocket, TCP, and UDP simultaneously. Multiple ground stations can connect at once. Auto-reconnect on FC disconnect.
+
+**50km data link.** When paired with ADOS Mission Control, the agent publishes telemetry via MQTT over a Cloudflare Tunnel at 2Hz+. No port forwarding needed. Works from anywhere with a cellular connection.
+
+**HD video streaming.** The video pipeline pushes an RTSP stream to a cloud relay. The GCS plays it in-browser via MediaSource Extensions at 0.5-1.5s latency. WFB-ng long-range video link support is planned.
+
+**Full remote control.** The GCS can send arm/disarm, mode changes, guided flight commands, and mission uploads through the cloud relay. The agent polls and executes them. All from a browser, over any network.
+
+**REST API.** FastAPI server at `:8080`. Get telemetry, set FC parameters, send commands, read logs — from any HTTP client or the paired GCS.
+
+**Terminal dashboard.** Five-screen TUI via `ados tui`: overview, telemetry, MAVLink inspector, logs, config editor. SSH-friendly for headless hardware.
+
+**Hardware auto-detection.** Detects board tier on boot (RPi Zero 2W through CM5 / Jetson) and enables services based on available resources.
+
+---
+
+## Hardware Support
 
 | Tier | Hardware | RAM | Capabilities |
 |------|----------|-----|-------------|
@@ -123,132 +90,159 @@ The agent auto-detects hardware at boot and enables services based on available 
 | Tier 3 (Autonomous) | CM5 / Jetson | 2GB+ | + Suite runtime, ROS2, vision, SLAM |
 | Tier 4 (Swarm) | CM5 + radios | 2.5GB+ | + Mesh networking, formation flight |
 
-**Detected boards:** Raspberry Pi CM4, Raspberry Pi CM5, Jetson (generic), macOS (dev mode), generic ARM64 Linux. Board profiles are YAML files in `src/ados/hal/boards/`.
-
-On macOS, the agent runs in dev mode with simulated hardware detection. Good for development and testing without a real drone.
-
-## Project Structure
-
-```
-src/ados/
-  __init__.py
-  core/               # AgentApp, config (Pydantic + YAML), logging (structlog),
-                      #   health monitoring, defaults
-  cli/                # Click CLI (ados command)
-  api/                # FastAPI server
-    routes/           # Route modules: status, telemetry, config, logs,
-                      #   services, params, commands
-  hal/                # Hardware abstraction layer
-    detect.py         # Auto-detect board, assign tier
-    boards/           # Board profiles (cm4.yaml, cm5.yaml, generic-arm64.yaml)
-  tui/                # Textual TUI app
-    screens/          # dashboard, telemetry, mavlink, logs, config_editor
-  services/
-    mavlink/          # FC connection (serial/USB), MAVLink state machine,
-                      #   message streams, WebSocket proxy, TCP proxy (5760),
-                      #   UDP proxy (14550/14551), demo mode
-    mqtt/             # MQTT gateway (paho-mqtt, optional)
-configs/              # config.example.yaml, defaults.yaml
-tests/                # pytest suite (api, config, connection, demo, hal, proxy, state)
-scripts/              # install.sh (Linux + macOS)
-.github/workflows/    # CI (ci.yml) + PyPI publish (publish.yml)
-```
-
-## Cloud Connectivity
-
-The agent can report status and receive commands through cloud relay when paired with an ADOS Mission Control instance.
-
-**Convex HTTP heartbeat.** Every 5 seconds, the agent POSTs full status (board info, health, FC connection, services) to `/agent/status`. When the GCS enqueues commands via Convex, the agent polls `/agent/commands` and ACKs results back.
-
-**MQTT telemetry.** When `server.mode` is set to `cloud` or `self_hosted`, the agent publishes to two MQTT topics:
-- `ados/{deviceId}/status` (QoS 1) — armed state, FC connected, tier
-- `ados/{deviceId}/telemetry` (QoS 0) — full vehicle state at configured rate
-
-**RTSP video push.** The video pipeline can push an RTSP stream to a cloud relay server, which converts it to fMP4-over-WebSocket for browser playback.
-
-**Config fields:**
-
-| Field | Default | Description |
-|-------|---------|-------------|
-| `server.mode` | `disabled` | `disabled`, `cloud`, or `self_hosted` |
-| `server.mqtt_transport` | `tcp` | `tcp` or `websockets` (use `websockets` for Cloudflare Tunnel) |
-| `server.mqtt_username` | — | MQTT broker username |
-| `server.mqtt_password` | — | MQTT broker password |
-| `video.cloud_relay_url` | — | RTSP relay server URL for cloud video streaming |
+Also runs on macOS in dev mode — useful for testing without a real drone.
 
 ---
 
-## What's Implemented vs Planned
+## CLI Reference
 
-| Feature | Status | Notes |
-|---------|--------|-------|
-| MAVLink proxy (serial to WS/TCP/UDP) | **Working** | Multi-client routing, reconnect logic |
-| REST API (FastAPI) | **Working** | 7 route modules, OpenAPI docs at /docs |
-| TUI dashboard (Textual) | **Working** | 5 screens, live updates |
-| CLI | **Working** | 10 commands, Click-based |
-| Demo mode | **Working** | Simulated telemetry, no hardware needed |
-| Hardware detection (HAL) | **Working** | Board YAML profiles, tier assignment |
-| Config system | **Working** | Pydantic models, YAML, deep merge, auto device_id |
-| Health monitoring | **Working** | CPU, RAM, disk, temp, systemd watchdog |
-| Structured logging | **Working** | structlog, JSON output, configurable level |
-| MQTT gateway | **Working** | paho-mqtt, optional (disabled in demo) |
-| Board profiles | **Working** | CM4, CM5, generic ARM64 |
-| Cloud relay (Convex HTTP + MQTT) | **Working** | Heartbeat, command polling, MQTT telemetry |
-| Video pipeline (WFB-ng) | Planned | HD video link management |
-| Suite runtime | Planned | YAML manifest execution, ROS2 integration |
-| Script executor | Planned | Text commands, Python SDK |
-| OTA updates | Planned | A/B partition, rollback |
-| Swarm coordination | Planned | LoRa mesh, formation flight |
-| Plugin system | Planned | Python entry points |
+| Command | Description |
+|---------|-------------|
+| `ados start` | Connect to FC and start all services |
+| `ados demo` | Start with simulated telemetry (no hardware needed) |
+| `ados tui` | Launch the terminal dashboard |
+| `ados status` | FC connection and agent status |
+| `ados health` | CPU, RAM, disk, temperature |
+| `ados config show` | Print current config |
+| `ados config set <key> <val>` | Update a config value |
+| `ados mavlink status` | MAVLink proxy status and connected clients |
+| `ados version` | Print agent version |
+
+---
+
+## REST API
+
+FastAPI server at `:8080`. Full OpenAPI docs at `/docs`.
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/status` | GET | Agent status, uptime, FC state |
+| `/api/telemetry` | GET | Attitude, GPS, battery snapshot |
+| `/api/params` | GET / PUT | Read or set FC parameters |
+| `/api/commands` | POST | Send MAVLink command to FC |
+| `/api/config` | GET / PUT | Read or update agent config |
+| `/api/logs` | GET | Recent log entries |
+| `/api/services` | GET | Running services and status |
+
+```bash
+# Get current telemetry
+curl http://localhost:8080/api/telemetry
+
+# Arm the drone
+curl -X POST http://localhost:8080/api/commands \
+  -H "Content-Type: application/json" \
+  -d '{"command": "arm"}'
+```
+
+---
+
+## Cloud Connectivity
+
+The agent connects to ADOS Mission Control over a three-layer relay.
+
+**Convex HTTP (baseline).** Every 5 seconds, the agent POSTs full status to the cloud. The GCS reads via reactive Convex queries. Commands go the reverse direction. Zero extra infra required.
+
+**MQTT telemetry (real-time).** When `server.mode` is `cloud` or `self_hosted`, the agent publishes to `ados/{deviceId}/status` and `ados/{deviceId}/telemetry` via Mosquitto over WebSocket. The GCS subscribes in-browser via mqtt.js. 2Hz+ update rate.
+
+**RTSP video.** The video pipeline pushes to a cloud relay, which converts it to fMP4-over-WebSocket for browser playback at 0.5-1.5s latency.
+
+| Config field | Default | Description |
+|---|---|---|
+| `server.mode` | `disabled` | `disabled`, `cloud`, or `self_hosted` |
+| `server.mqtt_transport` | `tcp` | `tcp` or `websockets` |
+| `server.mqtt_username` | — | MQTT broker username |
+| `video.cloud_relay_url` | — | RTSP relay server URL |
+
+---
+
+## Architecture
+
+```
+┌──────────┐  ┌──────────┐
+│   CLI    │  │   TUI    │   User interfaces
+└────┬─────┘  └────┬─────┘
+     │              │
+     ▼              ▼
+┌──────────────────────────┐
+│       REST API           │   FastAPI :8080
+└────────────┬─────────────┘
+             │
+             ▼
+┌──────────────────────────┐
+│       AgentApp           │   Core process manager
+└──┬──────────────┬────────┘
+   │              │
+   ▼              ▼
+┌──────────┐  ┌──────────┐
+│ MAVLink  │  │  MQTT    │   Services
+│  Proxy   │  │ Gateway  │
+└──────────┘  └──────────┘
+   │
+   ▼
+┌──────────┐
+│   FC     │   Flight controller (serial/USB)
+└──────────┘
+```
+
+---
+
+## What's Working
+
+| Feature | Status |
+|---------|--------|
+| MAVLink proxy (serial to WS/TCP/UDP) | Working |
+| REST API (FastAPI, 7 route modules) | Working |
+| TUI dashboard (5 screens) | Working |
+| CLI (10 commands) | Working |
+| Demo mode (simulated telemetry) | Working |
+| Hardware detection (board YAML profiles) | Working |
+| Config system (Pydantic + YAML) | Working |
+| Health monitoring (CPU, RAM, disk, temp) | Working |
+| MQTT gateway | Working |
+| Cloud relay (Convex HTTP + MQTT) | Working |
+| Video pipeline (HD, long-range link) | Planned |
+| Suite runtime (YAML manifest execution) | Planned |
+| Script executor (Python SDK, REST) | Planned |
+| OTA updates | Planned |
+| Swarm coordination (mesh, formation) | Planned |
+
+---
 
 ## Development
 
 ```bash
-# Clone and install
 git clone https://github.com/altnautica/ADOSDroneAgent.git
 cd ADOSDroneAgent
-python -m venv .venv
-source .venv/bin/activate
+python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 
-# Run tests
-pytest
-
-# Run linter
-ruff check src/
-
-# Run in demo mode (no hardware)
-ados demo
-
-# Launch TUI
-ados tui
+pytest          # run tests
+ruff check src/ # lint
+ados demo       # run without hardware
+ados tui        # launch terminal dashboard
 ```
 
-### Linux Install Script
+See [CONTRIBUTING.md](CONTRIBUTING.md) for code style and PR guidelines.
 
-For deploying on a companion computer (Raspberry Pi, Jetson, etc.):
-
-```bash
-curl -sSL https://raw.githubusercontent.com/altnautica/ADOSDroneAgent/main/scripts/install.sh | bash
-```
-
-The script detects your OS, installs Python 3.11 and dependencies, auto-detects the FC serial port, and configures systemd services.
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for code style, PR process, and architecture details.
-
-## Related Projects
-
-- [ADOS Mission Control](https://github.com/altnautica/ADOSMissionControl) . Open-source web GCS for ArduPilot, PX4, and Betaflight drones
-- [ArduPilot](https://github.com/ArduPilot/ardupilot) . Open-source autopilot firmware
-- [OpenHD](https://github.com/OpenHD/OpenHD) . Open-source digital FPV
-- [WFB-ng](https://github.com/svpcom/wfb-ng) . WiFi broadcast for long-range video
-
-## License
-
-[GPLv3](LICENSE). Free to use, modify, and distribute. Contributions welcome.
+---
 
 ## Community
 
-- Issues: [github.com/altnautica/ADOSDroneAgent/issues](https://github.com/altnautica/ADOSDroneAgent/issues)
-- Discord: [discord.gg/uxbvuD4d5q](https://discord.gg/uxbvuD4d5q)
-- Website: [altnautica.com](https://altnautica.com)
+- **[Discord](https://discord.gg/uxbvuD4d5q)** — Ask questions, share builds
+- **[Issues](https://github.com/altnautica/ADOSDroneAgent/issues)** — Bug reports and discussions
+- **[Website](https://altnautica.com)** — Company and product info
+
+---
+
+## Related
+
+- [ADOS Mission Control](https://github.com/altnautica/ADOSMissionControl) — browser GCS (the control side of this pair)
+- [ArduPilot](https://github.com/ArduPilot/ardupilot) — open-source autopilot firmware
+- [OpenHD](https://github.com/OpenHD/OpenHD) — open-source digital FPV
+- [WFB-ng](https://github.com/svpcom/wfb-ng) — WiFi broadcast for long-range video
+
+---
+
+## License
+
+[GPL-3.0-only](LICENSE). Free to use, modify, and distribute. Derivative works must also be GPL-3.0.
