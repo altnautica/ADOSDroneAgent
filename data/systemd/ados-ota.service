@@ -1,0 +1,17 @@
+[Unit]
+Description=ADOS OTA Updater
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/ados/venv/bin/python -m ados.services.ota
+Environment=ADOS_CONFIG=/etc/ados/config.yaml
+EnvironmentFile=-/etc/ados/env
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/var/ados /opt/ados /etc/ados
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ados-ota
