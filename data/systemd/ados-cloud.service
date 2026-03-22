@@ -1,7 +1,6 @@
 [Unit]
 Description=ADOS Cloud Relay (MQTT + Convex Heartbeat)
 After=ados-mavlink.service
-BindsTo=ados-supervisor.service
 PartOf=ados-supervisor.service
 
 [Service]

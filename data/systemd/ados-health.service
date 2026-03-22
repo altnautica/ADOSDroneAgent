@@ -1,7 +1,6 @@
 [Unit]
 Description=ADOS Health Monitor
-After=ados-supervisor.service
-BindsTo=ados-supervisor.service
+After=network-online.target
 PartOf=ados-supervisor.service
 
 [Service]
