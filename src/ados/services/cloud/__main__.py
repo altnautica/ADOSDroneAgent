@@ -80,15 +80,18 @@ def _get_services_status() -> list[dict]:
             except Exception:
                 pass
 
-        services.append({
+        entry: dict = {
             "name": name,
             "status": state,
-            "pid": pid,
             "cpuPercent": round(cpu, 1),
             "memoryMb": round(mem, 1),
             "uptimeSeconds": uptime_secs,
             "category": categories.get(name, "core"),
-        })
+        }
+        # Only include PID if it's a real value (Convex rejects null for v.number())
+        if pid and pid > 0:
+            entry["pid"] = pid
+        services.append(entry)
     return services
 
 
