@@ -46,8 +46,8 @@ async def main() -> None:
     # Register mDNS service
     await discovery.register(
         paired=pairing.is_paired,
-        code=getattr(pairing, "pairing_code", None),
-        owner=getattr(pairing, "owner_id", None),
+        code=pairing.get_info().get("pairing_code"),
+        owner=pairing.get_info().get("owner_id"),
     )
 
     log.info("discovery_service_ready", hostname=discovery.mdns_hostname)
@@ -58,10 +58,11 @@ async def main() -> None:
             await asyncio.wait_for(shutdown.wait(), timeout=30.0)
         except TimeoutError:
             # Refresh TXT records (pairing state may have changed)
+            info = pairing.get_info()
             await discovery.update_txt(
                 paired=pairing.is_paired,
-                code=getattr(pairing, "pairing_code", None),
-                owner=getattr(pairing, "owner_id", None),
+                code=info.get("pairing_code"),
+                owner=info.get("owner_id"),
             )
 
     log.info("discovery_service_stopping")
