@@ -198,6 +198,48 @@ class VehicleState:
             if self.param_cache is not None:
                 self.param_cache.set(param_name, msg.param_value, getattr(msg, "param_type", 0))
 
+    def update_from_dict(self, d: dict) -> None:
+        """Update fields from a dict (e.g., from IPC state snapshot)."""
+        if "armed" in d:
+            self.armed = d["armed"]
+        if "mode" in d:
+            self.mode = d["mode"]
+        if "mav_type" in d:
+            self.mav_type = d["mav_type"]
+        pos = d.get("position", {})
+        if pos:
+            self.lat = pos.get("lat", self.lat)
+            self.lon = pos.get("lon", self.lon)
+            self.alt_msl = pos.get("alt_msl", self.alt_msl)
+            self.alt_rel = pos.get("alt_rel", self.alt_rel)
+            self.heading = pos.get("heading", self.heading)
+        vel = d.get("velocity", {})
+        if vel:
+            self.groundspeed = vel.get("groundspeed", self.groundspeed)
+            self.airspeed = vel.get("airspeed", self.airspeed)
+            self.climb = vel.get("climb", self.climb)
+        att = d.get("attitude", {})
+        if att:
+            self.roll = att.get("roll", self.roll)
+            self.pitch = att.get("pitch", self.pitch)
+            self.yaw = att.get("yaw", self.yaw)
+        bat = d.get("battery", {})
+        if bat:
+            self.voltage_battery = bat.get("voltage", self.voltage_battery)
+            self.current_battery = bat.get("current", self.current_battery)
+            self.battery_remaining = bat.get("remaining", self.battery_remaining)
+        gps = d.get("gps", {})
+        if gps:
+            self.gps_fix_type = gps.get("fix_type", self.gps_fix_type)
+            self.gps_satellites = gps.get("satellites", self.gps_satellites)
+        if "last_heartbeat" in d:
+            self.last_heartbeat = d["last_heartbeat"]
+        if "last_update" in d:
+            self.last_update = d["last_update"]
+        # Cloud/system fields (not part of MAVLink, but used by cloud heartbeat)
+        if "fc_connected" in d:
+            self.fc_connected = d.get("fc_connected", False)
+
     def to_dict(self) -> dict:
         """Serialize to dictionary for REST API."""
         return {
