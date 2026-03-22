@@ -236,9 +236,6 @@ class VehicleState:
             self.last_heartbeat = d["last_heartbeat"]
         if "last_update" in d:
             self.last_update = d["last_update"]
-        # Cloud/system fields (not part of MAVLink, but used by cloud heartbeat)
-        if "fc_connected" in d:
-            self.fc_connected = d.get("fc_connected", False)
 
     def to_dict(self) -> dict:
         """Serialize to dictionary for REST API."""
