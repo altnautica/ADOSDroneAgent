@@ -100,6 +100,11 @@ class AgentApp:
         self._start_time = time.monotonic()
         self._tasks: list[asyncio.Task] = []
 
+        # CPU/memory history ring buffers for sparkline charts (5s interval, 60 samples = 5 min)
+        from collections import deque
+        self._cpu_history: deque[float] = deque(maxlen=60)
+        self._memory_history: deque[float] = deque(maxlen=60)
+
         # Lazily-initialized service references (private — internal only)
         self._fc_connection = None
         self._mavlink_proxy = None
@@ -441,9 +446,14 @@ class AgentApp:
                         if real_state == "running":
                             running_count += 1
 
-                    # Get process metrics for distribution across running services
+                    # Get process-level metrics (single process, all services share)
                     proc_cpu = 0.0
                     proc_rss_mb = 0.0
+                    mem_used_mb = 0
+                    mem_total_mb = 0
+                    disk_used_gb = 0.0
+                    disk_total_gb = 0.0
+                    cpu_cores = 0
                     try:
                         import os as _os
 
@@ -451,20 +461,36 @@ class AgentApp:
                         _proc = _psutil.Process(_os.getpid())
                         proc_cpu = _proc.cpu_percent(interval=0)
                         proc_rss_mb = _proc.memory_info().rss / (1024 * 1024)
+                        _vm = _psutil.virtual_memory()
+                        mem_used_mb = round(_vm.used / (1024 * 1024))
+                        mem_total_mb = round(_vm.total / (1024 * 1024))
+                        _disk = _psutil.disk_usage("/")
+                        disk_used_gb = round(_disk.used / (1024**3), 1)
+                        disk_total_gb = round(_disk.total / (1024**3), 1)
+                        cpu_cores = _psutil.cpu_count() or 0
                     except Exception:
                         pass
 
-                    per_svc_cpu = proc_cpu / running_count if running_count > 0 else 0.0
-                    per_svc_rss = proc_rss_mb / running_count if running_count > 0 else 0.0
+                    # Track CPU/memory history for sparkline charts (5s interval, 5 min window)
+                    self._cpu_history.append(cpu_percent)
+                    self._memory_history.append(memory_percent)
 
+                    # Per-service data with real uptime (no fake CPU/RAM distribution)
+                    now_mono = time.monotonic()
                     for svc_name, svc_state in all_services.items():
                         real_state = _svc_state(svc_name, svc_state)
-                        is_running = real_state == "running"
+                        # Compute per-service uptime from transition history
+                        svc_uptime = 0.0
+                        transitions = self.services.get_transitions(svc_name)
+                        if transitions:
+                            for ts, st in reversed(transitions):
+                                if st == ServiceState.RUNNING:
+                                    svc_uptime = now_mono - ts
+                                    break
                         service_list.append({
                             "name": svc_name,
                             "status": real_state,
-                            "cpuPercent": round(per_svc_cpu, 1) if is_running else 0,
-                            "memoryMb": round(per_svc_rss, 1) if is_running else 0,
+                            "uptimeSeconds": round(svc_uptime),
                         })
 
                     payload = {
@@ -480,6 +506,19 @@ class AgentApp:
                         "memoryPercent": memory_percent,
                         "diskPercent": disk_percent,
                         "temperature": temperature,
+                        # Absolute resource values
+                        "memoryUsedMb": mem_used_mb,
+                        "memoryTotalMb": mem_total_mb,
+                        "diskUsedGb": disk_used_gb,
+                        "diskTotalGb": disk_total_gb,
+                        "cpuCores": cpu_cores,
+                        "boardRamMb": mem_total_mb,
+                        # Process-level totals (single-process architecture)
+                        "processCpuPercent": round(proc_cpu, 1),
+                        "processMemoryMb": round(proc_rss_mb, 1),
+                        # History arrays for sparkline charts
+                        "cpuHistory": list(self._cpu_history),
+                        "memoryHistory": list(self._memory_history),
                         "fcConnected": fc_connected,
                         "fcPort": fc_port,
                         "fcBaud": fc_baud,
