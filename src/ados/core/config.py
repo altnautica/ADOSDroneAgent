@@ -152,6 +152,8 @@ class SecurityConfig(BaseModel):
     tls: TlsConfig = TlsConfig()
     wireguard: WireguardConfig = WireguardConfig()
     api: ApiSecurityConfig = ApiSecurityConfig()
+    hmac_enabled: bool = False
+    hmac_secret: str = ""
 
 
 # --- Suites ---
