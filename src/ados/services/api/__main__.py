@@ -55,17 +55,18 @@ async def main() -> None:
             self.services = ServiceTracker()
             self._tasks = []
             self._fc_connection = None
+            self._vehicle_state = None
+            self._param_cache = None
             self._video_pipeline = None
             self._wfb_manager = None
             self._command_executor = None
             self._script_runner = None
+            self._demo_scripting = None
             self.ota_updater = None
             self.discovery_service = None
             self.board_name = "unknown"
-            self.health = type("Health", (), {
-                "cpu_percent": 0.0, "memory_percent": 0.0,
-                "disk_percent": 0.0, "temperature": None,
-            })()
+            from ados.core.health import HealthMonitor
+            self.health = HealthMonitor()
             self.demo = False
 
         @property
