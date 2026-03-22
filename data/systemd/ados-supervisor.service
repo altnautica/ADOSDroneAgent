@@ -1,0 +1,29 @@
+[Unit]
+Description=ADOS Drone Agent Supervisor
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+ExecStart=/opt/ados/venv/bin/ados-supervisor
+Restart=always
+RestartSec=1
+WatchdogSec=30
+TimeoutStartSec=60
+Environment=ADOS_CONFIG=/etc/ados/config.yaml
+EnvironmentFile=-/etc/ados/env
+
+# Security
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/var/ados /etc/ados /run/ados
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ados-supervisor
+
+[Install]
+WantedBy=multi-user.target

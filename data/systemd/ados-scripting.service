@@ -1,0 +1,27 @@
+[Unit]
+Description=ADOS Scripting Engine
+After=ados-mavlink.service
+BindsTo=ados-supervisor.service
+PartOf=ados-supervisor.service
+
+[Service]
+Type=simple
+ExecStart=/opt/ados/venv/bin/python -m ados.services.scripting
+Restart=on-failure
+RestartSec=3
+Environment=ADOS_CONFIG=/etc/ados/config.yaml
+EnvironmentFile=-/etc/ados/env
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/var/ados /run/ados /etc/ados
+
+MemoryMax=64M
+CPUQuota=20%
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ados-scripting
+
+[Install]
+WantedBy=ados-supervisor.service

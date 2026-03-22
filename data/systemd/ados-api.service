@@ -1,0 +1,27 @@
+[Unit]
+Description=ADOS REST API
+After=ados-mavlink.service
+BindsTo=ados-supervisor.service
+PartOf=ados-supervisor.service
+
+[Service]
+Type=simple
+ExecStart=/opt/ados/venv/bin/python -m ados.services.api
+Restart=always
+RestartSec=2
+Environment=ADOS_CONFIG=/etc/ados/config.yaml
+EnvironmentFile=-/etc/ados/env
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/var/ados /run/ados
+
+MemoryMax=64M
+CPUQuota=20%
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ados-api
+
+[Install]
+WantedBy=ados-supervisor.service

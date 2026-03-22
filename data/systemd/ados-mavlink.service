@@ -1,0 +1,30 @@
+[Unit]
+Description=ADOS MAVLink Proxy
+After=ados-supervisor.service
+BindsTo=ados-supervisor.service
+PartOf=ados-supervisor.service
+
+[Service]
+Type=simple
+ExecStart=/opt/ados/venv/bin/python -m ados.services.mavlink
+Restart=always
+RestartSec=1
+Environment=ADOS_CONFIG=/etc/ados/config.yaml
+EnvironmentFile=-/etc/ados/env
+
+# MAVLink needs serial port access
+SupplementaryGroups=dialout
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/var/ados /run/ados /dev
+
+# Resource limits
+MemoryMax=50M
+CPUQuota=25%
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ados-mavlink
+
+[Install]
+WantedBy=ados-supervisor.service
