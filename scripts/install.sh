@@ -15,8 +15,10 @@ INSTALL_DIR="/opt/ados"
 CONFIG_DIR="/etc/ados"
 DATA_DIR="/var/ados"
 VENV_DIR="${INSTALL_DIR}/venv"
-SERVICE_NAME="ados-agent"
+SERVICE_NAME="ados-supervisor"
 SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
+LEGACY_SERVICE="ados-agent"
+SYSTEMD_SRC_DIR=""  # Set at runtime to data/systemd/ relative to repo
 DEVICE_ID_FILE="${CONFIG_DIR}/device-id"
 CONVEX_URL="https://convex-site.altnautica.com"
 
@@ -59,20 +61,29 @@ do_uninstall() {
     fi
 
     # Remove global symlinks
-    rm -f /usr/local/bin/ados /usr/local/bin/ados-agent
+    rm -f /usr/local/bin/ados /usr/local/bin/ados-agent /usr/local/bin/ados-supervisor
     info "Global symlinks removed."
 
-    # Stop and disable systemd service
-    if [ -f "${SERVICE_FILE}" ]; then
-        info "Stopping and disabling ${SERVICE_NAME} service..."
-        systemctl stop "${SERVICE_NAME}" 2>/dev/null || true
-        systemctl disable "${SERVICE_NAME}" 2>/dev/null || true
-        rm -f "${SERVICE_FILE}"
-        systemctl daemon-reload
-        info "Service removed."
-    else
-        info "No systemd service found, skipping."
+    # Stop and disable all ADOS systemd services
+    for svc_file in /etc/systemd/system/ados-*.service; do
+        [ -f "$svc_file" ] || continue
+        local svc_name
+        svc_name=$(basename "$svc_file" .service)
+        info "Stopping and disabling ${svc_name}..."
+        systemctl stop "${svc_name}" 2>/dev/null || true
+        systemctl disable "${svc_name}" 2>/dev/null || true
+        rm -f "$svc_file"
+    done
+    # Also remove legacy single-service unit
+    if [ -f "/etc/systemd/system/ados-agent.service" ]; then
+        systemctl stop "ados-agent" 2>/dev/null || true
+        systemctl disable "ados-agent" 2>/dev/null || true
+        rm -f "/etc/systemd/system/ados-agent.service"
     fi
+    rm -f /etc/tmpfiles.d/ados.conf
+    rm -rf /run/ados
+    systemctl daemon-reload
+    info "All ADOS services removed."
 
     # Remove install directory (venv + cloned code)
     if [ -d "${INSTALL_DIR}" ]; then
@@ -345,45 +356,73 @@ CFGEOF
 # ─── Install systemd Service ────────────────────────────────────────────────
 
 install_systemd_service() {
-    info "Installing systemd service..."
+    info "Installing systemd services (multi-process architecture)..."
 
-    local new_service
-    new_service=$(mktemp)
+    # Migrate from legacy single-service if present
+    if [ -f "/etc/systemd/system/ados-agent.service" ]; then
+        info "Migrating from legacy ados-agent.service..."
+        systemctl stop ados-agent 2>/dev/null || true
+        systemctl disable ados-agent 2>/dev/null || true
+        rm -f /etc/systemd/system/ados-agent.service
+    fi
 
-    cat > "$new_service" <<SVCEOF
+    # Find systemd unit source directory
+    local systemd_src=""
+    if [ -d "${INSTALL_DIR}/repo/data/systemd" ]; then
+        systemd_src="${INSTALL_DIR}/repo/data/systemd"
+    elif [ -d "$(dirname "$0")/../data/systemd" ]; then
+        systemd_src="$(cd "$(dirname "$0")/../data/systemd" && pwd)"
+    fi
+
+    if [ -z "$systemd_src" ] || [ ! -d "$systemd_src" ]; then
+        warn "No systemd unit templates found, generating supervisor unit..."
+        # Fallback: generate supervisor unit directly
+        cat > "/etc/systemd/system/ados-supervisor.service" <<SVCEOF
 [Unit]
-Description=ADOS Drone Agent
+Description=ADOS Drone Agent Supervisor
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=notify
-EnvironmentFile=-${CONFIG_DIR}/env
-ExecStart=${VENV_DIR}/bin/ados-agent
-Restart=on-failure
-RestartSec=5
+ExecStart=${VENV_DIR}/bin/ados-supervisor
+Restart=always
+RestartSec=1
 WatchdogSec=30
-StandardOutput=journal
-StandardError=journal
-# Security hardening
+TimeoutStartSec=60
+EnvironmentFile=-${CONFIG_DIR}/env
 NoNewPrivileges=yes
 ProtectSystem=strict
-ReadWritePaths=${DATA_DIR} ${CONFIG_DIR}
+ProtectHome=yes
 PrivateTmp=yes
+ReadWritePaths=${DATA_DIR} ${CONFIG_DIR} /run/ados
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ados-supervisor
 
 [Install]
 WantedBy=multi-user.target
 SVCEOF
-
-    # Only rewrite if changed
-    if [ -f "${SERVICE_FILE}" ] && diff -q "$new_service" "${SERVICE_FILE}" &>/dev/null; then
-        info "Service file unchanged, skipping rewrite."
-        rm "$new_service"
     else
-        mv "$new_service" "${SERVICE_FILE}"
-        systemctl daemon-reload
-        info "Service file written."
+        # Deploy all unit files from data/systemd/
+        local count=0
+        for unit_file in "${systemd_src}"/*.service; do
+            [ -f "$unit_file" ] || continue
+            local unit_name
+            unit_name=$(basename "$unit_file")
+            # Replace venv path if different from default
+            sed "s|/opt/ados/venv|${VENV_DIR}|g" "$unit_file" > "/etc/systemd/system/${unit_name}"
+            count=$((count + 1))
+        done
+        info "Deployed ${count} systemd unit files."
     fi
+
+    # Create /run/ados for Unix sockets (tmpfiles.d for persistence across reboots)
+    mkdir -p /run/ados
+    chmod 755 /run/ados
+    cat > /etc/tmpfiles.d/ados.conf <<TMPEOF
+d /run/ados 0755 root root -
+TMPEOF
 
     # Write environment file
     local device_id=""
@@ -394,11 +433,16 @@ SVCEOF
     cat > "${CONFIG_DIR}/env" <<ENVEOF
 ADOS_DEVICE_ID=${device_id}
 ADOS_CONFIG=${CONFIG_DIR}/config.yaml
+ADOS_RUN_DIR=/run/ados
 ENVEOF
 
-    systemctl enable "${SERVICE_NAME}" 2>/dev/null
-    systemctl restart "${SERVICE_NAME}"
-    info "Service enabled and restarted."
+    systemctl daemon-reload
+
+    # Enable and start supervisor (it manages all other services)
+    systemctl enable ados-supervisor 2>/dev/null
+    systemctl restart ados-supervisor
+    info "Supervisor service enabled and started."
+    info "Child services will be started by the supervisor based on hardware detection and suite config."
 }
 
 # ─── Global Symlinks ──────────────────────────────────────────────────────
@@ -406,7 +450,10 @@ ENVEOF
 install_global_symlinks() {
     ln -sf "${VENV_DIR}/bin/ados" /usr/local/bin/ados
     ln -sf "${VENV_DIR}/bin/ados-agent" /usr/local/bin/ados-agent
-    info "Global commands installed: ados, ados-agent"
+    if [ -f "${VENV_DIR}/bin/ados-supervisor" ]; then
+        ln -sf "${VENV_DIR}/bin/ados-supervisor" /usr/local/bin/ados-supervisor
+    fi
+    info "Global commands installed: ados, ados-agent, ados-supervisor"
 }
 
 # ─── Write Pairing State ────────────────────────────────────────────────────
