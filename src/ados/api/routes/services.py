@@ -117,19 +117,18 @@ async def list_services():
                 "transition_count": info["transition_count"],
             })
 
-    # Distribute process metrics evenly across running services.
-    per_svc_cpu = total_cpu / running_count if running_count > 0 else 0.0
-    per_svc_rss = total_rss_mb / running_count if running_count > 0 else 0.0
-
+    # Compute per-service uptime from ServiceTracker transitions
+    now_mono = time.monotonic()
     for svc in services:
-        if svc["state"] == "running":
-            svc["pid"] = pid
-            svc["cpuPercent"] = round(per_svc_cpu, 1)
-            svc["memoryMb"] = round(per_svc_rss, 1)
-        else:
-            svc["pid"] = None
-            svc["cpuPercent"] = 0.0
-            svc["memoryMb"] = 0.0
+        svc_name = svc["name"]
+        transitions = app.services.get_transitions(svc_name)
+        svc_uptime = 0.0
+        if transitions:
+            for ts, st in reversed(transitions):
+                if st.value == "running":
+                    svc_uptime = now_mono - ts
+                    break
+        svc["uptimeSeconds"] = round(svc_uptime)
 
     return {
         "services": services,
