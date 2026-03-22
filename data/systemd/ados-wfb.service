@@ -1,7 +1,6 @@
 [Unit]
 Description=ADOS WFB-ng Link Manager
 After=ados-mavlink.service
-BindsTo=ados-supervisor.service
 PartOf=ados-supervisor.service
 
 [Service]

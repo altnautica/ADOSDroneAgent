@@ -1,7 +1,6 @@
 [Unit]
 Description=ADOS Scripting Engine
 After=ados-mavlink.service
-BindsTo=ados-supervisor.service
 PartOf=ados-supervisor.service
 
 [Service]

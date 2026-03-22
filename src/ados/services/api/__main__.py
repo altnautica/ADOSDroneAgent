@@ -42,12 +42,35 @@ async def main() -> None:
     # without the full process supervisor.
     from ados.api.server import create_app
 
+    from ados.core.pairing import PairingManager
+    from ados.core.main import ServiceTracker
+
     class _StandaloneAgent:
         """Minimal stand-in for AgentApp when running API standalone."""
 
         def __init__(self, cfg, state):
             self.config = cfg
             self._state_client = state
+            self.pairing_manager = PairingManager(state_path=cfg.pairing.state_path)
+            self.services = ServiceTracker()
+            self._tasks = []
+            self._fc_connection = None
+            self._video_pipeline = None
+            self._wfb_manager = None
+            self._command_executor = None
+            self._script_runner = None
+            self.ota_updater = None
+            self.discovery_service = None
+            self.board_name = "unknown"
+            self.health = type("Health", (), {
+                "cpu_percent": 0.0, "memory_percent": 0.0,
+                "disk_percent": 0.0, "temperature": None,
+            })()
+            self.demo = False
+
+        @property
+        def uptime_seconds(self) -> float:
+            return 0.0
 
     agent_shim = _StandaloneAgent(config, state_client)
     app = create_app(agent_shim)
