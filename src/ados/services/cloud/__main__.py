@@ -39,11 +39,20 @@ async def main() -> None:
 
     # Start MQTT gateway
     from ados.services.mqtt.gateway import MqttGateway
+    from ados.services.mavlink.state import VehicleState
     from ados.core.pairing import PairingManager
 
     pairing = PairingManager(state_path=config.pairing.state_path)
 
-    mqtt = MqttGateway(config, state_client)
+    # VehicleState proxy: updated from state IPC, provides the interface MqttGateway expects
+    vehicle_state = VehicleState()
+
+    # Sync IPC state into VehicleState on each update
+    def _on_state_update(state_dict: dict) -> None:
+        vehicle_state.update_from_dict(state_dict)
+    state_client.set_state_handler(_on_state_update)
+
+    mqtt = MqttGateway(config, vehicle_state, api_key=pairing.api_key)
 
     tasks = []
 
@@ -62,10 +71,11 @@ async def main() -> None:
         while not shutdown.is_set():
             if pairing.is_paired and convex_url:
                 try:
+                    from ados import __version__
                     payload = {
                         "deviceId": config.agent.device_id,
                         "apiKey": pairing.api_key,
-                        "version": "0.3.0",
+                        "version": __version__,
                         "uptimeSeconds": 0,
                         # State from IPC
                         **_build_status_from_state(state_client.state),

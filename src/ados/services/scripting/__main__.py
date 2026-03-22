@@ -53,8 +53,22 @@ async def main() -> None:
     from ados.services.scripting.text_listener import TextCommandListener
 
     vehicle_state = VehicleState()
-    safety = SafetyValidator(vehicle_state)
-    executor = CommandExecutor(mavlink_client, vehicle_state, safety)
+    from ados.services.scripting.safety import SafetyLimits
+    safety = SafetyValidator(SafetyLimits(), vehicle_state)
+
+    # Adapter: MavlinkIPCClient → fc_connection interface for CommandExecutor
+    class _IPCFCAdapter:
+        """Adapts MavlinkIPCClient to the fc_connection interface."""
+        def __init__(self, ipc_client: MavlinkIPCClient) -> None:
+            self._ipc = ipc_client
+        @property
+        def connected(self) -> bool:
+            return self._ipc.connected
+        def send_bytes(self, data: bytes) -> None:
+            self._ipc.send(data)
+
+    fc_adapter = _IPCFCAdapter(mavlink_client)
+    executor = CommandExecutor(fc_adapter, vehicle_state, safety)
 
     text_listener = TextCommandListener(config.scripting.text_commands, executor)
     sdk_server = SdkServer(executor, port=8892)
