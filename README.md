@@ -20,27 +20,30 @@ ADOS Drone Agent is the onboard intelligence layer for software-defined drones. 
 <table>
   <tr>
     <td width="50%">
-      <img src="https://placehold.co/800x450/111827/3A82FF?text=TUI+Dashboard" alt="TUI Dashboard" height="220" width="100%"><br>
-      <sub>Terminal dashboard — system health, FC status, live telemetry (<code>ados tui</code>)</sub>
+      <img src="docs/screenshots/overview.png" alt="ADOS Drone Agent overview showing services, system resources, and logs" height="220" width="100%"><br>
+      <sub>Overview tab, showing running services, system resources, and live logs (<code>ados tui</code>)</sub>
     </td>
     <td width="50%">
-      <img src="https://placehold.co/800x450/111827/3A82FF?text=REST+API+%2F+Swagger" alt="REST API" height="220" width="100%"><br>
-      <sub>FastAPI REST API with auto-generated Swagger docs at <code>:8080/docs</code></sub>
+      <img src="docs/screenshots/scripts.png" alt="Python script editor with syntax highlighting for drone automation" height="220" width="100%"><br>
+      <sub>Script editor with syntax highlighting for Python drone automation</sub>
     </td>
   </tr>
   <tr>
     <td width="50%">
-      <img src="https://placehold.co/800x450/111827/3A82FF?text=Cloud+Relay+Connected" alt="Cloud Relay" height="220" width="100%"><br>
-      <sub>Cloud relay — agent paired with ADOS Mission Control over MQTT</sub>
+      <img src="docs/screenshots/fleet-network.png" alt="Fleet network enrollment, MQTT gateway, mesh radio peers" height="220" width="100%"><br>
+      <sub>Fleet network enrollment, MQTT gateway status, and mesh radio peers</sub>
     </td>
     <td width="50%">
-      <img src="https://placehold.co/800x450/111827/3A82FF?text=Demo+Mode" alt="Demo Mode" height="220" width="100%"><br>
-      <sub>Demo mode — simulated telemetry with no hardware required (<code>ados demo</code>)</sub>
+      <img src="docs/screenshots/suites.png" alt="Application suites: Sentry, Survey, Inspection, Agriculture, Cargo, SAR" height="220" width="100%"><br>
+      <sub>Application suites: Sentry, Survey, Inspection, Agriculture, Cargo, and SAR</sub>
     </td>
   </tr>
 </table>
 
-> Real screenshots coming. Run `ados tui` or `ados demo` to see it live.
+<p align="center">
+  <img src="docs/screenshots/peripherals.png" alt="Connected peripherals with live sensor readings" width="60%"><br>
+  <sub>Connected peripherals with live sensor readings</sub>
+</p>
 
 ---
 
