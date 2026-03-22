@@ -5,6 +5,7 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
+from ados import __version__
 from ados.api.deps import get_agent_app
 
 router = APIRouter(tags=["pairing"])
@@ -45,7 +46,7 @@ async def get_pairing_info():
     return PairingInfo(
         device_id=app.config.agent.device_id,
         name=app.config.agent.name,
-        version="0.2.0",
+        version=__version__,
         board=app.board_name,
         paired=info["paired"],
         pairing_code=info.get("pairing_code"),
