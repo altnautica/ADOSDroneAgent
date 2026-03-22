@@ -28,6 +28,70 @@ from ados.core.ipc import StateIPCClient
 from ados.core.logging import configure_logging
 
 
+def _get_services_status() -> list[dict]:
+    """Query systemd for all ados-* service states + per-PID metrics."""
+    import subprocess
+
+    try:
+        import psutil
+    except ImportError:
+        psutil = None
+
+    svc_names = [
+        "ados-supervisor", "ados-mavlink", "ados-api", "ados-cloud",
+        "ados-health", "ados-video", "ados-wfb", "ados-scripting",
+        "ados-ota", "ados-discovery",
+    ]
+    categories = {
+        "ados-supervisor": "core", "ados-mavlink": "core",
+        "ados-api": "core", "ados-cloud": "core", "ados-health": "core",
+        "ados-video": "hardware", "ados-wfb": "hardware",
+        "ados-scripting": "suite", "ados-ota": "ondemand",
+        "ados-discovery": "ondemand",
+    }
+    services = []
+    for name in svc_names:
+        try:
+            result = subprocess.run(
+                ["systemctl", "is-active", name],
+                capture_output=True, text=True, timeout=5,
+            )
+            raw = result.stdout.strip()
+            state = "running" if raw == "active" else ("failed" if raw == "failed" else "stopped")
+        except Exception:
+            state = "stopped"
+
+        pid = None
+        cpu = 0.0
+        mem = 0.0
+        uptime_secs = 0
+        if state == "running" and psutil:
+            try:
+                pid_result = subprocess.run(
+                    ["systemctl", "show", "-p", "MainPID", "--value", name],
+                    capture_output=True, text=True, timeout=5,
+                )
+                pid = int(pid_result.stdout.strip())
+                if pid > 0:
+                    proc = psutil.Process(pid)
+                    cpu = proc.cpu_percent(interval=0)
+                    mem = proc.memory_info().rss / (1024 * 1024)
+                    uptime_secs = int(time.time() - proc.create_time())
+            except Exception:
+                pass
+
+        services.append({
+            "name": name,
+            "status": state,
+            "pid": pid,
+            "cpuPercent": round(cpu, 1),
+            "memoryMb": round(mem, 1),
+            "uptimeSeconds": uptime_secs,
+            "category": categories.get(name, "core"),
+        })
+    return services
+
+
 def _get_local_ip() -> str:
     """Detect local IP via UDP socket probe."""
     try:
@@ -187,7 +251,7 @@ async def main() -> None:
                         "fcConnected": getattr(vehicle_state, "armed", False) or bool(getattr(vehicle_state, "last_heartbeat", "")),
                         "fcPort": "",
                         "fcBaud": 0,
-                        "services": [],
+                        "services": _get_services_status(),
                         "lastIp": _get_local_ip(),
                         "mdnsHost": "",
                         "agentVersion": __version__,
