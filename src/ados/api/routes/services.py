@@ -142,5 +142,30 @@ async def list_services():
 
 @router.post("/services/{name}/restart")
 async def restart_service(name: str):
-    """Restart a named service (stub — systemd services not yet managed via API)."""
-    return {"status": "ok", "message": f"Restart requested for {name}"}
+    """Restart a named systemd service."""
+    import subprocess
+
+    # Validate service name (prevent injection)
+    allowed = {
+        "ados-mavlink", "ados-api", "ados-cloud", "ados-health",
+        "ados-video", "ados-wfb", "ados-scripting", "ados-ota",
+        "ados-discovery",
+    }
+    svc_name = name if name.startswith("ados-") else f"ados-{name}"
+    if svc_name not in allowed:
+        return {"status": "error", "message": f"Unknown service: {name}"}
+
+    try:
+        result = subprocess.run(
+            ["systemctl", "restart", svc_name],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if result.returncode == 0:
+            return {"status": "ok", "message": f"Restarted {svc_name}"}
+        return {"status": "error", "message": result.stderr.strip() or f"Failed to restart {svc_name}"}
+    except subprocess.TimeoutExpired:
+        return {"status": "error", "message": f"Restart timed out for {svc_name}"}
+    except Exception as exc:
+        return {"status": "error", "message": str(exc)}
