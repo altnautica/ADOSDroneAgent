@@ -58,6 +58,7 @@ Issues = "https://github.com/altnautica/ADOSDroneAgent/issues"
 [project.scripts]
 ados = "ados.cli.main:cli"
 ados-agent = "ados.core.main:main"
+ados-supervisor = "ados.core.supervisor:main"
 
 [project.entry-points."ados.plugins"]
 # Plugin entry points will be registered here

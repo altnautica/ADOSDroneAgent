@@ -508,7 +508,7 @@ class Supervisor:
 
 
 async def run_supervisor(config) -> None:
-    """Main supervisor entry point."""
+    """Async supervisor entry point."""
     supervisor = Supervisor(config)
 
     loop = asyncio.get_event_loop()
@@ -516,3 +516,13 @@ async def run_supervisor(config) -> None:
         loop.add_signal_handler(sig, lambda: asyncio.create_task(supervisor.stop()))
 
     await supervisor.start()
+
+
+def main() -> None:
+    """Sync entry point for console_scripts."""
+    from ados.core.config import load_config
+    from ados.core.logging import configure_logging
+
+    config = load_config()
+    configure_logging(config.logging.level)
+    asyncio.run(run_supervisor(config))
