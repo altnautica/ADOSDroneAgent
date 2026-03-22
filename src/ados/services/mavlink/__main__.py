@@ -44,14 +44,20 @@ async def main() -> None:
     vehicle_state = VehicleState()
     fc = FCConnection(config.mavlink, vehicle_state)
 
-    # Wire FC data to IPC broadcast
-    def on_fc_data(data: bytes) -> None:
-        mavlink_ipc.broadcast(data)
+    # Subscribe to FC data and broadcast to IPC clients
+    fc_queue = fc.subscribe()
 
-    fc.set_data_callback(on_fc_data)
+    async def ipc_broadcast_loop() -> None:
+        """Read MAVLink frames from FC queue and broadcast to IPC clients."""
+        while not shutdown.is_set():
+            try:
+                data = await asyncio.wait_for(fc_queue.get(), timeout=1.0)
+                mavlink_ipc.broadcast(data)
+            except TimeoutError:
+                pass
 
     # Wire client commands back to FC
-    mavlink_ipc.set_command_handler(lambda data: fc.send_raw(data))
+    mavlink_ipc.set_command_handler(lambda data: fc.send_bytes(data))
 
     # Periodically publish state to state IPC
     async def state_publish_loop() -> None:
@@ -73,6 +79,7 @@ async def main() -> None:
 
     tasks = [
         asyncio.create_task(fc.run(), name="fc-connection"),
+        asyncio.create_task(ipc_broadcast_loop(), name="ipc-broadcast"),
         asyncio.create_task(ws_proxy.run(), name="ws-proxy"),
         asyncio.create_task(tcp_proxy.run(), name="tcp-proxy"),
         asyncio.create_task(state_publish_loop(), name="state-publish"),
@@ -86,6 +93,7 @@ async def main() -> None:
     await shutdown.wait()
 
     log.info("mavlink_service_stopping")
+    fc.unsubscribe(fc_queue)
     for task in tasks:
         task.cancel()
     await asyncio.gather(*tasks, return_exceptions=True)
