@@ -59,8 +59,17 @@ def create_app(agent: AgentApp) -> FastAPI:
     # so auth runs AFTER CORS headers are added but BEFORE rate limiting.
     app.add_middleware(ApiKeyAuthMiddleware)
 
-    # Rate limiting middleware — added after auth.
-    # Execution order: CORS → Auth → Rate Limit → Route handler.
+    # HMAC + replay protection — added after auth, before rate limit.
+    # Only active when config.security.hmac_enabled = True.
+    from ados.api.middleware.security import SecurityMiddleware
+    app.add_middleware(
+        SecurityMiddleware,
+        enabled=agent.config.security.hmac_enabled,
+        secret=agent.config.security.hmac_secret,
+    )
+
+    # Rate limiting middleware — added after auth + security.
+    # Execution order: CORS → Auth → Security (HMAC+Replay) → Rate Limit → Route handler.
     from ados.security.rate_limit import RateLimitMiddleware
     app.add_middleware(RateLimitMiddleware, rate=10.0, burst=20)
 
