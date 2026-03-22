@@ -1,0 +1,27 @@
+[Unit]
+Description=ADOS mDNS Discovery
+After=ados-supervisor.service
+BindsTo=ados-supervisor.service
+PartOf=ados-supervisor.service
+
+[Service]
+Type=simple
+ExecStart=/opt/ados/venv/bin/python -m ados.services.discovery
+Restart=on-failure
+RestartSec=10
+Environment=ADOS_CONFIG=/etc/ados/config.yaml
+EnvironmentFile=-/etc/ados/env
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/var/ados /run/ados /etc/ados
+
+MemoryMax=20M
+CPUQuota=5%
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ados-discovery
+
+[Install]
+WantedBy=ados-supervisor.service

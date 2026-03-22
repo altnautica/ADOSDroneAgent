@@ -1,0 +1,29 @@
+[Unit]
+Description=ADOS WFB-ng Link Manager
+After=ados-mavlink.service
+BindsTo=ados-supervisor.service
+PartOf=ados-supervisor.service
+
+[Service]
+Type=simple
+ExecStart=/opt/ados/venv/bin/python -m ados.services.wfb
+Restart=on-failure
+RestartSec=5
+Environment=ADOS_CONFIG=/etc/ados/config.yaml
+EnvironmentFile=-/etc/ados/env
+
+# WFB needs raw socket + WiFi adapter access
+AmbientCapabilities=CAP_NET_RAW CAP_NET_ADMIN
+NoNewPrivileges=no
+ProtectSystem=strict
+ReadWritePaths=/var/ados /run/ados /dev /etc/ados
+
+MemoryMax=30M
+CPUQuota=15%
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ados-wfb
+
+[Install]
+WantedBy=ados-supervisor.service
