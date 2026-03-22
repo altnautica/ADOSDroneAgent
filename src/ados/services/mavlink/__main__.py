@@ -71,10 +71,10 @@ async def main() -> None:
     from ados.services.mavlink.udp_proxy import UdpProxy
 
     ws_proxy = MavlinkProxy(config.mavlink, fc)
-    tcp_proxy = TcpProxy(config.mavlink, fc)
+    tcp_proxy = TcpProxy(fc, port=5760)
     udp_proxies = [
-        UdpProxy(config.mavlink, fc, port=14550),
-        UdpProxy(config.mavlink, fc, port=14551),
+        UdpProxy(fc, port=14550),
+        UdpProxy(fc, port=14551),
     ]
 
     tasks = [
