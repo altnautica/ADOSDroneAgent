@@ -251,7 +251,10 @@ async def main() -> None:
                         "boardRamMb": round(vm.total / (1024 * 1024)),
                         "cpuHistory": list(cpu_history),
                         "memoryHistory": list(memory_history),
-                        "fcConnected": getattr(vehicle_state, "armed", False) or bool(getattr(vehicle_state, "last_heartbeat", "")),
+                        "fcConnected": (
+                            getattr(vehicle_state, "armed", False)
+                            or bool(getattr(vehicle_state, "last_heartbeat", ""))
+                        ),
                         "fcPort": "",
                         "fcBaud": 0,
                         "services": _get_services_status(),

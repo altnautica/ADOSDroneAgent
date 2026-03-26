@@ -140,10 +140,12 @@ async def deactivate_suite(suite_id: str):
 @router.post("/suites/{suite_id}/install")
 async def install_suite(suite_id: str):
     """Install a suite from registry (future)."""
-    return {"status": "not_implemented", "message": f"Suite install from registry not yet available: {suite_id}"}
+    msg = f"Suite install from registry not yet available: {suite_id}"
+    return {"status": "not_implemented", "message": msg}
 
 
 @router.post("/suites/{suite_id}/uninstall")
 async def uninstall_suite(suite_id: str):
     """Uninstall a suite (future)."""
-    return {"status": "not_implemented", "message": f"Suite uninstall not yet available: {suite_id}"}
+    msg = f"Suite uninstall not yet available: {suite_id}"
+    return {"status": "not_implemented", "message": msg}

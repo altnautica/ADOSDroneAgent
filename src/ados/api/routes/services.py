@@ -164,7 +164,8 @@ async def restart_service(name: str):
         )
         if result.returncode == 0:
             return {"status": "ok", "message": f"Restarted {svc_name}"}
-        return {"status": "error", "message": result.stderr.strip() or f"Failed to restart {svc_name}"}
+        msg = result.stderr.strip() or f"Failed to restart {svc_name}"
+        return {"status": "error", "message": msg}
     except subprocess.TimeoutExpired:
         return {"status": "error", "message": f"Restart timed out for {svc_name}"}
     except Exception as exc:
