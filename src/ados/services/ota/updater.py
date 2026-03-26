@@ -44,11 +44,13 @@ class OtaUpdater:
         config: OtaConfig,
         checker: UpdateChecker,
         downloader: UpdateDownloader,
+        rollback: RollbackManager | None = None,
         current_version: str = "0.1.0",
     ) -> None:
         self._config = config
         self._checker = checker
         self._downloader = downloader
+        self._rollback = rollback
         self._current_version = current_version
         self._state = UpdateState.IDLE
         self._error: str = ""
@@ -338,5 +340,8 @@ class OtaUpdater:
             "speed_bps": round(progress.speed_bps, 0),
             "eta_seconds": round(progress.eta_seconds, 0),
         }
+
+        if self._rollback:
+            result["slots"] = self._rollback.get_status()
 
         return result
