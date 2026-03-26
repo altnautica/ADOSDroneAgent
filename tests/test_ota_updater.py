@@ -5,12 +5,12 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from ados.services.ota.rollback import RollbackManager
 
 from ados.core.config import OtaConfig
 from ados.services.ota.checker import UpdateChecker
 from ados.services.ota.downloader import UpdateDownloader
 from ados.services.ota.manifest import UpdateManifest
-from ados.services.ota.rollback import RollbackManager
 from ados.services.ota.updater import OtaUpdater, UpdateState
 
 

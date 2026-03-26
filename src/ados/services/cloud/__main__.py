@@ -269,7 +269,11 @@ async def main() -> None:
                         if resp.status_code == 200:
                             log.debug("cloud_status_sent")
                         else:
-                            log.warning("cloud_status_rejected", status=resp.status_code, body=resp.text[:200])
+                            log.warning(
+                                "cloud_status_rejected",
+                                status=resp.status_code,
+                                body=resp.text[:200],
+                            )
                 except Exception as exc:
                     log.debug("cloud_heartbeat_failed", error=str(exc))
             await asyncio.sleep(5)
