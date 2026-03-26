@@ -22,6 +22,8 @@ log = get_logger("ota-updater")
 
 DOWNLOAD_DIR = "/var/ados/downloads"
 STATE_FILE = "/var/ados/ota-state.json"
+SLOT_A_PATH = "/var/ados/slot-a"
+SLOT_B_PATH = "/var/ados/slot-b"
 
 
 class UpdateState(StrEnum):
