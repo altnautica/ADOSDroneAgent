@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict, dataclass, field
-from enum import Enum
+from enum import StrEnum
 from pathlib import Path
 
 from ados.core.logging import get_logger
@@ -14,7 +14,7 @@ log = get_logger("ota-rollback")
 MAX_BOOT_FAILURES = 3
 
 
-class SlotStatus(str, Enum):
+class SlotStatus(StrEnum):
     ACTIVE = "active"
     STANDBY = "standby"
     BOOTABLE = "bootable"
