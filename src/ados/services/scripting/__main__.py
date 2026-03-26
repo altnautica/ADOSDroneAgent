@@ -36,7 +36,10 @@ async def main() -> None:
     try:
         await mavlink_client.connect()
     except ConnectionError:
-        log.warning("mavlink_ipc_unavailable", msg="Commands will fail until MAVLink service starts")
+        log.warning(
+            "mavlink_ipc_unavailable",
+            msg="Commands will fail until MAVLink service starts",
+        )
 
     # Connect to state IPC for vehicle telemetry
     state_client = StateIPCClient()
