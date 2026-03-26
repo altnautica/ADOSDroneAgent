@@ -127,7 +127,8 @@ async def test_install_success(updater, tmp_path):
     updater._downloaded_path = str(downloaded)
 
     with patch("ados.services.ota.updater.SLOT_A_PATH", str(tmp_path / "slot-a")), \
-         patch("ados.services.ota.updater.SLOT_B_PATH", str(tmp_path / "slot-b")):
+         patch("ados.services.ota.updater.SLOT_B_PATH", str(tmp_path / "slot-b")), \
+         patch("ados.services.ota.updater.STATE_FILE", str(tmp_path / "ota-state.json")):
         # Create slot-a so config migration path exists
         (tmp_path / "slot-a").mkdir()
         result = await updater.install()
