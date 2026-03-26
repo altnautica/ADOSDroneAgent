@@ -15,6 +15,7 @@ from ados.core.logging import get_logger
 from ados.services.ota.checker import UpdateChecker
 from ados.services.ota.downloader import DownloadProgress, UpdateDownloader
 from ados.services.ota.manifest import UpdateManifest
+from ados.services.ota.rollback import RollbackManager
 from ados.services.ota.verifier import verify_sha256
 
 log = get_logger("ota-updater")
