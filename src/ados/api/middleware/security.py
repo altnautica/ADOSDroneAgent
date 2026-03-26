@@ -11,8 +11,6 @@ When disabled, all requests pass through unchanged (backwards compatible).
 
 from __future__ import annotations
 
-import time
-
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
@@ -80,7 +78,10 @@ class SecurityMiddleware(BaseHTTPMiddleware):
         if not timestamp_str or not nonce or not signature:
             return JSONResponse(
                 status_code=401,
-                content={"error": "Missing security headers (X-Timestamp, X-Nonce, X-HMAC-Signature)"},
+                content={
+                    "error": "Missing security headers"
+                    " (X-Timestamp, X-Nonce, X-HMAC-Signature)"
+                },
             )
 
         # Parse timestamp

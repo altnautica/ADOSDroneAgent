@@ -41,9 +41,8 @@ async def main() -> None:
     # Build a minimal AgentApp-like shim so create_app() can function
     # without the full process supervisor.
     from ados.api.server import create_app
-
-    from ados.core.pairing import PairingManager
     from ados.core.main import ServiceTracker
+    from ados.core.pairing import PairingManager
 
     class _StandaloneAgent:
         """Minimal stand-in for AgentApp when running API standalone."""

@@ -126,10 +126,10 @@ async def main() -> None:
         log.warning("state_ipc_unavailable", msg="Running without telemetry")
 
     # Initialize pairing + MQTT
-    from ados.services.mqtt.gateway import MqttGateway
-    from ados.services.mavlink.state import VehicleState
     from ados.core.pairing import PairingManager
     from ados.hal.detect import detect_board
+    from ados.services.mavlink.state import VehicleState
+    from ados.services.mqtt.gateway import MqttGateway
 
     pairing = PairingManager(state_path=config.pairing.state_path)
     convex_url = config.pairing.convex_url

@@ -28,7 +28,10 @@ def _scan_all() -> list[dict]:
         from ados.hal.usb import discover_usb_devices
         for dev in discover_usb_devices():
             peripherals.append({
-                "name": getattr(dev, "product", None) or f"USB {dev.vendor_id:04x}:{dev.product_id:04x}",
+                "name": (
+                    getattr(dev, "product", None)
+                    or f"USB {dev.vendor_id:04x}:{dev.product_id:04x}"
+                ),
                 "type": "usb",
                 "category": _classify_usb(dev.vendor_id, dev.product_id),
                 "bus": f"usb:{getattr(dev, 'bus', '?')}:{getattr(dev, 'address', '?')}",

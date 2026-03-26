@@ -13,9 +13,8 @@ import asyncio
 import json
 import os
 import struct
-import time
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable
 
 import structlog
 
