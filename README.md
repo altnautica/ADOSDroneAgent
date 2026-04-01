@@ -6,7 +6,7 @@
 
 ADOS Drone Agent is the onboard intelligence layer for software-defined drones. It runs on your companion computer, proxies MAVLink from the flight controller to WebSocket and TCP, handles the 50km data link, streams HD video, and gives you full remote control from ADOS Mission Control or any HTTP client.
 
-> **Pairs with [ADOS Mission Control](https://github.com/altnautica/ADOSMissionControl)** — open-source browser GCS with AI PID tuning, mission planning, 3D simulation, live ADS-B, and gamepad flight control at 50Hz.
+> **Part of the ADOS ecosystem.** Pairs with [ADOS Mission Control](https://github.com/altnautica/ADOSMissionControl) (the browser GCS) for AI PID tuning, mission planning, 3D simulation, live ADS-B, and gamepad flight control at 50Hz. The agent runs on the drone; Mission Control runs in your browser.
 
 <p align="center">
   <strong><a href="https://github.com/altnautica/ADOSMissionControl">ADOS Mission Control</a></strong> |
@@ -64,6 +64,35 @@ curl -sSL https://raw.githubusercontent.com/altnautica/ADOSDroneAgent/main/scrip
 
 The script detects your OS, installs Python 3.11, auto-detects the FC serial port, and configures systemd services.
 
+### System Requirements
+
+| Requirement | Minimum | Recommended |
+|-------------|---------|-------------|
+| Python | 3.11+ | 3.12 |
+| OS | Any Linux with systemd | Raspberry Pi OS, Ubuntu, Debian |
+| RAM | 64MB (Tier 1 basic) | 512MB+ (Tier 2+) |
+| Storage | 100MB | 500MB |
+| FC connection | Serial (UART or USB) | UART at 921600 baud |
+
+Also runs on macOS for local development and testing.
+
+---
+
+## Why ADOS Drone Agent
+
+| | ADOS Drone Agent | Rpanion-server | BlueOS | Raw MAVProxy |
+|---|---|---|---|---|
+| **MAVLink proxy** | Yes (serial to WS/TCP/UDP) | Yes | Yes | Yes |
+| **Cloud relay** | Yes (MQTT + Convex, zero port forwarding) | No | No | No |
+| **HD video** | Yes (RTSP, WFB-ng planned) | Yes (basic) | Yes | No |
+| **REST API** | Yes (15 route modules, OpenAPI docs) | Limited | Yes | No |
+| **Terminal UI** | Yes (5 screens, SSH-friendly) | No | No | No |
+| **Application suites** | Yes (6 YAML-based vertical modules) | No | No | No |
+| **Hardware auto-detect** | Yes (tier-based feature scaling) | No | No | No |
+| **OTA updates** | Planned | No | Yes | No |
+| **Target** | Drones (any size) | Drones / Rovers | Underwater ROVs | Any MAVLink |
+| **License** | GPL-3.0 | GPL-3.0 | Custom | GPL-3.0 |
+
 ---
 
 ## What It Does
@@ -76,7 +105,7 @@ The script detects your OS, installs Python 3.11, auto-detects the FC serial por
 
 **Full remote control.** The GCS can send arm/disarm, mode changes, guided flight commands, and mission uploads through the cloud relay. The agent polls and executes them. All from a browser, over any network.
 
-**REST API.** FastAPI server at `:8080`. Get telemetry, set FC parameters, send commands, read logs — from any HTTP client or the paired GCS.
+**REST API.** FastAPI server at `:8080` with 15 route modules. Get telemetry, set FC parameters, send commands, manage config, control video, manage suites, run scripts. Full OpenAPI docs at `/docs`.
 
 **Terminal dashboard.** Five-screen TUI via `ados tui`: overview, telemetry, MAVLink inspector, logs, config editor. SSH-friendly for headless hardware.
 
@@ -90,14 +119,16 @@ The script detects your OS, installs Python 3.11, auto-detects the FC serial por
 |------|----------|-----|-------------|
 | Tier 1 (Basic) | RPi Zero 2W | 128MB+ | MAVLink proxy, MQTT gateway |
 | Tier 2 (Smart) | RPi 4 / CM4 | 512MB+ | + Python scripting, sensor monitoring |
-| Tier 3 (Autonomous) | CM5 / Jetson | 2GB+ | + Suite runtime, ROS2, vision, SLAM |
+| Tier 3 (Autonomous) | CM5 / Jetson Nano | 2GB+ | + Suite runtime, ROS2, vision, SLAM |
 | Tier 4 (Swarm) | CM5 + radios | 2.5GB+ | + Mesh networking, formation flight |
 
-Also runs on macOS in dev mode — useful for testing without a real drone.
+Any Linux ARM64 or x86_64 board with a serial port should work. The tier system scales features to available resources automatically.
 
 ---
 
 ## CLI Reference
+
+24 commands. Run `ados --help` for the full list.
 
 | Command | Description |
 |---------|-------------|
@@ -108,14 +139,27 @@ Also runs on macOS in dev mode — useful for testing without a real drone.
 | `ados health` | CPU, RAM, disk, temperature |
 | `ados config show` | Print current config |
 | `ados config set <key> <val>` | Update a config value |
-| `ados mavlink status` | MAVLink proxy status and connected clients |
+| `ados mavlink` | MAVLink proxy status and connected clients |
+| `ados video` | Video pipeline status |
+| `ados link` | Cloud connectivity status |
+| `ados scripts` | List available automation scripts |
+| `ados run <path>` | Execute a Python automation script |
+| `ados send <command>` | Send a command to the FC (arm, disarm, mode) |
+| `ados snap` | Take a camera snapshot |
+| `ados pair` | Pair with ADOS Mission Control |
+| `ados unpair` | Remove GCS pairing |
+| `ados update` | Check for agent updates |
+| `ados upgrade` | Upgrade to latest version |
+| `ados rollback [version]` | Rollback to a previous version |
+| `ados check` | Run pre-flight diagnostics |
+| `ados uninstall` | Remove the agent |
 | `ados version` | Print agent version |
 
 ---
 
 ## REST API
 
-FastAPI server at `:8080`. Full OpenAPI docs at `/docs`.
+FastAPI server at `:8080`. Full OpenAPI docs at `/docs`. 15 route modules.
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
@@ -126,6 +170,14 @@ FastAPI server at `:8080`. Full OpenAPI docs at `/docs`.
 | `/api/config` | GET / PUT | Read or update agent config |
 | `/api/logs` | GET | Recent log entries |
 | `/api/services` | GET | Running services and status |
+| `/api/video` | GET / POST | Video pipeline status and control |
+| `/api/scripts` | GET / POST | List and execute automation scripts |
+| `/api/suites` | GET / PUT | Suite activation and status |
+| `/api/fleet` | GET / POST | Fleet enrollment and network status |
+| `/api/peripherals` | GET | Connected sensors and hardware |
+| `/api/pairing` | GET / POST / DELETE | GCS pairing management |
+| `/api/system` | GET / POST | System info, reboot, shutdown |
+| `/api/ota` | GET / POST | Update check, upgrade, rollback |
 
 ```bash
 # Get current telemetry
@@ -167,19 +219,19 @@ The agent connects to ADOS Mission Control over a three-layer relay.
      │              │
      ▼              ▼
 ┌──────────────────────────┐
-│       REST API           │   FastAPI :8080
+│       REST API           │   FastAPI :8080 (15 route modules)
 └────────────┬─────────────┘
              │
              ▼
 ┌──────────────────────────┐
 │       AgentApp           │   Core process manager
-└──┬──────────────┬────────┘
-   │              │
-   ▼              ▼
-┌──────────┐  ┌──────────┐
-│ MAVLink  │  │  MQTT    │   Services
-│  Proxy   │  │ Gateway  │
-└──────────┘  └──────────┘
+└──┬───────┬───────┬───────┘
+   │       │       │
+   ▼       ▼       ▼
+┌──────┐ ┌──────┐ ┌──────┐
+│ MAV  │ │ MQTT │ │Video │   Services
+│Proxy │ │ GW   │ │Pipe  │
+└──────┘ └──────┘ └──────┘
    │
    ▼
 ┌──────────┐
@@ -194,19 +246,21 @@ The agent connects to ADOS Mission Control over a three-layer relay.
 | Feature | Status |
 |---------|--------|
 | MAVLink proxy (serial to WS/TCP/UDP) | Working |
-| REST API (FastAPI, 7 route modules) | Working |
+| REST API (FastAPI, 15 route modules) | Working |
 | TUI dashboard (5 screens) | Working |
-| CLI (10 commands) | Working |
+| CLI (24 commands) | Working |
 | Demo mode (simulated telemetry) | Working |
-| Hardware detection (board YAML profiles) | Working |
+| Hardware detection (board tier profiles) | Working |
 | Config system (Pydantic + YAML) | Working |
 | Health monitoring (CPU, RAM, disk, temp) | Working |
 | MQTT gateway | Working |
 | Cloud relay (Convex HTTP + MQTT) | Working |
-| Video pipeline (HD, long-range link) | Planned |
+| GCS pairing (Mission Control link) | Working |
+| OTA updates (upgrade + rollback) | Working |
+| Video pipeline (RTSP + cloud relay) | In Progress |
+| WFB-ng long-range video link | Planned |
 | Suite runtime (YAML manifest execution) | Planned |
 | Script executor (Python SDK, REST) | Planned |
-| OTA updates | Planned |
 | Swarm coordination (mesh, formation) | Planned |
 
 ---
