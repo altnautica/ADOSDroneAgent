@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ADOS Agent — Network</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <nav>
+    <a href="index.html">Status</a>
+    <a href="network.html">Network</a>
+    <a href="video.html">Video</a>
+    <a href="mavlink.html">MAVLink</a>
+    <a href="system.html">System</a>
+  </nav>
+  <main>
+    <h1>Network</h1>
+
+    <h2>WiFi Access Point</h2>
+    <div class="card">
+      <div class="field">
+        <label for="ap-ssid">SSID Prefix</label>
+        <input type="text" id="ap-ssid" placeholder="ADOS">
+      </div>
+      <div class="field">
+        <label for="ap-pass">Password</label>
+        <div style="display:flex;gap:8px;">
+          <input type="password" id="ap-pass" style="flex:1;margin-bottom:0" placeholder="Min 8 characters">
+          <button class="btn btn-outline" style="width:auto;padding:10px 14px" onclick="togglePw('ap-pass',this)">Show</button>
+        </div>
+      </div>
+      <div class="field mt">
+        <label for="ap-channel">Channel</label>
+        <select id="ap-channel"></select>
+      </div>
+      <div class="toggle-row">
+        <label>Captive Portal</label>
+        <input type="checkbox" id="ap-captive">
+      </div>
+    </div>
+
+    <h2>4G Modem</h2>
+    <div class="card">
+      <div class="kv">
+        <span class="kv-label">Status</span>
+        <span class="kv-value"><span id="modem-badge" class="badge">--</span></span>
+      </div>
+      <div class="kv">
+        <span class="kv-label">Signal</span>
+        <span class="kv-value" id="modem-signal">--</span>
+      </div>
+      <div class="kv"><span class="kv-label">Carrier</span><span class="kv-value" id="modem-carrier">--</span></div>
+      <div class="kv"><span class="kv-label">IP</span><span class="kv-value" id="modem-ip">--</span></div>
+      <div class="kv"><span class="kv-label">APN</span><span class="kv-value" id="modem-apn">--</span></div>
+    </div>
+
+    <button class="btn btn-primary" onclick="saveNetwork()">Save Network Settings</button>
+  </main>
+
+  <script src="/app.js"></script>
+  <script>
+    // Populate channel dropdown
+    const chSel = document.getElementById('ap-channel');
+    for (let i = 1; i <= 14; i++) {
+      chSel.appendChild(new Option(`Channel ${i}`, i));
+    }
+
+    // Load current config
+    (async function() {
+      const [cfg, net] = await Promise.all([fetchApi('config'), fetchApi('network')]);
+
+      if (cfg && cfg.network) {
+        document.getElementById('ap-ssid').value = cfg.network.ssid_prefix || '';
+        document.getElementById('ap-pass').value = cfg.network.password || '';
+        document.getElementById('ap-channel').value = cfg.network.channel || 6;
+        document.getElementById('ap-captive').checked = !!cfg.network.captive_portal;
+      }
+
+      if (net && net.modem) {
+        const m = net.modem;
+        setBadge('modem-badge', m.connected ? 'ok' : 'err', m.connected ? 'Connected' : 'No modem');
+        setHtml('modem-signal', m.signal_dbm != null ? `${m.signal_dbm} dBm ${signalBarsHtml(m.signal_dbm)}` : '--');
+        setText('modem-carrier', m.carrier || '--');
+        setText('modem-ip', m.ip || '--');
+        setText('modem-apn', m.apn || '--');
+      }
+    })();
+
+    // Refresh modem status with polling
+    window._onStatus = function(d) {
+      if (!d.modem) return;
+      const m = d.modem;
+      setBadge('modem-badge', m.connected ? 'ok' : 'err', m.connected ? 'Connected' : 'No modem');
+      if (m.signal_dbm != null) {
+        setHtml('modem-signal', `${m.signal_dbm} dBm ${signalBarsHtml(m.signal_dbm)}`);
+      }
+    };
+
+    async function saveNetwork() {
+      const pw = document.getElementById('ap-pass').value;
+      if (pw && pw.length < 8) {
+        showToast('Password must be at least 8 characters', true);
+        return;
+      }
+      await putConfig({
+        network: {
+          ssid_prefix: document.getElementById('ap-ssid').value,
+          password: pw,
+          channel: parseInt(document.getElementById('ap-channel').value),
+          captive_portal: document.getElementById('ap-captive').checked,
+        }
+      });
+    }
+  </script>
+</body>
+</html>

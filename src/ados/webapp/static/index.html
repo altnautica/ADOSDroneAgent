@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ADOS Agent — Status</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <nav>
+    <a href="index.html">Status</a>
+    <a href="network.html">Network</a>
+    <a href="video.html">Video</a>
+    <a href="mavlink.html">MAVLink</a>
+    <a href="system.html">System</a>
+  </nav>
+  <main>
+    <h1>Status</h1>
+
+    <div class="card">
+      <div class="card-header">Flight Controller <span id="fc-badge" class="badge">--</span></div>
+      <div class="kv"><span class="kv-label">Mode</span><span class="kv-value" id="fc-mode">--</span></div>
+      <div class="kv"><span class="kv-label">Armed</span><span class="kv-value" id="fc-armed">--</span></div>
+    </div>
+
+    <div class="card">
+      <div class="card-header">GPS</div>
+      <div class="kv"><span class="kv-label">Position</span><span class="kv-value" id="gps-pos">--</span></div>
+      <div class="kv"><span class="kv-label">Altitude</span><span class="kv-value" id="gps-alt">--</span></div>
+      <div class="kv"><span class="kv-label">Satellites</span><span class="kv-value" id="gps-sats">--</span></div>
+      <div class="kv"><span class="kv-label">Fix</span><span class="kv-value" id="gps-fix">--</span></div>
+    </div>
+
+    <div class="card">
+      <div class="card-header">Battery</div>
+      <div class="kv"><span class="kv-label">Voltage</span><span class="kv-value" id="batt-v">--</span></div>
+      <div class="kv"><span class="kv-label">Current</span><span class="kv-value" id="batt-a">--</span></div>
+      <div class="kv"><span class="kv-label">Remaining</span><span class="kv-value" id="batt-pct">--</span></div>
+    </div>
+
+    <div class="card">
+      <div class="card-header">System</div>
+      <div class="kv"><span class="kv-label">CPU</span><span class="kv-value" id="sys-cpu">--</span></div>
+      <div class="kv"><span class="kv-label">RAM</span><span class="kv-value" id="sys-ram">--</span></div>
+      <div class="kv"><span class="kv-label">Disk</span><span class="kv-value" id="sys-disk">--</span></div>
+      <div class="kv"><span class="kv-label">Temp</span><span class="kv-value" id="sys-temp">--</span></div>
+    </div>
+
+    <h2>Services</h2>
+    <div class="card" style="padding:0 16px;">
+      <table>
+        <thead><tr><th>Service</th><th>Status</th><th style="text-align:right">Uptime</th></tr></thead>
+        <tbody id="svc-table"><tr><td colspan="3" class="text-dim">Loading...</td></tr></tbody>
+      </table>
+    </div>
+  </main>
+
+  <script src="/app.js"></script>
+  <script>
+    const FIX_TYPES = ['No GPS','No Fix','2D','3D','DGPS','RTK Float','RTK Fixed'];
+
+    window._onStatus = function(d) {
+      // FC
+      const fc = d.fc_connected;
+      setBadge('fc-badge', fc ? 'ok' : 'err', fc ? 'Connected' : 'Disconnected');
+      setText('fc-mode', d.fc_mode || '--');
+      setText('fc-armed', d.fc_armed ? 'ARMED' : 'Disarmed');
+
+      // GPS
+      const lat = d.gps_lat, lon = d.gps_lon;
+      setText('gps-pos', lat != null ? `${lat.toFixed(6)}, ${lon.toFixed(6)}` : '--');
+      setText('gps-alt', d.gps_alt != null ? `${d.gps_alt.toFixed(1)} m` : '--');
+      setText('gps-sats', d.gps_sats != null ? d.gps_sats : '--');
+      setText('gps-fix', FIX_TYPES[d.gps_fix] || '--');
+
+      // Battery
+      setText('batt-v', d.batt_voltage != null ? `${d.batt_voltage.toFixed(1)} V` : '--');
+      setText('batt-a', d.batt_current != null ? `${d.batt_current.toFixed(1)} A` : '--');
+      const bp = d.batt_percent;
+      const bpEl = document.getElementById('batt-pct');
+      if (bpEl) { bpEl.textContent = bp != null ? `${bp}%` : '--'; bpEl.style.cssText = battColor(bp); }
+
+      // System
+      setText('sys-cpu', d.cpu_percent != null ? `${d.cpu_percent}%` : '--');
+      setText('sys-ram', d.ram_percent != null ? `${d.ram_percent}%` : '--');
+      setText('sys-disk', d.disk_percent != null ? `${d.disk_percent}%` : '--');
+      setText('sys-temp', d.temperature != null ? `${d.temperature}°C` : '--');
+    };
+
+    // Services table - separate poll
+    async function loadServices() {
+      const svcs = await fetchApi('services');
+      const tb = document.getElementById('svc-table');
+      if (!svcs || !tb) return;
+      tb.innerHTML = '';
+      svcs.forEach(s => {
+        const tr = document.createElement('tr');
+        const tdName = document.createElement('td');
+        tdName.textContent = s.name;
+        const tdStatus = document.createElement('td');
+        tdStatus.innerHTML = `<span class="badge ${s.running ? 'ok' : 'err'}">${s.running ? 'Running' : 'Stopped'}</span>`;
+        const tdUp = document.createElement('td');
+        tdUp.style.textAlign = 'right';
+        tdUp.textContent = formatUptime(s.uptime);
+        tr.append(tdName, tdStatus, tdUp);
+        tb.appendChild(tr);
+      });
+    }
+    loadServices();
+    setInterval(loadServices, 5000);
+  </script>
+</body>
+</html>

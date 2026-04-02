@@ -1,0 +1,82 @@
+# Luckfox Pico Zero RV1106G3 — Budget companion, Pico Zero form factor
+name: "Luckfox Pico Zero RV1106G3"
+vendor: "Luckfox"
+soc: "RV1106G3"
+arch: "armv7l"
+model_patterns:
+  - "rv1106-g3"
+  - "rv1106g3"
+  - "Luckfox Pico Zero"
+default_tier: 2
+
+gpio_pins: []
+uart_paths:
+  - /dev/ttyS0
+hw_video_codecs:
+  - h264_enc
+  - h264_dec
+  - h265_enc
+  - h265_dec
+
+board:
+  id: rv1106-g3
+  manufacturer: Luckfox
+  status: testing
+
+compute:
+  cores: 1
+  core_type: "Cortex-A7"
+  max_freq_mhz: 1200
+  gpu: null
+  npu_tops: 0.5
+  hw_encoder: ["h264", "h265"]
+  hw_decoder: ["h264", "h265"]
+  ram_mb: 256
+  ram_type: built-in
+
+storage:
+  emmc: false
+  sd_card: true
+  nand: false
+
+buses:
+  uart:
+    - id: uart0
+      path: /dev/ttyS0
+      baud: 921600
+      fc_capable: true
+  usb:
+    - id: usb0
+      path: "/dev/bus/usb/001/*"
+      type: usb2
+  i2c: []
+  spi: []
+
+network:
+  wifi: false
+  ethernet: true
+  bluetooth: false
+
+video:
+  csi_ports: 1
+  max_encode_resolution: "1920x1080"
+  max_encode_fps: 30
+  encoder_api: rkmedia
+
+power:
+  typical_watts: 0.9
+  max_watts: 1.3
+  voltage: 5.0
+
+profiles:
+  tier: budget
+  max_features:
+    - mavlink_proxy
+    - mqtt_gateway
+    - video_pipeline
+    - rest_api
+    - wifi_ap
+  video_capable: true
+  recommended_resolution: "1280x720"
+  memory_budget_mb: 135
+  notes: "G3 variant of RV1106. Same capabilities as RV1106 256MB. Pico Zero form factor is smaller."

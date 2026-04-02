@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ADOS Agent — MAVLink</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <nav>
+    <a href="index.html">Status</a>
+    <a href="network.html">Network</a>
+    <a href="video.html">Video</a>
+    <a href="mavlink.html">MAVLink</a>
+    <a href="system.html">System</a>
+  </nav>
+  <main>
+    <h1>MAVLink</h1>
+
+    <div class="card">
+      <div class="card-header">Flight Controller <span id="fc-badge" class="badge">--</span></div>
+      <div class="kv"><span class="kv-label">Firmware</span><span class="kv-value" id="fc-fw">--</span></div>
+      <div class="kv"><span class="kv-label">Vehicle</span><span class="kv-value" id="fc-vehicle">--</span></div>
+      <div class="kv"><span class="kv-label">Clients</span><span class="kv-value" id="fc-clients">--</span></div>
+    </div>
+
+    <h2>Serial Connection</h2>
+    <div class="card">
+      <div class="field">
+        <label for="mav-port">Serial Port</label>
+        <input type="text" id="mav-port" placeholder="auto">
+      </div>
+      <div class="field">
+        <label for="mav-baud">Baud Rate</label>
+        <select id="mav-baud">
+          <option value="115200">115200</option>
+          <option value="230400">230400</option>
+          <option value="460800">460800</option>
+          <option value="921600">921600</option>
+        </select>
+      </div>
+    </div>
+
+    <h2>Proxy Ports</h2>
+    <div class="card">
+      <div class="kv"><span class="kv-label">TCP Port</span><span class="kv-value" id="mav-tcp">--</span></div>
+      <div class="kv"><span class="kv-label">UDP Port</span><span class="kv-value" id="mav-udp">--</span></div>
+    </div>
+
+    <button class="btn btn-primary" onclick="saveMavlink()">Save MAVLink Settings</button>
+  </main>
+
+  <script src="/app.js"></script>
+  <script>
+    (async function() {
+      const cfg = await fetchApi('config');
+      if (cfg && cfg.mavlink) {
+        const m = cfg.mavlink;
+        document.getElementById('mav-port').value = m.serial_port || 'auto';
+        document.getElementById('mav-baud').value = m.baud_rate || 115200;
+        setText('mav-tcp', m.tcp_port || '--');
+        setText('mav-udp', m.udp_port || '--');
+      }
+    })();
+
+    window._onStatus = function(d) {
+      setBadge('fc-badge', d.fc_connected ? 'ok' : 'err', d.fc_connected ? 'Connected' : 'Disconnected');
+      setText('fc-fw', d.fc_firmware || '--');
+      setText('fc-vehicle', d.fc_vehicle_type || '--');
+      setText('fc-clients', d.mavlink_clients != null ? d.mavlink_clients : '--');
+    };
+
+    async function saveMavlink() {
+      await putConfig({
+        mavlink: {
+          serial_port: document.getElementById('mav-port').value,
+          baud_rate: parseInt(document.getElementById('mav-baud').value),
+        }
+      });
+    }
+  </script>
+</body>
+</html>

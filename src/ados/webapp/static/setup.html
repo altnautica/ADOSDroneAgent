@@ -1,0 +1,281 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ADOS Agent — Setup</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <div class="wizard">
+    <div class="wizard-progress" id="progress-bar"></div>
+    <div id="step-counter" class="text-dim text-sm mb"></div>
+
+    <!-- Step 1: Welcome -->
+    <section class="wizard-body" id="step-1">
+      <div class="wizard-title">Welcome</div>
+      <p class="wizard-subtitle" id="welcome-brand">Let's set up your drone computer.</p>
+      <p style="color:var(--text-dim);font-size:14px;margin-top:16px;">
+        This wizard will walk you through WiFi, flight controller, video, and cloud configuration. It takes about 2 minutes.
+      </p>
+    </section>
+
+    <!-- Step 2: WiFi Password -->
+    <section class="wizard-body hidden" id="step-2">
+      <div class="wizard-title">WiFi Password</div>
+      <p class="wizard-subtitle">Set a password for the drone's WiFi access point.</p>
+      <div class="field">
+        <label for="setup-pw">Password (min 8 characters)</label>
+        <input type="password" id="setup-pw" placeholder="Enter password">
+      </div>
+      <div class="field">
+        <label for="setup-pw2">Confirm Password</label>
+        <input type="password" id="setup-pw2" placeholder="Confirm password">
+      </div>
+      <div id="pw-error" class="text-sm" style="color:var(--error);margin-top:4px;"></div>
+    </section>
+
+    <!-- Step 3: Flight Controller -->
+    <section class="wizard-body hidden" id="step-3">
+      <div class="wizard-title">Flight Controller</div>
+      <p class="wizard-subtitle">Detecting your flight controller...</p>
+      <div class="card">
+        <div class="kv">
+          <span class="kv-label">Status</span>
+          <span class="kv-value"><span id="setup-fc-badge" class="badge">Detecting <span class="spinner"></span></span></span>
+        </div>
+        <div class="kv"><span class="kv-label">Firmware</span><span class="kv-value" id="setup-fc-fw">--</span></div>
+      </div>
+      <p class="text-dim text-sm mb">Or configure manually:</p>
+      <div class="field">
+        <label for="setup-fc-port">Serial Port</label>
+        <input type="text" id="setup-fc-port" placeholder="auto">
+      </div>
+      <div class="field">
+        <label for="setup-fc-baud">Baud Rate</label>
+        <select id="setup-fc-baud">
+          <option value="115200">115200</option>
+          <option value="230400">230400</option>
+          <option value="460800">460800</option>
+          <option value="921600">921600</option>
+        </select>
+      </div>
+    </section>
+
+    <!-- Step 4: Video -->
+    <section class="wizard-body hidden" id="step-4">
+      <div class="wizard-title">Video</div>
+      <p class="wizard-subtitle">Configure your camera stream.</p>
+      <div class="card">
+        <div class="kv">
+          <span class="kv-label">Camera</span>
+          <span class="kv-value"><span id="setup-cam-badge" class="badge">Detecting <span class="spinner"></span></span></span>
+        </div>
+      </div>
+      <div class="field">
+        <label for="setup-vid-res">Resolution</label>
+        <select id="setup-vid-res">
+          <option value="1920x1080">1080p</option>
+          <option value="1280x720">720p</option>
+          <option value="640x480">480p</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="setup-vid-codec">Codec</label>
+        <select id="setup-vid-codec">
+          <option value="h264">H.264</option>
+          <option value="h265">H.265 (HEVC)</option>
+        </select>
+      </div>
+    </section>
+
+    <!-- Step 5: Cloud -->
+    <section class="wizard-body hidden" id="step-5">
+      <div class="wizard-title">Cloud (Optional)</div>
+      <p class="wizard-subtitle">Connect to an MQTT broker for remote telemetry. You can skip this.</p>
+      <div class="field">
+        <label for="setup-mqtt-url">MQTT Broker URL</label>
+        <input type="url" id="setup-mqtt-url" placeholder="mqtts://broker.example.com:8883">
+      </div>
+      <div class="field">
+        <label for="setup-mqtt-user">Username</label>
+        <input type="text" id="setup-mqtt-user" placeholder="Optional">
+      </div>
+      <div class="field">
+        <label for="setup-mqtt-pass">Password</label>
+        <input type="password" id="setup-mqtt-pass" placeholder="Optional">
+      </div>
+    </section>
+
+    <!-- Step 6: Summary -->
+    <section class="wizard-body hidden" id="step-6">
+      <div class="wizard-title">Review Settings</div>
+      <p class="wizard-subtitle">Check everything looks right before saving.</p>
+      <div class="card" style="padding:0 16px;">
+        <table>
+          <tbody id="summary-table"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- Footer with nav buttons -->
+    <div class="wizard-footer">
+      <button class="btn btn-outline hidden" id="btn-back" onclick="goStep(-1)">Back</button>
+      <button class="btn btn-outline hidden" id="btn-skip" onclick="goStep(1)">Skip</button>
+      <button class="btn btn-primary" id="btn-next" onclick="goStep(1)">Get Started</button>
+    </div>
+  </div>
+
+  <script src="/app.js"></script>
+  <script>
+    const TOTAL_STEPS = 6;
+    let current = 1;
+    let fcDetected = false;
+    let camDetected = false;
+    let _detectInterval = null;
+
+    function renderProgress() {
+      const bar = document.getElementById('progress-bar');
+      bar.innerHTML = '';
+      for (let i = 1; i <= TOTAL_STEPS; i++) {
+        const cls = i < current ? 'step done' : i === current ? 'step current' : 'step';
+        bar.innerHTML += `<div class="${cls}"></div>`;
+      }
+      document.getElementById('step-counter').textContent = `Step ${current} of ${TOTAL_STEPS}`;
+    }
+
+    function showStep() {
+      for (let i = 1; i <= TOTAL_STEPS; i++) {
+        document.getElementById('step-' + i).classList.toggle('hidden', i !== current);
+      }
+      renderProgress();
+
+      const back = document.getElementById('btn-back');
+      const skip = document.getElementById('btn-skip');
+      const next = document.getElementById('btn-next');
+
+      back.classList.toggle('hidden', current === 1);
+      skip.classList.toggle('hidden', current !== 5);
+
+      if (current === 1) {
+        next.textContent = 'Get Started';
+      } else if (current === TOTAL_STEPS) {
+        next.textContent = 'Save & Reboot';
+        next.className = 'btn btn-primary';
+        buildSummary();
+      } else {
+        next.textContent = 'Next';
+      }
+
+      // Start FC/cam detection polling on relevant steps
+      clearInterval(_detectInterval);
+      if (current === 3 || current === 4) {
+        detectHardware();
+        _detectInterval = setInterval(detectHardware, 3000);
+      }
+    }
+
+    async function detectHardware() {
+      const status = await fetchApi('status');
+      if (!status) return;
+
+      if (current === 3) {
+        fcDetected = !!status.fc_connected;
+        setBadge('setup-fc-badge', fcDetected ? 'ok' : 'warn', fcDetected ? 'Connected' : 'Not found');
+        setText('setup-fc-fw', status.fc_firmware || '--');
+      }
+
+      if (current === 4) {
+        const vs = await fetchApi('video/status');
+        if (vs) {
+          camDetected = !!vs.camera_detected;
+          setBadge('setup-cam-badge', camDetected ? 'ok' : 'warn', camDetected ? 'Detected' : 'Not found');
+        }
+      }
+    }
+
+    function validate() {
+      if (current === 2) {
+        const pw = document.getElementById('setup-pw').value;
+        const pw2 = document.getElementById('setup-pw2').value;
+        const err = document.getElementById('pw-error');
+        if (pw.length < 8) { err.textContent = 'Password must be at least 8 characters.'; return false; }
+        if (pw !== pw2) { err.textContent = 'Passwords do not match.'; return false; }
+        err.textContent = '';
+      }
+      return true;
+    }
+
+    async function saveStep() {
+      if (current === 2) {
+        await putConfig({ network: { password: document.getElementById('setup-pw').value } });
+      } else if (current === 3) {
+        await putConfig({ mavlink: {
+          serial_port: document.getElementById('setup-fc-port').value || 'auto',
+          baud_rate: parseInt(document.getElementById('setup-fc-baud').value),
+        }});
+      } else if (current === 4) {
+        await putConfig({ video: {
+          resolution: document.getElementById('setup-vid-res').value,
+          codec: document.getElementById('setup-vid-codec').value,
+        }});
+      } else if (current === 5) {
+        const url = document.getElementById('setup-mqtt-url').value;
+        if (url) {
+          await putConfig({ mqtt: {
+            broker_url: url,
+            username: document.getElementById('setup-mqtt-user').value,
+            password: document.getElementById('setup-mqtt-pass').value,
+          }});
+        }
+      }
+    }
+
+    function buildSummary() {
+      const rows = [
+        ['WiFi Password', document.getElementById('setup-pw').value ? '********' : '(unchanged)'],
+        ['FC Port', document.getElementById('setup-fc-port').value || 'auto'],
+        ['Baud Rate', document.getElementById('setup-fc-baud').value],
+        ['Video', document.getElementById('setup-vid-res').value + ' ' + document.getElementById('setup-vid-codec').value],
+        ['MQTT', document.getElementById('setup-mqtt-url').value || 'Skipped'],
+      ];
+      document.getElementById('summary-table').innerHTML = rows.map(
+        ([k, v]) => `<tr><td class="text-dim">${k}</td><td style="text-align:right;font-weight:500">${v}</td></tr>`
+      ).join('');
+    }
+
+    async function goStep(dir) {
+      if (dir > 0 && !validate()) return;
+
+      // Save current step before advancing
+      if (dir > 0 && current >= 2 && current <= 5) {
+        await saveStep();
+      }
+
+      // Final step: save and reboot
+      if (dir > 0 && current === TOTAL_STEPS) {
+        if (!confirm('Save settings and reboot? You will need to reconnect to WiFi.')) return;
+        await postCommand('reboot');
+        showToast('Rebooting...');
+        document.getElementById('btn-next').disabled = true;
+        document.getElementById('btn-next').textContent = 'Rebooting...';
+        return;
+      }
+
+      current = Math.max(1, Math.min(TOTAL_STEPS, current + dir));
+      showStep();
+    }
+
+    // Load branding
+    (async function() {
+      const info = await fetchApi('info');
+      if (info && info.product_name) {
+        document.getElementById('welcome-brand').textContent =
+          `Let's set up your ${info.product_name}.`;
+      }
+    })();
+
+    showStep();
+  </script>
+</body>
+</html>
