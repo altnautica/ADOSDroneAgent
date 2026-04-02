@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ADOS Agent — Video</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <nav>
+    <a href="index.html">Status</a>
+    <a href="network.html">Network</a>
+    <a href="video.html">Video</a>
+    <a href="mavlink.html">MAVLink</a>
+    <a href="system.html">System</a>
+  </nav>
+  <main>
+    <h1>Video</h1>
+
+    <div class="card">
+      <div class="card-header">Camera <span id="cam-badge" class="badge">--</span></div>
+      <div class="kv"><span class="kv-label">Device</span><span class="kv-value" id="cam-device">--</span></div>
+    </div>
+
+    <h2>Preview</h2>
+    <div class="card" style="padding:0;overflow:hidden;border-radius:var(--radius);">
+      <div id="preview-wrap" style="position:relative;background:#000;aspect-ratio:16/9;display:flex;align-items:center;justify-content:center;">
+        <iframe id="preview-frame" style="width:100%;height:100%;border:none;display:none;"></iframe>
+        <span id="preview-placeholder" class="text-dim" style="font-size:14px;">No camera detected</span>
+      </div>
+    </div>
+
+    <h2>Settings</h2>
+    <div class="card">
+      <div class="field">
+        <label for="vid-res">Resolution</label>
+        <select id="vid-res">
+          <option value="1920x1080">1920x1080 (1080p)</option>
+          <option value="1280x720">1280x720 (720p)</option>
+          <option value="640x480">640x480 (480p)</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="vid-fps">Frame Rate</label>
+        <select id="vid-fps">
+          <option value="30">30 fps</option>
+          <option value="25">25 fps</option>
+          <option value="15">15 fps</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="vid-codec">Codec</label>
+        <select id="vid-codec">
+          <option value="h264">H.264</option>
+          <option value="h265">H.265 (HEVC)</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>Bitrate</label>
+        <div class="range-row">
+          <input type="range" id="vid-bitrate" min="500" max="8000" step="100" value="4000">
+          <span id="vid-bitrate-val">4000 kbps</span>
+        </div>
+      </div>
+      <div class="toggle-row">
+        <label>Adaptive Bitrate</label>
+        <input type="checkbox" id="vid-abr">
+      </div>
+    </div>
+
+    <button class="btn btn-primary" onclick="saveVideo()">Save Video Settings</button>
+  </main>
+
+  <script src="/app.js"></script>
+  <script>
+    const bitrateSlider = document.getElementById('vid-bitrate');
+    const bitrateLabel = document.getElementById('vid-bitrate-val');
+    bitrateSlider.addEventListener('input', () => {
+      bitrateLabel.textContent = bitrateSlider.value + ' kbps';
+    });
+
+    // Load current state
+    (async function() {
+      const [vs, cfg] = await Promise.all([fetchApi('video/status'), fetchApi('config')]);
+
+      if (vs) {
+        setBadge('cam-badge', vs.camera_detected ? 'ok' : 'err', vs.camera_detected ? 'Detected' : 'Not found');
+        setText('cam-device', vs.device_path || '--');
+
+        if (vs.whep_url && vs.streaming) {
+          document.getElementById('preview-frame').src = vs.whep_url;
+          document.getElementById('preview-frame').style.display = 'block';
+          document.getElementById('preview-placeholder').style.display = 'none';
+        }
+      }
+
+      if (cfg && cfg.video) {
+        const v = cfg.video;
+        if (v.resolution) document.getElementById('vid-res').value = v.resolution;
+        if (v.fps) document.getElementById('vid-fps').value = v.fps;
+        if (v.codec) document.getElementById('vid-codec').value = v.codec;
+        if (v.bitrate_kbps) {
+          bitrateSlider.value = v.bitrate_kbps;
+          bitrateLabel.textContent = v.bitrate_kbps + ' kbps';
+        }
+        document.getElementById('vid-abr').checked = !!v.adaptive_bitrate;
+      }
+    })();
+
+    // Refresh camera status
+    window._onStatus = async function() {
+      const vs = await fetchApi('video/status');
+      if (!vs) return;
+      setBadge('cam-badge', vs.camera_detected ? 'ok' : 'err', vs.camera_detected ? 'Detected' : 'Not found');
+      setText('cam-device', vs.device_path || '--');
+    };
+
+    async function saveVideo() {
+      await putConfig({
+        video: {
+          resolution: document.getElementById('vid-res').value,
+          fps: parseInt(document.getElementById('vid-fps').value),
+          codec: document.getElementById('vid-codec').value,
+          bitrate_kbps: parseInt(bitrateSlider.value),
+          adaptive_bitrate: document.getElementById('vid-abr').checked,
+        }
+      });
+    }
+  </script>
+</body>
+</html>

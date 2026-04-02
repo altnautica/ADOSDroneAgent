@@ -1,0 +1,68 @@
+# ADOS Ground Station — Hardware Variants
+
+## Product Tiers
+
+| Variant | Board | Adapter(s) | Display | Key Feature | Target Price |
+|---------|-------|-----------|---------|-------------|-------------|
+| USB Dongle | RTL8812EU only | Self | None | Plug into Linux laptop | $30-50 |
+| Lite | Radxa CM3 (RK3566, 2GB) | 1x RTL8812EU | WiFi AP to browser | Turnkey, cheapest | $100-150 |
+| Pro | Radxa CM4 (RK3588S2, 4GB) | 2x RTL8812EU | HDMI + WiFi AP | Diversity + local display | $200-350 |
+| Field Kit | Raspberry Pi 5 (4GB) + case | 1-2x RTL8812EU | 7" HDMI touchscreen | Complete portable station | $250-400 |
+
+## Baseboard Reuse (DEC-073)
+
+Same HGLRC baseboard PCB works for both air unit and ground station. The only difference is software mode (TX vs RX) and which peripherals are connected.
+
+| Peripheral | Air Unit | Ground Station |
+|-----------|----------|---------------|
+| Camera (CSI) | Connected | Not used |
+| FC (UART) | Connected | Not used |
+| RTL8812EU (USB) | Connected (TX) | Connected (RX) |
+| HDMI output | Not used | Optional (Pro variant) |
+| 4G modem (USB) | Optional (BVLOS telemetry) | Optional (cloud uplink) |
+| WiFi AP | Optional | Always active |
+
+One hardware design. Two products. Differentiated entirely by software config.
+
+## RTL8812EU Adapters
+
+| Adapter | Chipset | Form Factor | TX Power | Price | Notes |
+|---------|---------|-------------|----------|-------|-------|
+| LB-LINK BL-M8812EU2 | RTL8812EU | 30x30mm module | 29dBm (800mW) | ~$10 | Best for baseboard integration |
+| ALFA AWUS036ACH | RTL8812AU | USB-A dongle, dual antenna | 20dBm (100mW) | ~$52 | External, dual RP-SMA |
+| Generic USB-C dongle | RTL8812EU | USB-C stick | 29dBm | $15-25 | Consumer-friendly |
+
+VID:PID for auto-detection: RTL8812EU = `0BDA:B812`
+
+**WARNING:** RTL8812BU (different chip) does NOT support monitor mode. Do not use for WFB-ng. The chip names look similar but they are fundamentally different silicon.
+
+## Competitor Ground Station Hardware (Reference)
+
+| Product | Type | Price | Range | Latency | Display |
+|---------|------|-------|-------|---------|---------|
+| SIYI MK32 | All-in-one RC + GCS | $1,112 (bundle) | 15km | ~180ms | 7" 1080p touch |
+| SIYI MK15 | All-in-one RC + GCS | ~$400-600 | 15km | ~180ms | 5.5" 1080p touch |
+| Herelink v1.1 | All-in-one RC + GCS | ~$800-1,500 | 20km | ~200ms | 5.46" 1080p, 1000 nit |
+| Skydroid H16 | All-in-one RC | ~$300-500 | 10km | ~180ms | 7" 1080p, IP67 |
+| Skydroid G12 | All-in-one RC | ~$400-700 | 20km | ~180ms | 5.5" 1080p, 1000 nit |
+| OpenHD (DIY) | Pi + adapters | ~$130-200 BOM | 50km+ | 100-150ms | HDMI (7" Pi screen) |
+| RubyFPV (DIY) | Pi + adapters | ~$130-200 BOM | 50km+ | 32-70ms | HDMI |
+
+## Display Options (Pro and Field Kit Variants)
+
+| Display | Size | Resolution | Brightness | Price | Notes |
+|---------|------|-----------|------------|-------|-------|
+| Generic HDMI (Pi-compatible) | 7" | 1024x600 | 300-500 nit | $40-80 | Indoor/shade only |
+| High-brightness IPS | 7" | 1024x600 | 1000+ nit | $200-400 | Outdoor direct sunlight |
+| Walksnail Avatar Goggles X | FPV goggles | 1080p | N/A | $400-600 | Immersive, HDMI input |
+| Fatshark + Avatar VRX | FPV goggles | varies | N/A | $300-550 | Legacy goggles + HDMI receiver |
+
+## Power Consumption
+
+| Variant | Idle | Active (video RX) | Power Source |
+|---------|------|-------------------|-------------|
+| Lite (CM3) | ~2W | ~5W | USB-C 5V/2A |
+| Pro (CM4) | ~3W | ~8W | USB-C 5V/3A |
+| Field Kit (Pi 5 + screen) | ~5W | ~12-15W | USB-C PD 27W adapter or LiPo battery |
+
+The Lite variant runs on any standard phone charger. The Pro variant needs a slightly beefier USB-C supply. The Field Kit benefits from a dedicated battery pack for untethered field use.
