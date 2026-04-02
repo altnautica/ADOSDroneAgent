@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ADOS Agent — System</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <nav>
+    <a href="index.html">Status</a>
+    <a href="network.html">Network</a>
+    <a href="video.html">Video</a>
+    <a href="mavlink.html">MAVLink</a>
+    <a href="system.html">System</a>
+  </nav>
+  <main>
+    <h1>System</h1>
+
+    <h2>Resources</h2>
+    <div class="card">
+      <div style="margin-bottom:12px;">
+        <div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:4px;">
+          <span>CPU</span><span id="gauge-cpu-val">--%</span>
+        </div>
+        <div class="progress"><div class="progress-fill" id="gauge-cpu"></div></div>
+      </div>
+      <div style="margin-bottom:12px;">
+        <div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:4px;">
+          <span>RAM</span><span id="gauge-ram-val">--</span>
+        </div>
+        <div class="progress"><div class="progress-fill" id="gauge-ram"></div></div>
+      </div>
+      <div style="margin-bottom:12px;">
+        <div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:4px;">
+          <span>Disk</span><span id="gauge-disk-val">--</span>
+        </div>
+        <div class="progress"><div class="progress-fill" id="gauge-disk"></div></div>
+      </div>
+      <div class="kv"><span class="kv-label">Temperature</span><span class="kv-value" id="sys-temp">--</span></div>
+    </div>
+
+    <h2>Agent Info</h2>
+    <div class="card">
+      <div class="kv"><span class="kv-label">Version</span><span class="kv-value" id="info-ver">--</span></div>
+      <div class="kv"><span class="kv-label">Device ID</span><span class="kv-value" id="info-id">--</span></div>
+      <div class="kv"><span class="kv-label">Board</span><span class="kv-value" id="info-board">--</span></div>
+      <div class="kv"><span class="kv-label">Uptime</span><span class="kv-value" id="info-uptime">--</span></div>
+    </div>
+
+    <h2>Actions</h2>
+    <div class="card">
+      <button class="btn btn-outline" onclick="doReboot()">Reboot Device</button>
+      <button class="btn btn-danger" onclick="doFactoryReset()">Factory Reset</button>
+    </div>
+
+    <h2 class="mt">Recent Logs</h2>
+    <div id="log-box" class="log-box">Loading...</div>
+  </main>
+
+  <script src="/app.js"></script>
+  <script>
+    // Load agent info once
+    (async function() {
+      const info = await fetchApi('info');
+      if (info) {
+        setText('info-ver', info.version || '--');
+        setText('info-id', info.device_id || '--');
+        setText('info-board', info.board_name || '--');
+      }
+    })();
+
+    window._onStatus = function(d) {
+      // Gauges
+      setProgress('gauge-cpu', d.cpu_percent);
+      document.getElementById('gauge-cpu-val').textContent = (d.cpu_percent != null ? d.cpu_percent + '%' : '--%');
+
+      setProgress('gauge-ram', d.ram_percent);
+      const ramLabel = d.ram_used_mb != null && d.ram_total_mb != null
+        ? `${d.ram_used_mb} / ${d.ram_total_mb} MB (${d.ram_percent}%)`
+        : '--%';
+      document.getElementById('gauge-ram-val').textContent = ramLabel;
+
+      setProgress('gauge-disk', d.disk_percent);
+      const diskLabel = d.disk_used_gb != null && d.disk_total_gb != null
+        ? `${d.disk_used_gb} / ${d.disk_total_gb} GB (${d.disk_percent}%)`
+        : '--%';
+      document.getElementById('gauge-disk-val').textContent = diskLabel;
+
+      setText('sys-temp', d.temperature != null ? `${d.temperature}°C` : '--');
+      setText('info-uptime', formatUptime(d.uptime));
+    };
+
+    // Logs
+    async function loadLogs() {
+      const data = await fetchApi('logs?limit=20');
+      const box = document.getElementById('log-box');
+      if (data && data.lines) {
+        box.textContent = data.lines.join('\n');
+        box.scrollTop = box.scrollHeight;
+      } else if (data === null) {
+        box.textContent = 'Failed to load logs.';
+      }
+    }
+    loadLogs();
+    setInterval(loadLogs, 5000);
+
+    function doReboot() {
+      if (!confirm('Reboot the device? You will lose connection temporarily.')) return;
+      postCommand('reboot');
+      showToast('Rebooting...');
+    }
+
+    function doFactoryReset() {
+      if (!confirm('Factory reset will erase all settings and restore defaults. This cannot be undone. Continue?')) return;
+      if (!confirm('Are you sure? All configuration will be lost.')) return;
+      postCommand('factory_reset');
+      showToast('Factory reset initiated...');
+    }
+  </script>
+</body>
+</html>

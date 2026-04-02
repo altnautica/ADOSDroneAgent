@@ -1,0 +1,112 @@
+# Radxa CM3 / RK3566 — Recommended primary target (extended profile)
+# Merged from Agent Lite's richer schema + full agent's model_patterns.
+# See also radxa-cm3.yaml for the original full agent profile.
+name: "Radxa CM3 (RK3566)"
+vendor: "Radxa"
+soc: "RK3566"
+arch: "aarch64"
+model_patterns:
+  - "Radxa CM3"
+  - "Radxa Compute Module 3"
+  - "ROCK 3 Compute Module"
+  - "rk3566"
+default_tier: 3
+
+gpio_pins:
+  - 3   # SDA
+  - 5   # SCL
+  - 8   # UART TX
+  - 10  # UART RX
+  - 12  # PWM
+uart_paths:
+  - /dev/ttyS0
+  - /dev/ttyS1
+  - /dev/ttyS2
+hw_video_codecs:
+  - h264_enc
+  - h264_dec
+  - h265_enc
+  - h265_dec
+  - vp9_dec
+
+board:
+  id: rk3566
+  manufacturer: Radxa
+  status: recommended
+
+compute:
+  cores: 4
+  core_type: "Cortex-A55"
+  max_freq_mhz: 1800
+  gpu: "Mali-G52 2EE"
+  npu_tops: 0.8
+  hw_encoder: ["h264"]
+  hw_decoder: ["h264", "h265", "vp9"]
+  ram_mb: 2048
+  ram_type: LPDDR4
+
+storage:
+  emmc: true
+  emmc_gb: 8
+  sd_card: true
+  nand: false
+
+buses:
+  uart:
+    - id: uart0
+      path: /dev/ttyS0
+      baud: 921600
+      fc_capable: true
+    - id: uart1
+      path: /dev/ttyS1
+      baud: 115200
+      fc_capable: false
+  usb:
+    - id: usb0
+      path: "/dev/bus/usb/001/*"
+      type: usb2
+    - id: usb1
+      path: "/dev/bus/usb/002/*"
+      type: usb2
+  i2c:
+    - id: i2c0
+      path: /dev/i2c-0
+      speed_hz: 400000
+    - id: i2c1
+      path: /dev/i2c-1
+      speed_hz: 400000
+  spi:
+    - id: spi0
+      path: /dev/spidev0.0
+
+network:
+  wifi: true
+  ethernet: true
+  bluetooth: true
+
+video:
+  csi_ports: 1
+  max_encode_resolution: "1920x1080"
+  max_encode_fps: 60
+  encoder_api: rkmedia
+
+power:
+  typical_watts: 2.5
+  max_watts: 4.0
+  voltage: 5.0
+
+profiles:
+  tier: recommended
+  max_features:
+    - mavlink_proxy
+    - mqtt_gateway
+    - video_pipeline
+    - rest_api
+    - wifi_ap
+    - wfb_ng
+    - captive_portal
+    - config_webapp
+  video_capable: true
+  recommended_resolution: "1920x1080"
+  memory_budget_mb: 287
+  notes: "Recommended primary target. 2GB RAM provides massive headroom (~1.7GB free). Quad A55 @ 1.8GHz runs Python comfortably. H.264 1080p@60 HW encode. Same Hirose connector as CM4 for single baseboard design. $36 module cost enables $50-80 retail."

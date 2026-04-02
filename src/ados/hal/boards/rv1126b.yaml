@@ -1,0 +1,101 @@
+# Rockchip RV1126B — HGLRC partnership target chip
+name: "Rockchip RV1126B"
+vendor: "Rockchip"
+soc: "RV1126B"
+arch: "armv7l"
+model_patterns:
+  - "rv1126"
+  - "rv1126b"
+default_tier: 3
+
+gpio_pins: []
+uart_paths:
+  - /dev/ttyS0
+  - /dev/ttyS1
+hw_video_codecs:
+  - h264_enc
+  - h264_dec
+  - h265_enc
+  - h265_dec
+
+board:
+  id: rv1126b
+  manufacturer: Rockchip
+  status: target
+
+compute:
+  cores: 4
+  core_type: "Cortex-A7"
+  max_freq_mhz: 1500
+  gpu: null
+  npu_tops: 2.0
+  hw_encoder: ["h264", "h265"]
+  hw_decoder: ["h264", "h265"]
+  ram_mb: 1024
+  ram_type: external_ddr
+
+storage:
+  emmc: true
+  sd_card: true
+  nand: true
+
+buses:
+  uart:
+    - id: uart0
+      path: /dev/ttyS0
+      baud: 921600
+      fc_capable: true
+    - id: uart1
+      path: /dev/ttyS1
+      baud: 115200
+      fc_capable: false
+  usb:
+    - id: usb0
+      path: "/dev/bus/usb/001/*"
+      type: usb2
+    - id: usb1
+      path: "/dev/bus/usb/002/*"
+      type: usb2
+  i2c:
+    - id: i2c0
+      path: /dev/i2c-0
+      speed_hz: 400000
+    - id: i2c1
+      path: /dev/i2c-1
+      speed_hz: 400000
+  spi:
+    - id: spi0
+      path: /dev/spidev0.0
+
+network:
+  wifi: false
+  ethernet: true
+  bluetooth: false
+
+video:
+  csi_ports: 2
+  max_encode_resolution: "3840x2160"
+  max_encode_fps: 30
+  encoder_api: rkmedia
+  isp: true
+
+power:
+  typical_watts: 2.0
+  max_watts: 3.5
+  voltage: 5.0
+
+profiles:
+  tier: recommended
+  max_features:
+    - mavlink_proxy
+    - mqtt_gateway
+    - video_pipeline
+    - rest_api
+    - wifi_ap
+    - wfb_ng
+    - captive_portal
+    - config_webapp
+  video_capable: true
+  recommended_resolution: "1920x1080"
+  memory_budget_mb: 135
+  notes: "Quad A7, 2.0 TOPS NPU, H.265 4K encode, dual CSI, built-in ISP. Strongest video capability of all budget chips. NPU enables future object detection."

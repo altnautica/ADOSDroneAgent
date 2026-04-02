@@ -1,0 +1,76 @@
+# Luckfox Pico RV1103 — Ultra-low-cost, telemetry-only
+name: "Luckfox Pico RV1103"
+vendor: "Luckfox"
+soc: "RV1103"
+arch: "armv7l"
+model_patterns:
+  - "rv1103"
+  - "Luckfox Pico"
+default_tier: 1
+
+gpio_pins: []
+uart_paths:
+  - /dev/ttyS0
+hw_video_codecs:
+  - h264_enc
+  - h264_dec
+
+board:
+  id: rv1103
+  manufacturer: Luckfox
+  status: testing
+
+compute:
+  cores: 1
+  core_type: "Cortex-A7"
+  max_freq_mhz: 1200
+  gpu: null
+  npu_tops: 0.5
+  hw_encoder: ["h264"]
+  hw_decoder: ["h264"]
+  ram_mb: 64
+  ram_type: built-in
+
+storage:
+  emmc: false
+  sd_card: true
+  nand: false
+
+buses:
+  uart:
+    - id: uart0
+      path: /dev/ttyS0
+      baud: 921600
+      fc_capable: true
+  usb:
+    - id: usb0
+      path: "/dev/bus/usb/001/*"
+      type: usb2
+  i2c: []
+  spi: []
+
+network:
+  wifi: false
+  ethernet: true
+  bluetooth: false
+
+video:
+  csi_ports: 1
+  max_encode_resolution: "1920x1080"
+  max_encode_fps: 30
+  encoder_api: rkmedia
+
+power:
+  typical_watts: 0.8
+  max_watts: 1.2
+  voltage: 5.0
+
+profiles:
+  tier: minimal
+  max_features:
+    - mavlink_proxy
+    - mqtt_gateway
+  video_capable: true
+  recommended_resolution: "640x480"
+  memory_budget_mb: 52
+  notes: "64MB RAM is very tight. MAVLink + MQTT only. No video pipeline, no webapp, no WiFi AP. Telemetry relay only."

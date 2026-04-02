@@ -1,0 +1,77 @@
+# Luckfox Lyra RK3506G2 — Triple-core, no video encoder
+name: "Luckfox Lyra RK3506G2"
+vendor: "Luckfox"
+soc: "RK3506G2"
+arch: "armv7l"
+model_patterns:
+  - "rk3506"
+  - "Luckfox Lyra"
+default_tier: 1
+
+gpio_pins: []
+uart_paths:
+  - /dev/ttyS0
+hw_video_codecs:
+  - h264_dec
+
+board:
+  id: rk3506
+  manufacturer: Luckfox
+  status: testing
+
+compute:
+  cores: 3
+  core_type: "Cortex-A7"
+  max_freq_mhz: 1500
+  gpu: null
+  npu_tops: 0
+  hw_encoder: []
+  hw_decoder: ["h264"]
+  ram_mb: 256
+  ram_type: built-in
+
+storage:
+  emmc: false
+  sd_card: true
+  nand: true
+  nand_mb: 256
+
+buses:
+  uart:
+    - id: uart0
+      path: /dev/ttyS0
+      baud: 921600
+      fc_capable: true
+  usb:
+    - id: usb0
+      path: "/dev/bus/usb/001/*"
+      type: usb2
+  i2c:
+    - id: i2c0
+      path: /dev/i2c-0
+      speed_hz: 400000
+  spi:
+    - id: spi0
+      path: /dev/spidev0.0
+
+network:
+  wifi: true
+  ethernet: true
+  bluetooth: true
+
+power:
+  typical_watts: 1.2
+  max_watts: 2.0
+  voltage: 5.0
+
+profiles:
+  tier: telemetry_only
+  max_features:
+    - mavlink_proxy
+    - mqtt_gateway
+    - rest_api
+    - wifi_ap
+  video_capable: false
+  recommended_resolution: null
+  memory_budget_mb: 67
+  notes: "Triple-core A7 with WiFi 6 and BT 5.2 built in. Good for telemetry relay. NOT recommended for video (no HW encoder, software encode saturates CPU). Cheapest multi-core option."

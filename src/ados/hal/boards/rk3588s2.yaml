@@ -1,0 +1,113 @@
+# Radxa CM4 / RK3588S2 — Pro tier
+name: "Radxa CM4 (RK3588S2)"
+vendor: "Radxa"
+soc: "RK3588S2"
+arch: "aarch64"
+model_patterns:
+  - "Radxa CM4"
+  - "Radxa Compute Module 4"
+  - "rk3588s2"
+default_tier: 4
+
+gpio_pins:
+  - 3   # SDA
+  - 5   # SCL
+  - 8   # UART TX
+  - 10  # UART RX
+  - 12  # PWM
+uart_paths:
+  - /dev/ttyS0
+  - /dev/ttyS1
+hw_video_codecs:
+  - h264_enc
+  - h264_dec
+  - h265_enc
+  - h265_dec
+  - av1_dec
+  - vp9_dec
+
+board:
+  id: rk3588s2
+  manufacturer: Radxa
+  status: supported
+
+compute:
+  cores: 8
+  core_type: "Cortex-A76 x4 + Cortex-A55 x4"
+  max_freq_mhz: 2400
+  gpu: "Mali-G610 MP4"
+  npu_tops: 6.0
+  hw_encoder: ["h264", "h265"]
+  hw_decoder: ["h264", "h265", "vp9", "av1"]
+  ram_mb: 4096
+  ram_type: LPDDR4X
+
+storage:
+  emmc: true
+  emmc_gb: 32
+  sd_card: true
+  nand: false
+
+buses:
+  uart:
+    - id: uart0
+      path: /dev/ttyS0
+      baud: 921600
+      fc_capable: true
+    - id: uart1
+      path: /dev/ttyS1
+      baud: 115200
+      fc_capable: false
+  usb:
+    - id: usb0
+      path: "/dev/bus/usb/001/*"
+      type: usb2
+    - id: usb1
+      path: "/dev/bus/usb/002/*"
+      type: usb3
+  i2c:
+    - id: i2c0
+      path: /dev/i2c-0
+      speed_hz: 400000
+    - id: i2c1
+      path: /dev/i2c-1
+      speed_hz: 400000
+  spi:
+    - id: spi0
+      path: /dev/spidev0.0
+  pcie:
+    - id: pcie0
+      type: pcie3.0
+      lanes: 1
+
+network:
+  wifi: true
+  ethernet: true
+  bluetooth: true
+
+video:
+  csi_ports: 2
+  max_encode_resolution: "7680x4320"
+  max_encode_fps: 30
+  encoder_api: rkmedia
+
+power:
+  typical_watts: 4.0
+  max_watts: 8.0
+  voltage: 5.0
+
+profiles:
+  tier: pro
+  max_features:
+    - mavlink_proxy
+    - mqtt_gateway
+    - video_pipeline
+    - rest_api
+    - wifi_ap
+    - wfb_ng
+    - captive_portal
+    - config_webapp
+  video_capable: true
+  recommended_resolution: "1920x1080"
+  memory_budget_mb: 287
+  notes: "Pro tier. 6 TOPS NPU for AI/object detection. H.265 8K encode. USB 3.0 + PCIe 3.0. Same Hirose connector as CM3 for single baseboard design. $72 module cost."
