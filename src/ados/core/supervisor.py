@@ -274,7 +274,7 @@ class Supervisor:
 
             devices = discover_usb_devices()
             wfb_ids = {(0x0BDA, 0xA81A), (0x0BDA, 0x8812), (0x0BDA, 0x881A)}
-            return any((d.vendor_id, d.product_id) in wfb_ids for d in devices)
+            return any((d.vid, d.pid) in wfb_ids for d in devices)
         except Exception:
             return False
 
