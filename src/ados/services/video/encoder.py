@@ -1,10 +1,16 @@
-"""Encoder abstraction — builds command lines for rpicam-vid, ffmpeg, or GStreamer."""
+"""Encoder abstraction — builds command lines for rpicam-vid, ffmpeg, or GStreamer.
+
+Handles CSI, USB, and IP cameras with hardware/software encoding fallbacks.
+Camera capabilities (from HAL discovery) drive input format selection for
+optimal framerate and CPU usage.
+"""
 
 from __future__ import annotations
 
 import re
 import shlex
 import shutil
+import subprocess
 from dataclasses import dataclass
 from enum import StrEnum
 
@@ -53,7 +59,7 @@ def detect_available_encoder() -> EncoderType | None:
 def detect_encoder_for_camera(camera: CameraInfo) -> EncoderType | None:
     """Pick the right encoder based on camera type.
 
-    CSI cameras use rpicam-vid (native Pi encoder), falling back to ffmpeg.
+    CSI cameras use rpicam-vid (native Pi hardware encoder), falling back to ffmpeg.
     USB and IP cameras use ffmpeg, falling back to GStreamer.
     """
     if camera.type == CameraType.CSI:
@@ -71,6 +77,28 @@ def detect_encoder_for_camera(camera: CameraInfo) -> EncoderType | None:
             log.info("encoder_selected", encoder="gstreamer", reason=f"{camera.type.value}_fallback")
             return EncoderType.GSTREAMER
     log.warning("no_encoder_for_camera", camera_type=camera.type.value)
+    return None
+
+
+def _detect_hw_h264_encoder() -> str | None:
+    """Check if ffmpeg has a hardware H.264 encoder available.
+
+    Returns the encoder name (e.g., 'h264_v4l2m2m' for Pi, 'h264_nvenc' for Jetson)
+    or None if only software encoding is available.
+    """
+    try:
+        result = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-encoders"],
+            capture_output=True, text=True, timeout=5,
+        )
+        output = result.stdout
+        # Check hardware encoders in order of preference
+        hw_encoders = ["h264_v4l2m2m", "h264_nvenc", "h264_vaapi", "h264_omx"]
+        for enc in hw_encoders:
+            if enc in output:
+                return enc
+    except Exception:
+        pass
     return None
 
 
@@ -99,6 +127,7 @@ def build_encoder_command(
     config: EncoderConfig,
     source: str,
     output: str,
+    camera: CameraInfo | None = None,
 ) -> list[str]:
     """Build a subprocess command list for the given encoder configuration.
 
@@ -106,6 +135,7 @@ def build_encoder_command(
         config: Encoder settings (type, codec, resolution, etc.).
         source: Input source (device path, URL, or ``-`` for stdin).
         output: Output destination (file path, pipe URI, or ``-`` for stdout).
+        camera: Optional camera info for capability-aware input format selection.
 
     Returns:
         Command list suitable for ``subprocess.Popen`` or ``asyncio.create_subprocess_exec``.
@@ -118,7 +148,7 @@ def build_encoder_command(
     if config.type == EncoderType.RPICAM_VID:
         return _build_rpicam_command(config, source, output)
     if config.type == EncoderType.FFMPEG:
-        return _build_ffmpeg_command(config, source, output)
+        return _build_ffmpeg_command(config, source, output, camera)
     if config.type == EncoderType.GSTREAMER:
         return _build_gstreamer_command(config, source, output)
     return []
@@ -129,7 +159,10 @@ def _build_rpicam_command(
     source: str,
     output: str,
 ) -> list[str]:
-    """rpicam-vid command for CSI camera encoding."""
+    """rpicam-vid command for CSI camera encoding.
+
+    Uses the Pi's hardware VideoCore encoder for zero-CPU H.264/H.265.
+    """
     cmd = [
         "rpicam-vid",
         "--width", str(config.width),
@@ -151,45 +184,90 @@ def _build_rpicam_command(
     return cmd
 
 
+def _select_input_format(camera: CameraInfo | None) -> str | None:
+    """Choose the best V4L2 input format based on camera capabilities.
+
+    Priority: mjpeg (compressed, high fps, low USB bandwidth) > yuyv (raw, lower fps).
+    Returns None if capabilities are unknown (let ffmpeg auto-detect).
+    """
+    if camera is None:
+        return None
+    caps = [c.lower() for c in camera.capabilities]
+    if "mjpeg" in caps or "mjpg" in caps:
+        return "mjpeg"
+    if "yuyv" in caps or "rawvideo" in caps:
+        return "yuyv"
+    return None
+
+
 def _build_ffmpeg_command(
     config: EncoderConfig,
     source: str,
     output: str,
+    camera: CameraInfo | None = None,
 ) -> list[str]:
-    """ffmpeg command for generic encoding."""
-    codec_map = {
-        "h264": "libx264",
-        "h265": "libx265",
-        "hevc": "libx265",
-        "mjpeg": "mjpeg",
-    }
-    ffmpeg_codec = codec_map.get(config.codec, "libx264")
+    """ffmpeg command for USB/IP camera encoding.
+
+    Input format selection:
+      - USB cameras: prefer MJPG for 30fps (vs 5-10fps raw YUYV)
+      - IP cameras (RTSP): no V4L2 wrapper needed
+
+    Encoder selection:
+      - Hardware H.264 (v4l2m2m, nvenc, vaapi) if available
+      - Software libx264 ultrafast as fallback
+    """
+    # Select output codec — try hardware first for H.264
+    hw_encoder = None
+    if config.codec in ("h264", "H264"):
+        hw_encoder = _detect_hw_h264_encoder()
+
+    if hw_encoder:
+        ffmpeg_codec = hw_encoder
+        log.info("hw_encoder_selected", encoder=hw_encoder)
+    else:
+        codec_map = {
+            "h264": "libx264",
+            "h265": "libx265",
+            "hevc": "libx265",
+            "mjpeg": "mjpeg",
+        }
+        ffmpeg_codec = codec_map.get(config.codec, "libx264")
 
     cmd = ["ffmpeg", "-y"]
+
     if source.startswith("rtsp://") or source.startswith("http://"):
-        # Network source — no v4l2 wrapper
+        # Network/IP camera source
         cmd.extend(["-i", source])
     else:
-        # V4L2 device — prefer MJPG input format for higher framerate
-        # Most USB cameras support 30fps in MJPG but only 5-10fps in raw YUYV
+        # V4L2 device — select best input format from camera capabilities
+        input_fmt = _select_input_format(camera)
+        cmd.extend(["-f", "v4l2"])
+        if input_fmt:
+            cmd.extend(["-input_format", input_fmt])
         cmd.extend([
-            "-f", "v4l2",
-            "-input_format", "mjpeg",
             "-video_size", f"{config.width}x{config.height}",
             "-framerate", str(config.fps),
             "-i", source,
         ])
+
     cmd.extend([
         "-c:v", ffmpeg_codec,
         "-b:v", f"{config.bitrate_kbps}k",
     ])
+
+    # Encoder-specific tuning
     if ffmpeg_codec == "libx264":
         cmd.extend(["-preset", "ultrafast", "-tune", "zerolatency"])
-    # Specify output format for RTSP/UDP/TCP destinations
+    elif ffmpeg_codec == "h264_v4l2m2m":
+        # Pi V4L2 M2M: no preset/tune flags, but set GOP for low latency
+        cmd.extend(["-g", str(config.fps)])
+
+    # Specify output format for network destinations
     if output.startswith("rtsp://"):
         cmd.extend(["-f", "rtsp"])
     elif output.startswith("udp://") or output.startswith("tcp://"):
         cmd.extend(["-f", "mpegts"])
+
     cmd.append(output)
     return cmd
 
@@ -199,16 +277,28 @@ def _build_gstreamer_command(
     source: str,
     output: str,
 ) -> list[str]:
-    """GStreamer pipeline command."""
+    """GStreamer pipeline command (last-resort fallback)."""
     encoder_element = "x264enc" if config.codec in ("h264", "H264") else "x265enc"
     safe_source = shlex.quote(source)
-    safe_output = shlex.quote(output)
-    pipeline = (
-        f"v4l2src device={safe_source} ! "
-        f"video/x-raw,width={config.width},height={config.height},"
-        f"framerate={config.fps}/1 ! "
-        f"videoconvert ! {encoder_element} bitrate={config.bitrate_kbps} "
-        f"tune=zerolatency ! "
-        f"filesink location={safe_output}"
-    )
+
+    # Build pipeline for RTSP output via rtspclientsink, or file output
+    if output.startswith("rtsp://"):
+        safe_output = shlex.quote(output)
+        pipeline = (
+            f"v4l2src device={safe_source} ! "
+            f"image/jpeg,width={config.width},height={config.height},"
+            f"framerate={config.fps}/1 ! jpegdec ! videoconvert ! "
+            f"{encoder_element} bitrate={config.bitrate_kbps} "
+            f"tune=zerolatency ! h264parse ! "
+            f"rtspclientsink location={safe_output}"
+        )
+    else:
+        safe_output = shlex.quote(output)
+        pipeline = (
+            f"v4l2src device={safe_source} ! "
+            f"image/jpeg,width={config.width},height={config.height},"
+            f"framerate={config.fps}/1 ! jpegdec ! videoconvert ! "
+            f"{encoder_element} bitrate={config.bitrate_kbps} "
+            f"tune=zerolatency ! filesink location={safe_output}"
+        )
     return ["gst-launch-1.0", "-e", *pipeline.split()]
