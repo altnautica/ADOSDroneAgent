@@ -259,8 +259,8 @@ def _build_ffmpeg_command(
     if ffmpeg_codec == "libx264":
         cmd.extend(["-preset", "ultrafast", "-tune", "zerolatency"])
     elif ffmpeg_codec == "h264_v4l2m2m":
-        # Pi V4L2 M2M: no preset/tune flags, but set GOP for low latency
-        cmd.extend(["-g", str(config.fps)])
+        # Pi V4L2 M2M needs yuv420p input — force pixel format conversion
+        cmd.extend(["-pix_fmt", "yuv420p", "-g", str(config.fps)])
 
     # Specify output format for network destinations
     if output.startswith("rtsp://"):
