@@ -35,6 +35,7 @@ VID_TABLE: dict[int, tuple[str, UsbCategory]] = {
     0x2357: ("SiK Radio", UsbCategory.RADIO),
     # GPS
     0x1546: ("u-blox GPS", UsbCategory.GPS),
+    0x1209: ("Open-Source Hardware (pid.codes)", UsbCategory.FC),
 }
 
 # More specific VID:PID pairs override the VID-only lookup.
@@ -53,6 +54,8 @@ VID_PID_TABLE: dict[tuple[int, int], tuple[str, UsbCategory]] = {
     # u-blox specific
     (0x1546, 0x01A8): ("u-blox 8 GPS", UsbCategory.GPS),
     (0x1546, 0x01A7): ("u-blox 7 GPS", UsbCategory.GPS),
+    (0x1209, 0x5741): ("SpeedyBee F405 V4", UsbCategory.FC),
+    (0x0EDE, 0x8093): ("HZ USB Camera", UsbCategory.CAMERA),
 }
 
 

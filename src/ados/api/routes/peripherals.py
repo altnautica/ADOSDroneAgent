@@ -4,6 +4,10 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
+from ados.core.logging import get_logger
+
+log = get_logger("api.peripherals")
+
 router = APIRouter()
 
 
@@ -28,20 +32,17 @@ def _scan_all() -> list[dict]:
         from ados.hal.usb import discover_usb_devices
         for dev in discover_usb_devices():
             peripherals.append({
-                "name": (
-                    getattr(dev, "product", None)
-                    or f"USB {dev.vendor_id:04x}:{dev.product_id:04x}"
-                ),
+                "name": dev.name or f"USB {dev.vid:04x}:{dev.pid:04x}",
                 "type": "usb",
-                "category": _classify_usb(dev.vendor_id, dev.product_id),
-                "bus": f"usb:{getattr(dev, 'bus', '?')}:{getattr(dev, 'address', '?')}",
-                "address": f"{dev.vendor_id:04x}:{dev.product_id:04x}",
+                "category": _classify_usb(dev.vid, dev.pid),
+                "bus": f"usb:{dev.bus}:{dev.device}",
+                "address": f"{dev.vid:04x}:{dev.pid:04x}",
                 "rate_hz": 0,
                 "status": "ok",
                 "last_reading": "",
             })
-    except Exception:
-        pass
+    except Exception as e:
+        log.warning("usb_scan_failed", error=str(e))
 
     # Cameras
     try:
@@ -49,7 +50,7 @@ def _scan_all() -> list[dict]:
         for cam in discover_cameras():
             peripherals.append({
                 "name": getattr(cam, "name", "Camera"),
-                "type": getattr(cam, "interface", "unknown"),
+                "type": cam.type.value,
                 "category": "camera",
                 "bus": getattr(cam, "device_path", ""),
                 "address": getattr(cam, "device_path", ""),
@@ -57,40 +58,40 @@ def _scan_all() -> list[dict]:
                 "status": "ok",
                 "last_reading": "",
             })
-    except Exception:
-        pass
+    except Exception as e:
+        log.warning("camera_scan_failed", error=str(e))
 
     # Cellular modems
     try:
-        from ados.hal.modem import Modem
-        modem = Modem()
-        if modem.detected:
+        from ados.hal.modem import detect_modem
+        modem_info = detect_modem()
+        if modem_info:
             peripherals.append({
-                "name": getattr(modem, "model", "4G Modem"),
+                "name": modem_info.name,
                 "type": "cellular",
                 "category": "compute",
                 "bus": "usb",
-                "address": getattr(modem, "device_path", ""),
+                "address": modem_info.ip_address or "",
                 "rate_hz": 0,
                 "status": "ok",
-                "last_reading": f"Signal: {getattr(modem, 'signal_strength', 'N/A')}",
+                "last_reading": f"Signal: {modem_info.signal_strength}% | {modem_info.operator} | {modem_info.connection_state}",
             })
-    except Exception:
-        pass
+    except Exception as e:
+        log.warning("modem_scan_failed", error=str(e))
 
     return peripherals
 
 
 def _classify_usb(vid: int, pid: int) -> str:
     """Classify USB device by VID:PID."""
-    # RTL8812EU WiFi adapters (WFB-ng compatible)
-    wfb_ids = {(0x0BDA, 0xA81A), (0x0BDA, 0x8812), (0x0BDA, 0x881A)}
-    if (vid, pid) in wfb_ids:
-        return "video"  # WFB video adapter
-
-    # Serial port adapters (FC connection)
-    serial_vids = {0x0403, 0x10C4, 0x1A86, 0x2341}  # FTDI, CP210x, CH340, Arduino
-    if vid in serial_vids:
-        return "sensor"
-
-    return "compute"
+    from ados.hal.usb import categorize_device, UsbCategory
+    _, category = categorize_device(vid, pid, "")
+    category_map = {
+        UsbCategory.FC: "sensor",
+        UsbCategory.CAMERA: "camera",
+        UsbCategory.RADIO: "video",
+        UsbCategory.GPS: "sensor",
+        UsbCategory.LORA: "video",
+        UsbCategory.OTHER: "compute",
+    }
+    return category_map.get(category, "compute")

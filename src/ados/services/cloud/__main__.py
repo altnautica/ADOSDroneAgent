@@ -92,6 +92,50 @@ def _get_services_status() -> list[dict]:
         if pid and pid > 0:
             entry["pid"] = pid
         services.append(entry)
+
+    # Fallback: if ALL services show stopped, try psutil process scanning
+    # (agent may run as direct processes under ados-supervisor, not systemd units)
+    all_stopped = all(s["status"] == "stopped" for s in services)
+    if all_stopped and psutil:
+        MODULE_TO_SERVICE = {
+            "ados.services.mavlink": "ados-mavlink",
+            "ados.services.api": "ados-api",
+            "ados.services.cloud": "ados-cloud",
+            "ados.services.health": "ados-health",
+            "ados.services.video": "ados-video",
+            "ados.services.network": "ados-wfb",
+            "ados.services.scripting": "ados-scripting",
+            "ados.services.ota": "ados-ota",
+            "ados-supervisor": "ados-supervisor",
+        }
+        # Build lookup for quick update
+        svc_lookup = {s["name"]: s for s in services}
+        try:
+            for proc in psutil.process_iter(["pid", "cmdline", "cpu_percent", "memory_info", "create_time"]):
+                try:
+                    cmdline = proc.info.get("cmdline") or []
+                    cmdline_str = " ".join(cmdline)
+                    matched_svc = None
+                    for module_key, svc_name in MODULE_TO_SERVICE.items():
+                        if module_key in cmdline_str:
+                            matched_svc = svc_name
+                            break
+                    if matched_svc and matched_svc in svc_lookup:
+                        entry = svc_lookup[matched_svc]
+                        entry["status"] = "running"
+                        entry["pid"] = proc.info["pid"]
+                        entry["cpuPercent"] = round(proc.info.get("cpu_percent", 0.0), 1)
+                        mem_info = proc.info.get("memory_info")
+                        if mem_info:
+                            entry["memoryMb"] = round(mem_info.rss / (1024 * 1024), 1)
+                        ct = proc.info.get("create_time")
+                        if ct:
+                            entry["uptimeSeconds"] = int(time.time() - ct)
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    continue
+        except Exception:
+            pass
+
     return services
 
 
@@ -230,6 +274,32 @@ async def main() -> None:
 
                     uptime = time.monotonic() - start_time
 
+                    # Check if we received a heartbeat recently (within 10 seconds)
+                    _last_hb = getattr(vehicle_state, "last_heartbeat", "")
+                    _fc_connected = False
+                    _fc_port = ""
+                    _fc_baud = 0
+                    if _last_hb:
+                        try:
+                            from datetime import datetime
+                            hb_time = datetime.fromisoformat(_last_hb)
+                            age = (datetime.now(hb_time.tzinfo) - hb_time).total_seconds()
+                            _fc_connected = age < 10.0
+                        except Exception:
+                            _fc_connected = bool(_last_hb)
+
+                    # Try to read FC port/baud from health file
+                    try:
+                        import json as _json
+                        from pathlib import Path
+                        health_path = Path("/run/ados/health.json")
+                        if health_path.exists():
+                            health_data = _json.loads(health_path.read_text())
+                            _fc_port = health_data.get("fc_port", "")
+                            _fc_baud = health_data.get("fc_baud", 0)
+                    except Exception:
+                        pass
+
                     payload = {
                         "deviceId": config.agent.device_id,
                         "apiKey": pairing.api_key,
@@ -251,12 +321,9 @@ async def main() -> None:
                         "boardRamMb": round(vm.total / (1024 * 1024)),
                         "cpuHistory": list(cpu_history),
                         "memoryHistory": list(memory_history),
-                        "fcConnected": (
-                            getattr(vehicle_state, "armed", False)
-                            or bool(getattr(vehicle_state, "last_heartbeat", ""))
-                        ),
-                        "fcPort": "",
-                        "fcBaud": 0,
+                        "fcConnected": _fc_connected,
+                        "fcPort": _fc_port,
+                        "fcBaud": _fc_baud,
                         "services": _get_services_status(),
                         "lastIp": _get_local_ip(),
                         "mdnsHost": "",
@@ -283,6 +350,114 @@ async def main() -> None:
 
     tasks.append(asyncio.create_task(heartbeat_loop(), name="heartbeat"))
 
+    # ── Cloud Command Helpers ────────────────────────────────────
+
+    def _get_recent_logs(limit: int = 200) -> list[dict]:
+        """Read recent logs from journald."""
+        import subprocess
+        try:
+            result = subprocess.run(
+                ["journalctl", "-u", "ados-supervisor", "--no-pager", "-n", str(limit), "-o", "json"],
+                capture_output=True, text=True, timeout=10,
+            )
+            if result.returncode != 0:
+                return []
+            entries = []
+            for line in result.stdout.strip().splitlines():
+                try:
+                    import json as _json
+                    entry = _json.loads(line)
+                    entries.append({
+                        "timestamp": entry.get("__REALTIME_TIMESTAMP", ""),
+                        "level": entry.get("PRIORITY", "6"),
+                        "message": entry.get("MESSAGE", ""),
+                        "unit": entry.get("_SYSTEMD_UNIT", ""),
+                    })
+                except Exception:
+                    continue
+            return entries
+        except Exception:
+            return []
+
+    def _list_scripts() -> list[dict]:
+        """List script files in /var/ados/scripts/."""
+        from pathlib import Path
+        scripts_dir = Path("/var/ados/scripts")
+        if not scripts_dir.exists():
+            return []
+        scripts = []
+        for f in scripts_dir.glob("*.py"):
+            scripts.append({
+                "id": f.stem,
+                "name": f.name,
+                "path": str(f),
+                "size": f.stat().st_size,
+                "modified": f.stat().st_mtime,
+            })
+        return scripts
+
+    def _list_suites() -> list[dict]:
+        """List suite manifests in /etc/ados/suites/."""
+        from pathlib import Path
+        suites_dir = Path("/etc/ados/suites")
+        if not suites_dir.exists():
+            return []
+        suites = []
+        for f in suites_dir.glob("*.yaml"):
+            suites.append({
+                "id": f.stem,
+                "name": f.stem.replace("-", " ").title(),
+                "path": str(f),
+                "installed": True,
+                "active": False,
+            })
+        return suites
+
+    async def _execute_command(cmd: dict) -> tuple[str, dict | None, dict | None]:
+        """Execute a cloud command and return (status, result, data)."""
+        command = cmd.get("command", "")
+        args = cmd.get("args") or {}
+
+        try:
+            if command in ("get_peripherals", "scan_peripherals"):
+                from ados.api.routes.peripherals import _scan_all
+                data = _scan_all()
+                return "completed", {"success": True, "message": "ok"}, data
+
+            elif command == "get_services":
+                data = _get_services_status()
+                return "completed", {"success": True, "message": "ok"}, data
+
+            elif command == "get_logs":
+                limit = args.get("limit", 200)
+                data = _get_recent_logs(limit)
+                return "completed", {"success": True, "message": "ok"}, data
+
+            elif command == "get_scripts":
+                data = _list_scripts()
+                return "completed", {"success": True, "message": "ok"}, data
+
+            elif command == "get_suites":
+                data = _list_suites()
+                return "completed", {"success": True, "message": "ok"}, data
+
+            elif command == "get_peers":
+                return "completed", {"success": True, "message": "ok"}, []
+
+            elif command == "get_enrollment":
+                return "completed", {"success": True, "message": "ok"}, {"enrolled": False}
+
+            elif command == "restart_service":
+                name = args.get("name", "")
+                # For now, just acknowledge - supervisor handles restarts
+                return "completed", {"success": True, "message": f"Restart requested for {name}"}, None
+
+            else:
+                return "failed", {"success": False, "message": f"Unknown command: {command}"}, None
+
+        except Exception as e:
+            return "failed", {"success": False, "message": str(e)}, None
+
     # ── Cloud Command Polling (when paired) ────────────────────
 
     async def command_poll_loop() -> None:
@@ -303,7 +478,35 @@ async def main() -> None:
                             data = resp.json()
                             commands = data.get("commands", [])
                             for cmd in commands:
-                                log.info("cloud_command_received", command=cmd)
+                                cmd_id = cmd.get("_id")
+                                cmd_name = cmd.get("command", "unknown")
+                                log.info("cloud_command_executing", command=cmd_name, id=cmd_id)
+
+                                status, result, cmd_data = await _execute_command(cmd)
+
+                                # ACK back to Convex
+                                try:
+                                    ack_payload: dict = {
+                                        "commandId": cmd_id,
+                                        "deviceId": config.agent.device_id,
+                                        "apiKey": pairing.api_key,
+                                        "status": status,
+                                    }
+                                    if result:
+                                        ack_payload["result"] = result
+                                    if cmd_data is not None:
+                                        ack_payload["data"] = cmd_data
+
+                                    ack_resp = await client.post(
+                                        f"{convex_url}/agent/commands/ack",
+                                        json=ack_payload,
+                                    )
+                                    if ack_resp.status_code == 200:
+                                        log.info("cloud_command_acked", command=cmd_name, status=status)
+                                    else:
+                                        log.warning("cloud_command_ack_failed", command=cmd_name, http_status=ack_resp.status_code)
+                                except Exception as ack_err:
+                                    log.warning("cloud_command_ack_error", command=cmd_name, error=str(ack_err))
                 except Exception:
                     log.debug("cloud_command_poll_failed")
             await asyncio.sleep(5)
