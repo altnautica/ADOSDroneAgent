@@ -180,7 +180,7 @@ def _build_ffmpeg_command(
     cmd.extend([
         "-c:v", ffmpeg_codec,
         "-b:v", f"{config.bitrate_kbps}k",
-    ]
+    ])
     if ffmpeg_codec == "libx264":
         cmd.extend(["-preset", "ultrafast", "-tune", "zerolatency"])
     cmd.append(output)
