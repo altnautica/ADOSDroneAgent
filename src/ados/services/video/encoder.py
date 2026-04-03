@@ -170,9 +170,11 @@ def _build_ffmpeg_command(
         # Network source — no v4l2 wrapper
         cmd.extend(["-i", source])
     else:
-        # V4L2 device
+        # V4L2 device — prefer MJPG input format for higher framerate
+        # Most USB cameras support 30fps in MJPG but only 5-10fps in raw YUYV
         cmd.extend([
             "-f", "v4l2",
+            "-input_format", "mjpeg",
             "-video_size", f"{config.width}x{config.height}",
             "-framerate", str(config.fps),
             "-i", source,
