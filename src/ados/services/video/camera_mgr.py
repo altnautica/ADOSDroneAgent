@@ -5,7 +5,7 @@ from __future__ import annotations
 from enum import StrEnum
 
 from ados.core.logging import get_logger
-from ados.hal.camera import CameraInfo, CameraType
+from ados.hal.camera import CameraInfo, CameraType, HardwareRole
 
 log = get_logger("video.camera_mgr")
 
@@ -75,12 +75,19 @@ class CameraManager:
     def auto_assign(self) -> None:
         """Automatically assign roles based on camera type heuristics.
 
+        Filters out non-camera hardware (codecs, ISPs, decoders).
         CSI cameras become PRIMARY (first) or SECONDARY (subsequent).
         USB cameras fill remaining roles.
         """
-        csi_cameras = [c for c in self._cameras if c.type == CameraType.CSI]
-        usb_cameras = [c for c in self._cameras if c.type == CameraType.USB]
-        ip_cameras = [c for c in self._cameras if c.type == CameraType.IP]
+        # Filter out internal hardware devices (codecs, ISPs, decoders)
+        real_cameras = [c for c in self._cameras if c.hardware_role == HardwareRole.CAMERA]
+        filtered = len(self._cameras) - len(real_cameras)
+        if filtered > 0:
+            log.info("non_camera_devices_filtered", count=filtered)
+
+        csi_cameras = [c for c in real_cameras if c.type == CameraType.CSI]
+        usb_cameras = [c for c in real_cameras if c.type == CameraType.USB]
+        ip_cameras = [c for c in real_cameras if c.type == CameraType.IP]
 
         all_ordered = csi_cameras + usb_cameras + ip_cameras
 
