@@ -17,7 +17,7 @@ mavlink:
       enabled: true
 
 video:
-  mode: "disabled"
+  mode: "auto"
   cloud_relay_url: ""
 
 network:
