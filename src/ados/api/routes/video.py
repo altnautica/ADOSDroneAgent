@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 
 from ados.api.deps import get_agent_app
 from ados.core.logging import get_logger
@@ -25,8 +25,13 @@ def _get_video_pipeline():
 
 
 @router.get("/video")
-async def get_video_status():
-    """Video pipeline status: cameras, streams, recording, mediamtx."""
+async def get_video_status(request: Request):
+    """Video pipeline status: cameras, streams, recording, mediamtx, WHEP URL."""
+    from ados.core.deps import check_video_dependencies
+
+    deps = check_video_dependencies()
+    deps_dict = {d.name: {"found": d.found, "path": d.path} for d in deps}
+
     pipeline = _get_video_pipeline()
     if pipeline is None:
         return {
@@ -34,8 +39,22 @@ async def get_video_status():
             "cameras": {"cameras": [], "assignments": {}},
             "recorder": {"recording": False, "current_path": "", "recordings_dir": ""},
             "mediamtx": {"running": False},
+            "whep_url": None,
+            "dependencies": deps_dict,
         }
-    return pipeline.get_status()
+
+    status = pipeline.get_status()
+
+    # Construct WHEP URL from mediamtx state
+    if status.get("mediamtx", {}).get("running"):
+        webrtc_port = status["mediamtx"].get("webrtc_port", 8889)
+        host = request.headers.get("host", "localhost").split(":")[0]
+        status["whep_url"] = f"http://{host}:{webrtc_port}/main/whep"
+    else:
+        status["whep_url"] = None
+
+    status["dependencies"] = deps_dict
+    return status
 
 
 @router.post("/video/snapshot")
