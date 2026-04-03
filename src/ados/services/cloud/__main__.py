@@ -198,9 +198,22 @@ async def main() -> None:
     # MQTT telemetry publishing
     tasks.append(asyncio.create_task(mqtt.run(shutdown), name="mqtt-gateway"))
 
-    # State IPC reading
+    # State IPC reading with auto-retry
+    async def state_reader_with_retry() -> None:
+        """Read vehicle state from IPC, auto-reconnect on failure."""
+        while not shutdown.is_set():
+            try:
+                if not state_client.connected:
+                    await state_client.connect(retries=3, delay=2.0)
+                await state_client.read_loop()
+            except Exception as e:
+                log.warning("state_ipc_read_failed", error=str(e))
+            if not shutdown.is_set():
+                log.info("state_ipc_reconnecting")
+                await asyncio.sleep(2)
+
     if state_client.connected:
-        tasks.append(asyncio.create_task(state_client.read_loop(), name="state-reader"))
+        tasks.append(asyncio.create_task(state_reader_with_retry(), name="state-reader"))
 
     # ── Pairing Beacon Loop (when NOT paired) ──────────────────
 
