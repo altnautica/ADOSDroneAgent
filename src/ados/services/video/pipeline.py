@@ -114,7 +114,7 @@ class VideoPipeline:
 
         # Start mediamtx for stream output
         pipe_uri = f"rtsp://localhost:{self._mediamtx.rtsp_port}/main"
-        cmd = build_encoder_command(enc_config, primary.device_path, pipe_uri)
+        cmd = build_encoder_command(enc_config, primary.device_path, pipe_uri, camera=primary)
 
         if not cmd:
             log.error("encoder_command_empty")
