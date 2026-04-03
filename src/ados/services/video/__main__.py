@@ -24,6 +24,10 @@ async def main() -> None:
     log = structlog.get_logger()
     log.info("video_service_starting")
 
+    if config.video.mode == "disabled":
+        log.info("video_service_disabled", msg="video.mode is 'disabled' in config, exiting")
+        return
+
     shutdown = asyncio.Event()
     loop = asyncio.get_event_loop()
     for sig in (signal.SIGTERM, signal.SIGINT):
