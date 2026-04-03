@@ -138,12 +138,17 @@ class MediamtxManager:
         if not self._running or self._process is None:
             return
 
-        self._process.terminate()
-        try:
-            await asyncio.wait_for(self._process.wait(), timeout=5.0)
-        except TimeoutError:
-            self._process.kill()
-            await self._process.wait()
+        if self._process.returncode is None:
+            try:
+                self._process.terminate()
+            except ProcessLookupError:
+                pass
+            else:
+                try:
+                    await asyncio.wait_for(self._process.wait(), timeout=5.0)
+                except TimeoutError:
+                    self._process.kill()
+                    await self._process.wait()
 
         self._running = False
         self._process = None
