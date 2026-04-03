@@ -183,6 +183,11 @@ def _build_ffmpeg_command(
     ])
     if ffmpeg_codec == "libx264":
         cmd.extend(["-preset", "ultrafast", "-tune", "zerolatency"])
+    # Specify output format for RTSP/UDP/TCP destinations
+    if output.startswith("rtsp://"):
+        cmd.extend(["-f", "rtsp"])
+    elif output.startswith("udp://") or output.startswith("tcp://"):
+        cmd.extend(["-f", "mpegts"])
     cmd.append(output)
     return cmd
 
