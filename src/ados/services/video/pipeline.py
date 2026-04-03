@@ -215,14 +215,25 @@ class VideoPipeline:
         self._state = PipelineState.STOPPED
         log.info("pipeline_stopped")
 
-    def _check_health(self) -> bool:
+    async def _check_health(self) -> bool:
         """Check if the encoder subprocess is still running."""
         if self._encoder_process is None:
             return False
         if self._encoder_process.returncode is not None:
+            # Capture stderr for diagnostics
+            stderr_text = ""
+            if self._encoder_process.stderr:
+                try:
+                    data = await asyncio.wait_for(
+                        self._encoder_process.stderr.read(2048), timeout=0.5
+                    )
+                    stderr_text = data.decode(errors="replace").strip()[-500:]
+                except (TimeoutError, asyncio.CancelledError):
+                    pass
             log.warning(
                 "encoder_process_exited",
                 returncode=self._encoder_process.returncode,
+                stderr=stderr_text or "(no output)",
             )
             return False
         return True
@@ -238,7 +249,7 @@ class VideoPipeline:
         try:
             while True:
                 if self._state == PipelineState.RUNNING:
-                    if not self._check_health():
+                    if not await self._check_health():
                         self._restart_count += 1
                         delay = min(
                             self._base_restart_delay * (2 ** (self._restart_count - 1)),
