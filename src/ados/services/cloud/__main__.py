@@ -547,6 +547,32 @@ async def main() -> None:
 
     tasks.append(asyncio.create_task(command_poll_loop(), name="command-poll"))
 
+    # ── MAVLink MQTT Relay (when paired) ──────────────────────
+
+    async def mavlink_relay_task() -> None:
+        """Relay raw MAVLink frames over MQTT for remote GCS access."""
+        while not shutdown.is_set():
+            if not pairing.is_paired:
+                await asyncio.sleep(5)
+                continue
+            try:
+                from ados.services.cloud.mavlink_relay import MavlinkMqttRelay
+
+                relay = MavlinkMqttRelay(
+                    device_id=config.agent.device_id,
+                    broker=config.server.cloud.mqtt_broker,
+                    port=config.server.cloud.mqtt_port,
+                    transport=config.server.mqtt_transport,
+                    username=f"ados-{config.agent.device_id}",
+                    password=pairing.api_key or "",
+                )
+                await relay.start(shutdown)
+            except Exception as exc:
+                log.warning("mavlink_relay_failed", error=str(exc))
+                await asyncio.sleep(5)
+
+    tasks.append(asyncio.create_task(mavlink_relay_task(), name="mavlink-relay"))
+
     log.info("cloud_service_ready", paired=pairing.is_paired)
     await shutdown.wait()
 
