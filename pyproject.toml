@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ados-drone-agent"
-version = "0.3.0"
+version = "0.3.3"
 description = "ADOS Drone Agent — Software-defined drone network agent"
 readme = "README.md"
 license = "GPL-3.0-or-later"
@@ -70,6 +70,7 @@ where = ["src"]
 "ados.hal" = ["boards/*.yaml"]
 "ados.core" = ["defaults.yaml"]
 "ados.tui" = ["*.tcss"]
+
 
 [tool.ruff]
 target-version = "py311"

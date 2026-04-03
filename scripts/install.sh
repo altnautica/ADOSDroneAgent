@@ -409,10 +409,13 @@ install_systemd_service() {
     fi
 
     # Find systemd unit source directory
+    # Check: script-level var (from upgrade clone), repo clone, script-relative
     local systemd_src=""
-    if [ -d "${INSTALL_DIR}/repo/data/systemd" ]; then
+    if [ -n "${SYSTEMD_SRC_DIR:-}" ] && [ -d "${SYSTEMD_SRC_DIR}" ]; then
+        systemd_src="${SYSTEMD_SRC_DIR}"
+    elif [ -d "${INSTALL_DIR}/repo/data/systemd" ]; then
         systemd_src="${INSTALL_DIR}/repo/data/systemd"
-    elif [ -d "$(dirname "$0")/../data/systemd" ]; then
+    elif [ -d "$(dirname "$0" 2>/dev/null)/../data/systemd" ] 2>/dev/null; then
         systemd_src="$(cd "$(dirname "$0")/../data/systemd" && pwd)"
     fi
 
@@ -692,9 +695,24 @@ if is_installed && $DO_UPGRADE && ! $DO_FORCE; then
     local_ver=$(get_installed_version)
     info "Current version: ${local_ver}"
 
-    # Upgrade the pip package
+    # Ensure system deps are present (ffmpeg, v4l2-utils may be missing on older installs)
+    info "Checking system dependencies..."
+    for pkg in ffmpeg v4l2-utils avahi-daemon; do
+        if ! dpkg -s "$pkg" &>/dev/null; then
+            info "Installing missing system dependency: ${pkg}"
+            apt-get install -y -qq "$pkg" 2>/dev/null || true
+        fi
+    done
+
+    # Clone repo to temp dir for pip install + systemd files + install script
+    local tmp_repo
+    tmp_repo="$(mktemp -d)"
+    info "Fetching latest source..."
+    git clone --depth 1 --quiet "${REPO_URL}" "${tmp_repo}/repo"
+
+    # Upgrade pip package from cloned source (ensures version match)
     info "Upgrading pip package..."
-    "${VENV_DIR}/bin/pip" install --upgrade "git+${REPO_URL}" --quiet
+    "${VENV_DIR}/bin/pip" install --upgrade "${tmp_repo}/repo" --quiet
 
     new_ver=$(get_installed_version)
     if [ "$local_ver" = "$new_ver" ]; then
@@ -706,8 +724,14 @@ if is_installed && $DO_UPGRADE && ! $DO_FORCE; then
     # Ensure mediamtx is installed
     install_mediamtx
 
-    # Update service file if needed and restart
+    # Update systemd service files from cloned repo
+    if [ -d "${tmp_repo}/repo/data/systemd" ]; then
+        SYSTEMD_SRC_DIR="${tmp_repo}/repo/data/systemd"
+    fi
     install_systemd_service
+
+    # Clean up temp repo
+    rm -rf "${tmp_repo}"
 
     # Ensure global symlinks point to current venv
     install_global_symlinks
@@ -767,10 +791,23 @@ mkdir -p "${DATA_DIR}/recordings"
 info "Creating Python virtual environment at ${VENV_DIR}..."
 "$PYTHON" -m venv "${VENV_DIR}"
 
+# Clone repo for pip install + data files (needed when piped via curl)
+FRESH_REPO_DIR=""
+if [ ! -d "$(dirname "$0" 2>/dev/null)/../data/systemd" ] 2>/dev/null; then
+    FRESH_REPO_DIR="$(mktemp -d)"
+    info "Cloning repository..."
+    git clone --depth 1 --quiet "${REPO_URL}" "${FRESH_REPO_DIR}/repo"
+    SYSTEMD_SRC_DIR="${FRESH_REPO_DIR}/repo/data/systemd"
+fi
+
 # Install the agent package
 info "Installing ados-drone-agent..."
 "${VENV_DIR}/bin/pip" install --upgrade pip --quiet
-"${VENV_DIR}/bin/pip" install "git+${REPO_URL}" --quiet
+if [ -n "${FRESH_REPO_DIR}" ]; then
+    "${VENV_DIR}/bin/pip" install "${FRESH_REPO_DIR}/repo" --quiet
+else
+    "${VENV_DIR}/bin/pip" install "git+${REPO_URL}" --quiet
+fi
 
 # Generate device identity (idempotent)
 generate_device_id
@@ -785,6 +822,11 @@ fi
 
 # Install systemd service
 install_systemd_service
+
+# Clean up temp repo if we cloned one
+if [ -n "${FRESH_REPO_DIR}" ]; then
+    rm -rf "${FRESH_REPO_DIR}"
+fi
 
 # Install global symlinks (ados, ados-agent → /usr/local/bin/)
 install_global_symlinks
