@@ -245,7 +245,7 @@ install_system_deps() {
 
 # ─── MediaMTX Installation ─────────────────────────────────────────────────
 
-MEDIAMTX_VERSION="1.12.2"
+MEDIAMTX_VERSION="1.17.1"
 
 install_mediamtx() {
     info "Checking mediamtx..."
@@ -258,7 +258,7 @@ install_mediamtx() {
     arch="$(detect_arch)"
     local mtx_arch
     case "$arch" in
-        aarch64) mtx_arch="arm64v8" ;;
+        aarch64) mtx_arch="arm64" ;;
         armhf)   mtx_arch="armv7" ;;
         x86_64)  mtx_arch="amd64" ;;
         *)
