@@ -49,7 +49,9 @@ class VideoPipeline:
         self._encoder_process: asyncio.subprocess.Process | None = None
         self._encoder_type: EncoderType | None = None
         self._cloud_push_process: asyncio.subprocess.Process | None = None
+        self._cloud_stderr_task: asyncio.Task | None = None
         self._restart_count: int = 0
+        self._cloud_restart_count: int = 0
         self._max_restart_delay: float = 300.0  # 5 minutes
         self._base_restart_delay: float = 5.0
 
@@ -141,7 +143,7 @@ class VideoPipeline:
             self._encoder_process = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
             )
             self._state = PipelineState.RUNNING
             log.info(
@@ -155,11 +157,28 @@ class VideoPipeline:
             self._state = PipelineState.ERROR
             return False
 
+    @staticmethod
+    async def _drain_stderr(proc: asyncio.subprocess.Process, label: str) -> None:
+        """Continuously drain subprocess stderr to prevent pipe buffer deadlock."""
+        if proc.stderr is None:
+            return
+        try:
+            while True:
+                line = await proc.stderr.readline()
+                if not line:
+                    break
+                text = line.decode(errors="replace").rstrip()
+                if text:
+                    log.debug("subprocess_stderr", label=label, line=text)
+        except (asyncio.CancelledError, Exception):
+            pass
+
     async def start_cloud_push(self) -> bool:
         """Push local RTSP stream to cloud video relay for remote viewing.
 
         Spawns an ffmpeg process that reads from local mediamtx RTSP
-        and pushes to the cloud relay RTSP endpoint.
+        and pushes to the cloud relay RTSP endpoint. Uses TCP transport
+        and timeouts to detect network failures.
         """
         cloud_url = self._config.cloud_relay_url
         if not cloud_url:
@@ -176,12 +195,19 @@ class VideoPipeline:
         try:
             self._cloud_push_process = await asyncio.create_subprocess_exec(
                 "ffmpeg",
+                "-rtsp_transport", "tcp",
+                "-timeout", "5000000",
                 "-i", local_rtsp,
                 "-c", "copy",
                 "-f", "rtsp",
+                "-rtsp_transport", "tcp",
                 push_url,
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.PIPE,
+            )
+            # Drain stderr in background to prevent pipe buffer deadlock
+            self._cloud_stderr_task = asyncio.create_task(
+                self._drain_stderr(self._cloud_push_process, "cloud_push")
             )
             log.info("cloud_push_started", destination=push_url)
             return True
@@ -191,6 +217,9 @@ class VideoPipeline:
 
     async def stop_cloud_push(self) -> None:
         """Stop the cloud RTSP push."""
+        if self._cloud_stderr_task is not None:
+            self._cloud_stderr_task.cancel()
+            self._cloud_stderr_task = None
         proc = self._cloud_push_process
         if proc is not None and proc.returncode is None:
             proc.terminate()
@@ -227,21 +256,30 @@ class VideoPipeline:
         if self._encoder_process is None:
             return False
         if self._encoder_process.returncode is not None:
-            # Capture stderr for diagnostics (ffmpeg banner is ~2KB, errors at end)
-            stderr_text = ""
-            if self._encoder_process.stderr:
-                try:
-                    data = await asyncio.wait_for(
-                        self._encoder_process.stderr.read(8192), timeout=0.5
-                    )
-                    stderr_text = data.decode(errors="replace").strip()[-1000:]
-                except (TimeoutError, asyncio.CancelledError):
-                    pass
             log.warning(
                 "encoder_process_exited",
                 returncode=self._encoder_process.returncode,
-                stderr=stderr_text or "(no output)",
             )
+            return False
+        return True
+
+    async def _check_cloud_push_health(self) -> bool:
+        """Check if the cloud push subprocess is still running.
+
+        Returns True if healthy or if cloud push is not configured.
+        Returns False only when the process has died unexpectedly.
+        """
+        if self._cloud_push_process is None:
+            return True  # Not configured, nothing to check
+        if self._cloud_push_process.returncode is not None:
+            log.warning(
+                "cloud_push_process_exited",
+                returncode=self._cloud_push_process.returncode,
+            )
+            self._cloud_push_process = None
+            if self._cloud_stderr_task is not None:
+                self._cloud_stderr_task.cancel()
+                self._cloud_stderr_task = None
             return False
         return True
 
@@ -284,6 +322,32 @@ class VideoPipeline:
                         success = await self.start_stream()
                         if success:
                             self._restart_count = 0
+                    elif not await self._check_cloud_push_health():
+                        # Encoder is fine but cloud push died — restart only cloud push
+                        self._cloud_restart_count += 1
+                        delay = min(
+                            self._base_restart_delay * (2 ** (self._cloud_restart_count - 1)),
+                            self._max_restart_delay,
+                        )
+                        if self._cloud_restart_count >= 10:
+                            log.error(
+                                "cloud_push_circuit_breaker",
+                                msg="too many cloud push failures, waiting 5 minutes",
+                                attempts=self._cloud_restart_count,
+                            )
+                            await asyncio.sleep(self._max_restart_delay)
+                            self._cloud_restart_count = 0
+                        else:
+                            log.warning(
+                                "cloud_push_restarting",
+                                attempt=self._cloud_restart_count,
+                                backoff_secs=delay,
+                            )
+                            await self.stop_cloud_push()
+                            await asyncio.sleep(max(0, delay - _HEALTH_CHECK_INTERVAL))
+                            success = await self.start_cloud_push()
+                            if success:
+                                self._cloud_restart_count = 0
 
                 await asyncio.sleep(_HEALTH_CHECK_INTERVAL)
         finally:
