@@ -44,19 +44,21 @@ def _scan_all() -> list[dict]:
     except Exception as e:
         log.warning("usb_scan_failed", error=str(e))
 
-    # Cameras
+    # Cameras and video hardware
     try:
-        from ados.hal.camera import discover_cameras
+        from ados.hal.camera import discover_cameras, HardwareRole
         for cam in discover_cameras():
+            role = getattr(cam, "hardware_role", HardwareRole.CAMERA)
+            category = role.value  # "camera", "codec", "isp", or "decoder"
             peripherals.append({
-                "name": getattr(cam, "name", "Camera"),
+                "name": cam.name,
                 "type": cam.type.value,
-                "category": "camera",
-                "bus": getattr(cam, "device_path", ""),
-                "address": getattr(cam, "device_path", ""),
+                "category": category,
+                "bus": cam.device_path,
+                "address": cam.device_path,
                 "rate_hz": 0,
                 "status": "ok",
-                "last_reading": "",
+                "last_reading": ", ".join(cam.capabilities) if cam.capabilities else "",
             })
     except Exception as e:
         log.warning("camera_scan_failed", error=str(e))

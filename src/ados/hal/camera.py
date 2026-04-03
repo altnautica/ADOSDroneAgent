@@ -19,9 +19,16 @@ class CameraType(StrEnum):
     IP = "ip"
 
 
+class HardwareRole(StrEnum):
+    CAMERA = "camera"
+    CODEC = "codec"
+    ISP = "isp"
+    DECODER = "decoder"
+
+
 @dataclass
 class CameraInfo:
-    """Represents a discovered camera device."""
+    """Represents a discovered camera or video hardware device."""
 
     name: str
     type: CameraType
@@ -29,6 +36,7 @@ class CameraInfo:
     width: int = 0
     height: int = 0
     capabilities: list[str] = field(default_factory=list)
+    hardware_role: HardwareRole = HardwareRole.CAMERA
 
     def to_dict(self) -> dict:
         return {
@@ -38,6 +46,7 @@ class CameraInfo:
             "width": self.width,
             "height": self.height,
             "capabilities": self.capabilities,
+            "hardware_role": self.hardware_role.value,
         }
 
 
@@ -105,11 +114,21 @@ def _discover_usb_cameras() -> list[CameraInfo]:
                 # Device name line (strip trailing colon and bus info)
                 current_name = stripped.rstrip(":").split("(")[0].strip()
             elif stripped.startswith("/dev/video"):
+                # Classify Pi internal hardware vs actual cameras
+                name_lower = (current_name or "").lower()
+                role = HardwareRole.CAMERA
+                if "codec" in name_lower:
+                    role = HardwareRole.CODEC
+                elif "isp" in name_lower:
+                    role = HardwareRole.ISP
+                elif "hevc" in name_lower or "rpivid" in name_lower:
+                    role = HardwareRole.DECODER
                 cameras.append(CameraInfo(
                     name=current_name or "USB Camera",
                     type=CameraType.USB,
                     device_path=stripped,
-                    capabilities=["mjpeg", "yuyv"],
+                    capabilities=["mjpeg", "yuyv"] if role == HardwareRole.CAMERA else ["h264"] if role == HardwareRole.CODEC else [],
+                    hardware_role=role,
                 ))
 
         if cameras:
