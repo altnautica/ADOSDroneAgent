@@ -20,4 +20,4 @@ These documents are for hardware OEM partners building companion computer produc
 
 ## Questions?
 
-Contact: ajay@altnautica.com
+Contact: team@altnautica.com

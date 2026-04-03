@@ -10,7 +10,7 @@ readme = "README.md"
 license = "GPL-3.0-or-later"
 requires-python = ">=3.11"
 authors = [
-    { name = "Altnautica", email = "engineering@altnautica.com" }
+    { name = "Altnautica", email = "team@altnautica.com" }
 ]
 keywords = ["drone", "mavlink", "ardupilot", "companion-computer", "fleet-management"]
 classifiers = [
