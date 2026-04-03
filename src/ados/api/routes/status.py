@@ -24,6 +24,9 @@ async def get_status():
 
     health_info = app.health.last.to_dict()
 
+    from ados.core.deps import check_video_dependencies
+    deps = check_video_dependencies()
+
     return {
         "version": __version__,
         "uptime_seconds": app.uptime_seconds,
@@ -32,6 +35,7 @@ async def get_status():
         "fc_connected": app._fc_connection.connected if app._fc_connection else False,
         "fc_port": app._fc_connection.port if app._fc_connection else None,
         "fc_baud": app._fc_connection.baud if app._fc_connection else None,
+        "dependencies": {d.name: d.found for d in deps},
     }
 
 
