@@ -84,6 +84,13 @@ class VideoPipeline:
             log.warning("pipeline_already_running")
             return True
 
+        # Clean up any leftover processes from a previous run
+        if self._encoder_process is not None and self._encoder_process.returncode is None:
+            log.info("killing_stale_encoder", pid=self._encoder_process.pid)
+            self._encoder_process.kill()
+            await self._encoder_process.wait()
+            self._encoder_process = None
+
         self._state = PipelineState.STARTING
 
         # Discover cameras
@@ -271,9 +278,9 @@ class VideoPipeline:
                             attempt=self._restart_count,
                             backoff_secs=delay,
                         )
-                        self._state = PipelineState.STOPPED
-                        self._encoder_process = None
-                        await asyncio.sleep(delay - _HEALTH_CHECK_INTERVAL)
+                        # Stop everything cleanly before restarting
+                        await self.stop_stream()
+                        await asyncio.sleep(max(0, delay - _HEALTH_CHECK_INTERVAL))
                         success = await self.start_stream()
                         if success:
                             self._restart_count = 0
