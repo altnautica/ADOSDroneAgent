@@ -244,10 +244,15 @@ class Supervisor:
 
     async def _detect_and_start_hardware(self) -> None:
         """Detect connected hardware and start appropriate services."""
-        # Check for cameras
+        # Check video config before starting video service
+        video_mode = getattr(self.config, "video", None)
+        video_enabled = video_mode and getattr(video_mode, "mode", "disabled") != "disabled"
+
         has_camera = Path("/dev/video0").exists() or self._check_csi_camera()
-        if has_camera and "ados-video" in self._services:
+        if has_camera and video_enabled and "ados-video" in self._services:
             await self.start_service("ados-video")
+        elif not video_enabled:
+            log.info("video_service_skipped", reason="video.mode is disabled in config")
 
         # Check for WFB-ng adapter
         has_wfb = self._check_wfb_adapter()

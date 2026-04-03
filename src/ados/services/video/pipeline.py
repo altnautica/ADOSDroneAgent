@@ -13,7 +13,7 @@ from ados.services.video.encoder import (
     EncoderConfig,
     EncoderType,
     build_encoder_command,
-    detect_available_encoder,
+    detect_encoder_for_camera,
 )
 from ados.services.video.mediamtx import MediamtxManager
 from ados.services.video.recorder import VideoRecorder
@@ -49,6 +49,9 @@ class VideoPipeline:
         self._encoder_process: asyncio.subprocess.Process | None = None
         self._encoder_type: EncoderType | None = None
         self._cloud_push_process: asyncio.subprocess.Process | None = None
+        self._restart_count: int = 0
+        self._max_restart_delay: float = 300.0  # 5 minutes
+        self._base_restart_delay: float = 5.0
 
     @property
     def state(self) -> PipelineState:
@@ -93,7 +96,7 @@ class VideoPipeline:
             return False
 
         # Detect encoder
-        self._encoder_type = detect_available_encoder()
+        self._encoder_type = detect_encoder_for_camera(primary)
         if self._encoder_type is None:
             log.error("no_encoder_available")
             self._state = PipelineState.ERROR
@@ -122,7 +125,9 @@ class VideoPipeline:
         self._mediamtx.generate_config({"main": "publisher"})
         mtx_ok = await self._mediamtx.start()
         if not mtx_ok:
-            log.warning("mediamtx_start_failed", msg="streaming without mediamtx")
+            log.error("mediamtx_start_failed", msg="cannot stream without mediamtx — install mediamtx")
+            self._state = PipelineState.ERROR
+            return False
 
         # Start encoder subprocess
         try:
@@ -234,10 +239,33 @@ class VideoPipeline:
             while True:
                 if self._state == PipelineState.RUNNING:
                     if not self._check_health():
-                        log.warning("pipeline_health_check_failed", msg="restarting")
+                        self._restart_count += 1
+                        delay = min(
+                            self._base_restart_delay * (2 ** (self._restart_count - 1)),
+                            self._max_restart_delay,
+                        )
+                        if self._restart_count >= 10:
+                            log.error(
+                                "pipeline_circuit_breaker",
+                                msg="too many failures, waiting 5 minutes",
+                                attempts=self._restart_count,
+                            )
+                            self._state = PipelineState.ERROR
+                            await asyncio.sleep(self._max_restart_delay)
+                            self._restart_count = 0
+                            continue
+                        log.warning(
+                            "pipeline_health_check_failed",
+                            msg="restarting",
+                            attempt=self._restart_count,
+                            backoff_secs=delay,
+                        )
                         self._state = PipelineState.STOPPED
                         self._encoder_process = None
-                        await self.start_stream()
+                        await asyncio.sleep(delay - _HEALTH_CHECK_INTERVAL)
+                        success = await self.start_stream()
+                        if success:
+                            self._restart_count = 0
 
                 await asyncio.sleep(_HEALTH_CHECK_INTERVAL)
         finally:
