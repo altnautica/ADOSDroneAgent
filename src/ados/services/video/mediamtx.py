@@ -76,10 +76,11 @@ class MediamtxManager:
         }
 
         for name, source in streams.items():
-            config["paths"][name] = {
-                "source": source,
-                "sourceOnDemand": True,
-            }
+            path_config: dict = {"source": source}
+            # sourceOnDemand is only valid for non-publisher sources
+            if source != "publisher":
+                path_config["sourceOnDemand"] = True
+            config["paths"][name] = path_config
 
         # Write config to a temp file
         config_dir = Path(tempfile.gettempdir()) / "ados"
