@@ -355,6 +355,15 @@ async def main() -> None:
                         8889 if _video_svc and _video_svc["status"] == "running" else 0
                     )
 
+                    # MAVLink WebSocket proxy port for GCS direct connection
+                    _mavlink_svc = next(
+                        (s for s in payload["services"] if s["name"] == "ados-mavlink"),
+                        None,
+                    )
+                    payload["mavlinkWsPort"] = (
+                        8765 if _mavlink_svc and _mavlink_svc["status"] == "running" else 0
+                    )
+
                     # Remove null temperature (Convex v.float64() rejects null)
                     if payload["temperature"] is None:
                         del payload["temperature"]
