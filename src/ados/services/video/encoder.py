@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 
 from ados.core.logging import get_logger
+from ados.hal.camera import CameraInfo, CameraType
 
 log = get_logger("video.encoder")
 
@@ -46,6 +47,30 @@ def detect_available_encoder() -> EncoderType | None:
         log.info("encoder_detected", encoder="gstreamer")
         return EncoderType.GSTREAMER
     log.warning("no_encoder_found")
+    return None
+
+
+def detect_encoder_for_camera(camera: CameraInfo) -> EncoderType | None:
+    """Pick the right encoder based on camera type.
+
+    CSI cameras use rpicam-vid (native Pi encoder), falling back to ffmpeg.
+    USB and IP cameras use ffmpeg, falling back to GStreamer.
+    """
+    if camera.type == CameraType.CSI:
+        if shutil.which("rpicam-vid"):
+            log.info("encoder_selected", encoder="rpicam-vid", reason="csi_camera")
+            return EncoderType.RPICAM_VID
+        if shutil.which("ffmpeg"):
+            log.info("encoder_selected", encoder="ffmpeg", reason="csi_fallback")
+            return EncoderType.FFMPEG
+    elif camera.type in (CameraType.USB, CameraType.IP):
+        if shutil.which("ffmpeg"):
+            log.info("encoder_selected", encoder="ffmpeg", reason=f"{camera.type.value}_camera")
+            return EncoderType.FFMPEG
+        if shutil.which("gst-launch-1.0"):
+            log.info("encoder_selected", encoder="gstreamer", reason=f"{camera.type.value}_fallback")
+            return EncoderType.GSTREAMER
+    log.warning("no_encoder_for_camera", camera_type=camera.type.value)
     return None
 
 
@@ -116,7 +141,12 @@ def _build_rpicam_command(
         "--nopreview",
     ]
     if source and source != "-":
-        cmd.extend(["--camera", source])
+        # rpicam-vid expects camera index (0, 1, ...) not device path
+        if source.startswith("/dev/video"):
+            cam_idx = source.replace("/dev/video", "")
+        else:
+            cam_idx = source
+        cmd.extend(["--camera", cam_idx])
     cmd.extend(["-o", output])
     return cmd
 
@@ -135,13 +165,19 @@ def _build_ffmpeg_command(
     }
     ffmpeg_codec = codec_map.get(config.codec, "libx264")
 
-    cmd = [
-        "ffmpeg",
-        "-y",
-        "-f", "v4l2",
-        "-video_size", f"{config.width}x{config.height}",
-        "-framerate", str(config.fps),
-        "-i", source,
+    cmd = ["ffmpeg", "-y"]
+    if source.startswith("rtsp://") or source.startswith("http://"):
+        # Network source — no v4l2 wrapper
+        cmd.extend(["-i", source])
+    else:
+        # V4L2 device
+        cmd.extend([
+            "-f", "v4l2",
+            "-video_size", f"{config.width}x{config.height}",
+            "-framerate", str(config.fps),
+            "-i", source,
+        ])
+    cmd.extend([
         "-c:v", ffmpeg_codec,
         "-b:v", f"{config.bitrate_kbps}k",
     ]
