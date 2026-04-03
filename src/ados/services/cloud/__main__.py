@@ -28,6 +28,9 @@ from ados.core.ipc import StateIPCClient
 from ados.core.logging import configure_logging
 
 
+_proc_cache: dict[int, object] = {}  # PID → psutil.Process cache for CPU baseline
+
+
 def _get_services_status() -> list[dict]:
     """Query systemd for all ados-* service states + per-PID metrics."""
     import subprocess
@@ -73,7 +76,12 @@ def _get_services_status() -> list[dict]:
                 )
                 pid = int(pid_result.stdout.strip())
                 if pid > 0:
-                    proc = psutil.Process(pid)
+                    # Reuse cached Process objects so cpu_percent() has a baseline
+                    proc = _proc_cache.get(pid)
+                    if proc is None:
+                        proc = psutil.Process(pid)
+                        _proc_cache[pid] = proc
+                        proc.cpu_percent(interval=0)  # Prime the baseline
                     cpu = proc.cpu_percent(interval=0)
                     mem = proc.memory_info().rss / (1024 * 1024)
                     uptime_secs = int(time.time() - proc.create_time())
@@ -92,6 +100,12 @@ def _get_services_status() -> list[dict]:
         if pid and pid > 0:
             entry["pid"] = pid
         services.append(entry)
+
+    # Clean stale PIDs from cache
+    active_pids = {s.get("pid") for s in services if s.get("pid")}
+    stale = [p for p in _proc_cache if p not in active_pids]
+    for p in stale:
+        _proc_cache.pop(p, None)
 
     # Fallback: if ALL services show stopped, try psutil process scanning
     # (agent may run as direct processes under ados-supervisor, not systemd units)
