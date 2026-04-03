@@ -220,14 +220,14 @@ class VideoPipeline:
         if self._encoder_process is None:
             return False
         if self._encoder_process.returncode is not None:
-            # Capture stderr for diagnostics
+            # Capture stderr for diagnostics (ffmpeg banner is ~2KB, errors at end)
             stderr_text = ""
             if self._encoder_process.stderr:
                 try:
                     data = await asyncio.wait_for(
-                        self._encoder_process.stderr.read(2048), timeout=0.5
+                        self._encoder_process.stderr.read(8192), timeout=0.5
                     )
-                    stderr_text = data.decode(errors="replace").strip()[-500:]
+                    stderr_text = data.decode(errors="replace").strip()[-1000:]
                 except (TimeoutError, asyncio.CancelledError):
                     pass
             log.warning(
