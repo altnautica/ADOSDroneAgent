@@ -705,7 +705,6 @@ if is_installed && $DO_UPGRADE && ! $DO_FORCE; then
     done
 
     # Clone repo to temp dir for pip install + systemd files + install script
-    local tmp_repo
     tmp_repo="$(mktemp -d)"
     info "Fetching latest source..."
     git clone --depth 1 --quiet "${REPO_URL}" "${tmp_repo}/repo"
