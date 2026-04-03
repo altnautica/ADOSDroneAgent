@@ -47,10 +47,11 @@ def _scan_all() -> list[dict]:
     # Cameras and video hardware
     try:
         from ados.hal.camera import discover_cameras, HardwareRole
+        raw_cameras = []
         for cam in discover_cameras():
             role = getattr(cam, "hardware_role", HardwareRole.CAMERA)
-            category = role.value  # "camera", "codec", "isp", or "decoder"
-            peripherals.append({
+            category = role.value
+            raw_cameras.append({
                 "name": cam.name,
                 "type": cam.type.value,
                 "category": category,
@@ -59,6 +60,17 @@ def _scan_all() -> list[dict]:
                 "rate_hz": 0,
                 "status": "ok",
                 "last_reading": ", ".join(cam.capabilities) if cam.capabilities else "",
+            })
+        # Group by name to deduplicate (e.g., bcm2835-codec-decode x5 → 1 entry)
+        grouped: dict[str, list[dict]] = {}
+        for entry in raw_cameras:
+            grouped.setdefault(entry["name"], []).append(entry)
+        for name, entries in grouped.items():
+            first = entries[0]
+            peripherals.append({
+                **first,
+                "endpoints": [e["address"] for e in entries],
+                "endpoint_count": len(entries),
             })
     except Exception as e:
         log.warning("camera_scan_failed", error=str(e))
