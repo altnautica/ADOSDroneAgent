@@ -236,9 +236,51 @@ install_system_deps() {
         git \
         curl \
         avahi-daemon \
+        ffmpeg \
+        v4l2-utils \
         2>/dev/null
 
     info "System dependencies installed."
+}
+
+# ─── MediaMTX Installation ─────────────────────────────────────────────────
+
+MEDIAMTX_VERSION="1.12.2"
+
+install_mediamtx() {
+    info "Checking mediamtx..."
+    if command -v mediamtx &>/dev/null; then
+        info "mediamtx already installed: $(which mediamtx)"
+        return 0
+    fi
+
+    local arch
+    arch="$(detect_arch)"
+    local mtx_arch
+    case "$arch" in
+        aarch64) mtx_arch="arm64v8" ;;
+        armhf)   mtx_arch="armv7" ;;
+        x86_64)  mtx_arch="amd64" ;;
+        *)
+            warn "Unsupported architecture for mediamtx: $arch"
+            return 1
+            ;;
+    esac
+
+    local url="https://github.com/bluenviron/mediamtx/releases/download/v${MEDIAMTX_VERSION}/mediamtx_v${MEDIAMTX_VERSION}_linux_${mtx_arch}.tar.gz"
+    local tmp_dir
+    tmp_dir="$(mktemp -d)"
+
+    info "Downloading mediamtx v${MEDIAMTX_VERSION} for ${mtx_arch}..."
+    if curl -fSL "$url" -o "$tmp_dir/mediamtx.tar.gz"; then
+        tar -xzf "$tmp_dir/mediamtx.tar.gz" -C "$tmp_dir"
+        install -m 755 "$tmp_dir/mediamtx" /usr/local/bin/mediamtx
+        info "mediamtx installed to /usr/local/bin/mediamtx"
+    else
+        warn "Failed to download mediamtx — video streaming will not work"
+    fi
+
+    rm -rf "$tmp_dir"
 }
 
 # ─── Generate Device Identity ────────────────────────────────────────────────
@@ -661,6 +703,9 @@ if is_installed && $DO_UPGRADE && ! $DO_FORCE; then
         info "Upgraded: ${local_ver} -> ${new_ver}"
     fi
 
+    # Ensure mediamtx is installed
+    install_mediamtx
+
     # Update service file if needed and restart
     install_systemd_service
 
@@ -706,6 +751,9 @@ info "Python: ${PYTHON} ($(${PYTHON} --version 2>&1 | awk '{print $2}'))"
 
 # Install system dependencies
 install_system_deps
+
+# Install mediamtx for video streaming
+install_mediamtx
 
 # Create directory structure
 info "Creating directories..."
