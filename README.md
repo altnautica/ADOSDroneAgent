@@ -12,6 +12,7 @@ ADOS Drone Agent is the onboard intelligence layer for software-defined drones. 
   <strong><a href="https://github.com/altnautica/ADOSMissionControl">ADOS Mission Control</a></strong> |
   <strong><a href="https://altnautica.com">Website</a></strong> |
   <strong><a href="https://discord.gg/uxbvuD4d5q">Discord</a></strong> |
+  <strong><a href="mailto:team@altnautica.com">Email</a></strong> |
   <strong><a href="https://github.com/altnautica/ADOSDroneAgent/issues">Issues</a></strong>
 </p>
 
@@ -286,6 +287,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for code style and PR guidelines.
 ## Community
 
 - **[Discord](https://discord.gg/uxbvuD4d5q)** — Ask questions, share builds
+- **[Email](mailto:team@altnautica.com)** — team@altnautica.com
 - **[Issues](https://github.com/altnautica/ADOSDroneAgent/issues)** — Bug reports and discussions
 - **[Website](https://altnautica.com)** — Company and product info
 
