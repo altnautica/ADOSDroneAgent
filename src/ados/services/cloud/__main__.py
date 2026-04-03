@@ -343,6 +343,18 @@ async def main() -> None:
                         "agentVersion": __version__,
                     }
 
+                    # Video pipeline status for GCS auto-discovery
+                    _video_svc = next(
+                        (s for s in payload["services"] if s["name"] == "ados-video"),
+                        None,
+                    )
+                    payload["videoState"] = (
+                        _video_svc["status"] if _video_svc else "stopped"
+                    )
+                    payload["videoWhepPort"] = (
+                        8889 if _video_svc and _video_svc["status"] == "running" else 0
+                    )
+
                     # Remove null temperature (Convex v.float64() rejects null)
                     if payload["temperature"] is None:
                         del payload["temperature"]
