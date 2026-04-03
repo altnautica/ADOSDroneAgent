@@ -97,11 +97,16 @@ class MediamtxManager:
         """Start the mediamtx process.
 
         Returns True if started successfully, False if binary not found or
-        already running.
+        already running. Waits briefly for ports to bind.
         """
-        if self._running:
-            log.warning("mediamtx_already_running")
-            return True
+        # Check if previously started process is actually still alive
+        if self._running and self._process is not None:
+            if self._process.returncode is not None:
+                log.info("mediamtx_process_died", returncode=self._process.returncode)
+                self._running = False
+                self._process = None
+            else:
+                return True  # Already running and alive
 
         binary = shutil.which("mediamtx")
         if not binary:
@@ -120,6 +125,8 @@ class MediamtxManager:
             )
             self._running = True
             log.info("mediamtx_started", pid=self._process.pid)
+            # Wait for mediamtx to bind its ports before returning
+            await asyncio.sleep(1.0)
             return True
         except Exception as exc:
             log.error("mediamtx_start_failed", error=str(exc))
