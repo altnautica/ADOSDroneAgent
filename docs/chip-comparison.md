@@ -12,7 +12,7 @@
 | RK3506G2 | Cortex-A7 | 3 | 1.5 GHz | 256MB (PoP) | None | None (decode only) | H.264 | ~$3-4 | ~₹1,350 (Luckfox Lyra) | Not Recommended |
 | RK3566 | Cortex-A55 | 4 | 1.8 GHz | 1-8GB | 0.8 TOPS | H.264 1080p60 | H.264/H.265 4K | ~$8-12 | $36 (Radxa CM3) | **RECOMMENDED** |
 | RV1126B | Cortex-A7 | 4 | 1.5 GHz | 256MB-1GB | 2.0 TOPS | H.265 4K30 | H.264/H.265 | ~$8-10 | Not available in India | Strong |
-| RK3576 | A72+A53 | 4+4 | 2.2+1.8 GHz | 2-16GB | 6 TOPS | H.265 4K60 | 8K | ~$15-20 | TBD | Future |
+| RK3576 | A72+A53 | 4+4 | 2.2+1.8 GHz | 2-16GB | 6 TOPS | H.265 4K60 | 8K | ~$15-20 | $70 (Radxa CM4) | **ACTIVE** (Android RC) |
 | RK3588S2 | A76+A55 | 4+4 | 2.4+1.8 GHz | 4-32GB | 6 TOPS | H.265 8K30 | 8K | ~$35-40 | $72 (Radxa CM4) | Pro Tier |
 
 ---
@@ -181,26 +181,30 @@
 
 ### RK3576
 
-**Viability: FUTURE OPTION**
+**Viability: ACTIVE — Android RC controller target (DEC-090)**
 
-- **Memory:** 2-16GB LPDDR5.
+Rocky confirmed RK3576 running Android with 4GB RAM + 64GB Flash (Session 7, Apr 2). Target SoC for HGLRC Android RC controller product (DEC-090). NOT for companion computer — companion uses RV1126B.
+
+- **Memory:** 2-16GB LPDDR5. HGLRC config: 4GB RAM + 64GB Flash.
 - **Video Encode:** H.265 at 4K@60fps.
 - **Power:** ~3-5W typical.
 - **NPU:** 6 TOPS. Serious inference capability.
+- **Dev Board:** Radxa CM4 (RK3576) — $70 for 4GB/32GB config.
 
 **Pros:**
 - big.LITTLE (4x A72 + 4x A53). Desktop-class performance
 - 6 TOPS NPU. Real AI at the edge
 - H.265 4K60 encode
 - LPDDR5 bandwidth
+- Android 14 support (critical for RC controller use case)
+- Radxa CM4 available as dev board ($70 for 4GB/32GB)
 
 **Cons:**
-- No production boards available yet (as of March 2026)
-- Higher power draw and thermal requirements
-- Overkill for basic companion computer duties
-- Pricing TBD
+- Higher power draw and thermal requirements (acceptable for handheld RC with battery)
+- Overkill for basic companion computer duties (use RV1126B instead)
+- $15-20 chip cost pushes retail RC controller toward $200-400 range
 
-**Recommended Use:** Future "Agent Pro" tier. When edge AI features (real-time object tracking, autonomous inspection, obstacle avoidance) become product requirements, this chip makes sense. Not needed for initial ADOS Drone Agent launch.
+**Recommended Use:** Android RC controller primary target (DEC-090). Runs ADOS Mission Control as native Android GCS app with touchscreen, physical sticks, and video display. Companion computer uses RV1126B instead (lower power, better ISP). Not needed for air-side ADOS Drone Agent.
 
 ---
 
