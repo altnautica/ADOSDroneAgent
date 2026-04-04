@@ -284,6 +284,16 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for code style and PR guidelines.
 
 ---
 
+## Hardware Partners
+
+Building and testing ADOS Drone Agent on real companion computers and flight hardware. Want to get involved? [Email us](mailto:team@altnautica.com).
+
+<!-- Format: | [![Company](logo-url)](website) -->
+
+*Interested in sponsoring or sending test hardware? See our [partnership info](mailto:team@altnautica.com).*
+
+---
+
 ## Community
 
 - **[Discord](https://discord.gg/uxbvuD4d5q)** — Ask questions, share builds
