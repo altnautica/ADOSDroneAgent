@@ -1,0 +1,172 @@
+# RK3576 — Unified companion computer + Android RC platform
+# Reference design: TaiShan Pi 3M (立创·泰山派3M RK3576 开发板V1.4)
+# Decision: DEC-099
+# HGLRC partnership: companion computer (air unit) and Android RC controller
+name: "RK3576 (HGLRC Agent Board)"
+vendor: "HGLRC / Altnautica"
+soc: "RK3576"
+arch: "aarch64"
+model_patterns:
+  - "RK3576"
+  - "rk3576"
+  - "TaiShan Pi 3M"
+  - "HGLRC Agent"
+  - "ADOS Agent Board"
+default_tier: 3
+
+gpio_pins:
+  - 3   # I2C4 SDA
+  - 5   # I2C4 SCL
+  - 8   # UART4 TX (FC MAVLink)
+  - 10  # UART4 RX (FC MAVLink)
+  - 12  # PWM (buzzer)
+  - 16  # GPIO LED green (heartbeat)
+  - 18  # GPIO LED red (error)
+  - 22  # GPIO LED blue (4G connected)
+  - 24  # SPI1 CS0 (LoRa)
+  - 26  # GPIO user button
+uart_paths:
+  - /dev/ttyS4   # UART4 — FC MAVLink (primary)
+  - /dev/ttyS5   # UART5 — GPS passthrough / expansion
+  - /dev/ttyS0   # UART0 — debug console (1500000 baud)
+hw_video_codecs:
+  - h264_enc
+  - h264_dec
+  - h265_enc
+  - h265_dec
+  - vp9_dec
+  - av1_dec
+
+board:
+  id: rk3576
+  manufacturer: HGLRC
+  status: recommended
+  reference_schematic: "TaiShan Pi 3M V1.4 (立创·泰山派3M RK3576 开发板V1.4)"
+
+compute:
+  cores: 8
+  core_type: "4x Cortex-A72 @ 2.2GHz + 4x Cortex-A53 @ 1.8GHz"
+  max_freq_mhz: 2200
+  gpu: "Mali-G52 MC3"
+  npu_tops: 6.0
+  npu_runtime: "rknn-toolkit-lite2"
+  hw_encoder: ["h264", "h265"]
+  hw_decoder: ["h264", "h265", "vp9", "av1"]
+  max_encode_resolution: "3840x2160"
+  max_encode_fps: 60
+  ram_mb: 4096
+  ram_type: LPDDR5
+
+storage:
+  emmc: true
+  emmc_gb: 32
+  sd_card: true
+  nand: false
+
+buses:
+  uart:
+    - id: uart4
+      path: /dev/ttyS4
+      baud: 921600
+      fc_capable: true
+      notes: "FC MAVLink link via JST-GH 4-pin header"
+    - id: uart5
+      path: /dev/ttyS5
+      baud: 115200
+      fc_capable: false
+      notes: "GPS passthrough or expansion"
+    - id: uart0
+      path: /dev/ttyS0
+      baud: 1500000
+      fc_capable: false
+      notes: "Debug console (Rockchip default baud)"
+  usb:
+    - id: usb_host1
+      path: "/dev/bus/usb/001/*"
+      type: usb2
+      notes: "RTL8812EU for WFB-ng video link"
+    - id: usb_host2
+      path: "/dev/bus/usb/002/*"
+      type: usb2
+      notes: "Expansion (camera, sensor, etc.)"
+    - id: usb3_otg
+      path: "/dev/bus/usb/003/*"
+      type: usb3
+      notes: "USB3 OTG for development/flashing"
+  i2c:
+    - id: i2c2
+      path: /dev/i2c-2
+      speed_hz: 400000
+      notes: "RTC (HYM8563S)"
+    - id: i2c4
+      path: /dev/i2c-4
+      speed_hz: 400000
+      notes: "Sensor expansion header (JST-GH 4-pin)"
+  spi:
+    - id: spi1
+      path: /dev/spidev1.0
+      notes: "LoRa radio expansion (SX1262), 10MHz max"
+  can:
+    - id: can0
+      path: /dev/can0
+      notes: "DroneCAN header (DNP in V1, SN65HVD230 transceiver)"
+
+network:
+  wifi: true
+  wifi_chip: "AP6256"
+  wifi_standard: "802.11ac (WiFi 5)"
+  wifi_bands: "2.4GHz + 5GHz"
+  ethernet: false
+  bluetooth: true
+  bluetooth_version: "5.0"
+  cellular: true
+  cellular_slot: "Mini-PCIe"
+  cellular_modems: ["Quectel EC25", "Quectel EC200", "SIMCom SIM7600"]
+
+video:
+  csi_ports: 2
+  csi_lanes: "4-lane each (CSI0 + CSI1)"
+  max_encode_resolution: "3840x2160"
+  max_encode_fps: 60
+  encoder_api: mpp
+  encoder_codec: "h265"
+  isp: "Rockchip ISP (rkisp)"
+  notes: "Triple CSI on SoC (CSI0, CSI1, CSI3), drone board uses 2"
+
+power:
+  typical_watts: 5.0
+  max_watts: 12.0
+  voltage: 5.0
+  pmic: "RK806S-5"
+  notes: "5V from drone BEC, 3A minimum. P-MOSFET reverse polarity + TVS protection."
+
+thermal:
+  cooling: "passive"
+  heatsink: "15x15x5mm aluminum, spring clip"
+  thermal_vias: "4x4 array under SoC"
+  throttle_75c: "CPU 75%"
+  throttle_85c: "CPU 50%, NPU 50%"
+  throttle_95c: "emergency shutdown"
+
+profiles:
+  tier: recommended
+  max_features:
+    - mavlink_proxy
+    - mqtt_gateway
+    - video_pipeline
+    - rest_api
+    - wifi_ap
+    - wfb_ng
+    - captive_portal
+    - config_webapp
+    - npu_vision
+    - scripting
+    - suite_runtime
+    - ota_updater
+    - sensor_manager
+    - modem_manager
+  video_capable: true
+  recommended_resolution: "1920x1080"
+  recommended_codec: "h265"
+  memory_budget_mb: 500
+  notes: "Unified platform for companion computer and Android RC controller. 6T NPU enables real-time object detection. H.265 4K@60 encode saves 50% bandwidth on 4G. Triple CSI for multi-camera. Mini-PCIe for native 4G modem. One chip, two products (DEC-099)."
