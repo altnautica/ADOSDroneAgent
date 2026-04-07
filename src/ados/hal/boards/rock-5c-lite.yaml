@@ -1,0 +1,139 @@
+# Radxa ROCK 5C Lite (RK3582) — Pro tier (NPU intact, no GPU)
+#
+# Binned RK3588S2 with GPU (Mali-G610) and 2x Cortex-A76 fused off.
+# NPU and VPU survive binning intact: 6 TOPS @ INT4 / ~5 TOPS @ INT8.
+# RK3588 model zoo binaries (YOLOv8n, MiDaS, RetinaFace) run unmodified
+# via standard RKNPU2 / rknn-toolkit2 stack.
+#
+# Why no_gpu matters: video pipeline must use VPU H.264/H.265 hardware
+# encode (rkmpp) -> WFB-ng path. No GLES, no Vulkan compositing. HDMI
+# output (when needed for bench debug only) goes through DRM direct,
+# not Mesa/EGL.
+#
+# Audit note (2026-04-07): an earlier procurement research pass falsely
+# claimed "RK3582 has the NPU fused off". That claim is wrong. Sources:
+#   - https://dl.radxa.com/rock5/5c/docs/hw/v1100/radxa_rock5c_product_brief.pdf
+#   - https://www.cnx-software.com/2024/05/18/radxa-rock-5c-lite-sbc-rockchip-rk3588s2-rk3582-soc-wifi-6-raspberry-pi-pcie-ffc-connector/
+#   - https://www.hackster.io/news/radxa-launches-the-rock-5c-5c-lite-single-board-computers-and-adopts-raspberry-pi-s-pcie-pinout-d327c57ed04c
+#   - https://forum.radxa.com/t/announcing-the-rock-5c-power-performance-and-versatility-for-just-30/20429
+
+name: "Radxa ROCK 5C Lite (RK3582)"
+vendor: "Radxa"
+soc: "RK3582"
+arch: "aarch64"
+model_patterns:
+  - "Radxa ROCK 5C Lite"
+  - "Radxa Rock 5C Lite"
+  - "rock-5c-lite"
+  - "rk3582"
+default_tier: 4
+
+gpio_pins:
+  - 3   # SDA
+  - 5   # SCL
+  - 8   # UART TX
+  - 10  # UART RX
+  - 12  # PWM
+uart_paths:
+  - /dev/ttyS0
+  - /dev/ttyS1
+hw_video_codecs:
+  - h264_enc
+  - h264_dec
+  - h265_enc
+  - h265_dec
+  - av1_dec
+  - vp9_dec
+
+board:
+  id: rock-5c-lite
+  manufacturer: Radxa
+  status: supported
+
+compute:
+  cores: 6
+  core_type: "Cortex-A76 x2 + Cortex-A55 x4"
+  max_freq_mhz: 2400
+  gpu: null              # Mali-G610 fused off vs full Rock 5C
+  npu_tops: 6.0          # 6 TOPS @ INT4, ~5 TOPS @ INT8 (intact, NOT fused off)
+  hw_encoder: ["h264", "h265"]
+  hw_decoder: ["h264", "h265", "vp9", "av1"]
+  ram_mb: 16384          # 16 GB LPDDR4x as procured
+  ram_type: LPDDR4X
+
+storage:
+  emmc: true
+  emmc_gb: 0             # Socket present, not always populated. Set per-unit.
+  sd_card: true
+  nand: false
+
+buses:
+  uart:
+    - id: uart0
+      path: /dev/ttyS0
+      baud: 921600
+      fc_capable: true
+    - id: uart1
+      path: /dev/ttyS1
+      baud: 115200
+      fc_capable: false
+  usb:
+    - id: usb0
+      path: "/dev/bus/usb/001/*"
+      type: usb2
+    - id: usb1
+      path: "/dev/bus/usb/002/*"
+      type: usb3
+    - id: usb2
+      path: "/dev/bus/usb/003/*"
+      type: usb2
+    - id: usb3
+      path: "/dev/bus/usb/004/*"
+      type: usb3
+  i2c:
+    - id: i2c0
+      path: /dev/i2c-0
+      speed_hz: 400000
+    - id: i2c1
+      path: /dev/i2c-1
+      speed_hz: 400000
+  spi:
+    - id: spi0
+      path: /dev/spidev0.0
+  pcie:
+    - id: pcie0
+      type: pcie3.0
+      lanes: 1
+
+network:
+  wifi: true             # WiFi 6 onboard
+  ethernet: true         # Gigabit
+  bluetooth: true        # BT 5.4
+
+video:
+  csi_ports: 1           # Only 1x MIPI CSI 22-pin Pi-5-style FPC broken out
+  csi_connector: "22-pin 0.5mm Pi-5-style FPC"
+  max_encode_resolution: "3840x2160"
+  max_encode_fps: 60
+  encoder_api: rkmpp     # Mali-G610 absent, so video uses VPU + DRM, NOT GLES
+
+power:
+  typical_watts: 4.0
+  max_watts: 8.5
+  voltage: 5.0
+  input: "USB-C 5V/3A"
+
+profiles:
+  tier: pro
+  max_features:
+    - mavlink_proxy
+    - mqtt_gateway
+    - video_pipeline
+    - rest_api
+    - vision_engine     # NPU is intact, vision behaviors run real-time
+    - wfb_ng
+    - cloud_relay
+  video_capable: true
+  recommended_resolution: "1920x1080"
+  memory_budget_mb: 4096    # Plenty of RAM headroom on 16GB
+  notes: "ADOS Dev Rig primary companion (DEC-103). Procured 2026-04-05 from Evelta India for 16894 INR. NPU intact at 6 TOPS INT4 (RK3588 model zoo compatible). GPU fused off but irrelevant for headless drone use (no GLES needed; video uses VPU + WFB-ng). Heatsink mandatory (throttles 80C). Same physical PCB as full Rock 5C (1x MIPI CSI broken out, dual MIPI CSI not feasible)."
