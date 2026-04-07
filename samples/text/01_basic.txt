@@ -1,0 +1,10 @@
+# Sample — basic text command routine
+# Each line is a single Tello-style command. Runs top-to-bottom.
+
+arm
+takeoff
+up 100
+forward 200
+ccw 90
+forward 200
+land

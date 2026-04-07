@@ -1,0 +1,28 @@
+# Sample — Lawn-mower survey grid
+# Uses the survey suite pattern generator. Flies a grid over the
+# polygon at 30 m AGL with 15 m line spacing and 75% overlap.
+
+mission:
+  name: survey_demo
+  suite: survey
+
+  pattern:
+    type: survey_grid
+    polygon:
+      - { lat: 12.9716, lon: 77.5946 }
+      - { lat: 12.9720, lon: 77.5946 }
+      - { lat: 12.9720, lon: 77.5952 }
+      - { lat: 12.9716, lon: 77.5952 }
+    altitude: 30
+    line_spacing: 15
+    overlap_front: 0.80
+    overlap_side: 0.75
+    heading: 0
+
+  camera:
+    trigger: distance
+    trigger_distance: 10
+
+  actions:
+    on_start: takeoff
+    on_complete: return_to_launch
