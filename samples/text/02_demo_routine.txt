@@ -1,0 +1,13 @@
+# Sample — short demo routine for live audiences
+# 30-second showcase. Requires open area, props on, battery > 50%.
+
+battery?
+arm
+takeoff
+up 150
+cw 360
+down 50
+forward 100
+back 100
+ccw 180
+land

@@ -1,0 +1,28 @@
+# Sample — Simple 3-waypoint mission
+# Takeoff, hit three waypoints around Bangalore, return to launch.
+
+mission:
+  name: simple_waypoints
+  default_speed: 5.0   # m/s
+  rtl_on_complete: true
+
+  waypoints:
+    - type: takeoff
+      altitude: 10
+
+    - type: waypoint
+      lat: 12.9716
+      lon: 77.5946
+      alt: 10
+
+    - type: waypoint
+      lat: 12.9720
+      lon: 77.5950
+      alt: 15
+
+    - type: waypoint
+      lat: 12.9716
+      lon: 77.5952
+      alt: 10
+
+    - type: return_to_launch
