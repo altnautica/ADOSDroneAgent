@@ -188,15 +188,27 @@ class MavlinkIPCClient:
             raise RuntimeError("Not connected")
         try:
             while self._connected:
-                header = await self._reader.readexactly(HEADER_SIZE)
+                # DEC-106 Bug #17: self._reader can become None during
+                # shutdown race (disconnect() sets it to None while this
+                # loop is between reads). Snapshot locally and guard.
+                reader = self._reader
+                if reader is None:
+                    break
+                header = await reader.readexactly(HEADER_SIZE)
                 (length,) = struct.unpack("!I", header)
                 if length > MAX_FRAME_SIZE:
                     log.warning("mavlink_ipc_oversized_frame", length=length)
                     break
-                data = await self._reader.readexactly(length)
+                reader = self._reader
+                if reader is None:
+                    break
+                data = await reader.readexactly(length)
                 if self._on_data:
                     self._on_data(data)
         except (asyncio.IncompleteReadError, ConnectionResetError, OSError):
+            self._connected = False
+        except AttributeError:
+            # Reader dropped mid-read during shutdown race
             self._connected = False
 
 

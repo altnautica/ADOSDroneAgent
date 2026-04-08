@@ -11,6 +11,7 @@
 set -euo pipefail
 
 REPO_URL="https://github.com/altnautica/ADOSDroneAgent.git"
+BRANCH_NAME=""  # DEC-106: optional feature branch for --branch flag
 INSTALL_DIR="/opt/ados"
 CONFIG_DIR="/etc/ados"
 DATA_DIR="/var/ados"
@@ -152,6 +153,16 @@ while [ $# -gt 0 ]; do
             DO_UPGRADE=true
             shift
             ;;
+        --branch)
+            # DEC-106: install from a feature branch instead of main
+            shift
+            BRANCH_NAME="${1:-}"
+            if [ -z "$BRANCH_NAME" ]; then
+                error "--branch requires a NAME argument"
+                exit 1
+            fi
+            shift
+            ;;
         *)
             warn "Unknown option: $1"
             shift
@@ -219,13 +230,29 @@ find_python() {
 
 install_system_deps() {
     info "Installing system dependencies..."
-    apt-get update -qq
+
+    # DEC-106 Bug #10/#11: hold packages known to break mid-install on Radxa
+    # BSP images before touching apt. u-boot-rk2410 postinst can trigger a
+    # mid-install reboot; aic8800-usb-dkms has a broken 5.0+git build that
+    # fails DKMS compile and leaves apt in a half-configured state. These
+    # holds are idempotent and safe on boards where the packages aren't
+    # present.
+    for pkg in u-boot-rk2410 aic8800-usb-dkms radxa-system-config-aic8800-usb-dkms; do
+        if dpkg -l "$pkg" 2>/dev/null | grep -q "^ii"; then
+            apt-mark hold "$pkg" >/dev/null 2>&1 || true
+        fi
+    done
+
+    apt-get update
 
     # Core: Python venv, pip, dev headers for native extensions
     # libcap-dev: Linux capabilities (for low-level device access)
     # libsystemd-dev: systemd notify protocol
     # libyaml-dev: fast YAML parsing (PyYAML C extension)
-    apt-get install -y -qq \
+    # DEC-106 Bug #1: v4l-utils (NOT v4l2-utils — wrong package name that
+    # broke install on Debian Bookworm). Bug #2: no 2>/dev/null hiding apt
+    # errors — let failures surface to the install log.
+    apt-get install -y \
         python3-venv \
         python3-pip \
         python3-dev \
@@ -237,8 +264,7 @@ install_system_deps() {
         curl \
         avahi-daemon \
         ffmpeg \
-        v4l2-utils \
-        2>/dev/null
+        v4l-utils
 
     info "System dependencies installed."
 }
@@ -389,6 +415,19 @@ pairing:
 
 discovery:
   mdns_enabled: true
+
+# DEC-106 Bug #12/#13: video pipeline defaults. Empty cloud_relay_url means
+# local mediamtx only — configure post-install when a cloud relay is ready.
+video:
+  mode: "auto"
+  cloud_relay_url: ""
+  record: false
+  camera:
+    width: 1280
+    height: 720
+    fps: 30
+    codec: "h264"
+    bitrate_kbps: 4000
 CFGEOF
 
     chmod 644 "$config_file"
@@ -695,9 +734,9 @@ if is_installed && $DO_UPGRADE && ! $DO_FORCE; then
     local_ver=$(get_installed_version)
     info "Current version: ${local_ver}"
 
-    # Ensure system deps are present (ffmpeg, v4l2-utils may be missing on older installs)
+    # Ensure system deps are present (ffmpeg, v4l-utils may be missing on older installs)
     info "Checking system dependencies..."
-    for pkg in ffmpeg v4l2-utils avahi-daemon; do
+    for pkg in ffmpeg v4l-utils avahi-daemon; do
         if ! dpkg -s "$pkg" &>/dev/null; then
             info "Installing missing system dependency: ${pkg}"
             apt-get install -y -qq "$pkg" 2>/dev/null || true
@@ -707,7 +746,13 @@ if is_installed && $DO_UPGRADE && ! $DO_FORCE; then
     # Clone repo to temp dir for pip install + systemd files + install script
     tmp_repo="$(mktemp -d)"
     info "Fetching latest source..."
-    git clone --depth 1 --quiet "${REPO_URL}" "${tmp_repo}/repo"
+    # DEC-106: honor --branch for feature-branch installs
+    if [ -n "$BRANCH_NAME" ]; then
+        info "Using branch: ${BRANCH_NAME}"
+        git clone --depth 1 --quiet --branch "${BRANCH_NAME}" "${REPO_URL}" "${tmp_repo}/repo"
+    else
+        git clone --depth 1 --quiet "${REPO_URL}" "${tmp_repo}/repo"
+    fi
 
     # Upgrade pip package from cloned source (ensures version match)
     info "Upgrading pip package..."
@@ -795,7 +840,13 @@ FRESH_REPO_DIR=""
 if [ ! -d "$(dirname "$0" 2>/dev/null)/../data/systemd" ] 2>/dev/null; then
     FRESH_REPO_DIR="$(mktemp -d)"
     info "Cloning repository..."
-    git clone --depth 1 --quiet "${REPO_URL}" "${FRESH_REPO_DIR}/repo"
+    # DEC-106: honor --branch for feature-branch installs
+    if [ -n "$BRANCH_NAME" ]; then
+        info "Using branch: ${BRANCH_NAME}"
+        git clone --depth 1 --quiet --branch "${BRANCH_NAME}" "${REPO_URL}" "${FRESH_REPO_DIR}/repo"
+    else
+        git clone --depth 1 --quiet "${REPO_URL}" "${FRESH_REPO_DIR}/repo"
+    fi
     SYSTEMD_SRC_DIR="${FRESH_REPO_DIR}/repo/data/systemd"
 fi
 

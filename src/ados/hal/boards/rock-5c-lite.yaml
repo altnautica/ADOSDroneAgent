@@ -22,9 +22,16 @@ vendor: "Radxa"
 soc: "RK3582"
 arch: "aarch64"
 model_patterns:
+  # DEC-106 Bug #7/#20: /proc/device-tree/model on Rock 5C Lite hardware
+  # reports "Radxa ROCK 5C " (no "Lite" suffix) — Radxa uses the same DT
+  # for both Rock 5C and Rock 5C Lite variants. Without the no-suffix
+  # pattern, detect.py's substring match falls back to generic-aarch64.
   - "Radxa ROCK 5C Lite"
   - "Radxa Rock 5C Lite"
+  - "Radxa ROCK 5C"
+  - "Radxa Rock 5C"
   - "rock-5c-lite"
+  - "rock-5c"
   - "rk3582"
 default_tier: 4
 
