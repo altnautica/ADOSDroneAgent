@@ -91,7 +91,22 @@ def _discover_csi_cameras() -> list[CameraInfo]:
 
 
 def _discover_usb_cameras() -> list[CameraInfo]:
-    """Detect USB cameras via v4l2-ctl --list-devices."""
+    """Detect USB cameras via v4l2-ctl --list-devices.
+
+    DEC-106 Bug #16: v4l2-ctl --list-devices exits non-zero when any
+    /dev/videoN node fails to open (e.g. a stale node from a recently
+    unplugged device), but still prints valid cameras to stdout. The old
+    early-return on `returncode != 0` threw away good data. We now parse
+    stdout regardless of exit code.
+
+    DEC-106 Bug #21: UVC cameras create TWO /dev/videoN nodes per physical
+    camera (main capture stream + metadata). The old parser added ALL
+    listed nodes as separate CameraInfo entries, so a single USB camera
+    appeared as two CameraInfo objects — camera_mgr.auto_assign() then
+    picked one as primary and one as secondary, both pointing at the
+    same physical device. Fix: only add the FIRST /dev/videoN in each
+    device-name block (the subsequent nodes are metadata/alternates).
+    """
     cameras: list[CameraInfo] = []
     try:
         result = subprocess.run(
@@ -100,20 +115,26 @@ def _discover_usb_cameras() -> list[CameraInfo]:
             text=True,
             timeout=10,
         )
-        if result.returncode != 0:
-            return cameras
+        # DEC-106 Bug #16: parse stdout regardless of returncode
 
         # Parse blocks: device name on one line, /dev/videoN on next indented lines
         current_name = ""
+        block_consumed = False  # DEC-106 Bug #21: one CameraInfo per device block
         for line in result.stdout.splitlines():
             stripped = line.strip()
             if not stripped:
                 current_name = ""
+                block_consumed = False
                 continue
             if not line.startswith("\t") and not line.startswith("    "):
                 # Device name line (strip trailing colon and bus info)
                 current_name = stripped.rstrip(":").split("(")[0].strip()
+                block_consumed = False
             elif stripped.startswith("/dev/video"):
+                if block_consumed:
+                    # Skip subsequent nodes in the same device block
+                    # (UVC metadata node, alternate formats, etc.)
+                    continue
                 # Classify Pi internal hardware vs actual cameras
                 name_lower = (current_name or "").lower()
                 role = HardwareRole.CAMERA
@@ -130,6 +151,7 @@ def _discover_usb_cameras() -> list[CameraInfo]:
                     capabilities=["mjpeg", "yuyv"] if role == HardwareRole.CAMERA else ["h264"] if role == HardwareRole.CODEC else [],
                     hardware_role=role,
                 ))
+                block_consumed = True
 
         if cameras:
             log.info("usb_cameras_found", count=len(cameras))
