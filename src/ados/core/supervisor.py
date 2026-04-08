@@ -29,6 +29,10 @@ from pathlib import Path
 
 import structlog
 
+# DEC-106 Bug #15: hot-plug handling
+from ados.hal.hotplug import HotplugMonitor
+from ados.hal.usb import UsbCategory, UsbDevice
+
 log = structlog.get_logger()
 
 # Circuit breaker: stop restarting after N failures in M seconds
@@ -82,6 +86,13 @@ class Supervisor:
         self._active_suite: str | None = None
         self._cpu_history: deque[float] = deque(maxlen=60)
         self._memory_history: deque[float] = deque(maxlen=60)
+
+        # DEC-106 Bug #15: hot-plug monitor state
+        self._hotplug_monitor: HotplugMonitor | None = None
+        self._hotplug_task: asyncio.Task | None = None
+        self._hotplug_first_scan_done: bool = False
+        self._hotplug_last_event_time: dict[str, float] = {}
+        self._hotplug_debounce_secs: float = 3.0
 
         # Build service map
         for svc_def in SERVICE_REGISTRY:
@@ -224,6 +235,14 @@ class Supervisor:
 
         log.info("supervisor_ready", services=len(self._services))
 
+        # DEC-106 Bug #15: start hot-plug monitor
+        self._hotplug_monitor = HotplugMonitor()
+        self._hotplug_task = asyncio.create_task(self._run_hotplug_monitor())
+        log.info(
+            "hotplug_monitor_wired",
+            debounce_secs=self._hotplug_debounce_secs,
+        )
+
         # 5. Enter monitor loop
         await self._monitor_loop()
 
@@ -231,6 +250,17 @@ class Supervisor:
         """Graceful shutdown: stop all services in reverse order."""
         self._shutdown.set()
         log.info("supervisor_stopping")
+
+        # DEC-106 Bug #15: cancel hot-plug monitor before stopping services
+        if self._hotplug_monitor:
+            self._hotplug_monitor.stop()
+        if self._hotplug_task:
+            self._hotplug_task.cancel()
+            try:
+                await self._hotplug_task
+            except (asyncio.CancelledError, Exception):
+                pass
+            self._hotplug_task = None
 
         # Stop suite services first, then hardware, then core
         for category in ("suite", "hardware", "ondemand", "core"):
