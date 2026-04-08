@@ -111,8 +111,8 @@ network:
   bluetooth: true        # BT 5.4
 
 video:
-  csi_ports: 1           # Only 1x MIPI CSI 22-pin Pi-5-style FPC broken out
-  csi_connector: "22-pin 0.5mm Pi-5-style FPC"
+  csi_ports: 1           # Only 1x MIPI CSI 31-pin Radxa-proprietary broken out (DEC-104)
+  csi_connector: "31-pin 0.3mm Radxa FPC (Hirose FH35C-31S-0.3SHW(50)), 4-lane"
   max_encode_resolution: "3840x2160"
   max_encode_fps: 60
   encoder_api: rkmpp     # Mali-G610 absent, so video uses VPU + DRM, NOT GLES
