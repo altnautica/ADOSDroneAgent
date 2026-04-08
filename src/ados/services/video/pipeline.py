@@ -50,6 +50,8 @@ class VideoPipeline:
         self._encoder_type: EncoderType | None = None
         self._cloud_push_process: asyncio.subprocess.Process | None = None
         self._cloud_stderr_task: asyncio.Task | None = None
+        # DEC-106 Bug #4: encoder stderr was DEVNULL, hiding all ffmpeg errors
+        self._encoder_stderr_task: asyncio.Task | None = None
         self._restart_count: int = 0
         self._cloud_restart_count: int = 0
         self._max_restart_delay: float = 300.0  # 5 minutes
@@ -139,11 +141,17 @@ class VideoPipeline:
             return False
 
         # Start encoder subprocess
+        # DEC-106 Bug #4: stderr was DEVNULL, hiding all ffmpeg errors on
+        # crash. Pipe it and drain in the background so errors surface in
+        # the structured log.
         try:
             self._encoder_process = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            self._encoder_stderr_task = asyncio.create_task(
+                self._drain_stderr(self._encoder_process, "encoder")
             )
             self._state = PipelineState.RUNNING
             log.info(
@@ -234,13 +242,38 @@ class VideoPipeline:
         """Stop the encoding pipeline and mediamtx."""
         await self.stop_cloud_push()
 
-        if self._encoder_process is not None:
-            self._encoder_process.terminate()
-            try:
-                await asyncio.wait_for(self._encoder_process.wait(), timeout=5.0)
-            except TimeoutError:
-                self._encoder_process.kill()
-                await self._encoder_process.wait()
+        # DEC-106 Bug #5: the encoder subprocess could already be dead by
+        # the time stop_stream() runs (e.g. ffmpeg crashed 5s after start
+        # due to h264_v4l2m2m device-not-found). Calling .terminate() /
+        # .kill() / .wait() on a dead process raises ProcessLookupError
+        # from asyncio's base_subprocess._check_proc, which used to crash
+        # the video service. Guard every call with `returncode is None`
+        # and swallow ProcessLookupError.
+        if self._encoder_stderr_task is not None:
+            self._encoder_stderr_task.cancel()
+            self._encoder_stderr_task = None
+
+        proc = self._encoder_process
+        if proc is not None:
+            if proc.returncode is None:
+                try:
+                    proc.terminate()
+                except ProcessLookupError:
+                    pass
+                try:
+                    await asyncio.wait_for(proc.wait(), timeout=5.0)
+                except TimeoutError:
+                    if proc.returncode is None:
+                        try:
+                            proc.kill()
+                        except ProcessLookupError:
+                            pass
+                        try:
+                            await proc.wait()
+                        except ProcessLookupError:
+                            pass
+                except ProcessLookupError:
+                    pass
             self._encoder_process = None
 
         await self._mediamtx.stop()

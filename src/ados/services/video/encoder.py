@@ -86,6 +86,23 @@ def _detect_hw_h264_encoder() -> str | None:
     Returns the encoder name (e.g., 'h264_v4l2m2m' for Pi, 'h264_nvenc' for Jetson)
     or None if only software encoding is available.
     """
+    # DEC-106 Bug #3: ffmpeg's h264_v4l2m2m plugin is listed in -encoders
+    # output on Rockchip SoCs because the plugin library is present, but it
+    # cannot find the rkmpp encoder device and hangs in an uninterruptible
+    # subprocess.wait() when probed. Force libx264 software encoder fallback
+    # on Rockchip by short-circuiting BEFORE the ffmpeg probe runs.
+    #
+    # TODO(follow-up PR): detect gstreamer mpph264enc via
+    #   `gst-inspect-1.0 mpph264enc` and emit a GStreamer-based encoder
+    #   command instead of ffmpeg on Rockchip. libx264 CPU cost is fine
+    #   on Rock 5C Lite (~48% at 1280x720@30) but wastes the VPU.
+    try:
+        with open("/proc/device-tree/compatible", "rb") as _f:
+            if b"rockchip" in _f.read():
+                return None
+    except Exception:
+        pass
+
     try:
         result = subprocess.run(
             ["ffmpeg", "-hide_banner", "-encoders"],
