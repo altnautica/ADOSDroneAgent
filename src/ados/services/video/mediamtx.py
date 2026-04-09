@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import shutil
+import socket
 import tempfile
 from pathlib import Path
 
@@ -16,6 +17,46 @@ log = get_logger("video.mediamtx")
 _DEFAULT_API_PORT = 9997
 _DEFAULT_RTSP_PORT = 8554
 _DEFAULT_WEBRTC_PORT = 8889
+
+# DEC-108: STUN servers for WebRTC ICE NAT traversal. Google's free public
+# STUN servers handle NAT punching for ~95% of home/cellular networks.
+# Required for any WAN P2P direct path; harmless on local LAN.
+_DEFAULT_STUN_SERVERS = [
+    "stun:stun.l.google.com:19302",
+    "stun:stun1.l.google.com:19302",
+]
+
+
+def _detect_lan_ips() -> list[str]:
+    """Discover the SBC's LAN IPs by enumerating non-loopback interfaces.
+
+    DEC-108: mediamtx's auto-discovery of WebRTC ICE host candidates was
+    only finding 127.0.0.1 on the Rock 5C Lite bench rig (probably because
+    the WiFi interface comes up after mediamtx starts, or because the
+    interface enumeration doesn't include all addresses). The result was
+    that browsers received an SDP answer with only a loopback candidate
+    and the WebRTC connection silently failed with "no video track
+    received within 10s".
+
+    Fix: detect the SBC's actual outbound IPv4 address at config-gen time
+    and pass it to mediamtx as `webrtcAdditionalHosts`. This guarantees
+    that at least one reachable host candidate is advertised.
+
+    Strategy: open a UDP socket toward a public IP (no packet is actually
+    sent — UDP connect is just a routing-table lookup). The kernel picks
+    the outbound interface and we read its bound address.
+    """
+    ips: list[str] = []
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        if ip and ip != "127.0.0.1" and not ip.startswith("169.254."):
+            ips.append(ip)
+    except Exception as exc:
+        log.warning("lan_ip_detect_failed", error=str(exc))
+    return ips
 
 
 class MediamtxManager:
@@ -63,6 +104,12 @@ class MediamtxManager:
         Returns:
             The path to the generated configuration file.
         """
+        # DEC-108: detect the SBC's LAN IP and force mediamtx to advertise
+        # it as a WebRTC host candidate. Without this mediamtx auto-discovery
+        # was only emitting 127.0.0.1, which browsers can't reach.
+        lan_ips = _detect_lan_ips()
+        log.info("mediamtx_webrtc_hosts", hosts=lan_ips)
+
         config: dict = {
             "logLevel": "warn",
             "api": True,
@@ -71,9 +118,15 @@ class MediamtxManager:
             "rtspAddress": f":{self._rtsp_port}",
             "webrtc": True,
             "webrtcAddress": f":{self._webrtc_port}",
+            "webrtcAllowOrigin": "*",
+            "webrtcICEServers2": [
+                {"url": stun_url} for stun_url in _DEFAULT_STUN_SERVERS
+            ],
             "hls": False,
             "paths": {},
         }
+        if lan_ips:
+            config["webrtcAdditionalHosts"] = lan_ips
 
         for name, source in streams.items():
             path_config: dict = {"source": source}
