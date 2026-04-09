@@ -4,7 +4,11 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ados-drone-agent"
-version = "0.3.5"
+# DEC-107 Bug #24: version is sourced from src/ados/__init__.py per
+# operating-rule 23 (single source of truth). Was hardcoded to 0.3.5
+# while __init__.py sat at 0.3.9, causing pip metadata and `ados version`
+# to disagree. Now both read from the same place.
+dynamic = ["version"]
 description = "ADOS Drone Agent — Software-defined drone network agent"
 readme = "README.md"
 license = "GPL-3.0-or-later"
@@ -62,6 +66,9 @@ ados-supervisor = "ados.core.supervisor:main"
 
 [project.entry-points."ados.plugins"]
 # Plugin entry points will be registered here
+
+[tool.setuptools.dynamic]
+version = {attr = "ados.__version__"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
