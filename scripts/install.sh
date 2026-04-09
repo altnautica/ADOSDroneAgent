@@ -10,6 +10,28 @@
 # =============================================================================
 set -euo pipefail
 
+# DEC-107 Bug #23: prevent needrestart and debconf from interfering with the
+# install script when invoked via `curl -sSL ... | sudo bash -s -- ...`.
+#
+# Without these settings, an apt-pulled systemd security upgrade triggers
+# `needrestart` which immediately restarts ssh.service. That kills the SSH
+# pipe carrying this script's stdin to bash, bash sees EOF mid-execution,
+# and any file descriptors pip/sed are holding open get closed mid-write.
+# Result: 0-byte systemd unit files in /etc/systemd/system/, 0-byte pydantic
+# __init__.py in the venv, and a half-broken install.
+#
+# Fix: tell needrestart to list-only (NEEDRESTART_MODE=l), suspend prompts
+# (NEEDRESTART_SUSPEND=1), and force debconf to noninteractive frontend so
+# nothing tries to prompt the user. These exports are inherited by every
+# apt-get and dpkg invocation in the rest of this script.
+#
+# Validated 2026-04-09 on Rock 5C Lite rsdk-b1: without these env vars,
+# the first `curl|sudo bash` install reliably produces 0-byte files.
+export NEEDRESTART_MODE=l
+export NEEDRESTART_SUSPEND=1
+export DEBIAN_FRONTEND=noninteractive
+export DEBCONF_NOWARNINGS=yes
+
 REPO_URL="https://github.com/altnautica/ADOSDroneAgent.git"
 BRANCH_NAME=""  # DEC-106: optional feature branch for --branch flag
 INSTALL_DIR="/opt/ados"
