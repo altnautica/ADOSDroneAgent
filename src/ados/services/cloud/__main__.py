@@ -587,6 +587,36 @@ async def main() -> None:
 
     tasks.append(asyncio.create_task(mavlink_relay_task(), name="mavlink-relay"))
 
+    # ── WebRTC Signaling Relay (when paired) ──────────────────
+    # DEC-108 Phase B0: relays SDP offers/answers between MQTT and local
+    # mediamtx WHEP, enabling P2P direct WebRTC across WAN. Browser dials
+    # in from command.altnautica.com on any network; SDP handshake flows
+    # via MQTT, media flows direct peer-to-peer after ICE punching.
+
+    async def webrtc_signaling_task() -> None:
+        """Relay WebRTC SDP offers/answers over MQTT for cross-network video."""
+        while not shutdown.is_set():
+            if not pairing.is_paired:
+                await asyncio.sleep(5)
+                continue
+            try:
+                from ados.services.cloud.webrtc_signaling import WebrtcSignalingRelay
+
+                relay = WebrtcSignalingRelay(
+                    device_id=config.agent.device_id,
+                    broker=config.server.cloud.mqtt_broker,
+                    port=config.server.cloud.mqtt_port,
+                    transport=config.server.mqtt_transport,
+                    username=f"ados-{config.agent.device_id}",
+                    password=pairing.api_key or "",
+                )
+                await relay.start(shutdown)
+            except Exception as exc:
+                log.warning("webrtc_signaling_failed", error=str(exc))
+                await asyncio.sleep(5)
+
+    tasks.append(asyncio.create_task(webrtc_signaling_task(), name="webrtc-signaling"))
+
     log.info("cloud_service_ready", paired=pairing.is_paired)
     await shutdown.wait()
 
