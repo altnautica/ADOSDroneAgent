@@ -274,7 +274,30 @@ def _build_ffmpeg_command(
 
     # Encoder-specific tuning
     if ffmpeg_codec == "libx264":
-        cmd.extend(["-preset", "ultrafast", "-tune", "zerolatency"])
+        # DEC-108 Phase A: force browser-compatible H.264 output.
+        #
+        # Without -pix_fmt yuv420p, libx264 inherits the chroma from the
+        # input. USB UVC cameras commonly send YUYV422, so libx264 produces
+        # `High 4:2:2 profile` H.264 — which browser WebRTC stacks REJECT
+        # outright. The GCS's MSE player (mse-player.ts) hardcodes the
+        # decoder string to `avc1.640029` = H.264 High profile, level 4.1,
+        # 4:2:0 chroma. This pins the encoder to that exact profile.
+        #
+        # -g matches keyframe interval to fps (1s GOP) so WebRTC and MSE
+        # players see a fresh keyframe within ~1s of subscribing — without
+        # this, late joiners stare at black until the next IDR (~10s).
+        #
+        # Validated on Rock 5C Lite bench 2026-04-09: HZ USB Camera
+        # produced High 4:2:2 with the unfixed encoder, browser couldn't
+        # decode. With this fix the stream is High 4:2:0 level 4.1.
+        cmd.extend([
+            "-pix_fmt", "yuv420p",
+            "-profile:v", "high",
+            "-level:v", "4.1",
+            "-preset", "ultrafast",
+            "-tune", "zerolatency",
+            "-g", str(config.fps),
+        ])
     elif ffmpeg_codec == "h264_v4l2m2m":
         # Pi V4L2 M2M needs yuv420p input — force pixel format conversion
         cmd.extend(["-pix_fmt", "yuv420p", "-g", str(config.fps)])
