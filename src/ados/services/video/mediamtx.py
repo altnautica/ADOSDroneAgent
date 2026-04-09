@@ -21,9 +21,18 @@ _DEFAULT_WEBRTC_PORT = 8889
 # DEC-108: STUN servers for WebRTC ICE NAT traversal. Google's free public
 # STUN servers handle NAT punching for ~95% of home/cellular networks.
 # Required for any WAN P2P direct path; harmless on local LAN.
+#
+# DEC-107 Phase H: expanded list — more candidates = higher chance of finding
+# a working ICE pair on cellular carriers, corporate networks, and NATs with
+# restricted endpoint mapping. Cloudflare's STUN has global anycast coverage;
+# Twilio's adds another independent network path. All five are free and
+# unlimited.
 _DEFAULT_STUN_SERVERS = [
     "stun:stun.l.google.com:19302",
     "stun:stun1.l.google.com:19302",
+    "stun:stun2.l.google.com:19302",
+    "stun:stun.cloudflare.com:3478",
+    "stun:global.stun.twilio.com:3478",
 ]
 
 
@@ -119,6 +128,15 @@ class MediamtxManager:
             "webrtc": True,
             "webrtcAddress": f":{self._webrtc_port}",
             "webrtcAllowOrigin": "*",
+            # DEC-107 Phase H: bump handshake timeout from default 10s to
+            # 15s so slow cellular initial-SDP exchange has headroom.
+            "webrtcHandshakeTimeout": "15s",
+            # DEC-107 Phase H: pin WebRTC media UDP + TCP to a single port
+            # (:8189). Single-port NAT profile = easier for the SBC's home
+            # router to keep mapping state across session restarts, and TCP
+            # fallback (same port) helps networks that block UDP.
+            "webrtcLocalUDPAddress": ":8189",
+            "webrtcLocalTCPAddress": ":8189",
             "webrtcICEServers2": [
                 {"url": stun_url} for stun_url in _DEFAULT_STUN_SERVERS
             ],
