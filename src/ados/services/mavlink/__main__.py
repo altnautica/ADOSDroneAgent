@@ -60,9 +60,22 @@ async def main() -> None:
     mavlink_ipc.set_command_handler(lambda data: fc.send_bytes(data))
 
     # Periodically publish state to state IPC
+    # DEC-108 Phase E: also publish FC connection metadata + service uptime
+    # so the API service's /status endpoint can return real values instead
+    # of the StandaloneAgent shim's hardcoded `False` and `0.0`. Without
+    # this, `ados status` always shows "FC: False / Uptime: 0s" even when
+    # the FC is connected.
+    import time as _time
+    _service_start = _time.monotonic()
+
     async def state_publish_loop() -> None:
         while not shutdown.is_set():
-            state_ipc.publish(vehicle_state.to_dict())
+            payload = vehicle_state.to_dict()
+            payload["fc_connected"] = fc.connected
+            payload["fc_port"] = config.mavlink.serial_port
+            payload["fc_baud"] = config.mavlink.baud_rate
+            payload["service_uptime"] = _time.monotonic() - _service_start
+            state_ipc.publish(payload)
             await asyncio.sleep(0.1)  # 10Hz
 
     # Start proxies

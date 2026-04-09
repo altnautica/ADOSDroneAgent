@@ -297,6 +297,13 @@ def _build_ffmpeg_command(
             "-preset", "ultrafast",
             "-tune", "zerolatency",
             "-g", str(config.fps),
+            # DEC-108 Phase E: convert MP4-style NAL framing to Annex-B for
+            # downstream RTSP/WebRTC compatibility. libx264 produces AVCC
+            # length-prefixed NALs by default; mediamtx (and browser WebRTC
+            # decoders that mediamtx feeds) expect Annex-B start codes.
+            # Without this we saw `inboundFramesInError` climbing on
+            # mediamtx — those were NAL parse failures at the RTSP boundary.
+            "-bsf:v", "h264_mp4toannexb",
         ])
     elif ffmpeg_codec == "h264_v4l2m2m":
         # Pi V4L2 M2M needs yuv420p input — force pixel format conversion
@@ -304,7 +311,13 @@ def _build_ffmpeg_command(
 
     # Specify output format for network destinations
     if output.startswith("rtsp://"):
-        cmd.extend(["-f", "rtsp"])
+        # DEC-108 Phase E: force RTSP output transport to TCP. Default is
+        # UDP which fragments large H.264 NALs across multiple datagrams;
+        # with `-tune zerolatency` libx264 keyframes spike to 8-12 Mbps and
+        # the fragmentation causes mediamtx reassembly errors. TCP RTSP
+        # eliminates the fragmentation issue (cost: marginally higher
+        # latency, irrelevant on localhost).
+        cmd.extend(["-rtsp_transport", "tcp", "-f", "rtsp"])
     elif output.startswith("udp://") or output.startswith("tcp://"):
         cmd.extend(["-f", "mpegts"])
 
