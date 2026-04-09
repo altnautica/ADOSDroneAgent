@@ -40,8 +40,23 @@ from ados.core.ipc import MavlinkIPCClient
 log = structlog.get_logger("cloud.mavlink_relay")
 
 # DEC-106 Bug #14: queue + metric constants
-_QUEUE_MAXSIZE = 200  # ~6.6s at 30 msg/s before drops start
+# DEC-108 Phase E (RCA 2026-04-09): bumped from 200 → 2000.
+# At 30 msg/s the old 200-frame buffer gave ~6.6 seconds of headroom.
+# In practice the bench showed 17.4% sustained drop rate over 30+ minutes,
+# which is far worse than transient backpressure. Root cause: paho-mqtt's
+# default max_inflight_messages=20 was the actual bottleneck — paho's
+# internal queue fills almost instantly when the WSS/Cloudflare round-trip
+# is anything above ~50ms. Bumping the asyncio queue alone wouldn't fix it
+# (and didn't, in earlier attempts), so we ALSO bump paho's inflight limit
+# below in the Client constructor.
+_QUEUE_MAXSIZE = 2000  # ~66s at 30 msg/s before drops start
 _METRIC_LOG_INTERVAL = 10.0  # seconds
+# DEC-108 Phase E: paho's default max_inflight is 20, way too low for the
+# SpeedyBee F405's ~30 msg/s rate over a Cloudflare WSS tunnel. Bump to
+# 1000 so the actual MQTT publish path is the limit, not paho's internal
+# queue. paho honors this even at QoS 0 because it tracks all in-flight
+# publishes through its socket buffer.
+_PAHO_MAX_INFLIGHT = 1000
 
 
 class MavlinkMqttRelay:
@@ -103,6 +118,13 @@ class MavlinkMqttRelay:
             transport=self._transport,
             protocol=mqtt_client.MQTTv5,
         )
+
+        # DEC-108 Phase E: bump paho's max in-flight messages from default 20
+        # to 1000. The default was the actual bottleneck causing 17.4% drops
+        # on the bench — paho silently throttles publish() once the inflight
+        # counter hits this limit, and at 30 msg/s with WSS/Cloudflare RTT of
+        # ~50-150ms, the inflight queue fills almost instantly.
+        self._mqtt.max_inflight_messages_set(_PAHO_MAX_INFLIGHT)
 
         if self._username:
             self._mqtt.username_pw_set(self._username, self._password)
