@@ -21,6 +21,36 @@ import psutil
 from ados import __version__
 
 API_BASE = "http://localhost:8080"
+PAIRING_STATE_PATH = Path("/etc/ados/pairing.json")
+
+
+def _load_api_key() -> str | None:
+    """Read the local pairing.json and return the API key if paired.
+
+    DEC-108 Phase E: when the agent is paired (api/middleware/auth.py
+    enforces ApiKeyAuthMiddleware), the CLI must send the X-ADOS-Key
+    header on every request to /api/* routes. The key lives at
+    /etc/ados/pairing.json (written by install.sh during pairing).
+
+    Returns the api_key string, or None if pairing.json is missing or
+    unreadable. The CLI continues without the header in that case —
+    auth-exempt endpoints (e.g. /api/pairing/info) still work.
+    """
+    try:
+        import json
+        if PAIRING_STATE_PATH.exists():
+            with open(PAIRING_STATE_PATH) as f:
+                data = json.load(f)
+            return data.get("api_key")
+    except (OSError, ValueError, json.JSONDecodeError):
+        pass
+    return None
+
+
+def _auth_headers() -> dict[str, str]:
+    """Build request headers including the agent API key when paired."""
+    key = _load_api_key()
+    return {"X-ADOS-Key": key} if key else {}
 
 
 def _api_get(path: str, *, raw: bool = False) -> dict | None:
@@ -34,7 +64,7 @@ def _api_get(path: str, *, raw: bool = False) -> dict | None:
         Parsed JSON dict, or None on connection/HTTP error.
     """
     try:
-        resp = httpx.get(f"{API_BASE}{path}", timeout=5.0)
+        resp = httpx.get(f"{API_BASE}{path}", headers=_auth_headers(), timeout=5.0)
         resp.raise_for_status()
         return resp.json()
     except httpx.ConnectError:
@@ -149,6 +179,7 @@ def set_config(key: str, value: str) -> None:
     try:
         resp = httpx.put(
             f"{API_BASE}/api/config",
+            headers=_auth_headers(),
             json={"key": key, "value": value},
             timeout=5.0,
         )
@@ -204,7 +235,7 @@ def video(as_json: bool) -> None:
 def snap() -> None:
     """Capture a JPEG snapshot from the video pipeline."""
     try:
-        resp = httpx.post(f"{API_BASE}/api/video/snapshot", timeout=10.0)
+        resp = httpx.post(f"{API_BASE}/api/video/snapshot", headers=_auth_headers(), timeout=10.0)
         resp.raise_for_status()
         data = resp.json()
         if data.get("error"):
@@ -270,7 +301,7 @@ def scripts(as_json: bool) -> None:
 def run(path: str) -> None:
     """Run a Python script on the agent."""
     try:
-        resp = httpx.post(f"{API_BASE}/api/scripts/run", json={"path": path}, timeout=5.0)
+        resp = httpx.post(f"{API_BASE}/api/scripts/run", headers=_auth_headers(), json={"path": path}, timeout=5.0)
         resp.raise_for_status()
         data = resp.json()
         click.echo(f"Started: {data.get('script_id', '?')}")
@@ -294,6 +325,7 @@ def send(command: str) -> None:
     try:
         resp = httpx.post(
             f"{API_BASE}/api/scripting/command",
+            headers=_auth_headers(),
             json={"command": command},
             timeout=5.0,
         )
@@ -343,7 +375,7 @@ def update(as_json: bool) -> None:
 def check() -> None:
     """Check for available OTA updates."""
     try:
-        resp = httpx.post(f"{API_BASE}/api/ota/check", timeout=30.0)
+        resp = httpx.post(f"{API_BASE}/api/ota/check", headers=_auth_headers(), timeout=30.0)
         resp.raise_for_status()
         data = resp.json()
         if data.get("status") == "update_available":
@@ -373,7 +405,7 @@ def upgrade(yes: bool) -> None:
     # Check
     click.echo("Checking for updates...")
     try:
-        resp = httpx.post(f"{API_BASE}/api/ota/check", timeout=30.0)
+        resp = httpx.post(f"{API_BASE}/api/ota/check", headers=_auth_headers(), timeout=30.0)
         resp.raise_for_status()
         data = resp.json()
     except httpx.ConnectError:
@@ -399,7 +431,7 @@ def upgrade(yes: bool) -> None:
     # Install
     click.echo("Downloading and installing...")
     try:
-        resp = httpx.post(f"{API_BASE}/api/ota/install", timeout=300.0)
+        resp = httpx.post(f"{API_BASE}/api/ota/install", headers=_auth_headers(), timeout=300.0)
         resp.raise_for_status()
         result = resp.json()
     except httpx.HTTPError as e:
@@ -415,7 +447,7 @@ def upgrade(yes: bool) -> None:
     # Restart
     click.echo("Restarting service...")
     try:
-        resp = httpx.post(f"{API_BASE}/api/ota/restart", timeout=30.0)
+        resp = httpx.post(f"{API_BASE}/api/ota/restart", headers=_auth_headers(), timeout=30.0)
         resp.raise_for_status()
         result = resp.json()
         click.echo(result.get("message", "Done."))
@@ -431,7 +463,7 @@ def rollback_cmd(version: str | None) -> None:
         params = {}
         if version:
             params["version"] = version
-        resp = httpx.post(f"{API_BASE}/api/ota/rollback", params=params, timeout=120.0)
+        resp = httpx.post(f"{API_BASE}/api/ota/rollback", headers=_auth_headers(), params=params, timeout=120.0)
         resp.raise_for_status()
         data = resp.json()
         if data.get("status") == "rolled_back":
@@ -494,7 +526,7 @@ def pair(as_json: bool) -> None:
 def unpair() -> None:
     """Unpair the agent and generate a new pairing code."""
     try:
-        resp = httpx.post(f"{API_BASE}/api/pairing/unpair", timeout=5.0)
+        resp = httpx.post(f"{API_BASE}/api/pairing/unpair", headers=_auth_headers(), timeout=5.0)
         if resp.status_code == 409:
             click.echo("Agent is not currently paired.")
             return
@@ -829,7 +861,7 @@ def _safe_pkg_version(pkg_name: str) -> str:
 def _get_fc_info() -> dict:
     """Try to get FC info from the running agent API."""
     try:
-        resp = httpx.get(f"{API_BASE}/api/status", timeout=3.0)
+        resp = httpx.get(f"{API_BASE}/api/status", headers=_auth_headers(), timeout=3.0)
         resp.raise_for_status()
         data = resp.json()
         return {
