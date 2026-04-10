@@ -92,12 +92,10 @@ def detect_encoder_for_camera(camera: CameraInfo) -> EncoderType | None:
             log.info("encoder_selected", encoder="ffmpeg", reason="csi_fallback")
             return EncoderType.FFMPEG
     elif camera.type in (CameraType.USB, CameraType.IP):
-        # On Rockchip, prefer GStreamer + mpph264enc (hardware VPU encoding).
-        # ffmpeg's h264_v4l2m2m doesn't work on Rockchip (DEC-106 Bug #3)
-        # and libx264 software encoding wastes CPU on A55 cores.
-        if _is_rockchip() and _has_mpph264enc() and shutil.which("gst-launch-1.0"):
-            log.info("encoder_selected", encoder="gstreamer", reason="rockchip_mpph264enc")
-            return EncoderType.GSTREAMER
+        # mpph264enc (Rockchip VPU) disabled: produces corrupt frames on
+        # RK3582 — 326 mpp_frame_deinit errors per 30s, causing browser
+        # decoder stalls after a few seconds. Fall back to ffmpeg libx264.
+        # TODO: revisit when Rockchip MPP library gets a frame pool fix.
         if shutil.which("ffmpeg"):
             log.info("encoder_selected", encoder="ffmpeg", reason=f"{camera.type.value}_camera")
             return EncoderType.FFMPEG
