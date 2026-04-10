@@ -300,7 +300,34 @@ class VideoPipeline:
         if not self._mediamtx.is_running():
             log.warning("mediamtx_died_during_stream")
             return False
+        # Verify mediamtx is actually receiving data from the encoder.
+        # ffmpeg's RTSP TCP connection can silently die (e.g., during system
+        # load spikes from service restarts). ffmpeg stays alive (process
+        # returncode is None) but writes to a dead socket. mediamtx shows
+        # the path as ready=false with no source. Detect this by probing
+        # the mediamtx REST API.
+        if not await self._check_mediamtx_path_ready():
+            log.warning("mediamtx_path_not_ready", msg="encoder RTSP connection likely dead")
+            return False
         return True
+
+    async def _check_mediamtx_path_ready(self) -> bool:
+        """Probe mediamtx API to verify the stream path has an active publisher."""
+        import httpx
+        try:
+            async with httpx.AsyncClient(timeout=2.0) as client:
+                resp = await client.get(
+                    f"http://127.0.0.1:{self._mediamtx._api_port}/v3/paths/list"
+                )
+                if resp.status_code != 200:
+                    return True  # Can't check, assume OK
+                data = resp.json()
+                items = data.get("items", [])
+                if not items:
+                    return True  # No paths configured, skip check
+                return items[0].get("ready", False)
+        except Exception:
+            return True  # Network error probing, assume OK
 
     async def _check_cloud_push_health(self) -> bool:
         """Check if the cloud push subprocess is still running.
