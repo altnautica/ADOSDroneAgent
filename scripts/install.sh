@@ -286,7 +286,11 @@ install_system_deps() {
         curl \
         avahi-daemon \
         ffmpeg \
-        v4l-utils
+        v4l-utils \
+        gstreamer1.0-tools \
+        gstreamer1.0-plugins-base \
+        gstreamer1.0-plugins-good \
+        gstreamer1.0-rtsp
 
     info "System dependencies installed."
 }
@@ -758,7 +762,7 @@ if is_installed && $DO_UPGRADE && ! $DO_FORCE; then
 
     # Ensure system deps are present (ffmpeg, v4l-utils may be missing on older installs)
     info "Checking system dependencies..."
-    for pkg in ffmpeg v4l-utils avahi-daemon; do
+    for pkg in ffmpeg v4l-utils avahi-daemon gstreamer1.0-tools gstreamer1.0-rtsp; do
         if ! dpkg -s "$pkg" &>/dev/null; then
             info "Installing missing system dependency: ${pkg}"
             apt-get install -y -qq "$pkg" 2>/dev/null || true
