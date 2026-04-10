@@ -129,6 +129,13 @@ class MediamtxManager:
             "webrtc": True,
             "webrtcAddress": f":{self._webrtc_port}",
             "webrtcAllowOrigin": "*",
+            # Disable auto-discovery of interface IPs to prevent IPv6
+            # link-local (fe80::) candidates from being advertised.
+            # IPv6 link-local WebRTC connections drop after 30-60s when
+            # the neighbor cache entry expires, causing video freezes.
+            # We rely solely on webrtcAdditionalHosts (populated with
+            # the detected IPv4 LAN IP) for stable ICE candidates.
+            "webrtcIPsFromInterfaces": False,
             # DEC-107 Phase H: bump handshake timeout from default 10s to
             # 15s so slow cellular initial-SDP exchange has headroom.
             "webrtcHandshakeTimeout": "15s",
