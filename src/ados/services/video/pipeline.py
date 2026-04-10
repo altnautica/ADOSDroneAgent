@@ -285,7 +285,7 @@ class VideoPipeline:
         log.info("pipeline_stopped")
 
     async def _check_health(self) -> bool:
-        """Check if the encoder subprocess is still running."""
+        """Check if the encoder and mediamtx are both running and healthy."""
         if self._encoder_process is None:
             return False
         if self._encoder_process.returncode is not None:
@@ -293,6 +293,12 @@ class VideoPipeline:
                 "encoder_process_exited",
                 returncode=self._encoder_process.returncode,
             )
+            return False
+        # Also verify mediamtx is alive — if it crashes, ffmpeg blocks on its
+        # TCP write to the dead RTSP socket and appears healthy (returncode is
+        # still None), but no frames reach the browser.
+        if not self._mediamtx.is_running():
+            log.warning("mediamtx_died_during_stream")
             return False
         return True
 
