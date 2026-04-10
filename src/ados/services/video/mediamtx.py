@@ -151,6 +151,10 @@ class MediamtxManager:
             # sourceOnDemand is only valid for non-publisher sources
             if source != "publisher":
                 path_config["sourceOnDemand"] = True
+            # Minimize internal read buffering for low latency. Default
+            # mediamtx readBufferCount queues several frames; setting to 0
+            # means frames pass through immediately.
+            path_config["readBufferCount"] = 0
             config["paths"][name] = path_config
 
         # Write config to a temp file
