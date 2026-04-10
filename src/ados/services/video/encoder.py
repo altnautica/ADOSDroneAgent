@@ -300,20 +300,23 @@ def _build_ffmpeg_command(
         # decoder string to `avc1.640029` = H.264 High profile, level 4.1,
         # 4:2:0 chroma. This pins the encoder to that exact profile.
         #
-        # -g matches keyframe interval to fps (1s GOP) so WebRTC and MSE
-        # players see a fresh keyframe within ~1s of subscribing — without
-        # this, late joiners stare at black until the next IDR (~10s).
+        # -g sets the keyframe (IDR) interval. Halved to fps/2 (~0.5s GOP)
+        # so WebRTC viewers recover from packet loss in 0.5s instead of 1s.
+        # Late joiners also see a keyframe within ~0.5s of subscribing.
+        # Trade-off: ~15% higher bitrate from more frequent IDR frames,
+        # acceptable on LAN and 4G.
         #
         # Validated on Rock 5C Lite bench 2026-04-09: HZ USB Camera
         # produced High 4:2:2 with the unfixed encoder, browser couldn't
         # decode. With this fix the stream is High 4:2:0 level 4.1.
+        gop = max(config.fps // 2, 1)
         cmd.extend([
             "-pix_fmt", "yuv420p",
             "-profile:v", "high",
             "-level:v", "4.1",
             "-preset", "ultrafast",
             "-tune", "zerolatency",
-            "-g", str(config.fps),
+            "-g", str(gop),
             # DEC-108 Phase E: convert MP4-style NAL framing to Annex-B for
             # downstream RTSP/WebRTC compatibility. libx264 produces AVCC
             # length-prefixed NALs by default; mediamtx (and browser WebRTC
@@ -324,7 +327,8 @@ def _build_ffmpeg_command(
         ])
     elif ffmpeg_codec == "h264_v4l2m2m":
         # Pi V4L2 M2M needs yuv420p input — force pixel format conversion
-        cmd.extend(["-pix_fmt", "yuv420p", "-g", str(config.fps)])
+        gop_hw = max(config.fps // 2, 1)
+        cmd.extend(["-pix_fmt", "yuv420p", "-g", str(gop_hw)])
 
     # Specify output format for network destinations
     if output.startswith("rtsp://"):
