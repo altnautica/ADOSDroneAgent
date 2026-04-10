@@ -278,7 +278,7 @@ class Supervisor:
         video_mode = getattr(self.config, "video", None)
         video_enabled = video_mode and getattr(video_mode, "mode", "disabled") != "disabled"
 
-        has_camera = Path("/dev/video0").exists() or self._check_csi_camera()
+        has_camera = any(Path("/dev").glob("video[0-9]*")) or self._check_csi_camera()
         if has_camera and video_enabled and "ados-video" in self._services:
             await self.start_service("ados-video")
         elif not video_enabled:
