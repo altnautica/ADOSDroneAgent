@@ -19,73 +19,94 @@ FEATURES_FILE = STATE_DIR / "features.json"
 # Built-in feature definitions.  Each key is a feature_id.
 # "tier_required" is the minimum board tier needed to run the feature.
 FEATURE_REGISTRY: dict[str, dict[str, Any]] = {
-    "follow_me": {
+    "follow-me": {
         "name": "Follow Me",
         "description": "GPS or vision-based follow-me tracking",
         "category": "vision",
         "tier_required": 3,
         "requires_npu": False,
     },
-    "precision_landing": {
+    "precision-landing": {
         "name": "Precision Landing",
         "description": "AprilTag or visual marker precision landing",
         "category": "vision",
         "tier_required": 3,
         "requires_npu": False,
     },
-    "object_detection": {
-        "name": "Object Detection",
-        "description": "Real-time object detection via NPU",
+    "active-track": {
+        "name": "ActiveTrack",
+        "description": "Multi-target aware tracking with automatic re-acquisition",
         "category": "vision",
         "tier_required": 3,
         "requires_npu": True,
     },
-    "obstacle_avoidance": {
+    "obstacle-avoidance": {
         "name": "Obstacle Avoidance",
         "description": "Depth-based obstacle detection and avoidance",
         "category": "vision",
         "tier_required": 3,
         "requires_npu": True,
     },
-    "object_tracking": {
-        "name": "Object Tracking",
-        "description": "KCF or deep tracker for persistent object following",
-        "category": "vision",
-        "tier_required": 3,
-        "requires_npu": True,
-    },
-    "crop_health": {
-        "name": "Crop Health Mapping",
-        "description": "Multispectral crop health analysis",
-        "category": "agriculture",
-        "tier_required": 3,
-        "requires_npu": True,
-    },
-    "thermal_analysis": {
-        "name": "Thermal Analysis",
-        "description": "Thermal anomaly detection for inspection",
-        "category": "inspection",
-        "tier_required": 3,
-        "requires_npu": True,
-    },
-    "quickshots": {
-        "name": "QuickShots",
-        "description": "Automated cinematic flight patterns (dronie, orbit, rocket)",
+    "orbit": {
+        "name": "Orbit",
+        "description": "Circle a point of interest at configurable radius and speed",
         "category": "flight",
-        "tier_required": 2,
+        "tier_required": 3,
         "requires_npu": False,
     },
-    "terrain_follow": {
+    "quickshot-dronie": {
+        "name": "Dronie",
+        "description": "Fly backward and upward for a dramatic reveal shot",
+        "category": "flight",
+        "tier_required": 3,
+        "requires_npu": True,
+    },
+    "quickshot-rocket": {
+        "name": "Rocket",
+        "description": "Fly straight up while camera points down at subject",
+        "category": "flight",
+        "tier_required": 3,
+        "requires_npu": True,
+    },
+    "quickshot-circle": {
+        "name": "Circle Shot",
+        "description": "Complete a 360-degree orbit around the subject",
+        "category": "flight",
+        "tier_required": 3,
+        "requires_npu": True,
+    },
+    "quickshot-helix": {
+        "name": "Helix",
+        "description": "Spiral upward around the subject while filming",
+        "category": "flight",
+        "tier_required": 3,
+        "requires_npu": True,
+    },
+    "quickshot-boomerang": {
+        "name": "Boomerang",
+        "description": "Arc away from subject and return in a smooth path",
+        "category": "flight",
+        "tier_required": 3,
+        "requires_npu": True,
+    },
+    "terrain-following": {
         "name": "Terrain Following",
         "description": "Vision or rangefinder-based terrain following",
         "category": "flight",
         "tier_required": 2,
         "requires_npu": False,
     },
-    "survey_capture": {
-        "name": "Survey Capture",
-        "description": "Automated survey image capture with overlap control",
-        "category": "survey",
+    "gesture-recognition": {
+        "name": "Gesture Control",
+        "description": "Control the drone with hand gestures",
+        "category": "vision",
+        "tier_required": 3,
+        "requires_npu": True,
+    },
+    "panorama": {
+        "name": "Panorama",
+        "description": "Automated 360-degree panorama capture",
+        "category": "flight",
         "tier_required": 2,
         "requires_npu": False,
     },
