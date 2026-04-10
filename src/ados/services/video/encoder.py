@@ -256,9 +256,26 @@ def _build_ffmpeg_command(
         # Network/IP camera source
         cmd.extend(["-i", source])
     else:
-        # V4L2 device — select best input format from camera capabilities
+        # V4L2 device — select best input format from camera capabilities.
+        #
+        # Low-latency flags (before -i so they apply to the input demuxer):
+        #   -fflags nobuffer    : do not buffer input frames; hand them to the
+        #                         encoder as soon as they arrive from the camera
+        #   -flags low_delay    : hint the codec layer to prefer low delay
+        #   -probesize 32       : reduce stream probing to 32 bytes (V4L2
+        #                         streams have a fixed format, no need to probe)
+        #   -analyzeduration 0  : skip analysis phase (same reason as above)
+        #   -thread_queue_size 4: shrink the input demux queue from the default
+        #                         8 to 4 — fewer buffered frames = less latency
         input_fmt = _select_input_format(camera)
-        cmd.extend(["-f", "v4l2"])
+        cmd.extend([
+            "-fflags", "nobuffer",
+            "-flags", "low_delay",
+            "-probesize", "32",
+            "-analyzeduration", "0",
+            "-thread_queue_size", "4",
+            "-f", "v4l2",
+        ])
         if input_fmt:
             cmd.extend(["-input_format", input_fmt])
         cmd.extend([
@@ -317,7 +334,10 @@ def _build_ffmpeg_command(
         # the fragmentation causes mediamtx reassembly errors. TCP RTSP
         # eliminates the fragmentation issue (cost: marginally higher
         # latency, irrelevant on localhost).
-        cmd.extend(["-rtsp_transport", "tcp", "-f", "rtsp"])
+        #
+        # -max_delay 0: flush encoded frames to the muxer immediately
+        # instead of waiting for the muxer's default interleave buffer.
+        cmd.extend(["-max_delay", "0", "-rtsp_transport", "tcp", "-f", "rtsp"])
     elif output.startswith("udp://") or output.startswith("tcp://"):
         cmd.extend(["-f", "mpegts"])
 
