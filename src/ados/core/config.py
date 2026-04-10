@@ -201,6 +201,18 @@ class OtaConfig(BaseModel):
     service_name: str = "ados-agent"
 
 
+# --- Vision ---
+
+class VisionConfig(BaseModel):
+    enabled: bool = False
+    backend: str = "auto"  # auto, rknn, tensorrt, opencv_dnn, tflite
+    confidence_threshold: float = 0.5
+    models_dir: str = "/opt/ados/models/vision"
+    models_cache_max_mb: int = 500
+    registry_url: str = "https://raw.githubusercontent.com/altnautica/ADOSMissionControl/main/public/models/registry.json"
+    auto_download: bool = True
+
+
 # --- Logging ---
 
 class LoggingConfig(BaseModel):
@@ -265,6 +277,7 @@ class ADOSConfig(BaseModel):
     logging: LoggingConfig = LoggingConfig()
     pairing: PairingConfig = PairingConfig()
     discovery: DiscoveryConfig = DiscoveryConfig()
+    vision: VisionConfig = VisionConfig()
     swarm: SwarmConfig = SwarmConfig()
 
     model_config = {"extra": "ignore"}
