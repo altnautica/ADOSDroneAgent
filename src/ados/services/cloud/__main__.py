@@ -351,7 +351,7 @@ async def main() -> None:
                         "fcConnected": _fc_connected,
                         "fcPort": _fc_port,
                         "fcBaud": _fc_baud,
-                        "services": _get_services_status(),
+                        "services": await asyncio.to_thread(_get_services_status),
                         "lastIp": _get_local_ip(),
                         "mdnsHost": "",
                         "agentVersion": __version__,
@@ -462,23 +462,29 @@ async def main() -> None:
         return suites
 
     async def _execute_command(cmd: dict) -> tuple[str, dict | None, dict | None]:
-        """Execute a cloud command and return (status, result, data)."""
+        """Execute a cloud command and return (status, result, data).
+
+        Heavy commands (get_services, get_logs, scan_peripherals) run in a
+        thread via asyncio.to_thread() so they don't block the event loop.
+        Blocking subprocess.run() calls in these functions were stalling the
+        heartbeat task for 3-6s, causing false stale warnings in the GCS.
+        """
         command = cmd.get("command", "")
         args = cmd.get("args") or {}
 
         try:
             if command in ("get_peripherals", "scan_peripherals"):
                 from ados.api.routes.peripherals import _scan_all
-                data = _scan_all()
+                data = await asyncio.to_thread(_scan_all)
                 return "completed", {"success": True, "message": "ok"}, data
 
             elif command == "get_services":
-                data = _get_services_status()
+                data = await asyncio.to_thread(_get_services_status)
                 return "completed", {"success": True, "message": "ok"}, data
 
             elif command == "get_logs":
                 limit = args.get("limit", 200)
-                data = _get_recent_logs(limit)
+                data = await asyncio.to_thread(_get_recent_logs, limit)
                 return "completed", {"success": True, "message": "ok"}, data
 
             elif command == "get_scripts":
