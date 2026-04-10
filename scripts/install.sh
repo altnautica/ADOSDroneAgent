@@ -852,6 +852,8 @@ mkdir -p "${CONFIG_DIR}/certs"
 mkdir -p "${DATA_DIR}/logs/flights"
 mkdir -p "${DATA_DIR}/scripts"
 mkdir -p "${DATA_DIR}/recordings"
+mkdir -p "${INSTALL_DIR}/models/vision"
+mkdir -p "${DATA_DIR}/state"
 
 # Create or refresh the Python venv
 info "Creating Python virtual environment at ${VENV_DIR}..."
