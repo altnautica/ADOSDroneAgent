@@ -129,22 +129,17 @@ class MediamtxManager:
             "webrtc": True,
             "webrtcAddress": f":{self._webrtc_port}",
             "webrtcAllowOrigin": "*",
-            # Disable auto-discovery of interface IPs to prevent IPv6
-            # link-local (fe80::) candidates from being advertised.
-            # IPv6 link-local WebRTC connections drop after 30-60s when
-            # the neighbor cache entry expires, causing video freezes.
-            # We rely solely on webrtcAdditionalHosts (populated with
-            # the detected IPv4 LAN IP) for stable ICE candidates.
+            # Disable interface IP auto-discovery AND bind UDP/TCP to the
+            # specific IPv4 LAN address. Without this, Pion's ICE agent
+            # enumerates all socket-bound addresses (127.0.0.1, IPv6 ULA,
+            # link-local) and the browser selects unstable candidates that
+            # drop after 30-60s. Binding to the LAN IP forces ONLY that
+            # address as an ICE host candidate.
             "webrtcIPsFromInterfaces": False,
-            # DEC-107 Phase H: bump handshake timeout from default 10s to
-            # 15s so slow cellular initial-SDP exchange has headroom.
+            "webrtcIPsFromInterfacesList": [],
             "webrtcHandshakeTimeout": "15s",
-            # DEC-107 Phase H: pin WebRTC media UDP + TCP to a single port
-            # (:8189). Single-port NAT profile = easier for the SBC's home
-            # router to keep mapping state across session restarts, and TCP
-            # fallback (same port) helps networks that block UDP.
-            "webrtcLocalUDPAddress": ":8189",
-            "webrtcLocalTCPAddress": ":8189",
+            "webrtcLocalUDPAddress": f"{lan_ips[0]}:8189" if lan_ips else ":8189",
+            "webrtcLocalTCPAddress": f"{lan_ips[0]}:8189" if lan_ips else ":8189",
             "webrtcICEServers2": [
                 {"url": stun_url} for stun_url in _DEFAULT_STUN_SERVERS
             ],
