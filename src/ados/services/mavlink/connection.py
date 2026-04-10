@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import glob
+import time
 from typing import TYPE_CHECKING
 
 from pymavlink import mavutil
@@ -15,6 +16,9 @@ if TYPE_CHECKING:
     from ados.services.mavlink.state import VehicleState
 
 log = get_logger("mavlink.connection")
+
+# Re-request FC data streams every 30 seconds to survive FC reboots.
+_STREAM_REREQUEST_INTERVAL = 30.0
 
 SERIAL_PATTERNS = [
     "/dev/ttyACM*",
@@ -112,6 +116,7 @@ class FCConnection:
         self._baud: int = 0
         self._lock = asyncio.Lock()
         self._subscribers: list[asyncio.Queue[bytes]] = []
+        self._streams_requested_at: float = 0.0
 
     @property
     def connected(self) -> bool:
@@ -156,8 +161,20 @@ class FCConnection:
                 0, 0, 0,
             )
 
+    def _cleanup_connection(self) -> None:
+        """Close the current mavutil connection and release file descriptors."""
+        if self._conn:
+            try:
+                self._conn.close()
+            except Exception:
+                pass
+            self._conn = None
+
     async def _connect(self) -> bool:
         """Establish MAVLink connection."""
+        # Close any previous connection to prevent FD leaks.
+        self._cleanup_connection()
+
         port = self.config.serial_port
 
         # Check for SITL-style TCP connection string
@@ -197,8 +214,7 @@ class FCConnection:
                 )
 
                 # Request data streams
-                from ados.services.mavlink.streams import request_data_streams
-                request_data_streams(self._conn)
+                self._request_streams()
 
                 return True
             else:
@@ -207,6 +223,13 @@ class FCConnection:
         except Exception as e:
             log.error("connection_failed", error=str(e), port=self._port)
             return False
+
+    def _request_streams(self) -> None:
+        """Request data streams from FC and record the timestamp."""
+        from ados.services.mavlink.streams import request_data_streams
+        if self._conn:
+            request_data_streams(self._conn)
+            self._streams_requested_at = time.monotonic()
 
     async def run(self) -> None:
         """Main connection loop with auto-reconnect."""
@@ -228,6 +251,7 @@ class FCConnection:
             except Exception as e:
                 log.error("read_loop_error", error=str(e))
                 self._connected = False
+                self._cleanup_connection()
                 await asyncio.sleep(1)
 
     async def _read_loop(self) -> None:
@@ -247,6 +271,11 @@ class FCConnection:
                 # Update vehicle state
                 self.state.update_from_message(msg)
 
+                # Re-request streams periodically to survive FC reboots.
+                elapsed = time.monotonic() - self._streams_requested_at
+                if elapsed >= _STREAM_REREQUEST_INTERVAL:
+                    self._request_streams()
+
                 # Get raw bytes and distribute to subscribers
                 raw = msg.get_msgbuf()
                 if raw:
@@ -262,9 +291,11 @@ class FCConnection:
                 if self._conn and (not self._conn.port.closed if has_port else True):
                     continue
                 self._connected = False
+                self._cleanup_connection()
             except Exception as e:
                 log.error("recv_error", error=str(e))
                 self._connected = False
+                self._cleanup_connection()
 
     def _recv_msg(self):
         """Blocking receive (runs in executor thread)."""
