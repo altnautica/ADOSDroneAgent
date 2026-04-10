@@ -84,6 +84,7 @@ class MediamtxManager:
         self._rtsp_port = rtsp_port
         self._webrtc_port = webrtc_port
         self._process: asyncio.subprocess.Process | None = None
+        self._stderr_task: asyncio.Task | None = None
         self._config_path: str = ""
         self._running = False
 
@@ -199,6 +200,15 @@ class MediamtxManager:
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.PIPE,
             )
+            # Drain stderr in the background to prevent pipe buffer deadlock.
+            # mediamtx logs WebRTC connection events, RTSP sessions, etc. to
+            # stderr. Without draining, the 64KB pipe buffer fills and mediamtx
+            # blocks on its next write, freezing the entire video pipeline while
+            # the process appears alive (returncode stays None, health check
+            # passes). This was the root cause of progressive video freezing.
+            self._stderr_task = asyncio.create_task(
+                self._drain_stderr()
+            )
             self._running = True
             log.info("mediamtx_started", pid=self._process.pid)
             # Wait for mediamtx to bind its ports before returning
@@ -208,8 +218,28 @@ class MediamtxManager:
             log.error("mediamtx_start_failed", error=str(exc))
             return False
 
+    async def _drain_stderr(self) -> None:
+        """Continuously drain mediamtx stderr to prevent pipe buffer deadlock."""
+        if self._process is None or self._process.stderr is None:
+            return
+        try:
+            while True:
+                line = await self._process.stderr.readline()
+                if not line:
+                    break
+                text = line.decode(errors="replace").rstrip()
+                if text:
+                    log.debug("mediamtx_stderr", line=text)
+        except (asyncio.CancelledError, Exception):
+            pass
+
     async def stop(self) -> None:
         """Stop the mediamtx process gracefully."""
+        # Cancel stderr drain task first to avoid reading from a dead process
+        if self._stderr_task is not None:
+            self._stderr_task.cancel()
+            self._stderr_task = None
+
         if not self._running or self._process is None:
             return
 
