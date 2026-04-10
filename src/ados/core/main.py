@@ -117,6 +117,9 @@ class AgentApp:
         self._demo_scripting = None
         # Public attribute: accessed by OTA API routes via get_agent_app().ota_updater
         self.ota_updater = None
+        # Public attributes: accessed by features/vision API routes
+        self.feature_manager = None
+        self.model_manager = None
 
         # Pairing and discovery (public — accessed by API routes)
         from ados.core.pairing import PairingManager
@@ -147,6 +150,36 @@ class AgentApp:
         # Set tier from detection if auto
         if self.config.agent.tier == "auto":
             self.config.agent.tier = f"tier{board.tier}"
+
+        # Initialize feature manager and model manager
+        from ados.core.features import FeatureManager
+        from ados.services.vision.model_manager import ModelManager
+
+        # Load raw board profile YAML for capabilities (includes compute, video, etc.)
+        board_profile_dict: dict = {}
+        try:
+            from ados.hal.detect import BOARDS_DIR
+            import yaml as _yaml
+
+            if BOARDS_DIR.is_dir():
+                model_lower = board.model.lower()
+                for yaml_file in sorted(BOARDS_DIR.glob("*.yaml")):
+                    with open(yaml_file) as _f:
+                        raw = _yaml.safe_load(_f)
+                        if not raw:
+                            continue
+                        for pattern in raw.get("model_patterns", []):
+                            if pattern.lower() in model_lower:
+                                board_profile_dict = raw
+                                break
+                    if board_profile_dict:
+                        break
+        except Exception:
+            pass
+
+        self.feature_manager = FeatureManager(board_profile_dict, self.config)
+        npu_tops = board_profile_dict.get("compute", {}).get("npu_tops", 0)
+        self.model_manager = ModelManager(self.config.vision, npu_tops=npu_tops)
 
         # Initialize MAVLink connection
         from ados.services.mavlink.state import VehicleState

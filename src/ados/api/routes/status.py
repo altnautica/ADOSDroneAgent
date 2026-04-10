@@ -207,6 +207,15 @@ async def get_full_status(request: Request):
     if app._vehicle_state:
         telemetry = app._vehicle_state.to_dict()
 
+    # --- Capabilities (from FeatureManager if available) ---
+    capabilities = {}
+    fm = getattr(app, "feature_manager", None)
+    if fm is not None:
+        try:
+            capabilities = fm.get_capabilities()
+        except Exception:
+            pass
+
     return {
         "version": __version__,
         "uptime_seconds": uptime,
@@ -219,6 +228,7 @@ async def get_full_status(request: Request):
         "resources": resources,
         "video": video,
         "telemetry": telemetry,
+        "capabilities": capabilities,
     }
 
 
