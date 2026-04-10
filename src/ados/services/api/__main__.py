@@ -67,6 +67,39 @@ async def main() -> None:
             from ados.core.health import HealthMonitor
             self.health = HealthMonitor()
             self.demo = False
+            # Feature and model management (used by /api/capabilities etc.)
+            try:
+                from ados.core.features import FeatureManager
+                from ados.services.vision.model_manager import ModelManager
+                from ados.hal.detect import detect_board, load_board_profile
+                import yaml
+                board_info = detect_board()
+                self.board_name = board_info.name
+                # Load raw board profile YAML for compute/NPU fields
+                board_profile_dict = {}
+                try:
+                    profile = load_board_profile(board_info)
+                    if profile and hasattr(profile, '_raw'):
+                        board_profile_dict = profile._raw
+                    elif profile:
+                        # Fallback: load YAML directly from boards/ dir
+                        from pathlib import Path
+                        boards_dir = Path(__file__).parent.parent.parent / "hal" / "boards"
+                        for yf in boards_dir.glob("*.yaml"):
+                            with open(yf) as f:
+                                data = yaml.safe_load(f) or {}
+                            if data.get("name") == board_info.name:
+                                board_profile_dict = data
+                                break
+                except Exception:
+                    pass
+                self.feature_manager = FeatureManager(board_profile_dict, cfg)
+                npu_tops = board_profile_dict.get("compute", {}).get("npu_tops", 0)
+                self.model_manager = ModelManager(cfg.vision, npu_tops=npu_tops)
+            except Exception as e:
+                log.warning("feature_manager_init_failed", error=str(e))
+                self.feature_manager = None
+                self.model_manager = None
 
         @property
         def uptime_seconds(self) -> float:
