@@ -415,11 +415,31 @@ def _build_gstreamer_command(
             f"speed-preset=ultrafast tune=zerolatency key-int-max={gop}"
         )
 
-    # For RTSP output: GStreamer encodes via VPU, pipes raw H.264 byte-stream
-    # to ffmpeg which handles RTSP muxing (copy codec, near-zero CPU).
-    # rtspclientsink isn't in the default GStreamer install on Debian.
     if output.startswith("rtsp://"):
         safe_output = shlex.quote(output)
+        # Direct GStreamer → mediamtx via rtspclientsink (RTSP RECORD).
+        # No ffmpeg pipe, no re-muxing. Requires gstreamer1.0-rtsp package.
+        if shutil.which("gst-inspect-1.0"):
+            try:
+                probe = subprocess.run(
+                    ["gst-inspect-1.0", "rtspclientsink"],
+                    capture_output=True, timeout=5,
+                )
+                has_rtsp_sink = probe.returncode == 0
+            except Exception:
+                has_rtsp_sink = False
+        else:
+            has_rtsp_sink = False
+
+        if has_rtsp_sink:
+            pipeline = (
+                f"v4l2src device={safe_source} ! {src_caps} ! "
+                f"{decode} ! {encoder} ! h264parse ! "
+                f"rtspclientsink location={safe_output} protocols=tcp latency=0"
+            )
+            return ["gst-launch-1.0", "-e", *pipeline.split()]
+
+        # Fallback: pipe GStreamer H.264 → ffmpeg for RTSP muxing.
         gst_cmd = (
             f"gst-launch-1.0 -q v4l2src device={safe_source} ! {src_caps} ! "
             f"{decode} ! {encoder} ! h264parse ! "
@@ -427,7 +447,7 @@ def _build_gstreamer_command(
         )
         ffmpeg_cmd = (
             f"ffmpeg -y -fflags nobuffer -f h264 -i pipe:0 "
-            f"-c:v copy -bsf:v h264_mp4toannexb "
+            f"-c:v copy "
             f"-max_delay 0 -rtsp_transport tcp -f rtsp {safe_output}"
         )
         return ["bash", "-c", f"{gst_cmd} 2>/dev/null | {ffmpeg_cmd}"]
