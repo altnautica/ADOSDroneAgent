@@ -278,6 +278,12 @@ async def main() -> None:
         """When paired, POST full status to Convex every 5s."""
         import httpx
 
+        # Cache service status to avoid running 10+ subprocess calls
+        # every heartbeat. Refresh every 6th iteration (~30s).
+        _cached_services: list[dict] = []
+        _svc_refresh_counter = 0
+        _SVC_REFRESH_INTERVAL = 6  # refresh every 6 heartbeats
+
         while not shutdown.is_set():
             # Re-check pairing state each iteration (may change via beacon)
             if pairing.is_paired and convex_url:
@@ -298,6 +304,14 @@ async def main() -> None:
 
                     cpu_history.append(cpu_pct)
                     memory_history.append(mem_pct)
+
+                    # Refresh service status cache periodically (expensive:
+                    # 10+ subprocess calls). Skip on most heartbeats to keep
+                    # CPU free for the video encoder.
+                    _svc_refresh_counter += 1
+                    if _svc_refresh_counter >= _SVC_REFRESH_INTERVAL or not _cached_services:
+                        _cached_services = await asyncio.to_thread(_get_services_status)
+                        _svc_refresh_counter = 0
 
                     uptime = time.monotonic() - start_time
 
@@ -351,7 +365,7 @@ async def main() -> None:
                         "fcConnected": _fc_connected,
                         "fcPort": _fc_port,
                         "fcBaud": _fc_baud,
-                        "services": await asyncio.to_thread(_get_services_status),
+                        "services": _cached_services,
                         "lastIp": _get_local_ip(),
                         "mdnsHost": "",
                         "agentVersion": __version__,
