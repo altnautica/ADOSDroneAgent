@@ -56,11 +56,33 @@ def detect_available_encoder() -> EncoderType | None:
     return None
 
 
+def _is_rockchip() -> bool:
+    """Check if running on a Rockchip SoC."""
+    try:
+        with open("/proc/device-tree/compatible", "rb") as f:
+            return b"rockchip" in f.read()
+    except Exception:
+        return False
+
+
+def _has_mpph264enc() -> bool:
+    """Check if GStreamer's mpph264enc (Rockchip VPU) is available."""
+    try:
+        result = subprocess.run(
+            ["gst-inspect-1.0", "mpph264enc"],
+            capture_output=True, timeout=5,
+        )
+        return result.returncode == 0
+    except Exception:
+        return False
+
+
 def detect_encoder_for_camera(camera: CameraInfo) -> EncoderType | None:
     """Pick the right encoder based on camera type.
 
     CSI cameras use rpicam-vid (native Pi hardware encoder), falling back to ffmpeg.
-    USB and IP cameras use ffmpeg, falling back to GStreamer.
+    USB and IP cameras: on Rockchip prefer GStreamer with mpph264enc (hardware VPU,
+    near-zero CPU), falling back to ffmpeg (software libx264).
     """
     if camera.type == CameraType.CSI:
         if shutil.which("rpicam-vid"):
@@ -70,6 +92,12 @@ def detect_encoder_for_camera(camera: CameraInfo) -> EncoderType | None:
             log.info("encoder_selected", encoder="ffmpeg", reason="csi_fallback")
             return EncoderType.FFMPEG
     elif camera.type in (CameraType.USB, CameraType.IP):
+        # On Rockchip, prefer GStreamer + mpph264enc (hardware VPU encoding).
+        # ffmpeg's h264_v4l2m2m doesn't work on Rockchip (DEC-106 Bug #3)
+        # and libx264 software encoding wastes CPU on A55 cores.
+        if _is_rockchip() and _has_mpph264enc() and shutil.which("gst-launch-1.0"):
+            log.info("encoder_selected", encoder="gstreamer", reason="rockchip_mpph264enc")
+            return EncoderType.GSTREAMER
         if shutil.which("ffmpeg"):
             log.info("encoder_selected", encoder="ffmpeg", reason=f"{camera.type.value}_camera")
             return EncoderType.FFMPEG
@@ -167,7 +195,7 @@ def build_encoder_command(
     if config.type == EncoderType.FFMPEG:
         return _build_ffmpeg_command(config, source, output, camera)
     if config.type == EncoderType.GSTREAMER:
-        return _build_gstreamer_command(config, source, output)
+        return _build_gstreamer_command(config, source, output, camera)
     return []
 
 
@@ -353,29 +381,62 @@ def _build_gstreamer_command(
     config: EncoderConfig,
     source: str,
     output: str,
+    camera: CameraInfo | None = None,
 ) -> list[str]:
-    """GStreamer pipeline command (last-resort fallback)."""
-    encoder_element = "x264enc" if config.codec in ("h264", "H264") else "x265enc"
+    """GStreamer pipeline command.
+
+    On Rockchip: uses mpph264enc (VPU hardware, near-zero CPU).
+    Fallback: x264enc (software, same as ffmpeg libx264).
+    """
     safe_source = shlex.quote(source)
 
-    # Build pipeline for RTSP output via rtspclientsink, or file output
-    if output.startswith("rtsp://"):
-        safe_output = shlex.quote(output)
-        pipeline = (
-            f"v4l2src device={safe_source} ! "
-            f"image/jpeg,width={config.width},height={config.height},"
-            f"framerate={config.fps}/1 ! jpegdec ! videoconvert ! "
-            f"{encoder_element} bitrate={config.bitrate_kbps} "
-            f"tune=zerolatency ! h264parse ! "
-            f"rtspclientsink location={safe_output}"
+    # Detect input format from camera caps
+    input_fmt = _select_input_format(camera)
+    if input_fmt == "mjpeg":
+        src_caps = f"image/jpeg,width={config.width},height={config.height},framerate={config.fps}/1"
+        decode = "jpegdec ! videoconvert"
+    else:
+        src_caps = f"video/x-raw,width={config.width},height={config.height},framerate={config.fps}/1"
+        decode = "videoconvert"
+
+    # Pick encoder: mpph264enc (Rockchip VPU) > x264enc (software)
+    gop = max(config.fps // 2, 1)
+    if _is_rockchip() and _has_mpph264enc():
+        # mpph264enc: hardware VPU encoder. bps = bits per second.
+        # header-mode=1 inserts SPS/PPS before every IDR for WebRTC
+        # late-joiner compatibility.
+        encoder = (
+            f"mpph264enc bps={config.bitrate_kbps * 1000} "
+            f"gop={gop} header-mode=1"
         )
     else:
-        safe_output = shlex.quote(output)
-        pipeline = (
-            f"v4l2src device={safe_source} ! "
-            f"image/jpeg,width={config.width},height={config.height},"
-            f"framerate={config.fps}/1 ! jpegdec ! videoconvert ! "
-            f"{encoder_element} bitrate={config.bitrate_kbps} "
-            f"tune=zerolatency ! filesink location={safe_output}"
+        encoder = (
+            f"x264enc bitrate={config.bitrate_kbps} "
+            f"speed-preset=ultrafast tune=zerolatency key-int-max={gop}"
         )
+
+    # For RTSP output: GStreamer encodes via VPU, pipes raw H.264 byte-stream
+    # to ffmpeg which handles RTSP muxing (copy codec, near-zero CPU).
+    # rtspclientsink isn't in the default GStreamer install on Debian.
+    if output.startswith("rtsp://"):
+        safe_output = shlex.quote(output)
+        gst_cmd = (
+            f"gst-launch-1.0 -q v4l2src device={safe_source} ! {src_caps} ! "
+            f"{decode} ! {encoder} ! h264parse ! "
+            f"'video/x-h264,stream-format=byte-stream' ! fdsink fd=1"
+        )
+        ffmpeg_cmd = (
+            f"ffmpeg -y -fflags nobuffer -f h264 -i pipe:0 "
+            f"-c:v copy -bsf:v h264_mp4toannexb "
+            f"-max_delay 0 -rtsp_transport tcp -f rtsp {safe_output}"
+        )
+        return ["bash", "-c", f"{gst_cmd} 2>/dev/null | {ffmpeg_cmd}"]
+
+    # File/other output: direct GStreamer pipeline
+    safe_output = shlex.quote(output)
+    pipeline = (
+        f"v4l2src device={safe_source} ! {src_caps} ! "
+        f"{decode} ! {encoder} ! h264parse ! "
+        f"filesink location={safe_output}"
+    )
     return ["gst-launch-1.0", "-e", *pipeline.split()]
