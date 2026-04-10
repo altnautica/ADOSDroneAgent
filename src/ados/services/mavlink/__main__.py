@@ -59,6 +59,13 @@ async def main() -> None:
     # Wire client commands back to FC
     mavlink_ipc.set_command_handler(lambda data: fc.send_bytes(data))
 
+    # Send companion computer heartbeat to FC at 1Hz so ArduPilot registers
+    # us as a valid GCS component and does not trigger GCS failsafe.
+    async def heartbeat_loop() -> None:
+        while not shutdown.is_set():
+            fc.send_heartbeat()
+            await asyncio.sleep(1.0)
+
     # Periodically publish state to state IPC
     # DEC-108 Phase E: also publish FC connection metadata + service uptime
     # so the API service's /status endpoint can return real values instead
@@ -72,8 +79,8 @@ async def main() -> None:
         while not shutdown.is_set():
             payload = vehicle_state.to_dict()
             payload["fc_connected"] = fc.connected
-            payload["fc_port"] = config.mavlink.serial_port
-            payload["fc_baud"] = config.mavlink.baud_rate
+            payload["fc_port"] = fc.port
+            payload["fc_baud"] = fc.baud
             payload["service_uptime"] = _time.monotonic() - _service_start
             state_ipc.publish(payload)
             await asyncio.sleep(0.1)  # 10Hz
@@ -92,6 +99,7 @@ async def main() -> None:
 
     tasks = [
         asyncio.create_task(fc.run(), name="fc-connection"),
+        asyncio.create_task(heartbeat_loop(), name="fc-heartbeat"),
         asyncio.create_task(ipc_broadcast_loop(), name="ipc-broadcast"),
         asyncio.create_task(ws_proxy.run(), name="ws-proxy"),
         asyncio.create_task(tcp_proxy.run(), name="tcp-proxy"),
