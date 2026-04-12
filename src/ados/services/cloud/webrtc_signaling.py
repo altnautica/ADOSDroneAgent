@@ -32,6 +32,8 @@ from __future__ import annotations
 import asyncio
 import ssl
 
+import json
+
 import httpx
 import paho.mqtt.client as mqtt_client
 import structlog
@@ -89,6 +91,7 @@ class WebrtcSignalingRelay:
         self._metrics: dict[str, int] = {
             "offers_received": 0,
             "answers_published": 0,
+            "error_answers_published": 0,
             "whep_errors": 0,
             "publish_errors": 0,
         }
@@ -180,6 +183,27 @@ class WebrtcSignalingRelay:
         finally:
             await self.stop()
 
+    def _publish_error(self, error: str, status: int = 0) -> None:
+        """Publish a JSON error to the answer topic so the browser fails fast.
+
+        SDP always starts with ``v=0``; JSON always starts with ``{``.
+        The browser distinguishes them with a single-character check.
+        """
+        if not self._mqtt:
+            return
+        payload = json.dumps({"error": error, "status": status})
+        try:
+            self._mqtt.publish(
+                self._topic_answer,
+                payload.encode("utf-8"),
+                qos=1,
+            )
+            self._metrics["error_answers_published"] += 1
+            log.info("webrtc_signaling_error_published", error=error, status=status)
+        except Exception as exc:
+            self._metrics["publish_errors"] += 1
+            log.warning("webrtc_signaling_error_publish_failed", error=str(exc))
+
     async def _handle_offer(self, sdp_offer: str) -> None:
         """Forward an SDP offer to local mediamtx and publish the answer.
 
@@ -201,11 +225,13 @@ class WebrtcSignalingRelay:
                     status=resp.status_code,
                     body=resp.text[:200],
                 )
+                self._publish_error("whep_failed", resp.status_code)
                 return
             sdp_answer = resp.text
         except Exception as exc:
             self._metrics["whep_errors"] += 1
             log.warning("webrtc_signaling_whep_exception", error=str(exc))
+            self._publish_error("whep_exception", 0)
             return
 
         try:
