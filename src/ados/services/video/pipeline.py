@@ -255,6 +255,7 @@ class VideoPipeline:
 
     async def stop_stream(self) -> None:
         """Stop the encoding pipeline and mediamtx."""
+        log.info("stop_stream_begin")
         await self.stop_cloud_push()
 
         # DEC-106 Bug #5: the encoder subprocess could already be dead by
@@ -270,6 +271,15 @@ class VideoPipeline:
 
         proc = self._encoder_process
         if proc is not None:
+            # Collect zombie first — if ffmpeg already died, proc.returncode
+            # stays None until wait() is called. Without this, terminate()
+            # hits a dead PID, ProcessLookupError is caught, but then we
+            # never reap the child, and subsequent stop_stream() calls can
+            # hang on proc.wait() for a zombie that the OS already reaped.
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=0.5)
+            except (TimeoutError, ProcessLookupError):
+                pass
             if proc.returncode is None:
                 try:
                     proc.terminate()
@@ -277,7 +287,7 @@ class VideoPipeline:
                     pass
                 try:
                     await asyncio.wait_for(proc.wait(), timeout=5.0)
-                except TimeoutError:
+                except (TimeoutError, ProcessLookupError):
                     if proc.returncode is None:
                         try:
                             proc.kill()
@@ -287,8 +297,6 @@ class VideoPipeline:
                             await proc.wait()
                         except ProcessLookupError:
                             pass
-                except ProcessLookupError:
-                    pass
             self._encoder_process = None
 
         await self._mediamtx.stop()
