@@ -310,6 +310,15 @@ def _build_ffmpeg_command(
             "-i", source,
         ])
 
+    # Output framerate: the V4L2 -framerate flag is an input hint that
+    # drivers can ignore. Many USB cameras only support fixed rates (e.g.
+    # 30fps MJPEG) and override lower requests. Without -r, ffmpeg encodes
+    # every frame the camera delivers — on a 4x A55 with libx264, 30fps
+    # drives speed below 1.0x, frames accumulate in mediamtx buffers, the
+    # browser jitter buffer fills, and video freezes after a few seconds.
+    # -r drops frames to the target fps BEFORE encoding.
+    cmd.extend(["-r", str(config.fps)])
+
     cmd.extend([
         "-c:v", ffmpeg_codec,
         "-b:v", f"{config.bitrate_kbps}k",
