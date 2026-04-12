@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from enum import StrEnum
 from typing import TYPE_CHECKING
 
@@ -40,6 +41,13 @@ class VideoPipeline:
     the camera manager, encoder, mediamtx, and recorder.
     """
 
+    # Grace period after pipeline start before health checks run.
+    # ffmpeg needs ~1-2s to open the camera, encode the first frame, and
+    # connect to mediamtx RTSP. Without this grace period, the very first
+    # health check fires <0.5s after start, finds mediamtx path not ready
+    # (ffmpeg hasn't published yet), and kills a perfectly healthy pipeline.
+    _STARTUP_GRACE_SECS: float = 8.0
+
     def __init__(self, config: VideoConfig) -> None:
         self._config = config
         self._state = PipelineState.STOPPED
@@ -56,6 +64,7 @@ class VideoPipeline:
         self._cloud_restart_count: int = 0
         self._max_restart_delay: float = 300.0  # 5 minutes
         self._base_restart_delay: float = 5.0
+        self._started_at: float = 0.0  # monotonic time of last start_stream()
 
     @property
     def state(self) -> PipelineState:
@@ -154,6 +163,7 @@ class VideoPipeline:
                 self._drain_stderr(self._encoder_process, "encoder")
             )
             self._state = PipelineState.RUNNING
+            self._started_at = time.monotonic()
             log.info(
                 "pipeline_started",
                 encoder=self._encoder_type.value,
@@ -167,7 +177,12 @@ class VideoPipeline:
 
     @staticmethod
     async def _drain_stderr(proc: asyncio.subprocess.Process, label: str) -> None:
-        """Continuously drain subprocess stderr to prevent pipe buffer deadlock."""
+        """Continuously drain subprocess stderr to prevent pipe buffer deadlock.
+
+        Logs at WARNING level so ffmpeg errors are visible in journalctl
+        at the default info log level. Previously logged at debug, which
+        hid every ffmpeg crash reason from the operator.
+        """
         if proc.stderr is None:
             return
         try:
@@ -177,7 +192,7 @@ class VideoPipeline:
                     break
                 text = line.decode(errors="replace").rstrip()
                 if text:
-                    log.debug("subprocess_stderr", label=label, line=text)
+                    log.warning("subprocess_stderr", label=label, line=text)
         except (asyncio.CancelledError, Exception):
             pass
 
@@ -300,6 +315,15 @@ class VideoPipeline:
         if not self._mediamtx.is_running():
             log.warning("mediamtx_died_during_stream")
             return False
+        # Grace period: ffmpeg needs ~1-2s to open the camera, encode the
+        # first frame, and connect to mediamtx RTSP. Without this, the
+        # very first health check fires <0.5s after start, finds
+        # mediamtx_path_not_ready (ffmpeg hasn't published yet), and kills
+        # a perfectly healthy pipeline. Confirmed from journalctl: pipeline
+        # starts at T+0s, health check kills it at T+0.45s.
+        elapsed = time.monotonic() - self._started_at
+        if elapsed < self._STARTUP_GRACE_SECS:
+            return True
         # Verify mediamtx is actually receiving data from the encoder.
         # ffmpeg's RTSP TCP connection can silently die (e.g., during system
         # load spikes from service restarts). ffmpeg stays alive (process
@@ -320,6 +344,10 @@ class VideoPipeline:
         failures where mediamtx had crashed or the stream was dead.
         """
         import httpx
+        import logging
+        # Suppress httpx's per-request INFO log ("HTTP Request: GET ...")
+        # which spams journalctl every 5 seconds with no diagnostic value.
+        logging.getLogger("httpx").setLevel(logging.WARNING)
         try:
             async with httpx.AsyncClient(timeout=2.0) as client:
                 resp = await client.get(
