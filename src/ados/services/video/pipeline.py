@@ -312,7 +312,13 @@ class VideoPipeline:
         return True
 
     async def _check_mediamtx_path_ready(self) -> bool:
-        """Probe mediamtx API to verify the stream path has an active publisher."""
+        """Probe mediamtx API to verify the stream path has an active publisher.
+
+        Returns False when the API is unreachable, returns an error, or
+        reports no active publisher. Previous versions returned True on
+        exceptions (assuming healthy when unable to check), which hid
+        failures where mediamtx had crashed or the stream was dead.
+        """
         import httpx
         try:
             async with httpx.AsyncClient(timeout=2.0) as client:
@@ -320,14 +326,14 @@ class VideoPipeline:
                     f"http://127.0.0.1:{self._mediamtx._api_port}/v3/paths/list"
                 )
                 if resp.status_code != 200:
-                    return True  # Can't check, assume OK
+                    return False
                 data = resp.json()
                 items = data.get("items", [])
                 if not items:
-                    return True  # No paths configured, skip check
+                    return False
                 return items[0].get("ready", False)
         except Exception:
-            return True  # Network error probing, assume OK
+            return False
 
     async def _check_cloud_push_health(self) -> bool:
         """Check if the cloud push subprocess is still running.
@@ -414,6 +420,35 @@ class VideoPipeline:
                             success = await self.start_cloud_push()
                             if success:
                                 self._cloud_restart_count = 0
+
+                elif self._state in (PipelineState.ERROR, PipelineState.STOPPED):
+                    # Retry start_stream with backoff. Covers cases where the
+                    # initial start failed (no camera at boot, missing binary)
+                    # and the resource appears later (USB hotplug, apt install).
+                    self._restart_count += 1
+                    delay = min(
+                        self._base_restart_delay * (2 ** (self._restart_count - 1)),
+                        self._max_restart_delay,
+                    )
+                    if self._restart_count >= 10:
+                        log.warning(
+                            "pipeline_retry_backoff",
+                            msg="10 consecutive failures, backing off 5 minutes",
+                            attempts=self._restart_count,
+                        )
+                        await asyncio.sleep(self._max_restart_delay)
+                        self._restart_count = 0
+                        continue
+                    log.info(
+                        "pipeline_retry_from_error",
+                        attempt=self._restart_count,
+                        backoff_secs=delay,
+                    )
+                    await asyncio.sleep(max(0, delay - _HEALTH_CHECK_INTERVAL))
+                    success = await self.start_stream()
+                    if success:
+                        self._restart_count = 0
+                        log.info("pipeline_recovered", msg="stream started after retry")
 
                 await asyncio.sleep(_HEALTH_CHECK_INTERVAL)
         finally:
