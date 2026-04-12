@@ -310,6 +310,16 @@ def _build_ffmpeg_command(
             "-i", source,
         ])
 
+    # Output framerate: USB cameras often ignore the V4L2 -framerate hint
+    # and deliver at their native rate (e.g. 30fps MJPEG). Without -r,
+    # ffmpeg encodes every frame. On a 4x A55 with libx264 at 30fps,
+    # speed dips to 0.93-0.97x, frames accumulate in mediamtx buffers,
+    # and the RTSP TCP connection eventually stalls (confirmed: ffmpeg
+    # dies after ~25 min every time at 30fps, health check catches
+    # mediamtx_path_not_ready). -r drops frames to target fps BEFORE
+    # encoding. At 15fps, speed stays at 1.0x+ with headroom.
+    cmd.extend(["-r", str(config.fps)])
+
     cmd.extend([
         "-c:v", ffmpeg_codec,
         "-b:v", f"{config.bitrate_kbps}k",
