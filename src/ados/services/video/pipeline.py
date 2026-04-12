@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import time
 from enum import StrEnum
 from typing import TYPE_CHECKING
@@ -271,32 +272,35 @@ class VideoPipeline:
 
         proc = self._encoder_process
         if proc is not None:
-            # Collect zombie first — if ffmpeg already died, proc.returncode
-            # stays None until wait() is called. Without this, terminate()
-            # hits a dead PID, ProcessLookupError is caught, but then we
-            # never reap the child, and subsequent stop_stream() calls can
-            # hang on proc.wait() for a zombie that the OS already reaped.
-            try:
-                await asyncio.wait_for(proc.wait(), timeout=0.5)
-            except (TimeoutError, ProcessLookupError):
-                pass
-            if proc.returncode is None:
+            # Check if the process still exists at all. os.kill(pid, 0)
+            # raises ProcessLookupError if the PID is gone, which means
+            # the child was already reaped. In that case, skip proc.wait()
+            # entirely — asyncio's proc.wait() can hang forever if the
+            # SIGCHLD was already consumed before the event loop's child
+            # watcher could track it. This was the root cause of
+            # stop_stream() hanging indefinitely.
+            pid_alive = True
+            if proc.pid is not None:
+                try:
+                    os.kill(proc.pid, 0)
+                except (ProcessLookupError, OSError):
+                    pid_alive = False
+                    log.info("encoder_already_dead", pid=proc.pid)
+
+            if pid_alive and proc.returncode is None:
                 try:
                     proc.terminate()
                 except ProcessLookupError:
                     pass
                 try:
                     await asyncio.wait_for(proc.wait(), timeout=5.0)
-                except (TimeoutError, ProcessLookupError):
+                except (TimeoutError, ProcessLookupError, asyncio.CancelledError):
                     if proc.returncode is None:
                         try:
                             proc.kill()
                         except ProcessLookupError:
                             pass
-                        try:
-                            await proc.wait()
-                        except ProcessLookupError:
-                            pass
+            # Don't call proc.wait() for dead processes — it hangs.
             self._encoder_process = None
 
         await self._mediamtx.stop()
@@ -317,6 +321,15 @@ class VideoPipeline:
                 returncode=self._encoder_process.returncode,
             )
             return False
+        # os.kill(pid, 0) detects dead processes even when asyncio hasn't
+        # collected the exit code. This catches the case where ffmpeg dies
+        # silently and proc.returncode stays None.
+        if self._encoder_process.pid is not None:
+            try:
+                os.kill(self._encoder_process.pid, 0)
+            except (ProcessLookupError, OSError):
+                log.warning("encoder_process_vanished", pid=self._encoder_process.pid)
+                return False
         # Also verify mediamtx is alive — if it crashes, ffmpeg blocks on its
         # TCP write to the dead RTSP socket and appears healthy (returncode is
         # still None), but no frames reach the browser.
