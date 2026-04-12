@@ -18,7 +18,10 @@ ProtectSystem=strict
 ReadWritePaths=/var/ados /run/ados /dev /tmp
 
 MemoryMax=512M
-CPUQuota=50%
+# CPUQuota removed: 50% was throttling 43% of scheduling periods
+# (nr_throttled=6255/14471), causing ffmpeg keyframe burst stalls
+# that broke the RTSP TCP connection to mediamtx after ~24 minutes.
+# The SBC has 4 cores / 15GB RAM — no need to throttle video encoding.
 
 StandardOutput=journal
 StandardError=journal
