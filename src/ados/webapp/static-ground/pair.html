@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pair with drone . ADOS</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body data-page="pair">
+<header>
+  <button class="back" type="button">Back</button>
+  <div class="title">ADOS Ground Station . Setup</div>
+</header>
+<main>
+  <h1>Pair with drone</h1>
+  <p class="muted">Enter the pairing key shown on the drone OLED or in Mission Control.</p>
+
+  <form id="pair-form" class="card">
+    <div class="row">
+      <label for="pair-key">Pairing key</label>
+      <input id="pair-key" class="mono" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="32 character pairing key">
+    </div>
+    <button class="primary" type="submit">Pair</button>
+    <div id="pair-ok" class="result-ok hidden">Paired.</div>
+    <div id="pair-fail" class="result-fail hidden"></div>
+  </form>
+</main>
+<script src="app.js"></script>
+</body>
+</html>
