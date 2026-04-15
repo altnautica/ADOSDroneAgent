@@ -1,0 +1,27 @@
+[Unit]
+Description=ADOS Ground Station WiFi AP
+After=ados-supervisor.service network.target
+PartOf=ados-supervisor.service
+ConditionPathExists=/sys/class/net/wlan0
+
+[Service]
+Type=simple
+User=root
+ExecStart=/opt/ados/venv/bin/python -m ados.services.ground_station.hostapd_manager
+Restart=on-failure
+RestartSec=10
+Environment=ADOS_CONFIG=/etc/ados/config.yaml
+EnvironmentFile=-/etc/ados/env
+
+# hostapd_manager shells out to `ip`, `iw`, `systemctl` and writes to /etc/ados
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
+NoNewPrivileges=no
+
+MemoryMax=64M
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ados-hostapd
+
+[Install]
+WantedBy=ados-supervisor.service

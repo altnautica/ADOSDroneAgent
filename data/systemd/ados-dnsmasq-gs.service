@@ -1,0 +1,26 @@
+[Unit]
+Description=ADOS Ground Station DHCP/DNS (dnsmasq)
+After=ados-hostapd.service
+PartOf=ados-supervisor.service
+Requires=ados-hostapd.service
+ConditionPathExists=/etc/ados/dnsmasq-gs.conf
+
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/sbin/dnsmasq --keep-in-foreground --conf-file=/etc/ados/dnsmasq-gs.conf
+Restart=on-failure
+RestartSec=5
+
+# dnsmasq binds UDP/53 and UDP/67 on wlan0
+AmbientCapabilities=CAP_NET_BIND_SERVICE CAP_NET_ADMIN CAP_NET_RAW
+NoNewPrivileges=no
+
+MemoryMax=32M
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ados-dnsmasq-gs
+
+[Install]
+WantedBy=ados-supervisor.service

@@ -14,27 +14,42 @@
 <main>
   <h1>Network</h1>
 
+  <div id="auth-banner" class="result-fail hidden"></div>
+
   <div class="card">
     <h2>Access point</h2>
     <p class="row"><span class="muted">SSID</span><br><span id="ap-ssid" class="mono">ADOS-GS-...</span></p>
+    <p class="row"><span class="muted">Channel</span><br><span id="ap-channel" class="mono">-</span></p>
     <p class="row"><span class="muted">Passphrase</span><br>
-      <span id="ap-pass" class="mono">(tap to reveal)</span>
+      <span id="ap-pass" class="mono">(on the case label)</span>
     </p>
-    <button id="ap-reveal" class="secondary" type="button">Reveal passphrase</button>
     <button id="ap-change" class="secondary" type="button">Change</button>
+
+    <div id="ap-change-form" class="hidden">
+      <div class="row">
+        <label for="ap-ssid-input">New SSID</label>
+        <input id="ap-ssid-input" class="mono" type="text" autocomplete="off" spellcheck="false">
+      </div>
+      <div class="row">
+        <label for="ap-channel-input">Channel (1-11 for 2.4 GHz, 36-165 for 5 GHz)</label>
+        <input id="ap-channel-input" class="mono" type="text" autocomplete="off" inputmode="numeric">
+      </div>
+      <button id="ap-save" class="primary" type="button">Save</button>
+      <p class="muted">Passphrase is printed on the case label. Set it over a trusted connection only.</p>
+    </div>
   </div>
 
   <div class="card">
     <h2>WiFi client</h2>
-    <p id="wifi-state">Not joined</p>
-    <button id="wifi-scan" class="secondary" type="button">Scan networks</button>
+    <p class="muted">Not available yet.</p>
   </div>
 
   <div class="card">
     <h2>4G modem</h2>
-    <p id="modem-state">No modem detected</p>
+    <p class="muted">Not available yet.</p>
   </div>
 </main>
+<div id="spinner" class="spinner hidden"></div>
 <script src="app.js"></script>
 </body>
 </html>
