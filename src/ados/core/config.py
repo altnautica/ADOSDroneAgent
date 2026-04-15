@@ -288,10 +288,33 @@ class SwarmConfig(BaseModel):
 # The migrator in `load_config()` picks the legacy side-file value up
 # once and preserves the file on disk.
 
+class GroundStationUiConfig(BaseModel):
+    """OLED + buttons + screens UI config for the ground-station profile.
+
+    Phase 4 Wave 2: pulled out of the legacy `/etc/ados/ground-station-ui.json`
+    side-file into the Pydantic model so it round-trips through save cycles
+    and is consumed live by oled_service and button_service. The legacy file
+    is migrated once at load time and preserved on disk for rollback.
+
+    Field shapes are intentionally loose (`dict`) because the OLED, button
+    mapping, and screen order schemas are still evolving across waves. The
+    REST handlers and services know the keys they care about.
+    """
+
+    oled: dict = Field(default_factory=dict)
+    buttons: dict = Field(default_factory=dict)
+    screens: dict = Field(default_factory=dict)
+
+
 class GroundStationConfig(BaseModel):
     share_uplink: bool = False
     paired_drone_id: str | None = None
     paired_at: str | None = None  # iso timestamp
+    ui: GroundStationUiConfig = Field(default_factory=GroundStationUiConfig)
+    # Phase 4 Wave 2 Cellos: gate the cloud_relay_bridge live state IPC
+    # read so a quick rollback to the stub VehicleState is possible if
+    # the wiring causes regressions in the field. Default True.
+    use_live_state_ipc: bool = True
 
 
 # --- Top-level ---
@@ -333,8 +356,10 @@ class ADOSConfig(BaseModel):
 # One-shot per-process guard. Keeps the INFO log from spamming even
 # though the migrator is cheap and idempotent after the first run.
 _SHARE_UPLINK_MIGRATED: bool = False
+_GS_UI_MIGRATED: bool = False
 
 _LEGACY_GS_UI_PATH = Path("/etc/ados/ground-station-ui.json")
+_GS_UI_KEYS = ("oled", "buttons", "screens")
 
 
 def _migrate_share_uplink_from_legacy_json(
@@ -438,6 +463,105 @@ def _migrate_share_uplink_from_legacy_json(
     return raw
 
 
+def _migrate_gs_ui_from_legacy_json(
+    raw: dict[str, Any],
+    yaml_path: Path | None,
+) -> dict[str, Any]:
+    """Pull oled/buttons/screens out of the legacy ground-station-ui.json side-file.
+
+    Same shape as `_migrate_share_uplink_from_legacy_json`. Per-key check:
+    if `raw['ground_station']['ui'][key]` is already set, do not overwrite.
+    Legacy file is preserved on disk for rollback.
+    """
+    global _GS_UI_MIGRATED
+    if _GS_UI_MIGRATED:
+        return raw
+
+    try:
+        if not _LEGACY_GS_UI_PATH.is_file():
+            _GS_UI_MIGRATED = True
+            return raw
+
+        import json
+
+        try:
+            legacy_data = json.loads(
+                _LEGACY_GS_UI_PATH.read_text(encoding="utf-8")
+            )
+        except (OSError, ValueError):
+            _GS_UI_MIGRATED = True
+            return raw
+
+        if not isinstance(legacy_data, dict):
+            _GS_UI_MIGRATED = True
+            return raw
+
+        gs_section = raw.get("ground_station")
+        if not isinstance(gs_section, dict):
+            gs_section = {}
+        ui_section = gs_section.get("ui")
+        if not isinstance(ui_section, dict):
+            ui_section = {}
+
+        merged_any = False
+        for key in _GS_UI_KEYS:
+            if key in legacy_data and isinstance(legacy_data[key], dict):
+                if key not in ui_section:
+                    ui_section[key] = legacy_data[key]
+                    merged_any = True
+
+        if not merged_any:
+            _GS_UI_MIGRATED = True
+            return raw
+
+        gs_section["ui"] = ui_section
+        raw["ground_station"] = gs_section
+
+        if yaml_path is not None:
+            try:
+                to_write: dict[str, Any] = {}
+                if yaml_path.is_file():
+                    with open(yaml_path, encoding="utf-8") as fh:
+                        loaded = yaml.safe_load(fh)
+                    if isinstance(loaded, dict):
+                        to_write = loaded
+                disk_gs = to_write.get("ground_station")
+                if not isinstance(disk_gs, dict):
+                    disk_gs = {}
+                disk_ui = disk_gs.get("ui")
+                if not isinstance(disk_ui, dict):
+                    disk_ui = {}
+                for key in _GS_UI_KEYS:
+                    if key in ui_section and key not in disk_ui:
+                        disk_ui[key] = ui_section[key]
+                disk_gs["ui"] = disk_ui
+                to_write["ground_station"] = disk_gs
+
+                body = yaml.safe_dump(
+                    to_write,
+                    sort_keys=False,
+                    default_flow_style=False,
+                )
+                yaml_path.parent.mkdir(parents=True, exist_ok=True)
+                tmp_path = yaml_path.with_suffix(yaml_path.suffix + ".tmp")
+                tmp_path.write_text(body, encoding="utf-8")
+                import os as _os
+                _os.replace(str(tmp_path), str(yaml_path))
+            except (OSError, yaml.YAMLError):
+                pass
+
+        import logging as _logging
+
+        _logging.getLogger("ados.core.config").info(
+            "migrated ground_station.ui (oled/buttons/screens) from "
+            "/etc/ados/ground-station-ui.json (legacy file preserved)"
+        )
+    finally:
+        _GS_UI_MIGRATED = True
+
+    return raw
+
+
 def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
     """Merge override into base recursively."""
     merged = base.copy()
@@ -481,6 +605,7 @@ def load_config(path: str | Path | None = None) -> ADOSConfig:
     # side-file into the Pydantic-backed ground_station section. Idempotent,
     # runs at most once per process.
     raw = _migrate_share_uplink_from_legacy_json(raw, picked_path)
+    raw = _migrate_gs_ui_from_legacy_json(raw, picked_path)
 
     # Load defaults.yaml from package data
     import importlib.resources

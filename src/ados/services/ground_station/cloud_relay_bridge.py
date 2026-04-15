@@ -64,6 +64,7 @@ class CloudRelayBridge:
         paired_drone_id: Optional[str],
         convex_base_url: str = "https://convex.altnautica.com",
         api_key: Optional[str] = None,
+        state_reader: Any = None,
     ) -> None:
         self._bus = uplink_bus
         self._mqtt = mqtt_gateway
@@ -71,6 +72,10 @@ class CloudRelayBridge:
         self._drone_id = paired_drone_id
         self._convex_base = convex_base_url.rstrip("/")
         self._api_key = api_key
+        # Phase 4 Wave 2 Cellos: optional StateReader. When wired the
+        # bridge owns its lifecycle so MqttGateway and the Convex
+        # heartbeat read live VehicleState rather than the stub.
+        self._state_reader = state_reader
 
         self._running = False
         self._main_task: Optional[asyncio.Task] = None
@@ -97,6 +102,13 @@ class CloudRelayBridge:
         if self._running:
             return
         self._running = True
+        # Phase 4 Wave 2 Cellos: bring up the state reader before the
+        # MQTT and heartbeat tasks so first publish carries fresh data.
+        if self._state_reader is not None:
+            try:
+                await self._state_reader.start()
+            except Exception as exc:
+                log.warning("cloud_relay.state_reader_start_failed", error=str(exc))
         self._main_task = asyncio.create_task(self._run())
         self._heartbeat_task = asyncio.create_task(self._convex_heartbeat_loop())
         log.info(
@@ -121,6 +133,11 @@ class CloudRelayBridge:
                     pass
         self._main_task = None
         self._heartbeat_task = None
+        if self._state_reader is not None:
+            try:
+                await self._state_reader.stop()
+            except Exception as exc:
+                log.debug("cloud_relay.state_reader_stop_failed", error=str(exc))
         log.info("cloud_relay.stop")
 
     def status(self) -> dict:
@@ -350,6 +367,30 @@ class CloudRelayBridge:
                     "forwarding_telemetry": self._forward_telemetry,
                     "ts_ms": int(time.time() * 1000),
                 }
+                # Phase 4 Wave 2 Cellos: enrich the heartbeat with live
+                # VehicleState (armed, mode, lat/lon, battery) when a
+                # state reader is wired. Falls back silently when the
+                # reader is absent or has not yet received its first
+                # snapshot.
+                if self._state_reader is not None:
+                    try:
+                        vs = self._state_reader.get_latest()
+                        payload["telemetry"] = {
+                            "armed": bool(vs.armed),
+                            "mode": vs.mode,
+                            "lat": vs.lat,
+                            "lon": vs.lon,
+                            "alt_rel": vs.alt_rel,
+                            "battery_voltage": vs.voltage_battery,
+                            "battery_remaining": vs.battery_remaining,
+                            "fc_connected": bool(vs.last_heartbeat),
+                            "last_heartbeat": vs.last_heartbeat,
+                        }
+                    except Exception as exc:
+                        log.debug(
+                            "cloud_relay.heartbeat_telemetry_failed",
+                            error=str(exc),
+                        )
                 headers: dict[str, str] = {"content-type": "application/json"}
                 if self._api_key:
                     headers["x-ados-key"] = self._api_key
@@ -451,12 +492,28 @@ def _build_default_bridge() -> "CloudRelayBridge":
             except Exception:
                 drone_id = None
 
-        # TODO(Phase 4): wire live VehicleState via state IPC so MQTT and
-        # Convex heartbeats publish fresh telemetry. Phase 3 POC publishes
-        # a fresh VehicleState instance on each relay restart which has no
-        # connection to the running ados-mavlink.service. Acceptable for
-        # POC. Blocker 1 of Wave B.
-        state = VehicleState()
+        # Phase 4 Wave 2 Cellos (Wave B blocker 1 fix): wire live
+        # VehicleState via the ados-mavlink state IPC socket
+        # (`/run/ados/state.sock`). Bridge owns the StateReader. The
+        # MqttGateway and Convex heartbeat path read the same
+        # VehicleState object so both publish fresh telemetry.
+        # Gated by `ground_station.use_live_state_ipc` for rollback.
+        state_reader = None
+        use_live_ipc = bool(
+            getattr(getattr(config, "ground_station", None), "use_live_state_ipc", True)
+        )
+        if use_live_ipc:
+            try:
+                from ados.services.ground_station.state_reader import StateReader
+                state_reader = StateReader()
+                state = state_reader.vehicle_state
+            except Exception as exc:
+                log.warning("cloud_relay.state_reader_init_failed", error=str(exc))
+                state_reader = None
+                state = VehicleState()
+        else:
+            log.info("cloud_relay.state_ipc_disabled_by_config")
+            state = VehicleState()
         api_key = getattr(config.security.api, "api_key", None) or None
         mqtt_gw = MqttGateway(config, state, api_key=api_key)
 
@@ -489,6 +546,7 @@ def _build_default_bridge() -> "CloudRelayBridge":
             mavlink_relay=relay,
             paired_drone_id=drone_id,
             api_key=api_key,
+            state_reader=state_reader,
         )
     except Exception as exc:
         log.warning("cloud_relay.build_failed", error=str(exc))

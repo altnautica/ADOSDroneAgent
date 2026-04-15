@@ -31,7 +31,9 @@ import asyncio
 import signal
 import sys
 import time
+from typing import Any
 
+from ados.core.config import load_config
 from ados.core.logging import configure_logging, get_logger
 from ados.services.ui.events import ButtonEvent, ButtonEventBus
 
@@ -47,6 +49,28 @@ CANCEL_HOLD_SECONDS: float = 6.0
 
 # Debounce window passed to gpiozero.
 BOUNCE_TIME: float = 0.02
+
+# Phase 4 Wave 2: BCM pin -> friendly button id used by the REST schema.
+# `B1`, `B2`, `B3`, `B4` correspond to the four front-panel buttons in
+# the order documented at `hal/boards/rpi4b.yaml`. The REST mapping
+# uses keys like `B1_short`, `B2_long`. Anything outside this table is
+# resolved as `BX_short` / `BX_long` where X is the BCM pin number, so
+# extra GPIO buttons added later still get a stable mapping key.
+PIN_TO_LABEL: dict[int, str] = {5: "B1", 6: "B2", 13: "B3", 19: "B4"}
+
+# Default mapping. Used when `ground_station.ui.buttons.mapping` is empty
+# or missing. Mirrors the REST defaults at
+# `api/routes/ground_station.py::_DEFAULT_BUTTONS`.
+DEFAULT_BUTTON_MAPPING: dict[str, str] = {
+    "B1_short": "cycle_screen",
+    "B1_long": "toggle_backlight",
+    "B2_short": "show_network",
+    "B2_long": "show_qr",
+    "B3_short": "confirm",
+    "B3_long": "pair_drone",
+    "B4_short": "back",
+    "B4_long": "menu",
+}
 
 
 def _now_ms() -> int:
@@ -73,6 +97,43 @@ class ButtonService:
         self._loop = loop or asyncio.get_event_loop()
         self._press_ms: dict[int, int] = {}
         self._buttons: list = []  # holds gpiozero.Button refs
+        # Phase 4 Wave 2: live action mapping rebuilt on SIGHUP.
+        self._mapping: dict[str, str] = dict(DEFAULT_BUTTON_MAPPING)
+        self.reload_mapping()
+
+    def _label_for_pin(self, pin: int) -> str:
+        """Return `B1`..`B4` for known pins, else `BX<pin>` for extras."""
+        return PIN_TO_LABEL.get(pin, f"BX{pin}")
+
+    def reload_mapping(self) -> None:
+        """Rebuild `self._mapping` from `ground_station.ui.buttons.mapping`.
+
+        Tolerates a missing ground_station block, a missing ui block, or
+        an empty mapping by falling back to `DEFAULT_BUTTON_MAPPING`.
+        Keys in the loaded mapping override the defaults one by one so
+        a partial remap (e.g. user only changed `B1_short`) keeps the
+        rest of the defaults intact.
+        """
+        merged = dict(DEFAULT_BUTTON_MAPPING)
+        try:
+            cfg = load_config()
+            ui = getattr(getattr(cfg, "ground_station", None), "ui", None)
+            buttons_cfg: Any = getattr(ui, "buttons", {}) if ui is not None else {}
+            if isinstance(buttons_cfg, dict):
+                raw_map = buttons_cfg.get("mapping", {})
+                if isinstance(raw_map, dict):
+                    for k, v in raw_map.items():
+                        if isinstance(k, str) and isinstance(v, str):
+                            merged[k] = v
+        except Exception as exc:
+            log.warning("button_mapping_reload_failed", error=str(exc))
+        self._mapping = merged
+        log.info("button_mapping_loaded", entries=len(merged))
+
+    def _resolve_action(self, pin: int, kind: str) -> str | None:
+        """Look up the action name for a (pin, kind) pair. None when unmapped."""
+        key = f"{self._label_for_pin(pin)}_{kind}"
+        return self._mapping.get(key)
 
     def start(self) -> None:
         """Attach gpiozero callbacks to every pin.
@@ -133,11 +194,19 @@ class ButtonService:
                 return
 
             kind: str = "long" if held_s >= LONG_PRESS_SECONDS else "short"
-            event = ButtonEvent(button=pin, kind=kind, timestamp_ms=now)  # type: ignore[arg-type]
+            action = self._resolve_action(pin, kind)
+            event = ButtonEvent(  # type: ignore[arg-type]
+                button=pin,
+                kind=kind,
+                timestamp_ms=now,
+                action=action,
+            )
             log.info(
                 "button event",
                 pin=pin,
+                label=self._label_for_pin(pin),
                 kind=kind,
+                action=action,
                 held_seconds=round(held_s, 2),
             )
             # Schedule the publish onto the asyncio loop from the
@@ -187,6 +256,18 @@ async def _run() -> int:
         except NotImplementedError:
             # Windows or restricted environments. Fall through.
             signal.signal(sig, _signal_stop)
+
+    def _signal_reload(*_args) -> None:
+        log.info("button service reloading mapping on SIGHUP")
+        service.reload_mapping()
+
+    try:
+        loop.add_signal_handler(signal.SIGHUP, _signal_reload)
+    except (NotImplementedError, AttributeError):
+        try:
+            signal.signal(signal.SIGHUP, _signal_reload)
+        except (AttributeError, ValueError):
+            pass
 
     try:
         await stop_event.wait()
