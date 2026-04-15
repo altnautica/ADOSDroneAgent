@@ -554,10 +554,32 @@ ENVEOF
     info "Supervisor service enabled and started."
     info "Child services will be started by the supervisor based on hardware detection and suite config."
 
+    # MSN-028 Phase 4 Track A Wave 3: enable cross-profile Peripheral
+    # Manager unit + drop the manifest drop-in directory. Runs on both
+    # drone and ground-station profiles.
+    enable_universal_units
+
     # DEC-112 / MSN-024: enable ground-station units if profile demands them.
     if [ "${ADOS_PROFILE:-drone}" = "ground_station" ] || [ "${ADOS_PROFILE:-drone}" = "ground-station" ]; then
         enable_ground_station_units
     fi
+}
+
+# Enable cross-profile systemd units. Run on every install regardless
+# of the detected profile.
+enable_universal_units() {
+    info "Enabling cross-profile systemd units..."
+    for unit in ados-peripherals.service; do
+        if [ -f "/etc/systemd/system/${unit}" ]; then
+            systemctl enable "${unit}" 2>/dev/null || true
+        else
+            warn "Unit ${unit} not deployed; skipping enable."
+        fi
+    done
+
+    # Manifest drop-in directory for /etc/ados/peripherals/*.yaml.
+    mkdir -p /etc/ados/peripherals
+    chmod 0755 /etc/ados/peripherals
 }
 
 # ─── Ground-station Profile (DEC-112, MSN-024) ─────────────────────────────
@@ -784,12 +806,31 @@ enable_ground_station_units() {
     fi
     if [ -n "${udev_src}" ] && [ -f "${udev_src}" ]; then
         install -m 0644 "${udev_src}" "/etc/udev/rules.d/99-ados-input.rules"
-        udevadm control --reload 2>/dev/null || true
-        udevadm trigger 2>/dev/null || true
         info "Input udev rules installed."
     else
         warn "Input udev rules source not found; skipping 99-ados-input.rules install."
     fi
+
+    # Install modem hot-plug udev rule when the modem stack is enabled.
+    # Gated on ADOS_ENABLE_MODEM=1 (matches the modemmanager apt install gate).
+    if [ "${ADOS_ENABLE_MODEM:-0}" = "1" ]; then
+        local modem_udev_src=""
+        if [ -n "${FRESH_REPO_DIR:-}" ] && [ -f "${FRESH_REPO_DIR}/repo/data/udev/99-ados-modem.rules" ]; then
+            modem_udev_src="${FRESH_REPO_DIR}/repo/data/udev/99-ados-modem.rules"
+        elif [ -f "$(dirname "$0" 2>/dev/null)/../data/udev/99-ados-modem.rules" ] 2>/dev/null; then
+            modem_udev_src="$(cd "$(dirname "$0")/../data/udev" && pwd)/99-ados-modem.rules"
+        fi
+        if [ -n "${modem_udev_src}" ] && [ -f "${modem_udev_src}" ]; then
+            install -m 0644 "${modem_udev_src}" "/etc/udev/rules.d/99-ados-modem.rules"
+            info "Modem udev rules installed."
+        else
+            warn "Modem udev rules source not found; skipping 99-ados-modem.rules install."
+        fi
+    fi
+
+    # Single reload + trigger after all rule copies (efficient).
+    udevadm control --reload 2>/dev/null || true
+    udevadm trigger 2>/dev/null || true
 }
 
 # ─── Global Symlinks ──────────────────────────────────────────────────────

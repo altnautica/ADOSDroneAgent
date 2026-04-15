@@ -1,0 +1,9 @@
+# ADOS Ground Station. SIM7600G-H modem hot-plug.
+# Trigger ados-modem.service when a SIMCom or Qualcomm 4G modem appears.
+ACTION=="add", SUBSYSTEM=="usb", ATTR{idVendor}=="1e0e", ATTR{idProduct}=="900[1-9]", RUN+="/bin/systemctl --no-block start ados-modem.service"
+ACTION=="add", SUBSYSTEM=="usb", ATTR{idVendor}=="1e0e", ATTR{idProduct}=="901[0-9]", RUN+="/bin/systemctl --no-block start ados-modem.service"
+ACTION=="add", SUBSYSTEM=="usb", ATTR{idVendor}=="05c6", ATTR{idProduct}=="9091", RUN+="/bin/systemctl --no-block start ados-modem.service"
+ACTION=="add", SUBSYSTEM=="usb", ATTR{idVendor}=="05c6", ATTR{idProduct}=="90b6", RUN+="/bin/systemctl --no-block start ados-modem.service"
+ACTION=="add", SUBSYSTEM=="usb", ATTR{idVendor}=="05c6", ATTR{idProduct}=="9003", RUN+="/bin/systemctl --no-block start ados-modem.service"
+
+# On remove the service stays up (idle is harmless if the modem is gone).
