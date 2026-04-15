@@ -1,0 +1,24 @@
+[Unit]
+Description=ADOS Physical Buttons (ground-station profile)
+After=ados-supervisor.service
+PartOf=ados-supervisor.service
+ConditionPathExists=/dev/gpiochip0
+
+[Service]
+Type=simple
+User=root
+SupplementaryGroups=gpio
+ExecStart=/opt/ados/venv/bin/python -m ados.services.ui.button_service
+Restart=on-failure
+RestartSec=5
+Environment=ADOS_CONFIG=/etc/ados/config.yaml
+EnvironmentFile=-/etc/ados/env
+
+MemoryMax=48M
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ados-buttons
+
+[Install]
+WantedBy=ados-supervisor.service

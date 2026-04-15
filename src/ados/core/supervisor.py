@@ -79,6 +79,12 @@ SERVICE_REGISTRY: list[dict] = [
     {"name": "ados-wfb-rx", "category": "hardware", "profile_gate": "ground_station"},
     {"name": "ados-mediamtx-gs", "category": "hardware", "profile_gate": "ground_station"},
     {"name": "ados-usb-gadget", "category": "hardware", "profile_gate": "ground_station"},
+    # MSN-025 Wave D: physical UI + AP + first-boot captive portal.
+    {"name": "ados-oled", "category": "hardware", "profile_gate": "ground_station"},
+    {"name": "ados-buttons", "category": "hardware", "profile_gate": "ground_station"},
+    {"name": "ados-hostapd", "category": "hardware", "profile_gate": "ground_station"},
+    {"name": "ados-dnsmasq-gs", "category": "hardware", "profile_gate": "ground_station"},
+    {"name": "ados-setup-captive", "category": "ondemand", "profile_gate": "ground_station"},
 ]
 
 

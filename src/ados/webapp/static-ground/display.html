@@ -14,28 +14,39 @@
 <main>
   <h1>Display</h1>
 
+  <div id="auth-banner" class="result-fail hidden"></div>
+
+  <div class="card">
+    <h2>OLED</h2>
+    <div class="row">
+      <label for="oled-brightness">Brightness (<span id="oled-brightness-label">-</span>)</label>
+      <input id="oled-brightness" type="range" min="0" max="100" step="1" value="80" disabled>
+    </div>
+  </div>
+
   <div class="card">
     <h2>HDMI</h2>
     <div class="row">
       <label for="hdmi-res">Output resolution</label>
       <select id="hdmi-res" disabled>
         <option value="auto">Auto</option>
-        <option value="1080p">1080p 60</option>
-        <option value="720p">720p 60</option>
       </select>
     </div>
+    <p class="muted">Not available yet.</p>
   </div>
 
   <div class="card">
     <h2>Gamepad</h2>
-    <p id="gamepad-state">None assigned</p>
+    <p class="muted">Not available yet.</p>
   </div>
 
   <div class="card">
     <h2>Bluetooth</h2>
     <button id="bt-pair" class="secondary" type="button" disabled>Pair device</button>
+    <p class="muted">Not available yet.</p>
   </div>
 </main>
+<div id="spinner" class="spinner hidden"></div>
 <script src="app.js"></script>
 </body>
 </html>

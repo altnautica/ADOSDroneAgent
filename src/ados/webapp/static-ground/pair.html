@@ -15,6 +15,15 @@
   <h1>Pair with drone</h1>
   <p class="muted">Enter the pairing key shown on the drone OLED or in Mission Control.</p>
 
+  <div id="auth-banner" class="result-fail hidden"></div>
+
+  <div id="pair-already" class="card hidden">
+    <p>Already paired with <span id="pair-already-drone" class="mono">-</span>.</p>
+    <p class="muted">Unpair first to pair with a different drone.</p>
+    <button id="pair-unpair" class="secondary" type="button">Unpair</button>
+    <a href="index.html" class="secondary" style="display:inline-block;margin-left:8px;padding:10px 14px;text-decoration:none;">Back to home</a>
+  </div>
+
   <form id="pair-form" class="card">
     <div class="row">
       <label for="pair-key">Pairing key</label>
@@ -25,6 +34,7 @@
     <div id="pair-fail" class="result-fail hidden"></div>
   </form>
 </main>
+<div id="spinner" class="spinner hidden"></div>
 <script src="app.js"></script>
 </body>
 </html>

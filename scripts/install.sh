@@ -663,13 +663,38 @@ install_ground_station_driver() {
 # no-op for drone because we branch on profile at the call site.
 enable_ground_station_units() {
     info "Enabling ground-station systemd units..."
-    for unit in ados-wfb-rx.service ados-mediamtx-gs.service ados-usb-gadget.service; do
+    for unit in \
+        ados-wfb-rx.service \
+        ados-mediamtx-gs.service \
+        ados-usb-gadget.service \
+        ados-oled.service \
+        ados-buttons.service \
+        ados-hostapd.service \
+        ados-dnsmasq-gs.service \
+        ados-setup-captive.service; do
         if [ -f "/etc/systemd/system/${unit}" ]; then
             systemctl enable "${unit}" 2>/dev/null || true
         else
             warn "Unit ${unit} not deployed; skipping enable."
         fi
     done
+
+    # Ensure state + config dirs exist for AP passphrase, setup sentinel, etc.
+    mkdir -p /etc/ados /var/lib/ados
+    chmod 0755 /etc/ados /var/lib/ados
+
+    # Button service uses libgpiod via /dev/gpiochip0 which requires gpio group.
+    # Idempotent: usermod -aG is a no-op if the user is already a member.
+    if getent group gpio >/dev/null 2>&1; then
+        if id ados >/dev/null 2>&1; then
+            usermod -aG gpio ados || true
+        fi
+        if id pi >/dev/null 2>&1; then
+            usermod -aG gpio pi || true
+        fi
+    else
+        warn "gpio group not present on this system; skipping usermod -aG gpio."
+    fi
 }
 
 # ─── Global Symlinks ──────────────────────────────────────────────────────

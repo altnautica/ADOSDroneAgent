@@ -13,14 +13,42 @@
 </header>
 <main>
   <h1>Radio</h1>
-  <p class="muted">Read only in Wave A. Change flow wires up in Wave D.</p>
+
+  <div id="auth-banner" class="result-fail hidden"></div>
 
   <div class="card">
     <p class="row"><span class="muted">Channel</span><br><span id="wfb-channel" class="mono">...</span></p>
     <p class="row"><span class="muted">Bitrate profile</span><br><span id="wfb-profile">...</span></p>
-    <button class="secondary" type="button" disabled>Change</button>
+    <button id="wfb-change" class="secondary" type="button" disabled>Change</button>
+
+    <div id="wfb-form" class="hidden">
+      <div class="row">
+        <label for="wfb-channel-input">Channel</label>
+        <select id="wfb-channel-input">
+          <option value="36">36</option>
+          <option value="40">40</option>
+          <option value="44">44</option>
+          <option value="48">48</option>
+          <option value="149">149</option>
+          <option value="153">153</option>
+          <option value="157">157</option>
+          <option value="161">161</option>
+          <option value="165">165</option>
+        </select>
+      </div>
+      <div class="row">
+        <label for="wfb-profile-input">Bitrate profile</label>
+        <select id="wfb-profile-input">
+          <option value="conservative">conservative</option>
+          <option value="balanced">balanced</option>
+          <option value="aggressive">aggressive</option>
+        </select>
+      </div>
+      <button id="wfb-save" class="primary" type="button">Save</button>
+    </div>
   </div>
 </main>
+<div id="spinner" class="spinner hidden"></div>
 <script src="app.js"></script>
 </body>
 </html>
