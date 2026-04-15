@@ -402,7 +402,7 @@ def _build_default_bridge() -> "CloudRelayBridge":
         from ados.services.mqtt.gateway import MqttGateway
         from ados.services.cloud.mavlink_relay import MavlinkMqttRelay
         from ados.services.mavlink.state import VehicleState
-        from ados.services.ground_station.pair_manager import PairManager
+        from ados.services.ground_station.pair_manager import get_pair_manager
     except Exception as exc:
         log.warning("cloud_relay.dependency_import_failed", error=str(exc))
         return CloudRelayBridge(
@@ -415,7 +415,7 @@ def _build_default_bridge() -> "CloudRelayBridge":
     try:
         config = load_config()
         router = get_uplink_router()
-        pair = PairManager()
+        pair = get_pair_manager()
         drone_id: Optional[str] = None
         # Wave B blocker 2 fix: read paired_drone_id from PairManager.status()
         # rather than config.ground_station.paired_drone_id. The pair manager
