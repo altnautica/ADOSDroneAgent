@@ -1,0 +1,25 @@
+[Unit]
+Description=ADOS mediamtx Manager (ground-station profile)
+After=ados-supervisor.service ados-wfb-rx.service
+PartOf=ados-supervisor.service
+
+[Service]
+Type=simple
+ExecStart=/opt/ados/venv/bin/python -m ados.services.ground_station.mediamtx_manager
+Restart=on-failure
+RestartSec=5
+Environment=ADOS_CONFIG=/etc/ados/config.yaml
+EnvironmentFile=-/etc/ados/env
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/var/ados /run/ados /etc/ados /tmp
+
+MemoryMax=256M
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ados-mediamtx-gs
+
+[Install]
+WantedBy=ados-supervisor.service

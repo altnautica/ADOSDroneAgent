@@ -47,6 +47,9 @@ class ServiceSpec:
     name: str
     category: str  # "core", "hardware", "suite", "ondemand"
     enabled: bool = True
+    # DEC-112: profile_gate scopes the service to one profile.
+    # None = runs on any profile. "drone" or "ground_station" gate it.
+    profile_gate: str | None = None
     # Track failures for circuit breaker
     failure_times: list[float] = field(default_factory=list)
     # Runtime state
@@ -72,6 +75,10 @@ SERVICE_REGISTRY: list[dict] = [
     # On-demand
     {"name": "ados-ota", "category": "ondemand"},
     {"name": "ados-discovery", "category": "ondemand"},
+    # DEC-112: ground-station only services.
+    {"name": "ados-wfb-rx", "category": "hardware", "profile_gate": "ground_station"},
+    {"name": "ados-mediamtx-gs", "category": "hardware", "profile_gate": "ground_station"},
+    {"name": "ados-usb-gadget", "category": "hardware", "profile_gate": "ground_station"},
 ]
 
 
@@ -96,7 +103,11 @@ class Supervisor:
 
         # Build service map
         for svc_def in SERVICE_REGISTRY:
-            spec = ServiceSpec(name=svc_def["name"], category=svc_def["category"])
+            spec = ServiceSpec(
+                name=svc_def["name"],
+                category=svc_def["category"],
+                profile_gate=svc_def.get("profile_gate"),
+            )
             self._services[spec.name] = spec
 
     @property
@@ -110,6 +121,20 @@ class Supervisor:
         spec = self._services.get(name)
         if not spec:
             log.warning("unknown_service", name=name)
+            return False
+
+        # DEC-112: gate by agent profile. Services tagged for one profile
+        # do not start on another.
+        active_profile = getattr(
+            getattr(self.config, "agent", None), "profile", "auto"
+        )
+        if spec.profile_gate and active_profile != spec.profile_gate:
+            log.info(
+                "service_profile_gated",
+                service=name,
+                required=spec.profile_gate,
+                active=active_profile,
+            )
             return False
 
         # Circuit breaker check

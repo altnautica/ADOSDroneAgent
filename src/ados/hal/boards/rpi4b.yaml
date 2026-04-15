@@ -19,3 +19,44 @@ hw_video_codecs:
   - h264_enc
   - h264_dec
   - h265_dec
+
+# DEC-112: ground-station bench build uses OLED on I2C1 and four menu buttons.
+buses:
+  i2c:
+    - id: i2c1
+      path: /dev/i2c-1
+      notes: "OLED on pins 3/5 (SDA/SCL)"
+
+# Ground-station menu buttons (BCM GPIO numbering).
+# header_pin is the physical pin on the 40-pin header.
+gpio_buttons:
+  - id: btn_b1
+    pin: 5
+    header_pin: 29
+    function: "ground-station menu up"
+  - id: btn_b2
+    pin: 6
+    header_pin: 31
+    function: "ground-station menu down"
+  - id: btn_b3
+    pin: 13
+    header_pin: 33
+    function: "ground-station menu select"
+  - id: btn_b4
+    pin: 19
+    header_pin: 35
+    function: "ground-station menu back"
+
+profiles:
+  ground_station:
+    tier: "lite"
+    video_capable: true
+    usb_gadget: true
+    hdmi: true
+    max_features:
+      - wfb_rx
+      - mediamtx_relay
+      - wifi_ap
+      - usb_tether
+      - oled_ui
+      - hdmi_kiosk

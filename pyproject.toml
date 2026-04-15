@@ -52,6 +52,15 @@ dev = [
     "mypy>=1.8.0",
     "black>=24.1.0",
 ]
+# DEC-112 / MSN-024: ground-station profile extras. Pulled only when the
+# installer detects ground_station profile or when a developer runs
+# `pip install -e ".[ground-station]"`. Drone profile never needs these.
+ground-station = [
+    "luma.oled>=3.13.0",
+    "gpiozero>=2.0",
+    "dbus-next>=0.2.3",
+    "smbus2>=0.4.3",
+]
 
 [project.urls]
 Homepage = "https://altnautica.com/drone-agent"
