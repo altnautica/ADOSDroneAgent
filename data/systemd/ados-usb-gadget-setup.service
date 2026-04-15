@@ -1,0 +1,22 @@
+[Unit]
+Description=ADOS USB Gadget Setup (libcomposite CDC-NCM + RNDIS)
+Documentation=https://github.com/altnautica/ADOSDroneAgent
+# MSN-029 Cellos Wave 1 H2. Composes the configfs gadget BEFORE
+# the Python usb_gadget manager or the supervisor touch it, so
+# that the kernel-side tree is already up when user-space asks.
+After=sys-kernel-config.mount
+Before=ados-supervisor.service
+ConditionPathExists=/sys/class/udc
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# Ensure configfs is mounted even on minimal images.
+ExecStartPre=/bin/sh -c 'test -d /sys/kernel/config/usb_gadget || mount -t configfs none /sys/kernel/config || true'
+ExecStart=/usr/local/lib/ados/usb-gadget/ados-cdc-ncm-rndis.sh
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ados-usb-gadget-setup
+
+[Install]
+WantedBy=multi-user.target

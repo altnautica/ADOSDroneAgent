@@ -1,6 +1,6 @@
 [Unit]
 Description=ADOS Ground Station DHCP/DNS (dnsmasq)
-After=ados-hostapd.service
+After=ados-supervisor.service ados-hostapd.service
 PartOf=ados-supervisor.service
 Requires=ados-hostapd.service
 ConditionPathExists=/etc/ados/dnsmasq-gs.conf

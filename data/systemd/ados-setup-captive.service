@@ -1,6 +1,6 @@
 [Unit]
 Description=ADOS Captive Portal DNS + HTTP responder (first-boot only)
-After=ados-hostapd.service
+After=ados-supervisor.service ados-hostapd.service
 PartOf=ados-supervisor.service
 
 [Service]

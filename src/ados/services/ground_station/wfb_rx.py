@@ -171,7 +171,14 @@ class WfbRxManager:
                 await asyncio.wait_for(proc.wait(), timeout=5.0)
                 log.info("ground_wfb_rx_stopped", pid=proc.pid)
             except TimeoutError:
-                proc.kill()
+                try:
+                    proc.kill()
+                except ProcessLookupError:
+                    pass
+                try:
+                    await asyncio.wait_for(proc.wait(), timeout=1.0)
+                except asyncio.TimeoutError:
+                    pass
                 log.warning("ground_wfb_rx_killed", pid=proc.pid)
             except ProcessLookupError:
                 log.debug("ground_wfb_rx_already_exited")

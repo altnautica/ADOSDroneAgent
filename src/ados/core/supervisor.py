@@ -102,6 +102,7 @@ SERVICE_REGISTRY: list[dict] = [
     {"name": "ados-uplink-router", "category": "hardware", "profile_gate": "ground_station"},
     {"name": "ados-modem", "category": "hardware", "profile_gate": "ground_station"},
     {"name": "ados-wifi-client", "category": "hardware", "profile_gate": "ground_station"},
+    {"name": "ados-ethernet", "category": "hardware", "profile_gate": "ground_station"},
     {"name": "ados-cloud-relay", "category": "core", "profile_gate": "ground_station"},
 ]
 

@@ -27,9 +27,11 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import math
 import os
 import re
 import subprocess
+from collections import Counter
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -124,10 +126,15 @@ def _load_config_dict() -> dict:
 
 
 def _save_config_dict(data: dict) -> bool:
-    """Atomically rewrite `/etc/ados/config.yaml` with the given dict."""
+    """Atomically rewrite `/etc/ados/config.yaml` with the given dict.
+
+    H8/M1: mode is 0o600 because this file carries secrets
+    (server.self_hosted.api_key, security.hmac_secret, mqtt_password,
+    pairing state). Only root should read it.
+    """
     try:
         body = yaml.safe_dump(data, sort_keys=False, default_flow_style=False)
-        _atomic_write(_CONFIG_PATH, body.encode("utf-8"), mode=0o644)
+        _atomic_write(_CONFIG_PATH, body.encode("utf-8"), mode=0o600)
         return True
     except (OSError, yaml.YAMLError) as exc:
         log.error("config_write_failed", path=str(_CONFIG_PATH), error=str(exc))
@@ -239,6 +246,17 @@ def _validate_pair_key(pair_key: str) -> None:
         raise PairKeyError(
             "pair_key must be hex or base58 characters only"
         )
+
+    # Entropy guard: block trivial all-alphanumeric short keys and
+    # low-diversity strings (e.g. "aaaaaaaaaaaaaaaaaa"). Shannon
+    # entropy per character below 4.0 bits indicates weak keying.
+    if stripped.isalnum() and len(stripped) < 24:
+        raise PairKeyError("pair key entropy too low")
+    counts = Counter(stripped)
+    total = len(stripped)
+    entropy = -sum((c / total) * math.log2(c / total) for c in counts.values())
+    if entropy < 4.0:
+        raise PairKeyError("pair key entropy too low")
 
 
 class PairManager:

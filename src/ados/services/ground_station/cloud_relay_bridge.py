@@ -54,6 +54,11 @@ class CloudRelayBridge:
     The bridge owns a lifecycle loop that listens to the uplink bus
     and reconciles the MQTT gateway and the MAVLink relay on every
     relevant event. When no uplink is active the bridge sits idle.
+
+    Security: `api_key` is sensitive. It is read from
+    `server.self_hosted.api_key` in `/etc/ados/config.yaml`, which must
+    be mode 0600 and owned by root. See `pair_manager._save_config_dict`
+    and the H8/M1 hardening in MSN-029.
     """
 
     def __init__(

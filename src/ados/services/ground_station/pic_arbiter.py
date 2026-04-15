@@ -161,10 +161,13 @@ class PicArbiter:
         self.claimed_since: Optional[float] = None
         self.claim_counter: int = 0
         self.primary_gamepad_id: Optional[str] = None
+        self.last_heartbeat_ts: Optional[float] = None
 
         self.bus = PicEventBus()
         self._lock = asyncio.Lock()
         self._confirm_tokens: dict[str, _ConfirmToken] = {}
+        self._watchdog_task: Optional[asyncio.Task] = None
+        self._watchdog_stop: Optional[asyncio.Event] = None
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -203,6 +206,7 @@ class PicArbiter:
         self.state = "claimed"
         self.claimed_by = client_id
         self.claimed_since = time.time()
+        self.last_heartbeat_ts = time.time()
         self.claim_counter += 1
         self._refresh_primary_gamepad()
         return self.claim_counter
@@ -463,6 +467,89 @@ class PicArbiter:
             )
 
     # ------------------------------------------------------------------
+    # Session heartbeat + watchdog
+    # ------------------------------------------------------------------
+    # Clients holding PIC must POST /pic/heartbeat at least every
+    # _HEARTBEAT_TIMEOUT_SECONDS or the server-side watchdog will
+    # auto-release their claim. Prevents stale PIC state when a GCS
+    # tab closes without calling /pic/release.
+    _HEARTBEAT_TIMEOUT_SECONDS: float = 30.0
+    _WATCHDOG_INTERVAL_SECONDS: float = 5.0
+
+    async def heartbeat(self, client_id: str) -> dict:
+        """Record a heartbeat for the active PIC holder."""
+        async with self._lock:
+            if self.state != "claimed" or self.claimed_by != client_id:
+                return {
+                    "ok": False,
+                    "error": "no_active_claim",
+                    "current_pic": self.claimed_by,
+                    "status": 410,
+                }
+            self.last_heartbeat_ts = time.time()
+            return {
+                "ok": True,
+                "claimed_by": self.claimed_by,
+                "claim_counter": self.claim_counter,
+                "last_heartbeat_ts": self.last_heartbeat_ts,
+            }
+
+    async def _session_watchdog(self) -> None:
+        """Auto-release PIC if no heartbeat within the timeout window."""
+        assert self._watchdog_stop is not None
+        stop = self._watchdog_stop
+        while not stop.is_set():
+            try:
+                await asyncio.wait_for(
+                    stop.wait(), timeout=self._WATCHDOG_INTERVAL_SECONDS
+                )
+                return
+            except asyncio.TimeoutError:
+                pass
+
+            expired_client: Optional[str] = None
+            async with self._lock:
+                if (
+                    self.state == "claimed"
+                    and self.claimed_by is not None
+                    and self.last_heartbeat_ts is not None
+                ):
+                    age = time.time() - self.last_heartbeat_ts
+                    if age > self._HEARTBEAT_TIMEOUT_SECONDS:
+                        expired_client = self.claimed_by
+
+            if expired_client is not None:
+                log.info(
+                    "pic.auto_release_on_timeout",
+                    client_id=expired_client,
+                    timeout_seconds=self._HEARTBEAT_TIMEOUT_SECONDS,
+                )
+                await self.release(expired_client)
+
+    async def start_watchdog(self) -> None:
+        """Start the background session watchdog task. Idempotent."""
+        if self._watchdog_task is not None and not self._watchdog_task.done():
+            return
+        self._watchdog_stop = asyncio.Event()
+        self._watchdog_task = asyncio.create_task(
+            self._session_watchdog(), name="pic_session_watchdog"
+        )
+        log.info("pic.watchdog_started", interval=self._WATCHDOG_INTERVAL_SECONDS)
+
+    async def stop_watchdog(self) -> None:
+        """Stop the background session watchdog. Idempotent."""
+        if self._watchdog_stop is not None:
+            self._watchdog_stop.set()
+        task = self._watchdog_task
+        if task is not None and not task.done():
+            try:
+                await asyncio.wait_for(task, timeout=2.0)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                task.cancel()
+        self._watchdog_task = None
+        self._watchdog_stop = None
+
+    # ------------------------------------------------------------------
     # Hotplug integration
     # ------------------------------------------------------------------
     async def run_hotplug_integration(
@@ -553,6 +640,8 @@ async def _run_service() -> None:
         )
     )
 
+    await arbiter.start_watchdog()
+
     log.info(
         "pic.service_ready",
         client_hint=client_hint,
@@ -561,6 +650,7 @@ async def _run_service() -> None:
 
     await stop_event.wait()
 
+    await arbiter.stop_watchdog()
     hotplug_task.cancel()
     try:
         await hotplug_task

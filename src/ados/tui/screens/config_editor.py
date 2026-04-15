@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import structlog
@@ -76,6 +77,16 @@ class ConfigScreen(Screen):
         file_dot = self.query_one("#config-file-dot", StatusDot)
         try:
             self._config_path.write_text(editor.text)
+            # H8/M1: config.yaml carries secrets (api_key, hmac_secret,
+            # mqtt_password). Lock permissions to root after every write.
+            try:
+                os.chmod(self._config_path, 0o600)
+            except OSError as chmod_exc:
+                log.warning(
+                    "config_chmod_failed",
+                    path=str(self._config_path),
+                    error=str(chmod_exc),
+                )
             path_label.update(f"File: {self._config_path} [saved]")
             file_dot.set_state("ok")
         except OSError as e:

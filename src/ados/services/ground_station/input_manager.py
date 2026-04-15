@@ -349,6 +349,10 @@ class InputManager:
                 proc.kill()
             except ProcessLookupError:
                 pass
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=1.0)
+            except asyncio.TimeoutError:
+                pass
             return 124, "", "timeout"
 
         stdout = stdout_b.decode(errors="replace")

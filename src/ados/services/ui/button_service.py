@@ -30,6 +30,7 @@ from __future__ import annotations
 import asyncio
 import signal
 import sys
+import threading
 import time
 from typing import Any
 
@@ -98,6 +99,11 @@ class ButtonService:
         self._press_ms: dict[int, int] = {}
         self._buttons: list = []  # holds gpiozero.Button refs
         # Phase 4 Wave 2: live action mapping rebuilt on SIGHUP.
+        # The mapping is read from the gpiozero worker thread in
+        # `_resolve_action` and written from the asyncio SIGHUP handler
+        # in `reload_mapping`. A threading.Lock guards the swap so a
+        # release callback never sees a half-built dict.
+        self._mapping_lock = threading.Lock()
         self._mapping: dict[str, str] = dict(DEFAULT_BUTTON_MAPPING)
         self.reload_mapping()
 
@@ -127,13 +133,15 @@ class ButtonService:
                             merged[k] = v
         except Exception as exc:
             log.warning("button_mapping_reload_failed", error=str(exc))
-        self._mapping = merged
+        with self._mapping_lock:
+            self._mapping = merged
         log.info("button_mapping_loaded", entries=len(merged))
 
     def _resolve_action(self, pin: int, kind: str) -> str | None:
         """Look up the action name for a (pin, kind) pair. None when unmapped."""
         key = f"{self._label_for_pin(pin)}_{kind}"
-        return self._mapping.get(key)
+        with self._mapping_lock:
+            return self._mapping.get(key)
 
     def start(self) -> None:
         """Attach gpiozero callbacks to every pin.
