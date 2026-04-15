@@ -1,0 +1,27 @@
+[Unit]
+Description=ADOS Cloud Relay Bridge (ground-station profile)
+After=ados-supervisor.service ados-uplink-router.service
+PartOf=ados-supervisor.service
+Requires=ados-uplink-router.service
+
+[Service]
+Type=simple
+User=root
+ExecStart=/opt/ados/venv/bin/python -m ados.services.ground_station.cloud_relay_bridge
+Restart=on-failure
+RestartSec=10
+Environment=ADOS_CONFIG=/etc/ados/config.yaml
+EnvironmentFile=-/etc/ados/env
+
+NoNewPrivileges=no
+ProtectSystem=strict
+ReadWritePaths=/var/ados /run/ados /etc/ados
+
+MemoryMax=128M
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ados-cloud-relay
+
+[Install]
+WantedBy=ados-supervisor.service

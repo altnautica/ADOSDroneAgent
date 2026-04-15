@@ -89,6 +89,16 @@ SERVICE_REGISTRY: list[dict] = [
     {"name": "ados-kiosk", "category": "hardware", "profile_gate": "ground_station"},
     {"name": "ados-input", "category": "hardware", "profile_gate": "ground_station"},
     {"name": "ados-pic", "category": "hardware", "profile_gate": "ground_station"},
+    # MSN-027 Wave C Cellos: Phase 3 uplink matrix + cloud relay.
+    # No `network` or `cloud` category exists in the supervisor taxonomy
+    # (categories are core/hardware/suite/ondemand). Uplink managers are
+    # hardware-like (they bind to real interfaces). The cloud relay is
+    # treated as core because it is always running on the ground-station
+    # profile, independent of hardware detection.
+    {"name": "ados-uplink-router", "category": "hardware", "profile_gate": "ground_station"},
+    {"name": "ados-modem", "category": "hardware", "profile_gate": "ground_station"},
+    {"name": "ados-wifi-client", "category": "hardware", "profile_gate": "ground_station"},
+    {"name": "ados-cloud-relay", "category": "core", "profile_gate": "ground_station"},
 ]
 
 
