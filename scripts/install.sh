@@ -553,6 +553,123 @@ ENVEOF
     systemctl restart ados-supervisor
     info "Supervisor service enabled and started."
     info "Child services will be started by the supervisor based on hardware detection and suite config."
+
+    # DEC-112 / MSN-024: enable ground-station units if profile demands them.
+    if [ "${ADOS_PROFILE:-drone}" = "ground_station" ] || [ "${ADOS_PROFILE:-drone}" = "ground-station" ]; then
+        enable_ground_station_units
+    fi
+}
+
+# ─── Ground-station Profile (DEC-112, MSN-024) ─────────────────────────────
+
+# Resolve agent profile. Honors /etc/ados/profile.conf if present, otherwise
+# tries `python -m ados.bootstrap.profile_detect` (First Violins). Falls back
+# to "drone" so a missing detector never turns a drone into a ground station.
+resolve_profile() {
+    local profile_file="${CONFIG_DIR}/profile.conf"
+    if [ -f "${profile_file}" ]; then
+        # profile.conf is a trivial `profile=<name>` or single-word file
+        local val
+        val="$(grep -E '^profile=' "${profile_file}" 2>/dev/null | cut -d= -f2 | tr -d '[:space:]' || true)"
+        if [ -z "${val}" ]; then
+            val="$(tr -d '[:space:]' < "${profile_file}" || true)"
+        fi
+        if [ -n "${val}" ]; then
+            echo "${val}"
+            return 0
+        fi
+    fi
+    if "${VENV_DIR}/bin/python" -c "import ados.bootstrap.profile_detect" 2>/dev/null; then
+        local detected
+        detected="$("${VENV_DIR}/bin/python" -m ados.bootstrap.profile_detect 2>/dev/null | tr -d '[:space:]' || true)"
+        if [ -n "${detected}" ]; then
+            mkdir -p "${CONFIG_DIR}"
+            echo "profile=${detected}" > "${profile_file}"
+            echo "${detected}"
+            return 0
+        fi
+    fi
+    echo "drone"
+}
+
+# Extra apt deps needed for the ground-station profile. Idempotent.
+install_ground_station_deps() {
+    info "Installing ground-station profile dependencies..."
+    apt-get install -y \
+        hostapd \
+        dnsmasq \
+        bluetooth \
+        bluez \
+        chromium-browser \
+        cage || {
+        # chromium-browser has different package names on Debian Bookworm
+        # (chromium) and some Radxa BSPs. Fall back gracefully.
+        warn "Primary ground-station deps install failed; retrying with chromium fallback."
+        apt-get install -y hostapd dnsmasq bluetooth bluez cage || true
+        apt-get install -y chromium || true
+    }
+
+    # Ensure dwc2 overlay + module load for USB gadget mode (Pi family).
+    local cfg="/boot/firmware/config.txt"
+    if [ ! -f "${cfg}" ] && [ -f "/boot/config.txt" ]; then
+        cfg="/boot/config.txt"
+    fi
+    if [ -f "${cfg}" ]; then
+        if ! grep -qE '^\s*dtoverlay=dwc2' "${cfg}"; then
+            info "Appending dtoverlay=dwc2 to ${cfg}"
+            printf '\n# ADOS ground-station profile: USB gadget mode\ndtoverlay=dwc2\n' >> "${cfg}"
+        fi
+    else
+        warn "Boot config not found; skipping dtoverlay=dwc2 append."
+    fi
+
+    local cmdline="/boot/firmware/cmdline.txt"
+    if [ ! -f "${cmdline}" ] && [ -f "/boot/cmdline.txt" ]; then
+        cmdline="/boot/cmdline.txt"
+    fi
+    if [ -f "${cmdline}" ]; then
+        if ! grep -q 'modules-load=dwc2' "${cmdline}"; then
+            info "Appending modules-load=dwc2 to ${cmdline}"
+            # cmdline.txt is single-line; append before the trailing newline
+            sed -i 's/$/ modules-load=dwc2/' "${cmdline}"
+        fi
+    else
+        warn "Boot cmdline not found; skipping modules-load=dwc2 append."
+    fi
+
+    info "Ground-station deps installed."
+}
+
+# Install RTL8812AU/EU driver via DKMS. Idempotent.
+install_ground_station_driver() {
+    local script_path=""
+    if [ -n "${FRESH_REPO_DIR:-}" ] && [ -x "${FRESH_REPO_DIR}/repo/scripts/drivers/install-rtl8812eu.sh" ]; then
+        script_path="${FRESH_REPO_DIR}/repo/scripts/drivers/install-rtl8812eu.sh"
+    elif [ -x "$(dirname "$0" 2>/dev/null)/drivers/install-rtl8812eu.sh" ] 2>/dev/null; then
+        script_path="$(cd "$(dirname "$0")/drivers" && pwd)/install-rtl8812eu.sh"
+    fi
+    if [ -z "${script_path}" ] || [ ! -x "${script_path}" ]; then
+        warn "RTL8812AU installer not found; skipping driver build."
+        return 0
+    fi
+    info "Running RTL8812AU/EU DKMS installer..."
+    "${script_path}" || {
+        warn "RTL8812AU DKMS install failed; WFB-ng RX will not work until resolved."
+        return 0
+    }
+}
+
+# Enable ground-station systemd units. Safe to run on any profile; a
+# no-op for drone because we branch on profile at the call site.
+enable_ground_station_units() {
+    info "Enabling ground-station systemd units..."
+    for unit in ados-wfb-rx.service ados-mediamtx-gs.service ados-usb-gadget.service; do
+        if [ -f "/etc/systemd/system/${unit}" ]; then
+            systemctl enable "${unit}" 2>/dev/null || true
+        else
+            warn "Unit ${unit} not deployed; skipping enable."
+        fi
+    done
 }
 
 # ─── Global Symlinks ──────────────────────────────────────────────────────
@@ -885,6 +1002,24 @@ if [ -n "${FRESH_REPO_DIR}" ]; then
     "${VENV_DIR}/bin/pip" install "${FRESH_REPO_DIR}/repo" --quiet
 else
     "${VENV_DIR}/bin/pip" install "git+${REPO_URL}" --quiet
+fi
+
+# Resolve profile (DEC-112). Ground-station profile pulls extra apt deps,
+# the RTL8812AU DKMS driver, and the ground-station python extras.
+ADOS_PROFILE="$(resolve_profile)"
+info "Agent profile: ${ADOS_PROFILE}"
+
+if [ "${ADOS_PROFILE}" = "ground_station" ] || [ "${ADOS_PROFILE}" = "ground-station" ]; then
+    install_ground_station_deps
+    install_ground_station_driver
+    info "Installing ground-station Python extras..."
+    if [ -n "${FRESH_REPO_DIR}" ]; then
+        "${VENV_DIR}/bin/pip" install "${FRESH_REPO_DIR}/repo[ground-station]" --quiet || \
+            warn "Ground-station extras install failed; continuing."
+    else
+        "${VENV_DIR}/bin/pip" install "ados-drone-agent[ground-station] @ git+${REPO_URL}" --quiet || \
+            warn "Ground-station extras install failed; continuing."
+    fi
 fi
 
 # Generate device identity (idempotent)

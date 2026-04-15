@@ -1,0 +1,28 @@
+[Unit]
+Description=ADOS USB Gadget Manager (ground-station profile)
+After=ados-supervisor.service
+PartOf=ados-supervisor.service
+ConditionPathExists=/sys/kernel/config/usb_gadget
+
+[Service]
+Type=simple
+User=root
+ExecStart=/opt/ados/venv/bin/python -m ados.services.ground_station.usb_gadget
+Restart=on-failure
+RestartSec=5
+Environment=ADOS_CONFIG=/etc/ados/config.yaml
+EnvironmentFile=-/etc/ados/env
+
+# Needs configfs write access for USB gadget composition
+NoNewPrivileges=no
+ProtectSystem=strict
+ReadWritePaths=/var/ados /run/ados /etc/ados /sys/kernel/config/usb_gadget
+
+MemoryMax=32M
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ados-usb-gadget
+
+[Install]
+WantedBy=ados-supervisor.service

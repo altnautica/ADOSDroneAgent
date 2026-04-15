@@ -16,6 +16,7 @@ from ados.api.routes import (
     config,
     features,
     fleet,
+    ground_station,
     logs,
     ota,
     pairing,
@@ -96,6 +97,7 @@ def create_app(agent: AgentApp) -> FastAPI:
     app.include_router(suites.router, prefix="/api")
     app.include_router(fleet.router, prefix="/api")
     app.include_router(features.router, prefix="/api")
+    app.include_router(ground_station.router, prefix="/api")
 
     return app
 

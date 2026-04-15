@@ -6,14 +6,29 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 # --- Agent ---
+
+# DEC-112: profile drives air vs ground-station behavior. "auto" triggers
+# the boot-time fingerprint in ados.bootstrap.profile_detect.
+_ALLOWED_PROFILES = {"auto", "drone", "ground_station"}
+
 
 class AgentConfig(BaseModel):
     device_id: str = ""
     name: str = "my-drone"
     tier: str = "auto"
+    profile: str = "auto"  # auto | drone | ground_station (DEC-112)
+
+    @field_validator("profile")
+    @classmethod
+    def _validate_profile(cls, value: str) -> str:
+        if value not in _ALLOWED_PROFILES:
+            raise ValueError(
+                f"agent.profile must be one of {sorted(_ALLOWED_PROFILES)}, got '{value}'"
+            )
+        return value
 
 
 # --- MAVLink ---
