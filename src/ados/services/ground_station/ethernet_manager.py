@@ -221,24 +221,230 @@ class EthernetManager:
         )
         return {"ok": rc == 0, "error": err.strip() if rc != 0 else None}
 
+    @staticmethod
+    def _parse_nmcli_terse_fields(line: str) -> list[str]:
+        """Parse an nmcli terse-output line honoring ``\\:`` and ``\\\\`` escapes."""
+        parts: list[str] = []
+        buf: list[str] = []
+        i = 0
+        while i < len(line):
+            ch = line[i]
+            if ch == "\\" and i + 1 < len(line):
+                buf.append(line[i + 1])
+                i += 2
+                continue
+            if ch == ":":
+                parts.append("".join(buf))
+                buf = []
+                i += 1
+                continue
+            buf.append(ch)
+            i += 1
+        parts.append("".join(buf))
+        return parts
+
+    async def _discover_primary_connection(self) -> tuple[str | None, str | None]:
+        """Pick the primary Ethernet NM connection.
+
+        Returns (connection_name, device). Prefers an ACTIVE ethernet
+        connection on ``self._interface``; falls back to the first
+        ethernet-type saved connection; else first ethernet connection
+        with matching device.
+
+        When no NM-managed Ethernet connection exists, logs a single
+        WARNING event so an operator on a non-NM BSP (for example one
+        that uses systemd-networkd) sees a clear cause-of-failure.
+        """
+        rc, out, _ = await _run(
+            ["nmcli", "-t", "-f", "NAME,TYPE,DEVICE", "connection", "show"],
+            timeout=5,
+        )
+        saved: list[tuple[str, str]] = []  # (name, device)
+        if rc == 0:
+            for line in out.splitlines():
+                if not line.strip():
+                    continue
+                parts = self._parse_nmcli_terse_fields(line)
+                if len(parts) >= 3 and parts[1] == "802-3-ethernet":
+                    saved.append((parts[0], parts[2] or ""))
+
+        rc2, out2, _ = await _run(
+            ["nmcli", "-t", "-f", "NAME,TYPE,DEVICE", "connection", "show", "--active"],
+            timeout=5,
+        )
+        active_names: set[str] = set()
+        if rc2 == 0:
+            for line in out2.splitlines():
+                if not line.strip():
+                    continue
+                parts = self._parse_nmcli_terse_fields(line)
+                if parts and parts[0]:
+                    active_names.add(parts[0])
+
+        for name, dev in saved:
+            if name in active_names and (dev == self._interface or not dev):
+                return name, dev or self._interface
+        for name, dev in saved:
+            if dev == self._interface:
+                return name, dev
+        if saved:
+            name, dev = saved[0]
+            return name, dev or self._interface
+
+        # No NM-managed Ethernet profile. Surface a clear reason for operators
+        # on non-NM BSPs (systemd-networkd, pure ifupdown, etc.) so they do not
+        # see a bare 500 on the PUT /network/ethernet route.
+        try:
+            carrier_path = f"/sys/class/net/{self._interface}/carrier"
+            link_up = False
+            try:
+                with open(carrier_path) as fh:
+                    link_up = fh.read().strip() == "1"
+            except OSError:
+                link_up = False
+            _logger.warning(
+                "no_nm_ethernet_connection",
+                interface=self._interface,
+                link_up=link_up,
+                hint="NetworkManager must manage the Ethernet device. "
+                     "Check 'nmcli connection show' and 'systemctl status NetworkManager'. "
+                     "On BSPs using systemd-networkd the Ethernet form is not supported.",
+            )
+        except Exception:
+            pass
+        return None, None
+
     async def configure_static(
         self,
         ip: str,
         gateway: str,
         dns: list[str],
     ) -> dict:
-        """Phase 3 stub. Returns a deferred marker."""
-        log.info(
-            "configure_static_stub",
-            ip=ip,
-            gateway=gateway,
-            dns=dns,
-            note="DHCP only for Phase 3",
+        """Apply static IPv4 config via nmcli on the primary Ethernet connection."""
+        name, _dev = await self._discover_primary_connection()
+        if not name:
+            return {
+                "ok": False,
+                "error": "no_ethernet_connection",
+                "hint": "No saved NetworkManager Ethernet connection found",
+            }
+
+        dns_str = " ".join(dns) if dns else ""
+        rc, _out, err = await _run(
+            [
+                "nmcli", "connection", "modify", name,
+                "ipv4.method", "manual",
+                "ipv4.addresses", ip,
+                "ipv4.gateway", gateway,
+                "ipv4.dns", dns_str,
+            ],
+            timeout=10,
         )
+        if rc != 0:
+            log.warning("ethernet_static_modify_failed", name=name, err=err.strip())
+            return {"ok": False, "error": err.strip() or "nmcli_modify_failed"}
+
+        rc2, _out2, err2 = await _run(
+            ["nmcli", "connection", "up", name],
+            timeout=20,
+        )
+        if rc2 != 0:
+            log.warning("ethernet_up_failed", name=name, err=err2.strip())
+            return {"ok": False, "error": err2.strip() or "nmcli_up_failed"}
+
+        log.info("ethernet_configured_static", name=name, ip=ip, gateway=gateway)
         return {
-            "ok": False,
-            "error": "not_implemented_phase_3",
-            "hint": "DHCP only for Phase 3",
+            "mode": "static",
+            "ip": ip,
+            "gateway": gateway,
+            "dns": list(dns),
+            "ok": True,
+        }
+
+    async def configure_dhcp(self) -> dict:
+        """Reset primary Ethernet connection to DHCP via nmcli."""
+        name, _dev = await self._discover_primary_connection()
+        if not name:
+            return {
+                "ok": False,
+                "error": "no_ethernet_connection",
+                "hint": "No saved NetworkManager Ethernet connection found",
+            }
+
+        rc, _out, err = await _run(
+            [
+                "nmcli", "connection", "modify", name,
+                "ipv4.method", "auto",
+                "ipv4.addresses", "",
+                "ipv4.gateway", "",
+                "ipv4.dns", "",
+            ],
+            timeout=10,
+        )
+        if rc != 0:
+            log.warning("ethernet_dhcp_modify_failed", name=name, err=err.strip())
+            return {"ok": False, "error": err.strip() or "nmcli_modify_failed"}
+
+        rc2, _out2, err2 = await _run(
+            ["nmcli", "connection", "up", name],
+            timeout=20,
+        )
+        if rc2 != 0:
+            log.warning("ethernet_up_failed", name=name, err=err2.strip())
+            return {"ok": False, "error": err2.strip() or "nmcli_up_failed"}
+
+        log.info("ethernet_configured_dhcp", name=name)
+        return {"mode": "dhcp", "ok": True}
+
+    async def config(self) -> dict:
+        """Return the persisted profile config (mode/ip/gateway/dns) plus live link state.
+
+        This is the view backing GET /api/v1/ground-station/network/ethernet.
+        The mode and static fields come from the NM connection profile, not
+        from runtime ``ip addr``, so the UI reflects what will apply on
+        next reconnect. Live link + current IP are merged in from status().
+        """
+        name, _dev = await self._discover_primary_connection()
+        mode: str = "dhcp"
+        profile_ip: str | None = None
+        profile_gateway: str | None = None
+        profile_dns: list[str] = []
+
+        if name:
+            rc, out, _ = await _run(
+                [
+                    "nmcli", "-t",
+                    "-f", "ipv4.method,ipv4.addresses,ipv4.gateway,ipv4.dns",
+                    "connection", "show", name,
+                ],
+                timeout=5,
+            )
+            if rc == 0:
+                for line in out.splitlines():
+                    if ":" not in line:
+                        continue
+                    key, _, val = line.partition(":")
+                    val = val.strip()
+                    if key == "ipv4.method":
+                        mode = "static" if val == "manual" else "dhcp"
+                    elif key == "ipv4.addresses":
+                        profile_ip = val or None
+                    elif key == "ipv4.gateway":
+                        profile_gateway = val or None
+                    elif key == "ipv4.dns":
+                        profile_dns = [d for d in val.split(",") if d] if val else []
+
+        live = await self.status()
+        return {
+            "mode": mode,
+            "connection_name": name,
+            "ip": profile_ip,
+            "gateway": profile_gateway,
+            "dns": profile_dns,
+            "link": bool(live.get("link", False)),
+            "speed_mbps": live.get("speed_mbps"),
+            "current_ip": live.get("ip"),
+            "current_gateway": live.get("gateway"),
         }
 
     # -------------------- background poll --------------------

@@ -17,10 +17,11 @@ import asyncio
 import json
 import time
 from pathlib import Path
-from typing import Any
+import re as _re
+from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from ados.api.deps import get_agent_app
 
@@ -611,6 +612,151 @@ async def put_ground_station_ap(update: ApUpdate) -> dict[str, Any]:
         _save_config(app)
 
     return _ap_view(app)
+
+
+# ---------------------------------------------------------------------------
+# /network/ethernet
+# ---------------------------------------------------------------------------
+
+
+_IPV4_RE = _re.compile(
+    r"^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$"
+)
+
+
+def _validate_ipv4(value: str) -> bool:
+    return bool(_IPV4_RE.match(value))
+
+
+def _validate_ipv4_cidr(value: str) -> bool:
+    if "/" not in value:
+        return False
+    addr, _, prefix = value.partition("/")
+    if not _validate_ipv4(addr):
+        return False
+    try:
+        p = int(prefix)
+    except ValueError:
+        return False
+    return 0 <= p <= 32
+
+
+class EthernetConfigUpdate(BaseModel):
+    """PUT body for /network/ethernet."""
+
+    mode: Literal["dhcp", "static"]
+    ip: str | None = None
+    gateway: str | None = None
+    dns: list[str] | None = None
+
+    @field_validator("ip")
+    @classmethod
+    def _v_ip(cls, v: str | None) -> str | None:
+        if v is None or v == "":
+            return None
+        if not _validate_ipv4_cidr(v):
+            raise ValueError("ip must be IPv4 with CIDR suffix, e.g. 192.168.1.42/24")
+        return v
+
+    @field_validator("gateway")
+    @classmethod
+    def _v_gateway(cls, v: str | None) -> str | None:
+        if v is None or v == "":
+            return None
+        if not _validate_ipv4(v):
+            raise ValueError("gateway must be a valid IPv4 address")
+        return v
+
+    @field_validator("dns")
+    @classmethod
+    def _v_dns(cls, v: list[str] | None) -> list[str] | None:
+        if v is None:
+            return None
+        for entry in v:
+            if not _validate_ipv4(entry):
+                raise ValueError(f"dns entry {entry!r} is not a valid IPv4 address")
+        return v
+
+
+def _ethernet_mgr() -> Any:
+    from ados.services.ground_station.ethernet_manager import (
+        get_ethernet_manager,
+    )
+
+    return get_ethernet_manager()
+
+
+@router.get("/network/ethernet")
+async def get_network_ethernet() -> dict[str, Any]:
+    """Return the configured Ethernet profile plus live link state."""
+    _require_ground_profile()
+    try:
+        return await _ethernet_mgr().config()
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail={"error": {"code": "E_ETHERNET_CONFIG_READ_FAILED", "message": str(exc)}},
+        ) from exc
+
+
+@router.put("/network/ethernet")
+async def put_network_ethernet(update: EthernetConfigUpdate) -> dict[str, Any]:
+    """Apply Ethernet IPv4 config. mode=dhcp or mode=static."""
+    _require_ground_profile()
+    mgr = _ethernet_mgr()
+
+    if update.mode == "static":
+        if not update.ip or not update.gateway:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": {
+                        "code": "E_ETHERNET_STATIC_MISSING_FIELDS",
+                        "message": "ip and gateway are required when mode=static",
+                    }
+                },
+            )
+        try:
+            result = await mgr.configure_static(
+                ip=update.ip,
+                gateway=update.gateway,
+                dns=list(update.dns or []),
+            )
+        except Exception as exc:
+            raise HTTPException(
+                status_code=500,
+                detail={"error": {"code": "E_ETHERNET_STATIC_FAILED", "message": str(exc)}},
+            ) from exc
+    else:
+        try:
+            result = await mgr.configure_dhcp()
+        except Exception as exc:
+            raise HTTPException(
+                status_code=500,
+                detail={"error": {"code": "E_ETHERNET_DHCP_FAILED", "message": str(exc)}},
+            ) from exc
+
+    if isinstance(result, dict) and result.get("ok") is False:
+        err_code = (
+            "E_ETHERNET_NO_CONNECTION"
+            if result.get("error") == "no_ethernet_connection"
+            else "E_ETHERNET_APPLY_FAILED"
+        )
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "error": {
+                    "code": err_code,
+                    "message": str(result.get("error") or "ethernet_apply_failed"),
+                    "hint": result.get("hint"),
+                }
+            },
+        )
+
+    try:
+        return await mgr.config()
+    except Exception:
+        return {"mode": update.mode, "applied": True}
 
 
 # ---------------------------------------------------------------------------
