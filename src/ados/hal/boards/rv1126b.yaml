@@ -1,4 +1,4 @@
-# Rockchip RV1126B — HGLRC partnership target chip
+# Rockchip RV1126B reference profile. Low-cost companion computer with ISP, encoder, NPU.
 name: "Rockchip RV1126B"
 vendor: "Rockchip"
 soc: "RV1126B"

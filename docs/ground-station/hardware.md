@@ -9,9 +9,9 @@
 | Pro | Radxa CM4 (RK3588S2, 4GB) | 2x RTL8812EU | HDMI + WiFi AP | Diversity + local display | $200-350 |
 | Field Kit | Raspberry Pi 5 (4GB) + case | 1-2x RTL8812EU | 7" HDMI touchscreen | Complete portable station | $250-400 |
 
-## Baseboard Reuse (DEC-073)
+## Baseboard Reuse
 
-Same HGLRC baseboard PCB works for both air unit and ground station. The only difference is software mode (TX vs RX) and which peripherals are connected.
+Same reference baseboard PCB works for both air unit and ground station. The only difference is software mode (TX vs RX) and which peripherals are connected.
 
 | Peripheral | Air Unit | Ground Station |
 |-----------|----------|---------------|

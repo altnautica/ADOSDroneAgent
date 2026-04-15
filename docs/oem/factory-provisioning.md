@@ -216,7 +216,7 @@ User completes setup wizard
       {
         "deviceId": "a3f2b7c1-...",
         "firmware": "0.3.1",
-        "hardware": "hglrc-companion-v1",
+        "hardware": "example-companion-v1",
         "fcType": "ArduPilot",
         "fcVersion": "4.5.7"
       }

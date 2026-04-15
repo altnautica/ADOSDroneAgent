@@ -7,7 +7,7 @@ This directory contains Buildroot configuration overlays for building production
 | Role | Responsibility |
 |------|---------------|
 | **Chip vendor (Rockchip)** | Provides BSP (Board Support Package): kernel source, U-Boot, device tree templates |
-| **Board designer (HGLRC)** | Customizes device tree for their PCB, selects peripherals, builds the image |
+| **Board designer** | Customizes device tree for their PCB, selects peripherals, builds the image |
 | **Software developer (Altnautica)** | Provides this overlay: pre-installed agent, systemd service, default config, first-boot scripts |
 
 ## Directory Structure
@@ -23,7 +23,7 @@ buildroot/
     └── rk3506_defconfig
 ```
 
-## How to Build (for HGLRC)
+## How to Build (for OEM partners)
 
 1. Clone the Rockchip Buildroot SDK for your chip
 2. Copy `configs/<chip>_defconfig` into `buildroot/configs/`

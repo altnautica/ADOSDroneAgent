@@ -78,9 +78,8 @@ ados-supervisor = "ados.core.supervisor:main"
 # Plugin entry points will be registered here
 
 # MSN-028 Phase 4 Track A Wave 3: Peripheral Manager plugin group.
-# Out-of-tree products (ADOS Edge per DEC-098, HGLRC Android RC per
-# DEC-090/091/092) register peripheral manifests here. No built-in
-# plugins ship in Wave 3.
+# External OEM partners contribute manifests via entry points or
+# filesystem drop-in. No built-in plugins ship in Wave 3.
 [project.entry-points."ados.peripherals"]
 
 [tool.setuptools.dynamic]

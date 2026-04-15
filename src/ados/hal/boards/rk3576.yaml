@@ -1,16 +1,16 @@
-# RK3576 — Unified companion computer + Android RC platform
+# Rockchip RK3576 reference board.
+# Applicable to companion computer (air unit) and Android RC controller builds.
 # Reference design: TaiShan Pi 3M (立创·泰山派3M RK3576 开发板V1.4)
 # Decision: DEC-099
-# HGLRC partnership: companion computer (air unit) and Android RC controller
-name: "RK3576 (HGLRC Agent Board)"
-vendor: "HGLRC / Altnautica"
+name: "Rockchip RK3576 (Reference)"
+vendor: "Rockchip"
 soc: "RK3576"
 arch: "aarch64"
 model_patterns:
   - "RK3576"
   - "rk3576"
   - "TaiShan Pi 3M"
-  - "HGLRC Agent"
+  - "Reference Agent Board"
   - "ADOS Agent Board"
 default_tier: 3
 
@@ -39,7 +39,7 @@ hw_video_codecs:
 
 board:
   id: rk3576
-  manufacturer: HGLRC
+  manufacturer: Reference
   status: recommended
   reference_schematic: "TaiShan Pi 3M V1.4 (立创·泰山派3M RK3576 开发板V1.4)"
 

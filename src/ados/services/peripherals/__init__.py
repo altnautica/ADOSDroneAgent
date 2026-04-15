@@ -1,8 +1,8 @@
 """Peripheral Manager. Plugin registry for external devices.
 
 The Peripheral Manager is a thin, profile-agnostic registry that lets
-out-of-tree products (ADOS Edge per DEC-098, HGLRC Android RC per
-DEC-090/091/092, and future partners) declare their peripherals as
+out-of-tree products (ADOS Edge per DEC-098, external OEM partners,
+and future plugins) declare their peripherals as
 manifests. The agent loads those manifests from two sources: Python
 entry points under the group ``ados.peripherals`` and YAML files in
 ``/etc/ados/peripherals/*.yaml``. Each manifest describes how to match

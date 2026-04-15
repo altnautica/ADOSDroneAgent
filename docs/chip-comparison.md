@@ -70,7 +70,7 @@
 - Limited USB (one host port on most boards)
 - No PCIe, no SATA, no display output
 
-**Recommended Use:** Cost-optimized ADOS Drone Agent deployment. Best at 256MB. Targets the $50-60 retail price point when paired with HGLRC baseboard. Good for basic companion computer duties: video streaming, telemetry relay, config webapp.
+**Recommended Use:** Cost-optimized ADOS Drone Agent deployment. Best at 256MB. Targets the $50-60 retail price point when paired with a reference OEM baseboard. Good for basic companion computer duties: video streaming, telemetry relay, config webapp.
 
 ---
 
@@ -135,7 +135,7 @@
 - 4x Cortex-A55 cores at 1.8 GHz. Genuine multi-core performance
 - 2GB RAM leaves 1.7GB free after ADOS Drone Agent. Room for future features
 - Well-supported by Radxa (Debian, Ubuntu, Buildroot, mainline kernel progress)
-- CM3 form factor (100-pin Hirose connectors). Same connector layout proposed for HGLRC baseboard
+- CM3 form factor (100-pin Hirose connectors). Same connector layout proposed for the reference companion baseboard
 - PCIe 2.1, USB 3.0, dual CSI, HDMI. Real I/O
 - Proven in production (Radxa ships thousands of CM3 units)
 - Available in India ($36 for 2GB variant)
@@ -147,7 +147,7 @@
 - No H.265 encoder (H.264 only)
 - $36 module cost pushes retail board price toward $60-80
 
-**Recommended Use:** Primary target for HGLRC baseboard (DEC-073). Best balance of performance, memory, I/O, and software support. The Cortex-A55 cores handle Python asyncio without breaking a sweat. 2GB RAM means no memory anxiety. Debian support means pip install works. This is the chip to build on.
+**Recommended Use:** Primary target for the reference companion baseboard. Best balance of performance, memory, I/O, and software support. The Cortex-A55 cores handle Python asyncio without breaking a sweat. 2GB RAM means no memory anxiety. Debian support means pip install works. This is the chip to build on.
 
 ---
 
@@ -170,22 +170,22 @@
 
 **Cons:**
 - **Not readily available in India.** This is the primary blocker
-- Rocky (HGLRC) prefers this chip, but sourcing for Indian production is uncertain
+- Sourcing for Indian production is uncertain
 - A7 cores (not A55). Weaker per-core performance than RK3566
 - Limited board ecosystem (fewer dev boards than RK3566)
 - Buildroot preferred (Debian support is patchy)
 
-**Recommended Use:** Rocky's preferred chip. If HGLRC handles all hardware and manufacturing in Shenzhen, this is a strong pick. For any India-side prototyping or development, the RK3566 is more practical due to availability.
+**Recommended Use:** If the OEM partner handles hardware and manufacturing, this is a strong pick. For independent or India-side prototyping, the RK3566 is more practical due to availability.
 
 ---
 
 ### RK3576
 
-**Viability: ACTIVE — Android RC controller target (DEC-090)**
+**Viability: ACTIVE. Android RC controller target.**
 
-Rocky confirmed RK3576 running Android with 4GB RAM + 64GB Flash (Session 7, Apr 2). Target SoC for HGLRC Android RC controller product (DEC-090). NOT for companion computer — companion uses RV1126B.
+Confirmed running Android with 4GB RAM + 64GB Flash. Target SoC for the ADOS Android RC controller product. NOT for companion computer; companion uses RV1126B.
 
-- **Memory:** 2-16GB LPDDR5. HGLRC config: 4GB RAM + 64GB Flash.
+- **Memory:** 2-16GB LPDDR5. Reference config: 4GB RAM + 64GB Flash.
 - **Video Encode:** H.265 at 4K@60fps.
 - **Power:** ~3-5W typical.
 - **NPU:** 6 TOPS. Serious inference capability.
@@ -273,4 +273,4 @@ Ground station RX mode needs LESS compute than air unit TX mode. No video encodi
 
 **Cost-optimized fallback: RV1106 256MB.** For OEMs who need the absolute lowest BOM cost and accept the single-core limitation.
 
-**HGLRC co-development: RV1126B 1GB.** If Rocky handles sourcing and manufacturing in Shenzhen, this chip has the best video and NPU for its price. But Altnautica cannot prototype on it without hardware.
+**OEM-partner track: RV1126B 1GB.** If the OEM partner handles sourcing and manufacturing, this chip has the best video and NPU for its price. Altnautica cannot prototype on it without hardware.

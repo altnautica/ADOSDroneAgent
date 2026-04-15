@@ -13,7 +13,7 @@ branding/
 │   ├── logo.png              # 256x256, used in webapp header
 │   ├── favicon.ico           # 32x32
 │   └── webapp_theme.css      # CSS overrides for config webapp
-├── hglrc/                    # Example: HGLRC branding
+├── example-oem/              # Example: OEM branding
 │   ├── boot_splash.png
 │   ├── logo.png
 │   ├── favicon.ico
@@ -55,11 +55,11 @@ The config webapp (captive portal + settings page) is a lightweight web interfac
 **Example:**
 
 ```css
-/* branding/hglrc/webapp_theme.css */
+/* branding/example-oem/webapp_theme.css */
 
 :root {
   /* Primary colors */
-  --color-primary: #FF6600;        /* HGLRC orange */
+  --color-primary: #FF6600;        /* Example OEM orange */
   --color-primary-hover: #E55A00;
   --color-background: #0A0A0F;
   --color-surface: #1A1A2E;
@@ -103,7 +103,7 @@ The WiFi access point name during setup mode.
 ```yaml
 # /etc/ados/config.yaml
 network:
-  ap_ssid_prefix: "HGLRC"     # Results in "HGLRC-A3F2" (prefix + last 4 of MAC)
+  ap_ssid_prefix: "OEM"     # Results in "OEM-A3F2" (prefix + last 4 of MAC)
 ```
 
 **Default:** `"ADOS"` (results in `"ADOS-A3F2"`)
@@ -121,14 +121,14 @@ The agent's REST API returns the product name in status responses.
 ```yaml
 # /etc/ados/config.yaml
 branding:
-  product_name: "HGLRC DroneLink"
+  product_name: "Example OEM DroneLink"
 ```
 
 **Effect on `/api/status` response:**
 
 ```json
 {
-  "product": "HGLRC DroneLink",
+  "product": "Example OEM DroneLink",
   "version": "0.3.1",
   "uptime": 3847,
   "status": "operational",
@@ -149,14 +149,14 @@ The command-line tool name used when SSH-ing into the device.
 ```yaml
 # /etc/ados/config.yaml
 branding:
-  cli_name: "hglrc-drone"
+  cli_name: "example-drone"
 ```
 
 **Effect:** The CLI binary is always installed as `ados`, but the display name in help text and prompts uses the configured name:
 
 ```
 $ ados status
-HGLRC DroneLink v0.3.1
+Example OEM DroneLink v0.3.1
 Status: operational
 FC: ArduPilot 4.5.7 (connected)
 GPS: 3D fix (12 sats)
@@ -176,7 +176,7 @@ The config webapp page title and header text.
 ```yaml
 # /etc/ados/config.yaml
 branding:
-  webapp_title: "HGLRC DroneLink Setup"     # Browser tab title
+  webapp_title: "Example OEM DroneLink Setup"     # Browser tab title
   webapp_header: "DroneLink"                 # Header bar text (next to logo)
 ```
 

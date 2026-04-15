@@ -231,7 +231,7 @@ The relay spawns an ffmpeg process per active video stream (copy codec, zero tra
 
 ### What You Need
 
-- A domain name (e.g., `cloud.hglrc-drones.com`)
+- A domain name (e.g., `cloud.example-oem.com`)
 - SSL certificate (free via Let's Encrypt or Cloudflare)
 - DNS records for subdomains
 
