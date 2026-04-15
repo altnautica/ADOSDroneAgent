@@ -13,12 +13,13 @@ factory reset. Spec lives at
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field
 
 from ados.api.deps import get_agent_app
@@ -31,8 +32,10 @@ router = APIRouter(prefix="/v1/ground-station", tags=["ground-station"])
 # yet. Single file, atomic write, 0644.
 _UI_CONFIG_PATH = Path("/etc/ados/ground-station-ui.json")
 
+# Server and OLED both use 0-255 native scale per 2026-04-16 Phase 2
+# reconciliation. 204 is roughly 80 percent of 255.
 _DEFAULT_OLED: dict[str, Any] = {
-    "brightness": 80,
+    "brightness": 204,
     "auto_dim_enabled": True,
     "screen_cycle_seconds": 5,
 }
@@ -233,9 +236,14 @@ class PairRequest(BaseModel):
 
 
 class OledUpdate(BaseModel):
-    """PUT body for OLED UI settings."""
+    """PUT body for OLED UI settings.
 
-    brightness: int | None = Field(default=None, ge=0, le=100)
+    Server and OLED both use 0-255 native scale per 2026-04-16 Phase 2
+    reconciliation. This matches luma.oled device.contrast() directly
+    and the GCS slider range.
+    """
+
+    brightness: int | None = Field(default=None, ge=0, le=255)
     auto_dim_enabled: bool | None = None
     screen_cycle_seconds: int | None = Field(default=None, ge=1, le=60)
 
@@ -301,10 +309,23 @@ async def get_ground_station_status() -> dict[str, Any]:
     """
     app = _require_ground_profile()
 
+    # Phase 2: surface the current pair key fingerprint alongside the
+    # paired drone id. Source is PairManager.status().
+    paired_drone_id: str | None = None
+    key_fingerprint: str | None = None
+    try:
+        pair_status = await _pair_manager().status()
+        if pair_status.get("paired"):
+            paired_drone_id = pair_status.get("paired_drone_id")
+        key_fingerprint = pair_status.get("key_fingerprint")
+    except Exception:
+        pass
+
     return {
         "profile": "ground_station",
         "paired_drone": {
-            "device_id": None,
+            "device_id": paired_drone_id,
+            "key_fingerprint": key_fingerprint,
             "fc_mode": None,
             "battery_pct": None,
             "gps_sats": None,
@@ -605,12 +626,55 @@ async def put_ground_station_ui_screens(update: ScreensUpdate) -> dict[str, Any]
 
 
 # ---------------------------------------------------------------------------
+# /captive-token
+# ---------------------------------------------------------------------------
+
+
+def _is_ap_subnet_client(host: str | None) -> bool:
+    """True when the request came from the AP subnet 192.168.4.0/24.
+
+    POC check: string-prefix match on the hotspot subnet. Loopback is
+    also allowed so the agent itself and local tooling can mint a
+    token for tests. Anything else is rejected with 403.
+    """
+    if not host:
+        return False
+    if host == "127.0.0.1" or host == "::1":
+        return True
+    return host.startswith("192.168.4.")
+
+
+@router.get("/captive-token")
+async def get_captive_token(request: Request) -> dict[str, Any]:
+    """Mint a single-use captive-portal token for the setup webapp.
+
+    Gated on the AP subnet (192.168.4.0/24). Hosts connecting over any
+    other interface get 403. The token is attached by the webapp as
+    `X-ADOS-Captive-Key` on destructive operations.
+    """
+    _require_ground_profile()
+
+    client_host = request.client.host if request.client else None
+    if not _is_ap_subnet_client(client_host):
+        raise HTTPException(
+            status_code=403,
+            detail={"error": {"code": "E_CAPTIVE_ONLY"}},
+        )
+
+    from ados.services.setup_webapp.captive_token import get_captive_token_store
+
+    token = get_captive_token_store().generate()
+    return {"token": token}
+
+
+# ---------------------------------------------------------------------------
 # /factory-reset
 # ---------------------------------------------------------------------------
 
 
 @router.post("/factory-reset")
 async def post_factory_reset(
+    request: Request,
     confirm: str = Query(..., description="Current pair key fingerprint or stock token"),
 ) -> dict[str, Any]:
     """Wipe pair state and AP passphrase. Requires the current fingerprint.
@@ -621,6 +685,20 @@ async def post_factory_reset(
     live device.
     """
     _require_ground_profile()
+
+    # Captive-portal single-use token check. Phase 2: only factory
+    # reset is gated. The header is optional when called from loopback
+    # to keep CLI test paths open.
+    captive_header = request.headers.get("x-ados-captive-key")
+    client_host = request.client.host if request.client else None
+    if client_host not in ("127.0.0.1", "::1"):
+        from ados.services.setup_webapp.captive_token import get_captive_token_store
+
+        if not captive_header or not get_captive_token_store().consume(captive_header):
+            raise HTTPException(
+                status_code=401,
+                detail={"error": {"code": "E_CAPTIVE_TOKEN_INVALID"}},
+            )
 
     pm = _pair_manager()
 
@@ -646,3 +724,430 @@ async def post_factory_reset(
             status_code=500,
             detail={"error": {"code": "E_FACTORY_RESET_FAILED", "message": str(exc)}},
         ) from exc
+
+
+# ---------------------------------------------------------------------------
+# Phase 2 (MSN-026 Wave C Cellos): display, input, PIC arbiter.
+# ---------------------------------------------------------------------------
+
+
+_DEFAULT_DISPLAY: dict[str, Any] = {
+    "resolution": "auto",
+    "kiosk_enabled": False,
+    "kiosk_target_url": None,
+}
+
+
+def _load_display_config() -> dict[str, Any]:
+    """Read display section of the persistent UI config blob."""
+    data: dict[str, Any] = {}
+    try:
+        if _UI_CONFIG_PATH.is_file():
+            data = json.loads(_UI_CONFIG_PATH.read_text(encoding="utf-8")) or {}
+    except (OSError, ValueError):
+        data = {}
+    display = {**_DEFAULT_DISPLAY, **(data.get("display") or {})}
+    return display
+
+
+def _save_display_config(display: dict[str, Any]) -> None:
+    """Merge the new display blob back into the UI config file."""
+    data: dict[str, Any] = {}
+    try:
+        if _UI_CONFIG_PATH.is_file():
+            data = json.loads(_UI_CONFIG_PATH.read_text(encoding="utf-8")) or {}
+    except (OSError, ValueError):
+        data = {}
+    data["display"] = display
+    _UI_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    tmp = _UI_CONFIG_PATH.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
+    tmp.replace(_UI_CONFIG_PATH)
+
+
+class DisplayUpdate(BaseModel):
+    """PUT body for HDMI kiosk display config."""
+
+    resolution: str | None = Field(default=None)
+    kiosk_enabled: bool | None = None
+    kiosk_target_url: str | None = None
+
+
+class BluetoothScanRequest(BaseModel):
+    """POST body for the Bluetooth scan endpoint."""
+
+    duration_s: int | None = Field(default=None, ge=1, le=60)
+
+
+class BluetoothPairRequest(BaseModel):
+    """POST body for Bluetooth pairing."""
+
+    mac: str = Field(..., min_length=1)
+
+
+class GamepadPrimaryUpdate(BaseModel):
+    """PUT body for primary-gamepad selection."""
+
+    device_id: str = Field(..., min_length=1)
+
+
+class PicClaimRequest(BaseModel):
+    """POST body for PIC claim."""
+
+    client_id: str = Field(..., min_length=1)
+    confirm_token: str | None = None
+    force: bool | None = False
+
+
+class PicReleaseRequest(BaseModel):
+    """POST body for PIC release."""
+
+    client_id: str = Field(..., min_length=1)
+
+
+class PicConfirmTokenRequest(BaseModel):
+    """POST body for PIC confirm-token mint."""
+
+    client_id: str = Field(..., min_length=1)
+
+
+# ── /display ───────────────────────────────────────────────────────────────
+
+
+@router.get("/display")
+async def get_ground_station_display() -> dict[str, Any]:
+    """Return the persisted HDMI kiosk display config."""
+    _require_ground_profile()
+    return _load_display_config()
+
+
+@router.put("/display")
+async def put_ground_station_display(update: DisplayUpdate) -> dict[str, Any]:
+    """Update the HDMI kiosk display config and persist."""
+    _require_ground_profile()
+    current = _load_display_config()
+
+    allowed_res = {"auto", "720p", "1080p"}
+    if update.resolution is not None:
+        if update.resolution not in allowed_res:
+            raise HTTPException(
+                status_code=400,
+                detail={"error": {"code": "E_INVALID_RESOLUTION"}},
+            )
+        current["resolution"] = update.resolution
+    if update.kiosk_enabled is not None:
+        current["kiosk_enabled"] = bool(update.kiosk_enabled)
+    if update.kiosk_target_url is not None:
+        current["kiosk_target_url"] = update.kiosk_target_url
+
+    try:
+        _save_display_config(current)
+    except OSError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail={"error": {"code": "E_UI_SAVE_FAILED", "message": str(exc)}},
+        ) from exc
+    return current
+
+
+# ── /bluetooth ─────────────────────────────────────────────────────────────
+
+
+def _input_manager() -> Any:
+    """Lazy import helper for the InputManager singleton."""
+    from ados.services.ground_station.input_manager import get_input_manager
+
+    return get_input_manager()
+
+
+@router.post("/bluetooth/scan")
+async def post_bluetooth_scan(req: BluetoothScanRequest) -> dict[str, Any]:
+    """Run a BlueZ scan for nearby gamepads. Default duration 10 s."""
+    _require_ground_profile()
+
+    duration = req.duration_s if req.duration_s is not None else 10
+    try:
+        devices = await _input_manager().scan_bluetooth(duration_s=duration)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail={"error": {"code": "E_BT_SCAN_FAILED", "message": str(exc)}},
+        ) from exc
+    return {"devices": devices or []}
+
+
+@router.post("/bluetooth/pair")
+async def post_bluetooth_pair(req: BluetoothPairRequest) -> dict[str, Any]:
+    """Attempt to pair with a Bluetooth device by MAC address."""
+    _require_ground_profile()
+
+    try:
+        result = await _input_manager().pair_bluetooth(req.mac)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail={"error": {"code": "E_BT_PAIR_FAILED", "message": str(exc)}},
+        ) from exc
+
+    if isinstance(result, dict):
+        return result
+    return {"paired": bool(result), "error": None}
+
+
+@router.delete("/bluetooth/{mac}")
+async def delete_bluetooth(mac: str) -> dict[str, Any]:
+    """Forget a previously-paired Bluetooth device."""
+    _require_ground_profile()
+
+    try:
+        result = await _input_manager().forget_bluetooth(mac)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail={"error": {"code": "E_BT_FORGET_FAILED", "message": str(exc)}},
+        ) from exc
+
+    if isinstance(result, dict):
+        return result
+    return {"forgotten": bool(result)}
+
+
+@router.get("/bluetooth/paired")
+async def get_bluetooth_paired() -> dict[str, Any]:
+    """List paired Bluetooth devices."""
+    _require_ground_profile()
+
+    try:
+        devices = await _input_manager().paired_bluetooth()
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail={"error": {"code": "E_BT_LIST_FAILED", "message": str(exc)}},
+        ) from exc
+    return {"devices": devices or []}
+
+
+# ── /gamepads ──────────────────────────────────────────────────────────────
+
+
+@router.get("/gamepads")
+async def get_gamepads() -> dict[str, Any]:
+    """List connected gamepads and the current primary device id."""
+    _require_ground_profile()
+
+    mgr = _input_manager()
+    try:
+        devices = mgr.list_gamepads()
+        if asyncio.iscoroutine(devices):
+            devices = await devices
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail={"error": {"code": "E_GAMEPAD_LIST_FAILED", "message": str(exc)}},
+        ) from exc
+
+    primary_id: str | None = None
+    try:
+        primary = mgr.get_primary()
+        if asyncio.iscoroutine(primary):
+            primary = await primary
+        if isinstance(primary, dict):
+            primary_id = primary.get("device_id") or primary.get("id")
+        elif isinstance(primary, str):
+            primary_id = primary
+    except Exception:
+        primary_id = None
+
+    return {"devices": devices or [], "primary_id": primary_id}
+
+
+@router.put("/gamepads/primary")
+async def put_gamepad_primary(update: GamepadPrimaryUpdate) -> dict[str, Any]:
+    """Select the primary gamepad used by the PIC arbiter."""
+    _require_ground_profile()
+
+    try:
+        result = _input_manager().set_primary(update.device_id)
+        if asyncio.iscoroutine(result):
+            result = await result
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail={"error": {"code": "E_GAMEPAD_PRIMARY_FAILED", "message": str(exc)}},
+        ) from exc
+
+    return {"primary_id": update.device_id, "result": result}
+
+
+# ── /pic ───────────────────────────────────────────────────────────────────
+
+
+def _pic_arbiter() -> Any:
+    """Lazy import helper for the PicArbiter singleton."""
+    from ados.services.ground_station.pic_arbiter import get_pic_arbiter
+
+    return get_pic_arbiter()
+
+
+@router.get("/pic")
+async def get_pic_state() -> dict[str, Any]:
+    """Return the current PIC state dict."""
+    _require_ground_profile()
+
+    try:
+        state = _pic_arbiter().get_state()
+        if asyncio.iscoroutine(state):
+            state = await state
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail={"error": {"code": "E_PIC_STATE_FAILED", "message": str(exc)}},
+        ) from exc
+    return state if isinstance(state, dict) else {"state": state}
+
+
+@router.post("/pic/claim")
+async def post_pic_claim(req: PicClaimRequest) -> dict[str, Any]:
+    """Claim PIC. Returns 409 with needs_confirm=True when re-claim is required."""
+    _require_ground_profile()
+
+    arb = _pic_arbiter()
+    try:
+        result = arb.claim(
+            req.client_id,
+            confirm_token=req.confirm_token,
+            force=bool(req.force),
+        )
+        if asyncio.iscoroutine(result):
+            result = await result
+    except PermissionError as exc:
+        # Raised when another client holds PIC and no confirm token was
+        # provided. Signal the caller to mint a confirm token and retry.
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": {"code": "E_PIC_CONFIRM_REQUIRED", "message": str(exc)},
+                "needs_confirm": True,
+            },
+        ) from exc
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": {"code": "E_PIC_CLAIM_INVALID", "message": str(exc)}},
+        ) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail={"error": {"code": "E_PIC_CLAIM_FAILED", "message": str(exc)}},
+        ) from exc
+
+    if isinstance(result, dict):
+        if result.get("needs_confirm") and not result.get("granted"):
+            # Soft-reject path: arbiter returns dict rather than raising.
+            return {**result, "needs_confirm": True}
+        return result
+    return {"granted": bool(result), "client_id": req.client_id}
+
+
+@router.post("/pic/release")
+async def post_pic_release(req: PicReleaseRequest) -> dict[str, Any]:
+    """Release PIC held by the given client id."""
+    _require_ground_profile()
+
+    try:
+        result = _pic_arbiter().release(req.client_id)
+        if asyncio.iscoroutine(result):
+            result = await result
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail={"error": {"code": "E_PIC_RELEASE_FAILED", "message": str(exc)}},
+        ) from exc
+
+    if isinstance(result, dict):
+        return result
+    return {"released": bool(result), "client_id": req.client_id}
+
+
+@router.post("/pic/confirm-token")
+async def post_pic_confirm_token(req: PicConfirmTokenRequest) -> dict[str, Any]:
+    """Mint a short-lived PIC takeover confirmation token."""
+    _require_ground_profile()
+
+    try:
+        token = _pic_arbiter().create_confirm_token(req.client_id)
+        if asyncio.iscoroutine(token):
+            token = await token
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail={"error": {"code": "E_PIC_TOKEN_FAILED", "message": str(exc)}},
+        ) from exc
+
+    value: str
+    ttl: int = 2
+    if isinstance(token, dict):
+        value = str(token.get("token", ""))
+        ttl = int(token.get("ttl_seconds", 2))
+    else:
+        value = str(token)
+
+    return {"token": value, "ttl_seconds": ttl}
+
+
+@router.websocket("/pic/events")
+async def ws_pic_events(websocket: WebSocket) -> None:
+    """Stream PIC arbiter events as JSON until the client disconnects."""
+    # Profile gate before accepting so wrong-profile agents close 1008.
+    app = get_agent_app()
+    profile = getattr(app.config.agent, "profile", "auto")
+    if profile != "ground_station":
+        await websocket.close(code=1008, reason="E_PROFILE_MISMATCH")
+        return
+
+    await websocket.accept()
+
+    # Lazy import to avoid a circular at module load.
+    from ados.services.ground_station.pic_arbiter import get_pic_arbiter as _gpa
+
+    arb = _gpa()
+    bus = getattr(arb, "bus", None) or getattr(arb, "event_bus", None)
+    if bus is None:
+        await websocket.send_json({
+            "event": "error",
+            "code": "E_PIC_BUS_UNAVAILABLE",
+        })
+        await websocket.close()
+        return
+
+    queue: asyncio.Queue[Any] = asyncio.Queue()
+
+    def _on_event(payload: Any) -> None:
+        try:
+            queue.put_nowait(payload)
+        except asyncio.QueueFull:
+            pass
+
+    unsubscribe: Any = None
+    try:
+        subscribe = getattr(bus, "subscribe", None)
+        if callable(subscribe):
+            unsubscribe = subscribe(_on_event)
+    except Exception:
+        unsubscribe = None
+
+    try:
+        while True:
+            payload = await queue.get()
+            try:
+                await websocket.send_json(payload if isinstance(payload, dict) else {"event": payload})
+            except (WebSocketDisconnect, RuntimeError):
+                break
+    except WebSocketDisconnect:
+        pass
+    finally:
+        if callable(unsubscribe):
+            try:
+                unsubscribe()
+            except Exception:  # noqa: BLE001
+                pass

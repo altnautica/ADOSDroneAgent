@@ -1,0 +1,23 @@
+[Unit]
+Description=ADOS HDMI Kiosk (ground-station profile)
+After=ados-supervisor.service graphical.target
+PartOf=ados-supervisor.service
+ConditionPathExists=/dev/dri/card0
+
+[Service]
+Type=simple
+User=root
+Environment=ADOS_CONFIG=/etc/ados/config.yaml
+Environment=XDG_RUNTIME_DIR=/run/user/0
+Environment=DISPLAY=:0
+EnvironmentFile=-/etc/ados/env
+ExecStart=/opt/ados/venv/bin/python -m ados.services.kiosk.kiosk_service
+Restart=on-failure
+RestartSec=5
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ados-kiosk
+
+[Install]
+WantedBy=multi-user.target

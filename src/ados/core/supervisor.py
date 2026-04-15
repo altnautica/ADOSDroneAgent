@@ -85,6 +85,10 @@ SERVICE_REGISTRY: list[dict] = [
     {"name": "ados-hostapd", "category": "hardware", "profile_gate": "ground_station"},
     {"name": "ados-dnsmasq-gs", "category": "hardware", "profile_gate": "ground_station"},
     {"name": "ados-setup-captive", "category": "ondemand", "profile_gate": "ground_station"},
+    # MSN-026 Wave C Cellos: Phase 2 standalone flight stack.
+    {"name": "ados-kiosk", "category": "hardware", "profile_gate": "ground_station"},
+    {"name": "ados-input", "category": "hardware", "profile_gate": "ground_station"},
+    {"name": "ados-pic", "category": "hardware", "profile_gate": "ground_station"},
 ]
 
 

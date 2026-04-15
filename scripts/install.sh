@@ -671,7 +671,10 @@ enable_ground_station_units() {
         ados-buttons.service \
         ados-hostapd.service \
         ados-dnsmasq-gs.service \
-        ados-setup-captive.service; do
+        ados-setup-captive.service \
+        ados-kiosk.service \
+        ados-input.service \
+        ados-pic.service; do
         if [ -f "/etc/systemd/system/${unit}" ]; then
             systemctl enable "${unit}" 2>/dev/null || true
         else
@@ -694,6 +697,41 @@ enable_ground_station_units() {
         fi
     else
         warn "gpio group not present on this system; skipping usermod -aG gpio."
+    fi
+
+    # MSN-026 Wave C Cellos: input manager + PIC arbiter need /dev/input
+    # (gamepads, evdev) and Bluetooth DBus access. Add both the `ados`
+    # service user and the install-time `pi` user (if present) to the
+    # input, plugdev, and bluetooth groups. All three usermod calls are
+    # idempotent no-ops when membership already exists.
+    for grp in input plugdev bluetooth; do
+        if ! getent group "${grp}" >/dev/null 2>&1; then
+            warn "Group ${grp} not present on this system; skipping usermod -aG ${grp}."
+            continue
+        fi
+        if id ados >/dev/null 2>&1; then
+            usermod -aG "${grp}" ados || true
+        fi
+        if id pi >/dev/null 2>&1; then
+            usermod -aG "${grp}" pi || true
+        fi
+    done
+
+    # Install udev rules for gamepad + joystick hot-plug recognition.
+    # Rule file ships in data/udev/ and is copied to /etc/udev/rules.d/.
+    local udev_src=""
+    if [ -n "${FRESH_REPO_DIR:-}" ] && [ -f "${FRESH_REPO_DIR}/repo/data/udev/99-ados-input.rules" ]; then
+        udev_src="${FRESH_REPO_DIR}/repo/data/udev/99-ados-input.rules"
+    elif [ -f "$(dirname "$0" 2>/dev/null)/../data/udev/99-ados-input.rules" ] 2>/dev/null; then
+        udev_src="$(cd "$(dirname "$0")/../data/udev" && pwd)/99-ados-input.rules"
+    fi
+    if [ -n "${udev_src}" ] && [ -f "${udev_src}" ]; then
+        install -m 0644 "${udev_src}" "/etc/udev/rules.d/99-ados-input.rules"
+        udevadm control --reload 2>/dev/null || true
+        udevadm trigger 2>/dev/null || true
+        info "Input udev rules installed."
+    else
+        warn "Input udev rules source not found; skipping 99-ados-input.rules install."
     fi
 }
 

@@ -255,5 +255,190 @@ def gs_ui_oled(
         _pp(data.get("oled", data))
 
 
+# ── display ────────────────────────────────────────────────────────────────
+
+
+@gs_group.group("display")
+def gs_display() -> None:
+    """HDMI kiosk display config."""
+
+
+@gs_display.command("get")
+def gs_display_get() -> None:
+    """Print the current display config."""
+    data = _request("GET", "/api/v1/ground-station/display")
+    if data is not None:
+        _pp(data)
+
+
+@gs_display.command("set")
+@click.option(
+    "--resolution",
+    type=click.Choice(["auto", "720p", "1080p"]),
+    default=None,
+    help="HDMI output resolution.",
+)
+@click.option(
+    "--kiosk-enabled",
+    "kiosk_enabled",
+    type=bool,
+    default=None,
+    help="Enable or disable the kiosk browser.",
+)
+@click.option(
+    "--kiosk-url",
+    "kiosk_target_url",
+    default=None,
+    help="URL the kiosk browser loads at boot.",
+)
+def gs_display_set(
+    resolution: str | None,
+    kiosk_enabled: bool | None,
+    kiosk_target_url: str | None,
+) -> None:
+    """Update one or more display fields."""
+    body: dict[str, Any] = {}
+    if resolution is not None:
+        body["resolution"] = resolution
+    if kiosk_enabled is not None:
+        body["kiosk_enabled"] = kiosk_enabled
+    if kiosk_target_url is not None:
+        body["kiosk_target_url"] = kiosk_target_url
+    if not body:
+        click.echo("No fields to update. Use 'ados gs display get' to view.", err=True)
+        return
+    data = _request("PUT", "/api/v1/ground-station/display", json_body=body)
+    if data is not None:
+        _pp(data)
+
+
+# ── gamepad ────────────────────────────────────────────────────────────────
+
+
+@gs_group.group("gamepad")
+def gs_gamepad() -> None:
+    """Gamepad list and primary-device selection."""
+
+
+@gs_gamepad.command("list")
+def gs_gamepad_list() -> None:
+    """List connected gamepads and the current primary device id."""
+    data = _request("GET", "/api/v1/ground-station/gamepads")
+    if data is not None:
+        _pp(data)
+
+
+@gs_gamepad.command("primary")
+@click.argument("device_id")
+def gs_gamepad_primary(device_id: str) -> None:
+    """Set the primary gamepad used by the PIC arbiter."""
+    data = _request(
+        "PUT",
+        "/api/v1/ground-station/gamepads/primary",
+        json_body={"device_id": device_id},
+    )
+    if data is not None:
+        _pp(data)
+
+
+# ── pair bt ────────────────────────────────────────────────────────────────
+
+
+@gs_group.group("pair")
+def gs_pair_group() -> None:
+    """Pairing helpers (Bluetooth today, expandable later)."""
+
+
+@gs_pair_group.group("bt")
+def gs_pair_bt() -> None:
+    """Bluetooth pairing subcommands."""
+
+
+@gs_pair_bt.command("scan")
+@click.option(
+    "--duration",
+    "duration_s",
+    type=int,
+    default=10,
+    help="Scan duration in seconds (default 10).",
+)
+def gs_pair_bt_scan(duration_s: int) -> None:
+    """Run a BlueZ scan for nearby gamepads."""
+    data = _request(
+        "POST",
+        "/api/v1/ground-station/bluetooth/scan",
+        json_body={"duration_s": duration_s},
+    )
+    if data is not None:
+        _pp(data)
+
+
+@gs_pair_bt.command("pair")
+@click.argument("mac")
+def gs_pair_bt_pair(mac: str) -> None:
+    """Pair with a Bluetooth device by MAC."""
+    data = _request(
+        "POST",
+        "/api/v1/ground-station/bluetooth/pair",
+        json_body={"mac": mac},
+    )
+    if data is not None:
+        _pp(data)
+
+
+@gs_pair_bt.command("forget")
+@click.argument("mac")
+def gs_pair_bt_forget(mac: str) -> None:
+    """Forget a previously-paired Bluetooth device."""
+    data = _request(
+        "DELETE",
+        f"/api/v1/ground-station/bluetooth/{mac}",
+    )
+    if data is not None:
+        _pp(data)
+
+
+# ── pic ────────────────────────────────────────────────────────────────────
+
+
+@gs_group.group("pic")
+def gs_pic() -> None:
+    """Pilot-in-Command arbiter state and control."""
+
+
+@gs_pic.command("state")
+def gs_pic_state() -> None:
+    """Print the current PIC state dict."""
+    data = _request("GET", "/api/v1/ground-station/pic")
+    if data is not None:
+        _pp(data)
+
+
+@gs_pic.command("claim")
+@click.argument("client_id")
+@click.option("--force", is_flag=True, default=False, help="Force claim without confirm token.")
+def gs_pic_claim(client_id: str, force: bool) -> None:
+    """Claim PIC for the given client id."""
+    body: dict[str, Any] = {"client_id": client_id}
+    if force:
+        body["force"] = True
+    data = _request("POST", "/api/v1/ground-station/pic/claim", json_body=body)
+    if data is not None:
+        _pp(data)
+
+
+@gs_pic.command("release")
+@click.argument("client_id")
+def gs_pic_release(client_id: str) -> None:
+    """Release PIC held by the given client id."""
+    data = _request(
+        "POST",
+        "/api/v1/ground-station/pic/release",
+        json_body={"client_id": client_id},
+    )
+    if data is not None:
+        _pp(data)
+
+
 if __name__ == "__main__":
     gs_group()
