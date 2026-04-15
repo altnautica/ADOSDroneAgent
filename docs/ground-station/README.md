@@ -2,7 +2,7 @@
 
 The ADOS Ground Station is a companion product to the ADOS ADOS Drone Agent air unit. It receives WFB-ng long-range video and telemetry from the drone, and relays it to any browser (Mac, Windows, phone) via WiFi AP and WebRTC.
 
-Same codebase as ADOS Drone Agent, running in RX mode instead of TX mode. Same HGLRC baseboard hardware (DEC-073) can serve both products.
+Same codebase as ADOS Drone Agent, running in RX mode instead of TX mode. Same reference baseboard hardware can serve both products.
 
 ## Reading Order
 

@@ -6,8 +6,8 @@ here is how to spot it on a given transport, here is what I expose."
 The registry merges entry-point manifests with filesystem manifests
 and serves them over the REST API.
 
-Schema is intentionally narrow for Wave 3 so that ADOS Edge and HGLRC
-Android RC authors have a stable target before they ship any plugin
+Schema is intentionally narrow for Wave 3 so that ADOS Edge and
+external OEM partners have a stable target before they ship any plugin
 code. Future waves may add vendor-specific sections under ``extra``
 without breaking the top-level shape.
 """
@@ -59,7 +59,7 @@ class PeripheralManifest(BaseModel):
 
     The ``id`` is the unique identifier used in REST routes and
     registry lookups. Choose a short, dotted, lowercase string such
-    as ``ados.edge.controller`` or ``hglrc.rc.android``.
+    as ``ados.edge.controller`` or ``oem.rc.android``.
     """
 
     id: str
