@@ -225,6 +225,28 @@ class GroundStationModemManager:
             "available": True,
         }
 
+    async def close(self) -> None:
+        """Disconnect the dbus bus handle if connected. Idempotent.
+
+        The dbus-next MessageBus exposes `disconnect()` which closes the
+        underlying unix socket. Safe to call multiple times; the second
+        call sees `self._bus is None` and no-ops.
+        """
+        bus = self._bus
+        if bus is None:
+            return
+        self._bus = None
+        disconnect = getattr(bus, "disconnect", None)
+        if disconnect is None:
+            return
+        try:
+            result = disconnect()
+            if asyncio.iscoroutine(result):
+                await asyncio.wait_for(result, timeout=_DBUS_TIMEOUT_SECONDS)
+            log.info("modem.dbus_closed")
+        except Exception as exc:
+            log.warning("modem.dbus_close_failed", error=str(exc))
+
     async def configure(
         self,
         apn: Optional[str] = None,
@@ -713,6 +735,10 @@ async def _run_service() -> None:
         await manager.bring_down()
     except Exception as exc:
         log.warning("modem.shutdown_bring_down_failed", error=str(exc))
+    try:
+        await manager.close()
+    except Exception as exc:
+        log.warning("modem.shutdown_close_failed", error=str(exc))
     log.info("modem.service_stopped")
 
 

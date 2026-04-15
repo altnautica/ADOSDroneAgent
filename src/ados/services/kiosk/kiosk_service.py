@@ -178,24 +178,59 @@ class KioskSupervisor:
         )
 
     async def _graceful_kill(self, proc: asyncio.subprocess.Process) -> None:
-        if proc.returncode is not None:
-            return
+        if proc.returncode is None:
+            try:
+                proc.terminate()
+            except ProcessLookupError:
+                pass
+            else:
+                try:
+                    await asyncio.wait_for(
+                        proc.wait(), timeout=_SHUTDOWN_GRACE_SECONDS
+                    )
+                    log.info("kiosk_child_terminated", rc=proc.returncode)
+                except asyncio.TimeoutError:
+                    log.warning("kiosk_child_sigterm_timeout", pid=proc.pid)
+                    try:
+                        proc.kill()
+                        await proc.wait()
+                        log.warning("kiosk_child_killed", rc=proc.returncode)
+                    except ProcessLookupError:
+                        pass
+
+        # cage may leave an orphaned chromium-browser process when it is
+        # torn down under load. Sweep both names best-effort so systemd
+        # sees a clean exit. Idempotent: pkill returns non-zero when
+        # nothing matched, which is fine.
+        await self._sweep_orphans()
+
+    async def _sweep_orphans(self) -> None:
+        """Best-effort pkill sweep of cage and chromium-browser children."""
+        for name, first_sig in (("cage", "-TERM"), ("chromium", "-TERM")):
+            await self._run_pkill(first_sig, name)
+            await asyncio.sleep(1.0)
+            await self._run_pkill("-KILL", name)
+
+    @staticmethod
+    async def _run_pkill(sig: str, name: str) -> None:
         try:
-            proc.terminate()
-        except ProcessLookupError:
-            return
-        try:
-            await asyncio.wait_for(proc.wait(), timeout=_SHUTDOWN_GRACE_SECONDS)
-            log.info("kiosk_child_terminated", rc=proc.returncode)
-            return
-        except asyncio.TimeoutError:
-            log.warning("kiosk_child_sigterm_timeout", pid=proc.pid)
-        try:
-            proc.kill()
-            await proc.wait()
-            log.warning("kiosk_child_killed", rc=proc.returncode)
-        except ProcessLookupError:
-            return
+            proc = await asyncio.create_subprocess_exec(
+                "pkill",
+                sig,
+                "-f",
+                name,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=3.0)
+            except asyncio.TimeoutError:
+                try:
+                    proc.kill()
+                except ProcessLookupError:
+                    pass
+        except (FileNotFoundError, OSError) as exc:
+            log.debug("kiosk_pkill_skipped", sig=sig, name=name, error=str(exc))
 
     def _record_crash_and_check(self) -> bool:
         """Append now() to crash log, prune outside window. Return True if under limit."""

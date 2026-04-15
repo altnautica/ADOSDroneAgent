@@ -425,7 +425,7 @@ class DataCapTracker:
     def _classify(self) -> DataCapState:
         if self._cap_bytes <= 0:
             return "ok"
-        pct = self._state.cumulative_bytes * 100.0 / self._cap_bytes
+        pct = (self._state.cumulative_bytes / self._cap_bytes) * 100.0
         if pct >= 100.0:
             return "blocked_100"
         if pct >= 95.0:
@@ -489,7 +489,7 @@ class DataCapTracker:
         cap_mb = self._cap_bytes // (1024 * 1024)
         pct = 0.0
         if self._cap_bytes > 0:
-            pct = self._state.cumulative_bytes * 100.0 / self._cap_bytes
+            pct = (self._state.cumulative_bytes / self._cap_bytes) * 100.0
         return {
             "data_used_mb": used_mb,
             "cap_mb": cap_mb,
@@ -1193,6 +1193,90 @@ def _start_manager_polling() -> None:
 
 
 # ----------------------------------------------------------------------
+# H9: data-cap throttle consumer
+# ----------------------------------------------------------------------
+async def _run_data_cap_throttle_consumer(router: "UplinkRouter") -> None:
+    """Subscribe to the router bus and apply throttle on cap transitions.
+
+    Severity ladder:
+      warn_80     -> INFO  (remove any throttle, restore NAT)
+      throttle_95 -> WARN  (install 256 kbit tbf qdisc on active iface)
+      blocked_100 -> ERROR (drop MASQUERADE rule, hard block)
+
+    Direct-call wiring: the consumer resolves the active uplink's
+    interface at event-time by asking the router, and calls
+    `share_uplink_firewall.apply_throttle`. Errors are best-effort
+    logged and never crash the loop.
+    """
+    try:
+        from ados.services.ground_station.share_uplink_firewall import (
+            apply_throttle as _apply_throttle,
+        )
+    except Exception as exc:
+        log.warning("uplink.throttle_import_failed", error=str(exc))
+        return
+
+    try:
+        async for evt in router.bus.subscribe():
+            if evt.kind != "data_cap_threshold":
+                continue
+            state = evt.data_cap_state
+            if state is None:
+                continue
+
+            # Resolve active iface fresh on each transition.
+            active_iface: Optional[str] = None
+            active_name = router.active_uplink
+            if active_name:
+                try:
+                    active_iface = await router._uplink_iface(active_name)  # noqa: SLF001
+                except Exception as exc:
+                    log.debug(
+                        "uplink.throttle_iface_lookup_failed",
+                        error=str(exc),
+                    )
+
+            if state == "ok":
+                log.debug(
+                    "uplink.datacap_throttle_applied",
+                    state=state,
+                    iface=active_iface,
+                )
+            elif state == "warn_80":
+                log.info(
+                    "uplink.datacap_warn_80",
+                    iface=active_iface,
+                    note="usage crossed 80 percent of cellular cap",
+                )
+            elif state == "throttle_95":
+                log.warning(
+                    "uplink.datacap_throttle_95",
+                    iface=active_iface,
+                    rate_kbps=256,
+                )
+            elif state == "blocked_100":
+                log.error(
+                    "uplink.datacap_blocked_100",
+                    iface=active_iface,
+                    note="cellular cap reached; NAT forwarding dropped",
+                )
+
+            try:
+                result = await _apply_throttle(active_iface, state)
+                log.info("uplink.datacap_throttle_result", result=result)
+            except Exception as exc:
+                log.warning(
+                    "uplink.datacap_throttle_apply_failed",
+                    state=state,
+                    error=str(exc),
+                )
+    except asyncio.CancelledError:
+        return
+    except Exception as exc:
+        log.warning("uplink.datacap_throttle_consumer_exc", error=str(exc))
+
+
+# ----------------------------------------------------------------------
 # Service entry point
 # ----------------------------------------------------------------------
 async def _run_service() -> None:
@@ -1234,7 +1318,26 @@ async def _run_service() -> None:
     except Exception as exc:
         log.warning("uplink.share_uplink_reconcile_failed", error=str(exc))
 
+    # H9: wire data-cap throttle consumer. Subscribes to the router's
+    # own bus and calls share_uplink_firewall.apply_throttle on each
+    # DataCapState transition. Direct bus subscribe matches the pattern
+    # used by CloudRelayBridge and the manager-event bridges above.
+    throttle_task: Optional[asyncio.Task] = None
+    try:
+        throttle_task = asyncio.create_task(
+            _run_data_cap_throttle_consumer(router)
+        )
+    except Exception as exc:
+        log.warning("uplink.throttle_consumer_start_failed", error=str(exc))
+
     await stop_event.wait()
+
+    if throttle_task is not None:
+        throttle_task.cancel()
+        try:
+            await throttle_task
+        except (asyncio.CancelledError, Exception):
+            pass
 
     await router.stop()
     log.info("uplink.service_stopped")

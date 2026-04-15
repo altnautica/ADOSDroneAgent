@@ -1,6 +1,6 @@
 [Unit]
 Description=ADOS HDMI Kiosk (ground-station profile)
-After=ados-supervisor.service graphical.target
+After=ados-supervisor.service graphical.target ados-mediamtx-gs.service
 PartOf=ados-supervisor.service
 ConditionPathExists=/dev/dri/card0
 

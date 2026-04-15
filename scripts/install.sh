@@ -347,8 +347,12 @@ generate_device_id() {
     local device_id
     if [ -f /proc/sys/kernel/random/uuid ]; then
         device_id=$(cat /proc/sys/kernel/random/uuid)
-    else
+    elif command -v python3 >/dev/null 2>&1; then
         device_id=$(python3 -c "import uuid; print(uuid.uuid4())")
+    elif command -v openssl >/dev/null 2>&1; then
+        device_id=$(openssl rand -hex 16)
+    else
+        device_id="$(hostname)-$(date +%s)-$$"
     fi
 
     echo "$device_id" > "${DEVICE_ID_FILE}"
@@ -738,6 +742,37 @@ install_ground_station_driver() {
 # no-op for drone because we branch on profile at the call site.
 enable_ground_station_units() {
     info "Enabling ground-station systemd units..."
+
+    # MSN-029 H2: install libcomposite USB gadget script + oneshot
+    # composer unit. Both are gated behind ADOS_ENABLE_USB_GADGET=1
+    # (default off) until founder validates on bench. The Python-side
+    # ados-usb-gadget.service Manager remains in the enable list below
+    # for state transitions; it no-ops when the gadget is unbound.
+    if [ "${ADOS_ENABLE_USB_GADGET:-0}" = "1" ]; then
+        local gadget_src=""
+        if [ -n "${FRESH_REPO_DIR:-}" ] && [ -f "${FRESH_REPO_DIR}/repo/data/usb-gadget/ados-cdc-ncm-rndis.sh" ]; then
+            gadget_src="${FRESH_REPO_DIR}/repo/data/usb-gadget/ados-cdc-ncm-rndis.sh"
+        elif [ -f "$(dirname "$0" 2>/dev/null)/../data/usb-gadget/ados-cdc-ncm-rndis.sh" ] 2>/dev/null; then
+            gadget_src="$(cd "$(dirname "$0")/../data/usb-gadget" && pwd)/ados-cdc-ncm-rndis.sh"
+        fi
+        if [ -n "${gadget_src}" ] && [ -f "${gadget_src}" ]; then
+            install -d -m 0755 /usr/local/lib/ados/usb-gadget
+            install -m 0755 "${gadget_src}" /usr/local/lib/ados/usb-gadget/ados-cdc-ncm-rndis.sh
+            info "USB gadget composer script installed (ADOS_ENABLE_USB_GADGET=1)."
+            # Ensure dwc2 is loaded on Pi 4B class boards so the gadget
+            # subsystem has a UDC to bind to. No-op on boards that lack
+            # OTG hardware.
+            if ! grep -q '^dwc2' /etc/modules 2>/dev/null; then
+                echo dwc2 >> /etc/modules || true
+            fi
+            modprobe dwc2 2>/dev/null || true
+            modprobe libcomposite 2>/dev/null || true
+            systemctl enable ados-usb-gadget-setup.service 2>/dev/null || true
+        else
+            warn "USB gadget composer script source not found; skipping (ADOS_ENABLE_USB_GADGET=1 was set)."
+        fi
+    fi
+
     for unit in \
         ados-wfb-rx.service \
         ados-mediamtx-gs.service \
@@ -753,6 +788,7 @@ enable_ground_station_units() {
         ados-uplink-router.service \
         ados-modem.service \
         ados-wifi-client.service \
+        ados-ethernet.service \
         ados-cloud-relay.service; do
         if [ -f "/etc/systemd/system/${unit}" ]; then
             systemctl enable "${unit}" 2>/dev/null || true
@@ -783,7 +819,10 @@ enable_ground_station_units() {
     # service user and the install-time `pi` user (if present) to the
     # input, plugdev, and bluetooth groups. All three usermod calls are
     # idempotent no-ops when membership already exists.
-    for grp in input plugdev bluetooth; do
+    #
+    # MSN-029 Cellos Wave 1: also add i2c so the OLED + future I2C
+    # peripherals can be driven from userspace without root.
+    for grp in input plugdev bluetooth i2c; do
         if ! getent group "${grp}" >/dev/null 2>&1; then
             warn "Group ${grp} not present on this system; skipping usermod -aG ${grp}."
             continue
@@ -795,6 +834,10 @@ enable_ground_station_units() {
             usermod -aG "${grp}" pi || true
         fi
     done
+
+    # MSN-029 Cellos Wave 1: trigger udev rebuild so i2c-dev nodes pick
+    # up the new group membership without requiring a reboot.
+    udevadm trigger --subsystem-match=i2c-dev || true
 
     # Install udev rules for gamepad + joystick hot-plug recognition.
     # Rule file ships in data/udev/ and is copied to /etc/udev/rules.d/.

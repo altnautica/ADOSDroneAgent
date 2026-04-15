@@ -1148,6 +1148,12 @@ class PicConfirmTokenRequest(BaseModel):
     client_id: str = Field(..., min_length=1)
 
 
+class PicHeartbeatRequest(BaseModel):
+    """POST body for PIC session heartbeat."""
+
+    client_id: str = Field(..., min_length=1)
+
+
 # ── /display ───────────────────────────────────────────────────────────────
 
 
@@ -1432,6 +1438,35 @@ async def post_pic_confirm_token(req: PicConfirmTokenRequest) -> dict[str, Any]:
     return {"token": value, "ttl_seconds": ttl}
 
 
+@router.post("/pic/heartbeat")
+async def post_pic_heartbeat(req: PicHeartbeatRequest) -> dict[str, Any]:
+    """Refresh the PIC session TTL. 410 if the client does not hold PIC."""
+    _require_ground_profile()
+
+    try:
+        result = _pic_arbiter().heartbeat(req.client_id)
+        if asyncio.iscoroutine(result):
+            result = await result
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail={"error": {"code": "E_PIC_HEARTBEAT_FAILED", "message": str(exc)}},
+        ) from exc
+
+    if isinstance(result, dict) and result.get("ok") is False:
+        raise HTTPException(
+            status_code=int(result.get("status", 410)),
+            detail={
+                "error": {
+                    "code": "E_PIC_NO_ACTIVE_CLAIM",
+                    "message": str(result.get("error", "no active claim")),
+                    "current_pic": result.get("current_pic"),
+                }
+            },
+        )
+    return result if isinstance(result, dict) else {"ok": True}
+
+
 @router.websocket("/pic/events")
 async def ws_pic_events(websocket: WebSocket) -> None:
     """Stream PIC arbiter events as JSON until the client disconnects."""
@@ -1511,7 +1546,7 @@ class ModemConfigUpdate(BaseModel):
     """PUT body for /network/modem."""
 
     apn: str | None = None
-    cap_gb: float | None = None
+    cap_gb: float | None = Field(default=None, gt=0, le=9223372036.0)
     enabled: bool | None = None
 
 

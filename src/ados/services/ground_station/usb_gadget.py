@@ -305,7 +305,14 @@ class UsbGadgetManager:
                 self._dnsmasq.wait(timeout=5.0)
                 log.info("usb_gadget_dnsmasq_stopped")
             except subprocess.TimeoutExpired:
-                self._dnsmasq.kill()
+                try:
+                    self._dnsmasq.kill()
+                except ProcessLookupError:
+                    pass
+                try:
+                    self._dnsmasq.wait(timeout=1.0)
+                except subprocess.TimeoutExpired:
+                    pass
                 log.warning("usb_gadget_dnsmasq_killed")
             except ProcessLookupError:
                 pass
