@@ -649,6 +649,30 @@ install_ground_station_deps() {
         info "Skipping modem stack (set ADOS_ENABLE_MODEM=1 to install modemmanager + libqmi-utils + libmbim-utils)."
     fi
 
+    # MSN-027 Phase 4 Wave 2 Cellos: optional share_uplink firewall
+    # persistence. Skipped by default because share_uplink is opt-in
+    # and pulling iptables-persistent on every ground station that
+    # never plans to NAT for AP clients is wasteful. Set
+    # `ADOS_ENABLE_SHARE_UPLINK=1` to install iptables-persistent on
+    # Debian/Raspbian. On non-Debian or buildroot images we skip the
+    # apt install and let the runtime helper fall back to nftables
+    # (when present) for persistence.
+    if [ "${ADOS_ENABLE_SHARE_UPLINK:-0}" = "1" ]; then
+        if command -v apt-get >/dev/null 2>&1; then
+            info "ADOS_ENABLE_SHARE_UPLINK=1 set; installing iptables-persistent..."
+            DEBIAN_FRONTEND=noninteractive \
+                debconf-set-selections <<<'iptables-persistent iptables-persistent/autosave_v4 boolean true' || true
+            DEBIAN_FRONTEND=noninteractive \
+                debconf-set-selections <<<'iptables-persistent iptables-persistent/autosave_v6 boolean true' || true
+            DEBIAN_FRONTEND=noninteractive apt-get install -y iptables iptables-persistent || \
+                warn "iptables-persistent install failed; share_uplink will use nftables fallback if available."
+        else
+            info "Non-Debian image; skipping iptables-persistent. share_uplink helper will use nftables fallback when 'nft' is present."
+        fi
+    else
+        info "Skipping share_uplink firewall persistence (set ADOS_ENABLE_SHARE_UPLINK=1 to install iptables-persistent on Debian)."
+    fi
+
     # MSN-027 Wave C Cellos: NetworkManager is mandatory for the WiFi
     # client manager (nmcli backend). Enable + start if it is installed
     # but inactive. Radxa BSPs ship with it but sometimes leave it masked.

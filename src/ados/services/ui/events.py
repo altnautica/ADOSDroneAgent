@@ -43,6 +43,12 @@ class ButtonEvent:
     button: int
     kind: Literal["short", "long"]
     timestamp_ms: int
+    # Phase 4 Wave 2: resolved action name from the live button mapping
+    # in `ground_station.ui.buttons.mapping`. None when the mapping has
+    # no entry for this `(button, kind)` pair, or when the publisher
+    # has no mapping context (e.g. tests, simulation). Consumers may
+    # treat None as "use default for this button".
+    action: str | None = None
 
 
 class ButtonEventBus:

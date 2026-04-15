@@ -26,7 +26,21 @@ Design choices:
     B3 short: enter or confirm
     B4 short: back out one level (top level returns to status)
 - Burn-in protection: contrast auto-dim to 40 after 60 seconds idle,
-  pixel-invert toggled every 10 minutes.
+  pixel-invert toggled every 10 minutes. Phase 4 Wave 2 confirms the
+  invert clock resets to "just normal-started" on every button press
+  so the operator always sees the natural orientation right after
+  interacting.
+
+Manual bench soak for the 10-minute pixel-invert cycle:
+  1. Boot the ground-station SBC with an OLED attached.
+  2. `journalctl -u ados-oled.service -f` to watch state changes.
+  3. Do not press any front-panel button.
+  4. After ~10 minutes the display should swap fg/bg colors.
+  5. After another ~10 minutes it should swap back.
+  6. Press any button. The display should return to natural
+     orientation immediately and the 10-min clock should reset.
+  7. To shorten the soak for a quick test, temporarily lower
+     `INVERT_PERIOD_SECONDS` to e.g. 60 in this file.
 
 Not in Wave B scope:
 - systemd unit files (Wave D).
@@ -79,14 +93,23 @@ HEIGHT = 64
 # Polling cadence for agent state.
 POLL_PERIOD_SECONDS = 1.0
 
-# Screen registry in auto-cycle order.
-STATUS_SCREENS: list[tuple[str, Any]] = [
-    ("link", screen_link),
-    ("drone", screen_drone),
-    ("gcs", screen_gcs),
-    ("net", screen_net),
-    ("system", screen_system),
-]
+# Screen registry. Phase 4 Wave 2: now a dict keyed by screen id so the
+# active list can be rebuilt from `ground_station.ui.screens` config.
+# REST schema uses the keys `home`, `link`, `drone`, `network`,
+# `system`, `qr`. We map the historical Wave B ids onto the current
+# REST schema (`net` -> `network`, no separate `home` or `qr` renderer
+# yet) so an unknown screen id is silently skipped instead of crashing.
+SCREEN_RENDERERS: dict[str, Any] = {
+    "link": screen_link,
+    "drone": screen_drone,
+    "gcs": screen_gcs,
+    "net": screen_net,
+    "network": screen_net,
+    "system": screen_system,
+}
+
+DEFAULT_SCREEN_ORDER: list[str] = ["link", "drone", "gcs", "net", "system"]
+DEFAULT_SCREEN_ENABLED: list[str] = ["link", "drone", "gcs", "net", "system"]
 
 # Menu tree from spec 05-physical-ui-oled-buttons.md.
 # Each node is (label, children). Leaf nodes have empty children and
@@ -157,6 +180,17 @@ class OledService:
         self._dimmed: bool = False
         self._state: dict[str, Any] = {}
         self._stop = asyncio.Event()
+        # Phase 4 Wave 2: dynamic screen list and OLED prefs are
+        # rebuilt from `ground_station.ui` on SIGHUP. Initial values
+        # are populated from `load_config()` in `_reload_ui_config()`.
+        self._active_screens: list[tuple[str, Any]] = [
+            (sid, SCREEN_RENDERERS[sid]) for sid in DEFAULT_SCREEN_ORDER
+        ]
+        self._cycle_seconds: float = AUTO_CYCLE_SECONDS
+        self._auto_dim_enabled: bool = True
+        self._brightness_active: int = CONTRAST_ACTIVE
+        self._reload_requested: bool = False
+        self._reload_ui_config()
 
     def _probe_device(self) -> bool:
         """Try SSD1306 then SH1106 at 0x3C and 0x3D. Return True on bind."""
@@ -206,6 +240,75 @@ class OledService:
         except Exception as exc:
             log.debug("invert_failed", error=str(exc))
 
+    def _reload_ui_config(self) -> None:
+        """Rebuild active screen list, brightness, and cycle period from config.
+
+        Called once at construction and again whenever SIGHUP fires. Tolerates
+        a missing `ground_station.ui` block by falling back to defaults. Never
+        raises: if config load itself blows up we keep the prior state.
+        """
+        try:
+            cfg = load_config()
+            ui = getattr(getattr(cfg, "ground_station", None), "ui", None)
+            screens_cfg = getattr(ui, "screens", {}) if ui is not None else {}
+            oled_cfg = getattr(ui, "oled", {}) if ui is not None else {}
+        except Exception as exc:
+            log.warning("ui_config_reload_failed", error=str(exc))
+            return
+
+        order = screens_cfg.get("order") if isinstance(screens_cfg, dict) else None
+        enabled = screens_cfg.get("enabled") if isinstance(screens_cfg, dict) else None
+        if not isinstance(order, list) or not order:
+            order = list(DEFAULT_SCREEN_ORDER)
+        if not isinstance(enabled, list) or not enabled:
+            enabled = list(DEFAULT_SCREEN_ENABLED)
+
+        enabled_set = set(enabled)
+        active: list[tuple[str, Any]] = []
+        for sid in order:
+            if not isinstance(sid, str):
+                continue
+            if sid not in enabled_set:
+                continue
+            renderer = SCREEN_RENDERERS.get(sid)
+            if renderer is None:
+                continue
+            active.append((sid, renderer))
+        if not active:
+            # Empty active set is unusable. Fall back to defaults so the
+            # operator always has something on screen.
+            active = [(sid, SCREEN_RENDERERS[sid]) for sid in DEFAULT_SCREEN_ORDER]
+
+        self._active_screens = active
+        # Clamp screen_idx in case the list shrank under us.
+        if self._screen_idx >= len(self._active_screens):
+            self._screen_idx = 0
+
+        if isinstance(oled_cfg, dict):
+            cycle = oled_cfg.get("screen_cycle_seconds")
+            if isinstance(cycle, (int, float)) and cycle > 0:
+                self._cycle_seconds = float(cycle)
+            auto_dim = oled_cfg.get("auto_dim_enabled")
+            if isinstance(auto_dim, bool):
+                self._auto_dim_enabled = auto_dim
+            brightness = oled_cfg.get("brightness")
+            if isinstance(brightness, int) and 0 <= brightness <= 255:
+                self._brightness_active = brightness
+                if not self._dimmed:
+                    self._set_contrast(brightness)
+
+        log.info(
+            "oled_ui_config_reloaded",
+            screens=[sid for sid, _ in self._active_screens],
+            cycle_s=self._cycle_seconds,
+            auto_dim=self._auto_dim_enabled,
+            brightness=self._brightness_active,
+        )
+
+    def request_reload(self) -> None:
+        """SIGHUP entry point. Set a flag the render loop will pick up."""
+        self._reload_requested = True
+
     async def _poll_state_forever(self) -> None:
         """Refresh self._state at 1 Hz from the agent REST endpoint."""
         async with httpx.AsyncClient(timeout=0.9) as client:
@@ -235,8 +338,16 @@ class OledService:
             self._last_button_ts = _now()
             # Wake from dim on any press.
             if self._dimmed:
-                self._set_contrast(CONTRAST_ACTIVE)
+                self._set_contrast(self._brightness_active)
                 self._dimmed = False
+            # Phase 4 Wave 2: pixel-invert burn-in protection. On any
+            # button press, return the display to natural orientation
+            # and reset the invert clock so the user always sees the
+            # non-inverted view right after they interact. The 10-min
+            # invert / 10-min normal cycle restarts from "normal" now.
+            if self._inverted:
+                self._set_invert(False)
+            self._last_invert_ts = _now()
             if ev.kind != "short":
                 # Long press hooks live in Wave C (factory reset, pair).
                 log.info("oled_long_press_passthrough", button=ev.button)
@@ -247,10 +358,11 @@ class OledService:
                 self._handle_menu_press(ev.button)
 
     def _handle_status_press(self, button: int) -> None:
+        n = max(1, len(self._active_screens))
         if button == B1:
-            self._screen_idx = (self._screen_idx - 1) % len(STATUS_SCREENS)
+            self._screen_idx = (self._screen_idx - 1) % n
         elif button == B2:
-            self._screen_idx = (self._screen_idx + 1) % len(STATUS_SCREENS)
+            self._screen_idx = (self._screen_idx + 1) % n
         elif button == B3:
             self._mode = "menu"
             self._menu_stack = []
@@ -299,28 +411,46 @@ class OledService:
         while not self._stop.is_set():
             now = _now()
 
-            # Idle auto-dim.
+            # Phase 4 Wave 2: pick up SIGHUP-driven config reloads.
+            if self._reload_requested:
+                self._reload_requested = False
+                self._reload_ui_config()
+                last_advance = now
+
+            # Idle auto-dim. Honors the auto_dim_enabled flag from config.
             idle = now - self._last_button_ts
-            if not self._dimmed and idle >= IDLE_DIM_SECONDS:
+            if (
+                self._auto_dim_enabled
+                and not self._dimmed
+                and idle >= IDLE_DIM_SECONDS
+            ):
                 self._set_contrast(CONTRAST_DIM)
                 self._dimmed = True
 
-            # Periodic pixel invert for burn-in mitigation.
+            # Periodic pixel invert for burn-in mitigation. The 10-min
+            # cycle clock is reset on every button press (see
+            # `_consume_buttons`) so the user never sees an inverted
+            # screen immediately after interacting.
             if now - self._last_invert_ts >= INVERT_PERIOD_SECONDS:
                 self._set_invert(not self._inverted)
                 self._last_invert_ts = now
 
-            # Auto-advance status screens.
-            if self._mode == "status" and (now - last_advance) >= AUTO_CYCLE_SECONDS:
-                self._screen_idx = (self._screen_idx + 1) % len(STATUS_SCREENS)
+            # Auto-advance status screens using the live cycle period.
+            n_screens = len(self._active_screens)
+            if (
+                self._mode == "status"
+                and n_screens > 0
+                and (now - last_advance) >= self._cycle_seconds
+            ):
+                self._screen_idx = (self._screen_idx + 1) % n_screens
                 last_advance = now
 
             try:
                 with canvas(self._device) as draw:
-                    if self._mode == "status":
-                        _, module = STATUS_SCREENS[self._screen_idx]
+                    if self._mode == "status" and n_screens > 0:
+                        _, module = self._active_screens[self._screen_idx]
                         module.render(draw, WIDTH, HEIGHT, self._state)
-                    else:
+                    elif self._mode == "menu":
                         screen_menu.render(
                             draw,
                             WIDTH,
@@ -391,6 +521,18 @@ async def _amain() -> int:
             loop.add_signal_handler(sig, _on_signal)
         except NotImplementedError:
             signal.signal(sig, _on_signal)
+
+    def _on_sighup(*_a: Any) -> None:
+        log.info("oled_service_signal_reload")
+        service.request_reload()
+
+    try:
+        loop.add_signal_handler(signal.SIGHUP, _on_sighup)
+    except (NotImplementedError, AttributeError):
+        try:
+            signal.signal(signal.SIGHUP, _on_sighup)
+        except (AttributeError, ValueError):
+            pass
 
     rc = await service.run()
     await bus.close()

@@ -1222,6 +1222,18 @@ async def _run_service() -> None:
         active=router.active_uplink,
     )
 
+    # Phase 4 Wave 2 Cellos: reconcile share_uplink firewall state on
+    # start. Brings sysctl ip_forward + NAT MASQUERADE in line with the
+    # persisted `ground_station.share_uplink` flag so reboots survive.
+    try:
+        from ados.services.ground_station.share_uplink_firewall import (
+            reconcile_on_start as _reconcile_share_uplink,
+        )
+        result = await _reconcile_share_uplink()
+        log.info("uplink.share_uplink_reconciled", result=result)
+    except Exception as exc:
+        log.warning("uplink.share_uplink_reconcile_failed", error=str(exc))
+
     await stop_event.wait()
 
     await router.stop()

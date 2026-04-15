@@ -688,10 +688,53 @@ async def get_ground_station_ui() -> dict[str, Any]:
     return _load_ui_config()
 
 
+def _persist_gs_ui_section(section: str, value: dict[str, Any]) -> None:
+    """Write `ground_station.ui.<section>` into the YAML-backed ADOSConfig.
+
+    Phase 4 Wave 2: the OLED, button, and screen UI config now lives in
+    the Pydantic model so it round-trips through save cycles and is
+    consumed by the live services. The legacy JSON side-file is no
+    longer written, but remains on disk for rollback (the load-time
+    migrator preserves it).
+    """
+    from ados.services.ground_station.pair_manager import (
+        _load_config_dict,
+        _save_config_dict,
+    )
+
+    data = _load_config_dict()
+    gs_section = data.get("ground_station")
+    if not isinstance(gs_section, dict):
+        gs_section = {}
+        data["ground_station"] = gs_section
+    ui_section = gs_section.get("ui")
+    if not isinstance(ui_section, dict):
+        ui_section = {}
+        gs_section["ui"] = ui_section
+    ui_section[section] = value
+    if not _save_config_dict(data):
+        raise OSError("failed to persist ground_station.ui to /etc/ados/config.yaml")
+
+
+def _refresh_in_memory_ui(app: Any, section: str, value: dict[str, Any]) -> None:
+    """Mirror the persisted section into the running app config."""
+    try:
+        gs = getattr(app.config, "ground_station", None)
+        if gs is None:
+            return
+        ui = getattr(gs, "ui", None)
+        if ui is None:
+            return
+        if hasattr(ui, section):
+            setattr(ui, section, dict(value))
+    except Exception:
+        pass
+
+
 @router.put("/ui/oled")
 async def put_ground_station_ui_oled(update: OledUpdate) -> dict[str, Any]:
-    """Update OLED settings. Returns the full UI config."""
-    _require_ground_profile()
+    """Update OLED settings, persist to config.yaml, signal oled_service."""
+    app = _require_ground_profile()
 
     data = _load_ui_config()
     oled = dict(data["oled"])
@@ -704,43 +747,50 @@ async def put_ground_station_ui_oled(update: OledUpdate) -> dict[str, Any]:
     data["oled"] = oled
 
     try:
-        _save_ui_config(data)
+        _persist_gs_ui_section("oled", oled)
     except OSError as exc:
         raise HTTPException(
             status_code=500,
             detail={"error": {"code": "E_UI_SAVE_FAILED", "message": str(exc)}},
         ) from exc
+
+    _refresh_in_memory_ui(app, "oled", oled)
+
+    from ados.services.ui.reload_signal import signal_oled_reload
+
+    signal_oled_reload()
     return data
 
 
 @router.put("/ui/buttons")
 async def put_ground_station_ui_buttons(update: ButtonsUpdate) -> dict[str, Any]:
-    """Replace the button mapping. Returns the full UI config.
-
-    Phase 1 note: the OLED/button service does not consume this remap
-    yet (Phase 2 work). The endpoint is live so the GCS matrix UI has
-    a persistent home for the binding.
-    """
-    _require_ground_profile()
+    """Replace the button mapping. Persisted to config and SIGHUP'd live."""
+    app = _require_ground_profile()
 
     data = _load_ui_config()
     if update.mapping is not None:
         data["buttons"] = {"mapping": dict(update.mapping)}
 
     try:
-        _save_ui_config(data)
+        _persist_gs_ui_section("buttons", data["buttons"])
     except OSError as exc:
         raise HTTPException(
             status_code=500,
             detail={"error": {"code": "E_UI_SAVE_FAILED", "message": str(exc)}},
         ) from exc
+
+    _refresh_in_memory_ui(app, "buttons", data["buttons"])
+
+    from ados.services.ui.reload_signal import signal_buttons_reload
+
+    signal_buttons_reload()
     return data
 
 
 @router.put("/ui/screens")
 async def put_ground_station_ui_screens(update: ScreensUpdate) -> dict[str, Any]:
-    """Update screen order and/or enabled set. Returns the full UI config."""
-    _require_ground_profile()
+    """Update screen order and/or enabled set. SIGHUPs oled_service live."""
+    app = _require_ground_profile()
 
     data = _load_ui_config()
     screens = dict(data["screens"])
@@ -751,12 +801,18 @@ async def put_ground_station_ui_screens(update: ScreensUpdate) -> dict[str, Any]
     data["screens"] = screens
 
     try:
-        _save_ui_config(data)
+        _persist_gs_ui_section("screens", screens)
     except OSError as exc:
         raise HTTPException(
             status_code=500,
             detail={"error": {"code": "E_UI_SAVE_FAILED", "message": str(exc)}},
         ) from exc
+
+    _refresh_in_memory_ui(app, "screens", screens)
+
+    from ados.services.ui.reload_signal import signal_oled_reload
+
+    signal_oled_reload()
     return data
 
 
@@ -1507,85 +1563,40 @@ def _persist_share_uplink_flag(enabled: bool) -> None:
 
 
 async def _apply_share_uplink(enabled: bool) -> dict[str, Any]:
-    """Best-effort apply of NAT + ip_forward for AP clients.
+    """Apply sysctl + NAT and persist firewall state across reboots.
 
-    Phase 3 POC: sets `net.ipv4.ip_forward` and installs a single
-    MASQUERADE rule on the currently active uplink interface. If the
-    sysctl or iptables call fails (no iptables binary, missing CAP),
-    the request still persists the flag and returns the failure in
-    the `apply_error` field instead of 500. Full firewall rule
-    management lives in a later phase.
+    Phase 4 Wave 2 Cellos: delegates to
+    `services/ground_station/share_uplink_firewall.apply_share_uplink`
+    which handles distro detection, iptables-persistent vs nftables
+    fallback, atomic sysctl drop-in, and persistence of the rule set.
+    Phase 3 inline POC is replaced; signature preserved for callers.
     """
-    apply_error: str | None = None
+    active_iface: str | None = None
     try:
-        proc = await asyncio.create_subprocess_exec(
-            "sysctl",
-            "-w",
-            f"net.ipv4.ip_forward={1 if enabled else 0}",
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.PIPE,
+        router_ = _uplink_router()
+        active_name = router_.active_uplink
+        if active_name:
+            mgr = await router_._manager_for(active_name)  # type: ignore[attr-defined]
+            if mgr is not None:
+                get_iface = getattr(mgr, "get_iface", None)
+                if callable(get_iface):
+                    active_iface = get_iface()
+    except Exception:
+        active_iface = None
+
+    try:
+        from ados.services.ground_station.share_uplink_firewall import (
+            apply_share_uplink as _apply,
         )
-        _, err = await proc.communicate()
-        if proc.returncode != 0:
-            apply_error = (err or b"").decode(errors="replace").strip() or "sysctl_failed"
+        result = await _apply(bool(enabled), active_iface)
     except Exception as exc:
-        apply_error = f"sysctl_exception: {exc}"
+        return {"applied": False, "apply_error": f"firewall_helper_failed: {exc}"}
 
-    # Best-effort NAT rule on the active uplink. No-op when disabled or
-    # when the router has no active uplink yet.
-    if enabled and apply_error is None:
-        try:
-            active_iface: str | None = None
-            try:
-                router_ = _uplink_router()
-                active_name = router_.active_uplink
-                if active_name:
-                    mgr = await router_._manager_for(active_name)  # type: ignore[attr-defined]
-                    if mgr is not None:
-                        get_iface = getattr(mgr, "get_iface", None)
-                        if callable(get_iface):
-                            active_iface = get_iface()
-            except Exception:
-                active_iface = None
-            if active_iface:
-                cmd = [
-                    "iptables",
-                    "-t",
-                    "nat",
-                    "-C",
-                    "POSTROUTING",
-                    "-o",
-                    active_iface,
-                    "-j",
-                    "MASQUERADE",
-                ]
-                check = await asyncio.create_subprocess_exec(
-                    *cmd,
-                    stdout=asyncio.subprocess.DEVNULL,
-                    stderr=asyncio.subprocess.DEVNULL,
-                )
-                await check.communicate()
-                if check.returncode != 0:
-                    add = await asyncio.create_subprocess_exec(
-                        "iptables",
-                        "-t",
-                        "nat",
-                        "-A",
-                        "POSTROUTING",
-                        "-o",
-                        active_iface,
-                        "-j",
-                        "MASQUERADE",
-                        stdout=asyncio.subprocess.DEVNULL,
-                        stderr=asyncio.subprocess.PIPE,
-                    )
-                    _, err2 = await add.communicate()
-                    if add.returncode != 0:
-                        apply_error = (err2 or b"").decode(errors="replace").strip() or "iptables_failed"
-        except Exception as exc:
-            apply_error = f"iptables_exception: {exc}"
-
-    return {"applied": apply_error is None, "apply_error": apply_error}
+    return {
+        "applied": bool(result.get("applied", False)),
+        "apply_error": result.get("apply_error"),
+        "backend": result.get("backend"),
+    }
 
 
 @router.put("/network/share_uplink")
@@ -1611,6 +1622,7 @@ async def put_network_share_uplink(update: ShareUplinkUpdate) -> dict[str, Any]:
         "enabled": bool(update.enabled),
         "applied": applied["applied"],
         "apply_error": applied["apply_error"],
+        "backend": applied.get("backend"),
     }
 
 
