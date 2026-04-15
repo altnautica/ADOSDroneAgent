@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Network . ADOS</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body data-page="network">
+<header>
+  <button class="back" type="button">Back</button>
+  <div class="title">ADOS Ground Station . Setup</div>
+</header>
+<main>
+  <h1>Network</h1>
+
+  <div class="card">
+    <h2>Access point</h2>
+    <p class="row"><span class="muted">SSID</span><br><span id="ap-ssid" class="mono">ADOS-GS-...</span></p>
+    <p class="row"><span class="muted">Passphrase</span><br>
+      <span id="ap-pass" class="mono">(tap to reveal)</span>
+    </p>
+    <button id="ap-reveal" class="secondary" type="button">Reveal passphrase</button>
+    <button id="ap-change" class="secondary" type="button">Change</button>
+  </div>
+
+  <div class="card">
+    <h2>WiFi client</h2>
+    <p id="wifi-state">Not joined</p>
+    <button id="wifi-scan" class="secondary" type="button">Scan networks</button>
+  </div>
+
+  <div class="card">
+    <h2>4G modem</h2>
+    <p id="modem-state">No modem detected</p>
+  </div>
+</main>
+<script src="app.js"></script>
+</body>
+</html>

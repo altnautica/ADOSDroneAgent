@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Display . ADOS</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body data-page="display">
+<header>
+  <button class="back" type="button">Back</button>
+  <div class="title">ADOS Ground Station . Setup</div>
+</header>
+<main>
+  <h1>Display</h1>
+
+  <div class="card">
+    <h2>HDMI</h2>
+    <div class="row">
+      <label for="hdmi-res">Output resolution</label>
+      <select id="hdmi-res" disabled>
+        <option value="auto">Auto</option>
+        <option value="1080p">1080p 60</option>
+        <option value="720p">720p 60</option>
+      </select>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Gamepad</h2>
+    <p id="gamepad-state">None assigned</p>
+  </div>
+
+  <div class="card">
+    <h2>Bluetooth</h2>
+    <button id="bt-pair" class="secondary" type="button" disabled>Pair device</button>
+  </div>
+</main>
+<script src="app.js"></script>
+</body>
+</html>
