@@ -18,6 +18,17 @@ setup webapp can show "USB tether unavailable, check boot config".
 Runs as root. If started as non-root, logs a warning and still
 attempts the operation; configfs writes and dnsmasq spawn will then
 fail cleanly with EACCES.
+
+Android 11+ tether behavior
+---------------------------
+Android 11 and newer phones expose CDC-NCM as "USB Ethernet". When
+the user plugs a USB-C cable between the phone and the ground
+station, Android prompts "Allow USB Ethernet" on the notification
+shade. Tap allow, then open the setup webapp at
+http://192.168.7.1/. The phone receives 192.168.7.2 from the
+dnsmasq served here. Android 10 and older do not support this path
+reliably and should use the WiFi AP instead. The setup webapp
+surfaces this as a hint on the landing page.
 """
 
 from __future__ import annotations

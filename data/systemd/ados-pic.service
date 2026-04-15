@@ -1,0 +1,20 @@
+[Unit]
+Description=ADOS Pilot-in-Command Arbiter (ground-station profile)
+After=ados-supervisor.service ados-input.service
+PartOf=ados-supervisor.service
+
+[Service]
+Type=simple
+User=root
+Environment=ADOS_CONFIG=/etc/ados/config.yaml
+EnvironmentFile=-/etc/ados/env
+ExecStart=/opt/ados/venv/bin/python -m ados.services.ground_station.pic_arbiter
+Restart=on-failure
+RestartSec=5
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ados-pic
+
+[Install]
+WantedBy=multi-user.target

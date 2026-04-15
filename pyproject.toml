@@ -60,6 +60,7 @@ ground-station = [
     "gpiozero>=2.0",
     "dbus-next>=0.2.3",
     "smbus2>=0.4.3",
+    "evdev>=1.6.1",
 ]
 
 [project.urls]

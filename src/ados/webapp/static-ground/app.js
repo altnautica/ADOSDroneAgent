@@ -5,6 +5,7 @@
 var API_BASE = "/api/v1/ground-station";
 var REFRESH_MS = 5000;
 var refreshTimer = null;
+var captiveToken = null;
 
 function $(id) { return document.getElementById(id); }
 
@@ -20,13 +21,20 @@ function goBack() {
 // Shared helpers
 // ---------------------------------------------------------------------------
 
-async function api(method, path, body) {
+async function api(method, path, body, extraHeaders) {
   showSpinner();
   try {
     var opts = { method: method, headers: {} };
     if (body !== undefined && body !== null) {
       opts.headers["Content-Type"] = "application/json";
       opts.body = JSON.stringify(body);
+    }
+    if (extraHeaders) {
+      for (var k in extraHeaders) {
+        if (Object.prototype.hasOwnProperty.call(extraHeaders, k)) {
+          opts.headers[k] = extraHeaders[k];
+        }
+      }
     }
     var res = await fetch(API_BASE + path, opts);
     var text = await res.text();
@@ -95,6 +103,17 @@ function reportAuthError(err) {
       b.textContent = "Agent refused the request (HTTP " + err.status + "). Check that the ground-station profile allows captive access.";
       b.classList.remove("hidden");
     }
+  }
+}
+
+async function fetchCaptiveToken() {
+  // Best-effort. Token is only mintable from the AP subnet so this
+  // can fail in dev and that is fine.
+  try {
+    var r = await api("GET", "/captive-token");
+    if (r && r.token) captiveToken = r.token;
+  } catch (err) {
+    // 403 outside AP subnet is expected in dev. Stay quiet.
   }
 }
 
@@ -425,7 +444,9 @@ function initAdvanced() {
     }
 
     try {
-      await api("POST", "/factory-reset?confirm=" + encodeURIComponent(token));
+      var headers = {};
+      if (captiveToken) headers["X-ADOS-Captive-Key"] = captiveToken;
+      await api("POST", "/factory-reset?confirm=" + encodeURIComponent(token), null, headers);
       alert("Factory reset complete. Reloading.");
       location.href = "index.html";
     } catch (err) {
@@ -446,6 +467,9 @@ function initAdvanced() {
 document.addEventListener("DOMContentLoaded", function () {
   var backBtn = document.querySelector("header .back");
   if (backBtn) backBtn.addEventListener("click", goBack);
+
+  // Fire-and-forget token fetch so destructive actions have one ready.
+  fetchCaptiveToken();
 
   var page = document.body.dataset.page;
   if (page === "index") initIndex();
