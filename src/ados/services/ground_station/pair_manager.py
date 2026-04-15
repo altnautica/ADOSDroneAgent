@@ -439,7 +439,31 @@ class PairManager:
         }
 
 
+# ----------------------------------------------------------------------
+# Module-level singleton
+# ----------------------------------------------------------------------
+# Phase 4 Wave 1: match the pattern used by get_input_manager(),
+# get_pic_arbiter(), get_modem_manager(). Prior to this, callers
+# instantiated PairManager() directly, which worked but fragmented
+# state and made test teardown awkward.
+_instance: "PairManager | None" = None
+
+
+def get_pair_manager() -> "PairManager":
+    """Return the process-wide PairManager singleton."""
+    global _instance
+    if _instance is None:
+        _instance = PairManager()
+    return _instance
+
+
+def _reset_for_tests() -> None:
+    """Drop the cached singleton. Test-only helper."""
+    global _instance
+    _instance = None
+
+
 # No systemd entry point. PairManager is consumed in-process by the
 # REST API service (Wave C Cellos) and the physical UI handler (Wave D).
 # A `__main__` block is intentionally omitted; for bench testing use
-# `python -c "import asyncio; from ados.services.ground_station.pair_manager import PairManager; print(asyncio.run(PairManager().status()))"`.
+# `python -c "import asyncio; from ados.services.ground_station.pair_manager import get_pair_manager; print(asyncio.run(get_pair_manager().status()))"`.

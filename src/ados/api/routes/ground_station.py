@@ -195,10 +195,10 @@ def _hostapd_manager(app: Any) -> Any:
 
 
 def _pair_manager() -> Any:
-    """Construct a PairManager. Lazy import so route module loads without it."""
-    from ados.services.ground_station.pair_manager import PairManager
+    """Return the process-wide PairManager. Lazy import so route module loads without it."""
+    from ados.services.ground_station.pair_manager import get_pair_manager
 
-    return PairManager()
+    return get_pair_manager()
 
 
 def _stock_confirm_token() -> str:
@@ -527,13 +527,20 @@ def _router_state_view() -> dict[str, Any]:
 
 
 def _load_share_uplink_flag() -> bool:
+    """Read share_uplink from the Pydantic-backed ADOSConfig.
+
+    Phase 4 Wave 1: authoritative source is now
+    `ADOSConfig.ground_station.share_uplink` (YAML). The legacy JSON
+    side-file at `_UI_CONFIG_PATH` is handled by the one-shot migrator
+    in `ados.core.config.load_config()` and preserved on disk.
+    """
     try:
-        if _UI_CONFIG_PATH.is_file():
-            data = json.loads(_UI_CONFIG_PATH.read_text(encoding="utf-8")) or {}
-            return bool(data.get("share_uplink", False))
-    except (OSError, ValueError):
-        pass
-    return False
+        from ados.core.config import load_config
+
+        cfg = load_config()
+        return bool(cfg.ground_station.share_uplink)
+    except Exception:
+        return False
 
 
 @router.get("/network")
@@ -1476,18 +1483,27 @@ async def put_network_priority(update: UplinkPriorityUpdate) -> dict[str, Any]:
 
 
 def _persist_share_uplink_flag(enabled: bool) -> None:
-    """Write share_uplink flag back into the ground-station UI config file."""
-    data: dict[str, Any] = {}
-    try:
-        if _UI_CONFIG_PATH.is_file():
-            data = json.loads(_UI_CONFIG_PATH.read_text(encoding="utf-8")) or {}
-    except (OSError, ValueError):
-        data = {}
-    data["share_uplink"] = bool(enabled)
-    _UI_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    tmp = _UI_CONFIG_PATH.with_suffix(".tmp")
-    tmp.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
-    tmp.replace(_UI_CONFIG_PATH)
+    """Write share_uplink into the Pydantic-backed ADOSConfig on disk.
+
+    Phase 4 Wave 1: writes to `/etc/ados/config.yaml` under
+    `ground_station.share_uplink`. The legacy JSON side-file is NOT
+    written, but is preserved on disk for rollback. The pair_manager
+    atomic save helper is reused so air and ground paths share one
+    code path.
+    """
+    from ados.services.ground_station.pair_manager import (
+        _load_config_dict,
+        _save_config_dict,
+    )
+
+    data = _load_config_dict()
+    gs_section = data.get("ground_station")
+    if not isinstance(gs_section, dict):
+        gs_section = {}
+        data["ground_station"] = gs_section
+    gs_section["share_uplink"] = bool(enabled)
+    if not _save_config_dict(data):
+        raise OSError("failed to persist share_uplink to /etc/ados/config.yaml")
 
 
 async def _apply_share_uplink(enabled: bool) -> dict[str, Any]:

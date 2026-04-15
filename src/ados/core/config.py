@@ -277,6 +277,23 @@ class SwarmConfig(BaseModel):
     default_spacing: int = 10
 
 
+# --- Ground Station ---
+
+# Phase 4 Wave 1: ground_station fields now live in the Pydantic model
+# so they validate, round-trip through save cycles, and show up in
+# config dumps. Prior to Phase 4, `paired_drone_id` and `paired_at`
+# were written to `/etc/ados/config.yaml` via direct YAML manipulation
+# in pair_manager.py while ADOSConfig had `extra="ignore"`, and
+# `share_uplink` lived in a side-file at `/etc/ados/ground-station-ui.json`.
+# The migrator in `load_config()` picks the legacy side-file value up
+# once and preserves the file on disk.
+
+class GroundStationConfig(BaseModel):
+    share_uplink: bool = False
+    paired_drone_id: str | None = None
+    paired_at: str | None = None  # iso timestamp
+
+
 # --- Top-level ---
 
 class ADOSConfig(BaseModel):
@@ -294,6 +311,7 @@ class ADOSConfig(BaseModel):
     discovery: DiscoveryConfig = DiscoveryConfig()
     vision: VisionConfig = VisionConfig()
     swarm: SwarmConfig = SwarmConfig()
+    ground_station: GroundStationConfig = GroundStationConfig()
 
     model_config = {"extra": "ignore"}
 
@@ -308,6 +326,116 @@ class ADOSConfig(BaseModel):
                 agent["device_id"] = str(uuid.uuid4())[:8]
                 data["agent"] = agent
         return data
+
+
+# --- Legacy migrators ---
+
+# One-shot per-process guard. Keeps the INFO log from spamming even
+# though the migrator is cheap and idempotent after the first run.
+_SHARE_UPLINK_MIGRATED: bool = False
+
+_LEGACY_GS_UI_PATH = Path("/etc/ados/ground-station-ui.json")
+
+
+def _migrate_share_uplink_from_legacy_json(
+    raw: dict[str, Any],
+    yaml_path: Path | None,
+) -> dict[str, Any]:
+    """Pull `share_uplink` out of the legacy ground-station-ui.json side-file.
+
+    Runs at most once per process (guarded by `_SHARE_UPLINK_MIGRATED`)
+    and is a no-op if:
+    - the legacy file does not exist, OR
+    - the legacy file has no `share_uplink` key, OR
+    - `raw['ground_station']['share_uplink']` is already set (Pydantic
+      value wins).
+
+    On a live migration the resolved value is written into `raw`
+    in-memory AND flushed back to the on-disk YAML so later reads see
+    the Pydantic field without needing the legacy file. The legacy
+    JSON is preserved on disk for rollback and audit.
+    """
+    global _SHARE_UPLINK_MIGRATED
+    if _SHARE_UPLINK_MIGRATED:
+        return raw
+
+    try:
+        if not _LEGACY_GS_UI_PATH.is_file():
+            _SHARE_UPLINK_MIGRATED = True
+            return raw
+
+        import json
+
+        try:
+            legacy_data = json.loads(
+                _LEGACY_GS_UI_PATH.read_text(encoding="utf-8")
+            )
+        except (OSError, ValueError):
+            _SHARE_UPLINK_MIGRATED = True
+            return raw
+
+        if not isinstance(legacy_data, dict):
+            _SHARE_UPLINK_MIGRATED = True
+            return raw
+
+        if "share_uplink" not in legacy_data:
+            _SHARE_UPLINK_MIGRATED = True
+            return raw
+
+        gs_section = raw.get("ground_station")
+        if not isinstance(gs_section, dict):
+            gs_section = {}
+        if "share_uplink" in gs_section:
+            # Pydantic config already has a value. Do not overwrite.
+            _SHARE_UPLINK_MIGRATED = True
+            return raw
+
+        legacy_value = bool(legacy_data.get("share_uplink", False))
+        gs_section["share_uplink"] = legacy_value
+        raw["ground_station"] = gs_section
+
+        # Flush to disk so subsequent loads do not need the legacy file.
+        # Best-effort: on failure we still return the in-memory merge.
+        if yaml_path is not None:
+            try:
+                to_write: dict[str, Any] = {}
+                if yaml_path.is_file():
+                    with open(yaml_path, encoding="utf-8") as fh:
+                        loaded = yaml.safe_load(fh)
+                    if isinstance(loaded, dict):
+                        to_write = loaded
+                disk_gs = to_write.get("ground_station")
+                if not isinstance(disk_gs, dict):
+                    disk_gs = {}
+                disk_gs["share_uplink"] = legacy_value
+                to_write["ground_station"] = disk_gs
+
+                body = yaml.safe_dump(
+                    to_write,
+                    sort_keys=False,
+                    default_flow_style=False,
+                )
+                yaml_path.parent.mkdir(parents=True, exist_ok=True)
+                tmp_path = yaml_path.with_suffix(yaml_path.suffix + ".tmp")
+                tmp_path.write_text(body, encoding="utf-8")
+                import os as _os
+                _os.replace(str(tmp_path), str(yaml_path))
+            except (OSError, yaml.YAMLError):
+                # Non-fatal. In-memory value still applies for this run.
+                pass
+
+        # Log once. Use plain logging to avoid a circular import on
+        # `ados.core.logging`, which itself may call `load_config()`.
+        import logging as _logging
+
+        _logging.getLogger("ados.core.config").info(
+            "migrated share_uplink from /etc/ados/ground-station-ui.json "
+            "(legacy file preserved)"
+        )
+    finally:
+        _SHARE_UPLINK_MIGRATED = True
+
+    return raw
 
 
 def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
@@ -339,13 +467,20 @@ def load_config(path: str | Path | None = None) -> ADOSConfig:
     ])
 
     raw: dict[str, Any] = {}
+    picked_path: Path | None = None
     for candidate in candidates:
         if candidate.is_file():
             with open(candidate) as f:
                 loaded = yaml.safe_load(f)
                 if isinstance(loaded, dict):
                     raw = loaded
+            picked_path = candidate
             break
+
+    # Legacy migration: pull share_uplink out of the pre-Phase-4
+    # side-file into the Pydantic-backed ground_station section. Idempotent,
+    # runs at most once per process.
+    raw = _migrate_share_uplink_from_legacy_json(raw, picked_path)
 
     # Load defaults.yaml from package data
     import importlib.resources
