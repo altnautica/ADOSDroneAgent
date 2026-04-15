@@ -417,16 +417,144 @@ def _ap_view(app: Any) -> dict[str, Any]:
         }
 
 
+async def _wifi_client_view() -> dict[str, Any]:
+    """Wave C Cellos: surface WifiClientManager status + enabled_on_boot."""
+    try:
+        from ados.services.ground_station.wifi_client_manager import (
+            get_wifi_client_manager,
+        )
+
+        mgr = get_wifi_client_manager()
+        st = await mgr.status()
+        cfg = mgr._load_client_config()  # internal helper, ok for a view
+        return {
+            "enabled_on_boot": bool(cfg.get("enabled_on_boot", False)),
+            "connected": bool(st.get("connected", False)),
+            "ssid": st.get("ssid"),
+            "signal": st.get("signal"),
+            "ip": st.get("ip"),
+        }
+    except Exception:
+        return {
+            "enabled_on_boot": False,
+            "connected": False,
+            "ssid": None,
+            "signal": None,
+            "ip": None,
+        }
+
+
+async def _ethernet_view() -> dict[str, Any]:
+    try:
+        from ados.services.ground_station.ethernet_manager import (
+            get_ethernet_manager,
+        )
+
+        st = await get_ethernet_manager().status()
+        return {
+            "link": bool(st.get("link", False)),
+            "speed_mbps": st.get("speed_mbps"),
+            "ip": st.get("ip"),
+            "gateway": st.get("gateway"),
+        }
+    except Exception:
+        return {"link": False, "speed_mbps": None, "ip": None, "gateway": None}
+
+
+async def _modem_view() -> dict[str, Any]:
+    try:
+        from ados.services.ground_station.modem_manager import (
+            get_modem_manager,
+        )
+
+        mgr = get_modem_manager()
+        st = await mgr.status()
+        usage = await mgr.data_usage()
+        cfg = getattr(mgr, "_config", {}) or {}
+
+        cap_gb = cfg.get("cap_gb")
+        try:
+            cap_mb = int(float(cap_gb) * 1024) if cap_gb is not None else 0
+        except (TypeError, ValueError):
+            cap_mb = 0
+        total_bytes = int(usage.get("total_bytes", 0) or 0)
+        data_used_mb = int(total_bytes / (1024 * 1024)) if total_bytes else 0
+        percent = (data_used_mb / cap_mb * 100.0) if cap_mb else 0.0
+
+        return {
+            "enabled": bool(cfg.get("enabled", False)),
+            "connected": bool(st.get("connected", False)),
+            "iface": st.get("iface"),
+            "ip": st.get("ip"),
+            "signal_quality": st.get("signal_quality"),
+            "technology": st.get("technology"),
+            "apn": st.get("apn") or cfg.get("apn"),
+            "operator": st.get("operator"),
+            "data_used_mb": data_used_mb,
+            "cap_mb": cap_mb,
+            "percent": round(percent, 2),
+            "state": "connected" if st.get("connected") else "disconnected",
+        }
+    except Exception:
+        return {
+            "enabled": False,
+            "connected": False,
+            "iface": None,
+            "ip": None,
+            "signal_quality": None,
+            "technology": None,
+            "apn": None,
+            "operator": None,
+            "data_used_mb": 0,
+            "cap_mb": 0,
+            "percent": 0.0,
+            "state": "unknown",
+        }
+
+
+def _router_state_view() -> dict[str, Any]:
+    """Active uplink + priority list from UplinkRouter singleton."""
+    try:
+        from ados.services.ground_station.uplink_router import get_uplink_router
+
+        router = get_uplink_router()
+        return {
+            "active_uplink": router.active_uplink,
+            "priority": list(router.get_priority()),
+        }
+    except Exception:
+        return {"active_uplink": None, "priority": []}
+
+
+def _load_share_uplink_flag() -> bool:
+    try:
+        if _UI_CONFIG_PATH.is_file():
+            data = json.loads(_UI_CONFIG_PATH.read_text(encoding="utf-8")) or {}
+            return bool(data.get("share_uplink", False))
+    except (OSError, ValueError):
+        pass
+    return False
+
+
 @router.get("/network")
 async def get_ground_station_network() -> dict[str, Any]:
-    """Network uplinks view. Only AP has real data in Phase 1."""
+    """Network uplinks view.
+
+    Wave C Cellos expands this from the Phase 1 AP-only stub to cover
+    all four uplinks (wifi_client, ethernet, modem_4g) plus the
+    active_uplink + priority surfaced by UplinkRouter and the
+    share_uplink flag.
+    """
     app = _require_ground_profile()
+    router_view = _router_state_view()
     return {
         "ap": _ap_view(app),
-        "wifi_client": {"enabled": False, "ssid": None, "connected": False},
-        "ethernet": {"enabled": False, "connected": False, "ip": None},
-        "modem_4g": {"enabled": False, "connected": False, "carrier": None},
-        "active_uplink": None,
+        "wifi_client": await _wifi_client_view(),
+        "ethernet": await _ethernet_view(),
+        "modem_4g": await _modem_view(),
+        "active_uplink": router_view["active_uplink"],
+        "priority": router_view["priority"],
+        "share_uplink": _load_share_uplink_flag(),
     }
 
 
@@ -1151,3 +1279,374 @@ async def ws_pic_events(websocket: WebSocket) -> None:
                 unsubscribe()
             except Exception:  # noqa: BLE001
                 pass
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 (MSN-027 Wave C Cellos): network uplinks (wifi client, modem,
+# uplink router priority + share_uplink toggle) + uplink event stream.
+# ---------------------------------------------------------------------------
+
+
+_UPLINK_PRIORITY_PATH = Path("/etc/ados/ground-station-uplink.json")
+
+
+class WifiJoinRequest(BaseModel):
+    """PUT body for /network/client/join."""
+
+    ssid: str = Field(..., min_length=1)
+    passphrase: str | None = None
+    force: bool | None = False
+
+
+class ModemConfigUpdate(BaseModel):
+    """PUT body for /network/modem."""
+
+    apn: str | None = None
+    cap_gb: float | None = None
+    enabled: bool | None = None
+
+
+class UplinkPriorityUpdate(BaseModel):
+    """PUT body for /network/priority."""
+
+    priority: list[str] = Field(..., min_length=1)
+
+
+class ShareUplinkUpdate(BaseModel):
+    """PUT body for /network/share_uplink."""
+
+    enabled: bool
+
+
+def _wifi_client_manager() -> Any:
+    from ados.services.ground_station.wifi_client_manager import (
+        get_wifi_client_manager,
+    )
+
+    return get_wifi_client_manager()
+
+
+def _modem_mgr() -> Any:
+    from ados.services.ground_station.modem_manager import get_modem_manager
+
+    return get_modem_manager()
+
+
+def _uplink_router() -> Any:
+    from ados.services.ground_station.uplink_router import get_uplink_router
+
+    return get_uplink_router()
+
+
+# ── /network/client ────────────────────────────────────────────────────────
+
+
+@router.get("/network/client/scan")
+async def get_network_client_scan() -> dict[str, Any]:
+    """Scan for nearby WiFi networks via nmcli."""
+    _require_ground_profile()
+    try:
+        networks = await _wifi_client_manager().scan(timeout_s=10)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail={"error": {"code": "E_WIFI_SCAN_FAILED", "message": str(exc)}},
+        ) from exc
+    return {"networks": networks or []}
+
+
+@router.put("/network/client/join")
+async def put_network_client_join(req: WifiJoinRequest) -> dict[str, Any]:
+    """Join a WiFi network. 409 on AP mutex conflict without force."""
+    _require_ground_profile()
+
+    try:
+        result = await _wifi_client_manager().join(
+            ssid=req.ssid,
+            passphrase=req.passphrase,
+            force=bool(req.force),
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail={"error": {"code": "E_WIFI_JOIN_FAILED", "message": str(exc)}},
+        ) from exc
+
+    if isinstance(result, dict) and not result.get("joined"):
+        err = str(result.get("error") or "")
+        if err == "wlan0_busy_ap_active":
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": {
+                        "code": "E_WLAN0_BUSY_AP_ACTIVE",
+                        "message": result.get("hint")
+                        or "AP is active; retry with force=true to steal wlan0",
+                    },
+                    "needs_force": True,
+                },
+            )
+
+    return {
+        "joined": bool(result.get("joined", False)) if isinstance(result, dict) else False,
+        "ip": result.get("ip") if isinstance(result, dict) else None,
+        "gateway": result.get("gateway") if isinstance(result, dict) else None,
+        "error": result.get("error") if isinstance(result, dict) else None,
+    }
+
+
+@router.delete("/network/client")
+async def delete_network_client() -> dict[str, Any]:
+    """Disconnect the current WiFi client connection."""
+    _require_ground_profile()
+    try:
+        return await _wifi_client_manager().leave()
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail={"error": {"code": "E_WIFI_LEAVE_FAILED", "message": str(exc)}},
+        ) from exc
+
+
+# ── /network/modem ─────────────────────────────────────────────────────────
+
+
+@router.get("/network/modem")
+async def get_network_modem() -> dict[str, Any]:
+    """Return modem status + data usage + configured cap."""
+    _require_ground_profile()
+    return await _modem_view()
+
+
+@router.put("/network/modem")
+async def put_network_modem(update: ModemConfigUpdate) -> dict[str, Any]:
+    """Update modem config (apn, cap_gb, enabled). Returns refreshed view."""
+    _require_ground_profile()
+    try:
+        await _modem_mgr().configure(
+            apn=update.apn,
+            cap_gb=update.cap_gb,
+            enabled=update.enabled,
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail={"error": {"code": "E_MODEM_CONFIGURE_FAILED", "message": str(exc)}},
+        ) from exc
+    return await _modem_view()
+
+
+# ── /network/priority ──────────────────────────────────────────────────────
+
+
+@router.get("/network/priority")
+async def get_network_priority() -> dict[str, Any]:
+    """Return the current uplink priority list."""
+    _require_ground_profile()
+    try:
+        priority = list(_uplink_router().get_priority())
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail={"error": {"code": "E_UPLINK_PRIORITY_FAILED", "message": str(exc)}},
+        ) from exc
+    return {"priority": priority}
+
+
+@router.put("/network/priority")
+async def put_network_priority(update: UplinkPriorityUpdate) -> dict[str, Any]:
+    """Set the uplink priority list. Router persists to its own JSON."""
+    _require_ground_profile()
+    try:
+        _uplink_router().set_priority(list(update.priority))
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": {"code": "E_UPLINK_PRIORITY_INVALID", "message": str(exc)}},
+        ) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail={"error": {"code": "E_UPLINK_PRIORITY_FAILED", "message": str(exc)}},
+        ) from exc
+    return {"priority": list(_uplink_router().get_priority())}
+
+
+# ── /network/share_uplink ──────────────────────────────────────────────────
+
+
+def _persist_share_uplink_flag(enabled: bool) -> None:
+    """Write share_uplink flag back into the ground-station UI config file."""
+    data: dict[str, Any] = {}
+    try:
+        if _UI_CONFIG_PATH.is_file():
+            data = json.loads(_UI_CONFIG_PATH.read_text(encoding="utf-8")) or {}
+    except (OSError, ValueError):
+        data = {}
+    data["share_uplink"] = bool(enabled)
+    _UI_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    tmp = _UI_CONFIG_PATH.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
+    tmp.replace(_UI_CONFIG_PATH)
+
+
+async def _apply_share_uplink(enabled: bool) -> dict[str, Any]:
+    """Best-effort apply of NAT + ip_forward for AP clients.
+
+    Phase 3 POC: sets `net.ipv4.ip_forward` and installs a single
+    MASQUERADE rule on the currently active uplink interface. If the
+    sysctl or iptables call fails (no iptables binary, missing CAP),
+    the request still persists the flag and returns the failure in
+    the `apply_error` field instead of 500. Full firewall rule
+    management lives in a later phase.
+    """
+    apply_error: str | None = None
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "sysctl",
+            "-w",
+            f"net.ipv4.ip_forward={1 if enabled else 0}",
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, err = await proc.communicate()
+        if proc.returncode != 0:
+            apply_error = (err or b"").decode(errors="replace").strip() or "sysctl_failed"
+    except Exception as exc:
+        apply_error = f"sysctl_exception: {exc}"
+
+    # Best-effort NAT rule on the active uplink. No-op when disabled or
+    # when the router has no active uplink yet.
+    if enabled and apply_error is None:
+        try:
+            active_iface: str | None = None
+            try:
+                router_ = _uplink_router()
+                active_name = router_.active_uplink
+                if active_name:
+                    mgr = await router_._manager_for(active_name)  # type: ignore[attr-defined]
+                    if mgr is not None:
+                        get_iface = getattr(mgr, "get_iface", None)
+                        if callable(get_iface):
+                            active_iface = get_iface()
+            except Exception:
+                active_iface = None
+            if active_iface:
+                cmd = [
+                    "iptables",
+                    "-t",
+                    "nat",
+                    "-C",
+                    "POSTROUTING",
+                    "-o",
+                    active_iface,
+                    "-j",
+                    "MASQUERADE",
+                ]
+                check = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.DEVNULL,
+                )
+                await check.communicate()
+                if check.returncode != 0:
+                    add = await asyncio.create_subprocess_exec(
+                        "iptables",
+                        "-t",
+                        "nat",
+                        "-A",
+                        "POSTROUTING",
+                        "-o",
+                        active_iface,
+                        "-j",
+                        "MASQUERADE",
+                        stdout=asyncio.subprocess.DEVNULL,
+                        stderr=asyncio.subprocess.PIPE,
+                    )
+                    _, err2 = await add.communicate()
+                    if add.returncode != 0:
+                        apply_error = (err2 or b"").decode(errors="replace").strip() or "iptables_failed"
+        except Exception as exc:
+            apply_error = f"iptables_exception: {exc}"
+
+    return {"applied": apply_error is None, "apply_error": apply_error}
+
+
+@router.put("/network/share_uplink")
+async def put_network_share_uplink(update: ShareUplinkUpdate) -> dict[str, Any]:
+    """Toggle IPv4 forwarding + NAT masquerade for AP clients.
+
+    POC implementation: writes net.ipv4.ip_forward via sysctl and adds
+    a MASQUERADE rule on the active uplink. On failure the flag is
+    still persisted and the error is surfaced in the response. Full
+    firewall management comes in a later phase.
+    """
+    _require_ground_profile()
+    try:
+        _persist_share_uplink_flag(update.enabled)
+    except OSError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail={"error": {"code": "E_UI_SAVE_FAILED", "message": str(exc)}},
+        ) from exc
+
+    applied = await _apply_share_uplink(bool(update.enabled))
+    return {
+        "enabled": bool(update.enabled),
+        "applied": applied["applied"],
+        "apply_error": applied["apply_error"],
+    }
+
+
+# ── /ws/uplink ─────────────────────────────────────────────────────────────
+
+
+@router.websocket("/ws/uplink")
+async def ws_uplink_events(websocket: WebSocket) -> None:
+    """Stream UplinkRouter events as JSON until the client disconnects.
+
+    Mirrors the `/pic/events` pattern: profile-gate before accept so
+    wrong-profile callers close with 1008; subscribe to the async
+    iterator `UplinkEventBus.subscribe()`; JSON-serialize each event.
+    """
+    app = get_agent_app()
+    profile = getattr(app.config.agent, "profile", "auto")
+    if profile != "ground_station":
+        await websocket.close(code=1008, reason="E_PROFILE_MISMATCH")
+        return
+
+    await websocket.accept()
+
+    try:
+        from ados.services.ground_station.uplink_router import get_uplink_router
+    except Exception:
+        await websocket.send_json({"event": "error", "code": "E_UPLINK_ROUTER_UNAVAILABLE"})
+        await websocket.close()
+        return
+
+    try:
+        bus = get_uplink_router().bus
+    except Exception:
+        await websocket.send_json({"event": "error", "code": "E_UPLINK_BUS_UNAVAILABLE"})
+        await websocket.close()
+        return
+
+    try:
+        async for evt in bus.subscribe():
+            try:
+                payload = {
+                    "kind": evt.kind,
+                    "active_uplink": evt.active_uplink,
+                    "available": list(evt.available) if evt.available is not None else [],
+                    "internet_reachable": bool(evt.internet_reachable),
+                    "data_cap_state": evt.data_cap_state,
+                    "timestamp_ms": evt.timestamp_ms,
+                }
+                await websocket.send_json(payload)
+            except (WebSocketDisconnect, RuntimeError):
+                break
+    except WebSocketDisconnect:
+        pass
+    except Exception:
+        # Bus closed or subscriber removed under us.
+        pass

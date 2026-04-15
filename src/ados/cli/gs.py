@@ -175,6 +175,14 @@ def gs_network() -> None:
     """Network-stack controls (AP, uplinks)."""
 
 
+@gs_network.command("show")
+def gs_network_show() -> None:
+    """Print the full network uplink view (AP, wifi client, ethernet, modem)."""
+    data = _request("GET", "/api/v1/ground-station/network")
+    if data is not None:
+        _pp(data)
+
+
 @gs_network.command("ap")
 @click.option("--enabled", type=bool, default=None, help="Start or stop the AP.")
 @click.option("--ssid", default=None, help="Set the AP SSID (must start with ADOS-GS-).")
@@ -435,6 +443,144 @@ def gs_pic_release(client_id: str) -> None:
         "POST",
         "/api/v1/ground-station/pic/release",
         json_body={"client_id": client_id},
+    )
+    if data is not None:
+        _pp(data)
+
+
+# ── network client ─────────────────────────────────────────────────────────
+
+
+@gs_network.group("client")
+def gs_network_client() -> None:
+    """WiFi client (station) controls."""
+
+
+@gs_network_client.command("scan")
+def gs_network_client_scan() -> None:
+    """Scan for nearby WiFi networks."""
+    data = _request("GET", "/api/v1/ground-station/network/client/scan")
+    if data is not None:
+        _pp(data)
+
+
+@gs_network_client.command("join")
+@click.argument("ssid")
+@click.option("--passphrase", default=None, help="WPA2 passphrase (optional).")
+@click.option("--force", is_flag=True, default=False, help="Steal wlan0 from AP.")
+def gs_network_client_join(ssid: str, passphrase: str | None, force: bool) -> None:
+    """Join a WiFi network as a station."""
+    body: dict[str, Any] = {"ssid": ssid, "force": force}
+    if passphrase is not None:
+        body["passphrase"] = passphrase
+    data = _request("PUT", "/api/v1/ground-station/network/client/join", json_body=body)
+    if data is not None:
+        _pp(data)
+
+
+@gs_network_client.command("leave")
+def gs_network_client_leave() -> None:
+    """Disconnect the current WiFi client connection."""
+    data = _request("DELETE", "/api/v1/ground-station/network/client")
+    if data is not None:
+        _pp(data)
+
+
+# ── network modem ──────────────────────────────────────────────────────────
+
+
+@gs_network.group("modem")
+def gs_network_modem() -> None:
+    """Cellular modem status and configuration."""
+
+
+@gs_network_modem.command("status")
+def gs_network_modem_status() -> None:
+    """Print modem status and data usage."""
+    data = _request("GET", "/api/v1/ground-station/network/modem")
+    if data is not None:
+        _pp(data)
+
+
+@gs_network_modem.command("usage")
+def gs_network_modem_usage() -> None:
+    """Print modem data usage (alias for status, filters to usage fields)."""
+    data = _request("GET", "/api/v1/ground-station/network/modem")
+    if data is not None:
+        view = {
+            "data_used_mb": data.get("data_used_mb"),
+            "cap_mb": data.get("cap_mb"),
+            "percent": data.get("percent"),
+            "iface": data.get("iface"),
+        }
+        _pp(view)
+
+
+@gs_network_modem.command("configure")
+@click.option("--apn", default=None, help="APN (e.g. 'airtelgprs.com').")
+@click.option("--cap-gb", "cap_gb", type=float, default=None, help="Monthly data cap in GB.")
+@click.option("--enabled/--disabled", "enabled", default=None, help="Enable or disable the modem.")
+def gs_network_modem_configure(
+    apn: str | None,
+    cap_gb: float | None,
+    enabled: bool | None,
+) -> None:
+    """Update modem config. Any flag omitted is left unchanged."""
+    body: dict[str, Any] = {}
+    if apn is not None:
+        body["apn"] = apn
+    if cap_gb is not None:
+        body["cap_gb"] = cap_gb
+    if enabled is not None:
+        body["enabled"] = enabled
+    if not body:
+        click.echo("No fields to update. Use 'ados gs network modem status' to view.", err=True)
+        return
+    data = _request("PUT", "/api/v1/ground-station/network/modem", json_body=body)
+    if data is not None:
+        _pp(data)
+
+
+# ── network priority ───────────────────────────────────────────────────────
+
+
+@gs_network.command("priority")
+def gs_network_priority() -> None:
+    """Print the uplink priority list."""
+    data = _request("GET", "/api/v1/ground-station/network/priority")
+    if data is not None:
+        _pp(data)
+
+
+@gs_network.command("priority-set")
+@click.argument("priority_csv")
+def gs_network_priority_set(priority_csv: str) -> None:
+    """Set uplink priority. Pass comma-separated names (e.g. 'eth,wifi,modem')."""
+    priority = [p.strip() for p in priority_csv.split(",") if p.strip()]
+    if not priority:
+        click.echo("Error: priority list is empty.", err=True)
+        return
+    data = _request(
+        "PUT",
+        "/api/v1/ground-station/network/priority",
+        json_body={"priority": priority},
+    )
+    if data is not None:
+        _pp(data)
+
+
+# ── share-uplink ───────────────────────────────────────────────────────────
+
+
+@gs_network.command("share-uplink")
+@click.argument("state", type=click.Choice(["on", "off"]))
+def gs_network_share_uplink(state: str) -> None:
+    """Enable or disable IPv4 forwarding + NAT for AP clients."""
+    enabled = state == "on"
+    data = _request(
+        "PUT",
+        "/api/v1/ground-station/network/share_uplink",
+        json_body={"enabled": enabled},
     )
     if data is not None:
         _pp(data)

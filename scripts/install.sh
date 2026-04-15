@@ -637,6 +637,35 @@ install_ground_station_deps() {
         warn "Boot cmdline not found; skipping modules-load=dwc2 append."
     fi
 
+    # MSN-027 Wave C Cellos: optional modem stack. Skipped by default so
+    # ground stations without cellular hardware do not pull ~80 MB of
+    # ModemManager + libqmi + libmbim just to stare at them. Set
+    # `ADOS_ENABLE_MODEM=1` in the install environment to opt in.
+    if [ "${ADOS_ENABLE_MODEM:-0}" = "1" ]; then
+        info "ADOS_ENABLE_MODEM=1 set; installing ModemManager + QMI/MBIM utilities..."
+        apt-get install -y modemmanager libqmi-utils libmbim-utils || \
+            warn "Modem stack install failed; ados-modem.service will run in AT fallback mode only."
+    else
+        info "Skipping modem stack (set ADOS_ENABLE_MODEM=1 to install modemmanager + libqmi-utils + libmbim-utils)."
+    fi
+
+    # MSN-027 Wave C Cellos: NetworkManager is mandatory for the WiFi
+    # client manager (nmcli backend). Enable + start if it is installed
+    # but inactive. Radxa BSPs ship with it but sometimes leave it masked.
+    if systemctl list-unit-files NetworkManager.service >/dev/null 2>&1; then
+        if ! systemctl is-active --quiet NetworkManager.service; then
+            info "Enabling and starting NetworkManager..."
+            systemctl unmask NetworkManager.service 2>/dev/null || true
+            systemctl enable NetworkManager.service 2>/dev/null || true
+            systemctl start NetworkManager.service 2>/dev/null || \
+                warn "NetworkManager start failed; WiFi client + uplink router will be degraded."
+        else
+            info "NetworkManager already active."
+        fi
+    else
+        warn "NetworkManager not installed. WiFi client manager will fail. Install with: apt-get install network-manager"
+    fi
+
     info "Ground-station deps installed."
 }
 
@@ -674,7 +703,11 @@ enable_ground_station_units() {
         ados-setup-captive.service \
         ados-kiosk.service \
         ados-input.service \
-        ados-pic.service; do
+        ados-pic.service \
+        ados-uplink-router.service \
+        ados-modem.service \
+        ados-wifi-client.service \
+        ados-cloud-relay.service; do
         if [ -f "/etc/systemd/system/${unit}" ]; then
             systemctl enable "${unit}" 2>/dev/null || true
         else

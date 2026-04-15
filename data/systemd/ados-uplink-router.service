@@ -1,0 +1,29 @@
+[Unit]
+Description=ADOS Uplink Router (ground-station profile)
+After=ados-supervisor.service NetworkManager.service
+PartOf=ados-supervisor.service
+Requires=ados-supervisor.service
+
+[Service]
+Type=simple
+User=root
+ExecStart=/opt/ados/venv/bin/python -m ados.services.ground_station.uplink_router
+Restart=on-failure
+RestartSec=10
+Environment=ADOS_CONFIG=/etc/ados/config.yaml
+EnvironmentFile=-/etc/ados/env
+
+# Needs to read /proc/net and modify the routing table.
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
+NoNewPrivileges=no
+ProtectSystem=strict
+ReadWritePaths=/var/ados /run/ados /etc/ados
+
+MemoryMax=96M
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ados-uplink-router
+
+[Install]
+WantedBy=ados-supervisor.service
