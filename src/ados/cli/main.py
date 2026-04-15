@@ -90,6 +90,12 @@ def cli(ctx: click.Context) -> None:
         show_help()
 
 
+# Ground-station subgroup (MSN-025 Phase 1).
+from ados.cli.gs import gs_group as _gs_group  # noqa: E402
+
+cli.add_command(_gs_group)
+
+
 # ─── INFO ───────────────────────────────────────────────────────────────────
 
 

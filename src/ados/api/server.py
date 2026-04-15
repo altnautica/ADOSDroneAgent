@@ -75,8 +75,10 @@ def create_app(agent: AgentApp) -> FastAPI:
     from ados.security.rate_limit import RateLimitMiddleware
     app.add_middleware(RateLimitMiddleware, rate=10.0, burst=20)
 
-    # Health check
-    @app.get("/")
+    # Health check. Moved off `/` so the ground-station static mount
+    # can own the root path (`/` -> `static-ground/index.html`).
+    # MSN-025 Wave B.
+    @app.get("/healthz")
     async def health_check():
         return {"status": "ok", "version": __version__}
 
@@ -98,6 +100,25 @@ def create_app(agent: AgentApp) -> FastAPI:
     app.include_router(fleet.router, prefix="/api")
     app.include_router(features.router, prefix="/api")
     app.include_router(ground_station.router, prefix="/api")
+
+    # Ground-station profile: mount the setup webapp at `/` so phones
+    # hitting `http://192.168.4.1/` over the captive portal land on
+    # `static-ground/index.html` directly. Mount is added AFTER every
+    # router above so API routes match first (FastAPI resolves routes
+    # in registration order, and the static mount is the catch-all).
+    # MSN-025 Wave B, DEC-112.
+    if agent.config.agent.profile == "ground_station":
+        from pathlib import Path
+
+        from fastapi.staticfiles import StaticFiles
+
+        static_dir = Path(__file__).resolve().parent.parent / "webapp" / "static-ground"
+        if static_dir.exists():
+            app.mount(
+                "/",
+                StaticFiles(directory=str(static_dir), html=True),
+                name="ground_static",
+            )
 
     return app
 
