@@ -1,0 +1,3 @@
+[submodule "vendor/rtl8812au"]
+	path = vendor/rtl8812au
+	url = https://github.com/aircrack-ng/rtl8812au.git
