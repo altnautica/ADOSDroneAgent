@@ -1,0 +1,27 @@
+[Unit]
+Description=ADOS Peripheral Manager (plugin registry)
+After=network-online.target
+PartOf=ados-supervisor.service
+
+[Service]
+Type=simple
+ExecStart=/opt/ados/venv/bin/python -m ados.services.peripherals.service
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=10
+Environment=ADOS_CONFIG=/etc/ados/config.yaml
+EnvironmentFile=-/etc/ados/env
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/var/ados /run/ados /etc/ados /etc/ados/peripherals
+
+MemoryMax=20M
+CPUQuota=5%
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ados-peripherals
+
+[Install]
+WantedBy=ados-supervisor.service

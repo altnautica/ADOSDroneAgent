@@ -22,6 +22,7 @@ from ados.api.routes import (
     pairing,
     params,
     peripherals,
+    peripherals_v1,
     scripts,
     services,
     status,
@@ -96,6 +97,9 @@ def create_app(agent: AgentApp) -> FastAPI:
     app.include_router(pairing.router, prefix="/api")
     app.include_router(system.router, prefix="/api")
     app.include_router(peripherals.router, prefix="/api")
+    # MSN-028 Phase 4 Track A Wave 3: Peripheral Manager plugin registry.
+    # Lives alongside the legacy /api/peripherals hardware scan route.
+    app.include_router(peripherals_v1.router, prefix="/api")
     app.include_router(suites.router, prefix="/api")
     app.include_router(fleet.router, prefix="/api")
     app.include_router(features.router, prefix="/api")

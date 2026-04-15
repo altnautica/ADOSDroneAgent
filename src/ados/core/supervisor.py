@@ -75,6 +75,10 @@ SERVICE_REGISTRY: list[dict] = [
     # On-demand
     {"name": "ados-ota", "category": "ondemand"},
     {"name": "ados-discovery", "category": "ondemand"},
+    # MSN-028 Phase 4 Track A Wave 3: Peripheral Manager plugin registry.
+    # Cross-profile (no profile_gate) — peripherals exist on both drone
+    # and ground-station profiles.
+    {"name": "ados-peripherals", "category": "hardware"},
     # DEC-112: ground-station only services.
     {"name": "ados-wfb-rx", "category": "hardware", "profile_gate": "ground_station"},
     {"name": "ados-mediamtx-gs", "category": "hardware", "profile_gate": "ground_station"},
