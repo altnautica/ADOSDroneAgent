@@ -302,7 +302,7 @@ class EthernetManager:
                     link_up = fh.read().strip() == "1"
             except OSError:
                 link_up = False
-            _logger.warning(
+            log.warning(
                 "no_nm_ethernet_connection",
                 interface=self._interface,
                 link_up=link_up,
