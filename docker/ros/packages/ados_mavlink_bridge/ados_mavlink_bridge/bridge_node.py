@@ -299,6 +299,10 @@ class MavlinkBridge(Node):
             imu_msg.linear_acceleration.x = imu2["xacc"]
             imu_msg.linear_acceleration.y = imu2["yacc"]
             imu_msg.linear_acceleration.z = imu2["zacc"]
+        else:
+            # ROS convention: covariance[0] = -1 means data unavailable.
+            # Prevents downstream nodes from treating zeros as real readings.
+            imu_msg.linear_acceleration_covariance[0] = -1.0
 
         self._pub_imu.publish(imu_msg)
 
@@ -411,7 +415,13 @@ class MavlinkBridge(Node):
             0,                           # time_boot_ms (filled by FC)
             1, 1,                        # target_system, target_component
             mavlink2.MAV_FRAME_BODY_NED, # coordinate_frame
-            0x0DC7,                      # type_mask: use vx/vy/vz/yaw_rate
+            # type_mask 0x0DC7 = 0b0000_1101_1100_0111
+            # Bits 0-2 (pos x/y/z): SET (ignore position)
+            # Bits 3-5 (vel x/y/z): CLEAR (use velocity)
+            # Bits 6-8 (accel): SET (ignore acceleration)
+            # Bit 10 (yaw): SET (ignore yaw)
+            # Bit 11 (yaw_rate): CLEAR (use yaw_rate)
+            0x0DC7,
             0, 0, 0,                     # x, y, z (ignored)
             vx, vy, vz,                  # vx, vy, vz
             0, 0, 0,                     # afx, afy, afz (ignored)
@@ -525,31 +535,40 @@ class MavlinkBridge(Node):
             # Wait before reconnecting
             await asyncio.sleep(2.0)
 
-    async def run(self) -> None:
-        """Main entry: spin ROS + IPC connection concurrently."""
-        # Run IPC connection in background
-        ipc_task = asyncio.create_task(self._connect_loop())
+    def run(self) -> None:
+        """Main entry: rclpy.spin() in a daemon thread, IPC loop in asyncio.
 
-        # Spin ROS node
+        This avoids the rclpy/asyncio executor conflict. rclpy.spin() owns
+        its own thread for callbacks (subscriptions, timers). The asyncio
+        event loop owns the IPC socket connection. They share state through
+        the node's attributes (thread-safe for simple reads/writes of Python
+        objects due to the GIL).
+        """
+        import threading
+
+        # Start rclpy spin in a daemon thread
+        spin_thread = threading.Thread(target=self._spin_thread, daemon=True)
+        spin_thread.start()
+
+        # Run IPC connection loop in the main asyncio event loop
         try:
-            while rclpy.ok():
-                rclpy.spin_once(self, timeout_sec=0.01)
-                await asyncio.sleep(0.01)
+            asyncio.run(self._connect_loop())
         except KeyboardInterrupt:
             pass
-        finally:
-            ipc_task.cancel()
-            try:
-                await ipc_task
-            except asyncio.CancelledError:
-                pass
+
+    def _spin_thread(self) -> None:
+        """Run rclpy.spin() in a background thread."""
+        try:
+            rclpy.spin(self)
+        except Exception:
+            pass
 
 
 def main(args=None) -> None:
     rclpy.init(args=args)
     node = MavlinkBridge()
     try:
-        asyncio.run(node.run())
+        node.run()
     except KeyboardInterrupt:
         pass
     finally:

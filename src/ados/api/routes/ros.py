@@ -120,28 +120,36 @@ async def initialize_ros(req: RosInitRequest) -> StreamingResponse:
         )
 
     async def event_stream():
-        """SSE progress stream."""
-        yield _sse_event("step", {"step": "preflight", "message": "Checking prerequisites..."})
+        """SSE progress stream. Cancels init_task on client disconnect."""
+        init_task: asyncio.Task | None = None
+        try:
+            yield _sse_event("step", {"step": "preflight", "message": "Checking prerequisites..."})
 
-        yield _sse_event("step", {"step": "image", "message": "Preparing Docker image..."})
+            yield _sse_event("step", {"step": "image", "message": "Preparing Docker image..."})
 
-        # Run initialization in background
-        init_task = asyncio.create_task(manager.initialize())
+            # Run initialization in background
+            init_task = asyncio.create_task(manager.initialize())
 
-        # Poll for state changes while initializing
-        prev_state = None
-        while not init_task.done():
-            current = manager.state.value
-            if current != prev_state:
-                yield _sse_event("progress", {"state": current})
-                prev_state = current
-            await asyncio.sleep(1)
+            # Poll for state changes while initializing
+            prev_state = None
+            while not init_task.done():
+                current = manager.state.value
+                if current != prev_state:
+                    yield _sse_event("progress", {"state": current})
+                    prev_state = current
+                await asyncio.sleep(1)
 
-        success = await init_task
-        if success:
-            yield _sse_event("done", {"state": "running", "message": "ROS environment ready"})
-        else:
-            yield _sse_event("error", {"state": "error", "message": manager.error or "Unknown error"})
+            success = await init_task
+            if success:
+                yield _sse_event("done", {"state": "running", "message": "ROS environment ready"})
+            else:
+                yield _sse_event("error", {"state": "error", "message": manager.error or "Unknown error"})
+        except (GeneratorExit, asyncio.CancelledError):
+            # Client disconnected. Cancel the background init task.
+            if init_task and not init_task.done():
+                init_task.cancel()
+                log.info("SSE client disconnected, cancelled ROS init task")
+            raise
 
     return StreamingResponse(
         event_stream(),
