@@ -33,6 +33,7 @@ COPY --from=s6-fetch /tmp/s6/ /
 RUN apt-get update && apt-get install -y --no-install-recommends \
         python3-pip \
         python3-pymavlink \
+        python3-opencv \
         v4l-utils \
         ros-${ROS_DISTRO}-foxglove-bridge \
         ros-${ROS_DISTRO}-image-transport \

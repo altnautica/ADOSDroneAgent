@@ -95,6 +95,11 @@ from ados.cli.gs import gs_group as _gs_group  # noqa: E402
 
 cli.add_command(_gs_group)
 
+# ROS 2 subgroup (DEC-111).
+from ados.cli.ros import ros as _ros_group  # noqa: E402
+
+cli.add_command(_ros_group)
+
 
 # ─── INFO ───────────────────────────────────────────────────────────────────
 

@@ -188,43 +188,109 @@ async def stop_ros() -> dict[str, str]:
     return {"status": "stopped"}
 
 
-# ── Phase 4 stubs (workspace, launch, recording, tunnel) ────────────
+# ── Phase 4: Workspace, Launch, Recording ────────────────────────────
 
 @router.post("/ros/launch")
 async def launch_node(package: str = "", executable: str = "", name: str = "") -> dict:
-    """Launch a user ROS node. Phase 4."""
-    raise HTTPException(status_code=501, detail="Not implemented yet (Phase 4)")
+    """Launch a user ROS node inside the container."""
+    manager = _get_manager()
+    if manager.state != RosState.RUNNING:
+        raise HTTPException(status_code=412, detail="ROS environment is not running")
+    if not package:
+        raise HTTPException(status_code=422, detail="package is required")
+
+    # Build ros2 run command
+    cmd_parts = ["run", package]
+    if executable:
+        cmd_parts.append(executable)
+
+    result = manager._exec_ros2_cmd(*cmd_parts, timeout=15)
+    if result is None:
+        raise HTTPException(status_code=500, detail="Failed to launch node")
+
+    return {"status": "launched", "package": package, "executable": executable}
 
 
 @router.get("/ros/workspace")
 async def get_workspace() -> dict:
-    """Get workspace metadata. Phase 4."""
-    raise HTTPException(status_code=501, detail="Not implemented yet (Phase 4)")
+    """Get workspace metadata: packages, last build, disk usage."""
+    manager = _get_manager()
+    if manager.state != RosState.RUNNING:
+        raise HTTPException(status_code=412, detail="ROS environment is not running")
+
+    from ados.services.ros_workspace import get_info
+    config = get_agent_app().config
+    info = get_info(config.ros.workspace_path)
+    return info
 
 
 @router.post("/ros/workspace/build")
 async def build_workspace() -> StreamingResponse:
-    """Trigger colcon build. Phase 4."""
-    raise HTTPException(status_code=501, detail="Not implemented yet (Phase 4)")
+    """Trigger colcon build with SSE output streaming."""
+    manager = _get_manager()
+    if manager.state != RosState.RUNNING:
+        raise HTTPException(status_code=412, detail="ROS environment is not running")
+
+    from ados.services.ros_workspace import build
+    config = get_agent_app().config
+
+    async def build_stream():
+        try:
+            async for line in build(config.ros.workspace_path):
+                yield _sse_event("output", {"line": line})
+            yield _sse_event("done", {"status": "success"})
+        except Exception as exc:
+            yield _sse_event("error", {"status": "failed", "message": str(exc)})
+
+    return StreamingResponse(
+        build_stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
+    )
 
 
 @router.post("/ros/recording/start")
-async def start_recording() -> dict:
-    """Start MCAP recording. Phase 4."""
-    raise HTTPException(status_code=501, detail="Not implemented yet (Phase 4)")
+async def start_recording(
+    topics: list[str] | None = None,
+    max_size_mb: int = 500,
+    max_duration_s: int = 3600,
+) -> dict:
+    """Start MCAP recording of ROS topics."""
+    manager = _get_manager()
+    if manager.state != RosState.RUNNING:
+        raise HTTPException(status_code=412, detail="ROS environment is not running")
+
+    from ados.services.ros_recording import RecordingManager
+    rec_mgr = RecordingManager()
+    result = rec_mgr.start(topics=topics or [], max_duration_s=max_duration_s)
+    if result is None:
+        raise HTTPException(status_code=500, detail="Failed to start recording")
+    return result
 
 
 @router.post("/ros/recording/stop")
-async def stop_recording() -> dict:
-    """Stop MCAP recording. Phase 4."""
-    raise HTTPException(status_code=501, detail="Not implemented yet (Phase 4)")
+async def stop_recording(recording_id: str = "") -> dict:
+    """Stop an active MCAP recording."""
+    if not recording_id:
+        raise HTTPException(status_code=422, detail="recording_id is required")
+
+    from ados.services.ros_recording import RecordingManager
+    rec_mgr = RecordingManager()
+    result = rec_mgr.stop(recording_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail="Recording not found or already stopped")
+    return result
 
 
 @router.get("/ros/recordings")
 async def list_recordings() -> list:
-    """List MCAP recordings. Phase 4."""
-    raise HTTPException(status_code=501, detail="Not implemented yet (Phase 4)")
+    """List MCAP recording files with metadata."""
+    from ados.services.ros_recording import RecordingManager
+    rec_mgr = RecordingManager()
+    return rec_mgr.list_recordings()
 
+
+# ── Phase 5 stubs: Tunnel ────────────────────────────────────────────
 
 @router.post("/ros/tunnel/config")
 async def configure_tunnel() -> dict:
