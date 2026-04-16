@@ -86,7 +86,7 @@ Also runs on macOS for local development and testing.
 | **MAVLink proxy** | Yes (serial to WS/TCP/UDP) | Yes | Yes | Yes |
 | **Cloud relay** | Yes (MQTT + Convex, zero port forwarding) | No | No | No |
 | **HD video** | Yes (RTSP, WFB-ng planned) | Yes (basic) | Yes | No |
-| **REST API** | Yes (15 route modules, OpenAPI docs) | Limited | Yes | No |
+| **REST API** | Yes (16 route modules, OpenAPI docs) | Limited | Yes | No |
 | **Terminal UI** | Yes (5 screens, SSH-friendly) | No | No | No |
 | **Application suites** | Yes (6 YAML-based vertical modules) | No | No | No |
 | **Hardware auto-detect** | Yes (tier-based feature scaling) | No | No | No |
@@ -106,7 +106,7 @@ Also runs on macOS for local development and testing.
 
 **Full remote control.** The GCS can send arm/disarm, mode changes, guided flight commands, and mission uploads through the cloud relay. The agent polls and executes them. All from a browser, over any network.
 
-**REST API.** FastAPI server at `:8080` with 15 route modules. Get telemetry, set FC parameters, send commands, manage config, control video, manage suites, run scripts. Full OpenAPI docs at `/docs`.
+**REST API.** FastAPI server at `:8080` with 16 route modules. Get telemetry, set FC parameters, send commands, manage config, control video, manage suites, run scripts. Full OpenAPI docs at `/docs`.
 
 **Terminal dashboard.** Five-screen TUI via `ados tui`: overview, telemetry, MAVLink inspector, logs, config editor. SSH-friendly for headless hardware.
 
@@ -120,7 +120,7 @@ Also runs on macOS for local development and testing.
 |------|----------|-----|-------------|
 | Tier 1 (Basic) | RPi Zero 2W | 128MB+ | MAVLink proxy, MQTT gateway |
 | Tier 2 (Smart) | RPi 4 / CM4 | 512MB+ | + Python scripting, sensor monitoring |
-| Tier 3 (Autonomous) | CM5 / Jetson Nano | 2GB+ | + Suite runtime, ROS2, vision, SLAM |
+| Tier 3 (Autonomous) | CM5 / Jetson Nano | 2GB+ | + Suite runtime, vision, SLAM |
 | Tier 4 (Swarm) | CM5 + radios | 2.5GB+ | + Mesh networking, formation flight |
 
 Any Linux ARM64 or x86_64 board with a serial port should work. The tier system scales features to available resources automatically.
@@ -129,7 +129,7 @@ Any Linux ARM64 or x86_64 board with a serial port should work. The tier system 
 
 ## CLI Reference
 
-24 commands. Run `ados --help` for the full list.
+34 commands. Run `ados --help` for the full list.
 
 | Command | Description |
 |---------|-------------|
@@ -155,12 +155,17 @@ Any Linux ARM64 or x86_64 board with a serial port should work. The tier system 
 | `ados check` | Run pre-flight diagnostics |
 | `ados uninstall` | Remove the agent |
 | `ados version` | Print agent version |
+| `ados ros status` | ROS 2 environment status |
+| `ados ros init` | Initialize Docker-based ROS 2 environment |
+| `ados ros create-node <name>` | Scaffold a new ROS 2 Python package |
+| `ados ros build` | Trigger colcon build in the container |
+| `ados ros shell` | Open an interactive shell in the ROS container |
 
 ---
 
 ## REST API
 
-FastAPI server at `:8080`. Full OpenAPI docs at `/docs`. 15 route modules.
+FastAPI server at `:8080`. Full OpenAPI docs at `/docs`. 16 route modules.
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
@@ -179,6 +184,12 @@ FastAPI server at `:8080`. Full OpenAPI docs at `/docs`. 15 route modules.
 | `/api/pairing` | GET / POST / DELETE | GCS pairing management |
 | `/api/system` | GET / POST | System info, reboot, shutdown |
 | `/api/ota` | GET / POST | Update check, upgrade, rollback |
+| `/api/ros/status` | GET | ROS 2 environment state and container info |
+| `/api/ros/init` | POST | Initialize ROS environment (SSE progress stream) |
+| `/api/ros/nodes` | GET | Running ROS 2 nodes with publisher/subscriber info |
+| `/api/ros/topics` | GET | Active topics with types and rates |
+| `/api/ros/workspace` | GET | Workspace packages and build status |
+| `/api/ros/recordings` | GET | MCAP recording files with metadata |
 
 ```bash
 # Get current telemetry
@@ -211,6 +222,27 @@ The agent connects to ADOS Mission Control over a three-layer relay.
 
 ---
 
+## ROS 2 Integration
+
+Opt-in ROS 2 Jazzy environment running inside a Docker container alongside the agent. Designed for researchers, commercial integrators, and developers who want to connect the drone to the wider robotics ecosystem without affecting users who don't need ROS.
+
+**How it works.** A single `ados ros init` command pulls the Docker image, starts the container, and launches the MAVLink bridge node. The bridge reads the agent's IPC socket and publishes 11 mavros-compatible ROS 2 topics (IMU, GPS, battery, state, rangefinder, and more). Foxglove Studio connects to port 8766 for real-time visualization.
+
+**Three access tiers.** LAN Direct (ws://drone:8766, no cloud dependency), Altnautica Cloud Relay (wss://ros-*.altnautica.com via Cloudflare Tunnel), or Self-Hosted (Tailscale, ZeroTier, WireGuard, or your own tunnel).
+
+**Developer workspace.** Write ROS 2 nodes in Python or C++, auto-build on save, scaffold from templates (`ados ros create-node my_planner --template planner`). MCAP recording with automatic rotation policy.
+
+**Profiles.** Minimal (bridge + Foxglove only, ~340 MB RAM), VIO (+ camera + VINS-Fusion, ~900 MB), Mapping (+ octomap, ~900 MB).
+
+| Config | Default | Description |
+|---|---|---|
+| `ros.enabled` | `false` | Enable ROS 2 integration |
+| `ros.middleware` | `zenoh` | `zenoh` (NAT-friendly) or `cyclonedds` (LAN, lower latency) |
+| `ros.profile` | `minimal` | `minimal`, `vio`, `mapping`, or `custom` |
+| `ros.foxglove_port` | `8766` | Foxglove bridge WebSocket port |
+
+---
+
 ## Architecture
 
 ```
@@ -220,7 +252,7 @@ The agent connects to ADOS Mission Control over a three-layer relay.
      │              │
      ▼              ▼
 ┌──────────────────────────┐
-│       REST API           │   FastAPI :8080 (15 route modules)
+│       REST API           │   FastAPI :8080 (16 route modules)
 └────────────┬─────────────┘
              │
              ▼
@@ -229,15 +261,17 @@ The agent connects to ADOS Mission Control over a three-layer relay.
 └──┬───────┬───────┬───────┘
    │       │       │
    ▼       ▼       ▼
-┌──────┐ ┌──────┐ ┌──────┐
-│ MAV  │ │ MQTT │ │Video │   Services
-│Proxy │ │ GW   │ │Pipe  │
-└──────┘ └──────┘ └──────┘
-   │
-   ▼
-┌──────────┐
-│   FC     │   Flight controller (serial/USB)
-└──────────┘
+┌──────┐ ┌──────┐ ┌──────┐   ┌─────────────────────┐
+│ MAV  │ │ MQTT │ │Video │   │  ROS 2 Container    │  Optional (Docker)
+│Proxy │ │ GW   │ │Pipe  │   │  MAVLink bridge     │
+└──────┘ └──────┘ └──────┘   │  Foxglove bridge    │
+   │                          │  User nodes         │
+   ▼                          └─────────┬───────────┘
+┌──────────┐                            │
+│   FC     │   Flight controller        │  /run/ados/mavlink.sock
+└──────────┘   (serial/USB)             │  (IPC bind mount)
+   ▲                                    │
+   └────────────────────────────────────┘
 ```
 
 ---
@@ -247,9 +281,9 @@ The agent connects to ADOS Mission Control over a three-layer relay.
 | Feature | Status |
 |---------|--------|
 | MAVLink proxy (serial to WS/TCP/UDP) | Working |
-| REST API (FastAPI, 15 route modules) | Working |
+| REST API (FastAPI, 16 route modules) | Working |
 | TUI dashboard (5 screens) | Working |
-| CLI (24 commands) | Working |
+| CLI (34 commands) | Working |
 | Demo mode (simulated telemetry) | Working |
 | Hardware detection (board tier profiles) | Working |
 | Config system (Pydantic + YAML) | Working |
@@ -260,6 +294,7 @@ The agent connects to ADOS Mission Control over a three-layer relay.
 | OTA updates (upgrade + rollback) | Working |
 | Video pipeline (RTSP + cloud relay) | In Progress |
 | WFB-ng long-range video link | Planned |
+| ROS 2 integration (Docker, Foxglove) | Planned |
 | Suite runtime (YAML manifest execution) | Planned |
 | Script executor (Python SDK, REST) | Planned |
 | Swarm coordination (mesh, formation) | Planned |
