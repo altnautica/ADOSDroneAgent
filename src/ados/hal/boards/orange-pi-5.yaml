@@ -22,3 +22,9 @@ hw_video_codecs:
   - h265_dec
   - av1_dec
   - vp9_dec
+
+# ROS 2: RK3588S with 4-16 GB variants. Docker fits. Minimal profile conservative
+# default for 4 GB; 8+ GB boards could run VIO but RAM is not guaranteed at HAL level.
+ros:
+  supported: true
+  max_profile: minimal

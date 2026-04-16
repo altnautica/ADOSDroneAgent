@@ -23,6 +23,7 @@ from ados.api.routes import (
     params,
     peripherals,
     peripherals_v1,
+    ros,
     scripts,
     services,
     status,
@@ -104,6 +105,8 @@ def create_app(agent: AgentApp) -> FastAPI:
     app.include_router(fleet.router, prefix="/api")
     app.include_router(features.router, prefix="/api")
     app.include_router(ground_station.router, prefix="/api")
+    # DEC-111: ROS 2 environment management (opt-in).
+    app.include_router(ros.router, prefix="/api")
 
     # Ground-station profile: mount the setup webapp at `/` so phones
     # hitting `http://192.168.4.1/` over the captive portal land on

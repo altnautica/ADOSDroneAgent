@@ -19,3 +19,8 @@ hw_video_codecs:
   - h264_enc
   - h264_dec
   - h265_dec
+
+# ROS 2: CM4 ships in 1-8 GB variants but most drone builds use 1-2 GB.
+# No NPU. Docker overhead too high on typical configs.
+ros:
+  supported: false

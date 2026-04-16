@@ -47,6 +47,12 @@ gpio_buttons:
     header_pin: 35
     function: "ground-station menu back"
 
+# ROS 2: 4-8 GB RAM variants. Docker fits but no NPU, so VIO is CPU-bound.
+# MAVLink bridge + foxglove_bridge only. No VIO.
+ros:
+  supported: true
+  max_profile: minimal
+
 profiles:
   ground_station:
     tier: "lite"

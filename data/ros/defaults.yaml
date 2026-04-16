@@ -1,0 +1,15 @@
+# ADOS ROS 2 integration defaults.
+# Merged into the ros section of /etc/ados/config.yaml by load_config().
+
+ros:
+  enabled: false
+  domain_id: 0
+  middleware: zenoh        # zenoh | cyclonedds
+  profile: minimal         # minimal | vio | mapping | custom
+  image_name: ados-ros
+  image_tag: jazzy
+  foxglove_port: 8766      # 8765 is taken by agent MAVLink WS proxy
+  workspace_path: /opt/ados/ros-ws
+  offline_image_path: /opt/ados/ros-offline/jazzy-base.tar.zst
+  memory_limit_mb: 4096
+  cpu_limit: 2.0

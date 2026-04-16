@@ -1,0 +1,56 @@
+# ADOS ROS 2 container - rendered by ros_manager.py from this Jinja2 template.
+# Do not edit the rendered output; modify this template instead.
+
+services:
+  ados-ros:
+    image: {{ image_name }}:{{ image_tag }}
+    container_name: ados-ros
+    network_mode: host
+    restart: unless-stopped
+    privileged: false
+
+    environment:
+      - ROS_DOMAIN_ID={{ domain_id }}
+      - RMW_IMPLEMENTATION={{ rmw_implementation }}
+      - ROS_LOG_DIR=/var/log/ados/ros
+      - ADOS_DEVICE_ID={{ device_id }}
+      - ADOS_PROFILE={{ profile }}
+      - ADOS_FOXGLOVE_PORT={{ foxglove_port }}
+
+    volumes:
+      # IPC sockets (mavlink.sock, state.sock) - read/write
+      - /run/ados:/run/ados
+
+      # User ROS workspace - persistent across container restarts
+      - {{ workspace_path }}:/root/ados_ws
+
+      # Camera device access
+      - /dev:/dev
+
+      # ROS logs alongside agent logs
+      - /var/log/ados/ros:/var/log/ados/ros
+
+      # Chrony socket for time sync
+      - /run/chrony:/run/chrony:ro
+
+      # Board-specific config (camera intrinsics, etc.)
+      - /etc/ados:/etc/ados:ro
+
+    devices:
+      - /dev/video0:/dev/video0
+      - /dev/video1:/dev/video1
+      - /dev/video2:/dev/video2
+      - /dev/video3:/dev/video3
+
+    cap_add:
+      - SYS_RAWIO    # v4l2 ioctl access
+
+    mem_limit: {{ memory_limit_mb }}m
+    cpus: {{ cpu_limit }}
+
+    healthcheck:
+      test: ["CMD", "ros2", "node", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s

@@ -11,3 +11,7 @@ uart_paths:
   - /dev/ttyAMA0
   - /dev/ttyS0
 hw_video_codecs: []
+
+# ROS 2: unknown hardware. Cannot guarantee Docker or sufficient RAM.
+ros:
+  supported: false
