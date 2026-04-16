@@ -1,0 +1,75 @@
+# SPDX-License-Identifier: GPL-3.0-only
+"""{{ package_name }} perception node.
+
+Subscribes to /camera/image_raw (sensor_msgs/Image).
+Publishes detection results as JSON on /detections (std_msgs/String).
+Placeholder: logs frame reception at a throttled rate.
+"""
+
+from __future__ import annotations
+
+import json
+import time
+
+import rclpy
+from rclpy.node import Node
+from sensor_msgs.msg import Image
+from std_msgs.msg import String
+
+
+class {{ node_name | capitalize }}Perception(Node):
+    """Camera perception node with detection output."""
+
+    def __init__(self) -> None:
+        super().__init__("{{ node_name }}")
+
+        self._sub_image = self.create_subscription(
+            Image, "/camera/image_raw", self._on_image, 5
+        )
+        self._pub_detections = self.create_publisher(String, "/detections", 10)
+
+        self._frame_count = 0
+        self._last_log_time = 0.0
+        self.get_logger().info("{{ node_name }} perception node started")
+
+    def _on_image(self, msg: Image) -> None:
+        """Process an incoming camera frame.
+
+        Replace this placeholder with your detection or processing logic.
+        """
+        self._frame_count += 1
+        now = time.monotonic()
+
+        # Throttle logging to once per second
+        if now - self._last_log_time >= 1.0:
+            self.get_logger().info(
+                f"frame received: {msg.width}x{msg.height} "
+                f"encoding={msg.encoding} total_frames={self._frame_count}"
+            )
+            self._last_log_time = now
+
+        # Placeholder: publish empty detections
+        result = {
+            "frame_id": self._frame_count,
+            "timestamp": msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9,
+            "detections": [],
+        }
+        det_msg = String()
+        det_msg.data = json.dumps(result)
+        self._pub_detections.publish(det_msg)
+
+
+def main(args=None) -> None:
+    rclpy.init(args=args)
+    node = {{ node_name | capitalize }}Perception()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.destroy_node()
+        rclpy.try_shutdown()
+
+
+if __name__ == "__main__":
+    main()

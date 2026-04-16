@@ -1,0 +1,52 @@
+# SPDX-License-Identifier: GPL-3.0-only
+"""{{ package_name }} node.
+
+Publishes std_msgs/String on /{{ node_name }}/output at 1 Hz.
+Subscribes to /{{ node_name }}/input and logs received messages.
+"""
+
+from __future__ import annotations
+
+import rclpy
+from rclpy.node import Node
+from std_msgs.msg import String
+
+
+class {{ node_name | capitalize }}Node(Node):
+    """Basic publisher/subscriber node."""
+
+    def __init__(self) -> None:
+        super().__init__("{{ node_name }}")
+
+        self._publisher = self.create_publisher(String, "/{{ node_name }}/output", 10)
+        self._subscription = self.create_subscription(
+            String, "/{{ node_name }}/input", self._on_input, 10
+        )
+        self._timer = self.create_timer(1.0, self._publish)
+        self._count = 0
+        self.get_logger().info("{{ node_name }} node started")
+
+    def _publish(self) -> None:
+        msg = String()
+        msg.data = f"Hello from {{ node_name }}: {self._count}"
+        self._publisher.publish(msg)
+        self._count += 1
+
+    def _on_input(self, msg: String) -> None:
+        self.get_logger().info(f"Received on /{{ node_name }}/input: {msg.data}")
+
+
+def main(args=None) -> None:
+    rclpy.init(args=args)
+    node = {{ node_name | capitalize }}Node()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.destroy_node()
+        rclpy.try_shutdown()
+
+
+if __name__ == "__main__":
+    main()
