@@ -1,8 +1,10 @@
 # ADOS Ground Station — Documentation
 
-The ADOS Ground Station is a companion product to the ADOS ADOS Drone Agent air unit. It receives WFB-ng long-range video and telemetry from the drone, and relays it to any browser (Mac, Windows, phone) via WiFi AP and WebRTC.
+The ADOS Ground Station is a companion product to the ADOS Drone Agent air unit. It receives WFB-ng long-range video and telemetry from the drone, and relays it to any browser (Mac, Windows, phone) via WiFi AP and WebRTC.
 
 Same codebase as ADOS Drone Agent, running in RX mode instead of TX mode. Same reference baseboard hardware can serve both products.
+
+The ground station can optionally run in one of three roles: `direct` (the default: one node serves the pilot end-to-end), `relay` (a field-placed node that forwards received WFB-ng fragments to the receiver over a local wireless mesh), or `receiver` (the hub that combines fragments from one or more relays into one clean stream using WFB-ng's native FEC). `direct` is the current default and covers the one-pilot, one-site case. `relay` and `receiver` are opt-in when a deployment needs coverage across obstructions or long corridors.
 
 ## Reading Order
 
