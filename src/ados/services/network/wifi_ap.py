@@ -1,7 +1,7 @@
 """WiFi Access Point manager — hostapd + dnsmasq lifecycle.
 
-Ported from ADOS Agent Lite. Manages a WiFi AP for direct GCS connection
-when no existing network is available (field operations).
+Manages a WiFi AP for direct GCS connection when no existing network
+is available (field operations).
 """
 
 from __future__ import annotations

@@ -1,7 +1,7 @@
 """4G LTE modem service — AT commands, APN auto-detection, signal monitoring.
 
-Ported from ADOS Agent Lite. This is the AT-command-based modem manager
-for direct serial communication with Quectel and similar USB modems.
+AT-command-based modem manager for direct serial communication with
+Quectel and similar USB modems.
 
 Note: The full agent also has ``ados.hal.modem`` which uses mmcli
 (ModemManager) for modem detection. This module provides an alternative

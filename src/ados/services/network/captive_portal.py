@@ -1,8 +1,7 @@
 """Captive portal — iptables rules + portal check URL handlers.
 
-Ported from ADOS Agent Lite. Redirects HTTP/HTTPS traffic on the AP
-interface to the agent's REST API, triggering OS captive portal detection
-on Android, iOS, and Windows devices.
+Redirects HTTP/HTTPS traffic on the AP interface to the agent's REST API,
+triggering OS captive portal detection on Android, iOS, and Windows devices.
 """
 
 from __future__ import annotations
