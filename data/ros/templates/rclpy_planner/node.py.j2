@@ -1,0 +1,68 @@
+# SPDX-License-Identifier: GPL-3.0-only
+"""{{ package_name }} trajectory planner node.
+
+Subscribes to /odom (nav_msgs/Odometry) for position feedback.
+Publishes /cmd_vel (geometry_msgs/Twist) with velocity commands.
+Simple placeholder logic: move forward at 1.0 m/s.
+"""
+
+from __future__ import annotations
+
+import rclpy
+from geometry_msgs.msg import Twist
+from nav_msgs.msg import Odometry
+from rclpy.node import Node
+
+
+class {{ node_name | capitalize }}Planner(Node):
+    """Trajectory planner that reads odometry and publishes velocity."""
+
+    def __init__(self) -> None:
+        super().__init__("{{ node_name }}")
+
+        self._sub_odom = self.create_subscription(
+            Odometry, "/odom", self._on_odom, 10
+        )
+        self._pub_cmd = self.create_publisher(Twist, "/cmd_vel", 10)
+        self._timer = self.create_timer(0.1, self._plan)  # 10 Hz
+
+        self._latest_odom: Odometry | None = None
+        self.get_logger().info("{{ node_name }} planner started")
+
+    def _on_odom(self, msg: Odometry) -> None:
+        self._latest_odom = msg
+
+    def _plan(self) -> None:
+        """Compute and publish velocity command.
+
+        Placeholder: constant forward velocity at 1.0 m/s.
+        Replace with your planning logic.
+        """
+        cmd = Twist()
+
+        if self._latest_odom is not None:
+            # Simple forward motion. Replace this with your own planner.
+            cmd.linear.x = 1.0
+            cmd.linear.y = 0.0
+            cmd.linear.z = 0.0
+            cmd.angular.x = 0.0
+            cmd.angular.y = 0.0
+            cmd.angular.z = 0.0
+
+        self._pub_cmd.publish(cmd)
+
+
+def main(args=None) -> None:
+    rclpy.init(args=args)
+    node = {{ node_name | capitalize }}Planner()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.destroy_node()
+        rclpy.try_shutdown()
+
+
+if __name__ == "__main__":
+    main()

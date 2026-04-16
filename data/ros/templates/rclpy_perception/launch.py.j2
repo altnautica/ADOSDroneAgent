@@ -1,0 +1,15 @@
+"""Launch file for {{ package_name }} perception node."""
+
+from launch import LaunchDescription
+from launch_ros.actions import Node
+
+
+def generate_launch_description():
+    return LaunchDescription([
+        Node(
+            package="{{ package_name }}",
+            executable="{{ node_name }}_node",
+            name="{{ node_name }}",
+            output="screen",
+        ),
+    ])
