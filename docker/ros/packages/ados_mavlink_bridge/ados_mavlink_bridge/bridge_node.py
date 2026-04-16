@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import math
+import queue
 import struct
 import time
 from typing import Optional
@@ -141,8 +142,10 @@ class MavlinkBridge(Node):
         self._publisher_drops = 0
         self._last_setpoint_time = 0.0
 
-        # Setpoint queue for reverse direction
-        self._setpoint_queue: asyncio.Queue = asyncio.Queue(maxsize=32)
+        # Setpoint queue for reverse direction.
+        # Must be queue.Queue (thread-safe) because _on_velocity_setpoint()
+        # runs in the rclpy spin thread while _connect_loop() drains from asyncio.
+        self._setpoint_queue: queue.Queue = queue.Queue(maxsize=32)
 
         # Writer reference (set when connected)
         self._writer: Optional[asyncio.StreamWriter] = None
@@ -432,7 +435,10 @@ class MavlinkBridge(Node):
         frame = mav_msg.pack(self._mav)
         try:
             self._setpoint_queue.put_nowait(frame)
-        except asyncio.QueueFull:
+        except queue.Full:
+            self._publisher_drops += 1
+        except Exception:
+            # Prevent any exception from crashing the rclpy spin thread
             self._publisher_drops += 1
 
     # ── Health diagnostics ───────────────────────────────────────────
@@ -509,14 +515,14 @@ class MavlinkBridge(Node):
                     frame_data = await reader.readexactly(frame_len)
                     self._decode_and_publish(frame_data)
 
-                    # Send any queued setpoints
-                    while not self._setpoint_queue.empty():
+                    # Drain queued setpoints (queue.Queue is thread-safe)
+                    while True:
                         try:
                             setpoint_frame = self._setpoint_queue.get_nowait()
                             length_prefix = struct.pack(HEADER_FMT, len(setpoint_frame))
                             writer.write(length_prefix + setpoint_frame)
                             await writer.drain()
-                        except asyncio.QueueEmpty:
+                        except queue.Empty:
                             break
 
             except asyncio.IncompleteReadError:
