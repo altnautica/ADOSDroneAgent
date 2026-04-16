@@ -1,0 +1,8 @@
+#!/command/execlineb -P
+# ADOS camera capture ROS 2 node.
+# Publishes /camera/image_raw and /camera/camera_info from a USB UVC device.
+
+fdmove -c 2 1
+foreground { echo "[s6] Starting ados-camera-node" }
+
+/bin/bash -c "source /opt/ros/jazzy/setup.bash && source /opt/ados/ros-packages/install/setup.bash && ros2 launch ados_camera_node camera.launch.py"
