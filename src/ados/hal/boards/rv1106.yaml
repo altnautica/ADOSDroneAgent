@@ -71,6 +71,10 @@ power:
   max_watts: 1.5
   voltage: 5.0
 
+# ROS 2: 256 MB RAM, armv7l. Cannot run Docker or Jazzy.
+ros:
+  supported: false
+
 profiles:
   tier: budget
   max_features:

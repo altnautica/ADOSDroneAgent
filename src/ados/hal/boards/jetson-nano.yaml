@@ -20,3 +20,9 @@ hw_video_codecs:
   - h264_dec
   - h265_enc
   - h265_dec
+
+# ROS 2: 4 GB RAM. Docker fits but Tegra X1 GPU (no dedicated NPU) limits vision.
+# MAVLink bridge + foxglove_bridge only. No VIO.
+ros:
+  supported: true
+  max_profile: minimal

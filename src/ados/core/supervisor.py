@@ -104,6 +104,8 @@ SERVICE_REGISTRY: list[dict] = [
     {"name": "ados-wifi-client", "category": "hardware", "profile_gate": "ground_station"},
     {"name": "ados-ethernet", "category": "hardware", "profile_gate": "ground_station"},
     {"name": "ados-cloud-relay", "category": "core", "profile_gate": "ground_station"},
+    # DEC-111: ROS 2 environment (opt-in, Docker-managed).
+    {"name": "ados-ros", "category": "suite"},
 ]
 
 

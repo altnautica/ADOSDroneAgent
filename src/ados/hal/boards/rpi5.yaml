@@ -19,3 +19,8 @@ hw_video_codecs:
   - h264_dec
   - h265_enc
   - h265_dec
+
+# ROS 2: BCM2712 with 8 GB variant available. No dedicated NPU but VIO runs on CPU.
+ros:
+  supported: true
+  max_profile: vio

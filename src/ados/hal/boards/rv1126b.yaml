@@ -84,6 +84,10 @@ power:
   max_watts: 3.5
   voltage: 5.0
 
+# ROS 2: 1 GB RAM, armv7l. Too tight for Jazzy Docker image.
+ros:
+  supported: false
+
 profiles:
   tier: recommended
   max_features:

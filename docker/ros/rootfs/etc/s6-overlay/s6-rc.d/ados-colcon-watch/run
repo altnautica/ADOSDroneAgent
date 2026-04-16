@@ -1,0 +1,26 @@
+#!/command/execlineb -P
+# Auto-build watcher for the user workspace.
+# Monitors ~/ados_ws/src/ for changes and triggers colcon build.
+
+fdmove -c 2 1
+foreground { echo "[s6] Starting colcon-watch on /root/ados_ws/src/" }
+
+/bin/bash -c "
+source /opt/ros/jazzy/setup.bash
+source /opt/ados/ros-packages/install/setup.bash
+cd /root/ados_ws
+
+# Wait until src/ exists and has at least one package
+while [ ! -d src ] || [ -z \"$(ls -A src 2>/dev/null)\" ]; do
+    sleep 5
+done
+
+# Watch for changes and rebuild
+while true; do
+    inotifywait -r -e modify,create,delete src/ 2>/dev/null
+    echo '[colcon-watch] Change detected, rebuilding...'
+    colcon build --merge-install 2>&1 | tail -5
+    echo '[colcon-watch] Build complete.'
+    sleep 2
+done
+"

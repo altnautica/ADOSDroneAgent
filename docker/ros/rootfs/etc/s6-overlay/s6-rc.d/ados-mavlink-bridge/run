@@ -1,0 +1,8 @@
+#!/command/execlineb -P
+# ADOS MAVLink bridge ROS 2 node.
+# Reads /run/ados/mavlink.sock, publishes mavros-compatible topics.
+
+fdmove -c 2 1
+foreground { echo "[s6] Starting ados-mavlink-bridge" }
+
+/bin/bash -c "source /opt/ros/jazzy/setup.bash && source /opt/ados/ros-packages/install/setup.bash && ros2 launch ados_mavlink_bridge bridge.launch.py"

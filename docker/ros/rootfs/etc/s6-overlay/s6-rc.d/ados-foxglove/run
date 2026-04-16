@@ -1,0 +1,8 @@
+#!/command/execlineb -P
+# Foxglove bridge WebSocket server on port 8766.
+# Exposes all ROS topics to Foxglove Studio and the GCS embedded panel.
+
+fdmove -c 2 1
+foreground { echo "[s6] Starting foxglove_bridge on port ${ADOS_FOXGLOVE_PORT:-8766}" }
+
+/bin/bash -c "source /opt/ros/jazzy/setup.bash && source /opt/ados/ros-packages/install/setup.bash && ros2 launch foxglove_bridge foxglove_bridge_launch.xml port:=${ADOS_FOXGLOVE_PORT:-8766} send_buffer_limit:=100000000 num_threads:=2"

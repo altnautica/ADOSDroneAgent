@@ -22,3 +22,9 @@ hw_video_codecs:
   - h265_enc
   - h265_dec
   - av1_dec
+
+# ROS 2: 4-8 GB RAM. Orin GPU with NVDLA accelerator. Docker fits.
+# Minimal profile conservative default; 8 GB variant could run VIO.
+ros:
+  supported: true
+  max_profile: minimal

@@ -1,0 +1,29 @@
+[Unit]
+Description=ADOS ROS 2 Environment
+After=docker.service ados-mavlink.service
+Requires=docker.service
+PartOf=ados-supervisor.service
+
+[Service]
+Type=simple
+ExecStart=/opt/ados/venv/bin/python -m ados.services.ros_manager
+ExecStop=/opt/ados/venv/bin/python -m ados.services.ros_manager --stop
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=300
+Environment=ADOS_CONFIG=/etc/ados/config.yaml
+EnvironmentFile=-/etc/ados/env
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/var/ados /run/ados /etc/ados /var/log/ados /opt/ados/ros-ws /tmp
+
+MemoryMax=256M
+CPUQuota=50%
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ados-ros
+
+[Install]
+WantedBy=ados-supervisor.service

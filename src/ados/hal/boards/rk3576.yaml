@@ -148,6 +148,11 @@ thermal:
   throttle_85c: "CPU 50%, NPU 50%"
   throttle_95c: "emergency shutdown"
 
+# ROS 2: 4 GB RAM + 6 TOPS NPU. Jazzy Docker fits. VIO viable with NPU acceleration.
+ros:
+  supported: true
+  max_profile: vio
+
 profiles:
   tier: recommended
   max_features:

@@ -130,6 +130,10 @@ power:
   voltage: 5.0
   input: "USB-C 5V/3A"
 
+ros:
+  supported: true
+  max_profile: vio          # 16 GB RAM, 6 TOPS NPU. VIO fits comfortably.
+
 profiles:
   tier: pro
   max_features:

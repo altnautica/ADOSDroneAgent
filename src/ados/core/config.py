@@ -254,6 +254,38 @@ class DiscoveryConfig(BaseModel):
     service_type: str = "_ados._tcp.local."
 
 
+# --- ROS 2 ---
+
+class RosConfig(BaseModel):
+    enabled: bool = False
+    domain_id: int = 0
+    middleware: str = "zenoh"           # zenoh | cyclonedds
+    profile: str = "minimal"           # minimal | vio | mapping | custom
+    image_name: str = "ados-ros"
+    image_tag: str = "jazzy"
+    foxglove_port: int = 8766          # 8765 taken by MAVLink WS proxy
+    workspace_path: str = "/opt/ados/ros-ws"
+    offline_image_path: str = "/opt/ados/ros-offline/jazzy-base.tar.zst"
+    memory_limit_mb: int = 4096
+    cpu_limit: float = 2.0
+
+    @field_validator("middleware")
+    @classmethod
+    def _validate_middleware(cls, value: str) -> str:
+        allowed = {"zenoh", "cyclonedds"}
+        if value not in allowed:
+            raise ValueError(f"ros.middleware must be one of {sorted(allowed)}, got '{value}'")
+        return value
+
+    @field_validator("profile")
+    @classmethod
+    def _validate_profile(cls, value: str) -> str:
+        allowed = {"minimal", "vio", "mapping", "custom"}
+        if value not in allowed:
+            raise ValueError(f"ros.profile must be one of {sorted(allowed)}, got '{value}'")
+        return value
+
+
 # --- Swarm ---
 
 class LoraConfig(BaseModel):
@@ -335,6 +367,7 @@ class ADOSConfig(BaseModel):
     vision: VisionConfig = VisionConfig()
     swarm: SwarmConfig = SwarmConfig()
     ground_station: GroundStationConfig = GroundStationConfig()
+    ros: RosConfig = RosConfig()
 
     model_config = {"extra": "ignore"}
 
