@@ -49,8 +49,8 @@ services:
     cpus: {{ cpu_limit }}
 
     healthcheck:
-      test: ["CMD", "ros2", "node", "list"]
+      test: ["CMD-SHELL", "ros2 node list 2>/dev/null | grep -q ados_mavlink_bridge"]
       interval: 10s
-      timeout: 5s
+      timeout: 10s
       retries: 3
-      start_period: 30s
+      start_period: 60s

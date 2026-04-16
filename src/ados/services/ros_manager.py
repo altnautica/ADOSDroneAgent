@@ -307,12 +307,16 @@ class RosManager:
 
     async def _is_healthy(self) -> bool:
         """Check if the container is healthy via docker inspect."""
-        result = subprocess.run(
-            ["docker", "inspect", "--format", "{{.State.Health.Status}}", "ados-ros"],
-            capture_output=True,
-            timeout=5,
-        )
-        return result.returncode == 0 and result.stdout.decode().strip() == "healthy"
+        try:
+            result = await asyncio.to_thread(
+                subprocess.run,
+                ["docker", "inspect", "--format", "{{.State.Health.Status}}", "ados-ros"],
+                capture_output=True,
+                timeout=5,
+            )
+            return result.returncode == 0 and result.stdout.decode().strip() == "healthy"
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            return False
 
     # ── Status queries ───────────────────────────────────────────────
 
@@ -365,15 +369,15 @@ class RosManager:
             nodes = self._exec_ros2_cmd("node", "list")
             if nodes:
                 status["nodes_count"] = len([n for n in nodes.splitlines() if n.strip()])
-        except Exception:
-            pass
+        except Exception as exc:
+            log.debug("failed to count nodes: %s", exc)
 
         try:
             topics = self._exec_ros2_cmd("topic", "list")
             if topics:
                 status["topics_count"] = len([t for t in topics.splitlines() if t.strip()])
-        except Exception:
-            pass
+        except Exception as exc:
+            log.debug("failed to count topics: %s", exc)
 
         return status
 
@@ -396,7 +400,7 @@ class RosManager:
 
                 # Get node info for publishers/subscribers
                 try:
-                    info = self._exec_ros2_cmd("node", "info", name)
+                    info = self._exec_ros2_cmd("node", "info", name, timeout=30)
                     if info:
                         pubs = []
                         subs = []
@@ -458,18 +462,26 @@ class RosManager:
             log.warning("failed to list topics: %s", exc)
             return []
 
-    def _exec_ros2_cmd(self, *args: str) -> str | None:
-        """Execute a ros2 CLI command inside the container."""
+    def _exec_ros2_cmd(self, *args: str, timeout: int = 10) -> str | None:
+        """Execute a ros2 CLI command inside the container.
+
+        Args:
+            *args: ros2 subcommand and arguments (e.g. "node", "list")
+            timeout: seconds before giving up. Use 30 for introspection
+                     commands like 'node info' that can be slow.
+        """
         try:
             result = subprocess.run(
                 ["docker", "exec", "ados-ros", "ros2", *args],
                 capture_output=True,
-                timeout=10,
+                timeout=timeout,
             )
             if result.returncode == 0:
                 return result.stdout.decode("utf-8", errors="replace")
         except subprocess.TimeoutExpired:
-            log.warning("ros2 command timed out: %s", " ".join(args))
+            log.warning("ros2 command timed out (%ds): %s", timeout, " ".join(args))
+        except FileNotFoundError:
+            log.debug("docker not found on PATH")
         return None
 
 
