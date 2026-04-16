@@ -1,8 +1,8 @@
 """Resilient task wrapper — exponential backoff for non-critical services.
 
-Ported from ADOS Agent Lite. Wraps an async callable so that crashes
-in one service don't bring down the entire agent. Failed services are
-restarted with exponential backoff up to a configurable maximum.
+Wraps an async callable so that crashes in one service don't bring down
+the entire agent. Failed services are restarted with exponential backoff
+up to a configurable maximum.
 """
 
 from __future__ import annotations

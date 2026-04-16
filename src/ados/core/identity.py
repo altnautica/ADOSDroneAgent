@@ -1,9 +1,9 @@
 """Device identity management — persistent device ID generation.
 
-Ported from ADOS Agent Lite. On first boot, generates a 12-char hex
-device ID and persists it to /etc/ados/device-id. Subsequent boots
-read the existing ID. Falls back to ephemeral ID if the filesystem
-is read-only or the agent runs as non-root.
+On first boot, generates a 12-char hex device ID and persists it to
+/etc/ados/device-id. Subsequent boots read the existing ID. Falls back
+to ephemeral ID if the filesystem is read-only or the agent runs as
+non-root.
 """
 
 from __future__ import annotations

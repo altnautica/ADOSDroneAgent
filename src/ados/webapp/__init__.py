@@ -1,8 +1,7 @@
 """Config webapp — vanilla HTML/JS/CSS served by the agent's REST API.
 
-Ported from ADOS Agent Lite. Provides a browser-based configuration
-interface accessible via the drone's WiFi AP. Mobile-first, dark theme,
-no web fonts or external dependencies.
+Browser-based configuration interface accessible via the drone's WiFi AP.
+Mobile-first, dark theme, no web fonts or external dependencies.
 
 Pages:
   - index.html    — Status dashboard (FC, GPS, battery, system, services)
