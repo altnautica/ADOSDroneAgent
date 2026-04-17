@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import yaml
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -337,11 +337,6 @@ class GroundStationUiConfig(BaseModel):
     screens: dict = Field(default_factory=dict)
 
 
-_ALLOWED_ROLES = {"direct", "relay", "receiver"}
-_ALLOWED_CLOUD_UPLINK = {"auto", "force_on", "force_off"}
-_ALLOWED_MESH_CARRIER = {"802.11s", "ibss"}
-
-
 class WfbRelayConfig(BaseModel):
     """Relay-role WFB forwarder settings.
 
@@ -377,20 +372,11 @@ class MeshConfig(BaseModel):
     """
 
     interface_override: str | None = None
-    carrier: str = "802.11s"
+    carrier: Literal["802.11s", "ibss"] = "802.11s"
     mesh_id: str | None = None
     shared_key_path: str = "/etc/ados/mesh/psk.key"
     channel: int = 1  # 2.4 GHz ch 1 default for mesh dongle
     bat_iface: str = "bat0"
-
-    @field_validator("carrier")
-    @classmethod
-    def _validate_carrier(cls, value: str) -> str:
-        if value not in _ALLOWED_MESH_CARRIER:
-            raise ValueError(
-                f"ground_station.mesh.carrier must be one of {sorted(_ALLOWED_MESH_CARRIER)}, got '{value}'"
-            )
-        return value
 
 
 class GroundStationConfig(BaseModel):
@@ -408,32 +394,14 @@ class GroundStationConfig(BaseModel):
     # WFB fragments to a receiver over batman-adv. `receiver` aggregates
     # fragments from the local NIC and from remote relays and publishes
     # the combined FEC-repaired stream for the mediamtx pipeline.
-    role: str = "direct"
+    role: Literal["direct", "relay", "receiver"] = "direct"
     # Whether this node should advertise its uplink as a batman-adv
     # gateway. `auto` lets the mesh_manager decide based on actual
     # uplink health.
-    cloud_uplink: str = "auto"
+    cloud_uplink: Literal["auto", "force_on", "force_off"] = "auto"
     wfb_relay: WfbRelayConfig = WfbRelayConfig()
     wfb_receiver: WfbReceiverConfig = WfbReceiverConfig()
     mesh: MeshConfig = MeshConfig()
-
-    @field_validator("role")
-    @classmethod
-    def _validate_role(cls, value: str) -> str:
-        if value not in _ALLOWED_ROLES:
-            raise ValueError(
-                f"ground_station.role must be one of {sorted(_ALLOWED_ROLES)}, got '{value}'"
-            )
-        return value
-
-    @field_validator("cloud_uplink")
-    @classmethod
-    def _validate_cloud_uplink(cls, value: str) -> str:
-        if value not in _ALLOWED_CLOUD_UPLINK:
-            raise ValueError(
-                f"ground_station.cloud_uplink must be one of {sorted(_ALLOWED_CLOUD_UPLINK)}, got '{value}'"
-            )
-        return value
 
 
 # --- Top-level ---

@@ -1049,12 +1049,61 @@ async def post_factory_reset(
         )
 
     try:
-        return await pm.factory_reset()
+        result = await pm.factory_reset()
     except Exception as exc:
         raise HTTPException(
             status_code=500,
             detail={"error": {"code": "E_FACTORY_RESET_FAILED", "message": str(exc)}},
         ) from exc
+
+    # Also wipe mesh identity so a decommissioned box cannot rejoin the
+    # old deployment on its next boot. Safe to call unconditionally: it
+    # no-ops when no mesh state exists.
+    mesh_wipe: dict[str, Any] = {"cleared_mesh": False}
+    try:
+        from ados.services.ground_station.pairing_client import (
+            clear_persisted_identity,
+            has_persisted_identity,
+        )
+        from ados.services.ground_station.pairing_manager import (
+            REVOCATIONS_PATH,
+        )
+        from ados.services.ground_station.role_manager import (
+            ROLE_FILE,
+            apply_role,
+        )
+
+        had_identity = has_persisted_identity()
+        clear_persisted_identity()
+        if REVOCATIONS_PATH.is_file():
+            try:
+                REVOCATIONS_PATH.unlink()
+            except OSError:
+                pass
+        if ROLE_FILE.is_file():
+            try:
+                ROLE_FILE.unlink()
+            except OSError:
+                pass
+        # Drive every mesh unit back to masked state.
+        await apply_role("direct", reason="factory_reset")
+        mesh_wipe = {
+            "cleared_mesh": had_identity,
+            "role": "direct",
+        }
+    except Exception as exc:
+        # Best-effort: do not fail the factory reset itself. Log the
+        # mesh-wipe failure so the operator can follow up.
+        mesh_wipe = {
+            "cleared_mesh": False,
+            "error": str(exc),
+        }
+
+    if isinstance(result, dict):
+        result.setdefault("mesh", mesh_wipe)
+    else:
+        result = {"result": result, "mesh": mesh_wipe}
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -2254,29 +2303,45 @@ async def post_pair_revoke(device_id: str) -> dict[str, Any]:
 
 @router.post("/pair/join")
 async def post_pair_join(req: PairJoinRequest) -> dict[str, Any]:
-    """Relay-side: initiate a join request to a receiver.
+    """Relay-side: send a join request and wait for the encrypted invite.
 
-    Returns a request reference. Actual join completion happens
-    asynchronously when the receiver's encrypted invite arrives on
-    UDP/bat0:5801 (handled by pairing_manager listener on the relay).
+    Synchronously runs the ECDH exchange, decrypts the invite, and
+    persists mesh identity to disk. Returns success so the caller can
+    promote the node to `relay` and start mesh services.
     """
     _require_ground_profile()
     from ados.services.ground_station.role_manager import get_current_role
-    if get_current_role() != "relay":
+    current = get_current_role()
+    if current == "receiver":
         raise HTTPException(
             status_code=409,
-            detail={"error": {"code": "E_WRONG_ROLE", "required": "relay"}},
+            detail={
+                "error": {
+                    "code": "E_WRONG_ROLE",
+                    "required": "direct_or_relay",
+                    "current": current,
+                }
+            },
         )
-    # Relay-side initiation is primarily UDP broadcast. This REST entry
-    # point is an escape hatch that requests a specific receiver when
-    # mDNS discovery is not working. The listener task on the relay
-    # actually performs the ECDH and writes bundle on success.
-    now_ms = int(time.time() * 1000)
+    from ados.services.ground_station.pairing_client import request_join
+    result = await request_join(
+        receiver_host=req.receiver_host,
+        receiver_port=req.receiver_port,
+    )
+    if not result.ok:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": {
+                    "code": result.error_code or "E_JOIN_FAILED",
+                    "message": result.error_message or "join failed",
+                }
+            },
+        )
     return {
-        "request_ref": f"join-{now_ms}",
-        "receiver_host": req.receiver_host,
-        "receiver_port": req.receiver_port,
-        "submitted_at_ms": now_ms,
+        "mesh_id": result.mesh_id,
+        "receiver_host": result.receiver_host,
+        "ok": True,
     }
 
 
