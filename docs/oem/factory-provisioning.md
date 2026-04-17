@@ -273,7 +273,7 @@ ados deprovision --confirm
 If a device is deprovisioned but the cloud record persists:
 
 ```bash
-# Via Altnautica admin API (Enterprise tier)
+# Via Altnautica admin API (managed-hosting customers)
 curl -X DELETE https://api.altnautica.com/v1/devices/{deviceId} \
   -H "Authorization: Bearer $ADMIN_API_KEY"
 ```
