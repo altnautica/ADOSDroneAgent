@@ -318,9 +318,16 @@ async def get_ground_station_status() -> dict[str, Any]:
     except Exception:
         pass
 
-    # Role snapshot. Source of truth for the OLED Mesh submenu visibility
-    # and for the GCS TopBar role badge. Reads the on-disk role sentinel
-    # (authoritative across restarts) plus the Pydantic-configured value.
+    # Role snapshot. Source of truth for the OLED Mesh submenu
+    # visibility and for the GCS TopBar role badge.
+    #
+    # `current` reads `/etc/ados/mesh/role` (authoritative across
+    # restarts and during a transition). `configured` reads the
+    # Pydantic config value. They diverge briefly during early boot
+    # before `Supervisor._apply_ground_station_role` runs, and during
+    # a live role transition. Clients that drive state-machine
+    # decisions should always prefer `current`; `configured` is shown
+    # to the operator as "intended role" when it differs from active.
     role_block: dict[str, Any] = {
         "current": "direct",
         "configured": "direct",
