@@ -356,6 +356,7 @@ class PairingManager:
         self._transport: asyncio.DatagramTransport | None = None
         self._protocol: _PairingProtocol | None = None
         self._expire_task: asyncio.Task | None = None
+        self._tick_task: asyncio.Task | None = None
 
     @property
     def window(self) -> AcceptWindow | None:
@@ -451,6 +452,41 @@ class PairingManager:
             ):
                 await self._publish_close_locked()
 
+    async def _tick_while_open(self, window_monotonic_ns: int) -> None:
+        """Publish `accept_window_tick` every 5 s while `window_monotonic_ns`
+        is the active deadline. Lets OLED and GCS render a live countdown
+        without polling REST. Tick stops automatically when the deadline
+        passes, when the operator closes early, or when a new window is
+        opened (the `closes_at_monotonic_ns` compare becomes false)."""
+        TICK_PERIOD_S = 5.0
+        while True:
+            try:
+                await asyncio.sleep(TICK_PERIOD_S)
+            except asyncio.CancelledError:
+                return
+            now_ns = time.monotonic_ns()
+            remaining_ns = window_monotonic_ns - now_ns
+            if remaining_ns <= 0:
+                return
+            # Snapshot the window reference under the lock; if a newer
+            # window has superseded this one, we exit. Avoid emitting a
+            # tick for a stale deadline.
+            async with self._lock:
+                if (
+                    self._window is None
+                    or self._window.closes_at_monotonic_ns != window_monotonic_ns
+                ):
+                    return
+                remaining_s = max(0, int(remaining_ns // 1_000_000_000))
+                now_ms = int(time.time() * 1000)
+            await self._bus.publish(
+                PairingEvent(
+                    kind="accept_window_tick",
+                    timestamp_ms=now_ms,
+                    payload={"remaining_seconds": remaining_s},
+                )
+            )
+
     async def _publish_close_locked(self) -> None:
         """Internal close helper. Caller must hold `_lock`."""
         now_ms = int(time.time() * 1000)
@@ -460,6 +496,9 @@ class PairingManager:
         if self._expire_task is not None and not self._expire_task.done():
             self._expire_task.cancel()
             self._expire_task = None
+        if self._tick_task is not None and not self._tick_task.done():
+            self._tick_task.cancel()
+            self._tick_task = None
         await self._bus.publish(
             PairingEvent(
                 kind="accept_window_closed",
@@ -505,11 +544,17 @@ class PairingManager:
             raise RuntimeError(
                 f"pairing UDP bind failed on port {PAIR_UDP_PORT}"
             )
-        # Schedule auto-close at the expiry deadline.
+        # Schedule auto-close at the expiry deadline + a 5 s tick task
+        # so OLED and GCS can render a live countdown without polling.
         if self._expire_task is not None and not self._expire_task.done():
             self._expire_task.cancel()
         self._expire_task = asyncio.create_task(
             self._expire_at(self._window.closes_at_monotonic_ns)
+        )
+        if self._tick_task is not None and not self._tick_task.done():
+            self._tick_task.cancel()
+        self._tick_task = asyncio.create_task(
+            self._tick_while_open(self._window.closes_at_monotonic_ns)
         )
         return self._window
 
