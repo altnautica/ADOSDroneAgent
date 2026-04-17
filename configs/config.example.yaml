@@ -24,10 +24,9 @@ mavlink:
   # MAVLink system ID for this companion computer
   system_id: 1
   component_id: 191
-  # Enable MAVLink 2 signing (recommended for production)
-  signing:
-    enabled: false
-    key: ""
+  # MAVLink 2 message signing is managed by the GCS (browser holds the key).
+  # The agent is a transparent pipe and exposes /api/mavlink/signing/* for
+  # capability detection and one-shot FC enrollment. No key persists here.
   # Forwarding endpoints (GCS, cloud, custom)
   endpoints:
     - type: websocket

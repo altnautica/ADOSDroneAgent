@@ -24,8 +24,6 @@ async def get_config():
             sec["api"]["api_key"] = "***" if sec["api"].get("api_key") else ""
         if "wireguard" in sec:
             sec["wireguard"]["config_path"] = "***"
-    if "mavlink" in data and "signing" in data["mavlink"]:
-        data["mavlink"]["signing"]["key"] = "***" if data["mavlink"]["signing"].get("key") else ""
     if "server" in data and "self_hosted" in data["server"]:
         data["server"]["self_hosted"]["api_key"] = "***"
     return data

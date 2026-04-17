@@ -26,6 +26,7 @@ from ados.api.routes import (
     ros,
     scripts,
     services,
+    signing,
     status,
     suites,
     system,
@@ -105,8 +106,11 @@ def create_app(agent: AgentApp) -> FastAPI:
     app.include_router(fleet.router, prefix="/api")
     app.include_router(features.router, prefix="/api")
     app.include_router(ground_station.router, prefix="/api")
-    # DEC-111: ROS 2 environment management (opt-in).
+    # ROS 2 environment management (opt-in).
     app.include_router(ros.router, prefix="/api")
+    # MAVLink v2 message signing: capability + one-shot FC enrollment.
+    # Agent holds no key material; key lives in the GCS browser.
+    app.include_router(signing.router, prefix="/api")
 
     # Ground-station profile: mount the setup webapp at `/` so phones
     # hitting `http://192.168.4.1/` over the captive portal land on

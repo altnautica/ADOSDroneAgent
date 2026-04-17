@@ -8,9 +8,6 @@ mavlink:
   baud_rate: 57600
   system_id: 1
   component_id: 191
-  signing:
-    enabled: false
-    key: ""
   endpoints:
     - type: websocket
       port: 8765

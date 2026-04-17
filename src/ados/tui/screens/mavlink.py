@@ -44,6 +44,7 @@ class MavlinkScreen(Screen):
                     yield Static("0 msg/s", id="mav-rate")
                     yield Static("  ", classes="spacer")
                     yield Static("0 total", id="mav-total")
+                yield Static("signing: --", id="mav-signing-status")
                 yield Input(placeholder="Filter by message name...", id="mav-filter")
             with InfoPanel("MESSAGES"):
                 yield DataTable(id="mav-table")
@@ -103,6 +104,27 @@ class MavlinkScreen(Screen):
         # Update header stats
         self.query_one("#mav-rate", Static).update(f"{rate} msg/s")
         self.query_one("#mav-total", Static).update(f"{new_total} total")
+
+        # Signing status line. Keys live in the GCS browser; the agent only
+        # reports capability and observed signed-frame counters.
+        signing_line = self.query_one("#mav-signing-status", Static)
+        try:
+            cap = await fetcher.get_signing_capability()
+            ctr = await fetcher.get_signing_counters()
+        except Exception:
+            cap, ctr = None, None
+        if cap is None:
+            signing_line.update("signing: unknown")
+        elif cap.get("supported"):
+            tx = ctr.get("tx_signed_count", 0) if ctr else 0
+            rx = ctr.get("rx_signed_count", 0) if ctr else 0
+            fw = cap.get("firmware_name") or "ArduPilot"
+            signing_line.update(
+                f"signing: supported ({fw})   signed frames tx={tx} rx={rx}"
+            )
+        else:
+            reason = cap.get("reason") or "unknown"
+            signing_line.update(f"signing: not available ({reason})")
 
         # Rebuild table
         table = self.query_one("#mav-table", DataTable)
