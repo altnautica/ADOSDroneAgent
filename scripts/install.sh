@@ -137,6 +137,7 @@ PAIR_CODE=""
 DRONE_NAME=""
 DO_FORCE=false
 DO_UPGRADE=false
+WITH_MESH=false  # DEC-119 / MSN-035: Phase 5 distributed RX + local mesh
 
 # Positional pairing code: first non-flag arg that looks like a 4-8 char alphanumeric code
 if [ $# -gt 0 ] && [[ "$1" =~ ^[A-Za-z0-9]{4,8}$ ]]; then
@@ -183,6 +184,14 @@ while [ $# -gt 0 ]; do
                 error "--branch requires a NAME argument"
                 exit 1
             fi
+            shift
+            ;;
+        --with-mesh)
+            # DEC-119 / MSN-035: install Phase 5 mesh dependencies
+            # (batctl, avahi-daemon, wpasupplicant mesh backend) and
+            # mark the node as mesh-capable in /etc/ados/profile.conf.
+            # Safe to combine with --upgrade on an existing install.
+            WITH_MESH=true
             shift
             ;;
         *)
@@ -719,6 +728,61 @@ install_ground_station_deps() {
     info "Ground-station deps installed."
 }
 
+# DEC-119 / MSN-035: Phase 5 mesh dependencies. Only runs when --with-mesh
+# is passed. Installs batctl + avahi-daemon + wpasupplicant with mesh
+# backend, writes the mesh_capable flag into /etc/ados/profile.conf,
+# and leaves the node's role at `direct` so existing deployments are
+# not auto-promoted into mesh mode.
+install_mesh_deps() {
+    info "Installing mesh (Phase 5) dependencies..."
+
+    if command -v apt-get >/dev/null 2>&1; then
+        DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            batctl \
+            avahi-daemon \
+            wpasupplicant \
+            iw || {
+            warn "Mesh deps install failed; ados-batman.service will not start."
+        }
+
+        # wpad-mesh-wolfssl carries the SAE (802.11s authentication)
+        # backend on Raspbian/Debian. Best-effort: not every release
+        # ships it. IBSS carrier fallback works without it.
+        DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            wpasupplicant-mesh-sae 2>/dev/null || \
+            DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            wpad-mesh-wolfssl 2>/dev/null || \
+            info "802.11s SAE backend not available via apt; IBSS fallback will apply."
+    else
+        warn "apt-get not found; skipping mesh deps. Install batctl + avahi-daemon manually."
+    fi
+
+    # Ensure /etc/ados/ exists (may run before ground-station deps on a
+    # fresh install) then flip the mesh_capable flag in profile.conf.
+    mkdir -p /etc/ados
+    local pc="/etc/ados/profile.conf"
+    if [ -f "${pc}" ]; then
+        if grep -q '^mesh_capable:' "${pc}"; then
+            sed -i 's/^mesh_capable:.*/mesh_capable: true/' "${pc}"
+        else
+            echo "mesh_capable: true" >> "${pc}"
+        fi
+    else
+        cat > "${pc}" <<EOF
+profile: auto
+mesh_capable: true
+EOF
+    fi
+
+    # Ensure the mesh identity directory exists (0o755; the PSK file
+    # inside stays 0o600 and is written by mesh_manager on first boot
+    # for receivers or by pairing_manager for relays).
+    mkdir -p /etc/ados/mesh
+    chmod 755 /etc/ados/mesh
+
+    info "Mesh capability enabled. Role stays 'direct' until set via OLED -> Mesh or 'ados gs role set <role>'."
+}
+
 # Install RTL8812AU/EU driver via DKMS. Idempotent.
 install_ground_station_driver() {
     local script_path=""
@@ -1068,6 +1132,7 @@ if is_installed && ! $DO_FORCE && ! $DO_UPGRADE; then
     echo "    --upgrade    Update to latest version (skip apt, skip venv rebuild)"
     echo "    --force      Full reinstall from scratch"
     echo "    --pair CODE  Update pairing code only (<5s)"
+    echo "    --with-mesh  Install batctl + avahi for Phase 5 distributed RX"
     echo "    CODE         Same as --pair CODE (positional)"
     echo ""
     print_pairing_code
@@ -1130,6 +1195,13 @@ if is_installed && $DO_UPGRADE && ! $DO_FORCE; then
     # Handle pairing code if provided alongside --upgrade
     if [ -n "$PAIR_CODE" ]; then
         write_pairing "$PAIR_CODE"
+    fi
+
+    # DEC-119 / MSN-035: --with-mesh on an existing install opts into
+    # Phase 5. Installs batctl + avahi and flips mesh_capable without
+    # touching role (still `direct` until operator sets it).
+    if [ "${WITH_MESH}" = "true" ]; then
+        install_mesh_deps
     fi
 
     echo ""
@@ -1223,6 +1295,11 @@ if [ "${ADOS_PROFILE}" = "ground_station" ] || [ "${ADOS_PROFILE}" = "ground-sta
     else
         "${VENV_DIR}/bin/pip" install "ados-drone-agent[ground-station] @ git+${REPO_URL}" --quiet || \
             warn "Ground-station extras install failed; continuing."
+    fi
+
+    # DEC-119 / MSN-035: Phase 5 mesh extras. Opt-in via --with-mesh.
+    if [ "${WITH_MESH}" = "true" ]; then
+        install_mesh_deps
     fi
 fi
 

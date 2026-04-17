@@ -59,6 +59,15 @@ profiles:
     video_capable: true
     usb_gadget: true
     hdmi: true
+    # DEC-119 / MSN-035: Phase 5 distributed RX. Pi 4B supports all
+    # three roles because it has 4x USB ports for a primary WFB dongle
+    # plus a second dongle for 802.11s/IBSS mesh carrier.
+    role: direct
+    supports_roles:
+      - direct
+      - relay
+      - receiver
+    mesh_capable: true
     max_features:
       - wfb_rx
       - mediamtx_relay
@@ -66,3 +75,6 @@ profiles:
       - usb_tether
       - oled_ui
       - hdmi_kiosk
+      - mesh_relay
+      - mesh_receiver
+      - batman_adv
