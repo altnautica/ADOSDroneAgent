@@ -387,8 +387,17 @@ class PairingManager:
             )
             log.info("pairing_window_opened", duration_s=duration_s)
         # Bind the UDP listener outside the lock so a slow bind does
-        # not stall other acquirers.
-        await self._bind_socket()
+        # not stall other acquirers. If the bind fails, close the
+        # window and raise so the REST caller sees the error instead
+        # of being left with an open-but-unreachable accept state.
+        bound = await self._bind_socket()
+        if not bound:
+            async with self._lock:
+                if self._window is not None:
+                    await self._publish_close_locked()
+            raise RuntimeError(
+                f"pairing UDP bind failed on port {PAIR_UDP_PORT}"
+            )
         # Schedule auto-close at the expiry deadline.
         if self._expire_task is not None and not self._expire_task.done():
             self._expire_task.cancel()
@@ -497,21 +506,30 @@ class PairingManager:
             log.info("pairing_join_approved", device_id=device_id)
         # Send outside the lock so a slow sendto does not stall other
         # state transitions. The socket is process-wide; UDP is lossy
-        # but the relay's listener should re-request on timeout.
+        # so we transmit twice with a 100 ms gap to survive a single
+        # dropped packet without forcing the operator to press the
+        # button again. The relay's receive loop ignores duplicates
+        # that fail to decrypt, so double-sending is safe.
         if self._transport is not None:
-            try:
-                self._transport.sendto(blob, remote_addr)
-                log.info(
-                    "pairing_invite_sent",
-                    device_id=device_id,
-                    addr=f"{remote_addr[0]}:{remote_addr[1]}",
-                )
-            except Exception as exc:
-                log.warning(
-                    "pairing_invite_send_failed",
-                    device_id=device_id,
-                    error=str(exc),
-                )
+            for attempt in range(2):
+                try:
+                    self._transport.sendto(blob, remote_addr)
+                    log.info(
+                        "pairing_invite_sent",
+                        device_id=device_id,
+                        addr=f"{remote_addr[0]}:{remote_addr[1]}",
+                        attempt=attempt + 1,
+                    )
+                except Exception as exc:
+                    log.warning(
+                        "pairing_invite_send_failed",
+                        device_id=device_id,
+                        attempt=attempt + 1,
+                        error=str(exc),
+                    )
+                    break
+                if attempt == 0:
+                    await asyncio.sleep(0.1)
         else:
             log.warning(
                 "pairing_invite_no_socket",
