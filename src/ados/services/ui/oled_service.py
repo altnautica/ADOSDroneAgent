@@ -78,6 +78,10 @@ from ados.services.ui.screens.mesh import (
     unset_boot as screen_mesh_unset_boot,
 )
 
+# The `unset_boot` module is additionally reached via OVERLAY_SCREENS
+# below; keeping the direct import for the first-boot render path lets
+# the render loop skip a dict lookup on every tick.
+
 log = get_logger("ui.oled_service")
 
 # Button BCM pins, matching `button_service.py`.
@@ -421,12 +425,28 @@ class OledService:
         screen_id: str,
         initial_state: dict[str, Any] | None = None,
     ) -> None:
-        """Switch the display to a mesh overlay screen."""
+        """Switch the display to a mesh overlay screen.
+
+        Fires the previous overlay's `on_exit` before swapping in the
+        new module. Nested transitions (e.g. accept_window -> error on
+        REST failure) stop their background tasks cleanly instead of
+        leaking them.
+        """
         module = OVERLAY_SCREENS.get(screen_id)
         if module is None:
             log.warning("overlay_unknown", screen_id=screen_id)
             return
         prev_id = self._overlay_id
+        prev_module = self._overlay_module
+        # Call the outgoing overlay's on_exit BEFORE we replace state,
+        # so it still sees its own overlay_id/state while cleaning up.
+        if prev_module is not None:
+            on_exit = getattr(prev_module, "on_exit", None)
+            if callable(on_exit):
+                try:
+                    asyncio.create_task(on_exit(self))
+                except Exception as exc:
+                    log.debug("overlay_on_exit_failed", screen=prev_id, error=str(exc))
         self._overlay_id = screen_id
         self._overlay_module = module
         # Module-provided initial state takes precedence over caller-
@@ -579,6 +599,13 @@ class OledService:
                             node.get("children") or [], self._state
                         )
                         self._menu_sel = 0
+                        # Position the cursor on "Set role" explicitly
+                        # so the next B3 always drives the role picker
+                        # even if a future change adds earlier items.
+                        for j, child in enumerate(self._menu_items):
+                            if child.get("label") == "Set role":
+                                self._menu_sel = j
+                                break
                         break
             elif self._mode == "status":
                 self._handle_status_press(ev.button)
@@ -671,7 +698,13 @@ class OledService:
                 self._mode = "status"
 
     def _render_role_badge(self, draw: Any) -> None:
-        """Draw a compact role indicator at the top-right of the status cycle."""
+        """Draw a compact role indicator at the top-right of the status cycle.
+
+        Kept tight (3-char role tag, optional 3-char mesh_id suffix) so
+        it fits in the ~30 px strip beyond where status screens like
+        `link.py` draw channel text at x=88. The badge renders at or
+        past x=94 to avoid overlap.
+        """
         role_block = self._state.get("role") or {}
         role = role_block.get("current")
         mesh_capable = role_block.get("mesh_capable", False)
@@ -679,15 +712,20 @@ class OledService:
             return
         mesh_block = self._state.get("mesh") or {}
         if role == "receiver":
-            mesh_id = str(mesh_block.get("mesh_id") or "")[:4]
-            label = f"Rx {mesh_id}" if mesh_id else "Rx"
+            mesh_id = str(mesh_block.get("mesh_id") or "")[:3]
+            label = f"Rx{mesh_id}" if mesh_id else "Rx"
         elif role == "relay":
             label = "Rly"
         elif role == "direct":
             label = "Dir"
         else:
-            label = "unset"
-        draw.text((WIDTH - (len(label) * 6 + 2), 0), label, fill="white")
+            label = "?"
+        label = label[:5]
+        # Right-anchor at WIDTH with a 6px per glyph approximation and
+        # a minimum left bound of 94 to stay clear of channel text.
+        approx_px = len(label) * 6
+        x = max(94, WIDTH - approx_px - 2)
+        draw.text((x, 0), label, fill="white")
 
     def _first_boot_unset(self) -> bool:
         role_block = self._state.get("role") or {}
