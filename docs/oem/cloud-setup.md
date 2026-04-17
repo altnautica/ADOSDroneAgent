@@ -88,10 +88,10 @@ volumes:
 
 Use `mqtt.altnautica.com` (WebSocket on port 443 via Cloudflare Tunnel).
 
-- Included in Pro tier ($29/mo) and Enterprise tier ($99+/mo)
 - No deployment needed on your side
-- We handle uptime, scaling, and monitoring
+- Altnautica handles uptime, scaling, and monitoring
 - Device credentials provisioned via API
+- Contact Altnautica for access to the hosted broker
 
 ### Topic Structure
 
@@ -312,4 +312,4 @@ All prices in USD. Based on commodity VPS pricing (DigitalOcean, Vultr, Hetzner)
 | Monitoring + alerting | $20-50 |
 | **Total** | **$340-770/mo** |
 
-At large scale, consider Altnautica's Enterprise tier ($99+/mo) which includes all cloud infrastructure, multi-region TURN, and monitoring. Break-even is around 200-300 active drones.
+At large scale, contact Altnautica about managed hosting. The managed path bundles MQTT, multi-region TURN, and monitoring so the OEM does not run cloud infrastructure directly.
