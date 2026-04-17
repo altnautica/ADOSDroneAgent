@@ -71,6 +71,18 @@ from ados.services.ui.screens import (
     net as screen_net,
     system as screen_system,
 )
+from ados.services.ui.screens.mesh import (
+    accept_window as screen_mesh_accept_window,
+    error_states as screen_mesh_error_states,
+    hub_unreachable as screen_mesh_hub_unreachable,
+    join_request_inflight as screen_mesh_join_request_inflight,
+    join_scan as screen_mesh_join_scan,
+    joined_status as screen_mesh_joined_status,
+    leave_confirm as screen_mesh_leave_confirm,
+    neighbors as screen_mesh_neighbors,
+    role_picker as screen_mesh_role_picker,
+    unset_boot as screen_mesh_unset_boot,
+)
 
 log = get_logger("ui.oled_service")
 
@@ -111,9 +123,35 @@ SCREEN_RENDERERS: dict[str, Any] = {
 DEFAULT_SCREEN_ORDER: list[str] = ["link", "drone", "gcs", "net", "system"]
 DEFAULT_SCREEN_ENABLED: list[str] = ["link", "drone", "gcs", "net", "system"]
 
-# Menu tree from spec 05-physical-ui-oled-buttons.md.
-# Each node is (label, children). Leaf nodes have empty children and
-# are logged as menu_action_stub when selected.
+# Overlay screen registry. Each module exports render() plus optional
+# BUTTON_ACTIONS, initial_state(service), on_enter(service), and
+# on_exit(service). The service dispatches button presses to
+# BUTTON_ACTIONS while the overlay is active. B4 in an overlay always
+# exits unless the module maps B4 to a different action.
+OVERLAY_SCREENS: dict[str, Any] = {
+    "unset_boot": screen_mesh_unset_boot,
+    "role_picker": screen_mesh_role_picker,
+    "accept_window": screen_mesh_accept_window,
+    "join_scan": screen_mesh_join_scan,
+    "join_request_inflight": screen_mesh_join_request_inflight,
+    "joined_status": screen_mesh_joined_status,
+    "hub_unreachable": screen_mesh_hub_unreachable,
+    "neighbors": screen_mesh_neighbors,
+    "leave_confirm": screen_mesh_leave_confirm,
+    "error_states": screen_mesh_error_states,
+}
+
+# Secondary poll cadence for pending-relay list while the Accept-window
+# overlay is live. Faster than the main status poll so the operator sees
+# incoming requests with minimal latency.
+PAIRING_POLL_SECONDS = 0.5
+
+# Menu tree from the physical UI spec.
+# Each node is {label, children, optional: visibility, screen}. Leaves
+# with a `screen` key open the named overlay. Leaves without one are
+# logged as `menu_action_stub`. `visibility` is an optional callable
+# `state -> bool`; when present, the node is hidden if the callable
+# returns False. The filter runs against the live agent state snapshot.
 MENU_TREE: list[dict[str, Any]] = [
     {"label": "Pair with drone", "children": []},
     {
@@ -123,6 +161,42 @@ MENU_TREE: list[dict[str, Any]] = [
             {"label": "WiFi client scan", "children": []},
             {"label": "4G modem status", "children": []},
             {"label": "Uplink priority", "children": []},
+        ],
+    },
+    {
+        "label": "Mesh",
+        "visibility": lambda st: bool((st.get("role") or {}).get("mesh_capable")),
+        "children": [
+            {
+                "label": "Set role",
+                "children": [],
+                "screen": "role_picker",
+            },
+            {
+                "label": "Accept relay",
+                "children": [],
+                "screen": "accept_window",
+                "visibility": lambda st: (st.get("role") or {}).get("current") == "receiver",
+            },
+            {
+                "label": "Join mesh",
+                "children": [],
+                "screen": "join_scan",
+                "visibility": lambda st: (st.get("role") or {}).get("current") == "relay"
+                and not (st.get("mesh") or {}).get("up"),
+            },
+            {
+                "label": "Neighbors",
+                "children": [],
+                "screen": "neighbors",
+                "visibility": lambda st: (st.get("role") or {}).get("current") in ("relay", "receiver"),
+            },
+            {
+                "label": "Leave mesh",
+                "children": [],
+                "screen": "leave_confirm",
+                "visibility": lambda st: (st.get("mesh") or {}).get("up", False),
+            },
         ],
     },
     {
@@ -150,6 +224,27 @@ MENU_TREE: list[dict[str, Any]] = [
     },
     {"label": "Back to status", "children": []},
 ]
+
+
+def _filter_visible(items: list[dict[str, Any]], state: dict) -> list[dict[str, Any]]:
+    """Drop items whose `visibility` callable returns False.
+
+    Nodes without a visibility callable are always visible. Errors in
+    the callable are treated as "hide" so a broken predicate does not
+    crash the menu.
+    """
+    out: list[dict[str, Any]] = []
+    for node in items:
+        vis = node.get("visibility")
+        if vis is None:
+            out.append(node)
+            continue
+        try:
+            if vis(state):
+                out.append(node)
+        except Exception:
+            pass
+    return out
 
 
 def _now() -> float:
