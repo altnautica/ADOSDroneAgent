@@ -774,6 +774,14 @@ EOF
     mkdir -p /etc/ados/mesh
     chmod 755 /etc/ados/mesh
 
+    # Enable the pairing daemon so UDP 5801 can survive REST restarts.
+    # REST continues to use the in-process PairingManager by default;
+    # operators flip ADOS_PAIRING_VIA_DAEMON=1 in /etc/ados/env to
+    # opt into the split topology.
+    if [ -f "/etc/systemd/system/ados-mesh-pairing.service" ]; then
+        systemctl enable ados-mesh-pairing.service 2>/dev/null || true
+    fi
+
     info "Mesh capability enabled. Role stays 'direct' until set via OLED -> Mesh or 'ados gs role set <role>'."
 }
 
