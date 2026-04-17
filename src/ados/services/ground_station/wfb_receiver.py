@@ -249,6 +249,22 @@ async def _watch_relay_churn(state: ReceiverState) -> None:
             )
 
 
+def _publish_adapter_missing_event(reason: str, detail: str) -> None:
+    """Broadcast that the local WFB adapter is not available. OLED and
+    GCS consume the `wfb_adapter_missing` event to show an operator
+    error instead of silently forwarding only relay fragments."""
+    try:
+        bus = get_mesh_event_bus()
+        bus.publish(MeshEvent(
+            bus="mesh",
+            kind="wfb_adapter_missing",
+            timestamp_ms=int(time.time() * 1000),
+            payload={"side": "receiver", "reason": reason, "detail": detail},
+        ))
+    except Exception as exc:
+        log.debug("adapter_missing_event_publish_failed", error=str(exc))
+
+
 async def main() -> None:
     config = load_config()
     configure_logging(config.logging.level)
@@ -270,6 +286,19 @@ async def main() -> None:
             if not set_monitor_mode(drone_iface):
                 slog.warning("wfb_receiver_monitor_mode_failed", iface=drone_iface)
                 drone_iface = ""
+                _publish_adapter_missing_event(
+                    "monitor_mode_failed",
+                    f"Could not put {compatible[0].interface_name} into monitor mode.",
+                )
+        else:
+            # Local NIC aggregation was requested but no monitor-capable
+            # adapter is present. The receiver will still serve forwarded
+            # fragments, but the operator needs to know they have lost
+            # local reception. Surface the event so OLED and GCS light up.
+            _publish_adapter_missing_event(
+                "adapter_not_found",
+                "No monitor-capable WFB adapter detected for local reception.",
+            )
     state.drone_iface = drone_iface
 
     if not key_exists():

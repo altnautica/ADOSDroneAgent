@@ -129,13 +129,20 @@ def _run(cmd: list[str], timeout: float = 10.0) -> tuple[int, str, str]:
         return 124, stdout or "", stderr or "timeout"
 
 
+class MeshIdentityMissing(RuntimeError):
+    """A relay role was requested but the deployment mesh identity
+    (mesh_id + PSK) has not been delivered via a pairing invite yet.
+    The caller should fall back to `direct` rather than crash-loop."""
+
+
 def _ensure_mesh_identity(role: str, config: ADOSConfig) -> tuple[str, bytes]:
     """Load or create the deployment mesh_id + shared PSK.
 
     On a receiver node the first boot generates both and writes them to
     `/etc/ados/mesh/`. Relays pick these values up from the pairing
     invite bundle written by `pairing_manager`. If the files are missing
-    on a relay we raise so the caller can surface an OLED error state.
+    on a relay we raise `MeshIdentityMissing` so the caller can surface
+    an OLED error state and downgrade role instead of crash-looping.
     """
     MESH_ID_PATH.parent.mkdir(parents=True, exist_ok=True)
 
@@ -153,7 +160,7 @@ def _ensure_mesh_identity(role: str, config: ADOSConfig) -> tuple[str, bytes]:
         MESH_ID_PATH.write_text(mesh_id + "\n", encoding="utf-8")
         os.chmod(MESH_ID_PATH, 0o644)
     else:
-        raise RuntimeError(
+        raise MeshIdentityMissing(
             "mesh_id missing. A relay must be paired with a receiver before "
             "mesh_manager can start."
         )
@@ -171,7 +178,7 @@ def _ensure_mesh_identity(role: str, config: ADOSConfig) -> tuple[str, bytes]:
         psk_path.write_bytes(psk)
         os.chmod(psk_path, 0o600)
     else:
-        raise RuntimeError(
+        raise MeshIdentityMissing(
             f"mesh PSK missing at {psk_path}. A relay must be paired before "
             "mesh_manager can start."
         )
@@ -506,8 +513,24 @@ class MeshManager:
 
         try:
             mesh_id, _psk = _ensure_mesh_identity(self._role, self._config)
-        except RuntimeError as exc:
+        except MeshIdentityMissing as exc:
             log.error("mesh_identity_missing", error=str(exc))
+            bus = get_mesh_event_bus()
+            try:
+                bus.publish(MeshEvent(
+                    bus="mesh",
+                    kind="identity_missing",
+                    timestamp_ms=int(time.time() * 1000),
+                    payload={"role": self._role, "reason": str(exc)},
+                ))
+            except Exception:
+                pass
+            # Signal a distinct "graceful downgrade" path to main() by
+            # re-raising. A plain setup-failure would have returned False
+            # and triggered a systemd restart loop.
+            raise
+        except RuntimeError as exc:
+            log.error("mesh_identity_error", error=str(exc))
             return False
         self._mesh_id = mesh_id
 
@@ -588,7 +611,22 @@ async def main() -> None:
     slog.info("mesh_manager_starting")
 
     manager = MeshManager(config)
-    ok = await manager.setup()
+    try:
+        ok = await manager.setup()
+    except MeshIdentityMissing:
+        # Relay role was active but no pairing invite bundle has been
+        # delivered yet. Crash-looping helps nobody, so we downgrade the
+        # role sentinel to `direct`, let systemd's ConditionPathExists
+        # keep us inactive until the role sentinel is re-armed (via
+        # pairing or explicit ados gs role set), and exit cleanly.
+        try:
+            role_path = Path("/etc/ados/mesh/role")
+            role_path.parent.mkdir(parents=True, exist_ok=True)
+            role_path.write_text("direct\n", encoding="utf-8")
+        except OSError as exc:
+            slog.error("mesh_role_sentinel_write_failed", error=str(exc))
+        slog.warning("mesh_identity_missing_downgraded_to_direct")
+        sys.exit(0)
     if not ok:
         slog.error("mesh_setup_failed")
         sys.exit(2)
