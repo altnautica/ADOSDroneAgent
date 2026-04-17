@@ -1,20 +1,20 @@
-"""OLED status display service (MSN-025 Wave B).
+"""OLED status display service.
 
 Drives the 128x64 SSD1306 or SH1106 I2C OLED on the ground-station
 front panel. Auto-cycles five status screens (Link, Drone, GCS, Net,
-System) at 5-second intervals. Reacts to front-panel button events
-from `ButtonEventBus` for manual screen advance and menu entry.
+System) at 5-second intervals plus a role badge for mesh-capable
+nodes. Reacts to front-panel button events from `ButtonEventBus` for
+manual screen advance, menu entry, and mesh overlay screens.
 
 Design choices:
-- luma.oled probes the I2C bus at 0x3C (most common) then 0x3D. Both
-  SSD1306 and SH1106 are tried on each address. If none bind, the
-  service logs a clear warning and exits 0. The systemd unit (wired
-  in Wave D) is expected to use `Restart=no` for graceful absence on
-  hardware without an OLED. Rule 26: no manual recovery expected.
-- Status state is refreshed at 1 Hz by polling the agent REST API
-  loopback endpoint `/api/v1/ground-station/status`. Wave C owns the
-  endpoint body shape. Until it exists the poll returns empty dict
-  and screens render the "--" placeholder.
+- luma.oled probes the I2C bus at 0x3C then 0x3D. Both SSD1306 and
+  SH1106 are tried on each address. If none bind, the service logs
+  a clear warning and exits 0 so the systemd unit can stay inactive
+  on hardware without an OLED.
+- Status state is refreshed at 1 Hz by polling
+  `/api/v1/ground-station/status`. While the pairing accept overlay
+  is live a secondary 2 Hz poll hits `/pair/pending` so the pending
+  list feels responsive.
 - Button mapping on status cycle:
     B1 short: previous screen
     B2 short: next screen
@@ -23,13 +23,14 @@ Design choices:
 - Button mapping on menu:
     B1 short: selection up
     B2 short: selection down
-    B3 short: enter or confirm
+    B3 short: enter, confirm, or open overlay
     B4 short: back out one level (top level returns to status)
+- Button mapping on overlay: per-screen BUTTON_ACTIONS dispatch.
+  Unmapped button falls through to B4-exits default.
 - Burn-in protection: contrast auto-dim to 40 after 60 seconds idle,
-  pixel-invert toggled every 10 minutes. Phase 4 Wave 2 confirms the
-  invert clock resets to "just normal-started" on every button press
-  so the operator always sees the natural orientation right after
-  interacting.
+  pixel-invert toggled every 10 minutes. The invert clock resets on
+  every button press so the operator always sees the natural
+  orientation right after they interact.
 
 Manual bench soak for the 10-minute pixel-invert cycle:
   1. Boot the ground-station SBC with an OLED attached.
@@ -41,13 +42,6 @@ Manual bench soak for the 10-minute pixel-invert cycle:
      orientation immediately and the 10-min clock should reset.
   7. To shorten the soak for a quick test, temporarily lower
      `INVERT_PERIOD_SECONDS` to e.g. 60 in this file.
-
-Not in Wave B scope:
-- systemd unit files (Wave D).
-- REST endpoint `/api/v1/ground-station/status` is read-only; the
-  writer lives in Wave C.
-- Actual wiring of menu items to agent actions (pair, reboot, etc.)
-  stubs through `log.info("menu_action_stub", ...)`.
 """
 
 from __future__ import annotations
@@ -105,12 +99,12 @@ HEIGHT = 64
 # Polling cadence for agent state.
 POLL_PERIOD_SECONDS = 1.0
 
-# Screen registry. Phase 4 Wave 2: now a dict keyed by screen id so the
-# active list can be rebuilt from `ground_station.ui.screens` config.
-# REST schema uses the keys `home`, `link`, `drone`, `network`,
-# `system`, `qr`. We map the historical Wave B ids onto the current
-# REST schema (`net` -> `network`, no separate `home` or `qr` renderer
-# yet) so an unknown screen id is silently skipped instead of crashing.
+# Screen registry keyed by screen id so the active list can be rebuilt
+# from `ground_station.ui.screens` config. REST schema uses the keys
+# `home`, `link`, `drone`, `network`, `system`, `qr`. We map older ids
+# onto the current REST schema (`net` -> `network`, no separate `home`
+# or `qr` renderer yet) so an unknown screen id is silently skipped
+# instead of crashing.
 SCREEN_RENDERERS: dict[str, Any] = {
     "link": screen_link,
     "drone": screen_drone,
@@ -291,7 +285,7 @@ class OledService:
         # Optional second poll that runs only while the pairing
         # accept-window overlay is active.
         self._pairing_poll_task: asyncio.Task | None = None
-        # Phase 4 Wave 2: dynamic screen list and OLED prefs are
+        # Dynamic screen list and OLED prefs are
         # rebuilt from `ground_station.ui` on SIGHUP. Initial values
         # are populated from `load_config()` in `_reload_ui_config()`.
         self._active_screens: list[tuple[str, Any]] = [
