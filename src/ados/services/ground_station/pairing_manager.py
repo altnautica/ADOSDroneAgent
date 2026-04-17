@@ -33,6 +33,7 @@ import asyncio
 import json
 import os
 import secrets
+import socket
 import struct
 import time
 from dataclasses import dataclass, field
@@ -298,14 +299,31 @@ class PairingManager:
         return self._window
 
     async def _bind_socket(self, bind_addr: str = "0.0.0.0") -> bool:
-        """Bring up the UDP listener. Idempotent."""
+        """Bring up the UDP listener. Idempotent.
+
+        Pre-creates the socket with SO_REUSEADDR so a fast restart (agent
+        crash-and-restart within the kernel's rebind wait window) can
+        reclaim UDP 5801 without the bind failing.
+        """
         if self._transport is not None:
             return True
         loop = asyncio.get_running_loop()
         try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            # SO_REUSEPORT is Linux-specific and best-effort. It lets two
+            # processes bind the same UDP port concurrently during a
+            # rolling restart; the old process drains while the new one
+            # accepts. Not fatal if the kernel rejects it.
+            try:
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+            except (AttributeError, OSError):
+                pass
+            sock.setblocking(False)
+            sock.bind((bind_addr, PAIR_UDP_PORT))
             transport, protocol = await loop.create_datagram_endpoint(
                 lambda: _PairingProtocol(self),
-                local_addr=(bind_addr, PAIR_UDP_PORT),
+                sock=sock,
             )
         except OSError as exc:
             log.error(
@@ -417,8 +435,14 @@ class PairingManager:
             return False
         return int(time.time() * 1000) < self._window.closes_at_ms
 
-    def is_window_open(self) -> bool:
-        return self._is_window_open_locked()
+    async def is_window_open(self) -> bool:
+        """Thread-safe public check. Acquires `_lock` so callers that then
+        mutate (close, approve) see a consistent snapshot. The sync variant
+        `_is_window_open_locked` stays available for call sites that are
+        already inside `_lock`.
+        """
+        async with self._lock:
+            return self._is_window_open_locked()
 
     async def submit_request(
         self,

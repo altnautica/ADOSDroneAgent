@@ -91,18 +91,42 @@ class MeshSnapshot:
 
 
 def _run(cmd: list[str], timeout: float = 10.0) -> tuple[int, str, str]:
+    """Run a command with a hard timeout. Escalates TERM -> KILL.
+
+    `subprocess.run(timeout=...)` calls `proc.kill()` internally on
+    timeout but then waits for `communicate()` to drain stdout/stderr.
+    If the process is deadlocked in the kernel (wedged WiFi driver,
+    stuck `batctl`), that drain can itself hang. We use Popen directly
+    so a final forced wait + resource release is bounded.
+    """
     try:
-        result = subprocess.run(
+        proc = subprocess.Popen(
             cmd,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
-            timeout=timeout,
         )
-        return result.returncode, result.stdout, result.stderr
-    except subprocess.TimeoutExpired:
-        return 124, "", "timeout"
     except FileNotFoundError:
         return 127, "", "not found"
+
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout)
+        return proc.returncode, stdout, stderr
+    except subprocess.TimeoutExpired:
+        proc.terminate()
+        try:
+            stdout, stderr = proc.communicate(timeout=1.0)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            try:
+                stdout, stderr = proc.communicate(timeout=1.0)
+            except subprocess.TimeoutExpired:
+                # Kernel still holds the process. Give up and let the
+                # zombie be reaped when the parent exits. We have
+                # exhausted the recovery options without blocking the
+                # caller further.
+                return 124, "", "timeout (kill did not release)"
+        return 124, stdout or "", stderr or "timeout"
 
 
 def _ensure_mesh_identity(role: str, config: ADOSConfig) -> tuple[str, bytes]:
@@ -370,11 +394,14 @@ async def _poll_once(
     bus = get_mesh_event_bus()
     now_ms = int(time.time() * 1000)
 
-    rc, out, _e = _run(["batctl", "n", "-H"], timeout=3.0)
+    # Thread-hop subprocess calls so a wedged `batctl` caused by a
+    # deadlocked kernel module does not stall the event loop. The
+    # kill-safe `_run` bounds the wait to (timeout + 2s).
+    rc, out, _e = await asyncio.to_thread(_run, ["batctl", "n", "-H"], 3.0)
     if rc == 0:
         snap.neighbors = _parse_neighbors(out)
 
-    rc, out, _e = _run(["batctl", "gwl", "-H"], timeout=3.0)
+    rc, out, _e = await asyncio.to_thread(_run, ["batctl", "gwl", "-H"], 3.0)
     if rc == 0:
         snap.gateways = _parse_gateways(out)
         selected = next((g.mac for g in snap.gateways if g.selected), None)
