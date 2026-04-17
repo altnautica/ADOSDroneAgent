@@ -1102,28 +1102,43 @@ async def post_factory_reset(
     # mesh services (batman, wfb_relay, wfb_receiver) are stopped and
     # their identity files are not racing with the pair_manager reset.
     # `apply_role("direct")` is a no-op when already direct.
+    #
+    # Role transition MUST succeed before pair state is wiped. A
+    # half-finished factory reset that wipes `/etc/ados/mesh/` while
+    # batman-adv is still reading from it leaves the filesystem in a
+    # state that usually needs a reboot to recover. On transition
+    # failure we 500 and abort the whole reset. The operator can try
+    # again once the services are stopped (`ados gs role set direct`
+    # manually, then retry factory reset).
+    from ados.services.ground_station.pairing_client import (
+        clear_persisted_identity,
+        has_persisted_identity,
+    )
+    from ados.services.ground_station.pairing_manager import (
+        REVOCATIONS_PATH,
+    )
+    from ados.services.ground_station.role_manager import (
+        ROLE_FILE,
+        apply_role,
+    )
+
     mesh_wipe: dict[str, Any] = {"cleared_mesh": False}
     try:
-        from ados.services.ground_station.pairing_client import (
-            clear_persisted_identity,
-            has_persisted_identity,
-        )
-        from ados.services.ground_station.pairing_manager import (
-            REVOCATIONS_PATH,
-        )
-        from ados.services.ground_station.role_manager import (
-            ROLE_FILE,
-            apply_role,
-        )
-
         had_identity = has_persisted_identity()
         await apply_role("direct", reason="factory_reset")
     except Exception as exc:
-        mesh_wipe = {
-            "cleared_mesh": False,
-            "error": f"role transition failed: {exc}",
-        }
-        had_identity = False
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "error": {
+                    "code": "E_FACTORY_RESET_ROLE_FAILED",
+                    "message": (
+                        f"Could not downgrade to direct role before wipe: {exc}. "
+                        "Pair state NOT wiped. Stop mesh services manually and retry."
+                    ),
+                }
+            },
+        ) from exc
 
     try:
         result = await pm.factory_reset()

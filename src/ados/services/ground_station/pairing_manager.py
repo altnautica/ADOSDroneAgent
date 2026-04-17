@@ -61,6 +61,32 @@ REVOCATIONS_PATH = Path("/etc/ados/mesh/revocations.json")
 PAIR_UDP_PORT = 5801
 DEFAULT_ACCEPT_WINDOW_S = 60
 INVITE_TTL_S = 120
+MESH_IFACE = "bat0"
+
+
+def _resolve_bat0_ip_or_fallback() -> str:
+    """Return the IPv4 address of `bat0`. If the mesh interface does
+    not exist yet, or it has no IPv4 assignment, fall back to
+    `0.0.0.0` and log the wider scope."""
+    try:
+        import fcntl
+        import struct as _struct
+
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            packed = _struct.pack("256s", MESH_IFACE.encode("ascii"))
+            # SIOCGIFADDR = 0x8915
+            ip_bytes = fcntl.ioctl(sock.fileno(), 0x8915, packed)[20:24]
+        finally:
+            sock.close()
+        return socket.inet_ntoa(ip_bytes)
+    except OSError:
+        log.warning(
+            "pairing_bat0_ip_unavailable_falling_back",
+            detail="Binding UDP 5801 to 0.0.0.0. The mesh carrier does "
+                   "not have an IPv4 address yet.",
+        )
+        return "0.0.0.0"
 
 
 @dataclass
@@ -119,8 +145,15 @@ class InviteBundle:
 
 @dataclass
 class AcceptWindow:
+    # Wall-clock timestamps kept for UI display and REST snapshots.
+    # Do NOT use them for freshness checks; wall-clock can go backwards
+    # on NTP step corrections and expire a valid window early or accept
+    # a stale one. `closes_at_monotonic_ns` is the authoritative deadline.
     opened_at_ms: int
     closes_at_ms: int
+    # Authoritative deadline for `is_window_open` and `_expire_at`.
+    # Populated when the window is created.
+    closes_at_monotonic_ns: int = 0
     pending: list[PendingRequest] = field(default_factory=list)
     approvals: dict[str, int] = field(default_factory=dict)  # device_id -> ts
 
@@ -135,8 +168,16 @@ def _hkdf_session_key(shared: bytes, context: bytes) -> bytes:
     return h2.finalize()
 
 
-def load_revocations() -> set[str]:
-    """Read the revocation list. Returns an empty set on missing/bad file."""
+# In-memory revocation cache. Every join request lands here first, so a
+# from-disk reload per request would be a DoS vector under churn. Cache
+# is refreshed on any revoke / unrevoke mutation and on a 30 s TTL; set
+# `_REVOCATIONS_CACHE_TS_NS` to 0 to force a reload on next read.
+_REVOCATIONS_CACHE: set[str] | None = None
+_REVOCATIONS_CACHE_TS_NS: int = 0
+_REVOCATIONS_CACHE_TTL_S = 30.0
+
+
+def _read_revocations_from_disk() -> set[str]:
     if not REVOCATIONS_PATH.is_file():
         return set()
     try:
@@ -148,12 +189,34 @@ def load_revocations() -> set[str]:
     return set()
 
 
+def load_revocations() -> set[str]:
+    """Return the current revocation set. Cached in memory with a 30 s
+    TTL to keep `is_revoked` cheap under join churn. Mutations go
+    through `save_revocations` / `revoke` / `unrevoke` which bust the
+    cache explicitly."""
+    global _REVOCATIONS_CACHE, _REVOCATIONS_CACHE_TS_NS
+    now_ns = time.monotonic_ns()
+    if _REVOCATIONS_CACHE is not None and (
+        (now_ns - _REVOCATIONS_CACHE_TS_NS) < int(_REVOCATIONS_CACHE_TTL_S * 1e9)
+    ):
+        return set(_REVOCATIONS_CACHE)
+    fresh = _read_revocations_from_disk()
+    _REVOCATIONS_CACHE = fresh
+    _REVOCATIONS_CACHE_TS_NS = now_ns
+    return set(fresh)
+
+
 def save_revocations(revoked: set[str]) -> None:
     REVOCATIONS_PATH.parent.mkdir(parents=True, exist_ok=True)
     tmp = REVOCATIONS_PATH.with_suffix(REVOCATIONS_PATH.suffix + ".tmp")
     tmp.write_text(json.dumps(sorted(revoked)), encoding="utf-8")
     os.chmod(tmp, 0o600)
     os.replace(str(tmp), str(REVOCATIONS_PATH))
+    # Update the cache synchronously so the next `is_revoked` call sees
+    # the post-mutation state immediately, not after the TTL.
+    global _REVOCATIONS_CACHE, _REVOCATIONS_CACHE_TS_NS
+    _REVOCATIONS_CACHE = set(revoked)
+    _REVOCATIONS_CACHE_TS_NS = time.monotonic_ns()
 
 
 def revoke(device_id: str) -> None:
@@ -298,15 +361,23 @@ class PairingManager:
     def window(self) -> AcceptWindow | None:
         return self._window
 
-    async def _bind_socket(self, bind_addr: str = "0.0.0.0") -> bool:
+    async def _bind_socket(self, bind_addr: str | None = None) -> bool:
         """Bring up the UDP listener. Idempotent.
 
-        Pre-creates the socket with SO_REUSEADDR so a fast restart (agent
-        crash-and-restart within the kernel's rebind wait window) can
-        reclaim UDP 5801 without the bind failing.
+        Binds to the mesh interface (`bat0` by default) when it has an
+        IPv4 address. This stops off-mesh attackers on a shared LAN from
+        reaching UDP 5801. If the mesh carrier is not up yet or does not
+        have an IP, falls back to `0.0.0.0` and logs a warning so the
+        operator sees why the bind is wider than it should be.
+
+        Pre-creates the socket with SO_REUSEADDR so a fast restart
+        (agent crash-and-restart within the kernel's rebind wait window)
+        can reclaim UDP 5801 without the bind failing.
         """
         if self._transport is not None:
             return True
+        if bind_addr is None:
+            bind_addr = _resolve_bat0_ip_or_fallback()
         loop = asyncio.get_running_loop()
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -319,6 +390,20 @@ class PairingManager:
                 sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
             except (AttributeError, OSError):
                 pass
+            # SO_BINDTODEVICE restricts the socket to packets that
+            # ingressed on the named interface. Requires CAP_NET_RAW
+            # which the service unit declares. Best-effort: on some
+            # kernels this errors for unprivileged callers; falling
+            # back to the bind-to-IP above still scopes reachability.
+            if bind_addr != "0.0.0.0":
+                try:
+                    sock.setsockopt(
+                        socket.SOL_SOCKET,
+                        25,  # SO_BINDTODEVICE
+                        b"bat0\0",
+                    )
+                except (OSError, PermissionError):
+                    pass
             sock.setblocking(False)
             sock.bind((bind_addr, PAIR_UDP_PORT))
             transport, protocol = await loop.create_datagram_endpoint(
@@ -347,10 +432,11 @@ class PairingManager:
         self._transport = None
         self._protocol = None
 
-    async def _expire_at(self, when_ms: int) -> None:
-        """Sleep until `when_ms` then close the window if still open."""
-        now_ms = int(time.time() * 1000)
-        delay = max(0.0, (when_ms - now_ms) / 1000.0)
+    async def _expire_at(self, when_monotonic_ns: int) -> None:
+        """Sleep until `when_monotonic_ns` then close the window if
+        still open. Monotonic clock so an NTP step during the Accept
+        window does not wake the expiry task early or late."""
+        delay = max(0.0, (when_monotonic_ns - time.monotonic_ns()) / 1e9)
         try:
             await asyncio.sleep(delay)
         except asyncio.CancelledError:
@@ -360,7 +446,7 @@ class PairingManager:
         async with self._lock:
             if (
                 self._window is not None
-                and self._window.closes_at_ms == when_ms
+                and self._window.closes_at_monotonic_ns == when_monotonic_ns
                 and not self._is_window_open_locked()
             ):
                 await self._publish_close_locked()
@@ -395,6 +481,9 @@ class PairingManager:
             self._window = AcceptWindow(
                 opened_at_ms=now_ms,
                 closes_at_ms=now_ms + duration_s * 1000,
+                closes_at_monotonic_ns=(
+                    time.monotonic_ns() + duration_s * 1_000_000_000
+                ),
             )
             await self._bus.publish(
                 PairingEvent(
@@ -420,7 +509,7 @@ class PairingManager:
         if self._expire_task is not None and not self._expire_task.done():
             self._expire_task.cancel()
         self._expire_task = asyncio.create_task(
-            self._expire_at(self._window.closes_at_ms)
+            self._expire_at(self._window.closes_at_monotonic_ns)
         )
         return self._window
 
@@ -433,6 +522,13 @@ class PairingManager:
     def _is_window_open_locked(self) -> bool:
         if self._window is None:
             return False
+        # Authoritative freshness check uses monotonic ns. Wall-clock
+        # only serves the display field `closes_at_ms` which is what
+        # the operator sees on the OLED countdown and in REST snapshots.
+        if self._window.closes_at_monotonic_ns > 0:
+            return time.monotonic_ns() < self._window.closes_at_monotonic_ns
+        # Backwards-compat for any in-flight window opened before the
+        # monotonic field existed.
         return int(time.time() * 1000) < self._window.closes_at_ms
 
     async def is_window_open(self) -> bool:
