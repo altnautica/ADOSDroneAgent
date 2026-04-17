@@ -338,6 +338,62 @@ class GroundStationUiConfig(BaseModel):
     screens: dict = Field(default_factory=dict)
 
 
+_ALLOWED_ROLES = {"direct", "relay", "receiver"}
+_ALLOWED_CLOUD_UPLINK = {"auto", "force_on", "force_off"}
+_ALLOWED_MESH_CARRIER = {"802.11s", "ibss"}
+
+
+class WfbRelayConfig(BaseModel):
+    """Relay-role WFB forwarder settings.
+
+    On `relay` nodes, `wfb_rx -f` resolves the receiver via mDNS on the
+    batman-adv interface and forwards fragments to its UDP listen port.
+    """
+
+    receiver_mdns_service: str = "_ados-receiver._tcp"
+    receiver_port: int = 5800
+
+
+class WfbReceiverConfig(BaseModel):
+    """Receiver-role WFB aggregator settings.
+
+    On `receiver` nodes, `wfb_rx -a` listens on `listen_port` for relay
+    forwards and FEC-combines them with a local adapter stream if
+    `accept_local_nic` is true.
+    """
+
+    listen_port: int = 5800
+    accept_local_nic: bool = True
+
+
+class MeshConfig(BaseModel):
+    """batman-adv local mesh transport settings.
+
+    `carrier` is the L2 technology on the second USB WiFi dongle:
+    802.11s (native mesh, preferred) or IBSS (ad-hoc, fallback for
+    drivers without 802.11s). `mesh_id` and `shared_key_path` gate the
+    deployment so two adjacent sites on the same channel stay isolated.
+    `shared_key_path` defaults to a device-derived key written on first
+    boot by mesh_manager (0o600, never logged).
+    """
+
+    interface_override: str | None = None
+    carrier: str = "802.11s"
+    mesh_id: str | None = None
+    shared_key_path: str = "/etc/ados/mesh/psk.key"
+    channel: int = 1  # 2.4 GHz ch 1 default for mesh dongle
+    bat_iface: str = "bat0"
+
+    @field_validator("carrier")
+    @classmethod
+    def _validate_carrier(cls, value: str) -> str:
+        if value not in _ALLOWED_MESH_CARRIER:
+            raise ValueError(
+                f"ground_station.mesh.carrier must be one of {sorted(_ALLOWED_MESH_CARRIER)}, got '{value}'"
+            )
+        return value
+
+
 class GroundStationConfig(BaseModel):
     share_uplink: bool = False
     paired_drone_id: str | None = None
@@ -347,6 +403,37 @@ class GroundStationConfig(BaseModel):
     # read so a quick rollback to the stub VehicleState is possible if
     # the wiring causes regressions in the field. Default True.
     use_live_state_ipc: bool = True
+
+    # DEC-119 / MSN-035: Phase 5 distributed RX role. `direct` keeps
+    # the existing single-node behavior. `relay` forwards WFB fragments
+    # to a receiver over batman-adv. `receiver` aggregates fragments
+    # from local + remote sources and publishes the combined stream.
+    role: str = "direct"
+    # Whether this node should advertise its uplink as a batman-adv
+    # gateway. `auto` lets the mesh_manager decide based on actual
+    # uplink health.
+    cloud_uplink: str = "auto"
+    wfb_relay: WfbRelayConfig = WfbRelayConfig()
+    wfb_receiver: WfbReceiverConfig = WfbReceiverConfig()
+    mesh: MeshConfig = MeshConfig()
+
+    @field_validator("role")
+    @classmethod
+    def _validate_role(cls, value: str) -> str:
+        if value not in _ALLOWED_ROLES:
+            raise ValueError(
+                f"ground_station.role must be one of {sorted(_ALLOWED_ROLES)}, got '{value}'"
+            )
+        return value
+
+    @field_validator("cloud_uplink")
+    @classmethod
+    def _validate_cloud_uplink(cls, value: str) -> str:
+        if value not in _ALLOWED_CLOUD_UPLINK:
+            raise ValueError(
+                f"ground_station.cloud_uplink must be one of {sorted(_ALLOWED_CLOUD_UPLINK)}, got '{value}'"
+            )
+        return value
 
 
 # --- Top-level ---
