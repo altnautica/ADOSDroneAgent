@@ -394,13 +394,14 @@ class PairingManager:
             # SO_BINDTODEVICE restricts the socket to packets that
             # ingressed on the named interface. Requires CAP_NET_RAW
             # which the service unit declares. Best-effort: on some
-            # kernels this errors for unprivileged callers; falling
-            # back to the bind-to-IP above still scopes reachability.
+            # kernels this errors for unprivileged callers, on non-Linux
+            # (macOS dev) the constant may not exist. Falling back to
+            # the bind-to-IP above still scopes reachability.
             if bind_addr != "0.0.0.0":
                 try:
                     sock.setsockopt(
                         socket.SOL_SOCKET,
-                        25,  # SO_BINDTODEVICE
+                        getattr(socket, "SO_BINDTODEVICE", 25),
                         b"bat0\0",
                     )
                 except (OSError, PermissionError):

@@ -77,10 +77,10 @@ async def _call(op: str, args: dict[str, Any] | None = None) -> dict[str, Any]:
 
 
 class PairingDaemonProxy:
-    """Thin wrapper that mimics the subset of PairingManager used by
-    REST handlers. Not a full drop-in: `approve` returns a bool, not
-    the raw blob, because the blob does not need to cross the socket
-    boundary (the daemon sends it on UDP itself)."""
+    """Thin wrapper covering the subset of PairingManager used by REST
+    handlers. The daemon builds the invite bundle itself (same disk
+    state) so `approve` takes only the device id and returns the
+    encoded blob plus issued/expires timestamps in a dict."""
 
     async def open_window(self, duration_s: int = 60) -> dict[str, Any]:
         return await _call("open_window", {"duration_s": duration_s})
@@ -95,9 +95,11 @@ class PairingDaemonProxy:
     async def snapshot(self) -> dict[str, Any]:
         return await _call("snapshot", {})
 
-    async def approve(self, device_id: str) -> bool:
-        result = await _call("approve", {"device_id": device_id})
-        return bool(result.get("approved"))
+    async def approve(self, device_id: str) -> dict[str, Any]:
+        """Approve a pending relay. Returns the full result dict with
+        `approved`, `invite_blob_hex`, `issued_at_ms`, `expires_at_ms`.
+        Raises `PairingRpcError` if the daemon rejects the approval."""
+        return await _call("approve", {"device_id": device_id})
 
     async def revoke(self, device_id: str) -> bool:
         result = await _call("revoke", {"device_id": device_id})
