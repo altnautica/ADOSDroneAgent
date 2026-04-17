@@ -366,6 +366,7 @@ Building and testing ADOS Drone Agent on real companion computers and flight har
 ## Community
 
 - **[Discord](https://discord.gg/uxbvuD4d5q)** — Ask questions, share builds
+- **[LinkedIn](https://www.linkedin.com/company/altnautica/)** — Follow company updates
 - **[Email](mailto:team@altnautica.com)** — team@altnautica.com
 - **[Issues](https://github.com/altnautica/ADOSDroneAgent/issues)** — Bug reports and discussions
 - **[Website](https://altnautica.com)** — Company and product info
