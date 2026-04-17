@@ -163,37 +163,64 @@ MENU_TREE: list[dict[str, Any]] = [
     },
     {
         "label": "Mesh",
-        "visibility": lambda st: bool((st.get("role") or {}).get("mesh_capable")),
+        # Mesh menu is always visible so operators on drone-profile or
+        # direct-role nodes can see that the feature exists. When the
+        # node is not mesh_capable, the submenu collapses to a single
+        # hint item explaining how to enable it. This avoids a silent
+        # "nothing happens when I open Mesh" failure mode.
         "children": [
+            {
+                "label": "Mesh unavailable",
+                "children": [],
+                "screen": "mesh_unavailable",
+                "visibility": lambda st: not bool(
+                    (st.get("role") or {}).get("mesh_capable")
+                ),
+            },
             {
                 "label": "Set role",
                 "children": [],
                 "screen": "role_picker",
+                "visibility": lambda st: bool(
+                    (st.get("role") or {}).get("mesh_capable")
+                ),
             },
             {
                 "label": "Accept relay",
                 "children": [],
                 "screen": "accept_window",
-                "visibility": lambda st: (st.get("role") or {}).get("current") == "receiver",
+                "visibility": lambda st: (
+                    bool((st.get("role") or {}).get("mesh_capable"))
+                    and (st.get("role") or {}).get("current") == "receiver"
+                ),
             },
             {
                 "label": "Join mesh",
                 "children": [],
                 "screen": "join_scan",
-                "visibility": lambda st: (st.get("role") or {}).get("current") == "relay"
-                and not (st.get("mesh") or {}).get("up"),
+                "visibility": lambda st: (
+                    bool((st.get("role") or {}).get("mesh_capable"))
+                    and (st.get("role") or {}).get("current") == "relay"
+                    and not (st.get("mesh") or {}).get("up")
+                ),
             },
             {
                 "label": "Neighbors",
                 "children": [],
                 "screen": "neighbors",
-                "visibility": lambda st: (st.get("role") or {}).get("current") in ("relay", "receiver"),
+                "visibility": lambda st: (
+                    bool((st.get("role") or {}).get("mesh_capable"))
+                    and (st.get("role") or {}).get("current") in ("relay", "receiver")
+                ),
             },
             {
                 "label": "Leave mesh",
                 "children": [],
                 "screen": "leave_confirm",
-                "visibility": lambda st: (st.get("mesh") or {}).get("up", False),
+                "visibility": lambda st: (
+                    bool((st.get("role") or {}).get("mesh_capable"))
+                    and (st.get("mesh") or {}).get("up", False)
+                ),
             },
         ],
     },
