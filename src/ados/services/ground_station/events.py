@@ -7,14 +7,14 @@ election changes, and field pairing lifecycle.
 Both buses are pure asyncio with per-subscriber queues so slow consumers
 do not block the publisher. Used by:
 
-- `role_manager` — publishes role transitions.
-- `mesh_manager` — publishes neighbor join/leave, partition detected,
+- `role_manager` publishes role transitions.
+- `mesh_manager` publishes neighbor join/leave, partition detected, and
   gateway election changes.
-- `pairing_manager` — publishes pair window open/close, request received,
-  approval applied, revocation applied.
-- REST `/api/v1/ground-station/mesh/events` WebSocket — fans events out
+- `pairing_manager` publishes pair window open/close, request received,
+  approval applied, and revocation applied.
+- The REST `/api/v1/ground-station/mesh/events` WebSocket fans events out
   to GCS clients.
-- OLED `screens/mesh/*` — subscribes to refresh state without polling.
+- OLED `screens/mesh/*` subscribes to refresh state without polling.
 
 Consumers should treat the bus as "best-effort telemetry." Dropped events
 are acceptable; authoritative state always lives in the managers.
