@@ -1,8 +1,8 @@
-"""Role transitions for the ground-station distributed RX profile (MSN-035).
+"""Role transitions for the ground-station distributed RX profile.
 
 A ground-station node operates in one of three roles:
 
-- `direct`: single-node RX, same as Phase 0-4 behavior. No mesh services.
+- `direct`: single-node RX, no mesh services running.
 - `relay`: forwards WFB fragments to a receiver over batman-adv.
 - `receiver`: aggregates fragments from local NIC plus remote relays,
   FEC-combines them, feeds the existing mediamtx-gs pipeline.

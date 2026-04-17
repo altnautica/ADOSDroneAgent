@@ -1,4 +1,4 @@
-"""Field-only tap-to-pair for mesh relays (MSN-035).
+"""Field-only tap-to-pair for mesh relays.
 
 When a receiver operator opens the Accept window from the OLED, this
 module listens on UDP/`bat0` for join requests, runs a Curve25519 ECDH
@@ -225,15 +225,62 @@ def decrypt_invite(
     return bundle
 
 
+class _PairingProtocol(asyncio.DatagramProtocol):
+    """UDP datagram handler for incoming relay join requests.
+
+    Wire format (JSON one line per datagram):
+        {"type": "join", "device_id": "<id>", "pubkey_hex": "<64-hex>"}
+
+    Reply is the encrypted invite blob from `encrypt_invite`, sent by
+    the receiver when `approve()` is called. The relay listens on the
+    same socket for the reply.
+    """
+
+    def __init__(self, manager: "PairingManager") -> None:
+        self._manager = manager
+        self.transport: asyncio.DatagramTransport | None = None
+
+    def connection_made(self, transport: asyncio.BaseTransport) -> None:  # noqa: D401
+        self.transport = transport  # type: ignore[assignment]
+
+    def datagram_received(self, data: bytes, addr: tuple) -> None:
+        try:
+            msg = json.loads(data.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError):
+            log.debug("pairing_recv_bad_payload", addr=addr)
+            return
+        if msg.get("type") != "join":
+            return
+        device_id = msg.get("device_id")
+        pubkey_hex = msg.get("pubkey_hex")
+        if not device_id or not pubkey_hex:
+            return
+        try:
+            pubkey = bytes.fromhex(pubkey_hex)
+        except ValueError:
+            return
+        if len(pubkey) != 32:
+            return
+        # Hand off to the manager. The coroutine writes the state under
+        # its lock and publishes the PairingEvent.
+        asyncio.create_task(
+            self._manager.submit_request(device_id, pubkey, addr)
+        )
+
+    def error_received(self, exc: Exception) -> None:
+        log.debug("pairing_udp_error", error=str(exc))
+
+
 class PairingManager:
     """Receiver-side state machine for the Accept window.
 
     Owned by the REST layer; one instance per process. Not a standalone
-    systemd service. When the REST handler opens the window, this class
-    binds a UDP listener on `bat0:5801` and buffers incoming join
-    requests into `pending`. The OLED handler (or REST caller) then
-    approves individual device_ids, which encrypts and sends the invite
-    bundle on the same socket.
+    systemd service. When the REST handler or OLED flow opens the
+    window, this class binds a UDP listener on `bat0:5801` and buffers
+    incoming join requests into `pending`. The OLED handler (or REST
+    caller) then approves individual device_ids, which encrypts the
+    invite bundle and sends it back on the same socket. The window
+    auto-closes at `closes_at_ms` via a scheduled timer task.
     """
 
     def __init__(self) -> None:
@@ -242,11 +289,81 @@ class PairingManager:
         self._pub: bytes = b""
         self._bus = get_pairing_event_bus()
         self._lock = asyncio.Lock()
-        self._socket_task: asyncio.Task | None = None
+        self._transport: asyncio.DatagramTransport | None = None
+        self._protocol: _PairingProtocol | None = None
+        self._expire_task: asyncio.Task | None = None
 
     @property
     def window(self) -> AcceptWindow | None:
         return self._window
+
+    async def _bind_socket(self, bind_addr: str = "0.0.0.0") -> bool:
+        """Bring up the UDP listener. Idempotent."""
+        if self._transport is not None:
+            return True
+        loop = asyncio.get_running_loop()
+        try:
+            transport, protocol = await loop.create_datagram_endpoint(
+                lambda: _PairingProtocol(self),
+                local_addr=(bind_addr, PAIR_UDP_PORT),
+            )
+        except OSError as exc:
+            log.error(
+                "pairing_bind_failed",
+                addr=bind_addr,
+                port=PAIR_UDP_PORT,
+                error=str(exc),
+            )
+            return False
+        self._transport = transport  # type: ignore[assignment]
+        self._protocol = protocol  # type: ignore[assignment]
+        log.info("pairing_bind_ok", addr=bind_addr, port=PAIR_UDP_PORT)
+        return True
+
+    def _close_socket(self) -> None:
+        if self._transport is not None:
+            try:
+                self._transport.close()
+            except Exception:
+                pass
+        self._transport = None
+        self._protocol = None
+
+    async def _expire_at(self, when_ms: int) -> None:
+        """Sleep until `when_ms` then close the window if still open."""
+        now_ms = int(time.time() * 1000)
+        delay = max(0.0, (when_ms - now_ms) / 1000.0)
+        try:
+            await asyncio.sleep(delay)
+        except asyncio.CancelledError:
+            return
+        # Only close if this is still the active window (operator may
+        # have already closed it or reopened a new one).
+        async with self._lock:
+            if (
+                self._window is not None
+                and self._window.closes_at_ms == when_ms
+                and not self._is_window_open_locked()
+            ):
+                await self._publish_close_locked()
+
+    async def _publish_close_locked(self) -> None:
+        """Internal close helper. Caller must hold `_lock`."""
+        now_ms = int(time.time() * 1000)
+        self._window = None
+        self._priv = None
+        self._close_socket()
+        if self._expire_task is not None and not self._expire_task.done():
+            self._expire_task.cancel()
+            self._expire_task = None
+        await self._bus.publish(
+            PairingEvent(
+                kind="accept_window_closed",
+                timestamp_ms=now_ms,
+                payload={},
+            )
+        )
+        log.info("pairing_window_closed")
 
     async def open_window(
         self,
@@ -269,23 +386,22 @@ class PairingManager:
                 )
             )
             log.info("pairing_window_opened", duration_s=duration_s)
-            return self._window
+        # Bind the UDP listener outside the lock so a slow bind does
+        # not stall other acquirers.
+        await self._bind_socket()
+        # Schedule auto-close at the expiry deadline.
+        if self._expire_task is not None and not self._expire_task.done():
+            self._expire_task.cancel()
+        self._expire_task = asyncio.create_task(
+            self._expire_at(self._window.closes_at_ms)
+        )
+        return self._window
 
     async def close_window(self) -> None:
         async with self._lock:
             if self._window is None:
                 return
-            now_ms = int(time.time() * 1000)
-            self._window = None
-            self._priv = None
-            await self._bus.publish(
-                PairingEvent(
-                    kind="accept_window_closed",
-                    timestamp_ms=now_ms,
-                    payload={},
-                )
-            )
-            log.info("pairing_window_closed")
+            await self._publish_close_locked()
 
     def _is_window_open_locked(self) -> bool:
         if self._window is None:
@@ -301,9 +417,15 @@ class PairingManager:
         relay_pubkey: bytes,
         remote_addr: tuple[str, int],
     ) -> bool:
-        """Record an incoming join request. Returns False if rejected."""
-        if not self.is_window_open():
-            return False
+        """Record an incoming join request. Returns False if rejected.
+
+        Revocation is checked first (before the lock) because the
+        revocation set is file-backed and we want to short-circuit on
+        a banned device without holding the state lock. The rest of the
+        window-open check and the pending-list mutation happen under
+        the lock so the window cannot close out from under us between
+        the check and the append.
+        """
         if is_revoked(device_id):
             await self._bus.publish(
                 PairingEvent(
@@ -314,6 +436,8 @@ class PairingManager:
             )
             return False
         async with self._lock:
+            if not self._is_window_open_locked():
+                return False
             if self._window is None:
                 return False
             existing = {r.device_id for r in self._window.pending}

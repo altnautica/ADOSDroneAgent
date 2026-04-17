@@ -1,4 +1,4 @@
-"""Profile auto-detect for ADOS Drone Agent (DEC-112).
+"""Profile auto-detect for ADOS Drone Agent.
 
 Runs a hardware fingerprint and picks `drone` or `ground_station`. If the
 signals are ambiguous the result is `unconfigured` and a human picks via
@@ -285,8 +285,8 @@ def detect_profile(config_override: str | None = None) -> dict[str, Any]:
         "ground_score": ground_score,
         "air_score": air_score,
         "signals": signals,
-        # DEC-119 / MSN-035: second wireless NIC gates mesh role visibility.
-        # Default False so existing single-node deployments keep current UX.
+        # second wireless NIC gates mesh role visibility. Default False
+        # so existing single-node deployments keep current UX.
         "mesh_capable": probe_mesh_capable(),
         "detected_at": _now_iso(),
     }

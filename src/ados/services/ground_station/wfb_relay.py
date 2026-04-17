@@ -1,4 +1,4 @@
-"""WFB relay lifecycle (MSN-035 relay role).
+"""WFB relay lifecycle.
 
 Runs on nodes with `ground_station.role == "relay"`. Drives `wfb_rx -f`
 to forward WFB video fragments over batman-adv to the receiver. The

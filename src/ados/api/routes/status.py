@@ -14,16 +14,13 @@ router = APIRouter()
 async def get_status():
     """Agent status: version, uptime, board, FC connection state.
 
-    DEC-108 Phase E: when running under the multi-process supervisor (the
-    normal production path), the API service is a separate process from
-    ados-mavlink and has no direct access to the FC connection. The
-    `_StandaloneAgent` shim in services/api/__main__.py keeps `_fc_connection`
-    as None, which used to make this endpoint return "FC: False / Uptime: 0s"
-    forever. Fix: read from the StateIPC client (which subscribes to
-    `/run/ados/state.sock` published by ados-mavlink at 10Hz) instead of
-    the local `_fc_connection`. The mavlink service now publishes
-    `fc_connected`, `fc_port`, `fc_baud`, and `service_uptime` alongside
-    the vehicle state dict.
+    Under the multi-process supervisor (the normal production path), the
+    API service is a separate process from ados-mavlink and has no direct
+    access to the FC connection. The `_StandaloneAgent` shim in
+    services/api/__main__.py keeps `_fc_connection` as None, so the
+    endpoint reads the StateIPC client instead (the mavlink service
+    publishes `fc_connected`, `fc_port`, `fc_baud`, and `service_uptime`
+    alongside the vehicle state dict at 10Hz on `/run/ados/state.sock`).
     """
     app = get_agent_app()
     board_info = {}
@@ -216,9 +213,9 @@ async def get_full_status(request: Request):
         except Exception:
             pass
 
-    # --- Mesh (DEC-119 / MSN-035). Only populated on ground-station
-    # profile with a non-direct role. Direct nodes and drone-profile
-    # nodes get an empty dict so clients can feature-detect cheaply. ---
+    # --- Mesh snapshot. Only populated on ground-station profile with
+    # a non-direct role. Direct nodes and drone-profile nodes get an
+    # empty dict so clients can feature-detect cheaply. ---
     mesh_block: dict = {}
     try:
         profile = getattr(app.config.agent, "profile", "auto")

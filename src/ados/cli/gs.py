@@ -1,8 +1,8 @@
 """`ados gs ...` subcommands for the ground-station profile.
 
-Wave C Cellos (MSN-025 Phase 1). Wraps the REST API exposed by
-`ados.api.routes.ground_station` so bench operators can drive the
-ground-station agent from the local shell without curl gymnastics.
+Wraps the REST API exposed by `ados.api.routes.ground_station` so bench
+operators can drive the ground-station agent from the local shell
+without curl gymnastics.
 
 Registered under the main `cli` group in `ados.cli.main` via
 `cli.add_command(gs_group)`.
@@ -586,7 +586,7 @@ def gs_network_share_uplink(state: str) -> None:
         _pp(data)
 
 
-# ── DEC-119 / MSN-035: Phase 5 distributed RX (role + mesh) ────────────────
+# ── Distributed RX role + mesh subcommands ────────────────────────────────
 
 
 @gs_group.group("role")

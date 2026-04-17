@@ -1,8 +1,8 @@
-"""Mesh and pairing event buses for the ground-station profile (MSN-035).
+"""Mesh and pairing event buses for the ground-station profile.
 
 Mirrors the `ButtonEventBus` pattern in `ados.services.ui.events` but scoped
-to Phase 5 concerns: role transitions, batman-adv neighbor churn, gateway
-election changes, and field pairing lifecycle.
+to distributed receive concerns: role transitions, batman-adv neighbor
+churn, gateway election changes, and field pairing lifecycle.
 
 Both buses are pure asyncio with per-subscriber queues so slow consumers
 do not block the publisher. Used by:
