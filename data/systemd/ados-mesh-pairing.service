@@ -1,0 +1,36 @@
+[Unit]
+Description=ADOS mesh pairing daemon (UDP 5801 sidecar for pairing_manager)
+After=ados-supervisor.service ados-batman.service
+Wants=ados-batman.service
+PartOf=ados-supervisor.service
+# Only runs on nodes that were brought up via install.sh --with-mesh.
+# The mesh role sentinel gates the wfb-relay/receiver services; the
+# pairing daemon is broader because the receiver operator can open a
+# pairing window even when wfb-receiver is not yet up.
+ConditionPathExists=/etc/ados/profile.conf
+
+[Service]
+Type=simple
+User=root
+ExecStart=/opt/ados/venv/bin/python -m ados.services.ground_station.pairing_daemon
+Restart=on-failure
+RestartSec=5
+Environment=ADOS_CONFIG=/etc/ados/config.yaml
+EnvironmentFile=-/etc/ados/env
+
+# Needs raw socket capability to bind UDP 5801 on bat0 and the ability
+# to use SO_BINDTODEVICE. Matches the capability set we grant the
+# in-process pairing code today.
+AmbientCapabilities=CAP_NET_RAW CAP_NET_ADMIN CAP_NET_BIND_SERVICE
+NoNewPrivileges=no
+ProtectSystem=strict
+ReadWritePaths=/var/ados /run/ados /etc/ados /etc/ados/mesh
+
+MemoryMax=48M
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ados-mesh-pairing
+
+[Install]
+WantedBy=ados-supervisor.service
