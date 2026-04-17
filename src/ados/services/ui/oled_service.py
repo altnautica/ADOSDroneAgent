@@ -261,10 +261,11 @@ class OledService:
         api_port: int = 8080,
     ) -> None:
         self._bus = bus
-        self._api_url = f"http://{api_host}:{api_port}/api/v1/ground-station/status"
+        self._api_base = f"http://{api_host}:{api_port}/api/v1/ground-station"
+        self._api_url = f"{self._api_base}/status"
         self._device = None
         self._driver_name = ""
-        self._mode: str = "status"  # "status" or "menu"
+        self._mode: str = "status"  # "status" | "menu" | "overlay" | "unset"
         self._screen_idx: int = 0
         self._menu_stack: list[tuple[list[dict[str, Any]], int]] = []
         self._menu_items: list[dict[str, Any]] = MENU_TREE
@@ -275,6 +276,21 @@ class OledService:
         self._dimmed: bool = False
         self._state: dict[str, Any] = {}
         self._stop = asyncio.Event()
+        # Overlay mode: mesh screens hijack the display while the
+        # operator drives a pairing or role transition. _overlay_module
+        # is the live renderer; _overlay_state is a small scratch dict
+        # the screen uses for cursor position, timers, etc. The button
+        # bus dispatches to _overlay_module.BUTTON_ACTIONS first when
+        # the service is in overlay mode.
+        self._overlay_id: str | None = None
+        self._overlay_module: Any | None = None
+        self._overlay_state: dict[str, Any] = {}
+        # Shared HTTP client reused by overlay button handlers and the
+        # state poller. Created in `run()` so the event loop is set.
+        self._http: Any | None = None
+        # Optional second poll that runs only while the pairing
+        # accept-window overlay is active.
+        self._pairing_poll_task: asyncio.Task | None = None
         # Phase 4 Wave 2: dynamic screen list and OLED prefs are
         # rebuilt from `ground_station.ui` on SIGHUP. Initial values
         # are populated from `load_config()` in `_reload_ui_config()`.
@@ -404,26 +420,128 @@ class OledService:
         """SIGHUP entry point. Set a flag the render loop will pick up."""
         self._reload_requested = True
 
+    # ── Overlay lifecycle ───────────────────────────────────────
+
+    def _enter_overlay(
+        self,
+        screen_id: str,
+        initial_state: dict[str, Any] | None = None,
+    ) -> None:
+        """Switch the display to a mesh overlay screen."""
+        module = OVERLAY_SCREENS.get(screen_id)
+        if module is None:
+            log.warning("overlay_unknown", screen_id=screen_id)
+            return
+        prev_id = self._overlay_id
+        self._overlay_id = screen_id
+        self._overlay_module = module
+        # Module-provided initial state takes precedence over caller-
+        # supplied overrides so screens can compute from live state.
+        if hasattr(module, "initial_state"):
+            try:
+                base = module.initial_state(self)
+            except Exception as exc:
+                log.debug("overlay_initial_state_failed", screen=screen_id, error=str(exc))
+                base = {}
+        else:
+            base = {}
+        if initial_state:
+            base.update(initial_state)
+        self._overlay_state = base
+        self._mode = "overlay"
+        log.info("overlay_entered", screen_id=screen_id, previous=prev_id)
+        # Screen-level on_enter hook (e.g. the accept_window overlay
+        # opens the pairing window via REST when the operator enters).
+        on_enter = getattr(module, "on_enter", None)
+        if callable(on_enter):
+            try:
+                asyncio.create_task(on_enter(self))
+            except Exception as exc:
+                log.debug("overlay_on_enter_failed", screen=screen_id, error=str(exc))
+
+    def _exit_overlay(self) -> None:
+        prev_id = self._overlay_id
+        prev_module = self._overlay_module
+        self._overlay_id = None
+        self._overlay_module = None
+        self._overlay_state = {}
+        self._mode = "status"
+        log.info("overlay_exited", screen_id=prev_id)
+        on_exit = getattr(prev_module, "on_exit", None) if prev_module else None
+        if callable(on_exit):
+            try:
+                asyncio.create_task(on_exit(self))
+            except Exception as exc:
+                log.debug("overlay_on_exit_failed", screen=prev_id, error=str(exc))
+
+    def _start_pairing_poll(self) -> None:
+        if self._pairing_poll_task is not None and not self._pairing_poll_task.done():
+            return
+        self._pairing_poll_task = asyncio.create_task(
+            self._poll_pairing_forever(), name="oled_pairing_poll"
+        )
+
+    def _stop_pairing_poll(self) -> None:
+        task = self._pairing_poll_task
+        if task is not None and not task.done():
+            task.cancel()
+        self._pairing_poll_task = None
+
+    async def _poll_pairing_forever(self) -> None:
+        """Refresh pairing snapshot at 2 Hz while the accept overlay is live."""
+        if self._http is None:
+            return
+        while not self._stop.is_set() and self._overlay_id == "accept_window":
+            try:
+                r = await self._http.get(f"{self._api_base}/pair/pending", timeout=0.9)
+                if r.status_code == 200:
+                    data = r.json()
+                    if isinstance(data, dict):
+                        self._state.setdefault("pairing", {})["window"] = {
+                            "open": data.get("open", False),
+                            "opened_at_ms": data.get("opened_at_ms"),
+                            "closes_at_ms": data.get("closes_at_ms"),
+                        }
+                        self._state["pairing"]["pending"] = data.get("pending") or []
+            except Exception:
+                pass
+            try:
+                await asyncio.wait_for(self._stop.wait(), timeout=PAIRING_POLL_SECONDS)
+            except asyncio.TimeoutError:
+                continue
+
     async def _poll_state_forever(self) -> None:
-        """Refresh self._state at 1 Hz from the agent REST endpoint."""
-        async with httpx.AsyncClient(timeout=0.9) as client:
-            while not self._stop.is_set():
-                try:
-                    r = await client.get(self._api_url)
-                    if r.status_code == 200:
-                        data = r.json()
-                        if isinstance(data, dict):
-                            self._state = data
-                except Exception:
-                    # Endpoint may not exist yet (Wave C owns it). Stay
-                    # quiet and keep the last known state.
-                    pass
-                try:
-                    await asyncio.wait_for(
-                        self._stop.wait(), timeout=POLL_PERIOD_SECONDS
-                    )
-                except asyncio.TimeoutError:
-                    continue
+        """Refresh self._state at 1 Hz from the agent REST endpoint.
+
+        Uses the shared HTTP client so overlay button handlers can
+        reuse it without creating a second TCP connection pool.
+        """
+        if self._http is None:
+            return
+        while not self._stop.is_set():
+            try:
+                r = await self._http.get(self._api_url, timeout=0.9)
+                if r.status_code == 200:
+                    data = r.json()
+                    if isinstance(data, dict):
+                        # Preserve the pairing sub-tree written by the
+                        # pair-window secondary poll; the status
+                        # endpoint does not carry it and a naive
+                        # overwrite would wipe live overlay state.
+                        existing_pair = self._state.get("pairing")
+                        self._state = data
+                        if existing_pair is not None:
+                            self._state["pairing"] = existing_pair
+            except Exception:
+                # Agent may be briefly unreachable during a restart.
+                # Keep the last known state.
+                pass
+            try:
+                await asyncio.wait_for(
+                    self._stop.wait(), timeout=POLL_PERIOD_SECONDS
+                )
+            except asyncio.TimeoutError:
+                continue
 
     async def _consume_buttons(self) -> None:
         """Drain the button bus and update UI state."""
@@ -435,22 +553,65 @@ class OledService:
             if self._dimmed:
                 self._set_contrast(self._brightness_active)
                 self._dimmed = False
-            # Phase 4 Wave 2: pixel-invert burn-in protection. On any
-            # button press, return the display to natural orientation
-            # and reset the invert clock so the user always sees the
-            # non-inverted view right after they interact. The 10-min
-            # invert / 10-min normal cycle restarts from "normal" now.
+            # Pixel-invert burn-in protection. On any button press,
+            # return the display to natural orientation and reset the
+            # invert clock so the user always sees the non-inverted
+            # view right after they interact.
             if self._inverted:
                 self._set_invert(False)
             self._last_invert_ts = _now()
             if ev.kind != "short":
-                # Long press hooks live in Wave C (factory reset, pair).
-                log.info("oled_long_press_passthrough", button=ev.button)
+                # Long-press hooks reach the system-level handler
+                # regardless of overlay. One example is factory reset
+                # on long B4. Trace for bench visibility.
+                if self._mode == "overlay":
+                    log.info("oled_long_press_during_overlay", button=ev.button)
+                else:
+                    log.info("oled_long_press_passthrough", button=ev.button)
                 continue
-            if self._mode == "status":
+            if self._mode == "overlay":
+                await self._handle_overlay_press(ev.button)
+            elif self._mode == "unset":
+                # Any press moves operator into the Mesh -> Set role menu.
+                self._mode = "menu"
+                self._menu_stack = []
+                self._menu_items = _filter_visible(MENU_TREE, self._state)
+                self._menu_sel = 0
+                # Auto-enter Mesh submenu if present.
+                for i, node in enumerate(self._menu_items):
+                    if node.get("label") == "Mesh":
+                        self._menu_stack.append((self._menu_items, i))
+                        self._menu_items = _filter_visible(
+                            node.get("children") or [], self._state
+                        )
+                        self._menu_sel = 0
+                        break
+            elif self._mode == "status":
                 self._handle_status_press(ev.button)
             else:
                 self._handle_menu_press(ev.button)
+
+    async def _handle_overlay_press(self, button: int) -> None:
+        module = self._overlay_module
+        if module is None:
+            self._exit_overlay()
+            return
+        actions = getattr(module, "BUTTON_ACTIONS", None) or {}
+        handler = actions.get(button)
+        if handler is None:
+            # Unmapped button in overlay: B4 always exits as a safe default.
+            if button == B4:
+                self._exit_overlay()
+            return
+        try:
+            await handler(self)
+        except Exception as exc:
+            log.warning(
+                "overlay_action_failed",
+                screen_id=self._overlay_id,
+                button=button,
+                error=str(exc),
+            )
 
     def _handle_status_press(self, button: int) -> None:
         n = max(1, len(self._active_screens))
@@ -461,29 +622,46 @@ class OledService:
         elif button == B3:
             self._mode = "menu"
             self._menu_stack = []
-            self._menu_items = MENU_TREE
+            self._menu_items = _filter_visible(MENU_TREE, self._state)
             self._menu_sel = 0
         elif button == B4:
             # No-op on status auto-cycle. Stay put.
             pass
 
     def _handle_menu_press(self, button: int) -> None:
+        if not self._menu_items:
+            # Empty after filtering; back out.
+            if self._menu_stack:
+                parent_items, parent_sel = self._menu_stack.pop()
+                self._menu_items = _filter_visible(parent_items, self._state)
+                self._menu_sel = min(parent_sel, max(0, len(self._menu_items) - 1))
+            else:
+                self._mode = "status"
+            return
         if button == B1:
             self._menu_sel = (self._menu_sel - 1) % len(self._menu_items)
         elif button == B2:
             self._menu_sel = (self._menu_sel + 1) % len(self._menu_items)
         elif button == B3:
             current = self._menu_items[self._menu_sel]
+            screen_id = current.get("screen")
             children = current.get("children") or []
             if current.get("label") == "Back to status":
                 self._mode = "status"
                 return
+            if screen_id:
+                # Menu leaf drives an overlay screen.
+                self._enter_overlay(screen_id)
+                return
             if children:
                 self._menu_stack.append((self._menu_items, self._menu_sel))
-                self._menu_items = children
+                self._menu_items = _filter_visible(children, self._state)
                 self._menu_sel = 0
             else:
-                path = [items[idx].get("label", "") for (items, idx) in self._menu_stack]
+                path = [
+                    (items[idx].get("label", "") if idx < len(items) else "")
+                    for (items, idx) in self._menu_stack
+                ]
                 path.append(current.get("label", ""))
                 log.info(
                     "menu_action_stub",
@@ -492,9 +670,37 @@ class OledService:
                 )
         elif button == B4:
             if self._menu_stack:
-                self._menu_items, self._menu_sel = self._menu_stack.pop()
+                parent_items, parent_sel = self._menu_stack.pop()
+                self._menu_items = _filter_visible(parent_items, self._state)
+                self._menu_sel = min(parent_sel, max(0, len(self._menu_items) - 1))
             else:
                 self._mode = "status"
+
+    def _render_role_badge(self, draw: Any) -> None:
+        """Draw a compact role indicator at the top-right of the status cycle."""
+        role_block = self._state.get("role") or {}
+        role = role_block.get("current")
+        mesh_capable = role_block.get("mesh_capable", False)
+        if not mesh_capable:
+            return
+        mesh_block = self._state.get("mesh") or {}
+        if role == "receiver":
+            mesh_id = str(mesh_block.get("mesh_id") or "")[:4]
+            label = f"Rx {mesh_id}" if mesh_id else "Rx"
+        elif role == "relay":
+            label = "Rly"
+        elif role == "direct":
+            label = "Dir"
+        else:
+            label = "unset"
+        draw.text((WIDTH - (len(label) * 6 + 2), 0), label, fill="white")
+
+    def _first_boot_unset(self) -> bool:
+        role_block = self._state.get("role") or {}
+        if not role_block.get("mesh_capable", False):
+            return False
+        current = role_block.get("current")
+        return current in (None, "", "unset")
 
     async def _render_forever(self) -> None:
         """Main draw loop. Advances status screens every AUTO_CYCLE_SECONDS."""
@@ -506,11 +712,18 @@ class OledService:
         while not self._stop.is_set():
             now = _now()
 
-            # Phase 4 Wave 2: pick up SIGHUP-driven config reloads.
+            # Pick up SIGHUP-driven config reloads.
             if self._reload_requested:
                 self._reload_requested = False
                 self._reload_ui_config()
                 last_advance = now
+
+            # First-boot unset override: when the node is mesh-capable
+            # but role is still unset, take over the status cycle until
+            # the operator sets a role. Any button press enters the
+            # Mesh submenu directly.
+            if self._first_boot_unset() and self._mode not in ("menu", "overlay"):
+                self._mode = "unset"
 
             # Idle auto-dim. Honors the auto_dim_enabled flag from config.
             idle = now - self._last_button_ts
@@ -522,10 +735,9 @@ class OledService:
                 self._set_contrast(CONTRAST_DIM)
                 self._dimmed = True
 
-            # Periodic pixel invert for burn-in mitigation. The 10-min
-            # cycle clock is reset on every button press (see
-            # `_consume_buttons`) so the user never sees an inverted
-            # screen immediately after interacting.
+            # Periodic pixel invert for burn-in mitigation. The cycle
+            # clock is reset on every button press so the user never
+            # sees an inverted screen immediately after interacting.
             if now - self._last_invert_ts >= INVERT_PERIOD_SECONDS:
                 self._set_invert(not self._inverted)
                 self._last_invert_ts = now
@@ -542,9 +754,18 @@ class OledService:
 
             try:
                 with canvas(self._device) as draw:
-                    if self._mode == "status" and n_screens > 0:
+                    if self._mode == "overlay" and self._overlay_module is not None:
+                        overlay_state = {
+                            **self._state,
+                            "_overlay_state": self._overlay_state,
+                        }
+                        self._overlay_module.render(draw, WIDTH, HEIGHT, overlay_state)
+                    elif self._mode == "unset":
+                        screen_mesh_unset_boot.render(draw, WIDTH, HEIGHT, self._state)
+                    elif self._mode == "status" and n_screens > 0:
                         _, module = self._active_screens[self._screen_idx]
                         module.render(draw, WIDTH, HEIGHT, self._state)
+                        self._render_role_badge(draw)
                     elif self._mode == "menu":
                         screen_menu.render(
                             draw,
@@ -572,6 +793,7 @@ class OledService:
             )
             return 0
         log.info("oled_service_running", driver=self._driver_name)
+        self._http = httpx.AsyncClient(timeout=0.9)
         tasks = [
             asyncio.create_task(self._render_forever(), name="oled_render"),
             asyncio.create_task(self._consume_buttons(), name="oled_buttons"),
@@ -582,7 +804,13 @@ class OledService:
         finally:
             for t in tasks:
                 t.cancel()
+            self._stop_pairing_poll()
             await asyncio.gather(*tasks, return_exceptions=True)
+            try:
+                if self._http is not None:
+                    await self._http.aclose()
+            except Exception:
+                pass
             try:
                 if self._device is not None:
                     self._device.cleanup()
