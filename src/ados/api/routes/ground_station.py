@@ -1164,6 +1164,16 @@ async def post_factory_reset(
                     ROLE_FILE.unlink()
                 except OSError:
                     pass
+            # Gateway pin also lives under /etc/ados/mesh/. Clearing
+            # it keeps "factory reset = clean slate" honest so a fresh
+            # re-pair does not silently inherit the old operator's
+            # preferred gateway MAC.
+            gateway_path = Path("/etc/ados/mesh/gateway.json")
+            if gateway_path.is_file():
+                try:
+                    gateway_path.unlink()
+                except OSError:
+                    pass
             mesh_wipe = {
                 "cleared_mesh": had_identity,
                 "role": "direct",
@@ -2336,7 +2346,12 @@ async def get_wfb_receiver_combined() -> dict[str, Any]:
 
 @router.post("/pair/accept")
 async def post_pair_accept(req: PairAcceptRequest) -> dict[str, Any]:
-    """Open the Accept window on a receiver. Idempotent during open window."""
+    """Open the Accept window on a receiver. Idempotent during open window.
+
+    Routes through `pairing_facade()` so when `ADOS_PAIRING_VIA_DAEMON=1`
+    the call lands in `ados-mesh-pairing.service` and the UDP bind
+    survives a REST restart.
+    """
     _require_ground_profile()
     from ados.services.ground_station.role_manager import get_current_role
     if get_current_role() != "receiver":
@@ -2344,14 +2359,32 @@ async def post_pair_accept(req: PairAcceptRequest) -> dict[str, Any]:
             status_code=409,
             detail={"error": {"code": "E_WRONG_ROLE", "required": "receiver"}},
         )
-    from ados.services.ground_station.pairing_manager import get_pairing_manager
-    mgr = get_pairing_manager()
-    window = await mgr.open_window(duration_s=req.duration_s)
-    return {
-        "opened_at_ms": window.opened_at_ms,
-        "closes_at_ms": window.closes_at_ms,
-        "duration_s": req.duration_s,
-    }
+    from ados.services.ground_station.pairing_client_rpc import (
+        PairingRpcError,
+        pairing_facade,
+        use_daemon,
+    )
+    mgr = pairing_facade()
+    try:
+        if use_daemon():
+            # Daemon proxy returns a dict, not an AcceptWindow instance.
+            result = await mgr.open_window(duration_s=req.duration_s)
+            return {
+                "opened_at_ms": int(result.get("opened_at_ms", 0)),
+                "closes_at_ms": int(result.get("closes_at_ms", 0)),
+                "duration_s": req.duration_s,
+            }
+        window = await mgr.open_window(duration_s=req.duration_s)
+        return {
+            "opened_at_ms": window.opened_at_ms,
+            "closes_at_ms": window.closes_at_ms,
+            "duration_s": req.duration_s,
+        }
+    except PairingRpcError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={"error": {"code": "E_PAIR_DAEMON_UNAVAILABLE", "message": str(exc)}},
+        ) from exc
 
 
 @router.post("/pair/close")
@@ -2370,29 +2403,52 @@ async def post_pair_close() -> dict[str, Any]:
             status_code=409,
             detail={"error": {"code": "E_WRONG_ROLE", "required": "receiver"}},
         )
-    from ados.services.ground_station.pairing_manager import get_pairing_manager
-    mgr = get_pairing_manager()
-    was_open = await mgr.is_window_open()
-    await mgr.close_window()
-    return {"closed": was_open}
+    from ados.services.ground_station.pairing_client_rpc import (
+        PairingRpcError,
+        pairing_facade,
+        use_daemon,
+    )
+    mgr = pairing_facade()
+    try:
+        if use_daemon():
+            result = await mgr.close_window()
+            return {"closed": bool(result.get("closed", False))}
+        was_open = await mgr.is_window_open()
+        await mgr.close_window()
+        return {"closed": was_open}
+    except PairingRpcError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={"error": {"code": "E_PAIR_DAEMON_UNAVAILABLE", "message": str(exc)}},
+        ) from exc
 
 
 @router.get("/pair/pending")
 async def get_pair_pending() -> dict[str, Any]:
     _require_ground_profile()
-    from ados.services.ground_station.pairing_manager import get_pairing_manager
-    snap = await get_pairing_manager().snapshot()
-    return snap
+    from ados.services.ground_station.pairing_client_rpc import (
+        PairingRpcError,
+        pairing_facade,
+    )
+    try:
+        snap = await pairing_facade().snapshot()
+        return snap
+    except PairingRpcError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={"error": {"code": "E_PAIR_DAEMON_UNAVAILABLE", "message": str(exc)}},
+        ) from exc
 
 
 @router.post("/pair/approve/{device_id}")
 async def post_pair_approve(device_id: str) -> dict[str, Any]:
     """Approve a pending relay. Encrypts + returns the invite blob.
 
-    The actual blob transmission is done by the pairing socket listener
-    running on UDP/bat0:5801. This handler is a control-plane shortcut
-    for operators using the REST interface (OLED-only flow also works
-    without hitting REST).
+    The actual blob transmission is done by the pairing UDP listener
+    (either in-process via `ados-api` or out-of-process via
+    `ados-mesh-pairing.service` when `ADOS_PAIRING_VIA_DAEMON=1`).
+    This handler is a control-plane shortcut for operators using REST
+    directly; the field-only OLED flow works without hitting REST.
     """
     app = _require_ground_profile()
     from ados.services.ground_station.role_manager import get_current_role
@@ -2401,19 +2457,66 @@ async def post_pair_approve(device_id: str) -> dict[str, Any]:
             status_code=409,
             detail={"error": {"code": "E_WRONG_ROLE", "required": "receiver"}},
         )
+    from ados.services.ground_station.pairing_client_rpc import (
+        PairingRpcError,
+        use_daemon,
+    )
+
+    # Daemon path. The daemon builds its own invite bundle from the
+    # same mesh identity files, so we just forward the device id.
+    if use_daemon():
+        from ados.services.ground_station.pairing_client_rpc import (
+            PairingDaemonProxy,
+        )
+        proxy = PairingDaemonProxy()
+        try:
+            if not await proxy.is_window_open():
+                raise HTTPException(
+                    status_code=410,
+                    detail={"error": {"code": "E_PAIR_WINDOW_EXPIRED"}},
+                )
+            result = await proxy.approve(device_id)
+        except PairingRpcError as exc:
+            msg = str(exc)
+            if "not found" in msg or "window closed" in msg:
+                raise HTTPException(
+                    status_code=404,
+                    detail={"error": {"code": "E_PAIR_REQUEST_NOT_FOUND"}},
+                ) from exc
+            if "mesh not initialized" in msg:
+                raise HTTPException(
+                    status_code=503,
+                    detail={"error": {"code": "E_MESH_NOT_INITIALIZED"}},
+                ) from exc
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "error": {
+                        "code": "E_PAIR_DAEMON_UNAVAILABLE",
+                        "message": msg,
+                    }
+                },
+            ) from exc
+        return {
+            "device_id": device_id,
+            "invite_blob_hex": str(result.get("invite_blob_hex", "")),
+            "issued_at_ms": int(result.get("issued_at_ms", 0)),
+            "expires_at_ms": int(result.get("expires_at_ms", 0)),
+        }
+
+    # In-process path. Build the invite bundle here because the
+    # in-process `PairingManager.approve(device_id, bundle)` takes it
+    # from the caller rather than reading disk itself.
     from ados.services.ground_station.pairing_manager import (
         InviteBundle,
         get_pairing_manager,
     )
-    import secrets as _secrets
     mgr = get_pairing_manager()
     if not await mgr.is_window_open():
         raise HTTPException(
             status_code=410,
             detail={"error": {"code": "E_PAIR_WINDOW_EXPIRED"}},
         )
-    # Assemble the invite bundle from current mesh + wfb state. The
-    # mesh_id + psk path are expected to exist on a receiver node.
     mesh_id_path = Path("/etc/ados/mesh/id")
     psk_path = Path(app.config.ground_station.mesh.shared_key_path)
     try:
@@ -2424,7 +2527,6 @@ async def post_pair_approve(device_id: str) -> dict[str, Any]:
             status_code=503,
             detail={"error": {"code": "E_MESH_NOT_INITIALIZED"}},
         )
-    # WFB rx key is the drone-paired key material.
     from ados.services.wfb.key_mgr import get_key_paths
     _tx, rx_key_path = get_key_paths()
     try:

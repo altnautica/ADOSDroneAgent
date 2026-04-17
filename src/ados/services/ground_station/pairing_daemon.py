@@ -47,7 +47,9 @@ import asyncio
 import json
 import os
 import signal
+import socket
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -55,11 +57,57 @@ import structlog
 
 from ados.core.logging import configure_logging, get_logger
 
-from .pairing_manager import get_pairing_manager, revoke as revoke_device
+from .pairing_manager import (
+    InviteBundle,
+    get_pairing_manager,
+    revoke as revoke_device,
+)
 
 log = get_logger("ground_station.pairing_daemon")
 
 SOCKET_PATH = Path("/run/ados/pairing.sock")
+
+
+def _build_invite_bundle() -> InviteBundle | None:
+    """Assemble an InviteBundle from the local mesh + wfb state.
+
+    Reads `/etc/ados/mesh/id`, the configured mesh PSK, the drone WFB
+    rx key, and the receiver's own hostname. Returns None if the mesh
+    is not yet initialized. The same fields that the REST handler used
+    to collect at call time are now read here so the daemon can approve
+    a relay without the REST process needing to pass the bundle over
+    the socket.
+    """
+    from ados.core.config import load_config
+    from ados.services.wfb.key_mgr import get_key_paths
+
+    config = load_config()
+    mesh_id_path = Path("/etc/ados/mesh/id")
+    psk_path = Path(config.ground_station.mesh.shared_key_path)
+    try:
+        mesh_id = mesh_id_path.read_text(encoding="utf-8").strip()
+        psk = psk_path.read_bytes().strip()
+    except OSError:
+        return None
+
+    _tx, rx_key_path = get_key_paths()
+    try:
+        wfb_rx_key = Path(rx_key_path).read_bytes()
+    except OSError:
+        wfb_rx_key = b""
+
+    hostname = socket.gethostname()
+    now_ms = int(time.time() * 1000)
+    return InviteBundle(
+        mesh_id=mesh_id,
+        mesh_psk=psk,
+        drone_channel=config.video.wfb.channel,
+        wfb_rx_key=wfb_rx_key,
+        receiver_mdns_host=hostname,
+        receiver_mdns_port=5800,
+        issued_at_ms=now_ms,
+        expires_at_ms=now_ms + 120_000,
+    )
 
 
 async def _handle_op(op: str, args: dict[str, Any]) -> dict[str, Any]:
@@ -77,8 +125,9 @@ async def _handle_op(op: str, args: dict[str, Any]) -> dict[str, Any]:
                 },
             }
         if op == "close_window":
+            was_open = await mgr.is_window_open()
             await mgr.close_window()
-            return {"ok": True, "result": {"closed": True}}
+            return {"ok": True, "result": {"closed": was_open}}
         if op == "is_window_open":
             return {"ok": True, "result": {"open": await mgr.is_window_open()}}
         if op == "snapshot":
@@ -87,12 +136,19 @@ async def _handle_op(op: str, args: dict[str, Any]) -> dict[str, Any]:
             device_id = str(args.get("device_id", ""))
             if not device_id:
                 return {"ok": False, "error": "device_id required"}
-            blob = await mgr.approve(device_id)
+            bundle = _build_invite_bundle()
+            if bundle is None:
+                return {"ok": False, "error": "mesh not initialized"}
+            blob = await mgr.approve(device_id, bundle)
+            if blob is None:
+                return {"ok": False, "error": "pair request not found or window closed"}
             return {
-                "ok": blob is not None,
+                "ok": True,
                 "result": {
-                    "approved": blob is not None,
-                    "invite_bytes": len(blob) if blob else 0,
+                    "approved": True,
+                    "invite_blob_hex": blob.hex(),
+                    "issued_at_ms": bundle.issued_at_ms,
+                    "expires_at_ms": bundle.expires_at_ms,
                 },
             }
         if op == "revoke":
@@ -169,11 +225,13 @@ async def main() -> None:
     # matches the in-process behavior and avoids holding the port when
     # no operator has asked for pairing.
     server = await asyncio.start_unix_server(_serve_connection, path=str(SOCKET_PATH))
-    # World read/write so the REST and OLED service users can speak to
-    # the daemon. File-system permissions are the access control; the
-    # socket itself does not authenticate.
+    # Root-only. The daemon and its sole in-process client (the REST
+    # handler in ados-api.service) both run as root, so 0o600 is
+    # sufficient and prevents an unprivileged local user from sending
+    # arbitrary approve/revoke RPCs that would admit or eject a relay
+    # without operator consent.
     try:
-        os.chmod(str(SOCKET_PATH), 0o666)
+        os.chmod(str(SOCKET_PATH), 0o600)
     except OSError as exc:
         slog.warning("pairing_daemon_socket_chmod_failed", error=str(exc))
 
