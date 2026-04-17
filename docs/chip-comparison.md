@@ -13,7 +13,7 @@
 | RK3566 | Cortex-A55 | 4 | 1.8 GHz | 1-8GB | 0.8 TOPS | H.264 1080p60 | H.264/H.265 4K | ~$8-12 | $36 (Radxa CM3) | **RECOMMENDED** |
 | RV1126B | Cortex-A7 | 4 | 1.5 GHz | 256MB-1GB | 2.0 TOPS | H.265 4K30 | H.264/H.265 | ~$8-10 | Not available in India | Strong |
 | RK3576 | A72+A53 | 4+4 | 2.2+1.8 GHz | 2-16GB | 6 TOPS | H.265 4K60 | 8K | ~$15-20 | $70 (Radxa CM4) | **ACTIVE** (Android RC) |
-| RK3588S2 | A76+A55 | 4+4 | 2.4+1.8 GHz | 4-32GB | 6 TOPS | H.265 8K30 | 8K | ~$35-40 | $72 (Radxa CM4) | Pro Tier |
+| RK3588S2 | A76+A55 | 4+4 | 2.4+1.8 GHz | 4-32GB | 6 TOPS | H.265 8K30 | 8K | ~$35-40 | $72 (Radxa CM4) | High end |
 
 ---
 

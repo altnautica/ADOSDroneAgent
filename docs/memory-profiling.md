@@ -33,7 +33,7 @@ Buildroot-based systems (RV1103, RV1106, RK3506) use significantly less kernel a
 
 Cannot fit: FastAPI (~15MB), mediamtx (~25MB), hostapd+dnsmasq (~4MB), or config webapp static files.
 
-**Recommendation:** Only viable as a "telemetry puck." If video is not needed, this works. But for $1-2 more, the RV1106 128MB includes video capability, making this chip hard to justify.
+**Recommendation:** Only viable as a telemetry-only node. If video is needed, the RV1106 128MB is the better choice because it includes a hardware encoder.
 
 ---
 
