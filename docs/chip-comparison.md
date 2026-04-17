@@ -70,7 +70,7 @@
 - Limited USB (one host port on most boards)
 - No PCIe, no SATA, no display output
 
-**Recommended Use:** Cost-optimized ADOS Drone Agent deployment. Best at 256MB. Targets the $50-60 retail price point when paired with a reference OEM baseboard. Good for basic companion computer duties: video streaming, telemetry relay, config webapp.
+**Recommended Use:** Cost-optimized ADOS Drone Agent deployment. Best at 256MB. Good for basic companion computer duties: video streaming, telemetry relay, config webapp.
 
 ---
 
@@ -138,16 +138,14 @@
 - CM3 form factor (100-pin Hirose connectors). Same connector layout proposed for the reference companion baseboard
 - PCIe 2.1, USB 3.0, dual CSI, HDMI. Real I/O
 - Proven in production (Radxa ships thousands of CM3 units)
-- Available in India ($36 for 2GB variant)
+- Available in India
 - Runs full Debian with apt. Much easier development than Buildroot-only chips
 
 **Cons:**
 - Higher power draw than RV1106 (~2W vs ~0.5W)
 - Larger module size (55mm x 40mm CM3 vs tiny Luckfox boards)
 - No H.265 encoder (H.264 only)
-- $36 module cost pushes retail board price toward $60-80
-
-**Recommended Use:** Primary target for the reference companion baseboard. Best balance of performance, memory, I/O, and software support. The Cortex-A55 cores handle Python asyncio without breaking a sweat. 2GB RAM means no memory anxiety. Debian support means pip install works. This is the chip to build on.
+**Recommended Use:** Primary target for the reference companion baseboard. Best balance of performance, memory, I/O, and software support. The Cortex-A55 cores handle Python asyncio without breaking a sweat. 2GB RAM means no memory anxiety. Debian support means pip install works.
 
 ---
 
@@ -166,7 +164,7 @@
 - H.265 4K hardware encode. Superior video capability
 - 2.0 TOPS NPU. Enables on-device AI features (person detection, tracking)
 - Built-in ISP handles HDR, WDR, 3D NR
-- Chip price ($8-10) is competitive with RK3566
+- Chip price is competitive with RK3566
 
 **Cons:**
 - **Not readily available in India.** This is the primary blocker
@@ -202,15 +200,14 @@ Confirmed running Android with 4GB RAM + 64GB Flash. Target SoC for the ADOS And
 **Cons:**
 - Higher power draw and thermal requirements (acceptable for handheld RC with battery)
 - Overkill for basic companion computer duties (use RV1126B instead)
-- $15-20 chip cost pushes retail RC controller toward $200-400 range
 
-**Recommended Use:** Android RC controller primary target (DEC-090). Runs ADOS Mission Control as native Android GCS app with touchscreen, physical sticks, and video display. Companion computer uses RV1126B instead (lower power, better ISP). Not needed for air-side ADOS Drone Agent.
+**Recommended Use:** Android RC controller primary target. Runs ADOS Mission Control as native Android GCS app with touchscreen, physical sticks, and video display. Companion computer uses RV1126B instead (lower power, better ISP). Not needed for air-side ADOS Drone Agent.
 
 ---
 
 ### RK3588S2 (Radxa CM4)
 
-**Viability: PRO TIER**
+**Viability: HIGH END**
 
 - **Memory:** 4GB, 8GB, 16GB, or 32GB LPDDR5.
 - **Video Encode:** H.265 at 8K@30fps. Three independent encode streams.
@@ -223,15 +220,14 @@ Confirmed running Android with 4GB RAM + 64GB Flash. Target SoC for the ADOS And
 - 6 TOPS NPU for real AI workloads
 - Same Hirose connector as CM3 (same baseboard works)
 - Well-supported by Radxa (Debian, Ubuntu, Android)
-- Available in India ($72 for 4GB variant)
+- Available in India
 
 **Cons:**
-- $72 module cost pushes retail price to $120-150
 - 5-8W power draw requires active cooling or heatsink
 - Overkill for basic ADOS Drone Agent
 - Higher thermal output in enclosed drone housing
 
-**Recommended Use:** Pro tier companion computer (DEC-073). For customers who need multi-camera, AI inference, and full ROS2. Not the initial ADOS Drone Agent target. Same baseboard as RK3566 (CM3 connector compatible with CM4).
+**Recommended Use:** High-end companion computer for customers who need multi-camera, AI inference, and full ROS 2. Not the initial ADOS Drone Agent target. Same baseboard as RK3566 (CM3 connector compatible with CM4).
 
 ---
 
