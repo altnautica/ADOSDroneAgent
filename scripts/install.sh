@@ -134,7 +134,6 @@ PAIR_CODE=""
 DRONE_NAME=""
 DO_FORCE=false
 DO_UPGRADE=false
-WITH_MESH=false  # distributed RX + local mesh opt-in
 
 # Positional pairing code: first non-flag arg that looks like a 4-8 char alphanumeric code
 if [ $# -gt 0 ] && [[ "$1" =~ ^[A-Za-z0-9]{4,8}$ ]]; then
@@ -181,14 +180,6 @@ while [ $# -gt 0 ]; do
                 error "--branch requires a NAME argument"
                 exit 1
             fi
-            shift
-            ;;
-        --with-mesh)
-            # install distributed RX mesh dependencies (batctl, avahi-daemon,
-            # wpasupplicant mesh backend) and mark the node as mesh-capable
-            # in /etc/ados/profile.conf. Safe to combine with --upgrade on
-            # an existing install.
-            WITH_MESH=true
             shift
             ;;
         *)
@@ -723,9 +714,10 @@ install_ground_station_deps() {
     info "Ground-station deps installed."
 }
 
-# Distributed RX mesh dependencies. Only runs when --with-mesh is passed.
-# Installs batctl + avahi-daemon + wpasupplicant with mesh backend, writes
-# the mesh_capable flag into /etc/ados/profile.conf, and leaves the node's
+# Distributed RX mesh dependencies. Always runs on ground-station profile
+# (packages are small, ~8MB, and unused on a `direct` node). Installs
+# batctl + avahi-daemon + wpasupplicant with mesh backend, writes the
+# mesh_capable flag into /etc/ados/profile.conf, and leaves the node's
 # role at `direct` so existing deployments are not auto-promoted into mesh.
 install_mesh_deps() {
     info "Installing mesh dependencies..."
@@ -785,7 +777,7 @@ EOF
     info "Mesh capability enabled. Role stays 'direct' until set via OLED -> Mesh or 'ados gs role set <role>'."
 }
 
-# Install RTL8812AU/EU driver via DKMS. Idempotent.
+# Install RTL8812EU driver via DKMS. Idempotent.
 install_ground_station_driver() {
     local script_path=""
     if [ -n "${FRESH_REPO_DIR:-}" ] && [ -x "${FRESH_REPO_DIR}/repo/scripts/drivers/install-rtl8812eu.sh" ]; then
@@ -794,12 +786,12 @@ install_ground_station_driver() {
         script_path="$(cd "$(dirname "$0")/drivers" && pwd)/install-rtl8812eu.sh"
     fi
     if [ -z "${script_path}" ] || [ ! -x "${script_path}" ]; then
-        warn "RTL8812AU installer not found; skipping driver build."
+        warn "RTL8812EU installer not found; skipping driver build."
         return 0
     fi
-    info "Running RTL8812AU/EU DKMS installer..."
+    info "Running RTL8812EU DKMS installer..."
     "${script_path}" || {
-        warn "RTL8812AU DKMS install failed; WFB-ng RX will not work until resolved."
+        warn "RTL8812EU DKMS install failed; WFB-ng RX will not work until resolved."
         return 0
     }
 }
@@ -1132,7 +1124,6 @@ if is_installed && ! $DO_FORCE && ! $DO_UPGRADE; then
     echo "    --upgrade    Update to latest version (skip apt, skip venv rebuild)"
     echo "    --force      Full reinstall from scratch"
     echo "    --pair CODE  Update pairing code only (<5s)"
-    echo "    --with-mesh  Install batctl + avahi for distributed RX mesh"
     echo "    CODE         Same as --pair CODE (positional)"
     echo ""
     print_pairing_code
@@ -1197,10 +1188,11 @@ if is_installed && $DO_UPGRADE && ! $DO_FORCE; then
         write_pairing "$PAIR_CODE"
     fi
 
-    # --with-mesh on an existing install opts the node into distributed
-    # RX. Installs batctl + avahi and flips mesh_capable without touching
-    # role (stays `direct` until operator sets it).
-    if [ "${WITH_MESH}" = "true" ]; then
+    # Mesh deps on upgrade. Installs batctl + avahi and flips
+    # mesh_capable without touching role (stays `direct` until
+    # operator sets it). Applied on every ground-station upgrade; a
+    # drone-profile node skips this entire block.
+    if [ "${ADOS_PROFILE:-}" = "ground_station" ] || [ "${ADOS_PROFILE:-}" = "ground-station" ]; then
         install_mesh_deps
     fi
 
@@ -1281,7 +1273,8 @@ else
 fi
 
 # Resolve agent profile. Ground-station profile pulls extra apt deps,
-# the RTL8812AU DKMS driver, and the ground-station python extras.
+# the RTL8812EU DKMS driver, the ground-station python extras, and the
+# mesh dependency bundle (batctl + avahi + wpasupplicant-mesh-sae).
 ADOS_PROFILE="$(resolve_profile)"
 info "Agent profile: ${ADOS_PROFILE}"
 
@@ -1297,10 +1290,11 @@ if [ "${ADOS_PROFILE}" = "ground_station" ] || [ "${ADOS_PROFILE}" = "ground-sta
             warn "Ground-station extras install failed; continuing."
     fi
 
-    # Mesh extras. Opt-in via --with-mesh.
-    if [ "${WITH_MESH}" = "true" ]; then
-        install_mesh_deps
-    fi
+    # Mesh dependencies are always installed on the ground-station
+    # profile. Small footprint (~8MB) and unused on a `direct` node;
+    # the second-USB-WiFi fingerprint in profile_detect sets
+    # `mesh_capable: true` when a carrier adapter is present.
+    install_mesh_deps
 fi
 
 # Generate device identity (idempotent)

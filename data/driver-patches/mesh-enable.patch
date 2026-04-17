@@ -1,0 +1,22 @@
+Enable 802.11s mesh point mode in the vendored RTL8812EU driver build.
+
+The driver ships with core/mesh/rtw_mesh.c, core/mesh/rtw_mesh_hwmp.c,
+and core/mesh/rtw_mesh_pathtbl.c (~7,157 LOC), plus NL80211_IFTYPE_MESH_POINT
+registered in os_dep/linux/ioctl_cfg80211.c, but the build flag that gates
+this code is not set by default. Adding CONFIG_RTW_MESH=y compiles the mesh
+path into the kernel module so a second USB adapter on a relay or receiver
+ground node can run batman-adv over an 802.11s carrier.
+
+Applied at install time by scripts/drivers/install-rtl8812eu.sh before
+dkms build. Idempotent: `patch -N` skips the hunk on reapplication.
+
+--- a/Makefile
++++ b/Makefile
+@@ -107,6 +107,7 @@ CONFIG_REDUCE_TX_CPU_LOADING = n
+ CONFIG_BR_EXT = y
+ CONFIG_TDLS = n
+ CONFIG_WIFI_MONITOR = y
++CONFIG_RTW_MESH = y
+ CONFIG_MCC_MODE = n
+ CONFIG_APPEND_VENDOR_IE_ENABLE = n
+ CONFIG_RTW_NAPI = y

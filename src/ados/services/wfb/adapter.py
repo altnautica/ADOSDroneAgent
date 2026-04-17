@@ -12,11 +12,17 @@ from ados.hal.usb import UsbCategory, discover_usb_devices
 
 log = get_logger("wfb.adapter")
 
-# Known WFB-ng compatible chipsets by VID:PID
+# Known WFB-ng compatible chipsets by VID:PID.
+# RTL8812AU family (0x8812, 0x881A-C) and RTL8812EU / RTL8822E (0xB812)
+# are both served by the vendored DKMS driver and both support monitor
+# mode with frame injection. Other chipsets in the Realtek family are
+# out of scope for WFB-ng.
 WFB_COMPATIBLE: dict[tuple[int, int], str] = {
     (0x0BDA, 0x8812): "RTL8812AU",
-    (0x0BDA, 0xB812): "RTL8812BU",
     (0x0BDA, 0x881A): "RTL8812AU (alt)",
+    (0x0BDA, 0x881B): "RTL8812AU (alt)",
+    (0x0BDA, 0x881C): "RTL8812AU (alt)",
+    (0x0BDA, 0xB812): "RTL8812EU",
     (0x2357, 0x0120): "RTL8812AU (TP-Link)",
     (0x2357, 0x0101): "RTL8812AU (TP-Link alt)",
 }
@@ -130,7 +136,7 @@ def detect_wfb_adapters() -> list[WifiAdapterInfo]:
 
     On Linux, parses `iw dev` and `iw phy` to find interfaces that support
     monitor mode. Cross-references with USB device list to identify known
-    WFB-ng compatible chipsets (RTL8812AU/BU).
+    WFB-ng compatible chipsets (RTL8812AU family and RTL8812EU).
 
     On macOS or other platforms, returns an empty list with a warning.
     """

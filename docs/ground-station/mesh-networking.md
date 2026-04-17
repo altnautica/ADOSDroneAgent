@@ -32,7 +32,7 @@ batman-adv is the default because it works with nothing but the nodes themselves
 - USB 2.0 port is sufficient. USB 3.0 is fine.
 - Either 2.4 GHz or 5 GHz will work. Avoid putting the mesh carrier on the same channel as the WFB-ng primary to prevent self-interference.
 
-The installer pulls `batctl`, `avahi-daemon`, `wpasupplicant` (and `wpasupplicant-mesh-sae` or `wpad-mesh-wolfssl` when apt has them) as part of `install.sh --with-mesh`. It also writes `mesh_capable: true` into `/etc/ados/profile.conf`.
+The installer always pulls `batctl`, `avahi-daemon`, `wpasupplicant` (and `wpasupplicant-mesh-sae` or `wpad-mesh-wolfssl` when apt has them) on a ground-station profile. profile_detect scans for a second USB WiFi adapter and writes `mesh_capable: true` into `/etc/ados/profile.conf` when one is present. No install-time flag is required.
 
 ## Carrier modes
 

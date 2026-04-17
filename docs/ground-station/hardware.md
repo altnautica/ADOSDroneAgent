@@ -62,14 +62,18 @@ Single-node `direct` is the default. `relay` and `receiver` are opt-in when a de
 | Role | Role purpose | Extra hardware over `direct` | Why |
 |------|---|---|---|
 | `direct` | One node serves the pilot end-to-end | None | Baseline. 1× RTL8812EU (WFB-ng RX), 1× antenna, the SBC itself |
-| `relay` | Forwards WFB-ng fragments it heard to the receiver | + 1× generic USB WiFi dongle (mesh carrier), + 1× small antenna for that dongle | batman-adv mesh runs on a dedicated interface so it does not compete with WFB-ng for airtime on the primary adapter |
-| `receiver` | Hub. Combines fragments from relays into one clean stream | + 1× generic USB WiFi dongle (mesh carrier), + 1× small antenna for that dongle | Same reason as relay. The receiver also publishes the mesh service record on `bat0` |
+| `relay` | Forwards WFB-ng fragments it heard to the receiver | + 1× second RTL8812EU (mesh carrier), + 1× antenna for that adapter | Two separate radios on two separate USB ports. Primary stays in monitor mode for WFB-ng RX; mesh carrier runs 802.11s for batman-adv |
+| `receiver` | Hub. Combines fragments from relays into one clean stream | + 1× second RTL8812EU (mesh carrier), + 1× antenna for that adapter | Same reason as relay. The receiver also publishes the mesh service record on `bat0` |
 
-**Mesh carrier adapter requirements.**
+**Mesh carrier default: same RTL8812EU as the primary.** One SKU per node, one DKMS driver, one antenna ecosystem. The same vendored driver compiles with `CONFIG_RTW_MESH=y` so monitor mode binds on the primary NIC and 802.11s mesh point binds on the secondary NIC simultaneously. Both radios run at the same 29 dBm output, which triples node-to-node mesh range versus 100 mW alternatives and determines how far relays can sit from the receiver on a corridor deployment.
 
-- Linux driver that supports 802.11s or IBSS mode (verified with `iw list`)
-- USB 2.0 port on the host SBC is enough. A USB 3.0 port is fine.
-- Any 2.4 GHz or 5 GHz chipset works. Typical price range USD 8-15.
-- Do NOT reuse the RTL8812EU for mesh. The WFB-ng primary adapter stays dedicated to WFB-ng RX.
+**Mesh carrier alternatives.** Any USB WiFi adapter with a Linux driver that supports 802.11s or IBSS mode also works. Common alternatives are MediaTek MT7612U (dual-band, mainline `mt76` driver) and MT7921AU (WiFi 6, mainline `mt7921u`). These have lower TX power than the RTL8812EU and require shorter node spacing.
+
+**RF planning for co-chassis radios.**
+
+- Primary WFB-ng: UNII-3 (channel 149 or 153).
+- Mesh carrier: UNII-1 (channel 36 or 40). Keep ~100 MHz of guard band between the two radios on the same chassis.
+- Antenna separation: 30 cm minimum on the same chassis. Orthogonal polarization helps further.
+- USB: two separate USB 3.0 ports on the host SBC are recommended. USB 2.0 works but caps throughput.
 
 **Cloud uplink stays optional per node.** Any node (relay or receiver) with a WiFi client, Ethernet, or 4G connection can advertise itself as the mesh cloud gateway. No extra hardware is required for gateway election; the existing 4G modem or Ethernet port does the work.

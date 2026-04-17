@@ -7,24 +7,24 @@ This doc walks through setting up a fresh node as a relay.
 ## Prerequisites
 
 - A flashed SBC with the usual ground-station hardware: one RTL8812EU USB adapter for WFB-ng RX, one OLED on I2C, and four GPIO buttons.
-- **One additional USB WiFi dongle** used as the mesh carrier.
+- **One additional RTL8812EU USB adapter** used as the mesh carrier (default). Any 802.11s-capable USB WiFi dongle also works, but same-chip is the default for inventory simplicity and matching TX power.
 - The ground-station-profile fingerprint. This is auto-detected on first boot (OLED + 4 buttons + RTL8812EU + no flight controller).
 - A deployed receiver node already running and within radio range of where this relay will live.
 
 ## Install
 
-From a fresh image, run the standard installer with the `--with-mesh` flag:
+From a fresh image, run the standard installer:
 
 ```
 curl -sSL https://raw.githubusercontent.com/altnautica/ADOSDroneAgent/main/scripts/install.sh \
-  | sudo bash -s -- --with-mesh
+  | sudo bash
 ```
 
-`--with-mesh` adds these steps to the normal install:
+On a ground-station profile the install always includes these mesh steps; no flag required:
 
 1. `apt install batctl avahi-daemon wpasupplicant iw`
 2. Best-effort `apt install` of `wpasupplicant-mesh-sae` or `wpad-mesh-wolfssl` (802.11s SAE backend). If neither is available, the mesh carrier falls back to IBSS.
-3. Writes `mesh_capable: true` to `/etc/ados/profile.conf`.
+3. profile_detect fingerprint scans for a second USB WiFi adapter and sets `mesh_capable: true` in `/etc/ados/profile.conf` when present.
 4. Creates `/etc/ados/mesh/` with 0755 permissions.
 
 Reboot is not required. The mesh services stay masked until the role sentinel is set to `relay` or `receiver`.

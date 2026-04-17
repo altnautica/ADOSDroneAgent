@@ -48,9 +48,12 @@ VID_PID_TABLE: dict[tuple[int, int], tuple[str, UsbCategory]] = {
     (0x046D, 0x082D): ("Logitech HD Pro Webcam C920", UsbCategory.CAMERA),
     (0x046D, 0x0843): ("Logitech Webcam C930e", UsbCategory.CAMERA),
     (0x0C45, 0x6366): ("Generic USB Camera", UsbCategory.CAMERA),
-    # RTL8812AU/BU (used for WFB-ng video link)
+    # RTL8812 family (used for WFB-ng video link)
     (0x0BDA, 0x8812): ("RTL8812AU WiFi (Video Link)", UsbCategory.RADIO),
-    (0x0BDA, 0xB812): ("RTL8812BU WiFi (Video Link)", UsbCategory.RADIO),
+    (0x0BDA, 0x881A): ("RTL8812AU WiFi (Video Link)", UsbCategory.RADIO),
+    (0x0BDA, 0x881B): ("RTL8812AU WiFi (Video Link)", UsbCategory.RADIO),
+    (0x0BDA, 0x881C): ("RTL8812AU WiFi (Video Link)", UsbCategory.RADIO),
+    (0x0BDA, 0xB812): ("RTL8812EU WiFi (Video Link)", UsbCategory.RADIO),
     # u-blox specific
     (0x1546, 0x01A8): ("u-blox 8 GPS", UsbCategory.GPS),
     (0x1546, 0x01A7): ("u-blox 7 GPS", UsbCategory.GPS),

@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
-# ADOS Ground Agent: RTL8812AU/EU DKMS driver installer.
+# ADOS Ground Agent: RTL8812EU DKMS driver installer.
 #
-# Builds and installs the aircrack-ng/rtl8812au driver via DKMS so it
+# Builds and installs the vendored RTL8812EU driver via DKMS so it
 # survives kernel upgrades. Idempotent: re-running is a no-op when the
 # module is already built and loaded.
 #
-# Vendored source lives at vendor/rtl8812au/ (git submodule).
+# Vendored source lives at vendor/rtl8812eu/ (git submodule).
+# The mesh-enable patch at data/driver-patches/mesh-enable.patch is
+# applied to the Makefile before DKMS registers the source, so 802.11s
+# mesh point mode is compiled into the final kernel module.
 #
 # Usage:
 #   sudo scripts/drivers/install-rtl8812eu.sh
@@ -30,7 +33,11 @@ error() { echo -e "${RED}[rtl8812eu]${NC}  $*" >&2; }
 # Resolve repo root (script is at scripts/drivers/install-rtl8812eu.sh)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
-VENDOR_DIR="${REPO_ROOT}/vendor/rtl8812au"
+VENDOR_DIR="${REPO_ROOT}/vendor/rtl8812eu"
+PATCH_FILE="${REPO_ROOT}/data/driver-patches/mesh-enable.patch"
+
+# Module name exposed by the 8822E driver build
+MODULE_NAME="8812eu"
 
 if [ "$(id -u)" -ne 0 ]; then
     error "Must run as root (sudo)."
@@ -53,12 +60,19 @@ if [ -z "${DRIVER_VERSION}" ]; then
     error "Could not parse PACKAGE_VERSION from ${VENDOR_DIR}/dkms.conf"
     exit 1
 fi
-DKMS_NAME="8812au/${DRIVER_VERSION}"
+
+# Read package name from dkms.conf
+DKMS_PACKAGE="$(awk -F'"' '/^PACKAGE_NAME=/ {print $2}' "${VENDOR_DIR}/dkms.conf" | head -n1)"
+if [ -z "${DKMS_PACKAGE}" ]; then
+    error "Could not parse PACKAGE_NAME from ${VENDOR_DIR}/dkms.conf"
+    exit 1
+fi
+DKMS_NAME="${DKMS_PACKAGE}/${DRIVER_VERSION}"
 info "Driver: ${DKMS_NAME}"
 
 # Fast-path: if already loaded and installed, exit clean
-if lsmod | awk '{print $1}' | grep -qx "88XXau"; then
-    info "88XXau module already loaded."
+if lsmod | awk '{print $1}' | grep -qx "${MODULE_NAME}"; then
+    info "${MODULE_NAME} module already loaded."
     exit 0
 fi
 
@@ -66,6 +80,7 @@ fi
 NEED_INSTALL=""
 command -v dkms >/dev/null 2>&1 || NEED_INSTALL="${NEED_INSTALL} dkms"
 command -v make >/dev/null 2>&1 || NEED_INSTALL="${NEED_INSTALL} build-essential"
+command -v patch >/dev/null 2>&1 || NEED_INSTALL="${NEED_INSTALL} patch"
 
 # Pick the right headers package for the running distro
 HEADERS_PKG=""
@@ -93,14 +108,30 @@ if [ -n "${NEED_INSTALL}" ] || [ -n "${HEADERS_PKG}" ]; then
     }
 fi
 
+# Apply the mesh-enable patch before DKMS registers the source.
+# Idempotent: patch -N skips the hunk if already applied.
+if [ -f "${PATCH_FILE}" ]; then
+    if grep -qxF "CONFIG_RTW_MESH = y" "${VENDOR_DIR}/Makefile"; then
+        info "Mesh build flag already present in Makefile."
+    else
+        info "Applying mesh-enable patch to ${VENDOR_DIR}/Makefile"
+        ( cd "${VENDOR_DIR}" && patch -p1 -N --forward < "${PATCH_FILE}" ) || {
+            error "Patch application failed."
+            exit 2
+        }
+    fi
+else
+    warn "Mesh-enable patch not found at ${PATCH_FILE}. 802.11s mesh mode will not be compiled in."
+fi
+
 # Register source tree with DKMS (idempotent)
-if ! dkms status "8812au" 2>/dev/null | grep -q "${DRIVER_VERSION}"; then
+if ! dkms status "${DKMS_PACKAGE}" 2>/dev/null | grep -q "${DRIVER_VERSION}"; then
     info "dkms add ${VENDOR_DIR}"
     dkms add "${VENDOR_DIR}" || {
-        # A stale /var/lib/dkms/8812au from a prior install is the usual culprit
+        # A stale /var/lib/dkms/${DKMS_PACKAGE} from a prior install is the usual culprit
         warn "dkms add failed; attempting remove + retry."
         dkms remove "${DKMS_NAME}" --all 2>/dev/null || true
-        rm -rf "/var/lib/dkms/8812au/${DRIVER_VERSION}" 2>/dev/null || true
+        rm -rf "/var/lib/dkms/${DKMS_PACKAGE}/${DRIVER_VERSION}" 2>/dev/null || true
         dkms add "${VENDOR_DIR}" || {
             error "dkms add failed after retry."
             exit 2
@@ -113,7 +144,7 @@ fi
 # Build + install for current kernel (idempotent: dkms skips if already built)
 info "dkms build ${DKMS_NAME}"
 dkms build "${DKMS_NAME}" -k "${KERNEL}" || {
-    error "dkms build failed. See /var/lib/dkms/8812au/${DRIVER_VERSION}/build/make.log"
+    error "dkms build failed. See /var/lib/dkms/${DKMS_PACKAGE}/${DRIVER_VERSION}/build/make.log"
     exit 2
 }
 
@@ -124,16 +155,16 @@ dkms install "${DKMS_NAME}" -k "${KERNEL}" --force || {
 }
 
 # Load the module
-info "modprobe 88XXau"
-modprobe 88XXau || {
-    error "modprobe 88XXau failed."
+info "modprobe ${MODULE_NAME}"
+modprobe "${MODULE_NAME}" || {
+    error "modprobe ${MODULE_NAME} failed."
     exit 3
 }
 
-if ! lsmod | awk '{print $1}' | grep -qx "88XXau"; then
-    error "88XXau not loaded after modprobe."
+if ! lsmod | awk '{print $1}' | grep -qx "${MODULE_NAME}"; then
+    error "${MODULE_NAME} not loaded after modprobe."
     exit 3
 fi
 
-info "RTL8812AU/EU driver installed and loaded."
+info "RTL8812EU driver installed and loaded with 802.11s mesh support."
 exit 0
