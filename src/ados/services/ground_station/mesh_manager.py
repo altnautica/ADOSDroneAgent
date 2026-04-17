@@ -340,11 +340,15 @@ def _parse_gateways(text: str) -> list[MeshGateway]:
                     down_kbps = int(down_s.rstrip("Mbps").rstrip("kbps") or "0")
                 except ValueError:
                     pass
-            elif tok.rstrip("(").isdigit():
-                try:
-                    tq = int(tok.rstrip(")").lstrip("("))
-                except ValueError:
-                    pass
+            else:
+                # batctl prints TQ as "(240)" in some versions and bare
+                # "240" in others. Strip parentheses either way.
+                stripped = tok.strip("()")
+                if stripped.isdigit():
+                    try:
+                        tq = int(stripped)
+                    except ValueError:
+                        pass
         out.append(
             MeshGateway(
                 mac=mac,
