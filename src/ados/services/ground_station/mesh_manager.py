@@ -286,6 +286,45 @@ def _bind_iface_to_bat(iface: str, bat_iface: str) -> bool:
     return True
 
 
+_GATEWAY_PREFERENCE_PATH = Path("/etc/ados/mesh/gateway.json")
+
+
+def _apply_persisted_gateway_preference() -> str | None:
+    """Re-apply the operator's last gateway pin on mesh setup.
+
+    Reads `/etc/ados/mesh/gateway.json` which is written by the REST
+    endpoint when the operator clicks a pin button in the GCS.
+    Returns the pinned MAC on success, or None if no preference is
+    persisted or the file is unreadable.
+
+    The file schema is `{"mode": "auto"|"pinned"|"off", "pinned_mac": str|null}`.
+    Only the "pinned" mode with a non-null MAC triggers `batctl gw_sel`.
+    Auto and off modes are already the default batman-adv behavior on
+    fresh bringup; no explicit action needed here.
+    """
+    if not _GATEWAY_PREFERENCE_PATH.is_file():
+        return None
+    try:
+        data = json.loads(_GATEWAY_PREFERENCE_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        log.warning("gateway_preference_read_failed", error=str(exc))
+        return None
+    mode = data.get("mode")
+    pinned_mac = data.get("pinned_mac")
+    if mode != "pinned" or not pinned_mac:
+        return None
+    rc, _o, err = _run(["batctl", "gw_sel", str(pinned_mac)], timeout=5.0)
+    if rc != 0:
+        log.warning(
+            "gateway_pin_apply_failed",
+            mac=pinned_mac,
+            err=err.strip(),
+        )
+        return None
+    log.info("gateway_pin_applied", mac=pinned_mac)
+    return str(pinned_mac)
+
+
 def _configure_gateway_mode(role: str, cloud_uplink: str, has_uplink: bool) -> str:
     """Pick batman gateway mode and apply it. Returns the resulting mode."""
     advertise = False
@@ -553,14 +592,16 @@ class MeshManager:
             return False
 
         # Gateway mode decision. "has_uplink" is best-effort here;
-        # uplink_router owns the real decision and can toggle this via
-        # future PUT /mesh/gateway_preference.
+        # uplink_router owns the real decision. Operator preference from
+        # the GCS lands in /etc/ados/mesh/gateway.json and is re-applied
+        # here at setup so pins survive agent + mesh restarts.
         has_uplink = Path("/run/ados/uplink-active").is_file()
         mode = _configure_gateway_mode(
             self._role,
             self._config.ground_station.cloud_uplink,
             has_uplink,
         )
+        pinned_mac = _apply_persisted_gateway_preference()
         log.info(
             "mesh_up",
             role=self._role,
@@ -568,6 +609,7 @@ class MeshManager:
             carrier=self._carrier,
             mesh_id=mesh_id,
             gw_mode=mode,
+            pinned_mac=pinned_mac,
         )
 
         self._snapshot.mesh_iface = iface

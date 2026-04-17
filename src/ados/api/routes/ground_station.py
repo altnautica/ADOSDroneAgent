@@ -2186,7 +2186,13 @@ async def get_mesh_gateways() -> dict[str, Any]:
 async def put_gateway_preference(
     update: MeshGatewayPreferenceUpdate,
 ) -> dict[str, Any]:
-    """Pin a gateway, let batman auto-pick, or disable client mode."""
+    """Pin a gateway, let batman auto-pick, or disable client mode.
+
+    Persists the preference to `/etc/ados/mesh/gateway.json` so a pin
+    survives agent and mesh restarts. `mesh_manager` re-applies the
+    pin at setup time. Direct exec also happens here as a convenience
+    so operators see immediate feedback without waiting for a restart.
+    """
     _require_ground_profile()
     from ados.services.ground_station.role_manager import get_current_role
     if get_current_role() == "direct":
@@ -2194,11 +2200,31 @@ async def put_gateway_preference(
             status_code=404,
             detail={"error": {"code": "E_NOT_IN_MESH"}},
         )
-    # Translates to `batctl gw_mode <client|off>` plus optional
-    # `batctl gw_sel <mac>`. Mesh_manager watches for this file and
-    # re-applies on change; direct exec also happens here as a
-    # convenience so operators see instant feedback.
+    import json as _json
+    import os as _os
     import subprocess as _sp
+    # Persist first. If the write fails we still apply (some kernels have
+    # /etc read-only briefly on upgrade) but surface the error in the
+    # response so the UI knows the pin will not survive restart.
+    gateway_path = Path("/etc/ados/mesh/gateway.json")
+    persist_error: str | None = None
+    try:
+        gateway_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = gateway_path.with_suffix(gateway_path.suffix + ".tmp")
+        tmp.write_text(
+            _json.dumps(
+                {
+                    "mode": update.mode,
+                    "pinned_mac": update.pinned_mac,
+                },
+                sort_keys=True,
+            ),
+            encoding="utf-8",
+        )
+        _os.replace(str(tmp), str(gateway_path))
+    except OSError as exc:
+        persist_error = str(exc)
+
     try:
         if update.mode == "off":
             _sp.run(["batctl", "gw_mode", "off"], check=False, timeout=5)
@@ -2215,10 +2241,14 @@ async def put_gateway_preference(
             status_code=503,
             detail={"error": {"code": "E_BATCTL_UNAVAILABLE"}},
         )
-    return {
+    resp: dict[str, Any] = {
         "mode": update.mode,
         "pinned_mac": update.pinned_mac,
+        "persisted": persist_error is None,
     }
+    if persist_error is not None:
+        resp["persist_error"] = persist_error
+    return resp
 
 
 @router.get("/mesh/config")
