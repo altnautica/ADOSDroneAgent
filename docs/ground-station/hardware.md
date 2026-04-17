@@ -66,3 +66,22 @@ VID:PID for auto-detection: RTL8812EU = `0BDA:B812`
 | Field Kit (Pi 5 + screen) | ~5W | ~12-15W | USB-C PD 27W adapter or LiPo battery |
 
 The Lite variant runs on any standard phone charger. The Pro variant needs a slightly beefier USB-C supply. The Field Kit benefits from a dedicated battery pack for untethered field use.
+
+## Per-Role BOM Deltas
+
+Single-node `direct` is the default. `relay` and `receiver` are opt-in when a deployment spans obstructed terrain or long corridors.
+
+| Role | Role purpose | Extra hardware over `direct` | Why |
+|------|---|---|---|
+| `direct` | One node serves the pilot end-to-end | None | Baseline. 1× RTL8812EU (WFB-ng RX), 1× antenna, the SBC itself |
+| `relay` | Forwards WFB-ng fragments it heard to the receiver | + 1× generic USB WiFi dongle (mesh carrier), + 1× small antenna for that dongle | batman-adv mesh runs on a dedicated interface so it does not compete with WFB-ng for airtime on the primary adapter |
+| `receiver` | Hub. Combines fragments from relays into one clean stream | + 1× generic USB WiFi dongle (mesh carrier), + 1× small antenna for that dongle | Same reason as relay. The receiver also publishes the mesh service record on `bat0` |
+
+**Mesh carrier adapter requirements.**
+
+- Linux driver that supports 802.11s or IBSS mode (verified with `iw list`)
+- USB 2.0 port on the host SBC is enough. A USB 3.0 port is fine.
+- Any 2.4 GHz or 5 GHz chipset works. Typical price range USD 8-15.
+- Do NOT reuse the RTL8812EU for mesh. The WFB-ng primary adapter stays dedicated to WFB-ng RX.
+
+**Cloud uplink stays optional per node.** Any node (relay or receiver) with a WiFi client, Ethernet, or 4G connection can advertise itself as the mesh cloud gateway. No extra hardware is required for gateway election; the existing 4G modem or Ethernet port does the work.

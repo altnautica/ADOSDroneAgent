@@ -132,6 +132,22 @@ wfb:
   key_file: /etc/ados/wfb.key
 ```
 
+## Distributed Receive Primitives
+
+WFB-ng already ships the forwarder and aggregator flags needed to split the receiver across multiple physical nodes. The agent wraps them behind `ground_station.role`.
+
+| Role | Command the agent runs | What it does |
+|------|---|---|
+| `direct` | `wfb_rx -p <port> -u <udp-out> -K <keyfile> <monitor-iface>` | Single-node receive. Decodes WFB-ng, decrypts, runs FEC, emits video on a UDP port that mediamtx picks up. |
+| `relay` | `wfb_rx -f <receiver-ip> -p <port> -K <keyfile> <monitor-iface>` | Same decode and decrypt, but instead of emitting locally the relay forwards surviving fragments to the receiver over the mesh. |
+| `receiver` | `wfb_rx -a -p <port> -u <udp-out> -K <keyfile> <monitor-iface>` | Aggregator mode. Accepts fragments from its own monitor adapter AND from every forwarder that can reach it. Reed-Solomon FEC combine works across the merged stream. |
+
+**FEC combine.** With `wfb_rx -a`, the receiver runs the same k=8 / n=12 FEC on the union of fragments it heard locally plus every fragment each relay forwarded. If one node hears packets 1, 3, 5, 7 and another hears packets 2, 4, 6, 8, the combined stream decodes cleanly even though neither node alone would have enough data.
+
+**Same key everywhere.** All three roles load the same `/etc/ados/wfb.key`. The shared ChaCha20 session key is derived once; pairing of relays to receiver is a separate concern handled over the batman-adv mesh.
+
+**No drone-side change.** The drone always runs a single `wfb_tx`. Distributed receive is purely a ground-side concern.
+
 ## Troubleshooting
 
 | Symptom | Likely Cause | Fix |
@@ -142,3 +158,5 @@ wfb:
 | Very short range (<1km) | TX power too low or antenna disconnected | Check `tx_power` config, verify antenna connector |
 | wfb_tx/rx won't start | Adapter not in monitor mode | Check driver installation, verify VID:PID |
 | High latency (>100ms) | 40MHz bandwidth + high FEC | Switch to 20MHz, reduce FEC K value |
+| Receiver aggregator shows 0 relays | Mesh not up between nodes or pairing missing | See `mesh-networking.md` and `pairing-protocol.md` |
+| Relay keeps reconnecting | Receiver moved or was replaced; mDNS record stale | Re-pair through the receiver's Accept window |

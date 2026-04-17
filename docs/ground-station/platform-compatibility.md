@@ -61,6 +61,21 @@ The ADOS ground station is the fifth option: a small, cheap Linux box that handl
 
 The gap between "what WFB-ng can deliver" (30-70ms, 50km+) and "what most users can access" (only Linux users, ~5-15% of the market) is the entire product opportunity.
 
+## Mesh Capability by Host Board
+
+A node can act as `relay` or `receiver` if it has a second USB port (beyond the one used by the RTL8812EU) AND a kernel with the `batman-adv` module. Both are standard on every supported board once the `--with-mesh` install option runs apt install for `batctl` and related packages.
+
+| Board | Second USB port for mesh dongle | Kernel batman-adv module | Mesh capable |
+|-------|---|---|---|
+| Raspberry Pi 4B | Yes (4× USB total) | Yes (in-tree) | Yes |
+| Raspberry Pi 5 | Yes (4× USB total) | Yes (in-tree) | Yes |
+| Radxa Rock 5C / 5C Lite | Yes (2× USB 2.0 + 2× USB 3.0) | Yes (in-tree) | Yes |
+| Radxa CM3 + carrier | Depends on carrier | Yes (in-tree) | Yes if carrier exposes ≥ 2 USB ports |
+| Radxa CM4 + carrier | Depends on carrier | Yes (in-tree) | Yes if carrier exposes ≥ 2 USB ports |
+| USB Dongle variant | No (host-dependent) | Host-dependent | Not applicable (not a standalone node) |
+
+`direct` role works on every board above without the mesh dongle. Mesh support is an additional capability, not a prerequisite.
+
 ## Browser Requirements
 
 Any modern browser with WebRTC support works. No extensions, plugins, or installations required.

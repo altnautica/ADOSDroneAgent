@@ -83,6 +83,22 @@ The dual display mode is the most capable setup: the pilot watches low-latency H
 | Solid yellow | Error (check REST API status endpoint) |
 | Blinking red | Hardware fault (adapter not detected) |
 
+## Field-Only Tap-to-Pair (Relay and Receiver Roles)
+
+When two or three ground nodes work together in the distributed-receive setup, they join a batman-adv mesh and exchange a shared pairing credential so only approved nodes carry traffic. The flow runs entirely from the OLED on each node, no laptop needed.
+
+1. On the node you want to make the hub, open the menu and navigate to `Mesh > Set role`. Pick `Receiver`. The service restart completes in a few seconds.
+2. Still on the receiver, navigate to `Mesh > Accept relay` and press Select. The screen shows a countdown. During this window, the receiver listens for pairing requests on its mesh interface. Any relays that send a request appear inline on the same screen, with approve and reject actions.
+3. On each relay node, open the menu and navigate to `Mesh > Set role`. Pick `Relay`. After the restart, navigate to `Mesh > Join mesh` and pick the receiver from the scan list. The relay sends its signed invite request to the receiver and waits.
+4. Back on the receiver, pending relays are listed on the `Accept relay` screen. Scroll to each one and approve.
+5. The relay OLED status line now shows the mesh as linked. Video fragments start flowing.
+
+If the accept window expires before every relay has joined, reopen another window on the receiver. Rejected or revoked relays can be re-added the same way.
+
+**No QR code. No phone app. No laptop.** The operator only touches the OLED and the 4 buttons. The invite bundle is a short signed message that travels over UDP on the mesh interface, so there is no cable or IP configuration to worry about.
+
+**Factory reset wipes pairing state.** A long hold on the Back button during boot (or `sudo ados gs reset --confirm <pair-key-fingerprint>`; use `factory-reset-unpaired` when the node has not been paired yet) removes the mesh identity, the pairing invite bundle, and the approved-relay list. The node returns to `direct` role.
+
 ## REST API Status
 
 `GET http://192.168.4.1:8080/api/status` returns JSON with service health:
