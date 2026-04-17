@@ -1,0 +1,34 @@
+[Unit]
+Description=ADOS batman-adv local wireless mesh (ground-station mesh role)
+After=ados-supervisor.service systemd-networkd.service
+PartOf=ados-supervisor.service
+# Only comes up when the role sentinel is `relay` or `receiver`. role_manager
+# writes /etc/ados/mesh/role on every transition. On direct-mode nodes the
+# sentinel either does not exist or reads `direct`, keeping the unit inactive.
+ConditionPathExists=/etc/ados/mesh/role
+AssertPathExists=/etc/ados/mesh/role
+
+[Service]
+Type=simple
+User=root
+ExecStart=/opt/ados/venv/bin/python -m ados.services.ground_station.mesh_manager
+Restart=on-failure
+RestartSec=10
+Environment=ADOS_CONFIG=/etc/ados/config.yaml
+EnvironmentFile=-/etc/ados/env
+
+# batman-adv needs raw netlink + interface admin + monitor-mode on the
+# secondary WiFi dongle for 802.11s or IBSS carrier bringup.
+AmbientCapabilities=CAP_NET_RAW CAP_NET_ADMIN CAP_SYS_MODULE
+NoNewPrivileges=no
+ProtectSystem=strict
+ReadWritePaths=/var/ados /run/ados /dev /etc/ados /sys/class/net
+
+MemoryMax=48M
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ados-batman
+
+[Install]
+WantedBy=ados-supervisor.service

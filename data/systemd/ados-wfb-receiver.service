@@ -1,0 +1,32 @@
+[Unit]
+Description=ADOS WFB-ng receiver (mesh receiver role)
+After=ados-supervisor.service ados-batman.service
+Wants=ados-batman.service
+PartOf=ados-supervisor.service
+# Only runs when the role sentinel reads `receiver`. role_manager owns this file.
+ConditionPathExists=/etc/ados/mesh/role
+
+[Service]
+Type=simple
+User=root
+ExecStart=/opt/ados/venv/bin/python -m ados.services.ground_station.wfb_receiver
+Restart=on-failure
+RestartSec=5
+Environment=ADOS_CONFIG=/etc/ados/config.yaml
+EnvironmentFile=-/etc/ados/env
+
+# Receiver drives wfb_rx -a which binds a raw socket on the local NIC
+# plus a UDP listener on the mesh interface.
+AmbientCapabilities=CAP_NET_RAW CAP_NET_ADMIN CAP_NET_BIND_SERVICE
+NoNewPrivileges=no
+ProtectSystem=strict
+ReadWritePaths=/var/ados /run/ados /dev /etc/ados
+
+MemoryMax=96M
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ados-wfb-receiver
+
+[Install]
+WantedBy=ados-supervisor.service

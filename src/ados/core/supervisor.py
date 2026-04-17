@@ -50,6 +50,11 @@ class ServiceSpec:
     # DEC-112: profile_gate scopes the service to one profile.
     # None = runs on any profile. "drone" or "ground_station" gate it.
     profile_gate: str | None = None
+    # DEC-119 / MSN-035: role_gate scopes a ground-station service to
+    # one or more mesh roles. None = runs on any role. Examples:
+    # "relay", "receiver", or "relay|receiver" for units that cover
+    # both. Only consulted when profile_gate == "ground_station".
+    role_gate: str | None = None
     # Track failures for circuit breaker
     failure_times: list[float] = field(default_factory=list)
     # Runtime state
@@ -104,6 +109,13 @@ SERVICE_REGISTRY: list[dict] = [
     {"name": "ados-wifi-client", "category": "hardware", "profile_gate": "ground_station"},
     {"name": "ados-ethernet", "category": "hardware", "profile_gate": "ground_station"},
     {"name": "ados-cloud-relay", "category": "core", "profile_gate": "ground_station"},
+    # DEC-119 / MSN-035: Phase 5 distributed RX role-gated services.
+    # ados-batman covers batman-adv bringup for both relay and receiver.
+    # ados-wfb-relay forwards fragments; only active on relay nodes.
+    # ados-wfb-receiver aggregates fragments; only active on receiver nodes.
+    {"name": "ados-batman", "category": "hardware", "profile_gate": "ground_station", "role_gate": "relay|receiver"},
+    {"name": "ados-wfb-relay", "category": "hardware", "profile_gate": "ground_station", "role_gate": "relay"},
+    {"name": "ados-wfb-receiver", "category": "hardware", "profile_gate": "ground_station", "role_gate": "receiver"},
     # DEC-111: ROS 2 environment (opt-in, Docker-managed).
     {"name": "ados-ros", "category": "suite"},
 ]
@@ -134,6 +146,7 @@ class Supervisor:
                 name=svc_def["name"],
                 category=svc_def["category"],
                 profile_gate=svc_def.get("profile_gate"),
+                role_gate=svc_def.get("role_gate"),
             )
             self._services[spec.name] = spec
 
@@ -163,6 +176,28 @@ class Supervisor:
                 active=active_profile,
             )
             return False
+
+        # DEC-119 / MSN-035: gate by ground-station role. role_gate is a
+        # pipe-separated list of allowed roles. The active role comes from
+        # the on-disk sentinel managed by role_manager so it stays in sync
+        # even if the Pydantic config is briefly stale during a transition.
+        if spec.role_gate:
+            try:
+                from ados.services.ground_station.role_manager import (
+                    get_current_role,
+                )
+                active_role = get_current_role()
+            except Exception:
+                active_role = "direct"
+            allowed = {r.strip() for r in spec.role_gate.split("|") if r.strip()}
+            if active_role not in allowed:
+                log.info(
+                    "service_role_gated",
+                    service=name,
+                    required=spec.role_gate,
+                    active=active_role,
+                )
+                return False
 
         # Circuit breaker check
         if spec.state == "circuit_open":
