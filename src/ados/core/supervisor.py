@@ -84,7 +84,11 @@ SERVICE_REGISTRY: list[dict] = [
     # peripherals exist on both drone and ground-station profiles.
     {"name": "ados-peripherals", "category": "hardware"},
     # Ground-station only services.
-    {"name": "ados-wfb-rx", "category": "hardware", "profile_gate": "ground_station"},
+    # ados-wfb-rx is the single-node RX path. On relay/receiver nodes the
+    # wfb_rx process is driven by ados-wfb-relay or ados-wfb-receiver
+    # instead, so we gate this one to the direct role to keep both
+    # processes from grabbing the same monitor-mode adapter.
+    {"name": "ados-wfb-rx", "category": "hardware", "profile_gate": "ground_station", "role_gate": "direct"},
     {"name": "ados-mediamtx-gs", "category": "hardware", "profile_gate": "ground_station"},
     {"name": "ados-usb-gadget", "category": "hardware", "profile_gate": "ground_station"},
     # Physical UI + AP + first-boot captive portal.
@@ -185,7 +189,13 @@ class Supervisor:
                     get_current_role,
                 )
                 active_role = get_current_role()
-            except Exception:
+            except Exception as exc:
+                log.warning(
+                    "role_gate_check_failed",
+                    service=name,
+                    error=str(exc),
+                    fallback_role="direct",
+                )
                 active_role = "direct"
             allowed = {r.strip() for r in spec.role_gate.split("|") if r.strip()}
             if active_role not in allowed:
@@ -287,9 +297,52 @@ class Supervisor:
 
     # ── Startup Sequence ───────────────────────────────────────
 
+    def _apply_ground_station_role(self) -> None:
+        """Write the role sentinel and mask/unmask units for the current role.
+
+        Runs only when the agent profile is `ground_station`. Pulls the
+        configured role from `config.ground_station.role` and hands it to
+        the role_manager helper, which writes `/etc/ados/mesh/role` and
+        applies the systemd unit mask/unmask state. Idempotent.
+        """
+        profile = getattr(
+            getattr(self.config, "agent", None), "profile", "auto"
+        )
+        if profile != "ground_station":
+            return
+        configured_role = getattr(
+            getattr(self.config, "ground_station", None), "role", "direct"
+        )
+        try:
+            from ados.services.ground_station.role_manager import (
+                apply_role_on_boot_sync,
+            )
+        except ImportError as exc:
+            log.warning(
+                "role_manager_import_failed",
+                error=str(exc),
+                fallback_role="direct",
+            )
+            return
+        try:
+            apply_role_on_boot_sync(configured_role)
+            log.info("ground_station_role_applied", role=configured_role)
+        except Exception as exc:
+            log.warning(
+                "ground_station_role_apply_failed",
+                role=configured_role,
+                error=str(exc),
+            )
+
     async def start(self) -> None:
         """Full supervisor startup: core → hardware → suite → monitor."""
         log.info("supervisor_starting")
+
+        # 0. On ground-station profile, apply the configured mesh role so
+        #    the on-disk sentinel, systemd masks, and role-gate checks
+        #    all agree before the hardware pass tries to start role-gated
+        #    services. On drone profile this is a no-op.
+        self._apply_ground_station_role()
 
         # 1. Start core services
         for name, spec in self._services.items():

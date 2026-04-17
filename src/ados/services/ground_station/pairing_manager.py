@@ -465,11 +465,13 @@ class PairingManager:
         device_id: str,
         bundle: InviteBundle,
     ) -> bytes | None:
-        """Build the encrypted invite for a pending relay.
+        """Build the encrypted invite and send it back to the relay.
 
-        Returns the opaque blob the caller should send back on the UDP
-        socket, or None if the device_id is not pending or the window
-        is closed.
+        Returns the opaque blob so the REST caller can also log or display
+        it. Also writes the blob onto the UDP socket addressed to the
+        relay's remote_addr so the field-only OLED flow completes without
+        any GCS involvement. Returns None if the device_id is not pending
+        or the window is closed.
         """
         async with self._lock:
             if self._window is None or self._priv is None:
@@ -484,6 +486,7 @@ class PairingManager:
                 return None
             blob = encrypt_invite(bundle, self._priv, match.relay_pubkey)
             self._window.approvals[device_id] = int(time.time() * 1000)
+            remote_addr = match.remote_addr
             await self._bus.publish(
                 PairingEvent(
                     kind="join_approved",
@@ -492,7 +495,29 @@ class PairingManager:
                 )
             )
             log.info("pairing_join_approved", device_id=device_id)
-            return blob
+        # Send outside the lock so a slow sendto does not stall other
+        # state transitions. The socket is process-wide; UDP is lossy
+        # but the relay's listener should re-request on timeout.
+        if self._transport is not None:
+            try:
+                self._transport.sendto(blob, remote_addr)
+                log.info(
+                    "pairing_invite_sent",
+                    device_id=device_id,
+                    addr=f"{remote_addr[0]}:{remote_addr[1]}",
+                )
+            except Exception as exc:
+                log.warning(
+                    "pairing_invite_send_failed",
+                    device_id=device_id,
+                    error=str(exc),
+                )
+        else:
+            log.warning(
+                "pairing_invite_no_socket",
+                device_id=device_id,
+            )
+        return blob
 
     async def snapshot(self) -> dict[str, Any]:
         async with self._lock:

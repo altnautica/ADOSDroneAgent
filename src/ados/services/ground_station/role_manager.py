@@ -63,6 +63,15 @@ _ALL_MESH_UNITS: tuple[str, ...] = (
     "ados-wfb-receiver.service",
 )
 
+# Runtime state files published by mesh and wfb services. Cleared when a
+# node transitions out of a role so a stale snapshot can never mislead a
+# REST client or the OLED on the next start.
+_MESH_STATE_FILES: tuple[Path, ...] = (
+    Path("/run/ados/mesh-state.json"),
+    Path("/run/ados/wfb-relay.json"),
+    Path("/run/ados/wfb-receiver.json"),
+)
+
 
 def get_current_role() -> str:
     """Read the on-disk role sentinel.
@@ -190,6 +199,15 @@ async def apply_role(
     for unit in reversed(_ROLE_UNITS.get(current, [])):
         await _stop_unit(unit)
         units_stopped.append(unit)
+
+    # Clear stale runtime snapshots so a freshly-direct node cannot
+    # serve old mesh data from a previous relay or receiver session.
+    for p in _MESH_STATE_FILES:
+        try:
+            if p.is_file():
+                p.unlink()
+        except OSError as exc:
+            log.debug("mesh_state_unlink_failed", path=str(p), error=str(exc))
 
     # Mask every mesh unit, then unmask the ones for the target role.
     # Masking is idempotent; a unit that was already masked stays masked.
