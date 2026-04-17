@@ -95,10 +95,15 @@ from ados.cli.gs import gs_group as _gs_group  # noqa: E402
 
 cli.add_command(_gs_group)
 
-# ROS 2 subgroup (DEC-111).
+# ROS 2 subgroup.
 from ados.cli.ros import ros as _ros_group  # noqa: E402
 
 cli.add_command(_ros_group)
+
+# MAVLink signing subgroup.
+from ados.cli.signing import signing_group as _signing_group  # noqa: E402
+
+cli.add_command(_signing_group)
 
 
 # ─── INFO ───────────────────────────────────────────────────────────────────

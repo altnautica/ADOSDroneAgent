@@ -113,6 +113,10 @@ Also runs on macOS for local development and testing.
 
 **Hardware auto-detection.** Detects board tier on boot (RPi Zero 2W through CM5 / Jetson) and enables services based on available resources.
 
+**Ground station mode.** The same agent codebase runs on a ground SBC. A hardware fingerprint at boot picks the `ground_station` profile (OLED on I2C plus four GPIO buttons plus an RTL8812EU adapter, no flight controller) versus the drone profile. Within the ground-station profile the node runs in one of three deployment roles described below.
+
+**Distributed receive and local mesh.** Two or three Ground Agents can be deployed together for obstructed flight areas. A `receiver` node hubs the deployment; one or more `relay` nodes forward WFB-ng fragments to the receiver over a self-healing batman-adv mesh on a second USB WiFi dongle. The receiver runs WFB-ng's native FEC combine across the merged stream. Pairing is field-only via the OLED in 60 seconds, no laptop required. See `docs.altnautica.com/ground-agent/mesh-overview` for the full picture.
+
 ---
 
 ## Hardware Support

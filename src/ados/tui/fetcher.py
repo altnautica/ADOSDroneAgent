@@ -104,6 +104,12 @@ class AgentFetcher:
     async def get_config(self) -> dict[str, Any] | None:
         return await self._get("/api/config")
 
+    async def get_signing_capability(self) -> dict[str, Any] | None:
+        return await self._get("/api/mavlink/signing/capability")
+
+    async def get_signing_counters(self) -> dict[str, Any] | None:
+        return await self._get("/api/mavlink/signing/counters")
+
     async def close(self) -> None:
         """Close the underlying HTTP client."""
         await self._client.aclose()
