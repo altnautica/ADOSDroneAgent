@@ -586,5 +586,167 @@ def gs_network_share_uplink(state: str) -> None:
         _pp(data)
 
 
+# ── DEC-119 / MSN-035: Phase 5 distributed RX (role + mesh) ────────────────
+
+
+@gs_group.group("role")
+def gs_role_group() -> None:
+    """Read or change the ground-station mesh role (direct/relay/receiver)."""
+
+
+@gs_role_group.command("show")
+def gs_role_show() -> None:
+    data = _request("GET", "/api/v1/ground-station/role")
+    if data is not None:
+        _pp(data)
+
+
+@gs_role_group.command("set")
+@click.argument("role", type=click.Choice(["direct", "relay", "receiver"]))
+def gs_role_set(role: str) -> None:
+    """Apply a role transition. Masks/unmasks systemd units in order."""
+    data = _request(
+        "PUT",
+        "/api/v1/ground-station/role",
+        json_body={"role": role},
+    )
+    if data is not None:
+        _pp(data)
+
+
+@gs_group.group("mesh")
+def gs_mesh_group() -> None:
+    """Inspect and operate the batman-adv local mesh."""
+
+
+@gs_mesh_group.command("health")
+def gs_mesh_health() -> None:
+    data = _request("GET", "/api/v1/ground-station/mesh")
+    if data is not None:
+        _pp(data)
+
+
+@gs_mesh_group.command("neighbors")
+def gs_mesh_neighbors() -> None:
+    data = _request("GET", "/api/v1/ground-station/mesh/neighbors")
+    if data is None:
+        return
+    rows = data.get("neighbors", [])
+    if not rows:
+        click.echo("(no neighbors)")
+        return
+    click.echo(f"{'mac':<18}  {'iface':<8}  {'tq':>4}  last_seen_ms")
+    for n in rows:
+        click.echo(
+            f"{n.get('mac', '?'):<18}  "
+            f"{n.get('iface', '?'):<8}  "
+            f"{n.get('tq', 0):>4}  "
+            f"{n.get('last_seen_ms', 0)}"
+        )
+
+
+@gs_mesh_group.command("gateways")
+def gs_mesh_gateways() -> None:
+    data = _request("GET", "/api/v1/ground-station/mesh/gateways")
+    if data is None:
+        return
+    sel = data.get("selected") or "(none)"
+    click.echo(f"selected: {sel}")
+    rows = data.get("gateways", [])
+    if not rows:
+        click.echo("(no gateways advertised)")
+        return
+    click.echo(f"{'sel':<3}  {'mac':<18}  up_kbps   down_kbps  tq")
+    for g in rows:
+        mark = "*" if g.get("selected") else " "
+        click.echo(
+            f" {mark}   "
+            f"{g.get('mac', '?'):<18}  "
+            f"{g.get('class_up_kbps', 0):>7}   "
+            f"{g.get('class_down_kbps', 0):>7}    "
+            f"{g.get('tq', 0)}"
+        )
+
+
+@gs_mesh_group.command("route")
+@click.argument("dest_mac")
+def gs_mesh_route(dest_mac: str) -> None:
+    """Show the mesh route to a destination MAC."""
+    data = _request("GET", "/api/v1/ground-station/mesh/routes")
+    if data is None:
+        return
+    hits = [r for r in data.get("routes", []) if r.get("mac") == dest_mac]
+    if not hits:
+        click.echo(f"(no route to {dest_mac})")
+        return
+    for r in hits:
+        _pp(r)
+
+
+@gs_mesh_group.command("accept")
+@click.option("--window", "window_s", default=60, show_default=True,
+              help="Accept-window duration in seconds (5-300).")
+def gs_mesh_accept(window_s: int) -> None:
+    """Open the Accept window on a receiver (wait for relay join requests)."""
+    data = _request(
+        "POST",
+        "/api/v1/ground-station/pair/accept",
+        json_body={"duration_s": window_s},
+    )
+    if data is not None:
+        _pp(data)
+
+
+@gs_mesh_group.command("pending")
+def gs_mesh_pending() -> None:
+    """List relay join requests waiting for approval."""
+    data = _request("GET", "/api/v1/ground-station/pair/pending")
+    if data is not None:
+        _pp(data)
+
+
+@gs_mesh_group.command("approve")
+@click.argument("device_id")
+def gs_mesh_approve(device_id: str) -> None:
+    """Approve a pending relay by device id."""
+    data = _request(
+        "POST",
+        f"/api/v1/ground-station/pair/approve/{device_id}",
+    )
+    if data is not None:
+        _pp(data)
+
+
+@gs_mesh_group.command("revoke")
+@click.argument("device_id")
+def gs_mesh_revoke(device_id: str) -> None:
+    """Revoke a previously approved relay."""
+    data = _request(
+        "POST",
+        f"/api/v1/ground-station/pair/revoke/{device_id}",
+    )
+    if data is not None:
+        _pp(data)
+
+
+@gs_mesh_group.command("join")
+@click.option("--receiver-host", default=None, help="Optional receiver hostname hint.")
+@click.option("--receiver-port", type=int, default=None, help="Optional receiver UDP port.")
+def gs_mesh_join(receiver_host: str | None, receiver_port: int | None) -> None:
+    """Relay-side: request to join the current deployment."""
+    body: dict[str, Any] = {}
+    if receiver_host:
+        body["receiver_host"] = receiver_host
+    if receiver_port:
+        body["receiver_port"] = receiver_port
+    data = _request(
+        "POST",
+        "/api/v1/ground-station/pair/join",
+        json_body=body or None,
+    )
+    if data is not None:
+        _pp(data)
+
+
 if __name__ == "__main__":
     gs_group()

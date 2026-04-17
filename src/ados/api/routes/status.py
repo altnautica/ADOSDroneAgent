@@ -216,6 +216,41 @@ async def get_full_status(request: Request):
         except Exception:
             pass
 
+    # --- Mesh (DEC-119 / MSN-035). Only populated on ground-station
+    # profile with a non-direct role. Direct nodes and drone-profile
+    # nodes get an empty dict so clients can feature-detect cheaply. ---
+    mesh_block: dict = {}
+    try:
+        profile = getattr(app.config.agent, "profile", "auto")
+        if profile == "ground_station":
+            from ados.services.ground_station.role_manager import get_current_role
+            role = get_current_role()
+            mesh_block["role"] = role
+            # mesh_capable hint from /etc/ados/profile.conf
+            try:
+                import yaml as _yaml
+                pc = _yaml.safe_load(
+                    open("/etc/ados/profile.conf", encoding="utf-8")
+                ) or {}
+                mesh_block["mesh_capable"] = bool(pc.get("mesh_capable", False))
+            except OSError:
+                mesh_block["mesh_capable"] = False
+            if role in ("relay", "receiver"):
+                try:
+                    import json as _json
+                    from pathlib import Path as _P
+                    snap = _json.loads(
+                        _P("/run/ados/mesh-state.json").read_text(encoding="utf-8")
+                    )
+                    mesh_block["up"] = bool(snap.get("up", False))
+                    mesh_block["peer_count"] = len(snap.get("neighbors", []))
+                    mesh_block["selected_gateway"] = snap.get("selected_gateway")
+                    mesh_block["partition"] = bool(snap.get("partition", False))
+                except (OSError, ValueError):
+                    pass
+    except Exception:
+        pass
+
     return {
         "version": __version__,
         "uptime_seconds": uptime,
@@ -229,6 +264,7 @@ async def get_full_status(request: Request):
         "video": video,
         "telemetry": telemetry,
         "capabilities": capabilities,
+        "mesh": mesh_block,
     }
 
 
