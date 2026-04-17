@@ -2327,7 +2327,7 @@ async def post_pair_close() -> dict[str, Any]:
         )
     from ados.services.ground_station.pairing_manager import get_pairing_manager
     mgr = get_pairing_manager()
-    was_open = mgr.is_window_open()
+    was_open = await mgr.is_window_open()
     await mgr.close_window()
     return {"closed": was_open}
 
@@ -2362,7 +2362,7 @@ async def post_pair_approve(device_id: str) -> dict[str, Any]:
     )
     import secrets as _secrets
     mgr = get_pairing_manager()
-    if not mgr.is_window_open():
+    if not await mgr.is_window_open():
         raise HTTPException(
             status_code=410,
             detail={"error": {"code": "E_PAIR_WINDOW_EXPIRED"}},
