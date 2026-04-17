@@ -1,0 +1,31 @@
+[Unit]
+Description=ADOS WFB-ng relay (mesh relay role)
+After=ados-supervisor.service ados-batman.service
+Wants=ados-batman.service
+PartOf=ados-supervisor.service
+# Only runs when the role sentinel reads `relay`. role_manager owns this file.
+ConditionPathExists=/etc/ados/mesh/role
+
+[Service]
+Type=simple
+User=root
+ExecStart=/opt/ados/venv/bin/python -m ados.services.ground_station.wfb_relay
+Restart=on-failure
+RestartSec=5
+Environment=ADOS_CONFIG=/etc/ados/config.yaml
+EnvironmentFile=-/etc/ados/env
+
+# Relay shells out to wfb_rx -f which needs raw socket + monitor mode.
+AmbientCapabilities=CAP_NET_RAW CAP_NET_ADMIN
+NoNewPrivileges=no
+ProtectSystem=strict
+ReadWritePaths=/var/ados /run/ados /dev /etc/ados
+
+MemoryMax=64M
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ados-wfb-relay
+
+[Install]
+WantedBy=ados-supervisor.service
