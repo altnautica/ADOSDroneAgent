@@ -2008,7 +2008,8 @@ def _read_yaml_or_empty(path: Path) -> dict[str, Any]:
     """Read a YAML file into a dict. Returns {} on any failure.
 
     Used for `/etc/ados/profile.conf` which is written as YAML by
-    `profile_detect.write_profile_conf` and by `install.sh --with-mesh`.
+    `profile_detect.write_profile_conf` and by the ground-station install
+    path.
     """
     try:
         if path.is_file():
@@ -2081,10 +2082,11 @@ async def get_role() -> dict[str, Any]:
 async def put_role(req: RoleChangeRequest) -> dict[str, Any]:
     """Change mesh role. Applies mask/unmask + start/stop in order."""
     app = _require_ground_profile()
-    # Mesh capability gate: profile.conf is YAML, written by install.sh
-    # with --with-mesh and by profile_detect. Nodes without the flag
-    # cannot assume a mesh role; direct remains allowed so an opt-out
-    # path is available even if the flag is missing.
+    # Mesh capability gate: profile.conf is YAML, written by the
+    # ground-station install path and refreshed by profile_detect when
+    # it sees a second USB WiFi adapter. Nodes without the flag cannot
+    # assume a mesh role; direct remains allowed so an opt-out path is
+    # available even if the flag is missing.
     profile_conf = _read_yaml_or_empty(Path("/etc/ados/profile.conf"))
     mesh_capable = bool(profile_conf.get("mesh_capable", False))
     if req.role in ("relay", "receiver") and not mesh_capable:

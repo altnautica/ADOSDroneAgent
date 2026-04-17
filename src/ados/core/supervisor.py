@@ -767,7 +767,7 @@ class Supervisor:
         elif device.category == UsbCategory.RADIO:
             # Only restart ados-wfb for the WFB-ng adapter
             pid_hex = f"{device.pid:04x}".lower()
-            if pid_hex in ("8812", "b812"):  # RTL8812AU/BU
+            if pid_hex in ("8812", "881a", "881b", "881c", "b812"):  # RTL8812 family
                 affected_service = "ados-wfb"
         # GPS / LORA / OTHER: log-only, no restart
 

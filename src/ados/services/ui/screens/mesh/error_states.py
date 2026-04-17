@@ -22,7 +22,7 @@ _MESSAGES: dict[str, tuple[str, str]] = {
     "E_REST_UNAVAILABLE": ("Agent offline", "REST call did not respond"),
     "E_MESH_PARTITION": ("Mesh split", "Some peers unreachable"),
     "E_PSK_MISMATCH": ("PSK mismatch", "Different deployment"),
-    "E_BATCTL_UNAVAILABLE": ("batctl missing", "Install with --with-mesh"),
+    "E_BATCTL_UNAVAILABLE": ("batctl missing", "Re-run installer"),
 }
 
 

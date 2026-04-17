@@ -36,7 +36,7 @@ The agent writes `/etc/ados/mesh/role`, stops the services that no longer apply,
 
 Failure modes:
 
-- `403 role transition requires mesh capability`. run `install.sh --with-mesh` on this node first.
+- `403 role transition requires mesh capability`. plug a second USB WiFi adapter into this node; profile_detect will fingerprint it on the next boot (or after `systemctl restart ados-bootstrap` on the running node) and flip `mesh_capable: true` in `/etc/ados/profile.conf`.
 - `409 relay requires an approved invite bundle`. a relay needs to join a receiver's Accept window before the role can switch. See `relay-mode-setup.md`.
 
 ## ados gs mesh

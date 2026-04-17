@@ -7,7 +7,7 @@ This doc walks through setting up a fresh node as a receiver and admitting relay
 ## Prerequisites
 
 - A flashed SBC with the usual ground-station hardware: one RTL8812EU USB adapter for WFB-ng RX, one OLED on I2C, and four GPIO buttons.
-- **One additional USB WiFi dongle** used as the mesh carrier.
+- **One additional RTL8812EU USB adapter** used as the mesh carrier (default). Any 802.11s-capable USB WiFi dongle also works, but same-chip is the default for inventory simplicity and matching TX power.
 - The ground-station-profile fingerprint (auto-detected at boot).
 - The drone paired and transmitting on a known channel.
 
@@ -15,14 +15,14 @@ One node in a distributed-receive deployment becomes the receiver; the rest are 
 
 ## Install
 
-Run the standard installer with the `--with-mesh` flag:
+Run the standard installer:
 
 ```
 curl -sSL https://raw.githubusercontent.com/altnautica/ADOSDroneAgent/main/scripts/install.sh \
-  | sudo bash -s -- --with-mesh
+  | sudo bash
 ```
 
-This installs `batctl`, `avahi-daemon`, `wpasupplicant`, and (best-effort) an 802.11s SAE backend. It writes `mesh_capable: true` to `/etc/ados/profile.conf`. Role stays at `direct` until it is explicitly set.
+On a ground-station profile, this install always pulls `batctl`, `avahi-daemon`, `wpasupplicant`, and a best-effort 802.11s SAE backend. profile_detect fingerprints the second USB WiFi adapter and writes `mesh_capable: true` to `/etc/ados/profile.conf`. Role stays at `direct` until it is explicitly set.
 
 ## Role transition
 

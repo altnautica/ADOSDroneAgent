@@ -21,7 +21,7 @@ class WfbChannel:
     bandwidth_mhz: int = 20
 
 
-# Standard 5 GHz channels commonly used with WFB-ng and RTL8812AU/BU.
+# Standard 5 GHz channels commonly used with WFB-ng on the RTL8812 family.
 # These channels are typically available in most regulatory domains.
 STANDARD_CHANNELS: list[WfbChannel] = [
     WfbChannel(frequency_mhz=5180, channel_number=36),

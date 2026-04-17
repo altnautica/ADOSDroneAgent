@@ -34,11 +34,16 @@ except ImportError:  # pragma: no cover - fall back to stdlib logging
     log = logging.getLogger(__name__)
 
 
-# RTL8812 family USB IDs (vendor 0x0bda Realtek, known product IDs).
+# RTL8812 family USB IDs used on WFB-ng primary adapters.
+# (vendor 0x0bda Realtek, known product IDs for the RTL8812 series).
+# 0xB812 is the RTL8822E-class silicon used by the LB-LINK BL-M8812EU2
+# module and similar vendor rebrands of the RTL8812EU.
 _RTL8812_IDS: set[tuple[int, int]] = {
     (0x0BDA, 0x8812),
     (0x0BDA, 0x881A),
-    (0x0BDA, 0xA81A),
+    (0x0BDA, 0x881B),
+    (0x0BDA, 0x881C),
+    (0x0BDA, 0xB812),
 }
 
 # Default I2C bus for OLED and default BCM GPIO pin set for the four buttons.
@@ -215,15 +220,16 @@ def probe_uplink_type() -> tuple[int, int, bool]:
 
 
 def probe_mesh_capable() -> bool:
-    """True when a second wireless adapter is present beyond the primary WFB NIC.
+    """True when a second USB-attached wireless adapter is present.
 
     Mesh role (relay or receiver) requires one wireless NIC in monitor mode
     for WFB-ng plus a second NIC running 802.11s or IBSS for batman-adv.
-    We approximate that by counting /sys/class/net/wlan* entries. The
-    mesh_manager service validates driver support for 802.11s at service
-    start; this probe is intentionally permissive so --with-mesh can still
-    flag the node as mesh-capable at install time even if the second
-    dongle is temporarily unplugged.
+    The second NIC must be USB-attached so it can be hot-plugged and does
+    not clash with the SBC's onboard SDIO or PCIe wireless (e.g. Pi 4B's
+    Broadcom module or a Radxa CM4 onboard chip). Counting raw
+    /sys/class/net/wlan* entries is not enough because onboard WiFi shows
+    up there too; we walk each wlan*/device symlink and match the bus
+    type before counting.
 
     The flag does not change the default role (which stays `direct`). It
     only controls whether the OLED shows the Mesh submenu and whether the
@@ -233,8 +239,22 @@ def probe_mesh_capable() -> bool:
         net_dir = Path("/sys/class/net")
         if not net_dir.is_dir():
             return False
-        wlan_ifaces = [p.name for p in net_dir.iterdir() if p.name.startswith("wlan")]
-        return len(wlan_ifaces) >= 2
+        usb_wlan_count = 0
+        for iface in net_dir.iterdir():
+            if not iface.name.startswith("wlan"):
+                continue
+            device_link = iface / "device"
+            if not device_link.exists():
+                continue
+            try:
+                resolved = os.path.realpath(device_link)
+            except OSError:
+                continue
+            # Device path contains "/usb" only when the NIC is attached via
+            # USB. Onboard SDIO shows "/sdio/", PCIe shows "/pci/", etc.
+            if "/usb" in resolved:
+                usb_wlan_count += 1
+        return usb_wlan_count >= 2
     except OSError:
         return False
 

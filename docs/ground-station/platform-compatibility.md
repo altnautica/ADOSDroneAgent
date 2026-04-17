@@ -6,7 +6,7 @@ WFB-ng requires WiFi adapters in monitor mode with packet injection. This is a L
 
 WFB-ng (WiFi Broadcast next generation) works by putting a WiFi adapter into monitor mode and injecting raw 802.11 frames. This bypasses the normal WiFi stack entirely. No association, no authentication, no TCP/IP overhead. Just raw packets over the air, with FEC (forward error correction) to handle packet loss. This is what gives WFB-ng its low latency and long range.
 
-But monitor mode with packet injection requires kernel-level driver support that exposes raw frame transmission and reception. Only Linux provides this through its mac80211 subsystem and patched RTL8812AU/EU drivers.
+But monitor mode with packet injection requires kernel-level driver support that exposes raw frame transmission and reception. Only Linux provides this through its mac80211 subsystem and patched drivers for the RTL8812 family.
 
 This is not a temporary software limitation. Apple, Microsoft, and Google deliberately restrict raw WiFi access for security reasons. There is no workaround, no hack, no special driver that enables it on these platforms. The only path to WFB-ng performance is a hardware device running Linux.
 
@@ -41,7 +41,7 @@ WFB-ng requires a Linux host with monitor-mode drivers. Mac, Windows, Android, a
 
 ## Mesh Capability by Host Board
 
-A node can act as `relay` or `receiver` if it has a second USB port (beyond the one used by the RTL8812EU) AND a kernel with the `batman-adv` module. Both are standard on every supported board once the `--with-mesh` install option runs apt install for `batctl` and related packages.
+A node can act as `relay` or `receiver` if it has a second USB port (beyond the one used by the primary RTL8812EU) AND a kernel with the `batman-adv` module. Both are standard on every supported board. The mesh deps (`batctl`, `avahi-daemon`, `wpasupplicant-mesh-sae`) are installed on every ground-station install without any flag; the role stays `direct` by default until the operator picks `relay` or `receiver` via the OLED or `ados gs role set`.
 
 | Board | Second USB port for mesh dongle | Kernel batman-adv module | Mesh capable |
 |-------|---|---|---|
@@ -51,6 +51,8 @@ A node can act as `relay` or `receiver` if it has a second USB port (beyond the 
 | Radxa CM3 + carrier | Depends on carrier | Yes (in-tree) | Yes if carrier exposes ≥ 2 USB ports |
 | Radxa CM4 + carrier | Depends on carrier | Yes (in-tree) | Yes if carrier exposes ≥ 2 USB ports |
 | USB Dongle variant | No (host-dependent) | Host-dependent | Not applicable (not a standalone node) |
+
+**Default mesh carrier adapter: same RTL8812EU as the primary.** Two identical adapters on two USB ports, same DKMS driver, same antenna ecosystem. The primary holds monitor mode for WFB-ng RX; the secondary runs 802.11s for batman-adv. MediaTek MT7612U and MT7921AU are valid alternatives when the operator wants mainline kernel coverage but the default stays same-chip for inventory simplicity and range.
 
 `direct` role works on every board above without the mesh dongle. Mesh support is an additional capability, not a prerequisite.
 

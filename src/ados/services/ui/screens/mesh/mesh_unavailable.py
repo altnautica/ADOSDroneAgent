@@ -16,10 +16,10 @@ from typing import Any, Awaitable, Callable
 
 def render(draw: Any, width: int, height: int, state: dict) -> None:
     draw.text((0, 0), "Mesh unavailable", fill="white")
-    draw.text((0, 14), "Need a 2nd USB WiFi", fill="white")
-    draw.text((0, 24), "adapter + mesh deps.", fill="white")
-    draw.text((0, 38), "Rerun installer with", fill="white")
-    draw.text((0, 48), "--with-mesh on setup.", fill="white")
+    draw.text((0, 14), "Plug a 2nd USB WiFi", fill="white")
+    draw.text((0, 24), "adapter and reboot.", fill="white")
+    draw.text((0, 38), "Auto-detect picks it", fill="white")
+    draw.text((0, 48), "up on next boot.", fill="white")
     draw.text((0, 56), "B4 back", fill="white")
 
 
