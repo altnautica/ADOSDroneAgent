@@ -318,6 +318,47 @@ async def get_ground_station_status() -> dict[str, Any]:
     except Exception:
         pass
 
+    # Role snapshot. Source of truth for the OLED Mesh submenu visibility
+    # and for the GCS TopBar role badge. Reads the on-disk role sentinel
+    # (authoritative across restarts) plus the Pydantic-configured value.
+    role_block: dict[str, Any] = {
+        "current": "direct",
+        "configured": "direct",
+        "supported": ["direct", "relay", "receiver"],
+        "mesh_capable": False,
+    }
+    try:
+        from ados.services.ground_station.role_manager import get_current_role
+        role_block["current"] = get_current_role()
+    except Exception:
+        pass
+    try:
+        role_block["configured"] = getattr(
+            getattr(app.config, "ground_station", None), "role", "direct"
+        )
+    except Exception:
+        pass
+    profile_conf = _read_yaml_or_empty(Path("/etc/ados/profile.conf"))
+    role_block["mesh_capable"] = bool(profile_conf.get("mesh_capable", False))
+
+    # Mesh snapshot. Populated only when a relay or receiver node has an
+    # active mesh. Direct nodes get an empty dict so the OLED and GCS can
+    # feature-detect without extra round-trips.
+    mesh_block: dict[str, Any] = {}
+    try:
+        snap_path = Path("/run/ados/mesh-state.json")
+        if role_block["current"] in ("relay", "receiver") and snap_path.is_file():
+            snap = json.loads(snap_path.read_text(encoding="utf-8"))
+            mesh_block = {
+                "up": bool(snap.get("up", False)),
+                "peer_count": len(snap.get("neighbors", [])),
+                "selected_gateway": snap.get("selected_gateway"),
+                "partition": bool(snap.get("partition", False)),
+                "mesh_id": snap.get("mesh_id"),
+            }
+    except Exception:
+        pass
+
     return {
         "profile": "ground_station",
         "paired_drone": {
@@ -332,6 +373,8 @@ async def get_ground_station_status() -> dict[str, Any]:
         "network": _network_view(app),
         "system": _system_snapshot(),
         "recording": False,
+        "role": role_block,
+        "mesh": mesh_block,
     }
 
 
@@ -1048,17 +1091,10 @@ async def post_factory_reset(
             detail={"error": {"code": "E_CONFIRM_MISMATCH"}},
         )
 
-    try:
-        result = await pm.factory_reset()
-    except Exception as exc:
-        raise HTTPException(
-            status_code=500,
-            detail={"error": {"code": "E_FACTORY_RESET_FAILED", "message": str(exc)}},
-        ) from exc
-
-    # Also wipe mesh identity so a decommissioned box cannot rejoin the
-    # old deployment on its next boot. Safe to call unconditionally: it
-    # no-ops when no mesh state exists.
+    # Take the node out of any mesh role BEFORE wiping pair state, so
+    # mesh services (batman, wfb_relay, wfb_receiver) are stopped and
+    # their identity files are not racing with the pair_manager reset.
+    # `apply_role("direct")` is a no-op when already direct.
     mesh_wipe: dict[str, Any] = {"cleared_mesh": False}
     try:
         from ados.services.ground_station.pairing_client import (
@@ -1074,30 +1110,47 @@ async def post_factory_reset(
         )
 
         had_identity = has_persisted_identity()
-        clear_persisted_identity()
-        if REVOCATIONS_PATH.is_file():
-            try:
-                REVOCATIONS_PATH.unlink()
-            except OSError:
-                pass
-        if ROLE_FILE.is_file():
-            try:
-                ROLE_FILE.unlink()
-            except OSError:
-                pass
-        # Drive every mesh unit back to masked state.
         await apply_role("direct", reason="factory_reset")
-        mesh_wipe = {
-            "cleared_mesh": had_identity,
-            "role": "direct",
-        }
     except Exception as exc:
-        # Best-effort: do not fail the factory reset itself. Log the
-        # mesh-wipe failure so the operator can follow up.
         mesh_wipe = {
             "cleared_mesh": False,
-            "error": str(exc),
+            "error": f"role transition failed: {exc}",
         }
+        had_identity = False
+
+    try:
+        result = await pm.factory_reset()
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail={"error": {"code": "E_FACTORY_RESET_FAILED", "message": str(exc)}},
+        ) from exc
+
+    # Wipe mesh identity files after services are down and pair state
+    # is cleared. Safe to call unconditionally; no-ops when the files
+    # are already absent.
+    if "error" not in mesh_wipe:
+        try:
+            clear_persisted_identity()
+            if REVOCATIONS_PATH.is_file():
+                try:
+                    REVOCATIONS_PATH.unlink()
+                except OSError:
+                    pass
+            if ROLE_FILE.is_file():
+                try:
+                    ROLE_FILE.unlink()
+                except OSError:
+                    pass
+            mesh_wipe = {
+                "cleared_mesh": had_identity,
+                "role": "direct",
+            }
+        except Exception as exc:
+            mesh_wipe = {
+                "cleared_mesh": False,
+                "error": str(exc),
+            }
 
     if isinstance(result, dict):
         result.setdefault("mesh", mesh_wipe)
@@ -1919,6 +1972,25 @@ def _read_json_or_empty(path: Path) -> dict[str, Any]:
     return {}
 
 
+def _read_yaml_or_empty(path: Path) -> dict[str, Any]:
+    """Read a YAML file into a dict. Returns {} on any failure.
+
+    Used for `/etc/ados/profile.conf` which is written as YAML by
+    `profile_detect.write_profile_conf` and by `install.sh --with-mesh`.
+    """
+    try:
+        if path.is_file():
+            import yaml as _yaml
+            data = _yaml.safe_load(path.read_text(encoding="utf-8"))
+            return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        pass
+    except Exception:
+        # Corrupt YAML should not crash the endpoint; treat as empty.
+        pass
+    return {}
+
+
 class RoleChangeRequest(BaseModel):
     role: Literal["direct", "relay", "receiver"]
     confirm_token: str | None = None
@@ -1977,17 +2049,41 @@ async def get_role() -> dict[str, Any]:
 async def put_role(req: RoleChangeRequest) -> dict[str, Any]:
     """Change mesh role. Applies mask/unmask + start/stop in order."""
     app = _require_ground_profile()
-    # Mesh capability gate: profile.conf is written by install.sh with
-    # --with-mesh and by profile_detect. Nodes without the flag cannot
-    # assume a mesh role; direct remains allowed so an opt-out path is
-    # available even if the flag is missing.
-    profile_conf = _read_json_or_empty(Path("/etc/ados/profile.conf"))
+    # Mesh capability gate: profile.conf is YAML, written by install.sh
+    # with --with-mesh and by profile_detect. Nodes without the flag
+    # cannot assume a mesh role; direct remains allowed so an opt-out
+    # path is available even if the flag is missing.
+    profile_conf = _read_yaml_or_empty(Path("/etc/ados/profile.conf"))
     mesh_capable = bool(profile_conf.get("mesh_capable", False))
     if req.role in ("relay", "receiver") and not mesh_capable:
         raise HTTPException(
             status_code=409,
             detail={"error": {"code": "E_MESH_NOT_CAPABLE"}},
         )
+
+    # Paired-identity gate for relay: transitioning a fresh box into the
+    # relay role with no mesh_id or psk on disk would send mesh_manager
+    # into a restart loop. Force the operator to pair first. `direct`
+    # and `receiver` have no such requirement (receiver generates its
+    # own identity on first boot of mesh_manager).
+    if req.role == "relay":
+        try:
+            from ados.services.ground_station.pairing_client import (
+                has_persisted_identity,
+            )
+            paired = has_persisted_identity()
+        except Exception:
+            paired = False
+        if not paired:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": {
+                        "code": "E_NOT_PAIRED",
+                        "message": "relay role requires a completed pair with a receiver",
+                    }
+                },
+            )
 
     from ados.services.ground_station.role_manager import apply_role
     try:
@@ -2204,6 +2300,29 @@ async def post_pair_accept(req: PairAcceptRequest) -> dict[str, Any]:
         "closes_at_ms": window.closes_at_ms,
         "duration_s": req.duration_s,
     }
+
+
+@router.post("/pair/close")
+async def post_pair_close() -> dict[str, Any]:
+    """Close the receiver Accept window early. Idempotent.
+
+    Called by the OLED when the operator presses B4 during the Accept
+    window overlay. Also safe to call when no window is open; returns
+    `{"closed": false}` in that case so the caller can distinguish a
+    real close from a no-op.
+    """
+    _require_ground_profile()
+    from ados.services.ground_station.role_manager import get_current_role
+    if get_current_role() != "receiver":
+        raise HTTPException(
+            status_code=409,
+            detail={"error": {"code": "E_WRONG_ROLE", "required": "receiver"}},
+        )
+    from ados.services.ground_station.pairing_manager import get_pairing_manager
+    mgr = get_pairing_manager()
+    was_open = mgr.is_window_open()
+    await mgr.close_window()
+    return {"closed": was_open}
 
 
 @router.get("/pair/pending")
