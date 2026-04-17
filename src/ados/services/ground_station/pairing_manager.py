@@ -1,0 +1,402 @@
+"""Field-only tap-to-pair for mesh relays (MSN-035).
+
+When a receiver operator opens the Accept window from the OLED, this
+module listens on UDP/`bat0` for join requests, runs a Curve25519 ECDH
+key exchange with each requesting relay, encrypts an invite bundle
+containing everything the relay needs to join the deployment (mesh id,
+shared PSK, receiver mDNS name, drone WFB key, expiry), and sends it
+back. The relay writes the bundle into `/etc/ados/mesh/` and restarts
+its mesh services.
+
+No laptop. No cloud. No QR codes. Default window is 60 seconds; the
+receiver operator explicitly closes it by pressing B4.
+
+State machine (per node)::
+
+    idle -> accept_window_open -> request_received -> approved -> completed
+                     |-> closed (60s timeout or B4)
+
+    idle -> joining -> joined
+           |-> psk_mismatch | bundle_expired | revoked
+
+Revocation list is persisted at `/etc/ados/mesh/revocations.json`
+(0o600). When a revoked relay attempts to join, the request is silently
+dropped and `revoked` event published.
+
+The module provides library-level primitives only. The REST router and
+OLED screens drive the lifecycle.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import os
+import secrets
+import struct
+import time
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+from cryptography.hazmat.primitives import hashes, hmac
+from cryptography.hazmat.primitives.asymmetric.x25519 import (
+    X25519PrivateKey,
+    X25519PublicKey,
+)
+from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
+from cryptography.hazmat.primitives.serialization import (
+    Encoding,
+    PublicFormat,
+)
+
+from ados.core.logging import get_logger
+
+from .events import PairingEvent, get_pairing_event_bus
+
+log = get_logger("ground_station.pairing_manager")
+
+REVOCATIONS_PATH = Path("/etc/ados/mesh/revocations.json")
+PAIR_UDP_PORT = 5801
+DEFAULT_ACCEPT_WINDOW_S = 60
+INVITE_TTL_S = 120
+
+
+@dataclass
+class PendingRequest:
+    """A relay's join request waiting for operator approval."""
+
+    device_id: str
+    relay_pubkey: bytes  # 32-byte X25519 public key
+    remote_addr: tuple[str, int]
+    received_at_ms: int
+
+
+@dataclass
+class InviteBundle:
+    """What a relay receives on approval.
+
+    Fields map 1:1 into /etc/ados/mesh/ paths on the relay side.
+    """
+
+    mesh_id: str
+    mesh_psk: bytes  # 32 bytes
+    drone_channel: int
+    wfb_rx_key: bytes  # drone-paired wfb rx key material
+    receiver_mdns_host: str
+    receiver_mdns_port: int
+    issued_at_ms: int
+    expires_at_ms: int
+
+    def pack(self) -> bytes:
+        payload = {
+            "mesh_id": self.mesh_id,
+            "mesh_psk": self.mesh_psk.hex(),
+            "drone_channel": self.drone_channel,
+            "wfb_rx_key": self.wfb_rx_key.hex(),
+            "receiver_mdns_host": self.receiver_mdns_host,
+            "receiver_mdns_port": self.receiver_mdns_port,
+            "issued_at_ms": self.issued_at_ms,
+            "expires_at_ms": self.expires_at_ms,
+        }
+        return json.dumps(payload, sort_keys=True).encode("utf-8")
+
+    @classmethod
+    def unpack(cls, blob: bytes) -> InviteBundle:
+        data = json.loads(blob.decode("utf-8"))
+        return cls(
+            mesh_id=data["mesh_id"],
+            mesh_psk=bytes.fromhex(data["mesh_psk"]),
+            drone_channel=int(data["drone_channel"]),
+            wfb_rx_key=bytes.fromhex(data["wfb_rx_key"]),
+            receiver_mdns_host=data["receiver_mdns_host"],
+            receiver_mdns_port=int(data["receiver_mdns_port"]),
+            issued_at_ms=int(data["issued_at_ms"]),
+            expires_at_ms=int(data["expires_at_ms"]),
+        )
+
+
+@dataclass
+class AcceptWindow:
+    opened_at_ms: int
+    closes_at_ms: int
+    pending: list[PendingRequest] = field(default_factory=list)
+    approvals: dict[str, int] = field(default_factory=dict)  # device_id -> ts
+
+
+def _hkdf_session_key(shared: bytes, context: bytes) -> bytes:
+    """Derive a 32-byte ChaCha20Poly1305 key from the ECDH shared secret."""
+    h = hmac.HMAC(b"\x00" * 32, hashes.SHA256())
+    h.update(shared)
+    prk = h.finalize()
+    h2 = hmac.HMAC(prk, hashes.SHA256())
+    h2.update(context + b"\x01")
+    return h2.finalize()
+
+
+def load_revocations() -> set[str]:
+    """Read the revocation list. Returns an empty set on missing/bad file."""
+    if not REVOCATIONS_PATH.is_file():
+        return set()
+    try:
+        data = json.loads(REVOCATIONS_PATH.read_text(encoding="utf-8"))
+        if isinstance(data, list):
+            return {str(x) for x in data}
+    except (OSError, ValueError):
+        pass
+    return set()
+
+
+def save_revocations(revoked: set[str]) -> None:
+    REVOCATIONS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    tmp = REVOCATIONS_PATH.with_suffix(REVOCATIONS_PATH.suffix + ".tmp")
+    tmp.write_text(json.dumps(sorted(revoked)), encoding="utf-8")
+    os.chmod(tmp, 0o600)
+    os.replace(str(tmp), str(REVOCATIONS_PATH))
+
+
+def revoke(device_id: str) -> None:
+    rs = load_revocations()
+    rs.add(device_id)
+    save_revocations(rs)
+    log.info("pairing_revoked", device_id=device_id)
+
+
+def unrevoke(device_id: str) -> None:
+    rs = load_revocations()
+    rs.discard(device_id)
+    save_revocations(rs)
+
+
+def is_revoked(device_id: str) -> bool:
+    return device_id in load_revocations()
+
+
+def generate_keypair() -> tuple[X25519PrivateKey, bytes]:
+    """Return (private, public_bytes) for ECDH."""
+    priv = X25519PrivateKey.generate()
+    pub = priv.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+    return priv, pub
+
+
+def encrypt_invite(
+    bundle: InviteBundle,
+    receiver_priv: X25519PrivateKey,
+    relay_pubkey_bytes: bytes,
+) -> bytes:
+    """ECDH + ChaCha20Poly1305 encrypted invite bundle.
+
+    Wire format:
+        32 bytes  receiver_pubkey
+        12 bytes  nonce
+        N bytes   ciphertext || tag
+    """
+    peer_pub = X25519PublicKey.from_public_bytes(relay_pubkey_bytes)
+    shared = receiver_priv.exchange(peer_pub)
+    key = _hkdf_session_key(shared, b"ados-mesh-invite")
+    nonce = secrets.token_bytes(12)
+    cipher = ChaCha20Poly1305(key)
+    ct = cipher.encrypt(nonce, bundle.pack(), associated_data=None)
+    receiver_pub = receiver_priv.public_key().public_bytes(
+        Encoding.Raw, PublicFormat.Raw,
+    )
+    return receiver_pub + nonce + ct
+
+
+def decrypt_invite(
+    blob: bytes,
+    relay_priv: X25519PrivateKey,
+) -> InviteBundle:
+    """Decrypt an invite received from the receiver."""
+    if len(blob) < 32 + 12 + 16:
+        raise ValueError("invite blob too short")
+    receiver_pub_bytes = blob[:32]
+    nonce = blob[32:44]
+    ct = blob[44:]
+    peer_pub = X25519PublicKey.from_public_bytes(receiver_pub_bytes)
+    shared = relay_priv.exchange(peer_pub)
+    key = _hkdf_session_key(shared, b"ados-mesh-invite")
+    cipher = ChaCha20Poly1305(key)
+    plaintext = cipher.decrypt(nonce, ct, associated_data=None)
+    bundle = InviteBundle.unpack(plaintext)
+    now_ms = int(time.time() * 1000)
+    if now_ms > bundle.expires_at_ms:
+        raise ValueError("invite expired")
+    return bundle
+
+
+class PairingManager:
+    """Receiver-side state machine for the Accept window.
+
+    Owned by the REST layer; one instance per process. Not a standalone
+    systemd service. When the REST handler opens the window, this class
+    binds a UDP listener on `bat0:5801` and buffers incoming join
+    requests into `pending`. The OLED handler (or REST caller) then
+    approves individual device_ids, which encrypts and sends the invite
+    bundle on the same socket.
+    """
+
+    def __init__(self) -> None:
+        self._window: AcceptWindow | None = None
+        self._priv: X25519PrivateKey | None = None
+        self._pub: bytes = b""
+        self._bus = get_pairing_event_bus()
+        self._lock = asyncio.Lock()
+        self._socket_task: asyncio.Task | None = None
+
+    @property
+    def window(self) -> AcceptWindow | None:
+        return self._window
+
+    async def open_window(
+        self,
+        duration_s: int = DEFAULT_ACCEPT_WINDOW_S,
+    ) -> AcceptWindow:
+        async with self._lock:
+            if self._window is not None and self._is_window_open_locked():
+                return self._window
+            self._priv, self._pub = generate_keypair()
+            now_ms = int(time.time() * 1000)
+            self._window = AcceptWindow(
+                opened_at_ms=now_ms,
+                closes_at_ms=now_ms + duration_s * 1000,
+            )
+            await self._bus.publish(
+                PairingEvent(
+                    kind="accept_window_opened",
+                    timestamp_ms=now_ms,
+                    payload={"duration_s": duration_s},
+                )
+            )
+            log.info("pairing_window_opened", duration_s=duration_s)
+            return self._window
+
+    async def close_window(self) -> None:
+        async with self._lock:
+            if self._window is None:
+                return
+            now_ms = int(time.time() * 1000)
+            self._window = None
+            self._priv = None
+            await self._bus.publish(
+                PairingEvent(
+                    kind="accept_window_closed",
+                    timestamp_ms=now_ms,
+                    payload={},
+                )
+            )
+            log.info("pairing_window_closed")
+
+    def _is_window_open_locked(self) -> bool:
+        if self._window is None:
+            return False
+        return int(time.time() * 1000) < self._window.closes_at_ms
+
+    def is_window_open(self) -> bool:
+        return self._is_window_open_locked()
+
+    async def submit_request(
+        self,
+        device_id: str,
+        relay_pubkey: bytes,
+        remote_addr: tuple[str, int],
+    ) -> bool:
+        """Record an incoming join request. Returns False if rejected."""
+        if not self.is_window_open():
+            return False
+        if is_revoked(device_id):
+            await self._bus.publish(
+                PairingEvent(
+                    kind="revoked",
+                    timestamp_ms=int(time.time() * 1000),
+                    payload={"device_id": device_id},
+                )
+            )
+            return False
+        async with self._lock:
+            if self._window is None:
+                return False
+            existing = {r.device_id for r in self._window.pending}
+            if device_id not in existing:
+                self._window.pending.append(
+                    PendingRequest(
+                        device_id=device_id,
+                        relay_pubkey=relay_pubkey,
+                        remote_addr=remote_addr,
+                        received_at_ms=int(time.time() * 1000),
+                    )
+                )
+                await self._bus.publish(
+                    PairingEvent(
+                        kind="join_request_received",
+                        timestamp_ms=int(time.time() * 1000),
+                        payload={"device_id": device_id},
+                    )
+                )
+                log.info("pairing_join_request", device_id=device_id)
+        return True
+
+    async def approve(
+        self,
+        device_id: str,
+        bundle: InviteBundle,
+    ) -> bytes | None:
+        """Build the encrypted invite for a pending relay.
+
+        Returns the opaque blob the caller should send back on the UDP
+        socket, or None if the device_id is not pending or the window
+        is closed.
+        """
+        async with self._lock:
+            if self._window is None or self._priv is None:
+                return None
+            if not self._is_window_open_locked():
+                return None
+            match = next(
+                (r for r in self._window.pending if r.device_id == device_id),
+                None,
+            )
+            if match is None:
+                return None
+            blob = encrypt_invite(bundle, self._priv, match.relay_pubkey)
+            self._window.approvals[device_id] = int(time.time() * 1000)
+            await self._bus.publish(
+                PairingEvent(
+                    kind="join_approved",
+                    timestamp_ms=int(time.time() * 1000),
+                    payload={"device_id": device_id},
+                )
+            )
+            log.info("pairing_join_approved", device_id=device_id)
+            return blob
+
+    async def snapshot(self) -> dict[str, Any]:
+        async with self._lock:
+            if self._window is None:
+                return {"open": False}
+            return {
+                "open": self._is_window_open_locked(),
+                "opened_at_ms": self._window.opened_at_ms,
+                "closes_at_ms": self._window.closes_at_ms,
+                "pending": [
+                    {
+                        "device_id": r.device_id,
+                        "received_at_ms": r.received_at_ms,
+                        "remote_ip": r.remote_addr[0],
+                    }
+                    for r in self._window.pending
+                ],
+                "approvals": dict(self._window.approvals),
+            }
+
+
+# Process-local singleton so the REST router, OLED menu, and socket
+# listener all see the same state machine.
+_manager: PairingManager | None = None
+
+
+def get_pairing_manager() -> PairingManager:
+    global _manager
+    if _manager is None:
+        _manager = PairingManager()
+    return _manager
