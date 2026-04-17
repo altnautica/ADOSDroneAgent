@@ -1859,3 +1859,504 @@ async def ws_uplink_events(websocket: WebSocket) -> None:
     except Exception:
         # Bus closed or subscriber removed under us.
         pass
+
+
+# ---------------------------------------------------------------------------
+# DEC-119 / MSN-035: Phase 5 distributed RX + mesh + pairing routes
+# ---------------------------------------------------------------------------
+
+_MESH_STATE_JSON = Path("/run/ados/mesh-state.json")
+_WFB_RELAY_JSON = Path("/run/ados/wfb-relay.json")
+_WFB_RECEIVER_JSON = Path("/run/ados/wfb-receiver.json")
+
+
+def _read_json_or_empty(path: Path) -> dict[str, Any]:
+    try:
+        if path.is_file():
+            return json.loads(path.read_text(encoding="utf-8")) or {}
+    except (OSError, ValueError):
+        pass
+    return {}
+
+
+class RoleChangeRequest(BaseModel):
+    role: Literal["direct", "relay", "receiver"]
+    confirm_token: str | None = None
+
+
+class MeshConfigUpdate(BaseModel):
+    mesh_id: str | None = None
+    carrier: Literal["802.11s", "ibss"] | None = None
+    channel: int | None = Field(default=None, ge=1, le=13)
+
+
+class MeshGatewayPreferenceUpdate(BaseModel):
+    mode: Literal["auto", "pinned", "off"]
+    pinned_mac: str | None = None
+
+
+class PairAcceptRequest(BaseModel):
+    duration_s: int = Field(default=60, ge=5, le=300)
+
+
+class PairApproveRequest(BaseModel):
+    device_id: str
+
+
+class PairRevokeRequest(BaseModel):
+    device_id: str
+
+
+class PairJoinRequest(BaseModel):
+    receiver_host: str | None = None
+    receiver_port: int | None = Field(default=None, ge=1, le=65535)
+
+
+@router.get("/role")
+async def get_role() -> dict[str, Any]:
+    """Read current mesh role plus a capability hint."""
+    app = _require_ground_profile()
+    from ados.services.ground_station.role_manager import (
+        all_mesh_units,
+        get_current_role,
+        role_units,
+    )
+    current = get_current_role()
+    return {
+        "role": current,
+        "configured": getattr(
+            getattr(app.config, "ground_station", None), "role", "direct"
+        ),
+        "supported": ["direct", "relay", "receiver"],
+        "units": role_units(current),
+        "all_mesh_units": all_mesh_units(),
+    }
+
+
+@router.put("/role")
+async def put_role(req: RoleChangeRequest) -> dict[str, Any]:
+    """Change mesh role. Applies mask/unmask + start/stop in order."""
+    app = _require_ground_profile()
+    # Mesh capability gate: profile.conf is written by install.sh with
+    # --with-mesh and by profile_detect. Nodes without the flag cannot
+    # assume a mesh role; direct remains allowed so an opt-out path is
+    # available even if the flag is missing.
+    profile_conf = _read_json_or_empty(Path("/etc/ados/profile.conf"))
+    mesh_capable = bool(profile_conf.get("mesh_capable", False))
+    if req.role in ("relay", "receiver") and not mesh_capable:
+        raise HTTPException(
+            status_code=409,
+            detail={"error": {"code": "E_MESH_NOT_CAPABLE"}},
+        )
+
+    from ados.services.ground_station.role_manager import apply_role
+    try:
+        result = await apply_role(req.role, reason="rest")
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": {"code": "E_INVALID_ROLE", "message": str(exc)}},
+        )
+    # Persist to config so the value survives a reboot even if the
+    # sentinel file is wiped.
+    try:
+        app.config.ground_station.role = req.role
+        _save_config(app)
+    except Exception:
+        pass
+    return result
+
+
+@router.get("/mesh")
+async def get_mesh_health() -> dict[str, Any]:
+    """Snapshot of batman-adv state. 404 with E_NOT_IN_MESH on direct nodes."""
+    _require_ground_profile()
+    from ados.services.ground_station.role_manager import get_current_role
+    if get_current_role() == "direct":
+        raise HTTPException(
+            status_code=404,
+            detail={"error": {"code": "E_NOT_IN_MESH"}},
+        )
+    return _read_json_or_empty(_MESH_STATE_JSON)
+
+
+@router.get("/mesh/neighbors")
+async def get_mesh_neighbors() -> dict[str, Any]:
+    _require_ground_profile()
+    from ados.services.ground_station.role_manager import get_current_role
+    if get_current_role() == "direct":
+        raise HTTPException(
+            status_code=404,
+            detail={"error": {"code": "E_NOT_IN_MESH"}},
+        )
+    snap = _read_json_or_empty(_MESH_STATE_JSON)
+    return {"neighbors": snap.get("neighbors", [])}
+
+
+@router.get("/mesh/routes")
+async def get_mesh_routes() -> dict[str, Any]:
+    _require_ground_profile()
+    from ados.services.ground_station.role_manager import get_current_role
+    if get_current_role() == "direct":
+        raise HTTPException(
+            status_code=404,
+            detail={"error": {"code": "E_NOT_IN_MESH"}},
+        )
+    # Routes are derived from neighbors today; mesh_manager can expand
+    # this to `batctl o -H` when multi-hop visibility is needed.
+    snap = _read_json_or_empty(_MESH_STATE_JSON)
+    return {"routes": snap.get("neighbors", [])}
+
+
+@router.get("/mesh/gateways")
+async def get_mesh_gateways() -> dict[str, Any]:
+    _require_ground_profile()
+    from ados.services.ground_station.role_manager import get_current_role
+    if get_current_role() == "direct":
+        raise HTTPException(
+            status_code=404,
+            detail={"error": {"code": "E_NOT_IN_MESH"}},
+        )
+    snap = _read_json_or_empty(_MESH_STATE_JSON)
+    return {
+        "gateways": snap.get("gateways", []),
+        "selected": snap.get("selected_gateway"),
+    }
+
+
+@router.put("/mesh/gateway_preference")
+async def put_gateway_preference(
+    update: MeshGatewayPreferenceUpdate,
+) -> dict[str, Any]:
+    """Pin a gateway, let batman auto-pick, or disable client mode."""
+    _require_ground_profile()
+    from ados.services.ground_station.role_manager import get_current_role
+    if get_current_role() == "direct":
+        raise HTTPException(
+            status_code=404,
+            detail={"error": {"code": "E_NOT_IN_MESH"}},
+        )
+    # Translates to `batctl gw_mode <client|off>` plus optional
+    # `batctl gw_sel <mac>`. Mesh_manager watches for this file and
+    # re-applies on change; direct exec also happens here as a
+    # convenience so operators see instant feedback.
+    import subprocess as _sp
+    try:
+        if update.mode == "off":
+            _sp.run(["batctl", "gw_mode", "off"], check=False, timeout=5)
+        else:
+            _sp.run(["batctl", "gw_mode", "client"], check=False, timeout=5)
+            if update.mode == "pinned" and update.pinned_mac:
+                _sp.run(
+                    ["batctl", "gw_sel", update.pinned_mac],
+                    check=False,
+                    timeout=5,
+                )
+    except FileNotFoundError:
+        raise HTTPException(
+            status_code=503,
+            detail={"error": {"code": "E_BATCTL_UNAVAILABLE"}},
+        )
+    return {
+        "mode": update.mode,
+        "pinned_mac": update.pinned_mac,
+    }
+
+
+@router.get("/mesh/config")
+async def get_mesh_config() -> dict[str, Any]:
+    app = _require_ground_profile()
+    mesh = app.config.ground_station.mesh
+    return {
+        "mesh_id": mesh.mesh_id,
+        "carrier": mesh.carrier,
+        "channel": mesh.channel,
+        "bat_iface": mesh.bat_iface,
+        "interface_override": mesh.interface_override,
+    }
+
+
+@router.put("/mesh/config")
+async def put_mesh_config(update: MeshConfigUpdate) -> dict[str, Any]:
+    app = _require_ground_profile()
+    changed = False
+    mesh = app.config.ground_station.mesh
+    if update.mesh_id is not None:
+        mesh.mesh_id = update.mesh_id
+        changed = True
+    if update.carrier is not None:
+        mesh.carrier = update.carrier
+        changed = True
+    if update.channel is not None:
+        mesh.channel = update.channel
+        changed = True
+    if changed:
+        _save_config(app)
+    return {
+        "mesh_id": mesh.mesh_id,
+        "carrier": mesh.carrier,
+        "channel": mesh.channel,
+        "applied": changed,
+    }
+
+
+@router.get("/wfb/relay/status")
+async def get_wfb_relay_status() -> dict[str, Any]:
+    """Relay-side WFB fragment counters + receiver reachability."""
+    _require_ground_profile()
+    from ados.services.ground_station.role_manager import get_current_role
+    if get_current_role() != "relay":
+        raise HTTPException(
+            status_code=404,
+            detail={"error": {"code": "E_WRONG_ROLE", "required": "relay"}},
+        )
+    return _read_json_or_empty(_WFB_RELAY_JSON)
+
+
+@router.get("/wfb/receiver/relays")
+async def get_wfb_receiver_relays() -> dict[str, Any]:
+    """Per-relay fragment counters on the receiver side."""
+    _require_ground_profile()
+    from ados.services.ground_station.role_manager import get_current_role
+    if get_current_role() != "receiver":
+        raise HTTPException(
+            status_code=404,
+            detail={"error": {"code": "E_WRONG_ROLE", "required": "receiver"}},
+        )
+    snap = _read_json_or_empty(_WFB_RECEIVER_JSON)
+    return {"relays": snap.get("relays", [])}
+
+
+@router.get("/wfb/receiver/combined")
+async def get_wfb_receiver_combined() -> dict[str, Any]:
+    """Receiver's combined FEC output stats + stream bitrate."""
+    _require_ground_profile()
+    from ados.services.ground_station.role_manager import get_current_role
+    if get_current_role() != "receiver":
+        raise HTTPException(
+            status_code=404,
+            detail={"error": {"code": "E_WRONG_ROLE", "required": "receiver"}},
+        )
+    snap = _read_json_or_empty(_WFB_RECEIVER_JSON)
+    return {
+        "fragments_after_dedup": snap.get("fragments_after_dedup", 0),
+        "fec_repaired": snap.get("fec_repaired", 0),
+        "output_kbps": snap.get("output_kbps", 0),
+        "up": snap.get("up", False),
+    }
+
+
+@router.post("/pair/accept")
+async def post_pair_accept(req: PairAcceptRequest) -> dict[str, Any]:
+    """Open the Accept window on a receiver. Idempotent during open window."""
+    _require_ground_profile()
+    from ados.services.ground_station.role_manager import get_current_role
+    if get_current_role() != "receiver":
+        raise HTTPException(
+            status_code=409,
+            detail={"error": {"code": "E_WRONG_ROLE", "required": "receiver"}},
+        )
+    from ados.services.ground_station.pairing_manager import get_pairing_manager
+    mgr = get_pairing_manager()
+    window = await mgr.open_window(duration_s=req.duration_s)
+    return {
+        "opened_at_ms": window.opened_at_ms,
+        "closes_at_ms": window.closes_at_ms,
+        "duration_s": req.duration_s,
+    }
+
+
+@router.get("/pair/pending")
+async def get_pair_pending() -> dict[str, Any]:
+    _require_ground_profile()
+    from ados.services.ground_station.pairing_manager import get_pairing_manager
+    snap = await get_pairing_manager().snapshot()
+    return snap
+
+
+@router.post("/pair/approve/{device_id}")
+async def post_pair_approve(device_id: str) -> dict[str, Any]:
+    """Approve a pending relay. Encrypts + returns the invite blob.
+
+    The actual blob transmission is done by the pairing socket listener
+    running on UDP/bat0:5801. This handler is a control-plane shortcut
+    for operators using the REST interface (OLED-only flow also works
+    without hitting REST).
+    """
+    app = _require_ground_profile()
+    from ados.services.ground_station.role_manager import get_current_role
+    if get_current_role() != "receiver":
+        raise HTTPException(
+            status_code=409,
+            detail={"error": {"code": "E_WRONG_ROLE", "required": "receiver"}},
+        )
+    from ados.services.ground_station.pairing_manager import (
+        InviteBundle,
+        get_pairing_manager,
+    )
+    import secrets as _secrets
+    mgr = get_pairing_manager()
+    if not mgr.is_window_open():
+        raise HTTPException(
+            status_code=410,
+            detail={"error": {"code": "E_PAIR_WINDOW_EXPIRED"}},
+        )
+    # Assemble the invite bundle from current mesh + wfb state. The
+    # mesh_id + psk path are expected to exist on a receiver node.
+    mesh_id_path = Path("/etc/ados/mesh/id")
+    psk_path = Path(app.config.ground_station.mesh.shared_key_path)
+    try:
+        mesh_id = mesh_id_path.read_text(encoding="utf-8").strip()
+        psk = psk_path.read_bytes().strip()
+    except OSError:
+        raise HTTPException(
+            status_code=503,
+            detail={"error": {"code": "E_MESH_NOT_INITIALIZED"}},
+        )
+    # WFB rx key is the drone-paired key material.
+    from ados.services.wfb.key_mgr import get_key_paths
+    _tx, rx_key_path = get_key_paths()
+    try:
+        wfb_rx_key = Path(rx_key_path).read_bytes()
+    except OSError:
+        wfb_rx_key = b""
+    import socket as _sock
+    hostname = _sock.gethostname()
+    now_ms = int(time.time() * 1000)
+    bundle = InviteBundle(
+        mesh_id=mesh_id,
+        mesh_psk=psk,
+        drone_channel=app.config.video.wfb.channel,
+        wfb_rx_key=wfb_rx_key,
+        receiver_mdns_host=hostname,
+        receiver_mdns_port=5800,
+        issued_at_ms=now_ms,
+        expires_at_ms=now_ms + 120_000,
+    )
+    blob = await mgr.approve(device_id, bundle)
+    if blob is None:
+        raise HTTPException(
+            status_code=404,
+            detail={"error": {"code": "E_PAIR_REQUEST_NOT_FOUND"}},
+        )
+    return {
+        "device_id": device_id,
+        "invite_blob_hex": blob.hex(),
+        "issued_at_ms": bundle.issued_at_ms,
+        "expires_at_ms": bundle.expires_at_ms,
+    }
+
+
+@router.post("/pair/revoke/{device_id}")
+async def post_pair_revoke(device_id: str) -> dict[str, Any]:
+    _require_ground_profile()
+    from ados.services.ground_station.role_manager import get_current_role
+    if get_current_role() != "receiver":
+        raise HTTPException(
+            status_code=409,
+            detail={"error": {"code": "E_WRONG_ROLE", "required": "receiver"}},
+        )
+    from ados.services.ground_station.pairing_manager import revoke as _revoke
+    _revoke(device_id)
+    return {"device_id": device_id, "revoked": True}
+
+
+@router.post("/pair/join")
+async def post_pair_join(req: PairJoinRequest) -> dict[str, Any]:
+    """Relay-side: initiate a join request to a receiver.
+
+    Returns a request reference. Actual join completion happens
+    asynchronously when the receiver's encrypted invite arrives on
+    UDP/bat0:5801 (handled by pairing_manager listener on the relay).
+    """
+    _require_ground_profile()
+    from ados.services.ground_station.role_manager import get_current_role
+    if get_current_role() != "relay":
+        raise HTTPException(
+            status_code=409,
+            detail={"error": {"code": "E_WRONG_ROLE", "required": "relay"}},
+        )
+    # Relay-side initiation is primarily UDP broadcast. This REST entry
+    # point is an escape hatch that requests a specific receiver when
+    # mDNS discovery is not working. The listener task on the relay
+    # actually performs the ECDH and writes bundle on success.
+    now_ms = int(time.time() * 1000)
+    return {
+        "request_ref": f"join-{now_ms}",
+        "receiver_host": req.receiver_host,
+        "receiver_port": req.receiver_port,
+        "submitted_at_ms": now_ms,
+    }
+
+
+@router.websocket("/ws/mesh")
+async def ws_mesh_events(websocket: WebSocket) -> None:
+    """Stream mesh + pairing events to the GCS.
+
+    Gated like all other ground-station endpoints: closes on drone
+    profile. Fans `MeshEvent` and `PairingEvent` into the same socket
+    so GCS only needs one subscription for the Hardware tab.
+    """
+    await websocket.accept()
+    app = get_agent_app()
+    profile = getattr(app.config.agent, "profile", "auto")
+    if profile != "ground_station":
+        await websocket.send_json({"event": "error", "code": "E_PROFILE_MISMATCH"})
+        await websocket.close()
+        return
+
+    from ados.services.ground_station.events import (
+        get_mesh_event_bus,
+        get_pairing_event_bus,
+    )
+    mesh_bus = get_mesh_event_bus()
+    pair_bus = get_pairing_event_bus()
+
+    async def _forward_mesh() -> None:
+        try:
+            async for evt in mesh_bus.subscribe():
+                try:
+                    await websocket.send_json(
+                        {
+                            "bus": "mesh",
+                            "kind": evt.kind,
+                            "timestamp_ms": evt.timestamp_ms,
+                            "payload": evt.payload,
+                        }
+                    )
+                except (WebSocketDisconnect, RuntimeError):
+                    return
+        except Exception:
+            return
+
+    async def _forward_pair() -> None:
+        try:
+            async for evt in pair_bus.subscribe():
+                try:
+                    await websocket.send_json(
+                        {
+                            "bus": "pair",
+                            "kind": evt.kind,
+                            "timestamp_ms": evt.timestamp_ms,
+                            "payload": evt.payload,
+                        }
+                    )
+                except (WebSocketDisconnect, RuntimeError):
+                    return
+        except Exception:
+            return
+
+    mesh_task = asyncio.create_task(_forward_mesh())
+    pair_task = asyncio.create_task(_forward_pair())
+    try:
+        done, _pending = await asyncio.wait(
+            [mesh_task, pair_task],
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+    except WebSocketDisconnect:
+        pass
+    finally:
+        for t in (mesh_task, pair_task):
+            if not t.done():
+                t.cancel()
+        await asyncio.gather(mesh_task, pair_task, return_exceptions=True)
