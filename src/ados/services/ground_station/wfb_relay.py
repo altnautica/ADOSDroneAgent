@@ -234,6 +234,22 @@ async def _tail_stats(
             break
 
 
+def _publish_adapter_missing_event(reason: str, detail: str) -> None:
+    """Broadcast that the relay's drone-facing WFB adapter is not
+    available. OLED and GCS consume `wfb_adapter_missing` so the
+    operator knows why fragments stopped arriving at the receiver."""
+    try:
+        bus = get_mesh_event_bus()
+        bus.publish(MeshEvent(
+            bus="mesh",
+            kind="wfb_adapter_missing",
+            timestamp_ms=int(time.time() * 1000),
+            payload={"side": "relay", "reason": reason, "detail": detail},
+        ))
+    except Exception as exc:
+        log.debug("adapter_missing_event_publish_failed", error=str(exc))
+
+
 async def main() -> None:
     config = load_config()
     configure_logging(config.logging.level)
@@ -250,10 +266,18 @@ async def main() -> None:
     compatible = [a for a in adapters if a.is_wfb_compatible and a.supports_monitor]
     if not compatible:
         slog.error("wfb_relay_no_adapter")
+        _publish_adapter_missing_event(
+            "adapter_not_found",
+            "No monitor-capable WFB adapter detected on the relay node.",
+        )
         sys.exit(2)
     drone_iface = compatible[0].interface_name
     if not set_monitor_mode(drone_iface):
         slog.error("wfb_relay_monitor_mode_failed", iface=drone_iface)
+        _publish_adapter_missing_event(
+            "monitor_mode_failed",
+            f"Could not put {drone_iface} into monitor mode.",
+        )
         sys.exit(3)
     state.drone_iface = drone_iface
 

@@ -109,6 +109,8 @@ Also runs on macOS for local development and testing.
 
 **REST API.** FastAPI server at `:8080` with 16 route modules. Get telemetry, set FC parameters, send commands, manage config, control video, manage suites, run scripts. Full OpenAPI docs at `/docs`.
 
+**MAVLink signing.** The agent is a transparent pipe for MAVLink v2 signed frames. `/api/mavlink/signing/*` exposes capability detection and one-shot FC enrollment via `SETUP_SIGNING`. Keys live in the GCS browser; the agent holds no key material. See [docs](https://docs.altnautica.com/drone-agent/mavlink-signing).
+
 **Terminal dashboard.** Five-screen TUI via `ados tui`: overview, telemetry, MAVLink inspector, logs, config editor. SSH-friendly for headless hardware.
 
 **Hardware auto-detection.** Detects board tier on boot (RPi Zero 2W through CM5 / Jetson) and enables services based on available resources.
