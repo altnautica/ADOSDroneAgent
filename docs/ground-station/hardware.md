@@ -36,18 +36,6 @@ VID:PID for auto-detection: RTL8812EU = `0BDA:B812`
 
 **WARNING:** RTL8812BU (different chip) does NOT support monitor mode. Do not use for WFB-ng. The chip names look similar but they are fundamentally different silicon.
 
-## Competitor Ground Station Hardware (Reference)
-
-| Product | Type | Price | Range | Latency | Display |
-|---------|------|-------|-------|---------|---------|
-| SIYI MK32 | All-in-one RC + GCS | $1,112 (bundle) | 15km | ~180ms | 7" 1080p touch |
-| SIYI MK15 | All-in-one RC + GCS | ~$400-600 | 15km | ~180ms | 5.5" 1080p touch |
-| Herelink v1.1 | All-in-one RC + GCS | ~$800-1,500 | 20km | ~200ms | 5.46" 1080p, 1000 nit |
-| Skydroid H16 | All-in-one RC | ~$300-500 | 10km | ~180ms | 7" 1080p, IP67 |
-| Skydroid G12 | All-in-one RC | ~$400-700 | 20km | ~180ms | 5.5" 1080p, 1000 nit |
-| OpenHD (DIY) | Pi + adapters | ~$130-200 BOM | 50km+ | 100-150ms | HDMI (7" Pi screen) |
-| RubyFPV (DIY) | Pi + adapters | ~$130-200 BOM | 50km+ | 32-70ms | HDMI |
-
 ## Display Options (Pro and Field Kit Variants)
 
 | Display | Size | Resolution | Brightness | Price | Notes |

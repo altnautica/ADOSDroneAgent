@@ -35,31 +35,9 @@ The ADOS ground station runs WFB-ng on a Linux SBC (handling the hard part), the
 
 Every platform that can connect to WiFi and open a web browser gets full access to video, telemetry, drone control, and the ADOS Mission Control GCS. The ground station handles the Linux-specific WFB-ng work internally.
 
-## Why This Creates a Hardware Product
+## Why a Dedicated Ground Node
 
-Consider who actually flies drones professionally and what devices they carry.
-
-**Operator demographics** (from drone community surveys, forum demographics, and industry reports):
-
-- ~50% of drone operators use Windows as their primary field computer
-- ~35% use macOS
-- ~10% use Android tablets
-- ~5% use Linux
-
-That means roughly **85% of drone operators cannot run WFB-ng on their existing devices.** They use Mac or Windows laptops in the field for mission planning, data review, and reporting.
-
-On top of that, about **90% carry smartphones** (iOS or Android) as secondary screens or for quick field checks. None of these phones can run WFB-ng either.
-
-Without a dedicated ground station, these operators have limited options:
-
-1. **Carry a separate Linux laptop** just for video reception. Impractical. Adds weight, cost, and another device to manage in the field.
-2. **Run a Linux VM** on their Mac or Windows laptop. Fragile. USB passthrough for WiFi adapters is unreliable, and VM overhead adds latency. Not field-ready.
-3. **Use a commercial system** like Herelink or SIYI instead. Works, but costs $400-1,500 with 180-200ms latency and 15-20km range. You're paying more for worse performance.
-4. **Skip long-range video entirely.** Use 4G/LTE relay (100-300ms latency, cell coverage dependent) or standard WiFi (~300m range). Gives up the performance advantages that make WFB-ng worth using.
-
-The ADOS ground station is the fifth option: a small, cheap Linux box that handles WFB-ng internally and serves everything over standard web protocols. Your Mac becomes a WFB-ng viewer. Your iPhone becomes a WFB-ng viewer. Any device with a browser becomes a WFB-ng viewer.
-
-The gap between "what WFB-ng can deliver" (30-70ms, 50km+) and "what most users can access" (only Linux users, ~5-15% of the market) is the entire product opportunity.
+WFB-ng requires a Linux host with monitor-mode drivers. Mac, Windows, Android, and iOS do not expose the necessary low-level WiFi APIs. A dedicated Linux ground node handles WFB-ng internally and exposes video and telemetry to any connected device over standard web protocols (WiFi AP + WebRTC + WebSocket), so the client device does not need Linux or a compatible adapter.
 
 ## Mesh Capability by Host Board
 
@@ -104,30 +82,16 @@ Browsers released before 2020 may lack WebRTC support. Update to any recent vers
 - **USB device access.** You cannot plug a WiFi adapter into your laptop and use it through the browser for WFB-ng. The ground station SBC owns the adapter hardware.
 - **Offline maps.** Map tiles need to be pre-cached on the SBC, or the ground station needs internet access (via a second WiFi adapter or Ethernet) to fetch tiles on demand.
 
-## No Install Required
+## Access Methods for Drone Video
 
-| Traditional WFB-ng Setup | ADOS Ground Station |
-|--------------------------|-------------------|
-| Download custom Linux image | Power on the ground station |
-| Flash image to SD card | Connect your device to the GS WiFi network |
-| SSH into the Pi | Open browser, navigate to the GS IP address |
-| Edit WFB-ng config files | Done |
-| Install USB WiFi adapter drivers | |
-| Configure video pipeline | |
-| Set up separate GCS application | |
-| **Total: 30-60 minutes (if everything works)** | **Total: under 2 minutes** |
+| Method | Latency | Range | Platform Support | Setup Effort |
+|--------|---------|-------|-----------------|-------------|
+| WFB-ng direct on a Linux host | 30-70 ms | 50 km+ | Linux only | CLI config, Linux knowledge |
+| ADOS ground node, browser access | 50-80 ms | 50 km+ | Any browser | Plug and play |
+| 4G/LTE relay | 100-300 ms | Cell coverage area | Any browser | Moderate |
+| Standard WiFi | 20-50 ms | ~300 m | Any device | None |
 
-## Comparison: Access Methods for Drone Video
-
-| Method | Latency | Range | Platform Support | Hardware Cost | Setup Effort |
-|--------|---------|-------|-----------------|--------------|-------------|
-| WFB-ng direct (Linux) | 30-70 ms | 50 km+ | Linux only | $30-50 (adapter) | CLI config, Linux knowledge |
-| ADOS Ground Station | 50-80 ms* | 50 km+ | Any browser | $100-350 | Plug and play |
-| 4G/LTE relay | 100-300 ms | Cell coverage area | Any browser | $10-30/mo data | Moderate |
-| Standard WiFi | 20-50 ms | ~300 m | Any device | Free (built-in) | None |
-| Proprietary (SIYI, Herelink) | 180-200 ms | 15-20 km | Android only | $400-1,500 | Moderate |
-
-*ADOS GS adds ~10-20ms over raw WFB-ng due to the mediamtx WebRTC relay step.
+The ground-node-plus-browser path adds ~10-20 ms over raw WFB-ng due to the mediamtx WebRTC relay step.
 
 ## Edge Cases and Known Limitations
 
