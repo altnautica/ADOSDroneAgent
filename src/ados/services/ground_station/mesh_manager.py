@@ -1,4 +1,4 @@
-"""batman-adv local wireless mesh lifecycle for relay/receiver roles (MSN-035).
+"""batman-adv local wireless mesh lifecycle for relay/receiver roles.
 
 Brings up a second wireless interface in 802.11s (preferred) or IBSS
 (fallback) mode, binds it to `bat0`, and drives batman-adv gateway

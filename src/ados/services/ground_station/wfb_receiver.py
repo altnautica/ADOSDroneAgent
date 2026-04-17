@@ -1,4 +1,4 @@
-"""WFB receiver lifecycle (MSN-035 receiver role).
+"""WFB receiver lifecycle.
 
 Runs on nodes with `ground_station.role == "receiver"`. Drives `wfb_rx`
 in aggregator mode so it FEC-combines fragments arriving from the

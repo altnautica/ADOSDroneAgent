@@ -10,8 +10,8 @@
 # =============================================================================
 set -euo pipefail
 
-# DEC-107 Bug #23: prevent needrestart and debconf from interfering with the
-# install script when invoked via `curl -sSL ... | sudo bash -s -- ...`.
+# Prevent needrestart and debconf from interfering with the install script
+# when invoked via `curl -sSL ... | sudo bash -s -- ...`.
 #
 # Without these settings, an apt-pulled systemd security upgrade triggers
 # `needrestart` which immediately restarts ssh.service. That kills the SSH
@@ -24,16 +24,13 @@ set -euo pipefail
 # (NEEDRESTART_SUSPEND=1), and force debconf to noninteractive frontend so
 # nothing tries to prompt the user. These exports are inherited by every
 # apt-get and dpkg invocation in the rest of this script.
-#
-# Validated 2026-04-09 on Rock 5C Lite rsdk-b1: without these env vars,
-# the first `curl|sudo bash` install reliably produces 0-byte files.
 export NEEDRESTART_MODE=l
 export NEEDRESTART_SUSPEND=1
 export DEBIAN_FRONTEND=noninteractive
 export DEBCONF_NOWARNINGS=yes
 
 REPO_URL="https://github.com/altnautica/ADOSDroneAgent.git"
-BRANCH_NAME=""  # DEC-106: optional feature branch for --branch flag
+BRANCH_NAME=""  # optional feature branch for --branch flag
 INSTALL_DIR="/opt/ados"
 CONFIG_DIR="/etc/ados"
 DATA_DIR="/var/ados"
@@ -137,7 +134,7 @@ PAIR_CODE=""
 DRONE_NAME=""
 DO_FORCE=false
 DO_UPGRADE=false
-WITH_MESH=false  # DEC-119 / MSN-035: Phase 5 distributed RX + local mesh
+WITH_MESH=false  # distributed RX + local mesh opt-in
 
 # Positional pairing code: first non-flag arg that looks like a 4-8 char alphanumeric code
 if [ $# -gt 0 ] && [[ "$1" =~ ^[A-Za-z0-9]{4,8}$ ]]; then
@@ -177,7 +174,7 @@ while [ $# -gt 0 ]; do
             shift
             ;;
         --branch)
-            # DEC-106: install from a feature branch instead of main
+            # install from a feature branch instead of main
             shift
             BRANCH_NAME="${1:-}"
             if [ -z "$BRANCH_NAME" ]; then
@@ -187,10 +184,10 @@ while [ $# -gt 0 ]; do
             shift
             ;;
         --with-mesh)
-            # DEC-119 / MSN-035: install Phase 5 mesh dependencies
-            # (batctl, avahi-daemon, wpasupplicant mesh backend) and
-            # mark the node as mesh-capable in /etc/ados/profile.conf.
-            # Safe to combine with --upgrade on an existing install.
+            # install distributed RX mesh dependencies (batctl, avahi-daemon,
+            # wpasupplicant mesh backend) and mark the node as mesh-capable
+            # in /etc/ados/profile.conf. Safe to combine with --upgrade on
+            # an existing install.
             WITH_MESH=true
             shift
             ;;
@@ -262,12 +259,11 @@ find_python() {
 install_system_deps() {
     info "Installing system dependencies..."
 
-    # DEC-106 Bug #10/#11: hold packages known to break mid-install on Radxa
-    # BSP images before touching apt. u-boot-rk2410 postinst can trigger a
-    # mid-install reboot; aic8800-usb-dkms has a broken 5.0+git build that
-    # fails DKMS compile and leaves apt in a half-configured state. These
-    # holds are idempotent and safe on boards where the packages aren't
-    # present.
+    # Hold packages known to break mid-install on Radxa BSP images before
+    # touching apt. u-boot-rk2410 postinst can trigger a mid-install reboot;
+    # aic8800-usb-dkms has a broken 5.0+git build that fails DKMS compile
+    # and leaves apt in a half-configured state. These holds are idempotent
+    # and safe on boards where the packages are not present.
     for pkg in u-boot-rk2410 aic8800-usb-dkms radxa-system-config-aic8800-usb-dkms; do
         if dpkg -l "$pkg" 2>/dev/null | grep -q "^ii"; then
             apt-mark hold "$pkg" >/dev/null 2>&1 || true
@@ -280,9 +276,9 @@ install_system_deps() {
     # libcap-dev: Linux capabilities (for low-level device access)
     # libsystemd-dev: systemd notify protocol
     # libyaml-dev: fast YAML parsing (PyYAML C extension)
-    # DEC-106 Bug #1: v4l-utils (NOT v4l2-utils — wrong package name that
-    # broke install on Debian Bookworm). Bug #2: no 2>/dev/null hiding apt
-    # errors — let failures surface to the install log.
+    # Use v4l-utils (the Debian Bookworm package); v4l2-utils is wrong and
+    # breaks the install. Do not hide apt errors with 2>/dev/null; let
+    # failures surface to the install log.
     apt-get install -y \
         python3-venv \
         python3-pip \
@@ -455,8 +451,8 @@ pairing:
 discovery:
   mdns_enabled: true
 
-# DEC-106 Bug #12/#13: video pipeline defaults. Empty cloud_relay_url means
-# local mediamtx only — configure post-install when a cloud relay is ready.
+# Video pipeline defaults. Empty cloud_relay_url means local mediamtx
+# only; configure post-install when a cloud relay is ready.
 video:
   mode: "auto"
   cloud_relay_url: ""
@@ -567,12 +563,12 @@ ENVEOF
     info "Supervisor service enabled and started."
     info "Child services will be started by the supervisor based on hardware detection and suite config."
 
-    # MSN-028 Phase 4 Track A Wave 3: enable cross-profile Peripheral
-    # Manager unit + drop the manifest drop-in directory. Runs on both
-    # drone and ground-station profiles.
+    # Enable the cross-profile Peripheral Manager unit and create the
+    # manifest drop-in directory. Runs on both drone and ground-station
+    # profiles.
     enable_universal_units
 
-    # DEC-112 / MSN-024: enable ground-station units if profile demands them.
+    # Enable ground-station units if the profile demands them.
     if [ "${ADOS_PROFILE:-drone}" = "ground_station" ] || [ "${ADOS_PROFILE:-drone}" = "ground-station" ]; then
         enable_ground_station_units
     fi
@@ -595,11 +591,11 @@ enable_universal_units() {
     chmod 0755 /etc/ados/peripherals
 }
 
-# ─── Ground-station Profile (DEC-112, MSN-024) ─────────────────────────────
+# ─── Ground-station Profile ───────────────────────────────────────────────
 
 # Resolve agent profile. Honors /etc/ados/profile.conf if present, otherwise
-# tries `python -m ados.bootstrap.profile_detect` (First Violins). Falls back
-# to "drone" so a missing detector never turns a drone into a ground station.
+# tries `python -m ados.bootstrap.profile_detect`. Falls back to "drone" so
+# a missing detector never turns a drone into a ground station.
 resolve_profile() {
     local profile_file="${CONFIG_DIR}/profile.conf"
     if [ -f "${profile_file}" ]; then
@@ -672,10 +668,10 @@ install_ground_station_deps() {
         warn "Boot cmdline not found; skipping modules-load=dwc2 append."
     fi
 
-    # MSN-027 Wave C Cellos: optional modem stack. Skipped by default so
-    # ground stations without cellular hardware do not pull ~80 MB of
-    # ModemManager + libqmi + libmbim just to stare at them. Set
-    # `ADOS_ENABLE_MODEM=1` in the install environment to opt in.
+    # Optional modem stack. Skipped by default so ground stations without
+    # cellular hardware do not pull ~80 MB of ModemManager + libqmi +
+    # libmbim just to stare at them. Set `ADOS_ENABLE_MODEM=1` in the
+    # install environment to opt in.
     if [ "${ADOS_ENABLE_MODEM:-0}" = "1" ]; then
         info "ADOS_ENABLE_MODEM=1 set; installing ModemManager + QMI/MBIM utilities..."
         apt-get install -y modemmanager libqmi-utils libmbim-utils || \
@@ -684,14 +680,13 @@ install_ground_station_deps() {
         info "Skipping modem stack (set ADOS_ENABLE_MODEM=1 to install modemmanager + libqmi-utils + libmbim-utils)."
     fi
 
-    # MSN-027 Phase 4 Wave 2 Cellos: optional share_uplink firewall
-    # persistence. Skipped by default because share_uplink is opt-in
-    # and pulling iptables-persistent on every ground station that
-    # never plans to NAT for AP clients is wasteful. Set
-    # `ADOS_ENABLE_SHARE_UPLINK=1` to install iptables-persistent on
-    # Debian/Raspbian. On non-Debian or buildroot images we skip the
-    # apt install and let the runtime helper fall back to nftables
-    # (when present) for persistence.
+    # Optional share_uplink firewall persistence. Skipped by default
+    # because share_uplink is opt-in and pulling iptables-persistent on
+    # every ground station that never plans to NAT for AP clients is
+    # wasteful. Set `ADOS_ENABLE_SHARE_UPLINK=1` to install
+    # iptables-persistent on Debian/Raspbian. On non-Debian or buildroot
+    # images we skip the apt install and let the runtime helper fall
+    # back to nftables (when present) for persistence.
     if [ "${ADOS_ENABLE_SHARE_UPLINK:-0}" = "1" ]; then
         if command -v apt-get >/dev/null 2>&1; then
             info "ADOS_ENABLE_SHARE_UPLINK=1 set; installing iptables-persistent..."
@@ -708,9 +703,9 @@ install_ground_station_deps() {
         info "Skipping share_uplink firewall persistence (set ADOS_ENABLE_SHARE_UPLINK=1 to install iptables-persistent on Debian)."
     fi
 
-    # MSN-027 Wave C Cellos: NetworkManager is mandatory for the WiFi
-    # client manager (nmcli backend). Enable + start if it is installed
-    # but inactive. Radxa BSPs ship with it but sometimes leave it masked.
+    # NetworkManager is mandatory for the WiFi client manager (nmcli
+    # backend). Enable + start if installed but inactive. Radxa BSPs ship
+    # with it but sometimes leave it masked.
     if systemctl list-unit-files NetworkManager.service >/dev/null 2>&1; then
         if ! systemctl is-active --quiet NetworkManager.service; then
             info "Enabling and starting NetworkManager..."
@@ -728,13 +723,12 @@ install_ground_station_deps() {
     info "Ground-station deps installed."
 }
 
-# DEC-119 / MSN-035: Phase 5 mesh dependencies. Only runs when --with-mesh
-# is passed. Installs batctl + avahi-daemon + wpasupplicant with mesh
-# backend, writes the mesh_capable flag into /etc/ados/profile.conf,
-# and leaves the node's role at `direct` so existing deployments are
-# not auto-promoted into mesh mode.
+# Distributed RX mesh dependencies. Only runs when --with-mesh is passed.
+# Installs batctl + avahi-daemon + wpasupplicant with mesh backend, writes
+# the mesh_capable flag into /etc/ados/profile.conf, and leaves the node's
+# role at `direct` so existing deployments are not auto-promoted into mesh.
 install_mesh_deps() {
-    info "Installing mesh (Phase 5) dependencies..."
+    info "Installing mesh dependencies..."
 
     if command -v apt-get >/dev/null 2>&1; then
         DEBIAN_FRONTEND=noninteractive apt-get install -y \
@@ -807,7 +801,7 @@ install_ground_station_driver() {
 enable_ground_station_units() {
     info "Enabling ground-station systemd units..."
 
-    # MSN-029 H2: install libcomposite USB gadget script + oneshot
+    # Install libcomposite USB gadget script + oneshot
     # composer unit. Both are gated behind ADOS_ENABLE_USB_GADGET=1
     # (default off) until founder validates on bench. The Python-side
     # ados-usb-gadget.service Manager remains in the enable list below
@@ -878,14 +872,12 @@ enable_ground_station_units() {
         warn "gpio group not present on this system; skipping usermod -aG gpio."
     fi
 
-    # MSN-026 Wave C Cellos: input manager + PIC arbiter need /dev/input
-    # (gamepads, evdev) and Bluetooth DBus access. Add both the `ados`
-    # service user and the install-time `pi` user (if present) to the
-    # input, plugdev, and bluetooth groups. All three usermod calls are
-    # idempotent no-ops when membership already exists.
-    #
-    # MSN-029 Cellos Wave 1: also add i2c so the OLED + future I2C
-    # peripherals can be driven from userspace without root.
+    # input manager + PIC arbiter need /dev/input (gamepads, evdev) and
+    # Bluetooth DBus access. Add both the `ados` service user and the
+    # install-time `pi` user (if present) to the input, plugdev, and
+    # bluetooth groups. All usermod calls are idempotent no-ops when
+    # membership already exists. The i2c group lets the OLED and future
+    # I2C peripherals be driven from userspace without root.
     for grp in input plugdev bluetooth i2c; do
         if ! getent group "${grp}" >/dev/null 2>&1; then
             warn "Group ${grp} not present on this system; skipping usermod -aG ${grp}."
@@ -899,8 +891,8 @@ enable_ground_station_units() {
         fi
     done
 
-    # MSN-029 Cellos Wave 1: trigger udev rebuild so i2c-dev nodes pick
-    # up the new group membership without requiring a reboot.
+    # Trigger udev rebuild so i2c-dev nodes pick up the new group
+    # membership without requiring a reboot.
     udevadm trigger --subsystem-match=i2c-dev || true
 
     # Install udev rules for gamepad + joystick hot-plug recognition.
@@ -1132,7 +1124,7 @@ if is_installed && ! $DO_FORCE && ! $DO_UPGRADE; then
     echo "    --upgrade    Update to latest version (skip apt, skip venv rebuild)"
     echo "    --force      Full reinstall from scratch"
     echo "    --pair CODE  Update pairing code only (<5s)"
-    echo "    --with-mesh  Install batctl + avahi for Phase 5 distributed RX"
+    echo "    --with-mesh  Install batctl + avahi for distributed RX mesh"
     echo "    CODE         Same as --pair CODE (positional)"
     echo ""
     print_pairing_code
@@ -1158,7 +1150,7 @@ if is_installed && $DO_UPGRADE && ! $DO_FORCE; then
     # Clone repo to temp dir for pip install + systemd files + install script
     tmp_repo="$(mktemp -d)"
     info "Fetching latest source..."
-    # DEC-106: honor --branch for feature-branch installs
+    # honor --branch for feature-branch installs
     if [ -n "$BRANCH_NAME" ]; then
         info "Using branch: ${BRANCH_NAME}"
         git clone --depth 1 --quiet --branch "${BRANCH_NAME}" "${REPO_URL}" "${tmp_repo}/repo"
@@ -1197,9 +1189,9 @@ if is_installed && $DO_UPGRADE && ! $DO_FORCE; then
         write_pairing "$PAIR_CODE"
     fi
 
-    # DEC-119 / MSN-035: --with-mesh on an existing install opts into
-    # Phase 5. Installs batctl + avahi and flips mesh_capable without
-    # touching role (still `direct` until operator sets it).
+    # --with-mesh on an existing install opts the node into distributed
+    # RX. Installs batctl + avahi and flips mesh_capable without touching
+    # role (stays `direct` until operator sets it).
     if [ "${WITH_MESH}" = "true" ]; then
         install_mesh_deps
     fi
@@ -1261,7 +1253,7 @@ FRESH_REPO_DIR=""
 if [ ! -d "$(dirname "$0" 2>/dev/null)/../data/systemd" ] 2>/dev/null; then
     FRESH_REPO_DIR="$(mktemp -d)"
     info "Cloning repository..."
-    # DEC-106: honor --branch for feature-branch installs
+    # honor --branch for feature-branch installs
     if [ -n "$BRANCH_NAME" ]; then
         info "Using branch: ${BRANCH_NAME}"
         git clone --depth 1 --quiet --branch "${BRANCH_NAME}" "${REPO_URL}" "${FRESH_REPO_DIR}/repo"
@@ -1280,7 +1272,7 @@ else
     "${VENV_DIR}/bin/pip" install "git+${REPO_URL}" --quiet
 fi
 
-# Resolve profile (DEC-112). Ground-station profile pulls extra apt deps,
+# Resolve agent profile. Ground-station profile pulls extra apt deps,
 # the RTL8812AU DKMS driver, and the ground-station python extras.
 ADOS_PROFILE="$(resolve_profile)"
 info "Agent profile: ${ADOS_PROFILE}"
@@ -1297,7 +1289,7 @@ if [ "${ADOS_PROFILE}" = "ground_station" ] || [ "${ADOS_PROFILE}" = "ground-sta
             warn "Ground-station extras install failed; continuing."
     fi
 
-    # DEC-119 / MSN-035: Phase 5 mesh extras. Opt-in via --with-mesh.
+    # Mesh extras. Opt-in via --with-mesh.
     if [ "${WITH_MESH}" = "true" ]; then
         install_mesh_deps
     fi

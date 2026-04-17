@@ -1,14 +1,12 @@
-"""Ground-station profile routes (DEC-112, MSN-024/025).
+"""Ground-station profile routes.
 
 All endpoints gate on `config.agent.profile == "ground_station"` via
 `_require_ground_profile()`. Agents running the default drone profile
 get 404 with code `E_PROFILE_MISMATCH`.
 
-Phase 0 shipped status snapshot + WFB get/put. Phase 1 (Wave C Cellos)
-extends the surface to cover the OLED status schema, network AP
-controls, pair key lifecycle, UI config (OLED, buttons, screens), and
-factory reset. Spec lives at
-`product/specs/ados-ground-agent/11-agent-api-surface.md`.
+The surface covers the OLED status schema, network AP controls, pair key
+lifecycle, UI config (OLED, buttons, screens), factory reset, uplink
+matrix, pilot-in-command arbitration, and distributed receive.
 """
 
 from __future__ import annotations
@@ -33,8 +31,8 @@ router = APIRouter(prefix="/v1/ground-station", tags=["ground-station"])
 # yet. Single file, atomic write, 0644.
 _UI_CONFIG_PATH = Path("/etc/ados/ground-station-ui.json")
 
-# Server and OLED both use 0-255 native scale per 2026-04-16 Phase 2
-# reconciliation. 204 is roughly 80 percent of 255.
+# Server and OLED both use 0-255 native scale. 204 is roughly 80 percent
+# of 255.
 _DEFAULT_OLED: dict[str, Any] = {
     "brightness": 204,
     "auto_dim_enabled": True,
@@ -239,9 +237,8 @@ class PairRequest(BaseModel):
 class OledUpdate(BaseModel):
     """PUT body for OLED UI settings.
 
-    Server and OLED both use 0-255 native scale per 2026-04-16 Phase 2
-    reconciliation. This matches luma.oled device.contrast() directly
-    and the GCS slider range.
+    Server and OLED both use the 0-255 native scale. This matches
+    luma.oled device.contrast() directly and the GCS slider range.
     """
 
     brightness: int | None = Field(default=None, ge=0, le=255)
@@ -268,7 +265,7 @@ class ScreensUpdate(BaseModel):
 
 
 def _link_view(app: Any) -> dict[str, Any]:
-    """Best-effort link view. Phase 1 fills channel from config; rest stubbed."""
+    """Best-effort link view. Channel comes from config; the rest is stubbed."""
     wfb_cfg = getattr(app.config, "wfb", None)
     channel = getattr(wfb_cfg, "channel", None) if wfb_cfg is not None else None
     return {
@@ -304,14 +301,13 @@ def _network_view(app: Any) -> dict[str, Any]:
 async def get_ground_station_status() -> dict[str, Any]:
     """Full ground-station snapshot aligned with the OLED schema.
 
-    Wave C Cellos: extended from the Phase 0 stub to match the fields
-    the OLED service polls at 1 Hz. Fields that are not yet sourced
-    (paired drone telemetry, gcs clients, uplink) return None.
+    Matches the fields the OLED service polls at 1 Hz. Fields not yet
+    sourced (paired drone telemetry, gcs clients, uplink) return None.
     """
     app = _require_ground_profile()
 
-    # Phase 2: surface the current pair key fingerprint alongside the
-    # paired drone id. Source is PairManager.status().
+    # Surface the current pair key fingerprint alongside the paired
+    # drone id. Source is PairManager.status().
     paired_drone_id: str | None = None
     key_fingerprint: str | None = None
     try:
@@ -419,7 +415,7 @@ def _ap_view(app: Any) -> dict[str, Any]:
 
 
 async def _wifi_client_view() -> dict[str, Any]:
-    """Wave C Cellos: surface WifiClientManager status + enabled_on_boot."""
+    """Surface WifiClientManager status + enabled_on_boot."""
     try:
         from ados.services.ground_station.wifi_client_manager import (
             get_wifi_client_manager,
@@ -530,10 +526,10 @@ def _router_state_view() -> dict[str, Any]:
 def _load_share_uplink_flag() -> bool:
     """Read share_uplink from the Pydantic-backed ADOSConfig.
 
-    Phase 4 Wave 1: authoritative source is now
-    `ADOSConfig.ground_station.share_uplink` (YAML). The legacy JSON
-    side-file at `_UI_CONFIG_PATH` is handled by the one-shot migrator
-    in `ados.core.config.load_config()` and preserved on disk.
+    Authoritative source is `ADOSConfig.ground_station.share_uplink`
+    (YAML). The legacy JSON side-file at `_UI_CONFIG_PATH` is handled by
+    the one-shot migrator in `ados.core.config.load_config()` and
+    preserved on disk.
     """
     try:
         from ados.core.config import load_config
@@ -548,8 +544,7 @@ def _load_share_uplink_flag() -> bool:
 async def get_ground_station_network() -> dict[str, Any]:
     """Network uplinks view.
 
-    Wave C Cellos expands this from the Phase 1 AP-only stub to cover
-    all four uplinks (wifi_client, ethernet, modem_4g) plus the
+    Covers all four uplinks (wifi_client, ethernet, modem_4g) plus the
     active_uplink + priority surfaced by UplinkRouter and the
     share_uplink flag.
     """
@@ -837,11 +832,10 @@ async def get_ground_station_ui() -> dict[str, Any]:
 def _persist_gs_ui_section(section: str, value: dict[str, Any]) -> None:
     """Write `ground_station.ui.<section>` into the YAML-backed ADOSConfig.
 
-    Phase 4 Wave 2: the OLED, button, and screen UI config now lives in
-    the Pydantic model so it round-trips through save cycles and is
-    consumed by the live services. The legacy JSON side-file is no
-    longer written, but remains on disk for rollback (the load-time
-    migrator preserves it).
+    The OLED, button, and screen UI config lives in the Pydantic model
+    so it round-trips through save cycles and is consumed by the live
+    services. The legacy JSON side-file is no longer written, but remains
+    on disk for rollback (the load-time migrator preserves it).
     """
     from ados.services.ground_station.pair_manager import (
         _load_config_dict,
@@ -1023,9 +1017,9 @@ async def post_factory_reset(
     """
     _require_ground_profile()
 
-    # Captive-portal single-use token check. Phase 2: only factory
-    # reset is gated. The header is optional when called from loopback
-    # to keep CLI test paths open.
+    # Captive-portal single-use token check. Only factory reset is
+    # gated. The header is optional when called from loopback to keep
+    # CLI test paths open.
     captive_header = request.headers.get("x-ados-captive-key")
     client_host = request.client.host if request.client else None
     if client_host not in ("127.0.0.1", "::1"):
@@ -1064,7 +1058,7 @@ async def post_factory_reset(
 
 
 # ---------------------------------------------------------------------------
-# Phase 2 (MSN-026 Wave C Cellos): display, input, PIC arbiter.
+# Display, input, and pilot-in-command arbiter routes.
 # ---------------------------------------------------------------------------
 
 
@@ -1526,8 +1520,8 @@ async def ws_pic_events(websocket: WebSocket) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Phase 3 (MSN-027 Wave C Cellos): network uplinks (wifi client, modem,
-# uplink router priority + share_uplink toggle) + uplink event stream.
+# Network uplinks (wifi client, modem, uplink router priority +
+# share_uplink toggle) and uplink event stream.
 # ---------------------------------------------------------------------------
 
 
@@ -1722,11 +1716,10 @@ async def put_network_priority(update: UplinkPriorityUpdate) -> dict[str, Any]:
 def _persist_share_uplink_flag(enabled: bool) -> None:
     """Write share_uplink into the Pydantic-backed ADOSConfig on disk.
 
-    Phase 4 Wave 1: writes to `/etc/ados/config.yaml` under
-    `ground_station.share_uplink`. The legacy JSON side-file is NOT
-    written, but is preserved on disk for rollback. The pair_manager
-    atomic save helper is reused so air and ground paths share one
-    code path.
+    Writes to `/etc/ados/config.yaml` under `ground_station.share_uplink`.
+    The legacy JSON side-file is not written but is preserved on disk
+    for rollback. The pair_manager atomic save helper is reused so air
+    and ground paths share one code path.
     """
     from ados.services.ground_station.pair_manager import (
         _load_config_dict,
@@ -1746,11 +1739,9 @@ def _persist_share_uplink_flag(enabled: bool) -> None:
 async def _apply_share_uplink(enabled: bool) -> dict[str, Any]:
     """Apply sysctl + NAT and persist firewall state across reboots.
 
-    Phase 4 Wave 2 Cellos: delegates to
-    `services/ground_station/share_uplink_firewall.apply_share_uplink`
+    Delegates to `services/ground_station/share_uplink_firewall.apply_share_uplink`
     which handles distro detection, iptables-persistent vs nftables
     fallback, atomic sysctl drop-in, and persistence of the rule set.
-    Phase 3 inline POC is replaced; signature preserved for callers.
     """
     active_iface: str | None = None
     try:
@@ -1862,7 +1853,7 @@ async def ws_uplink_events(websocket: WebSocket) -> None:
 
 
 # ---------------------------------------------------------------------------
-# DEC-119 / MSN-035: Phase 5 distributed RX + mesh + pairing routes
+# Distributed RX + mesh + pairing routes
 # ---------------------------------------------------------------------------
 
 _MESH_STATE_JSON = Path("/run/ados/mesh-state.json")

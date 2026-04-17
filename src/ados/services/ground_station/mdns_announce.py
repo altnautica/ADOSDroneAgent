@@ -1,4 +1,4 @@
-"""mDNS announce/resolve helpers scoped to the mesh interface (MSN-035).
+"""mDNS announce and resolve helpers scoped to the mesh interface.
 
 Receivers publish `_ados-receiver._tcp` on the batman-adv interface so
 relays can find them without shared infra. This module isolates the

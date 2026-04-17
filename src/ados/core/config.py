@@ -10,8 +10,8 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 # --- Agent ---
 
-# DEC-112: profile drives air vs ground-station behavior. "auto" triggers
-# the boot-time fingerprint in ados.bootstrap.profile_detect.
+# profile drives air vs ground-station behavior. "auto" triggers the
+# boot-time hardware fingerprint in ados.bootstrap.profile_detect.
 _ALLOWED_PROFILES = {"auto", "drone", "ground_station"}
 
 
@@ -19,7 +19,7 @@ class AgentConfig(BaseModel):
     device_id: str = ""
     name: str = "my-drone"
     tier: str = "auto"
-    profile: str = "auto"  # auto | drone | ground_station (DEC-112)
+    profile: str = "auto"  # auto | drone | ground_station
 
     @field_validator("profile")
     @classmethod
@@ -311,26 +311,25 @@ class SwarmConfig(BaseModel):
 
 # --- Ground Station ---
 
-# Phase 4 Wave 1: ground_station fields now live in the Pydantic model
-# so they validate, round-trip through save cycles, and show up in
-# config dumps. Prior to Phase 4, `paired_drone_id` and `paired_at`
-# were written to `/etc/ados/config.yaml` via direct YAML manipulation
-# in pair_manager.py while ADOSConfig had `extra="ignore"`, and
-# `share_uplink` lived in a side-file at `/etc/ados/ground-station-ui.json`.
-# The migrator in `load_config()` picks the legacy side-file value up
-# once and preserves the file on disk.
+# ground_station fields live in the Pydantic model so they validate,
+# round-trip through save cycles, and show up in config dumps. An earlier
+# layout wrote `paired_drone_id` and `paired_at` to `/etc/ados/config.yaml`
+# via direct YAML manipulation in pair_manager.py while ADOSConfig had
+# `extra="ignore"`, and `share_uplink` lived in a side-file at
+# `/etc/ados/ground-station-ui.json`. The migrator in `load_config()` picks
+# the legacy side-file value up once and preserves the file on disk.
 
 class GroundStationUiConfig(BaseModel):
     """OLED + buttons + screens UI config for the ground-station profile.
 
-    Phase 4 Wave 2: pulled out of the legacy `/etc/ados/ground-station-ui.json`
-    side-file into the Pydantic model so it round-trips through save cycles
-    and is consumed live by oled_service and button_service. The legacy file
-    is migrated once at load time and preserved on disk for rollback.
+    Pulled out of the legacy `/etc/ados/ground-station-ui.json` side-file
+    into the Pydantic model so it round-trips through save cycles and is
+    consumed live by oled_service and button_service. The legacy file is
+    migrated once at load time and preserved on disk for rollback.
 
     Field shapes are intentionally loose (`dict`) because the OLED, button
-    mapping, and screen order schemas are still evolving across waves. The
-    REST handlers and services know the keys they care about.
+    mapping, and screen order schemas are still evolving. The REST handlers
+    and services know the keys they care about.
     """
 
     oled: dict = Field(default_factory=dict)
@@ -399,15 +398,16 @@ class GroundStationConfig(BaseModel):
     paired_drone_id: str | None = None
     paired_at: str | None = None  # iso timestamp
     ui: GroundStationUiConfig = Field(default_factory=GroundStationUiConfig)
-    # Phase 4 Wave 2 Cellos: gate the cloud_relay_bridge live state IPC
-    # read so a quick rollback to the stub VehicleState is possible if
-    # the wiring causes regressions in the field. Default True.
+    # gate the cloud_relay_bridge live state IPC read so a quick rollback
+    # to the stub VehicleState is possible if the wiring causes regressions
+    # in the field. Default True.
     use_live_state_ipc: bool = True
 
-    # DEC-119 / MSN-035: Phase 5 distributed RX role. `direct` keeps
-    # the existing single-node behavior. `relay` forwards WFB fragments
-    # to a receiver over batman-adv. `receiver` aggregates fragments
-    # from local + remote sources and publishes the combined stream.
+    # distributed receive role. `direct` is the single-node path and runs
+    # wfb_rx the way a standalone ground station does. `relay` forwards
+    # WFB fragments to a receiver over batman-adv. `receiver` aggregates
+    # fragments from the local NIC and from remote relays and publishes
+    # the combined FEC-repaired stream for the mediamtx pipeline.
     role: str = "direct"
     # Whether this node should advertise its uplink as a batman-adv
     # gateway. `auto` lets the mesh_manager decide based on actual

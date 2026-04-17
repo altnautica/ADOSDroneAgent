@@ -20,7 +20,7 @@ hw_video_codecs:
   - h264_dec
   - h265_dec
 
-# DEC-112: ground-station bench build uses OLED on I2C1 and four menu buttons.
+# ground-station bench build uses OLED on I2C1 and four menu buttons.
 buses:
   i2c:
     - id: i2c1
@@ -59,9 +59,9 @@ profiles:
     video_capable: true
     usb_gadget: true
     hdmi: true
-    # DEC-119 / MSN-035: Phase 5 distributed RX. Pi 4B supports all
-    # three roles because it has 4x USB ports for a primary WFB dongle
-    # plus a second dongle for 802.11s/IBSS mesh carrier.
+    # Pi 4B supports all three distributed receive roles because it has
+    # 4x USB ports for a primary WFB dongle plus a second dongle for the
+    # 802.11s or IBSS mesh carrier.
     role: direct
     supports_roles:
       - direct

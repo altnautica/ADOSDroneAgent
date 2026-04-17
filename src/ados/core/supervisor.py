@@ -29,7 +29,7 @@ from pathlib import Path
 
 import structlog
 
-# DEC-106 Bug #15: hot-plug handling
+# hot-plug handling for USB devices
 from ados.hal.hotplug import HotplugMonitor
 from ados.hal.usb import UsbCategory, UsbDevice
 
@@ -47,13 +47,13 @@ class ServiceSpec:
     name: str
     category: str  # "core", "hardware", "suite", "ondemand"
     enabled: bool = True
-    # DEC-112: profile_gate scopes the service to one profile.
+    # profile_gate scopes the service to one agent profile.
     # None = runs on any profile. "drone" or "ground_station" gate it.
     profile_gate: str | None = None
-    # DEC-119 / MSN-035: role_gate scopes a ground-station service to
-    # one or more mesh roles. None = runs on any role. Examples:
-    # "relay", "receiver", or "relay|receiver" for units that cover
-    # both. Only consulted when profile_gate == "ground_station".
+    # role_gate scopes a ground-station service to one or more distributed
+    # receive roles. None = runs on any role. Examples: "relay", "receiver",
+    # or "relay|receiver" for units that cover both. Only consulted when
+    # profile_gate == "ground_station".
     role_gate: str | None = None
     # Track failures for circuit breaker
     failure_times: list[float] = field(default_factory=list)
@@ -80,43 +80,41 @@ SERVICE_REGISTRY: list[dict] = [
     # On-demand
     {"name": "ados-ota", "category": "ondemand"},
     {"name": "ados-discovery", "category": "ondemand"},
-    # MSN-028 Phase 4 Track A Wave 3: Peripheral Manager plugin registry.
-    # Cross-profile (no profile_gate) — peripherals exist on both drone
-    # and ground-station profiles.
+    # Peripheral Manager plugin registry. Cross-profile (no profile_gate);
+    # peripherals exist on both drone and ground-station profiles.
     {"name": "ados-peripherals", "category": "hardware"},
-    # DEC-112: ground-station only services.
+    # Ground-station only services.
     {"name": "ados-wfb-rx", "category": "hardware", "profile_gate": "ground_station"},
     {"name": "ados-mediamtx-gs", "category": "hardware", "profile_gate": "ground_station"},
     {"name": "ados-usb-gadget", "category": "hardware", "profile_gate": "ground_station"},
-    # MSN-025 Wave D: physical UI + AP + first-boot captive portal.
+    # Physical UI + AP + first-boot captive portal.
     {"name": "ados-oled", "category": "hardware", "profile_gate": "ground_station"},
     {"name": "ados-buttons", "category": "hardware", "profile_gate": "ground_station"},
     {"name": "ados-hostapd", "category": "hardware", "profile_gate": "ground_station"},
     {"name": "ados-dnsmasq-gs", "category": "hardware", "profile_gate": "ground_station"},
     {"name": "ados-setup-captive", "category": "ondemand", "profile_gate": "ground_station"},
-    # MSN-026 Wave C Cellos: Phase 2 standalone flight stack.
+    # Standalone flight stack.
     {"name": "ados-kiosk", "category": "hardware", "profile_gate": "ground_station"},
     {"name": "ados-input", "category": "hardware", "profile_gate": "ground_station"},
     {"name": "ados-pic", "category": "hardware", "profile_gate": "ground_station"},
-    # MSN-027 Wave C Cellos: Phase 3 uplink matrix + cloud relay.
-    # No `network` or `cloud` category exists in the supervisor taxonomy
-    # (categories are core/hardware/suite/ondemand). Uplink managers are
-    # hardware-like (they bind to real interfaces). The cloud relay is
-    # treated as core because it is always running on the ground-station
-    # profile, independent of hardware detection.
+    # Uplink matrix and cloud relay. No `network` or `cloud` category exists
+    # in the supervisor taxonomy (categories are core/hardware/suite/ondemand).
+    # Uplink managers are hardware-like because they bind to real interfaces.
+    # The cloud relay is treated as core because it always runs on the
+    # ground-station profile, independent of hardware detection.
     {"name": "ados-uplink-router", "category": "hardware", "profile_gate": "ground_station"},
     {"name": "ados-modem", "category": "hardware", "profile_gate": "ground_station"},
     {"name": "ados-wifi-client", "category": "hardware", "profile_gate": "ground_station"},
     {"name": "ados-ethernet", "category": "hardware", "profile_gate": "ground_station"},
     {"name": "ados-cloud-relay", "category": "core", "profile_gate": "ground_station"},
-    # DEC-119 / MSN-035: Phase 5 distributed RX role-gated services.
-    # ados-batman covers batman-adv bringup for both relay and receiver.
-    # ados-wfb-relay forwards fragments; only active on relay nodes.
-    # ados-wfb-receiver aggregates fragments; only active on receiver nodes.
+    # Distributed receive role-gated services. ados-batman brings up
+    # batman-adv for both relay and receiver. ados-wfb-relay forwards
+    # fragments and is active on relay nodes only. ados-wfb-receiver
+    # aggregates fragments and is active on receiver nodes only.
     {"name": "ados-batman", "category": "hardware", "profile_gate": "ground_station", "role_gate": "relay|receiver"},
     {"name": "ados-wfb-relay", "category": "hardware", "profile_gate": "ground_station", "role_gate": "relay"},
     {"name": "ados-wfb-receiver", "category": "hardware", "profile_gate": "ground_station", "role_gate": "receiver"},
-    # DEC-111: ROS 2 environment (opt-in, Docker-managed).
+    # ROS 2 environment (opt-in, Docker-managed).
     {"name": "ados-ros", "category": "suite"},
 ]
 
@@ -133,7 +131,7 @@ class Supervisor:
         self._cpu_history: deque[float] = deque(maxlen=60)
         self._memory_history: deque[float] = deque(maxlen=60)
 
-        # DEC-106 Bug #15: hot-plug monitor state
+        # hot-plug monitor state
         self._hotplug_monitor: HotplugMonitor | None = None
         self._hotplug_task: asyncio.Task | None = None
         self._hotplug_first_scan_done: bool = False
@@ -163,8 +161,8 @@ class Supervisor:
             log.warning("unknown_service", name=name)
             return False
 
-        # DEC-112: gate by agent profile. Services tagged for one profile
-        # do not start on another.
+        # gate by agent profile. Services tagged for one profile do not
+        # start on another.
         active_profile = getattr(
             getattr(self.config, "agent", None), "profile", "auto"
         )
@@ -177,10 +175,10 @@ class Supervisor:
             )
             return False
 
-        # DEC-119 / MSN-035: gate by ground-station role. role_gate is a
-        # pipe-separated list of allowed roles. The active role comes from
-        # the on-disk sentinel managed by role_manager so it stays in sync
-        # even if the Pydantic config is briefly stale during a transition.
+        # gate by ground-station role. role_gate is a pipe-separated list
+        # of allowed roles. The active role comes from the on-disk sentinel
+        # managed by role_manager so it stays in sync even if the Pydantic
+        # config is briefly stale during a transition.
         if spec.role_gate:
             try:
                 from ados.services.ground_station.role_manager import (
@@ -322,7 +320,7 @@ class Supervisor:
 
         log.info("supervisor_ready", services=len(self._services))
 
-        # DEC-106 Bug #15: start hot-plug monitor
+        # start hot-plug monitor
         self._hotplug_monitor = HotplugMonitor()
         self._hotplug_task = asyncio.create_task(self._run_hotplug_monitor())
         log.info(
@@ -338,7 +336,7 @@ class Supervisor:
         self._shutdown.set()
         log.info("supervisor_stopping")
 
-        # DEC-106 Bug #15: cancel hot-plug monitor before stopping services
+        # cancel hot-plug monitor before stopping services
         if self._hotplug_monitor:
             self._hotplug_monitor.stop()
         if self._hotplug_task:
@@ -626,7 +624,7 @@ class Supervisor:
         }
 
 
-    # ── DEC-106 Bug #15: Hot-plug handling ─────────────────────
+    # ── Hot-plug handling ─────────────────────────────────────
 
     async def _run_hotplug_monitor(self) -> None:
         """Wrapper around HotplugMonitor.run() with first-scan gating.
@@ -663,7 +661,7 @@ class Supervisor:
         log.info("hotplug_gate_open", known_devices=known)
 
     def _on_hotplug_event(self, event: str, device: UsbDevice) -> None:
-        """DEC-106 Bug #15: dispatch USB add/remove events.
+        """Dispatch USB add/remove events to the right service handlers.
 
         CRITICAL: structlog uses `event` as the reserved positional
         argument for the log message. Using `event=...` as a kwarg in
