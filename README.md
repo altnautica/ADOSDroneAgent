@@ -130,6 +130,8 @@ Also runs on macOS for local development and testing.
 
 Any Linux ARM64 or x86_64 board with a serial port should work. The tier system scales features to available resources automatically.
 
+**Mesh role hardware.** A single ground node (`direct` role) needs one RTL8812EU USB WiFi adapter for WFB-ng. Relay and receiver nodes add a second USB WiFi dongle that carries batman-adv mesh traffic between nodes. Any adapter with a Linux driver that supports 802.11s or IBSS mode works for the mesh carrier.
+
 ---
 
 ## CLI Reference
@@ -166,6 +168,30 @@ Any Linux ARM64 or x86_64 board with a serial port should work. The tier system 
 | `ados ros build` | Trigger colcon build in the container |
 | `ados ros shell` | Open an interactive shell in the ROS container |
 
+### Ground station (`ados gs`)
+
+Available when the node is running in ground-station profile. Hidden on drone-profile installs.
+
+| Command | Description |
+|---------|-------------|
+| `ados gs status` | Profile, role, WFB-ng link, uplink priority |
+| `ados gs pair <key>` | Pair this ground node with a drone |
+| `ados gs network show` | Active uplinks and their priorities |
+| `ados gs network ap` | WiFi AP state and client list |
+| `ados gs network client scan` | Scan for joinable WiFi networks |
+| `ados gs network client join <ssid>` | Join an existing WiFi network for uplink |
+| `ados gs network modem status` | 4G modem signal, APN, data cap usage |
+| `ados gs role show` | Current deployment role (`direct`, `relay`, or `receiver`) |
+| `ados gs role set <role>` | Switch role. Agent restarts mesh and WFB-ng services |
+| `ados gs mesh health` | batman-adv carrier, mesh ID, gateway mode |
+| `ados gs mesh neighbors` | Neighbor MACs, TQ, last-seen |
+| `ados gs mesh gateways` | Advertised gateways and selected route |
+| `ados gs mesh accept <window_s>` | Open a pairing accept window on the receiver |
+| `ados gs mesh pending` | Relays waiting for approval |
+| `ados gs mesh approve <device_id>` | Admit a pending relay into the mesh |
+| `ados gs mesh revoke <device_id>` | Remove an approved relay |
+| `ados gs mesh join <host>` | On a relay, join a receiver during its accept window |
+
 ---
 
 ## REST API
@@ -195,6 +221,7 @@ FastAPI server at `:8080`. Full OpenAPI docs at `/docs`. 16 route modules.
 | `/api/ros/topics` | GET | Active topics with types and rates |
 | `/api/ros/workspace` | GET | Workspace packages and build status |
 | `/api/ros/recordings` | GET | MCAP recording files with metadata |
+| `/api/ground_station/*` | GET / PUT / POST / DELETE | Ground-station profile only. Role, mesh, pairing, WFB-ng relay/receiver, uplinks, physical UI |
 
 ```bash
 # Get current telemetry

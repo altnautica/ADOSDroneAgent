@@ -81,3 +81,29 @@ Fits comfortably in 2GB RAM (Radxa CM3 Lite variant).
 - **Captive portal for first boot.** Auto-redirects to setup wizard when user connects to WiFi. No need to know the IP address.
 - **WebRTC over HLS/DASH.** WebRTC gives sub-second latency. HLS/DASH add 3-10 seconds of buffering. Not acceptable for drone video.
 - **MAVLink over WebSocket.** Browsers cannot open raw TCP/UDP sockets. WebSocket is the only option for bidirectional binary data in a browser.
+
+## Multi-Node Topology (Distributed Receive)
+
+A single-node ground station (`direct` role) serves one site. When the flight area is obstructed or stretched along a corridor, two or three ground nodes can work together. One node becomes the `receiver` hub. Every other node becomes a `relay` that forwards WFB-ng fragments it hears.
+
+```
+  DRONE (single wfb_tx, 5.8 GHz)
+    │
+    ├── heard by relay A  ──►  batman-adv mesh  ──┐
+    ├── heard by relay B  ──►  batman-adv mesh  ──┤
+    └── heard by receiver ─────────────────────── ▼
+                                                  wfb_rx -a on receiver
+                                                  (Reed-Solomon FEC combine)
+                                                    │
+                                          mediamtx → WebRTC → browser
+```
+
+**Transport.** batman-adv on a second USB WiFi dongle per relay and receiver. The dongle runs in 802.11s (or IBSS) mode; the kernel module advertises OGMv2 messages every second and converges on routes in 3-5 s.
+
+**Discovery.** The receiver publishes `_ados-receiver._tcp` on the `bat0` interface. Relays resolve the receiver during role transition and re-resolve if the record disappears.
+
+**Cloud uplink.** Any node with WiFi client, Ethernet, or 4G can advertise itself as a batman-adv gateway (`gw server`). The receiver picks the best gateway by measured TQ via `gw client`. Gateway election is automatic and survives the loss of any one uplink.
+
+**Partition tolerance.** If the mesh splits, each side converges independently. When the partition heals, batman-adv re-merges routes. Pairing credentials survive partitions because they are stored per node at install time, not on the receiver.
+
+**Single-node stays the default.** The three-role code paths are gated by `ground_station.role` in config. A `direct` install never starts batman-adv, never opens UDP 5801, and behaves exactly like it did before.
