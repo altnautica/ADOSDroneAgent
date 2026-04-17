@@ -10,7 +10,9 @@ Registered under the main `cli` group in `ados.cli.main` via
 
 from __future__ import annotations
 
+import asyncio
 import json
+import signal
 import sys
 from pathlib import Path
 from typing import Any
@@ -683,18 +685,127 @@ def gs_mesh_route(dest_mac: str) -> None:
         _pp(r)
 
 
+async def _stream_mesh_ws(
+    matcher: Any,
+    timeout_s: float,
+) -> int:
+    """Connect to `/api/v1/ground-station/ws/mesh` and stream events.
+
+    `matcher` is an async callable `(event_dict) -> bool | None`. Return
+    True to stop the stream with success (exit 0). Return False to stop
+    with a "pairing failed" exit code (1). Return None to keep reading.
+    A Ctrl+C during the stream exits 130 cleanly.
+
+    The WebSocket import stays lazy: most `ados gs ...` subcommands do
+    not need `websockets`, so a missing dependency surfaces only on the
+    streaming path instead of breaking the whole CLI import.
+    """
+    try:
+        import websockets  # type: ignore[import-not-found]
+    except ImportError:
+        click.echo(
+            "error: `websockets` Python package not installed. "
+            "pip install websockets"
+        )
+        return 2
+
+    ws_base = API_BASE.replace("http://", "ws://").replace("https://", "wss://")
+    url = f"{ws_base}/api/v1/ground-station/ws/mesh"
+    key = _load_api_key()
+    if key:
+        url += f"?api_key={key}"
+
+    stop = asyncio.Event()
+
+    def _sigint_handler(*_args: Any) -> None:
+        stop.set()
+
+    loop = asyncio.get_event_loop()
+    try:
+        loop.add_signal_handler(signal.SIGINT, _sigint_handler)
+    except (NotImplementedError, RuntimeError):
+        pass
+
+    try:
+        async with websockets.connect(url, open_timeout=5.0) as ws:  # type: ignore[attr-defined]
+            end_at = loop.time() + timeout_s if timeout_s > 0 else None
+            while True:
+                if stop.is_set():
+                    click.echo("(cancelled)")
+                    return 130
+                remaining = (
+                    max(0.1, end_at - loop.time()) if end_at is not None else 60.0
+                )
+                try:
+                    raw = await asyncio.wait_for(ws.recv(), timeout=remaining)
+                except asyncio.TimeoutError:
+                    if end_at is not None and loop.time() >= end_at:
+                        click.echo("(timeout waiting for event)")
+                        return 3
+                    continue
+                try:
+                    evt = json.loads(raw)
+                except (ValueError, TypeError):
+                    continue
+                outcome = await matcher(evt)
+                if outcome is True:
+                    return 0
+                if outcome is False:
+                    return 1
+    except OSError as exc:
+        click.echo(f"error: ws connect failed: {exc}")
+        return 2
+
+
 @gs_mesh_group.command("accept")
 @click.option("--window", "window_s", default=60, show_default=True,
               help="Accept-window duration in seconds (5-300).")
-def gs_mesh_accept(window_s: int) -> None:
-    """Open the Accept window on a receiver (wait for relay join requests)."""
+@click.option("--wait/--no-wait", default=True, show_default=True,
+              help="Stream the live countdown until the window closes.")
+def gs_mesh_accept(window_s: int, wait: bool) -> None:
+    """Open the Accept window on a receiver (wait for relay join requests).
+
+    With `--wait` (the default), the command stays attached and prints
+    a live countdown driven by `accept_window_tick` events from the
+    receiver. Ctrl+C leaves the window open on the agent and returns
+    130. `--no-wait` returns after the POST, same as before.
+    """
     data = _request(
         "POST",
         "/api/v1/ground-station/pair/accept",
         json_body={"duration_s": window_s},
     )
-    if data is not None:
-        _pp(data)
+    if data is None:
+        return
+    _pp(data)
+    if not wait:
+        return
+
+    async def _matcher(evt: dict[str, Any]) -> bool | None:
+        if evt.get("bus") != "pair":
+            return None
+        kind = evt.get("kind")
+        payload = evt.get("payload") or {}
+        if kind == "accept_window_tick":
+            remaining = payload.get("remaining_seconds", "?")
+            click.echo(f"  {remaining}s remaining")
+            return None
+        if kind == "accept_window_closed":
+            click.echo("window closed.")
+            return True
+        if kind == "join_received":
+            device = payload.get("device_id", "?")
+            click.echo(f"  join request: {device}")
+            return None
+        if kind == "join_approved":
+            device = payload.get("device_id", "?")
+            click.echo(f"  approved: {device}")
+            return None
+        return None
+
+    exit_code = asyncio.run(_stream_mesh_ws(_matcher, float(window_s) + 10.0))
+    if exit_code != 0:
+        sys.exit(exit_code)
 
 
 @gs_mesh_group.command("pending")
@@ -732,8 +843,23 @@ def gs_mesh_revoke(device_id: str) -> None:
 @gs_mesh_group.command("join")
 @click.option("--receiver-host", default=None, help="Optional receiver hostname hint.")
 @click.option("--receiver-port", type=int, default=None, help="Optional receiver UDP port.")
-def gs_mesh_join(receiver_host: str | None, receiver_port: int | None) -> None:
-    """Relay-side: request to join the current deployment."""
+@click.option("--wait/--no-wait", default=True, show_default=True,
+              help="Stream progress until the join completes or times out.")
+@click.option("--timeout", "timeout_s", type=int, default=90, show_default=True,
+              help="Give up after this many seconds of inactivity.")
+def gs_mesh_join(
+    receiver_host: str | None,
+    receiver_port: int | None,
+    wait: bool,
+    timeout_s: int,
+) -> None:
+    """Relay-side: request to join the current deployment.
+
+    With `--wait` (the default), streams pair-bus events until the
+    receiver approves + the mesh identity lands on this relay, or
+    until the timeout. Ctrl+C exits with code 130. Without `--wait`,
+    returns immediately after the POST.
+    """
     body: dict[str, Any] = {}
     if receiver_host:
         body["receiver_host"] = receiver_host
@@ -744,8 +870,46 @@ def gs_mesh_join(receiver_host: str | None, receiver_port: int | None) -> None:
         "/api/v1/ground-station/pair/join",
         json_body=body or None,
     )
-    if data is not None:
-        _pp(data)
+    if data is None:
+        return
+    _pp(data)
+    if not wait:
+        return
+
+    click.echo("sent join request. awaiting approval...")
+
+    async def _matcher(evt: dict[str, Any]) -> bool | None:
+        if evt.get("bus") != "pair":
+            return None
+        kind = evt.get("kind")
+        payload = evt.get("payload") or {}
+        if kind == "join_request_sent":
+            return None
+        if kind == "join_received_ack":
+            click.echo("  receiver acknowledged join request")
+            return None
+        if kind == "invite_received":
+            click.echo("  invite bundle decrypted")
+            return None
+        if kind == "mesh_identity_saved":
+            click.echo("  mesh identity saved to /etc/ados/mesh/")
+            return None
+        if kind == "joined":
+            mesh_id = payload.get("mesh_id", "?")
+            click.echo(f"joined mesh {mesh_id}.")
+            return True
+        if kind == "join_rejected":
+            reason = payload.get("reason", "unknown")
+            click.echo(f"rejected by receiver: {reason}")
+            return False
+        if kind == "revoked":
+            click.echo("node is on the revocation list")
+            return False
+        return None
+
+    exit_code = asyncio.run(_stream_mesh_ws(_matcher, float(timeout_s)))
+    if exit_code != 0:
+        sys.exit(exit_code)
 
 
 if __name__ == "__main__":
