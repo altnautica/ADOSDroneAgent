@@ -1,4 +1,4 @@
-"""Fleet/DroneNet stub routes."""
+"""Fleet/MeshNet stub routes."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ router = APIRouter()
 
 @router.get("/fleet/enrollment")
 async def get_enrollment():
-    """Get DroneNet enrollment status."""
+    """Get MeshNet enrollment status."""
     return {"enrolled": False}
 
 
