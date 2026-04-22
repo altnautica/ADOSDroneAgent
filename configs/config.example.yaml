@@ -9,7 +9,7 @@ agent:
   device_id: ""
   # Human-readable name for this drone
   name: "my-drone"
-  # DroneNet tier (auto-detected from hardware if "auto")
+  # MeshNet tier (auto-detected from hardware if "auto")
   # Options: auto, tier1, tier2, tier3, tier4
   tier: "auto"
 
