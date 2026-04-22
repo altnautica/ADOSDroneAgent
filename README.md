@@ -376,9 +376,6 @@ Building and testing ADOS Drone Agent on real companion computers and flight har
 ## Related
 
 - [ADOS Mission Control](https://github.com/altnautica/ADOSMissionControl) — browser GCS (the control side of this pair)
-- [ArduPilot](https://github.com/ArduPilot/ardupilot) — open-source autopilot firmware
-- [OpenHD](https://github.com/OpenHD/OpenHD) — open-source digital FPV
-- [WFB-ng](https://github.com/svpcom/wfb-ng) — WiFi broadcast for long-range video
 
 ---
 
