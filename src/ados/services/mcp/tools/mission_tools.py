@@ -1,44 +1,53 @@
-"""MCP mission_tools tool handlers.
-
-Safety class: safe_write (default for this group; some tools may vary).
-All handlers are stubs returning not_implemented status.
-Full implementation ships in Phase 2.
-"""
-
+"""MCP mission tool handlers."""
 from __future__ import annotations
-
 from mcp.server.fastmcp import FastMCP
-
+from ..shim import ShimError, get as shim_get, post as shim_post
 
 def register(mcp: FastMCP) -> None:
-    """Register mission_tools tools on the MCP server."""
+    @mcp.tool(name="mission.download")
+    async def mission_download() -> dict:
+        """Download the current mission from the FC."""
+        try:
+            return await shim_get("mission")
+        except ShimError as e:
+            return {"status": "error", "message": str(e)}
 
     @mcp.tool(name="mission.upload")
-    def mission_upload(**kwargs: object) -> dict:
-        """Phase 1 stub for mission.upload."""
-        return {"status": "not_implemented", "message": "full implementation in phase 2"}
-
-    @mcp.tool(name="mission.download")
-    def mission_download(**kwargs: object) -> dict:
-        """Phase 1 stub for mission.download."""
-        return {"status": "not_implemented", "message": "full implementation in phase 2"}
+    async def mission_upload(waypoints: list) -> dict:
+        """Upload a list of waypoints to the FC."""
+        try:
+            return await shim_post("mission/upload", {"waypoints": waypoints})
+        except ShimError as e:
+            return {"status": "error", "message": str(e)}
 
     @mcp.tool(name="mission.start")
-    def mission_start(**kwargs: object) -> dict:
-        """Phase 1 stub for mission.start."""
-        return {"status": "not_implemented", "message": "full implementation in phase 2"}
+    async def mission_start() -> dict:
+        """Start the currently loaded mission."""
+        try:
+            return await shim_post("mission/start", {})
+        except ShimError as e:
+            return {"status": "error", "message": str(e)}
 
     @mcp.tool(name="mission.clear")
-    def mission_clear(**kwargs: object) -> dict:
-        """Phase 1 stub for mission.clear."""
-        return {"status": "not_implemented", "message": "full implementation in phase 2"}
+    async def mission_clear() -> dict:
+        """Clear the mission from the FC."""
+        try:
+            return await shim_post("mission/clear", {})
+        except ShimError as e:
+            return {"status": "error", "message": str(e)}
 
     @mcp.tool(name="mission.current_item")
-    def mission_current_item(**kwargs: object) -> dict:
-        """Phase 1 stub for mission.current_item."""
-        return {"status": "not_implemented", "message": "full implementation in phase 2"}
+    async def mission_current_item() -> dict:
+        """Get the current mission item index."""
+        try:
+            return await shim_get("mission/current_item")
+        except ShimError as e:
+            return {"status": "error", "message": str(e)}
 
     @mcp.tool(name="mission.set_current_item")
-    def mission_set_current_item(**kwargs: object) -> dict:
-        """Phase 1 stub for mission.set_current_item."""
-        return {"status": "not_implemented", "message": "full implementation in phase 2"}
+    async def mission_set_current_item(index: int) -> dict:
+        """Jump to a specific mission item."""
+        try:
+            return await shim_post("mission/current_item", {"index": index})
+        except ShimError as e:
+            return {"status": "error", "message": str(e)}

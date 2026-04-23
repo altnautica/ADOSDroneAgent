@@ -31,17 +31,20 @@ The MCP protocol endpoint is at /mcp.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import json
 import os
 import signal
 import socket
 import time
 from pathlib import Path
+from typing import Any
 
 import structlog
 import uvicorn
 from mcp.server.fastmcp import FastMCP
 from starlette.applications import Starlette
+from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Mount, Route
@@ -50,10 +53,16 @@ from ados.core.config import load_config
 from ados.core.logging import configure_logging
 from ados import __version__
 
-from .audit import AuditLog
+from .audit import AuditLog, args_sha256
+from .gate import Gate, GateStore, GateResult
 from .mdns import McpMdns
 from .tokens import TokenStore
 from .tools import register_all as register_all_tools
+
+# ContextVar: set by bearer-injection middleware, read by gate wrapper.
+_mcp_bearer: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "mcp_bearer", default=None
+)
 
 log = structlog.get_logger()
 
@@ -73,11 +82,114 @@ def _sd_notify(message: bytes) -> None:
         pass
 
 
+class BearerInjectionMiddleware(BaseHTTPMiddleware):
+    """Extracts Authorization: Bearer <secret> and stores in ContextVar."""
+
+    async def dispatch(self, request: Request, call_next):
+        auth = request.headers.get("Authorization", "")
+        bearer = auth.removeprefix("Bearer ").strip() if auth.startswith("Bearer ") else None
+        token_var = _mcp_bearer.set(bearer)
+        try:
+            return await call_next(request)
+        finally:
+            _mcp_bearer.reset(token_var)
+
+
+def _wrap_with_gate(
+    mcp: FastMCP,
+    token_store: TokenStore,
+    audit_log: AuditLog,
+    gate: Gate,
+    operator_present_getter,
+) -> None:
+    """Wrap the FastMCP tool manager's call_tool with the gate layer."""
+    original_call = mcp._tool_manager.call_tool
+
+    async def gated_call_tool(
+        name: str,
+        arguments: dict[str, Any],
+        context=None,
+        convert_result: bool = False,
+    ) -> Any:
+        bearer = _mcp_bearer.get()
+        sim_mode = bool(arguments.get("simulate", False))
+        confirm_id = arguments.get("_confirm_id")
+        typed_phrase = arguments.get("_typed_phrase")
+
+        start = time.monotonic()
+        result = gate.check(
+            bearer=bearer,
+            tool_name=name,
+            confirm_id=confirm_id,
+            typed_phrase=typed_phrase,
+            sim_mode=sim_mode,
+        )
+
+        if not result.passed:
+            latency = (time.monotonic() - start) * 1000
+            token_id = result.token.token_id if result.token else "anon"
+            audit_log.record(
+                token_id=token_id,
+                client_hint=result.token.client_hint if result.token else "unknown",
+                event="gate_block",
+                target=name,
+                outcome="GATE_BLOCKED",
+                latency_ms=latency,
+            )
+            return {"error": "GATE_BLOCKED", "reason": result.reason}
+
+        token = result.token
+        audit_log.record(
+            token_id=token.token_id if token else "anon",
+            client_hint=token.client_hint if token else "unknown",
+            event="tool_call",
+            target=name,
+            outcome="SUCCESS",
+            latency_ms=0,
+            args_sha256=args_sha256(arguments) if arguments else None,
+        )
+
+        # Remove gate-internal fields before passing to handler
+        clean_args = {k: v for k, v in arguments.items()
+                      if k not in ("_confirm_id", "_typed_phrase")}
+
+        try:
+            output = await original_call(
+                name=name,
+                arguments=clean_args,
+                context=context,
+                convert_result=convert_result,
+            )
+            latency = (time.monotonic() - start) * 1000
+            return output
+        except Exception as exc:
+            latency = (time.monotonic() - start) * 1000
+            audit_log.record(
+                token_id=token.token_id if token else "anon",
+                client_hint=token.client_hint if token else "unknown",
+                event="tool_call",
+                target=name,
+                outcome="ERROR",
+                latency_ms=latency,
+            )
+            raise
+
+    mcp._tool_manager.call_tool = gated_call_tool  # type: ignore[method-assign]
+
+
 def build_app(
     token_store: TokenStore,
     audit_log: AuditLog,
 ) -> Starlette:
     """Build the combined Starlette app: MCP protocol + pairing REST API."""
+
+    # Gate and prompt setup
+    gate_store = GateStore()
+    gate = Gate(
+        token_store=token_store,
+        gate_store=gate_store,
+        operator_present_getter=lambda: _operator_present,
+    )
 
     # FastMCP server
     mcp = FastMCP(
@@ -90,8 +202,15 @@ def build_app(
         ),
     )
 
-    # Register all tool stubs (Phase 1 — returns not_implemented)
+    # Register all tool handlers (Phase 1 stubs; Phase 2 real handlers)
     register_all_tools(mcp)
+
+    # Register all prompts
+    from .prompts import register_all as register_all_prompts
+    register_all_prompts(mcp)
+
+    # Wrap tool execution with the gate layer
+    _wrap_with_gate(mcp, token_store, audit_log, gate, lambda: _operator_present)
 
     # Pairing and management REST endpoints
     async def pair(request: Request) -> JSONResponse:
@@ -181,6 +300,74 @@ def build_app(
             "since": _operator_present_since,
         })
 
+    async def console_invoke(request: Request) -> JSONResponse:
+        """POST /mcp-api/invoke — Console terminal dispatcher.
+
+        Body: {
+          "type": "tool" | "resource" | "prompt",
+          "name": "<tool_name or prompt_name>",
+          "uri": "<resource URI>",   // for type=resource
+          "args": {}                  // for type=tool
+        }
+
+        Used exclusively by the GCS MCP Console terminal. The bearer
+        token must be in the Authorization header (same as MCP protocol).
+        """
+        body: dict = {}
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse({"error": "invalid JSON body"}, status_code=400)
+
+        invoke_type = body.get("type")
+
+        if invoke_type == "tool":
+            tool_name = body.get("name", "")
+            tool_args = body.get("args", {})
+            bearer = (request.headers.get("Authorization", "")).removeprefix("Bearer ").strip()
+            result = gate.check(bearer=bearer, tool_name=tool_name, sim_mode=bool(tool_args.get("simulate")))
+            if not result.passed:
+                return JSONResponse({"error": "GATE_BLOCKED", "reason": result.reason}, status_code=403)
+            try:
+                output = await mcp._tool_manager.call_tool(
+                    name=tool_name,
+                    arguments=tool_args,
+                )
+                return JSONResponse({"type": "tool", "name": tool_name, "result": output})
+            except Exception as e:
+                return JSONResponse({"type": "tool", "name": tool_name, "error": str(e)}, status_code=500)
+
+        elif invoke_type == "prompt":
+            prompt_name = body.get("name", "")
+            try:
+                output = await mcp._prompt_manager.render_prompt(prompt_name, {})
+                return JSONResponse({
+                    "type": "prompt", "name": prompt_name,
+                    "result": [{"role": m.role, "content": m.content.text if hasattr(m.content, 'text') else str(m.content)} for m in (output.messages if hasattr(output, 'messages') else [])],
+                })
+            except Exception as e:
+                return JSONResponse({"type": "prompt", "name": prompt_name, "error": str(e)}, status_code=500)
+
+        elif invoke_type == "resource":
+            uri = body.get("uri", "")
+            try:
+                result = await mcp._resource_manager.read_resource(uri)
+                return JSONResponse({"type": "resource", "uri": uri, "result": str(result)})
+            except Exception as e:
+                return JSONResponse({"type": "resource", "uri": uri, "error": str(e)}, status_code=500)
+
+        return JSONResponse({"error": "unknown invoke type"}, status_code=400)
+
+    async def console_catalog(request: Request) -> JSONResponse:
+        """GET /mcp-api/catalog — returns tools, resources, prompts for Console autocomplete."""
+        tools = [{"name": t.name, "description": t.description or ""} for t in mcp._tool_manager.list_tools()]
+        prompts_list = [{"name": p, "description": ""} for p in (mcp._prompt_manager._prompts.keys() if hasattr(mcp, '_prompt_manager') else [])]
+        return JSONResponse({
+            "tools": tools,
+            "resources": [],
+            "prompts": prompts_list,
+        })
+
     rest_routes = [
         Route("/pair", endpoint=pair, methods=["POST"]),
         Route("/tokens", endpoint=tokens_list, methods=["GET"]),
@@ -188,18 +375,29 @@ def build_app(
         Route("/audit/tail", endpoint=audit_tail, methods=["GET"]),
         Route("/status", endpoint=status, methods=["GET"]),
         Route("/operator-present", endpoint=operator_present, methods=["POST"]),
+        Route("/invoke", endpoint=console_invoke, methods=["POST"]),
+        Route("/catalog", endpoint=console_catalog, methods=["GET"]),
     ]
 
     # Get the FastMCP SSE Starlette app and mount it at /mcp
     mcp_starlette = mcp.sse_app()
 
-    app = Starlette(
+    inner = Starlette(
         routes=[
             Mount("/mcp", app=mcp_starlette),
             Mount("/mcp-api", routes=rest_routes),
         ]
     )
-    return app
+
+    # Wrap with bearer-injection middleware so gate can read the token
+    class _App:
+        def __init__(self) -> None:
+            self._app = BearerInjectionMiddleware(inner)
+
+        async def __call__(self, scope, receive, send):
+            await self._app(scope, receive, send)
+
+    return _App()  # type: ignore[return-value]
 
 
 class McpService:

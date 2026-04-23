@@ -1,39 +1,62 @@
 """MCP telemetry tool handlers.
 
-Safety class: read (default for this group; some tools may vary).
-All handlers are stubs returning not_implemented status.
-Full implementation ships in Phase 2.
+Reads state from /api/status or /api/telemetry via the shim layer.
+Safety class: read for all tools.
 """
 
 from __future__ import annotations
 
 from mcp.server.fastmcp import FastMCP
 
+from ..shim import ShimError, get as shim_get
+
 
 def register(mcp: FastMCP) -> None:
     """Register telemetry tools on the MCP server."""
 
     @mcp.tool(name="telemetry.snapshot")
-    def telemetry_snapshot(**kwargs: object) -> dict:
-        """Phase 1 stub for telemetry.snapshot."""
-        return {"status": "not_implemented", "message": "full implementation in phase 2"}
+    async def telemetry_snapshot() -> dict:
+        """Return a full telemetry snapshot: attitude, GPS, battery, mode, FC state."""
+        try:
+            return await shim_get("telemetry")
+        except ShimError as e:
+            return {"status": "error", "message": str(e)}
 
     @mcp.tool(name="telemetry.battery")
-    def telemetry_battery(**kwargs: object) -> dict:
-        """Phase 1 stub for telemetry.battery."""
-        return {"status": "not_implemented", "message": "full implementation in phase 2"}
+    async def telemetry_battery() -> dict:
+        """Return battery voltage, current, remaining percent, and cell count."""
+        try:
+            status = await shim_get("status/full")
+            batt = status.get("telemetry", {}).get("battery", {})
+            return {"battery": batt}
+        except ShimError as e:
+            return {"status": "error", "message": str(e)}
 
     @mcp.tool(name="telemetry.gps")
-    def telemetry_gps(**kwargs: object) -> dict:
-        """Phase 1 stub for telemetry.gps."""
-        return {"status": "not_implemented", "message": "full implementation in phase 2"}
+    async def telemetry_gps() -> dict:
+        """Return GPS fix type, satellite count, latitude, longitude, altitude."""
+        try:
+            status = await shim_get("status/full")
+            gps = status.get("telemetry", {}).get("gps", {})
+            pos = status.get("telemetry", {}).get("position", {})
+            return {"gps": gps, "position": pos}
+        except ShimError as e:
+            return {"status": "error", "message": str(e)}
 
     @mcp.tool(name="telemetry.attitude")
-    def telemetry_attitude(**kwargs: object) -> dict:
-        """Phase 1 stub for telemetry.attitude."""
-        return {"status": "not_implemented", "message": "full implementation in phase 2"}
+    async def telemetry_attitude() -> dict:
+        """Return roll, pitch, yaw, and angular velocities."""
+        try:
+            status = await shim_get("status/full")
+            att = status.get("telemetry", {}).get("attitude", {})
+            return {"attitude": att}
+        except ShimError as e:
+            return {"status": "error", "message": str(e)}
 
     @mcp.tool(name="telemetry.history")
-    def telemetry_history(**kwargs: object) -> dict:
-        """Phase 1 stub for telemetry.history."""
-        return {"status": "not_implemented", "message": "full implementation in phase 2"}
+    async def telemetry_history(seconds: int = 60) -> dict:
+        """Return recent telemetry history (up to seconds back)."""
+        try:
+            return await shim_get(f"telemetry?history={seconds}")
+        except ShimError as e:
+            return {"status": "error", "message": str(e)}

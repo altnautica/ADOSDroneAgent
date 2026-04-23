@@ -1,44 +1,62 @@
-"""MCP services_tools tool handlers.
+"""MCP services tool handlers.
 
-Safety class: safe_write (default for this group; some tools may vary).
-All handlers are stubs returning not_implemented status.
-Full implementation ships in Phase 2.
+Wraps /api/services/* via the shim layer.
 """
 
 from __future__ import annotations
 
 from mcp.server.fastmcp import FastMCP
 
+from ..shim import ShimError, get as shim_get, post as shim_post
+
 
 def register(mcp: FastMCP) -> None:
-    """Register services_tools tools on the MCP server."""
+    """Register services tools on the MCP server."""
 
     @mcp.tool(name="services.list")
-    def services_list(**kwargs: object) -> dict:
-        """Phase 1 stub for services.list."""
-        return {"status": "not_implemented", "message": "full implementation in phase 2"}
+    async def services_list() -> dict:
+        """List all agent services and their current states."""
+        try:
+            return await shim_get("services")
+        except ShimError as e:
+            return {"status": "error", "message": str(e)}
 
     @mcp.tool(name="services.status")
-    def services_status(**kwargs: object) -> dict:
-        """Phase 1 stub for services.status."""
-        return {"status": "not_implemented", "message": "full implementation in phase 2"}
+    async def services_status(name: str) -> dict:
+        """Get status of a specific service (e.g. ados-video)."""
+        try:
+            return await shim_get(f"services/{name}")
+        except ShimError as e:
+            return {"status": "error", "message": str(e)}
 
     @mcp.tool(name="services.start")
-    def services_start(**kwargs: object) -> dict:
-        """Phase 1 stub for services.start."""
-        return {"status": "not_implemented", "message": "full implementation in phase 2"}
+    async def services_start(name: str) -> dict:
+        """Start a stopped service."""
+        try:
+            return await shim_post(f"services/{name}/start", {})
+        except ShimError as e:
+            return {"status": "error", "message": str(e)}
 
     @mcp.tool(name="services.stop")
-    def services_stop(**kwargs: object) -> dict:
-        """Phase 1 stub for services.stop."""
-        return {"status": "not_implemented", "message": "full implementation in phase 2"}
+    async def services_stop(name: str) -> dict:
+        """Stop a running service."""
+        try:
+            return await shim_post(f"services/{name}/stop", {})
+        except ShimError as e:
+            return {"status": "error", "message": str(e)}
 
     @mcp.tool(name="services.restart")
-    def services_restart(**kwargs: object) -> dict:
-        """Phase 1 stub for services.restart."""
-        return {"status": "not_implemented", "message": "full implementation in phase 2"}
+    async def services_restart(name: str) -> dict:
+        """Restart a service."""
+        try:
+            return await shim_post(f"services/{name}/restart", {})
+        except ShimError as e:
+            return {"status": "error", "message": str(e)}
 
     @mcp.tool(name="services.logs")
-    def services_logs(**kwargs: object) -> dict:
-        """Phase 1 stub for services.logs."""
-        return {"status": "not_implemented", "message": "full implementation in phase 2"}
+    async def services_logs(name: str, lines: int = 50) -> dict:
+        """Get recent journal log lines for a service."""
+        try:
+            return await shim_get(f"services/{name}/logs?lines={lines}")
+        except ShimError as e:
+            return {"status": "error", "message": str(e)}
