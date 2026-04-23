@@ -1,39 +1,45 @@
-"""MCP ros_tools tool handlers.
-
-Safety class: read (default for this group; some tools may vary).
-All handlers are stubs returning not_implemented status.
-Full implementation ships in Phase 2.
-"""
-
+"""MCP ROS 2 tool handlers."""
 from __future__ import annotations
-
 from mcp.server.fastmcp import FastMCP
-
+from ..shim import ShimError, get as shim_get, post as shim_post
 
 def register(mcp: FastMCP) -> None:
-    """Register ros_tools tools on the MCP server."""
-
     @mcp.tool(name="ros.status")
-    def ros_status(**kwargs: object) -> dict:
-        """Phase 1 stub for ros.status."""
-        return {"status": "not_implemented", "message": "full implementation in phase 2"}
+    async def ros_status() -> dict:
+        """Return ROS 2 environment status."""
+        try:
+            return await shim_get("ros/status")
+        except ShimError as e:
+            return {"status": "error", "message": str(e)}
 
     @mcp.tool(name="ros.list_nodes")
-    def ros_list_nodes(**kwargs: object) -> dict:
-        """Phase 1 stub for ros.list_nodes."""
-        return {"status": "not_implemented", "message": "full implementation in phase 2"}
+    async def ros_list_nodes() -> dict:
+        """List active ROS 2 nodes."""
+        try:
+            return await shim_get("ros/nodes")
+        except ShimError as e:
+            return {"status": "error", "message": str(e)}
 
     @mcp.tool(name="ros.list_topics")
-    def ros_list_topics(**kwargs: object) -> dict:
-        """Phase 1 stub for ros.list_topics."""
-        return {"status": "not_implemented", "message": "full implementation in phase 2"}
+    async def ros_list_topics() -> dict:
+        """List active ROS 2 topics."""
+        try:
+            return await shim_get("ros/topics")
+        except ShimError as e:
+            return {"status": "error", "message": str(e)}
 
     @mcp.tool(name="ros.start_bag")
-    def ros_start_bag(**kwargs: object) -> dict:
-        """Phase 1 stub for ros.start_bag."""
-        return {"status": "not_implemented", "message": "full implementation in phase 2"}
+    async def ros_start_bag(filename: str = "") -> dict:
+        """Start recording a ROS 2 bag file."""
+        try:
+            return await shim_post("ros/recording/start", {"filename": filename})
+        except ShimError as e:
+            return {"status": "error", "message": str(e)}
 
     @mcp.tool(name="ros.stop_bag")
-    def ros_stop_bag(**kwargs: object) -> dict:
-        """Phase 1 stub for ros.stop_bag."""
-        return {"status": "not_implemented", "message": "full implementation in phase 2"}
+    async def ros_stop_bag() -> dict:
+        """Stop recording a ROS 2 bag file."""
+        try:
+            return await shim_post("ros/recording/stop", {})
+        except ShimError as e:
+            return {"status": "error", "message": str(e)}

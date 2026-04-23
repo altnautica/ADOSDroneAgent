@@ -26,6 +26,8 @@ def register_all(mcp: FastMCP) -> None:
     from .ros_tools import register as r_ros
     from .agent_tools import register as r_agent
 
+    from .assist import register as r_assist
+
     r_flight(mcp)
     r_telemetry(mcp)
     r_params(mcp)
@@ -40,3 +42,4 @@ def register_all(mcp: FastMCP) -> None:
     r_system(mcp)
     r_ros(mcp)
     r_agent(mcp)
+    r_assist(mcp)

@@ -1,44 +1,53 @@
-"""MCP files tool handlers.
-
-Safety class: safe_write (default for this group; some tools may vary).
-All handlers are stubs returning not_implemented status.
-Full implementation ships in Phase 2.
-"""
-
+"""MCP files tool handlers."""
 from __future__ import annotations
-
 from mcp.server.fastmcp import FastMCP
-
+from ..shim import ShimError, get as shim_get, post as shim_post
 
 def register(mcp: FastMCP) -> None:
-    """Register files tools on the MCP server."""
-
     @mcp.tool(name="files.list")
-    def files_list(**kwargs: object) -> dict:
-        """Phase 1 stub for files.list."""
-        return {"status": "not_implemented", "message": "full implementation in phase 2"}
+    async def files_list(path: str = "/var/ados") -> dict:
+        """List files at a path (subject to allowed_roots policy)."""
+        try:
+            return await shim_get(f"files?path={path}")
+        except ShimError as e:
+            return {"status": "error", "message": str(e)}
 
     @mcp.tool(name="files.read")
-    def files_read(**kwargs: object) -> dict:
-        """Phase 1 stub for files.read."""
-        return {"status": "not_implemented", "message": "full implementation in phase 2"}
+    async def files_read(path: str) -> dict:
+        """Read a text file (subject to allowed_roots policy)."""
+        try:
+            return await shim_get(f"files/read?path={path}")
+        except ShimError as e:
+            return {"status": "error", "message": str(e)}
 
     @mcp.tool(name="files.write")
-    def files_write(**kwargs: object) -> dict:
-        """Phase 1 stub for files.write."""
-        return {"status": "not_implemented", "message": "full implementation in phase 2"}
+    async def files_write(path: str, content: str) -> dict:
+        """Write content to a file (subject to allowed_roots policy)."""
+        try:
+            return await shim_post("files/write", {"path": path, "content": content})
+        except ShimError as e:
+            return {"status": "error", "message": str(e)}
 
     @mcp.tool(name="files.delete")
-    def files_delete(**kwargs: object) -> dict:
-        """Phase 1 stub for files.delete."""
-        return {"status": "not_implemented", "message": "full implementation in phase 2"}
+    async def files_delete(path: str) -> dict:
+        """Delete a file. Destructive."""
+        try:
+            return await shim_post("files/delete", {"path": path})
+        except ShimError as e:
+            return {"status": "error", "message": str(e)}
 
     @mcp.tool(name="files.stat")
-    def files_stat(**kwargs: object) -> dict:
-        """Phase 1 stub for files.stat."""
-        return {"status": "not_implemented", "message": "full implementation in phase 2"}
+    async def files_stat(path: str) -> dict:
+        """Return file metadata (size, mtime, type)."""
+        try:
+            return await shim_get(f"files/stat?path={path}")
+        except ShimError as e:
+            return {"status": "error", "message": str(e)}
 
     @mcp.tool(name="files.move")
-    def files_move(**kwargs: object) -> dict:
-        """Phase 1 stub for files.move."""
-        return {"status": "not_implemented", "message": "full implementation in phase 2"}
+    async def files_move(src: str, dst: str) -> dict:
+        """Move/rename a file."""
+        try:
+            return await shim_post("files/move", {"src": src, "dst": dst})
+        except ShimError as e:
+            return {"status": "error", "message": str(e)}

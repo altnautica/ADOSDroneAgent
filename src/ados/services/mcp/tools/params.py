@@ -1,49 +1,71 @@
-"""MCP params tool handlers.
+"""MCP parameter tool handlers.
 
-Safety class: safe_write (default for this group; some tools may vary).
-All handlers are stubs returning not_implemented status.
-Full implementation ships in Phase 2.
+Wraps /api/params/* via the shim layer.
+Safety class: read for reads, safe_write for writes.
 """
 
 from __future__ import annotations
 
 from mcp.server.fastmcp import FastMCP
 
+from ..shim import ShimError, get as shim_get, post as shim_post
+
 
 def register(mcp: FastMCP) -> None:
     """Register params tools on the MCP server."""
 
     @mcp.tool(name="params.list")
-    def params_list(**kwargs: object) -> dict:
-        """Phase 1 stub for params.list."""
-        return {"status": "not_implemented", "message": "full implementation in phase 2"}
+    async def params_list() -> dict:
+        """List all FC parameters."""
+        try:
+            return await shim_get("params")
+        except ShimError as e:
+            return {"status": "error", "message": str(e)}
 
     @mcp.tool(name="params.get")
-    def params_get(**kwargs: object) -> dict:
-        """Phase 1 stub for params.get."""
-        return {"status": "not_implemented", "message": "full implementation in phase 2"}
+    async def params_get(name: str) -> dict:
+        """Get a single FC parameter by name."""
+        try:
+            return await shim_get(f"params/{name}")
+        except ShimError as e:
+            return {"status": "error", "message": str(e)}
 
     @mcp.tool(name="params.set")
-    def params_set(**kwargs: object) -> dict:
-        """Phase 1 stub for params.set."""
-        return {"status": "not_implemented", "message": "full implementation in phase 2"}
+    async def params_set(name: str, value: float) -> dict:
+        """Set a FC parameter. ArduPilot auto-saves to EEPROM on PARAM_SET."""
+        try:
+            return await shim_post(f"params/{name}", {"value": value})
+        except ShimError as e:
+            return {"status": "error", "message": str(e)}
 
     @mcp.tool(name="params.diff")
-    def params_diff(**kwargs: object) -> dict:
-        """Phase 1 stub for params.diff."""
-        return {"status": "not_implemented", "message": "full implementation in phase 2"}
+    async def params_diff() -> dict:
+        """Return parameters that differ from their default values."""
+        try:
+            return await shim_get("params/diff")
+        except ShimError as e:
+            return {"status": "error", "message": str(e)}
 
     @mcp.tool(name="params.save_to_flash")
-    def params_save_to_flash(**kwargs: object) -> dict:
-        """Phase 1 stub for params.save_to_flash."""
-        return {"status": "not_implemented", "message": "full implementation in phase 2"}
+    async def params_save_to_flash() -> dict:
+        """Trigger MAV_CMD_PREFLIGHT_STORAGE (belt-and-suspenders flash write)."""
+        try:
+            return await shim_post("params/save", {})
+        except ShimError as e:
+            return {"status": "error", "message": str(e)}
 
     @mcp.tool(name="params.reset_to_default")
-    def params_reset_to_default(**kwargs: object) -> dict:
-        """Phase 1 stub for params.reset_to_default."""
-        return {"status": "not_implemented", "message": "full implementation in phase 2"}
+    async def params_reset_to_default(name: str) -> dict:
+        """Reset a single parameter to its default value."""
+        try:
+            return await shim_post(f"params/{name}/reset", {})
+        except ShimError as e:
+            return {"status": "error", "message": str(e)}
 
     @mcp.tool(name="params.reset_all_to_default")
-    def params_reset_all_to_default(**kwargs: object) -> dict:
-        """Phase 1 stub for params.reset_all_to_default."""
-        return {"status": "not_implemented", "message": "full implementation in phase 2"}
+    async def params_reset_all_to_default() -> dict:
+        """Reset ALL parameters to defaults. Destructive — confirm required."""
+        try:
+            return await shim_post("params/reset-all", {})
+        except ShimError as e:
+            return {"status": "error", "message": str(e)}

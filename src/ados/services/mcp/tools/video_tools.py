@@ -1,44 +1,53 @@
-"""MCP video_tools tool handlers.
-
-Safety class: safe_write (default for this group; some tools may vary).
-All handlers are stubs returning not_implemented status.
-Full implementation ships in Phase 2.
-"""
-
+"""MCP video tool handlers."""
 from __future__ import annotations
-
 from mcp.server.fastmcp import FastMCP
-
+from ..shim import ShimError, get as shim_get, post as shim_post
 
 def register(mcp: FastMCP) -> None:
-    """Register video_tools tools on the MCP server."""
-
     @mcp.tool(name="video.status")
-    def video_status(**kwargs: object) -> dict:
-        """Phase 1 stub for video.status."""
-        return {"status": "not_implemented", "message": "full implementation in phase 2"}
+    async def video_status() -> dict:
+        """Return video pipeline status."""
+        try:
+            return await shim_get("video")
+        except ShimError as e:
+            return {"status": "error", "message": str(e)}
 
     @mcp.tool(name="video.snapshot")
-    def video_snapshot(**kwargs: object) -> dict:
-        """Phase 1 stub for video.snapshot."""
-        return {"status": "not_implemented", "message": "full implementation in phase 2"}
+    async def video_snapshot() -> dict:
+        """Capture a JPEG snapshot. Returns a URL."""
+        try:
+            return await shim_post("video/snapshot", {})
+        except ShimError as e:
+            return {"status": "error", "message": str(e)}
 
     @mcp.tool(name="video.record_start")
-    def video_record_start(**kwargs: object) -> dict:
-        """Phase 1 stub for video.record_start."""
-        return {"status": "not_implemented", "message": "full implementation in phase 2"}
+    async def video_record_start(filename: str = "") -> dict:
+        """Start recording video."""
+        try:
+            return await shim_post("video/record/start", {"filename": filename})
+        except ShimError as e:
+            return {"status": "error", "message": str(e)}
 
     @mcp.tool(name="video.record_stop")
-    def video_record_stop(**kwargs: object) -> dict:
-        """Phase 1 stub for video.record_stop."""
-        return {"status": "not_implemented", "message": "full implementation in phase 2"}
+    async def video_record_stop() -> dict:
+        """Stop recording and return file path."""
+        try:
+            return await shim_post("video/record/stop", {})
+        except ShimError as e:
+            return {"status": "error", "message": str(e)}
 
     @mcp.tool(name="video.set_bitrate")
-    def video_set_bitrate(**kwargs: object) -> dict:
-        """Phase 1 stub for video.set_bitrate."""
-        return {"status": "not_implemented", "message": "full implementation in phase 2"}
+    async def video_set_bitrate(bitrate_kbps: int) -> dict:
+        """Set encode bitrate in kbps."""
+        try:
+            return await shim_post("video/bitrate", {"bitrate_kbps": bitrate_kbps})
+        except ShimError as e:
+            return {"status": "error", "message": str(e)}
 
     @mcp.tool(name="video.switch_camera")
-    def video_switch_camera(**kwargs: object) -> dict:
-        """Phase 1 stub for video.switch_camera."""
-        return {"status": "not_implemented", "message": "full implementation in phase 2"}
+    async def video_switch_camera(device: str) -> dict:
+        """Switch to a different camera device."""
+        try:
+            return await shim_post("video/camera", {"device": device})
+        except ShimError as e:
+            return {"status": "error", "message": str(e)}

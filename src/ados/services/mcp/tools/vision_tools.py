@@ -1,39 +1,45 @@
-"""MCP vision_tools tool handlers.
-
-Safety class: safe_write (default for this group; some tools may vary).
-All handlers are stubs returning not_implemented status.
-Full implementation ships in Phase 2.
-"""
-
+"""MCP vision tool handlers."""
 from __future__ import annotations
-
 from mcp.server.fastmcp import FastMCP
-
+from ..shim import ShimError, get as shim_get, post as shim_post
 
 def register(mcp: FastMCP) -> None:
-    """Register vision_tools tools on the MCP server."""
-
     @mcp.tool(name="vision.list_models")
-    def vision_list_models(**kwargs: object) -> dict:
-        """Phase 1 stub for vision.list_models."""
-        return {"status": "not_implemented", "message": "full implementation in phase 2"}
+    async def vision_list_models() -> dict:
+        """List installed vision models."""
+        try:
+            return await shim_get("vision/models")
+        except ShimError as e:
+            return {"status": "error", "message": str(e)}
 
     @mcp.tool(name="vision.set_model")
-    def vision_set_model(**kwargs: object) -> dict:
-        """Phase 1 stub for vision.set_model."""
-        return {"status": "not_implemented", "message": "full implementation in phase 2"}
+    async def vision_set_model(model_name: str) -> dict:
+        """Set the active vision model."""
+        try:
+            return await shim_post("vision/model", {"name": model_name})
+        except ShimError as e:
+            return {"status": "error", "message": str(e)}
 
     @mcp.tool(name="vision.detect_now")
-    def vision_detect_now(**kwargs: object) -> dict:
-        """Phase 1 stub for vision.detect_now."""
-        return {"status": "not_implemented", "message": "full implementation in phase 2"}
+    async def vision_detect_now() -> dict:
+        """Run one detection inference on the current frame."""
+        try:
+            return await shim_post("vision/detect", {})
+        except ShimError as e:
+            return {"status": "error", "message": str(e)}
 
     @mcp.tool(name="vision.start_tracker")
-    def vision_start_tracker(**kwargs: object) -> dict:
-        """Phase 1 stub for vision.start_tracker."""
-        return {"status": "not_implemented", "message": "full implementation in phase 2"}
+    async def vision_start_tracker(behavior: str = "follow_me") -> dict:
+        """Start a vision behavior (e.g. follow_me, orbit, spotlight)."""
+        try:
+            return await shim_post("vision/behavior/start", {"behavior": behavior})
+        except ShimError as e:
+            return {"status": "error", "message": str(e)}
 
     @mcp.tool(name="vision.stop_tracker")
-    def vision_stop_tracker(**kwargs: object) -> dict:
-        """Phase 1 stub for vision.stop_tracker."""
-        return {"status": "not_implemented", "message": "full implementation in phase 2"}
+    async def vision_stop_tracker() -> dict:
+        """Stop any active vision behavior."""
+        try:
+            return await shim_post("vision/behavior/stop", {})
+        except ShimError as e:
+            return {"status": "error", "message": str(e)}
