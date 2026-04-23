@@ -1,0 +1,26 @@
+[Unit]
+Description=ADOS Survey Quality and Dataset Service
+After=ados-api.service ados-mavlink.service
+PartOf=ados-supervisor.service
+
+[Service]
+Type=simple
+ExecStart=/opt/ados/venv/bin/python -m ados.services.survey
+Restart=on-failure
+RestartSec=3
+Environment=ADOS_CONFIG=/etc/ados/config.yaml
+EnvironmentFile=-/etc/ados/env
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/var/ados /run/ados
+
+MemoryMax=300M
+CPUQuota=25%
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ados-survey
+
+[Install]
+WantedBy=ados-supervisor.service
