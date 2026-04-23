@@ -18,9 +18,11 @@ from ados.api.routes import (
     fleet,
     ground_station,
     logs,
+    foxglove,
     memory,
     models,
     ota,
+    rerun as rerun_routes,
     survey,
     pairing,
     params,
@@ -117,6 +119,10 @@ def create_app(agent: AgentApp) -> FastAPI:
     app.include_router(models.router, prefix="/api")
     # Survey photogrammetry quality validation and dataset packaging.
     app.include_router(survey.router, prefix="/api")
+    # Foxglove WebSocket Protocol bridge.
+    app.include_router(foxglove.router, prefix="/api")
+    # Rerun visualization sink.
+    app.include_router(rerun_routes.router, prefix="/api")
     # MAVLink v2 message signing: capability + one-shot FC enrollment.
     # Agent holds no key material; key lives in the GCS browser.
     app.include_router(signing.router, prefix="/api")
