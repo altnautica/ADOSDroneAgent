@@ -12,6 +12,7 @@ from ados import __version__
 from ados.api.deps import set_agent_app
 from ados.api.middleware.auth import ApiKeyAuthMiddleware
 from ados.api.routes import (
+    assist,
     commands,
     config,
     features,
@@ -119,6 +120,8 @@ def create_app(agent: AgentApp) -> FastAPI:
     app.include_router(models.router, prefix="/api")
     # Survey photogrammetry quality validation and dataset packaging.
     app.include_router(survey.router, prefix="/api")
+    # Assist diagnostics and self-heal service.
+    app.include_router(assist.router, prefix="/api")
     # Foxglove WebSocket Protocol bridge.
     app.include_router(foxglove.router, prefix="/api")
     # Rerun visualization sink.
