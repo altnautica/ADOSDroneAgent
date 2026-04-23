@@ -19,7 +19,9 @@ from ados.api.routes import (
     ground_station,
     logs,
     memory,
+    models,
     ota,
+    survey,
     pairing,
     params,
     peripherals,
@@ -111,6 +113,10 @@ def create_app(agent: AgentApp) -> FastAPI:
     app.include_router(ros.router, prefix="/api")
     # World Model spatial memory (opt-in, requires ados-memory.service).
     app.include_router(memory.router, prefix="/api")
+    # On-drone ML model registry (on-demand install, no bundles).
+    app.include_router(models.router, prefix="/api")
+    # Survey photogrammetry quality validation and dataset packaging.
+    app.include_router(survey.router, prefix="/api")
     # MAVLink v2 message signing: capability + one-shot FC enrollment.
     # Agent holds no key material; key lives in the GCS browser.
     app.include_router(signing.router, prefix="/api")
