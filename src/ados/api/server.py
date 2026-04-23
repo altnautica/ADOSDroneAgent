@@ -18,6 +18,7 @@ from ados.api.routes import (
     fleet,
     ground_station,
     logs,
+    memory,
     ota,
     pairing,
     params,
@@ -108,6 +109,8 @@ def create_app(agent: AgentApp) -> FastAPI:
     app.include_router(ground_station.router, prefix="/api")
     # ROS 2 environment management (opt-in).
     app.include_router(ros.router, prefix="/api")
+    # World Model spatial memory (opt-in, requires ados-memory.service).
+    app.include_router(memory.router, prefix="/api")
     # MAVLink v2 message signing: capability + one-shot FC enrollment.
     # Agent holds no key material; key lives in the GCS browser.
     app.include_router(signing.router, prefix="/api")
