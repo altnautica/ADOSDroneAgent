@@ -36,6 +36,7 @@ from ados.api.routes import (
     status,
     suites,
     system,
+    vision,
     video,
     wfb,
 )
@@ -122,6 +123,8 @@ def create_app(agent: AgentApp) -> FastAPI:
     app.include_router(survey.router, prefix="/api")
     # Assist diagnostics and self-heal service.
     app.include_router(assist.router, prefix="/api")
+    # Vision Engine embedding stubs (World Model ingest falls back gracefully).
+    app.include_router(vision.router, prefix="/api")
     # Foxglove WebSocket Protocol bridge.
     app.include_router(foxglove.router, prefix="/api")
     # Rerun visualization sink.
