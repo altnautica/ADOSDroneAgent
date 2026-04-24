@@ -43,9 +43,6 @@ dependencies = [
     "cryptography>=42.0.0",
     "zeroconf>=0.131.0",
     "jinja2>=3.0.0",
-    "mcp>=1.0",
-    "sqlite-vec>=0.1",
-    "rerun-sdk>=0.18",
 ]
 
 [project.optional-dependencies]

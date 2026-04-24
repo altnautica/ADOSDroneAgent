@@ -316,56 +316,6 @@ class SwarmConfig(BaseModel):
     default_spacing: int = 10
 
 
-# --- MCP ---
-
-class McpConfig(BaseModel):
-    enabled: bool = True
-    host: str = "0.0.0.0"
-    port: int = 8090
-    unix_socket: str = "/run/ados/mcp.sock"
-    token_dir: str = "/etc/ados/mcp/tokens"
-    audit_log_dir: str = "/var/ados/mcp/audit"
-    audit_rotate_mb: int = 50
-    audit_read_sample_rate: int = 100  # Log 1 in N read events
-    token_default_ttl_days: int = 7
-    mdns_enabled: bool = True
-    require_hmac: bool = True
-
-
-# --- Assist ---
-
-class AssistFeaturesConfig(BaseModel):
-    diagnostics: bool = True
-    suggestions: bool = True
-    self_healing: bool = False
-    pr_drafts: bool = False
-    fleet_patterns: bool = False
-    setup_wizard: bool = True
-    narration_lm: bool = False
-
-
-class AssistConfig(BaseModel):
-    enabled: bool = False
-    features: AssistFeaturesConfig = AssistFeaturesConfig()
-    snapshot_retain_hours: int = 24
-    ring_buffer_minutes: int = 10
-    audit_retain_days: int = 90
-    safe_write_allowed: bool = True
-    flight_action_allowed: bool = False
-    destructive_allowed: bool = False
-
-
-# --- Memory (World Model) ---
-
-class MemoryConfig(BaseModel):
-    enabled: bool = True
-    db_path: str = "/var/ados/memory/world-model.db"
-    thumbs_dir: str = "/var/ados/memory/thumbs"
-    fullres_dir: str = "/var/ados/memory/frames"
-    snapshots_dir: str = "/var/ados/memory/snapshots"
-    retain_flights: int = 30
-
-
 # --- Ground Station ---
 
 # ground_station fields live in the Pydantic model so they validate,
@@ -480,9 +430,6 @@ class ADOSConfig(BaseModel):
     swarm: SwarmConfig = SwarmConfig()
     ground_station: GroundStationConfig = GroundStationConfig()
     ros: RosConfig = RosConfig()
-    mcp: McpConfig = McpConfig()
-    assist: AssistConfig = AssistConfig()
-    memory: MemoryConfig = MemoryConfig()
 
     model_config = {"extra": "ignore"}
 

@@ -12,19 +12,13 @@ from ados import __version__
 from ados.api.deps import set_agent_app
 from ados.api.middleware.auth import ApiKeyAuthMiddleware
 from ados.api.routes import (
-    assist,
     commands,
     config,
     features,
     fleet,
     ground_station,
     logs,
-    foxglove,
-    memory,
-    models,
     ota,
-    rerun as rerun_routes,
-    survey,
     pairing,
     params,
     peripherals,
@@ -36,7 +30,6 @@ from ados.api.routes import (
     status,
     suites,
     system,
-    vision,
     video,
     wfb,
 )
@@ -115,20 +108,6 @@ def create_app(agent: AgentApp) -> FastAPI:
     app.include_router(ground_station.router, prefix="/api")
     # ROS 2 environment management (opt-in).
     app.include_router(ros.router, prefix="/api")
-    # World Model spatial memory (opt-in, requires ados-memory.service).
-    app.include_router(memory.router, prefix="/api")
-    # On-drone ML model registry (on-demand install, no bundles).
-    app.include_router(models.router, prefix="/api")
-    # Survey photogrammetry quality validation and dataset packaging.
-    app.include_router(survey.router, prefix="/api")
-    # Assist diagnostics and self-heal service.
-    app.include_router(assist.router, prefix="/api")
-    # Vision Engine embedding stubs (World Model ingest falls back gracefully).
-    app.include_router(vision.router, prefix="/api")
-    # Foxglove WebSocket Protocol bridge.
-    app.include_router(foxglove.router, prefix="/api")
-    # Rerun visualization sink.
-    app.include_router(rerun_routes.router, prefix="/api")
     # MAVLink v2 message signing: capability + one-shot FC enrollment.
     # Agent holds no key material; key lives in the GCS browser.
     app.include_router(signing.router, prefix="/api")
