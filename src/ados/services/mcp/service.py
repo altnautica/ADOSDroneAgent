@@ -185,10 +185,24 @@ def build_app(
 
     # Gate and prompt setup
     gate_store = GateStore()
+
+    def _operator_present_fresh() -> bool:
+        """Return True only when operator-present is ON and heartbeat is fresh.
+
+        Stale after _OPERATOR_PRESENT_TIMEOUT (10s) since last heartbeat.
+        This prevents a crashed GCS from leaving flight_action tools
+        enabled indefinitely.
+        """
+        if not _operator_present:
+            return False
+        if _operator_present_since is None:
+            return False
+        return (time.time() - _operator_present_since) < _OPERATOR_PRESENT_TIMEOUT
+
     gate = Gate(
         token_store=token_store,
         gate_store=gate_store,
-        operator_present_getter=lambda: _operator_present,
+        operator_present_getter=_operator_present_fresh,
     )
 
     # FastMCP server
@@ -222,7 +236,7 @@ def build_app(
             pass
 
         client_hint = body.get("client_hint", request.headers.get("User-Agent", "unknown"))[:64]
-        token, mnemonic = token_store.mint(client_hint=client_hint)
+        token, mnemonic, bearer = token_store.mint(client_hint=client_hint)
         audit_log.record(
             token_id=token.token_id,
             client_hint=client_hint,
@@ -234,9 +248,11 @@ def build_app(
         return JSONResponse({
             "token_id": token.token_id,
             "mnemonic": mnemonic,
+            "bearer": bearer,
             "scopes": token.scopes,
             "expires_at": token.expires_at,
             "client_hint": token.client_hint,
+            "warning": "The bearer token is sensitive and shown only once. Copy it into your MCP client's Authorization: Bearer header.",
         })
 
     async def tokens_list(request: Request) -> JSONResponse:
