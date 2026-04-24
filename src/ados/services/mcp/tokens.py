@@ -183,8 +183,16 @@ class TokenStore:
         scopes: list[str] | None = None,
         allowed_roots: list[str] | None = None,
         ttl_seconds: int | None = None,
-    ) -> tuple[McpToken, str]:
-        """Create a new token and return (token, mnemonic)."""
+    ) -> tuple[McpToken, str, str]:
+        """Create a new token and return (token, mnemonic, hex_secret).
+
+        The hex_secret is the actual bearer token MCP clients must present
+        in their Authorization: Bearer header. It is returned ONCE at mint
+        time and never again — only its SHA-256 hash is persisted.
+
+        The mnemonic is a human-readable label derived one-way from the
+        secret; it is not usable for authentication.
+        """
         if not self._loaded:
             self.load_all()
 
@@ -209,7 +217,7 @@ class TokenStore:
 
         mnemonic = _mnemonic_from_secret(secret)
         log.info("mcp_token_minted", token_id=token_id, client_hint=client_hint)
-        return token, mnemonic
+        return token, mnemonic, secret
 
     def get(self, token_id: str) -> McpToken | None:
         if not self._loaded:
