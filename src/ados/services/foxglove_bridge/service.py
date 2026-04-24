@@ -81,6 +81,10 @@ class FoxgloveBridgeService:
         # Try to start foxglove_websocket server
         server_task = asyncio.create_task(self._start_server())
 
+        # Publish status to /run/ados/foxglove_status.json and watch for
+        # /run/ados/foxglove_cmd.json (start/stop recording from REST).
+        asyncio.create_task(self._status_and_cmd_loop())
+
         _sd_notify(b"READY=1")
         log.info("foxglove_bridge_ready", port=self.port)
 
@@ -203,3 +207,36 @@ class FoxgloveBridgeService:
                 "created_at": f.stat().st_mtime,
             })
         return results
+
+    async def _status_and_cmd_loop(self) -> None:
+        """Write status file so REST routes can report current state,
+        and poll command file for start/stop recording requests.
+        """
+        run_dir = Path(os.environ.get("ADOS_RUN_DIR", "/run/ados"))
+        status_file = run_dir / "foxglove_status.json"
+        cmd_file = run_dir / "foxglove_cmd.json"
+        last_cmd_ts = 0.0
+
+        while self._running:
+            try:
+                run_dir.mkdir(parents=True, exist_ok=True)
+                status_file.write_text(json.dumps({
+                    "ts": time.time(),
+                    "port": self.port,
+                    "recording": self._recording,
+                    "recording_path": self._recording_path,
+                }))
+
+                if cmd_file.exists():
+                    cmd = json.loads(cmd_file.read_text())
+                    cmd_ts = float(cmd.get("ts", 0))
+                    if cmd_ts > last_cmd_ts:
+                        last_cmd_ts = cmd_ts
+                        action = cmd.get("action")
+                        if action == "start":
+                            self.start_recording(cmd.get("filename", ""))
+                        elif action == "stop":
+                            self.stop_recording()
+            except Exception as e:
+                log.debug("foxglove_status_loop_error", error=str(e))
+            await asyncio.sleep(1.0)

@@ -76,6 +76,7 @@ class RerunSinkService:
         # Try to initialize Rerun SDK
         asyncio.create_task(self._init_rerun())
         asyncio.create_task(self._pump_state())
+        asyncio.create_task(self._status_and_cmd_loop())
 
         _sd_notify(b"READY=1")
         log.info("rerun_sink_ready", port=self.port)
@@ -175,3 +176,35 @@ class RerunSinkService:
                 "download_url": f"/api/rerun/recordings/{f.name}/download",
             })
         return results
+
+    async def _status_and_cmd_loop(self) -> None:
+        """Write status file for REST routes and poll cmd file for
+        start/stop recording requests."""
+        run_dir = Path(os.environ.get("ADOS_RUN_DIR", "/run/ados"))
+        status_file = run_dir / "rerun_status.json"
+        cmd_file = run_dir / "rerun_cmd.json"
+        last_cmd_ts = 0.0
+
+        while self._running:
+            try:
+                run_dir.mkdir(parents=True, exist_ok=True)
+                status_file.write_text(json.dumps({
+                    "ts": time.time(),
+                    "port": self.port,
+                    "recording": self._recording,
+                    "recording_path": self._recording_path,
+                }))
+
+                if cmd_file.exists():
+                    cmd = json.loads(cmd_file.read_text())
+                    cmd_ts = float(cmd.get("ts", 0))
+                    if cmd_ts > last_cmd_ts:
+                        last_cmd_ts = cmd_ts
+                        action = cmd.get("action")
+                        if action == "start":
+                            self.start_recording(cmd.get("filename", ""))
+                        elif action == "stop":
+                            self.stop_recording()
+            except Exception as e:
+                log.debug("rerun_status_loop_error", error=str(e))
+            await asyncio.sleep(1.0)
