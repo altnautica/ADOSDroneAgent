@@ -30,9 +30,11 @@ from .repair_queue import RepairQueue
 log = structlog.get_logger()
 
 RUN_DIR = Path(os.environ.get("ADOS_RUN_DIR", "/run/ados"))
+STATE_DIR = Path(os.environ.get("ADOS_ASSIST_STATE_DIR", "/var/ados/assist"))
 STATE_SOCK = RUN_DIR / "state.sock"
 
 EVAL_INTERVAL = 10.0  # Run rules every 10 seconds
+STATUS_WRITE_INTERVAL = 2.0  # Write status file every 2s so REST routes see fresh data
 
 
 def _sd_notify(message: bytes) -> None:
@@ -90,6 +92,8 @@ class AssistService:
         # Start collectors
         asyncio.create_task(self._state_collector())
         asyncio.create_task(self._evaluation_loop())
+        asyncio.create_task(self._status_writer())
+        asyncio.create_task(self._command_watcher())
 
         _sd_notify(b"READY=1")
         log.info("assist_service_ready")
@@ -145,6 +149,51 @@ class AssistService:
                 self.repair_queue.expire_timed_out()
             except Exception as e:
                 log.warning("assist_evaluation_error", error=str(e))
+
+    async def _status_writer(self) -> None:
+        """Write current status + suggestions + repairs to shared files so
+        the REST API routes can read them without inter-process RPC."""
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        RUN_DIR.mkdir(parents=True, exist_ok=True)
+        status_file = RUN_DIR / "assist_status.json"
+        suggestions_file = STATE_DIR / "suggestions.json"
+        repairs_file = STATE_DIR / "repairs.json"
+
+        while self._running:
+            try:
+                status_data = {**self.get_status(), "ts": time.time(), "collector_count": 1}
+                status_file.write_text(json.dumps(status_data))
+                suggestions_file.write_text(json.dumps(self.get_suggestions()))
+                repairs_file.write_text(json.dumps(self.get_repairs()))
+            except Exception as e:
+                log.debug("assist_status_write_failed", error=str(e))
+            await asyncio.sleep(STATUS_WRITE_INTERVAL)
+
+    async def _command_watcher(self) -> None:
+        """Poll the command file written by REST routes and apply actions."""
+        cmd_file = RUN_DIR / "assist_cmd.json"
+        last_ts = 0.0
+        while self._running:
+            try:
+                if cmd_file.exists():
+                    cmd = json.loads(cmd_file.read_text())
+                    cmd_ts = float(cmd.get("ts", 0))
+                    if cmd_ts > last_ts:
+                        last_ts = cmd_ts
+                        action = cmd.get("action")
+                        if action == "acknowledge" and self._emitter:
+                            self._emitter.acknowledge(cmd.get("suggestion_id", ""))
+                        elif action == "dismiss" and self._emitter:
+                            self._emitter.dismiss(cmd.get("suggestion_id", ""))
+                        elif action == "approve_repair":
+                            self.repair_queue.approve(cmd.get("repair_id", ""))
+                        elif action == "reject_repair":
+                            self.repair_queue.reject(cmd.get("repair_id", ""))
+                        elif action == "rollback_repair":
+                            self.repair_queue.rollback(cmd.get("repair_id", ""))
+            except Exception as e:
+                log.debug("assist_cmd_watch_error", error=str(e))
+            await asyncio.sleep(1.0)
 
     def get_status(self) -> dict[str, Any]:
         return {

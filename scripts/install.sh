@@ -569,7 +569,11 @@ ENVEOF
 # of the detected profile.
 enable_universal_units() {
     info "Enabling cross-profile systemd units..."
-    for unit in ados-peripherals.service; do
+    for unit in \
+        ados-peripherals.service \
+        ados-mcp.service \
+        ados-foxglove-bridge.service \
+        ados-rerun-sink.service; do
         if [ -f "/etc/systemd/system/${unit}" ]; then
             systemctl enable "${unit}" 2>/dev/null || true
         else
@@ -577,9 +581,31 @@ enable_universal_units() {
         fi
     done
 
+    # Opt-in suite services. Enabled but gated at runtime by the
+    # corresponding config flag (assist.enabled, memory.enabled,
+    # survey.enabled). Safe to enable by default — service code
+    # checks the flag and exits cleanly when disabled.
+    for unit in \
+        ados-memory.service \
+        ados-assist.service \
+        ados-survey.service; do
+        if [ -f "/etc/systemd/system/${unit}" ]; then
+            systemctl enable "${unit}" 2>/dev/null || true
+        fi
+    done
+
     # Manifest drop-in directory for /etc/ados/peripherals/*.yaml.
     mkdir -p /etc/ados/peripherals
     chmod 0755 /etc/ados/peripherals
+
+    # Working directories for the new services.
+    mkdir -p /etc/ados/mcp/tokens
+    chmod 0700 /etc/ados/mcp/tokens
+    mkdir -p /var/ados/mcp/audit
+    mkdir -p /var/ados/memory/thumbs /var/ados/memory/frames /var/ados/memory/snapshots
+    mkdir -p /var/ados/assist/snapshots /var/ados/assist/audit
+    mkdir -p /var/ados/foxglove /var/ados/rerun
+    mkdir -p /var/ados/models
 }
 
 # ─── Ground-station Profile ───────────────────────────────────────────────

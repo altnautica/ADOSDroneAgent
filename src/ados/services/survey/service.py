@@ -69,10 +69,24 @@ class SurveyService:
 
         # Monitor state socket for mission events
         asyncio.create_task(self._state_monitor())
+        asyncio.create_task(self._status_writer())
 
         await shutdown.wait()
         self._running = False
         log.info("survey_service_stopped")
+
+    async def _status_writer(self) -> None:
+        """Write status to /run/ados/survey_status.json every 2 seconds
+        so the REST routes can report current state."""
+        status_file = RUN_DIR / "survey_status.json"
+        while self._running:
+            try:
+                import json as _json, time as _time
+                data = {**self.current_status(), "ts": _time.time()}
+                status_file.write_text(_json.dumps(data))
+            except Exception:
+                pass
+            await asyncio.sleep(2.0)
 
     async def _state_monitor(self) -> None:
         """Watch state socket for armed/mission events."""

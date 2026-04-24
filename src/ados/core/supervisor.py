@@ -120,6 +120,23 @@ SERVICE_REGISTRY: list[dict] = [
     {"name": "ados-wfb-receiver", "category": "hardware", "profile_gate": "ground_station", "role_gate": "receiver"},
     # ROS 2 environment (opt-in, Docker-managed).
     {"name": "ados-ros", "category": "suite"},
+    # AI-native control layer services.
+    # MCP server exposes Tools, Resources, Prompts to external clients
+    # (Claude Desktop, Cursor, etc.). Core because always-on for
+    # drones that want AI control.
+    {"name": "ados-mcp", "category": "core"},
+    # World Model stores detections, entities, places locally in SQLite.
+    # Suite category because enabled via config.memory.enabled.
+    {"name": "ados-memory", "category": "suite"},
+    # Assist runs diagnostic collectors and a rules engine; emits
+    # suggestions and repair proposals. Suite-gated on config.assist.enabled.
+    {"name": "ados-assist", "category": "suite"},
+    # Survey quality validator runs during photogrammetry missions.
+    {"name": "ados-survey", "category": "suite"},
+    # Foxglove and Rerun bridges publish live telemetry for
+    # external visualization tools.
+    {"name": "ados-foxglove-bridge", "category": "hardware"},
+    {"name": "ados-rerun-sink", "category": "hardware"},
 ]
 
 
