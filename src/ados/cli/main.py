@@ -105,11 +105,6 @@ from ados.cli.signing import signing_group as _signing_group  # noqa: E402
 
 cli.add_command(_signing_group)
 
-# MCP server subgroup.
-from ados.cli.mcp import mcp_group as _mcp_group  # noqa: E402
-
-cli.add_command(_mcp_group)
-
 
 # ─── INFO ───────────────────────────────────────────────────────────────────
 
