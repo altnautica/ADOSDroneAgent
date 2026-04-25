@@ -24,12 +24,13 @@ import glob
 from importlib import metadata
 
 from ados.core.logging import get_logger
+from ados.core.paths import PERIPHERALS_GLOB
 from ados.services.peripherals.manifest import ManifestError, PeripheralManifest
 
 log = get_logger("peripherals.loader")
 
 _ENTRY_POINT_GROUP = "ados.peripherals"
-_DEFAULT_GLOB = "/etc/ados/peripherals/*.yaml"
+_DEFAULT_GLOB = PERIPHERALS_GLOB
 
 
 def _extract_manifest(obj: object, ep_name: str) -> PeripheralManifest | None:

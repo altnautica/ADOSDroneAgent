@@ -11,11 +11,12 @@ import yaml
 from pydantic import BaseModel
 
 from ados.core.logging import get_logger
+from ados.core.paths import BOARD_OVERRIDE_PATH as _BOARD_OVERRIDE_PATH
 
 log = get_logger("hal")
 
 BOARDS_DIR = Path(__file__).parent / "boards"
-BOARD_OVERRIDE_PATH = Path("/etc/ados/board_override")
+BOARD_OVERRIDE_PATH = _BOARD_OVERRIDE_PATH
 
 
 class BoardProfile(BaseModel):

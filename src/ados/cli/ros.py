@@ -23,8 +23,10 @@ from pathlib import Path
 import click
 import httpx
 
+from ados.core.paths import PAIRING_JSON, ROS_RECORDINGS_DIR
+
 API_BASE = "http://localhost:8080"
-PAIRING_STATE_PATH = Path("/etc/ados/pairing.json")
+PAIRING_STATE_PATH = PAIRING_JSON
 CONTAINER_NAME = "ados-ros"
 
 
@@ -478,8 +480,9 @@ def bag_play(file_path: str) -> None:
     """
     # Determine the container path
     container_path = file_path
-    if not file_path.startswith("/var/ados/ros/recordings"):
-        container_path = f"/var/ados/ros/recordings/{file_path}"
+    _ros_recordings_str = str(ROS_RECORDINGS_DIR)
+    if not file_path.startswith(_ros_recordings_str):
+        container_path = f"{_ros_recordings_str}/{file_path}"
 
     cmd = [
         "docker", "exec", CONTAINER_NAME, "bash", "-c",

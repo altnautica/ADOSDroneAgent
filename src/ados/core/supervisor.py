@@ -30,6 +30,7 @@ from pathlib import Path
 import structlog
 
 # hot-plug handling for USB devices
+from ados.core.paths import SUITES_DIR
 from ados.hal.hotplug import HotplugMonitor
 from ados.hal.usb import UsbCategory, UsbDevice
 
@@ -460,7 +461,7 @@ class Supervisor:
         log.info("suite_activating", suite=suite_id)
 
         # Load manifest
-        manifest_path = Path(f"/etc/ados/suites/{suite_id}.yaml")
+        manifest_path = SUITES_DIR / f"{suite_id}.yaml"
         if not manifest_path.exists():
             # Check built-in suites
             manifest_path = Path(f"/opt/ados/suites/{suite_id}.yaml")

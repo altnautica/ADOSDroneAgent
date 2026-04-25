@@ -24,10 +24,12 @@ from typing import Any
 
 import structlog
 
+from ados.core.paths import ROS_RECORDINGS_DIR
+
 log = structlog.get_logger("ados.services.ros_recording")
 
 CONTAINER_NAME = "ados-ros"
-RECORDINGS_DIR = Path("/var/ados/ros/recordings")
+RECORDINGS_DIR = ROS_RECORDINGS_DIR
 MAX_RECORDINGS = 10
 MAX_TOTAL_SIZE_MB = 5120  # 5 GB
 
@@ -76,7 +78,7 @@ class RecordingManager:
             RuntimeError: If the recording process fails to start.
         """
         recording_id = uuid.uuid4().hex[:12]
-        container_out = output_dir or f"/var/ados/ros/recordings/{recording_id}"
+        container_out = output_dir or str(ROS_RECORDINGS_DIR / recording_id)
 
         # Ensure the host directory exists
         host_out = RECORDINGS_DIR / recording_id

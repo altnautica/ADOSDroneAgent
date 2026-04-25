@@ -33,6 +33,8 @@ except ImportError:  # pragma: no cover - fall back to stdlib logging
 
     log = logging.getLogger(__name__)
 
+from ados.core.paths import PROFILE_CONF
+
 
 # RTL8812 family USB IDs used on WFB-ng primary adapters.
 # (vendor 0x0bda Realtek, known product IDs for the RTL8812 series).
@@ -336,7 +338,7 @@ def _now_iso() -> str:
 
 def write_profile_conf(
     result: dict[str, Any],
-    path: str = "/etc/ados/profile.conf",
+    path: str = str(PROFILE_CONF),
 ) -> bool:
     """Write the fingerprint snapshot to /etc/ados/profile.conf (YAML).
 

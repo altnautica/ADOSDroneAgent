@@ -13,6 +13,7 @@ from __future__ import annotations
 import threading
 
 from ados.core.logging import get_logger
+from ados.core.paths import PERIPHERALS_GLOB
 from ados.services.peripherals.loader import load_all
 from ados.services.peripherals.manifest import PeripheralManifest
 
@@ -28,7 +29,7 @@ class PeripheralRegistry:
 
     def __init__(
         self,
-        glob_path: str = "/etc/ados/peripherals/*.yaml",
+        glob_path: str = PERIPHERALS_GLOB,
     ) -> None:
         self._glob_path = glob_path
         self._lock = threading.Lock()

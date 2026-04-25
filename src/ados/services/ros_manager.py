@@ -23,12 +23,13 @@ from typing import Any
 from jinja2 import Template
 
 from ados.core.config import ADOSConfig, load_config
+from ados.core.paths import MAVLINK_SOCK, ROS_COMPOSE_PATH
 
 log = logging.getLogger("ados.services.ros_manager")
 
 # Container and compose paths
 COMPOSE_TEMPLATE = Path(__file__).parent.parent.parent.parent / "docker" / "ros" / "docker-compose.yml.j2"
-COMPOSE_OUTPUT = Path("/var/ados/ros/docker-compose.yml")
+COMPOSE_OUTPUT = ROS_COMPOSE_PATH
 WORKSPACE_DEFAULT = Path("/opt/ados/ros-ws")
 
 
@@ -83,7 +84,7 @@ class RosManager:
             issues.append("Docker daemon is not running")
 
         # MAVLink socket must exist
-        if not Path("/run/ados/mavlink.sock").exists():
+        if not MAVLINK_SOCK.exists():
             issues.append("MAVLink IPC socket not found. Is ados-mavlink running?")
 
         # Disk space check (need at least 2 GB for image + workspace)

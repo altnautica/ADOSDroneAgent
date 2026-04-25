@@ -22,13 +22,14 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from ados.core.logging import get_logger
+from ados.core.paths import PERIPHERALS_DIR
 from ados.services.peripherals.registry import get_peripheral_registry
 
 log = get_logger("api.peripherals_v1")
 
 router = APIRouter(prefix="/v1/peripherals", tags=["peripherals"])
 
-_CONFIG_DIR = Path("/etc/ados/peripherals")
+_CONFIG_DIR = PERIPHERALS_DIR
 
 
 class PeripheralActionRequest(BaseModel):

@@ -19,8 +19,10 @@ from typing import Any
 import click
 import httpx
 
+from ados.core.paths import PAIRING_JSON
+
 API_BASE = "http://127.0.0.1:8080"
-PAIRING_STATE_PATH = Path("/etc/ados/pairing.json")
+PAIRING_STATE_PATH = PAIRING_JSON
 
 
 def _load_api_key() -> str | None:

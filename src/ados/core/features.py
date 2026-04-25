@@ -10,10 +10,11 @@ from typing import Any
 
 from ados.core.config import ADOSConfig
 from ados.core.logging import get_logger
+from ados.core.paths import STATE_DIR as _STATE_DIR
 
 log = get_logger("features")
 
-STATE_DIR = Path("/var/ados/state")
+STATE_DIR = _STATE_DIR
 FEATURES_FILE = STATE_DIR / "features.json"
 
 # Built-in feature definitions.  Each key is a feature_id.

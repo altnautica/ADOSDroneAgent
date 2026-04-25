@@ -8,6 +8,20 @@ from typing import Any, Literal
 import yaml
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from ados.core.paths import (
+    CA_CERT_PATH,
+    CONFIG_YAML,
+    DEVICE_CERT_PATH,
+    DEVICE_KEY_PATH,
+    FLIGHT_LOGS_DIR,
+    GS_UI_JSON,
+    MESH_PSK_PATH,
+    PAIRING_JSON,
+    RECORDINGS_DIR,
+    SCRIPTS_DIR,
+    SUITES_DIR,
+)
+
 # --- Agent ---
 
 # profile drives air vs ground-station behavior. "auto" triggers the
@@ -84,7 +98,7 @@ class CameraConfig(BaseModel):
 
 class RecordingConfig(BaseModel):
     enabled: bool = False
-    path: str = "/var/ados/recordings"
+    path: str = str(RECORDINGS_DIR)
     max_duration_minutes: int = 30
 
 
@@ -152,9 +166,9 @@ class ServerConfig(BaseModel):
 
 class TlsConfig(BaseModel):
     enabled: bool = True
-    cert_path: str = "/etc/ados/certs/device.crt"
-    key_path: str = "/etc/ados/certs/device.key"
-    ca_path: str = "/etc/ados/certs/ca.crt"
+    cert_path: str = str(DEVICE_CERT_PATH)
+    key_path: str = str(DEVICE_KEY_PATH)
+    ca_path: str = str(CA_CERT_PATH)
 
 
 class WireguardConfig(BaseModel):
@@ -181,7 +195,7 @@ class SecurityConfig(BaseModel):
 # --- Suites ---
 
 class SuiteConfig(BaseModel):
-    manifest_dir: str = "/etc/ados/suites"
+    manifest_dir: str = str(SUITES_DIR)
     active: str = ""
     ros2_workspace: str = "/opt/ados/ros2_ws"
 
@@ -196,7 +210,7 @@ class TextCommandsConfig(BaseModel):
 
 class ScriptsConfig(BaseModel):
     enabled: bool = True
-    script_dir: str = "/var/ados/scripts"
+    script_dir: str = str(SCRIPTS_DIR)
     max_concurrent: int = 3
 
 
@@ -241,13 +255,13 @@ class LoggingConfig(BaseModel):
     level: str = "info"
     max_size_mb: int = 50
     keep_count: int = 5
-    flight_log_dir: str = "/var/ados/logs/flights"
+    flight_log_dir: str = str(FLIGHT_LOGS_DIR)
 
 
 # --- Pairing ---
 
 class PairingConfig(BaseModel):
-    state_path: str = "/etc/ados/pairing.json"
+    state_path: str = str(PAIRING_JSON)
     convex_url: str = ""  # Convex HTTP endpoint for cloud pairing
     beacon_interval: int = 30  # seconds
     heartbeat_interval: int = 60  # seconds
@@ -381,7 +395,7 @@ class MeshConfig(BaseModel):
     interface_override: str | None = None
     carrier: Literal["802.11s", "ibss"] = "802.11s"
     mesh_id: str | None = None
-    shared_key_path: str = "/etc/ados/mesh/psk.key"
+    shared_key_path: str = str(MESH_PSK_PATH)
     channel: int = 1  # 2.4 GHz ch 1 default for mesh dongle
     bat_iface: str = "bat0"
 
@@ -453,7 +467,7 @@ class ADOSConfig(BaseModel):
 _SHARE_UPLINK_MIGRATED: bool = False
 _GS_UI_MIGRATED: bool = False
 
-_LEGACY_GS_UI_PATH = Path("/etc/ados/ground-station-ui.json")
+_LEGACY_GS_UI_PATH = GS_UI_JSON
 _GS_UI_KEYS = ("oled", "buttons", "screens")
 
 
@@ -549,8 +563,7 @@ def _migrate_share_uplink_from_legacy_json(
         import logging as _logging
 
         _logging.getLogger("ados.core.config").info(
-            "migrated share_uplink from /etc/ados/ground-station-ui.json "
-            "(legacy file preserved)"
+            f"migrated share_uplink from {GS_UI_JSON} (legacy file preserved)"
         )
     finally:
         _SHARE_UPLINK_MIGRATED = True
@@ -649,7 +662,7 @@ def _migrate_gs_ui_from_legacy_json(
 
         _logging.getLogger("ados.core.config").info(
             "migrated ground_station.ui (oled/buttons/screens) from "
-            "/etc/ados/ground-station-ui.json (legacy file preserved)"
+            f"{GS_UI_JSON} (legacy file preserved)"
         )
     finally:
         _GS_UI_MIGRATED = True
@@ -681,7 +694,7 @@ def load_config(path: str | Path | None = None) -> ADOSConfig:
     if path:
         candidates.append(Path(path))
     candidates.extend([
-        Path("/etc/ados/config.yaml"),
+        CONFIG_YAML,
         Path("config.yaml"),
     ])
 
