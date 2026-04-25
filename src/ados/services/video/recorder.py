@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from ados.core.logging import get_logger
+from ados.core.paths import RECORDINGS_DIR
 
 log = get_logger("video.recorder")
 
@@ -44,7 +45,7 @@ class VideoRecorder:
     usage exceeds 80%, the oldest recordings are deleted automatically.
     """
 
-    def __init__(self, recording_dir: str = "/var/ados/recordings") -> None:
+    def __init__(self, recording_dir: str = str(RECORDINGS_DIR)) -> None:
         self._dir = Path(recording_dir)
         self._process: asyncio.subprocess.Process | None = None
         self._current_path: str = ""

@@ -7,11 +7,13 @@ from pathlib import Path
 import yaml
 from fastapi import APIRouter
 
+from ados.core.paths import ACTIVE_SUITE_PATH, STATE_DIR, SUITES_DIR
+
 router = APIRouter()
 
 SUITE_DIRS = [
     Path("/opt/ados/suites"),
-    Path("/etc/ados/suites"),
+    SUITES_DIR,
 ]
 
 
@@ -50,7 +52,7 @@ def _find_suites() -> list[dict]:
 
 def _is_active(suite_id: str) -> bool:
     """Check if a suite is currently active (reads from config or state file)."""
-    state_file = Path("/var/ados/state/active_suite")
+    state_file = ACTIVE_SUITE_PATH
     if state_file.exists():
         return state_file.read_text().strip() == suite_id
     return False
@@ -58,7 +60,7 @@ def _is_active(suite_id: str) -> bool:
 
 def _set_active(suite_id: str | None) -> None:
     """Record the active suite in state file."""
-    state_dir = Path("/var/ados/state")
+    state_dir = STATE_DIR
     state_dir.mkdir(parents=True, exist_ok=True)
     state_file = state_dir / "active_suite"
     if suite_id:

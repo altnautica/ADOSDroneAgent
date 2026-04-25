@@ -7,6 +7,7 @@ from enum import StrEnum
 from typing import TYPE_CHECKING
 
 from ados.core.logging import get_logger
+from ados.core.paths import WFB_KEY_DIR
 from ados.services.wfb.adapter import detect_wfb_adapters, set_monitor_mode
 from ados.services.wfb.key_mgr import get_key_paths, key_exists
 from ados.services.wfb.link_quality import LinkQualityMonitor, LinkStats
@@ -247,7 +248,7 @@ class WfbManager:
 
             # Step 3: Check for encryption keys
             if not key_exists():
-                log.warning("wfb_keys_missing", expected="/etc/ados/wfb/")
+                log.warning("wfb_keys_missing", expected=f"{WFB_KEY_DIR}/")
 
             # Step 4: Start wfb_tx and wfb_rx
             tx_ok = await self.start_tx(interface, self._channel)

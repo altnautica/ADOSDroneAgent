@@ -9,9 +9,11 @@ from pathlib import Path
 
 import structlog
 
+from ados.core.paths import FIREWALL_RULES_PATH
+
 log = structlog.get_logger(__name__)
 
-DEFAULT_RULES_PATH = "/etc/ados/firewall.rules"
+DEFAULT_RULES_PATH = str(FIREWALL_RULES_PATH)
 
 
 @dataclass

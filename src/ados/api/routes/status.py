@@ -6,6 +6,7 @@ from fastapi import APIRouter, Request
 
 from ados import __version__
 from ados.api.deps import get_agent_app
+from ados.core.paths import MESH_STATE_JSON, PROFILE_CONF
 
 router = APIRouter()
 
@@ -227,7 +228,7 @@ async def get_full_status(request: Request):
             try:
                 import yaml as _yaml
                 pc = _yaml.safe_load(
-                    open("/etc/ados/profile.conf", encoding="utf-8")
+                    open(PROFILE_CONF, encoding="utf-8")
                 ) or {}
                 mesh_block["mesh_capable"] = bool(pc.get("mesh_capable", False))
             except OSError:
@@ -235,9 +236,8 @@ async def get_full_status(request: Request):
             if role in ("relay", "receiver"):
                 try:
                     import json as _json
-                    from pathlib import Path as _P
                     snap = _json.loads(
-                        _P("/run/ados/mesh-state.json").read_text(encoding="utf-8")
+                        MESH_STATE_JSON.read_text(encoding="utf-8")
                     )
                     mesh_block["up"] = bool(snap.get("up", False))
                     mesh_block["peer_count"] = len(snap.get("neighbors", []))

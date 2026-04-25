@@ -14,10 +14,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from ados.core.logging import get_logger
+from ados.core.paths import AUDIT_LOG_PATH
 
 log = get_logger("audit-log")
 
-DEFAULT_LOG_PATH = "/var/ados/audit.jsonl"
+DEFAULT_LOG_PATH = str(AUDIT_LOG_PATH)
 MAX_LOG_SIZE_BYTES = 10 * 1024 * 1024  # 10 MB
 
 

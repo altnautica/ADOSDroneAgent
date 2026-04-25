@@ -12,10 +12,11 @@ import uuid
 from pathlib import Path
 
 from ados.core.logging import get_logger
+from ados.core.paths import DEVICE_ID_PATH as _DEVICE_ID_PATH
 
 log = get_logger("core.identity")
 
-DEVICE_ID_PATH = Path("/etc/ados/device-id")
+DEVICE_ID_PATH = _DEVICE_ID_PATH
 
 
 def get_or_create_device_id(path: Path | None = None) -> str:

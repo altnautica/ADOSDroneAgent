@@ -12,9 +12,11 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
 
+from ados.core.paths import CERTS_DIR
+
 log = structlog.get_logger(__name__)
 
-DEFAULT_CERT_DIR = "/etc/ados/certs"
+DEFAULT_CERT_DIR = str(CERTS_DIR)
 
 
 def generate_self_signed_cert(

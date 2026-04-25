@@ -7,10 +7,11 @@ import subprocess
 from pathlib import Path
 
 from ados.core.logging import get_logger
+from ados.core.paths import WFB_KEY_DIR
 
 log = get_logger("wfb.key_mgr")
 
-DEFAULT_KEY_DIR = "/etc/ados/wfb"
+DEFAULT_KEY_DIR = str(WFB_KEY_DIR)
 TX_KEY_NAME = "tx.key"
 RX_KEY_NAME = "rx.key"
 

@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 
 from ados.core.logging import get_logger
+from ados.core.paths import PAIRING_JSON
 
 log = get_logger("pairing")
 
@@ -15,7 +16,7 @@ log = get_logger("pairing")
 SAFE_CHARSET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
 CODE_LENGTH = 6
 CODE_TTL = 900  # 15 minutes
-PAIRING_STATE_PATH = "/etc/ados/pairing.json"
+PAIRING_STATE_PATH = str(PAIRING_JSON)
 
 
 class PairingManager:

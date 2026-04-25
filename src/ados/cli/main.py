@@ -19,9 +19,14 @@ import httpx
 import psutil
 
 from ados import __version__
+from ados.core.paths import (
+    CONFIG_YAML,
+    DEVICE_ID_PATH,
+    PAIRING_JSON,
+)
 
 API_BASE = "http://localhost:8080"
-PAIRING_STATE_PATH = Path("/etc/ados/pairing.json")
+PAIRING_STATE_PATH = PAIRING_JSON
 
 
 def _load_api_key() -> str | None:
@@ -976,9 +981,9 @@ def diag() -> None:
     # Agent
     click.echo(_section("Agent"))
     click.echo(f"  Version:       {__version__}")
-    config_path = os.environ.get("ADOS_CONFIG", "/etc/ados/config.yaml")
+    config_path = os.environ.get("ADOS_CONFIG", str(CONFIG_YAML))
     click.echo(f"  Config:        {config_path}")
-    device_id_path = "/etc/ados/device-id"
+    device_id_path = str(DEVICE_ID_PATH)
     device_id = _safe_read(device_id_path) or os.environ.get("ADOS_DEVICE_ID", "not set")
     click.echo(f"  Device ID:     {device_id}")
 

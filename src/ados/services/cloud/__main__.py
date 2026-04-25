@@ -26,6 +26,7 @@ from ados import __version__
 from ados.core.config import load_config
 from ados.core.ipc import StateIPCClient
 from ados.core.logging import configure_logging
+from ados.core.paths import HEALTH_JSON, SCRIPTS_DIR, SUITES_DIR
 
 
 _proc_cache: dict[int, object] = {}  # PID → psutil.Process cache for CPU baseline
@@ -332,8 +333,7 @@ async def main() -> None:
                     # Try to read FC port/baud from health file
                     try:
                         import json as _json
-                        from pathlib import Path
-                        health_path = Path("/run/ados/health.json")
+                        health_path = HEALTH_JSON
                         if health_path.exists():
                             health_data = _json.loads(health_path.read_text())
                             _fc_port = health_data.get("fc_port", "")
@@ -443,8 +443,7 @@ async def main() -> None:
 
     def _list_scripts() -> list[dict]:
         """List script files in /var/ados/scripts/."""
-        from pathlib import Path
-        scripts_dir = Path("/var/ados/scripts")
+        scripts_dir = SCRIPTS_DIR
         if not scripts_dir.exists():
             return []
         scripts = []
@@ -460,8 +459,7 @@ async def main() -> None:
 
     def _list_suites() -> list[dict]:
         """List suite manifests in /etc/ados/suites/."""
-        from pathlib import Path
-        suites_dir = Path("/etc/ados/suites")
+        suites_dir = SUITES_DIR
         if not suites_dir.exists():
             return []
         suites = []

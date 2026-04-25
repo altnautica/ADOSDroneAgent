@@ -18,9 +18,13 @@ from pathlib import Path
 
 import structlog
 
+from ados.core import paths as _paths
+
 log = structlog.get_logger()
 
-ADOS_RUN_DIR = Path(os.environ.get("ADOS_RUN_DIR", "/run/ados"))
+# Allow tests and dev rigs to override the runtime root via env var.
+# Defaults to the canonical /run/ados/ from `ados.core.paths`.
+ADOS_RUN_DIR = Path(os.environ.get("ADOS_RUN_DIR", str(_paths.ADOS_RUN_DIR)))
 MAVLINK_SOCK = ADOS_RUN_DIR / "mavlink.sock"
 STATE_SOCK = ADOS_RUN_DIR / "state.sock"
 

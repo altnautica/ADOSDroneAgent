@@ -11,12 +11,13 @@ from textual.containers import Horizontal, Vertical
 from textual.screen import Screen
 from textual.widgets import Button, Static, TextArea
 
+from ados.core.paths import CONFIG_YAML
 from ados.tui.widgets import InfoPanel, StatusDot
 
 log = structlog.get_logger("tui.config_editor")
 
 CONFIG_PATHS = [
-    Path("/etc/ados/config.yaml"),
+    CONFIG_YAML,
     Path.home() / ".ados" / "config.yaml",
 ]
 

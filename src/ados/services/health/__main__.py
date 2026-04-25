@@ -20,8 +20,9 @@ import structlog
 from ados.core.config import load_config
 from ados.core.health import HealthMonitor
 from ados.core.logging import configure_logging
+from ados.core.paths import ADOS_RUN_DIR
 
-HEALTH_FILE = Path(os.environ.get("ADOS_RUN_DIR", "/run/ados")) / "health.json"
+HEALTH_FILE = Path(os.environ.get("ADOS_RUN_DIR", str(ADOS_RUN_DIR))) / "health.json"
 COLLECT_INTERVAL = 5.0
 
 

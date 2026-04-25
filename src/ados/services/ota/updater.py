@@ -12,6 +12,12 @@ from pathlib import Path
 
 from ados.core.config import OtaConfig
 from ados.core.logging import get_logger
+from ados.core.paths import (
+    DOWNLOADS_DIR,
+    OTA_STATE_PATH,
+    SLOT_A_PATH as _SLOT_A_PATH,
+    SLOT_B_PATH as _SLOT_B_PATH,
+)
 from ados.services.ota.checker import UpdateChecker
 from ados.services.ota.downloader import DownloadProgress, UpdateDownloader
 from ados.services.ota.manifest import UpdateManifest
@@ -20,10 +26,10 @@ from ados.services.ota.verifier import verify_sha256
 
 log = get_logger("ota-updater")
 
-DOWNLOAD_DIR = "/var/ados/downloads"
-STATE_FILE = "/var/ados/ota-state.json"
-SLOT_A_PATH = "/var/ados/slot-a"
-SLOT_B_PATH = "/var/ados/slot-b"
+DOWNLOAD_DIR = str(DOWNLOADS_DIR)
+STATE_FILE = str(OTA_STATE_PATH)
+SLOT_A_PATH = str(_SLOT_A_PATH)
+SLOT_B_PATH = str(_SLOT_B_PATH)
 
 
 class UpdateState(StrEnum):

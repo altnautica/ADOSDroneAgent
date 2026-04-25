@@ -22,6 +22,16 @@ from fastapi import APIRouter, HTTPException, Query, Request, WebSocket, WebSock
 from pydantic import BaseModel, Field, field_validator
 
 from ados.api.deps import get_agent_app
+from ados.core.paths import (
+    GS_UI_JSON,
+    GS_UPLINK_JSON,
+    MESH_GATEWAY_JSON,
+    MESH_ID_PATH,
+    MESH_STATE_JSON,
+    PROFILE_CONF,
+    WFB_RECEIVER_JSON,
+    WFB_RELAY_JSON,
+)
 
 router = APIRouter(prefix="/v1/ground-station", tags=["ground-station"])
 
@@ -29,7 +39,7 @@ router = APIRouter(prefix="/v1/ground-station", tags=["ground-station"])
 # Persistent UI config lives in a separate JSON file because the
 # current Pydantic ADOSConfig does not model a ground_station section
 # yet. Single file, atomic write, 0644.
-_UI_CONFIG_PATH = Path("/etc/ados/ground-station-ui.json")
+_UI_CONFIG_PATH = GS_UI_JSON
 
 # Server and OLED both use 0-255 native scale. 204 is roughly 80 percent
 # of 255.
@@ -345,7 +355,7 @@ async def get_ground_station_status() -> dict[str, Any]:
         )
     except Exception:
         pass
-    profile_conf = _read_yaml_or_empty(Path("/etc/ados/profile.conf"))
+    profile_conf = _read_yaml_or_empty(PROFILE_CONF)
     role_block["mesh_capable"] = bool(profile_conf.get("mesh_capable", False))
 
     # Mesh snapshot. Populated only when a relay or receiver node has an
@@ -353,7 +363,7 @@ async def get_ground_station_status() -> dict[str, Any]:
     # feature-detect without extra round-trips.
     mesh_block: dict[str, Any] = {}
     try:
-        snap_path = Path("/run/ados/mesh-state.json")
+        snap_path = MESH_STATE_JSON
         if role_block["current"] in ("relay", "receiver") and snap_path.is_file():
             snap = json.loads(snap_path.read_text(encoding="utf-8"))
             mesh_block = {
@@ -1168,7 +1178,7 @@ async def post_factory_reset(
             # it keeps "factory reset = clean slate" honest so a fresh
             # re-pair does not silently inherit the old operator's
             # preferred gateway MAC.
-            gateway_path = Path("/etc/ados/mesh/gateway.json")
+            gateway_path = MESH_GATEWAY_JSON
             if gateway_path.is_file():
                 try:
                     gateway_path.unlink()
@@ -1659,7 +1669,7 @@ async def ws_pic_events(websocket: WebSocket) -> None:
 # ---------------------------------------------------------------------------
 
 
-_UPLINK_PRIORITY_PATH = Path("/etc/ados/ground-station-uplink.json")
+_UPLINK_PRIORITY_PATH = GS_UPLINK_JSON
 
 
 class WifiJoinRequest(BaseModel):
@@ -1990,9 +2000,9 @@ async def ws_uplink_events(websocket: WebSocket) -> None:
 # Distributed RX + mesh + pairing routes
 # ---------------------------------------------------------------------------
 
-_MESH_STATE_JSON = Path("/run/ados/mesh-state.json")
-_WFB_RELAY_JSON = Path("/run/ados/wfb-relay.json")
-_WFB_RECEIVER_JSON = Path("/run/ados/wfb-receiver.json")
+_MESH_STATE_JSON = MESH_STATE_JSON
+_WFB_RELAY_JSON = WFB_RELAY_JSON
+_WFB_RECEIVER_JSON = WFB_RECEIVER_JSON
 
 
 def _read_json_or_empty(path: Path) -> dict[str, Any]:
@@ -2087,7 +2097,7 @@ async def put_role(req: RoleChangeRequest) -> dict[str, Any]:
     # it sees a second USB WiFi adapter. Nodes without the flag cannot
     # assume a mesh role; direct remains allowed so an opt-out path is
     # available even if the flag is missing.
-    profile_conf = _read_yaml_or_empty(Path("/etc/ados/profile.conf"))
+    profile_conf = _read_yaml_or_empty(PROFILE_CONF)
     mesh_capable = bool(profile_conf.get("mesh_capable", False))
     if req.role in ("relay", "receiver") and not mesh_capable:
         raise HTTPException(
@@ -2218,7 +2228,7 @@ async def put_gateway_preference(
     # Persist first. If the write fails we still apply (some kernels have
     # /etc read-only briefly on upgrade) but surface the error in the
     # response so the UI knows the pin will not survive restart.
-    gateway_path = Path("/etc/ados/mesh/gateway.json")
+    gateway_path = MESH_GATEWAY_JSON
     persist_error: str | None = None
     try:
         gateway_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2519,7 +2529,7 @@ async def post_pair_approve(device_id: str) -> dict[str, Any]:
             status_code=410,
             detail={"error": {"code": "E_PAIR_WINDOW_EXPIRED"}},
         )
-    mesh_id_path = Path("/etc/ados/mesh/id")
+    mesh_id_path = MESH_ID_PATH
     psk_path = Path(app.config.ground_station.mesh.shared_key_path)
     try:
         mesh_id = mesh_id_path.read_text(encoding="utf-8").strip()
