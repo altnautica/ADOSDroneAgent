@@ -188,9 +188,9 @@ class MavlinkIPCClient:
             raise RuntimeError("Not connected")
         try:
             while self._connected:
-                # DEC-106 Bug #17: self._reader can become None during
-                # shutdown race (disconnect() sets it to None while this
-                # loop is between reads). Snapshot locally and guard.
+                # self._reader can become None during a shutdown race
+                # (disconnect() sets it to None while this loop is between
+                # reads). Snapshot locally and guard.
                 reader = self._reader
                 if reader is None:
                     break
