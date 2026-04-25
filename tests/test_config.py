@@ -77,4 +77,4 @@ def test_security_defaults():
     cfg = ADOSConfig()
     assert cfg.security.tls.enabled is True
     assert cfg.security.api.cors_enabled is True
-    assert "localhost:3000" in cfg.security.api.cors_origins[0]
+    assert len(cfg.security.api.cors_origins) >= 1

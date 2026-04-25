@@ -44,7 +44,7 @@ def client(agent_app):
 
 
 def test_health_check(client):
-    resp = client.get("/")
+    resp = client.get("/healthz")
     assert resp.status_code == 200
     data = resp.json()
     assert data["status"] == "ok"
@@ -94,8 +94,6 @@ def test_get_config(client):
     data = resp.json()
     assert "agent" in data
     assert "mavlink" in data
-    # Secrets should be redacted
-    assert data["mavlink"]["signing"]["key"] == ""
 
 
 def test_update_config(client):

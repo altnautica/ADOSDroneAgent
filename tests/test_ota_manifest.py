@@ -12,14 +12,12 @@ def _sample_data() -> dict:
     return {
         "version": "0.2.0",
         "channel": "stable",
-        "release_date": "2026-03-08T00:00:00Z",
+        "published_at": "2026-03-08T00:00:00Z",
         "download_url": "https://updates.altnautica.com/stable/ados-0.2.0.bin",
         "file_size": 52428800,
         "sha256": "a" * 64,
-        "signature": "c2lnbmF0dXJl",
-        "min_version": "0.1.0",
         "changelog": "Bug fixes and performance improvements.",
-        "requires_reboot": True,
+        "release_url": "https://github.com/altnautica/ADOSDroneAgent/releases/tag/v0.2.0",
     }
 
 
@@ -28,15 +26,14 @@ def test_valid_manifest():
     assert m.version == "0.2.0"
     assert m.channel == "stable"
     assert m.file_size == 52428800
-    assert m.requires_reboot is True
+    assert m.release_url.endswith("v0.2.0")
 
 
 def test_manifest_all_fields_present():
     fields = set(UpdateManifest.model_fields.keys())
     expected = {
-        "version", "channel", "release_date", "download_url",
-        "file_size", "sha256", "signature", "min_version",
-        "changelog", "requires_reboot",
+        "version", "channel", "published_at", "download_url",
+        "file_size", "sha256", "changelog", "release_url",
     }
     assert fields == expected
 

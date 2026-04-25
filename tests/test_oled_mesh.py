@@ -28,12 +28,19 @@ def _draw() -> ImageDraw.ImageDraw:
 # ---------------------------------------------------------------------------
 
 
-def test_menu_filter_hides_mesh_when_not_capable():
+def test_menu_filter_collapses_mesh_when_not_capable():
+    """When mesh is not capable, the Mesh entry stays visible but its
+    submenu collapses to a single "Mesh unavailable" hint item."""
     from ados.services.ui.oled_service import MENU_TREE, _filter_visible
 
     state = {"role": {"current": "direct", "mesh_capable": False}}
     labels = [n.get("label") for n in _filter_visible(MENU_TREE, state)]
-    assert "Mesh" not in labels
+    assert "Mesh" in labels
+    mesh_node = next(n for n in MENU_TREE if n.get("label") == "Mesh")
+    child_labels = [
+        n.get("label") for n in _filter_visible(mesh_node.get("children") or [], state)
+    ]
+    assert child_labels == ["Mesh unavailable"]
 
 
 def test_menu_filter_shows_mesh_when_capable():
