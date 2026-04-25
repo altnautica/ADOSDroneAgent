@@ -38,13 +38,14 @@ from pathlib import Path
 import yaml
 
 from ados.core.logging import get_logger
+from ados.core.paths import AP_PASSPHRASE_PATH, CONFIG_YAML
 from ados.services.wfb.key_mgr import get_key_paths
 
 log = get_logger("ground_station.pair_manager")
 
 _SETUP_COMPLETE_PATH = Path("/var/lib/ados/setup-complete")
-_AP_PASSPHRASE_PATH = Path("/etc/ados/ap-passphrase")
-_CONFIG_PATH = Path("/etc/ados/config.yaml")
+_AP_PASSPHRASE_PATH = AP_PASSPHRASE_PATH
+_CONFIG_PATH = CONFIG_YAML
 _WFB_RX_UNIT = "ados-wfb-rx.service"
 
 _HEX_RE = re.compile(r"^[0-9a-fA-F]+$")

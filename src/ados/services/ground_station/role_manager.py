@@ -40,12 +40,18 @@ import time
 from pathlib import Path
 
 from ados.core.logging import get_logger
+from ados.core.paths import (
+    MESH_ROLE_PATH,
+    MESH_STATE_JSON,
+    WFB_RECEIVER_JSON,
+    WFB_RELAY_JSON,
+)
 
 from .events import MeshEvent, get_mesh_event_bus
 
 log = get_logger("ground_station.role_manager")
 
-ROLE_FILE = Path("/etc/ados/mesh/role")
+ROLE_FILE = MESH_ROLE_PATH
 VALID_ROLES: tuple[str, ...] = ("direct", "relay", "receiver")
 
 # Systemd units gated by role. Order matters for start/stop sequencing.
@@ -67,9 +73,9 @@ _ALL_MESH_UNITS: tuple[str, ...] = (
 # node transitions out of a role so a stale snapshot can never mislead a
 # REST client or the OLED on the next start.
 _MESH_STATE_FILES: tuple[Path, ...] = (
-    Path("/run/ados/mesh-state.json"),
-    Path("/run/ados/wfb-relay.json"),
-    Path("/run/ados/wfb-receiver.json"),
+    MESH_STATE_JSON,
+    WFB_RELAY_JSON,
+    WFB_RECEIVER_JSON,
 )
 
 

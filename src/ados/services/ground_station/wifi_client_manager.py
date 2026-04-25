@@ -41,13 +41,14 @@ from pathlib import Path
 from typing import AsyncIterator, Literal
 
 from ados.core.logging import get_logger
+from ados.core.paths import GS_WIFI_CLIENT_JSON
 
 log = get_logger("ground_station.wifi_client")
 
 _WLAN_IFACE = "wlan0"
 _LOCK_PATH = Path("/var/lock/ados-wlan0.lock")
 _AP_FLAG_PATH = Path("/var/run/ados/ap-was-enabled")
-_CLIENT_CONFIG_PATH = Path("/etc/ados/ground-station-wifi-client.json")
+_CLIENT_CONFIG_PATH = GS_WIFI_CLIENT_JSON
 _HOSTAPD_UNIT = "ados-hostapd.service"
 
 

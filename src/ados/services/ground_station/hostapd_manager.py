@@ -36,6 +36,11 @@ import structlog
 
 from ados.core.config import load_config
 from ados.core.logging import configure_logging, get_logger
+from ados.core.paths import (
+    AP_PASSPHRASE_PATH,
+    DNSMASQ_CONF_PATH,
+    HOSTAPD_CONF_PATH,
+)
 
 log = get_logger("ground_station.hostapd")
 
@@ -47,9 +52,9 @@ _PASSPHRASE_ALPHABET = (
 )
 _PASSPHRASE_LEN = 10
 
-_PASSPHRASE_PATH = Path("/etc/ados/ap-passphrase")
-_HOSTAPD_CONF_PATH = Path("/etc/ados/hostapd-gs.conf")
-_DNSMASQ_CONF_PATH = Path("/etc/ados/dnsmasq-gs.conf")
+_PASSPHRASE_PATH = AP_PASSPHRASE_PATH
+_HOSTAPD_CONF_PATH = HOSTAPD_CONF_PATH
+_DNSMASQ_CONF_PATH = DNSMASQ_CONF_PATH
 
 _AP_IFACE = "wlan0"
 _AP_ADDR = "192.168.4.1"

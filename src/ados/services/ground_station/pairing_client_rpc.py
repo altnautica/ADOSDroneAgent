@@ -28,12 +28,13 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from ados.core.logging import get_logger
+from ados.core.paths import PAIRING_SOCK
 
 from .pairing_manager import PairingManager, get_pairing_manager
 
 log = get_logger("ground_station.pairing_client_rpc")
 
-SOCKET_PATH = Path("/run/ados/pairing.sock")
+SOCKET_PATH = PAIRING_SOCK
 CONNECT_TIMEOUT_S = 2.0
 IO_TIMEOUT_S = 5.0
 

@@ -44,15 +44,24 @@ from .pairing_manager import (
     generate_keypair,
 )
 
+from ados.core.paths import (
+    MESH_DIR as _MESH_DIR,
+    MESH_ID_PATH as _MESH_ID_PATH,
+    MESH_PSK_PATH as _MESH_PSK_PATH,
+    MESH_RECEIVER_JSON,
+    WFB_KEY_DIR,
+    WFB_RX_KEY_PATH,
+)
+
 log = get_logger("ground_station.pairing_client")
 
-MESH_DIR = Path("/etc/ados/mesh")
-MESH_ID_PATH = MESH_DIR / "id"
-MESH_PSK_PATH = MESH_DIR / "psk.key"
-RECEIVER_INFO_PATH = MESH_DIR / "receiver.json"
+MESH_DIR = _MESH_DIR
+MESH_ID_PATH = _MESH_ID_PATH
+MESH_PSK_PATH = _MESH_PSK_PATH
+RECEIVER_INFO_PATH = MESH_RECEIVER_JSON
 
-_WFB_KEY_DIR = Path("/etc/ados/wfb")
-_WFB_RX_KEY_PATH = _WFB_KEY_DIR / "rx.key"
+_WFB_KEY_DIR = WFB_KEY_DIR
+_WFB_RX_KEY_PATH = WFB_RX_KEY_PATH
 
 _DEFAULT_SERVICE = "_ados-receiver._tcp"
 _BROADCAST_FALLBACK_ADDR = "255.255.255.255"

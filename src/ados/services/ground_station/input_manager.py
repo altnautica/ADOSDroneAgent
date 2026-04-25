@@ -61,10 +61,11 @@ import structlog
 
 from ados.core.config import load_config
 from ados.core.logging import configure_logging, get_logger
+from ados.core.paths import GS_INPUT_JSON
 
 log = get_logger("ground_station.input")
 
-_STATE_PATH = Path("/etc/ados/ground-station-input.json")
+_STATE_PATH = GS_INPUT_JSON
 _INPUT_DIR = Path("/dev/input")
 _HOTPLUG_POLL_S = 1.0
 

@@ -56,6 +56,7 @@ from typing import Any
 import structlog
 
 from ados.core.logging import configure_logging, get_logger
+from ados.core.paths import MESH_ID_PATH, PAIRING_SOCK
 
 from .pairing_manager import (
     InviteBundle,
@@ -65,7 +66,7 @@ from .pairing_manager import (
 
 log = get_logger("ground_station.pairing_daemon")
 
-SOCKET_PATH = Path("/run/ados/pairing.sock")
+SOCKET_PATH = PAIRING_SOCK
 
 
 def _build_invite_bundle() -> InviteBundle | None:
@@ -82,7 +83,7 @@ def _build_invite_bundle() -> InviteBundle | None:
     from ados.services.wfb.key_mgr import get_key_paths
 
     config = load_config()
-    mesh_id_path = Path("/etc/ados/mesh/id")
+    mesh_id_path = MESH_ID_PATH
     psk_path = Path(config.ground_station.mesh.shared_key_path)
     try:
         mesh_id = mesh_id_path.read_text(encoding="utf-8").strip()

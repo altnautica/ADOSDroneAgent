@@ -37,13 +37,14 @@ import structlog
 from ados.core.config import load_config
 from ados.core.logging import configure_logging, get_logger
 from ados.services.wfb.adapter import detect_wfb_adapters, set_monitor_mode
+from ados.core.paths import WFB_RECEIVER_JSON
 from ados.services.wfb.key_mgr import get_key_paths, key_exists
 
 from .events import MeshEvent, get_mesh_event_bus
 
 log = get_logger("ground_station.wfb_receiver")
 
-RECEIVER_STATE_JSON = Path("/run/ados/wfb-receiver.json")
+RECEIVER_STATE_JSON = WFB_RECEIVER_JSON
 _RELAY_GRACE_MS = 4000
 _POLL_INTERVAL_S = 2.0
 _MDNS_SERVICE = "_ados-receiver._tcp"

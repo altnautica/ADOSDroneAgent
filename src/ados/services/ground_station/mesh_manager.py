@@ -41,16 +41,25 @@ import structlog
 
 from ados.core.config import ADOSConfig, load_config
 from ados.core.logging import configure_logging, get_logger
+from ados.core.paths import (
+    MESH_GATEWAY_JSON,
+    MESH_ID_PATH as _MESH_ID_PATH,
+    MESH_PSK_PATH as _MESH_PSK_PATH,
+    MESH_ROLE_PATH,
+    MESH_SOCK,
+    MESH_STATE_JSON as _MESH_STATE_JSON,
+    UPLINK_ACTIVE_FLAG,
+)
 
 from .events import MeshEvent, get_mesh_event_bus
 from .role_manager import get_current_role
 
 log = get_logger("ground_station.mesh_manager")
 
-MESH_STATE_PATH = Path("/run/ados/mesh.sock")
-MESH_STATE_JSON = Path("/run/ados/mesh-state.json")
-MESH_ID_PATH = Path("/etc/ados/mesh/id")
-MESH_PSK_PATH = Path("/etc/ados/mesh/psk.key")
+MESH_STATE_PATH = MESH_SOCK
+MESH_STATE_JSON = _MESH_STATE_JSON
+MESH_ID_PATH = _MESH_ID_PATH
+MESH_PSK_PATH = _MESH_PSK_PATH
 
 _POLL_INTERVAL_S = 2.0
 _NEIGHBOR_CHURN_DEAD_MS = 5000
@@ -286,7 +295,7 @@ def _bind_iface_to_bat(iface: str, bat_iface: str) -> bool:
     return True
 
 
-_GATEWAY_PREFERENCE_PATH = Path("/etc/ados/mesh/gateway.json")
+_GATEWAY_PREFERENCE_PATH = MESH_GATEWAY_JSON
 
 
 def _apply_persisted_gateway_preference() -> str | None:
@@ -595,7 +604,7 @@ class MeshManager:
         # uplink_router owns the real decision. Operator preference from
         # the GCS lands in /etc/ados/mesh/gateway.json and is re-applied
         # here at setup so pins survive agent + mesh restarts.
-        has_uplink = Path("/run/ados/uplink-active").is_file()
+        has_uplink = UPLINK_ACTIVE_FLAG.is_file()
         mode = _configure_gateway_mode(
             self._role,
             self._config.ground_station.cloud_uplink,
@@ -662,7 +671,7 @@ async def main() -> None:
         # keep us inactive until the role sentinel is re-armed (via
         # pairing or explicit ados gs role set), and exit cleanly.
         try:
-            role_path = Path("/etc/ados/mesh/role")
+            role_path = MESH_ROLE_PATH
             role_path.parent.mkdir(parents=True, exist_ok=True)
             role_path.write_text("direct\n", encoding="utf-8")
         except OSError as exc:
