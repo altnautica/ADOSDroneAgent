@@ -30,6 +30,7 @@ import structlog
 
 from ados.core.config import load_config
 from ados.core.logging import configure_logging, get_logger
+from ados.core.paths import WFB_KEY_DIR
 from ados.services.wfb.adapter import detect_wfb_adapters, set_monitor_mode
 from ados.services.wfb.key_mgr import get_key_paths, key_exists
 from ados.services.wfb.link_quality import LinkQualityMonitor, LinkStats
@@ -268,7 +269,7 @@ class WfbRxManager:
                 continue
 
             if not key_exists():
-                log.warning("ground_wfb_keys_missing", expected="/etc/ados/wfb/")
+                log.warning("ground_wfb_keys_missing", expected=f"{WFB_KEY_DIR}/")
 
             rx_ok = await self.start_rx(interface, self._channel)
             if not rx_ok:

@@ -47,6 +47,8 @@ from typing import Any, AsyncIterator, Literal, Optional, Protocol
 
 import structlog
 
+from ados.core.paths import GS_UPLINK_JSON
+
 log = structlog.get_logger(__name__)
 
 __all__ = [
@@ -63,7 +65,7 @@ __all__ = [
 UplinkEventKind = Literal["uplink_changed", "health_changed", "data_cap_threshold"]
 DataCapState = Literal["ok", "warn_80", "throttle_95", "blocked_100"]
 
-_PRIORITY_CONFIG_PATH = Path("/etc/ados/ground-station-uplink.json")
+_PRIORITY_CONFIG_PATH = GS_UPLINK_JSON
 _USAGE_STATE_PATH = Path("/var/lib/ados/modem-usage.json")
 
 # Default priority chain. `wlan0_ap` is the LAN-side SSID served to

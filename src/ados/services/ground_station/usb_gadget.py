@@ -45,6 +45,7 @@ import structlog
 
 from ados.core.config import load_config
 from ados.core.logging import configure_logging, get_logger
+from ados.core.paths import DNSMASQ_USB0_CONF, DNSMASQ_USB0_PID
 
 log = get_logger("ground_station.usb_gadget")
 
@@ -59,8 +60,8 @@ USB_SUBNET = "192.168.7.0/24"
 DHCP_RANGE_START = "192.168.7.2"
 DHCP_RANGE_END = "192.168.7.2"
 
-DNSMASQ_CONF_PATH = Path("/run/ados/dnsmasq-usb0.conf")
-DNSMASQ_PID_PATH = Path("/run/ados/dnsmasq-usb0.pid")
+DNSMASQ_CONF_PATH = DNSMASQ_USB0_CONF
+DNSMASQ_PID_PATH = DNSMASQ_USB0_PID
 
 # USB descriptor values, straight from 07-usb-tether-gadget.md
 ID_VENDOR = "0x1d6b"      # Linux Foundation

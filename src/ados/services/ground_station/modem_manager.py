@@ -40,6 +40,7 @@ from typing import Any, Optional
 
 import structlog
 
+from ados.core.paths import GS_MODEM_JSON
 from ados.hal.modem import detect_modem, get_modem_status
 
 log = structlog.get_logger(__name__)
@@ -51,7 +52,7 @@ __all__ = [
 ]
 
 
-_CONFIG_PATH = Path("/etc/ados/ground-station-modem.json")
+_CONFIG_PATH = GS_MODEM_JSON
 _WWAN_IFACE = "wwan0"
 _USB_IFACE = "usb0"
 _DBUS_TIMEOUT_SECONDS = 3.0

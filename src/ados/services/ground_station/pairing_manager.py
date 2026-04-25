@@ -52,12 +52,13 @@ from cryptography.hazmat.primitives.serialization import (
 )
 
 from ados.core.logging import get_logger
+from ados.core.paths import MESH_REVOCATIONS_JSON
 
 from .events import PairingEvent, get_pairing_event_bus
 
 log = get_logger("ground_station.pairing_manager")
 
-REVOCATIONS_PATH = Path("/etc/ados/mesh/revocations.json")
+REVOCATIONS_PATH = MESH_REVOCATIONS_JSON
 PAIR_UDP_PORT = 5801
 DEFAULT_ACCEPT_WINDOW_S = 60
 INVITE_TTL_S = 120
