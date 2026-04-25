@@ -1,4 +1,4 @@
-"""SIGHUP signaling helper for ground-station UI services (Phase 4 Track A).
+"""SIGHUP signaling helper for ground-station UI services.
 
 The ground-station OLED and button services run as their own systemd units
 (`ados-oled.service`, `ados-buttons.service`). When the GCS or captive

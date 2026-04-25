@@ -10,8 +10,6 @@ percent it drops everything except a minimal status heartbeat.
 
 This module does not rewrite the MQTT gateway or the MAVLink relay.
 It only orchestrates their lifecycle.
-
-Per DEC-070, DEC-071, DEC-072. MSN-027 Wave B.
 """
 
 from __future__ import annotations
@@ -58,7 +56,7 @@ class CloudRelayBridge:
     Security: `api_key` is sensitive. It is read from
     `server.self_hosted.api_key` in `/etc/ados/config.yaml`, which must
     be mode 0600 and owned by root. See `pair_manager._save_config_dict`
-    and the H8/M1 hardening in MSN-029.
+    for the on-disk hardening.
     """
 
     def __init__(
@@ -77,9 +75,9 @@ class CloudRelayBridge:
         self._drone_id = paired_drone_id
         self._convex_base = convex_base_url.rstrip("/")
         self._api_key = api_key
-        # Phase 4 Wave 2 Cellos: optional StateReader. When wired the
-        # bridge owns its lifecycle so MqttGateway and the Convex
-        # heartbeat read live VehicleState rather than the stub.
+        # Optional StateReader. When wired the bridge owns its
+        # lifecycle so MqttGateway and the Convex heartbeat read live
+        # VehicleState rather than the stub.
         self._state_reader = state_reader
 
         self._running = False
@@ -107,8 +105,8 @@ class CloudRelayBridge:
         if self._running:
             return
         self._running = True
-        # Phase 4 Wave 2 Cellos: bring up the state reader before the
-        # MQTT and heartbeat tasks so first publish carries fresh data.
+        # Bring up the state reader before the MQTT and heartbeat
+        # tasks so first publish carries fresh data.
         if self._state_reader is not None:
             try:
                 await self._state_reader.start()
@@ -372,11 +370,10 @@ class CloudRelayBridge:
                     "forwarding_telemetry": self._forward_telemetry,
                     "ts_ms": int(time.time() * 1000),
                 }
-                # Phase 4 Wave 2 Cellos: enrich the heartbeat with live
-                # VehicleState (armed, mode, lat/lon, battery) when a
-                # state reader is wired. Falls back silently when the
-                # reader is absent or has not yet received its first
-                # snapshot.
+                # Enrich the heartbeat with live VehicleState (armed,
+                # mode, lat/lon, battery) when a state reader is wired.
+                # Falls back silently when the reader is absent or has
+                # not yet received its first snapshot.
                 if self._state_reader is not None:
                     try:
                         vs = self._state_reader.get_latest()
@@ -463,12 +460,12 @@ def _build_default_bridge() -> "CloudRelayBridge":
         router = get_uplink_router()
         pair = get_pair_manager()
         drone_id: Optional[str] = None
-        # Wave B blocker 2 fix: read paired_drone_id from PairManager.status()
-        # rather than config.ground_station.paired_drone_id. The pair manager
-        # is the authoritative source. `status()` is async so we run it
-        # synchronously here via asyncio.run when no loop is active, or fall
-        # back to the config field if a loop is already running (systemd boot
-        # path with an embedded event loop).
+        # Read paired_drone_id from PairManager.status() rather than
+        # config.ground_station.paired_drone_id. The pair manager is
+        # the authoritative source. `status()` is async so we run it
+        # synchronously here via asyncio.run when no loop is active,
+        # or fall back to the config field if a loop is already
+        # running (systemd boot path with an embedded event loop).
         try:
             try:
                 _running_loop = asyncio.get_running_loop()
@@ -497,8 +494,7 @@ def _build_default_bridge() -> "CloudRelayBridge":
             except Exception:
                 drone_id = None
 
-        # Phase 4 Wave 2 Cellos (Wave B blocker 1 fix): wire live
-        # VehicleState via the ados-mavlink state IPC socket
+        # Wire live VehicleState via the ados-mavlink state IPC socket
         # (`/run/ados/state.sock`). Bridge owns the StateReader. The
         # MqttGateway and Convex heartbeat path read the same
         # VehicleState object so both publish fresh telemetry.
@@ -564,17 +560,17 @@ def _build_default_bridge() -> "CloudRelayBridge":
 
 
 # ----------------------------------------------------------------------
-# Service entry point (placeholder for Wave C systemd unit)
+# Service entry point (standalone systemd unit)
 # ----------------------------------------------------------------------
 async def _run_service() -> None:
     """Run the cloud relay bridge as a standalone systemd service.
 
-    Wave B blocker 3 fix: this entry MUST NOT start the uplink router.
-    The router is owned by `ados-uplink-router.service`. The bridge is
-    a subscriber to the router's UplinkEventBus. If the router has not
-    yet come up when the bridge starts, `bus.subscribe()` still works
-    (queue fills when the router eventually publishes). We log a
-    warning so the operator sees the dependency gap in journalctl.
+    This entry MUST NOT start the uplink router. The router is owned
+    by `ados-uplink-router.service`. The bridge is a subscriber to the
+    router's UplinkEventBus. If the router has not yet come up when
+    the bridge starts, `bus.subscribe()` still works (queue fills when
+    the router eventually publishes). We log a warning so the operator
+    sees the dependency gap in journalctl.
     """
     import signal
 

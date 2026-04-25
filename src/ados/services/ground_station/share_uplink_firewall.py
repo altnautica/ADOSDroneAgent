@@ -1,9 +1,9 @@
 """share_uplink firewall and sysctl persistence.
 
-Phase 3 wired runtime sysctl + iptables MASQUERADE for `share_uplink`
-through `api/routes/ground_station.py:_apply_share_uplink`. Those
-settings did NOT survive reboot. Phase 4 Wave 2 Cellos adds proper
-persistence here:
+Earlier code wired runtime sysctl + iptables MASQUERADE for
+`share_uplink` through `api/routes/ground_station.py:_apply_share_uplink`.
+Those settings did NOT survive reboot. This module adds proper
+persistence:
 
 - Atomic write of `/etc/sysctl.d/99-ados-share-uplink.conf` for
   `net.ipv4.ip_forward=1` (or removal of that file when disabled).

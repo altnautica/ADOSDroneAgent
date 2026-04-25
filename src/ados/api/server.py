@@ -80,7 +80,6 @@ def create_app(agent: AgentApp) -> FastAPI:
 
     # Health check. Moved off `/` so the ground-station static mount
     # can own the root path (`/` -> `static-ground/index.html`).
-    # MSN-025 Wave B.
     @app.get("/healthz")
     async def health_check():
         return {"status": "ok", "version": __version__}
@@ -99,8 +98,8 @@ def create_app(agent: AgentApp) -> FastAPI:
     app.include_router(pairing.router, prefix="/api")
     app.include_router(system.router, prefix="/api")
     app.include_router(peripherals.router, prefix="/api")
-    # MSN-028 Phase 4 Track A Wave 3: Peripheral Manager plugin registry.
-    # Lives alongside the legacy /api/peripherals hardware scan route.
+    # Peripheral Manager plugin registry. Lives alongside the legacy
+    # /api/peripherals hardware scan route.
     app.include_router(peripherals_v1.router, prefix="/api")
     app.include_router(suites.router, prefix="/api")
     app.include_router(fleet.router, prefix="/api")
@@ -117,7 +116,6 @@ def create_app(agent: AgentApp) -> FastAPI:
     # `static-ground/index.html` directly. Mount is added AFTER every
     # router above so API routes match first (FastAPI resolves routes
     # in registration order, and the static mount is the catch-all).
-    # MSN-025 Wave B, DEC-112.
     if agent.config.agent.profile == "ground_station":
         from pathlib import Path
 

@@ -1,4 +1,4 @@
-"""Uplink router + health monitor + data-cap tracker (MSN-027 Wave A).
+"""Uplink router + health monitor + data-cap tracker.
 
 The ground station can reach the cloud over several uplinks: wired
 Ethernet (`eth0`), WiFi client (`wlan0_client` when the onboard radio
@@ -23,12 +23,12 @@ Events fan out on `UplinkEventBus`, which mirrors `ButtonEventBus`
 from `src/ados/services/ui/events.py` and `PicEventBus` from
 `pic_arbiter.py`. Bounded per-subscriber queues, drop-on-full.
 
-Wiring: Wave A of this MSN delivers this file with stubbable manager
-references. Wave B wires the concrete `WifiClientManager`,
-`EthernetManager`, and this module's cellular dependency on
+Wiring: this file ships with stubbable manager references and is
+later wired against the concrete `WifiClientManager`,
+`EthernetManager`, and the cellular dependency on
 `GroundStationModemManager`. The router asks each manager for
-`is_up()`, `get_gateway()`, and (for modem) byte counters, so adding
-a new uplink in a later phase is a matter of dropping in another
+`is_up()`, `get_gateway()`, and (for modem) byte counters, so
+adding a new uplink later is a matter of dropping in another
 manager with the same three methods.
 """
 
@@ -168,8 +168,8 @@ class UplinkEventBus:
 class UplinkManagerProto(Protocol):
     """Structural type every uplink manager satisfies.
 
-    Wave A only uses `is_up`, `get_iface`, and `get_gateway`. The modem
-    manager in Wave A also exposes `data_usage` for the cap tracker.
+    The router only uses `is_up`, `get_iface`, and `get_gateway`. The
+    modem manager also exposes `data_usage` for the cap tracker.
     """
 
     async def is_up(self) -> bool: ...
@@ -178,12 +178,12 @@ class UplinkManagerProto(Protocol):
 
 
 class _StubManager:
-    """Inert placeholder so `UplinkRouter` can run before Wave B wires
-    the real Ethernet / WiFi client managers.
+    """Inert placeholder so `UplinkRouter` can run before the real
+    Ethernet / WiFi client managers are wired in.
 
     `is_up()` returns False so the stubbed uplink never passes
-    `_viable_uplinks()`. When Wave B lands, the stub is replaced by
-    the real manager through the router constructor.
+    `_viable_uplinks()`. The real manager replaces the stub through
+    the router constructor.
     """
 
     def __init__(self, iface: str) -> None:
@@ -1306,9 +1306,9 @@ async def _run_service() -> None:
         active=router.active_uplink,
     )
 
-    # Phase 4 Wave 2 Cellos: reconcile share_uplink firewall state on
-    # start. Brings sysctl ip_forward + NAT MASQUERADE in line with the
-    # persisted `ground_station.share_uplink` flag so reboots survive.
+    # Reconcile share_uplink firewall state on start. Brings sysctl
+    # ip_forward + NAT MASQUERADE in line with the persisted
+    # `ground_station.share_uplink` flag so reboots survive.
     try:
         from ados.services.ground_station.share_uplink_firewall import (
             reconcile_on_start as _reconcile_share_uplink,

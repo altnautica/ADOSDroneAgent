@@ -18,15 +18,15 @@ _DEFAULT_API_PORT = 9997
 _DEFAULT_RTSP_PORT = 8554
 _DEFAULT_WEBRTC_PORT = 8889
 
-# DEC-108: STUN servers for WebRTC ICE NAT traversal. Google's free public
+# STUN servers for WebRTC ICE NAT traversal. Google's free public
 # STUN servers handle NAT punching for ~95% of home/cellular networks.
 # Required for any WAN P2P direct path; harmless on local LAN.
 #
-# DEC-107 Phase H: expanded list — more candidates = higher chance of finding
-# a working ICE pair on cellular carriers, corporate networks, and NATs with
-# restricted endpoint mapping. Cloudflare's STUN has global anycast coverage;
-# Twilio's adds another independent network path. All five are free and
-# unlimited.
+# Expanded list: more candidates means higher chance of finding a
+# working ICE pair on cellular carriers, corporate networks, and NATs
+# with restricted endpoint mapping. Cloudflare's STUN has global
+# anycast coverage; Twilio's adds another independent network path.
+# All five are free and unlimited.
 _DEFAULT_STUN_SERVERS = [
     "stun:stun.l.google.com:19302",
     "stun:stun1.l.google.com:19302",
@@ -39,21 +39,21 @@ _DEFAULT_STUN_SERVERS = [
 def _detect_lan_ips() -> list[str]:
     """Discover the SBC's LAN IPs by enumerating non-loopback interfaces.
 
-    DEC-108: mediamtx's auto-discovery of WebRTC ICE host candidates was
-    only finding 127.0.0.1 on the Rock 5C Lite bench rig (probably because
+    mediamtx's auto-discovery of WebRTC ICE host candidates was only
+    finding 127.0.0.1 on the Rock 5C Lite bench rig (probably because
     the WiFi interface comes up after mediamtx starts, or because the
-    interface enumeration doesn't include all addresses). The result was
-    that browsers received an SDP answer with only a loopback candidate
-    and the WebRTC connection silently failed with "no video track
-    received within 10s".
+    interface enumeration doesn't include all addresses). The result
+    was that browsers received an SDP answer with only a loopback
+    candidate and the WebRTC connection silently failed with "no video
+    track received within 10s".
 
-    Fix: detect the SBC's actual outbound IPv4 address at config-gen time
-    and pass it to mediamtx as `webrtcAdditionalHosts`. This guarantees
-    that at least one reachable host candidate is advertised.
+    Fix: detect the SBC's actual outbound IPv4 address at config-gen
+    time and pass it to mediamtx as `webrtcAdditionalHosts`. This
+    guarantees that at least one reachable host candidate is advertised.
 
-    Strategy: open a UDP socket toward a public IP (no packet is actually
-    sent — UDP connect is just a routing-table lookup). The kernel picks
-    the outbound interface and we read its bound address.
+    Strategy: open a UDP socket toward a public IP (no packet is
+    actually sent, UDP connect is just a routing-table lookup). The
+    kernel picks the outbound interface and we read its bound address.
     """
     ips: list[str] = []
     try:
@@ -114,8 +114,8 @@ class MediamtxManager:
         Returns:
             The path to the generated configuration file.
         """
-        # DEC-108: detect the SBC's LAN IP and force mediamtx to advertise
-        # it as a WebRTC host candidate. Without this mediamtx auto-discovery
+        # Detect the SBC's LAN IP and force mediamtx to advertise it as
+        # a WebRTC host candidate. Without this mediamtx auto-discovery
         # was only emitting 127.0.0.1, which browsers can't reach.
         lan_ips = _detect_lan_ips()
         log.info("mediamtx_webrtc_hosts", hosts=lan_ips)

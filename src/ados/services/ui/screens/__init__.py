@@ -1,4 +1,4 @@
-"""OLED screen renderers (MSN-025 Wave B).
+"""OLED screen renderers.
 
 Each module exposes `render(draw, width, height, state)` that draws
 onto a PIL ImageDraw canvas handed in by `luma.core.render.canvas`.

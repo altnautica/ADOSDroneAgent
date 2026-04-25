@@ -608,10 +608,10 @@ async def main() -> None:
     tasks.append(asyncio.create_task(mavlink_relay_task(), name="mavlink-relay"))
 
     # ── WebRTC Signaling Relay (when paired) ──────────────────
-    # DEC-108 Phase B0: relays SDP offers/answers between MQTT and local
-    # mediamtx WHEP, enabling P2P direct WebRTC across WAN. Browser dials
-    # in from command.altnautica.com on any network; SDP handshake flows
-    # via MQTT, media flows direct peer-to-peer after ICE punching.
+    # Relays SDP offers/answers between MQTT and local mediamtx WHEP,
+    # enabling P2P direct WebRTC across WAN. Browser dials in from
+    # command.altnautica.com on any network; SDP handshake flows via
+    # MQTT, media flows direct peer-to-peer after ICE punching.
 
     async def webrtc_signaling_task() -> None:
         """Relay WebRTC SDP offers/answers over MQTT for cross-network video."""

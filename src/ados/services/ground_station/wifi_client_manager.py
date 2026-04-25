@@ -1,17 +1,17 @@
-"""WiFi client (station) manager for the ground-station profile (MSN-027).
+"""WiFi client (station) manager for the ground-station profile.
 
-Phase 3 uplink matrix. The ground station's onboard wlan0 radio can act
-as an AP (hostapd_manager) or as a station joining an upstream WiFi
-network for internet backhaul. The two modes are mutually exclusive on
-the same radio, so this manager coordinates with ados-hostapd via a
-file-based advisory lock.
+Part of the uplink matrix. The ground station's onboard wlan0 radio
+can act as an AP (hostapd_manager) or as a station joining an upstream
+WiFi network for internet backhaul. The two modes are mutually
+exclusive on the same radio, so this manager coordinates with
+ados-hostapd via a file-based advisory lock.
 
 Backend: NetworkManager (`nmcli`). NM persists saved connection
 profiles on its own, so we do not re-implement credential storage.
 What we do persist is the "client enabled on boot" flag so the uplink
 router knows which uplinks to bring up automatically.
 
-Published events (for uplink_router, Wave B):
+Published events (consumed by uplink_router):
     WifiClientEvent{kind, ssid, signal, ip, timestamp_ms}
 
 Mutex:

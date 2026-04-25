@@ -1,23 +1,23 @@
-"""Input device lifecycle for the ground-station profile (MSN-026 Phase 2).
+"""Input device lifecycle for the ground-station profile.
 
 Handles USB and Bluetooth gamepad enumeration, Bluetooth pairing,
 primary-device persistence, and hot-plug event publishing. The REST
-routes (Wave C) and the PIC arbiter (Wave B) both consume this module
-by calling `get_input_manager()` from the `ados-api` process.
+routes and the PIC arbiter both consume this module by calling
+`get_input_manager()` from the `ados-api` process.
 
 Why this file stays light on deps:
 
 * `evdev` is the Linux userspace joystick API. It is only present on
-  hosts that installed the ground-station extra (Wave C work). This
-  module must parse on every profile, so the import is lazy and
-  localized to the methods that actually need it.
+  hosts that installed the ground-station extra. This module must
+  parse on every profile, so the import is lazy and localized to the
+  methods that actually need it.
 * `pyudev` is not a dependency. Hot-plug uses a 1 Hz poll of
-  `/dev/input/`. That is good enough for device attach and detach on a
-  bench rig, and avoids pulling another library.
+  `/dev/input/`. That is good enough for device attach and detach on
+  a bench rig, and avoids pulling another library.
 * `bluetoothctl` is invoked via `subprocess`. `dbus-next` is declared
-  in the ground-station extra and could drive BlueZ directly, but for
-  Phase 2 the CLI path is simpler, uses the same patterns as
-  `hostapd_manager`, and is easy to read from logs.
+  in the ground-station extra and could drive BlueZ directly, but the
+  CLI path is simpler, uses the same patterns as `hostapd_manager`,
+  and is easy to read from logs.
 
 Lifecycle:
 
@@ -35,9 +35,9 @@ Events published on the bus:
 * kind="connected" for a newly seen device.
 * kind="disconnected" for a device that dropped off the bus.
 
-Consumers (pic_arbiter in Wave B) subscribe to the bus and react. The
-REST routes in Wave C call `list_gamepads`, `scan_bluetooth`,
-`pair_bluetooth`, and friends.
+Consumers such as `pic_arbiter` subscribe to the bus and react. The
+REST routes call `list_gamepads`, `scan_bluetooth`, `pair_bluetooth`,
+and friends.
 
 The module exits non-zero from `main()` only on fatal signal. The
 hot-plug loop swallows transient errors and keeps running; systemd
@@ -379,8 +379,8 @@ class InputManager:
 
         Scan is always stopped before returning, even on error. RSSI is
         not surfaced by `bluetoothctl devices`; callers that need RSSI
-        can read BlueZ directly later. For Phase 2 the name and MAC are
-        enough to populate the setup UI.
+        can read BlueZ directly later. The name and MAC are enough to
+        populate the setup UI.
         """
         await self._btctl("power", "on", timeout=5.0)
         await self._btctl("scan", "on", timeout=5.0)

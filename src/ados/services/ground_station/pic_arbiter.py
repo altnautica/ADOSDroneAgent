@@ -1,4 +1,4 @@
-"""Pilot-in-command arbiter (MSN-026 Wave B).
+"""Pilot-in-command arbiter.
 
 Manages which client currently holds PIC (pilot-in-command) authority for
 the ground station. Exactly one client at a time may send flight-critical
@@ -19,7 +19,7 @@ from `src/ados/services/ui/events.py`.
 Integration with InputManager: `run_hotplug_integration()` subscribes to
 the input manager bus and auto-claims PIC on first gamepad connect when
 no one holds PIC yet. A companion hook (`on_pic_disconnected`) is wired
-by the REST / WebSocket layer in Wave C when the PIC client drops.
+by the REST / WebSocket layer when the PIC client drops.
 
 Concurrency: all state mutations go through `self._lock`. Public methods
 are async and safe to call from multiple tasks.
@@ -222,9 +222,9 @@ class PicArbiter:
     ) -> dict:
         """Attempt to claim PIC for `client_id`.
 
-        Returns a dict describing the outcome. The REST layer in Wave C
-        maps `already_claimed` to HTTP 409 and surfaces `needs_confirm`
-        so the GCS can show the "Take control" prompt.
+        Returns a dict describing the outcome. The REST layer maps
+        `already_claimed` to HTTP 409 and surfaces `needs_confirm` so
+        the GCS can show the "Take control" prompt.
         """
         async with self._lock:
             self._purge_expired_tokens()
@@ -560,7 +560,7 @@ class PicArbiter:
         """Subscribe to InputManager bus and auto-claim on first gamepad.
 
         Intended to run as a long-lived task owned by the arbiter's
-        systemd unit or by the REST app's lifespan in Wave C.
+        systemd unit or by the REST app's lifespan.
         """
         im = get_input_manager()
         log.info(

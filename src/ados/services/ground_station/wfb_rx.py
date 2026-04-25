@@ -1,4 +1,4 @@
-"""WFB-ng ground-side RX lifecycle (DEC-112).
+"""WFB-ng ground-side RX lifecycle.
 
 Mirrors `ados.services.wfb.manager.WfbManager` for the ground-station
 profile. On the air side we run `wfb_tx` to transmit; here we run
@@ -188,9 +188,9 @@ class WfbRxManager:
     def stats(self) -> dict:
         """Return the ground-side link stats shape.
 
-        Schema chosen per MSN-024 scope: rssi_dbm, bitrate_mbps, fec_rec,
-        fec_lost, channel. Additional fields from the shared monitor are
-        included for parity with the air-side status payload.
+        Schema: rssi_dbm, bitrate_mbps, fec_rec, fec_lost, channel.
+        Additional fields from the shared monitor are included for
+        parity with the air-side status payload.
         """
         snap: LinkStats = self._monitor.get_current()
         return {

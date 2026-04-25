@@ -1,7 +1,7 @@
 """HDMI kiosk service: Chromium under cage, pointed at the local HUD.
 
-Ground-station Phase 2 (MSN-026). HDMI + gamepad should deliver standalone
-flight with no phone required. This service owns the HDMI output.
+HDMI + gamepad should deliver standalone flight with no phone
+required. This service owns the HDMI output.
 
 Lifecycle:
 1. Probe `/dev/dri/card0`. If absent, the Pi has no HDMI sink connected

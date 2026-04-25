@@ -1,4 +1,4 @@
-"""Ground-station modem manager (MSN-027 Wave A).
+"""Ground-station modem manager.
 
 Wraps the existing `src/ados/services/network/modem_at.py` AT-command
 backend and the `src/ados/hal/modem.py` mmcli probe with a
@@ -10,7 +10,7 @@ fallback mode and keeps serving status + data-usage reads.
 This module lives in the `ground_station` package because the full
 air-side agent uses its own embedded modem driver. The ground station
 runs a dedicated `ados-modem.service` unit that owns cellular
-uplink for the cloud relay path (DEC-070 MQTT + Convex HTTP).
+uplink for the cloud relay path (MQTT + Convex HTTP).
 
 Public surface:
 
@@ -497,11 +497,11 @@ class GroundStationModemManager:
     async def _bring_up_at(self, apn: str) -> dict:
         """Run `AtModemService` for a brief connect window.
 
-        We do not keep the `AtModemService` running here in Wave A. We
-        invoke its APN set + data enable primitives through a short
-        run loop driven by an internal shutdown event. Wave C will
-        wire the long-running service unit if we decide to keep the
-        AT path as a supervised fallback process.
+        We do not keep the `AtModemService` running here. We invoke
+        its APN set + data enable primitives through a short run loop
+        driven by an internal shutdown event. A future revision can
+        wire the long-running service unit if the AT path stays as a
+        supervised fallback process.
         """
         from ados.services.network.modem_at import AtModemService
 

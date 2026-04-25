@@ -1,5 +1,5 @@
 # ADOS Drone Agent - ROS 2 Jazzy container image
-# DEC-111: opt-in ROS 2 environment for research, VIO, and suite authors.
+# Opt-in ROS 2 environment for research, VIO, and suite authors.
 #
 # Build:
 #   docker build -t ados-ros:jazzy -f docker/ros/Dockerfile .

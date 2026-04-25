@@ -1,22 +1,22 @@
-"""Pair key manager for the ground-station profile (MSN-025, DEC-112).
+"""Pair key manager for the ground-station profile.
 
-The ground station and the paired drone share a WFB-ng keypair. The drone
-is provisioned with a tx key, the ground station with a matching rx key.
-This module owns the rx-side keypair for the ground station: writing
-`/etc/ados/wfb/rx.key` and `/etc/ados/wfb/rx.key.pub` atomically, tracking
-which drone is paired in agent config, signalling `ados-wfb-rx` to pick
-up the new keys, and dropping the setup-complete sentinel so the captive
-DNS responder (Wave B) can shut itself down.
+The ground station and the paired drone share a WFB-ng keypair. The
+drone is provisioned with a tx key, the ground station with a matching
+rx key. This module owns the rx-side keypair for the ground station:
+writing `/etc/ados/wfb/rx.key` and `/etc/ados/wfb/rx.key.pub`
+atomically, tracking which drone is paired in agent config, signalling
+`ados-wfb-rx` to pick up the new keys, and dropping the setup-complete
+sentinel so the captive DNS responder can shut itself down.
 
 Pair triggers:
-- Long-press B3 on the front-panel OLED (spec 05, Wave D handler).
-- POST `/wfb/pair` on the agent REST API (spec 11, Wave C Cellos routes).
+- Long-press B3 on the front-panel OLED (spec 05).
+- POST `/wfb/pair` on the agent REST API (spec 11).
 
-Phase 1 POC: `wfb_keygen` (the upstream tool) generates fresh random
+POC behavior: `wfb_keygen` (the upstream tool) generates fresh random
 keypairs and does not accept an input seed. So the pair flow here is
 "user supplied 32 bytes of shared key material, write those bytes
 straight into rx.key and publish a public fingerprint." This is
-acceptable for Phase 1 bench pairing. Phase 2 switches to a real
+acceptable for bench pairing. A future revision switches to a real
 NaCl keypair exchange over the webapp QR path.
 
 Key paths come from `ados.services.wfb.key_mgr.get_key_paths()` so air
@@ -70,7 +70,7 @@ def _decode_pair_key(pair_key: str) -> bytes:
     Accepts 32-byte hex (64 chars), raw hex of any >= 16 char length
     (zero-padded or truncated to 32 bytes), or a best-effort UTF-8 byte
     expansion for non-hex inputs. Falls back to SHA-256 of the input
-    bytes to always yield a stable 32-byte key. Phase 1 POC behavior.
+    bytes to always yield a stable 32-byte key. POC behavior.
     """
     if _HEX_RE.match(pair_key) and len(pair_key) % 2 == 0:
         try:
@@ -262,8 +262,8 @@ def _validate_pair_key(pair_key: str) -> None:
 class PairManager:
     """Drone pair key exchange for the ground-station profile.
 
-    Single instance per agent. Consumed by the Wave C REST routes
-    (`POST /wfb/pair`) and by the Wave D long-press B3 handler. All
+    Single instance per agent. Consumed by the REST routes
+    (`POST /wfb/pair`) and by the long-press B3 handler. All
     operations are async for API symmetry even though the underlying
     file and subprocess work is synchronous.
     """
@@ -324,8 +324,8 @@ class PairManager:
         raw_key = _decode_pair_key(pair_key.strip())
         # Public half: SHA-256 of the private key. Not a real NaCl
         # public key, but stable and good enough as a fingerprint
-        # anchor for Phase 1. Phase 2 replaces this with the real
-        # libsodium `crypto_scalarmult_base` derivation.
+        # anchor for now. A future revision replaces this with the
+        # real libsodium `crypto_scalarmult_base` derivation.
         pub_bytes = hashlib.sha256(raw_key).digest()
         fingerprint = _fingerprint(pub_bytes)
 
@@ -339,8 +339,8 @@ class PairManager:
         _set_paired_drone_id(drone_device_id or "unknown")
         _set_paired_at(paired_at)
 
-        # Drop the setup-complete sentinel so captive_dns.py (Wave B)
-        # stops redirecting. Best-effort: failure here does not unpair.
+        # Drop the setup-complete sentinel so captive_dns.py stops
+        # redirecting. Best-effort: failure here does not unpair.
         try:
             _atomic_write(
                 _SETUP_COMPLETE_PATH,
@@ -460,10 +460,10 @@ class PairManager:
 # ----------------------------------------------------------------------
 # Module-level singleton
 # ----------------------------------------------------------------------
-# Phase 4 Wave 1: match the pattern used by get_input_manager(),
-# get_pic_arbiter(), get_modem_manager(). Prior to this, callers
-# instantiated PairManager() directly, which worked but fragmented
-# state and made test teardown awkward.
+# Match the pattern used by get_input_manager(), get_pic_arbiter(),
+# get_modem_manager(). Prior to this, callers instantiated
+# PairManager() directly, which worked but fragmented state and
+# made test teardown awkward.
 _instance: "PairManager | None" = None
 
 
@@ -482,6 +482,6 @@ def _reset_for_tests() -> None:
 
 
 # No systemd entry point. PairManager is consumed in-process by the
-# REST API service (Wave C Cellos) and the physical UI handler (Wave D).
-# A `__main__` block is intentionally omitted; for bench testing use
+# REST API service and the physical UI handler. A `__main__` block is
+# intentionally omitted; for bench testing use
 # `python -c "import asyncio; from ados.services.ground_station.pair_manager import get_pair_manager; print(asyncio.run(get_pair_manager().status()))"`.

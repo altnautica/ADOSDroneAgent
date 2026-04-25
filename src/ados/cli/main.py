@@ -27,13 +27,13 @@ PAIRING_STATE_PATH = Path("/etc/ados/pairing.json")
 def _load_api_key() -> str | None:
     """Read the local pairing.json and return the API key if paired.
 
-    DEC-108 Phase E: when the agent is paired (api/middleware/auth.py
-    enforces ApiKeyAuthMiddleware), the CLI must send the X-ADOS-Key
-    header on every request to /api/* routes. The key lives at
+    When the agent is paired (api/middleware/auth.py enforces
+    ApiKeyAuthMiddleware), the CLI must send the X-ADOS-Key header on
+    every request to /api/* routes. The key lives at
     /etc/ados/pairing.json (written by install.sh during pairing).
 
     Returns the api_key string, or None if pairing.json is missing or
-    unreadable. The CLI continues without the header in that case —
+    unreadable. The CLI continues without the header in that case;
     auth-exempt endpoints (e.g. /api/pairing/info) still work.
     """
     try:
@@ -90,7 +90,7 @@ def cli(ctx: click.Context) -> None:
         show_help()
 
 
-# Ground-station subgroup (MSN-025 Phase 1).
+# Ground-station subgroup.
 from ados.cli.gs import gs_group as _gs_group  # noqa: E402
 
 cli.add_command(_gs_group)
