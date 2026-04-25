@@ -20,14 +20,12 @@ def _make_manifest() -> UpdateManifest:
     return UpdateManifest(
         version="0.2.0",
         channel="stable",
-        release_date="2026-03-08T00:00:00Z",
+        published_at="2026-03-08T00:00:00Z",
         download_url="https://updates.altnautica.com/stable/ados-0.2.0.bin",
         file_size=1024,
         sha256="a" * 64,
-        signature="c2ln",
-        min_version="0.1.0",
         changelog="Bug fixes.",
-        requires_reboot=False,
+        release_url="https://github.com/altnautica/ADOSDroneAgent/releases/tag/v0.2.0",
     )
 
 
@@ -132,8 +130,7 @@ def test_post_check_up_to_date(agent_app, client):
 
 def test_post_rollback_success(agent_app, client):
     mock_updater = MagicMock()
-    mock_updater._rollback = MagicMock()
-    mock_updater._rollback.rollback.return_value = True
+    mock_updater.rollback = AsyncMock(return_value=True)
     agent_app.ota_updater = mock_updater
 
     resp = client.post("/api/ota/rollback")

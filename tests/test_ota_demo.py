@@ -24,7 +24,7 @@ def test_initial_state():
 def test_fake_manifest():
     assert FAKE_MANIFEST.version == "99.0.0"
     assert FAKE_MANIFEST.channel == "demo"
-    assert FAKE_MANIFEST.requires_reboot is False
+    assert FAKE_MANIFEST.release_url.startswith("https://")
 
 
 def test_get_status_initial():

@@ -91,6 +91,9 @@ class TestMediamtxManager:
     async def test_start_already_running(self):
         mgr = MediamtxManager()
         mgr._running = True
+        mock_proc = MagicMock()
+        mock_proc.returncode = None
+        mgr._process = mock_proc
         result = await mgr.start()
         assert result is True
 

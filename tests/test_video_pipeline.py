@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+import os
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -57,7 +58,7 @@ class TestVideoPipeline:
 
         with (
             patch("ados.services.video.pipeline.discover_cameras", return_value=[cam]),
-            patch("ados.services.video.pipeline.detect_available_encoder", return_value=None),
+            patch("ados.services.video.pipeline.detect_encoder_for_camera", return_value=None),
         ):
             result = await pipeline.start_stream()
             assert result is False
@@ -91,7 +92,14 @@ class TestVideoPipeline:
         pipeline = VideoPipeline(config)
         mock_proc = MagicMock()
         mock_proc.returncode = None
+        # Use the test process pid so os.kill(pid, 0) succeeds
+        mock_proc.pid = os.getpid()
         pipeline._encoder_process = mock_proc
+        # Pretend mediamtx is alive and within startup grace period
+        pipeline._mediamtx = MagicMock()
+        pipeline._mediamtx.is_running = MagicMock(return_value=True)
+        import time as _time
+        pipeline._started_at = _time.monotonic()
         assert await pipeline._check_health() is True
 
     @pytest.mark.asyncio

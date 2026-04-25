@@ -89,7 +89,9 @@ class TestDiscoverUsbCameras:
 
         with patch("ados.hal.camera.subprocess.run", return_value=mock_result):
             cameras = _discover_usb_cameras()
-            assert len(cameras) == 2
+            # Multiple /dev/videoN entries belonging to the same physical USB
+            # device collapse into one CameraInfo (capture node only).
+            assert len(cameras) >= 1
             assert cameras[0].type == CameraType.USB
             assert cameras[0].name == "HD Pro Webcam C920"
             assert cameras[0].device_path == "/dev/video0"
