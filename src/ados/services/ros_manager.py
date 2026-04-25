@@ -4,8 +4,8 @@ Manages the Docker container lifecycle for the opt-in ROS 2 Jazzy
 environment. Handles image pull/load, compose rendering, start/stop,
 health checks, and status queries.
 
-DEC-111: ROS is opt-in. This service only starts when ros.enabled=true
-in the agent config AND the board profile has ros.supported=true.
+ROS is opt-in. This service only starts when ros.enabled=true in the
+agent config AND the board profile has ros.supported=true.
 """
 
 from __future__ import annotations

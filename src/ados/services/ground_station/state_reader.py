@@ -13,8 +13,6 @@ Pattern mirrors the existing StateIPC consumers:
 We use the cloud-service style (event-driven `set_state_handler` plus a
 self-healing reconnect loop) because the bridge already runs an asyncio
 task supervisor and benefits from push updates rather than 10Hz polling.
-
-Phase 4 Wave 2 fix for Wave B blocker 1.
 """
 
 from __future__ import annotations

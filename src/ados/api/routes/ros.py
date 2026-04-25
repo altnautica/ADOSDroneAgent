@@ -1,10 +1,10 @@
 """ROS 2 environment management API routes.
 
-DEC-111: REST endpoints for initializing, monitoring, and controlling
-the opt-in ROS 2 Jazzy Docker environment.
+REST endpoints for initializing, monitoring, and controlling the
+opt-in ROS 2 Jazzy Docker environment.
 
-Phase 2 endpoints: /api/ros/status, /api/ros/init, /api/ros/nodes, /api/ros/topics
-Phase 4 endpoints (stubs): launch, stop, workspace, build, recording, tunnel
+Live endpoints: /api/ros/status, /api/ros/init, /api/ros/nodes, /api/ros/topics
+Stub endpoints: launch, stop, workspace, build, recording, tunnel
 """
 
 from __future__ import annotations
@@ -188,7 +188,7 @@ async def stop_ros() -> dict[str, str]:
     return {"status": "stopped"}
 
 
-# ── Phase 4: Workspace, Launch, Recording ────────────────────────────
+# ── Workspace, Launch, Recording ────────────────────────────────────
 
 @router.post("/ros/launch")
 async def launch_node(package: str = "", executable: str = "", name: str = "") -> dict:
@@ -290,18 +290,18 @@ async def list_recordings() -> list:
     return rec_mgr.list_recordings()
 
 
-# ── Phase 5 stubs: Tunnel ────────────────────────────────────────────
+# ── Tunnel stubs ────────────────────────────────────────────────────
 
 @router.post("/ros/tunnel/config")
 async def configure_tunnel() -> dict:
-    """Configure cloud tunnel for ROS access. Phase 5."""
-    raise HTTPException(status_code=501, detail="Not implemented yet (Phase 5)")
+    """Configure cloud tunnel for ROS access. Stub."""
+    raise HTTPException(status_code=501, detail="Not implemented yet")
 
 
 @router.post("/ros/tunnel/test")
 async def test_tunnel() -> dict:
-    """Test tunnel reachability. Phase 5."""
-    raise HTTPException(status_code=501, detail="Not implemented yet (Phase 5)")
+    """Test tunnel reachability. Stub."""
+    raise HTTPException(status_code=501, detail="Not implemented yet")
 
 
 # ── SSE helpers ──────────────────────────────────────────────────────

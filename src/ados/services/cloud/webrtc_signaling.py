@@ -1,8 +1,8 @@
 """WebRTC SDP signaling relay over MQTT.
 
-DEC-108 Phase B0: lets a browser at command.altnautica.com (or any HTTPS
-origin) establish a WebRTC peer connection to mediamtx running on this
-agent EVEN WHEN THE BROWSER IS ON A DIFFERENT NETWORK from the SBC.
+Lets a browser at command.altnautica.com (or any HTTPS origin)
+establish a WebRTC peer connection to mediamtx running on this agent
+EVEN WHEN THE BROWSER IS ON A DIFFERENT NETWORK from the SBC.
 
 The actual video bytes flow direct peer-to-peer via WebRTC after the
 SDP handshake. This module ONLY handles the signaling exchange (~5-10 KB

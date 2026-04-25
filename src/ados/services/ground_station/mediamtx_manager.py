@@ -1,4 +1,4 @@
-"""mediamtx lifecycle for the ground-station profile (DEC-112).
+"""mediamtx lifecycle for the ground-station profile.
 
 The air-side mediamtx (ados.services.video.mediamtx.MediamtxManager)
 ingests a local camera encoder and publishes WHEP. On the ground side
@@ -159,7 +159,7 @@ class MediamtxGsManager:
 
         Uses `-c copy` (no transcode) and the H.264 mp4-to-annexb bsf
         for consistent NAL delivery, matching the fix pattern from the
-        air-side video pipeline (Phase E bug-sprint, DEC-109).
+        air-side video pipeline.
         """
         binary = shutil.which("ffmpeg")
         if not binary:

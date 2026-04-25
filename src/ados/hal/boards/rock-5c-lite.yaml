@@ -22,9 +22,9 @@ vendor: "Radxa"
 soc: "RK3582"
 arch: "aarch64"
 model_patterns:
-  # DEC-106 Bug #7/#20: /proc/device-tree/model on Rock 5C Lite hardware
-  # reports "Radxa ROCK 5C " (no "Lite" suffix) — Radxa uses the same DT
-  # for both Rock 5C and Rock 5C Lite variants. Without the no-suffix
+  # /proc/device-tree/model on Rock 5C Lite hardware reports
+  # "Radxa ROCK 5C " (no "Lite" suffix). Radxa uses the same DT for
+  # both Rock 5C and Rock 5C Lite variants. Without the no-suffix
   # pattern, detect.py's substring match falls back to generic-aarch64.
   - "Radxa ROCK 5C Lite"
   - "Radxa Rock 5C Lite"
@@ -118,7 +118,7 @@ network:
   bluetooth: true        # BT 5.4
 
 video:
-  csi_ports: 1           # Only 1x MIPI CSI 31-pin Radxa-proprietary broken out (DEC-104)
+  csi_ports: 1           # Only 1x MIPI CSI 31-pin Radxa-proprietary broken out
   csi_connector: "31-pin 0.3mm Radxa FPC (Hirose FH35C-31S-0.3SHW(50)), 4-lane"
   max_encode_resolution: "3840x2160"
   max_encode_fps: 60
@@ -147,4 +147,4 @@ profiles:
   video_capable: true
   recommended_resolution: "1920x1080"
   memory_budget_mb: 4096    # Plenty of RAM headroom on 16GB
-  notes: "ADOS Dev Rig primary companion (DEC-103). Procured 2026-04-05 from Evelta India for 16894 INR. NPU intact at 6 TOPS INT4 (RK3588 model zoo compatible). GPU fused off but irrelevant for headless drone use (no GLES needed; video uses VPU + WFB-ng). Heatsink mandatory (throttles 80C). Same physical PCB as full Rock 5C (1x MIPI CSI broken out, dual MIPI CSI not feasible)."
+  notes: "ADOS Dev Rig primary companion. NPU intact at 6 TOPS INT4 (RK3588 model zoo compatible). GPU fused off but irrelevant for headless drone use (no GLES needed; video uses VPU + WFB-ng). Heatsink mandatory (throttles 80C). Same physical PCB as full Rock 5C (1x MIPI CSI broken out, dual MIPI CSI not feasible)."

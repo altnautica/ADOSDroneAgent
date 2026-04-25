@@ -1,4 +1,4 @@
-"""Ground-station profile services (DEC-112).
+"""Ground-station profile services.
 
 Mirror of the air-side video and wfb services, flipped to the receive
 side. These modules run when AgentConfig.profile == "ground_station"

@@ -66,11 +66,11 @@ async def main() -> None:
             fc.send_heartbeat()
             await asyncio.sleep(1.0)
 
-    # Periodically publish state to state IPC
-    # DEC-108 Phase E: also publish FC connection metadata + service uptime
-    # so the API service's /status endpoint can return real values instead
-    # of the StandaloneAgent shim's hardcoded `False` and `0.0`. Without
-    # this, `ados status` always shows "FC: False / Uptime: 0s" even when
+    # Periodically publish state to state IPC.
+    # Also publish FC connection metadata + service uptime so the API
+    # service's /status endpoint can return real values instead of the
+    # StandaloneAgent shim's hardcoded `False` and `0.0`. Without this,
+    # `ados status` always shows "FC: False / Uptime: 0s" even when
     # the FC is connected.
     import time as _time
     _service_start = _time.monotonic()

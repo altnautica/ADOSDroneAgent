@@ -1,17 +1,18 @@
-"""Ethernet (eth0) uplink manager for the ground-station profile (MSN-027).
+"""Ethernet (eth0) uplink manager for the ground-station profile.
 
-Phase 3 uplink matrix. Much simpler than the WiFi client: most of the
-work is passive link detection, because NetworkManager already brings
-eth0 up on cable-plug via its default wired profile. This module:
+Part of the uplink matrix. Much simpler than the WiFi client: most
+of the work is passive link detection, because NetworkManager already
+brings eth0 up on cable-plug via its default wired profile. This
+module:
 
 1. Polls `/sys/class/net/eth0/carrier` every 5 s.
 2. Emits EthernetEvent{kind, link_up, ip, timestamp_ms} on state change.
 3. Exposes status + enable/disable for the uplink router.
-4. Configure-static is a Phase 3 stub; DHCP is the default path.
+4. Configure-static is a stub; DHCP is the default path.
 
 Normally this manager runs embedded inside the uplink_router process.
 A standalone `main()` is provided for bench testing and for the case
-where Cellos Wave C decides to ship a dedicated systemd unit.
+where a dedicated systemd unit is preferred.
 """
 
 from __future__ import annotations
@@ -497,7 +498,7 @@ def get_ethernet_manager() -> EthernetManager:
 async def main() -> None:
     """Optional standalone entry. Normal deployment embeds this manager
     inside the uplink_router process; this entry is for bench testing or
-    if Cellos Wave C opts for a dedicated systemd unit."""
+    when a dedicated systemd unit is preferred."""
     from ados.core.config import load_config
     from ados.core.logging import configure_logging
     import structlog

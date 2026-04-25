@@ -23,12 +23,12 @@ _MACOS_POLL_INTERVAL = 5.0
 def _device_key(dev: UsbDevice) -> str:
     """Generate a stable unique key for a USB device.
 
-    DEC-106 Bug #22: `dev.device` is the USB bus device number, which
-    the kernel changes on every re-enumeration (e.g. unplug + replug
-    or a DFU→flight-mode transition on SpeedyBee boards). Including it
-    in the key caused spurious "add" events for the same physical
-    device on every re-enum. Use bus + name + vid/pid instead — stable
-    enough to identify the same physical device across re-enums.
+    `dev.device` is the USB bus device number, which the kernel changes
+    on every re-enumeration (e.g. unplug + replug or a DFU/flight-mode
+    transition on SpeedyBee boards). Including it in the key caused
+    spurious "add" events for the same physical device on every re-enum.
+    Use bus + name + vid/pid instead, which is stable enough to identify
+    the same physical device across re-enums.
     """
     return f"{dev.vid:04x}:{dev.pid:04x}:{dev.bus}:{dev.name}"
 

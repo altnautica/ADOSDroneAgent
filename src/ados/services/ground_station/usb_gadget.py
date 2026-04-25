@@ -1,4 +1,4 @@
-"""USB composite gadget lifecycle (DEC-112, spec 07-usb-tether-gadget.md).
+"""USB composite gadget lifecycle (spec 07-usb-tether-gadget.md).
 
 Builds a libcomposite CDC-NCM + RNDIS gadget on the Pi 4B USB-C OTG
 port. The host (Mac, Windows, Linux, Android 11+) picks whichever

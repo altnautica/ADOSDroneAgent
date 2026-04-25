@@ -1,6 +1,6 @@
 // ADOS Ground Station setup webapp.
 // Vanilla JS. No framework. No build step.
-// Wave D: live REST wiring to /api/v1/ground-station/*.
+// Live REST wiring to /api/v1/ground-station/*.
 
 var API_BASE = "/api/v1/ground-station";
 var REFRESH_MS = 5000;

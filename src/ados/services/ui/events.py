@@ -1,8 +1,8 @@
-"""Button event bus (MSN-025 Wave A).
+"""Button event bus.
 
 Defines the `ButtonEvent` dataclass and a fanout `ButtonEventBus` that
-lets multiple consumers (OLED service in Wave B, logging, tests) each
-receive every published event on their own queue.
+lets multiple consumers (OLED service, logging, tests) each receive
+every published event on their own queue.
 
 The bus is pure asyncio. It has no GPIO dependency, so tests and the
 OLED service can subscribe without hardware. The button service in
@@ -43,8 +43,8 @@ class ButtonEvent:
     button: int
     kind: Literal["short", "long"]
     timestamp_ms: int
-    # Phase 4 Wave 2: resolved action name from the live button mapping
-    # in `ground_station.ui.buttons.mapping`. None when the mapping has
+    # Resolved action name from the live button mapping in
+    # `ground_station.ui.buttons.mapping`. None when the mapping has
     # no entry for this `(button, kind)` pair, or when the publisher
     # has no mapping context (e.g. tests, simulation). Consumers may
     # treat None as "use default for this button".

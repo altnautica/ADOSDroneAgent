@@ -1,4 +1,4 @@
-"""WiFi AP lifecycle for the ground-station profile (MSN-025, DEC-112).
+"""WiFi AP lifecycle for the ground-station profile.
 
 The ground-station Pi 4B runs `hostapd` on the onboard wlan0 so phones,
 tablets, and laptops can join a stable SSID (`ADOS-GS-<short_id>`) and
@@ -13,8 +13,8 @@ Lifecycle:
 3. Render a matching `dnsmasq` conf at `/etc/ados/dnsmasq-gs.conf` with
    DHCP range 192.168.4.10-100, lease 12h.
 4. Assign 192.168.4.1/24 to wlan0.
-5. Start hostapd and dnsmasq via systemd units (unit files land in
-   Wave D, `data/systemd/ados-hostapd.service`).
+5. Start hostapd and dnsmasq via systemd units
+   (`data/systemd/ados-hostapd.service`).
 6. Scrape `iw dev wlan0 station dump` for connected client MACs.
 
 Exits non-zero if config write fails. systemd restart policy handles

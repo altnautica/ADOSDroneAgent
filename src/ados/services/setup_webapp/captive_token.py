@@ -1,10 +1,10 @@
-"""Captive-portal single-use token store (MSN-026 Phase 2).
+"""Captive-portal single-use token store.
 
 Lightweight in-memory token authority for the ground-station setup
 webapp. The webapp fetches a token from
 `GET /api/v1/ground-station/captive-token` on page load and attaches
-it via the `X-ADOS-Captive-Key` header on destructive operations
-(factory reset in Phase 2; more later).
+it via the `X-ADOS-Captive-Key` header on destructive operations such
+as factory reset.
 
 Scope: POC protection. The token store is intentionally in-memory,
 non-persistent, and resets on agent restart. The endpoint that mints

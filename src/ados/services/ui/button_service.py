@@ -1,12 +1,12 @@
-"""Front-panel button service (MSN-025 Wave A).
+"""Front-panel button service.
 
 Reads the four ground-station front-panel buttons on GPIO 5, 6, 13,
 and 19 (BCM). Publishes short and long press events on a shared
-`ButtonEventBus`. Wave B OLED service consumes the bus.
+`ButtonEventBus`. The OLED service consumes the bus.
 
 Hardware contract:
 - Pins 5, 6, 13, 19 per `hal/boards/rpi4b.yaml` `gpio_buttons`.
-  Hardcoded here as a Phase 1 fallback. Future phases load from HAL
+  Hardcoded here as a fallback. Future revisions load from the HAL
   profile.
 - Internal pull-up, active-low (button press pulls pin to ground).
 - 20 ms debounce via gpiozero `bounce_time=0.02` plus a recent-edge
@@ -40,8 +40,8 @@ from ados.services.ui.events import ButtonEvent, ButtonEventBus
 
 log = get_logger("ui.button_service")
 
-# Phase 1 fallback pin list. Wave D or later will pull this from the
-# HAL profile (`hal/boards/rpi4b.yaml` `gpio_buttons`).
+# Fallback pin list. Future revisions will pull this from the HAL
+# profile (`hal/boards/rpi4b.yaml` `gpio_buttons`).
 BUTTON_PINS: list[int] = [5, 6, 13, 19]
 
 # Press classification thresholds (seconds).
@@ -51,7 +51,7 @@ CANCEL_HOLD_SECONDS: float = 6.0
 # Debounce window passed to gpiozero.
 BOUNCE_TIME: float = 0.02
 
-# Phase 4 Wave 2: BCM pin -> friendly button id used by the REST schema.
+# BCM pin -> friendly button id used by the REST schema.
 # `B1`, `B2`, `B3`, `B4` correspond to the four front-panel buttons in
 # the order documented at `hal/boards/rpi4b.yaml`. The REST mapping
 # uses keys like `B1_short`, `B2_long`. Anything outside this table is
@@ -98,7 +98,7 @@ class ButtonService:
         self._loop = loop or asyncio.get_event_loop()
         self._press_ms: dict[int, int] = {}
         self._buttons: list = []  # holds gpiozero.Button refs
-        # Phase 4 Wave 2: live action mapping rebuilt on SIGHUP.
+        # Live action mapping rebuilt on SIGHUP.
         # The mapping is read from the gpiozero worker thread in
         # `_resolve_action` and written from the asyncio SIGHUP handler
         # in `reload_mapping`. A threading.Lock guards the swap so a

@@ -22,7 +22,7 @@ fi
 # Ensure log directory exists
 mkdir -p /var/log/ados/ros
 
-# Bind Zenoh to loopback only for security (DEC-111 spec 10)
+# Bind Zenoh to loopback only for security (security spec).
 export ZENOH_LISTEN="tcp/127.0.0.1:7447"
 
 echo "[ados-ros] ROS_DISTRO=${ROS_DISTRO} RMW=${RMW_IMPLEMENTATION} DOMAIN=${ROS_DOMAIN_ID}"

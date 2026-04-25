@@ -112,11 +112,12 @@ def _detect_hw_h264_encoder() -> str | None:
     Returns the encoder name (e.g., 'h264_v4l2m2m' for Pi, 'h264_nvenc' for Jetson)
     or None if only software encoding is available.
     """
-    # DEC-106 Bug #3: ffmpeg's h264_v4l2m2m plugin is listed in -encoders
-    # output on Rockchip SoCs because the plugin library is present, but it
-    # cannot find the rkmpp encoder device and hangs in an uninterruptible
-    # subprocess.wait() when probed. Force libx264 software encoder fallback
-    # on Rockchip by short-circuiting BEFORE the ffmpeg probe runs.
+    # ffmpeg's h264_v4l2m2m plugin is listed in -encoders output on
+    # Rockchip SoCs because the plugin library is present, but it
+    # cannot find the rkmpp encoder device and hangs in an
+    # uninterruptible subprocess.wait() when probed. Force libx264
+    # software encoder fallback on Rockchip by short-circuiting
+    # BEFORE the ffmpeg probe runs.
     #
     # TODO(follow-up PR): detect gstreamer mpph264enc via
     #   `gst-inspect-1.0 mpph264enc` and emit a GStreamer-based encoder
@@ -327,24 +328,21 @@ def _build_ffmpeg_command(
 
     # Encoder-specific tuning
     if ffmpeg_codec == "libx264":
-        # DEC-108 Phase A: force browser-compatible H.264 output.
+        # Force browser-compatible H.264 output.
         #
         # Without -pix_fmt yuv420p, libx264 inherits the chroma from the
-        # input. USB UVC cameras commonly send YUYV422, so libx264 produces
-        # `High 4:2:2 profile` H.264 — which browser WebRTC stacks REJECT
-        # outright. The GCS's MSE player (mse-player.ts) hardcodes the
-        # decoder string to `avc1.640029` = H.264 High profile, level 4.1,
-        # 4:2:0 chroma. This pins the encoder to that exact profile.
+        # input. USB UVC cameras commonly send YUYV422, so libx264
+        # produces `High 4:2:2 profile` H.264, which browser WebRTC
+        # stacks REJECT outright. The GCS's MSE player (mse-player.ts)
+        # hardcodes the decoder string to `avc1.640029` = H.264 High
+        # profile, level 4.1, 4:2:0 chroma. This pins the encoder to
+        # that exact profile.
         #
         # -g sets the keyframe (IDR) interval. Halved to fps/2 (~0.5s GOP)
         # so WebRTC viewers recover from packet loss in 0.5s instead of 1s.
         # Late joiners also see a keyframe within ~0.5s of subscribing.
         # Trade-off: ~15% higher bitrate from more frequent IDR frames,
         # acceptable on LAN and 4G.
-        #
-        # Validated on Rock 5C Lite bench 2026-04-09: HZ USB Camera
-        # produced High 4:2:2 with the unfixed encoder, browser couldn't
-        # decode. With this fix the stream is High 4:2:0 level 4.1.
         gop = max(config.fps // 2, 1)
         cmd.extend([
             "-pix_fmt", "yuv420p",
@@ -353,12 +351,13 @@ def _build_ffmpeg_command(
             "-preset", "ultrafast",
             "-tune", "zerolatency",
             "-g", str(gop),
-            # DEC-108 Phase E: convert MP4-style NAL framing to Annex-B for
-            # downstream RTSP/WebRTC compatibility. libx264 produces AVCC
-            # length-prefixed NALs by default; mediamtx (and browser WebRTC
-            # decoders that mediamtx feeds) expect Annex-B start codes.
-            # Without this we saw `inboundFramesInError` climbing on
-            # mediamtx — those were NAL parse failures at the RTSP boundary.
+            # Convert MP4-style NAL framing to Annex-B for downstream
+            # RTSP/WebRTC compatibility. libx264 produces AVCC
+            # length-prefixed NALs by default; mediamtx (and browser
+            # WebRTC decoders that mediamtx feeds) expect Annex-B start
+            # codes. Without this we saw `inboundFramesInError` climbing
+            # on mediamtx, which is NAL parse failures at the RTSP
+            # boundary.
             "-bsf:v", "h264_mp4toannexb",
         ])
     elif ffmpeg_codec == "h264_v4l2m2m":
@@ -368,9 +367,9 @@ def _build_ffmpeg_command(
 
     # Specify output format for network destinations
     if output.startswith("rtsp://"):
-        # DEC-108 Phase E: force RTSP output transport to TCP. Default is
-        # UDP which fragments large H.264 NALs across multiple datagrams;
-        # with `-tune zerolatency` libx264 keyframes spike to 8-12 Mbps and
+        # Force RTSP output transport to TCP. Default is UDP which
+        # fragments large H.264 NALs across multiple datagrams; with
+        # `-tune zerolatency` libx264 keyframes spike to 8-12 Mbps and
         # the fragmentation causes mediamtx reassembly errors. TCP RTSP
         # eliminates the fragmentation issue (cost: marginally higher
         # latency, irrelevant on localhost).

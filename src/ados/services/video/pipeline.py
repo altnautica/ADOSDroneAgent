@@ -59,7 +59,7 @@ class VideoPipeline:
         self._encoder_type: EncoderType | None = None
         self._cloud_push_process: asyncio.subprocess.Process | None = None
         self._cloud_stderr_task: asyncio.Task | None = None
-        # DEC-106 Bug #4: encoder stderr was DEVNULL, hiding all ffmpeg errors
+        # Encoder stderr is captured (not DEVNULL) so ffmpeg errors surface.
         self._encoder_stderr_task: asyncio.Task | None = None
         self._restart_count: int = 0
         self._cloud_restart_count: int = 0
@@ -150,10 +150,9 @@ class VideoPipeline:
             self._state = PipelineState.ERROR
             return False
 
-        # Start encoder subprocess
-        # DEC-106 Bug #4: stderr was DEVNULL, hiding all ffmpeg errors on
-        # crash. Pipe it and drain in the background so errors surface in
-        # the structured log.
+        # Start encoder subprocess. Pipe stderr and drain in the
+        # background so ffmpeg errors surface in the structured log
+        # rather than getting silently dropped on crash.
         try:
             self._encoder_process = await asyncio.create_subprocess_exec(
                 *cmd,
@@ -259,13 +258,13 @@ class VideoPipeline:
         log.info("stop_stream_begin")
         await self.stop_cloud_push()
 
-        # DEC-106 Bug #5: the encoder subprocess could already be dead by
-        # the time stop_stream() runs (e.g. ffmpeg crashed 5s after start
-        # due to h264_v4l2m2m device-not-found). Calling .terminate() /
+        # The encoder subprocess could already be dead by the time
+        # stop_stream() runs (e.g. ffmpeg crashed 5s after start due to
+        # h264_v4l2m2m device-not-found). Calling .terminate() /
         # .kill() / .wait() on a dead process raises ProcessLookupError
-        # from asyncio's base_subprocess._check_proc, which used to crash
-        # the video service. Guard every call with `returncode is None`
-        # and swallow ProcessLookupError.
+        # from asyncio's base_subprocess._check_proc, which used to
+        # crash the video service. Guard every call with
+        # `returncode is None` and swallow ProcessLookupError.
         if self._encoder_stderr_task is not None:
             self._encoder_stderr_task.cancel()
             self._encoder_stderr_task = None

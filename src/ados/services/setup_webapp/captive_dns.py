@@ -1,4 +1,4 @@
-"""Captive portal DNS and HTTP probe responder (MSN-025 Wave B, DEC-112).
+"""Captive portal DNS and HTTP probe responder.
 
 First-boot aid. When a phone joins the ground-node AP we need the
 phone's OS to open a browser window pointed at our setup webapp. OS
@@ -18,8 +18,8 @@ Apple `/hotspot-detect.html`, Windows `/connecttest.txt` all receive
 
 Lifecycle per rule 26 and spec `10-setup-webapp.md`:
 - If `/var/lib/ados/setup-complete` exists at start, the service
-  logs and exits 0. The Wave D systemd unit runs with `Restart=no`
-  so exit 0 is a clean "done" signal.
+  logs and exits 0. The systemd unit runs with `Restart=no` so exit
+  0 is a clean "done" signal.
 - Otherwise we bind UDP 53 for DNS and TCP 80 for HTTP on all
   interfaces (the ground-station AP is typically the only route
   with inbound traffic, but we do not restrict the bind).
