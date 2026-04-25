@@ -6,9 +6,6 @@ vendor: "Radxa"
 soc: "RK3566"
 arch: "aarch64"
 model_patterns:
-  - "Radxa CM3"
-  - "Radxa Compute Module 3"
-  - "ROCK 3 Compute Module"
   - "rk3566"
 default_tier: 3
 
