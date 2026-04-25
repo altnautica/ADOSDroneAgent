@@ -132,8 +132,8 @@ class Supervisor:
         self._start_time = time.monotonic()
         self._services: dict[str, ServiceSpec] = {}
         self._active_suite: str | None = None
-        self._cpu_history: deque[float] = deque(maxlen=60)
-        self._memory_history: deque[float] = deque(maxlen=60)
+        self._cpu_history: deque[float] = deque(maxlen=3600)
+        self._memory_history: deque[float] = deque(maxlen=3600)
 
         # hot-plug monitor state
         self._hotplug_monitor: HotplugMonitor | None = None
