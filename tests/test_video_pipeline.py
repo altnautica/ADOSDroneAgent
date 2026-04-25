@@ -70,26 +70,29 @@ class TestVideoPipeline:
         await pipeline.stop_stream()
         assert pipeline.state == PipelineState.STOPPED
 
-    def test_check_health_no_process(self):
+    @pytest.mark.asyncio
+    async def test_check_health_no_process(self):
         config = VideoConfig()
         pipeline = VideoPipeline(config)
-        assert pipeline._check_health() is False
+        assert await pipeline._check_health() is False
 
-    def test_check_health_process_exited(self):
+    @pytest.mark.asyncio
+    async def test_check_health_process_exited(self):
         config = VideoConfig()
         pipeline = VideoPipeline(config)
         mock_proc = MagicMock()
         mock_proc.returncode = 1
         pipeline._encoder_process = mock_proc
-        assert pipeline._check_health() is False
+        assert await pipeline._check_health() is False
 
-    def test_check_health_process_running(self):
+    @pytest.mark.asyncio
+    async def test_check_health_process_running(self):
         config = VideoConfig()
         pipeline = VideoPipeline(config)
         mock_proc = MagicMock()
         mock_proc.returncode = None
         pipeline._encoder_process = mock_proc
-        assert pipeline._check_health() is True
+        assert await pipeline._check_health() is True
 
     @pytest.mark.asyncio
     async def test_start_stream_already_running(self):
