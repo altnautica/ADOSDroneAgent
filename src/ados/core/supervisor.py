@@ -56,7 +56,7 @@ class ServiceSpec:
     # profile_gate == "ground_station".
     role_gate: str | None = None
     # Track failures for circuit breaker
-    failure_times: list[float] = field(default_factory=list)
+    failure_times: deque[float] = field(default_factory=lambda: deque(maxlen=100))
     # Runtime state
     pid: int | None = None
     cpu_percent: float = 0.0
@@ -216,7 +216,8 @@ class Supervisor:
                 log.warning("circuit_breaker_open", service=name)
                 return False
             spec.state = "stopped"
-            spec.failure_times = recent
+            spec.failure_times.clear()
+            spec.failure_times.extend(recent)
 
         spec.state = "starting"
         try:
@@ -285,7 +286,8 @@ class Supervisor:
         """Open circuit breaker if too many failures in window."""
         now = time.monotonic()
         recent = [t for t in spec.failure_times if now - t < FAILURE_WINDOW_SECS]
-        spec.failure_times = recent
+        spec.failure_times.clear()
+        spec.failure_times.extend(recent)
         if len(recent) >= MAX_FAILURES:
             spec.state = "circuit_open"
             log.error(
