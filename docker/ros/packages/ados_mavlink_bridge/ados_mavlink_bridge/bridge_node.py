@@ -1,15 +1,13 @@
 """ADOS MAVLink Bridge ROS 2 Node.
 
 Reads binary MAVLink v2 frames from /run/ados/mavlink.sock (the agent's
-IPC socket, DEC-078) and publishes mavros-compatible ROS 2 topics.
+IPC socket) and publishes mavros-compatible ROS 2 topics.
 
 Subscribes to velocity setpoints and encodes them back to MAVLink
 SET_POSITION_TARGET_LOCAL_NED for the flight controller.
 
 Socket protocol: 4-byte big-endian length prefix + MAVLink v2 frame.
 This matches the agent's MavlinkIPCServer in ados.core.ipc.
-
-DEC-111, spec 04-mavlink-bridge.md
 """
 
 from __future__ import annotations

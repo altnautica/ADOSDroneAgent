@@ -93,19 +93,17 @@ def _discover_csi_cameras() -> list[CameraInfo]:
 def _discover_usb_cameras() -> list[CameraInfo]:
     """Detect USB cameras via v4l2-ctl --list-devices.
 
-    DEC-106 Bug #16: v4l2-ctl --list-devices exits non-zero when any
-    /dev/videoN node fails to open (e.g. a stale node from a recently
-    unplugged device), but still prints valid cameras to stdout. The old
-    early-return on `returncode != 0` threw away good data. We now parse
-    stdout regardless of exit code.
+    v4l2-ctl exits non-zero when any /dev/videoN node fails to open
+    (a stale node from a recently unplugged device, for example), but
+    still prints valid cameras to stdout. Parse stdout regardless of
+    exit code so the good data is not thrown away.
 
-    DEC-106 Bug #21: UVC cameras create TWO /dev/videoN nodes per physical
-    camera (main capture stream + metadata). The old parser added ALL
-    listed nodes as separate CameraInfo entries, so a single USB camera
-    appeared as two CameraInfo objects — camera_mgr.auto_assign() then
-    picked one as primary and one as secondary, both pointing at the
-    same physical device. Fix: only add the FIRST /dev/videoN in each
-    device-name block (the subsequent nodes are metadata/alternates).
+    UVC cameras create two /dev/videoN nodes per physical camera (a main
+    capture stream and a metadata stream). Adding all of them as separate
+    CameraInfo entries causes auto_assign() to pick one as primary and
+    one as secondary while both point at the same physical device. Only
+    the first /dev/videoN in each device-name block becomes a CameraInfo;
+    later nodes are metadata or alternates.
     """
     cameras: list[CameraInfo] = []
     try:
@@ -115,11 +113,11 @@ def _discover_usb_cameras() -> list[CameraInfo]:
             text=True,
             timeout=10,
         )
-        # DEC-106 Bug #16: parse stdout regardless of returncode
+        # parse stdout regardless of returncode (see docstring)
 
         # Parse blocks: device name on one line, /dev/videoN on next indented lines
         current_name = ""
-        block_consumed = False  # DEC-106 Bug #21: one CameraInfo per device block
+        block_consumed = False  # one CameraInfo per device block
         for line in result.stdout.splitlines():
             stripped = line.strip()
             if not stripped:
