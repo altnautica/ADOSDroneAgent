@@ -16,6 +16,8 @@ import asyncio
 from pathlib import Path
 from typing import Any
 
+import structlog
+
 from fastapi import (
     APIRouter,
     HTTPException,
@@ -42,6 +44,8 @@ from ados.api.routes.ground_station._common import (
 )
 from ados.core.paths import MESH_GATEWAY_JSON
 
+
+log = structlog.get_logger("ground_station.ui")
 
 router = APIRouter(prefix="/v1/ground-station", tags=["ground-station"])
 
@@ -646,13 +650,42 @@ async def ws_pic_events(websocket: WebSocket) -> None:
         await websocket.close()
         return
 
-    queue: asyncio.Queue[Any] = asyncio.Queue()
+    # Bounded outbound queue. A slow WS client (e.g. on a degraded
+    # cellular link) used to grow the queue without limit because the
+    # default asyncio.Queue() has no maxsize, which made the QueueFull
+    # branch below dead code and gave the agent an OOM vector.
+    # Drop-oldest keeps the most recent state events; we also log when
+    # we shed events so an operator can see the backpressure.
+    _PIC_WS_QUEUE_MAX = 100
+    queue: asyncio.Queue[Any] = asyncio.Queue(maxsize=_PIC_WS_QUEUE_MAX)
+    dropped = 0
 
     def _on_event(payload: Any) -> None:
+        nonlocal dropped
         try:
             queue.put_nowait(payload)
         except asyncio.QueueFull:
-            pass
+            # Make room for the new event by discarding the oldest, so
+            # the client always sees the latest state during sustained
+            # backpressure rather than a stale snapshot.
+            try:
+                queue.get_nowait()
+                queue.task_done()
+            except asyncio.QueueEmpty:
+                pass
+            try:
+                queue.put_nowait(payload)
+            except asyncio.QueueFull:
+                pass
+            dropped += 1
+            # Log every 10 dropped events so an operator can correlate
+            # with WS disconnect / reconnect storms in journalctl.
+            if dropped % 10 == 1:
+                log.warning(
+                    "pic_ws_backpressure_drop",
+                    dropped_count=dropped,
+                    queue_max=_PIC_WS_QUEUE_MAX,
+                )
 
     unsubscribe: Any = None
     try:
