@@ -142,6 +142,12 @@ class Supervisor:
         self._hotplug_first_scan_done: bool = False
         self._hotplug_last_event_time: dict[str, float] = {}
         self._hotplug_debounce_secs: float = 3.0
+        # Per-service restart task tracker so concurrent hot-plug events
+        # for the same service coalesce. Latest event wins: any in-flight
+        # restart task for the same service is cancelled before the new
+        # one is scheduled. Prevents start/stop thrash when multiple
+        # devices hot-plug within the kernel-settle window.
+        self._hotplug_restart_tasks: dict[str, asyncio.Task] = {}
 
         # Build service map
         for svc_def in SERVICE_REGISTRY:
@@ -460,6 +466,17 @@ class Supervisor:
             except (asyncio.CancelledError, Exception):
                 pass
             self._hotplug_task = None
+
+        # Cancel any in-flight hot-plug-driven service restarts so they
+        # do not race the shutdown stop_service calls below.
+        pending_restarts = [
+            t for t in self._hotplug_restart_tasks.values() if not t.done()
+        ]
+        for t in pending_restarts:
+            t.cancel()
+        if pending_restarts:
+            await asyncio.gather(*pending_restarts, return_exceptions=True)
+        self._hotplug_restart_tasks.clear()
 
         # Tier 0: HTTP frontend stops first so it stops accepting requests
         # against hardware services that are about to die.
@@ -853,24 +870,50 @@ class Supervisor:
                 action=event,
                 device_name=device.name,
             )
-            # Fire-and-forget so the poll loop is never blocked
-            asyncio.create_task(
-                self._hotplug_restart_service(affected_service)
-            )
+            self._schedule_hotplug_restart(affected_service)
+
+    def _schedule_hotplug_restart(self, name: str) -> None:
+        """Cancel any pending restart for `name`, then schedule a new one.
+
+        Multiple hot-plug events for the same service within a single
+        500ms kernel-settle window collapse into one restart instead of
+        thrashing systemctl. Per-service tracking — different services
+        run their restarts concurrently.
+        """
+        existing = self._hotplug_restart_tasks.get(name)
+        if existing is not None and not existing.done():
+            existing.cancel()
+            log.debug("hotplug_restart_coalesced", service=name)
+        task = asyncio.create_task(
+            self._hotplug_restart_service(name),
+            name=f"hotplug-restart-{name}",
+        )
+        self._hotplug_restart_tasks[name] = task
 
     async def _hotplug_restart_service(self, name: str) -> None:
         """Restart a service after a hot-plug event."""
         try:
-            # Small delay so the kernel finishes device-node creation
+            # Small delay so the kernel finishes device-node creation.
+            # Held in a single sleep so a coalesce-cancel during the
+            # window short-circuits the entire restart cleanly.
             await asyncio.sleep(0.5)
             await self.restart_service(name)
             log.info("hotplug_service_restarted", service=name)
+        except asyncio.CancelledError:
+            # Coalesced by a newer event; nothing to roll back.
+            raise
         except Exception as exc:
             log.error(
                 "hotplug_service_restart_failed",
                 service=name,
                 error=str(exc),
             )
+        finally:
+            # Drop our entry only if it's still us. A successor may have
+            # replaced our slot already.
+            current = self._hotplug_restart_tasks.get(name)
+            if current is asyncio.current_task():
+                self._hotplug_restart_tasks.pop(name, None)
 
 
 # ── Entry Point ────────────────────────────────────────────────
