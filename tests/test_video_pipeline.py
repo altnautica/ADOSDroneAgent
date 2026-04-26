@@ -109,3 +109,100 @@ class TestVideoPipeline:
         pipeline._state = PipelineState.RUNNING
         result = await pipeline.start_stream()
         assert result is True
+
+
+def _pipeline_with_mediamtx_mocks():
+    """Pipeline with camera + mediamtx fully mocked. Used for partial-start tests."""
+    from ados.hal.camera import CameraInfo, CameraType
+
+    config = VideoConfig()
+    pipeline = VideoPipeline(config)
+    cam = CameraInfo(name="Test", type=CameraType.CSI, device_path="/dev/video0")
+    pipeline._discover_and_assign = MagicMock(
+        side_effect=lambda: pipeline._camera_mgr.set_cameras([cam])
+    )
+    pipeline._camera_mgr.set_cameras = MagicMock()
+    pipeline._camera_mgr.get_primary = MagicMock(return_value=cam)
+    # Replace the manager wholesale so we can mock the read-only property too
+    mtx = MagicMock()
+    mtx.generate_config = MagicMock()
+    mtx.start = AsyncMock(return_value=True)
+    mtx.stop = AsyncMock(return_value=None)
+    mtx.rtsp_port = 8554
+    pipeline._mediamtx = mtx
+    return pipeline
+
+
+class TestPipelinePartialStartCleanup:
+    """If post-mediamtx setup fails, mediamtx must be torn down so the next
+    start_stream() does not collide on the port with a zombie."""
+
+    @pytest.mark.asyncio
+    async def test_filenotfound_during_encoder_spawn_stops_mediamtx(self, monkeypatch):
+        from ados.services.video.encoder import EncoderType
+
+        pipeline = _pipeline_with_mediamtx_mocks()
+        monkeypatch.setattr(
+            "ados.services.video.pipeline.detect_encoder_for_camera",
+            lambda cam: EncoderType.FFMPEG,
+        )
+        monkeypatch.setattr(
+            "ados.services.video.pipeline.build_encoder_command",
+            lambda *a, **k: ["ffmpeg", "-i", "x", "y"],
+        )
+
+        async def boom(*args, **kwargs):
+            raise FileNotFoundError("ffmpeg")
+
+        import asyncio as _asyncio
+        monkeypatch.setattr(_asyncio, "create_subprocess_exec", boom)
+
+        ok = await pipeline.start_stream()
+        assert ok is False
+        assert pipeline.state == PipelineState.ERROR
+        pipeline._mediamtx.stop.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_oserror_during_encoder_spawn_stops_mediamtx(self, monkeypatch):
+        from ados.services.video.encoder import EncoderType
+
+        pipeline = _pipeline_with_mediamtx_mocks()
+        monkeypatch.setattr(
+            "ados.services.video.pipeline.detect_encoder_for_camera",
+            lambda cam: EncoderType.FFMPEG,
+        )
+        monkeypatch.setattr(
+            "ados.services.video.pipeline.build_encoder_command",
+            lambda *a, **k: ["ffmpeg", "-i", "x", "y"],
+        )
+
+        async def boom(*args, **kwargs):
+            raise OSError("permission denied")
+
+        import asyncio as _asyncio
+        monkeypatch.setattr(_asyncio, "create_subprocess_exec", boom)
+
+        ok = await pipeline.start_stream()
+        assert ok is False
+        assert pipeline.state == PipelineState.ERROR
+        pipeline._mediamtx.stop.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_mediamtx_failed_to_start_does_not_call_stop(self, monkeypatch):
+        from ados.services.video.encoder import EncoderType
+
+        pipeline = _pipeline_with_mediamtx_mocks()
+        pipeline._mediamtx.start = AsyncMock(return_value=False)
+        monkeypatch.setattr(
+            "ados.services.video.pipeline.detect_encoder_for_camera",
+            lambda cam: EncoderType.FFMPEG,
+        )
+        monkeypatch.setattr(
+            "ados.services.video.pipeline.build_encoder_command",
+            lambda *a, **k: ["ffmpeg", "-i", "x", "y"],
+        )
+
+        ok = await pipeline.start_stream()
+        assert ok is False
+        assert pipeline.state == PipelineState.ERROR
+        pipeline._mediamtx.stop.assert_not_awaited()
