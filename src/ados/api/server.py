@@ -30,6 +30,7 @@ from ados.api.routes import (
     status,
     suites,
     system,
+    version,
     video,
     wfb,
 )
@@ -85,6 +86,7 @@ def create_app(agent: AgentApp) -> FastAPI:
         return {"status": "ok", "version": __version__}
 
     # Mount routes
+    app.include_router(version.router, prefix="/api")
     app.include_router(status.router, prefix="/api")
     app.include_router(services.router, prefix="/api")
     app.include_router(params.router, prefix="/api")
