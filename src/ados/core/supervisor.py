@@ -277,6 +277,45 @@ class Supervisor:
             log.error("service_stop_error", service=name, error=str(exc))
             return False
 
+    @staticmethod
+    def _is_active(name: str) -> bool:
+        """systemctl is-active probe. Returns True only on 'active'."""
+        try:
+            result = subprocess.run(
+                ["systemctl", "is-active", name],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            return result.stdout.strip() == "active"
+        except Exception:
+            return False
+
+    async def _wait_for_stop(
+        self, names: list[str], timeout_secs: float = 5.0
+    ) -> None:
+        """Block until none of the named services report `is-active`.
+
+        Polls systemctl is-active every 100ms. Returns early when all are
+        down. Times out silently after `timeout_secs` so a stuck service
+        cannot block the rest of shutdown indefinitely.
+        """
+        if not names:
+            return
+        deadline = time.monotonic() + timeout_secs
+        while time.monotonic() < deadline:
+            still_up = [n for n in names if self._is_active(n)]
+            if not still_up:
+                return
+            await asyncio.sleep(0.1)
+        leftover = [n for n in names if self._is_active(n)]
+        if leftover:
+            log.warning(
+                "stop_wait_timeout",
+                services=leftover,
+                timeout_secs=timeout_secs,
+            )
+
     async def restart_service(self, name: str) -> bool:
         """Restart a systemd service."""
         await self.stop_service(name)
@@ -388,7 +427,26 @@ class Supervisor:
         await self._monitor_loop()
 
     async def stop(self) -> None:
-        """Graceful shutdown: stop all services in reverse order."""
+        """Graceful shutdown: stop services in dependency-aware order.
+
+        Order matters because the API service is alive during teardown
+        and answers HTTP requests against hardware services. If video
+        is killed before API stops accepting requests, in-flight
+        /api/video calls return 500.
+
+        Sequence:
+          1. Stop the HTTP frontend (ados-api) first so no new requests
+             land on services that are about to die. Drain in-flight.
+          2. Stop suite services (top of the dependency tree).
+          3. Stop hardware services.
+          4. Stop on-demand services.
+          5. Stop the rest of the core services (mavlink, cloud, health).
+
+        Between each tier we poll `systemctl is-active` for up to 5s to
+        confirm the previous tier is actually down before tearing the
+        next one. systemctl returns once it has SENT SIGTERM, not once
+        the unit has stopped.
+        """
         self._shutdown.set()
         log.info("supervisor_stopping")
 
@@ -403,11 +461,25 @@ class Supervisor:
                 pass
             self._hotplug_task = None
 
-        # Stop suite services first, then hardware, then core
+        # Tier 0: HTTP frontend stops first so it stops accepting requests
+        # against hardware services that are about to die.
+        frontend_units: list[str] = []
+        api_spec = self._services.get("ados-api")
+        if api_spec and api_spec.state == "running":
+            await self.stop_service("ados-api")
+            frontend_units.append("ados-api")
+        await self._wait_for_stop(frontend_units)
+
+        # Tier 1-4: top-down dependency order. ados-api already stopped.
         for category in ("suite", "hardware", "ondemand", "core"):
+            tier_units: list[str] = []
             for name, spec in self._services.items():
+                if name == "ados-api":
+                    continue
                 if spec.category == category and spec.state == "running":
                     await self.stop_service(name)
+                    tier_units.append(name)
+            await self._wait_for_stop(tier_units)
 
         log.info("supervisor_stopped")
 
