@@ -153,6 +153,10 @@ class VideoPipeline:
         # Start encoder subprocess. Pipe stderr and drain in the
         # background so ffmpeg errors surface in the structured log
         # rather than getting silently dropped on crash.
+        #
+        # If anything past mediamtx.start() raises, mediamtx must be torn
+        # down too. Otherwise repeated start_stream() retries pile up
+        # zombie mediamtx processes that collide on the same port.
         try:
             self._encoder_process = await asyncio.create_subprocess_exec(
                 *cmd,
@@ -172,8 +176,33 @@ class VideoPipeline:
             return True
         except FileNotFoundError:
             log.error("encoder_binary_not_found", encoder=self._encoder_type.value)
-            self._state = PipelineState.ERROR
+            await self._teardown_after_partial_start()
             return False
+        except Exception as exc:
+            log.error("encoder_start_failed", error=str(exc), exc_info=True)
+            await self._teardown_after_partial_start()
+            return False
+
+    async def _teardown_after_partial_start(self) -> None:
+        """Roll back partial start. Stops any process spawned after mediamtx.start()."""
+        # Encoder may have spawned but not been assigned cleanly; sweep it.
+        if self._encoder_process is not None and self._encoder_process.returncode is None:
+            try:
+                self._encoder_process.kill()
+                await asyncio.wait_for(self._encoder_process.wait(), timeout=2.0)
+            except (TimeoutError, ProcessLookupError, OSError):
+                pass
+        self._encoder_process = None
+        if self._encoder_stderr_task is not None:
+            self._encoder_stderr_task.cancel()
+            self._encoder_stderr_task = None
+        # Tear down mediamtx so the next start_stream() is not blocked by
+        # a zombie holding the port.
+        try:
+            await self._mediamtx.stop()
+        except Exception as exc:
+            log.warning("mediamtx_teardown_failed", error=str(exc))
+        self._state = PipelineState.ERROR
 
     @staticmethod
     async def _drain_stderr(proc: asyncio.subprocess.Process, label: str) -> None:
