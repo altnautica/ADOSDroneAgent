@@ -96,13 +96,21 @@ class DataCapTracker:
         return _UsageState(last_reset_month=time.strftime("%Y-%m"))
 
     def _save_state(self) -> None:
+        """Atomic write of the cumulative counter.
+
+        Writes to a temp file, fsyncs the file descriptor, then atomically
+        replaces the canonical path. The fsync defends against power loss
+        between write() and the kernel flushing dirty pages — without it
+        the file system can drop the bytes and the cap counter rolls back.
+        """
         try:
             self._state_path.parent.mkdir(parents=True, exist_ok=True)
             tmp = self._state_path.with_suffix(".json.tmp")
-            tmp.write_text(
-                json.dumps(self._state.to_json()),
-                encoding="utf-8",
-            )
+            payload = json.dumps(self._state.to_json()).encode("utf-8")
+            with open(tmp, "wb") as fh:
+                fh.write(payload)
+                fh.flush()
+                os.fsync(fh.fileno())
             os.replace(tmp, self._state_path)
         except OSError as exc:
             log.warning("uplink.datacap_save_failed", error=str(exc))
@@ -215,6 +223,10 @@ class DataCapTracker:
         self._task = asyncio.create_task(self._run())
 
     async def stop(self) -> None:
+        """Graceful stop. Flushes the latest counter to disk before
+        cancelling the poll loop so a clean shutdown does not lose the
+        bytes accumulated since the last 60-second poll. SIGKILL still
+        loses up to one poll window — that is inherent."""
         self._stop.set()
         if self._task is not None:
             self._task.cancel()
@@ -223,6 +235,10 @@ class DataCapTracker:
             except (asyncio.CancelledError, Exception):
                 pass
             self._task = None
+        try:
+            self._save_state()
+        except Exception as exc:
+            log.warning("uplink.datacap_stop_flush_failed", error=str(exc))
 
     async def _run(self) -> None:
         log.info(
