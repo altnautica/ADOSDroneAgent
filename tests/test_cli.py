@@ -56,13 +56,13 @@ def _mock_detect_board():
     )
 
 
-@patch("ados.cli.main.psutil.virtual_memory", return_value=_mock_virtual_memory())
-@patch("ados.cli.main.psutil.cpu_count", return_value=4)
-@patch("ados.cli.main.psutil.cpu_freq", return_value=_mock_cpu_freq())
-@patch("ados.cli.main.psutil.net_if_addrs", return_value=_mock_net_if_addrs())
-@patch("ados.cli.main.psutil.boot_time", return_value=0.0)
-@patch("ados.cli.main.shutil.disk_usage", side_effect=_mock_disk_usage)
-@patch("ados.cli.main.os.getloadavg", return_value=(1.0, 0.8, 0.5))
+@patch("ados.cli._sysinfo.psutil.virtual_memory", return_value=_mock_virtual_memory())
+@patch("ados.cli._sysinfo.psutil.cpu_count", return_value=4)
+@patch("ados.cli._sysinfo.psutil.cpu_freq", return_value=_mock_cpu_freq())
+@patch("ados.cli._sysinfo.psutil.net_if_addrs", return_value=_mock_net_if_addrs())
+@patch("ados.cli._sysinfo.psutil.boot_time", return_value=0.0)
+@patch("ados.cli._sysinfo.shutil.disk_usage", side_effect=_mock_disk_usage)
+@patch("ados.cli._sysinfo.os.getloadavg", return_value=(1.0, 0.8, 0.5))
 @patch("ados.hal.detect.detect_board", return_value=_mock_detect_board())
 def test_diag_contains_board_section(
     mock_board, mock_load, mock_disk, mock_boot, mock_net,
@@ -76,13 +76,13 @@ def test_diag_contains_board_section(
     assert "Tier:" in result.output
 
 
-@patch("ados.cli.main.psutil.virtual_memory", return_value=_mock_virtual_memory())
-@patch("ados.cli.main.psutil.cpu_count", return_value=4)
-@patch("ados.cli.main.psutil.cpu_freq", return_value=_mock_cpu_freq())
-@patch("ados.cli.main.psutil.net_if_addrs", return_value=_mock_net_if_addrs())
-@patch("ados.cli.main.psutil.boot_time", return_value=0.0)
-@patch("ados.cli.main.shutil.disk_usage", side_effect=_mock_disk_usage)
-@patch("ados.cli.main.os.getloadavg", return_value=(1.0, 0.8, 0.5))
+@patch("ados.cli._sysinfo.psutil.virtual_memory", return_value=_mock_virtual_memory())
+@patch("ados.cli._sysinfo.psutil.cpu_count", return_value=4)
+@patch("ados.cli._sysinfo.psutil.cpu_freq", return_value=_mock_cpu_freq())
+@patch("ados.cli._sysinfo.psutil.net_if_addrs", return_value=_mock_net_if_addrs())
+@patch("ados.cli._sysinfo.psutil.boot_time", return_value=0.0)
+@patch("ados.cli._sysinfo.shutil.disk_usage", side_effect=_mock_disk_usage)
+@patch("ados.cli._sysinfo.os.getloadavg", return_value=(1.0, 0.8, 0.5))
 @patch("ados.hal.detect.detect_board", return_value=_mock_detect_board())
 def test_diag_contains_system_section(
     mock_board, mock_load, mock_disk, mock_boot, mock_net,
@@ -97,13 +97,13 @@ def test_diag_contains_system_section(
     assert "Uptime:" in result.output
 
 
-@patch("ados.cli.main.psutil.virtual_memory", return_value=_mock_virtual_memory())
-@patch("ados.cli.main.psutil.cpu_count", return_value=4)
-@patch("ados.cli.main.psutil.cpu_freq", return_value=_mock_cpu_freq())
-@patch("ados.cli.main.psutil.net_if_addrs", return_value=_mock_net_if_addrs())
-@patch("ados.cli.main.psutil.boot_time", return_value=0.0)
-@patch("ados.cli.main.shutil.disk_usage", side_effect=_mock_disk_usage)
-@patch("ados.cli.main.os.getloadavg", return_value=(1.0, 0.8, 0.5))
+@patch("ados.cli._sysinfo.psutil.virtual_memory", return_value=_mock_virtual_memory())
+@patch("ados.cli._sysinfo.psutil.cpu_count", return_value=4)
+@patch("ados.cli._sysinfo.psutil.cpu_freq", return_value=_mock_cpu_freq())
+@patch("ados.cli._sysinfo.psutil.net_if_addrs", return_value=_mock_net_if_addrs())
+@patch("ados.cli._sysinfo.psutil.boot_time", return_value=0.0)
+@patch("ados.cli._sysinfo.shutil.disk_usage", side_effect=_mock_disk_usage)
+@patch("ados.cli._sysinfo.os.getloadavg", return_value=(1.0, 0.8, 0.5))
 @patch("ados.hal.detect.detect_board", return_value=_mock_detect_board())
 def test_diag_contains_network_section(
     mock_board, mock_load, mock_disk, mock_boot, mock_net,
@@ -117,13 +117,13 @@ def test_diag_contains_network_section(
     assert "IP:" in result.output
 
 
-@patch("ados.cli.main.psutil.virtual_memory", return_value=_mock_virtual_memory())
-@patch("ados.cli.main.psutil.cpu_count", return_value=4)
-@patch("ados.cli.main.psutil.cpu_freq", return_value=_mock_cpu_freq())
-@patch("ados.cli.main.psutil.net_if_addrs", return_value=_mock_net_if_addrs())
-@patch("ados.cli.main.psutil.boot_time", return_value=0.0)
-@patch("ados.cli.main.shutil.disk_usage", side_effect=_mock_disk_usage)
-@patch("ados.cli.main.os.getloadavg", return_value=(1.0, 0.8, 0.5))
+@patch("ados.cli._sysinfo.psutil.virtual_memory", return_value=_mock_virtual_memory())
+@patch("ados.cli._sysinfo.psutil.cpu_count", return_value=4)
+@patch("ados.cli._sysinfo.psutil.cpu_freq", return_value=_mock_cpu_freq())
+@patch("ados.cli._sysinfo.psutil.net_if_addrs", return_value=_mock_net_if_addrs())
+@patch("ados.cli._sysinfo.psutil.boot_time", return_value=0.0)
+@patch("ados.cli._sysinfo.shutil.disk_usage", side_effect=_mock_disk_usage)
+@patch("ados.cli._sysinfo.os.getloadavg", return_value=(1.0, 0.8, 0.5))
 @patch("ados.hal.detect.detect_board", return_value=_mock_detect_board())
 def test_diag_contains_memory_cpu_disk(
     mock_board, mock_load, mock_disk, mock_boot, mock_net,
@@ -140,13 +140,13 @@ def test_diag_contains_memory_cpu_disk(
     assert "Disk" in result.output
 
 
-@patch("ados.cli.main.psutil.virtual_memory", return_value=_mock_virtual_memory())
-@patch("ados.cli.main.psutil.cpu_count", return_value=4)
-@patch("ados.cli.main.psutil.cpu_freq", return_value=_mock_cpu_freq())
-@patch("ados.cli.main.psutil.net_if_addrs", return_value=_mock_net_if_addrs())
-@patch("ados.cli.main.psutil.boot_time", return_value=0.0)
-@patch("ados.cli.main.shutil.disk_usage", side_effect=_mock_disk_usage)
-@patch("ados.cli.main.os.getloadavg", return_value=(1.0, 0.8, 0.5))
+@patch("ados.cli._sysinfo.psutil.virtual_memory", return_value=_mock_virtual_memory())
+@patch("ados.cli._sysinfo.psutil.cpu_count", return_value=4)
+@patch("ados.cli._sysinfo.psutil.cpu_freq", return_value=_mock_cpu_freq())
+@patch("ados.cli._sysinfo.psutil.net_if_addrs", return_value=_mock_net_if_addrs())
+@patch("ados.cli._sysinfo.psutil.boot_time", return_value=0.0)
+@patch("ados.cli._sysinfo.shutil.disk_usage", side_effect=_mock_disk_usage)
+@patch("ados.cli._sysinfo.os.getloadavg", return_value=(1.0, 0.8, 0.5))
 @patch("ados.hal.detect.detect_board", return_value=_mock_detect_board())
 def test_diag_contains_agent_and_deps(
     mock_board, mock_load, mock_disk, mock_boot, mock_net,
@@ -162,13 +162,13 @@ def test_diag_contains_agent_and_deps(
     assert "psutil" in result.output
 
 
-@patch("ados.cli.main.psutil.virtual_memory", return_value=_mock_virtual_memory())
-@patch("ados.cli.main.psutil.cpu_count", return_value=4)
-@patch("ados.cli.main.psutil.cpu_freq", return_value=_mock_cpu_freq())
-@patch("ados.cli.main.psutil.net_if_addrs", return_value=_mock_net_if_addrs())
-@patch("ados.cli.main.psutil.boot_time", return_value=0.0)
-@patch("ados.cli.main.shutil.disk_usage", side_effect=_mock_disk_usage)
-@patch("ados.cli.main.os.getloadavg", return_value=(1.0, 0.8, 0.5))
+@patch("ados.cli._sysinfo.psutil.virtual_memory", return_value=_mock_virtual_memory())
+@patch("ados.cli._sysinfo.psutil.cpu_count", return_value=4)
+@patch("ados.cli._sysinfo.psutil.cpu_freq", return_value=_mock_cpu_freq())
+@patch("ados.cli._sysinfo.psutil.net_if_addrs", return_value=_mock_net_if_addrs())
+@patch("ados.cli._sysinfo.psutil.boot_time", return_value=0.0)
+@patch("ados.cli._sysinfo.shutil.disk_usage", side_effect=_mock_disk_usage)
+@patch("ados.cli._sysinfo.os.getloadavg", return_value=(1.0, 0.8, 0.5))
 @patch("ados.hal.detect.detect_board", return_value=_mock_detect_board())
 def test_diag_contains_services_and_fc(
     mock_board, mock_load, mock_disk, mock_boot, mock_net,
@@ -183,13 +183,13 @@ def test_diag_contains_services_and_fc(
     assert "Connected:" in result.output
 
 
-@patch("ados.cli.main.psutil.virtual_memory", return_value=_mock_virtual_memory())
-@patch("ados.cli.main.psutil.cpu_count", return_value=4)
-@patch("ados.cli.main.psutil.cpu_freq", return_value=_mock_cpu_freq())
-@patch("ados.cli.main.psutil.net_if_addrs", return_value=_mock_net_if_addrs())
-@patch("ados.cli.main.psutil.boot_time", return_value=0.0)
-@patch("ados.cli.main.shutil.disk_usage", side_effect=_mock_disk_usage)
-@patch("ados.cli.main.os.getloadavg", return_value=(1.0, 0.8, 0.5))
+@patch("ados.cli._sysinfo.psutil.virtual_memory", return_value=_mock_virtual_memory())
+@patch("ados.cli._sysinfo.psutil.cpu_count", return_value=4)
+@patch("ados.cli._sysinfo.psutil.cpu_freq", return_value=_mock_cpu_freq())
+@patch("ados.cli._sysinfo.psutil.net_if_addrs", return_value=_mock_net_if_addrs())
+@patch("ados.cli._sysinfo.psutil.boot_time", return_value=0.0)
+@patch("ados.cli._sysinfo.shutil.disk_usage", side_effect=_mock_disk_usage)
+@patch("ados.cli._sysinfo.os.getloadavg", return_value=(1.0, 0.8, 0.5))
 @patch("ados.hal.detect.detect_board", return_value=_mock_detect_board())
 def test_diag_contains_temperature(
     mock_board, mock_load, mock_disk, mock_boot, mock_net,
