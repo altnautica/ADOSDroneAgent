@@ -17,8 +17,19 @@ if TYPE_CHECKING:
 
 log = get_logger("mavlink.connection")
 
-# Re-request FC data streams every 30 seconds to survive FC reboots.
-_STREAM_REREQUEST_INTERVAL = 30.0
+# Stream re-request cadence. We adapt within this band based on observed
+# message flow: healthy links extend toward the upper bound to avoid
+# stomping on a working stream with COMMAND_LONG bursts, while a stalled
+# link refreshes faster to recover quickly from FC reboots.
+_STREAM_REREQUEST_MIN_INTERVAL = 10.0
+_STREAM_REREQUEST_DEFAULT_INTERVAL = 30.0
+_STREAM_REREQUEST_MAX_INTERVAL = 60.0
+# When the last message arrived more than this long ago we treat the link
+# as stalled and force the next re-request as soon as the interval allows.
+_STREAM_STALL_THRESHOLD = 5.0
+# Grace period after a re-request before we consider the link to have
+# accepted the new stream config.
+_STREAM_HEALTHY_THRESHOLD = 2.0
 
 SERIAL_PATTERNS = [
     "/dev/ttyACM*",
@@ -117,6 +128,8 @@ class FCConnection:
         self._lock = asyncio.Lock()
         self._subscribers: list[asyncio.Queue[bytes]] = []
         self._streams_requested_at: float = 0.0
+        self._last_msg_at: float = 0.0
+        self._stream_interval: float = _STREAM_REREQUEST_DEFAULT_INTERVAL
 
     @property
     def connected(self) -> bool:
@@ -231,6 +244,25 @@ class FCConnection:
             request_data_streams(self._conn)
             self._streams_requested_at = time.monotonic()
 
+    def _adapt_stream_interval(self, now: float) -> None:
+        """Adjust the re-request cadence based on observed message flow.
+
+        Healthy stream: extend toward the upper bound so periodic
+        re-requests don't compete with bursty COMMAND_LONG traffic.
+        Stalled stream: drop toward the lower bound so we recover quickly
+        from FC reboots and link drops.
+        """
+        if self._last_msg_at == 0.0:
+            return
+        idle = now - self._last_msg_at
+        if idle >= _STREAM_STALL_THRESHOLD:
+            self._stream_interval = _STREAM_REREQUEST_MIN_INTERVAL
+        elif idle <= _STREAM_HEALTHY_THRESHOLD:
+            self._stream_interval = min(
+                self._stream_interval + 5.0,
+                _STREAM_REREQUEST_MAX_INTERVAL,
+            )
+
     async def run(self) -> None:
         """Main connection loop with auto-reconnect."""
         backoff = 1.0
@@ -268,12 +300,18 @@ class FCConnection:
                 if msg is None:
                     continue
 
+                now = time.monotonic()
+                self._last_msg_at = now
+
                 # Update vehicle state
                 self.state.update_from_message(msg)
 
                 # Re-request streams periodically to survive FC reboots.
-                elapsed = time.monotonic() - self._streams_requested_at
-                if elapsed >= _STREAM_REREQUEST_INTERVAL:
+                # The interval adapts: healthy stream backs off, stalled
+                # stream refreshes faster.
+                self._adapt_stream_interval(now)
+                elapsed = now - self._streams_requested_at
+                if elapsed >= self._stream_interval:
                     self._request_streams()
 
                 # Get raw bytes and distribute to subscribers
