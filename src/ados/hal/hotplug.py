@@ -1,4 +1,4 @@
-"""USB hot-plug monitoring — polls for device add/remove events."""
+"""USB hot-plug monitoring. Polls for device add/remove events."""
 
 from __future__ import annotations
 
@@ -52,6 +52,11 @@ class HotplugMonitor:
     @property
     def running(self) -> bool:
         return self._running
+
+    @property
+    def poll_interval(self) -> float:
+        """Effective poll interval in seconds for the current platform."""
+        return self._interval
 
     @property
     def known_devices(self) -> dict[str, UsbDevice]:

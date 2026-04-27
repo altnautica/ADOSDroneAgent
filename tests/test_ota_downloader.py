@@ -61,6 +61,7 @@ async def test_download_success(tmp_path):
     mock_response = AsyncMock()
     mock_response.raise_for_status = lambda: None
     mock_response.aiter_bytes = mock_aiter_bytes
+    mock_response.headers = {}
 
     mock_client = AsyncMock()
     mock_client.__aenter__ = AsyncMock(return_value=mock_client)
@@ -90,6 +91,7 @@ async def test_download_creates_target_dir(tmp_path):
     mock_response = AsyncMock()
     mock_response.raise_for_status = lambda: None
     mock_response.aiter_bytes = mock_aiter_bytes
+    mock_response.headers = {}
 
     mock_client = AsyncMock()
     mock_client.__aenter__ = AsyncMock(return_value=mock_client)
