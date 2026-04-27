@@ -33,7 +33,7 @@ class HotplugMixin:
         if self._hotplug_monitor is None:
             return
 
-        interval = self._hotplug_monitor._interval  # noqa: SLF001
+        interval = self._hotplug_monitor.poll_interval
         asyncio.create_task(self._hotplug_enable_gate(interval * 1.5))
 
         try:

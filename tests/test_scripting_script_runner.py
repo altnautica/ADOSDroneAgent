@@ -37,11 +37,18 @@ class TestScriptRunner:
         with pytest.raises(RuntimeError, match="not found"):
             runner.start_script("/nonexistent/script.py")
 
-    def test_start_script_returns_id(self, runner: ScriptRunner):
+    def test_start_script_returns_id(self, runner: ScriptRunner, monkeypatch):
         # script_runner.start_script calls asyncio.get_event_loop() which
         # raises in a sync test after a prior async test has closed its loop.
-        # Provide a fresh loop for this test.
+        # Provide a fresh loop for this test. Stub _run_script to a no-op
+        # coroutine so the unstarted task does not warn about an unawaited
+        # coroutine when the loop is closed below.
         import asyncio as _asyncio
+
+        async def _noop(*_a, **_kw):
+            return None
+
+        monkeypatch.setattr(runner, "_run_script", _noop)
         loop = _asyncio.new_event_loop()
         _asyncio.set_event_loop(loop)
         try:
@@ -55,14 +62,30 @@ class TestScriptRunner:
             finally:
                 os.unlink(path)
         finally:
+            # Drain any tasks start_script enqueued via create_task before
+            # closing the loop, otherwise their unstarted coroutines warn
+            # at GC time.
+            pending = _asyncio.all_tasks(loop)
+            for task in pending:
+                task.cancel()
+            if pending:
+                loop.run_until_complete(
+                    _asyncio.gather(*pending, return_exceptions=True)
+                )
             loop.close()
             _asyncio.set_event_loop(None)
 
-    def test_max_concurrent_enforced(self, runner: ScriptRunner):
+    def test_max_concurrent_enforced(self, runner: ScriptRunner, monkeypatch):
         # script_runner.start_script calls asyncio.get_event_loop() which
         # raises in a sync test after a prior async test has closed its loop.
-        # Provide a fresh loop for this test.
+        # Provide a fresh loop for this test. Stub _run_script to a no-op
+        # coroutine so unstarted tasks do not warn on loop close.
         import asyncio as _asyncio
+
+        async def _noop(*_a, **_kw):
+            return None
+
+        monkeypatch.setattr(runner, "_run_script", _noop)
         loop = _asyncio.new_event_loop()
         _asyncio.set_event_loop(loop)
         try:
@@ -83,6 +106,16 @@ class TestScriptRunner:
                 for p in paths:
                     os.unlink(p)
         finally:
+            # Drain any tasks start_script enqueued via create_task before
+            # closing the loop, otherwise their unstarted coroutines warn
+            # at GC time.
+            pending = _asyncio.all_tasks(loop)
+            for task in pending:
+                task.cancel()
+            if pending:
+                loop.run_until_complete(
+                    _asyncio.gather(*pending, return_exceptions=True)
+                )
             loop.close()
             _asyncio.set_event_loop(None)
 
