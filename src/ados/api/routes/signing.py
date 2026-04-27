@@ -107,7 +107,8 @@ async def enroll_fc_route(req: EnrollRequest) -> dict[str, Any]:
         # Defensive zeroize even if enroll_fc's own finally already ran.
         for i in range(len(key_bytes)):
             key_bytes[i] = 0
-        raise HTTPException(status_code=500, detail=f"enrollment failed: {exc}") from exc
+        log.error("signing_enroll_failed", error=str(exc), error_type=type(exc).__name__)
+        raise HTTPException(status_code=500, detail="enrollment failed") from exc
 
     # Log with key_id fingerprint only; never the hex key.
     log.info(
@@ -130,7 +131,8 @@ async def disable_on_fc_route() -> dict[str, Any]:
     try:
         return disable_on_fc(fc)
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"disable failed: {exc}") from exc
+        log.error("signing_disable_failed", error=str(exc), error_type=type(exc).__name__)
+        raise HTTPException(status_code=500, detail="disable failed") from exc
 
 
 @router.get("/mavlink/signing/require")
@@ -150,7 +152,8 @@ async def require_put(req: RequireRequest) -> dict[str, Any]:
     try:
         return set_require(fc, req.require)
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"set require failed: {exc}") from exc
+        log.error("signing_set_require_failed", error=str(exc), error_type=type(exc).__name__)
+        raise HTTPException(status_code=500, detail="set require failed") from exc
 
 
 @router.get("/mavlink/signing/counters")
