@@ -1,19 +1,7 @@
-"""ADOS Process Supervisor — manages child systemd services.
+"""Supervisor lifecycle: service start/stop, suite activation, monitor loop.
 
-The supervisor is the master process manager for the companion board.
-It starts/stops/restarts services, monitors health, collects per-PID metrics,
-and drives suite-based lifecycle (activate suite → start required services).
-
-Architecture:
-  systemd → ados-supervisor.service (this)
-    ├── ados-mavlink.service (core, always running)
-    ├── ados-api.service (core, always running)
-    ├── ados-cloud.service (core if paired)
-    ├── ados-health.service (core, always running)
-    ├── ados-video.service (hardware-dependent)
-    ├── ados-wfb.service (hardware-dependent)
-    ├── ados-scripting.service (suite-dependent)
-    └── ...
+The Supervisor class is composed with HotplugMixin so the USB add/remove
+routing lives in its own file.
 """
 
 from __future__ import annotations
@@ -24,108 +12,27 @@ import signal
 import subprocess
 import time
 from collections import deque
-from dataclasses import dataclass, field
 from pathlib import Path
 
 import structlog
 
-# hot-plug handling for USB devices
 from ados.core.paths import SUITES_DIR
 from ados.hal.hotplug import HotplugMonitor
-from ados.hal.usb import UsbCategory, UsbDevice
+from ados.hal.usb import UsbDevice  # noqa: F401  (used via HotplugMixin)
+
+from .hotplug import HotplugMixin
+from .registry import (
+    FAILURE_WINDOW_SECS,
+    MAX_FAILURES,
+    SERVICE_REGISTRY,
+    ServiceSpec,
+)
 
 log = structlog.get_logger()
 
-# Circuit breaker: stop restarting after N failures in M seconds
-MAX_FAILURES = 5
-FAILURE_WINDOW_SECS = 60.0
 
-
-@dataclass
-class ServiceSpec:
-    """Defines a managed service."""
-
-    name: str
-    category: str  # "core", "hardware", "suite", "ondemand"
-    enabled: bool = True
-    # profile_gate scopes the service to one agent profile.
-    # None = runs on any profile. "drone" or "ground_station" gate it.
-    profile_gate: str | None = None
-    # role_gate scopes a ground-station service to one or more distributed
-    # receive roles. None = runs on any role. Examples: "relay", "receiver",
-    # or "relay|receiver" for units that cover both. Only consulted when
-    # profile_gate == "ground_station".
-    role_gate: str | None = None
-    # Track failures for circuit breaker
-    failure_times: deque[float] = field(default_factory=lambda: deque(maxlen=100))
-    # Runtime state
-    pid: int | None = None
-    cpu_percent: float = 0.0
-    memory_mb: float = 0.0
-    uptime_seconds: float = 0.0
-    state: str = "stopped"  # stopped, starting, running, failed, circuit_open
-
-
-# All services the supervisor knows about
-SERVICE_REGISTRY: list[dict] = [
-    # Core (always running)
-    {"name": "ados-mavlink", "category": "core"},
-    {"name": "ados-api", "category": "core"},
-    {"name": "ados-cloud", "category": "core"},
-    {"name": "ados-health", "category": "core"},
-    # Hardware-dependent (started on detection)
-    {"name": "ados-video", "category": "hardware"},
-    {"name": "ados-wfb", "category": "hardware"},
-    # Suite-dependent (started on suite activation)
-    {"name": "ados-scripting", "category": "suite"},
-    # On-demand
-    {"name": "ados-ota", "category": "ondemand"},
-    {"name": "ados-discovery", "category": "ondemand"},
-    # Peripheral Manager plugin registry. Cross-profile (no profile_gate);
-    # peripherals exist on both drone and ground-station profiles.
-    {"name": "ados-peripherals", "category": "hardware"},
-    # Ground-station only services.
-    # ados-wfb-rx is the single-node RX path. On relay/receiver nodes the
-    # wfb_rx process is driven by ados-wfb-relay or ados-wfb-receiver
-    # instead, so we gate this one to the direct role to keep both
-    # processes from grabbing the same monitor-mode adapter.
-    {"name": "ados-wfb-rx", "category": "hardware", "profile_gate": "ground_station", "role_gate": "direct"},
-    {"name": "ados-mediamtx-gs", "category": "hardware", "profile_gate": "ground_station"},
-    {"name": "ados-usb-gadget", "category": "hardware", "profile_gate": "ground_station"},
-    # Physical UI + AP + first-boot captive portal.
-    {"name": "ados-oled", "category": "hardware", "profile_gate": "ground_station"},
-    {"name": "ados-buttons", "category": "hardware", "profile_gate": "ground_station"},
-    {"name": "ados-hostapd", "category": "hardware", "profile_gate": "ground_station"},
-    {"name": "ados-dnsmasq-gs", "category": "hardware", "profile_gate": "ground_station"},
-    {"name": "ados-setup-captive", "category": "ondemand", "profile_gate": "ground_station"},
-    # Standalone flight stack.
-    {"name": "ados-kiosk", "category": "hardware", "profile_gate": "ground_station"},
-    {"name": "ados-input", "category": "hardware", "profile_gate": "ground_station"},
-    {"name": "ados-pic", "category": "hardware", "profile_gate": "ground_station"},
-    # Uplink matrix and cloud relay. No `network` or `cloud` category exists
-    # in the supervisor taxonomy (categories are core/hardware/suite/ondemand).
-    # Uplink managers are hardware-like because they bind to real interfaces.
-    # The cloud relay is treated as core because it always runs on the
-    # ground-station profile, independent of hardware detection.
-    {"name": "ados-uplink-router", "category": "hardware", "profile_gate": "ground_station"},
-    {"name": "ados-modem", "category": "hardware", "profile_gate": "ground_station"},
-    {"name": "ados-wifi-client", "category": "hardware", "profile_gate": "ground_station"},
-    {"name": "ados-ethernet", "category": "hardware", "profile_gate": "ground_station"},
-    {"name": "ados-cloud-relay", "category": "core", "profile_gate": "ground_station"},
-    # Distributed receive role-gated services. ados-batman brings up
-    # batman-adv for both relay and receiver. ados-wfb-relay forwards
-    # fragments and is active on relay nodes only. ados-wfb-receiver
-    # aggregates fragments and is active on receiver nodes only.
-    {"name": "ados-batman", "category": "hardware", "profile_gate": "ground_station", "role_gate": "relay|receiver"},
-    {"name": "ados-wfb-relay", "category": "hardware", "profile_gate": "ground_station", "role_gate": "relay"},
-    {"name": "ados-wfb-receiver", "category": "hardware", "profile_gate": "ground_station", "role_gate": "receiver"},
-    # ROS 2 environment (opt-in, Docker-managed).
-    {"name": "ados-ros", "category": "suite"},
-]
-
-
-class Supervisor:
-    """Process supervisor — manages child systemd services."""
+class Supervisor(HotplugMixin):
+    """Process supervisor. Manages child systemd services."""
 
     def __init__(self, config) -> None:
         self.config = config
@@ -767,153 +674,6 @@ class Supervisor:
             "services": self.get_services_status(),
             "activeSuite": self._active_suite,
         }
-
-
-    # ── Hot-plug handling ─────────────────────────────────────
-
-    async def _run_hotplug_monitor(self) -> None:
-        """Wrapper around HotplugMonitor.run() with first-scan gating.
-
-        The monitor's first scan fires "add" events for every USB device
-        that was already present at supervisor startup. We do not want to
-        cascade-restart services for those. The gate flips open after
-        ~1.5× the first poll interval, which guarantees the first scan
-        finished.
-        """
-        if self._hotplug_monitor is None:
-            return
-
-        interval = self._hotplug_monitor._interval  # noqa: SLF001
-        asyncio.create_task(self._hotplug_enable_gate(interval * 1.5))
-
-        try:
-            await self._hotplug_monitor.run(self._on_hotplug_event)
-        except asyncio.CancelledError:
-            log.info("hotplug_monitor_task_cancelled")
-            raise
-        except Exception as exc:
-            log.error("hotplug_monitor_crashed", error=str(exc))
-
-    async def _hotplug_enable_gate(self, delay: float) -> None:
-        """Open the hot-plug event gate after the first scan finishes."""
-        await asyncio.sleep(delay)
-        self._hotplug_first_scan_done = True
-        known = (
-            len(self._hotplug_monitor.known_devices)
-            if self._hotplug_monitor
-            else 0
-        )
-        log.info("hotplug_gate_open", known_devices=known)
-
-    def _on_hotplug_event(self, event: str, device: UsbDevice) -> None:
-        """Dispatch USB add/remove events to the right service handlers.
-
-        CRITICAL: structlog uses `event` as the reserved positional
-        argument for the log message. Using `event=...` as a kwarg in
-        log.info() raises `TypeError: got multiple values for argument
-        'event'`. All log calls here rename the payload kwarg to
-        `action=` to avoid the collision.
-        """
-        # First-scan gate
-        if not self._hotplug_first_scan_done:
-            log.debug(
-                "hotplug_event_pre_gate",
-                action=event,
-                device_name=device.name,
-                category=device.category.value,
-            )
-            return
-
-        # Debounce: coalesce rapid events on the same device (e.g.
-        # SpeedyBee DFU→flight transition fires remove+add within ~1s).
-        key = f"{device.vid:04x}:{device.pid:04x}"
-        now = time.monotonic()
-        last = self._hotplug_last_event_time.get(key, 0.0)
-        if now - last < self._hotplug_debounce_secs:
-            log.debug(
-                "hotplug_event_debounced",
-                action=event,
-                device_name=device.name,
-                category=device.category.value,
-                delta_secs=round(now - last, 2),
-            )
-            self._hotplug_last_event_time[key] = now
-            return
-        self._hotplug_last_event_time[key] = now
-
-        log.info(
-            "hotplug_event",
-            action=event,
-            device_name=device.name,
-            vid=f"{device.vid:04x}",
-            pid=f"{device.pid:04x}",
-            category=device.category.value,
-        )
-
-        # Route by device category → service restart
-        affected_service: str | None = None
-        if device.category == UsbCategory.CAMERA:
-            affected_service = "ados-video"
-        elif device.category == UsbCategory.FC:
-            affected_service = "ados-mavlink"
-        elif device.category == UsbCategory.RADIO:
-            # Only restart ados-wfb for the WFB-ng adapter
-            pid_hex = f"{device.pid:04x}".lower()
-            if pid_hex in ("8812", "881a", "881b", "881c", "b812"):  # RTL8812 family
-                affected_service = "ados-wfb"
-        # GPS / LORA / OTHER: log-only, no restart
-
-        if affected_service and affected_service in self._services:
-            log.info(
-                "hotplug_triggered_restart",
-                service=affected_service,
-                action=event,
-                device_name=device.name,
-            )
-            self._schedule_hotplug_restart(affected_service)
-
-    def _schedule_hotplug_restart(self, name: str) -> None:
-        """Cancel any pending restart for `name`, then schedule a new one.
-
-        Multiple hot-plug events for the same service within a single
-        500ms kernel-settle window collapse into one restart instead of
-        thrashing systemctl. Per-service tracking — different services
-        run their restarts concurrently.
-        """
-        existing = self._hotplug_restart_tasks.get(name)
-        if existing is not None and not existing.done():
-            existing.cancel()
-            log.debug("hotplug_restart_coalesced", service=name)
-        task = asyncio.create_task(
-            self._hotplug_restart_service(name),
-            name=f"hotplug-restart-{name}",
-        )
-        self._hotplug_restart_tasks[name] = task
-
-    async def _hotplug_restart_service(self, name: str) -> None:
-        """Restart a service after a hot-plug event."""
-        try:
-            # Small delay so the kernel finishes device-node creation.
-            # Held in a single sleep so a coalesce-cancel during the
-            # window short-circuits the entire restart cleanly.
-            await asyncio.sleep(0.5)
-            await self.restart_service(name)
-            log.info("hotplug_service_restarted", service=name)
-        except asyncio.CancelledError:
-            # Coalesced by a newer event; nothing to roll back.
-            raise
-        except Exception as exc:
-            log.error(
-                "hotplug_service_restart_failed",
-                service=name,
-                error=str(exc),
-            )
-        finally:
-            # Drop our entry only if it's still us. A successor may have
-            # replaced our slot already.
-            current = self._hotplug_restart_tasks.get(name)
-            if current is asyncio.current_task():
-                self._hotplug_restart_tasks.pop(name, None)
 
 
 # ── Entry Point ────────────────────────────────────────────────
