@@ -20,9 +20,10 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 try:
     import structlog
@@ -280,15 +281,29 @@ def detect_profile(config_override: str | None = None) -> dict[str, Any]:
             "detected_at": _now_iso(),
         }
 
-    probes = {
-        "oled_i2c": probe_i2c_oled(),
-        "buttons_gpio": probe_gpio_buttons(),
-        "rtl8812": probe_rtl8812(),
-        "mavlink_serial": probe_mavlink_serial(),
-        "gps_serial": probe_gps_serial(),
-        "fc_heartbeat": probe_fc_heartbeat(),
-        "uplink": probe_uplink_type(),
+    # Probes are independent. The slow ones shell out to i2cdetect or
+    # lsusb with a 3 s timeout; on a freshly hot-plugged USB bus those
+    # calls sit waiting. Running them in a thread pool drops worst-case
+    # detection time from roughly the sum of timeouts to roughly the
+    # slowest single probe.
+    probe_callables: dict[str, Callable[[], tuple[int, int, bool]]] = {
+        "oled_i2c": probe_i2c_oled,
+        "buttons_gpio": probe_gpio_buttons,
+        "rtl8812": probe_rtl8812,
+        "mavlink_serial": probe_mavlink_serial,
+        "gps_serial": probe_gps_serial,
+        "fc_heartbeat": probe_fc_heartbeat,
+        "uplink": probe_uplink_type,
     }
+
+    probes: dict[str, tuple[int, int, bool]] = {}
+    with ThreadPoolExecutor(max_workers=len(probe_callables)) as pool:
+        futures = {name: pool.submit(fn) for name, fn in probe_callables.items()}
+        for name, future in futures.items():
+            try:
+                probes[name] = future.result()
+            except Exception:
+                probes[name] = (0, 0, False)
 
     ground_score = sum(g for g, _a, _d in probes.values())
     air_score = sum(a for _g, a, _d in probes.values())
@@ -299,6 +314,20 @@ def detect_profile(config_override: str | None = None) -> dict[str, Any]:
         profile = "drone"
     else:
         profile = "unconfigured"
+
+    # Stable tiebreaker: when the live probes are ambiguous, fall back to
+    # the last persisted profile from /etc/ados/profile.conf. Avoids
+    # flipping the role across reboots on boards that wear both an FC
+    # and an OLED. The persisted value only wins when the current scores
+    # are inconclusive AND the prior profile is still consistent with
+    # the strongest current signal class (no air_score dominance picking
+    # ground, and vice versa).
+    if profile == "unconfigured":
+        prior = _read_last_known_profile()
+        if prior == "ground_station" and air_score < 3:
+            profile = "ground_station"
+        elif prior == "drone" and ground_score < 3:
+            profile = "drone"
 
     signals = {name: detected for name, (_g, _a, detected) in probes.items()}
 
@@ -334,6 +363,32 @@ def _now_iso() -> str:
 
 
 # ---- Persistence ----------------------------------------------------------
+
+
+def _read_last_known_profile(path: str = str(PROFILE_CONF)) -> str | None:
+    """Return the profile recorded in profile.conf, or None on any error.
+
+    Used as a tiebreaker when the live probes are ambiguous. Failures
+    (file missing, yaml unavailable, parse error) collapse to None so
+    the caller falls through to "unconfigured" and the human picks via
+    OLED or the setup webapp.
+    """
+    target = Path(path)
+    if not target.is_file():
+        return None
+    try:
+        import yaml
+    except ImportError:
+        return None
+    try:
+        with open(target) as f:
+            data = yaml.safe_load(f) or {}
+    except (OSError, yaml.YAMLError):
+        return None
+    value = data.get("profile") if isinstance(data, dict) else None
+    if value in ("drone", "ground_station"):
+        return value
+    return None
 
 
 def write_profile_conf(
