@@ -42,12 +42,13 @@ class VideoPipeline:
     the camera manager, encoder, mediamtx, and recorder.
     """
 
-    # Grace period after pipeline start before health checks run.
-    # ffmpeg needs ~1-2s to open the camera, encode the first frame, and
-    # connect to mediamtx RTSP. Without this grace period, the very first
-    # health check fires <0.5s after start, finds mediamtx path not ready
-    # (ffmpeg hasn't published yet), and kills a perfectly healthy pipeline.
-    _STARTUP_GRACE_SECS: float = 8.0
+    # Grace period after pipeline start before health checks declare the
+    # pipeline dead. We exit grace as soon as mediamtx reports the path
+    # has an active publisher (the "first packet" event), so fast boards
+    # transition to live health checks in 1-2s while slow boards (Pi Zero,
+    # cold camera open) get the full 30s window before being killed.
+    # The previous fixed 8s wall-clock killed healthy slow boards.
+    _STARTUP_GRACE_MAX_SECS: float = 30.0
 
     def __init__(self, config: VideoConfig) -> None:
         self._config = config
@@ -66,6 +67,7 @@ class VideoPipeline:
         self._max_restart_delay: float = 300.0  # 5 minutes
         self._base_restart_delay: float = 5.0
         self._started_at: float = 0.0  # monotonic time of last start_stream()
+        self._first_packet_seen: bool = False  # set True once mediamtx reports a publisher
 
     @property
     def state(self) -> PipelineState:
@@ -168,6 +170,7 @@ class VideoPipeline:
             )
             self._state = PipelineState.RUNNING
             self._started_at = time.monotonic()
+            self._first_packet_seen = False
             log.info(
                 "pipeline_started",
                 encoder=self._encoder_type.value,
@@ -364,21 +367,29 @@ class VideoPipeline:
         if not self._mediamtx.is_running():
             log.warning("mediamtx_died_during_stream")
             return False
-        # Grace period: ffmpeg needs ~1-2s to open the camera, encode the
-        # first frame, and connect to mediamtx RTSP. Without this, the
-        # very first health check fires <0.5s after start, finds
-        # mediamtx_path_not_ready (ffmpeg hasn't published yet), and kills
-        # a perfectly healthy pipeline. Confirmed from journalctl: pipeline
-        # starts at T+0s, health check kills it at T+0.45s.
         elapsed = time.monotonic() - self._started_at
-        if elapsed < self._STARTUP_GRACE_SECS:
-            return True
-        # Verify mediamtx is actually receiving data from the encoder.
-        # ffmpeg's RTSP TCP connection can silently die (e.g., during system
-        # load spikes from service restarts). ffmpeg stays alive (process
-        # returncode is None) but writes to a dead socket. mediamtx shows
-        # the path as ready=false with no source. Detect this by probing
-        # the mediamtx REST API.
+        # Grace logic: poll mediamtx during the grace window. The moment it
+        # reports a publisher, latch _first_packet_seen and switch to live
+        # health checks. On slow boards the camera open + first encode can
+        # take 5-15 seconds; we allow up to _STARTUP_GRACE_MAX_SECS before
+        # giving up. On fast boards we exit grace in 1-2 seconds.
+        if not self._first_packet_seen:
+            if await self._check_mediamtx_path_ready():
+                self._first_packet_seen = True
+                log.info("pipeline_first_packet", elapsed=round(elapsed, 1))
+                return True
+            if elapsed < self._STARTUP_GRACE_MAX_SECS:
+                return True
+            log.warning(
+                "pipeline_grace_expired",
+                msg="no mediamtx publisher after grace window",
+                elapsed=round(elapsed, 1),
+            )
+            return False
+        # Live health check: verify mediamtx is still receiving data from
+        # the encoder. ffmpeg's RTSP TCP connection can silently die during
+        # system load spikes; the process stays alive but writes to a dead
+        # socket. mediamtx then reports ready=false.
         if not await self._check_mediamtx_path_ready():
             log.warning("mediamtx_path_not_ready", msg="encoder RTSP connection likely dead")
             return False
