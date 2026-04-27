@@ -5,8 +5,10 @@ modules. The barrel keeps `from ados.core.supervisor import Supervisor`
 working for callers that already import it that way.
 
 Modules:
-  registry.py: ServiceSpec, SERVICE_REGISTRY, circuit-breaker constants
-  hotplug.py:  HotplugMixin (USB add/remove routing)
+  registry.py:  ServiceSpec, SERVICE_REGISTRY, circuit-breaker constants
+  hotplug.py:   HotplugMixin (USB add/remove routing)
+  monitor.py:   MonitorMixin (periodic health check + metrics + watchdog)
+  heartbeat.py: HeartbeatMixin (per-service status + heartbeat payload)
   lifecycle.py: Supervisor class, run_supervisor, main entry point
 """
 
