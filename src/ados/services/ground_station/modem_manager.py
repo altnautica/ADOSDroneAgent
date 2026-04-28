@@ -33,7 +33,6 @@ import json
 import os
 import re
 import signal
-import subprocess
 import time
 from pathlib import Path
 from typing import Any, Optional
@@ -41,6 +40,7 @@ from typing import Any, Optional
 import structlog
 
 from ados.core.paths import GS_MODEM_JSON
+from ados.core.subprocess import run_cmd
 from ados.hal.modem import detect_modem, get_modem_status
 
 log = structlog.get_logger(__name__)
@@ -466,29 +466,19 @@ class GroundStationModemManager:
     async def _read_imei_via_dbus(self) -> Optional[str]:
         # Lightweight path: parse mmcli -m N for 'equipment identifier'.
         try:
-            proc = await asyncio.create_subprocess_exec(
-                "mmcli", "-L",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.DEVNULL,
-            )
-            stdout, _ = await proc.communicate()
-            match = re.search(r"/Modem/(\d+)", stdout.decode(errors="replace"))
+            result = await run_cmd(["mmcli", "-L"], timeout=5.0)
+            match = re.search(r"/Modem/(\d+)", result.stdout)
             if not match:
                 return None
             idx = match.group(1)
-            proc = await asyncio.create_subprocess_exec(
-                "mmcli", "-m", idx,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.DEVNULL,
-            )
-            stdout, _ = await proc.communicate()
-            for line in stdout.decode(errors="replace").splitlines():
+            result = await run_cmd(["mmcli", "-m", idx], timeout=5.0)
+            for line in result.stdout.splitlines():
                 low = line.lower()
                 if "equipment identifier" in low or "imei" in low:
                     digits = re.findall(r"\d{14,17}", line)
                     if digits:
                         return digits[0]
-        except (OSError, FileNotFoundError):
+        except (OSError, FileNotFoundError, asyncio.TimeoutError):
             return None
         return None
 
@@ -542,14 +532,12 @@ class GroundStationModemManager:
     async def _bring_down_link(self) -> bool:
         iface = self._current_iface()
         try:
-            proc = await asyncio.create_subprocess_exec(
-                "ip", "link", "set", iface, "down",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
+            result = await run_cmd(
+                ["ip", "link", "set", iface, "down"],
+                timeout=5.0,
             )
-            await proc.communicate()
-            return proc.returncode == 0
-        except OSError:
+            return result.ok
+        except (OSError, asyncio.TimeoutError):
             return False
 
     async def _status_at(self) -> dict:
@@ -593,17 +581,15 @@ class GroundStationModemManager:
 
     async def _read_iface_ip(self, iface: str) -> Optional[str]:
         try:
-            proc = await asyncio.create_subprocess_exec(
-                "ip", "-4", "addr", "show", iface,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.DEVNULL,
+            result = await run_cmd(
+                ["ip", "-4", "addr", "show", iface],
+                timeout=3.0,
             )
-            stdout, _ = await proc.communicate()
-            for line in stdout.decode(errors="replace").splitlines():
+            for line in result.stdout.splitlines():
                 line = line.strip()
                 if line.startswith("inet "):
                     return line.split()[1].split("/")[0]
-        except OSError:
+        except (OSError, asyncio.TimeoutError):
             return None
         return None
 
@@ -627,35 +613,20 @@ class GroundStationModemManager:
     async def _auto_detect_apn(self) -> Optional[str]:
         """Read IMSI via mmcli and pick an APN from the static map."""
         try:
-            proc = await asyncio.create_subprocess_exec(
-                "mmcli", "-L",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.DEVNULL,
-            )
-            stdout, _ = await proc.communicate()
-            match = re.search(r"/Modem/(\d+)", stdout.decode(errors="replace"))
+            result = await run_cmd(["mmcli", "-L"], timeout=5.0)
+            match = re.search(r"/Modem/(\d+)", result.stdout)
             if not match:
                 return None
             idx = match.group(1)
             # mmcli -m N --sim-list then mmcli -i SIM gives IMSI.
-            proc = await asyncio.create_subprocess_exec(
-                "mmcli", "-m", idx,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.DEVNULL,
-            )
-            stdout, _ = await proc.communicate()
-            text = stdout.decode(errors="replace")
+            result = await run_cmd(["mmcli", "-m", idx], timeout=5.0)
+            text = result.stdout
             sim_match = re.search(r"/SIM/(\d+)", text)
             if not sim_match:
                 return None
             sim_idx = sim_match.group(1)
-            proc = await asyncio.create_subprocess_exec(
-                "mmcli", "-i", sim_idx,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.DEVNULL,
-            )
-            stdout, _ = await proc.communicate()
-            text = stdout.decode(errors="replace")
+            result = await run_cmd(["mmcli", "-i", sim_idx], timeout=5.0)
+            text = result.stdout
             imsi_match = re.search(r"imsi\s*:\s*(\d+)", text, flags=re.IGNORECASE)
             if not imsi_match:
                 return None
@@ -669,7 +640,7 @@ class GroundStationModemManager:
                     )
                     return apn
             log.info("modem.apn_no_match", imsi_prefix=imsi[:6])
-        except (OSError, FileNotFoundError):
+        except (OSError, FileNotFoundError, asyncio.TimeoutError):
             return None
         return None
 

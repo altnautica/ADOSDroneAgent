@@ -33,7 +33,6 @@ import json
 import os
 import re
 import signal
-import subprocess
 import sys
 import time
 from dataclasses import asdict, dataclass
@@ -41,6 +40,7 @@ from pathlib import Path
 from typing import AsyncIterator, Literal
 
 from ados.core.logging import get_logger
+from ados.core.subprocess import CmdTimeout, run_cmd_sync
 from ados.core.paths import GS_WIFI_CLIENT_JSON
 
 log = get_logger("ground_station.wifi_client")
@@ -123,27 +123,20 @@ def _now_ms() -> int:
 
 
 async def _run(cmd: list[str], timeout: float = 15.0) -> tuple[int, str, str]:
-    """Run a command async. Returns (rc, stdout, stderr)."""
+    """Run a command async. Returns (rc, stdout, stderr).
+
+    Tuple-shaped wrapper over :func:`run_cmd` for legacy call sites.
+    """
+    from ados.core.subprocess import run_cmd
+
     try:
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        try:
-            out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-        except asyncio.TimeoutError:
-            proc.kill()
-            await proc.wait()
-            return 124, "", "timeout"
-        return (
-            proc.returncode or 0,
-            out.decode(errors="replace"),
-            err.decode(errors="replace"),
-        )
+        result = await run_cmd(cmd, timeout=timeout)
+    except asyncio.TimeoutError:
+        return 124, "", "timeout"
     except (OSError, asyncio.CancelledError) as exc:
         log.warning("run_failed", cmd=cmd, error=str(exc))
         return 1, "", str(exc)
+    return result.returncode, result.stdout, result.stderr
 
 
 def _parse_nmcli_terse(text: str, fields: int) -> list[list[str]]:
@@ -214,14 +207,12 @@ class WifiClientManager:
 
     def _is_hostapd_active(self) -> bool:
         try:
-            r = subprocess.run(
+            r = run_cmd_sync(
                 ["systemctl", "is-active", _HOSTAPD_UNIT],
-                check=False,
-                capture_output=True,
-                timeout=5,
+                timeout=5.0,
             )
-            return r.stdout.decode(errors="replace").strip() == "active"
-        except (OSError, subprocess.SubprocessError):
+            return r.stdout.strip() == "active"
+        except (OSError, CmdTimeout):
             return False
 
     def _write_ap_flag(self, enabled: bool) -> None:

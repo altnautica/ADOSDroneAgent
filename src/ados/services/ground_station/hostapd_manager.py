@@ -28,7 +28,6 @@ import os
 import re
 import secrets
 import signal
-import subprocess
 import sys
 from pathlib import Path
 
@@ -36,6 +35,7 @@ import structlog
 
 from ados.core.config import load_config
 from ados.core.logging import configure_logging, get_logger
+from ados.core.subprocess import CmdTimeout, run_cmd_sync
 from ados.core.paths import (
     AP_PASSPHRASE_PATH,
     DNSMASQ_CONF_PATH,
@@ -252,43 +252,37 @@ class HostapdManager:
         no-op that returns non-zero, which we swallow.
         """
         try:
-            subprocess.run(
+            run_cmd_sync(
                 ["ip", "addr", "add", _AP_CIDR, "dev", self._interface],
-                check=False,
-                capture_output=True,
-                timeout=5,
+                timeout=5.0,
             )
-            subprocess.run(
+            run_cmd_sync(
                 ["ip", "link", "set", self._interface, "up"],
-                check=False,
-                capture_output=True,
-                timeout=5,
+                timeout=5.0,
             )
             return True
-        except (OSError, subprocess.SubprocessError) as exc:
+        except (OSError, CmdTimeout) as exc:
             log.warning("ap_ip_assign_failed", error=str(exc))
             return False
 
     def _systemctl(self, action: str, unit: str) -> bool:
         """Thin wrapper around `systemctl <action> <unit>`."""
         try:
-            result = subprocess.run(
+            result = run_cmd_sync(
                 ["systemctl", action, unit],
-                check=False,
-                capture_output=True,
-                timeout=10,
+                timeout=10.0,
             )
-            if result.returncode != 0:
+            if not result.ok:
                 log.warning(
                     "systemctl_nonzero",
                     action=action,
                     unit=unit,
                     rc=result.returncode,
-                    stderr=result.stderr.decode(errors="replace").strip(),
+                    stderr=result.stderr.strip(),
                 )
                 return False
             return True
-        except (OSError, subprocess.SubprocessError) as exc:
+        except (OSError, CmdTimeout) as exc:
             log.warning(
                 "systemctl_failed", action=action, unit=unit, error=str(exc)
             )
@@ -326,33 +320,29 @@ class HostapdManager:
 
     def _is_unit_active(self, unit: str) -> bool:
         try:
-            result = subprocess.run(
+            result = run_cmd_sync(
                 ["systemctl", "is-active", unit],
-                check=False,
-                capture_output=True,
-                timeout=5,
+                timeout=5.0,
             )
-            return result.stdout.decode(errors="replace").strip() == "active"
-        except (OSError, subprocess.SubprocessError):
+            return result.stdout.strip() == "active"
+        except (OSError, CmdTimeout):
             return False
 
     def _connected_clients(self) -> list[str]:
         """Scrape `iw dev wlan0 station dump` for associated MAC addresses."""
         try:
-            result = subprocess.run(
+            result = run_cmd_sync(
                 ["iw", "dev", self._interface, "station", "dump"],
-                check=False,
-                capture_output=True,
-                timeout=5,
+                timeout=5.0,
             )
-        except (OSError, subprocess.SubprocessError) as exc:
+        except (OSError, CmdTimeout) as exc:
             log.debug("iw_station_dump_failed", error=str(exc))
             return []
 
-        if result.returncode != 0:
+        if not result.ok:
             return []
 
-        text = result.stdout.decode(errors="replace")
+        text = result.stdout
         macs: list[str] = []
         for line in text.splitlines():
             line = line.strip()
