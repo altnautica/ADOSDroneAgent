@@ -11,7 +11,8 @@ from .adapters import _EthernetAdapter, _ModemAdapter, _WifiClientAdapter
 from .data_cap import DataCapTracker, _UsageState
 from .events import DataCapState, UplinkEvent, UplinkEventBus, UplinkEventKind
 from .protocols import UplinkManagerProto, _StubManager
-from .router import UplinkRouter, get_uplink_router, main
+from .router import UplinkRouter
+from .service import get_uplink_router, main
 
 __all__ = [
     "UplinkEvent",

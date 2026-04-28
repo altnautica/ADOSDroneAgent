@@ -1,4 +1,4 @@
-"""Uplink router with priority chain, hysteresis, health probing, and service entry.
+"""Uplink router orchestrator.
 
 The ground station can reach the cloud over several uplinks: wired
 Ethernet (`eth0`), WiFi client (`wlan0_client` when the onboard radio
@@ -6,28 +6,26 @@ is in STA mode, which is mutually exclusive with AP mode), cellular
 (`wwan0` on the SIM7600G-H), and USB tether (`usb0` when a laptop
 shares its connection over USB gadget).
 
-This module picks exactly one of those as the default route based on a
-configured priority list, and fails over automatically when the active
-uplink stops reaching `convex.altnautica.com`.
+This orchestrator picks exactly one of those as the default route based
+on a configured priority list, and fails over automatically when the
+active uplink stops reaching `convex.altnautica.com`.
 
-Three concerns, one asyncio loop:
+Three concerns wired into one asyncio loop:
 
 1. `UplinkRouter`. Priority chain plus hysteresis plus routing table.
-2. The health checker. HEAD-equivalent TCP connect to the cloud relay,
-   bound to the current uplink's interface so the probe actually tests
-   the path.
-3. `DataCapTracker` (lives in `data_cap.py`). Reads modem byte counters,
-   persists cumulative usage, emits threshold events at 80 / 95 / 100
-   percent.
+2. The health checker. TCP connect to the cloud relay, bound to the
+   current uplink's interface. Implementation lives in `health.py`.
+3. `DataCapTracker`. Reads modem byte counters, persists cumulative
+   usage, emits threshold events. Lives in `data_cap.py`.
+
+Failover policy (priority load/save, hysteresis thresholds, route
+replace, target selection) lives in `failover.py`. The systemd service
+entry point and data-cap throttle consumer live in `service.py`.
 """
 
 from __future__ import annotations
 
 import asyncio
-import json
-import os
-import signal
-import socket
 import subprocess
 import time
 from pathlib import Path
@@ -37,46 +35,15 @@ import structlog
 
 from ados.core.paths import GS_UPLINK_JSON
 
+from . import failover as _failover
+from . import health as _health
 from .data_cap import DataCapTracker
 from .events import UplinkEvent, UplinkEventBus
 from .protocols import _StubManager
 
-__all__ = [
-    "UplinkRouter",
-    "get_uplink_router",
-    "main",
-]
+__all__ = ["UplinkRouter"]
 
 log = structlog.get_logger(__name__)
-
-_PRIORITY_CONFIG_PATH = GS_UPLINK_JSON
-
-# Default priority chain. `wlan0_ap` is the LAN-side SSID served to
-# phones and laptops, not an uplink, so it is absent here.
-_DEFAULT_PRIORITY: list[str] = ["eth0", "wlan0_client", "wwan0", "usb0"]
-
-# Per-uplink route metric. Lower number wins in the kernel routing
-# table, so we keep the gap large to survive manual `ip route` probes.
-_PRIORITY_METRIC = {
-    "eth0": 100,
-    "wlan0_client": 200,
-    "wwan0": 300,
-    "usb0": 400,
-}
-
-# Hysteresis knobs. Three consecutive fails flip us down to the next
-# viable uplink. Three consecutive successes on a higher-priority
-# uplink flip us back up. A 30 second cooldown between switches
-# prevents thrash when two uplinks are both flaky.
-_FAIL_DOWN_THRESHOLD = 3
-_SUCCESS_UP_THRESHOLD = 3
-_SWITCH_COOLDOWN_SECONDS = 30.0
-
-_HEALTH_INTERVAL_SECONDS = 15.0
-_HEALTH_TIMEOUT_SECONDS = 5.0
-_HEALTH_HOST = "convex.altnautica.com"
-_HEALTH_PORT = 443
-_HEALTH_PATH = "/"
 
 
 class UplinkRouter:
@@ -89,7 +56,7 @@ class UplinkRouter:
         ethernet_manager: Optional[Any] = None,
         usb_tether_check: Optional[Any] = None,
         priority: Optional[list[str]] = None,
-        priority_config_path: Path = _PRIORITY_CONFIG_PATH,
+        priority_config_path: Path = GS_UPLINK_JSON,
     ) -> None:
         self._modem = modem_manager
         self._wifi = wifi_client_manager or _StubManager("wlan0_client")
@@ -97,7 +64,9 @@ class UplinkRouter:
         self._usb_check = usb_tether_check
 
         self._priority_config_path = priority_config_path
-        self._priority = priority or self._load_priority()
+        self._priority = priority or _failover.load_priority(
+            self._priority_config_path
+        )
 
         self.active_uplink: Optional[str] = None
         self.internet_reachable: bool = False
@@ -160,41 +129,15 @@ class UplinkRouter:
             )
 
     # ------------------------------------------------------------------
-    # Priority list persistence
+    # Priority list
     # ------------------------------------------------------------------
-    def _load_priority(self) -> list[str]:
-        try:
-            if self._priority_config_path.exists():
-                raw = json.loads(
-                    self._priority_config_path.read_text(encoding="utf-8")
-                )
-                order = raw.get("priority")
-                if isinstance(order, list) and all(isinstance(x, str) for x in order):
-                    if order:
-                        return order
-        except (OSError, ValueError) as exc:
-            log.warning("uplink.priority_load_failed", error=str(exc))
-        return list(_DEFAULT_PRIORITY)
-
-    def _save_priority(self) -> None:
-        try:
-            self._priority_config_path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = self._priority_config_path.with_suffix(".json.tmp")
-            tmp.write_text(
-                json.dumps({"priority": self._priority}), encoding="utf-8"
-            )
-            os.replace(tmp, self._priority_config_path)
-        except OSError as exc:
-            log.warning("uplink.priority_save_failed", error=str(exc))
-
     def get_priority(self) -> list[str]:
         return list(self._priority)
 
     def set_priority(self, priority_list: list[str]) -> None:
-        if not priority_list or not all(isinstance(x, str) for x in priority_list):
-            raise ValueError("priority must be a non-empty list of strings")
+        _failover.validate_priority(priority_list)
         self._priority = list(priority_list)
-        self._save_priority()
+        _failover.save_priority(self._priority_config_path, self._priority)
         log.info("uplink.priority_updated", priority=self._priority)
 
     # ------------------------------------------------------------------
@@ -254,8 +197,6 @@ class UplinkRouter:
 
     async def _uplink_gateway(self, name: str) -> Optional[str]:
         if name == "usb0":
-            # USB gadget gateway is the laptop side. Read from the
-            # routing table rather than hardcoding.
             return self._read_iface_gateway("usb0")
         mgr = await self._manager_for(name)
         if mgr is None:
@@ -296,119 +237,41 @@ class UplinkRouter:
         return viable
 
     # ------------------------------------------------------------------
-    # Routing table
+    # Routing table + health probe shims
     # ------------------------------------------------------------------
     def _apply_default_route(self, iface: str, gateway: Optional[str]) -> bool:
-        metric = _PRIORITY_METRIC.get(iface, 500)
-        # Clear our own metric slot first so `replace` is idempotent.
-        cmd: list[str]
-        if gateway:
-            cmd = [
-                "ip", "route", "replace", "default",
-                "via", gateway, "dev", iface,
-                "metric", str(metric),
-            ]
-        else:
-            cmd = [
-                "ip", "route", "replace", "default",
-                "dev", iface, "metric", str(metric),
-            ]
-        try:
-            result = subprocess.run(
-                cmd, check=False, capture_output=True, timeout=5
-            )
-            if result.returncode != 0:
-                log.warning(
-                    "uplink.route_replace_failed",
-                    cmd=" ".join(cmd),
-                    rc=result.returncode,
-                    stderr=result.stderr.decode(errors="replace").strip(),
-                )
-                return False
-            log.info(
-                "uplink.route_applied",
-                iface=iface,
-                gateway=gateway,
-                metric=metric,
-            )
-            return True
-        except (OSError, subprocess.SubprocessError) as exc:
-            log.warning("uplink.route_apply_exc", error=str(exc))
-            return False
+        return _failover.apply_default_route(iface, gateway)
 
-    # ------------------------------------------------------------------
-    # Health probe
-    # ------------------------------------------------------------------
     async def _probe_host(self, iface: Optional[str]) -> bool:
-        """TCP connect to the cloud relay, optionally bound to an iface.
-
-        We do not attempt a real TLS handshake from stdlib to keep the
-        dep footprint minimal. A successful TCP connect to port 443 is
-        a strong proxy for reachability of the Cloudflare-fronted
-        Convex endpoint. On failure we log and return False.
-        """
-        loop = asyncio.get_running_loop()
-        try:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.setblocking(False)
-            if iface is not None:
-                try:
-                    sock.setsockopt(
-                        socket.SOL_SOCKET,
-                        socket.SO_BINDTODEVICE,
-                        iface.encode("ascii"),
-                    )
-                except (PermissionError, OSError) as exc:
-                    # SO_BINDTODEVICE needs CAP_NET_RAW. If unavailable
-                    # we fall back to a plain connect on the current
-                    # default route, which still validates reachability.
-                    log.debug(
-                        "uplink.bind_iface_failed",
-                        iface=iface,
-                        error=str(exc),
-                    )
-            try:
-                addr_info = await loop.getaddrinfo(
-                    _HEALTH_HOST, _HEALTH_PORT, type=socket.SOCK_STREAM
-                )
-            except OSError as exc:
-                log.debug("uplink.dns_failed", error=str(exc))
-                sock.close()
-                return False
-            if not addr_info:
-                sock.close()
-                return False
-            family, socktype, proto, _, sockaddr = addr_info[0]
-            if family != socket.AF_INET:
-                # Rebuild with matching family.
-                sock.close()
-                sock = socket.socket(family, socktype, proto)
-                sock.setblocking(False)
-            try:
-                await asyncio.wait_for(
-                    loop.sock_connect(sock, sockaddr),
-                    timeout=_HEALTH_TIMEOUT_SECONDS,
-                )
-                return True
-            except (asyncio.TimeoutError, OSError) as exc:
-                log.debug(
-                    "uplink.connect_failed", iface=iface, error=str(exc)
-                )
-                return False
-            finally:
-                try:
-                    sock.close()
-                except OSError:
-                    pass
-        except Exception as exc:
-            log.debug("uplink.probe_exc", error=str(exc))
-            return False
+        return await _health.probe_host(iface)
 
     # ------------------------------------------------------------------
     # Control loop
     # ------------------------------------------------------------------
     def _now_ms(self) -> int:
         return int(time.time() * 1000)
+
+    def _data_cap_state(self) -> Optional[str]:
+        if self.data_cap is None:
+            return None
+        return self.data_cap.get_usage()["state"]
+
+    async def _publish_health_change(
+        self,
+        active: Optional[str],
+        available: list[str],
+        reachable: bool,
+    ) -> None:
+        await self.bus.publish(
+            UplinkEvent(
+                kind="health_changed",
+                active_uplink=active,
+                available=available,
+                internet_reachable=reachable,
+                data_cap_state=self._data_cap_state(),
+                timestamp_ms=self._now_ms(),
+            )
+        )
 
     async def _switch_to(
         self, uplink: Optional[str], available: list[str]
@@ -436,11 +299,7 @@ class UplinkRouter:
                 active_uplink=uplink,
                 available=available,
                 internet_reachable=self.internet_reachable,
-                data_cap_state=(
-                    self.data_cap.get_usage()["state"]
-                    if self.data_cap is not None
-                    else None
-                ),
+                data_cap_state=self._data_cap_state(),
                 timestamp_ms=self._now_ms(),
             )
         )
@@ -455,20 +314,7 @@ class UplinkRouter:
                     await self._switch_to(None, [])
                 if self.internet_reachable:
                     self.internet_reachable = False
-                    await self.bus.publish(
-                        UplinkEvent(
-                            kind="health_changed",
-                            active_uplink=None,
-                            available=[],
-                            internet_reachable=False,
-                            data_cap_state=(
-                                self.data_cap.get_usage()["state"]
-                                if self.data_cap is not None
-                                else None
-                            ),
-                            timestamp_ms=self._now_ms(),
-                        )
-                    )
+                    await self._publish_health_change(None, [], False)
                 return
 
             # First-time pick. Use highest-priority viable uplink.
@@ -481,114 +327,82 @@ class UplinkRouter:
 
             cooldown_ok = (
                 time.monotonic() - self._last_switch_at
-            ) >= _SWITCH_COOLDOWN_SECONDS
+            ) >= _failover.SWITCH_COOLDOWN_SECONDS
 
             if ok:
-                self._fail_streak = 0
-                if not self.internet_reachable:
-                    self.internet_reachable = True
-                    log.info(
-                        "uplink.health_recovered", uplink=self.active_uplink
-                    )
-                    await self.bus.publish(
-                        UplinkEvent(
-                            kind="health_changed",
-                            active_uplink=self.active_uplink,
-                            available=available,
-                            internet_reachable=True,
-                            data_cap_state=(
-                                self.data_cap.get_usage()["state"]
-                                if self.data_cap is not None
-                                else None
-                            ),
-                            timestamp_ms=self._now_ms(),
-                        )
-                    )
-                # Check whether a higher-priority uplink came back.
-                if cooldown_ok and self.active_uplink is not None:
-                    current_idx = (
-                        self._priority.index(self.active_uplink)
-                        if self.active_uplink in self._priority
-                        else len(self._priority)
-                    )
-                    higher = [
-                        u for u in available
-                        if u in self._priority
-                        and self._priority.index(u) < current_idx
-                    ]
-                    if higher:
-                        self._success_streak += 1
-                        if self._success_streak >= _SUCCESS_UP_THRESHOLD:
-                            # Probe the higher-priority uplink before
-                            # switching up so we do not drop off a
-                            # working link for a dead one.
-                            candidate = higher[0]
-                            cand_iface = (
-                                await self._uplink_iface(candidate)
-                                or candidate
-                            )
-                            if await self._probe_host(cand_iface):
-                                await self._switch_to(candidate, available)
-                    else:
-                        self._success_streak = 0
+                await self._handle_probe_success(available, cooldown_ok)
                 return
 
-            # Fail path.
-            self._success_streak = 0
-            self._fail_streak += 1
-            if self._fail_streak < _FAIL_DOWN_THRESHOLD:
-                return
-            if not cooldown_ok:
-                return
+            await self._handle_probe_failure(available, cooldown_ok)
 
-            # Pick next viable uplink below the current one.
-            next_uplink: Optional[str] = None
-            if self.active_uplink in self._priority:
-                current_idx = self._priority.index(self.active_uplink)
-                for candidate in self._priority[current_idx + 1:]:
-                    if candidate in available:
-                        next_uplink = candidate
-                        break
-            # If none below, try anything available except current.
-            if next_uplink is None:
-                alternatives = [u for u in available if u != self.active_uplink]
-                if alternatives:
-                    next_uplink = alternatives[0]
-
-            if next_uplink is None:
-                # Only the current (failing) uplink is available.
-                if self.internet_reachable:
-                    self.internet_reachable = False
-                    await self.bus.publish(
-                        UplinkEvent(
-                            kind="health_changed",
-                            active_uplink=self.active_uplink,
-                            available=available,
-                            internet_reachable=False,
-                            data_cap_state=(
-                                self.data_cap.get_usage()["state"]
-                                if self.data_cap is not None
-                                else None
-                            ),
-                            timestamp_ms=self._now_ms(),
-                        )
-                    )
-                return
-
-            log.warning(
-                "uplink.failover",
-                from_uplink=self.active_uplink,
-                to_uplink=next_uplink,
-                fail_streak=self._fail_streak,
+    async def _handle_probe_success(
+        self, available: list[str], cooldown_ok: bool
+    ) -> None:
+        self._fail_streak = 0
+        if not self.internet_reachable:
+            self.internet_reachable = True
+            log.info("uplink.health_recovered", uplink=self.active_uplink)
+            await self._publish_health_change(
+                self.active_uplink, available, True
             )
-            self.internet_reachable = False
-            await self._switch_to(next_uplink, available)
+
+        if not (cooldown_ok and self.active_uplink is not None):
+            return
+
+        higher = _failover.select_higher_priority(
+            self._priority, available, self.active_uplink
+        )
+        if not higher:
+            self._success_streak = 0
+            return
+
+        self._success_streak += 1
+        if self._success_streak < _failover.SUCCESS_UP_THRESHOLD:
+            return
+
+        # Probe the higher-priority uplink before switching up so we do
+        # not drop off a working link for a dead one.
+        candidate = higher[0]
+        cand_iface = await self._uplink_iface(candidate) or candidate
+        if await self._probe_host(cand_iface):
+            await self._switch_to(candidate, available)
+
+    async def _handle_probe_failure(
+        self, available: list[str], cooldown_ok: bool
+    ) -> None:
+        self._success_streak = 0
+        self._fail_streak += 1
+        if self._fail_streak < _failover.FAIL_DOWN_THRESHOLD:
+            return
+        if not cooldown_ok:
+            return
+
+        next_uplink = _failover.select_failover_target(
+            self._priority, available, self.active_uplink
+        )
+        if next_uplink is None:
+            # Only the current (failing) uplink is available.
+            if self.internet_reachable:
+                self.internet_reachable = False
+                await self._publish_health_change(
+                    self.active_uplink, available, False
+                )
+            return
+
+        log.warning(
+            "uplink.failover",
+            from_uplink=self.active_uplink,
+            to_uplink=next_uplink,
+            fail_streak=self._fail_streak,
+        )
+        self.internet_reachable = False
+        await self._switch_to(next_uplink, available)
 
     async def _run_health_loop(self) -> None:
         log.info(
             "uplink.health_loop_start",
             priority=self._priority,
-            host=_HEALTH_HOST,
+            host=_health.HEALTH_HOST,
         )
         while not self._stop.is_set():
             try:
@@ -597,7 +411,8 @@ class UplinkRouter:
                 log.warning("uplink.tick_error", error=str(exc))
             try:
                 await asyncio.wait_for(
-                    self._stop.wait(), timeout=_HEALTH_INTERVAL_SECONDS
+                    self._stop.wait(),
+                    timeout=_health.HEALTH_INTERVAL_SECONDS,
                 )
                 break
             except asyncio.TimeoutError:
@@ -651,247 +466,3 @@ class UplinkRouter:
             "last_switch_monotonic": self._last_switch_at,
             "data_usage": usage,
         }
-
-
-# ----------------------------------------------------------------------
-# Module-level singleton
-# ----------------------------------------------------------------------
-_instance: "UplinkRouter | None" = None
-
-
-def get_uplink_router() -> "UplinkRouter":
-    global _instance
-    if _instance is None:
-        _instance = _build_router_with_concrete_managers()
-    return _instance
-
-
-def _build_router_with_concrete_managers() -> "UplinkRouter":
-    """Construct the router wrapping the real singleton managers.
-
-    Imports are local so that test harnesses or callers that want a
-    stub-only router can still instantiate `UplinkRouter()` directly
-    without pulling in NetworkManager or ModemManager dependencies.
-    """
-    from .adapters import _EthernetAdapter, _ModemAdapter, _WifiClientAdapter
-
-    try:
-        from ados.services.ground_station.modem_manager import (
-            get_modem_manager,
-        )
-        from ados.services.ground_station.wifi_client_manager import (
-            get_wifi_client_manager,
-        )
-        from ados.services.ground_station.ethernet_manager import (
-            get_ethernet_manager,
-        )
-    except Exception as exc:
-        log.warning("uplink.manager_import_failed", error=str(exc))
-        return UplinkRouter()
-
-    try:
-        modem_raw = get_modem_manager()
-        wifi_raw = get_wifi_client_manager()
-        eth_raw = get_ethernet_manager()
-    except Exception as exc:
-        log.warning("uplink.manager_init_failed", error=str(exc))
-        return UplinkRouter()
-
-    return UplinkRouter(
-        modem_manager=_ModemAdapter(modem_raw),
-        wifi_client_manager=_WifiClientAdapter(wifi_raw),
-        ethernet_manager=_EthernetAdapter(eth_raw),
-    )
-
-
-def _start_manager_polling() -> None:
-    """Kick the periodic poll loops on the WiFi and Ethernet managers.
-
-    The modem manager has no standalone polling loop. WiFi exposes
-    `start_polling()` with a 10s cadence. Ethernet exposes
-    `start_polling()` with a 5s cadence. Both are idempotent on a
-    running event loop.
-    """
-    try:
-        from ados.services.ground_station.wifi_client_manager import (
-            get_wifi_client_manager,
-        )
-        from ados.services.ground_station.ethernet_manager import (
-            get_ethernet_manager,
-        )
-    except Exception as exc:
-        log.debug("uplink.poll_import_failed", error=str(exc))
-        return
-
-    try:
-        get_wifi_client_manager().start_polling()
-    except Exception as exc:
-        log.warning("uplink.wifi_polling_start_failed", error=str(exc))
-
-    try:
-        get_ethernet_manager().start_polling()
-    except Exception as exc:
-        log.warning("uplink.eth_polling_start_failed", error=str(exc))
-
-
-# ----------------------------------------------------------------------
-# Data-cap throttle consumer
-# ----------------------------------------------------------------------
-async def _run_data_cap_throttle_consumer(router: "UplinkRouter") -> None:
-    """Subscribe to the router bus and apply throttle on cap transitions.
-
-    Severity ladder:
-      warn_80     -> INFO  (remove any throttle, restore NAT)
-      throttle_95 -> WARN  (install 256 kbit tbf qdisc on active iface)
-      blocked_100 -> ERROR (drop MASQUERADE rule, hard block)
-
-    Direct-call wiring: the consumer resolves the active uplink's
-    interface at event-time by asking the router, and calls
-    `share_uplink_firewall.apply_throttle`. Errors are best-effort
-    logged and never crash the loop.
-    """
-    try:
-        from ados.services.ground_station.share_uplink_firewall import (
-            apply_throttle as _apply_throttle,
-        )
-    except Exception as exc:
-        log.warning("uplink.throttle_import_failed", error=str(exc))
-        return
-
-    try:
-        async for evt in router.bus.subscribe():
-            if evt.kind != "data_cap_threshold":
-                continue
-            state = evt.data_cap_state
-            if state is None:
-                continue
-
-            # Resolve active iface fresh on each transition.
-            active_iface: Optional[str] = None
-            active_name = router.active_uplink
-            if active_name:
-                try:
-                    active_iface = await router._uplink_iface(active_name)  # noqa: SLF001
-                except Exception as exc:
-                    log.debug(
-                        "uplink.throttle_iface_lookup_failed",
-                        error=str(exc),
-                    )
-
-            if state == "ok":
-                log.debug(
-                    "uplink.datacap_throttle_applied",
-                    state=state,
-                    iface=active_iface,
-                )
-            elif state == "warn_80":
-                log.info(
-                    "uplink.datacap_warn_80",
-                    iface=active_iface,
-                    note="usage crossed 80 percent of cellular cap",
-                )
-            elif state == "throttle_95":
-                log.warning(
-                    "uplink.datacap_throttle_95",
-                    iface=active_iface,
-                    rate_kbps=256,
-                )
-            elif state == "blocked_100":
-                log.error(
-                    "uplink.datacap_blocked_100",
-                    iface=active_iface,
-                    note="cellular cap reached; NAT forwarding dropped",
-                )
-
-            try:
-                result = await _apply_throttle(active_iface, state)
-                log.info("uplink.datacap_throttle_result", result=result)
-            except Exception as exc:
-                log.warning(
-                    "uplink.datacap_throttle_apply_failed",
-                    state=state,
-                    error=str(exc),
-                )
-    except asyncio.CancelledError:
-        return
-    except Exception as exc:
-        log.warning("uplink.datacap_throttle_consumer_exc", error=str(exc))
-
-
-# ----------------------------------------------------------------------
-# Service entry point
-# ----------------------------------------------------------------------
-async def _run_service() -> None:
-    router = get_uplink_router()
-    _start_manager_polling()
-    router.bind_manager_events()
-    stop_event = asyncio.Event()
-
-    loop = asyncio.get_running_loop()
-
-    def _handle_signal(signame: str) -> None:
-        log.info("uplink.signal_received", signal=signame)
-        stop_event.set()
-
-    for signame in ("SIGINT", "SIGTERM"):
-        try:
-            loop.add_signal_handler(
-                getattr(signal, signame), _handle_signal, signame
-            )
-        except NotImplementedError:
-            pass
-
-    await router.start()
-    log.info(
-        "uplink.service_ready",
-        priority=router.get_priority(),
-        active=router.active_uplink,
-    )
-
-    # Reconcile share_uplink firewall state on start. Brings sysctl
-    # ip_forward + NAT MASQUERADE in line with the persisted
-    # `ground_station.share_uplink` flag so reboots survive.
-    try:
-        from ados.services.ground_station.share_uplink_firewall import (
-            reconcile_on_start as _reconcile_share_uplink,
-        )
-        result = await _reconcile_share_uplink()
-        log.info("uplink.share_uplink_reconciled", result=result)
-    except Exception as exc:
-        log.warning("uplink.share_uplink_reconcile_failed", error=str(exc))
-
-    # Wire data-cap throttle consumer. Subscribes to the router's own
-    # bus and calls share_uplink_firewall.apply_throttle on each
-    # DataCapState transition. Direct bus subscribe matches the pattern
-    # used by CloudRelayBridge and the manager-event bridges above.
-    throttle_task: Optional[asyncio.Task] = None
-    try:
-        throttle_task = asyncio.create_task(
-            _run_data_cap_throttle_consumer(router)
-        )
-    except Exception as exc:
-        log.warning("uplink.throttle_consumer_start_failed", error=str(exc))
-
-    await stop_event.wait()
-
-    if throttle_task is not None:
-        throttle_task.cancel()
-        try:
-            await throttle_task
-        except (asyncio.CancelledError, Exception):
-            pass
-
-    await router.stop()
-    log.info("uplink.service_stopped")
-
-
-def main() -> None:
-    """Systemd entry point for `ados-uplink.service`."""
-    try:
-        asyncio.run(_run_service())
-    except KeyboardInterrupt:
-        pass
-
-
-if __name__ == "__main__":
-    main()
