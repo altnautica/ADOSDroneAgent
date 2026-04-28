@@ -1,8 +1,9 @@
-"""Hardware Abstraction Layer — board detection and profiling."""
+"""Hardware Abstraction Layer for board detection and profiling."""
 
 from __future__ import annotations
 
 import platform
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -163,15 +164,45 @@ def _board_from_profile(
     )
 
 
-def detect_board() -> BoardInfo:
+# Board hardware does not change at runtime, so a single cached value is reused
+# for the service lifetime. invalidate_board_info_cache() clears it for tests
+# or in case the override file is changed by an operator action.
+_BOARD_INFO_CACHE: BoardInfo | None = None
+_BOARD_INFO_CACHE_LOCK = threading.Lock()
+
+
+def invalidate_board_info_cache() -> None:
+    """Clear the cached board detection result."""
+    global _BOARD_INFO_CACHE
+    with _BOARD_INFO_CACHE_LOCK:
+        _BOARD_INFO_CACHE = None
+
+
+def detect_board(force: bool = False) -> BoardInfo:
     """Detect the current board.
 
     Detection order:
-    1. /etc/ados/board_override — if present, load that profile by name
-    2. /proc/device-tree/model — match against board profile patterns
-    3. /proc/cpuinfo Hardware/model — fallback pattern matching
+    1. /etc/ados/board_override, if present, load that profile by name
+    2. /proc/device-tree/model, match against board profile patterns
+    3. /proc/cpuinfo Hardware/model, fallback pattern matching
     4. Platform-based fallback (macOS dev, generic-x86_64, generic-<arch>)
+
+    Result is cached for the service lifetime. Pass force=True to bypass
+    the cache and re-run detection.
     """
+    global _BOARD_INFO_CACHE
+    if not force and _BOARD_INFO_CACHE is not None:
+        return _BOARD_INFO_CACHE
+    with _BOARD_INFO_CACHE_LOCK:
+        if not force and _BOARD_INFO_CACHE is not None:
+            return _BOARD_INFO_CACHE
+        info = _detect_board_uncached()
+        _BOARD_INFO_CACHE = info
+        return info
+
+
+def _detect_board_uncached() -> BoardInfo:
+    """Run the full detection pipeline without consulting the cache."""
     import psutil
 
     ram_mb = psutil.virtual_memory().total // (1024 * 1024)
@@ -186,7 +217,7 @@ def detect_board() -> BoardInfo:
                 board = _board_from_profile(profile, override_name, ram_mb, cpu_cores)
                 log.info("board_override", board=board.name, tier=board.tier)
                 return board
-        # Override name didn't match any profile — use it as a raw name
+        # Override name did not match any profile, use it as a raw name
         tier = detect_tier(ram_mb)
         board = BoardInfo(
             name=override_name,

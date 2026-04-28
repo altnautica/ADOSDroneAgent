@@ -15,7 +15,16 @@ from ados.hal.detect import (
     _match_profile,
     detect_board,
     detect_tier,
+    invalidate_board_info_cache,
 )
+
+
+@pytest.fixture(autouse=True)
+def _clear_board_cache():
+    """Clear cached board info before and after each test."""
+    invalidate_board_info_cache()
+    yield
+    invalidate_board_info_cache()
 
 # ---------------------------------------------------------------------------
 # YAML profile filenames discovered at runtime (count grows as new boards land)
