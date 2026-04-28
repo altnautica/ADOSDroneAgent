@@ -137,7 +137,8 @@ class Supervisor(HotplugMixin, MonitorMixin, HeartbeatMixin):
 
         spec.state = "starting"
         try:
-            result = subprocess.run(
+            result = await asyncio.to_thread(
+                subprocess.run,
                 ["systemctl", "start", name],
                 capture_output=True,
                 text=True,
@@ -175,7 +176,8 @@ class Supervisor(HotplugMixin, MonitorMixin, HeartbeatMixin):
             return False
 
         try:
-            result = subprocess.run(
+            result = await asyncio.to_thread(
+                subprocess.run,
                 ["systemctl", "stop", name],
                 capture_output=True,
                 text=True,
@@ -219,11 +221,17 @@ class Supervisor(HotplugMixin, MonitorMixin, HeartbeatMixin):
             return
         deadline = time.monotonic() + timeout_secs
         while time.monotonic() < deadline:
-            still_up = [n for n in names if self._is_active(n)]
+            active_flags = await asyncio.gather(
+                *(asyncio.to_thread(self._is_active, n) for n in names)
+            )
+            still_up = [n for n, alive in zip(names, active_flags) if alive]
             if not still_up:
                 return
             await asyncio.sleep(0.1)
-        leftover = [n for n in names if self._is_active(n)]
+        leftover_flags = await asyncio.gather(
+            *(asyncio.to_thread(self._is_active, n) for n in names)
+        )
+        leftover = [n for n, alive in zip(names, leftover_flags) if alive]
         if leftover:
             log.warning(
                 "stop_wait_timeout",
@@ -301,11 +309,28 @@ class Supervisor(HotplugMixin, MonitorMixin, HeartbeatMixin):
         #    services. On drone profile this is a no-op.
         self._apply_ground_station_role()
 
-        # 1. Start core services
-        for name, spec in self._services.items():
-            if spec.category == "core":
-                await self.start_service(name)
-                await asyncio.sleep(0.5)  # stagger startup
+        # 1. Start core services. Core tier services are independent of
+        #    each other (hardware and suite tiers depend on core, not the
+        #    reverse), so we start them concurrently. Errors in one start
+        #    do not block the others; per-service failure handling lives
+        #    inside start_service.
+        core_names = [
+            name
+            for name, spec in self._services.items()
+            if spec.category == "core"
+        ]
+        if core_names:
+            results = await asyncio.gather(
+                *(self.start_service(n) for n in core_names),
+                return_exceptions=True,
+            )
+            for n, result in zip(core_names, results):
+                if isinstance(result, Exception):
+                    log.error(
+                        "service_start_failed",
+                        service=n,
+                        error=str(result),
+                    )
 
         # 2. Detect hardware and start hardware services
         await self._detect_and_start_hardware()
@@ -417,7 +442,9 @@ class Supervisor(HotplugMixin, MonitorMixin, HeartbeatMixin):
         video_mode = getattr(self.config, "video", None)
         video_enabled = video_mode and getattr(video_mode, "mode", "disabled") != "disabled"
 
-        has_camera = any(Path("/dev").glob("video[0-9]*")) or self._check_csi_camera()
+        has_camera = any(Path("/dev").glob("video[0-9]*")) or await asyncio.to_thread(
+            self._check_csi_camera
+        )
         if has_camera and video_enabled and "ados-video" in self._services:
             await self.start_service("ados-video")
         elif not video_enabled:

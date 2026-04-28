@@ -57,6 +57,8 @@ class MqttGateway:
             callback_api_version=mqtt.CallbackAPIVersion.VERSION2,
             transport=transport,
         )
+        # Higher inflight ceiling avoids drops at telemetry burst rates.
+        client.max_inflight_messages_set(1000)
 
         # WebSocket path (Mosquitto default)
         if transport == "websockets":
@@ -115,7 +117,8 @@ class MqttGateway:
             while not shutdown.is_set():
                 # Publish telemetry
                 telemetry = self.state.to_dict()
-                client.publish(
+                await asyncio.to_thread(
+                    client.publish,
                     f"ados/{self._device_id}/telemetry",
                     json.dumps(telemetry),
                     qos=0,
@@ -129,7 +132,8 @@ class MqttGateway:
                     "armed": self.state.armed,
                     "fc_connected": bool(self.state.last_heartbeat),
                 }
-                client.publish(
+                await asyncio.to_thread(
+                    client.publish,
                     f"ados/{self._device_id}/status",
                     json.dumps(status),
                     qos=1,

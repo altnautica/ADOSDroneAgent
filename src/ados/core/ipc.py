@@ -28,6 +28,24 @@ from ados.core import paths as _paths
 
 log = structlog.get_logger()
 
+# Optional msgpack encoder for the state channel. Kept as an optional import
+# so the agent runs unchanged on systems that do not have msgpack installed.
+# The env flag is read once at import time. Wiring the actual encode path is
+# deferred until the wire framing migration is planned, since switching from
+# newline-terminated JSON to length-prefixed binary is a breaking change for
+# any consumer that reads the state socket.
+try:
+    import msgpack as _msgpack  # type: ignore[import-not-found]
+
+    _MSGPACK_AVAILABLE = True
+except ImportError:
+    _msgpack = None  # type: ignore[assignment]
+    _MSGPACK_AVAILABLE = False
+
+_USE_MSGPACK = (
+    os.environ.get("ADOS_STATE_IPC_MSGPACK") == "1" and _MSGPACK_AVAILABLE
+)
+
 # Allow tests and dev rigs to override the runtime root via env var.
 # Defaults to the canonical /run/ados/ from `ados.core.paths`.
 ADOS_RUN_DIR = Path(os.environ.get("ADOS_RUN_DIR", str(_paths.ADOS_RUN_DIR)))
@@ -364,7 +382,15 @@ class StateIPCServer:
             self._sock_path.unlink()
 
     def publish(self, state: dict) -> None:
-        """Broadcast state snapshot to all clients (non-blocking)."""
+        """Broadcast state snapshot to all clients (non-blocking).
+
+        The wire format is newline-terminated JSON. A msgpack alternative is
+        scaffolded at module import (see ``_USE_MSGPACK``) and would yield a
+        ~3-5x serialization speedup on Pi-class hardware, but switching the
+        encoder requires a paired framing change (length prefix instead of
+        newline terminator) plus a coordinated update on the consumer side.
+        Until both halves land together the JSON path stays canonical.
+        """
         self._last_state = state
         if not self._clients:
             return

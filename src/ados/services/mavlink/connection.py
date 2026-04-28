@@ -314,12 +314,17 @@ class FCConnection:
                 if elapsed >= self._stream_interval:
                     self._request_streams()
 
-                # Get raw bytes and distribute to subscribers
+                # Get raw bytes and distribute to subscribers.
+                # Convert to immutable bytes once per message so all subscribers
+                # share the same buffer reference. Fan-out cost is O(subscribers);
+                # consider batching multiple frames per enqueue when subscriber
+                # count grows.
                 raw = msg.get_msgbuf()
                 if raw:
+                    frame = bytes(raw)
                     for q in self._subscribers:
                         try:
-                            q.put_nowait(bytes(raw))
+                            q.put_nowait(frame)
                         except asyncio.QueueFull:
                             pass  # Drop if subscriber is slow
 
