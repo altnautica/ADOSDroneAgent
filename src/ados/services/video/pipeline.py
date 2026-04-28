@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import time
 from enum import StrEnum
 from typing import TYPE_CHECKING
+
+import httpx
 
 from ados.core.logging import get_logger
 from ados.hal.camera import discover_cameras
@@ -24,6 +27,10 @@ if TYPE_CHECKING:
     from ados.core.config import VideoConfig
 
 log = get_logger("video.pipeline")
+
+# Suppress httpx's per-request INFO log ("HTTP Request: GET ...") which
+# spams journalctl every 5 seconds with no diagnostic value.
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 _HEALTH_CHECK_INTERVAL = 5.0
 
@@ -68,6 +75,8 @@ class VideoPipeline:
         self._base_restart_delay: float = 5.0
         self._started_at: float = 0.0  # monotonic time of last start_stream()
         self._first_packet_seen: bool = False  # set True once mediamtx reports a publisher
+        # Reuse client across probes; mediamtx URL is stable.
+        self._mediamtx_client: httpx.AsyncClient | None = None
 
     @property
     def state(self) -> PipelineState:
@@ -395,6 +404,25 @@ class VideoPipeline:
             return False
         return True
 
+    async def _get_mediamtx_client(self) -> httpx.AsyncClient:
+        """Lazily build the shared httpx client for mediamtx health probes."""
+        if self._mediamtx_client is None:
+            self._mediamtx_client = httpx.AsyncClient(
+                base_url=f"http://127.0.0.1:{self._mediamtx._api_port}",
+                timeout=httpx.Timeout(2.0, connect=0.5),
+                limits=httpx.Limits(max_connections=2, max_keepalive_connections=1),
+            )
+        return self._mediamtx_client
+
+    async def _close_mediamtx_client(self) -> None:
+        """Tear down the shared httpx client on pipeline shutdown."""
+        if self._mediamtx_client is not None:
+            try:
+                await self._mediamtx_client.aclose()
+            except Exception as exc:
+                log.warning("mediamtx_client_close_failed", error=str(exc))
+            self._mediamtx_client = None
+
     async def _check_mediamtx_path_ready(self) -> bool:
         """Probe mediamtx API to verify the stream path has an active publisher.
 
@@ -403,23 +431,16 @@ class VideoPipeline:
         exceptions (assuming healthy when unable to check), which hid
         failures where mediamtx had crashed or the stream was dead.
         """
-        import httpx
-        import logging
-        # Suppress httpx's per-request INFO log ("HTTP Request: GET ...")
-        # which spams journalctl every 5 seconds with no diagnostic value.
-        logging.getLogger("httpx").setLevel(logging.WARNING)
         try:
-            async with httpx.AsyncClient(timeout=2.0) as client:
-                resp = await client.get(
-                    f"http://127.0.0.1:{self._mediamtx._api_port}/v3/paths/list"
-                )
-                if resp.status_code != 200:
-                    return False
-                data = resp.json()
-                items = data.get("items", [])
-                if not items:
-                    return False
-                return items[0].get("ready", False)
+            client = await self._get_mediamtx_client()
+            resp = await client.get("/v3/paths/list")
+            if resp.status_code != 200:
+                return False
+            data = resp.json()
+            items = data.get("items", [])
+            if not items:
+                return False
+            return items[0].get("ready", False)
         except Exception:
             return False
 
@@ -559,6 +580,7 @@ class VideoPipeline:
                     self._encoder_process.kill()
                 log.info("encoder_process_cleaned_up")
             await self._mediamtx.stop()
+            await self._close_mediamtx_client()
 
     def get_status(self) -> dict:
         """Return current pipeline status for API responses."""
