@@ -9,6 +9,8 @@ PartOf=ados-supervisor.service
 # receiver operator can open a pairing window even when wfb-receiver is
 # not yet up.
 ConditionPathExists=/etc/ados/profile.conf
+StartLimitInterval=60s
+StartLimitBurst=5
 
 [Service]
 Type=simple

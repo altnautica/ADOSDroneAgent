@@ -2,6 +2,8 @@
 Description=ADOS Input Manager (ground-station profile)
 After=ados-supervisor.service
 PartOf=ados-supervisor.service
+StartLimitInterval=60s
+StartLimitBurst=5
 
 [Service]
 Type=simple

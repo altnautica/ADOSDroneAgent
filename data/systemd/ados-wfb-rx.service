@@ -3,6 +3,8 @@ Description=ADOS WFB-ng RX (ground-station profile)
 After=ados-supervisor.service
 PartOf=ados-supervisor.service
 ConditionKernelCommandLine=!no-wfb
+StartLimitInterval=60s
+StartLimitBurst=5
 
 [Service]
 Type=simple

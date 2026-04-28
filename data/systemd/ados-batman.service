@@ -7,6 +7,8 @@ PartOf=ados-supervisor.service
 # sentinel either does not exist or reads `direct`, keeping the unit inactive.
 ConditionPathExists=/etc/ados/mesh/role
 AssertPathExists=/etc/ados/mesh/role
+StartLimitInterval=60s
+StartLimitBurst=5
 
 [Service]
 Type=simple

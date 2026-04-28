@@ -3,6 +3,8 @@ Description=ADOS ROS 2 Environment
 After=docker.service ados-mavlink.service
 Requires=docker.service
 PartOf=ados-supervisor.service
+StartLimitInterval=60s
+StartLimitBurst=5
 
 [Service]
 Type=simple

@@ -2,6 +2,8 @@
 Description=ADOS WFB-ng Link Manager
 After=ados-mavlink.service
 PartOf=ados-supervisor.service
+StartLimitInterval=60s
+StartLimitBurst=5
 
 [Service]
 Type=simple

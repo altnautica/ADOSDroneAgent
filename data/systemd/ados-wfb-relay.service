@@ -5,6 +5,8 @@ Wants=ados-batman.service
 PartOf=ados-supervisor.service
 # Only runs when the role sentinel reads `relay`. role_manager owns this file.
 ConditionPathExists=/etc/ados/mesh/role
+StartLimitInterval=60s
+StartLimitBurst=5
 
 [Service]
 Type=simple

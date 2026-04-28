@@ -6,6 +6,8 @@ PartOf=ados-supervisor.service
 # /dev/ttyUSB0..3 and wwan0 on MBIM/QMI. The pattern keeps the unit
 # inactive on ground stations with no cellular hardware.
 ConditionPathExistsGlob=/dev/ttyUSB*
+StartLimitInterval=60s
+StartLimitBurst=5
 
 [Service]
 Type=simple

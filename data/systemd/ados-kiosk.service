@@ -3,6 +3,8 @@ Description=ADOS HDMI Kiosk (ground-station profile)
 After=ados-supervisor.service graphical.target ados-mediamtx-gs.service
 PartOf=ados-supervisor.service
 ConditionPathExists=/dev/dri/card0
+StartLimitInterval=60s
+StartLimitBurst=5
 
 [Service]
 Type=simple
