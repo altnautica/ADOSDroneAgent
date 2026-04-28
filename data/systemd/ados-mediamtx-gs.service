@@ -2,6 +2,8 @@
 Description=ADOS mediamtx Manager (ground-station profile)
 After=ados-supervisor.service ados-wfb-rx.service
 PartOf=ados-supervisor.service
+StartLimitInterval=60s
+StartLimitBurst=5
 
 [Service]
 Type=simple

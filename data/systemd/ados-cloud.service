@@ -2,6 +2,8 @@
 Description=ADOS Cloud Relay (MQTT + Convex Heartbeat)
 After=ados-mavlink.service
 PartOf=ados-supervisor.service
+StartLimitInterval=60s
+StartLimitBurst=5
 
 [Service]
 Type=simple

@@ -2,6 +2,8 @@
 Description=ADOS Drone Agent Supervisor
 After=network-online.target
 Wants=network-online.target
+StartLimitInterval=60s
+StartLimitBurst=5
 
 [Service]
 Type=notify

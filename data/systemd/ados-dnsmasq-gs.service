@@ -4,6 +4,8 @@ After=ados-supervisor.service ados-hostapd.service
 PartOf=ados-supervisor.service
 Requires=ados-hostapd.service
 ConditionPathExists=/etc/ados/dnsmasq-gs.conf
+StartLimitInterval=60s
+StartLimitBurst=5
 
 [Service]
 Type=simple

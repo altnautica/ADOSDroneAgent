@@ -3,6 +3,8 @@ Description=ADOS Physical Buttons (ground-station profile)
 After=ados-supervisor.service
 PartOf=ados-supervisor.service
 ConditionPathExists=/dev/gpiochip0
+StartLimitInterval=60s
+StartLimitBurst=5
 
 [Service]
 Type=simple

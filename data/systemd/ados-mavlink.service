@@ -2,6 +2,8 @@
 Description=ADOS MAVLink Proxy
 After=network-online.target
 PartOf=ados-supervisor.service
+StartLimitInterval=60s
+StartLimitBurst=5
 
 [Service]
 Type=simple

@@ -2,6 +2,8 @@
 Description=ADOS Scripting Engine
 After=ados-mavlink.service
 PartOf=ados-supervisor.service
+StartLimitInterval=60s
+StartLimitBurst=5
 
 [Service]
 Type=simple
