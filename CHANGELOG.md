@@ -4,6 +4,37 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.9.7] - 2026-04-30
+
+### Added
+
+- IPC dispatch capability gate. The plugin-runtime IPC server now
+  decorates each method with the capability it requires. Calls from a
+  plugin whose token does not carry the capability are rejected with
+  `capability_denied: <cap>` before the handler is reached. Eight
+  telemetry, mission, recording, and MAVLink stub methods are gated
+  ahead of their handler implementations so the contract stays
+  enforceable as those subsystems land. The Python plugin client maps
+  the wire error back to a `CapabilityDenied` exception.
+- Capability lookup helpers on `ados.plugins.capabilities`:
+  `get_granted_caps`, `has_capability`, `require_capability`. Each
+  consults the supervisor's install record so the same authoritative
+  source backs both the runtime gate and operator-facing tooling.
+- `PluginTestHarness` SDK at `ados.sdk.testing`. Plugin authors get an
+  in-process `PluginContext` wired to a fake IPC client, capability
+  injection, captured publishes, and YAML scenario replay. Manifest
+  field `agent.test_fixtures` maps friendly names to fixture paths the
+  harness resolves at replay time. Path traversal is rejected at
+  manifest validation.
+- `ados plugin test <plugin_dir>` subcommand. Validates the plugin
+  manifest, exports `ADOS_PLUGIN_*` env vars, and shells out to
+  `pytest` against the plugin's `tests/` directory so authors can run
+  their suites against the harness with a single command.
+- `tmpfiles.d` rule sweeps stale `/run/ados/plugins/*.sock` entries on
+  boot. Hard-killed plugin processes used to leave socket inodes
+  behind that blocked the next `bind()`; the rule lets the supervisor
+  rely on a clean socket directory.
+
 ## [0.9.6] - 2026-04-30
 
 ### Added

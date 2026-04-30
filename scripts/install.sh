@@ -631,6 +631,7 @@ install_plugin_tmpfiles() {
         cat > /etc/tmpfiles.d/ados-plugins.conf <<PLUGTMPEOF
 # ADOS plugin runtime sockets and runtime state
 d /run/ados/plugins 0750 ados ados -
+r! /run/ados/plugins/*.sock
 PLUGTMPEOF
     fi
     chmod 0644 /etc/tmpfiles.d/ados-plugins.conf
