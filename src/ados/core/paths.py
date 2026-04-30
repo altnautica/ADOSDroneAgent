@@ -81,6 +81,13 @@ SUITES_DIR = ADOS_ETC_DIR / "suites"
 PERIPHERALS_DIR = ADOS_ETC_DIR / "peripherals"
 PERIPHERALS_GLOB = "/etc/ados/peripherals/*.yaml"
 
+# Plugins
+PLUGIN_KEYS_DIR = ADOS_ETC_DIR / "plugin-keys"
+PLUGIN_REVOCATIONS_PATH = ADOS_ETC_DIR / "plugin-revocations.json"
+PLUGIN_RUN_DIR = ADOS_RUN_DIR / "plugins"
+PLUGIN_UNIT_DIR = Path("/etc/systemd/system")
+PLUGIN_UNIT_PREFIX = "ados-plugin-"
+
 # TLS certificates
 CERTS_DIR = ADOS_ETC_DIR / "certs"
 DEVICE_CERT_PATH = CERTS_DIR / "device.crt"
@@ -134,3 +141,9 @@ ROS_RECORDINGS_DIR = ROS_DIR / "recordings"
 
 # Audit log
 AUDIT_LOG_PATH = ADOS_VAR_DIR / "audit.jsonl"
+
+# Plugins (installed third-party bundles, plugin data, plugin configs)
+PLUGINS_INSTALL_DIR = ADOS_VAR_DIR / "plugins"
+PLUGIN_DATA_DIR = ADOS_VAR_DIR / "plugin-data"
+PLUGIN_LOG_DIR = Path("/var/log/ados/plugins")
+PLUGIN_STATE_PATH = STATE_DIR / "plugin-state.json"
