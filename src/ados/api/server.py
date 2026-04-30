@@ -23,6 +23,7 @@ from ados.api.routes import (
     params,
     peripherals,
     peripherals_v1,
+    plugins,
     ros,
     scripts,
     services,
@@ -112,6 +113,8 @@ def create_app(agent: AgentApp) -> FastAPI:
     # MAVLink v2 message signing: capability + one-shot FC enrollment.
     # Agent holds no key material; key lives in the GCS browser.
     app.include_router(signing.router, prefix="/api")
+    # Plugin lifecycle: install / enable / disable / remove.
+    app.include_router(plugins.router, prefix="/api")
 
     # Ground-station profile: mount the setup webapp at `/` so phones
     # hitting `http://192.168.4.1/` over the captive portal land on
