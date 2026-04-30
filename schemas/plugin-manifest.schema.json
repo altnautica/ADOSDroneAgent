@@ -1,0 +1,433 @@
+{
+  "$defs": {
+    "AgentBlock": {
+      "additionalProperties": false,
+      "description": "Agent-half manifest block.",
+      "properties": {
+        "entrypoint": {
+          "title": "Entrypoint",
+          "type": "string"
+        },
+        "isolation": {
+          "default": "subprocess",
+          "enum": [
+            "subprocess",
+            "inprocess"
+          ],
+          "title": "Isolation",
+          "type": "string"
+        },
+        "permissions": {
+          "items": {
+            "$ref": "#/$defs/PermissionRef"
+          },
+          "title": "Permissions",
+          "type": "array"
+        },
+        "resources": {
+          "$ref": "#/$defs/ResourceLimits"
+        },
+        "contributes": {
+          "$ref": "#/$defs/AgentContributes"
+        },
+        "mavlink_components": {
+          "items": {
+            "$ref": "#/$defs/MavlinkComponent"
+          },
+          "title": "Mavlink Components",
+          "type": "array"
+        },
+        "contains_vendor_binary": {
+          "default": false,
+          "title": "Contains Vendor Binary",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "entrypoint"
+      ],
+      "title": "AgentBlock",
+      "type": "object"
+    },
+    "AgentContributes": {
+      "additionalProperties": false,
+      "properties": {
+        "services": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Services",
+          "type": "array"
+        },
+        "drivers": {
+          "items": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "title": "Drivers",
+          "type": "array"
+        },
+        "vision": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/VisionContribution"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "title": "AgentContributes",
+      "type": "object"
+    },
+    "Compatibility": {
+      "additionalProperties": false,
+      "properties": {
+        "ados_version": {
+          "minLength": 1,
+          "title": "Ados Version",
+          "type": "string"
+        },
+        "gcs_version": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Gcs Version"
+        },
+        "supported_boards": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Supported Boards",
+          "type": "array"
+        }
+      },
+      "required": [
+        "ados_version"
+      ],
+      "title": "Compatibility",
+      "type": "object"
+    },
+    "GcsBlock": {
+      "additionalProperties": false,
+      "description": "GCS-half manifest block.",
+      "properties": {
+        "entrypoint": {
+          "title": "Entrypoint",
+          "type": "string"
+        },
+        "isolation": {
+          "default": "iframe",
+          "enum": [
+            "iframe",
+            "worker",
+            "inline"
+          ],
+          "title": "Isolation",
+          "type": "string"
+        },
+        "permissions": {
+          "items": {
+            "$ref": "#/$defs/PermissionRef"
+          },
+          "title": "Permissions",
+          "type": "array"
+        },
+        "contributes": {
+          "$ref": "#/$defs/GcsContributes"
+        },
+        "locales": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Locales",
+          "type": "array"
+        }
+      },
+      "required": [
+        "entrypoint"
+      ],
+      "title": "GcsBlock",
+      "type": "object"
+    },
+    "GcsContributes": {
+      "additionalProperties": false,
+      "properties": {
+        "panels": {
+          "items": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "title": "Panels",
+          "type": "array"
+        },
+        "overlays": {
+          "items": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "title": "Overlays",
+          "type": "array"
+        },
+        "notifications": {
+          "items": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "title": "Notifications",
+          "type": "array"
+        },
+        "smart_functions": {
+          "items": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "title": "Smart Functions",
+          "type": "array"
+        }
+      },
+      "title": "GcsContributes",
+      "type": "object"
+    },
+    "MavlinkComponent": {
+      "additionalProperties": false,
+      "properties": {
+        "component_id": {
+          "maximum": 255,
+          "minimum": 0,
+          "title": "Component Id",
+          "type": "integer"
+        },
+        "component_kind": {
+          "enum": [
+            "camera",
+            "gimbal",
+            "payload",
+            "peripheral",
+            "generic"
+          ],
+          "title": "Component Kind",
+          "type": "string"
+        },
+        "sub_id": {
+          "anyOf": [
+            {
+              "maximum": 255,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Sub Id"
+        }
+      },
+      "required": [
+        "component_id",
+        "component_kind"
+      ],
+      "title": "MavlinkComponent",
+      "type": "object"
+    },
+    "PermissionRef": {
+      "additionalProperties": false,
+      "description": "Object form of a permission entry: ``{id, required, degraded_behavior}``.",
+      "properties": {
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "required": {
+          "default": true,
+          "title": "Required",
+          "type": "boolean"
+        },
+        "degraded_behavior": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Degraded Behavior"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "title": "PermissionRef",
+      "type": "object"
+    },
+    "ResourceLimits": {
+      "additionalProperties": false,
+      "properties": {
+        "max_ram_mb": {
+          "default": 96,
+          "maximum": 4096,
+          "minimum": 8,
+          "title": "Max Ram Mb",
+          "type": "integer"
+        },
+        "max_cpu_percent": {
+          "default": 25,
+          "maximum": 100,
+          "minimum": 1,
+          "title": "Max Cpu Percent",
+          "type": "integer"
+        },
+        "max_pids": {
+          "default": 12,
+          "maximum": 256,
+          "minimum": 1,
+          "title": "Max Pids",
+          "type": "integer"
+        }
+      },
+      "title": "ResourceLimits",
+      "type": "object"
+    },
+    "VisionContribution": {
+      "additionalProperties": false,
+      "properties": {
+        "behaviors": {
+          "items": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "title": "Behaviors",
+          "type": "array"
+        },
+        "models": {
+          "items": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "title": "Models",
+          "type": "array"
+        },
+        "detectors": {
+          "items": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "title": "Detectors",
+          "type": "array"
+        }
+      },
+      "title": "VisionContribution",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Top-level plugin manifest. Loaded from ``manifest.yaml``.",
+  "properties": {
+    "schema_version": {
+      "default": 1,
+      "maximum": 1,
+      "minimum": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "id": {
+      "title": "Id",
+      "type": "string"
+    },
+    "version": {
+      "title": "Version",
+      "type": "string"
+    },
+    "name": {
+      "title": "Name",
+      "type": "string"
+    },
+    "description": {
+      "default": "",
+      "title": "Description",
+      "type": "string"
+    },
+    "author": {
+      "default": "",
+      "title": "Author",
+      "type": "string"
+    },
+    "homepage": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Homepage"
+    },
+    "license": {
+      "default": "",
+      "title": "License",
+      "type": "string"
+    },
+    "risk": {
+      "default": "medium",
+      "enum": [
+        "low",
+        "medium",
+        "high",
+        "critical"
+      ],
+      "title": "Risk",
+      "type": "string"
+    },
+    "compatibility": {
+      "$ref": "#/$defs/Compatibility"
+    },
+    "agent": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/AgentBlock"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "gcs": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/GcsBlock"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "extra": {
+      "additionalProperties": true,
+      "title": "Extra",
+      "type": "object"
+    }
+  },
+  "required": [
+    "id",
+    "version",
+    "name",
+    "compatibility"
+  ],
+  "title": "PluginManifest",
+  "type": "object"
+}

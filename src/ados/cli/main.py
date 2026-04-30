@@ -107,6 +107,11 @@ from ados.cli.signing import signing_group as _signing_group  # noqa: E402
 
 cli.add_command(_signing_group)
 
+# Plugin subgroup.
+from ados.cli.plugin import plugin_group as _plugin_group  # noqa: E402
+
+cli.add_command(_plugin_group)
+
 
 # ─── INFO ───────────────────────────────────────────────────────────────────
 
