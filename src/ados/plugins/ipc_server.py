@@ -182,6 +182,18 @@ class PluginIpcServer:
             env = await read_frame(reader)
             if env is None:
                 return
+            # Re-check token freshness on every request. The handshake
+            # accepted the token once; the session lives longer than the
+            # token's TTL is allowed to. If the token has aged past
+            # expires_at, refuse to route and signal token_expired so the
+            # runner can request a fresh token from the supervisor.
+            if session.token.is_expired():
+                await self._send_error(
+                    session.writer,
+                    "token_expired",
+                    req_id=env.request_id,
+                )
+                continue
             handler = _METHOD_HANDLERS.get(env.method)
             if handler is None:
                 await self._send_error(

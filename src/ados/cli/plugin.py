@@ -268,8 +268,17 @@ def remove(plugin_id: str, keep_data: bool, as_json: bool) -> None:
     default=None,
     help="Revoke a specific permission id.",
 )
+@click.option(
+    "--yes",
+    "-y",
+    "auto_yes",
+    is_flag=True,
+    help="Skip the confirmation prompt when revoking a permission.",
+)
 @click.option("--json", "as_json", is_flag=True)
-def perms(plugin_id: str, revoke_id: str | None, as_json: bool) -> None:
+def perms(
+    plugin_id: str, revoke_id: str | None, auto_yes: bool, as_json: bool
+) -> None:
     sup = _make_supervisor()
     install = next(
         (i for i in sup.installs() if i.plugin_id == plugin_id), None
@@ -278,6 +287,20 @@ def perms(plugin_id: str, revoke_id: str | None, as_json: bool) -> None:
         _emit_err(as_json, EXIT_NOT_FOUND, f"plugin {plugin_id} not installed")
         sys.exit(EXIT_NOT_FOUND)
     if revoke_id:
+        # Confirm intent before revoking a granted capability. The
+        # plugin loses access to the protected resource on the next
+        # token rotation, which can break a running workload. JSON
+        # callers and `--yes` operators skip the prompt.
+        if not auto_yes and not as_json:
+            click.echo(
+                f"About to revoke '{revoke_id}' from '{plugin_id}'."
+            )
+            click.echo(
+                "The plugin will lose access to the protected resource immediately."
+            )
+            if not click.confirm("Continue?", default=False):
+                click.echo("Revoke cancelled.")
+                sys.exit(EXIT_OK)
         try:
             from ados.plugins.state import revoke_permission, save_state, state_lock
 

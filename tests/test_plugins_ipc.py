@@ -235,6 +235,68 @@ async def test_handshake_with_expired_token_rejected(short_sock_dir: Path) -> No
 
 
 # ---------------------------------------------------------------------
+# Per-request token expiry enforcement
+# ---------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_request_after_token_expiry_returns_token_expired(
+    short_sock_dir: Path,
+) -> None:
+    """An aged-out token must be rejected on the next request even
+    though the handshake accepted a then-valid token."""
+    bus = EventBus()
+    issuer = TokenIssuer()
+    server = PluginIpcServer(
+        bus=bus, token_issuer=issuer, socket_dir=short_sock_dir
+    )
+    sock_path = await server.start_for_plugin(PLUGIN_ID)
+
+    # Mint a token with a short TTL so we can age past it inside the
+    # test without hanging the suite.
+    token = issuer.mint(
+        plugin_id=PLUGIN_ID,
+        granted_caps={"event.publish"},
+        ttl_seconds=1,
+    )
+    reader, writer = await asyncio.open_unix_connection(str(sock_path))
+    hello = Envelope(
+        type="request",
+        method="hello",
+        capability="",
+        args={},
+        request_id="r1",
+        token=token.to_string(),
+    )
+    writer.write(encode_frame(hello))
+    await writer.drain()
+    handshake_resp = await read_frame(reader)
+    assert handshake_resp is not None
+    assert handshake_resp.error is None
+
+    # Wait until the token has aged past expires_at.
+    await asyncio.sleep(1.2)
+
+    ping = Envelope(
+        type="request",
+        method="ping",
+        capability="",
+        args={},
+        request_id="r2",
+        token=token.to_string(),
+    )
+    writer.write(encode_frame(ping))
+    await writer.drain()
+    response = await read_frame(reader)
+    assert response is not None
+    assert response.error == "token_expired"
+
+    writer.close()
+    await writer.wait_closed()
+    await server.stop_for_plugin(PLUGIN_ID)
+
+
+# ---------------------------------------------------------------------
 # PluginContext public surface
 # ---------------------------------------------------------------------
 
