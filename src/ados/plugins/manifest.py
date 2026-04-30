@@ -129,11 +129,30 @@ class AgentBlock(_StrictModel):
     contributes: AgentContributes = Field(default_factory=AgentContributes)
     mavlink_components: list[MavlinkComponent] = Field(default_factory=list)
     contains_vendor_binary: bool = False
+    test_fixtures: dict[str, str] = Field(default_factory=dict)
+    """Map of friendly name to fixture YAML path (relative to plugin root).
+    Consumed by the SDK test harness so plugin tests can replay scenarios
+    by name. Paths are validated for traversal at install time."""
 
     @field_validator("entrypoint")
     @classmethod
     def _validate_entrypoint(cls, v: str) -> str:
         return _validate_entrypoint(v)
+
+    @field_validator("test_fixtures")
+    @classmethod
+    def _validate_test_fixtures(cls, raw: dict[str, str]) -> dict[str, str]:
+        for name, path in raw.items():
+            if not isinstance(name, str) or not name:
+                raise ManifestError(
+                    f"test_fixtures key must be a non-empty string, got {name!r}"
+                )
+            if not isinstance(path, str) or not path:
+                raise ManifestError(
+                    f"test_fixtures[{name!r}] must be a non-empty path"
+                )
+            _validate_entrypoint(path)
+        return raw
 
     @field_validator("permissions", mode="before")
     @classmethod
