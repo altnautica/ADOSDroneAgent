@@ -4,10 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ados-drone-agent"
-# DEC-107 Bug #24: version is sourced from src/ados/__init__.py per
-# operating-rule 23 (single source of truth). Was hardcoded to 0.3.5
-# while __init__.py sat at 0.3.9, causing pip metadata and `ados version`
-# to disagree. Now both read from the same place.
+# Version is read from src/ados/__init__.py via attr lookup so pip
+# metadata and `ados version` always agree.
 dynamic = ["version"]
 description = "ADOS Drone Agent — Software-defined drone network agent"
 readme = "README.md"
@@ -52,10 +50,12 @@ dev = [
     "ruff>=0.2.0",
     "mypy>=1.8.0",
     "black>=24.1.0",
+    "msgpack>=1.0.0",
+    "python-multipart>=0.0.6",
 ]
-# DEC-112 / MSN-024: ground-station profile extras. Pulled only when the
-# installer detects ground_station profile or when a developer runs
-# `pip install -e ".[ground-station]"`. Drone profile never needs these.
+# Ground-station profile extras. Pulled only when the installer detects
+# the ground_station profile or when a developer runs
+# `pip install -e ".[ground-station]"`. The drone profile never needs these.
 ground-station = [
     "luma.oled>=3.13.0",
     "gpiozero>=2.0",
@@ -78,10 +78,11 @@ ados-plugin-runner = "ados.plugins.runner:main"
 
 [project.entry-points."ados.plugins"]
 geofence = "ados.plugins.builtin.geofence"
+telemetry-logger = "ados.plugins.builtin.telemetry_logger"
+mavlink-inspector = "ados.plugins.builtin.mavlink_inspector"
 
-# MSN-028 Phase 4 Track A Wave 3: Peripheral Manager plugin group.
-# External OEM partners contribute manifests via entry points or
-# filesystem drop-in. No built-in plugins ship in Wave 3.
+# Peripheral Manager plugin group. External OEM partners contribute
+# manifests via entry points or filesystem drop-in.
 [project.entry-points."ados.peripherals"]
 
 [tool.setuptools.dynamic]
