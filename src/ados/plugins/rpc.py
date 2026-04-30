@@ -140,9 +140,14 @@ class CapabilityToken:
     signature: str  # hex-encoded HMAC-SHA256
 
     def to_string(self) -> str:
-        """Compact string form: ``v1.<plugin_id>.<session>.<issued>.<exp>.<hex_caps>.<sig>``"""
+        """Compact string form, pipe-separated.
+
+        Plugin ids are reverse-DNS so they contain dots. Tokens use ``|``
+        as the field separator to avoid ambiguity when parsing.
+        Layout: ``v1|<plugin_id>|<session>|<issued>|<exp>|<hex_caps>|<sig>``.
+        """
         caps_blob = ",".join(sorted(self.granted_caps)).encode("utf-8").hex()
-        return ".".join(
+        return "|".join(
             [
                 "v1",
                 self.plugin_id,
@@ -156,7 +161,7 @@ class CapabilityToken:
 
     @classmethod
     def from_string(cls, encoded: str) -> "CapabilityToken":
-        parts = encoded.split(".")
+        parts = encoded.split("|")
         if len(parts) != 7 or parts[0] != "v1":
             raise TokenError("malformed capability token")
         try:

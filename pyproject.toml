@@ -77,7 +77,7 @@ ados-supervisor = "ados.core.supervisor:main"
 ados-plugin-runner = "ados.plugins.runner:main"
 
 [project.entry-points."ados.plugins"]
-# Plugin entry points will be registered here
+geofence = "ados.plugins.builtin.geofence"
 
 # MSN-028 Phase 4 Track A Wave 3: Peripheral Manager plugin group.
 # External OEM partners contribute manifests via entry points or
