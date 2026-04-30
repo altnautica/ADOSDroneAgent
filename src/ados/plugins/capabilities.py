@@ -14,6 +14,13 @@ as advisory until the relevant subsystem ships its check.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
+from ados.plugins.errors import CapabilityDenied
+
+if TYPE_CHECKING:
+    from ados.plugins.supervisor import PluginSupervisor
+
 AGENT_CAPABILITIES: frozenset[str] = frozenset(
     {
         # event bus (enforced today)
@@ -69,3 +76,39 @@ rejects calls based on them yet."""
 def is_known_agent_capability(cap: str) -> bool:
     """Return True if the capability is declared in the catalog."""
     return cap in AGENT_CAPABILITIES
+
+
+def get_granted_caps(
+    supervisor: "PluginSupervisor", plugin_id: str
+) -> set[str]:
+    """Return the set of capability ids currently granted to plugin_id.
+
+    Looks up the plugin's install record in supervisor state and
+    extracts the granted permissions. Returns an empty set if the
+    plugin is not installed.
+
+    The supervisor IPC server already holds a verified
+    :class:`CapabilityToken` per request and checks against
+    ``token.granted_caps`` directly for the hot path. This helper is
+    for non-IPC contexts (CLI, REST handlers, supervisor methods)
+    that need the same view from state.
+    """
+    install = supervisor.find_install(plugin_id)
+    if install is None:
+        return set()
+    return {pid for pid, grant in install.permissions.items() if grant.granted}
+
+
+def has_capability(
+    supervisor: "PluginSupervisor", plugin_id: str, cap: str
+) -> bool:
+    """Return True if ``cap`` is currently granted to ``plugin_id``."""
+    return cap in get_granted_caps(supervisor, plugin_id)
+
+
+def require_capability(
+    supervisor: "PluginSupervisor", plugin_id: str, cap: str
+) -> None:
+    """Raise :class:`CapabilityDenied` if ``cap`` is not granted to ``plugin_id``."""
+    if not has_capability(supervisor, plugin_id, cap):
+        raise CapabilityDenied(plugin_id=plugin_id, capability=cap)

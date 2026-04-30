@@ -133,6 +133,12 @@ class PluginIpcClient:
         if response.error:
             if "not permitted" in response.error:
                 raise CapabilityDenied(self._plugin_id, capability)
+            if response.error.startswith("capability_denied:"):
+                # Format: "capability_denied: <cap>". The dispatcher
+                # gate rejects callers whose token does not carry the
+                # capability the method declares.
+                cap = response.error.split(":", 1)[1].strip()
+                raise CapabilityDenied(self._plugin_id, cap)
             raise PluginError(f"rpc error: {response.error}")
         return response
 
