@@ -10,13 +10,15 @@ These documents are for hardware OEM partners building companion computer produc
 | 2 | [factory-provisioning.md](factory-provisioning.md) | Manufacturing engineers | Device identity, certificates, batch provisioning |
 | 3 | [cloud-setup.md](cloud-setup.md) | DevOps, infrastructure | MQTT broker, STUN/TURN, video relay, domain setup |
 | 4 | [white-label-guide.md](white-label-guide.md) | Product managers, firmware engineers | Branding customization (splash, theme, SSID, CLI) |
+| 5 | [plugin-deployment.md](plugin-deployment.md) | Firmware engineers, security, manufacturing | Signed plugin distribution, key registration, factory install, revocation |
 
 ## Who These Are For
 
 - **Hardware engineers** building the baseboard PCB: Start with deployment-guide.md
-- **Manufacturing teams** setting up the production line: deployment-guide.md + factory-provisioning.md
+- **Manufacturing teams** setting up the production line: deployment-guide.md + factory-provisioning.md + plugin-deployment.md
 - **Software/DevOps teams** deploying cloud infrastructure: cloud-setup.md
 - **Product managers** customizing the product for their brand: white-label-guide.md
+- **Firmware engineers** shipping partner-specific behaviors: plugin-deployment.md
 
 ## Questions?
 
