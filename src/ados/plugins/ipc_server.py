@@ -194,11 +194,19 @@ class PluginIpcServer:
                     req_id=env.request_id,
                 )
                 continue
-            handler = _METHOD_HANDLERS.get(env.method)
-            if handler is None:
+            spec = _METHOD_HANDLERS.get(env.method)
+            if spec is None:
                 await self._send_error(
                     session.writer,
                     f"unknown method {env.method}",
+                    req_id=env.request_id,
+                )
+                continue
+            handler, requires = spec
+            if requires is not None and requires not in session.token.granted_caps:
+                await self._send_error(
+                    session.writer,
+                    f"capability_denied: {requires}",
                     req_id=env.request_id,
                 )
                 continue
@@ -288,6 +296,53 @@ class PluginIpcServer:
     ) -> dict:
         return {"pong": True, "plugin_id": session.plugin_id}
 
+    # ---- gated stubs -------------------------------------------------
+    # The next batch of capability-gated surfaces. Each method gate is
+    # declared in _METHOD_HANDLERS; the dispatcher rejects ungranted
+    # callers with capability_denied before reaching the handler. The
+    # bodies return not_implemented until the corresponding host
+    # service exposes a stable hook.
+
+    async def _handle_telemetry_subscribe(
+        self, session: PluginSession, env: Envelope
+    ) -> dict:
+        return {"error": "not_implemented", "method": "telemetry.subscribe"}
+
+    async def _handle_telemetry_extend(
+        self, session: PluginSession, env: Envelope
+    ) -> dict:
+        return {"error": "not_implemented", "method": "telemetry.extend"}
+
+    async def _handle_mission_read(
+        self, session: PluginSession, env: Envelope
+    ) -> dict:
+        return {"error": "not_implemented", "method": "mission.read"}
+
+    async def _handle_mission_write(
+        self, session: PluginSession, env: Envelope
+    ) -> dict:
+        return {"error": "not_implemented", "method": "mission.write"}
+
+    async def _handle_recording_start(
+        self, session: PluginSession, env: Envelope
+    ) -> dict:
+        return {"error": "not_implemented", "method": "recording.start"}
+
+    async def _handle_recording_stop(
+        self, session: PluginSession, env: Envelope
+    ) -> dict:
+        return {"error": "not_implemented", "method": "recording.stop"}
+
+    async def _handle_mavlink_subscribe(
+        self, session: PluginSession, env: Envelope
+    ) -> dict:
+        return {"error": "not_implemented", "method": "mavlink.subscribe"}
+
+    async def _handle_mavlink_send(
+        self, session: PluginSession, env: Envelope
+    ) -> dict:
+        return {"error": "not_implemented", "method": "mavlink.send"}
+
     # ---- helpers -----------------------------------------------------
 
     async def _send_response(
@@ -333,8 +388,39 @@ class _RpcError(Exception):
 _HandlerFn = Callable[
     [PluginIpcServer, PluginSession, Envelope], Awaitable[dict]
 ]
-_METHOD_HANDLERS: dict[str, _HandlerFn] = {
-    "event.publish": PluginIpcServer._handle_event_publish,
-    "event.subscribe": PluginIpcServer._handle_event_subscribe,
-    "ping": PluginIpcServer._handle_ping,
+
+# Method dispatch table. Each entry is (handler, required_capability).
+# A required_capability of None means the method is either ungated or
+# gated inline by the handler itself (event.publish and event.subscribe
+# do their own per-topic checks via is_publish_allowed / is_subscribe_allowed).
+# Methods with a non-None requirement are rejected with capability_denied
+# before reaching the handler when the calling token does not carry the cap.
+_HandlerSpec = tuple[_HandlerFn, str | None]
+_METHOD_HANDLERS: dict[str, _HandlerSpec] = {
+    "event.publish": (PluginIpcServer._handle_event_publish, None),
+    "event.subscribe": (PluginIpcServer._handle_event_subscribe, None),
+    "ping": (PluginIpcServer._handle_ping, None),
+    "telemetry.subscribe": (
+        PluginIpcServer._handle_telemetry_subscribe,
+        "telemetry.read",
+    ),
+    "telemetry.extend": (
+        PluginIpcServer._handle_telemetry_extend,
+        "telemetry.extend",
+    ),
+    "mission.read": (PluginIpcServer._handle_mission_read, "mission.read"),
+    "mission.write": (PluginIpcServer._handle_mission_write, "mission.write"),
+    "recording.start": (
+        PluginIpcServer._handle_recording_start,
+        "recording.write",
+    ),
+    "recording.stop": (
+        PluginIpcServer._handle_recording_stop,
+        "recording.write",
+    ),
+    "mavlink.subscribe": (
+        PluginIpcServer._handle_mavlink_subscribe,
+        "mavlink.read",
+    ),
+    "mavlink.send": (PluginIpcServer._handle_mavlink_send, "mavlink.write"),
 }

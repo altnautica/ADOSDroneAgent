@@ -149,6 +149,10 @@ class PluginSupervisor:
     def installs(self) -> list[PluginInstall]:
         return list(self._installs)
 
+    def find_install(self, plugin_id: str) -> PluginInstall | None:
+        """Return the install record for ``plugin_id`` or None if not installed."""
+        return find_install(self._installs, plugin_id)
+
     # ------------------------------------------------------------------
     # Install / enable / disable / remove
     # ------------------------------------------------------------------
