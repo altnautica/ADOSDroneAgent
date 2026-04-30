@@ -10,11 +10,17 @@ Endpoints:
 
 * ``GET    /api/plugins``                       list installs
 * ``GET    /api/plugins/{plugin_id}``           one install detail + manifest
-* ``POST   /api/plugins/install``               multipart upload (.adosplug)
+* ``POST   /api/plugins/parse``                 multipart upload, manifest preview only
+* ``POST   /api/plugins/install``               multipart upload (.adosplug), commits
 * ``POST   /api/plugins/{plugin_id}/grant``     grant one declared permission
 * ``POST   /api/plugins/{plugin_id}/enable``    enable + start
 * ``POST   /api/plugins/{plugin_id}/disable``   stop + disable
 * ``DELETE /api/plugins/{plugin_id}``           remove (optional ?keep_data=1)
+
+The two-stage install flow runs ``/parse`` first to validate and
+preview the manifest without touching disk, then ``/install`` after
+operator consent. Both accept the same multipart payload so the
+client can upload once and commit only after approval.
 
 Errors map to the CLI exit-code taxonomy via the structured
 ``{"ok": false, "code": N, "kind": "...", "detail": "..."}``
@@ -139,6 +145,62 @@ async def get_plugin(plugin_id: str):
             ],
         },
     }
+
+
+# ---------------------------------------------------------------------
+# Parse (non-committing manifest preview)
+# ---------------------------------------------------------------------
+
+
+def _archive_to_summary(raw: bytes) -> dict:
+    """Open + signature-verify the archive in memory and return a
+    manifest summary suitable for the install dialog. Does NOT touch
+    disk and does NOT mutate supervisor state."""
+    from ados.plugins.archive import parse_archive_bytes
+    contents = parse_archive_bytes(raw)
+    manifest = contents.manifest
+    return {
+        "ok": True,
+        "plugin_id": manifest.id,
+        "version": manifest.version,
+        "name": manifest.name,
+        "description": manifest.description,
+        "author": manifest.author,
+        "license": manifest.license,
+        "risk": manifest.risk,
+        "signer_id": contents.signer_id,
+        "signed": contents.signature_b64 is not None,
+        "halves": (
+            ["agent"] if manifest.agent is not None else []
+        )
+        + (["gcs"] if manifest.gcs is not None else []),
+        "permissions": [
+            {"id": pid, "required": True}
+            for pid in sorted(manifest.declared_permissions())
+        ],
+    }
+
+
+@router.post("/plugins/parse")
+async def parse_plugin_archive(file: UploadFile = File(...)):
+    """Validate a ``.adosplug`` archive without committing the install.
+
+    Used by the two-stage install dialog: the GCS uploads, the agent
+    parses + signature-checks + returns the manifest summary; the
+    operator reviews permissions; the GCS uploads again to ``/install``
+    only after consent. Both calls accept the same multipart shape.
+    """
+    if not file.filename or not file.filename.endswith(".adosplug"):
+        return _err(2, "usage_error", "expected a .adosplug file", 400)
+    raw = await file.read()
+    if not raw:
+        return _err(2, "usage_error", "empty upload", 400)
+    try:
+        return _archive_to_summary(raw)
+    except SignatureError as exc:
+        return _err(10, f"signature_{exc.kind}", str(exc), 400)
+    except (ManifestError, ArchiveError) as exc:
+        return _err(12, "manifest_invalid", str(exc), 400)
 
 
 # ---------------------------------------------------------------------

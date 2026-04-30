@@ -218,6 +218,49 @@ def test_remove_unknown_returns_404(client, supervisor):
     assert body["code"] == 14
 
 
+def test_parse_returns_manifest_summary_without_committing(
+    client, supervisor, tmp_path: Path
+):
+    archive_path = _build_archive(tmp_path)
+    raw = archive_path.read_bytes()
+    resp = client.post(
+        "/api/plugins/parse",
+        files={"file": ("p.adosplug", raw, "application/zip")},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["ok"] is True
+    assert body["plugin_id"] == "com.example.basic"
+    assert body["risk"] == "low"
+    assert body["signed"] is False
+    assert body["signer_id"] is None
+    assert "agent" in body["halves"]
+    assert any(p["id"] == "event.publish" for p in body["permissions"])
+    # Critically, parse must NOT have created an install row.
+    assert client.get("/api/plugins").json() == {"installs": []}
+
+
+def test_parse_rejects_non_adosplug(client, supervisor, tmp_path: Path):
+    bad = tmp_path / "x.txt"
+    bad.write_text("oops", encoding="utf-8")
+    resp = client.post(
+        "/api/plugins/parse",
+        files={"file": ("x.txt", bad.read_bytes(), "text/plain")},
+    )
+    assert resp.status_code == 400
+    assert resp.json()["code"] == 2
+
+
+def test_parse_rejects_malformed_archive(client, supervisor):
+    resp = client.post(
+        "/api/plugins/parse",
+        files={"file": ("p.adosplug", b"not a zip", "application/zip")},
+    )
+    assert resp.status_code == 400
+    body = resp.json()
+    assert body["code"] == 12
+
+
 def test_full_lifecycle_install_grant_enable_disable_remove(
     client, supervisor, tmp_path: Path
 ):
