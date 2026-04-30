@@ -398,3 +398,30 @@ def info(plugin_id: str, as_json: bool) -> None:
     else:
         click.echo(f"Built-in plugin: {plugin_id}")
         click.echo(f"Version: {builtin.version}")
+
+
+@plugin_group.command(
+    "lint", help="Run static analysis on a .adosplug archive before submission."
+)
+@click.argument("archive_path", type=click.Path(exists=True, dir_okay=False))
+@click.option("--json", "as_json", is_flag=True)
+def lint(archive_path: str, as_json: bool) -> None:
+    from ados.plugins.lint import format_report, lint_archive
+
+    try:
+        report = lint_archive(archive_path)
+    except (ArchiveError, ManifestError) as exc:
+        code = (
+            EXIT_MANIFEST_INVALID
+            if isinstance(exc, ManifestError)
+            else EXIT_GENERIC
+        )
+        _emit_err(as_json, code, str(exc))
+        sys.exit(code)
+
+    if as_json:
+        _emit_ok(as_json, report.to_dict())
+    else:
+        click.echo(format_report(report))
+
+    sys.exit(EXIT_OK if report.passed else EXIT_GENERIC)
