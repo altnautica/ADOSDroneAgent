@@ -139,7 +139,10 @@ class DiscoveryService:
         if self._zeroconf:
             try:
                 if self._info:
-                    await self._zeroconf.async_unregister_service(self._info)
+                    unregister_task = await self._zeroconf.async_unregister_service(
+                        self._info
+                    )
+                    await unregister_task
                 await self._zeroconf.async_close()
                 log.info("discovery_unregistered")
             except Exception as e:
