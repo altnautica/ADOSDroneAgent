@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from click.testing import CliRunner
@@ -256,6 +257,90 @@ def test_logs_linux_follow_flag(mock_run, mock_sys):
     assert result.exit_code == 0
     cmd = mock_run.call_args[0][0]
     assert "-f" in cmd
+
+
+# ─── demo command ────────────────────────────────────────────────────────────
+
+
+def test_demo_uses_user_writable_pairing_state(tmp_path):
+    """Demo mode should not need permission to write /etc/ados."""
+    from ados.core.config import ADOSConfig
+
+    config = ADOSConfig()
+    apps = []
+
+    class FakeAgentApp:
+        def __init__(self, app_config, demo):
+            self.config = app_config
+            self.demo = demo
+            apps.append(self)
+
+        def request_shutdown(self):
+            pass
+
+        async def start(self):
+            return None
+
+    with (
+        patch("pathlib.Path.home", return_value=tmp_path),
+        patch("ados.core.config.load_config", return_value=config),
+        patch("ados.core.logging.configure_logging"),
+        patch("ados.core.main.AgentApp", FakeAgentApp),
+    ):
+        result = runner.invoke(cli, ["demo", "--port", "18080"])
+
+    assert result.exit_code == 0
+    assert apps
+    assert apps[0].demo is True
+    assert config.pairing.state_path == str(tmp_path / ".ados" / "demo-pairing.json")
+    assert not config.pairing.state_path.startswith("/etc/ados")
+    assert config.pairing.convex_url == ""
+
+
+# ─── ground-station command namespace ────────────────────────────────────────
+
+
+def test_gs_wfb_pair_installs_pair_key():
+    """The WFB pair-key command should be reachable outside Bluetooth pairing."""
+    payload = {
+        "paired_drone_id": "drone-1",
+        "key_fingerprint": "abcd1234",
+        "paired_at": "2026-05-02T00:00:00Z",
+    }
+    with patch("ados.cli.gs._request", return_value=payload) as request:
+        result = runner.invoke(
+            cli,
+            ["gs", "wfb", "pair", "PAIRKEY", "--drone-id", "drone-1"],
+        )
+
+    assert result.exit_code == 0
+    assert "Paired. drone=drone-1 fingerprint=abcd1234" in result.output
+    request.assert_called_once_with(
+        "POST",
+        "/api/v1/ground-station/wfb/pair",
+        json_body={"pair_key": "PAIRKEY", "drone_device_id": "drone-1"},
+    )
+
+
+def test_gs_pair_namespace_is_for_bluetooth_helpers():
+    """`ados gs pair` remains the Bluetooth helper group."""
+    result = runner.invoke(cli, ["gs", "pair", "--help"])
+    assert result.exit_code == 0
+    assert "Bluetooth pairing subcommands" in result.output
+    assert "bt" in result.output
+
+
+def test_readme_cli_examples_match_current_command_names():
+    """README should not advertise stale command spellings."""
+    readme = Path("README.md").read_text(encoding="utf-8")
+    assert "ados config show" not in readme
+    assert "ados config set" not in readme
+    assert "ados gs pair <key>" not in readme
+    assert "ados gs mesh join <host>" not in readme
+    assert "ados config <key>" in readme
+    assert "ados set <key> <val>" in readme
+    assert "ados gs wfb pair <key>" in readme
+    assert "ados gs mesh join --receiver-host <host>" in readme
 
 
 @patch("ados.cli.main.platform.system", return_value="Linux")

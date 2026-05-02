@@ -130,12 +130,12 @@ $ ados gs mesh revoke ados-1a2b3c
 revoked. device added to revocations.
 ```
 
-### ados gs mesh join `[--host <ip>] [--port <port>]`
+### ados gs mesh join `[--receiver-host <ip>] [--receiver-port <port>]`
 
-Relay only. Sends a join request to a receiver. If `--host` and `--port` are omitted, the relay resolves `_ados-receiver._tcp` over mDNS on `bat0` and picks the first result. This command is usually driven from the OLED (`Mesh > Join mesh`), not the shell.
+Relay only. Sends a join request to a receiver. If `--receiver-host` and `--receiver-port` are omitted, the relay resolves `_ados-receiver._tcp` over mDNS on `bat0` and picks the first result. This command is usually driven from the OLED (`Mesh > Join mesh`), not the shell.
 
 ```
-$ ados gs mesh join --host 10.20.0.1 --port 5801
+$ ados gs mesh join --receiver-host 10.20.0.1 --receiver-port 5801
 join request sent. receiver must approve.
 ```
 
