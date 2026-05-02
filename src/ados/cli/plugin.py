@@ -198,7 +198,7 @@ def install(
                 as_json,
                 EXIT_PERMISSION_DENIED,
                 f"--yes refuses {result.risk}-risk plugins",
-                hint="Re-run interactively or pass --accept-risk.",
+                hint="Re-run interactively and approve the permissions after review.",
             )
             sup.remove(result.plugin_id, keep_data=False)
             sys.exit(EXIT_PERMISSION_DENIED)

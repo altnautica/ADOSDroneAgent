@@ -122,7 +122,12 @@ def gs_status() -> None:
         _pp(data)
 
 
-@gs_group.command("pair")
+@gs_group.group("wfb")
+def gs_wfb() -> None:
+    """WFB-ng pair-key controls."""
+
+
+@gs_wfb.command("pair")
 @click.argument("pair_key")
 @click.option(
     "--drone-id",
@@ -144,7 +149,7 @@ def gs_pair(pair_key: str, drone_device_id: str | None) -> None:
         )
 
 
-@gs_group.command("unpair")
+@gs_wfb.command("unpair")
 def gs_unpair() -> None:
     """Remove the installed pair key."""
     data = _request("DELETE", "/api/v1/ground-station/wfb/pair")

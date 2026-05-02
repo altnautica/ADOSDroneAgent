@@ -147,8 +147,9 @@ Any Linux ARM64 or x86_64 board with a serial port should work. The tier system 
 | `ados tui` | Launch the terminal dashboard |
 | `ados status` | FC connection and agent status |
 | `ados health` | CPU, RAM, disk, temperature |
-| `ados config show` | Print current config |
-| `ados config set <key> <val>` | Update a config value |
+| `ados config` | Print current config |
+| `ados config <key>` | Print one config value by dot path |
+| `ados set <key> <val>` | Update a config value |
 | `ados mavlink` | MAVLink proxy status and connected clients |
 | `ados video` | Video pipeline status |
 | `ados link` | Cloud connectivity status |
@@ -177,7 +178,8 @@ Available when the node is running in ground-station profile. Hidden on drone-pr
 | Command | Description |
 |---------|-------------|
 | `ados gs status` | Profile, role, WFB-ng link, uplink priority |
-| `ados gs pair <key>` | Pair this ground node with a drone |
+| `ados gs wfb pair <key>` | Pair this ground node with a drone |
+| `ados gs wfb unpair` | Remove the installed drone pair key |
 | `ados gs network show` | Active uplinks and their priorities |
 | `ados gs network ap` | WiFi AP state and client list |
 | `ados gs network client scan` | Scan for joinable WiFi networks |
@@ -192,7 +194,7 @@ Available when the node is running in ground-station profile. Hidden on drone-pr
 | `ados gs mesh pending` | Relays waiting for approval |
 | `ados gs mesh approve <device_id>` | Admit a pending relay into the mesh |
 | `ados gs mesh revoke <device_id>` | Remove an approved relay |
-| `ados gs mesh join <host>` | On a relay, join a receiver during its accept window |
+| `ados gs mesh join --receiver-host <host>` | On a relay, join a receiver during its accept window |
 
 ---
 
