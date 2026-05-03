@@ -78,32 +78,13 @@ The script detects your OS, installs Python 3.11, auto-detects the FC serial por
 
 Also runs on macOS for local development and testing.
 
----
-
-## Why ADOS Drone Agent
-
-| | ADOS Drone Agent | Rpanion-server | BlueOS | Raw MAVProxy |
-|---|---|---|---|---|
-| **MAVLink proxy** | Yes (serial to WS/TCP/UDP) | Yes | Yes | Yes |
-| **Cloud relay** | Yes (MQTT + Convex, zero port forwarding) | No | No | No |
-| **HD video** | Yes (RTSP, WFB-ng planned) | Yes (basic) | Yes | No |
-| **REST API** | Yes (16 route modules, OpenAPI docs) | Limited | Yes | No |
-| **Terminal UI** | Yes (5 screens, SSH-friendly) | No | No | No |
-| **Application suites** | Yes (6 YAML-based vertical modules) | No | No | No |
-| **Hardware auto-detect** | Yes (tier-based feature scaling) | No | No | No |
-| **OTA updates** | Planned | No | Yes | No |
-| **Target** | Drones (any size) | Drones / Rovers | Underwater ROVs | Any MAVLink |
-| **License** | GPL-3.0 | GPL-3.0 | Custom | GPL-3.0 |
-
----
-
 ## What It Does
 
 **MAVLink proxy.** Reads the FC serial port and routes MAVLink to WebSocket, TCP, and UDP simultaneously. Multiple ground stations can connect at once. Auto-reconnect on FC disconnect.
 
 **50km data link.** When paired with ADOS Mission Control, the agent publishes telemetry via MQTT over a Cloudflare Tunnel at 2Hz+. No port forwarding needed. Works from anywhere with a cellular connection.
 
-**HD video streaming.** The video pipeline pushes an RTSP stream to a cloud relay. The GCS plays it in-browser via MediaSource Extensions at 0.5-1.5s latency. WFB-ng long-range video link support is planned.
+**HD video streaming.** The video pipeline supports RTSP, WebRTC/WHEP, and WFB-ng radio paths. Mission Control can play live feeds in the browser over local or relayed connections.
 
 **Full remote control.** The GCS can send arm/disarm, mode changes, guided flight commands, and mission uploads through the cloud relay. The agent polls and executes them. All from a browser, over any network.
 

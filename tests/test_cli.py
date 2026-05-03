@@ -179,7 +179,7 @@ def test_diag_contains_services_and_fc(
     result = runner.invoke(cli, ["diag"])
     assert result.exit_code == 0
     assert "Services" in result.output
-    assert "ados-agent" in result.output
+    assert "ados-supervisor" in result.output
     assert "Flight Controller" in result.output
     assert "Connected:" in result.output
 
@@ -244,7 +244,7 @@ def test_logs_linux_calls_journalctl(mock_run, mock_sys):
     cmd = mock_run.call_args[0][0]
     assert "journalctl" in cmd
     assert "-u" in cmd
-    assert "ados-agent.service" in cmd
+    assert "ados-supervisor.service" in cmd
     assert "-n" in cmd
     assert "20" in cmd
 

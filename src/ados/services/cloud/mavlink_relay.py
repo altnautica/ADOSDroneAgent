@@ -129,8 +129,7 @@ class MavlinkMqttRelay:
             self._mqtt.username_pw_set(self._username, self._password)
 
         if self._transport == "websockets":
-            self._mqtt.tls_set(cert_reqs=ssl.CERT_NONE)
-            self._mqtt.tls_insecure_set(True)
+            self._mqtt.tls_set(cert_reqs=ssl.CERT_REQUIRED)
             self._mqtt.ws_set_options(path="/mqtt")
 
         # GCS→FC: forward MQTT messages to IPC
@@ -231,7 +230,7 @@ class MavlinkMqttRelay:
                     data = await asyncio.wait_for(
                         self._queue.get(), timeout=1.0
                     )
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     self._maybe_log_metrics(loop.time())
                     continue
 

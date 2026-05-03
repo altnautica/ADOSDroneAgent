@@ -184,7 +184,7 @@ def render_diag() -> None:
 
     # Services
     click.echo(_section("Services"))
-    for svc in ["ados-agent", "wfb_rx", "wfb_tx", "mavlink-router"]:
+    for svc in ["ados-supervisor", "ados-api", "ados-mavlink", "ados-cloud"]:
         st = _get_service_status(svc)
         click.echo(f"  {svc:20s} {st}")
 

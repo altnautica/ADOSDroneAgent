@@ -158,8 +158,9 @@ class AgentApp:
         # Load raw board profile YAML for capabilities (includes compute, video, etc.)
         board_profile_dict: dict = {}
         try:
-            from ados.hal.detect import BOARDS_DIR
             import yaml as _yaml
+
+            from ados.hal.detect import BOARDS_DIR
 
             if BOARDS_DIR.is_dir():
                 model_lower = board.model.lower()
@@ -324,14 +325,20 @@ class AgentApp:
                 owner=pm.owner_id,
             )
 
-        # Cloud pairing beacon (when unpaired, POST code to Convex)
-        self._start_service("pairing-beacon", self._cloud_beacon_loop())
+        if self._single_process_cloud_enabled():
+            # Cloud pairing beacon (when unpaired, POST code to Convex)
+            self._start_service("pairing-beacon", self._cloud_beacon_loop())
 
-        # Cloud heartbeat (when paired, POST status to Convex)
-        self._start_service("pairing-heartbeat", self._cloud_heartbeat_loop())
+            # Cloud heartbeat (when paired, POST status to Convex)
+            self._start_service("pairing-heartbeat", self._cloud_heartbeat_loop())
 
-        # Cloud command polling (when paired, poll Convex for commands)
-        self._start_service("cloud-command-poll", self._cloud_command_poll_loop())
+            # Cloud command polling (when paired, poll Convex for commands)
+            self._start_service("cloud-command-poll", self._cloud_command_poll_loop())
+        else:
+            log.info(
+                "single_process_cloud_disabled",
+                reason="cloud runs through managed service runtime",
+            )
 
         # Notify systemd
         self.health.sd_notify_ready()
@@ -359,6 +366,10 @@ class AgentApp:
 
         task = asyncio.create_task(_wrapper(), name=name)
         self._tasks.append(task)
+
+    def _single_process_cloud_enabled(self) -> bool:
+        """Return whether the fallback single-process runtime owns cloud loops."""
+        return bool(getattr(self.config.pairing, "single_process_cloud_enabled", False))
 
     async def _health_loop(self) -> None:
         """Periodically check system health."""
@@ -528,7 +539,6 @@ class AgentApp:
 
                     payload = {
                         "deviceId": self.config.agent.device_id,
-                        "apiKey": self.pairing_manager.api_key,
                         "version": __version__,
                         "uptimeSeconds": self.uptime_seconds,
                         "boardName": self.board_name,
@@ -565,6 +575,7 @@ class AgentApp:
                         await client.post(
                             f"{convex_url}/agent/status",
                             json=payload,
+                            headers={"X-ADOS-Key": self.pairing_manager.api_key},
                         )
                     log.debug("cloud_status_sent")
                 except Exception:
@@ -586,7 +597,8 @@ class AgentApp:
                     async with httpx.AsyncClient(timeout=10.0) as client:
                         resp = await client.get(
                             f"{convex_url}/agent/commands",
-                            params={"deviceId": device_id, "apiKey": api_key},
+                            params={"deviceId": device_id},
+                            headers={"X-ADOS-Key": api_key},
                         )
                         if resp.status_code != 200:
                             log.debug("cloud_command_poll_error", status=resp.status_code)
@@ -641,10 +653,10 @@ class AgentApp:
                                     json={
                                         "commandId": cmd_id,
                                         "deviceId": device_id,
-                                        "apiKey": api_key,
                                         "status": "completed" if result["success"] else "failed",
                                         "result": result,
                                     },
+                                    headers={"X-ADOS-Key": api_key},
                                 )
                             except Exception:
                                 log.debug("cloud_command_ack_failed", command_id=cmd_id)

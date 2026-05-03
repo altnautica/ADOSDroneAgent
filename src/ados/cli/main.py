@@ -7,7 +7,6 @@ import os
 import platform
 import shutil
 import signal
-import socket
 import subprocess
 import sys
 from pathlib import Path
@@ -16,11 +15,7 @@ import click
 import httpx
 
 from ados import __version__
-from ados.core.paths import (
-    CONFIG_YAML,
-    DEVICE_ID_PATH,
-    PAIRING_JSON,
-)
+from ados.core.paths import PAIRING_JSON
 
 API_BASE = "http://localhost:8080"
 PAIRING_STATE_PATH = PAIRING_JSON
@@ -324,7 +319,12 @@ def scripts(as_json: bool) -> None:
 def run(path: str) -> None:
     """Run a Python script on the agent."""
     try:
-        resp = httpx.post(f"{API_BASE}/api/scripts/run", headers=_auth_headers(), json={"path": path}, timeout=5.0)
+        resp = httpx.post(
+            f"{API_BASE}/api/scripts/run",
+            headers=_auth_headers(),
+            json={"path": path},
+            timeout=5.0,
+        )
         resp.raise_for_status()
         data = resp.json()
         click.echo(f"Started: {data.get('script_id', '?')}")
@@ -486,7 +486,12 @@ def rollback_cmd(version: str | None) -> None:
         params = {}
         if version:
             params["version"] = version
-        resp = httpx.post(f"{API_BASE}/api/ota/rollback", headers=_auth_headers(), params=params, timeout=120.0)
+        resp = httpx.post(
+            f"{API_BASE}/api/ota/rollback",
+            headers=_auth_headers(),
+            params=params,
+            timeout=120.0,
+        )
         resp.raise_for_status()
         data = resp.json()
         if data.get("status") == "rolled_back":
@@ -703,9 +708,16 @@ def uninstall(keep_config: bool, purge: bool, yes: bool) -> None:
     install_dir = Path("/opt/ados")
     config_dir = Path("/etc/ados")
     data_dir = Path("/var/ados")
-    service_name = "ados-agent"
-    service_file = Path("/etc/systemd/system/ados-agent.service")
-    symlinks = [Path("/usr/local/bin/ados"), Path("/usr/local/bin/ados-agent")]
+    service_names = ["ados-supervisor", "ados-agent"]
+    service_files = [
+        Path("/etc/systemd/system/ados-supervisor.service"),
+        Path("/etc/systemd/system/ados-agent.service"),
+    ]
+    symlinks = [
+        Path("/usr/local/bin/ados"),
+        Path("/usr/local/bin/ados-agent"),
+        Path("/usr/local/bin/ados-supervisor"),
+    ]
 
     if os.geteuid() != 0:
         click.echo("Error: Uninstall requires root. Run with sudo.", err=True)
@@ -713,8 +725,9 @@ def uninstall(keep_config: bool, purge: bool, yes: bool) -> None:
 
     # Show what will be removed
     items = []
-    if service_file.exists():
-        items.append(f"  systemd service: {service_name}")
+    for service_name, service_file in zip(service_names, service_files):
+        if service_file.exists():
+            items.append(f"  systemd service: {service_name}")
     for sym in symlinks:
         if sym.exists() or sym.is_symlink():
             items.append(f"  symlink: {sym}")
@@ -739,22 +752,26 @@ def uninstall(keep_config: bool, purge: bool, yes: bool) -> None:
     if not yes:
         click.confirm("Proceed with uninstall?", abort=True)
 
-    # 1. Stop and disable systemd service
-    if service_file.exists():
-        click.echo(f"Stopping {service_name}...")
-        subprocess.run(
-            ["systemctl", "stop", service_name],
-            capture_output=True, timeout=30,
-        )
-        subprocess.run(
-            ["systemctl", "disable", service_name],
-            capture_output=True, timeout=10,
-        )
-        try:
-            service_file.unlink()
-            click.echo(f"Removed {service_file}")
-        except OSError:
-            pass
+    # 1. Stop and disable systemd services
+    removed_service = False
+    for service_name, service_file in zip(service_names, service_files):
+        if service_file.exists():
+            click.echo(f"Stopping {service_name}...")
+            subprocess.run(
+                ["systemctl", "stop", service_name],
+                capture_output=True, timeout=30,
+            )
+            subprocess.run(
+                ["systemctl", "disable", service_name],
+                capture_output=True, timeout=10,
+            )
+            try:
+                service_file.unlink()
+                removed_service = True
+                click.echo(f"Removed {service_file}")
+            except OSError:
+                pass
+    if removed_service:
         subprocess.run(
             ["systemctl", "daemon-reload"],
             capture_output=True, timeout=10,
@@ -843,7 +860,7 @@ def logs(lines: int, follow: bool, since: str | None) -> None:
         return
 
     # Linux: use journalctl
-    cmd = ["journalctl", "-u", "ados-agent.service", "--no-pager"]
+    cmd = ["journalctl", "-u", "ados-supervisor.service", "--no-pager"]
 
     if follow:
         cmd.append("-f")
