@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from ados.core.main import ServiceState, ServiceTracker
+from ados.core.service_tracker import ServiceState, ServiceTracker
 
 
 def test_service_state_enum_values():
