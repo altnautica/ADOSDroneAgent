@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import Any
 
 import uvicorn
 from fastapi import FastAPI
@@ -35,14 +35,13 @@ from ados.api.routes import (
     video,
     wfb,
 )
-
-if TYPE_CHECKING:
-    from ados.api.runtime import ApiRuntime
+from ados.api.runtime import ensure_api_runtime
 
 
-def create_app(agent: ApiRuntime) -> FastAPI:
+def create_app(agent: Any) -> FastAPI:
     """Create and configure the FastAPI application."""
-    set_agent_app(agent)
+    api_runtime = ensure_api_runtime(agent)
+    set_agent_app(api_runtime)
 
     app = FastAPI(
         title="ADOS Drone Agent",
@@ -51,7 +50,7 @@ def create_app(agent: ApiRuntime) -> FastAPI:
     )
 
     # CORS
-    cors_config = agent.config.security.api
+    cors_config = api_runtime.config.security.api
     if cors_config.cors_enabled:
         app.add_middleware(
             CORSMiddleware,
@@ -71,8 +70,8 @@ def create_app(agent: ApiRuntime) -> FastAPI:
     from ados.api.middleware.security import SecurityMiddleware
     app.add_middleware(
         SecurityMiddleware,
-        enabled=agent.config.security.hmac_enabled,
-        secret=agent.config.security.hmac_secret,
+        enabled=api_runtime.config.security.hmac_enabled,
+        secret=api_runtime.config.security.hmac_secret,
     )
 
     # Rate limiting middleware — added after auth + security.
@@ -121,7 +120,7 @@ def create_app(agent: ApiRuntime) -> FastAPI:
     # `static-ground/index.html` directly. Mount is added AFTER every
     # router above so API routes match first (FastAPI resolves routes
     # in registration order, and the static mount is the catch-all).
-    if agent.config.agent.profile == "ground_station":
+    if api_runtime.config.agent.profile == "ground_station":
         from pathlib import Path
 
         from fastapi.staticfiles import StaticFiles
@@ -137,10 +136,11 @@ def create_app(agent: ApiRuntime) -> FastAPI:
     return app
 
 
-async def create_api_task(agent: ApiRuntime) -> None:
+async def create_api_task(agent: Any) -> None:
     """Create and run the API server as an asyncio task."""
-    app = create_app(agent)
-    api_config = agent.config.scripting.rest_api
+    api_runtime = ensure_api_runtime(agent)
+    app = create_app(api_runtime)
+    api_config = api_runtime.config.scripting.rest_api
 
     config = uvicorn.Config(
         app,

@@ -26,7 +26,7 @@ def _get_video_pipeline():
     Returns the pipeline object or None if not initialized.
     """
     app = get_agent_app()
-    return getattr(app, "_video_pipeline", None)
+    return app.video_pipeline()
 
 
 async def _probe_mediamtx() -> dict | None:
@@ -138,7 +138,7 @@ async def trigger_snapshot():
     from ados.services.video.snapshot import capture_snapshot
 
     app = get_agent_app()
-    state = getattr(app, "_vehicle_state", None)
+    state = app.vehicle_state()
     gps_lat = state.lat if state else 0.0
     gps_lon = state.lon if state else 0.0
 

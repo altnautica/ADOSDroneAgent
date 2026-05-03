@@ -21,3 +21,13 @@ def test_api_layer_does_not_type_against_legacy_agentapp() -> None:
             offenders.append(str(path))
 
     assert offenders == []
+
+
+def test_api_routes_do_not_reach_into_runtime_privates() -> None:
+    offenders = []
+    for path in Path("src/ados/api/routes").rglob("*.py"):
+        source = path.read_text()
+        if "app._" in source or 'getattr(app, "_' in source:
+            offenders.append(str(path))
+
+    assert offenders == []

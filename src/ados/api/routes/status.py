@@ -66,12 +66,14 @@ async def _fetch_mesh_state() -> dict:
 
 def _build_services_list_sync(app) -> list[dict]:
     """Synchronous services list builder. Pure data, no I/O."""
-    tracker_data = app.services.to_dict()
+    tracker = app.service_tracker
+    tracker_data = tracker.to_dict()
     services: list[dict] = []
-    task_names = {t.get_name() for t in app._tasks}
+    tasks = app.service_tasks()
+    task_names = {t.get_name() for t in tasks}
     now_mono = time.monotonic()
 
-    for task_item in app._tasks:
+    for task_item in tasks:
         name = task_item.get_name()
         tracked = tracker_data.get(name, {})
         raw_state = tracked.get("state", "running" if not task_item.done() else "stopped")
@@ -80,7 +82,7 @@ def _build_services_list_sync(app) -> list[dict]:
             "state": raw_state,
             "task_done": task_item.done(),
         }
-        transitions = app.services.get_transitions(name)
+        transitions = tracker.get_transitions(name)
         svc_uptime = 0.0
         if transitions:
             for ts, st in reversed(transitions):
@@ -97,7 +99,7 @@ def _build_services_list_sync(app) -> list[dict]:
                 "state": info["state"],
                 "task_done": True,
             }
-            transitions = app.services.get_transitions(name)
+            transitions = tracker.get_transitions(name)
             svc_uptime = 0.0
             if transitions:
                 for ts, st in reversed(transitions):
@@ -137,44 +139,27 @@ async def get_status():
     except Exception:
         pass
 
-    health_info = app.health.last.to_dict()
+    health_info = app.health_dict()
 
     deps_map = await status_cache.get(
         "video_deps", _fetch_video_deps, _VIDEO_DEPS_TTL,
     )
 
-    # Read live state from StateIPC if available (multi-process mode), fall
-    # back to the in-process FC connection if running as single-process.
-    state_client = getattr(app, "_state_client", None)
-    state = state_client.state if state_client and state_client.state else {}
-
-    fc_connected = state.get("fc_connected")
-    fc_port = state.get("fc_port")
-    fc_baud = state.get("fc_baud")
-    state_uptime = state.get("service_uptime")
-
-    if fc_connected is None and app._fc_connection is not None:
-        # Single-process fallback (e.g. running ados-agent monolithically)
-        fc_connected = app._fc_connection.connected
-        fc_port = getattr(app._fc_connection, "port", None)
-        fc_baud = getattr(app._fc_connection, "baud", None)
-
-    if fc_connected is None:
-        fc_connected = False
-
-    # Prefer the mavlink service's uptime when available (it's the actual
-    # "agent uptime" the user cares about). Falls back to the API service's
-    # own uptime which is 0.0 in the StandaloneAgent shim.
-    uptime = state_uptime if state_uptime is not None else app.uptime_seconds
+    fc_status = app.fc_status()
+    uptime = (
+        fc_status.uptime_seconds
+        if fc_status.uptime_seconds is not None
+        else app.uptime_seconds()
+    )
 
     return {
         "version": __version__,
         "uptime_seconds": uptime,
         "board": board_info,
         "health": health_info,
-        "fc_connected": fc_connected,
-        "fc_port": fc_port,
-        "fc_baud": fc_baud,
+        "fc_connected": fc_status.connected,
+        "fc_port": fc_status.port,
+        "fc_baud": fc_status.baud,
         "dependencies": deps_map,
     }
 
@@ -203,25 +188,14 @@ async def get_full_status(request: Request):
     except Exception:
         pass
 
-    health_info = app.health.last.to_dict()
+    health_info = app.health_dict()
 
-    state_client = getattr(app, "_state_client", None)
-    state = state_client.state if state_client and state_client.state else {}
-
-    fc_connected = state.get("fc_connected")
-    fc_port = state.get("fc_port")
-    fc_baud = state.get("fc_baud")
-    state_uptime = state.get("service_uptime")
-
-    if fc_connected is None and app._fc_connection is not None:
-        fc_connected = app._fc_connection.connected
-        fc_port = getattr(app._fc_connection, "port", None)
-        fc_baud = getattr(app._fc_connection, "baud", None)
-
-    if fc_connected is None:
-        fc_connected = False
-
-    uptime = state_uptime if state_uptime is not None else app.uptime_seconds
+    fc_status = app.fc_status()
+    uptime = (
+        fc_status.uptime_seconds
+        if fc_status.uptime_seconds is not None
+        else app.uptime_seconds()
+    )
 
     # --- Services (same logic as /api/services), cached briefly ---
     async def _build_services():
@@ -257,10 +231,10 @@ async def get_full_status(request: Request):
         pass
 
     # --- Video (same logic as /api/video with mediamtx probe) ---
-    from ados.api.routes.video import _get_video_pipeline, _probe_mediamtx
+    from ados.api.routes.video import _probe_mediamtx
 
     video = {"state": "not_initialized", "whep_url": None}
-    pipeline = _get_video_pipeline()
+    pipeline = app.video_pipeline()
     if pipeline is not None:
         vid_status = pipeline.get_status()
         if vid_status.get("mediamtx", {}).get("running"):
@@ -276,13 +250,11 @@ async def get_full_status(request: Request):
             video = {"state": "running", "whep_url": f"http://{host}:8889/main/whep"}
 
     # --- Telemetry snapshot ---
-    telemetry = {}
-    if app._vehicle_state:
-        telemetry = app._vehicle_state.to_dict()
+    telemetry = app.vehicle_state_dict()
 
     # --- Capabilities (from FeatureManager if available) ---
     capabilities = {}
-    fm = getattr(app, "feature_manager", None)
+    fm = app.feature_manager
     if fm is not None:
         try:
             capabilities = fm.get_capabilities()
@@ -321,9 +293,9 @@ async def get_full_status(request: Request):
         "uptime_seconds": uptime,
         "board": board_info,
         "health": health_info,
-        "fc_connected": fc_connected,
-        "fc_port": fc_port,
-        "fc_baud": fc_baud,
+        "fc_connected": fc_status.connected,
+        "fc_port": fc_status.port,
+        "fc_baud": fc_status.baud,
         "services": services,
         "resources": resources,
         "video": video,
@@ -344,6 +316,4 @@ async def get_full_status(request: Request):
 async def get_telemetry():
     """Current vehicle state from VehicleState."""
     app = get_agent_app()
-    if app._vehicle_state:
-        return app._vehicle_state.to_dict()
-    return {}
+    return app.vehicle_state_dict()

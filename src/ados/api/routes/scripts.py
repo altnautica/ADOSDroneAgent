@@ -29,9 +29,10 @@ class TextCommandRequest(BaseModel):
 async def list_scripts():
     """List all scripts and recent command log."""
     app = get_agent_app()
-    runner = getattr(app, "_script_runner", None)
-    executor = getattr(app, "_command_executor", None)
-    demo = getattr(app, "_demo_scripting", None)
+    handles = app.scripting_handles()
+    runner = handles.runner
+    executor = handles.executor
+    demo = handles.demo
 
     scripts: list[dict] = []
     command_log: list[dict] = []
@@ -87,7 +88,7 @@ async def delete_script(script_id: str):
 async def run_script_by_id(script_id: str):
     """Run a script by ID."""
     app = get_agent_app()
-    runner = getattr(app, "_script_runner", None)
+    runner = app.scripting_handles().runner
     if runner is None:
         raise HTTPException(status_code=503, detail="Script runner not available")
     try:
@@ -101,7 +102,7 @@ async def run_script_by_id(script_id: str):
 async def run_script(req: RunScriptRequest):
     """Start a Python script."""
     app = get_agent_app()
-    runner = getattr(app, "_script_runner", None)
+    runner = app.scripting_handles().runner
     if runner is None:
         raise HTTPException(status_code=503, detail="Script runner not available")
 
@@ -116,7 +117,7 @@ async def run_script(req: RunScriptRequest):
 async def stop_script(req: StopScriptRequest):
     """Stop a running script."""
     app = get_agent_app()
-    runner = getattr(app, "_script_runner", None)
+    runner = app.scripting_handles().runner
     if runner is None:
         raise HTTPException(status_code=503, detail="Script runner not available")
 
@@ -135,8 +136,9 @@ async def execute_text_command(req: TextCommandRequest):
     parsed = parse_text_command(req.command)
 
     # Try demo engine first, then real executor
-    demo = getattr(app, "_demo_scripting", None)
-    executor = getattr(app, "_command_executor", None)
+    handles = app.scripting_handles()
+    demo = handles.demo
+    executor = handles.executor
 
     if demo is not None:
         result = await demo.execute(parsed, source="api")
@@ -154,12 +156,13 @@ async def scripting_status():
     """Overall scripting engine status."""
     app = get_agent_app()
 
-    demo = getattr(app, "_demo_scripting", None)
+    handles = app.scripting_handles()
+    demo = handles.demo
     if demo is not None:
         return demo.status()
 
-    executor = getattr(app, "_command_executor", None)
-    runner = getattr(app, "_script_runner", None)
+    executor = handles.executor
+    runner = handles.runner
 
     result: dict = {"demo_mode": False}
 
@@ -173,7 +176,7 @@ async def scripting_status():
             1 for s in scripts if s.state.value == "running"
         )
 
-    fc = getattr(app, "_fc_connection", None)
+    fc = app.fc_connection()
     result["fc_connected"] = bool(fc and getattr(fc, "connected", False))
 
     return result

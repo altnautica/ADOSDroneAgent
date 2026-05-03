@@ -44,7 +44,7 @@ def _infer_service_state(app, name: str, tracker_state: str, task_done: bool) ->
 
     # FC connection — degraded if no serial port / not connected
     if name == "fc-connection":
-        fc = getattr(app, "_fc_connection", None)
+        fc = app.fc_connection()
         if fc and not getattr(fc, "connected", False):
             return "degraded"
 
@@ -55,7 +55,7 @@ def _infer_service_state(app, name: str, tracker_state: str, task_done: bool) ->
 
     # WFB link — degraded if no compatible adapter found
     if name == "wfb-link":
-        wfb = getattr(app, "_wfb_manager", None)
+        wfb = app.wfb_manager()
         if wfb and not getattr(wfb, "has_adapter", False):
             return "degraded"
 
@@ -73,7 +73,8 @@ async def list_services():
     app = get_agent_app()
 
     # Get state machine data from ServiceTracker
-    tracker_data = app.services.to_dict()
+    tracker = app.service_tracker
+    tracker_data = tracker.to_dict()
 
     # Get process-level metrics (all services share one process)
     proc = _get_process_metrics()
@@ -83,10 +84,11 @@ async def list_services():
 
     # Merge with asyncio task status for runtime info
     services = []
-    task_names = {t.get_name() for t in app._tasks}
+    tasks = app.service_tasks()
+    task_names = {t.get_name() for t in tasks}
     running_count = 0
 
-    for task in app._tasks:
+    for task in tasks:
         name = task.get_name()
         tracked = tracker_data.get(name, {})
         raw_state = tracked.get("state", "running" if not task.done() else "stopped")
@@ -121,7 +123,7 @@ async def list_services():
     now_mono = time.monotonic()
     for svc in services:
         svc_name = svc["name"]
-        transitions = app.services.get_transitions(svc_name)
+        transitions = tracker.get_transitions(svc_name)
         svc_uptime = 0.0
         if transitions:
             for ts, st in reversed(transitions):
