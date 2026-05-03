@@ -32,7 +32,7 @@ SIMPLE_COMMANDS = {
 async def execute_command(req: CommandRequest):
     """Execute a text command."""
     app = get_agent_app()
-    fc = app._fc_connection
+    fc = app.fc_connection()
 
     if not fc or not fc.connected:
         raise HTTPException(status_code=503, detail="FC not connected")

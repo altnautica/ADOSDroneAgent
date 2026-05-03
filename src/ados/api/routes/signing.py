@@ -70,9 +70,9 @@ async def capability() -> dict[str, Any]:
     """
     app = get_agent_app()
     return detect_capability(
-        app._fc_connection,
-        app._vehicle_state,
-        app._param_cache,
+        app.fc_connection(),
+        app.vehicle_state(),
+        app.param_cache(),
     )
 
 
@@ -85,7 +85,7 @@ async def enroll_fc_route(req: EnrollRequest) -> dict[str, Any]:
     is a short fingerprint (first 8 hex chars of sha256), not the key.
     """
     app = get_agent_app()
-    fc = app._fc_connection
+    fc = app.fc_connection()
     if fc is None or not fc.connected:
         raise HTTPException(status_code=503, detail="FC not connected")
 
@@ -125,7 +125,7 @@ async def enroll_fc_route(req: EnrollRequest) -> dict[str, Any]:
 async def disable_on_fc_route() -> dict[str, Any]:
     """Clear the FC's signing store (SETUP_SIGNING with all-zero key)."""
     app = get_agent_app()
-    fc = app._fc_connection
+    fc = app.fc_connection()
     if fc is None or not fc.connected:
         raise HTTPException(status_code=503, detail="FC not connected")
     try:
@@ -139,14 +139,14 @@ async def disable_on_fc_route() -> dict[str, Any]:
 async def require_get() -> dict[str, Any]:
     """Current SIGNING_REQUIRE param value as cached by ParamCache."""
     app = get_agent_app()
-    return get_require(app._param_cache)
+    return get_require(app.param_cache())
 
 
 @router.put("/mavlink/signing/require")
 async def require_put(req: RequireRequest) -> dict[str, Any]:
     """Set SIGNING_REQUIRE on the FC."""
     app = get_agent_app()
-    fc = app._fc_connection
+    fc = app.fc_connection()
     if fc is None or not fc.connected:
         raise HTTPException(status_code=503, detail="FC not connected")
     try:
@@ -164,7 +164,7 @@ async def counters() -> dict[str, Any]:
     holds no key). Counters just confirm signed frames are transiting.
     """
     app = get_agent_app()
-    observer = getattr(app, "_signing_observer", None)
+    observer = app.signing_observer()
     if observer is None:
         return {
             "tx_signed_count": 0,

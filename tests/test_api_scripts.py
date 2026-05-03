@@ -8,6 +8,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from ados.api.routes.scripts import router
+from ados.api.runtime import ensure_api_runtime
 
 
 @pytest.fixture
@@ -43,7 +44,10 @@ def client(mock_app):
     test_app = FastAPI()
     test_app.include_router(router, prefix="/api")
 
-    with patch("ados.api.routes.scripts.get_agent_app", return_value=mock_app):
+    with patch(
+        "ados.api.routes.scripts.get_agent_app",
+        return_value=ensure_api_runtime(mock_app),
+    ):
         yield TestClient(test_app)
 
 
@@ -103,7 +107,10 @@ class TestScriptsApiWithRunner:
         test_app = FastAPI()
         test_app.include_router(router, prefix="/api")
 
-        with patch("ados.api.routes.scripts.get_agent_app", return_value=mock_app):
+        with patch(
+            "ados.api.routes.scripts.get_agent_app",
+            return_value=ensure_api_runtime(mock_app),
+        ):
             yield TestClient(test_app)
 
     def test_run_script(self, runner_client):

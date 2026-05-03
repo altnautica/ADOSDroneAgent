@@ -13,7 +13,7 @@ supervisor reads their manifest off disk.
 
 from __future__ import annotations
 
-from importlib import metadata
+from importlib import import_module, metadata
 
 from ados.core.logging import get_logger
 from ados.plugins.manifest import PluginManifest
@@ -21,6 +21,11 @@ from ados.plugins.manifest import PluginManifest
 log = get_logger("plugins.loader")
 
 ENTRY_POINT_GROUP = "ados.plugins"
+BUILTIN_PLUGIN_MODULES = (
+    "ados.plugins.builtin.geofence",
+    "ados.plugins.builtin.telemetry_logger",
+    "ados.plugins.builtin.mavlink_inspector",
+)
 
 
 def _extract_manifest(obj: object, ep_name: str) -> PluginManifest | None:
@@ -74,6 +79,8 @@ def load_builtin_manifests() -> list[PluginManifest]:
         log.warning("plugin_entry_points_lookup_failed", error=str(exc))
         return manifests
 
+    seen_ids: set[str] = set()
+
     for ep in group:
         try:
             loaded = ep.load()
@@ -86,11 +93,33 @@ def load_builtin_manifests() -> list[PluginManifest]:
             continue
 
         manifest = _extract_manifest(loaded, ep.name)
-        if manifest is not None:
+        if manifest is not None and manifest.id not in seen_ids:
             manifests.append(manifest)
+            seen_ids.add(manifest.id)
             log.info(
                 "plugin_entry_point_loaded",
                 entry_point=ep.name,
+                plugin_id=manifest.id,
+            )
+
+    for module_name in BUILTIN_PLUGIN_MODULES:
+        try:
+            module = import_module(module_name)
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "plugin_builtin_fallback_load_failed",
+                module=module_name,
+                error=str(exc),
+            )
+            continue
+
+        manifest = _extract_manifest(module, module_name)
+        if manifest is not None and manifest.id not in seen_ids:
+            manifests.append(manifest)
+            seen_ids.add(manifest.id)
+            log.info(
+                "plugin_builtin_fallback_loaded",
+                module=module_name,
                 plugin_id=manifest.id,
             )
 

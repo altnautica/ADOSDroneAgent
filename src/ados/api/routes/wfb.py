@@ -21,7 +21,7 @@ class ChannelRequest(BaseModel):
 async def get_wfb_status():
     """Current WFB-ng link status: state, RSSI, channel, packet stats, adapter info."""
     app = get_agent_app()
-    wfb = getattr(app, "_wfb_manager", None)
+    wfb = app.wfb_manager()
     if wfb is None:
         return {
             "state": "disabled",
@@ -92,7 +92,7 @@ async def get_wfb_history(seconds: int = 60):
         seconds: Number of seconds of history (default 60, max 300).
     """
     app = get_agent_app()
-    wfb = getattr(app, "_wfb_manager", None)
+    wfb = app.wfb_manager()
     if wfb is None:
         return {"samples": [], "count": 0}
 
@@ -120,7 +120,7 @@ async def set_wfb_channel(request: ChannelRequest):
         )
 
     app = get_agent_app()
-    wfb = getattr(app, "_wfb_manager", None)
+    wfb = app.wfb_manager()
     if wfb is None:
         raise HTTPException(status_code=503, detail="WFB-ng service not running")
 
