@@ -38,14 +38,14 @@ async def main() -> None:
     except ConnectionError:
         log.warning("state_ipc_unavailable", msg="Running without live telemetry")
 
-    # Build a minimal AgentApp-like shim so create_app() can function
-    # without the full process supervisor.
+    # Build a minimal runtime shim so create_app() can function without
+    # the legacy single-process AgentApp.
     from ados.api.server import create_app
-    from ados.core.main import ServiceTracker
     from ados.core.pairing import PairingManager
+    from ados.core.service_tracker import ServiceTracker
 
     class _StandaloneAgent:
-        """Minimal stand-in for AgentApp when running API standalone."""
+        """Minimal runtime state object when running API standalone."""
 
         def __init__(self, cfg, state):
             self.config = cfg
@@ -69,11 +69,14 @@ async def main() -> None:
             self.demo = False
             # Feature and model management (used by /api/capabilities etc.)
             try:
-                from ados.core.features import FeatureManager
-                from ados.services.vision.model_manager import ModelManager
-                from ados.hal.detect import detect_board
-                import yaml
                 from pathlib import Path
+
+                import yaml
+
+                from ados.core.features import FeatureManager
+                from ados.hal.detect import detect_board
+                from ados.services.vision.model_manager import ModelManager
+
                 board_info = detect_board()
                 self.board_name = board_info.name
                 # Load raw board profile YAML for compute/NPU fields
