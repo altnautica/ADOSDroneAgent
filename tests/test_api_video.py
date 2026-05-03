@@ -2,63 +2,24 @@
 
 from __future__ import annotations
 
-import time
-from unittest.mock import MagicMock
-
 import pytest
 from fastapi.testclient import TestClient
 
 from ados.api.server import create_app
-from ados.core.config import ADOSConfig
-from ados.core.health import HealthMonitor
-from ados.core.service_tracker import ServiceTracker
-from ados.services.mavlink.state import VehicleState
 from ados.services.video.demo import DemoVideoPipeline
+from tests.api_runtime_utils import build_api_runtime
 
 
 @pytest.fixture
 def agent_app_with_video():
-    """Create a mock AgentApp with a demo video pipeline."""
-    app = MagicMock()
-    app.config = ADOSConfig()
-    app.health = HealthMonitor()
-    app.services = ServiceTracker()
-    app._start_time = time.monotonic()
-    app.uptime_seconds = 42.0
-    app._vehicle_state = VehicleState()
-    app._fc_connection = MagicMock()
-    app._fc_connection.connected = False
-    app._fc_connection.port = ""
-    app._fc_connection.baud = 0
-    app._tasks = []
-    app._param_cache = None
-    app._video_pipeline = DemoVideoPipeline()
-    # Auth middleware skips auth when unpaired
-    app.pairing_manager.is_paired = False
-    return app
+    """Create an API runtime double with a demo video pipeline."""
+    return build_api_runtime(video_pipeline=DemoVideoPipeline())
 
 
 @pytest.fixture
 def agent_app_no_video():
-    """Create a mock AgentApp without video pipeline."""
-    app = MagicMock()
-    app.config = ADOSConfig()
-    app.health = HealthMonitor()
-    app.services = ServiceTracker()
-    app._start_time = time.monotonic()
-    app.uptime_seconds = 42.0
-    app._vehicle_state = VehicleState()
-    app._fc_connection = MagicMock()
-    app._fc_connection.connected = False
-    app._fc_connection.port = ""
-    app._fc_connection.baud = 0
-    app._tasks = []
-    app._param_cache = None
-    # Explicitly no _video_pipeline attribute
-    del app._video_pipeline
-    # Auth middleware skips auth when unpaired
-    app.pairing_manager.is_paired = False
-    return app
+    """Create an API runtime double without a video pipeline."""
+    return build_api_runtime(video_pipeline=None)
 
 
 @pytest.fixture

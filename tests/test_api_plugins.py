@@ -8,7 +8,6 @@ the route module.
 
 from __future__ import annotations
 
-import time
 import zipfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -18,29 +17,14 @@ from fastapi.testclient import TestClient
 
 from ados.api.routes.plugins import _set_supervisor_for_tests
 from ados.api.server import create_app
-from ados.core.config import ADOSConfig
-from ados.core.health import HealthMonitor
-from ados.core.service_tracker import ServiceTracker
 from ados.plugins.archive import MANIFEST_FILENAME
 from ados.plugins.supervisor import PluginSupervisor
-from ados.services.mavlink.state import VehicleState
+from tests.api_runtime_utils import build_api_runtime
 
 
 @pytest.fixture
 def agent_app():
-    app = MagicMock()
-    app.config = ADOSConfig()
-    app.health = HealthMonitor()
-    app.services = ServiceTracker()
-    app._start_time = time.monotonic()
-    app.uptime_seconds = 0.0
-    app._vehicle_state = VehicleState()
-    app._fc_connection = MagicMock()
-    app._fc_connection.connected = False
-    app._tasks = []
-    app._param_cache = None
-    app.pairing_manager.is_paired = False
-    return app
+    return build_api_runtime(uptime_seconds=0.0)
 
 
 @pytest.fixture

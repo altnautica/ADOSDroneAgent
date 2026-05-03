@@ -88,7 +88,7 @@ Also runs on macOS for local development and testing.
 
 **Full remote control.** The GCS can send arm/disarm, mode changes, guided flight commands, and mission uploads through the cloud relay. The agent polls and executes them. All from a browser, over any network.
 
-**REST API.** FastAPI server at `:8080` with 16 route modules. Get telemetry, set FC parameters, send commands, manage config, control video, manage suites, run scripts. Full OpenAPI docs at `/docs`.
+**REST API.** FastAPI server at `:8080` with domain route modules. Get telemetry, read FC parameters, send commands, manage config, control video, manage suites, run scripts. Full OpenAPI docs at `/docs`.
 
 **MAVLink signing.** The agent is a transparent pipe for MAVLink v2 signed frames. `/api/mavlink/signing/*` exposes capability detection and one-shot FC enrollment via `SETUP_SIGNING`. Keys live in the GCS browser; the agent holds no key material. See [docs](https://docs.altnautica.com/drone-agent/mavlink-signing).
 
@@ -181,23 +181,24 @@ Available when the node is running in ground-station profile. Hidden on drone-pr
 
 ## REST API
 
-FastAPI server at `:8080`. Full OpenAPI docs at `/docs`. 16 route modules.
+FastAPI server at `:8080`. Full OpenAPI docs at `/docs`. Domain route modules cover the agent, ground-station profile, plugins, and optional subsystems.
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/api/status` | GET | Agent status, uptime, FC state |
 | `/api/telemetry` | GET | Attitude, GPS, battery snapshot |
-| `/api/params` | GET / PUT | Read or set FC parameters |
-| `/api/commands` | POST | Send MAVLink command to FC |
+| `/api/params` | GET | Read cached FC parameters |
+| `/api/command` | POST | Send MAVLink command to FC |
+| `/api/commands` | GET | List supported command names |
 | `/api/config` | GET / PUT | Read or update agent config |
 | `/api/logs` | GET | Recent log entries |
 | `/api/services` | GET | Running services and status |
 | `/api/video` | GET / POST | Video pipeline status and control |
 | `/api/scripts` | GET / POST | List and execute automation scripts |
-| `/api/suites` | GET / PUT | Suite activation and status |
-| `/api/fleet` | GET / POST | Fleet enrollment and network status |
+| `/api/suites` | GET | Suite activation and status |
+| `/api/fleet/*` | GET | Fleet enrollment and peer status |
 | `/api/peripherals` | GET | Connected sensors and hardware |
-| `/api/pairing` | GET / POST / DELETE | GCS pairing management |
+| `/api/pairing/*` | GET / POST | GCS pairing management |
 | `/api/system` | GET / POST | System info, reboot, shutdown |
 | `/api/ota` | GET / POST | Update check, upgrade, rollback |
 | `/api/ros/status` | GET | ROS 2 environment state and container info |
@@ -206,14 +207,14 @@ FastAPI server at `:8080`. Full OpenAPI docs at `/docs`. 16 route modules.
 | `/api/ros/topics` | GET | Active topics with types and rates |
 | `/api/ros/workspace` | GET | Workspace packages and build status |
 | `/api/ros/recordings` | GET | MCAP recording files with metadata |
-| `/api/ground_station/*` | GET / PUT / POST / DELETE | Ground-station profile only. Role, mesh, pairing, WFB-ng relay/receiver, uplinks, physical UI |
+| `/api/v1/ground-station/*` | GET / PUT / POST / DELETE | Ground-station profile only. Role, mesh, pairing, WFB-ng relay/receiver, uplinks, physical UI |
 
 ```bash
 # Get current telemetry
 curl http://localhost:8080/api/telemetry
 
 # Arm the drone
-curl -X POST http://localhost:8080/api/commands \
+curl -X POST http://localhost:8080/api/command \
   -H "Content-Type: application/json" \
   -d '{"command": "arm"}'
 ```
@@ -269,27 +270,37 @@ Opt-in ROS 2 Jazzy environment running inside a Docker container alongside the a
      │              │
      ▼              ▼
 ┌──────────────────────────┐
-│       REST API           │   FastAPI :8080 (16 route modules)
+│       REST API           │   FastAPI :8080 (domain route modules)
 └────────────┬─────────────┘
              │
              ▼
 ┌──────────────────────────┐
-│       AgentApp           │   Core process manager
+│   ApiRuntimeFacade       │   API-facing runtime boundary
 └──┬───────┬───────┬───────┘
    │       │       │
    ▼       ▼       ▼
-┌──────┐ ┌──────┐ ┌──────┐   ┌─────────────────────┐
-│ MAV  │ │ MQTT │ │Video │   │  ROS 2 Container    │  Optional (Docker)
-│Proxy │ │ GW   │ │Pipe  │   │  MAVLink bridge     │
-└──────┘ └──────┘ └──────┘   │  Foxglove bridge    │
-   │                          │  User nodes         │
-   ▼                          └─────────┬───────────┘
-┌──────────┐                            │
-│   FC     │   Flight controller        │  /run/ados/mavlink.sock
-└──────────┘   (serial/USB)             │  (IPC bind mount)
-   ▲                                    │
-   └────────────────────────────────────┘
+┌──────────┐ ┌──────────┐ ┌──────────┐   ┌─────────────────────┐
+│ Main     │ │Standalone│ │State IPC │   │  ROS 2 Container    │  Optional (Docker)
+│ runtime  │ │API svc   │ │snapshots │   │  MAVLink bridge     │
+└────┬─────┘ └────┬─────┘ └────┬─────┘   │  Foxglove bridge    │
+     │            │            │          │  User nodes         │
+     ▼            ▼            ▼          └─────────┬───────────┘
+┌──────┐ ┌──────┐ ┌──────┐                         │
+│ MAV  │ │ MQTT │ │Video │                         │
+│Proxy │ │ GW   │ │Pipe  │                         │
+└──────┘ └──────┘ └──────┘                         │
+   │                                                │
+   ▼                                                │
+┌──────────┐                                        │
+│   FC     │   Flight controller                    │  /run/ados/mavlink.sock
+└──────────┘   (serial/USB)                         │  (IPC bind mount)
+   ▲                                                │
+   └────────────────────────────────────────────────┘
 ```
+
+The API facade keeps route modules independent from runtime internals. Routes read
+FC status, telemetry, video, WFB, scripts, and parameter state through named
+accessors instead of reaching into private process fields.
 
 ---
 
@@ -298,7 +309,7 @@ Opt-in ROS 2 Jazzy environment running inside a Docker container alongside the a
 | Feature | Status |
 |---------|--------|
 | MAVLink proxy (serial to WS/TCP/UDP) | Working |
-| REST API (FastAPI, 16 route modules) | Working |
+| REST API (FastAPI domain route modules) | Working |
 | TUI dashboard (5 screens) | Working |
 | CLI (34 commands) | Working |
 | Demo mode (simulated telemetry) | Working |
@@ -331,6 +342,10 @@ ruff check src/ # lint
 ados demo       # run without hardware
 ados tui        # launch terminal dashboard
 ```
+
+API route changes should go through the runtime facade in `ados.api.runtime`.
+Tests that need runtime doubles should use `tests/api_runtime_utils.py` instead
+of constructing private process fields directly.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for code style and PR guidelines.
 

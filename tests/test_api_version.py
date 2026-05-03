@@ -2,14 +2,11 @@
 
 Locks the response shape so any future change is forced to either
 preserve it or bump api_version. Catches the kind of silent drift
-that DEC-110 surfaced when /api/status/full landed without the GCS
-knowing whether the agent supported it.
+that happens when agent endpoints land without the GCS knowing whether
+the agent supports them.
 """
 
 from __future__ import annotations
-
-import time
-from unittest.mock import MagicMock
 
 import pytest
 from fastapi.testclient import TestClient
@@ -17,28 +14,12 @@ from fastapi.testclient import TestClient
 from ados import __version__
 from ados.api.routes.version import API_VERSION, CAPABILITIES
 from ados.api.server import create_app
-from ados.core.config import ADOSConfig
-from ados.core.health import HealthMonitor
-from ados.core.service_tracker import ServiceTracker
-from ados.services.mavlink.state import VehicleState
+from tests.api_runtime_utils import build_api_runtime
 
 
 @pytest.fixture
 def client():
-    app = MagicMock()
-    app.config = ADOSConfig()
-    app.health = HealthMonitor()
-    app.services = ServiceTracker()
-    app._start_time = time.monotonic()
-    app.uptime_seconds = 0.0
-    app._vehicle_state = VehicleState()
-    app._fc_connection = MagicMock()
-    app._fc_connection.connected = False
-    app._fc_connection.port = ""
-    app._fc_connection.baud = 0
-    app._tasks = []
-    app._param_cache = None
-    app.pairing_manager.is_paired = False
+    app = build_api_runtime(uptime_seconds=0.0)
     return TestClient(create_app(app))
 
 
@@ -110,10 +91,9 @@ def test_capabilities_constant_is_unique():
 #   1. AGENT_CAPABILITIES_FROZEN here
 #   2. AGENT_CAPABILITIES_FROZEN in the GCS contract test
 #
-# The two-sided lock catches the seam regression DEC-110 surfaced where
-# /api/status/full landed without GCS knowing whether the agent
-# supported it. If the lists drift, one side's test fails with a clear
-# "GCS contract drift" / "agent contract drift" message.
+# The two-sided lock catches regressions where an agent endpoint lands
+# without the GCS knowing whether the agent supports it. If the lists
+# drift, one side's test fails with a clear contract drift message.
 
 AGENT_CAPABILITIES_FROZEN: tuple[str, ...] = (
     "status.full",

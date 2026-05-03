@@ -9,39 +9,21 @@ state visible to the client during sustained backpressure.
 
 from __future__ import annotations
 
-import time
-from unittest.mock import MagicMock
-
 import pytest
 from fastapi.testclient import TestClient
 
 from ados.api.server import create_app
 from ados.core.config import ADOSConfig
-from ados.core.health import HealthMonitor
-from ados.core.service_tracker import ServiceTracker
-from ados.services.mavlink.state import VehicleState
+from tests.api_runtime_utils import build_api_runtime
 
 
 @pytest.fixture
 def client(tmp_path, monkeypatch):
     monkeypatch.setenv("ADOS_PROFILE_OVERRIDE", "ground_station")
 
-    app = MagicMock()
     cfg = ADOSConfig()
     cfg.agent.profile = "ground_station"
-    app.config = cfg
-    app.health = HealthMonitor()
-    app.services = ServiceTracker()
-    app._start_time = time.monotonic()
-    app.uptime_seconds = 0.0
-    app._vehicle_state = VehicleState()
-    app._fc_connection = MagicMock()
-    app._fc_connection.connected = False
-    app._fc_connection.port = ""
-    app._fc_connection.baud = 0
-    app._tasks = []
-    app._param_cache = None
-    app.pairing_manager.is_paired = False
+    app = build_api_runtime(config=cfg, uptime_seconds=0.0)
     return TestClient(create_app(app))
 
 

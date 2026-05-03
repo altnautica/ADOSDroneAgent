@@ -2,42 +2,20 @@
 
 from __future__ import annotations
 
-import time
-from unittest.mock import MagicMock
-
 import pytest
 from fastapi.testclient import TestClient
 
 from ados.api.server import create_app
-from ados.core.config import ADOSConfig
-from ados.core.health import HealthMonitor
-from ados.core.service_tracker import ServiceTracker
-from ados.services.mavlink.state import VehicleState
 from ados.services.wfb.demo import DemoWfbManager
 from ados.services.wfb.link_quality import LinkStats
 from ados.services.wfb.manager import LinkState
+from tests.api_runtime_utils import build_api_runtime
 
 
 @pytest.fixture
 def agent_app():
-    """Create a mock AgentApp with WFB manager."""
-    app = MagicMock()
-    app.config = ADOSConfig()
-    app.health = HealthMonitor()
-    app.services = ServiceTracker()
-    app._start_time = time.monotonic()
-    app.uptime_seconds = 42.0
-    app._vehicle_state = VehicleState()
-    app._fc_connection = MagicMock()
-    app._fc_connection.connected = False
-    app._fc_connection.port = ""
-    app._fc_connection.baud = 0
-    app._tasks = []
-    app._param_cache = None
-    app._wfb_manager = None
-    # Auth middleware skips auth when unpaired
-    app.pairing_manager.is_paired = False
-    return app
+    """Create an API runtime double with no WFB manager."""
+    return build_api_runtime(wfb_manager=None)
 
 
 @pytest.fixture
@@ -62,7 +40,7 @@ def test_wfb_status_with_demo(agent_app):
     demo._state = LinkState.CONNECTED
     stats = LinkStats(rssi_dbm=-55.0, packets_received=1000, loss_percent=0.5)
     demo._monitor._latest = stats
-    agent_app._wfb_manager = demo
+    agent_app.wfb_manager_handle = demo
 
     fastapi_app = create_app(agent_app)
     client = TestClient(fastapi_app)
@@ -93,7 +71,7 @@ def test_wfb_history_with_data(agent_app):
             f"packets={1000+i} lost={i} fec_rec=0 fec_fail=0"
         )
         demo.monitor.feed_line(line)
-    agent_app._wfb_manager = demo
+    agent_app.wfb_manager_handle = demo
 
     fastapi_app = create_app(agent_app)
     client = TestClient(fastapi_app)
@@ -109,7 +87,7 @@ def test_wfb_history_with_data(agent_app):
 def test_wfb_set_channel_valid(agent_app):
     """POST /api/wfb/channel with valid channel."""
     demo = DemoWfbManager()
-    agent_app._wfb_manager = demo
+    agent_app.wfb_manager_handle = demo
 
     fastapi_app = create_app(agent_app)
     client = TestClient(fastapi_app)
@@ -125,7 +103,7 @@ def test_wfb_set_channel_valid(agent_app):
 def test_wfb_set_channel_invalid(agent_app):
     """POST /api/wfb/channel with invalid channel returns 400."""
     demo = DemoWfbManager()
-    agent_app._wfb_manager = demo
+    agent_app.wfb_manager_handle = demo
 
     fastapi_app = create_app(agent_app)
     client = TestClient(fastapi_app)

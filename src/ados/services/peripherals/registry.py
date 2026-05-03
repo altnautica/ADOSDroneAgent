@@ -2,10 +2,8 @@
 
 Keeps the merged set of manifests in memory, exposes lookup and
 listing helpers, and provides a ``reload()`` hook driven by SIGHUP.
-Wave 3 stubs out live transport detection: every peripheral reports
-``connected: False``. Track B fills in per-transport probing (lsusb
-scans, serial enumeration, mDNS lookups, BLE discovery) behind the
-same API.
+Live transport detection is intentionally conservative until per-transport
+probing is available: every peripheral reports ``connected: False``.
 """
 
 from __future__ import annotations
@@ -51,13 +49,13 @@ class PeripheralRegistry:
         return len(manifests)
 
     def _detect_connection(self, manifest: PeripheralManifest) -> bool:
-        """Wave 3 stub. Track B replaces this with real transport probing.
+        """Return whether the manifest matches a currently detected device.
 
         The signature stays stable so callers can rely on it: returns
         True if the manifest currently matches a live device on its
-        declared transport, False otherwise. Wave 3 always returns
-        False because no built-in plugins ship and we do not want to
-        claim devices the plugin layer has not validated yet.
+        declared transport, False otherwise. For now this always returns
+        False so the API does not claim devices before a transport probe
+        validates them.
         """
         return False
 

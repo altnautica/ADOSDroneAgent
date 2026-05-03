@@ -17,7 +17,6 @@ so the suite stays hermetic.
 
 from __future__ import annotations
 
-import time
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -26,32 +25,15 @@ from fastapi.testclient import TestClient
 
 from ados.api.server import create_app
 from ados.core.config import ADOSConfig
-from ados.core.health import HealthMonitor
-from ados.core.service_tracker import ServiceTracker
-from ados.services.mavlink.state import VehicleState
+from tests.api_runtime_utils import build_api_runtime
 
 GS_PREFIX = "/api/v1/ground-station"
 
 
 def _build_agent_app(profile: str = "ground_station") -> Any:
-    app = MagicMock()
     cfg = ADOSConfig()
     cfg.agent.profile = profile
-    app.config = cfg
-    app.health = HealthMonitor()
-    app.services = ServiceTracker()
-    app._start_time = time.monotonic()
-    app.uptime_seconds = 42.0
-    app._vehicle_state = VehicleState()
-    app._fc_connection = MagicMock()
-    app._fc_connection.connected = False
-    app._fc_connection.port = ""
-    app._fc_connection.baud = 0
-    app._tasks = []
-    app._param_cache = None
-    # Auth middleware short-circuits when unpaired.
-    app.pairing_manager.is_paired = False
-    return app
+    return build_api_runtime(config=cfg)
 
 
 @pytest.fixture

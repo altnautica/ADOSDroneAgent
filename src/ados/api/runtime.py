@@ -104,17 +104,23 @@ class ApiRuntimeFacade:
     def uptime_seconds(self) -> float:
         return self._runtime.uptime_seconds
 
+    def _runtime_attr(self, public_name: str, private_name: str, default: Any = None) -> Any:
+        if hasattr(self._runtime, public_name):
+            return getattr(self._runtime, public_name)
+        return getattr(self._runtime, private_name, default)
+
     def service_tasks(self) -> list[Any]:
-        return list(getattr(self._runtime, "_tasks", []))
+        tasks = self._runtime_attr("service_task_handles", "_tasks", [])
+        return list(tasks or [])
 
     def state_ipc_state(self) -> dict:
-        state_client = getattr(self._runtime, "_state_client", None)
+        state_client = self._runtime_attr("state_client", "_state_client")
         if state_client and state_client.state:
             return state_client.state
         return {}
 
     def fc_connection(self) -> Any:
-        return getattr(self._runtime, "_fc_connection", None)
+        return self._runtime_attr("fc_connection_handle", "_fc_connection")
 
     def fc_status(self) -> FcStatus:
         state = self.state_ipc_state()
@@ -137,7 +143,7 @@ class ApiRuntimeFacade:
         )
 
     def vehicle_state(self) -> Any:
-        return getattr(self._runtime, "_vehicle_state", None)
+        return self._runtime_attr("vehicle_state", "_vehicle_state")
 
     def vehicle_state_dict(self) -> dict:
         state = self.vehicle_state()
@@ -146,23 +152,89 @@ class ApiRuntimeFacade:
         return {}
 
     def param_cache(self) -> Any:
-        return getattr(self._runtime, "_param_cache", None)
+        return self._runtime_attr("param_cache_handle", "_param_cache")
 
     def video_pipeline(self) -> Any:
-        return getattr(self._runtime, "_video_pipeline", None)
+        return self._runtime_attr("video_pipeline_handle", "_video_pipeline")
 
     def wfb_manager(self) -> Any:
-        return getattr(self._runtime, "_wfb_manager", None)
+        return self._runtime_attr("wfb_manager_handle", "_wfb_manager")
 
     def scripting_handles(self) -> ScriptingHandles:
         return ScriptingHandles(
-            runner=getattr(self._runtime, "_script_runner", None),
-            executor=getattr(self._runtime, "_command_executor", None),
-            demo=getattr(self._runtime, "_demo_scripting", None),
+            runner=self._runtime_attr("script_runner", "_script_runner"),
+            executor=self._runtime_attr("command_executor", "_command_executor"),
+            demo=self._runtime_attr("demo_scripting", "_demo_scripting"),
         )
 
     def signing_observer(self) -> Any:
-        return getattr(self._runtime, "_signing_observer", None)
+        return self._runtime_attr("signing_observer", "_signing_observer")
+
+
+class StandaloneApiRuntime:
+    """Runtime object used when the REST API runs as its own service."""
+
+    def __init__(self, config: ADOSConfig, state_client: Any, log: Any) -> None:
+        from ados.core.health import HealthMonitor
+        from ados.core.pairing import PairingManager
+
+        self.config = config
+        self.state_client = state_client
+        self.pairing_manager = PairingManager(state_path=config.pairing.state_path)
+        self.services = ServiceTracker()
+        self.service_task_handles: list[Any] = []
+        self.fc_connection_handle = None
+        self.vehicle_state = None
+        self.param_cache_handle = None
+        self.video_pipeline_handle = None
+        self.wfb_manager_handle = None
+        self.command_executor = None
+        self.script_runner = None
+        self.demo_scripting = None
+        self.signing_observer = None
+        self.ota_updater = None
+        self.discovery_service = None
+        self.board_name = "unknown"
+        self.health = HealthMonitor()
+        self.demo = False
+        self.feature_manager = None
+        self.model_manager = None
+        self._initialize_feature_models(log)
+
+    @property
+    def uptime_seconds(self) -> float:
+        return 0.0
+
+    def _initialize_feature_models(self, log: Any) -> None:
+        try:
+            from pathlib import Path
+
+            import yaml
+
+            from ados.core.features import FeatureManager
+            from ados.hal.detect import detect_board
+            from ados.services.vision.model_manager import ModelManager
+
+            board_info = detect_board()
+            self.board_name = board_info.name
+            board_profile_dict: dict = {}
+            boards_dir = Path(__file__).resolve().parent.parent / "hal" / "boards"
+            if not boards_dir.exists():
+                import ados.hal
+
+                boards_dir = Path(ados.hal.__file__).parent / "boards"
+            for yf in boards_dir.glob("*.yaml"):
+                with open(yf) as f:
+                    data = yaml.safe_load(f) or {}
+                if data.get("name") == board_info.name:
+                    board_profile_dict = data
+                    break
+            self.feature_manager = FeatureManager(board_profile_dict, self.config)
+            npu_tops = board_profile_dict.get("compute", {}).get("npu_tops", 0)
+            self.model_manager = ModelManager(self.config.vision, npu_tops=npu_tops)
+            log.info("feature_manager_initialized", board=board_info.name, npu_tops=npu_tops)
+        except Exception as e:
+            log.warning("feature_manager_init_failed", error=str(e))
 
 
 def ensure_api_runtime(runtime: ApiRuntime | ApiRuntimeFacade | Any) -> ApiRuntimeFacade:

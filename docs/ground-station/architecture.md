@@ -2,13 +2,16 @@
 
 ## Overview
 
-Single Python process (asyncio), same `ados` package as the air unit. The mode flag (`wfb.mode: rx`) switches all services from transmit to receive behavior. One codebase, two products.
+Same `ados` package as the air unit, running with the `ground_station` profile.
+Profile and role settings switch services from transmit behavior to receive,
+relay, setup webapp, and local mesh behavior. One codebase supports both air
+and ground nodes.
 
 ## Service Layout
 
 ```
 ┌────────────────────────────────────────────────┐
-│         ADOS Ground Station (single process)    │
+│          ADOS Ground Station profile            │
 │                                                  │
 │  ┌──────────┐  ┌──────────┐  ┌──────────┐      │
 │  │ wfb_rx   │  │ mediamtx │  │ MAVLink  │      │
@@ -20,10 +23,14 @@ Single Python process (asyncio), same `ados` package as the air unit. The mode f
 │  ┌──────────┐  ┌──────────┐                     │
 │  │ WiFi AP  │  │ REST API │                     │
 │  │ +Captive │  │ + WebApp │                     │
-│  │  Portal  │  │ (:8080)  │                     │
+│  │  Portal  │  │ + facade │                     │
 │  └──────────┘  └──────────┘                     │
 └────────────────────────────────────────────────┘
 ```
+
+The REST API is served by `ados-api` on `:8080`. Route handlers read
+ground-station status, WFB-ng state, network state, and physical UI state
+through the API runtime facade rather than by depending on service internals.
 
 ## Data Flow
 
@@ -53,13 +60,14 @@ GROUND STATION:
 
 ## Boot Sequence
 
-1. Detect mode from config file (`/etc/ados/config.yaml`)
-2. Start `wfb_rx` (monitor mode, listen on configured channel)
-3. Start `mediamtx` (RTSP ingest from wfb_rx, WebRTC output)
-4. Start WiFi AP (`hostapd`, SSID: `ADOS-GS-XXXX`)
-5. Start REST API + web app on `:8080`
-6. Start MAVLink relay (forward telemetry from wfb_rx to WebSocket)
-7. LED solid green when all services healthy
+1. Detect profile from config and hardware fingerprint
+2. Start `ados-api` with the ground-station route surface on `:8080`
+3. Start `wfb_rx` (monitor mode, listen on configured channel)
+4. Start `mediamtx` (RTSP ingest from wfb_rx, WebRTC output)
+5. Start WiFi AP (`hostapd`, SSID: `ADOS-GS-XXXX`)
+6. Start setup webapp and captive portal services when enabled
+7. Start role-specific mesh, relay, receiver, OLED, button, and kiosk services
+8. LED solid green when required services are healthy
 
 ## Memory Estimate (Ground Station on RK3566)
 
