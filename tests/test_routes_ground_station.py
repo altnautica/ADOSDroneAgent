@@ -27,9 +27,8 @@ from fastapi.testclient import TestClient
 from ados.api.server import create_app
 from ados.core.config import ADOSConfig
 from ados.core.health import HealthMonitor
-from ados.core.main import ServiceTracker
+from ados.core.service_tracker import ServiceTracker
 from ados.services.mavlink.state import VehicleState
-
 
 GS_PREFIX = "/api/v1/ground-station"
 

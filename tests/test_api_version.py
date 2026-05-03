@@ -19,7 +19,7 @@ from ados.api.routes.version import API_VERSION, CAPABILITIES
 from ados.api.server import create_app
 from ados.core.config import ADOSConfig
 from ados.core.health import HealthMonitor
-from ados.core.main import ServiceTracker
+from ados.core.service_tracker import ServiceTracker
 from ados.services.mavlink.state import VehicleState
 
 
@@ -144,7 +144,8 @@ def test_capabilities_match_frozen_contract_with_gcs():
         "Agent CAPABILITIES drifted from the cross-repo contract.\n"
         "If this is intentional, update BOTH:\n"
         "  - AGENT_CAPABILITIES_FROZEN in this file\n"
-        "  - AGENT_CAPABILITIES_FROZEN in ADOSMissionControl/tests/contract/agent-version-contract.test.ts\n"
+        "  - AGENT_CAPABILITIES_FROZEN in "
+        "ADOSMissionControl/tests/contract/agent-version-contract.test.ts\n"
         f"Expected (frozen): {AGENT_CAPABILITIES_FROZEN}\n"
         f"Actual (current):  {actual}"
     )

@@ -37,10 +37,10 @@ from ados.api.routes import (
 )
 
 if TYPE_CHECKING:
-    from ados.core.main import AgentApp
+    from ados.api.runtime import ApiRuntime
 
 
-def create_app(agent: AgentApp) -> FastAPI:
+def create_app(agent: ApiRuntime) -> FastAPI:
     """Create and configure the FastAPI application."""
     set_agent_app(agent)
 
@@ -137,7 +137,7 @@ def create_app(agent: AgentApp) -> FastAPI:
     return app
 
 
-async def create_api_task(agent: AgentApp) -> None:
+async def create_api_task(agent: ApiRuntime) -> None:
     """Create and run the API server as an asyncio task."""
     app = create_app(agent)
     api_config = agent.config.scripting.rest_api
