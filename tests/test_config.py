@@ -16,6 +16,7 @@ def test_default_config():
     assert cfg.mavlink.baud_rate == 57600
     assert cfg.mavlink.system_id == 1
     assert cfg.mavlink.component_id == 191
+    assert cfg.ota.service_name == "ados-supervisor"
     assert cfg.logging.level == "info"
     assert cfg.swarm.enabled is False
 
@@ -78,3 +79,5 @@ def test_security_defaults():
     assert cfg.security.tls.enabled is True
     assert cfg.security.api.cors_enabled is True
     assert len(cfg.security.api.cors_origins) >= 1
+    assert "*" not in cfg.security.api.cors_origins
+    assert "http://localhost:4000" in cfg.security.api.cors_origins

@@ -343,7 +343,6 @@ async def main() -> None:
 
                     payload = {
                         "deviceId": config.agent.device_id,
-                        "apiKey": pairing.api_key,
                         "version": __version__,
                         "uptimeSeconds": round(uptime),
                         "boardName": board.name if board else "unknown",
@@ -397,7 +396,11 @@ async def main() -> None:
                         del payload["temperature"]
 
                     async with httpx.AsyncClient(timeout=10.0) as client:
-                        resp = await client.post(f"{convex_url}/agent/status", json=payload)
+                        resp = await client.post(
+                            f"{convex_url}/agent/status",
+                            json=payload,
+                            headers={"X-ADOS-Key": pairing.api_key},
+                        )
                         if resp.status_code == 200:
                             log.debug("cloud_status_sent")
                         else:
@@ -535,10 +538,8 @@ async def main() -> None:
                     async with httpx.AsyncClient(timeout=10.0) as client:
                         resp = await client.get(
                             f"{convex_url}/agent/commands",
-                            params={
-                                "deviceId": config.agent.device_id,
-                                "apiKey": pairing.api_key,
-                            },
+                            params={"deviceId": config.agent.device_id},
+                            headers={"X-ADOS-Key": pairing.api_key},
                         )
                         if resp.status_code == 200:
                             data = resp.json()
@@ -555,7 +556,6 @@ async def main() -> None:
                                     ack_payload: dict = {
                                         "commandId": cmd_id,
                                         "deviceId": config.agent.device_id,
-                                        "apiKey": pairing.api_key,
                                         "status": status,
                                     }
                                     if result:
@@ -566,6 +566,7 @@ async def main() -> None:
                                     ack_resp = await client.post(
                                         f"{convex_url}/agent/commands/ack",
                                         json=ack_payload,
+                                        headers={"X-ADOS-Key": pairing.api_key},
                                     )
                                     if ack_resp.status_code == 200:
                                         log.info("cloud_command_acked", command=cmd_name, status=status)

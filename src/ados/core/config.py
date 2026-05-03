@@ -180,7 +180,12 @@ class ApiSecurityConfig(BaseModel):
     api_key: str = ""
     cors_enabled: bool = True
     cors_origins: list[str] = Field(
-        default_factory=lambda: ["*"]
+        default_factory=lambda: [
+            "http://localhost:4000",
+            "http://127.0.0.1:4000",
+            "http://localhost:4001",
+            "http://127.0.0.1:4001",
+        ]
     )
 
 
@@ -234,7 +239,7 @@ class OtaConfig(BaseModel):
     auto_install: bool = False
     github_repo: str = "altnautica/ADOSDroneAgent"
     pip_path: str = "/opt/ados/venv/bin/pip"
-    service_name: str = "ados-agent"
+    service_name: str = "ados-supervisor"
 
 
 # --- Vision ---
@@ -265,6 +270,7 @@ class PairingConfig(BaseModel):
     convex_url: str = ""  # Convex HTTP endpoint for cloud pairing
     beacon_interval: int = 30  # seconds
     heartbeat_interval: int = 60  # seconds
+    single_process_cloud_enabled: bool = False
     code_ttl: int = 900  # 15 minutes
 
 

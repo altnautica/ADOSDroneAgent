@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import ssl
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from ados.core.logging import get_logger
@@ -76,12 +78,9 @@ class MqttGateway:
         # TLS for secure connections
         if self.config.security.tls.enabled or transport == "websockets":
             try:
-                import ssl
-                client.tls_set(cert_reqs=ssl.CERT_NONE)
-                # TLS insecure is safe here: Cloudflare Tunnel terminates TLS
-                # at the edge. The connection between agent and Cloudflare is
-                # encrypted, but the tunnel endpoint uses a self-signed cert.
-                client.tls_insecure_set(True)
+                ca_path = self.config.security.tls.ca_path
+                ca_certs = ca_path if ca_path and Path(ca_path).exists() else None
+                client.tls_set(ca_certs=ca_certs, cert_reqs=ssl.CERT_REQUIRED)
             except Exception as e:
                 log.warning("mqtt_tls_failed", error=str(e))
 

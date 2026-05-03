@@ -26,10 +26,10 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from fastapi import FastAPI
+from fastapi import FastAPI  # noqa: E402
 
-from ados import __version__
-from ados.api.routes import (
+from ados import __version__  # noqa: E402
+from ados.api.routes import (  # noqa: E402
     commands,
     config,
     features,
@@ -41,6 +41,7 @@ from ados.api.routes import (
     params,
     peripherals,
     peripherals_v1,
+    plugins,
     ros,
     scripts,
     services,
@@ -80,13 +81,14 @@ def build_spec_app() -> FastAPI:
     app.include_router(pairing.router, prefix="/api")
     app.include_router(system.router, prefix="/api")
     app.include_router(peripherals.router, prefix="/api")
-    app.include_router(peripherals_v1.router, prefix="/api/v1")
+    app.include_router(peripherals_v1.router, prefix="/api")
     app.include_router(suites.router, prefix="/api")
     app.include_router(fleet.router, prefix="/api")
     app.include_router(features.router, prefix="/api")
-    app.include_router(ground_station.router, prefix="/api/v1")
+    app.include_router(ground_station.router, prefix="/api")
     app.include_router(ros.router, prefix="/api")
     app.include_router(signing.router, prefix="/api")
+    app.include_router(plugins.router, prefix="/api")
 
     return app
 
