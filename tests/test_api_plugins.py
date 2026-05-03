@@ -8,7 +8,6 @@ the route module.
 
 from __future__ import annotations
 
-import io
 import time
 import zipfile
 from pathlib import Path
@@ -21,7 +20,7 @@ from ados.api.routes.plugins import _set_supervisor_for_tests
 from ados.api.server import create_app
 from ados.core.config import ADOSConfig
 from ados.core.health import HealthMonitor
-from ados.core.main import ServiceTracker
+from ados.core.service_tracker import ServiceTracker
 from ados.plugins.archive import MANIFEST_FILENAME
 from ados.plugins.supervisor import PluginSupervisor
 from ados.services.mavlink.state import VehicleState

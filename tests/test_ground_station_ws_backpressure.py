@@ -18,7 +18,7 @@ from fastapi.testclient import TestClient
 from ados.api.server import create_app
 from ados.core.config import ADOSConfig
 from ados.core.health import HealthMonitor
-from ados.core.main import ServiceTracker
+from ados.core.service_tracker import ServiceTracker
 from ados.services.mavlink.state import VehicleState
 
 
@@ -47,8 +47,9 @@ def client(tmp_path, monkeypatch):
 
 def test_pic_ws_backpressure_constant_is_present():
     """Sanity: the bounded queue constant exists in the route source."""
-    import ados.api.routes.ground_station.ui as ui_mod
     import inspect
+
+    import ados.api.routes.ground_station.ui as ui_mod
 
     src = inspect.getsource(ui_mod)
     assert "_PIC_WS_QUEUE_MAX = 100" in src, (
