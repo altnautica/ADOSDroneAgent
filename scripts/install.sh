@@ -593,6 +593,8 @@ install_motd() {
     local motd_src=""
     if [ -n "${MOTD_SRC_DIR:-}" ] && [ -d "${MOTD_SRC_DIR}" ]; then
         motd_src="${MOTD_SRC_DIR}"
+    elif [ -n "${FRESH_REPO_DIR:-}" ] && [ -d "${FRESH_REPO_DIR}/repo/data/motd" ]; then
+        motd_src="${FRESH_REPO_DIR}/repo/data/motd"
     elif [ -d "${INSTALL_DIR}/repo/data/motd" ]; then
         motd_src="${INSTALL_DIR}/repo/data/motd"
     elif [ -d "$(dirname "$0" 2>/dev/null)/../data/motd" ] 2>/dev/null; then
@@ -607,6 +609,32 @@ install_motd() {
     mkdir -p /etc/update-motd.d
     install -m 0755 "${motd_src}/30-ados" /etc/update-motd.d/30-ados
     info "SSH login banner installed at /etc/update-motd.d/30-ados."
+}
+
+# Block until the agent's REST API is reachable on localhost:8080,
+# or the timeout expires. Used so install.sh can honor Rule 26: every
+# manual step a bench operator might have to perform is a bug. The
+# operator should be able to type `ados` immediately after the install
+# returns and have a working agent.
+wait_for_api_ready() {
+    [ "$(uname -s)" = "Linux" ] || return 0
+    local timeout="${1:-30}"
+    local start
+    start=$(date +%s)
+    local now
+    while :; do
+        if curl -fsS --max-time 1 http://127.0.0.1:8080/api/v1/setup/status \
+            >/dev/null 2>&1; then
+            info "Agent REST API reachable on 127.0.0.1:8080."
+            return 0
+        fi
+        now=$(date +%s)
+        if [ $((now - start)) -ge "${timeout}" ]; then
+            warn "Agent REST API did not come up within ${timeout}s; check 'sudo journalctl -u ados-supervisor -n 100'."
+            return 1
+        fi
+        sleep 1
+    done
 }
 
 # Install the shared cgroup slice that hosts third-party plugin
@@ -702,22 +730,31 @@ enable_universal_units() {
 # a missing detector never turns a drone into a ground station.
 resolve_profile() {
     local profile_file="${CONFIG_DIR}/profile.conf"
+    local valid_re='^(auto|drone|ground_station|ground-station|unconfigured)$'
+
     if [ -f "${profile_file}" ]; then
-        # profile.conf is a trivial `profile=<name>` or single-word file
+        # profile.conf is a trivial `profile=<name>` file. Reject anything
+        # that is not one of the known profile names so a corrupt file
+        # left behind by an older install does not propagate.
         local val
         val="$(grep -E '^profile=' "${profile_file}" 2>/dev/null | cut -d= -f2 | tr -d '[:space:]' || true)"
-        if [ -z "${val}" ]; then
-            val="$(tr -d '[:space:]' < "${profile_file}" || true)"
-        fi
-        if [ -n "${val}" ]; then
+        if [[ "${val}" =~ ${valid_re} ]]; then
             echo "${val}"
             return 0
         fi
+        warn "Ignoring unrecognized profile.conf contents."
     fi
+
     if "${VENV_DIR}/bin/python" -c "import ados.bootstrap.profile_detect" 2>/dev/null; then
+        # Use detect_profile() directly so only the profile string lands
+        # on stdout. The previous shelling-out to `python -m ...` mixed
+        # YAML and any structlog output that escaped to stdout, which
+        # squashed into a corrupt one-liner under tr -d.
         local detected
-        detected="$("${VENV_DIR}/bin/python" -m ados.bootstrap.profile_detect 2>/dev/null | tr -d '[:space:]' || true)"
-        if [ -n "${detected}" ]; then
+        detected="$("${VENV_DIR}/bin/python" -c \
+            'from ados.bootstrap.profile_detect import detect_profile; print(detect_profile()["profile"])' \
+            2>/dev/null | tr -d '[:space:]' || true)"
+        if [[ "${detected}" =~ ${valid_re} ]]; then
             mkdir -p "${CONFIG_DIR}"
             echo "profile=${detected}" > "${profile_file}"
             echo "${detected}"
@@ -1102,6 +1139,12 @@ print_status() {
     if [ -f "${DEVICE_ID_FILE}" ]; then
         device_id=$(cat "${DEVICE_ID_FILE}")
     fi
+
+    # Block until the agent is actually serving requests so the operator
+    # can run `ados` immediately after this returns. Per Rule 26 every
+    # post-install manual step is a bug; if we exit before 8080 is
+    # bound, the operator races the supervisor's startup.
+    wait_for_api_ready 30 || true
 
     echo ""
     echo -e "${BOLD}=== Installation Complete ===${NC}"
