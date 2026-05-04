@@ -41,6 +41,10 @@ dependencies = [
     "cryptography>=42.0.0",
     "zeroconf>=0.131.0",
     "jinja2>=3.0.0",
+    # Required at runtime by ados.api.routes.plugins, which declares a
+    # Form(...) parameter for the .adosplug upload endpoint. FastAPI
+    # raises at module import time if this is missing.
+    "python-multipart>=0.0.6",
 ]
 
 [project.optional-dependencies]
@@ -51,7 +55,6 @@ dev = [
     "mypy>=1.8.0",
     "black>=24.1.0",
     "msgpack>=1.0.0",
-    "python-multipart>=0.0.6",
 ]
 # Ground-station profile extras. Pulled only when the installer detects
 # the ground_station profile or when a developer runs
