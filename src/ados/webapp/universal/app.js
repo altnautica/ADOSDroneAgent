@@ -687,12 +687,16 @@ function renderWizard(status, currentStepId) {
   const isSkippable = !isLast && (
     currentStep.state === "optional"
     || currentStep.state === "not_applicable"
-    || ["mavlink", "video", "remote_access", "ground_receiver", "pair"].includes(currentStep.id)
+    || ["mavlink", "video", "remote_access", "ground_receiver", "pair", "hardware_check"].includes(currentStep.id)
   );
   const skippedCount = (status.skipped_steps || []).length;
 
   const stepperDots = steps.map((s, idx) => {
-    const cls = idx === currentIdx ? "current" : (idx < currentIdx || s.state === "complete") ? "done" : "todo";
+    // Dot state is position-only: dots ahead of the current step always read
+    // as "todo" even when their underlying step is auto-satisfied. Surfacing
+    // auto-satisfaction inside the future step's body is clearer than lighting
+    // a dot the user has not yet visited.
+    const cls = idx === currentIdx ? "current" : idx < currentIdx ? "done" : "todo";
     return el("span", { className: `wizard-pip ${cls}`, "aria-label": `Step ${idx + 1}` });
   });
 
@@ -793,10 +797,14 @@ function renderWizardStepBody(step, status, onMutate) {
   switch (step.id) {
     case "welcome":
       return renderWelcomeStep(status);
+    case "profile":
+      return renderProfileStep(status, onMutate);
     case "cloud_choice":
       return renderCloudChoiceStep(status, onMutate);
     case "network":
       return renderNetworkStep(status);
+    case "hardware_check":
+      return renderHardwareCheckStep(status, onMutate);
     case "mavlink":
       return renderMavlinkStepInline(status);
     case "video":
@@ -1083,6 +1091,251 @@ function renderFinishStep(status) {
       ),
     ),
   });
+}
+
+function renderProfileStep(status, onMutate) {
+  const suggestion = status.profile_suggestion || {};
+  const currentProfile = status.profile === "ground_station" ? "ground_station" : "drone";
+  const currentRole = status.ground_role || suggestion.ground_role_hint || "direct";
+
+  // Pre-select: if the operator already confirmed a profile, surface that.
+  // Otherwise pick the live-detected suggestion.
+  let selectedKey;
+  if (suggestion.confirmed) {
+    selectedKey = currentProfile === "ground_station" ? `gs_${currentRole}` : "drone";
+  } else if (suggestion.detected === "ground_station") {
+    selectedKey = `gs_${suggestion.ground_role_hint || "direct"}`;
+  } else if (suggestion.detected === "drone") {
+    selectedKey = "drone";
+  } else {
+    selectedKey = currentProfile === "ground_station" ? `gs_${currentRole}` : "drone";
+  }
+
+  let resultMessage = "";
+  let resultClass = "";
+
+  const signalLine = (signals) => {
+    const entries = Object.entries(signals || {});
+    if (!entries.length) return "No live signals reported.";
+    return entries
+      .map(([name, present]) => `${name}: ${present ? "yes" : "no"}`)
+      .join("  ·  ");
+  };
+
+  const detected = suggestion.detected || "unconfigured";
+  const detectedLabel = detected === "ground_station"
+    ? `ground station (${suggestion.ground_role_hint || "direct"})`
+    : detected === "drone" ? "drone" : "unconfigured";
+
+  const cards = el("div", { className: "cloud-cards" });
+  const renderRadio = (key, title, blurb, isDetected) => {
+    const isSelected = selectedKey === key;
+    return el("label", { className: `cloud-card ${isSelected ? "selected" : ""}`.trim() },
+      el("input", {
+        type: "radio",
+        name: "profile_choice",
+        value: key,
+        checked: isSelected,
+        onchange: () => {
+          selectedKey = key;
+          renderCardClasses();
+        },
+      }),
+      el("div", { className: "cloud-card-body" },
+        el("strong", {}, title,
+          isDetected ? el("span", { className: "pill ok", style: { marginLeft: "8px" } }, "Detected") : null,
+        ),
+        el("p", {}, blurb),
+      ),
+    );
+  };
+
+  const renderCardClasses = () => {
+    Array.from(cards.children).forEach((node) => {
+      const radio = node.querySelector("input[type=radio]");
+      node.classList.toggle("selected", radio?.checked);
+    });
+  };
+
+  const isGroundDetected = (role) =>
+    detected === "ground_station" && (suggestion.ground_role_hint || "direct") === role;
+
+  cards.append(
+    renderRadio(
+      "drone",
+      "Drone (air-side companion)",
+      "Companion computer mounted on the aircraft. MAVLink to the FC, camera capture, optional 4G uplink.",
+      detected === "drone",
+    ),
+    renderRadio(
+      "gs_direct",
+      "Ground station — Direct",
+      "Single-radio receiver. WFB-ng directly into mediamtx; no mesh.",
+      isGroundDetected("direct"),
+    ),
+    renderRadio(
+      "gs_relay",
+      "Ground station — Relay",
+      "Forwards WFB fragments to a receiver over batman-adv. Needs a second USB wireless adapter.",
+      isGroundDetected("relay"),
+    ),
+    renderRadio(
+      "gs_receiver",
+      "Ground station — Receiver",
+      "Aggregates relay streams + local NIC, FEC-combined for the mediamtx pipeline. Needs a second USB wireless adapter.",
+      isGroundDetected("receiver"),
+    ),
+  );
+
+  const result = el("div", { className: `form-result ${resultClass}`.trim() }, resultMessage);
+
+  const submit = btn("Save profile", {
+    variant: "primary",
+    onclick: async () => {
+      const body = selectedKey === "drone"
+        ? { profile: "drone" }
+        : { profile: "ground_station", ground_role: selectedKey.slice(3) };
+      result.textContent = "Saving…";
+      result.className = "form-result";
+      try {
+        const res = await apiFetch("/api/v1/setup/profile", {
+          method: "POST",
+          body: JSON.stringify(body),
+        });
+        resultMessage = res?.message || "Profile saved.";
+        resultClass = res?.ok === false ? "err" : "ok";
+        result.textContent = resultMessage;
+        result.className = `form-result ${resultClass}`;
+        await onMutate();
+      } catch (err) {
+        resultMessage = `Failed: ${err.message || err}`;
+        resultClass = "err";
+        result.textContent = resultMessage;
+        result.className = "form-result err";
+      }
+    },
+  });
+
+  return el("div", { className: "page-body" },
+    card({
+      title: "Profile",
+      subtitle: `Auto-detected: ${detectedLabel}. Air score ${suggestion.air_score ?? 0}, ground score ${suggestion.ground_score ?? 0}.`,
+      body: el("div", { className: "card-pad" },
+        el("p", { style: { color: "var(--text-secondary)", fontSize: "13px", marginBottom: "12px" } },
+          "Pick the role this device should run as. The wizard branches the rest of the steps based on this choice."),
+        cards,
+      ),
+    }),
+    card({
+      title: "Live signals",
+      subtitle: "Sensors the boot-time fingerprint observed on this device.",
+      body: el("div", { className: "card-pad" },
+        el("p", { style: { color: "var(--text-tertiary)", fontSize: "12px", fontFamily: "var(--mono, monospace)" } },
+          signalLine(suggestion.signals)),
+        suggestion.mesh_capable
+          ? el("p", { style: { color: "var(--text-secondary)", fontSize: "13px", marginTop: "8px" } },
+              "Second USB wireless adapter detected. Relay and Receiver roles are eligible.")
+          : el("p", { style: { color: "var(--text-tertiary)", fontSize: "12px", marginTop: "8px" } },
+              "Only one wireless adapter detected. Mesh roles need a second USB WiFi dongle."),
+      ),
+    }),
+    card({
+      title: "Confirm",
+      body: el("div", {},
+        el("div", { className: "btn-row", style: { padding: "16px" } }, submit),
+        result,
+      ),
+    }),
+  );
+}
+
+function renderHardwareCheckStep(status, onMutate) {
+  let snapshot = status.hardware_check || { items: [], profile: status.profile, last_run: "" };
+
+  const stateClassFor = (state) => {
+    if (state === "ok") return "ok";
+    if (state === "missing") return "err";
+    if (state === "warning") return "warn";
+    return "muted";
+  };
+
+  const stateLabel = (state) => {
+    if (state === "ok") return "OK";
+    if (state === "missing") return "Missing";
+    if (state === "warning") return "Warning";
+    if (state === "checking") return "Checking";
+    return "Unknown";
+  };
+
+  const itemRow = (item) => el("div", { className: "dl-row" },
+    el("dt", {},
+      dot(stateClassFor(item.state)),
+      el("span", { style: { marginLeft: "8px" } }, item.label),
+      item.required
+        ? el("span", { className: "pill", style: { marginLeft: "8px", fontSize: "10px" } }, "Required")
+        : null,
+    ),
+    el("dd", {},
+      el("div", {}, el("strong", {}, stateLabel(item.state))),
+      el("div", { style: { color: "var(--text-secondary)", fontSize: "12px", marginTop: "2px" } }, item.detail || "—"),
+      item.fix_hint
+        ? el("div", { style: { color: "var(--text-tertiary)", fontSize: "12px", marginTop: "2px" } }, item.fix_hint)
+        : null,
+    ),
+  );
+
+  const requiredCount = (snapshot.items || []).filter((i) => i.required).length;
+  const requiredOk = (snapshot.items || []).filter((i) => i.required && i.state === "ok").length;
+  const allRequiredOk = requiredCount === 0 || requiredOk === requiredCount;
+
+  const itemsContainer = el("div", { className: "dl-rows" },
+    ...((snapshot.items || []).map(itemRow)),
+  );
+
+  const summary = el("div", { className: "card-pad" },
+    el("p", { style: { color: "var(--text-secondary)", fontSize: "13px" } },
+      `Profile: ${snapshot.profile}${snapshot.ground_role ? ` (${snapshot.ground_role})` : ""}. ` +
+      `${requiredOk} of ${requiredCount} required components detected.`),
+    snapshot.last_run
+      ? el("p", { style: { color: "var(--text-tertiary)", fontSize: "12px", marginTop: "4px" } },
+          `Last run ${snapshot.last_run}.`)
+      : null,
+  );
+
+  const refresh = btn("Refresh", {
+    onclick: async () => {
+      try {
+        const res = await apiFetch("/api/v1/setup/hardware-check/refresh", { method: "POST" });
+        if (res) {
+          snapshot = res;
+          itemsContainer.replaceChildren(...((snapshot.items || []).map(itemRow)));
+          summary.replaceChildren(
+            el("p", { style: { color: "var(--text-secondary)", fontSize: "13px" } },
+              `Profile: ${snapshot.profile}${snapshot.ground_role ? ` (${snapshot.ground_role})` : ""}. ` +
+              `${(snapshot.items || []).filter((i) => i.required && i.state === "ok").length} of ` +
+              `${(snapshot.items || []).filter((i) => i.required).length} required components detected.`),
+            el("p", { style: { color: "var(--text-tertiary)", fontSize: "12px", marginTop: "4px" } },
+              `Last run ${snapshot.last_run || ""}.`),
+          );
+        }
+        await onMutate();
+      } catch (err) {
+        console.error("hardware check refresh failed:", err);
+      }
+    },
+  });
+
+  return el("div", { className: "page-body" },
+    card({
+      title: "Hardware check",
+      subtitle: allRequiredOk
+        ? "All required components detected. Continue to cloud posture."
+        : "Some required components are missing. Plug them in and refresh, or continue without them.",
+      severity: allRequiredOk ? "ok" : "warn",
+      actions: [refresh],
+      body: el("div", {}, summary, itemsContainer),
+    }),
+  );
 }
 
 function renderGenericStep(step, status) {

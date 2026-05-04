@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+from ados.setup.models import CloudChoiceStatus
 from ados.setup.service import (
     _build_known_hosts,
     _cloud_choice_status,
@@ -301,3 +302,342 @@ def test_setup_state_corrupt_file_returns_defaults(monkeypatch, tmp_path) -> Non
     s = setup_state.read_state()
     assert s.setup_finalized is False
     assert s.skipped_steps == set()
+
+
+# --- profile choice ----------------------------------------------------------
+
+
+from ados.setup.profile import apply_profile, build_profile_suggestion  # noqa: E402
+
+
+class _AgentCfg:
+    def __init__(self, profile: str = "auto") -> None:
+        self.profile = profile
+        self.device_id = "test"
+        self.name = "test"
+
+
+class _GroundStationCfg:
+    def __init__(self, role: str = "direct") -> None:
+        self.role = role
+        self.share_uplink = False
+
+
+class _ProfileConfig:
+    def __init__(self, profile: str = "auto", role: str = "direct") -> None:
+        self.agent = _AgentCfg(profile)
+        self.ground_station = _GroundStationCfg(role)
+
+
+class _ProfileRuntime:
+    def __init__(self, profile: str = "auto", role: str = "direct") -> None:
+        self.config = _ProfileConfig(profile, role)
+        self.raw_runtime = _RawRuntime()
+
+
+def test_apply_profile_accepts_drone() -> None:
+    runtime = _ProfileRuntime(profile="auto")
+    result = apply_profile(runtime, profile="drone")
+    assert result.ok is True
+    assert runtime.config.agent.profile == "drone"
+    assert result.data.get("ground_role") == ""
+
+
+def test_apply_profile_accepts_ground_station_with_role() -> None:
+    runtime = _ProfileRuntime(profile="auto")
+    result = apply_profile(runtime, profile="ground_station", ground_role="relay")
+    assert result.ok is True
+    assert runtime.config.agent.profile == "ground_station"
+    assert runtime.config.ground_station.role == "relay"
+
+
+def test_apply_profile_defaults_ground_role_to_direct() -> None:
+    runtime = _ProfileRuntime(profile="auto")
+    result = apply_profile(runtime, profile="ground_station")
+    assert result.ok is True
+    assert runtime.config.ground_station.role == "direct"
+
+
+def test_apply_profile_rejects_unknown_profile() -> None:
+    runtime = _ProfileRuntime()
+    result = apply_profile(runtime, profile="quadcopter")  # type: ignore[arg-type]
+    assert result.ok is False
+
+
+def test_apply_profile_rejects_unknown_role() -> None:
+    runtime = _ProfileRuntime()
+    result = apply_profile(
+        runtime, profile="ground_station", ground_role="omega"
+    )
+    assert result.ok is False
+
+
+def test_build_profile_suggestion_marks_explicit_pick_confirmed(monkeypatch) -> None:
+    cfg = _ProfileConfig(profile="drone", role="direct")
+    monkeypatch.setattr(
+        "ados.bootstrap.profile_detect.detect_profile",
+        lambda config_override=None: {
+            "profile": "drone",
+            "ground_score": 0,
+            "air_score": 5,
+            "signals": {"mavlink_serial": True},
+            "mesh_capable": False,
+            "detected_at": "2026-05-04T20:00:00+05:30",
+        },
+    )
+    sug = build_profile_suggestion(cfg)
+    assert sug.confirmed is True
+    assert sug.detected == "drone"
+
+
+def test_build_profile_suggestion_unconfirmed_when_profile_auto(monkeypatch) -> None:
+    cfg = _ProfileConfig(profile="auto")
+    monkeypatch.setattr(
+        "ados.bootstrap.profile_detect.detect_profile",
+        lambda config_override=None: {
+            "profile": "ground_station",
+            "ground_score": 5,
+            "air_score": 0,
+            "signals": {"oled_i2c": True, "buttons_gpio": True},
+            "mesh_capable": False,
+            "detected_at": "2026-05-04T20:00:00+05:30",
+        },
+    )
+    sug = build_profile_suggestion(cfg)
+    assert sug.confirmed is False
+    assert sug.detected == "ground_station"
+    assert sug.signals.get("oled_i2c") is True
+
+
+# --- hardware check ----------------------------------------------------------
+
+
+from ados.setup.hardware_check import (  # noqa: E402
+    derive_step_state,
+    run_hardware_check,
+)
+from ados.setup.models import HardwareCheckItem, HardwareCheckStatus  # noqa: E402
+
+
+def test_derive_step_state_complete_when_all_required_ok() -> None:
+    snap = HardwareCheckStatus(
+        profile="drone",
+        items=[
+            HardwareCheckItem(id="board", label="Board", required=True, state="ok"),
+            HardwareCheckItem(id="fc", label="FC", required=True, state="ok"),
+            HardwareCheckItem(id="cam", label="Camera", required=True, state="ok"),
+            HardwareCheckItem(id="gps", label="GPS", required=False, state="warning"),
+        ],
+    )
+    state, _detail = derive_step_state(snap)
+    assert state == "complete"
+
+
+def test_derive_step_state_needs_action_when_required_missing() -> None:
+    snap = HardwareCheckStatus(
+        profile="drone",
+        items=[
+            HardwareCheckItem(id="board", label="Board", required=True, state="ok"),
+            HardwareCheckItem(id="fc", label="FC", required=True, state="missing"),
+        ],
+    )
+    state, _detail = derive_step_state(snap)
+    assert state == "needs_action"
+
+
+def test_run_hardware_check_drone_emits_required_items(monkeypatch) -> None:
+    # Stub out the heavy probes so the test does not hit real hardware.
+    monkeypatch.setattr(
+        "ados.hal.detect.detect_board",
+        lambda force=False: type(
+            "B",
+            (),
+            {
+                "name": "test",
+                "model": "test",
+                "tier": 3,
+                "ram_mb": 4096,
+                "cpu_cores": 4,
+            },
+        )(),
+    )
+    monkeypatch.setattr("ados.hal.camera.discover_cameras", lambda: [])
+    monkeypatch.setattr(
+        "ados.bootstrap.profile_detect.probe_mavlink_serial",
+        lambda: (0, 0, False),
+    )
+    monkeypatch.setattr(
+        "ados.bootstrap.profile_detect.probe_gps_serial", lambda: (0, 0, False)
+    )
+    monkeypatch.setattr("ados.hal.usb.discover_usb_devices", lambda: [])
+    monkeypatch.setattr("ados.hal.modem.detect_modem", lambda: None)
+
+    snap = run_hardware_check(None, profile="drone")
+    ids = [item.id for item in snap.items]
+    assert "board" in ids
+    assert "fc" in ids
+    assert "camera" in ids
+    # FC is required and missing -> step needs action
+    state, _ = derive_step_state(snap)
+    assert state == "needs_action"
+
+
+def test_run_hardware_check_ground_relay_requires_mesh_dongle(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "ados.hal.detect.detect_board",
+        lambda force=False: type(
+            "B",
+            (),
+            {
+                "name": "pi4b",
+                "model": "Raspberry Pi 4 Model B",
+                "tier": 3,
+                "ram_mb": 4096,
+                "cpu_cores": 4,
+            },
+        )(),
+    )
+    monkeypatch.setattr("ados.hal.usb.discover_usb_devices", lambda: [])
+    monkeypatch.setattr(
+        "ados.bootstrap.profile_detect.probe_mesh_capable", lambda: False
+    )
+    monkeypatch.setattr(
+        "ados.bootstrap.profile_detect.probe_i2c_oled", lambda bus=1: (0, 0, False)
+    )
+    monkeypatch.setattr(
+        "ados.bootstrap.profile_detect.probe_gpio_buttons",
+        lambda pins=None: (0, 0, False),
+    )
+    monkeypatch.setattr(
+        "ados.bootstrap.profile_detect.probe_uplink_type", lambda: (0, 0, False)
+    )
+    monkeypatch.setattr("ados.hal.modem.detect_modem", lambda: None)
+
+    snap = run_hardware_check(None, profile="ground_station", ground_role="relay")
+    item_ids = {item.id for item in snap.items}
+    assert "radio_wfb" in item_ids
+    assert "mesh_dongle" in item_ids
+    mesh = next(item for item in snap.items if item.id == "mesh_dongle")
+    assert mesh.required is True
+    assert mesh.state == "missing"
+
+
+# --- step assembler with profile + hardware_check ---------------------------
+
+
+from ados.setup.models import (  # noqa: E402
+    HardwareCheckItem as _HCItem,
+    HardwareCheckStatus as _HCStatus,
+    MavlinkAccess as _Mav,
+    NetworkStatus as _Net,
+    ProfileSuggestion as _Sug,
+    RemoteAccessStatus as _Rem,
+    VideoAccess as _Vid,
+)
+from ados.setup.service import _setup_steps  # noqa: E402
+
+
+def _all_complete_hc(profile: str) -> _HCStatus:
+    return _HCStatus(
+        profile=profile,
+        items=[
+            _HCItem(id="x", label="x", required=True, state="ok"),
+        ],
+    )
+
+
+def test_setup_steps_emits_profile_step_after_welcome() -> None:
+    steps = _setup_steps(
+        profile="drone",
+        mavlink=_Mav(),
+        video=_Vid(),
+        network=_Net(local_ips=["10.0.0.5"]),
+        remote=_Rem(),
+        cloud_choice=CloudChoiceStatus(),
+        profile_suggestion=_Sug(detected="drone", confirmed=True),
+        hardware_check=_all_complete_hc("drone"),
+        mission_control_url="",
+    )
+    ids = [s.id for s in steps]
+    assert ids[:2] == ["welcome", "profile"]
+    assert "hardware_check" in ids
+    # network sits between profile and hardware_check
+    assert ids.index("network") == ids.index("profile") + 1
+    assert ids.index("hardware_check") == ids.index("network") + 1
+
+
+def test_setup_steps_drone_includes_mavlink_and_skips_ground_receiver() -> None:
+    steps = _setup_steps(
+        profile="drone",
+        mavlink=_Mav(),
+        video=_Vid(),
+        network=_Net(local_ips=["10.0.0.5"]),
+        remote=_Rem(),
+        cloud_choice=CloudChoiceStatus(),
+        profile_suggestion=_Sug(detected="drone", confirmed=True),
+        hardware_check=_all_complete_hc("drone"),
+        mission_control_url="",
+    )
+    ids = {s.id for s in steps}
+    assert "mavlink" in ids
+    assert "ground_receiver" not in ids
+
+
+def test_setup_steps_ground_station_includes_ground_receiver_and_skips_mavlink() -> None:
+    steps = _setup_steps(
+        profile="ground_station",
+        mavlink=_Mav(),
+        video=_Vid(),
+        network=_Net(local_ips=["10.0.0.5"]),
+        remote=_Rem(),
+        cloud_choice=CloudChoiceStatus(),
+        profile_suggestion=_Sug(
+            detected="ground_station",
+            ground_role_hint="direct",
+            confirmed=True,
+        ),
+        hardware_check=_all_complete_hc("ground_station"),
+        mission_control_url="",
+    )
+    ids = {s.id for s in steps}
+    assert "ground_receiver" in ids
+    assert "mavlink" not in ids
+
+
+def test_setup_steps_profile_step_needs_action_when_unconfirmed() -> None:
+    steps = _setup_steps(
+        profile="auto",
+        mavlink=_Mav(),
+        video=_Vid(),
+        network=_Net(local_ips=["10.0.0.5"]),
+        remote=_Rem(),
+        cloud_choice=CloudChoiceStatus(),
+        profile_suggestion=_Sug(detected="drone", confirmed=False),
+        hardware_check=_all_complete_hc("drone"),
+        mission_control_url="",
+    )
+    profile_step = next(s for s in steps if s.id == "profile")
+    assert profile_step.state == "needs_action"
+
+
+def test_setup_steps_hardware_check_state_follows_required_items() -> None:
+    incomplete = _HCStatus(
+        profile="drone",
+        items=[
+            _HCItem(id="board", label="Board", required=True, state="ok"),
+            _HCItem(id="fc", label="FC", required=True, state="missing"),
+        ],
+    )
+    steps = _setup_steps(
+        profile="drone",
+        mavlink=_Mav(),
+        video=_Vid(),
+        network=_Net(local_ips=["10.0.0.5"]),
+        remote=_Rem(),
+        cloud_choice=CloudChoiceStatus(),
+        profile_suggestion=_Sug(detected="drone", confirmed=True),
+        hardware_check=incomplete,
+        mission_control_url="",
+    )
+    hw_step = next(s for s in steps if s.id == "hardware_check")
+    assert hw_step.state == "needs_action"

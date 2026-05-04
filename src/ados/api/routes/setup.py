@@ -9,7 +9,9 @@ from pydantic import BaseModel, Field
 
 from ados.api.deps import get_agent_app
 from ados.setup import state as setup_state
-from ados.setup.models import SetupActionResult, SetupStatus
+from ados.setup.hardware_check import run_hardware_check
+from ados.setup.models import HardwareCheckStatus, SetupActionResult, SetupStatus
+from ados.setup.profile import apply_profile
 from ados.setup.service import (
     apply_cloud_choice,
     build_setup_status,
@@ -23,7 +25,9 @@ router = APIRouter(prefix="/v1/setup", tags=["setup"])
 _VALID_STEP_IDS: frozenset[str] = frozenset(
     {
         "welcome",
+        "profile",
         "network",
+        "hardware_check",
         "cloud_choice",
         "pair",
         "mavlink",
@@ -51,6 +55,11 @@ class CloudChoiceRequest(BaseModel):
     self_hosted: SelfHostedBackendRequest | None = Field(default=None)
 
 
+class ProfileChoiceRequest(BaseModel):
+    profile: Literal["drone", "ground_station"]
+    ground_role: Literal["direct", "relay", "receiver"] | None = Field(default=None)
+
+
 @router.get("/status", response_model=SetupStatus)
 async def get_setup_status(request: Request) -> SetupStatus:
     """Return the universal setup state consumed by web, CLI, and GCS clients."""
@@ -64,6 +73,48 @@ async def get_setup_status(request: Request) -> SetupStatus:
 async def configure_cloudflare_tunnel(request: CloudflareTokenRequest) -> SetupActionResult:
     """Install a remotely managed Cloudflare Tunnel token or install command."""
     return install_cloudflare_token(get_agent_app(), request.token_or_script)
+
+
+@router.post("/profile", response_model=SetupActionResult)
+async def configure_profile(request: ProfileChoiceRequest) -> SetupActionResult:
+    """Persist the operator's profile choice from the onboarding wizard.
+
+    ``ground_role`` is required when ``profile`` is ``ground_station``
+    and selects the distributed-RX role on the ground station node.
+    """
+    return apply_profile(
+        get_agent_app(),
+        profile=request.profile,
+        ground_role=request.ground_role,
+    )
+
+
+@router.get("/hardware-check", response_model=HardwareCheckStatus)
+async def get_hardware_check() -> HardwareCheckStatus:
+    """Return the per-component hardware readiness snapshot for the active profile."""
+    runtime = get_agent_app()
+    config = runtime.config
+    profile = str(config.agent.profile)
+    if profile == "auto":
+        profile = "drone"
+    role = str(getattr(config.ground_station, "role", "direct") or "direct")
+    return run_hardware_check(runtime, profile=profile, ground_role=role)
+
+
+@router.post("/hardware-check/refresh", response_model=HardwareCheckStatus)
+async def refresh_hardware_check() -> HardwareCheckStatus:
+    """Re-run the hardware sweep on demand (no caching).
+
+    Wired so the wizard can offer a Refresh button after the operator
+    hot-plugs a USB device or swaps a camera mid-onboarding.
+    """
+    runtime = get_agent_app()
+    config = runtime.config
+    profile = str(config.agent.profile)
+    if profile == "auto":
+        profile = "drone"
+    role = str(getattr(config.ground_station, "role", "direct") or "direct")
+    return run_hardware_check(runtime, profile=profile, ground_role=role)
 
 
 @router.post("/cloud-choice", response_model=SetupActionResult)

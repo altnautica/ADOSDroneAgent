@@ -11,10 +11,13 @@ from pathlib import Path
 from typing import Any, Literal
 
 from ados import __version__
+from ados.setup.hardware_check import derive_step_state, run_hardware_check
 from ados.setup.models import (
     CloudChoiceStatus,
+    HardwareCheckStatus,
     MavlinkAccess,
     NetworkStatus,
+    ProfileSuggestion,
     RemoteAccessStatus,
     ServiceState,
     SetupAccessUrl,
@@ -23,6 +26,7 @@ from ados.setup.models import (
     SetupStep,
     VideoAccess,
 )
+from ados.setup.profile import build_profile_suggestion
 from ados.setup.state import read_state
 
 # Canonical local-access endpoints. These mirror the addresses configured by
@@ -152,18 +156,29 @@ def _setup_steps(
     network: NetworkStatus,
     remote: RemoteAccessStatus,
     cloud_choice: CloudChoiceStatus,
+    profile_suggestion: ProfileSuggestion,
+    hardware_check: HardwareCheckStatus,
     mission_control_url: str,
 ) -> list[SetupStep]:
     """Emit the canonical onboarding steps in spec-39 order.
 
-    Profile branches drop steps that do not apply (drone profile has no
-    ``ground_receiver`` step; ground profile has no ``mavlink`` step).
+    Profile branches drop steps that do not apply: the drone profile has
+    no ``ground_receiver`` step; the ground profile has no ``mavlink``
+    step. The ``profile`` step is profile-agnostic and lets the operator
+    confirm or override the auto-detected fingerprint. The
+    ``hardware_check`` step renders a per-component readout for the
+    chosen profile.
     """
     is_drone = profile != "ground_station"
     is_ground = profile == "ground_station"
     network_complete = bool(network.local_ips) or bool(network.hotspot_enabled)
     cloud_paired = cloud_choice.paired
     cloud_local = cloud_choice.mode == "local"
+    profile_confirmed = profile_suggestion.confirmed and profile in (
+        "drone",
+        "ground_station",
+    )
+    hw_state, hw_detail = derive_step_state(hardware_check)
 
     steps: list[SetupStep] = []
 
@@ -173,6 +188,21 @@ def _setup_steps(
             label="Welcome",
             state="complete",
             detail="Device identity available",
+        )
+    )
+
+    steps.append(
+        SetupStep(
+            id="profile",
+            label="Profile",
+            state="complete" if profile_confirmed else "needs_action",
+            detail=(
+                f"Confirmed as {profile}"
+                if profile_confirmed
+                else "Confirm or change the profile for this device"
+            ),
+            action_label="Choose profile",
+            href="/setup.html?step=profile",
         )
     )
 
@@ -188,6 +218,17 @@ def _setup_steps(
             ),
             action_label="Open Network",
             href="/network.html",
+        )
+    )
+
+    steps.append(
+        SetupStep(
+            id="hardware_check",
+            label="Hardware check",
+            state=hw_state,  # type: ignore[arg-type]
+            detail=hw_detail,
+            action_label="Open hardware check",
+            href="/setup.html?step=hardware_check",
         )
     )
 
@@ -413,6 +454,20 @@ async def build_setup_status(runtime: Any, host_header: str | None = None) -> Se
 
     services = _services(runtime)
     cloud_choice = _cloud_choice_status(config)
+    profile_suggestion = build_profile_suggestion(config)
+    profile_for_check = str(config.agent.profile)
+    if profile_for_check == "auto":
+        profile_for_check = (
+            profile_suggestion.detected
+            if profile_suggestion.detected != "unconfigured"
+            else "drone"
+        )
+    ground_role = str(getattr(config.ground_station, "role", "direct") or "direct")
+    hardware_check = run_hardware_check(
+        runtime,
+        profile=profile_for_check,
+        ground_role=ground_role,
+    )
     persisted = read_state()
     mission_control_url = _mission_control_url(host_name=host_name, config=config)
     access_urls = _access_urls(
@@ -434,6 +489,8 @@ async def build_setup_status(runtime: Any, host_header: str | None = None) -> Se
         network=network,
         remote=remote,
         cloud_choice=cloud_choice,
+        profile_suggestion=profile_suggestion,
+        hardware_check=hardware_check,
         mission_control_url=mission_control_url,
     )
 
@@ -463,6 +520,7 @@ async def build_setup_status(runtime: Any, host_header: str | None = None) -> Se
         device_id=config.agent.device_id,
         device_name=config.agent.name,
         profile=config.agent.profile,
+        ground_role=ground_role,
         setup_complete=setup_complete,
         setup_finalized=persisted.setup_finalized,
         completion_percent=completion_percent,
@@ -476,6 +534,8 @@ async def build_setup_status(runtime: Any, host_header: str | None = None) -> Se
         services=services,
         telemetry=runtime.vehicle_state_dict(),
         cloud_choice=cloud_choice,
+        profile_suggestion=profile_suggestion,
+        hardware_check=hardware_check,
         skipped_steps=sorted(persisted.skipped_steps),
     )
 

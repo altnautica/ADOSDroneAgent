@@ -88,6 +88,45 @@ class CloudChoiceStatus(BaseModel):
     last_checked: str | None = None  # ISO 8601 IST
 
 
+class ProfileSuggestion(BaseModel):
+    """Result of the boot-time hardware fingerprint surfaced to the wizard.
+
+    The wizard's profile step pre-selects ``detected`` and shows the per-
+    signal map so the operator can sanity-check the auto-pick before
+    confirming. ``confirmed`` flips true once the operator submits the
+    profile step at least once for the active config value.
+    """
+
+    detected: Literal["drone", "ground_station", "unconfigured"] = "unconfigured"
+    ground_role_hint: Literal["direct", "relay", "receiver"] = "direct"
+    ground_score: int = 0
+    air_score: int = 0
+    mesh_capable: bool = False
+    signals: dict[str, bool] = Field(default_factory=dict)
+    confirmed: bool = False
+    detected_at: str | None = None
+
+
+class HardwareCheckItem(BaseModel):
+    """One row in the hardware-check step's per-component readout."""
+
+    id: str
+    label: str
+    required: bool = False
+    state: Literal["ok", "missing", "warning", "checking", "unknown"] = "unknown"
+    detail: str = ""
+    fix_hint: str = ""
+
+
+class HardwareCheckStatus(BaseModel):
+    """Profile-aware hardware presence + readiness snapshot."""
+
+    profile: str
+    ground_role: str = ""
+    items: list[HardwareCheckItem] = Field(default_factory=list)
+    last_run: str = ""  # ISO 8601 IST
+
+
 class SetupActionResult(BaseModel):
     ok: bool
     message: str
@@ -99,6 +138,7 @@ class SetupStatus(BaseModel):
     device_id: str
     device_name: str
     profile: str
+    ground_role: str = ""
     setup_complete: bool
     setup_finalized: bool = False
     completion_percent: int
@@ -112,4 +152,6 @@ class SetupStatus(BaseModel):
     services: list[ServiceState] = Field(default_factory=list)
     telemetry: dict[str, object] = Field(default_factory=dict)
     cloud_choice: CloudChoiceStatus = Field(default_factory=CloudChoiceStatus)
+    profile_suggestion: ProfileSuggestion = Field(default_factory=ProfileSuggestion)
+    hardware_check: HardwareCheckStatus | None = None
     skipped_steps: list[str] = Field(default_factory=list)
