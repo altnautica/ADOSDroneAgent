@@ -20,6 +20,29 @@ _MEDIAMTX_API_PORT = 9997
 _MEDIAMTX_WEBRTC_PORT = 8889
 
 
+def _discover_cameras_for_api() -> dict:
+    """Run a fresh HAL camera discovery for the API response.
+
+    The live camera_mgr assignment lives in the ados-video process and
+    is not directly readable from the API process. Re-running the HAL
+    discovery is cheap (~150ms) and gives the operator the same view
+    the wizard's hardware-check step shows so the Video step's
+    "Detected cameras" panel is not silently empty when a camera IS
+    plugged in. Returns the same shape camera_mgr.to_dict() returns
+    with assignments left empty (we cannot infer those without IPC).
+    """
+    try:
+        from ados.hal.camera import discover_cameras
+
+        cams = discover_cameras()
+        return {
+            "cameras": [c.to_dict() for c in cams],
+            "assignments": {},
+        }
+    except Exception:
+        return {"cameras": [], "assignments": {}}
+
+
 def _get_video_pipeline():
     """Retrieve the video pipeline from the agent app.
 
@@ -73,15 +96,20 @@ async def get_video_status(request: Request):
     pipeline = _get_video_pipeline()
 
     # Multi-process mode: pipeline is None because ados-video owns it.
-    # Probe mediamtx directly to determine video state.
+    # Probe mediamtx directly to determine video state. The camera list
+    # comes from a fresh HAL discovery so the operator sees what the
+    # agent thinks is plugged in even though the live camera_mgr
+    # assignments live in the ados-video process and are not directly
+    # readable from here without IPC.
     if pipeline is None:
+        cameras_payload = _discover_cameras_for_api()
         mtx = await _probe_mediamtx()
         if mtx and mtx.get("ready"):
             host = request.headers.get("host", "localhost").split(":")[0]
             whep_url = f"http://{host}:{_MEDIAMTX_WEBRTC_PORT}/main/whep"
             return {
                 "state": "running",
-                "cameras": {"cameras": [], "assignments": {}},
+                "cameras": cameras_payload,
                 "recorder": {"recording": False, "current_path": "", "recordings_dir": ""},
                 "mediamtx": mtx,
                 "whep_url": whep_url,
@@ -89,7 +117,7 @@ async def get_video_status(request: Request):
             }
         return {
             "state": "not_initialized",
-            "cameras": {"cameras": [], "assignments": {}},
+            "cameras": cameras_payload,
             "recorder": {"recording": False, "current_path": "", "recordings_dir": ""},
             "mediamtx": {"running": False},
             "whep_url": None,
