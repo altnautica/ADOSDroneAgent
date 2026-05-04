@@ -228,3 +228,17 @@ def test_apply_cloud_choice_validates_port_range() -> None:
         self_hosted={"url": "https://example.com", "mqtt_port": 99999},
     )
     assert result.ok is False
+
+
+# --- AP defaults --------------------------------------------------------------
+
+
+def test_hotspot_default_password_is_altnautica() -> None:
+    """The agent's out-of-the-box AP passphrase is a known default so an
+    operator can connect from a phone at the bench without reading a
+    generated value off disk. Operators who need a unique passphrase set
+    `network.hotspot.password` in /etc/ados/config.yaml.
+    """
+    from ados.core.config import HotspotConfig
+
+    assert HotspotConfig().password == "altnautica"

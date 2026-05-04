@@ -127,7 +127,11 @@ class CellularConfig(BaseModel):
 class HotspotConfig(BaseModel):
     enabled: bool = True
     ssid: str = "ADOS-{device_id}"
-    password: str = "ados1234"
+    # Default WPA2 passphrase used when the agent first brings up its own
+    # access point. Predictable so operators can connect from a phone at
+    # the bench without reading a generated value off disk. Override in
+    # config.yaml for any deployment that needs a unique passphrase.
+    password: str = "altnautica"
     channel: int = 6
 
 

@@ -26,7 +26,6 @@ from __future__ import annotations
 import asyncio
 import os
 import re
-import secrets
 import signal
 import sys
 from pathlib import Path
@@ -44,14 +43,9 @@ from ados.core.paths import (
 
 log = get_logger("ground_station.hostapd")
 
-# Passphrase alphabet with ambiguous glyphs stripped (no 0/O, 1/l/I).
-_PASSPHRASE_ALPHABET = (
-    "ABCDEFGHJKLMNPQRSTUVWXYZ"
-    "abcdefghijkmnopqrstuvwxyz"
-    "23456789"
-)
-_PASSPHRASE_LEN = 10
-
+# Honored for legacy installs and for operators who explicitly rotated the
+# passphrase by writing this file. New installs rely on
+# ``network.hotspot.password`` from config; the agent never auto-generates.
 _PASSPHRASE_PATH = AP_PASSPHRASE_PATH
 _HOSTAPD_CONF_PATH = HOSTAPD_CONF_PATH
 _DNSMASQ_CONF_PATH = DNSMASQ_CONF_PATH
@@ -94,11 +88,13 @@ class HostapdManager:
         ssid: str | None = None,
         channel: int = 6,
         interface: str = _AP_IFACE,
+        passphrase: str = "",
     ) -> None:
         self._device_id = device_id
         self._ssid = ssid or _build_ssid(device_id)
         self._channel = channel
         self._interface = interface
+        self._configured_passphrase = passphrase
         self._passphrase: str = ""
         self._running = False
 
@@ -119,11 +115,20 @@ class HostapdManager:
         return self._passphrase
 
     def ensure_passphrase(self) -> str:
-        """Load the persisted passphrase or generate one on first boot.
+        """Resolve the AP passphrase to use.
 
-        The passphrase is never rotated automatically. Once written it
-        is the stable credential for the life of the device. File mode
-        0600 owned by the agent user (root under systemd).
+        Order of precedence:
+        1. ``/etc/ados/ap-passphrase`` if it exists. Honored for
+           legacy installs and for operators who explicitly rotated the
+           passphrase by writing the file.
+        2. The configured ``network.hotspot.password`` passed into the
+           manager constructor. This is the agent's default
+           (``altnautica`` out of the box; operators override in
+           ``/etc/ados/config.yaml``).
+
+        The agent never auto-generates a passphrase. A predictable
+        default is more useful than a random one for an OSS agent
+        operators are expected to access at the bench.
         """
         if _PASSPHRASE_PATH.exists():
             try:
@@ -139,21 +144,12 @@ class HostapdManager:
                     error=str(exc),
                 )
 
-        new_pass = "".join(
-            secrets.choice(_PASSPHRASE_ALPHABET) for _ in range(_PASSPHRASE_LEN)
-        )
-        try:
-            _PASSPHRASE_PATH.parent.mkdir(parents=True, exist_ok=True)
-            _PASSPHRASE_PATH.write_text(new_pass + "\n", encoding="utf-8")
-            os.chmod(_PASSPHRASE_PATH, 0o600)
-            log.info("ap_passphrase_generated", path=str(_PASSPHRASE_PATH))
-        except OSError as exc:
-            log.error(
-                "ap_passphrase_write_failed",
-                path=str(_PASSPHRASE_PATH),
-                error=str(exc),
-            )
-        self._passphrase = new_pass
+        configured = (self._configured_passphrase or "").strip()
+        if not configured:
+            configured = "altnautica"
+            log.warning("ap_passphrase_using_builtin_default")
+        self._passphrase = configured
+        log.info("ap_passphrase_from_config")
         return self._passphrase
 
     def _render_hostapd_conf(self) -> str:
@@ -432,6 +428,7 @@ async def main() -> None:
         device_id=device_id,
         ssid=ssid_override,
         channel=hotspot.channel,
+        passphrase=hotspot.password,
     )
     manager.ensure_passphrase()
 
