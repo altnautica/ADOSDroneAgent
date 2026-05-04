@@ -206,8 +206,16 @@ def _build_rpicam_command(
     """rpicam-vid command for CSI camera encoding.
 
     Uses the Pi's hardware VideoCore encoder for zero-CPU H.264/H.265.
+
+    For RTSP output, rpicam-vid's embedded libav RTSP muxer fails to
+    negotiate with mediamtx (the publish-header write returns a 400 even
+    once the RTSP listener is fully up). Pipe the raw H.264 elementary
+    stream into ffmpeg with explicit ``-rtsp_transport tcp`` and
+    ``-c copy`` (no re-encode). Verified end-to-end on Pi 4B + ov5647 +
+    mediamtx: ``[path main] stream is available and online, 1 track (H264)``.
+    For non-RTSP sinks (file path, fifo) keep the direct rpicam-vid output.
     """
-    cmd = [
+    rpicam_args = [
         "rpicam-vid",
         "--width", str(config.width),
         "--height", str(config.height),
@@ -216,6 +224,10 @@ def _build_rpicam_command(
         "--codec", config.codec,
         "--timeout", "0",
         "--nopreview",
+        # --inline embeds SPS/PPS in front of every IDR frame so the
+        # downstream ffmpeg muxer can recover from any mid-stream parse
+        # without restarting the whole pipeline.
+        "--inline",
     ]
     if source and source != "-":
         # rpicam-vid expects camera index (0, 1, ...) not device path
@@ -223,9 +235,38 @@ def _build_rpicam_command(
             cam_idx = source.replace("/dev/video", "")
         else:
             cam_idx = source
-        cmd.extend(["--camera", cam_idx])
-    cmd.extend(["-o", output])
-    return cmd
+        rpicam_args.extend(["--camera", cam_idx])
+
+    if output.startswith("rtsp://"):
+        # Pipe through ffmpeg with explicit TCP RTSP transport.
+        rpicam_args.extend(["-o", "-"])
+        ffmpeg_args = [
+            "ffmpeg",
+            "-loglevel", "error",
+            "-fflags", "nobuffer",
+            "-flags", "low_delay",
+            "-f", "h264",
+            "-i", "-",
+            "-c", "copy",
+            "-f", "rtsp",
+            "-rtsp_transport", "tcp",
+            output,
+        ]
+        # Compose into a single shell pipeline so the existing
+        # subprocess_exec call site stays unchanged.
+        rpicam_str = " ".join(_shell_quote(a) for a in rpicam_args)
+        ffmpeg_str = " ".join(_shell_quote(a) for a in ffmpeg_args)
+        return ["bash", "-c", f"{rpicam_str} | {ffmpeg_str}"]
+
+    rpicam_args.extend(["-o", output])
+    return rpicam_args
+
+
+def _shell_quote(arg: str) -> str:
+    """Minimal POSIX single-quote escape for arguments inside `bash -c`."""
+    if not arg or any(ch in arg for ch in (" ", "'", "\"", "$", "&", ";", "|", "<", ">", "(", ")", "*", "?", "{", "}", "\\", "`", "\n", "\t")):
+        return "'" + arg.replace("'", "'\\''") + "'"
+    return arg
 
 
 def _select_input_format(camera: CameraInfo | None) -> str | None:
