@@ -242,3 +242,62 @@ def test_hotspot_default_password_is_altnautica() -> None:
     from ados.core.config import HotspotConfig
 
     assert HotspotConfig().password == "altnautica"
+
+
+# --- setup state (gate) ------------------------------------------------------
+
+
+from pathlib import Path  # noqa: E402
+
+from ados.setup import state as setup_state  # noqa: E402
+
+
+def _redirect_state_path(monkeypatch, tmp_path: Path) -> Path:
+    target = tmp_path / "state.json"
+    monkeypatch.setattr(setup_state, "SETUP_STATE_PATH", target)
+    monkeypatch.setattr(setup_state, "SETUP_STATE_DIR", tmp_path)
+    return target
+
+
+def test_setup_state_defaults_when_file_missing(monkeypatch, tmp_path) -> None:
+    _redirect_state_path(monkeypatch, tmp_path)
+    s = setup_state.read_state()
+    assert s.setup_finalized is False
+    assert s.skipped_steps == set()
+
+
+def test_setup_state_mark_finalized_persists(monkeypatch, tmp_path) -> None:
+    target = _redirect_state_path(monkeypatch, tmp_path)
+    setup_state.mark_finalized()
+    assert target.exists()
+    s2 = setup_state.read_state()
+    assert s2.setup_finalized is True
+
+
+def test_setup_state_mark_and_clear_skip(monkeypatch, tmp_path) -> None:
+    _redirect_state_path(monkeypatch, tmp_path)
+    setup_state.mark_skipped("video")
+    setup_state.mark_skipped("remote_access")
+    s = setup_state.read_state()
+    assert s.skipped_steps == {"video", "remote_access"}
+    setup_state.clear_skipped("video")
+    s2 = setup_state.read_state()
+    assert s2.skipped_steps == {"remote_access"}
+
+
+def test_setup_state_reset_clears_everything(monkeypatch, tmp_path) -> None:
+    _redirect_state_path(monkeypatch, tmp_path)
+    setup_state.mark_finalized()
+    setup_state.mark_skipped("mavlink")
+    setup_state.reset_state()
+    s = setup_state.read_state()
+    assert s.setup_finalized is False
+    assert s.skipped_steps == set()
+
+
+def test_setup_state_corrupt_file_returns_defaults(monkeypatch, tmp_path) -> None:
+    target = _redirect_state_path(monkeypatch, tmp_path)
+    target.write_text("not valid json {{{", encoding="utf-8")
+    s = setup_state.read_state()
+    assert s.setup_finalized is False
+    assert s.skipped_steps == set()

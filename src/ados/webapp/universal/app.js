@@ -555,10 +555,14 @@ function renderDashboard() {
 // ---------------------------------------------------------------------------
 
 function setupModeFor(status) {
+  // The gate guarantees wizard mode whenever setup_finalized is false,
+  // regardless of the URL. Once finalized, honor an explicit ?mode=
+  // override and otherwise default to revisit.
+  if (!status?.setup_finalized) return "wizard";
   const params = new URLSearchParams(window.location.search);
   const explicit = params.get("mode");
   if (explicit === "wizard" || explicit === "revisit") return explicit;
-  return status?.setup_complete ? "revisit" : "wizard";
+  return "revisit";
 }
 
 function setupStepFor(status, mode) {
@@ -589,6 +593,15 @@ function renderRevisit(status) {
   const steps = status.steps || [];
   const next = steps.find((s) => s.state === "needs_action");
 
+  const rerunSetup = async () => {
+    try {
+      await apiFetch("/api/v1/setup/reset", { method: "POST" });
+    } catch (err) {
+      console.error("reset failed:", err);
+    }
+    window.location.assign("/setup.html?mode=wizard");
+  };
+
   const content = [
     pageHeader({
       eyebrow: "Setup",
@@ -598,7 +611,7 @@ function renderRevisit(status) {
         : "Walk through the remaining steps to bring this device online.",
       actions: [
         btn("Re-run setup", {
-          href: "/setup.html?mode=wizard",
+          onclick: rerunSetup,
           variant: status.setup_complete ? "primary" : null,
         }),
       ],
@@ -647,19 +660,36 @@ function renderRevisit(status) {
   renderShell("setup", content);
 }
 
+function renderWizardShell(content) {
+  // Sidebar-less full-bleed shell used while setup_finalized is false.
+  // Once finalized the sidebar comes back via renderShell.
+  const root = document.getElementById("app");
+  if (!root) return;
+  root.replaceChildren(
+    el("div", { className: "wizard-page" },
+      el("div", { className: "wizard-page-inner" }, ...content),
+    ),
+  );
+}
+
 function renderWizard(status, currentStepId) {
   const steps = status.steps || [];
   const currentIdx = Math.max(0, steps.findIndex((s) => s.id === currentStepId));
   const currentStep = steps[currentIdx] || steps[0];
   if (!currentStep) {
-    renderShell("setup", [pageHeader({ eyebrow: "Setup", title: "No steps reported" })]);
+    renderWizardShell([pageHeader({ eyebrow: "Setup", title: "No steps reported" })]);
     return;
   }
   const total = steps.length;
   const isFirst = currentIdx === 0;
   const isLast = currentIdx === total - 1;
-  const isSkippable = currentStep.state === "optional" || currentStep.state === "not_applicable" ||
-    ["mavlink", "video", "remote_access", "ground_receiver", "pair"].includes(currentStep.id);
+  const finalized = !!status.setup_finalized;
+  const isSkippable = !isLast && (
+    currentStep.state === "optional"
+    || currentStep.state === "not_applicable"
+    || ["mavlink", "video", "remote_access", "ground_receiver", "pair"].includes(currentStep.id)
+  );
+  const skippedCount = (status.skipped_steps || []).length;
 
   const stepperDots = steps.map((s, idx) => {
     const cls = idx === currentIdx ? "current" : (idx < currentIdx || s.state === "complete") ? "done" : "todo";
@@ -672,26 +702,59 @@ function renderWizard(status, currentStepId) {
     if (id) params.set("step", id); else params.delete("step");
     window.location.assign(`/setup.html?${params.toString()}`);
   };
-  const exitWizard = () => {
-    window.location.assign("/setup.html?mode=revisit");
+
+  const skipCurrent = async () => {
+    try {
+      await apiFetch(`/api/v1/setup/step/${encodeURIComponent(currentStep.id)}/skip`, {
+        method: "POST",
+      });
+    } catch (err) {
+      console.error("skip failed:", err);
+    }
+    const nextStep = steps[currentIdx + 1];
+    if (nextStep) goTo(nextStep.id);
   };
+
+  const finishWizard = async () => {
+    try {
+      await apiFetch("/api/v1/setup/finish", { method: "POST" });
+    } catch (err) {
+      console.error("finish failed:", err);
+    }
+    // Land on the dashboard now that the gate is open.
+    window.location.assign("/");
+  };
+
+  const finishLabel = isLast && skippedCount > 0
+    ? `Finish anyway (${skippedCount} skipped)`
+    : isLast
+      ? "Finish setup"
+      : "Continue";
 
   const stepBody = renderWizardStepBody(currentStep, status, () => loadStatus());
 
   const content = [
     el("header", { className: "wizard-header" },
+      el("div", { className: "wizard-brand" },
+        el("img", { src: "/brand.svg", alt: "" }),
+        el("div", { className: "wizard-brand-titles" },
+          el("strong", {}, "ADOS Setup"),
+          el("span", {}, status.device_name || "Drone Agent"),
+        ),
+      ),
       el("div", { className: "wizard-stepper" },
         el("span", { className: "wizard-step-count" }, `Step ${currentIdx + 1} of ${total}`),
         el("div", { className: "wizard-pips" }, ...stepperDots),
       ),
       el("div", { className: "wizard-header-actions" },
-        isSkippable && !isLast
-          ? btn("Skip for now", { variant: "ghost", onclick: () => {
-              const nextStep = steps[currentIdx + 1];
-              if (nextStep) goTo(nextStep.id);
-            } })
+        isSkippable
+          ? btn("Skip for now", { variant: "ghost", onclick: skipCurrent })
           : null,
-        btn("Exit", { variant: "ghost", onclick: exitWizard }),
+        // Exit only available once the operator finalized at least once;
+        // first-boot users have no escape hatch from the wizard.
+        finalized
+          ? btn("Exit", { variant: "ghost", onclick: () => window.location.assign("/setup.html?mode=revisit") })
+          : null,
       ),
     ),
     el("div", { className: "wizard-body" },
@@ -710,11 +773,11 @@ function renderWizard(status, currentStepId) {
           if (!isFirst) goTo(steps[currentIdx - 1].id);
         },
       }),
-      btn(isLast ? "Finish" : "Continue", {
+      btn(finishLabel, {
         variant: "primary",
         onclick: () => {
           if (isLast) {
-            exitWizard();
+            void finishWizard();
           } else {
             goTo(steps[currentIdx + 1].id);
           }
@@ -723,7 +786,7 @@ function renderWizard(status, currentStepId) {
     ),
   ];
 
-  renderShell("setup", content);
+  renderWizardShell(content);
 }
 
 function renderWizardStepBody(step, status, onMutate) {
@@ -1470,14 +1533,54 @@ const PAGES = {
   advanced: renderAdvanced,
 };
 
-function bootstrap() {
+async function gateBootstrap() {
+  // Block the page until we know whether the operator has finished
+  // onboarding. Anything other than the setup page redirects into the
+  // wizard when setup_finalized is false. The setup page itself forces
+  // wizard chrome regardless of ?mode= when not finalized so deep-links
+  // cannot escape the gate.
   const page = (document.body && document.body.dataset && document.body.dataset.page) || "dashboard";
+  let status = null;
+  try {
+    status = await apiFetch("/api/v1/setup/status");
+    currentStatus = status;
+    subscribers.forEach((fn) => {
+      try { fn(status); } catch (e) { console.error(e); }
+    });
+  } catch (err) {
+    console.error("gate: setup status load failed:", err);
+  }
+
+  const finalized = !!(status && status.setup_finalized);
+  if (!finalized && page !== "setup") {
+    // Pass the first incomplete step as a deep link so the wizard
+    // lands the operator where their attention is needed.
+    const steps = (status && status.steps) || [];
+    const target = steps.find((s) => s.state === "needs_action");
+    const stepParam = target ? `&step=${encodeURIComponent(target.id)}` : "";
+    window.location.replace(`/setup.html?mode=wizard${stepParam}`);
+    return;
+  }
+  if (!finalized && page === "setup") {
+    // Force wizard chrome. Strip ?mode=revisit if the operator tried
+    // to escape via URL editing.
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("mode") !== "wizard") {
+      params.set("mode", "wizard");
+      const target = (status && status.steps || []).find((s) => s.state === "needs_action");
+      if (target && !params.get("step")) {
+        params.set("step", target.id);
+      }
+      window.history.replaceState(null, "", `/setup.html?${params.toString()}`);
+    }
+  }
+
   (PAGES[page] || renderDashboard)();
   startPolling();
 }
 
 if (document.readyState === "loading") {
-  document.addEventListener("DOMContentLoaded", bootstrap, { once: true });
+  document.addEventListener("DOMContentLoaded", gateBootstrap, { once: true });
 } else {
-  bootstrap();
+  gateBootstrap();
 }

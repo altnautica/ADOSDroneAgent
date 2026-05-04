@@ -828,6 +828,23 @@ details > .body {
   padding: 0 16px 16px;
 }
 
+/* ----- wizard page shell (no sidebar) ---------------------------------- */
+
+.wizard-page {
+  min-height: 100dvh;
+  display: flex;
+  justify-content: center;
+  background: var(--bg-primary);
+}
+
+.wizard-page-inner {
+  width: 100%;
+  max-width: 720px;
+  padding: 0 24px;
+  display: flex;
+  flex-direction: column;
+}
+
 /* ----- wizard chrome --------------------------------------------------- */
 
 .wizard-header {
@@ -835,10 +852,44 @@ details > .body {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  padding: 14px 16px;
-  margin: -28px -32px 16px;
+  padding: 18px 0;
+  margin-bottom: 18px;
   border-bottom: 1px solid var(--border-default);
-  background: var(--bg-secondary);
+  background: transparent;
+}
+
+.wizard-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.wizard-brand img {
+  width: 26px;
+  height: 26px;
+  display: block;
+}
+
+.wizard-brand-titles {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.wizard-brand-titles strong {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.wizard-brand-titles span {
+  font-size: 11px;
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .wizard-stepper {
@@ -894,10 +945,10 @@ details > .body {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  margin: 24px -32px -64px;
-  padding: 14px 16px;
+  margin: 24px 0 32px;
+  padding: 14px 0;
   border-top: 1px solid var(--border-default);
-  background: var(--bg-secondary);
+  background: transparent;
 }
 
 .cloud-cards {

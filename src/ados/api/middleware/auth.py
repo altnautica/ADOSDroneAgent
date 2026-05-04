@@ -30,7 +30,15 @@ EXEMPT_PATHS = {
 SAME_ORIGIN_SETUP_PATHS = {
     "/api/v1/setup/remote-access/cloudflare",
     "/api/v1/setup/cloud-choice",
+    "/api/v1/setup/finish",
+    "/api/v1/setup/reset",
 }
+
+# Path prefixes that follow the same same-origin trust model. Used for
+# routes with a path parameter where exact-match would not work.
+SAME_ORIGIN_SETUP_PREFIXES = (
+    "/api/v1/setup/step/",
+)
 
 # Hostnames the agent itself binds. A request whose Origin header matches
 # one of these is considered same-origin. Augmented at runtime by the
@@ -94,7 +102,10 @@ class ApiKeyAuthMiddleware(BaseHTTPMiddleware):
         # accepts a same-origin browser without an API key. The
         # ``security.setup_token_required`` knob escalates to requiring
         # ``X-ADOS-Setup-Token`` instead.
-        if request.url.path in SAME_ORIGIN_SETUP_PATHS:
+        is_setup_mutation = request.url.path in SAME_ORIGIN_SETUP_PATHS or any(
+            request.url.path.startswith(prefix) for prefix in SAME_ORIGIN_SETUP_PREFIXES
+        )
+        if is_setup_mutation:
             require_token = bool(
                 getattr(app.config.security, "setup_token_required", False)
             )

@@ -23,6 +23,7 @@ from ados.setup.models import (
     SetupStep,
     VideoAccess,
 )
+from ados.setup.state import read_state
 
 # Canonical local-access endpoints. These mirror the addresses configured by
 # `services.network.wifi_ap` (hotspot AP) and `services.ground_station.usb_gadget`
@@ -412,6 +413,7 @@ async def build_setup_status(runtime: Any, host_header: str | None = None) -> Se
 
     services = _services(runtime)
     cloud_choice = _cloud_choice_status(config)
+    persisted = read_state()
     mission_control_url = _mission_control_url(host_name=host_name, config=config)
     access_urls = _access_urls(
         base_url=base_url,
@@ -434,6 +436,16 @@ async def build_setup_status(runtime: Any, host_header: str | None = None) -> Se
         cloud_choice=cloud_choice,
         mission_control_url=mission_control_url,
     )
+
+    # Apply persisted skip flags. Steps the operator chose to defer move
+    # from `needs_action` to `optional` so they no longer block the
+    # `setup_complete` derivation. We never downgrade `complete` or
+    # `not_applicable` via skip.
+    if persisted.skipped_steps:
+        for step in steps:
+            if step.id in persisted.skipped_steps and step.state == "needs_action":
+                step.state = "optional"
+
     complete_steps = sum(1 for step in steps if step.state == "complete")
     completion_percent = round((complete_steps / len(steps)) * 100)
     next_step = next((step for step in steps if step.state == "needs_action"), None)
@@ -443,12 +455,16 @@ async def build_setup_status(runtime: Any, host_header: str | None = None) -> Se
         else "Open Mission Control or continue optional remote access setup"
     )
 
+    natural_complete = not any(step.state == "needs_action" for step in steps)
+    setup_complete = persisted.setup_finalized or natural_complete
+
     return SetupStatus(
         version=__version__,
         device_id=config.agent.device_id,
         device_name=config.agent.name,
         profile=config.agent.profile,
-        setup_complete=not any(step.state == "needs_action" for step in steps),
+        setup_complete=setup_complete,
+        setup_finalized=persisted.setup_finalized,
         completion_percent=completion_percent,
         next_action=next_action,
         steps=steps,
@@ -460,6 +476,7 @@ async def build_setup_status(runtime: Any, host_header: str | None = None) -> Se
         services=services,
         telemetry=runtime.vehicle_state_dict(),
         cloud_choice=cloud_choice,
+        skipped_steps=sorted(persisted.skipped_steps),
     )
 
 

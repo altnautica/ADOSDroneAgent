@@ -142,6 +142,8 @@ SLOT_B_PATH = ADOS_VAR_DIR / "slot-b"
 
 # Suite activation state
 STATE_DIR = ADOS_VAR_DIR / "state"
+SETUP_STATE_DIR = ADOS_VAR_DIR / "setup"
+SETUP_STATE_PATH = SETUP_STATE_DIR / "state.json"
 ACTIVE_SUITE_PATH = STATE_DIR / "active_suite"
 
 # ROS recordings + compose file

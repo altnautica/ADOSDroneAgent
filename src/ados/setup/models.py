@@ -100,6 +100,7 @@ class SetupStatus(BaseModel):
     device_name: str
     profile: str
     setup_complete: bool
+    setup_finalized: bool = False
     completion_percent: int
     next_action: str
     steps: list[SetupStep]
@@ -111,3 +112,4 @@ class SetupStatus(BaseModel):
     services: list[ServiceState] = Field(default_factory=list)
     telemetry: dict[str, object] = Field(default_factory=dict)
     cloud_choice: CloudChoiceStatus = Field(default_factory=CloudChoiceStatus)
+    skipped_steps: list[str] = Field(default_factory=list)
