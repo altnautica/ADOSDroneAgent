@@ -331,16 +331,35 @@ def _uninstall_linux(*, purge: bool, yes: bool) -> None:
         Path("/usr/local/bin/ados-agent"),
         Path("/usr/local/bin/ados-supervisor"),
     ]
-    items = [
+    base_items = [
         *(f"systemd service: {path.name}" for path in service_files if path.exists()),
         *(f"symlink: {path}" for path in symlinks if path.exists() or path.is_symlink()),
         *(f"dir: {path}" for path in (install_dir, data_dir) if path.exists()),
     ]
+    if not base_items and not config_dir.exists():
+        click.echo("Nothing to uninstall. ADOS Drone Agent is not installed.")
+        return
+
+    # Interactive purge prompt. When the operator did not pass --purge and
+    # did not pass --yes, ask explicitly whether to keep the config so a
+    # full clean uninstall does not require remembering the flag.
+    if not yes and not purge and config_dir.exists():
+        click.echo("The following will be removed:")
+        for item in base_items:
+            click.echo(f"  {item}")
+        click.echo("")
+        click.echo(f"Config directory: {config_dir}")
+        click.echo("  Keep config: pairing key, device id, AP passphrase, custom YAML stay.")
+        click.echo("  Purge config: full uninstall, next install starts from clean defaults.")
+        purge = click.confirm("Also remove the config directory?", default=False)
+
+    items = list(base_items)
     if purge and config_dir.exists():
         items.append(f"dir: {config_dir}")
     if not items:
         click.echo("Nothing to uninstall. ADOS Drone Agent is not installed.")
         return
+    click.echo("")
     click.echo("The following will be removed:")
     for item in items:
         click.echo(f"  {item}")
