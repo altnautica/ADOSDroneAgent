@@ -672,7 +672,14 @@ function renderWizardShell(content) {
   );
 }
 
+// Steps that need to run an async preflight (save form, validate input,
+// hit a POST endpoint) before the wizard advances register a callback
+// here. Continue awaits it; truthy result advances, falsy halts. Cleared
+// on each wizard render so a stale hook from a prior step never fires.
+let wizardBeforeNextHook = null;
+
 function renderWizard(status, currentStepId) {
+  wizardBeforeNextHook = null;
   const steps = status.steps || [];
   const currentIdx = Math.max(0, steps.findIndex((s) => s.id === currentStepId));
   const currentStep = steps[currentIdx] || steps[0];
@@ -779,12 +786,16 @@ function renderWizard(status, currentStepId) {
       }),
       btn(finishLabel, {
         variant: "primary",
-        onclick: () => {
+        onclick: async () => {
           if (isLast) {
             void finishWizard();
-          } else {
-            goTo(steps[currentIdx + 1].id);
+            return;
           }
+          if (wizardBeforeNextHook) {
+            const ok = await wizardBeforeNextHook();
+            if (!ok) return;
+          }
+          goTo(steps[currentIdx + 1].id);
         },
       }),
     ),
@@ -1111,9 +1122,6 @@ function renderProfileStep(status, onMutate) {
     selectedKey = currentProfile === "ground_station" ? `gs_${currentRole}` : "drone";
   }
 
-  let resultMessage = "";
-  let resultClass = "";
-
   const signalLine = (signals) => {
     const entries = Object.entries(signals || {});
     if (!entries.length) return "No live signals reported.";
@@ -1187,34 +1195,40 @@ function renderProfileStep(status, onMutate) {
     ),
   );
 
-  const result = el("div", { className: `form-result ${resultClass}`.trim() }, resultMessage);
-
-  const submit = btn("Save profile", {
-    variant: "primary",
-    onclick: async () => {
-      const body = selectedKey === "drone"
-        ? { profile: "drone" }
-        : { profile: "ground_station", ground_role: selectedKey.slice(3) };
-      result.textContent = "Saving…";
-      result.className = "form-result";
-      try {
-        const res = await apiFetch("/api/v1/setup/profile", {
-          method: "POST",
-          body: JSON.stringify(body),
-        });
-        resultMessage = res?.message || "Profile saved.";
-        resultClass = res?.ok === false ? "err" : "ok";
-        result.textContent = resultMessage;
-        result.className = `form-result ${resultClass}`;
-        await onMutate();
-      } catch (err) {
-        resultMessage = `Failed: ${err.message || err}`;
-        resultClass = "err";
-        result.textContent = resultMessage;
-        result.className = "form-result err";
-      }
-    },
+  // Inline status slot. Shown while saving + on save failure. The save
+  // happens when the operator clicks Continue (wired via the
+  // wizardBeforeNextHook), not via a separate button — one CTA, not two.
+  const statusEl = el("div", {
+    className: "form-result",
+    style: { marginTop: "12px", minHeight: "1.2em" },
   });
+
+  wizardBeforeNextHook = async () => {
+    const body = selectedKey === "drone"
+      ? { profile: "drone" }
+      : { profile: "ground_station", ground_role: selectedKey.slice(3) };
+    statusEl.textContent = "Saving profile…";
+    statusEl.className = "form-result";
+    try {
+      const res = await apiFetch("/api/v1/setup/profile", {
+        method: "POST",
+        body: JSON.stringify(body),
+      });
+      if (res?.ok === false) {
+        statusEl.textContent = res.message || "Failed to save profile.";
+        statusEl.className = "form-result err";
+        return false;
+      }
+      statusEl.textContent = res?.message || "Profile saved.";
+      statusEl.className = "form-result ok";
+      await onMutate();
+      return true;
+    } catch (err) {
+      statusEl.textContent = `Failed: ${err.message || err}`;
+      statusEl.className = "form-result err";
+      return false;
+    }
+  };
 
   return el("div", { className: "page-body" },
     card({
@@ -1222,8 +1236,9 @@ function renderProfileStep(status, onMutate) {
       subtitle: `Auto-detected: ${detectedLabel}. Air score ${suggestion.air_score ?? 0}, ground score ${suggestion.ground_score ?? 0}.`,
       body: el("div", { className: "card-pad" },
         el("p", { style: { color: "var(--text-secondary)", fontSize: "13px", marginBottom: "12px" } },
-          "Pick the role this device should run as. The wizard branches the rest of the steps based on this choice."),
+          "Pick the role this device should run as, then click Continue. The wizard branches the rest of the steps based on this choice."),
         cards,
+        statusEl,
       ),
     }),
     card({
@@ -1237,13 +1252,6 @@ function renderProfileStep(status, onMutate) {
               "Second USB wireless adapter detected. Relay and Receiver roles are eligible.")
           : el("p", { style: { color: "var(--text-tertiary)", fontSize: "12px", marginTop: "8px" } },
               "Only one wireless adapter detected. Mesh roles need a second USB WiFi dongle."),
-      ),
-    }),
-    card({
-      title: "Confirm",
-      body: el("div", {},
-        el("div", { className: "btn-row", style: { padding: "16px" } }, submit),
-        result,
       ),
     }),
   );
