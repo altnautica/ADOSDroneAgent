@@ -102,6 +102,7 @@ do_uninstall() {
     fi
     rm -f /etc/tmpfiles.d/ados.conf
     rm -rf /run/ados
+    rm -f /etc/update-motd.d/30-ados
     systemctl daemon-reload
     info "All ADOS services removed."
 
@@ -577,6 +578,35 @@ ENVEOF
     if [ "${ADOS_PROFILE:-drone}" = "ground_station" ] || [ "${ADOS_PROFILE:-drone}" = "ground-station" ]; then
         enable_ground_station_units
     fi
+
+    # Drop the SSH login banner so operators see the setup URL the
+    # moment they log in. Idempotent.
+    install_motd
+}
+
+# Install the SSH login banner at /etc/update-motd.d/30-ados. The
+# script reads /api/v1/setup/status with a short timeout and prints
+# the primary setup URL plus the `ados` hint. Skipped on non-Linux.
+install_motd() {
+    [ "$(uname -s)" = "Linux" ] || return 0
+
+    local motd_src=""
+    if [ -n "${MOTD_SRC_DIR:-}" ] && [ -d "${MOTD_SRC_DIR}" ]; then
+        motd_src="${MOTD_SRC_DIR}"
+    elif [ -d "${INSTALL_DIR}/repo/data/motd" ]; then
+        motd_src="${INSTALL_DIR}/repo/data/motd"
+    elif [ -d "$(dirname "$0" 2>/dev/null)/../data/motd" ] 2>/dev/null; then
+        motd_src="$(cd "$(dirname "$0")/../data/motd" && pwd)"
+    fi
+
+    if [ -z "$motd_src" ] || [ ! -f "${motd_src}/30-ados" ]; then
+        warn "MOTD source not found, skipping login banner install."
+        return 0
+    fi
+
+    mkdir -p /etc/update-motd.d
+    install -m 0755 "${motd_src}/30-ados" /etc/update-motd.d/30-ados
+    info "SSH login banner installed at /etc/update-motd.d/30-ados."
 }
 
 # Install the shared cgroup slice that hosts third-party plugin

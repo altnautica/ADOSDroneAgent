@@ -324,6 +324,7 @@ def _uninstall_linux(*, purge: bool, yes: bool) -> None:
     install_dir = Path("/opt/ados")
     config_dir = Path("/etc/ados")
     data_dir = Path("/var/ados")
+    motd_file = Path("/etc/update-motd.d/30-ados")
     services = ["ados-supervisor", "ados-agent", "cloudflared"]
     service_files = [Path(f"/etc/systemd/system/{name}.service") for name in services]
     symlinks = [
@@ -335,6 +336,7 @@ def _uninstall_linux(*, purge: bool, yes: bool) -> None:
         *(f"systemd service: {path.name}" for path in service_files if path.exists()),
         *(f"symlink: {path}" for path in symlinks if path.exists() or path.is_symlink()),
         *(f"dir: {path}" for path in (install_dir, data_dir) if path.exists()),
+        *([f"login banner: {motd_file}"] if motd_file.exists() else []),
     ]
     if not base_items and not config_dir.exists():
         click.echo("Nothing to uninstall. ADOS Drone Agent is not installed.")
@@ -381,6 +383,8 @@ def _uninstall_linux(*, purge: bool, yes: bool) -> None:
     for path in (install_dir, data_dir):
         if path.exists():
             shutil.rmtree(path, ignore_errors=True)
+    if motd_file.exists():
+        motd_file.unlink(missing_ok=True)
     if purge and config_dir.exists():
         shutil.rmtree(config_dir, ignore_errors=True)
     click.echo("ADOS Drone Agent uninstalled.")

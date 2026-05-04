@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+# ADOS Drone Agent SSH login banner.
+# Reads /api/v1/setup/status with a short timeout and prints a tight
+# signpost so the operator knows where to go next. Always exits 0 so a
+# stalled agent never blocks the login.
+
+set +e
+
+API_BASE="${ADOS_API_BASE:-http://127.0.0.1:8080}"
+PYTHON="/opt/ados/venv/bin/python3"
+[ -x "$PYTHON" ] || PYTHON="$(command -v python3 2>/dev/null)"
+
+if [ -z "$PYTHON" ]; then
+    exit 0
+fi
+
+PAYLOAD="$(curl -fsS --max-time 1 "${API_BASE}/api/v1/setup/status" 2>/dev/null)"
+
+echo ""
+if [ -z "$PAYLOAD" ]; then
+    cat <<MOTD
+ADOS Drone Agent installed but the service is not responding.
+  Diagnose  sudo systemctl status ados-supervisor
+  Logs      sudo journalctl -u ados-supervisor -n 50
+
+MOTD
+    exit 0
+fi
+
+"$PYTHON" - "$PAYLOAD" <<'PYEOF'
+import json, sys
+try:
+    data = json.loads(sys.argv[1])
+except Exception:
+    sys.exit(0)
+
+version = data.get("version") or "?"
+profile = (data.get("profile") or "?").replace("_", " ")
+percent = data.get("completion_percent")
+percent_str = f"{percent}%" if isinstance(percent, (int, float)) else "?"
+next_action = (data.get("next_action") or "").strip()
+complete = bool(data.get("setup_complete"))
+
+primary = ""
+for entry in data.get("access_urls") or []:
+    if entry.get("kind") == "setup" and entry.get("primary"):
+        primary = entry.get("url") or ""
+        break
+if not primary:
+    for entry in data.get("access_urls") or []:
+        if entry.get("kind") == "setup":
+            primary = entry.get("url") or ""
+            break
+
+print(f"ADOS Drone Agent v{version} (profile: {profile})")
+status_line = f"  Setup     {percent_str} complete"
+if not complete and next_action:
+    status_line += f"  -  {next_action}"
+elif complete:
+    status_line += "  -  ready"
+print(status_line)
+if primary:
+    print(f"  Webapp    {primary}")
+print("  CLI       'ados' for live status, 'ados status --json' for scripting")
+print("")
+PYEOF
