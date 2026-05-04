@@ -70,6 +70,8 @@ CLOUDFLARE_TUNNEL_TOKEN_PATH = SECRETS_DIR / "cloudflare-tunnel-token"
 # Same-origin setup token, used when security.setup_token_required=True.
 # 0600 owner-only. CLI surfaces it in the status page.
 SETUP_TOKEN_PATH = SECRETS_DIR / "setup-token"
+# Self-hosted backend API key set during cloud-choice. 0600 owner-only.
+SERVER_API_KEY_PATH = SECRETS_DIR / "server-api-key"
 
 # Hostapd + dnsmasq config files (rendered on demand)
 HOSTAPD_CONF_PATH = ADOS_ETC_DIR / "hostapd-gs.conf"

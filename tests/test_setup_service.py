@@ -6,8 +6,10 @@ import pytest
 
 from ados.setup.service import (
     _build_known_hosts,
+    _cloud_choice_status,
     _mission_control_url,
     _safe_host_for,
+    apply_cloud_choice,
     extract_cloudflare_token,
 )
 
@@ -97,3 +99,132 @@ def test_mission_control_url_honours_explicit_config() -> None:
         _mission_control_url(host_name="10.0.0.5", config=cfg)
         == "https://command.altnautica.com"
     )
+
+
+# --- cloud-choice -------------------------------------------------------------
+
+
+class _Cloud:
+    url = "https://convex-site.altnautica.com"
+    mqtt_broker = "mqtt.altnautica.com"
+    mqtt_port = 443
+
+
+class _SelfHosted:
+    url = ""
+    mqtt_broker = ""
+    mqtt_port = 8883
+    api_key = ""
+
+
+class _Server:
+    mode = "cloud"
+    cloud = _Cloud()
+    self_hosted = _SelfHosted()
+    mqtt_password = ""
+
+
+class _CloudChoiceConfig:
+    server = _Server()
+
+
+def test_cloud_choice_status_local_returns_minimal_record() -> None:
+    cfg = _CloudChoiceConfig()
+    cfg.server.mode = "local"
+    cs = _cloud_choice_status(cfg)
+    assert cs.mode == "local"
+    assert cs.paired is False
+    assert cs.pair_code_required is False
+    assert cs.backend_url == ""
+
+
+def test_cloud_choice_status_cloud_carries_backend_url() -> None:
+    cfg = _CloudChoiceConfig()
+    cfg.server.mode = "cloud"
+    cs = _cloud_choice_status(cfg)
+    assert cs.mode == "cloud"
+    assert cs.pair_code_required is True
+    assert cs.backend_url == "https://convex-site.altnautica.com"
+
+
+def test_cloud_choice_status_self_hosted_reports_url() -> None:
+    cfg = _CloudChoiceConfig()
+    cfg.server.mode = "self_hosted"
+    cfg.server.self_hosted.url = "https://convex.example.com"
+    cs = _cloud_choice_status(cfg)
+    assert cs.mode == "self_hosted"
+    assert cs.backend_url == "https://convex.example.com"
+
+
+class _RawRuntime:
+    def save_config(self) -> None:
+        pass
+
+
+class _Runtime:
+    def __init__(self) -> None:
+        self.config = _CloudChoiceConfig()
+        self.raw_runtime = _RawRuntime()
+
+
+def test_apply_cloud_choice_local_clears_mqtt_password() -> None:
+    runtime = _Runtime()
+    runtime.config.server.mqtt_password = "leftover"
+    result = apply_cloud_choice(runtime, mode="local")
+    assert result.ok is True
+    assert runtime.config.server.mode == "local"
+    assert runtime.config.server.mqtt_password == ""
+
+
+def test_apply_cloud_choice_self_hosted_persists_url_and_port() -> None:
+    runtime = _Runtime()
+    result = apply_cloud_choice(
+        runtime,
+        mode="self_hosted",
+        self_hosted={
+            "url": "https://convex.example.com",
+            "mqtt_broker": "mqtt.example.com",
+            "mqtt_port": 8884,
+        },
+    )
+    assert result.ok is True
+    assert runtime.config.server.mode == "self_hosted"
+    assert runtime.config.server.self_hosted.url == "https://convex.example.com"
+    assert runtime.config.server.self_hosted.mqtt_broker == "mqtt.example.com"
+    assert runtime.config.server.self_hosted.mqtt_port == 8884
+
+
+def test_apply_cloud_choice_self_hosted_requires_url() -> None:
+    runtime = _Runtime()
+    result = apply_cloud_choice(
+        runtime,
+        mode="self_hosted",
+        self_hosted={"url": ""},
+    )
+    assert result.ok is False
+
+
+def test_apply_cloud_choice_rejects_self_hosted_block_in_other_modes() -> None:
+    runtime = _Runtime()
+    result = apply_cloud_choice(
+        runtime,
+        mode="cloud",
+        self_hosted={"url": "https://example.com"},
+    )
+    assert result.ok is False
+
+
+def test_apply_cloud_choice_rejects_unknown_mode() -> None:
+    runtime = _Runtime()
+    result = apply_cloud_choice(runtime, mode="quantum")
+    assert result.ok is False
+
+
+def test_apply_cloud_choice_validates_port_range() -> None:
+    runtime = _Runtime()
+    result = apply_cloud_choice(
+        runtime,
+        mode="self_hosted",
+        self_hosted={"url": "https://example.com", "mqtt_port": 99999},
+    )
+    assert result.ok is False

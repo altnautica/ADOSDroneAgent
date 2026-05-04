@@ -12,6 +12,7 @@ from typing import Any, Literal
 
 from ados import __version__
 from ados.setup.models import (
+    CloudChoiceStatus,
     MavlinkAccess,
     NetworkStatus,
     RemoteAccessStatus,
@@ -144,31 +145,115 @@ def _cloudflared_running(service_name: str) -> bool:
 
 def _setup_steps(
     *,
+    profile: str,
     mavlink: MavlinkAccess,
     video: VideoAccess,
     network: NetworkStatus,
     remote: RemoteAccessStatus,
+    cloud_choice: CloudChoiceStatus,
     mission_control_url: str,
 ) -> list[SetupStep]:
-    return [
+    """Emit the canonical onboarding steps in spec-39 order.
+
+    Profile branches drop steps that do not apply (drone profile has no
+    ``ground_receiver`` step; ground profile has no ``mavlink`` step).
+    """
+    is_drone = profile != "ground_station"
+    is_ground = profile == "ground_station"
+    network_complete = bool(network.local_ips) or bool(network.hotspot_enabled)
+    cloud_paired = cloud_choice.paired
+    cloud_local = cloud_choice.mode == "local"
+
+    steps: list[SetupStep] = []
+
+    steps.append(
         SetupStep(
-            id="identify",
-            label="Identify device",
+            id="welcome",
+            label="Welcome",
             state="complete",
-            detail="Device identity is available",
-        ),
+            detail="Device identity available",
+        )
+    )
+
+    steps.append(
         SetupStep(
-            id="mavlink",
-            label="Flight controller",
-            state="complete" if mavlink.connected else "needs_action",
+            id="network",
+            label="Network",
+            state="complete" if network_complete else "needs_action",
             detail=(
-                "MAVLink telemetry is live"
-                if mavlink.connected
-                else "Connect or configure the flight controller"
+                "Local access is available"
+                if network_complete
+                else "Enable hotspot, LAN, or USB access"
             ),
-            action_label="Open MAVLink setup",
-            href="/mavlink.html",
-        ),
+            action_label="Open Network",
+            href="/network.html",
+        )
+    )
+
+    steps.append(
+        SetupStep(
+            id="cloud_choice",
+            label="Cloud posture",
+            state=(
+                "complete"
+                if cloud_choice.mode in ("cloud", "self_hosted", "local")
+                and (cloud_local or cloud_choice.backend_url)
+                else "needs_action"
+            ),
+            detail=(
+                "Local-only mode. No cloud relay configured."
+                if cloud_local
+                else f"Connected to {cloud_choice.backend_url}"
+                if cloud_choice.backend_url
+                else "Choose a cloud posture for this device"
+            ),
+            action_label="Choose cloud posture",
+            href="/setup.html?step=cloud_choice",
+        )
+    )
+
+    if cloud_local:
+        steps.append(
+            SetupStep(
+                id="pair",
+                label="Pair with Mission Control",
+                state="not_applicable",
+                detail="No cloud relay; Mission Control connects directly over LAN.",
+            )
+        )
+    else:
+        steps.append(
+            SetupStep(
+                id="pair",
+                label="Pair with Mission Control",
+                state="complete" if cloud_paired else "needs_action",
+                detail=(
+                    "Device is paired."
+                    if cloud_paired
+                    else "Enter a pairing code from Mission Control."
+                ),
+                action_label="Enter pairing code",
+                href="/setup.html?step=pair",
+            )
+        )
+
+    if is_drone:
+        steps.append(
+            SetupStep(
+                id="mavlink",
+                label="Flight controller",
+                state="complete" if mavlink.connected else "needs_action",
+                detail=(
+                    "MAVLink telemetry is live"
+                    if mavlink.connected
+                    else "Connect or configure the flight controller"
+                ),
+                action_label="Open MAVLink",
+                href="/mavlink.html",
+            )
+        )
+
+    steps.append(
         SetupStep(
             id="video",
             label="Video",
@@ -178,21 +263,24 @@ def _setup_steps(
                 if video.state == "running"
                 else "Configure camera or video receiver"
             ),
-            action_label="Open video setup",
+            action_label="Open Video",
             href="/video.html",
-        ),
-        SetupStep(
-            id="network",
-            label="Network",
-            state="complete" if network.local_ips or network.hotspot_enabled else "needs_action",
-            detail=(
-                "Local access is available"
-                if network.local_ips or network.hotspot_enabled
-                else "Enable hotspot, LAN, or USB access"
-            ),
-            action_label="Open network setup",
-            href="/network.html",
-        ),
+        )
+    )
+
+    if is_ground:
+        steps.append(
+            SetupStep(
+                id="ground_receiver",
+                label="Ground receiver",
+                state="complete" if video.state == "running" else "needs_action",
+                detail="WFB receiver and mesh role configuration",
+                action_label="Open Ground station",
+                href="/ground.html",
+            )
+        )
+
+    steps.append(
         SetupStep(
             id="remote_access",
             label="Remote access",
@@ -202,12 +290,15 @@ def _setup_steps(
                 if remote.status == "running"
                 else "Optional cloud or tunnel link"
             ),
-            action_label="Open remote access",
+            action_label="Open Remote access",
             href="/remote.html",
-        ),
+        )
+    )
+
+    steps.append(
         SetupStep(
-            id="mission_control",
-            label="Mission Control",
+            id="finish",
+            label="Finish",
             state="complete" if mavlink.connected or video.state == "running" else "optional",
             detail=(
                 "Open Mission Control when local telemetry or video is ready"
@@ -216,8 +307,10 @@ def _setup_steps(
             ),
             action_label="Open Mission Control" if mission_control_url else "",
             href=mission_control_url,
-        ),
-    ]
+        )
+    )
+
+    return steps
 
 
 def _build_known_hosts(
@@ -318,6 +411,7 @@ async def build_setup_status(runtime: Any, host_header: str | None = None) -> Se
         video.public_whep_url = config.remote_access.cloudflare.video_whep_url
 
     services = _services(runtime)
+    cloud_choice = _cloud_choice_status(config)
     mission_control_url = _mission_control_url(host_name=host_name, config=config)
     access_urls = _access_urls(
         base_url=base_url,
@@ -332,10 +426,12 @@ async def build_setup_status(runtime: Any, host_header: str | None = None) -> Se
         mission_control_url=mission_control_url,
     )
     steps = _setup_steps(
+        profile=str(config.agent.profile),
         mavlink=mavlink,
         video=video,
         network=network,
         remote=remote,
+        cloud_choice=cloud_choice,
         mission_control_url=mission_control_url,
     )
     complete_steps = sum(1 for step in steps if step.state == "complete")
@@ -363,6 +459,7 @@ async def build_setup_status(runtime: Any, host_header: str | None = None) -> Se
         remote_access=remote,
         services=services,
         telemetry=runtime.vehicle_state_dict(),
+        cloud_choice=cloud_choice,
     )
 
 
@@ -555,6 +652,139 @@ def extract_cloudflare_token(value: str) -> str:
     if len(candidate) < 20:
         raise ValueError("Cloudflare tunnel token is too short")
     return candidate
+
+
+def _cloud_choice_status(config: Any) -> CloudChoiceStatus:
+    """Read the current cloud posture out of config for display."""
+    server = getattr(config, "server", None)
+    mode = getattr(server, "mode", "cloud") if server else "cloud"
+    if mode not in ("cloud", "self_hosted", "local"):
+        mode = "cloud"
+    if mode == "local":
+        return CloudChoiceStatus(
+            mode="local",
+            paired=False,
+            pair_code_required=False,
+            backend_url="",
+            backend_reachable=False,
+        )
+    if mode == "self_hosted":
+        sh = getattr(server, "self_hosted", None)
+        url = str(getattr(sh, "url", "") or "")
+        return CloudChoiceStatus(
+            mode="self_hosted",
+            paired=bool(getattr(sh, "api_key", "") or ""),
+            pair_code_required=True,
+            backend_url=url,
+            backend_reachable=False,
+        )
+    cloud = getattr(server, "cloud", None)
+    cloud_url = str(getattr(cloud, "url", "") or "")
+    return CloudChoiceStatus(
+        mode="cloud",
+        paired=False,
+        pair_code_required=True,
+        backend_url=cloud_url,
+        backend_reachable=False,
+    )
+
+
+def apply_cloud_choice(
+    runtime: Any,
+    *,
+    mode: str,
+    self_hosted: dict[str, Any] | None = None,
+) -> SetupActionResult:
+    """Apply a cloud-posture choice to ``config.server``.
+
+    Persists the chosen mode and any self-hosted backend coordinates the
+    operator entered. The optional ``api_key`` is written to a root-owned
+    secret file and is not stored back in config or returned in the
+    response. ``mqtt_password`` is cleared on transition to ``local``.
+    """
+    if mode not in ("cloud", "self_hosted", "local"):
+        return SetupActionResult(ok=False, message=f"Unknown mode: {mode}")
+
+    if mode == "self_hosted":
+        if not self_hosted or not self_hosted.get("url"):
+            return SetupActionResult(
+                ok=False,
+                message="self_hosted.url is required when mode is 'self_hosted'",
+            )
+    elif self_hosted:
+        return SetupActionResult(
+            ok=False,
+            message="self_hosted block is only valid when mode is 'self_hosted'",
+        )
+
+    config = runtime.config
+    config.server.mode = mode
+
+    api_key_written = False
+    if mode == "self_hosted":
+        sh = config.server.self_hosted
+        sh.url = str(self_hosted.get("url") or "").strip()
+        sh.mqtt_broker = str(self_hosted.get("mqtt_broker") or "").strip()
+        port_raw = self_hosted.get("mqtt_port")
+        if port_raw is not None:
+            try:
+                port_int = int(port_raw)
+            except (TypeError, ValueError):
+                return SetupActionResult(
+                    ok=False, message="self_hosted.mqtt_port must be an integer"
+                )
+            if not (1 <= port_int <= 65535):
+                return SetupActionResult(
+                    ok=False, message="self_hosted.mqtt_port must be 1-65535"
+                )
+            sh.mqtt_port = port_int
+        api_key = self_hosted.get("api_key")
+        if api_key:
+            try:
+                from ados.core.paths import SERVER_API_KEY_PATH
+                SERVER_API_KEY_PATH.parent.mkdir(parents=True, exist_ok=True)
+                fd = os.open(
+                    str(SERVER_API_KEY_PATH),
+                    os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
+                    0o600,
+                )
+                with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                    fh.write(str(api_key).strip())
+                    fh.write("\n")
+                api_key_written = True
+                sh.api_key = ""  # never echo back through config
+            except OSError as exc:
+                return SetupActionResult(
+                    ok=False, message=f"Could not write API key: {exc}"
+                )
+
+    if mode == "local":
+        config.server.mqtt_password = ""
+
+    saver = getattr(runtime.raw_runtime, "save_config", None)
+    if callable(saver):
+        try:
+            saver()
+        except Exception:
+            pass
+
+    data: dict[str, object] = {
+        "mode": mode,
+        "api_key_written": api_key_written,
+    }
+    if mode == "cloud":
+        data["backend_url"] = config.server.cloud.url
+    elif mode == "self_hosted":
+        data["backend_url"] = config.server.self_hosted.url
+
+    if mode == "local":
+        message = "Cloud posture set to local-only. Mission Control connects directly."
+    elif mode == "cloud":
+        message = "Cloud posture set to Altnautica cloud. Continue to pairing."
+    else:
+        message = "Cloud posture set to self-hosted backend. Continue to pairing."
+
+    return SetupActionResult(ok=True, message=message, data=data)
 
 
 def install_cloudflare_token(runtime: Any, token_or_script: str) -> SetupActionResult:

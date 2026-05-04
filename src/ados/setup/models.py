@@ -6,7 +6,9 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-SetupStepState = Literal["complete", "needs_action", "optional", "blocked"]
+SetupStepState = Literal[
+    "complete", "needs_action", "optional", "blocked", "not_applicable"
+]
 
 
 class SetupStep(BaseModel):
@@ -70,6 +72,22 @@ class ServiceState(BaseModel):
     state: str = "unknown"
 
 
+class CloudChoiceStatus(BaseModel):
+    """Cloud posture chosen during the onboarding wizard.
+
+    Set by ``POST /api/v1/setup/cloud-choice`` and surfaced read-only on
+    every ``SetupStatus`` response. Values mirror ``ServerConfig.mode``
+    plus a small set of operator-facing diagnostics.
+    """
+
+    mode: Literal["cloud", "self_hosted", "local"] = "cloud"
+    paired: bool = False
+    pair_code_required: bool = True
+    backend_url: str = ""  # display-only, never the API key
+    backend_reachable: bool = False
+    last_checked: str | None = None  # ISO 8601 IST
+
+
 class SetupActionResult(BaseModel):
     ok: bool
     message: str
@@ -92,3 +110,4 @@ class SetupStatus(BaseModel):
     remote_access: RemoteAccessStatus
     services: list[ServiceState] = Field(default_factory=list)
     telemetry: dict[str, object] = Field(default_factory=dict)
+    cloud_choice: CloudChoiceStatus = Field(default_factory=CloudChoiceStatus)

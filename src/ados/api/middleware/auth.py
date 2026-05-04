@@ -29,6 +29,7 @@ EXEMPT_PATHS = {
 # `security.setup_token_required` flag escalates to a token requirement.
 SAME_ORIGIN_SETUP_PATHS = {
     "/api/v1/setup/remote-access/cloudflare",
+    "/api/v1/setup/cloud-choice",
 }
 
 # Hostnames the agent itself binds. A request whose Origin header matches

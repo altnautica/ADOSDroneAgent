@@ -153,7 +153,12 @@ class SelfHostedServerConfig(BaseModel):
 
 
 class ServerConfig(BaseModel):
-    mode: str = "cloud"
+    # Cloud posture set by the onboarding wizard's cloud-choice step.
+    # `cloud` uses the Altnautica-managed Convex + MQTT backend;
+    # `self_hosted` points at the operator's own deployment;
+    # `local` disables the cloud relay entirely (Mission Control reaches
+    # the agent directly over LAN / hotspot / USB tether).
+    mode: Literal["cloud", "self_hosted", "local"] = "cloud"
     cloud: CloudServerConfig = CloudServerConfig()
     self_hosted: SelfHostedServerConfig = SelfHostedServerConfig()
     telemetry_rate: int = 2
