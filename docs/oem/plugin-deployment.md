@@ -240,7 +240,7 @@ The manifest declares a board, agent version, or capability set that the host do
 
 ```bash
 ados plugin info <id>     # shows the manifest's compatibility block
-ados version
+curl http://localhost:8080/api/version
 cat /etc/ados/profile.conf
 ```
 

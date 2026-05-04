@@ -23,7 +23,7 @@ ADOS Drone Agent is the onboard intelligence layer for software-defined drones. 
   <tr>
     <td width="50%">
       <img src="docs/screenshots/overview.png" alt="ADOS Drone Agent overview showing services, system resources, and logs" height="220" width="100%"><br>
-      <sub>Overview tab, showing running services, system resources, and live logs (<code>ados tui</code>)</sub>
+      <sub>Overview tab, showing running services, system resources, and live logs in Mission Control</sub>
     </td>
     <td width="50%">
       <img src="docs/screenshots/scripts.png" alt="Python script editor with syntax highlighting for drone automation" height="220" width="100%"><br>
@@ -55,7 +55,7 @@ ADOS Drone Agent is the onboard intelligence layer for software-defined drones. 
 git clone https://github.com/altnautica/ADOSDroneAgent.git
 cd ADOSDroneAgent
 pip install -e ".[dev]"
-ados demo    # simulated drone telemetry, no hardware needed
+ados --help
 ```
 
 Deploy to a companion computer (Raspberry Pi, Jetson, etc.):
@@ -64,7 +64,17 @@ Deploy to a companion computer (Raspberry Pi, Jetson, etc.):
 curl -sSL https://raw.githubusercontent.com/altnautica/ADOSDroneAgent/main/scripts/install.sh | bash
 ```
 
-The script detects your OS, installs Python 3.11, auto-detects the FC serial port, and configures systemd services.
+The script detects your OS, installs Python 3.11, configures systemd services,
+and serves the local setup webapp from the agent.
+
+After install, SSH into the node and run:
+
+```bash
+ados
+```
+
+The terminal status page shows the local setup URL, LAN or hotspot URLs, MAVLink
+state, video state, services, and remote access state.
 
 ### System Requirements
 
@@ -88,11 +98,19 @@ Also runs on macOS for local development and testing.
 
 **Full remote control.** The GCS can send arm/disarm, mode changes, guided flight commands, and mission uploads through the cloud relay. The agent polls and executes them. All from a browser, over any network.
 
-**REST API.** FastAPI server at `:8080` with domain route modules. Get telemetry, read FC parameters, send commands, manage config, control video, manage suites, run scripts. Full OpenAPI docs at `/docs`.
+**Local setup webapp.** The agent self-hosts a mobile-friendly setup app at
+`:8080`. Use it for first-run identity, MAVLink, video, network, remote access,
+ground-station setup, logs, and advanced recovery.
+
+**REST API.** FastAPI server at `:8080` with domain route modules. The
+`/api/v1/setup/status` facade feeds the webapp, CLI, Mission Control, Android
+handoff, and support tooling. Full OpenAPI docs are at `/docs`.
 
 **MAVLink signing.** The agent is a transparent pipe for MAVLink v2 signed frames. `/api/mavlink/signing/*` exposes capability detection and one-shot FC enrollment via `SETUP_SIGNING`. Keys live in the GCS browser; the agent holds no key material. See [docs](https://docs.altnautica.com/drone-agent/mavlink-signing).
 
-**Terminal dashboard.** Five-screen TUI via `ados tui`: overview, telemetry, MAVLink inspector, logs, config editor. SSH-friendly for headless hardware.
+**Terminal status page.** Run `ados` over SSH for a read-only full-screen status
+page. It points you to the setup webapp and shows MAVLink, video, network,
+remote access, services, and telemetry at a glance.
 
 **Hardware auto-detection.** Detects board tier on boot (RPi Zero 2W through CM5 / Jetson) and enables services based on available resources.
 
@@ -119,63 +137,22 @@ Any Linux ARM64 or x86_64 board with a serial port should work. The tier system 
 
 ## CLI Reference
 
-34 commands. Run `ados --help` for the full list.
+The public everyday CLI is intentionally small. Run `ados --help` for the
+current command list.
 
 | Command | Description |
 |---------|-------------|
-| `ados start` | Connect to FC and start all services |
-| `ados demo` | Start with simulated telemetry (no hardware needed) |
-| `ados tui` | Launch the terminal dashboard |
-| `ados status` | FC connection and agent status |
-| `ados health` | CPU, RAM, disk, temperature |
-| `ados config` | Print current config |
-| `ados config <key>` | Print one config value by dot path |
-| `ados set <key> <val>` | Update a config value |
-| `ados mavlink` | MAVLink proxy status and connected clients |
-| `ados video` | Video pipeline status |
-| `ados link` | Cloud connectivity status |
-| `ados scripts` | List available automation scripts |
-| `ados run <path>` | Execute a Python automation script |
-| `ados send <command>` | Send a command to the FC (arm, disarm, mode) |
-| `ados snap` | Take a camera snapshot |
-| `ados pair` | Pair with ADOS Mission Control |
-| `ados unpair` | Remove GCS pairing |
-| `ados update` | Check for agent updates |
-| `ados upgrade` | Upgrade to latest version |
-| `ados rollback [version]` | Rollback to a previous version |
-| `ados check` | Run pre-flight diagnostics |
-| `ados uninstall` | Remove the agent |
-| `ados version` | Print agent version |
-| `ados ros status` | ROS 2 environment status |
-| `ados ros init` | Initialize Docker-based ROS 2 environment |
-| `ados ros create-node <name>` | Scaffold a new ROS 2 Python package |
-| `ados ros build` | Trigger colcon build in the container |
-| `ados ros shell` | Open an interactive shell in the ROS container |
+| `ados` | Open the read-only terminal status page, or plain status when not attached to a TTY |
+| `ados status` | Print setup, MAVLink, video, network, remote access, and service status |
+| `ados status --json` | Print the full setup facade payload for scripts |
+| `ados update` | Check for and install an agent update |
+| `ados update --check-only` | Check without installing |
+| `ados uninstall` | Remove the agent from the system |
+| `ados uninstall --purge --yes` | Remove services, package files, and config without prompts |
 
-### Ground station (`ados gs`)
-
-Available when the node is running in ground-station profile. Hidden on drone-profile installs.
-
-| Command | Description |
-|---------|-------------|
-| `ados gs status` | Profile, role, WFB-ng link, uplink priority |
-| `ados gs wfb pair <key>` | Pair this ground node with a drone |
-| `ados gs wfb unpair` | Remove the installed drone pair key |
-| `ados gs network show` | Active uplinks and their priorities |
-| `ados gs network ap` | WiFi AP state and client list |
-| `ados gs network client scan` | Scan for joinable WiFi networks |
-| `ados gs network client join <ssid>` | Join an existing WiFi network for uplink |
-| `ados gs network modem status` | 4G modem signal, APN, data cap usage |
-| `ados gs role show` | Current deployment role (`direct`, `relay`, or `receiver`) |
-| `ados gs role set <role>` | Switch role. Agent restarts mesh and WFB-ng services |
-| `ados gs mesh health` | batman-adv carrier, mesh ID, gateway mode |
-| `ados gs mesh neighbors` | Neighbor MACs, TQ, last-seen |
-| `ados gs mesh gateways` | Advertised gateways and selected route |
-| `ados gs mesh accept <window_s>` | Open a pairing accept window on the receiver |
-| `ados gs mesh pending` | Relays waiting for approval |
-| `ados gs mesh approve <device_id>` | Admit a pending relay into the mesh |
-| `ados gs mesh revoke <device_id>` | Remove an approved relay |
-| `ados gs mesh join --receiver-host <host>` | On a relay, join a receiver during its accept window |
+Use the local setup webapp or Mission Control Hardware tab for configuration,
+ground-station pairing, video, network, remote access, logs, and advanced
+actions.
 
 ---
 
@@ -185,6 +162,8 @@ FastAPI server at `:8080`. Full OpenAPI docs at `/docs`. Domain route modules co
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
+| `/api/v1/setup/status` | GET | Universal setup, access URL, MAVLink, video, network, and remote-access status |
+| `/api/v1/setup/remote-access/cloudflare` | POST | Install a Cloudflare Tunnel token or install command |
 | `/api/status` | GET | Agent status, uptime, FC state |
 | `/api/telemetry` | GET | Attitude, GPS, battery snapshot |
 | `/api/params` | GET | Read cached FC parameters |
@@ -265,7 +244,7 @@ Opt-in ROS 2 Jazzy environment running inside a Docker container alongside the a
 
 ```
 ┌──────────┐  ┌──────────┐
-│   CLI    │  │   TUI    │   User interfaces
+│   CLI    │  │ Webapp   │   User interfaces
 └────┬─────┘  └────┬─────┘
      │              │
      ▼              ▼
@@ -310,8 +289,8 @@ accessors instead of reaching into private process fields.
 |---------|--------|
 | MAVLink proxy (serial to WS/TCP/UDP) | Working |
 | REST API (FastAPI domain route modules) | Working |
-| TUI dashboard (5 screens) | Working |
-| CLI (34 commands) | Working |
+| Universal setup facade and webapp | Working |
+| Minimal public CLI | Working |
 | Demo mode (simulated telemetry) | Working |
 | Hardware detection (board tier profiles) | Working |
 | Config system (Pydantic + YAML) | Working |
@@ -339,8 +318,8 @@ pip install -e ".[dev]"
 
 pytest          # run tests
 ruff check src/ # lint
-ados demo       # run without hardware
-ados tui        # launch terminal dashboard
+ados --help     # inspect public CLI
+ados status     # query a running local agent
 ```
 
 API route changes should go through the runtime facade in `ados.api.runtime`.

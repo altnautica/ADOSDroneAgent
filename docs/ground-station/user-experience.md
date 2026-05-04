@@ -49,7 +49,7 @@ The ground station WiFi AP supports 5-10 simultaneous browser clients. Each view
 | Solo operator | 1 | Pilot with phone |
 | Pilot + observer | 2 | Pilot on tablet, observer on laptop |
 | Training | 3+ | Instructor + student + safety officer |
-| Demo/presentation | 5-10 | Live flight demo for investors or partners |
+| Demo/presentation | 5-10 | Live flight demo for stakeholders or partners |
 
 ## Factory Reset
 
@@ -97,7 +97,7 @@ If the accept window expires before every relay has joined, reopen another windo
 
 **No QR code. No phone app. No laptop.** The operator only touches the OLED and the 4 buttons. The invite bundle is a short signed message that travels over UDP on the mesh interface, so there is no cable or IP configuration to worry about.
 
-**Factory reset wipes pairing state.** A long hold on the Back button during boot (or `sudo ados gs reset --confirm <pair-key-fingerprint>`; use `factory-reset-unpaired` when the node has not been paired yet) removes the mesh identity, the pairing invite bundle, and the approved-relay list. The node returns to `direct` role.
+**Factory reset wipes pairing state.** A long hold on the Back button during boot or the setup webapp Advanced reset action removes the mesh identity, the pairing invite bundle, and the approved-relay list. The node returns to `direct` role.
 
 ## REST API Status
 

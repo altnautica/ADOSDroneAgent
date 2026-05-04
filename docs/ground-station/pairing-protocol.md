@@ -85,7 +85,7 @@ Reopen a new window whenever more relays need to be added.
 
 To remove a relay from the mesh:
 
-1. `ados gs mesh revoke <device_id>` on the receiver.
+1. Revoke the relay from the setup webapp, OLED, Mission Control Hardware tab, or REST API on the receiver.
 2. Agent appends the device id to `/etc/ados/mesh/revocations.json`.
 3. The revoked relay's next join request (if any) is dropped before decryption.
 4. The revoked relay continues to hold the old mesh PSK until its next factory reset or manual PSK rotation. For mesh PSK rotation, trigger a receiver-side key rollover (covered in the deployment playbook). For field use, revocation plus physical possession of the revoked node is usually enough.
@@ -117,6 +117,6 @@ After factory reset, the node has to be re-paired from scratch. The receiver gen
 
 ## Related docs
 
-- [cli-reference-mesh.md](cli-reference-mesh.md). `ados gs mesh accept`, `approve`, `revoke`, `join`
+- [cli-reference-mesh.md](cli-reference-mesh.md). Ground-station role and mesh actions
 - [rest-api-mesh.md](rest-api-mesh.md). `/api/v1/ground-station/pair/*` routes
 - [mesh-networking.md](mesh-networking.md). batman-adv carrier that pairing sits on top of

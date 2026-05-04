@@ -91,7 +91,7 @@ class WfbRxManager:
 
         Returns interface name, or None if no compatible adapter is present.
         Thin wrapper over the shared wfb.adapter helper so callers outside
-        this module (TUI, API, tests) have a single entry point.
+        this module (setup webapp, API, tests) have a single entry point.
         """
         if self._config.interface:
             return self._config.interface

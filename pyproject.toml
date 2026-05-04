@@ -35,7 +35,7 @@ dependencies = [
     "websockets>=12.0",
     "structlog>=24.0.0",
     "pyserial>=3.5",
-    "textual>=0.89.0",
+    "rich>=13.7.0",
     "psutil>=5.9.0",
     "httpx>=0.27.0",
     "cryptography>=42.0.0",
@@ -94,7 +94,7 @@ where = ["src"]
 [tool.setuptools.package-data]
 "ados.hal" = ["boards/*.yaml"]
 "ados.core" = ["defaults.yaml"]
-"ados.tui" = ["*.tcss"]
+"ados.webapp" = ["universal/*"]
 
 
 [tool.ruff]

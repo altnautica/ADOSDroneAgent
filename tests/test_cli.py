@@ -1,9 +1,8 @@
-"""Tests for CLI commands: diag and logs."""
+"""Tests for the minimal public ADOS CLI."""
 
 from __future__ import annotations
 
-from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 from click.testing import CliRunner
 
@@ -12,258 +11,82 @@ from ados.cli.main import cli
 runner = CliRunner()
 
 
-# ─── diag command ────────────────────────────────────────────────────────────
+def _setup_payload() -> dict:
+    return {
+        "version": "0.10.0",
+        "device_id": "agent-1",
+        "device_name": "bench-agent",
+        "profile": "drone",
+        "completion_percent": 67,
+        "next_action": "Connect or configure the flight controller",
+        "access_urls": [
+            {
+                "kind": "setup",
+                "label": "Setup webapp",
+                "url": "http://127.0.0.1:8080",
+                "source": "local",
+                "primary": True,
+            }
+        ],
+        "mavlink": {"connected": False, "port": "", "baud": 0},
+        "video": {"state": "running", "whep_url": "http://127.0.0.1:8889/main/whep"},
+        "remote_access": {"status": "disabled"},
+    }
 
 
-def _mock_virtual_memory():
-    m = MagicMock()
-    m.total = 8 * 1024 ** 3  # 8 GB
-    m.used = 4 * 1024 ** 3
-    m.available = 4 * 1024 ** 3
-    m.percent = 50.0
-    return m
-
-
-def _mock_cpu_freq():
-    m = MagicMock()
-    m.current = 2400.0
-    return m
-
-
-def _mock_net_if_addrs():
-    import socket
-    addr = MagicMock()
-    addr.family = socket.AF_INET
-    addr.address = "192.168.1.100"
-    return {"eth0": [addr]}
-
-
-def _mock_disk_usage(path):
-    m = MagicMock()
-    m.total = 100 * 1024 ** 3
-    m.used = 40 * 1024 ** 3
-    m.free = 60 * 1024 ** 3
-    return m
-
-
-def _mock_detect_board():
-    from ados.hal.detect import BoardInfo
-    return BoardInfo(
-        name="test-board",
-        model="Test Model SBC",
-        tier=3,
-        ram_mb=8192,
-        cpu_cores=4,
-    )
-
-
-@patch("ados.cli._sysinfo.psutil.virtual_memory", return_value=_mock_virtual_memory())
-@patch("ados.cli._sysinfo.psutil.cpu_count", return_value=4)
-@patch("ados.cli._sysinfo.psutil.cpu_freq", return_value=_mock_cpu_freq())
-@patch("ados.cli._sysinfo.psutil.net_if_addrs", return_value=_mock_net_if_addrs())
-@patch("ados.cli._sysinfo.psutil.boot_time", return_value=0.0)
-@patch("ados.cli._sysinfo.shutil.disk_usage", side_effect=_mock_disk_usage)
-@patch("ados.cli._sysinfo.os.getloadavg", return_value=(1.0, 0.8, 0.5))
-@patch("ados.hal.detect.detect_board", return_value=_mock_detect_board())
-def test_diag_contains_board_section(
-    mock_board, mock_load, mock_disk, mock_boot, mock_net,
-    mock_freq, mock_cpu, mock_mem,
-):
-    """diag output should contain a Board section with expected fields."""
-    result = runner.invoke(cli, ["diag"])
+def test_help_shows_only_public_commands() -> None:
+    result = runner.invoke(cli, ["--help"])
     assert result.exit_code == 0
-    assert "Board" in result.output
-    assert "test-board" in result.output
-    assert "Tier:" in result.output
+    assert "status" in result.output
+    assert "update" in result.output
+    assert "uninstall" in result.output
+    assert "tui" not in result.output
+    assert "config" not in result.output
+    assert "gs" not in result.output
+    assert "plugin" not in result.output
 
 
-@patch("ados.cli._sysinfo.psutil.virtual_memory", return_value=_mock_virtual_memory())
-@patch("ados.cli._sysinfo.psutil.cpu_count", return_value=4)
-@patch("ados.cli._sysinfo.psutil.cpu_freq", return_value=_mock_cpu_freq())
-@patch("ados.cli._sysinfo.psutil.net_if_addrs", return_value=_mock_net_if_addrs())
-@patch("ados.cli._sysinfo.psutil.boot_time", return_value=0.0)
-@patch("ados.cli._sysinfo.shutil.disk_usage", side_effect=_mock_disk_usage)
-@patch("ados.cli._sysinfo.os.getloadavg", return_value=(1.0, 0.8, 0.5))
-@patch("ados.hal.detect.detect_board", return_value=_mock_detect_board())
-def test_diag_contains_system_section(
-    mock_board, mock_load, mock_disk, mock_boot, mock_net,
-    mock_freq, mock_cpu, mock_mem,
-):
-    """diag output should contain System section with OS and Python info."""
-    result = runner.invoke(cli, ["diag"])
+def test_status_prints_setup_summary() -> None:
+    with patch("ados.cli.main._setup_status", return_value=_setup_payload()):
+        result = runner.invoke(cli, ["status"])
     assert result.exit_code == 0
-    assert "System" in result.output
-    assert "Python:" in result.output
-    assert "Kernel:" in result.output
-    assert "Uptime:" in result.output
+    assert "bench-agent" in result.output
+    assert "Open setup: http://127.0.0.1:8080" in result.output
+    assert "Video:   running" in result.output
 
 
-@patch("ados.cli._sysinfo.psutil.virtual_memory", return_value=_mock_virtual_memory())
-@patch("ados.cli._sysinfo.psutil.cpu_count", return_value=4)
-@patch("ados.cli._sysinfo.psutil.cpu_freq", return_value=_mock_cpu_freq())
-@patch("ados.cli._sysinfo.psutil.net_if_addrs", return_value=_mock_net_if_addrs())
-@patch("ados.cli._sysinfo.psutil.boot_time", return_value=0.0)
-@patch("ados.cli._sysinfo.shutil.disk_usage", side_effect=_mock_disk_usage)
-@patch("ados.cli._sysinfo.os.getloadavg", return_value=(1.0, 0.8, 0.5))
-@patch("ados.hal.detect.detect_board", return_value=_mock_detect_board())
-def test_diag_contains_network_section(
-    mock_board, mock_load, mock_disk, mock_boot, mock_net,
-    mock_freq, mock_cpu, mock_mem,
-):
-    """diag output should show network info."""
-    result = runner.invoke(cli, ["diag"])
+def test_status_json_outputs_full_payload() -> None:
+    with patch("ados.cli.main._setup_status", return_value=_setup_payload()):
+        result = runner.invoke(cli, ["status", "--json"])
     assert result.exit_code == 0
-    assert "Network" in result.output
-    assert "Hostname:" in result.output
-    assert "IP:" in result.output
+    assert '"device_id": "agent-1"' in result.output
 
 
-@patch("ados.cli._sysinfo.psutil.virtual_memory", return_value=_mock_virtual_memory())
-@patch("ados.cli._sysinfo.psutil.cpu_count", return_value=4)
-@patch("ados.cli._sysinfo.psutil.cpu_freq", return_value=_mock_cpu_freq())
-@patch("ados.cli._sysinfo.psutil.net_if_addrs", return_value=_mock_net_if_addrs())
-@patch("ados.cli._sysinfo.psutil.boot_time", return_value=0.0)
-@patch("ados.cli._sysinfo.shutil.disk_usage", side_effect=_mock_disk_usage)
-@patch("ados.cli._sysinfo.os.getloadavg", return_value=(1.0, 0.8, 0.5))
-@patch("ados.hal.detect.detect_board", return_value=_mock_detect_board())
-def test_diag_contains_memory_cpu_disk(
-    mock_board, mock_load, mock_disk, mock_boot, mock_net,
-    mock_freq, mock_cpu, mock_mem,
-):
-    """diag output should show Memory, CPU, and Disk sections."""
-    result = runner.invoke(cli, ["diag"])
+def test_root_command_falls_back_to_plain_status_in_non_tty() -> None:
+    with patch("ados.cli.main._setup_status", return_value=_setup_payload()):
+        result = runner.invoke(cli, [])
     assert result.exit_code == 0
-    assert "Memory" in result.output
-    assert "8192 MB" in result.output
-    assert "CPU" in result.output
-    assert "Cores:" in result.output
-    assert "Load avg:" in result.output
-    assert "Disk" in result.output
+    assert "Open setup:" in result.output
 
 
-@patch("ados.cli._sysinfo.psutil.virtual_memory", return_value=_mock_virtual_memory())
-@patch("ados.cli._sysinfo.psutil.cpu_count", return_value=4)
-@patch("ados.cli._sysinfo.psutil.cpu_freq", return_value=_mock_cpu_freq())
-@patch("ados.cli._sysinfo.psutil.net_if_addrs", return_value=_mock_net_if_addrs())
-@patch("ados.cli._sysinfo.psutil.boot_time", return_value=0.0)
-@patch("ados.cli._sysinfo.shutil.disk_usage", side_effect=_mock_disk_usage)
-@patch("ados.cli._sysinfo.os.getloadavg", return_value=(1.0, 0.8, 0.5))
-@patch("ados.hal.detect.detect_board", return_value=_mock_detect_board())
-def test_diag_contains_agent_and_deps(
-    mock_board, mock_load, mock_disk, mock_boot, mock_net,
-    mock_freq, mock_cpu, mock_mem,
-):
-    """diag output should contain Agent and Dependencies sections."""
-    result = runner.invoke(cli, ["diag"])
+def test_update_check_only_does_not_install() -> None:
+    calls: list[tuple[str, str]] = []
+
+    def fake_request(method: str, path: str, **_kwargs):
+        calls.append((method, path))
+        if path == "/api/ota":
+            return {"current_version": "0.10.0"}
+        return {"status": "update_available", "version": "0.10.1"}
+
+    with patch("ados.cli.main._request", side_effect=fake_request):
+        result = runner.invoke(cli, ["update", "--check-only"])
     assert result.exit_code == 0
-    assert "Agent" in result.output
-    assert "Version:" in result.output
-    assert "Dependencies" in result.output
-    assert "pymavlink" in result.output
-    assert "psutil" in result.output
+    assert "Update available: 0.10.1" in result.output
+    assert ("POST", "/api/ota/install") not in calls
 
 
-@patch("ados.cli._sysinfo.psutil.virtual_memory", return_value=_mock_virtual_memory())
-@patch("ados.cli._sysinfo.psutil.cpu_count", return_value=4)
-@patch("ados.cli._sysinfo.psutil.cpu_freq", return_value=_mock_cpu_freq())
-@patch("ados.cli._sysinfo.psutil.net_if_addrs", return_value=_mock_net_if_addrs())
-@patch("ados.cli._sysinfo.psutil.boot_time", return_value=0.0)
-@patch("ados.cli._sysinfo.shutil.disk_usage", side_effect=_mock_disk_usage)
-@patch("ados.cli._sysinfo.os.getloadavg", return_value=(1.0, 0.8, 0.5))
-@patch("ados.hal.detect.detect_board", return_value=_mock_detect_board())
-def test_diag_contains_services_and_fc(
-    mock_board, mock_load, mock_disk, mock_boot, mock_net,
-    mock_freq, mock_cpu, mock_mem,
-):
-    """diag output should contain Services and Flight Controller sections."""
-    result = runner.invoke(cli, ["diag"])
-    assert result.exit_code == 0
-    assert "Services" in result.output
-    assert "ados-supervisor" in result.output
-    assert "Flight Controller" in result.output
-    assert "Connected:" in result.output
-
-
-@patch("ados.cli._sysinfo.psutil.virtual_memory", return_value=_mock_virtual_memory())
-@patch("ados.cli._sysinfo.psutil.cpu_count", return_value=4)
-@patch("ados.cli._sysinfo.psutil.cpu_freq", return_value=_mock_cpu_freq())
-@patch("ados.cli._sysinfo.psutil.net_if_addrs", return_value=_mock_net_if_addrs())
-@patch("ados.cli._sysinfo.psutil.boot_time", return_value=0.0)
-@patch("ados.cli._sysinfo.shutil.disk_usage", side_effect=_mock_disk_usage)
-@patch("ados.cli._sysinfo.os.getloadavg", return_value=(1.0, 0.8, 0.5))
-@patch("ados.hal.detect.detect_board", return_value=_mock_detect_board())
-def test_diag_contains_temperature(
-    mock_board, mock_load, mock_disk, mock_boot, mock_net,
-    mock_freq, mock_cpu, mock_mem,
-):
-    """diag output should have a Temperature section."""
-    result = runner.invoke(cli, ["diag"])
-    assert result.exit_code == 0
-    assert "Temperature" in result.output
-    assert "CPU:" in result.output
-
-
-# ─── logs command ────────────────────────────────────────────────────────────
-
-
-def test_logs_macos_no_logfile():
-    """On macOS with no log file, logs should print a helpful message."""
-    with patch("ados.cli.main.platform.system", return_value="Darwin"):
-        with patch("pathlib.Path.exists", return_value=False):
-            result = runner.invoke(cli, ["logs"])
-            assert result.exit_code == 0
-            assert "systemd is not available on macOS" in result.output
-
-
-def test_logs_macos_with_logfile(tmp_path):
-    """On macOS with a log file present, logs should read from it."""
-    log_file = tmp_path / "agent.log"
-    log_file.write_text("line1\nline2\nline3\nline4\nline5\n")
-
-    with patch("ados.cli.main.platform.system", return_value="Darwin"):
-        # Patch Path.home to return tmp_path parent so ~/.ados/agent.log works
-        ados_dir = tmp_path / ".ados"
-        ados_dir.mkdir()
-        ados_log = ados_dir / "agent.log"
-        ados_log.write_text("log line A\nlog line B\nlog line C\n")
-
-        with patch("pathlib.Path.home", return_value=tmp_path):
-            result = runner.invoke(cli, ["logs", "--lines", "2"])
-            assert result.exit_code == 0
-            assert "log line B" in result.output
-            assert "log line C" in result.output
-
-
-@patch("ados.cli.main.platform.system", return_value="Linux")
-@patch("ados.cli.main.subprocess.run")
-def test_logs_linux_calls_journalctl(mock_run, mock_sys):
-    """On Linux, logs should invoke journalctl."""
-    result = runner.invoke(cli, ["logs", "--lines", "20"])
-    assert result.exit_code == 0
-    mock_run.assert_called_once()
-    cmd = mock_run.call_args[0][0]
-    assert "journalctl" in cmd
-    assert "-u" in cmd
-    assert "ados-supervisor.service" in cmd
-    assert "-n" in cmd
-    assert "20" in cmd
-
-
-@patch("ados.cli.main.platform.system", return_value="Linux")
-@patch("ados.cli.main.subprocess.run")
-def test_logs_linux_follow_flag(mock_run, mock_sys):
-    """On Linux, --follow should pass -f to journalctl."""
-    result = runner.invoke(cli, ["logs", "--follow"])
-    assert result.exit_code == 0
-    cmd = mock_run.call_args[0][0]
-    assert "-f" in cmd
-
-
-# ─── demo command ────────────────────────────────────────────────────────────
-
-
-def test_demo_uses_user_writable_pairing_state(tmp_path):
-    """Demo mode should not need permission to write /etc/ados."""
+def test_demo_uses_user_writable_pairing_state(tmp_path) -> None:
+    """Demo mode remains available as a hidden no-hardware development path."""
     from ados.core.config import ADOSConfig
 
     config = ADOSConfig()
@@ -293,70 +116,4 @@ def test_demo_uses_user_writable_pairing_state(tmp_path):
     assert apps
     assert apps[0].demo is True
     assert config.pairing.state_path == str(tmp_path / ".ados" / "demo-pairing.json")
-    assert not config.pairing.state_path.startswith("/etc/ados")
     assert config.pairing.convex_url == ""
-
-
-# ─── ground-station command namespace ────────────────────────────────────────
-
-
-def test_gs_wfb_pair_installs_pair_key():
-    """The WFB pair-key command should be reachable outside Bluetooth pairing."""
-    payload = {
-        "paired_drone_id": "drone-1",
-        "key_fingerprint": "abcd1234",
-        "paired_at": "2026-05-02T00:00:00Z",
-    }
-    with patch("ados.cli.gs._request", return_value=payload) as request:
-        result = runner.invoke(
-            cli,
-            ["gs", "wfb", "pair", "PAIRKEY", "--drone-id", "drone-1"],
-        )
-
-    assert result.exit_code == 0
-    assert "Paired. drone=drone-1 fingerprint=abcd1234" in result.output
-    request.assert_called_once_with(
-        "POST",
-        "/api/v1/ground-station/wfb/pair",
-        json_body={"pair_key": "PAIRKEY", "drone_device_id": "drone-1"},
-    )
-
-
-def test_gs_pair_namespace_is_for_bluetooth_helpers():
-    """`ados gs pair` remains the Bluetooth helper group."""
-    result = runner.invoke(cli, ["gs", "pair", "--help"])
-    assert result.exit_code == 0
-    assert "Bluetooth pairing subcommands" in result.output
-    assert "bt" in result.output
-
-
-def test_readme_cli_examples_match_current_command_names():
-    """README should not advertise stale command spellings."""
-    readme = Path("README.md").read_text(encoding="utf-8")
-    assert "ados config show" not in readme
-    assert "ados config set" not in readme
-    assert "ados gs pair <key>" not in readme
-    assert "ados gs mesh join <host>" not in readme
-    assert "ados config <key>" in readme
-    assert "ados set <key> <val>" in readme
-    assert "ados gs wfb pair <key>" in readme
-    assert "ados gs mesh join --receiver-host <host>" in readme
-
-
-@patch("ados.cli.main.platform.system", return_value="Linux")
-@patch("ados.cli.main.subprocess.run")
-def test_logs_linux_since_flag(mock_run, mock_sys):
-    """On Linux, --since should be forwarded to journalctl."""
-    result = runner.invoke(cli, ["logs", "--since", "1h ago"])
-    assert result.exit_code == 0
-    cmd = mock_run.call_args[0][0]
-    assert "--since" in cmd
-    assert "1h ago" in cmd
-
-
-@patch("ados.cli.main.platform.system", return_value="Linux")
-@patch("ados.cli.main.subprocess.run", side_effect=FileNotFoundError)
-def test_logs_linux_no_journalctl(mock_run, mock_sys):
-    """If journalctl is missing, logs should print an error."""
-    result = runner.invoke(cli, ["logs"])
-    assert "journalctl not found" in result.output

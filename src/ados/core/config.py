@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 from ados.core.paths import (
     CA_CERT_PATH,
+    CLOUDFLARE_TUNNEL_TOKEN_PATH,
     CONFIG_YAML,
     DEVICE_CERT_PATH,
     DEVICE_KEY_PATH,
@@ -162,6 +163,24 @@ class ServerConfig(BaseModel):
     mqtt_password: str = ""  # Auto-filled from API key in cloud mode
 
 
+# --- Remote access ---
+
+class CloudflareTunnelConfig(BaseModel):
+    enabled: bool = False
+    token_path: str = str(CLOUDFLARE_TUNNEL_TOKEN_PATH)
+    service_name: str = "cloudflared"
+    setup_url: str = ""
+    api_url: str = ""
+    video_whep_url: str = ""
+    mavlink_ws_url: str = ""
+
+
+class RemoteAccessConfig(BaseModel):
+    provider: Literal["none", "cloudflare"] = "none"
+    public_urls: list[str] = Field(default_factory=list)
+    cloudflare: CloudflareTunnelConfig = CloudflareTunnelConfig()
+
+
 # --- Security ---
 
 class TlsConfig(BaseModel):
@@ -195,6 +214,11 @@ class SecurityConfig(BaseModel):
     api: ApiSecurityConfig = ApiSecurityConfig()
     hmac_enabled: bool = False
     hmac_secret: str = ""
+    # Setup-webapp auth posture. False (default) trusts any browser served
+    # the static webapp from this agent's own listening port (same-origin).
+    # True requires an X-ADOS-Setup-Token header on every setup mutation;
+    # the token is generated at first boot and printed by the CLI.
+    setup_token_required: bool = False
 
 
 # --- Suites ---
@@ -229,6 +253,12 @@ class ScriptingConfig(BaseModel):
     text_commands: TextCommandsConfig = TextCommandsConfig()
     scripts: ScriptsConfig = ScriptsConfig()
     rest_api: RestApiConfig = RestApiConfig()
+    # Optional explicit Mission Control URL surfaced through the setup
+    # facade. When empty, the agent only advertises localhost:4000 to
+    # operators who reached the setup webapp from localhost; everyone
+    # else sees no link. Set this if Mission Control is reachable at a
+    # known address (LAN IP, mDNS, tunnel, etc.).
+    mission_control_url: str = ""
 
 
 # --- OTA ---
@@ -439,6 +469,7 @@ class ADOSConfig(BaseModel):
     video: VideoConfig = VideoConfig()
     network: NetworkConfig = NetworkConfig()
     server: ServerConfig = ServerConfig()
+    remote_access: RemoteAccessConfig = RemoteAccessConfig()
     security: SecurityConfig = SecurityConfig()
     suites: SuiteConfig = SuiteConfig()
     scripting: ScriptingConfig = ScriptingConfig()

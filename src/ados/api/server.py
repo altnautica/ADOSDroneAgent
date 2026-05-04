@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
 from ados import __version__
 from ados.api.deps import set_agent_app
@@ -27,6 +29,7 @@ from ados.api.routes import (
     ros,
     scripts,
     services,
+    setup,
     signing,
     status,
     suites,
@@ -99,6 +102,7 @@ def create_app(agent: Any) -> FastAPI:
     app.include_router(ota.router, prefix="/api")
     app.include_router(pairing.router, prefix="/api")
     app.include_router(system.router, prefix="/api")
+    app.include_router(setup.router, prefix="/api")
     app.include_router(peripherals.router, prefix="/api")
     # Peripheral Manager plugin registry. Lives alongside the legacy
     # /api/peripherals hardware scan route.
@@ -115,23 +119,22 @@ def create_app(agent: Any) -> FastAPI:
     # Plugin lifecycle: install / enable / disable / remove.
     app.include_router(plugins.router, prefix="/api")
 
-    # Ground-station profile: mount the setup webapp at `/` so phones
-    # hitting `http://192.168.4.1/` over the captive portal land on
-    # `static-ground/index.html` directly. Mount is added AFTER every
-    # router above so API routes match first (FastAPI resolves routes
-    # in registration order, and the static mount is the catch-all).
-    if api_runtime.config.agent.profile == "ground_station":
-        from pathlib import Path
-
-        from fastapi.staticfiles import StaticFiles
-
-        static_dir = Path(__file__).resolve().parent.parent / "webapp" / "static-ground"
-        if static_dir.exists():
-            app.mount(
-                "/",
-                StaticFiles(directory=str(static_dir), html=True),
-                name="ground_static",
-            )
+    # Universal setup webapp. Mounted AFTER every router above so API routes
+    # match first and `/` serves the captive/local browser entry. The
+    # webapp must be present in the package; if it is not, that is a
+    # packaging regression and we surface it as a startup error instead of
+    # silently falling back.
+    static_dir = Path(__file__).resolve().parent.parent / "webapp" / "universal"
+    if not static_dir.exists():
+        raise RuntimeError(
+            f"Universal setup webapp directory missing at {static_dir}. "
+            "Reinstall the agent package or rebuild from source."
+        )
+    app.mount(
+        "/",
+        StaticFiles(directory=str(static_dir), html=True),
+        name="setup_static",
+    )
 
     return app
 

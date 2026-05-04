@@ -121,7 +121,7 @@ class LinkQualityMonitor:
     """Rolling buffer of link quality samples from wfb_rx.
 
     Maintains a ring buffer of the last N samples (default 300) for
-    graphing in the TUI and API history endpoint.
+    graphing in setup surfaces and the API history endpoint.
     """
 
     max_samples: int = DEFAULT_HISTORY_SIZE

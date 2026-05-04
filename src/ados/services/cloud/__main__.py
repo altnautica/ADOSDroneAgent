@@ -367,6 +367,12 @@ async def main() -> None:
                         "services": _cached_services,
                         "lastIp": _get_local_ip(),
                         "mdnsHost": "",
+                        "setupUrl": (
+                            f"http://{_get_local_ip()}:{config.scripting.rest_api.port}"
+                        ),
+                        "apiUrl": (
+                            f"http://{_get_local_ip()}:{config.scripting.rest_api.port}/api"
+                        ),
                         "agentVersion": __version__,
                     }
 
@@ -381,6 +387,10 @@ async def main() -> None:
                     payload["videoWhepPort"] = (
                         8889 if _video_svc and _video_svc["status"] == "running" else 0
                     )
+                    if payload["videoWhepPort"]:
+                        payload["videoWhepUrl"] = (
+                            f"http://{payload['lastIp']}:{payload['videoWhepPort']}/main/whep"
+                        )
 
                     # MAVLink WebSocket proxy port for GCS direct connection
                     _mavlink_svc = next(
@@ -390,6 +400,34 @@ async def main() -> None:
                     payload["mavlinkWsPort"] = (
                         8765 if _mavlink_svc and _mavlink_svc["status"] == "running" else 0
                     )
+                    if payload["mavlinkWsPort"]:
+                        payload["mavlinkWsUrl"] = (
+                            f"ws://{payload['lastIp']}:{payload['mavlinkWsPort']}/"
+                        )
+
+                    remote = config.remote_access.cloudflare
+                    if remote.setup_url:
+                        payload["setupUrl"] = remote.setup_url
+                    if remote.api_url:
+                        payload["apiUrl"] = remote.api_url
+                    if remote.video_whep_url:
+                        payload["videoWhepUrl"] = remote.video_whep_url
+                    if remote.mavlink_ws_url:
+                        payload["mavlinkWsUrl"] = remote.mavlink_ws_url
+                    # Mission Control URL is set by the operator when MC is
+                    # reachable at a known address. Leave empty by default;
+                    # the GCS uses its own URL when no advertised value
+                    # exists. (config.server.cloud.url is the Convex relay,
+                    # not Mission Control.)
+                    mc_url = (
+                        getattr(config.scripting, "mission_control_url", "") or ""
+                    )
+                    if mc_url:
+                        payload["missionControlUrl"] = mc_url
+                    payload["remoteAccess"] = {
+                        "provider": config.remote_access.provider,
+                        "publicUrls": config.remote_access.public_urls,
+                    }
 
                     # Remove null temperature (Convex v.float64() rejects null)
                     if payload["temperature"] is None:

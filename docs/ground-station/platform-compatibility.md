@@ -41,7 +41,7 @@ WFB-ng requires a Linux host with monitor-mode drivers. Mac, Windows, Android, a
 
 ## Mesh Capability by Host Board
 
-A node can act as `relay` or `receiver` if it has a second USB port (beyond the one used by the primary RTL8812EU) AND a kernel with the `batman-adv` module. Both are standard on every supported board. The mesh deps (`batctl`, `avahi-daemon`, `wpasupplicant-mesh-sae`) are installed on every ground-station install without any flag; the role stays `direct` by default until the operator picks `relay` or `receiver` via the OLED or `ados gs role set`.
+A node can act as `relay` or `receiver` if it has a second USB port (beyond the one used by the primary RTL8812EU) AND a kernel with the `batman-adv` module. Both are standard on every supported board. The mesh deps (`batctl`, `avahi-daemon`, `wpasupplicant-mesh-sae`) are installed on every ground-station install without any flag; the role stays `direct` by default until the operator picks `relay` or `receiver` via the OLED, setup webapp, or Mission Control Hardware tab.
 
 | Board | Second USB port for mesh dongle | Kernel batman-adv module | Mesh capable |
 |-------|---|---|---|

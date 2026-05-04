@@ -235,7 +235,7 @@ async def post_factory_reset(
     # batman-adv is still reading from it leaves the filesystem in a
     # state that usually needs a reboot to recover. On transition
     # failure we 500 and abort the whole reset. The operator can try
-    # again once the services are stopped (`ados gs role set direct`
+    # again once the services are stopped (role switched back to direct
     # manually, then retry factory reset).
     from ados.services.ground_station.pairing_client import (
         clear_persisted_identity,

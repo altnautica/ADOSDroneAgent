@@ -669,7 +669,7 @@ async def main() -> None:
         # delivered yet. Crash-looping helps nobody, so we downgrade the
         # role sentinel to `direct`, let systemd's ConditionPathExists
         # keep us inactive until the role sentinel is re-armed (via
-        # pairing or explicit ados gs role set), and exit cleanly.
+        # pairing or explicit role changes), and exit cleanly.
         try:
             role_path = MESH_ROLE_PATH
             role_path.parent.mkdir(parents=True, exist_ok=True)

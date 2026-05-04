@@ -29,11 +29,24 @@ server:
   mqtt_username: "ados"
   mqtt_password: ""
 
+remote_access:
+  provider: "none"
+  public_urls: []
+  cloudflare:
+    enabled: false
+    token_path: "/etc/ados/secrets/cloudflare-tunnel-token"
+    service_name: "cloudflared"
+    setup_url: ""
+    api_url: ""
+    video_whep_url: ""
+    mavlink_ws_url: ""
+
 security:
   tls:
     enabled: false
   api:
     cors_enabled: true
+  setup_token_required: false
 
 suites:
   manifest_dir: "/etc/ados/suites"

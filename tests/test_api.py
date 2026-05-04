@@ -39,6 +39,17 @@ def test_get_status(client):
     assert "fc_connected" in data
 
 
+def test_get_setup_status(client):
+    resp = client.get("/api/v1/setup/status")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["device_id"]
+    assert "steps" in data
+    assert "access_urls" in data
+    assert "mavlink" in data
+    assert "video" in data
+
+
 def test_get_telemetry(client):
     resp = client.get("/api/telemetry")
     assert resp.status_code == 200

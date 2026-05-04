@@ -41,7 +41,7 @@ batman-adv rides on a Layer-2 carrier. The agent picks one in this order:
 1. **802.11s with SAE**. encrypted mesh with a shared PSK. Preferred.
 2. **IBSS (ad-hoc)**. no authentication. Fallback when the SAE backend is not available on the host.
 
-Mode is detected at bringup. You can inspect which one is in use with `ados gs mesh health`. the `carrier` field is either `80211s` or `ibss`.
+Mode is detected at bringup. You can inspect which one is in use from the setup webapp, Mission Control Hardware tab, or mesh health REST endpoint. The `carrier` field is either `80211s` or `ibss`.
 
 ## Cloud gateway election
 
@@ -59,7 +59,7 @@ batctl gw_mode client
 
 The client measures TQ to each advertised gateway and routes cloud-bound traffic through the best one. If the selected gateway dies, batman-adv reselects in 3-5 s. The agent exposes this via:
 
-- `ados gs mesh gateways`. list every advertised gateway and the one currently selected
+- Mesh gateways status: list every advertised gateway and the one currently selected.
 - GET `/api/v1/ground-station/mesh/gateways`. same, as JSON
 
 ## mDNS
@@ -83,4 +83,4 @@ The receiver publishes a service record `_ados-receiver._tcp` on `bat0` via `ava
 - [relay-mode-setup.md](relay-mode-setup.md). how to bring up a relay
 - [receiver-mode-setup.md](receiver-mode-setup.md). how to bring up a receiver
 - [pairing-protocol.md](pairing-protocol.md). UDP 5801 invite flow that runs on top of batman-adv
-- [cli-reference-mesh.md](cli-reference-mesh.md). `ados gs mesh ...` commands
+- [cli-reference-mesh.md](cli-reference-mesh.md). Ground-station role and mesh actions

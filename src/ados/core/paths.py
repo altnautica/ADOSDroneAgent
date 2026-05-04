@@ -63,6 +63,14 @@ ENV_FILE = ADOS_ETC_DIR / "env"
 FIREWALL_RULES_PATH = ADOS_ETC_DIR / "firewall.rules"
 AP_PASSPHRASE_PATH = ADOS_ETC_DIR / "ap-passphrase"
 
+# Secret material written by setup flows. Files under this directory should
+# be created with owner-only permissions and must never be returned by APIs.
+SECRETS_DIR = ADOS_ETC_DIR / "secrets"
+CLOUDFLARE_TUNNEL_TOKEN_PATH = SECRETS_DIR / "cloudflare-tunnel-token"
+# Same-origin setup token, used when security.setup_token_required=True.
+# 0600 owner-only. CLI surfaces it in the status page.
+SETUP_TOKEN_PATH = SECRETS_DIR / "setup-token"
+
 # Hostapd + dnsmasq config files (rendered on demand)
 HOSTAPD_CONF_PATH = ADOS_ETC_DIR / "hostapd-gs.conf"
 DNSMASQ_CONF_PATH = ADOS_ETC_DIR / "dnsmasq-gs.conf"

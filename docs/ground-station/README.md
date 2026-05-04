@@ -20,7 +20,7 @@ The ground station can optionally run in one of three roles: `direct` (the defau
 | 8 | [relay-mode-setup.md](relay-mode-setup.md) | Set up a relay node step by step |
 | 9 | [receiver-mode-setup.md](receiver-mode-setup.md) | Set up a receiver hub step by step |
 | 10 | [pairing-protocol.md](pairing-protocol.md) | Field tap-to-pair protocol internals |
-| 11 | [cli-reference-mesh.md](cli-reference-mesh.md) | Full `ados gs role` and `ados gs mesh` reference |
+| 11 | [cli-reference-mesh.md](cli-reference-mesh.md) | Ground-station role and mesh action reference |
 | 12 | [rest-api-mesh.md](rest-api-mesh.md) | REST surface for role, mesh, and pairing |
 
 ## Key Concept

@@ -508,7 +508,24 @@ class AgentApp:
                         "services": service_list,
                         "lastIp": local_ip,
                         "mdnsHost": mdns_host,
+                        "setupUrl": f"http://{local_ip}:8080",
+                        "apiUrl": f"http://{local_ip}:8080/api",
                         "agentVersion": __version__,
+                    }
+
+                    remote = self.config.remote_access.cloudflare
+                    if remote.setup_url:
+                        payload["setupUrl"] = remote.setup_url
+                    if remote.api_url:
+                        payload["apiUrl"] = remote.api_url
+                    if remote.video_whep_url:
+                        payload["videoWhepUrl"] = remote.video_whep_url
+                    if remote.mavlink_ws_url:
+                        payload["mavlinkWsUrl"] = remote.mavlink_ws_url
+                    payload["missionControlUrl"] = self.config.server.cloud.url
+                    payload["remoteAccess"] = {
+                        "provider": self.config.remote_access.provider,
+                        "publicUrls": self.config.remote_access.public_urls,
                     }
 
                     async with httpx.AsyncClient(timeout=10.0) as client:
