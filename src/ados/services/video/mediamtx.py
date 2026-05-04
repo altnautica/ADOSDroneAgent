@@ -18,6 +18,42 @@ _DEFAULT_API_PORT = 9997
 _DEFAULT_RTSP_PORT = 8554
 _DEFAULT_WEBRTC_PORT = 8889
 
+# Max time to wait for mediamtx to bind its RTSP listener after start().
+# Empirically a Pi 4B cold-start mediamtx in ~150-300ms; the prior static
+# 1s sleep was usually enough but on first boot after install the load
+# pushed it past 1s, so the encoder lost the race against the RTSP port
+# accept and crashed with "failed to open output file rtsp://localhost:8554/main".
+_RTSP_BIND_TIMEOUT_S = 10.0
+_RTSP_BIND_PROBE_INTERVAL_S = 0.05
+
+
+async def _wait_for_tcp_port(host: str, port: int, timeout_s: float) -> bool:
+    """Poll TCP connect to (host, port) until success or timeout.
+
+    Returns True when a connect succeeds, False on timeout. Each probe
+    uses a short connect timeout so a stalled stack doesn't hold the
+    loop. Used to gate downstream consumers (encoder spawn) on the
+    mediamtx RTSP listener actually being ready.
+    """
+    deadline = asyncio.get_event_loop().time() + timeout_s
+    while True:
+        try:
+            reader, writer = await asyncio.wait_for(
+                asyncio.open_connection(host, port),
+                timeout=0.5,
+            )
+            writer.close()
+            try:
+                await writer.wait_closed()
+            except Exception:
+                pass
+            return True
+        except (OSError, asyncio.TimeoutError):
+            pass
+        if asyncio.get_event_loop().time() >= deadline:
+            return False
+        await asyncio.sleep(_RTSP_BIND_PROBE_INTERVAL_S)
+
 # STUN servers for WebRTC ICE NAT traversal. Google's free public
 # STUN servers handle NAT punching for ~95% of home/cellular networks.
 # Required for any WAN P2P direct path; harmless on local LAN.
@@ -209,8 +245,23 @@ class MediamtxManager:
             )
             self._running = True
             log.info("mediamtx_started", pid=self._process.pid)
-            # Wait for mediamtx to bind its ports before returning
-            await asyncio.sleep(1.0)
+            # Block until the RTSP listener is actually accepting connections
+            # so the downstream encoder doesn't lose the publish race. The
+            # prior static 1s sleep was unreliable on cold-boot Pi 4B and
+            # caused rpicam-vid to die with
+            #   what(): failed to open output file rtsp://localhost:8554/main
+            ready = await _wait_for_tcp_port(
+                "127.0.0.1", _DEFAULT_RTSP_PORT, _RTSP_BIND_TIMEOUT_S,
+            )
+            if not ready:
+                log.error(
+                    "mediamtx_rtsp_port_not_ready",
+                    port=_DEFAULT_RTSP_PORT,
+                    timeout_s=_RTSP_BIND_TIMEOUT_S,
+                )
+                # Don't return False here — the process is up; the RTSP
+                # listener may still come up after the timeout. Surface
+                # the slow start so it can be diagnosed in journalctl.
             return True
         except Exception as exc:
             log.error("mediamtx_start_failed", error=str(exc))

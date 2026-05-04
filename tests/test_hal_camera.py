@@ -102,6 +102,42 @@ class TestDiscoverUsbCameras:
         with patch("ados.hal.camera.subprocess.run", return_value=mock_result):
             assert _discover_usb_cameras() == []
 
+    def test_v4l2_pi_internal_devices_filtered(self):
+        # Raspberry Pi exposes the bcm2835 codec, ISP, hevc decoder, and
+        # unicam capture interface through /dev/videoN — none of these
+        # are capturable cameras for our purposes. With a real USB camera
+        # plugged in, only the camera should land in the result.
+        output = (
+            "bcm2835-codec-decode (platform:bcm2835-codec):\n"
+            "\t/dev/video10\n"
+            "\n"
+            "bcm2835-isp (platform:bcm2835-isp):\n"
+            "\t/dev/video13\n"
+            "\n"
+            "unicam (platform:fe801000.csi):\n"
+            "\t/dev/video0\n"
+            "\n"
+            "rpi-hevc-dec (platform:rpi-hevc-dec):\n"
+            "\t/dev/video19\n"
+            "\n"
+            "Logitech HD Pro Webcam C920 (usb-0000:00:14.0-1):\n"
+            "\t/dev/video2\n"
+            "\t/dev/video3\n"
+            "\n"
+        )
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = output
+
+        with patch("ados.hal.camera.subprocess.run", return_value=mock_result):
+            cameras = _discover_usb_cameras()
+            names = {c.name for c in cameras}
+            assert names == {"Logitech HD Pro Webcam C920"}
+            # No internal device should appear in the camera list.
+            for forbidden in ("bcm2835", "unicam", "hevc", "isp", "codec"):
+                for c in cameras:
+                    assert forbidden not in c.name.lower()
+
 
 class TestCamerasFromConfig:
     def test_empty_list(self):

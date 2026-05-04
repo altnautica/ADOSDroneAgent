@@ -133,21 +133,31 @@ def _discover_usb_cameras() -> list[CameraInfo]:
                     # Skip subsequent nodes in the same device block
                     # (UVC metadata node, alternate formats, etc.)
                     continue
-                # Classify Pi internal hardware vs actual cameras
+                # v4l2-ctl --list-devices returns the kernel's video subsystem,
+                # which on a Raspberry Pi includes the bcm2835 codec / ISP /
+                # hevc decoder / unicam capture backplane alongside any real
+                # USB UVC camera. Those internal devices are not capturable
+                # cameras for our purposes — skip them entirely so they do
+                # not pollute the camera list surfaced through /api/video,
+                # the wizard, or the GCS Hardware tab. The CSI capture path
+                # is reported separately by `_discover_csi_cameras` via
+                # rpicam-hello, which is the canonical source for CSI input.
                 name_lower = (current_name or "").lower()
-                role = HardwareRole.CAMERA
-                if "codec" in name_lower:
-                    role = HardwareRole.CODEC
-                elif "isp" in name_lower:
-                    role = HardwareRole.ISP
-                elif "hevc" in name_lower or "rpivid" in name_lower:
-                    role = HardwareRole.DECODER
+                if (
+                    "codec" in name_lower
+                    or "isp" in name_lower
+                    or "hevc" in name_lower
+                    or "rpivid" in name_lower
+                    or "unicam" in name_lower
+                ):
+                    block_consumed = True
+                    continue
                 cameras.append(CameraInfo(
                     name=current_name or "USB Camera",
                     type=CameraType.USB,
                     device_path=stripped,
-                    capabilities=["mjpeg", "yuyv"] if role == HardwareRole.CAMERA else ["h264"] if role == HardwareRole.CODEC else [],
-                    hardware_role=role,
+                    capabilities=["mjpeg", "yuyv"],
+                    hardware_role=HardwareRole.CAMERA,
                 ))
                 block_consumed = True
 

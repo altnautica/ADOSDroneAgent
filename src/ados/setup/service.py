@@ -295,16 +295,27 @@ def _setup_steps(
             )
         )
 
+    # Sharper detail string when a camera is detected by the HAL but the
+    # pipeline has not yet reached running state. Helps the operator see
+    # that the agent IS aware of their hardware so they don't think the
+    # camera is dead.
+    camera_detected = any(
+        item.id == "camera" and item.state == "ok"
+        for item in hardware_check.items
+    )
+    if video.state == "running":
+        video_detail = "WHEP video is live"
+    elif camera_detected:
+        video_detail = "Camera detected. Click Start video to begin streaming."
+    else:
+        video_detail = "No camera or receiver detected. Skip if you do not need video on this device."
+
     steps.append(
         SetupStep(
             id="video",
             label="Video",
             state="complete" if video.state == "running" else "needs_action",
-            detail=(
-                "WHEP video is available"
-                if video.state == "running"
-                else "Configure camera or video receiver"
-            ),
+            detail=video_detail,
             action_label="Open Video",
             href="/video.html",
         )

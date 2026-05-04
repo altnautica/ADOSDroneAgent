@@ -1021,21 +1021,124 @@ function renderMavlinkStepInline(status) {
 
 function renderVideoStepInline(status) {
   const v = status.video || {};
+  const isRunning = v.state === "running" && !!v.whep_url;
+
+  // mediamtx serves a built-in WebRTC test player at http://host:webrtc_port/<path>/.
+  // Reuse that as an inline confirmation preview rather than writing a WHEP
+  // client here. The whep_url shape is http://host:8889/main/whep, so the
+  // viewer URL is the same minus the trailing /whep.
+  const previewUrl = isRunning
+    ? v.whep_url.replace(/\/whep$/, "/")
+    : null;
+
+  // Lazy fetch of /api/video so the wizard step can enumerate cameras
+  // without bloating /api/v1/setup/status. Slot updates in place when
+  // the request returns.
+  const camerasSlot = el("div", { className: "dl-rows" });
+  const renderCameraRows = (rows) => {
+    if (!rows || rows.length === 0) {
+      camerasSlot.replaceChildren(
+        dlRow("Cameras", "None detected"),
+      );
+      return;
+    }
+    const items = rows.map((c) => {
+      const dims = (c.width && c.height) ? `${c.width}x${c.height}` : "";
+      const label = c.role && c.role !== "camera"
+        ? `${c.name} (${c.role})`
+        : c.name;
+      const value = [c.type, c.device_path, dims].filter(Boolean).join(" · ");
+      return dlRow(label || "Camera", value || "—");
+    });
+    camerasSlot.replaceChildren(...items);
+  };
+  renderCameraRows(null);
+  camerasSlot.appendChild(el("div", { style: { fontSize: "11px", color: "var(--text-tertiary)", marginTop: "4px" } }, "Loading camera list…"));
+  (async () => {
+    try {
+      const resp = await apiFetch("/api/video");
+      const flat = [];
+      const c = resp?.cameras;
+      // /api/video returns either a flat array or {cameras: [...], assignments: {...}}
+      if (Array.isArray(c)) {
+        flat.push(...c);
+      } else if (c && Array.isArray(c.cameras)) {
+        flat.push(...c.cameras);
+      }
+      renderCameraRows(flat);
+    } catch {
+      camerasSlot.replaceChildren(dlRow("Cameras", "Could not query agent"));
+    }
+  })();
+
+  // Start button + status — only shown when the pipeline is not running.
+  // It triggers the same supervised restart the systemd unit already
+  // performs on failure, so the operator has agency without leaving
+  // the wizard.
+  const startStatus = el("div", {
+    style: { fontSize: "12px", color: "var(--text-tertiary)", marginTop: "8px", minHeight: "1.2em" },
+  });
+  const startBtn = btn("Start video", {
+    variant: "primary",
+    onclick: async () => {
+      startStatus.textContent = "Starting…";
+      try {
+        await apiFetch("/api/services/ados-video/restart", { method: "POST" });
+        // Poll setup status for up to 15s for the pipeline to come up.
+        const deadline = Date.now() + 15000;
+        while (Date.now() < deadline) {
+          await new Promise((r) => setTimeout(r, 1000));
+          await loadStatus();
+          const cur = currentStatus?.video;
+          if (cur?.state === "running") {
+            startStatus.textContent = "Pipeline is running.";
+            // Re-render the wizard to show the preview iframe.
+            renderWizard(currentStatus, "video");
+            return;
+          }
+        }
+        startStatus.textContent = "Did not reach running state within 15s. Check /api/video and journalctl -u ados-video.";
+      } catch (err) {
+        startStatus.textContent = `Restart failed: ${err.message || err}`;
+      }
+    },
+  });
+
   return card({
     title: "Video pipeline",
     severity: severityForVideo(status),
     body: el("div", {},
       el("div", { className: "card-pad" },
         el("p", { style: { color: "var(--text-secondary)", fontSize: "13px", marginBottom: "12px" } },
-          v.state === "running"
-            ? "Pipeline is running. WHEP video is available for Mission Control."
-            : "No camera or receiver detected. Skip if you do not need video on this device."),
-        el("div", { className: "btn-row" }, btn("Open Video", { href: "/video.html" })),
+          isRunning
+            ? "Live preview below. The same WHEP stream is what Mission Control will receive."
+            : "Pipeline is not streaming yet. Start it to begin pushing the camera through WebRTC."),
+        isRunning && previewUrl
+          ? el("div", {
+              style: { marginBottom: "12px", border: "1px solid var(--border-default)", borderRadius: "4px", overflow: "hidden", background: "#000" },
+            },
+              el("iframe", {
+                src: previewUrl,
+                title: "Live WHEP preview",
+                allow: "autoplay",
+                style: { display: "block", width: "100%", aspectRatio: "16 / 9", border: "0" },
+              }),
+            )
+          : null,
+        el("div", { className: "btn-row" },
+          isRunning ? null : startBtn,
+          btn("Open Video", { href: "/video.html" }),
+        ),
+        isRunning ? null : startStatus,
       ),
       el("div", { className: "dl-rows" },
         dlRow("State", pretty(v.state)),
         dlRow("WHEP URL", v.whep_url),
         dlRow("Recording", v.recording ? "On" : "Off"),
+      ),
+      el("div", { className: "card-pad", style: { borderTop: "1px solid var(--border-default)", paddingTop: "12px" } },
+        el("div", { style: { fontSize: "11px", color: "var(--text-tertiary)", marginBottom: "6px" } }, "DETECTED CAMERAS"),
+        camerasSlot,
       ),
     ),
   });
