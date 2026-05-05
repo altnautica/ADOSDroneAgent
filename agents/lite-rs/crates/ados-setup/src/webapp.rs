@@ -21,9 +21,18 @@ use axum::{
 };
 use include_dir::{include_dir, Dir};
 
-// `CARGO_MANIFEST_DIR` for ados-setup is `agents/lite-rs/crates/ados-setup/`.
-// `web/setup/` lives at the repo root, so we go up four levels.
-static SETUP_WEBAPP: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/../../../../web/setup");
+// Embedded webapp lives at `agents/lite-rs/crates/ados-setup/web-setup/`,
+// kept in sync with the canonical `web/setup/` at the repo root.
+// The crate-local copy is required because `cross` (used for CI
+// cross-compile) only mounts the workspace root (agents/lite-rs/) into
+// the build container, so a `../../../../web/setup` path would resolve
+// to a directory outside the mount and break the build.
+//
+// Sync from canonical: `cp -r web/setup/* agents/lite-rs/crates/ados-setup/web-setup/`
+// Both the Python full agent and this Rust lite agent serve identical
+// HTML/CSS/JS — keep them in sync until we move to a shared crate +
+// build-time fetch.
+static SETUP_WEBAPP: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/web-setup");
 
 /// `GET /` redirects to the wizard.
 pub async fn redirect_root() -> Redirect {
