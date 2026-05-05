@@ -121,11 +121,21 @@ verify_artifact() {
         die "missing ${base}.sha256 — refusing to install unsigned/unchecked artifact"
     fi
 
-    # Ed25519 signature.
-    if ! command -v minisign >/dev/null 2>&1; then
-        log "minisign not installed; skipping signature check (not recommended)"
-        log "install with: apt-get install minisign  OR  brew install minisign"
+    # Ed25519 signature. Mandatory — a network-positioned attacker who
+    # ensures minisign is not pre-installed must not be able to bypass
+    # signature checks. Operators who genuinely need to skip can set
+    # ADOS_LITE_ALLOW_UNSIGNED=1 explicitly.
+    if [ "${ADOS_LITE_ALLOW_UNSIGNED:-0}" = "1" ]; then
+        log "warn: ADOS_LITE_ALLOW_UNSIGNED=1 set; skipping minisign signature verification"
         return 0
+    fi
+    if ! command -v minisign >/dev/null 2>&1; then
+        log "minisign is required but not installed"
+        log "install via: apt-get install -y minisign  (Debian/Ubuntu)"
+        log "         or: apk add minisign            (Alpine/Buildroot)"
+        log "         or: brew install minisign       (macOS)"
+        log "to bypass at your own risk, set ADOS_LITE_ALLOW_UNSIGNED=1"
+        die "signature verification cannot proceed without minisign"
     fi
     if [ ! -f "${artifact}.minisig" ]; then
         die "missing ${base}.minisig — refusing to install unsigned artifact"
@@ -144,18 +154,35 @@ extract_binary() {
     log "installed binary at ${INSTALL_BIN}"
 }
 
+generate_device_id() {
+    # Stable per-device identifier. Try /etc/machine-id first
+    # (systemd / Buildroot both populate it on first boot); fall back
+    # to uuidgen, then to a hostname + epoch hash.
+    if [ -r /etc/machine-id ]; then
+        printf 'ados-%s' "$(cat /etc/machine-id | tr -d '\n')"
+        return
+    fi
+    if command -v uuidgen >/dev/null 2>&1; then
+        printf 'ados-%s' "$(uuidgen | tr -d '\n')"
+        return
+    fi
+    printf 'ados-%s-%s' "$(hostname 2>/dev/null || echo unknown)" "$(date +%s)"
+}
+
 write_default_config() {
     if [ -f "${CONFIG_PATH}" ]; then
         log "config already present at ${CONFIG_PATH}; leaving untouched"
         return 0
     fi
     install -d -m 0755 "${CONFIG_DIR}"
+    local device_id
+    device_id="$(generate_device_id)"
     cat > "${CONFIG_PATH}" <<EOF
 # ADOS lightweight agent configuration.
 # See proto/setup/setup-api.yaml + proto/cloud/openapi.yaml for field semantics.
 
 agent:
-  device_id: ""
+  device_id: "${device_id}"
   name: "ADOS Lite"
 
 mavlink:
@@ -163,6 +190,10 @@ mavlink:
   baud: 115200
 
 cloud:
+  # mqtt_broker / convex_url / api_key are populated by the pairing
+  # flow. Until those values are set the agent runs offline (MAVLink
+  # router only) and the HTTPS layer emits a pairing beacon to register
+  # this device with the cloud relay.
   mqtt_broker: ""
   mqtt_port: 8883
   mqtt_use_tls: true
@@ -173,7 +204,7 @@ api:
   bind: "127.0.0.1:8080"
 EOF
     chmod 0644 "${CONFIG_PATH}"
-    log "wrote default config at ${CONFIG_PATH}"
+    log "wrote default config at ${CONFIG_PATH} (device_id: ${device_id})"
 }
 
 install_systemd_unit() {
@@ -284,15 +315,24 @@ main() {
     tmpdir="$(mktemp -d)"
     pushd "${tmpdir}" >/dev/null
 
-    # Find the artifact matching this target. The release page lists multiple
-    # files; we glob by suffix.
-    local listing artifact_url sums_url sig_url
-    listing="$(curl -fsSL "${release_url%/download/*}/expanded_assets/$(basename "${release_url}")" 2>/dev/null \
-        | grep -oE "ados-agent-lite-[^\"]+-${target}\.tar\.gz[^\"]*" \
-        | head -n1)"
+    # Find the artifact matching this target. Two query paths: the public
+    # GitHub API (returns asset list as JSON), and as a fallback the HTML
+    # asset-listing endpoint.
+    local listing artifact_url sums_url sig_url release_tag api_url
+    release_tag="$(basename "${release_url}")"
+    api_url="https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/releases/tags/${release_tag}"
+    listing="$(curl -fsSL "${api_url}" 2>/dev/null \
+        | grep -oE '"name"\s*:\s*"ados-agent-lite-[^"]+-'"${target}"'\.tar\.gz"' \
+        | head -n1 \
+        | sed -E 's/.*"name"\s*:\s*"([^"]+)".*/\1/')"
     if [ -z "${listing}" ]; then
-        # Fallback: try a known canonical name.
-        listing="ados-agent-lite-latest-${target}.tar.gz"
+        # Fallback: scrape the HTML expanded_assets endpoint.
+        listing="$(curl -fsSL "${release_url%/download/*}/expanded_assets/${release_tag}" 2>/dev/null \
+            | grep -oE "ados-agent-lite-[^\"]+-${target}\.tar\.gz" \
+            | head -n1)"
+    fi
+    if [ -z "${listing}" ]; then
+        die "could not resolve artifact name for ${target} from ${release_tag}; check the release page at https://github.com/${GITHUB_OWNER}/${GITHUB_REPO}/releases"
     fi
     artifact_url="${release_url}/${listing}"
     sums_url="${artifact_url}.sha256"

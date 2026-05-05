@@ -20,12 +20,13 @@ on:
   push:
     branches:
       - main
-    paths:
-      - "agents/lite-rs/**"
-      - ".github/workflows/lite-agent-release.yml"
-  push:
     tags:
       - "lite-v*"
+    paths:
+      # Path filter applies to branch pushes only; tag pushes always
+      # fire regardless of paths.
+      - "agents/lite-rs/**"
+      - ".github/workflows/lite-agent-release.yml"
 
 permissions:
   contents: write
@@ -54,12 +55,15 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install Rust toolchain
+        # cross runs the actual cross-compile inside its own Docker image
+        # with the target std bundled. The host only needs cargo to invoke
+        # cross; no rustup target add is required here.
         uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
 
       - name: Install cross
-        run: cargo install cross --git https://github.com/cross-rs/cross --rev v0.2.5 --locked
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cross@0.2.5
 
       - name: Install minisign
         run: |
@@ -96,18 +100,25 @@ jobs:
           install -m 0755 \
             "agents/lite-rs/target/${TARGET}/release/${BIN_NAME}" \
             "${STAGING}/${BIN_NAME}"
-          install -m 0644 LICENSE "${STAGING}/LICENSE" 2>/dev/null || true
-          install -m 0644 agents/lite-rs/README.md "${STAGING}/README.md" 2>/dev/null || true
+          install -m 0644 LICENSE "${STAGING}/LICENSE"
+          install -m 0644 agents/lite-rs/README.md "${STAGING}/README.md"
 
-          tar -czf "${ARTIFACT}" -C "${STAGING}" .
+          # Name files explicitly (no trailing ".") so the archive root
+          # contains "ados-agent-lite" and not "./ados-agent-lite". The
+          # install-lite.sh extractor expects the unprefixed form.
+          tar -czf "${ARTIFACT}" -C "${STAGING}" ados-agent-lite LICENSE README.md
           sha256sum "${ARTIFACT}" > "${ARTIFACT}.sha256"
           echo "artifact=${ARTIFACT}" >> "$GITHUB_OUTPUT"
 
       - name: Sign artifact (minisign Ed25519)
+        # Step-level if: cannot read step-level env, so gate on the
+        # secret directly. When the secret is unset (forks, dry-runs)
+        # the signing step is skipped entirely and the upload step
+        # uploads the unsigned artifact.
+        if: ${{ secrets.LITE_AGENT_MINISIGN_KEY != '' }}
         env:
           MINISIGN_KEY: ${{ secrets.LITE_AGENT_MINISIGN_KEY }}
           MINISIGN_PASSWORD: ${{ secrets.LITE_AGENT_MINISIGN_PASSWORD }}
-        if: ${{ env.MINISIGN_KEY != '' }}
         run: |
           ARTIFACT="${{ steps.stage.outputs.artifact }}"
           KEY_FILE="$(mktemp)"
@@ -123,7 +134,10 @@ jobs:
             ${{ steps.stage.outputs.artifact }}
             ${{ steps.stage.outputs.artifact }}.sha256
             ${{ steps.stage.outputs.artifact }}.minisig
-          if-no-files-found: error
+          # Don't fail the upload when the .minisig is absent (the
+          # signing step may have been skipped in forks). The .tar.gz
+          # and .sha256 are always present.
+          if-no-files-found: warn
           retention-days: 14
 
   release:
