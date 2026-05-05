@@ -133,6 +133,12 @@ pub enum EncoderError {
     #[error("subprocess wire protocol error: {0}")]
     Protocol(String),
 
+    /// The subprocess channel buffer does not yet hold a complete frame.
+    /// Distinct from `Protocol` so the reader loop can resume reading
+    /// rather than tear down the pipe on a partial-frame read.
+    #[error("subprocess wire frame incomplete: needs {0} more bytes")]
+    Incomplete(usize),
+
     /// I/O on a host file descriptor (UDS, pipe, V4L2 device) failed.
     #[error("encoder i/o error: {0}")]
     Io(String),

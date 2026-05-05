@@ -26,6 +26,7 @@
 //! `agents/lite-rs/boards/luckfox-pico-zero/rkmpi-wrapper/main.c`.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -100,9 +101,7 @@ pub fn frame_request(req: &SubprocessRequest) -> Result<Vec<u8>, EncoderError> {
 /// and by the real read loop once the subprocess is wired up.
 pub fn parse_response(framed: &[u8]) -> Result<(SubprocessResponse, usize), EncoderError> {
     if framed.len() < 4 {
-        return Err(EncoderError::Protocol(
-            "response shorter than 4-byte length prefix".into(),
-        ));
+        return Err(EncoderError::Incomplete(4 - framed.len()));
     }
     let len = u32::from_be_bytes([framed[0], framed[1], framed[2], framed[3]]) as usize;
     if len > MAX_FRAME_BYTES {
@@ -113,11 +112,7 @@ pub fn parse_response(framed: &[u8]) -> Result<(SubprocessResponse, usize), Enco
     }
     let total = 4 + len;
     if framed.len() < total {
-        return Err(EncoderError::Protocol(format!(
-            "response declared {} byte body, only {} bytes available",
-            len,
-            framed.len() - 4
-        )));
+        return Err(EncoderError::Incomplete(total - framed.len()));
     }
     let resp: SubprocessResponse = rmp_serde::from_slice(&framed[4..total])
         .map_err(|e| EncoderError::Protocol(format!("decode response: {e}")))?;
@@ -159,12 +154,47 @@ where
     Ok(resp)
 }
 
-/// Subprocess-backed encoder. Holds the wrapper binary path until the
-/// real spawn / supervise loop lands.
-#[derive(Debug)]
+/// Time the parent waits for the child to flush + exit cleanly after
+/// a Stop request before sending SIGKILL. Tuned so a healthy child has
+/// room to drain its outgoing frame queue without holding the parent
+/// hostage on a wedged subprocess.
+const STOP_GRACE: Duration = Duration::from_secs(2);
+
+/// Time the parent waits for the child's first `Ready` response before
+/// declaring the start handshake failed. The C wrapper opens the
+/// vendor library + initializes the encoder + allocates buffers in
+/// this window; 5s is comfortable on Cortex-A7 + RKMPI cold start.
+const READY_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Capacity of the internal mpsc that the reader task uses to hand
+/// encoded frames to `next_frame`. The encoder produces at the FC
+/// frame rate (~30 Hz typical); a 64-frame buffer absorbs a 2 s
+/// downstream stall before drops.
+const FRAME_QUEUE_CAPACITY: usize = 64;
+
+/// Subprocess-backed encoder. Owns the spawned wrapper child + the
+/// reader task that drains stdout into an in-memory frame queue.
 pub struct RkmpiEncoderSubprocess {
     wrapper_path: PathBuf,
-    started: bool,
+    state: Option<Running>,
+}
+
+/// Lifetime-bound runtime state for an actively running wrapper.
+/// Constructed by `start()`, consumed by `stop()`.
+struct Running {
+    child: tokio::process::Child,
+    stdin: tokio::process::ChildStdin,
+    frame_rx: tokio::sync::mpsc::Receiver<EncodedFrame>,
+    reader_task: tokio::task::JoinHandle<()>,
+}
+
+impl std::fmt::Debug for RkmpiEncoderSubprocess {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RkmpiEncoderSubprocess")
+            .field("wrapper_path", &self.wrapper_path)
+            .field("running", &self.state.is_some())
+            .finish()
+    }
 }
 
 impl RkmpiEncoderSubprocess {
@@ -173,7 +203,7 @@ impl RkmpiEncoderSubprocess {
     pub fn new<P: AsRef<Path>>(wrapper_path: P) -> Self {
         Self {
             wrapper_path: wrapper_path.as_ref().to_path_buf(),
-            started: false,
+            state: None,
         }
     }
 
@@ -181,41 +211,252 @@ impl RkmpiEncoderSubprocess {
     pub fn wrapper_path(&self) -> &Path {
         &self.wrapper_path
     }
+
+    /// True when a wrapper child is currently running.
+    pub fn is_running(&self) -> bool {
+        self.state.is_some()
+    }
+}
+
+impl Drop for RkmpiEncoderSubprocess {
+    fn drop(&mut self) {
+        // Best-effort: if the agent was dropped without an explicit
+        // `stop().await`, send SIGKILL to avoid leaving an orphan
+        // wrapper process holding the vendor encoder. The reader
+        // task aborts when its end of the pipe closes.
+        if let Some(mut state) = self.state.take() {
+            let _ = state.child.start_kill();
+            state.reader_task.abort();
+        }
+    }
 }
 
 #[async_trait::async_trait]
 impl Encoder for RkmpiEncoderSubprocess {
-    async fn start(&mut self, _config: EncoderConfig) -> Result<(), EncoderError> {
-        if self.started {
+    async fn start(&mut self, config: EncoderConfig) -> Result<(), EncoderError> {
+        if self.state.is_some() {
             return Err(EncoderError::AlreadyStarted);
         }
-        // TODO(hardware bringup): spawn the C wrapper via
-        // `tokio::process::Command::new(&self.wrapper_path)`, pipe
-        // stdin + stdout, send a framed
-        // `SubprocessRequest::Start(_config)`, wait for a
-        // `SubprocessResponse::Ready` (with a startup timeout), then
-        // split stdout into a background task that forwards
-        // `SubprocessResponse::Frame` onto an internal mpsc channel
-        // drained by `next_frame`. The supervise loop respawns on
-        // child exit with exponential backoff capped at 60s.
-        tracing::debug!(
-            wrapper = ?self.wrapper_path,
-            "rkmpi subprocess encoder start called (stub)"
-        );
-        Err(EncoderError::NotImplemented)
+
+        // Spawn the wrapper with piped stdin + stdout. Stderr inherits
+        // the parent's so vendor diagnostics (RKMPI's chatty lib log)
+        // land in journalctl alongside the agent's own tracing output.
+        let mut child = tokio::process::Command::new(&self.wrapper_path)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::inherit())
+            .kill_on_drop(true)
+            .spawn()
+            .map_err(|e| EncoderError::Subprocess(e.to_string()))?;
+
+        let mut stdin = child.stdin.take().ok_or_else(|| {
+            EncoderError::Protocol("child stdin pipe missing after spawn".into())
+        })?;
+        let stdout = child.stdout.take().ok_or_else(|| {
+            EncoderError::Protocol("child stdout pipe missing after spawn".into())
+        })?;
+
+        // Send the Start request. The wrapper parses, initialises the
+        // vendor encoder, and replies with Ready (or Error).
+        write_request(&mut stdin, &SubprocessRequest::Start(config))
+            .await
+            .map_err(|e| {
+                tracing::warn!(error = %e, "rkmpi wrapper start request failed; aborting child");
+                let _ = child.start_kill();
+                e
+            })?;
+
+        // Spawn the reader task. It runs until the child closes stdout
+        // (clean exit or crash) or until aborted by `stop()` / Drop.
+        let (frame_tx, frame_rx) = tokio::sync::mpsc::channel(FRAME_QUEUE_CAPACITY);
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        let reader_task = tokio::spawn(reader_loop(stdout, frame_tx, ready_tx));
+
+        // Wait for the wrapper's Ready response within the startup
+        // window. On timeout, abort the reader, kill the child, return
+        // a typed error.
+        match tokio::time::timeout(READY_TIMEOUT, ready_rx).await {
+            Ok(Ok(Ok(()))) => {
+                tracing::info!(
+                    wrapper = ?self.wrapper_path,
+                    "rkmpi wrapper ready"
+                );
+                self.state = Some(Running {
+                    child,
+                    stdin,
+                    frame_rx,
+                    reader_task,
+                });
+                Ok(())
+            }
+            Ok(Ok(Err(msg))) => {
+                let _ = child.start_kill();
+                reader_task.abort();
+                Err(EncoderError::Protocol(format!(
+                    "rkmpi wrapper start error: {msg}"
+                )))
+            }
+            Ok(Err(_)) => {
+                let _ = child.start_kill();
+                reader_task.abort();
+                Err(EncoderError::Protocol(
+                    "rkmpi wrapper closed stdout before sending Ready".into(),
+                ))
+            }
+            Err(_) => {
+                let _ = child.start_kill();
+                reader_task.abort();
+                Err(EncoderError::Protocol(format!(
+                    "rkmpi wrapper start timeout after {:?}",
+                    READY_TIMEOUT
+                )))
+            }
+        }
     }
 
     async fn next_frame(&mut self) -> Option<EncodedFrame> {
-        // TODO(hardware bringup): drain the internal mpsc receiver.
-        // None when the child has exited and the channel is closed.
-        None
+        // Drain the internal queue. Returns None when the reader task
+        // closed the channel (child exited or crashed) — caller should
+        // treat that as a signal to call `stop()` and decide whether
+        // to respawn.
+        match self.state.as_mut() {
+            Some(state) => state.frame_rx.recv().await,
+            None => None,
+        }
     }
 
     async fn stop(&mut self) {
-        // TODO(hardware bringup): send `SubprocessRequest::Stop`, wait
-        // for the child to flush + exit (bounded), `kill()` if it
-        // exceeds the deadline, reap. Idempotent.
-        self.started = false;
+        let Some(mut state) = self.state.take() else {
+            return; // idempotent
+        };
+
+        // Best-effort Stop request. If write fails (broken pipe because
+        // the child already crashed), fall through to the kill path.
+        if let Err(e) = write_request(&mut state.stdin, &SubprocessRequest::Stop).await {
+            tracing::warn!(error = %e, "rkmpi wrapper stop write failed; killing");
+        }
+
+        // Closing stdin signals EOF to the wrapper's read loop, which
+        // is what the C side waits on to break out of its main loop.
+        drop(state.stdin);
+
+        // Wait up to STOP_GRACE for clean exit, then SIGKILL.
+        match tokio::time::timeout(STOP_GRACE, state.child.wait()).await {
+            Ok(Ok(status)) => {
+                tracing::info!(
+                    wrapper = ?self.wrapper_path,
+                    status = ?status,
+                    "rkmpi wrapper exited cleanly"
+                );
+            }
+            Ok(Err(e)) => {
+                tracing::warn!(error = %e, "rkmpi wrapper wait failed");
+            }
+            Err(_) => {
+                tracing::warn!(
+                    wrapper = ?self.wrapper_path,
+                    grace_secs = STOP_GRACE.as_secs(),
+                    "rkmpi wrapper did not exit in grace window; sending SIGKILL"
+                );
+                let _ = state.child.start_kill();
+                let _ = state.child.wait().await;
+            }
+        }
+
+        // Reader task terminates naturally once the stdout pipe closes.
+        // If it's still alive (e.g. blocked on something other than a
+        // pipe read), abort to avoid a leak.
+        state.reader_task.abort();
+    }
+}
+
+/// Drain the wrapper's stdout. Forwards `Frame` responses to the
+/// internal mpsc, signals the start-handshake outcome via the oneshot,
+/// logs `Error` responses and exits when the pipe closes.
+async fn reader_loop(
+    mut stdout: tokio::process::ChildStdout,
+    frame_tx: tokio::sync::mpsc::Sender<EncodedFrame>,
+    ready_tx: tokio::sync::oneshot::Sender<Result<(), String>>,
+) {
+    use tokio::io::AsyncReadExt;
+
+    let mut ready_tx = Some(ready_tx);
+    let mut leftover: Vec<u8> = Vec::with_capacity(MAX_FRAME_BYTES);
+    let mut scratch = vec![0u8; 64 * 1024];
+
+    loop {
+        match stdout.read(&mut scratch).await {
+            Ok(0) => {
+                // EOF — child closed stdout. If we never observed a
+                // Ready, signal the start handshake's failure path.
+                if let Some(tx) = ready_tx.take() {
+                    let _ = tx.send(Err("child closed stdout before Ready".into()));
+                }
+                return;
+            }
+            Ok(n) => leftover.extend_from_slice(&scratch[..n]),
+            Err(e) => {
+                if let Some(tx) = ready_tx.take() {
+                    let _ = tx.send(Err(format!("stdout read error: {e}")));
+                }
+                tracing::warn!(error = %e, "rkmpi wrapper stdout read failed");
+                return;
+            }
+        }
+
+        // Try to parse zero or more frames out of the accumulated buffer.
+        loop {
+            match parse_response(&leftover) {
+                Ok((resp, consumed)) => {
+                    leftover.drain(..consumed);
+                    match resp {
+                        SubprocessResponse::Ready => {
+                            if let Some(tx) = ready_tx.take() {
+                                let _ = tx.send(Ok(()));
+                            }
+                            // If a wrapper goes Ready twice (shouldn't,
+                            // but harmless), ignore the duplicate.
+                        }
+                        SubprocessResponse::Frame {
+                            is_keyframe,
+                            pts_ms,
+                            bytes,
+                        } => {
+                            let frame = EncodedFrame {
+                                bytes,
+                                is_keyframe,
+                                pts_ms,
+                            };
+                            // try_send: if the consumer is wedged we drop
+                            // rather than block the reader task; a stalled
+                            // pipeline shouldn't backpressure the wrapper.
+                            if let Err(e) = frame_tx.try_send(frame) {
+                                tracing::warn!(error = %e, "rkmpi frame queue full; dropping frame");
+                            }
+                        }
+                        SubprocessResponse::Error { message } => {
+                            tracing::warn!(message = %message, "rkmpi wrapper reported error");
+                            if let Some(tx) = ready_tx.take() {
+                                let _ = tx.send(Err(message));
+                            }
+                            // Continue reading; the wrapper may recover.
+                        }
+                    }
+                }
+                Err(EncoderError::Incomplete(_)) => {
+                    // Need more bytes. Break out of the inner loop and
+                    // resume reading.
+                    break;
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "rkmpi wrapper protocol error; closing reader");
+                    if let Some(tx) = ready_tx.take() {
+                        let _ = tx.send(Err(e.to_string()));
+                    }
+                    return;
+                }
+            }
+        }
     }
 }
 
@@ -292,8 +533,8 @@ mod tests {
         // A truncated frame is detected, not silently misparsed.
         let truncated = &framed[..framed.len() - 1];
         match parse_response(truncated) {
-            Err(EncoderError::Protocol(_)) | Err(EncoderError::Io(_)) => {}
-            other => panic!("expected protocol error on truncated frame, got {other:?}"),
+            Err(EncoderError::Incomplete(_)) => {}
+            other => panic!("expected Incomplete on truncated frame, got {other:?}"),
         }
 
         // A frame whose declared length is below the cap but whose body
