@@ -2,6 +2,19 @@
 
 Documents the `ados` CLI surface every backend implementation must honor. Source of truth: `src/ados/cli/main.py` in the Python full agent.
 
+## Conformance
+
+Every backend MUST implement these four commands with the documented behavior. The CLI binary name is implementation-defined: the Python full agent ships `ados`; the Rust lite agent ships `ados-agent-lite` and may be installed alongside an `ados` symlink for operator convenience. Argument parsing, exit codes, and output text must match per-command.
+
+| Command | Conformance |
+|---|---|
+| `<cmd>` (no subcommand) | MUST — print status when not a TTY, optional rich dashboard when interactive |
+| `<cmd> status` | MUST |
+| `<cmd> update` | MUST — implementations may shell to their own installer (lite-rs execs `install-lite.sh --upgrade`) |
+| `<cmd> uninstall` | MUST — implementations may shell to their own uninstaller |
+
+Backend-specific extensions (e.g. `ados-agent-lite pair CODE`, `ados plugin list`) are allowed but not part of this contract; they are documented separately in their backend's CLI reference.
+
 ## Public commands
 
 The public surface is four commands. Backends must implement all four with byte-for-byte equivalent argument parsing, exit codes, and output.

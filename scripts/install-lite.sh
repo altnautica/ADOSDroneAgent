@@ -6,6 +6,7 @@
 # Usage:    sudo ./install-lite.sh                       (install unpaired)
 #           sudo ./install-lite.sh PAIRCODE              (install + pair)
 #           sudo ./install-lite.sh --pair PAIRCODE       (same, named flag)
+#           sudo ./install-lite.sh --upgrade             (re-pull latest binary, preserve config)
 #           sudo ./install-lite.sh --uninstall
 # Idempotent: re-runs are safe and update in place.
 #
@@ -414,6 +415,17 @@ main() {
             --uninstall)
                 uninstall
                 return 0
+                ;;
+            --upgrade)
+                # --upgrade is a label: existing agent.yaml is preserved,
+                # signed binary is re-fetched and replaced in place. The
+                # core install path below already handles this case
+                # (write_default_config skips if /etc/ados/agent.yaml
+                # exists). We accept the flag explicitly so the operator
+                # contract is documented and so a future sub-flow can
+                # branch on it (e.g. skip the pair-code prompt).
+                log "upgrade mode: existing config preserved"
+                shift
                 ;;
             -*)
                 log "warn: ignoring unknown flag: $1"

@@ -47,13 +47,25 @@ enum Command {
         json: bool,
     },
 
-    /// Persist a pair code into agent.yaml and signal the running agent
-    /// to reload. After this the cloud client switches from the unpaired
-    /// pairing-beacon flow to the paired heartbeat flow.
+    /// Persist a pair code into pairing.json and signal the running
+    /// agent to reload. After this the cloud client switches from the
+    /// unpaired pairing-beacon flow to the paired heartbeat flow.
     Pair {
         /// Pair code from Mission Control "Add drone".
         code: String,
     },
+
+    /// Re-run the install script in upgrade mode. Pulls the latest
+    /// signed binary from GitHub Releases, verifies SHA256, and replaces
+    /// the on-disk binary in place. Setup state + pairing state are
+    /// preserved. Mirrors `ados update` from the DEC-141 four-command
+    /// CLI contract.
+    Update,
+
+    /// Stop the agent service, remove the binary + init unit, and
+    /// preserve config + pairing state for a possible re-install.
+    /// Mirrors `ados uninstall` from the DEC-141 contract.
+    Uninstall,
 
     /// Print version information and exit.
     Version,
@@ -173,11 +185,61 @@ async fn main() -> Result<()> {
         Command::Run => run(cli.config).await,
         Command::Status { json } => print_status(&cli.config, json).await,
         Command::Pair { code } => persist_pair_code(&cli.config, &code).await,
+        Command::Update => run_install_script(&["--upgrade"]).await,
+        Command::Uninstall => run_install_script(&["--uninstall"]).await,
         Command::Version => {
             println!("ados-agent-lite {}", env!("CARGO_PKG_VERSION"));
             Ok(())
         }
     }
+}
+
+/// Re-run install-lite.sh from the canonical raw URL with the supplied
+/// flags. Used by `update` and `uninstall` so the agent stays a single
+/// signed static binary — operator state lives in /etc/ados/, not in
+/// the agent process. Falls back to a local copy at /usr/local/bin/
+/// install-lite.sh when present (developer override).
+async fn run_install_script(args: &[&str]) -> Result<()> {
+    use std::process::Command as PCommand;
+    const URL: &str =
+        "https://raw.githubusercontent.com/altnautica/ADOSDroneAgent/main/scripts/install-lite.sh";
+    // Prefer a sibling install-lite.sh if the operator put one there
+    // for testing. Otherwise curl-pipe the canonical URL.
+    let local_paths = [
+        "/usr/local/share/ados/install-lite.sh",
+        "/usr/local/bin/install-lite.sh",
+    ];
+    let mut command = if let Some(path) = local_paths.iter().find(|p| std::path::Path::new(p).exists()) {
+        let mut c = PCommand::new("sh");
+        c.arg(path).args(args);
+        c
+    } else {
+        // Curl-pipe: `curl ... | sh -s -- <args>` with explicit args
+        // separator. Falls back to wget on Buildroot rootfs without
+        // curl (mirrors the install-script's own fetch helper).
+        let fetch = if std::path::Path::new("/usr/bin/curl").exists() {
+            format!("curl -fsSL {URL}")
+        } else {
+            format!("wget -q -O - {URL}")
+        };
+        let mut c = PCommand::new("sh");
+        c.arg("-c").arg(format!(
+            "{} | sh -s -- {}",
+            fetch,
+            args.iter()
+                .map(|a| format!("'{}'", a.replace('\'', "'\\''")))
+                .collect::<Vec<_>>()
+                .join(" ")
+        ));
+        c
+    };
+    let status = command
+        .status()
+        .with_context(|| format!("running install-lite.sh {}", args.join(" ")))?;
+    if !status.success() {
+        anyhow::bail!("install-lite.sh exited with code {:?}", status.code());
+    }
+    Ok(())
 }
 
 fn init_tracing() {
