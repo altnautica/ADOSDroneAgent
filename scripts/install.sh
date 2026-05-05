@@ -29,12 +29,137 @@ export NEEDRESTART_SUSPEND=1
 export DEBIAN_FRONTEND=noninteractive
 export DEBCONF_NOWARNINGS=yes
 
-# Profile dispatch. When ADOS_PROFILE=lite-rs is set, exec the lightweight
-# Rust agent installer instead of the Python full-agent path. The lite
-# installer downloads a prebuilt signed binary from GitHub Releases; the
-# Python installer below remains the default for full-feature deployments
-# on Pi 4B / Pi 5 / Rock 5C / 1 GB+ class boards.
-if [ "${ADOS_PROFILE:-}" = "lite-rs" ] || [ "${ADOS_PROFILE:-}" = "lite" ]; then
+# Profile dispatch with board fingerprint auto-detection.
+#
+# Every operator types the same command. The script reads the running SBC
+# (via /proc/device-tree/model + /proc/cpuinfo + /proc/meminfo) and matches
+# against the lite-eligible board manifest (lite-boards.json published
+# alongside each lite-agent release). If the board is in the manifest OR
+# total RAM is at or below 384 MB (failsafe for unknown low-RAM boards),
+# the script exec's install-lite.sh. Otherwise it continues into the
+# Python full-agent install body below.
+#
+# Override priority: --profile lite|full|auto flag > ADOS_PROFILE env var
+# > auto-detect. --dry-run prints the detected profile and exits.
+
+LITE_BOARDS_MANIFEST_URL="${ADOS_LITE_BOARDS_URL:-https://github.com/altnautica/ADOSDroneAgent/releases/download/lite-agent-main/lite-boards.json}"
+LITE_RAM_FAILSAFE_KB=393216  # 384 MB
+
+# Pre-parse --profile / --dry-run without consuming the rest of "$@"; the
+# remaining args still flow to the full flag parser below or to
+# install-lite.sh on dispatch.
+_PROFILE_OVERRIDE=""
+_DRY_RUN=false
+_PRESCAN_ARGS=("$@")
+_i=0
+while [ ${_i} -lt ${#_PRESCAN_ARGS[@]} ]; do
+    case "${_PRESCAN_ARGS[${_i}]}" in
+        --profile)
+            _PROFILE_OVERRIDE="${_PRESCAN_ARGS[$((_i+1))]:-}"
+            _i=$((_i+2))
+            ;;
+        --dry-run)
+            _DRY_RUN=true
+            _i=$((_i+1))
+            ;;
+        *)
+            _i=$((_i+1))
+            ;;
+    esac
+done
+
+detect_profile() {
+    local model="" model_lower="" mem_kb=""
+
+    # Primary fingerprint: /proc/device-tree/model. Strip the null byte
+    # the kernel terminates the string with.
+    if [ -r /proc/device-tree/model ]; then
+        model="$(tr -d '\000' < /proc/device-tree/model 2>/dev/null || true)"
+    fi
+
+    # Fallback: /proc/cpuinfo "Hardware" line (older Pi kernels, x86 has no
+    # device-tree at all).
+    if [ -z "${model}" ] && [ -r /proc/cpuinfo ]; then
+        model="$(awk -F: '/^Hardware/ {sub(/^ */, "", $2); print $2; exit}' /proc/cpuinfo)"
+    fi
+
+    if [ -n "${model}" ]; then
+        model_lower="$(printf '%s' "${model}" | tr '[:upper:]' '[:lower:]')"
+    fi
+
+    # Fetch the lite-eligible board manifest. 5s timeout so a network blip
+    # doesn't stall every install. Failure falls through to the RAM failsafe.
+    local manifest=""
+    if command -v curl >/dev/null 2>&1; then
+        manifest="$(curl -fsSL --max-time 5 "${LITE_BOARDS_MANIFEST_URL}" 2>/dev/null || true)"
+    fi
+
+    if [ -n "${manifest}" ] && [ -n "${model_lower}" ]; then
+        # Extract every model_pattern from the manifest. Use python3 (always
+        # present on a fresh BSP); jq is faster but not always installed.
+        local patterns=""
+        if command -v python3 >/dev/null 2>&1; then
+            patterns="$(printf '%s' "${manifest}" | python3 -c '
+import json, sys
+try:
+    m = json.load(sys.stdin)
+    for b in m.get("boards", []):
+        for p in b.get("model_patterns", []) or []:
+            print(p)
+except Exception:
+    pass
+' 2>/dev/null || true)"
+        elif command -v jq >/dev/null 2>&1; then
+            patterns="$(printf '%s' "${manifest}" | jq -r '.boards[]?.model_patterns[]?' 2>/dev/null || true)"
+        fi
+
+        if [ -n "${patterns}" ]; then
+            local pattern pattern_lower
+            while IFS= read -r pattern; do
+                [ -z "${pattern}" ] && continue
+                pattern_lower="$(printf '%s' "${pattern}" | tr '[:upper:]' '[:lower:]')"
+                case "${model_lower}" in
+                    *"${pattern_lower}"*)
+                        echo "lite-rs"
+                        return 0
+                        ;;
+                esac
+            done <<< "${patterns}"
+        fi
+    fi
+
+    # Failsafe: any board with <= 384 MB total RAM gets the lite path even
+    # when the manifest fetch failed or didn't list it.
+    if [ -r /proc/meminfo ]; then
+        mem_kb="$(awk '/^MemTotal:/ {print $2; exit}' /proc/meminfo 2>/dev/null || true)"
+        if [ -n "${mem_kb}" ] && [ "${mem_kb}" -le "${LITE_RAM_FAILSAFE_KB}" ]; then
+            echo "lite-rs"
+            return 0
+        fi
+    fi
+
+    echo "full"
+}
+
+# Resolve the profile.
+_PROFILE=""
+if [ -n "${_PROFILE_OVERRIDE}" ] && [ "${_PROFILE_OVERRIDE}" != "auto" ]; then
+    _PROFILE="${_PROFILE_OVERRIDE}"
+elif [ -n "${ADOS_PROFILE:-}" ] && [ "${ADOS_PROFILE}" != "auto" ]; then
+    _PROFILE="${ADOS_PROFILE}"
+else
+    _PROFILE="$(detect_profile)"
+fi
+# Normalize legacy alias.
+[ "${_PROFILE}" = "lite" ] && _PROFILE="lite-rs"
+
+if [ "${_DRY_RUN}" = "true" ]; then
+    echo "Detected profile: ${_PROFILE}"
+    echo "(run without --dry-run to proceed)"
+    exit 0
+fi
+
+if [ "${_PROFILE}" = "lite-rs" ]; then
     SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)" || SCRIPT_DIR=""
     LITE_INSTALLER=""
     if [ -n "${SCRIPT_DIR}" ] && [ -x "${SCRIPT_DIR}/install-lite.sh" ]; then
@@ -50,6 +175,7 @@ if [ "${ADOS_PROFILE:-}" = "lite-rs" ] || [ "${ADOS_PROFILE:-}" = "lite" ]; then
     fi
     exec "${LITE_INSTALLER}" "$@"
 fi
+# else fall through to the Python full-agent install body.
 
 REPO_URL="https://github.com/altnautica/ADOSDroneAgent.git"
 BRANCH_NAME=""  # optional feature branch for --branch flag
@@ -203,6 +329,16 @@ while [ $# -gt 0 ]; do
                 error "--branch requires a NAME argument"
                 exit 1
             fi
+            shift
+            ;;
+        --profile)
+            # Already consumed by the pre-dispatch parser at the top of
+            # the script. Skip the value too so we don't loop forever.
+            shift
+            shift 2>/dev/null || true
+            ;;
+        --dry-run)
+            # Same — consumed up top.
             shift
             ;;
         *)
