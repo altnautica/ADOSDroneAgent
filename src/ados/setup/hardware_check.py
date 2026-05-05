@@ -233,6 +233,107 @@ def _check_oled() -> HardwareCheckItem:
     )
 
 
+def _check_display() -> HardwareCheckItem:
+    """SPI LCD readiness probe.
+
+    Returns one of four states based on what we can read from
+    ``/etc/ados/display.conf`` (written by the LCD-overlay installer)
+    and ``/sys/class/graphics/fb1/name`` (populated by the kernel
+    once the device-tree overlay binds the panel after a reboot):
+
+    * ``ok``: conf present AND fb1 reports the expected driver name.
+    * ``warning`` (pending_reboot): conf present but fb1 absent or
+      bound to a different driver — the operator has run the install
+      step but not yet rebooted.
+    * ``unknown`` (not_configured): no conf file at all; the board may
+      not have any displays.supported entry, or the operator passed
+      ``--display none``.
+    * ``warning`` (error): conf present but the running kernel
+      framebuffer disagrees with the expected driver name.
+    """
+    from ados.core.paths import DISPLAY_CONF_PATH
+
+    if not DISPLAY_CONF_PATH.exists():
+        return HardwareCheckItem(
+            id="display",
+            label="Local display (SPI LCD)",
+            state="unknown",
+            detail="No /etc/ados/display.conf — no LCD provisioned for this board.",
+            fix_hint=(
+                "Optional. Plug a supported SPI LCD and rerun the install "
+                "with --upgrade to provision the device-tree overlay."
+            ),
+        )
+
+    conf: dict[str, str] = {}
+    try:
+        for raw in DISPLAY_CONF_PATH.read_text().splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, _, v = line.partition("=")
+            conf[k.strip()] = v.strip()
+    except OSError as exc:
+        return HardwareCheckItem(
+            id="display",
+            label="Local display (SPI LCD)",
+            state="warning",
+            detail=f"display.conf unreadable: {exc}",
+        )
+
+    display_id = conf.get("display_id", "?")
+    fb_path = Path(conf.get("framebuffer_path", "/dev/fb1"))
+    expected_name = conf.get("framebuffer_name_expected") or "fb_ili9486"
+
+    if not fb_path.exists():
+        return HardwareCheckItem(
+            id="display",
+            label="Local display (SPI LCD)",
+            state="warning",
+            detail=(
+                f"{display_id} provisioned but {fb_path} is not bound. "
+                "Reboot to load the overlay."
+            ),
+            fix_hint="Run `sudo reboot`. The kernel binds the panel at boot.",
+        )
+
+    fb_name_path = Path("/sys/class/graphics") / fb_path.name / "name"
+    actual_name = ""
+    try:
+        actual_name = fb_name_path.read_text().strip()
+    except OSError:
+        pass
+
+    has_touch = (conf.get("has_touch", "false").lower() == "true")
+    res = conf.get("resolution", "?")
+    rotation = conf.get("rotation", "0")
+    suffix = " + touch" if has_touch else ""
+
+    if expected_name and actual_name and expected_name not in actual_name:
+        return HardwareCheckItem(
+            id="display",
+            label="Local display (SPI LCD)",
+            state="warning",
+            detail=(
+                f"{fb_path} bound to {actual_name}, expected {expected_name}. "
+                "Overlay may have changed."
+            ),
+            fix_hint=(
+                "Re-run `sudo install.sh --upgrade` to refresh the "
+                "device-tree overlay, then reboot."
+            ),
+        )
+
+    return HardwareCheckItem(
+        id="display",
+        label="Local display (SPI LCD)",
+        state="ok",
+        detail=(
+            f"{display_id} on {fb_path} ({res}, rotation {rotation}{suffix})."
+        ),
+    )
+
+
 def _check_buttons() -> HardwareCheckItem:
     try:
         from ados.bootstrap.profile_detect import probe_gpio_buttons
@@ -443,6 +544,7 @@ def _ground_items(role: str) -> Iterable[HardwareCheckItem]:
     else:
         yield _check_mesh_dongle(required=False)
     yield _check_oled()
+    yield _check_display()
     yield _check_buttons()
     yield _check_hdmi()
     yield _check_joystick()

@@ -26,10 +26,104 @@ from ados import __version__
 from ados.core.config import load_config
 from ados.core.ipc import StateIPCClient
 from ados.core.logging import configure_logging
-from ados.core.paths import HEALTH_JSON, SCRIPTS_DIR, SUITES_DIR
+from ados.core.paths import (
+    DISPLAY_CONF_PATH,
+    HEALTH_JSON,
+    SCRIPTS_DIR,
+    SUITES_DIR,
+)
 
 
 _proc_cache: dict[int, object] = {}  # PID → psutil.Process cache for CPU baseline
+
+
+def _collect_attached_display() -> dict | None:
+    """Build a peripherals[] entry for the attached SPI LCD when present.
+
+    Reads ``/etc/ados/display.conf`` (written by the LCD-overlay
+    installer) and translates it into the canonical peripheral shape
+    consumed by Mission Control's infer-capabilities pipeline.
+    Returns ``None`` when no display is provisioned, so the caller can
+    drop ``peripherals`` from the payload entirely on boards that
+    have no LCD.
+    """
+    if not DISPLAY_CONF_PATH.exists():
+        return None
+    try:
+        text = DISPLAY_CONF_PATH.read_text()
+    except OSError:
+        return None
+    conf: dict[str, str] = {}
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, _, v = line.partition("=")
+        conf[k.strip()] = v.strip()
+    if not conf:
+        return None
+    fb_path = conf.get("framebuffer_path", "/dev/fb1")
+    fb_name = (
+        Path(f"/sys/class/graphics/{Path(fb_path).name}/name").read_text().strip()
+        if Path(f"/sys/class/graphics/{Path(fb_path).name}/name").exists()
+        else ""
+    )
+    bound = bool(fb_name)
+    has_touch = (conf.get("has_touch", "false").lower() == "true")
+    return {
+        "id": "local-display",
+        "name": _display_name(conf),
+        "category": "display",
+        "type": "spi-lcd",
+        "bus": conf.get("bus", "spi"),
+        "address": fb_path,
+        "rate_hz": 0,
+        "status": "ok" if bound else "warning",
+        "last_reading": _now_iso(),
+        "extra": {
+            "controller": conf.get("controller", ""),
+            "touch_chip": conf.get("touch_chip", ""),
+            "has_touch": has_touch,
+            "resolution": conf.get("resolution", ""),
+            "rotation": int(conf.get("rotation", 0) or 0),
+            "board": conf.get("board", ""),
+            "display_id": conf.get("display_id", ""),
+            "framebuffer_path": fb_path,
+            "framebuffer_name_actual": fb_name,
+            "framebuffer_name_expected": conf.get("framebuffer_name_expected", ""),
+            "overlay_source": conf.get("overlay_source", ""),
+            "overlay_ref": conf.get("overlay_ref", ""),
+            "activated_via": conf.get("activated_via", ""),
+            "bound": bound,
+        },
+    }
+
+
+def _display_name(conf: dict[str, str]) -> str:
+    """Friendly label for the heartbeat. Maps known display ids to a name."""
+    mapping = {
+        "waveshare35a": 'Waveshare 3.5" SPI LCD',
+    }
+    display_id = conf.get("display_id", "")
+    if display_id in mapping:
+        return mapping[display_id]
+    if display_id:
+        return display_id
+    return "Local display"
+
+
+def _now_iso() -> str:
+    from datetime import datetime, timezone
+
+    return (
+        datetime.now(timezone.utc).astimezone().replace(microsecond=0).isoformat()
+    )
+
+
+# Pathlib import is used by _collect_attached_display + _display_name; keep
+# the deferred import at use-time below to avoid a top-level dependency on
+# pathlib for modules that only care about the heartbeat shape.
+from pathlib import Path  # noqa: E402
 
 
 def _get_services_status() -> list[dict]:
@@ -432,6 +526,15 @@ async def main() -> None:
                     # Remove null temperature (Convex v.float64() rejects null)
                     if payload["temperature"] is None:
                         del payload["temperature"]
+
+                    # Optional peripherals block. Currently carries the
+                    # attached SPI LCD (if /etc/ados/display.conf is
+                    # present). Mission Control's infer-capabilities
+                    # filters peripherals[] for category="display" and
+                    # populates the per-drone capability store.
+                    _attached_display = _collect_attached_display()
+                    if _attached_display is not None:
+                        payload["peripherals"] = [_attached_display]
 
                     async with httpx.AsyncClient(timeout=10.0) as client:
                         resp = await client.post(

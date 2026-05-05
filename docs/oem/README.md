@@ -11,6 +11,7 @@ These documents are for hardware OEM partners building companion computer produc
 | 3 | [cloud-setup.md](cloud-setup.md) | DevOps, infrastructure | MQTT broker, STUN/TURN, video relay, domain setup |
 | 4 | [white-label-guide.md](white-label-guide.md) | Product managers, firmware engineers | Branding customization (splash, theme, SSID, CLI) |
 | 5 | [plugin-deployment.md](plugin-deployment.md) | Firmware engineers, security, manufacturing | Signed plugin distribution, key registration, factory install, revocation |
+| 6 | [spi-lcd-deployment.md](spi-lcd-deployment.md) | Hardware engineers, field deployment | Attaching a 3.5" SPI LCD on Cubie A7Z and Rock 5C ground-station builds |
 
 ## Who These Are For
 

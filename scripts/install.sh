@@ -1127,6 +1127,30 @@ install_ground_station_driver() {
     }
 }
 
+# SPI LCD overlay installer for boards that ship displays.supported in
+# their YAML profile. Compiles or activates the right device-tree
+# overlay, writes /etc/ados/display.conf, and queues fbtft + ads7846
+# for next boot. Operator can override with ADOS_DISPLAY=<id> or
+# ADOS_DISPLAY=none. Failure is non-fatal so a missing LCD or missing
+# kernel headers does not block the rest of the install.
+install_display_driver() {
+    local script_path=""
+    if [ -n "${FRESH_REPO_DIR:-}" ] && [ -x "${FRESH_REPO_DIR}/repo/scripts/drivers/install-display-overlay.sh" ]; then
+        script_path="${FRESH_REPO_DIR}/repo/scripts/drivers/install-display-overlay.sh"
+    elif [ -x "$(dirname "$0" 2>/dev/null)/drivers/install-display-overlay.sh" ] 2>/dev/null; then
+        script_path="$(cd "$(dirname "$0")/drivers" && pwd)/install-display-overlay.sh"
+    fi
+    if [ -z "${script_path}" ] || [ ! -x "${script_path}" ]; then
+        warn "LCD overlay installer not found; skipping display provisioning."
+        return 0
+    fi
+    info "Running LCD overlay installer..."
+    "${script_path}" --display "${ADOS_DISPLAY:-auto}" || {
+        warn "LCD overlay install returned non-zero; the agent will boot without an attached panel."
+        return 0
+    }
+}
+
 # Enable ground-station systemd units. Safe to run on any profile; a
 # no-op for drone because we branch on profile at the call site.
 enable_ground_station_units() {
@@ -1514,6 +1538,13 @@ if is_installed && $DO_UPGRADE && ! $DO_FORCE; then
     fi
     install_systemd_service
 
+    # LCD overlay installer needs the cloned scripts + DTS sources,
+    # so it runs before the temp-repo cleanup. Skipped on drone profile
+    # by the function's profile gate.
+    if [ "${ADOS_PROFILE:-}" = "ground_station" ] || [ "${ADOS_PROFILE:-}" = "ground-station" ]; then
+        FRESH_REPO_DIR="${tmp_repo}" install_display_driver
+    fi
+
     # Clean up temp repo
     rm -rf "${tmp_repo}"
 
@@ -1632,6 +1663,15 @@ if [ "${ADOS_PROFILE}" = "ground_station" ] || [ "${ADOS_PROFILE}" = "ground-sta
     # the second-USB-WiFi fingerprint in profile_detect sets
     # `mesh_capable: true` when a carrier adapter is present.
     install_mesh_deps
+
+    # SPI LCD on the 40-pin header (e.g. Waveshare 3.5" RPi LCD on
+    # Cubie A7Z or Rock 5C). The driver script auto-detects the board
+    # and the supported display, compiles or activates the right
+    # device-tree overlay, writes /etc/ados/display.conf, and queues
+    # the kernel modules needed at next boot. Skipped on boards with
+    # no displays.supported entry. Failure is non-fatal so the agent
+    # itself still boots when the LCD-overlay step fails.
+    install_display_driver
 fi
 
 # Generate device identity (idempotent)
