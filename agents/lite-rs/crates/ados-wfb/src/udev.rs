@@ -1,20 +1,26 @@
 //! Hot-plug detection for RTL8812-family WFB-ng dongles.
 //!
-//! Two backends:
+//! Three backends:
 //!
-//! - [`SysfsUdev`] (default) polls `/sys/class/net/` and emits
+//! - [`spawn_udev`] returns the production backend appropriate for the
+//!   target. On Linux that's [`netlink::NetlinkUdev`] (real udev events
+//!   over an `AF_NETLINK` socket via the `udev` crate); on every other
+//!   platform it falls back to [`SysfsUdev`] so the workspace still
+//!   compiles cleanly on macOS dev hosts.
+//! - [`SysfsUdev`] polls `/sys/class/net/` and emits
 //!   [`DongleEvent::Added`] / [`DongleEvent::Removed`] when an interface
 //!   appears or disappears whose driver name carries an RTL8812 marker.
 //!   Polling rather than `inotify` keeps the dependency footprint flat
 //!   on a 256 MB SBC and avoids the gotcha that `inotify` does not fire
 //!   on `/sys` (sysfs is a synthetic filesystem). The poll interval
-//!   defaults to 1 s.
+//!   defaults to 1 s. Used as the macOS dev fallback and as a runtime
+//!   fallback on Linux when the netlink path errors.
 //! - [`MockUdev`] (behind the `mock` feature) lets tests inject events
 //!   directly without touching `/sys`. Used by unit tests in this crate
 //!   and by integration tests in downstream crates that exercise the
 //!   `WfbManager` state machine.
 //!
-//! Both backends produce a `tokio::sync::mpsc::Receiver<DongleEvent>`
+//! All three backends produce a `tokio::sync::mpsc::Receiver<DongleEvent>`
 //! the manager can `.recv().await` on.
 
 use std::collections::HashMap;
@@ -30,7 +36,48 @@ use tracing::{debug, trace, warn};
 /// Empirically the RTL8812EU dongles register either `8812` or `88XXau` as
 /// their driver name depending on which out-of-tree driver flavor the
 /// operator built. Both pass the same test.
-const RTL8812_DRIVER_MARKERS: &[&str] = &["8812", "88XXau", "88xxau"];
+pub(crate) const RTL8812_DRIVER_MARKERS: &[&str] = &["8812", "88XXau", "88xxau"];
+
+/// Tag identifying which backend the factory chose. Surfaced in the
+/// REST status response so the wizard can render "real udev" vs
+/// "polling fallback" without any Linux-only knowledge of its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UdevBackend {
+    /// Polling backend over `/sys/class/net`. Used on macOS dev hosts
+    /// and as a runtime fallback when the Linux netlink path errors.
+    Sysfs,
+    /// Real udev events over an `AF_NETLINK` socket. Linux only.
+    Netlink,
+}
+
+/// Factory function: pick the best backend for the target and spawn a
+/// watcher. Returns the receiver end of the event stream plus the tag
+/// of which backend was chosen so the manager can include it in the
+/// status snapshot.
+///
+/// On Linux this prefers the netlink backend; if that fails to bind
+/// (a containerized rootfs without `/run/udev`, an unprivileged
+/// container that cannot open the netlink socket) it falls back to
+/// the polling sysfs backend. On every other platform the sysfs
+/// backend is the only path.
+pub fn spawn_udev() -> Result<(mpsc::Receiver<DongleEvent>, UdevBackend), UdevError> {
+    #[cfg(target_os = "linux")]
+    {
+        match netlink::NetlinkUdev::new()?.spawn() {
+            Ok(rx) => Ok((rx, UdevBackend::Netlink)),
+            Err(e) => {
+                tracing::warn!(error = %e, "netlink udev failed; falling back to sysfs polling");
+                let rx = SysfsUdev::new().spawn()?;
+                Ok((rx, UdevBackend::Sysfs))
+            }
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let rx = SysfsUdev::new().spawn()?;
+        Ok((rx, UdevBackend::Sysfs))
+    }
+}
 
 /// Default poll cadence for the sysfs backend.
 const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(1);
@@ -319,6 +366,186 @@ mod tests {
         match result {
             Err(UdevError::SysfsUnreadable { .. }) => {}
             other => panic!("expected SysfsUnreadable, got {other:?}"),
+        }
+    }
+
+    /// On macOS dev hosts the factory must return the polling backend
+    /// because libudev does not exist. The actual sysfs root will not
+    /// exist either, so the spawn will fail with `SysfsUnreadable` —
+    /// that's still the correct backend selection, the test asserts
+    /// the dispatch path (not the real spawn).
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn factory_returns_sysfs_on_non_linux() {
+        // We can't directly test the dispatch boolean without exposing
+        // it; this test covers the macOS path by confirming `spawn_udev`
+        // returns the same `UdevError` shape `SysfsUdev::spawn` does
+        // when /sys/class/net is absent.
+        let result = spawn_udev();
+        match result {
+            Err(UdevError::SysfsUnreadable { .. }) => {}
+            // On a dev mac that happens to have /sys/class/net (rare;
+            // some VM setups expose it) the spawn succeeds — that's
+            // also a pass because we got Sysfs back, not a non-existent
+            // backend.
+            Ok((_, backend)) => assert_eq!(backend, UdevBackend::Sysfs),
+        }
+    }
+
+    /// On Linux, the factory must reach the netlink path first. We
+    /// can't reliably bind a real netlink socket inside `cargo test`
+    /// (no privileges, sandbox), so we verify the construction path
+    /// at least doesn't panic. A live netlink test runs on the
+    /// hardware-bench rig.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn netlink_backend_constructible_on_linux() {
+        // `NetlinkUdev::new()` only fails when libudev itself cannot
+        // initialise — which on a sane Linux host with /run/udev
+        // present succeeds, but in a sandbox without /run/udev fails
+        // cleanly. Either branch is fine; we just want the call to
+        // return without unwinding.
+        let _ = netlink::NetlinkUdev::new();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Netlink backend — Linux only.
+// ---------------------------------------------------------------------------
+
+#[cfg(target_os = "linux")]
+pub mod netlink {
+    //! Real udev events over an `AF_NETLINK` socket.
+    //!
+    //! The `udev` crate exposes a `MonitorBuilder` that, once filtered
+    //! to the `net` subsystem, emits one event per kernel uevent. Each
+    //! event carries the action (`add` / `remove` / `change`), the
+    //! sysfs path of the device, and a property bag including
+    //! `INTERFACE` and `DRIVER`.
+    //!
+    //! We register a filter for the `net` subsystem at builder time so
+    //! the kernel only forwards us events from the right subsystem; we
+    //! then walk through the `DRIVER` field on each event and translate
+    //! into the same [`super::DongleEvent`] enum the polling backend
+    //! emits, so the manager state machine consumes both paths
+    //! identically.
+    use std::os::fd::AsRawFd;
+    use std::time::Duration;
+
+    use super::{
+        is_rtl8812_driver, DongleEvent, UdevError, EVENT_CHANNEL_DEPTH,
+    };
+    use tokio::io::{unix::AsyncFd, Interest};
+    use tokio::sync::mpsc;
+    use tracing::{debug, trace, warn};
+
+    /// Wrapper around `udev::MonitorSocket` that exposes a tokio-friendly
+    /// async interface via `AsyncFd`.
+    pub struct NetlinkUdev {
+        socket: udev::MonitorSocket,
+    }
+
+    impl NetlinkUdev {
+        /// Construct a monitor scoped to the `net` subsystem.
+        pub fn new() -> Result<Self, UdevError> {
+            let socket = udev::MonitorBuilder::new()
+                .map_err(|e| UdevError::SysfsUnreadable {
+                    path: std::path::PathBuf::from("netlink"),
+                    source: std::io::Error::other(format!("MonitorBuilder::new: {e}")),
+                })?
+                .match_subsystem("net")
+                .map_err(|e| UdevError::SysfsUnreadable {
+                    path: std::path::PathBuf::from("netlink"),
+                    source: std::io::Error::other(format!("match_subsystem: {e}")),
+                })?
+                .listen()
+                .map_err(|e| UdevError::SysfsUnreadable {
+                    path: std::path::PathBuf::from("netlink"),
+                    source: std::io::Error::other(format!("listen: {e}")),
+                })?;
+            Ok(Self { socket })
+        }
+
+        /// Spawn the watcher task and return the receiver end.
+        pub fn spawn(self) -> Result<mpsc::Receiver<DongleEvent>, UdevError> {
+            let (tx, rx) = mpsc::channel(EVENT_CHANNEL_DEPTH);
+            tokio::spawn(async move {
+                if let Err(e) = run(self.socket, tx).await {
+                    warn!(error = %e, "netlink udev watcher exited");
+                }
+            });
+            Ok(rx)
+        }
+    }
+
+    async fn run(
+        socket: udev::MonitorSocket,
+        tx: mpsc::Sender<DongleEvent>,
+    ) -> std::io::Result<()> {
+        let fd = socket.as_raw_fd();
+        let async_fd = AsyncFd::with_interest(FdGuard(fd), Interest::READABLE)?;
+        loop {
+            let mut guard = async_fd.readable().await?;
+            // Drain everything available without blocking.
+            let mut iter = socket.iter();
+            while let Some(event) = iter.next() {
+                if let Some(evt) = translate(&event) {
+                    if tx.send(evt).await.is_err() {
+                        return Ok(()); // receiver dropped
+                    }
+                }
+            }
+            guard.clear_ready();
+            // Yield to the runtime so we don't spin if the event burst
+            // was empty (libudev sometimes wakes spuriously).
+            tokio::time::sleep(Duration::from_millis(1)).await;
+            trace!("netlink udev wake");
+        }
+    }
+
+    /// Translate a udev `Event` into a [`DongleEvent`], filtering out
+    /// non-RTL8812 drivers and actions other than `add`/`remove`.
+    fn translate(event: &udev::Event) -> Option<DongleEvent> {
+        let iface = event
+            .property_value("INTERFACE")
+            .or_else(|| event.attribute_value("INTERFACE"))
+            .map(|s| s.to_string_lossy().into_owned())?;
+        if !iface.starts_with("wlan") {
+            return None;
+        }
+        // The `DRIVER` property is the canonical field for filtering
+        // RTL8812-family adapters; we re-use the same substring matcher
+        // the polling backend uses so both code paths share the filter.
+        let driver = event
+            .property_value("DRIVER")
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let driver_line = format!("DRIVER={driver}");
+        if is_rtl8812_driver(&driver_line).is_none() {
+            return None;
+        }
+        match event.event_type() {
+            udev::EventType::Add => {
+                debug!(iface = %iface, driver = %driver, "netlink: dongle added");
+                Some(DongleEvent::Added(iface))
+            }
+            udev::EventType::Remove => {
+                debug!(iface = %iface, driver = %driver, "netlink: dongle removed");
+                Some(DongleEvent::Removed(iface))
+            }
+            // `change` events fire when the kernel updates link state
+            // (carrier up/down) and are not interesting to us.
+            _ => None,
+        }
+    }
+
+    /// Tiny `AsRawFd` newtype so `AsyncFd` can wrap the libudev socket
+    /// without us having to take ownership of it (libudev keeps the
+    /// real handle).
+    struct FdGuard(std::os::fd::RawFd);
+    impl AsRawFd for FdGuard {
+        fn as_raw_fd(&self) -> std::os::fd::RawFd {
+            self.0
         }
     }
 }

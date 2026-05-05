@@ -71,6 +71,16 @@ async-trait = "0.1"
 # a stable format independent of the host libc.
 rmp-serde = "1.3"
 
+# V4L2 hardware encoder bindings for the Pi-class V4L2 backend. Safe
+# wrapper around the kernel ioctls that runs the encoder loop without
+# the agent crate dropping its `forbid(unsafe_code)` posture.
+v4l = "0.14"
+
+# Byte buffer helpers for the RTSP push module. `Bytes` and `BytesMut`
+# avoid copying frame payloads as they hop from the encoder mpsc to the
+# RTP packetizer to the TCP write half.
+bytes = "1"
+
 # System metrics (cpu, memory, temperature) for the heartbeat
 # enrichment. Cross-platform; reads /proc on Linux, sysctl on macOS.
 sysinfo = { version = "0.32", default-features = false, features = ["system"] }

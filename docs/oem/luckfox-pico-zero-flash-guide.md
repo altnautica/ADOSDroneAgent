@@ -223,15 +223,67 @@ Image size is around 60 MB compressed, 200 MB uncompressed.
 ## Build your own
 
 OEMs who want to bake custom defaults (Wi-Fi credentials, white-label
-branding, pre-configured cloud relay URL) can build a derivative image:
+branding, pre-configured cloud relay URL) can build a derivative image
+locally. The same recipe runs in
+`.github/workflows/luckfox-image-build.yml`, so a local build produces
+an artifact byte-equivalent to a stamped CI release modulo overlay and
+signing key.
 
-1. Clone this repo plus the upstream Luckfox SDK.
-2. Wire `agents/lite-rs/buildroot/` in as the `BR2_EXTERNAL` tree.
-3. Copy `luckfox_pico_zero_ados_defconfig` and tailor as needed.
-4. Apply your overlay at `BR2_ROOTFS_OVERLAY`.
-5. Build and sign with your own minisign key (replace the vendored
-   public key in `scripts/install-lite.sh` to match).
+### Prerequisites
 
-The rootfs overlay is the right place for white-label branding, custom
-TLS roots for self-hosted relays, and pre-shared Wi-Fi credentials. The
-agent code itself does not need a fork.
+- Linux build host (Ubuntu 22.04 or newer recommended; macOS works
+  via Docker but is slower). Buildroot expects a GNU/Linux toolchain.
+- 8 GB free disk for the SDK clone, 16 GB for a full build tree.
+- Buildroot host packages:
+  ```sh
+  sudo apt-get install -y build-essential libncurses5-dev rsync bc \
+    cpio python3 python3-pip unzip gzip xz-utils file wget git bison \
+    flex minisign
+  ```
+- A clone of the upstream Luckfox SDK (the BSP, kernel, and base
+  Buildroot tree live there; this repo's
+  `agents/lite-rs/buildroot/` is the BR2_EXTERNAL overlay only):
+  ```sh
+  git clone https://github.com/LuckfoxTECH/luckfox-pico ~/luckfox-sdk
+  ```
+- A minisign keypair if you want signed artifacts (optional; the
+  install path warns and skips verify when no signature is present).
+
+### Build steps
+
+1. Wire this repo's `agents/lite-rs/buildroot/` in as the
+   `BR2_EXTERNAL` tree:
+   ```sh
+   export BR2_EXTERNAL=/path/to/ADOSDroneAgent/agents/lite-rs/buildroot
+   ```
+2. Pick the closest base defconfig from the Luckfox SDK
+   (`luckfox_pico_zero_buildroot_defconfig` is the typical match) and
+   layer the ADOS additions on top:
+   ```sh
+   cd ~/luckfox-sdk
+   make luckfox_pico_zero_buildroot_defconfig
+   echo 'BR2_PACKAGE_ADOS_AGENT_LITE=y' >> .config
+   yes "" | make olddefconfig
+   ```
+3. Drop your overlay (white-label branding, custom TLS roots,
+   pre-shared Wi-Fi credentials) into a directory and point
+   `BR2_ROOTFS_OVERLAY` at it. The overlay is the right place for any
+   per-OEM defaults; the agent code itself does not need a fork.
+4. Run the full build:
+   ```sh
+   make BR2_JLEVEL="$(nproc)"
+   ```
+   First build is 30 to 60 minutes depending on host CPU and network
+   throughput for the upstream package fetch. Subsequent builds with
+   `ccache` warm hit in under 10 minutes.
+5. Compress and (optionally) sign the resulting image:
+   ```sh
+   "${BR2_EXTERNAL}/post-image.sh" output/images/sdcard.img
+   minisign -S -s ~/.minisign/your.key \
+     -m output/images/sdcard.img.gz
+   ```
+
+If you sign with your own keypair, replace the vendored public key in
+`scripts/install-lite.sh` with the one matching your private key, or
+disable verification by setting `ADOS_SKIP_MINISIGN=1` in the install
+environment (not recommended for production).

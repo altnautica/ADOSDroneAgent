@@ -34,10 +34,16 @@ pub mod profile;
 pub mod router;
 pub mod state;
 pub mod webapp;
+pub mod wfb_handlers;
 
 pub use diag::DiagState;
 pub use origin::OriginAllowlist;
 pub use router::{
     setup_router, setup_router_with_diag, setup_router_with_origin_check,
-    setup_router_with_origin_check_and_diag, SetupState,
+    setup_router_with_origin_check_and_diag, setup_router_with_origin_check_diag_and_wfb,
+    setup_router_with_wfb, setup_router_with_wfb_and_diag, SetupState,
+};
+pub use wfb_handlers::{
+    wfb_router_only, SharedWfbManager, WfbConfigureRequest, WfbConfigureResponse,
+    WfbRegenerateKeyResponse,
 };

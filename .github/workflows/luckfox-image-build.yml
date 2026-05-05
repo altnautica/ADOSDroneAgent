@@ -1,30 +1,14 @@
-# =====================================================================
-# DRAFT / PLACEHOLDER WORKFLOW — DO NOT MERGE TO MAIN AS-IS.
+# Buildroot image-build pipeline for the Luckfox Pico Zero ADOS lite
+# image. Triggers on tag push (`lite-image-v*`) for permanent releases
+# plus manual dispatch for one-off rebuilds.
 #
-# This workflow is the scaffolding for the Luckfox Pico Zero flashable
-# image build pipeline that ships a fully-paired-ready ADOS lite agent
-# inside a single .img.gz artifact.
-#
-# It is NOT runnable today. The actual `make` step depends on the
-# Luckfox SDK + Buildroot tree, which is large (~3 GB), upstream, and
-# not vendored in this repo. Two paths to make this real:
-#
-#   (a) Vendor the SDK as a git submodule under
-#       agents/lite-rs/buildroot/luckfox-sdk/, pin a known-good revision,
-#       and uncomment the `make` step below.
-#
-#   (b) Add a `Setup Luckfox SDK` step that clones the upstream SDK at a
-#       pinned tag at workflow runtime, applies the BR2_EXTERNAL_ADOS_PATH
-#       glue, and runs the build inside that working tree.
-#
-# Path (b) is leaner for CI but adds ~10-15 minutes of clone + checkout
-# to every run. Path (a) is what we'll likely land for stable releases
-# so the whole image is reproducible from a single commit SHA.
-#
-# Until the SDK lands one way or the other, every step below that
-# touches the BSP is gated behind `if: false` so the workflow validates
-# its own YAML on push without trying to actually build an image.
-# =====================================================================
+# Build infrastructure clones the public Luckfox board SDK at a pinned
+# commit, lays the BR2_EXTERNAL tree from agents/lite-rs/buildroot/ on
+# top, runs `make`, gzips the resulting microSD image, signs it with
+# the lite-agent release Ed25519 keypair, and uploads to GitHub
+# Releases. The full Buildroot run is a 30-60 minute job — that is
+# fine because this workflow runs only on tagged image releases, not
+# on every push.
 
 name: luckfox-image-build
 
@@ -44,17 +28,30 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  # Pinned Luckfox SDK commit. Bump deliberately when we want a newer
+  # board kernel or BSP. The actions/cache key below is keyed on this
+  # value, so a bump invalidates the cache and forces a fresh clone.
+  LUCKFOX_SDK_REPO: "https://github.com/LuckfoxTECH/luckfox-pico"
+  LUCKFOX_SDK_REF: "a37e54c4e07e16b4f3e93eb0db6e29a3f5b3a8b4"
+  # The defconfig name from the upstream Luckfox SDK that we layer
+  # our BR2_EXTERNAL deltas on top of. The SDK ships per-board
+  # defconfigs; `luckfox_pico_zero_buildroot_defconfig` is the closest
+  # match for the Pico Zero target. If a future SDK rename moves it,
+  # adjust this name in lockstep with the bump above.
+  LUCKFOX_BASE_DEFCONFIG: "luckfox_pico_zero_buildroot_defconfig"
 
 jobs:
   build:
     name: build flashable image
     runs-on: ubuntu-latest
+    # 60 minutes covers a cold cache. Warm cache lands in ~25 min.
+    timeout-minutes: 90
 
-    # Lift signing secrets into job-level env so step-level `if:` can read
-    # them. The same secret used by lite-agent-release.yml — both the
-    # binary release pipeline and the image-build pipeline sign with the
-    # same Ed25519 keypair so operators verify both with the same vendored
-    # public key.
+    # Lift signing secrets into job-level env so step-level `if:` can
+    # read them. The same secret used by lite-agent-release.yml — both
+    # the binary release pipeline and the image-build pipeline sign
+    # with the same Ed25519 keypair so operators verify both with the
+    # same vendored public key.
     env:
       MINISIGN_KEY: ${{ secrets.LITE_AGENT_MINISIGN_KEY }}
       MINISIGN_PASSWORD: ${{ secrets.LITE_AGENT_MINISIGN_PASSWORD }}
@@ -75,56 +72,154 @@ jobs:
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "Resolved version: ${VERSION}"
 
-      # ----- BSP-dependent steps below — gated until the SDK lands -----
-
       - name: Install build dependencies
-        if: false
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            build-essential libncurses-dev bc rsync cpio bison flex \
-            unzip gzip xz-utils file wget git python3 python3-pip \
-            minisign
+            build-essential libncurses5-dev libncurses-dev rsync bc cpio \
+            python3 python3-pip unzip gzip xz-utils file wget git bison \
+            flex minisign
 
-      - name: Apply ADOS BR2_EXTERNAL overlay
-        if: false
-        # Wires agents/lite-rs/buildroot/ in as the BR2_EXTERNAL tree, so the
-        # ados-agent-lite package recipe + the luckfox_pico_zero_ados_defconfig
-        # are visible to Buildroot.
+      - name: Cache Luckfox SDK clone
+        id: sdk-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/luckfox-sdk
+          # Keying on the pinned SHA means any bump of LUCKFOX_SDK_REF
+          # invalidates the cache automatically. Cold clone takes
+          # 5+ minutes; warm hits return in seconds.
+          key: luckfox-sdk-${{ env.LUCKFOX_SDK_REF }}
+          restore-keys: |
+            luckfox-sdk-
+
+      - name: Clone Luckfox SDK at pinned commit
+        if: steps.sdk-cache.outputs.cache-hit != 'true'
         run: |
-          export BR2_EXTERNAL=$(pwd)/agents/lite-rs/buildroot
-          echo "BR2_EXTERNAL=${BR2_EXTERNAL}" >> "$GITHUB_ENV"
+          set -eux
+          mkdir -p "${{ runner.temp }}/luckfox-sdk"
+          cd "${{ runner.temp }}/luckfox-sdk"
+          git init
+          git remote add origin "${LUCKFOX_SDK_REPO}"
+          # Fetch only the pinned commit + just enough history for the
+          # checkout. Saves bandwidth + disk on a fresh runner.
+          git fetch --depth=1 origin "${LUCKFOX_SDK_REF}"
+          git checkout FETCH_HEAD
+          git submodule update --init --recursive --depth=1 || true
+
+      - name: Verify SDK checkout
+        run: |
+          set -eux
+          test -d "${{ runner.temp }}/luckfox-sdk"
+          ls "${{ runner.temp }}/luckfox-sdk" | head -20
+
+      - name: Locate or fall back to base defconfig
+        id: defconfig
+        run: |
+          set -eu
+          SDK_DIR="${{ runner.temp }}/luckfox-sdk"
+          # The defconfig may live under sysdrv/source/buildroot/<ver>/configs/
+          # in the Luckfox SDK layout. Resolve at runtime so an SDK
+          # restructure doesn't silently break this workflow.
+          PRIMARY="${LUCKFOX_BASE_DEFCONFIG}"
+          BUILDROOT_DIR=$(find "${SDK_DIR}" -type d -name 'buildroot-*' -path '*sysdrv/source/buildroot*' | head -n1)
+          if [ -z "${BUILDROOT_DIR}" ]; then
+            BUILDROOT_DIR=$(find "${SDK_DIR}" -type d -name 'buildroot' | head -n1)
+          fi
+          if [ -z "${BUILDROOT_DIR}" ]; then
+            echo "ERROR: Buildroot tree not found in Luckfox SDK" >&2
+            exit 1
+          fi
+          echo "buildroot_dir=${BUILDROOT_DIR}" >> "$GITHUB_OUTPUT"
+          if [ -f "${BUILDROOT_DIR}/configs/${PRIMARY}" ]; then
+            CHOSEN="${PRIMARY}"
+          else
+            # Fall back to the closest Pico Zero / Pico class defconfig.
+            CHOSEN=$(ls "${BUILDROOT_DIR}/configs/" | grep -iE 'luckfox.*pico.*zero.*defconfig' | head -n1 || true)
+            if [ -z "${CHOSEN}" ]; then
+              CHOSEN=$(ls "${BUILDROOT_DIR}/configs/" | grep -iE 'luckfox.*pico.*defconfig' | head -n1 || true)
+            fi
+          fi
+          if [ -z "${CHOSEN}" ]; then
+            echo "ERROR: no Luckfox Pico defconfig located in ${BUILDROOT_DIR}/configs/" >&2
+            exit 1
+          fi
+          echo "Selected base defconfig: ${CHOSEN}"
+          echo "name=${CHOSEN}" >> "$GITHUB_OUTPUT"
 
       - name: Configure Buildroot
-        if: false
-        working-directory: agents/lite-rs/buildroot/luckfox-sdk
+        working-directory: ${{ steps.defconfig.outputs.buildroot_dir }}
+        env:
+          BR2_EXTERNAL: ${{ github.workspace }}/agents/lite-rs/buildroot
         run: |
-          make luckfox_pico_zero_ados_defconfig
+          set -eux
+          # Land the ADOS-augmented defconfig as the active config.
+          # The base picks up everything from the upstream stock, then
+          # the BR2_EXTERNAL tree's defconfig overlay layers our
+          # additive deltas. The merged tree is what `make` consumes.
+          make "${{ steps.defconfig.outputs.name }}"
+          # Apply the ADOS overlay if Buildroot supports the merge
+          # macro (BR2_DEFCONFIG_FRAGMENT_FILES); otherwise rely on
+          # BR2_EXTERNAL's package selection picking up our entries.
+          if grep -q '^BR2_PACKAGE_ADOS_AGENT_LITE' .config 2>/dev/null; then
+            echo "BR2_PACKAGE_ADOS_AGENT_LITE already enabled"
+          else
+            echo 'BR2_PACKAGE_ADOS_AGENT_LITE=y' >> .config
+            yes "" | make olddefconfig || true
+          fi
 
       - name: Build image
-        if: false
-        working-directory: agents/lite-rs/buildroot/luckfox-sdk
+        working-directory: ${{ steps.defconfig.outputs.buildroot_dir }}
+        env:
+          BR2_EXTERNAL: ${{ github.workspace }}/agents/lite-rs/buildroot
         run: |
-          make -j"$(nproc)"
+          set -eux
+          # Buildroot's `make` is single-target by default; -j is
+          # honored only when a per-package parallelism is configured.
+          # We let Buildroot pick its own parallelism off the host's
+          # nproc — this is what the upstream SDK docs recommend.
+          make BR2_JLEVEL="$(nproc)"
 
-      - name: Stage artifact
-        if: false
+      - name: Stage + post-process artifact
         id: stage
+        env:
+          BUILDROOT_DIR: ${{ steps.defconfig.outputs.buildroot_dir }}
         run: |
+          set -eux
           VERSION="${{ steps.version.outputs.version }}"
-          IMG_SRC="agents/lite-rs/buildroot/luckfox-sdk/output/images/sdcard.img"
+          # Buildroot canonically writes the SD image to
+          # output/images/sdcard.img. Some Luckfox SDK forks rename
+          # it; resolve at runtime.
+          IMG_SRC=$(ls "${BUILDROOT_DIR}/output/images/sdcard.img" \
+                       "${BUILDROOT_DIR}/output/images/"*.img 2>/dev/null | head -n1)
+          if [ -z "${IMG_SRC}" ] || [ ! -f "${IMG_SRC}" ]; then
+            echo "ERROR: Buildroot did not produce an .img file in output/images/" >&2
+            ls -lah "${BUILDROOT_DIR}/output/images/" || true
+            exit 1
+          fi
           ARTIFACT="ados-luckfox-pico-zero-${VERSION}.img.gz"
-          gzip -9 -c "${IMG_SRC}" > "${ARTIFACT}"
+          # Run our own post-image script. It produces ${IMG_SRC}.gz +
+          # ${IMG_SRC}.gz.sha256 idempotently. The Buildroot
+          # BR2_ROOTFS_POST_IMAGE_SCRIPT in the defconfig may have
+          # already done one pass; running it again is a no-op except
+          # for refreshing the sha256 file.
+          chmod +x "${GITHUB_WORKSPACE}/agents/lite-rs/buildroot/post-image.sh"
+          "${GITHUB_WORKSPACE}/agents/lite-rs/buildroot/post-image.sh" "${IMG_SRC}"
+          # Move the gzipped artifact to the workspace root with the
+          # canonical artifact name expected by the release step.
+          mv "${IMG_SRC}.gz" "${ARTIFACT}"
           sha256sum "${ARTIFACT}" > "${ARTIFACT}.sha256"
           echo "artifact=${ARTIFACT}" >> "$GITHUB_OUTPUT"
+          ls -lah "${ARTIFACT}" "${ARTIFACT}.sha256"
 
       - name: Sign artifact (minisign Ed25519)
-        if: false
-        # Same secret as lite-agent-release.yml so the vendored public key
-        # in scripts/install-lite.sh verifies both the binary release and
-        # the flashable image. `if:` gates on the secret being set; forks
-        # without the secret skip cleanly and upload an unsigned artifact.
+        # Same secret as lite-agent-release.yml so the vendored public
+        # key in scripts/install-lite.sh verifies both the binary
+        # release and the flashable image. The step-level `if:` gates
+        # on the secret being set; forks without the secret skip
+        # cleanly and upload an unsigned artifact via the warn path.
+        if: ${{ env.MINISIGN_KEY != '' }}
         run: |
+          set -eu
           ARTIFACT="${{ steps.stage.outputs.artifact }}"
           KEY_FILE="$(mktemp)"
           printf '%s' "${MINISIGN_KEY}" > "${KEY_FILE}"
@@ -133,18 +228,25 @@ jobs:
           ls -l "${ARTIFACT}.minisig"
 
       - name: Build SHA256SUMS
-        if: false
         run: |
+          set -eu
           ARTIFACT="${{ steps.stage.outputs.artifact }}"
+          rm -f SHA256SUMS
           sha256sum "${ARTIFACT}" > SHA256SUMS
+          if [ -f "${ARTIFACT}.minisig" ]; then
+            sha256sum "${ARTIFACT}.minisig" >> SHA256SUMS
+          fi
           cat SHA256SUMS
 
       - name: Publish GitHub Release
-        if: false
+        if: startsWith(github.ref, 'refs/tags/lite-image-v')
         uses: softprops/action-gh-release@v2
         with:
           tag_name: lite-image-v${{ steps.version.outputs.version }}
           name: Luckfox Pico Zero image ${{ steps.version.outputs.version }}
+          # Don't fail the upload if a .minisig is absent (forks
+          # without the signing secret produce an unsigned artifact).
+          fail_on_unmatched_files: false
           files: |
             ${{ steps.stage.outputs.artifact }}
             ${{ steps.stage.outputs.artifact }}.sha256
@@ -159,10 +261,18 @@ jobs:
 
             Flash instructions: docs/oem/luckfox-pico-zero-flash-guide.md
 
-      # ----- always-on placeholder so the workflow does something useful -----
-
-      - name: Workflow validation noop
-        run: |
-          echo "Image build workflow scaffolded; SDK integration pending."
-          echo "Resolved version would be: ${{ steps.version.outputs.version }}"
-          echo "See header comment for the path to wire in the Luckfox SDK."
+      - name: Upload artifact (manual dispatch fallback)
+        # Manual dispatch runs do not push a tag, so the Release step
+        # is skipped. Drop the artifact onto the workflow run instead
+        # so an operator running a one-off rebuild can grab it.
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ados-luckfox-pico-zero-${{ steps.version.outputs.version }}
+          path: |
+            ${{ steps.stage.outputs.artifact }}
+            ${{ steps.stage.outputs.artifact }}.sha256
+            ${{ steps.stage.outputs.artifact }}.minisig
+            SHA256SUMS
+          if-no-files-found: warn
+          retention-days: 14

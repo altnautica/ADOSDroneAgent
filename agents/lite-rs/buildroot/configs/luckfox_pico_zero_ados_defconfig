@@ -102,9 +102,14 @@ BR2_PACKAGE_MINISIGN=y
 # alone and only set the rootfs overlay path so /etc/ados/ pre-populates.
 BR2_ROOTFS_OVERLAY="$(BR2_EXTERNAL_ADOS_PATH)/board/luckfox_pico_zero/rootfs-overlay"
 
-# Post-image script: rename the resulting .img to the canonical artifact
-# name that .github/workflows/luckfox-image-build.yml expects.
-BR2_ROOTFS_POST_IMAGE_SCRIPT="$(BR2_EXTERNAL_ADOS_PATH)/board/luckfox_pico_zero/post-image.sh"
+# Post-image script: gzip + sha256 the resulting .img. The CI workflow
+# at .github/workflows/luckfox-image-build.yml also invokes this script
+# explicitly after `make` returns, which is harmless when the variable
+# below is set (Buildroot runs it once during the build, the workflow
+# re-runs it idempotently on the gzipped artifact). Local-build workflows
+# that prefer the workflow to do the compression can leave this line
+# commented out.
+BR2_ROOTFS_POST_IMAGE_SCRIPT="$(BR2_EXTERNAL_ADOS_PATH)/post-image.sh"
 
 #
 # === Notes ===

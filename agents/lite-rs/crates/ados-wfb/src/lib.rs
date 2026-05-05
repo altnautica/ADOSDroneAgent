@@ -31,9 +31,14 @@ use thiserror::Error;
 use tokio::sync::Mutex;
 use tracing::{info, warn};
 
-pub use keys::{derive_key, seal, unseal, KeyError, KEY_LEN, NONCE_LEN};
-pub use process::{ProcessError, WfbProcess, WfbTxArgs, DEFAULT_WFB_TX_PATH};
-pub use udev::{DongleEvent, SysfsUdev, UdevError};
+pub use keys::{
+    derive_key, derive_keypair, generate_keypair, generate_passphrase, key_fingerprint,
+    regenerate_public_key_hex, seal, unseal, KeyError, KEY_LEN, NONCE_LEN, PUBLIC_KEY_LEN,
+};
+pub use process::{
+    GuardInterval, ProcessError, WfbAdvancedOpts, WfbProcess, WfbTxArgs, DEFAULT_WFB_TX_PATH,
+};
+pub use udev::{spawn_udev, DongleEvent, SysfsUdev, UdevBackend, UdevError};
 
 #[cfg(any(test, feature = "mock"))]
 pub use udev::MockUdev;
@@ -61,7 +66,21 @@ pub struct WfbConfig {
     /// `wlanX` interface to bind to. `None` means "auto-detect via
     /// udev"; the manager fills this in once it sees an Added event.
     pub interface: Option<String>,
+    /// Filesystem path to the keypair file (32-byte secret + 32-byte
+    /// public concatenated). Read by `wfb_tx` via the `-K` flag. Mode
+    /// 0600 owned by root; the manager refuses to spawn against a
+    /// world-readable file.
+    pub keypair_path: PathBuf,
+    /// FEC + PHY tuning passed through to `wfb_tx`. Defaults match the
+    /// upstream example config (`fec_k=8 fec_n=12 -B 20 -G long ...`).
+    #[serde(default)]
+    pub advanced: WfbAdvancedOpts,
 }
+
+/// Default keypair location. Lives under the same `/etc/ados/secrets/`
+/// directory as the other agent secrets so the install script's 0700
+/// permissions enforcement covers it transparently.
+pub const DEFAULT_KEYPAIR_PATH: &str = "/etc/ados/secrets/wfb-keypair";
 
 impl Default for WfbConfig {
     fn default() -> Self {
@@ -72,6 +91,8 @@ impl Default for WfbConfig {
             key_passphrase: String::new(),
             wfb_tx_path: PathBuf::from(DEFAULT_WFB_TX_PATH),
             interface: None,
+            keypair_path: PathBuf::from(DEFAULT_KEYPAIR_PATH),
+            advanced: WfbAdvancedOpts::default(),
         }
     }
 }
@@ -100,6 +121,11 @@ pub enum WfbError {
     /// Manager invariant violation (e.g., start called twice).
     #[error("manager invariant: {0}")]
     Invariant(&'static str),
+    /// Filesystem I/O failure on a runtime path (keypair persistence,
+    /// etc.). Wraps the underlying `std::io::Error` so the wizard can
+    /// surface a useful operator hint.
+    #[error("io: {0}")]
+    Io(#[from] std::io::Error),
 }
 
 /// State machine the manager exposes over a snapshot. Wire-compatible
@@ -250,16 +276,79 @@ impl WfbManager {
             Some(i) => i,
             None => return Ok(None),
         };
-        let key = derive_key(&cfg.key_passphrase)?;
-        let key_hex = key.iter().map(|b| format!("{b:02x}")).collect();
+        // Validate the passphrase up-front so a missing key surfaces as
+        // a typed error rather than a SpawnFailed at exec time. The
+        // derived bytes themselves are not part of the argv any more —
+        // wfb_tx reads them from the keypair file via -K.
+        let _ = derive_key(&cfg.key_passphrase)?;
         Ok(Some(WfbTxArgs {
             interface: iface,
             channel: cfg.channel,
             mcs_index: cfg.mcs_index,
             tx_power_dbm: cfg.tx_power_dbm,
-            key_hex,
+            keypair_path: cfg.keypair_path.clone(),
+            advanced: cfg.advanced.clone(),
         }))
     }
+
+    /// Materialise the keypair file at `cfg.keypair_path`. Writes the
+    /// 32-byte secret derived from the passphrase followed by its
+    /// 32-byte public component, matching the keypair-file format
+    /// `wfb_tx -K` consumes. The file is created with mode 0600; the
+    /// caller is expected to have already locked the parent directory
+    /// to 0700 via `ensure_secret_dir` from the setup crate.
+    pub async fn persist_keypair_file(&self) -> Result<[u8; PUBLIC_KEY_LEN], WfbError> {
+        let cfg = self.config.lock().await;
+        let (public, broadcast) = derive_keypair(&cfg.key_passphrase)?;
+        let mut bytes = Vec::with_capacity(KEY_LEN + PUBLIC_KEY_LEN);
+        bytes.extend_from_slice(&broadcast);
+        bytes.extend_from_slice(&public);
+        write_keypair_atomic(&cfg.keypair_path, &bytes)?;
+        Ok(public)
+    }
+}
+
+/// Atomic-write a keypair file at mode 0600. Mirrors the shape of
+/// `ados_setup::atomic::atomic_write` but lives here to avoid pulling
+/// in a setup-crate dep on the wfb crate.
+fn write_keypair_atomic(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let parent = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+    std::fs::create_dir_all(parent)?;
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let tmp = parent.join(format!(
+        ".{}.{}.{}.tmp",
+        path.file_name().and_then(|n| n.to_str()).unwrap_or("tmp"),
+        std::process::id(),
+        nanos
+    ));
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let mut f = match opts.open(&tmp) {
+        Ok(f) => f,
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(e);
+        }
+    };
+    if let Err(e) = f.write_all(bytes).and_then(|_| f.sync_all()) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    drop(f);
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    Ok(())
 }
 
 fn validate_config(cfg: &WfbConfig) -> Result<(), WfbError> {
@@ -293,6 +382,8 @@ mod tests {
             key_passphrase: "test-passphrase".to_string(),
             wfb_tx_path: PathBuf::from(DEFAULT_WFB_TX_PATH),
             interface: None,
+            keypair_path: PathBuf::from(DEFAULT_KEYPAIR_PATH),
+            advanced: WfbAdvancedOpts::default(),
         }
     }
 
@@ -353,17 +444,41 @@ mod tests {
     }
 
     /// build_args returns None until a dongle is bound, then returns
-    /// the argv with the derived key in hex.
+    /// the argv carrying the keypair file path + advanced opts.
     #[tokio::test]
-    async fn build_args_yields_hex_key_after_binding() {
+    async fn build_args_after_binding() {
         let m = WfbManager::new(cfg()).expect("ctor");
         assert!(m.build_args().await.expect("ok").is_none());
         m.handle_dongle_event(DongleEvent::Added("wlan0".to_string())).await;
         let args = m.build_args().await.expect("ok").expect("bound");
         assert_eq!(args.interface, "wlan0");
-        // Hex of 32 bytes is 64 chars.
-        assert_eq!(args.key_hex.len(), 64);
-        assert!(args.key_hex.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_eq!(args.channel, 161);
+        assert_eq!(args.mcs_index, 1);
+        assert_eq!(args.advanced.fec_k, 8);
+        assert_eq!(args.advanced.fec_n, 12);
+        assert!(args.keypair_path.to_string_lossy().contains("wfb-keypair"));
+    }
+
+    /// `persist_keypair_file` writes a 64-byte file (32-byte broadcast
+    /// + 32-byte public) at mode 0600 and returns the public bytes.
+    #[tokio::test]
+    async fn persist_keypair_file_writes_concatenated_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("kp");
+        let mut c = cfg();
+        c.keypair_path = path.clone();
+        let m = WfbManager::new(c).expect("ctor");
+        let public = m.persist_keypair_file().await.expect("write");
+        let bytes = std::fs::read(&path).expect("read keypair");
+        assert_eq!(bytes.len(), KEY_LEN + PUBLIC_KEY_LEN);
+        // Last 32 bytes match the returned public.
+        assert_eq!(&bytes[KEY_LEN..], &public[..]);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "keypair file must be 0600");
+        }
     }
 
     /// Constructor rejects an obviously bad initial config so the

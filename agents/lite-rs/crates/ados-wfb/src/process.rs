@@ -6,11 +6,15 @@
 //! flapping dongle does not turn into a fork-bomb.
 //!
 //! The command line is built from a [`WfbTxArgs`] struct so tests can
-//! exercise the build path without a real `wfb_tx` binary.
+//! exercise the build path without a real `wfb_tx` binary. Argument
+//! names match the upstream `wfb_tx` CLI documented in the WFB-ng
+//! project README + man page: short flags `-K -k -n -p -B -G -M -S -L
+//! -u` plus a positional `<wlan_iface>`.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::process::{Child, Command};
 use tracing::{debug, info, warn};
@@ -44,27 +48,99 @@ pub enum ProcessError {
     },
 }
 
-/// Command-line arguments passed to `wfb_tx`. Captures only the fields
-/// we know to exist on the upstream CLI; future fields land here as
-/// optional values so the build path stays stable.
-///
-// TODO: validate exact argument names against wfb_tx --help on the
-// target Buildroot image once the binary is in hand.
+/// FEC and PHY-layer tuning for `wfb_tx`. Defaults match the values
+/// the upstream WFB-ng project ships in its example config: `fec_k=8`,
+/// `fec_n=12`, `radio_port=1`, 20 MHz bandwidth, long guard interval,
+/// STBC + LDPC off, UDP listen on 5600. Operators that need different
+/// values supply them via the `[wfb.advanced]` section in agent.yaml.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WfbAdvancedOpts {
+    /// FEC data shards. The total number of shards is `fec_n`; data
+    /// shards are `fec_k`. Default 8.
+    pub fec_k: u8,
+    /// Total FEC shards. Default 12 (8 data + 4 parity).
+    pub fec_n: u8,
+    /// WFB-ng radio port. Multiple streams (video, telemetry,
+    /// tunnel) can multiplex on different ports. Default 1.
+    pub radio_port: u8,
+    /// 802.11 channel bandwidth in MHz. Common values: 20, 40, 80.
+    /// Default 20.
+    pub bandwidth_mhz: u8,
+    /// 802.11 guard interval. `"long"` = 800 ns, `"short"` = 400 ns.
+    /// Short halves the protected dead time on each symbol but raises
+    /// inter-symbol interference at long range. Default `"long"`.
+    pub guard_interval: GuardInterval,
+    /// Space-time block coding. 0 = off, 1..=3 select stream count.
+    /// Default 0.
+    pub stbc: u8,
+    /// Low-density parity check. 0 = off, 1 = on. Default 0.
+    pub ldpc: u8,
+    /// UDP port `wfb_tx` listens on for input frames. Encoded H.264
+    /// NAL units are sent here from the parent process. Default 5600.
+    pub udp_listen_port: u16,
+}
+
+impl Default for WfbAdvancedOpts {
+    fn default() -> Self {
+        Self {
+            fec_k: 8,
+            fec_n: 12,
+            radio_port: 1,
+            bandwidth_mhz: 20,
+            guard_interval: GuardInterval::Long,
+            stbc: 0,
+            ldpc: 0,
+            udp_listen_port: 5600,
+        }
+    }
+}
+
+/// 802.11 guard interval selector. The CLI argument is a single byte
+/// (`-G long` / `-G short`) so we keep the type narrow.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GuardInterval {
+    Long,
+    Short,
+}
+
+impl GuardInterval {
+    fn as_arg(&self) -> &'static str {
+        match self {
+            GuardInterval::Long => "long",
+            GuardInterval::Short => "short",
+        }
+    }
+}
+
+/// Command-line arguments passed to `wfb_tx`. Mirrors the upstream
+/// flag surface; the keypair file lives on disk as a 32-byte secret +
+/// 32-byte public concatenated, and the path is passed to `-K`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WfbTxArgs {
-    /// `wlanX` interface bound to the air-side adapter.
+    /// `wlanX` interface bound to the air-side adapter. Passed as the
+    /// trailing positional argument.
     pub interface: String,
-    /// 802.11 channel number (1-13 for 2.4 GHz, 36+ for 5 GHz).
+    /// 802.11 channel number (1-13 for 2.4 GHz, 36+ for 5 GHz). Passed
+    /// to `-f` on some upstream forks; the canonical CLI threads it
+    /// through the bind-to-channel ioctl outside the argv. We surface
+    /// it here for log + REST visibility but it does not appear in the
+    /// argv; the orchestration layer runs `iw dev <iface> set channel`
+    /// before exec.
     pub channel: u8,
-    /// 802.11 MCS index. Drives the over-the-air bitrate.
+    /// 802.11 MCS index. Drives the over-the-air bitrate. `-M`.
     pub mcs_index: u8,
     /// Transmit power, expressed in dBm. Negative values mean "leave
-    /// at adapter default."
+    /// at adapter default" — tx power is set via `iw` before exec for
+    /// the same reason as `channel`. Carried for symmetry with the
+    /// REST surface.
     pub tx_power_dbm: i8,
-    /// Hex-encoded 32-byte broadcast key. The argument name is
-    /// `--key` per the wfb_tx CLI; the value is the hex of the bytes
-    /// returned by [`crate::keys::derive_key`].
-    pub key_hex: String,
+    /// Filesystem path to the keypair file. The file format is the
+    /// 32-byte secret followed by the 32-byte public, big-endian, as
+    /// documented in the WFB-ng project README. `-K`.
+    pub keypair_path: PathBuf,
+    /// FEC + PHY tuning. Defaults match the upstream example config.
+    pub advanced: WfbAdvancedOpts,
 }
 
 impl WfbTxArgs {
@@ -72,21 +148,31 @@ impl WfbTxArgs {
     /// expects. Kept as a function so tests can assert byte-for-byte
     /// equivalence on the argument vector.
     pub fn to_argv(&self) -> Vec<String> {
-        let mut argv = vec![
-            "--interface".to_string(),
-            self.interface.clone(),
-            "--channel".to_string(),
-            self.channel.to_string(),
-            "--mcs".to_string(),
+        // Argv layout matches the documented wfb_tx CLI: short-flag pairs
+        // for each tunable, then the trailing wlan interface positional.
+        vec![
+            "-K".into(),
+            self.keypair_path.to_string_lossy().into_owned(),
+            "-k".into(),
+            self.advanced.fec_k.to_string(),
+            "-n".into(),
+            self.advanced.fec_n.to_string(),
+            "-p".into(),
+            self.advanced.radio_port.to_string(),
+            "-B".into(),
+            self.advanced.bandwidth_mhz.to_string(),
+            "-G".into(),
+            self.advanced.guard_interval.as_arg().to_string(),
+            "-M".into(),
             self.mcs_index.to_string(),
-            "--key".to_string(),
-            self.key_hex.clone(),
-        ];
-        if self.tx_power_dbm >= 0 {
-            argv.push("--txpower".to_string());
-            argv.push(self.tx_power_dbm.to_string());
-        }
-        argv
+            "-S".into(),
+            self.advanced.stbc.to_string(),
+            "-L".into(),
+            self.advanced.ldpc.to_string(),
+            "-u".into(),
+            self.advanced.udp_listen_port.to_string(),
+            self.interface.clone(),
+        ]
     }
 }
 
@@ -230,38 +316,89 @@ mod tests {
             channel: 161,
             mcs_index: 1,
             tx_power_dbm: 25,
-            key_hex: "deadbeef".repeat(8), // 32 bytes hex-encoded
+            keypair_path: PathBuf::from("/etc/ados/secrets/wfb-keypair"),
+            advanced: WfbAdvancedOpts::default(),
         }
     }
 
-    /// Build but do not run: the argv must reflect the configured
-    /// channel / MCS / key / power exactly. This is the contract the
-    /// integration test against the real `wfb_tx --help` output will
-    /// pin once the binary is in hand.
+    /// Build but do not run: the argv must include every documented
+    /// short flag the upstream `wfb_tx` CLI consumes. Builds out the
+    /// full surface and asserts each `-X <value>` pair lands exactly.
     #[test]
-    fn apply_config_changes_args() {
+    fn argv_build_includes_all_options() {
+        let a = sample_args();
+        let argv = a.to_argv();
+        // Walk through the expected ordering. Every flag must appear
+        // immediately followed by its value, and the trailing positional
+        // is the wlan interface name.
+        let expected = vec![
+            "-K".to_string(),
+            "/etc/ados/secrets/wfb-keypair".to_string(),
+            "-k".to_string(),
+            "8".to_string(),
+            "-n".to_string(),
+            "12".to_string(),
+            "-p".to_string(),
+            "1".to_string(),
+            "-B".to_string(),
+            "20".to_string(),
+            "-G".to_string(),
+            "long".to_string(),
+            "-M".to_string(),
+            "1".to_string(),
+            "-S".to_string(),
+            "0".to_string(),
+            "-L".to_string(),
+            "0".to_string(),
+            "-u".to_string(),
+            "5600".to_string(),
+            "wlan0".to_string(),
+        ];
+        assert_eq!(argv, expected);
+    }
+
+    /// Apply a non-default tuning (bandwidth + guard interval + STBC +
+    /// LDPC) and confirm the argv carries the new values.
+    #[test]
+    fn argv_build_reflects_advanced_tuning() {
         let mut a = sample_args();
-        let initial = a.to_argv();
-        assert!(initial.contains(&"--channel".to_string()));
-        assert!(initial.contains(&"161".to_string()));
-        assert!(initial.contains(&"--mcs".to_string()));
-        assert!(initial.contains(&"1".to_string()));
-        assert!(initial.contains(&"--key".to_string()));
-        assert!(initial.contains(&"--txpower".to_string()));
-        assert!(initial.contains(&"25".to_string()));
+        a.mcs_index = 4;
+        a.advanced.bandwidth_mhz = 40;
+        a.advanced.guard_interval = GuardInterval::Short;
+        a.advanced.stbc = 1;
+        a.advanced.ldpc = 1;
+        a.advanced.fec_k = 4;
+        a.advanced.fec_n = 8;
+        a.advanced.radio_port = 7;
+        a.advanced.udp_listen_port = 5601;
+        let argv = a.to_argv();
+        // Spot-check the most critical pairs.
+        let argv_pairs: Vec<(String, String)> = argv
+            .windows(2)
+            .map(|w| (w[0].clone(), w[1].clone()))
+            .collect();
+        assert!(argv_pairs.contains(&("-k".to_string(), "4".to_string())));
+        assert!(argv_pairs.contains(&("-n".to_string(), "8".to_string())));
+        assert!(argv_pairs.contains(&("-p".to_string(), "7".to_string())));
+        assert!(argv_pairs.contains(&("-B".to_string(), "40".to_string())));
+        assert!(argv_pairs.contains(&("-G".to_string(), "short".to_string())));
+        assert!(argv_pairs.contains(&("-M".to_string(), "4".to_string())));
+        assert!(argv_pairs.contains(&("-S".to_string(), "1".to_string())));
+        assert!(argv_pairs.contains(&("-L".to_string(), "1".to_string())));
+        assert!(argv_pairs.contains(&("-u".to_string(), "5601".to_string())));
+        // Trailing positional is still the iface.
+        assert_eq!(argv.last().unwrap(), "wlan0");
+    }
 
-        // Mutate channel + MCS, ensure argv reflects.
-        a.channel = 36;
-        a.mcs_index = 5;
-        let updated = a.to_argv();
-        assert!(updated.contains(&"36".to_string()));
-        assert!(updated.contains(&"5".to_string()));
-        assert!(!updated.contains(&"161".to_string()));
-
-        // Negative tx power omits the flag entirely.
-        a.tx_power_dbm = -1;
-        let no_power = a.to_argv();
-        assert!(!no_power.contains(&"--txpower".to_string()));
+    /// The keypair file path lands in argv exactly as stored. A symlink
+    /// or a path with spaces must round-trip without lossy escaping.
+    #[test]
+    fn keypair_file_used_when_present() {
+        let mut a = sample_args();
+        a.keypair_path = PathBuf::from("/var/lib/ados/wfb keypair.bin");
+        let argv = a.to_argv();
+        let pos = argv.iter().position(|s| s == "-K").expect("-K flag");
+        assert_eq!(argv[pos + 1], "/var/lib/ados/wfb keypair.bin");
     }
 
     /// Spawn a `/bin/sleep 0.05`, wait for it, observe a clean exit.
@@ -273,15 +410,9 @@ mod tests {
             // Skip on hosts without /bin/sleep (rare; CI macs ship it).
             return;
         }
-        let args = WfbTxArgs {
-            interface: "0.05".to_string(), // /bin/sleep takes seconds as positional
-            channel: 1,
-            mcs_index: 0,
-            tx_power_dbm: -1,
-            key_hex: "00".to_string(),
-        };
-        // /bin/sleep ignores our --interface flag style. Use a custom
-        // process where we override argv directly.
+        let args = sample_args();
+        // /bin/sleep ignores our argv style. Use a custom process where
+        // we override argv directly.
         let mut child = tokio::process::Command::new(&path)
             .arg("0.05")
             .kill_on_drop(true)
@@ -303,16 +434,7 @@ mod tests {
         if !path.exists() {
             return;
         }
-        let mut proc = WfbProcess::new(
-            path,
-            WfbTxArgs {
-                interface: "wlan0".to_string(),
-                channel: 1,
-                mcs_index: 0,
-                tx_power_dbm: -1,
-                key_hex: "00".to_string(),
-            },
-        );
+        let mut proc = WfbProcess::new(path, sample_args());
         proc.spawn().expect("spawn /bin/false");
         let initial_backoff = proc.backoff();
         let status = proc.wait_then_backoff().await.expect("wait");

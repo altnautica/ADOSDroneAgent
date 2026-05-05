@@ -15,6 +15,13 @@ tracing = { workspace = true }
 thiserror = { workspace = true }
 async-trait = { workspace = true }
 rmp-serde = { workspace = true }
+bytes = { workspace = true }
+
+# V4L2 high-level wrapper. The crate's own surface is safe; the unsafe
+# ioctl boundary is contained inside its `v4l-sys` dep, so the
+# `ados-video` crate keeps its `forbid(unsafe_code)` posture.
+[target.'cfg(target_os = "linux")'.dependencies]
+v4l = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt", "sync", "io-util", "net", "time", "signal", "process", "rt-multi-thread"] }

@@ -23,6 +23,7 @@ use crate::handlers;
 use crate::origin::{check_origin, OriginAllowlist};
 use crate::state::StateStore;
 use crate::webapp;
+use crate::wfb_handlers::{self, SharedWfbManager};
 
 use std::path::PathBuf;
 
@@ -83,6 +84,23 @@ fn api_routes() -> Router<Arc<SetupState>> {
         .route("/api/v1/setup/reset", post(handlers::post_reset))
 }
 
+/// WFB-ng broadcast-config sub-router (3 routes). Mounted alongside
+/// the universal setup routes so the same-origin gate + body limit
+/// cover them uniformly. Stays in its own `Router::new()` because the
+/// shared manager is delivered via `Extension`, not `with_state`.
+fn wfb_routes() -> Router<Arc<SetupState>> {
+    Router::new()
+        .route("/api/v1/setup/wfb", get(wfb_handlers::get_wfb))
+        .route(
+            "/api/v1/setup/wfb/configure",
+            post(wfb_handlers::post_wfb_configure),
+        )
+        .route(
+            "/api/v1/setup/wfb/regenerate-key",
+            post(wfb_handlers::post_wfb_regenerate_key),
+        )
+}
+
 /// Unauthenticated probe (`/api/v1/health`) that lives OUTSIDE the
 /// same-origin gate so monitoring agents and SREs can hit it from
 /// neighbouring hosts without forging an `Origin` header. The handler
@@ -107,6 +125,35 @@ fn diag_routes() -> Router<Arc<SetupState>> {
 
 pub fn setup_router(state: Arc<SetupState>) -> Router {
     setup_router_with_diag(state, DiagState::shared())
+}
+
+/// Variant of [`setup_router`] that includes the WFB-ng routes. The
+/// production wiring uses this when the agent has a `WfbManager` to
+/// share; tests can call [`setup_router`] alone when they want the
+/// pre-MSN-056 surface.
+pub fn setup_router_with_wfb(
+    state: Arc<SetupState>,
+    wfb_manager: SharedWfbManager,
+) -> Router {
+    setup_router_with_wfb_and_diag(state, wfb_manager, DiagState::shared())
+}
+
+/// Variant accepting both the diag handle and the wfb manager. Wires
+/// the `Extension(SharedWfbManager)` layer onto the wfb sub-router
+/// before merging it with the rest so the wfb handlers see the right
+/// extractor.
+pub fn setup_router_with_wfb_and_diag(
+    state: Arc<SetupState>,
+    wfb_manager: SharedWfbManager,
+    diag: Arc<DiagState>,
+) -> Router {
+    let api = api_routes()
+        .merge(wfb_routes().layer(Extension(wfb_manager)))
+        .merge(operability_routes())
+        .merge(diag_routes());
+    api.fallback(get(webapp::serve_request))
+        .with_state(state)
+        .layer(Extension(diag))
 }
 
 /// Same as `setup_router` but accepts an externally-constructed
@@ -174,6 +221,30 @@ pub fn setup_router_with_origin_check_and_diag(
         .layer(middleware::from_fn_with_state(allowlist, check_origin));
     // Health stays UNGATED so SRE liveness probes from neighbouring
     // hosts work without an Origin header.
+    gated
+        .merge(operability_routes())
+        .fallback(get(webapp::serve_request))
+        .with_state(state)
+        .layer(Extension(diag))
+}
+
+/// Variant that bundles the same-origin gate, the diag handle, and
+/// the WFB-ng manager. This is the production wiring the agent binary
+/// uses once the MSN-056 wfb crate is wired in.
+pub fn setup_router_with_origin_check_diag_and_wfb(
+    state: Arc<SetupState>,
+    allowlist: Arc<OriginAllowlist>,
+    diag: Arc<DiagState>,
+    wfb_manager: SharedWfbManager,
+) -> Router {
+    // Wfb routes ride alongside the rest of the setup routes inside
+    // the gated branch, so a hostile page on the LAN cannot POST a
+    // fresh passphrase from a foreign origin. The handlers consume the
+    // shared manager via `Extension(SharedWfbManager)`.
+    let gated = api_routes()
+        .merge(wfb_routes().layer(Extension(wfb_manager)))
+        .merge(diag_routes())
+        .layer(middleware::from_fn_with_state(allowlist, check_origin));
     gated
         .merge(operability_routes())
         .fallback(get(webapp::serve_request))

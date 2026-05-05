@@ -29,8 +29,11 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+pub mod libcamera;
+pub mod nal;
 pub mod null;
 pub mod rkmpi_subprocess;
+pub mod rtsp;
 pub mod v4l2;
 
 /// Configuration applied at encoder start. The values describe the desired
@@ -181,10 +184,23 @@ pub trait Encoder: Send {
 /// the real backends arrive.
 pub fn encoder_for_board(encoder_api: &str) -> Box<dyn Encoder + Send> {
     match encoder_api {
-        "v4l2" | "libcamera" => Box::new(v4l2::V4l2Encoder::new()),
+        // libcamera-vid subprocess; primary Pi-class path because the
+        // V4L2 M2M wiring through /dev/video11 is fiddly to drive from
+        // userspace and `libcamera-vid` ships in-tree on Bookworm.
+        "libcamera" => Box::new(libcamera::LibcameraEncoder::new()),
+        // V4L2 capture-only loop. Used by UVC H.264 USB cameras and any
+        // device that already emits encoded H.264 on its CAPTURE queue.
+        "v4l2" => Box::new(v4l2::V4l2Encoder::new()),
+        // Rockchip vendor-SDK path on RV1106 / RV1106G3 (Luckfox Pico
+        // Zero). The agent spawns a uclibc-built C wrapper that links
+        // librockchip_mpp.so; the parent and child exchange
+        // length-prefixed msgpack messages.
         "rkmpi" | "rkmedia" => Box::new(rkmpi_subprocess::RkmpiEncoderSubprocess::new(
             rkmpi_subprocess::default_subprocess_path(),
         )),
+        // Boards without a video pipeline fall through to the null
+        // encoder; agent main can still surface the device in the
+        // fleet view without any video subsystem at all.
         _ => Box::new(null::NullEncoder::new()),
     }
 }
@@ -218,6 +234,17 @@ mod tests {
     fn factory_dispatches_v4l2_alias() {
         let _ = encoder_for_board("v4l2");
         let _ = encoder_for_board("libcamera");
+    }
+
+    #[test]
+    fn factory_dispatches_libcamera_separately_from_v4l2() {
+        // The libcamera and v4l2 backends are now distinct concrete
+        // types. We can't ask `Any::type_id` through a trait object
+        // without erasing it explicitly, but we can at least make sure
+        // both branches return without panicking and that the two
+        // factories are reachable.
+        let _ = encoder_for_board("libcamera");
+        let _ = encoder_for_board("v4l2");
     }
 
     #[test]

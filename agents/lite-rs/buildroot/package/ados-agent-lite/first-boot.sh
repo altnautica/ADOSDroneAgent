@@ -1,125 +1,111 @@
 #!/bin/sh
 #
-# First-boot pairing-code surfacing for the ADOS lite agent on Buildroot.
+# First-boot pairing surface for the ADOS lite agent.
+#
+# Idempotent: the script writes a sentinel after the first successful run
+# and exits 0 on any subsequent invocation. Operators who want to
+# re-surface the pair code (e.g. they didn't see the UART banner the
+# first time) remove /etc/ados/.first-boot-done and re-run via the
+# busybox sysv-rc init: `/etc/init.d/S98ados-first-boot start`.
 #
 # Lifecycle:
-#   1. If /etc/ados/pairing.json exists with a non-empty pair_code, exit early —
-#      the operator pre-paired the image at build time or via a prior boot.
-#   2. Otherwise, generate a fresh pair code via the agent CLI. The agent must
-#      already be running (S99ados-agent-lite starts before this in init order
-#      via the K* numbering convention; if the order is reversed in a downstream
-#      BSP, this script tolerates a not-yet-running agent and retries briefly).
-#   3. Print the code to dmesg + the active console/UART so an operator with a
-#      USB-UART cable hooked to the SBC's debug pins can read it without SSH.
-#   4. If the board profile reports an attached display (OLED or LCD), render
-#      the code there too.
+#   1. If the sentinel exists, exit 0.
+#   2. Ask the running agent to mint-or-return its current pair code via
+#      `ados-agent-lite pair --autogen`. The agent persists the code to
+#      pairing.json under the canonical TTL semantics, so this script
+#      is forward-compatible with operators who pre-populate pairing.json
+#      via a build-time overlay.
+#   3. Print the code to logger + /dev/kmsg + the active UART(s).
+#   4. If an SSD1306-class OLED is detected on I2C bus 1 at 0x3C, render
+#      the code there too via `ados-agent-lite display --message`.
+#   5. Touch the sentinel.
 #
-# The agent CLI subcommand `pair --autogen` is the spec'd entry point. If that
-# subcommand isn't present yet (lite-agent < TBD), the script falls back to
-# reading pairing state from the running agent's HTTP API and printing whatever
-# beacon code the agent is already broadcasting. Either way the operator gets
-# a code to type into Mission Control "Add drone".
-#
-# TODO(future): wire `ados-agent-lite pair --autogen` once that flag lands.
-# Tracked at agents/lite-rs/CHANGELOG.md.
+# Failure mode: if the agent isn't running yet, the script exits 1 and
+# the operator can manually re-run after the agent service is up. The
+# sentinel is NOT written on failure so the next invocation retries.
 
-set -u
+set -eu
 
-LOG_TAG="ados-first-boot"
-PAIRING_FILE="/etc/ados/pairing.json"
-AGENT_BIN="/usr/local/bin/ados-agent-lite"
-AGENT_CONFIG="/etc/ados/agent.yaml"
-API_BASE="http://127.0.0.1:8080/api/v1"
+PAIRING_JSON=/etc/ados/pairing.json
+SENTINEL=/etc/ados/.first-boot-done
+AGENT_BIN=/usr/local/bin/ados-agent-lite
 
-# Where to print the banner. /dev/console is always present on Buildroot;
-# /dev/ttyS0 is the typical UART debug console on Luckfox-class boards.
-BANNER_TARGETS="/dev/console /dev/ttyS0"
-
-log() {
-	# logger may not exist on the most stripped Buildroot rootfs; fall back
-	# to /dev/kmsg which is always writable by root.
-	if command -v logger >/dev/null 2>&1; then
-		logger -t "$LOG_TAG" -- "$*"
-	fi
-	if [ -w /dev/kmsg ]; then
-		printf '<6>%s: %s\n' "$LOG_TAG" "$*" > /dev/kmsg
-	fi
-}
-
-# Already paired? Skip the surface.
-if [ -s "$PAIRING_FILE" ]; then
-	if grep -q '"pair_code"\s*:\s*"[^"]\+"' "$PAIRING_FILE" 2>/dev/null; then
-		log "pairing.json already populated; first-boot surface skipped"
-		exit 0
-	fi
+if [ -f "$SENTINEL" ]; then
+    exit 0
 fi
 
-# Wait briefly for the agent's HTTP API to be reachable. The agent service
-# starts before this in normal init order, but on slow boards or USB-UART
-# arbitration delays the socket may take a moment.
-i=0
-while [ "$i" -lt 30 ]; do
-	if command -v wget >/dev/null 2>&1 && \
-		wget -q -T 1 -O /dev/null "$API_BASE/setup/state" >/dev/null 2>&1; then
-		break
-	fi
-	if command -v curl >/dev/null 2>&1 && \
-		curl -fsS --max-time 1 -o /dev/null "$API_BASE/setup/state" >/dev/null 2>&1; then
-		break
-	fi
-	sleep 1
-	i=$((i + 1))
-done
+# Ensure the parent directory exists so `touch "$SENTINEL"` at the end
+# does not fail on a freshly-flashed rootfs where /etc/ados/ may not yet
+# carry the agent's expected layout.
+mkdir -p "$(dirname "$SENTINEL")"
 
-CODE=""
-
-# Preferred path: ask the agent to generate and persist a fresh code.
-# TODO(future): the --autogen flag is on the lite-agent backlog. Until it
-# lands, the agent's beacon-broadcast loop generates a per-device code we can
-# read via the HTTP surface (next branch below).
-if [ -x "$AGENT_BIN" ] && "$AGENT_BIN" --help 2>&1 | grep -q -- '--autogen'; then
-	if "$AGENT_BIN" --config "$AGENT_CONFIG" pair --autogen >/tmp/.pair-out 2>&1; then
-		CODE=$(grep -oE 'PAIR[: ][A-Za-z0-9]{4,8}' /tmp/.pair-out | head -n1 | sed -E 's/PAIR[: ]//')
-	fi
-	rm -f /tmp/.pair-out
+# Generate-or-return a pair code via the agent. `pair --autogen` is the
+# canonical entry point: it asks PairingStore::get_or_create_code(),
+# persists, and prints the line `==== ADOS PAIR CODE: XXXXXX ====` to
+# stdout. We capture stdout, extract the 6-character code, and re-emit
+# it on every surface. The agent must be reachable; the busybox init
+# orders S98 before S99, but a slow boot can flip that — handle the
+# missing-agent case explicitly rather than silently swallowing.
+PAIR_OUT=""
+if [ ! -x "$AGENT_BIN" ]; then
+    logger -t ados-first-boot "ERROR: $AGENT_BIN missing or not executable"
+    echo "first-boot: agent binary missing at $AGENT_BIN" > /dev/kmsg 2>/dev/null || true
+    exit 1
 fi
 
-# Fallback: read the unpaired-state heartbeat the agent is already broadcasting.
-if [ -z "$CODE" ]; then
-	if command -v wget >/dev/null 2>&1; then
-		BODY=$(wget -q -T 2 -O - "$API_BASE/pairing/state" 2>/dev/null || true)
-	elif command -v curl >/dev/null 2>&1; then
-		BODY=$(curl -fsS --max-time 2 "$API_BASE/pairing/state" 2>/dev/null || true)
-	else
-		BODY=""
-	fi
-	# Tolerate either { "pair_code": "ABCD" } or { "code": "ABCD" } shapes.
-	CODE=$(printf '%s' "$BODY" \
-		| grep -oE '"(pair_code|code)"\s*:\s*"[A-Za-z0-9]{4,8}"' \
-		| head -n1 \
-		| sed -E 's/.*"([A-Za-z0-9]+)".*/\1/')
+if ! PAIR_OUT=$("$AGENT_BIN" pair --autogen 2>&1); then
+    logger -t ados-first-boot "ERROR: pair --autogen failed; agent not running?"
+    echo "first-boot: pair --autogen failed" > /dev/kmsg 2>/dev/null || true
+    exit 1
 fi
+
+# Pair codes are 6 uppercase alphanumerics — the same charset the
+# PairingStore generator emits. `head -n1` keeps the first match in
+# case the agent prints multiple banners (which it does not today,
+# but the pattern is defensive).
+CODE=$(printf '%s\n' "$PAIR_OUT" | grep -oE '[A-Z0-9]{6}' | head -n1 || true)
 
 if [ -z "$CODE" ]; then
-	log "could not obtain a pair code from the agent; operator must pair via Mission Control 'Add drone' beacon scan"
-	exit 1
+    logger -t ados-first-boot "ERROR: could not extract pair code from agent output"
+    echo "first-boot: pair --autogen produced no code" > /dev/kmsg 2>/dev/null || true
+    exit 1
 fi
 
-BANNER="==== ADOS PAIR CODE: ${CODE} ===="
-log "$BANNER"
+BANNER="==== ADOS PAIR CODE: $CODE ===="
 
-for tgt in $BANNER_TARGETS; do
-	if [ -w "$tgt" ]; then
-		printf '\n%s\n\n' "$BANNER" > "$tgt" 2>/dev/null || true
-	fi
+# logger lands in /var/log/messages on Buildroot rootfs.
+logger -t ados-first-boot "$BANNER"
+
+# /dev/kmsg surfaces in dmesg + the kernel console (if a serial
+# console is configured at boot). Always writable by root.
+echo "$BANNER" > /dev/kmsg 2>/dev/null || true
+
+# UART banner: print to the canonical Luckfox debug UART plus the
+# generic console so an operator with a USB-UART cable hooked to the
+# debug pins reads the code without SSH. The list is widened with
+# /dev/console (always present on Buildroot) and /dev/ttyS2 because
+# the RV1106 evaluation pinout sometimes routes the debug UART to ttyS2
+# rather than ttyS0 depending on boot loader configuration.
+for tty in /dev/ttyS0 /dev/ttyS2 /dev/console; do
+    if [ -w "$tty" ]; then
+        printf '\n%s\n\n' "$BANNER" > "$tty" 2>/dev/null || true
+    fi
 done
 
-# Best-effort OLED render. The board profile lists optional display peripherals;
-# the agent owns the framebuffer/I2C path. We invoke a generic "show banner"
-# CLI subcommand if present, otherwise skip silently — the UART surface above
-# is the primary channel.
-if [ -x "$AGENT_BIN" ] && "$AGENT_BIN" --help 2>&1 | grep -q 'display'; then
-	"$AGENT_BIN" display banner "${BANNER}" >/dev/null 2>&1 || true
+# OLED probe. SSD1306 panels live at 0x3C on I2C bus 1 by Linux
+# convention. i2cdetect's exit code is 0 even when nothing answers, so
+# we check stdout for the "3c" cell. The probe is best-effort: if
+# i2cdetect is missing (lighter rootfs builds), or if no panel
+# responds, we silently skip and rely on the UART surface above.
+if command -v i2cdetect >/dev/null 2>&1; then
+    if i2cdetect -y 1 0x3c 0x3c 2>/dev/null | grep -qi '3c'; then
+        # The agent owns the OLED framebuffer; we hand the banner to
+        # the dedicated `display` subcommand, which is a forward-compat
+        # hook (the binary may not implement it yet — `|| true` swallows
+        # the not-found error so the rest of the boot continues).
+        "$AGENT_BIN" display --message "ADOS PAIR: $CODE" 2>/dev/null || true
+    fi
 fi
 
-exit 0
+# Sentinel last so a failure earlier leaves the surface re-runnable.
+touch "$SENTINEL"

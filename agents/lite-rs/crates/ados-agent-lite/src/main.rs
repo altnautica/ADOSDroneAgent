@@ -53,9 +53,24 @@ enum Command {
     /// Persist a pair code into pairing.json and signal the running
     /// agent to reload. After this the cloud client switches from the
     /// unpaired pairing-beacon flow to the paired heartbeat flow.
+    ///
+    /// Two modes:
+    ///   `pair <CODE>`   — operator provides the code (typed from
+    ///                     Mission Control "Add drone").
+    ///   `pair --autogen` — mint-or-return the device's current code
+    ///                     via PairingStore::get_or_create_code() and
+    ///                     print it to stdout. Used by the first-boot
+    ///                     surface so a freshly-flashed image emits a
+    ///                     code on UART/OLED without operator input.
     Pair {
-        /// Pair code from Mission Control "Add drone".
-        code: String,
+        /// Pair code from Mission Control "Add drone". Mutually
+        /// exclusive with `--autogen`.
+        code: Option<String>,
+        /// Mint-or-return the device's current pair code via the
+        /// canonical TTL semantics and print it. Mutually exclusive
+        /// with a positional code.
+        #[arg(long, conflicts_with = "code")]
+        autogen: bool,
     },
 
     /// Re-run the install script in upgrade mode. Pulls the latest
@@ -265,7 +280,7 @@ async fn main() -> Result<()> {
     match cli.command.unwrap_or(Command::Run) {
         Command::Run => run(cli.config).await,
         Command::Status { json } => print_status(&cli.config, json).await,
-        Command::Pair { code } => persist_pair_code(&cli.config, &code).await,
+        Command::Pair { code, autogen } => run_pair(&cli.config, code, autogen).await,
         Command::Update {
             check_only,
             yes,
@@ -1071,6 +1086,57 @@ fn load_config(path: &std::path::Path) -> Result<AgentConfig> {
     Ok(parsed)
 }
 
+/// Dispatch the `pair` subcommand: either persist an operator-typed
+/// code, or mint-or-return the device's current code via the canonical
+/// TTL semantics. The two modes are mutually exclusive at the clap
+/// layer; this function enforces the "must pick one" rule and routes
+/// to the right helper.
+async fn run_pair(
+    config_path: &std::path::Path,
+    code: Option<String>,
+    autogen: bool,
+) -> Result<()> {
+    match (code, autogen) {
+        (Some(code), false) => persist_pair_code(config_path, &code).await,
+        (None, true) => autogen_pair_code(config_path).await,
+        (None, false) => anyhow::bail!(
+            "pair: provide a code or pass --autogen (e.g. `ados-agent-lite pair ABC123` or \
+             `ados-agent-lite pair --autogen`)"
+        ),
+        (Some(_), true) => {
+            // clap's `conflicts_with` already rejects this at parse
+            // time, but defense-in-depth keeps the invariant local.
+            anyhow::bail!("pair: --autogen conflicts with a positional code")
+        }
+    }
+}
+
+/// Mint-or-return the device's current pair code via
+/// `PairingStore::get_or_create_code()` and print it. Used by the
+/// first-boot surface (S98ados-first-boot) so a freshly-flashed image
+/// emits a code on UART/OLED without requiring operator input.
+///
+/// The output format is the canonical first-boot banner so consumers
+/// (the script that sources this output, the operator reading the
+/// UART) get a stable, greppable line.
+async fn autogen_pair_code(config_path: &std::path::Path) -> Result<()> {
+    let pairing_path = config_path
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("/etc/ados"))
+        .join("pairing.json");
+
+    let store = ados_setup::pairing::PairingStore::new(&pairing_path);
+    let code = store
+        .get_or_create_code()
+        .with_context(|| format!("autogen pair code at {}", pairing_path.display()))?;
+
+    // Canonical banner. The first-boot surface greps this for the
+    // 6-character code; any change to the format must update
+    // package/ados-agent-lite/first-boot.sh in lockstep.
+    println!("==== ADOS PAIR CODE: {} ====", code);
+    Ok(())
+}
+
 /// Persist a pair code via the canonical `pairing.json` path (mirrors
 /// the Python full agent's PairingManager). The pair code goes to
 /// `pairing.json:pairing_code`, NOT to `agent.yaml:cloud.api_key` —
@@ -1722,6 +1788,79 @@ cloud:
         std::fs::write(&path, "{}").unwrap();
         let err = persist_pair_code(&path, "").await.unwrap_err();
         assert!(err.to_string().contains("empty"));
+    }
+
+    #[tokio::test]
+    async fn autogen_pair_code_creates_pairing_json_and_returns_code() {
+        // Fresh temp dir, no pre-existing pairing.json. The first
+        // invocation should mint a code, persist it, and the file
+        // should appear with a 6-character code.
+        let dir = tempfile::tempdir().unwrap();
+        let agent_yaml = dir.path().join("agent.yaml");
+        std::fs::write(&agent_yaml, "agent:\n  device_id: \"x\"\n").unwrap();
+
+        autogen_pair_code(&agent_yaml).await.unwrap();
+
+        let pairing_path = dir.path().join("pairing.json");
+        assert!(
+            pairing_path.exists(),
+            "pairing.json should be created by --autogen"
+        );
+        let state = ados_setup::pairing::PairingStore::new(&pairing_path)
+            .load()
+            .unwrap();
+        let code = state.pairing_code.expect("autogen produced no code");
+        assert_eq!(code.len(), 6, "pair code is 6 chars");
+        assert!(
+            code.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit()),
+            "pair code uses safe charset only: {}",
+            code
+        );
+    }
+
+    #[tokio::test]
+    async fn run_pair_routes_positional_to_persist() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent_yaml = dir.path().join("agent.yaml");
+        std::fs::write(&agent_yaml, "agent:\n  device_id: \"x\"\n").unwrap();
+
+        run_pair(&agent_yaml, Some("ABC123".to_string()), false)
+            .await
+            .unwrap();
+
+        let pairing_path = dir.path().join("pairing.json");
+        let state = ados_setup::pairing::PairingStore::new(&pairing_path)
+            .load()
+            .unwrap();
+        assert_eq!(state.pairing_code.as_deref(), Some("ABC123"));
+    }
+
+    #[tokio::test]
+    async fn run_pair_routes_autogen_when_no_code() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent_yaml = dir.path().join("agent.yaml");
+        std::fs::write(&agent_yaml, "agent:\n  device_id: \"x\"\n").unwrap();
+
+        run_pair(&agent_yaml, None, true).await.unwrap();
+
+        let pairing_path = dir.path().join("pairing.json");
+        let state = ados_setup::pairing::PairingStore::new(&pairing_path)
+            .load()
+            .unwrap();
+        assert!(state.pairing_code.is_some(), "autogen should mint a code");
+    }
+
+    #[tokio::test]
+    async fn run_pair_errors_when_neither_code_nor_autogen() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent_yaml = dir.path().join("agent.yaml");
+        std::fs::write(&agent_yaml, "agent:\n  device_id: \"x\"\n").unwrap();
+        let err = run_pair(&agent_yaml, None, false).await.unwrap_err();
+        // The error message guides the operator to the two valid
+        // invocations; both forms must be present so the help is
+        // self-contained.
+        let msg = err.to_string();
+        assert!(msg.contains("--autogen"), "error message: {}", msg);
     }
 
     #[test]

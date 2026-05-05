@@ -28,6 +28,21 @@ x25519-dalek = { workspace = true }
 chacha20poly1305 = { workspace = true }
 sha2 = { workspace = true }
 
+# OS-entropy RNG for the regenerate-key REST handler. The `getrandom`
+# feature pins to /dev/urandom on Linux + Security.Framework on macOS so
+# the dev host CI builds and the Buildroot target both read from the
+# same kernel-blessed source.
+rand_core = { version = "0.6", features = ["getrandom"] }
+
 [dev-dependencies]
 tempfile = "3"
 tokio = { workspace = true, features = ["macros", "rt", "sync", "io-util", "net", "time", "signal", "process", "rt-multi-thread", "fs"] }
+
+# Real udev netlink monitor on Linux. The crate links libudev which is
+# Linux-only, so the dep is target-gated so `ados-wfb` still compiles
+# cleanly on macOS dev hosts where the polling SysfsUdev backend is the
+# only path. The udev backend lives behind `#[cfg(target_os = "linux")]`
+# in `udev.rs` and the factory function picks the right one.
+[target.'cfg(target_os = "linux")'.dependencies]
+udev = "0.9"
+tokio-stream = "0.1"
