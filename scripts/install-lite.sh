@@ -129,12 +129,18 @@ resolve_release_url() {
         version="lite-agent-main"
     else
         # Latest stable: query the GitHub API for the most recent
-        # 'lite-v*' tag.
+        # 'lite-v*' tag. When no stable tag exists yet (early in the
+        # project's life), fall back automatically to the rolling main
+        # build rather than failing — operators get a working install
+        # without needing to set ADOS_RELEASE_CHANNEL=main themselves.
         version="$(_fetch "https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/releases" \
             | grep -E '"tag_name"\s*:\s*"lite-v' \
             | head -n1 \
             | sed -E 's/.*"tag_name"\s*:\s*"(lite-v[^"]+)".*/\1/')"
-        [ -n "${version}" ] || die "no stable lite-v* release found"
+        if [ -z "${version}" ]; then
+            log "notice: no stable lite-v* release found; using rolling lite-agent-main"
+            version="lite-agent-main"
+        fi
     fi
 
     echo "https://github.com/${GITHUB_OWNER}/${GITHUB_REPO}/releases/download/${version}"
