@@ -1,0 +1,278 @@
+openapi: 3.0.3
+info:
+  title: ADOS Setup Webapp REST API
+  description: |
+    REST surface served by the agent at /api/v1/setup/* and consumed by
+    the universal setup webapp at web/setup/. Source of truth:
+    src/ados/api/routes/setup.py in the Python full agent. Backends in
+    this repository serve the same routes with the same response
+    shapes.
+
+    Authentication: setup mutations follow same-origin trust by default
+    and require an X-ADOS-Setup-Token header when
+    config.security.setup_token_required is true. Cross-origin callers
+    (cloud relay, third-party integrations) require X-ADOS-Key.
+  version: "1.0.0"
+  license:
+    name: GPL-3.0-or-later
+
+servers:
+  - url: "http://localhost:8080/api/v1/setup"
+    description: Direct LAN access (default port)
+  - url: "{agent_host}/api/v1/setup"
+    description: Operator-resolved agent host
+    variables:
+      agent_host:
+        default: "http://ados.local:8080"
+
+components:
+  securitySchemes:
+    AdosSetupToken:
+      type: apiKey
+      in: header
+      name: X-ADOS-Setup-Token
+      description: Optional setup-mutation token; required only when config.security.setup_token_required is true. Cross-origin callers always require X-ADOS-Key instead.
+
+  schemas:
+    SetupStatus:
+      type: object
+      description: |
+        Universal setup state. See SetupStatus in src/ados/setup/models.py
+        for the canonical Pydantic shape. Includes profile, hardware
+        check status, services, access URLs, MAVLink and video state,
+        and the remote-access (Cloudflare Tunnel) block.
+      additionalProperties: true
+
+    SetupActionResult:
+      type: object
+      properties:
+        ok: { type: boolean }
+        message: { type: string, nullable: true }
+        status: { $ref: "#/components/schemas/SetupStatus" }
+
+    HardwareCheckStatus:
+      type: object
+      additionalProperties: true
+      description: |
+        Per-component readiness for the selected profile. Populated by
+        the hardware check engine reading /proc and lsusb against the
+        board YAML's documented requirements.
+
+    ProfileChoiceRequest:
+      type: object
+      required: [profile]
+      properties:
+        profile:
+          type: string
+          enum: [drone, ground_station]
+        ground_role:
+          type: string
+          enum: [direct, relay, receiver]
+          description: Required when profile is "ground_station".
+        runtime_mode:
+          type: string
+          enum: [full, lite]
+          description: Optional runtime variant; backends may ignore when not applicable.
+
+    CloudChoiceRequest:
+      type: object
+      required: [mode]
+      properties:
+        mode:
+          type: string
+          enum: [cloud, self_hosted, local]
+        self_hosted:
+          type: object
+          nullable: true
+          properties:
+            url: { type: string }
+            mqtt_broker: { type: string, default: "" }
+            mqtt_port: { type: integer, default: 8883 }
+            api_key: { type: string, default: "", writeOnly: true }
+
+    CloudflareTunnelRequest:
+      type: object
+      required: [token_or_script]
+      properties:
+        token_or_script:
+          type: string
+          writeOnly: true
+          description: |
+            Raw Cloudflare Tunnel token, or the full install command
+            string Cloudflare shows in its dashboard. The agent extracts
+            the token, persists it root-owned 0600 to
+            /etc/ados/secrets/cloudflare-tunnel-token, and never echoes
+            it back in any response or log.
+
+    CloudflareVerifyResponse:
+      type: object
+      properties:
+        reachable: { type: boolean }
+        status_code: { type: integer, nullable: true }
+        latency_ms: { type: integer, nullable: true }
+        target_url: { type: string }
+        error: { type: string, nullable: true }
+
+paths:
+  /status:
+    get:
+      summary: Read the universal setup state
+      responses:
+        "200":
+          description: Current setup status
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SetupStatus" }
+
+  /profile:
+    post:
+      summary: Configure drone or ground-station profile
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ProfileChoiceRequest" }
+      responses:
+        "200":
+          description: Profile saved
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SetupActionResult" }
+
+  /hardware-check:
+    get:
+      summary: Read per-component hardware readiness
+      responses:
+        "200":
+          description: Hardware check snapshot
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/HardwareCheckStatus" }
+
+  /hardware-check/refresh:
+    post:
+      summary: Re-run the hardware check
+      description: |
+        Useful after hot-plugging USB peripherals or swapping a camera.
+        The agent re-probes /proc, lsusb, and the device tree, then
+        returns the updated snapshot.
+      responses:
+        "200":
+          description: Hardware check snapshot after refresh
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/HardwareCheckStatus" }
+
+  /cloud-choice:
+    post:
+      summary: Set cloud posture (cloud, self-hosted, or local)
+      description: |
+        Configures the cloud relay endpoint or self-hosted broker. The
+        api_key field, when supplied, is written to a root-owned secret
+        file and never echoed back.
+      security:
+        - AdosSetupToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CloudChoiceRequest" }
+      responses:
+        "200":
+          description: Cloud choice saved
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SetupActionResult" }
+
+  /remote-access/cloudflare:
+    post:
+      summary: Install a Cloudflare Tunnel token and start cloudflared
+      security:
+        - AdosSetupToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CloudflareTunnelRequest" }
+      responses:
+        "200":
+          description: Token persisted; cloudflared service starting
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SetupActionResult" }
+
+  /cloudflare/verify:
+    get:
+      summary: Verify Cloudflare Tunnel reachability
+      description: |
+        The agent makes an outbound HTTPS GET to its public setup URL
+        and reports the result. Timeout is 5 s.
+      responses:
+        "200":
+          description: Tunnel verification result
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CloudflareVerifyResponse" }
+
+  /cloudflare/logs:
+    get:
+      summary: Stream cloudflared journal lines via WebSocket
+      description: |
+        Upgrades to a WebSocket. Each frame is a single journal line
+        from the cloudflared systemd unit. Token-shaped values are
+        redacted before emission. No authentication required for the
+        WebSocket upgrade itself; the upgrade respects same-origin
+        trust on the underlying request.
+      responses:
+        "101":
+          description: WebSocket upgrade
+
+  /finish:
+    post:
+      summary: Mark onboarding complete
+      description: |
+        Sets setup_finalized=true in the persistent state and
+        transitions the wizard out of first-boot mode.
+      security:
+        - AdosSetupToken: []
+      responses:
+        "200":
+          description: Setup finalized
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SetupStatus" }
+
+  /step/{step_id}/skip:
+    post:
+      summary: Defer a setup step
+      parameters:
+        - in: path
+          name: step_id
+          required: true
+          schema:
+            type: string
+            enum: [welcome, profile, hardware_check, cloud_choice, pair, mavlink, video, ground_receiver, remote_access, finish]
+      security:
+        - AdosSetupToken: []
+      responses:
+        "200":
+          description: Step skipped; updated status returned
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SetupStatus" }
+        "400":
+          description: Step is required (welcome, finish) and cannot be skipped
+        "404":
+          description: Unknown step_id
+
+  /reset:
+    post:
+      summary: Clear setup_finalized and the skipped-steps set
+      security:
+        - AdosSetupToken: []
+      responses:
+        "200":
+          description: Setup state reset; wizard returns to first-boot mode
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SetupStatus" }
