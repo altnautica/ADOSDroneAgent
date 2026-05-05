@@ -33,11 +33,11 @@ tokio-tungstenite = "0.21"
 rumqttc = { version = "0.24", default-features = false, features = ["use-rustls"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 
-# MAVLink — pure Rust dialect codegen. "ardupilotmega" implements the
-# protocol surface compatible with ArduPilot + Betaflight common subset.
-# TODO: narrow dialect features in the next phase once the router shape
-# is known; the full message set adds binary size we don't all need.
-mavlink = { version = "0.13", default-features = false, features = ["std", "ardupilotmega"] }
+# MAVLink dialect codegen — added when the router needs typed message
+# helpers. The current router parses raw v2 frames byte-for-byte and
+# fans them out as opaque blobs, so no dialect is linked. Reintroduce
+# with a narrow feature set when typed decoding is needed.
+# mavlink = { version = "0.13", default-features = false, features = ["std", "ardupilotmega"] }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }

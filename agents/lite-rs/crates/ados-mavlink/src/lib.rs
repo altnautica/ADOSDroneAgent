@@ -65,28 +65,52 @@ pub struct RouterHandles {
 
 /// Open the FC serial port and run the bidirectional router.
 ///
-/// Returns immediately with handles for in-process consumers. The actual
-/// router task runs in the background until cancelled by dropping the
-/// `Sender` halves of the returned handles or until the serial port errors
-/// out.
+/// Returns immediately with handles for in-process consumers. The router
+/// task runs in the background and re-opens the serial port on EOF or
+/// I/O error with a 1-5 s exponential backoff, so transient FC reboots
+/// or USB-CDC drops do not silently take the agent offline.
 pub fn spawn_router(
     config: MavlinkConfig,
 ) -> Result<RouterHandles, MavlinkError> {
-    let stream = tokio_serial::new(&config.port, config.baud)
-        .timeout(Duration::from_millis(50))
-        .open_native_async()
-        .map_err(|source| MavlinkError::SerialOpen {
-            path: config.port.clone(),
-            source,
-        })?;
+    // Open once up-front to validate the configuration before we declare
+    // ourselves ready. The actual router task drops this stream and reopens
+    // on every iteration so it has a clean restart path.
+    let initial_stream = open_serial(&config)?;
+    drop(initial_stream);
 
     let (inbound_tx, _inbound_rx) = broadcast::channel(BROADCAST_CAPACITY);
     let (outbound_tx, outbound_rx) = mpsc::channel(OUTBOUND_CAPACITY);
 
     let inbound_for_task = inbound_tx.clone();
+    let config_for_task = config.clone();
     tokio::spawn(async move {
-        if let Err(e) = router_loop(stream, inbound_for_task, outbound_rx).await {
-            tracing::error!(error = %e, "mavlink router exited with error");
+        let mut backoff_secs: u64 = 1;
+        // Single shared receiver moved into each iteration.
+        let mut outbound_rx = outbound_rx;
+        loop {
+            let stream = match open_serial(&config_for_task) {
+                Ok(s) => {
+                    backoff_secs = 1;
+                    s
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, retry_in_secs = backoff_secs, "mavlink serial reopen failed");
+                    tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
+                    backoff_secs = (backoff_secs * 2).min(5);
+                    continue;
+                }
+            };
+            tracing::info!(port = %config_for_task.port, "mavlink router connected");
+            match router_loop(stream, &inbound_for_task, &mut outbound_rx).await {
+                Ok(_) => {
+                    tracing::warn!("mavlink router serial returned EOF; reopening");
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "mavlink router I/O error; reopening");
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+            }
         }
     });
 
@@ -96,12 +120,24 @@ pub fn spawn_router(
     })
 }
 
+fn open_serial(config: &MavlinkConfig) -> Result<SerialStream, MavlinkError> {
+    tokio_serial::new(&config.port, config.baud)
+        .timeout(Duration::from_millis(50))
+        .open_native_async()
+        .map_err(|source| MavlinkError::SerialOpen {
+            path: config.port.clone(),
+            source,
+        })
+}
+
 /// The router I/O loop. Reads from serial into a frame buffer, broadcasts
-/// each parsed frame, and writes inbound commands back to the FC.
+/// each parsed frame, and writes inbound commands back to the FC. Returns
+/// `Ok(())` on EOF (zero-byte read) so the outer reconnect loop can
+/// reopen the serial port; returns `Err` on real I/O failure.
 async fn router_loop(
     mut stream: SerialStream,
-    inbound: broadcast::Sender<Vec<u8>>,
-    mut outbound: mpsc::Receiver<Vec<u8>>,
+    inbound: &broadcast::Sender<Vec<u8>>,
+    outbound: &mut mpsc::Receiver<Vec<u8>>,
 ) -> Result<(), MavlinkError> {
     let mut read_buf = vec![0u8; MAX_FRAME_BYTES * 4];
     let mut frame_buf: Vec<u8> = Vec::with_capacity(MAX_FRAME_BYTES);
@@ -112,11 +148,10 @@ async fn router_loop(
             read_result = stream.read(&mut read_buf) => {
                 let n = read_result?;
                 if n == 0 {
-                    tracing::warn!("serial read returned 0 bytes; reopening connection");
                     return Ok(());
                 }
                 frame_buf.extend_from_slice(&read_buf[..n]);
-                drain_frames(&mut frame_buf, &inbound);
+                drain_frames(&mut frame_buf, inbound);
             }
             // Outbound command path: forward to FC.
             cmd = outbound.recv() => {

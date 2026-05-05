@@ -15,9 +15,10 @@
 
 #![forbid(unsafe_code)]
 
+use std::fmt;
 use std::time::Duration;
 
-use rumqttc::{AsyncClient, MqttOptions, QoS};
+use rumqttc::{AsyncClient, MqttOptions, QoS, Transport};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::sync::broadcast;
@@ -36,7 +37,11 @@ pub enum CloudError {
 
 /// Configuration for the cloud client. Carries the broker address, the
 /// device identity, and (when paired) the API key issued at pair time.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// `Debug` is implemented manually so the `api_key` is never echoed into
+/// log messages or panic backtraces. Use the field accessors directly
+/// when the cleartext value is required.
+#[derive(Clone, Serialize, Deserialize)]
 pub struct CloudConfig {
     pub device_id: String,
     pub mqtt_broker: String,
@@ -46,6 +51,24 @@ pub struct CloudConfig {
     /// Per-device API key. Empty string means "unpaired" — the client will
     /// emit a pairing beacon instead of a heartbeat until paired.
     pub api_key: String,
+}
+
+impl fmt::Debug for CloudConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let api_key_status = if self.api_key.is_empty() {
+            "<unset>"
+        } else {
+            "<redacted>"
+        };
+        f.debug_struct("CloudConfig")
+            .field("device_id", &self.device_id)
+            .field("mqtt_broker", &self.mqtt_broker)
+            .field("mqtt_port", &self.mqtt_port)
+            .field("mqtt_use_tls", &self.mqtt_use_tls)
+            .field("convex_url", &self.convex_url)
+            .field("api_key", &api_key_status)
+            .finish()
+    }
 }
 
 /// Pairing beacon payload posted to `{convex_url}/pairing/register` every
@@ -98,6 +121,11 @@ async fn mqtt_publish_loop(
     let mut opts = MqttOptions::new(&client_id, &config.mqtt_broker, config.mqtt_port);
     opts.set_keep_alive(Duration::from_secs(60));
     opts.set_clean_session(true);
+    if config.mqtt_use_tls {
+        // Default rustls configuration with the platform native trust store
+        // bundled by rumqttc. The agent does not pin a custom CA at v0.1.
+        opts.set_transport(Transport::tls_with_default_config());
+    }
     if !config.api_key.is_empty() {
         opts.set_credentials(client_id.as_str(), config.api_key.as_str());
     }

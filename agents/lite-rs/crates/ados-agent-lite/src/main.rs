@@ -15,7 +15,7 @@ use std::sync::Arc;
 use ados_cloud::CloudConfig;
 use ados_mavlink::MavlinkConfig;
 use anyhow::{Context, Result};
-use axum::{response::Json, routing::get, Router};
+use axum::{extract::DefaultBodyLimit, response::Json, routing::get, Router};
 use clap::{Parser, Subcommand};
 use serde::Deserialize;
 use serde_json::Value;
@@ -38,8 +38,13 @@ enum Command {
     /// Run the agent (default when invoked without a subcommand).
     Run,
 
-    /// Print agent status and exit.
-    Status,
+    /// Print agent status and exit. Reads from the running agent's HTTP
+    /// API at the bind address configured in agent.yaml.
+    Status {
+        /// Emit JSON to stdout instead of plain-text.
+        #[arg(long, short = 'j')]
+        json: bool,
+    },
 
     /// Print version information and exit.
     Version,
@@ -137,7 +142,11 @@ fn default_true() -> bool {
     true
 }
 fn default_api_bind() -> String {
-    "0.0.0.0:8080".into()
+    // Bind to localhost by default. Operators who need LAN access for the
+    // setup webapp must explicitly opt in via api.bind in agent.yaml. This
+    // avoids unintentionally exposing the setup surface to other devices
+    // on the same Wi-Fi.
+    "127.0.0.1:8080".into()
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -147,10 +156,7 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command.unwrap_or(Command::Run) {
         Command::Run => run(cli.config).await,
-        Command::Status => {
-            print_status();
-            Ok(())
-        }
+        Command::Status { json } => print_status(&cli.config, json).await,
         Command::Version => {
             println!("ados-agent-lite {}", env!("CARGO_PKG_VERSION"));
             Ok(())
@@ -164,11 +170,62 @@ fn init_tracing() {
     fmt().with_env_filter(filter).compact().init();
 }
 
-fn print_status() {
-    println!("ados-agent-lite {}", env!("CARGO_PKG_VERSION"));
-    println!(
-        "status: read from /api/v1/setup/status when the agent is running"
-    );
+async fn print_status(config_path: &std::path::Path, as_json: bool) -> Result<()> {
+    let config = load_config(config_path)
+        .with_context(|| format!("loading config from {}", config_path.display()))?;
+
+    // Construct the status URL from the configured bind address. When the
+    // agent binds to 0.0.0.0 the CLI still reaches it via 127.0.0.1.
+    let bind_addr: SocketAddr = config
+        .api
+        .bind
+        .parse()
+        .with_context(|| format!("invalid api.bind address: {}", config.api.bind))?;
+    let host = if bind_addr.ip().is_unspecified() {
+        std::net::IpAddr::from([127u8, 0, 0, 1])
+    } else {
+        bind_addr.ip()
+    };
+    let url = format!("http://{}:{}/api/v1/setup/status", host, bind_addr.port());
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()?;
+    let resp = client
+        .get(&url)
+        .send()
+        .await
+        .with_context(|| format!("contacting agent at {}", url))?;
+    let status = resp.status();
+    let body: Value = resp
+        .json()
+        .await
+        .with_context(|| "parsing agent status response")?;
+
+    if as_json {
+        println!("{}", serde_json::to_string_pretty(&body)?);
+    } else {
+        let device_id = body
+            .get("device_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("<unset>");
+        let version = body.get("version").and_then(|v| v.as_str()).unwrap_or("?");
+        let runtime_mode = body
+            .get("runtime_mode")
+            .and_then(|v| v.as_str())
+            .unwrap_or("?");
+        let profile = body.get("profile").and_then(|v| v.as_str()).unwrap_or("?");
+        let setup_finalized = body
+            .get("setup_finalized")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        println!("ados-agent-lite {} (HTTP {})", version, status.as_u16());
+        println!("  device_id:        {}", device_id);
+        println!("  profile:          {}", profile);
+        println!("  runtime_mode:    {}", runtime_mode);
+        println!("  setup_finalized: {}", setup_finalized);
+    }
+    Ok(())
 }
 
 async fn run(config_path: PathBuf) -> Result<()> {
@@ -230,6 +287,10 @@ async fn run(config_path: PathBuf) -> Result<()> {
     });
     let app = Router::new()
         .route("/api/v1/setup/status", get(setup_status))
+        // Cap request bodies at 64 KiB. The setup surface accepts no
+        // large payloads today; this is defense-in-depth for the POST
+        // handlers that land in subsequent versions.
+        .layer(DefaultBodyLimit::max(64 * 1024))
         .with_state(app_state);
 
     let bind_addr: SocketAddr = config
@@ -237,6 +298,12 @@ async fn run(config_path: PathBuf) -> Result<()> {
         .bind
         .parse()
         .with_context(|| format!("invalid api.bind address: {}", config.api.bind))?;
+    if bind_addr.ip().is_unspecified() {
+        tracing::warn!(
+            addr = %bind_addr,
+            "http api binding 0.0.0.0; setup surface is exposed to every interface"
+        );
+    }
     let listener = tokio::net::TcpListener::bind(&bind_addr)
         .await
         .with_context(|| format!("binding HTTP server on {}", bind_addr))?;
@@ -286,17 +353,69 @@ struct AppState {
 async fn setup_status(
     axum::extract::State(state): axum::extract::State<Arc<AppState>>,
 ) -> Json<Value> {
+    // Returns the canonical SetupStatus shape so consumers (the setup
+    // webapp, Mission Control, the cloud relay) read every expected
+    // field. Empty / null sub-blocks reflect the v0.1 minimum-viable
+    // surface; richer values populate as the agent grows access to FC
+    // state, video pipeline, and remote-access providers.
     Json(serde_json::json!({
-        "device_id": state.device_id,
         "version": env!("CARGO_PKG_VERSION"),
         "agent_version": env!("CARGO_PKG_VERSION"),
-        "runtime_mode": "lite",
+        "device_id": state.device_id,
+        "device_name": "ADOS Lite Agent",
         "profile": "drone",
+        "ground_role": "",
+        "runtime_mode": "lite",
+        "setup_complete": false,
         "setup_finalized": false,
+        "completion_percent": 0,
+        "next_action": "pair",
+        "steps": [],
+        "skipped_steps": [],
+        "access_urls": [],
+        "network": {
+            "hostname": "",
+            "mdns_host": "",
+            "api_port": 8080,
+            "hotspot_enabled": false,
+            "hotspot_ssid": "",
+            "local_ips": []
+        },
+        "mavlink": {
+            "connected": false,
+            "port": null,
+            "baud": null,
+            "websocket_url": null,
+            "public_websocket_url": null
+        },
+        "video": {
+            "state": "not_initialized",
+            "whep_url": null,
+            "public_whep_url": null,
+            "recording": false
+        },
+        "remote_access": {
+            "provider": "none",
+            "enabled": false,
+            "configured": false,
+            "status": "disabled",
+            "public_urls": [],
+            "error": ""
+        },
+        "cloud_choice": {
+            "mode": "cloud",
+            "paired": false,
+            "pair_code_required": true,
+            "backend_url": "",
+            "backend_reachable": false,
+            "last_checked": null
+        },
+        "profile_suggestion": null,
+        "hardware_check": null,
         "services": [
-            { "name": "mavlink-router", "status": "running" },
-            { "name": "cloud-client", "status": "running" },
-            { "name": "http-api", "status": "running" }
+            { "name": "mavlink-router", "state": "running" },
+            { "name": "cloud-client",   "state": "running" },
+            { "name": "http-api",       "state": "running" }
         ]
     }))
 }
@@ -312,7 +431,7 @@ mod tests {
         assert_eq!(parsed.mavlink.baud, 115_200);
         assert_eq!(parsed.cloud.mqtt_port, 8883);
         assert!(parsed.cloud.mqtt_use_tls);
-        assert_eq!(parsed.api.bind, "0.0.0.0:8080");
+        assert_eq!(parsed.api.bind, "127.0.0.1:8080");
     }
 
     #[test]
