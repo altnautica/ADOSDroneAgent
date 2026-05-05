@@ -1,0 +1,168 @@
+# =====================================================================
+# DRAFT / PLACEHOLDER WORKFLOW — DO NOT MERGE TO MAIN AS-IS.
+#
+# This workflow is the scaffolding for the Luckfox Pico Zero flashable
+# image build pipeline that ships a fully-paired-ready ADOS lite agent
+# inside a single .img.gz artifact.
+#
+# It is NOT runnable today. The actual `make` step depends on the
+# Luckfox SDK + Buildroot tree, which is large (~3 GB), upstream, and
+# not vendored in this repo. Two paths to make this real:
+#
+#   (a) Vendor the SDK as a git submodule under
+#       agents/lite-rs/buildroot/luckfox-sdk/, pin a known-good revision,
+#       and uncomment the `make` step below.
+#
+#   (b) Add a `Setup Luckfox SDK` step that clones the upstream SDK at a
+#       pinned tag at workflow runtime, applies the BR2_EXTERNAL_ADOS_PATH
+#       glue, and runs the build inside that working tree.
+#
+# Path (b) is leaner for CI but adds ~10-15 minutes of clone + checkout
+# to every run. Path (a) is what we'll likely land for stable releases
+# so the whole image is reproducible from a single commit SHA.
+#
+# Until the SDK lands one way or the other, every step below that
+# touches the BSP is gated behind `if: false` so the workflow validates
+# its own YAML on push without trying to actually build an image.
+# =====================================================================
+
+name: luckfox-image-build
+
+on:
+  push:
+    tags:
+      - "lite-image-v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Image version (without the lite-image-v prefix), e.g. 0.1.0"
+        required: true
+        default: "0.1.0-dev"
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: build flashable image
+    runs-on: ubuntu-latest
+
+    # Lift signing secrets into job-level env so step-level `if:` can read
+    # them. The same secret used by lite-agent-release.yml — both the
+    # binary release pipeline and the image-build pipeline sign with the
+    # same Ed25519 keypair so operators verify both with the same vendored
+    # public key.
+    env:
+      MINISIGN_KEY: ${{ secrets.LITE_AGENT_MINISIGN_KEY }}
+      MINISIGN_PASSWORD: ${{ secrets.LITE_AGENT_MINISIGN_PASSWORD }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Resolve version
+        id: version
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/lite-image-v* ]]; then
+            VERSION="${GITHUB_REF#refs/tags/lite-image-v}"
+          else
+            VERSION="${{ github.event.inputs.version || '0.0.0-dev' }}"
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Resolved version: ${VERSION}"
+
+      # ----- BSP-dependent steps below — gated until the SDK lands -----
+
+      - name: Install build dependencies
+        if: false
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential libncurses-dev bc rsync cpio bison flex \
+            unzip gzip xz-utils file wget git python3 python3-pip \
+            minisign
+
+      - name: Apply ADOS BR2_EXTERNAL overlay
+        if: false
+        # Wires agents/lite-rs/buildroot/ in as the BR2_EXTERNAL tree, so the
+        # ados-agent-lite package recipe + the luckfox_pico_zero_ados_defconfig
+        # are visible to Buildroot.
+        run: |
+          export BR2_EXTERNAL=$(pwd)/agents/lite-rs/buildroot
+          echo "BR2_EXTERNAL=${BR2_EXTERNAL}" >> "$GITHUB_ENV"
+
+      - name: Configure Buildroot
+        if: false
+        working-directory: agents/lite-rs/buildroot/luckfox-sdk
+        run: |
+          make luckfox_pico_zero_ados_defconfig
+
+      - name: Build image
+        if: false
+        working-directory: agents/lite-rs/buildroot/luckfox-sdk
+        run: |
+          make -j"$(nproc)"
+
+      - name: Stage artifact
+        if: false
+        id: stage
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          IMG_SRC="agents/lite-rs/buildroot/luckfox-sdk/output/images/sdcard.img"
+          ARTIFACT="ados-luckfox-pico-zero-${VERSION}.img.gz"
+          gzip -9 -c "${IMG_SRC}" > "${ARTIFACT}"
+          sha256sum "${ARTIFACT}" > "${ARTIFACT}.sha256"
+          echo "artifact=${ARTIFACT}" >> "$GITHUB_OUTPUT"
+
+      - name: Sign artifact (minisign Ed25519)
+        if: false
+        # Same secret as lite-agent-release.yml so the vendored public key
+        # in scripts/install-lite.sh verifies both the binary release and
+        # the flashable image. `if:` gates on the secret being set; forks
+        # without the secret skip cleanly and upload an unsigned artifact.
+        run: |
+          ARTIFACT="${{ steps.stage.outputs.artifact }}"
+          KEY_FILE="$(mktemp)"
+          printf '%s' "${MINISIGN_KEY}" > "${KEY_FILE}"
+          echo "${MINISIGN_PASSWORD}" | minisign -S -s "${KEY_FILE}" -m "${ARTIFACT}"
+          shred -u "${KEY_FILE}"
+          ls -l "${ARTIFACT}.minisig"
+
+      - name: Build SHA256SUMS
+        if: false
+        run: |
+          ARTIFACT="${{ steps.stage.outputs.artifact }}"
+          sha256sum "${ARTIFACT}" > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Publish GitHub Release
+        if: false
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: lite-image-v${{ steps.version.outputs.version }}
+          name: Luckfox Pico Zero image ${{ steps.version.outputs.version }}
+          files: |
+            ${{ steps.stage.outputs.artifact }}
+            ${{ steps.stage.outputs.artifact }}.sha256
+            ${{ steps.stage.outputs.artifact }}.minisig
+            SHA256SUMS
+          body: |
+            Flashable microSD image for the Luckfox Pico Zero.
+
+            Verify before flashing:
+              minisign -V -p <vendored-public-key> -m ados-luckfox-pico-zero-*.img.gz
+              sha256sum -c SHA256SUMS
+
+            Flash instructions: docs/oem/luckfox-pico-zero-flash-guide.md
+
+      # ----- always-on placeholder so the workflow does something useful -----
+
+      - name: Workflow validation noop
+        run: |
+          echo "Image build workflow scaffolded; SDK integration pending."
+          echo "Resolved version would be: ${{ steps.version.outputs.version }}"
+          echo "See header comment for the path to wire in the Luckfox SDK."

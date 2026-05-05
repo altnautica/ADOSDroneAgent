@@ -1,0 +1,72 @@
+#!/bin/sh
+#
+# Start / stop the ADOS lite agent under busybox sysv-rc init.
+#
+# This is the in-image counterpart to the systemd unit and the init script
+# that scripts/install-lite.sh writes for non-Buildroot busybox systems.
+# Behavior is intentionally identical so an operator who switches between
+# install paths sees the same service contract.
+
+DAEMON=/usr/local/bin/ados-agent-lite
+CONFIG=/etc/ados/agent.yaml
+PIDFILE=/var/run/ados-agent-lite.pid
+LOGFILE=/var/log/ados-agent-lite.log
+
+# Wait for the agent's HTTP API to come up before declaring start success.
+# Helps the first-boot script time the pairing-code generation correctly.
+WAIT_FOR_API_SECONDS=10
+
+start() {
+	echo "Starting ados-agent-lite..."
+	# Make sure the runtime dirs exist before fork — busybox start-stop-daemon
+	# does not create them. /var/run is usually a tmpfs and may have been
+	# wiped at boot.
+	mkdir -p /var/run /var/log /etc/ados
+	start-stop-daemon -S -b -m -p "$PIDFILE" \
+		-x "$DAEMON" -- --config "$CONFIG" run \
+		>>"$LOGFILE" 2>&1
+	# Best-effort readiness wait. Don't block forever — first-boot.sh runs
+	# after this and has its own retry loop on /api/v1/setup/state.
+	i=0
+	while [ "$i" -lt "$WAIT_FOR_API_SECONDS" ]; do
+		if [ -S /run/ados/state.sock ] || \
+			(command -v wget >/dev/null 2>&1 && \
+			 wget -q -T 1 -O - http://127.0.0.1:8080/api/v1/setup/state >/dev/null 2>&1); then
+			break
+		fi
+		sleep 1
+		i=$((i + 1))
+	done
+}
+
+stop() {
+	echo "Stopping ados-agent-lite..."
+	start-stop-daemon -K -p "$PIDFILE" --quiet
+	rm -f "$PIDFILE"
+}
+
+restart() {
+	stop || true
+	sleep 1
+	start
+}
+
+status() {
+	if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
+		echo "ados-agent-lite running (pid $(cat "$PIDFILE"))"
+		return 0
+	fi
+	echo "ados-agent-lite not running"
+	return 1
+}
+
+case "$1" in
+	start)   start ;;
+	stop)    stop ;;
+	restart) restart ;;
+	status)  status ;;
+	*)
+		echo "Usage: $0 {start|stop|restart|status}"
+		exit 1
+		;;
+esac

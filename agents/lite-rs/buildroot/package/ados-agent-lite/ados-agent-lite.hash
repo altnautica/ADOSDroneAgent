@@ -1,0 +1,20 @@
+# Buildroot hash file for the ados-agent-lite release tarball.
+#
+# Buildroot rebuilds the package on every release-tarball SHA bump, and the
+# .hash file pins the exact bytes we expect from GitHub Releases. Override
+# ADOS_AGENT_LITE_VERSION in the defconfig to pin a stable release; bump
+# both the sha256 line and the LICENSE line below when you do.
+#
+# Generate locally:
+#   curl -L <release-url>/ados-agent-lite-lite-agent-main-armv7-unknown-linux-musleabihf.tar.gz \
+#     | sha256sum
+#   sha256sum LICENSE
+#
+# Format: <algo>  <hex>  <filename>
+#
+# Until the lite-image-v* tag pipeline cuts its first stable release, this file
+# carries placeholders. The CI workflow at .github/workflows/luckfox-image-build.yml
+# substitutes real digests on tag.
+
+# sha256  PLACEHOLDER  ados-agent-lite-lite-agent-main-armv7-unknown-linux-musleabihf.tar.gz
+# sha256  PLACEHOLDER  LICENSE

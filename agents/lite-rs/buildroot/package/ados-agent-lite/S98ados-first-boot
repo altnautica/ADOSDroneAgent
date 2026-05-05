@@ -1,0 +1,36 @@
+#!/bin/sh
+#
+# Runs once at first boot, before the agent service starts. Generates a
+# device-specific pair code if pairing state is empty and surfaces it on the
+# console + UART (and OLED when available) so the bench operator can read it
+# without bringing up SSH.
+#
+# Idempotent: a sentinel file at /etc/ados/.first-boot-done causes subsequent
+# boots to noop. To rerun (e.g. for a factory reset) delete the sentinel and
+# /etc/ados/pairing.json before reboot.
+
+FIRST_BOOT_SCRIPT=/usr/local/sbin/ados-first-boot
+SENTINEL=/etc/ados/.first-boot-done
+
+case "$1" in
+	start)
+		if [ -f "$SENTINEL" ]; then
+			exit 0
+		fi
+		if [ -x "$FIRST_BOOT_SCRIPT" ]; then
+			"$FIRST_BOOT_SCRIPT" || true
+			# Always lay the sentinel even if the script soft-failed.
+			# A failed first-boot pairing surface should not loop on
+			# every reboot — the operator can re-run by hand.
+			touch "$SENTINEL" 2>/dev/null || true
+		fi
+		;;
+	stop|restart|status)
+		# Nothing to do — this is a one-shot at boot.
+		exit 0
+		;;
+	*)
+		echo "Usage: $0 {start|stop|restart|status}"
+		exit 1
+		;;
+esac

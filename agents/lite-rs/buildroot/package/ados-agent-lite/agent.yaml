@@ -1,0 +1,33 @@
+# Default ADOS lite agent configuration baked into the Buildroot rootfs.
+# Mirrors the shape that scripts/install-lite.sh writes on a curl-pipe install
+# so the in-image experience matches the network-install experience exactly.
+#
+# Field reference: proto/setup/setup-api.yaml + proto/cloud/openapi.yaml.
+#
+# device_id is populated on first boot from /etc/machine-id by the agent
+# itself when it sees an empty value; we leave it blank here so two devices
+# flashed from the same image do not collide on the cloud relay.
+
+agent:
+  device_id: ""
+  name: "ADOS Lite"
+  profile: drone
+
+mavlink:
+  port: "/dev/ttyS0"
+  baud: 115200
+
+cloud:
+  # mqtt_broker is populated by the pairing flow; until paired the agent
+  # skips the MQTT publish loop and emits a beacon every 30 seconds with a
+  # fresh pair code that Mission Control "Add drone" can match.
+  mqtt_broker: ""
+  mqtt_port: 8883
+  mqtt_use_tls: true
+  convex_url: "https://convex-site.altnautica.com"
+
+api:
+  # Bind to all interfaces by default — fresh-boot operators reach the setup
+  # webapp at http://<board-ip>:8080/setup over Wi-Fi or Ethernet. Tighten to
+  # 127.0.0.1 in field deployments where the operator pairs out-of-band.
+  bind: "0.0.0.0:8080"

@@ -1,0 +1,33 @@
+[package]
+name = "ados-wfb"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "WFB-ng air-side orchestration (dongle hot-plug, key derivation, wfb_tx subprocess) for the lite ADOS Drone Agent"
+
+[features]
+default = []
+# Exposes the in-memory mock udev source so tests can drive add/remove
+# events without touching /sys.
+mock = []
+
+[dependencies]
+tokio = { workspace = true, features = ["fs"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+
+# Curve25519 + AEAD + SHA-256 for the WFB-ng broadcast key derivation.
+# All three live in the workspace deps so `ados-wfb` and any future
+# crate that needs the same crypto primitives pin identical versions.
+x25519-dalek = { workspace = true }
+chacha20poly1305 = { workspace = true }
+sha2 = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { workspace = true, features = ["macros", "rt", "sync", "io-util", "net", "time", "signal", "process", "rt-multi-thread", "fs"] }

@@ -1,0 +1,60 @@
+# Build template for the rkmpi-wrapper subprocess.
+#
+# Copy to `Makefile`, set SDK_ROOT to the local Luckfox SDK install,
+# then run `make`. The output is a uclibc-linked executable that the
+# lite agent's installer drops at `/usr/lib/ados/rkmpi-wrapper`.
+#
+# This template is checked in as documentation; the actual build runs
+# in the Buildroot recipe shipped under
+# `package/ados-rkmpi-wrapper/` (added in a follow-on task once the C
+# source lands).
+
+# ---- toolchain --------------------------------------------------------
+
+# Path to the unpacked Luckfox SDK. Override on the command line:
+#   make SDK_ROOT=/opt/luckfox-pico
+SDK_ROOT ?= /opt/luckfox-pico
+
+# uclibc cross-compile triplet for RV1106 / RV1106G3.
+TRIPLET ?= arm-rockchip830-linux-uclibcgnueabihf
+TOOLCHAIN_BIN ?= $(SDK_ROOT)/tools/linux/toolchain/$(TRIPLET)/bin
+CC := $(TOOLCHAIN_BIN)/$(TRIPLET)-gcc
+STRIP := $(TOOLCHAIN_BIN)/$(TRIPLET)-strip
+
+# ---- vendor headers + library ----------------------------------------
+
+# Vendor RKMPI headers ship under media/mpp/release_*/include/rockchip
+# in the SDK tree. The release variant must match the target ABI
+# (arm-rockchip830-linux-uclibcgnueabihf for the wrapper).
+RKMPI_INCLUDE ?= $(SDK_ROOT)/media/mpp/release_mpp_rv1106_$(TRIPLET)/include/rockchip
+RKMPI_LIB ?= $(SDK_ROOT)/media/mpp/release_mpp_rv1106_$(TRIPLET)/lib
+
+# ---- build flags -----------------------------------------------------
+
+CFLAGS := -O2 -Wall -Wextra -Werror \
+          -ffunction-sections -fdata-sections \
+          -I$(RKMPI_INCLUDE)
+LDFLAGS := -Wl,--gc-sections \
+           -L$(RKMPI_LIB) -Wl,-rpath-link,$(RKMPI_LIB)
+LDLIBS := -lrockchip_mpp -lrkaiq -lpthread -lm
+
+# Length-prefixed msgpack framing is implemented inline in the wrapper;
+# no msgpack-c dependency is pulled in. The body shape is small enough
+# to encode by hand.
+
+OBJ := main.o framing.o encoder.o
+
+# ---- targets ---------------------------------------------------------
+
+.PHONY: all clean
+all: rkmpi-wrapper
+
+rkmpi-wrapper: $(OBJ)
+	$(CC) -o $@ $^ $(LDFLAGS) $(LDLIBS)
+	$(STRIP) --strip-unneeded $@
+
+%.o: %.c
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+clean:
+	rm -f $(OBJ) rkmpi-wrapper

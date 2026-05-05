@@ -1,0 +1,118 @@
+# Buildroot defconfig — ADOS lite agent on Luckfox Pico Zero (RV1106G3).
+#
+# This file is a DELTA on top of the stock Luckfox Pico Zero defconfig that
+# the upstream Luckfox SDK ships at:
+#   <luckfox-sdk>/sysdrv/source/buildroot/buildroot-2024.02/configs/
+# The full settings tree (toolchain triplet, kernel headers, init system,
+# rootfs format) lives in the SDK and we do not duplicate those here — pulling
+# them in by mistake would force this file to track upstream toolchain churn.
+#
+# How to use:
+#   1. Copy the upstream stock defconfig to this path with the ADOS suffix:
+#        cp <upstream> luckfox_pico_zero_ados_defconfig
+#   2. Apply the deltas listed below (uncomment lines, add packages).
+#   3. Drop into <buildroot>/configs/ via BR2_EXTERNAL_ADOS_PATH. Build with:
+#        make luckfox_pico_zero_ados_defconfig
+#        make
+#
+# The deltas below are additive — we do not flip any upstream selection off,
+# we only add the packages the lite agent needs. Stock Luckfox already gives
+# us busybox sysv-rc init, uclibc rootfs, and the Rockchip kernel, which is
+# exactly what the lite-agent musl-static binary is built against.
+
+#
+# === ADOS lite agent + its prerequisites ===
+#
+
+# Lite agent binary + init scripts + default agent.yaml. See
+# package/ados-agent-lite/ for the recipe body.
+BR2_PACKAGE_ADOS_AGENT_LITE=y
+
+#
+# === Networking ===
+#
+
+# Wi-Fi userspace. The AIC8800DC out-of-tree driver is provided as a separate
+# package once the kernel-side bits land in the upstream Buildroot tree.
+BR2_PACKAGE_WPA_SUPPLICANT=y
+
+# DHCP client. busybox udhcpc is in by default; uncomment dhcpcd if the
+# operator profile prefers it (slightly more compliant on multi-iface boards).
+# BR2_PACKAGE_DHCPCD=y
+
+# NTP — agent timestamps need real time. chrony is the lighter daemon and
+# comes up under busybox sysv-rc cleanly.
+BR2_PACKAGE_CHRONY=y
+
+# SSH for bench / debug. Dropbear (~200 KB) over OpenSSH (~2 MB) on the lite
+# rootfs. Configure root login disabled by default at first boot via the
+# overlay; operators add an authorized_keys via the setup webapp later.
+BR2_PACKAGE_DROPBEAR=y
+
+#
+# === Wi-Fi adapter for WFB-ng (air-side) ===
+#
+
+# RTL8812AU/EU out-of-tree driver, used for WFB-ng broadcast on the air side.
+# The Buildroot package name varies across SDK forks. The Luckfox SDK does
+# not ship this package today; it must be added as a Buildroot patch alongside
+# the WFB-ng orchestration work. Until then this line is a TODO marker; the
+# kernel module is loaded out-of-tree at install time on a regular Buildroot
+# image, and bench operators can sideload via the same path.
+# BR2_PACKAGE_RTL8812AU=y
+
+#
+# === Hardware enablement ===
+#
+
+# udev for device-node management. busybox mdev is the stock alternative on
+# minimal Buildroot but doesn't gracefully handle USB hotplug for the
+# AIC8800DC SDIO bring-up sequence; eudev is the right call here.
+BR2_PACKAGE_EUDEV=y
+
+# Linux kernel headers — already pulled by the agent toolchain, but we set
+# this explicitly so kernel module DKMS rebuilds work on-image when an
+# operator sideloads a Wi-Fi driver.
+# BR2_TOOLCHAIN_HEADERS_AT_LEAST_5_10=y  # set in upstream stock defconfig
+
+#
+# === Tools the operator can rely on at first-boot ===
+#
+
+# wget is in busybox by default. The lite installer prefers curl; including
+# both costs ~80 KB and removes a fork-error path on the first install
+# attempt over the setup webapp.
+BR2_PACKAGE_LIBCURL=y
+BR2_PACKAGE_LIBCURL_CURL=y
+
+# minisign for OTA verification (matches scripts/install-lite.sh contract).
+# If the upstream Buildroot tree doesn't carry a minisign package, vendor it
+# under a BR2_EXTERNAL_ADOS_PATH/package/minisign/ recipe instead.
+BR2_PACKAGE_MINISIGN=y
+
+# tar (busybox provides) — the lite installer extracts the release tarball
+# via `gzip -dc | tar -x -f -` so no extra package is required.
+
+#
+# === Filesystem + boot ===
+#
+
+# Root filesystem format. The stock Luckfox defconfig already selects the
+# right squashfs/ext4 combination for the RV1106 boot chain; we leave that
+# alone and only set the rootfs overlay path so /etc/ados/ pre-populates.
+BR2_ROOTFS_OVERLAY="$(BR2_EXTERNAL_ADOS_PATH)/board/luckfox_pico_zero/rootfs-overlay"
+
+# Post-image script: rename the resulting .img to the canonical artifact
+# name that .github/workflows/luckfox-image-build.yml expects.
+BR2_ROOTFS_POST_IMAGE_SCRIPT="$(BR2_EXTERNAL_ADOS_PATH)/board/luckfox_pico_zero/post-image.sh"
+
+#
+# === Notes ===
+#
+# - We deliberately do NOT enable a default-password shell or a debug serial
+#   getty without auth gate. The first-boot pairing surface is the only
+#   identity-bearing artifact in the image; SSH keys arrive via the setup
+#   webapp under operator authentication.
+# - We do NOT bake an operator's pair code into the image. Each flashed SBC
+#   generates its own at first boot from /etc/machine-id, which is unique per
+#   device because Buildroot's first-boot service regenerates it.

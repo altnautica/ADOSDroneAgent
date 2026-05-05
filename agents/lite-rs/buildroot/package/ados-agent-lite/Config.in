@@ -1,0 +1,9 @@
+config BR2_PACKAGE_ADOS_AGENT_LITE
+	bool "ados-agent-lite"
+	depends on BR2_TOOLCHAIN_HAS_THREADS
+	help
+	  ADOS Drone Agent (lite profile) — Rust single-binary control
+	  plane for low-RAM SBCs. MAVLink router + cloud relay client +
+	  universal setup wizard.
+
+	  https://github.com/altnautica/ADOSDroneAgent

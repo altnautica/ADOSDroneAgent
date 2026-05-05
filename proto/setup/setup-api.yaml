@@ -184,6 +184,118 @@ components:
             does not yet wire a frame-rate estimator. Populated by a
             later phase.
 
+    WfbConfigSummary:
+      type: object
+      description: |
+        Public surface of the WFB-ng air-side configuration. The
+        operator passphrase is deliberately omitted — only the derived
+        key bytes ever leave the agent process, and they only travel
+        as command-line arguments to the local `wfb_tx` child.
+      required:
+        - channel
+        - mcs_index
+        - tx_power_dbm
+        - binary_present
+      properties:
+        channel:
+          type: integer
+          minimum: 1
+          maximum: 165
+          description: 802.11 channel. 1-13 (2.4 GHz) or 36-165 (5 GHz).
+        mcs_index:
+          type: integer
+          minimum: 0
+          maximum: 7
+          description: 802.11 MCS index. Single-stream RTL8812 path runs 0..=7.
+        tx_power_dbm:
+          type: integer
+          minimum: -1
+          maximum: 30
+          description: |
+            Transmit power in dBm. Negative values mean "leave the
+            adapter at its default" rather than "off."
+        interface:
+          type: string
+          nullable: true
+          description: |
+            Bound `wlanX` interface name. `null` until a dongle is
+            detected by the udev watcher.
+        binary_present:
+          type: boolean
+          description: |
+            True when the configured `wfb_tx` binary path resolves on
+            disk. The wizard surfaces this in the hardware-check step.
+
+    WfbStateResponse:
+      type: object
+      description: |
+        Combined state-machine + config snapshot returned by
+        GET /api/v1/setup/wfb. Lite-specific operability extension.
+      required: [state, config_summary]
+      properties:
+        state:
+          type: object
+          description: |
+            Tagged union over the WFB manager state. The `state` field
+            (string) discriminates `idle`, `dongle_detected`, `running`,
+            and `crashed` cases. Each case carries its own additional
+            properties (`iface` for `dongle_detected` / `running`,
+            `last_error` + `restart_at_unix` for `crashed`).
+          additionalProperties: true
+        config_summary:
+          $ref: "#/components/schemas/WfbConfigSummary"
+
+    WfbConfigureRequest:
+      type: object
+      description: |
+        Channel / MCS / passphrase / power update request for the
+        WFB-ng broadcast pipeline. The passphrase is `writeOnly` so
+        operators cannot read it back from the GET surface.
+      required: [channel, mcs_index, tx_power_dbm, key_passphrase]
+      properties:
+        channel:
+          type: integer
+          minimum: 1
+          maximum: 165
+        mcs_index:
+          type: integer
+          minimum: 0
+          maximum: 7
+        tx_power_dbm:
+          type: integer
+          minimum: -1
+          maximum: 30
+        key_passphrase:
+          type: string
+          writeOnly: true
+          description: |
+            Operator-supplied passphrase. The agent runs the documented
+            KDF (SHA-256 → Curve25519 → SHA-256) to mint the 32-byte
+            broadcast key, never persisting the passphrase in clear.
+
+    WfbConfigureResponse:
+      type: object
+      required: [ok, state]
+      properties:
+        ok: { type: boolean }
+        message: { type: string, nullable: true }
+        state: { $ref: "#/components/schemas/WfbStateResponse" }
+
+    WfbRegenerateKeyResponse:
+      type: object
+      description: |
+        Result of POST /api/v1/setup/wfb/regenerate-key. Returns the
+        public component of a freshly minted Curve25519 keypair so the
+        operator can record it for ground-side decoding. The secret
+        scalar stays on disk in a root-owned 0600 file and is not
+        returned in any response.
+      required: [ok, public_key_hex]
+      properties:
+        ok: { type: boolean }
+        public_key_hex:
+          type: string
+          description: 32-byte Curve25519 public key, hex-encoded.
+
     DiagResponse:
       type: object
       description: |
@@ -432,6 +544,70 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/HealthResponse" }
+
+  /api/v1/setup/wfb:
+    get:
+      summary: Read WFB-ng broadcast configuration and dongle state (lite-specific)
+      description: |
+        Lite-specific operability extension. Returns the current
+        WFB-ng channel / MCS / tx-power configuration plus the manager
+        state machine (idle / dongle-detected / running / crashed) so
+        the wizard can render an "is it broadcasting?" banner without
+        polling lower-level system tools.
+
+        Backends are not required to implement; if implemented, the
+        response shape must match `WfbStateResponse`. The Python full
+        agent ships its WFB-ng surface under a different route shape
+        and is not bound by this schema.
+      responses:
+        "200":
+          description: Current WFB state + config summary
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/WfbStateResponse" }
+
+  /api/v1/setup/wfb/configure:
+    post:
+      summary: Update WFB-ng channel, MCS, transmit power, and passphrase (lite-specific)
+      description: |
+        Lite-specific operability extension. Validates the supplied
+        channel / MCS / power against the safety envelope (1-13 or
+        36-165 for channel, 0-7 for MCS, -1..=30 dBm for power) and,
+        on success, runs the documented KDF over the passphrase to
+        mint a fresh 32-byte broadcast key. The agent restarts
+        `wfb_tx` with the new arguments on the next event tick.
+      security:
+        - AdosSetupToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/WfbConfigureRequest" }
+      responses:
+        "200":
+          description: Configuration accepted
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/WfbConfigureResponse" }
+        "400":
+          description: Validation failure (channel / MCS / power out of range, empty passphrase)
+
+  /api/v1/setup/wfb/regenerate-key:
+    post:
+      summary: Mint a fresh Curve25519 keypair for the broadcast pipeline (lite-specific)
+      description: |
+        Lite-specific operability extension. Generates a new
+        Curve25519 keypair, persists the secret scalar root-owned 0600,
+        and returns only the public component. The operator records
+        the public key for ground-side decoder seeding.
+      security:
+        - AdosSetupToken: []
+      responses:
+        "200":
+          description: New keypair minted; public key returned
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/WfbRegenerateKeyResponse" }
 
   /api/v1/diag:
     get:

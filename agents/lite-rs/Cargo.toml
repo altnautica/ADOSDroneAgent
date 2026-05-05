@@ -4,6 +4,8 @@ members = [
     "crates/ados-mavlink",
     "crates/ados-cloud",
     "crates/ados-setup",
+    "crates/ados-video",
+    "crates/ados-wfb",
 ]
 resolver = "2"
 
@@ -59,9 +61,36 @@ thiserror = "1"
 # Time
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 
+# Async trait dispatch — used by the encoder backends in `ados-video`
+# so the trait surface is `Send`-friendly across `await` points without
+# the boilerplate that `impl Trait` in trait methods would require.
+async-trait = "0.1"
+
+# Length-prefixed msgpack framing on the rkmpi subprocess channel. The
+# C wrapper produces the same wire format so the parent and child speak
+# a stable format independent of the host libc.
+rmp-serde = "1.3"
+
 # System metrics (cpu, memory, temperature) for the heartbeat
 # enrichment. Cross-platform; reads /proc on Linux, sysctl on macOS.
 sysinfo = { version = "0.32", default-features = false, features = ["system"] }
+
+# Curve25519 scalar arithmetic for the WFB-ng broadcast key derivation
+# in `ados-wfb`. The `static_secrets` feature exposes `StaticSecret` so
+# the crate can derive from a deterministic scalar (the SHA-256 of an
+# operator passphrase) rather than only the ephemeral path the default
+# feature set offers.
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+
+# AEAD that wraps the wfb-ng broadcast payload between the air-side
+# encoder and any ground-side decoder seeded with the same key. Same
+# crate `ados-wfb` exports.
+chacha20poly1305 = "0.10"
+
+# SHA-256 — already used by `ados-cloud` for cloudflared release-asset
+# verification; promoted to the workspace so `ados-wfb`'s key-derivation
+# layer pins the same version.
+sha2 = "0.10"
 
 # Residual rustls-webpki 0.102.8 advisory chain
 # ---------------------------------------------
