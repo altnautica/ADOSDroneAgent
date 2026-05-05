@@ -178,6 +178,12 @@ export function streamConsole(opts) {
     try {
       const wsUrl = url.startsWith("ws") ? url : `${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}${url}`;
       socket = new WebSocket(wsUrl);
+      // Default browser binaryType is "blob"; the MAVLink proxy on port
+      // 8765 sends raw frames as binary, and our parser only handles
+      // ArrayBuffer / Uint8Array. Without this, every binary frame is
+      // dropped silently. Text frames (e.g. cloudflared journal lines)
+      // ignore binaryType, so this is safe for both consumers.
+      socket.binaryType = "arraybuffer";
     } catch (err) {
       setStatus(`Connect failed: ${err.message || err}`, "err");
       scheduleReconnect();
