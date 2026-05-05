@@ -29,5 +29,8 @@ jobs:
       - name: Lint with ruff
         run: ruff check src/ tests/
 
+      - name: Verify webapp parity (canonical vs lite embedded copy)
+        run: bash scripts/verify-webapp-sync.sh
+
       - name: Run tests
         run: pytest -v
