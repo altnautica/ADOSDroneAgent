@@ -23,6 +23,11 @@ chrono = { workspace = true }
 # compile time so the lite agent can serve the wizard with no
 # runtime filesystem dependency.
 include_dir = "0.7"
+# Crypto-secure random for pairing code + API key generation.
+rand = { version = "0.8", default-features = false, features = ["std", "std_rng"] }
+# URL-safe base64 (no padding) for API keys, matching Python's
+# `secrets.token_urlsafe(32)`.
+base64 = "0.22"
 
 [dev-dependencies]
 tempfile = "3"

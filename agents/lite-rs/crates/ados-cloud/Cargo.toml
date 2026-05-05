@@ -9,6 +9,7 @@ rust-version.workspace = true
 description = "Cloud relay client (MQTT + HTTPS heartbeat) for the lite ADOS Drone Agent"
 
 [dependencies]
+ados-setup = { path = "../ados-setup" }
 tokio = { workspace = true }
 rumqttc = { workspace = true }
 reqwest = { workspace = true }

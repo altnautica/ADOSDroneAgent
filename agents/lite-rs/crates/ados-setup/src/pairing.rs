@@ -16,8 +16,18 @@
 
 use std::path::PathBuf;
 
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+use rand::seq::SliceRandom;
+use rand::{rngs::OsRng, RngCore};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+
+/// Same charset as the Python `core/pairing.py:SAFE_CHARSET` —
+/// excludes ambiguous glyphs (0/O, 1/I, L) so an operator reading a code
+/// off an OLED or a sticker doesn't mistype.
+const SAFE_CHARSET: &[u8] = b"ABCDEFGHJKMNPQRSTUVWXYZ23456789";
+const CODE_LENGTH: usize = 6;
+const CODE_TTL_SECS: f64 = 900.0; // 15 minutes — matches Python
 
 #[derive(Debug, Error)]
 pub enum PairingError {
@@ -137,6 +147,62 @@ impl PairingStore {
     pub fn unpair(&self) -> Result<(), PairingError> {
         self.save(&PairingState::default())
     }
+
+    /// Return the current pair code if it is still within its TTL,
+    /// otherwise mint a fresh one and persist it. Mirrors Python's
+    /// `PairingManager.get_or_create_code()`. The pair code is what
+    /// the operator types into Mission Control's "Add drone" dialog.
+    pub fn get_or_create_code(&self) -> Result<String, PairingError> {
+        let mut state = self.load()?;
+        let now = now_epoch();
+        let still_fresh = state
+            .pairing_code
+            .as_deref()
+            .filter(|c| !c.is_empty())
+            .and_then(|code| {
+                let created = state.code_created_at.unwrap_or(0.0);
+                if (now - created) < CODE_TTL_SECS {
+                    Some(code.to_string())
+                } else {
+                    None
+                }
+            });
+        if let Some(code) = still_fresh {
+            return Ok(code);
+        }
+        let code = generate_code();
+        state.pairing_code = Some(code.clone());
+        state.code_created_at = Some(now);
+        // Code rotation does not auto-unpair; only an explicit
+        // operator action (set_code on a fresh code, or unpair) wipes
+        // the API key. Keeping the existing api_key here lets a
+        // re-pairing flow detect the device is already claimed.
+        self.save(&state)?;
+        Ok(code)
+    }
+}
+
+/// Generate a 6-char operator-friendly code from the safe charset.
+/// Cryptographically random — uses `OsRng`.
+pub fn generate_code() -> String {
+    let mut rng = OsRng;
+    (0..CODE_LENGTH)
+        .map(|_| {
+            *SAFE_CHARSET
+                .choose(&mut rng)
+                .expect("SAFE_CHARSET is non-empty")
+        })
+        .map(|b| b as char)
+        .collect()
+}
+
+/// Generate an API key matching Python's `"ados_" + secrets.token_urlsafe(32)`.
+/// 32 random bytes encoded as URL-safe base64 with no padding.
+pub fn generate_api_key() -> String {
+    let mut bytes = [0u8; 32];
+    OsRng.fill_bytes(&mut bytes);
+    let encoded = URL_SAFE_NO_PAD.encode(bytes);
+    format!("ados_{encoded}")
 }
 
 fn now_epoch() -> f64 {
@@ -260,5 +326,102 @@ mod tests {
         let store = PairingStore::new(&path);
         let loaded = store.load().unwrap();
         assert!(!loaded.paired);
+    }
+
+    #[test]
+    fn generate_code_returns_safe_charset_only() {
+        // 100 codes, all should be 6 chars from the safe charset.
+        for _ in 0..100 {
+            let code = generate_code();
+            assert_eq!(code.len(), CODE_LENGTH);
+            for ch in code.chars() {
+                assert!(
+                    SAFE_CHARSET.contains(&(ch as u8)),
+                    "code {} contains forbidden char {}",
+                    code,
+                    ch
+                );
+            }
+            // Forbidden glyphs are ambiguous reads — guarantee they never appear.
+            for forbidden in ['0', 'O', '1', 'I', 'L'] {
+                assert!(
+                    !code.contains(forbidden),
+                    "code {} contains forbidden glyph {}",
+                    code,
+                    forbidden
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn generate_api_key_has_correct_prefix_and_length() {
+        let key = generate_api_key();
+        assert!(key.starts_with("ados_"));
+        // 32 bytes -> ceil(32 / 3) * 4 = 44 chars in standard base64;
+        // url_safe_no_pad strips the padding so 32 bytes -> 43 chars.
+        // Total length: "ados_" (5) + 43 = 48.
+        assert_eq!(key.len(), 48);
+        // Charset check — every char after the prefix is base64url-safe.
+        let suffix = &key[5..];
+        for ch in suffix.chars() {
+            assert!(
+                ch.is_ascii_alphanumeric() || ch == '-' || ch == '_',
+                "api key suffix contains non-base64url char: {}",
+                ch
+            );
+        }
+    }
+
+    #[test]
+    fn generate_api_key_returns_unique_values() {
+        let a = generate_api_key();
+        let b = generate_api_key();
+        assert_ne!(a, b, "two consecutive api keys collided — RNG broken");
+    }
+
+    #[test]
+    fn get_or_create_code_returns_fresh_code_within_ttl() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = PairingStore::new(dir.path().join("pairing.json"));
+        let code1 = store.get_or_create_code().unwrap();
+        let code2 = store.get_or_create_code().unwrap();
+        // Within TTL, second call returns the same code as the first.
+        assert_eq!(code1, code2);
+    }
+
+    #[test]
+    fn get_or_create_code_regenerates_after_ttl_expiry() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pairing.json");
+        let store = PairingStore::new(&path);
+        // Seed an "old" code by writing one with code_created_at far in the past.
+        let mut state = PairingState::default();
+        state.pairing_code = Some("ABCDEF".into());
+        state.code_created_at = Some(0.0); // way pre-1970-equivalent in TTL terms
+        store.save(&state).unwrap();
+        // New call should regenerate (because (now - 0) > 900 seconds).
+        let fresh = store.get_or_create_code().unwrap();
+        assert_ne!(fresh, "ABCDEF");
+        assert_eq!(fresh.len(), CODE_LENGTH);
+    }
+
+    #[test]
+    fn get_or_create_code_preserves_existing_api_key() {
+        // A regenerated code should NOT clear the api_key — the device
+        // stays paired even as the operator-facing code rotates.
+        let dir = tempfile::tempdir().unwrap();
+        let store = PairingStore::new(dir.path().join("pairing.json"));
+        store.set_code("INITIAL").unwrap();
+        store.claim("user-x", "ados_initial_key").unwrap();
+        // Force regen by forging the timestamp.
+        let mut state = store.load().unwrap();
+        state.code_created_at = Some(0.0);
+        store.save(&state).unwrap();
+        // Get fresh code; api_key must still be intact.
+        let _ = store.get_or_create_code().unwrap();
+        let after = store.load().unwrap();
+        assert!(after.is_paired());
+        assert_eq!(after.api_key.as_deref(), Some("ados_initial_key"));
     }
 }

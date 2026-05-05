@@ -16,12 +16,16 @@
 #![forbid(unsafe_code)]
 
 use std::fmt;
+use std::path::PathBuf;
 use std::time::Duration;
 
+use ados_setup::pairing::PairingStore;
 use rumqttc::{AsyncClient, MqttOptions, QoS, Transport};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::sync::broadcast;
+
+const DEFAULT_PAIRING_PATH: &str = "/etc/ados/pairing.json";
 
 #[derive(Debug, Error)]
 pub enum CloudError {
@@ -36,11 +40,19 @@ pub enum CloudError {
 }
 
 /// Configuration for the cloud client. Carries the broker address, the
-/// device identity, and (when paired) the API key issued at pair time.
+/// device identity, and the path to `pairing.json` where the live
+/// pair-code + api-key live.
 ///
-/// `Debug` is implemented manually so the `api_key` is never echoed into
-/// log messages or panic backtraces. Use the field accessors directly
-/// when the cleartext value is required.
+/// `Debug` is implemented manually so the pair-code path is logged but
+/// no secret value ever lands in a panic backtrace.
+///
+/// Note: prior versions of this struct carried an `api_key` field
+/// directly. That was structurally wrong — agent.yaml's `cloud.api_key`
+/// was being conflated with the short operator-typed pair code. The
+/// canonical state lives in `pairing.json` (matching the Python full
+/// agent's PairingManager). The cloud client now reads pairing.json on
+/// every iteration so a `ados-agent-lite pair CODE` from another
+/// process is picked up without restart.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct CloudConfig {
     pub device_id: String,
@@ -48,25 +60,25 @@ pub struct CloudConfig {
     pub mqtt_port: u16,
     pub mqtt_use_tls: bool,
     pub convex_url: String,
-    /// Per-device API key. Empty string means "unpaired" — the client will
-    /// emit a pairing beacon instead of a heartbeat until paired.
-    pub api_key: String,
+    /// Path to pairing.json. Default is `/etc/ados/pairing.json` to match
+    /// the Python full agent. Tests override this to a tempdir.
+    #[serde(default = "default_pairing_path")]
+    pub pairing_path: PathBuf,
+}
+
+fn default_pairing_path() -> PathBuf {
+    PathBuf::from(DEFAULT_PAIRING_PATH)
 }
 
 impl fmt::Debug for CloudConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let api_key_status = if self.api_key.is_empty() {
-            "<unset>"
-        } else {
-            "<redacted>"
-        };
         f.debug_struct("CloudConfig")
             .field("device_id", &self.device_id)
             .field("mqtt_broker", &self.mqtt_broker)
             .field("mqtt_port", &self.mqtt_port)
             .field("mqtt_use_tls", &self.mqtt_use_tls)
             .field("convex_url", &self.convex_url)
-            .field("api_key", &api_key_status)
+            .field("pairing_path", &self.pairing_path)
             .finish()
     }
 }
@@ -130,14 +142,25 @@ async fn mqtt_publish_loop(
     let client_id = format!("ados-{}", config.device_id);
     let mut opts = MqttOptions::new(&client_id, &config.mqtt_broker, config.mqtt_port);
     opts.set_keep_alive(Duration::from_secs(60));
-    opts.set_clean_session(true);
+    // clean_session=false preserves unsent frames across reconnect — the
+    // broker keeps the inflight queue. Setting true would drop any
+    // mid-flight publishes during a network blip.
+    opts.set_clean_session(false);
     if config.mqtt_use_tls {
         // Default rustls configuration with the platform native trust store
         // bundled by rumqttc. The agent does not pin a custom CA at v0.1.
         opts.set_transport(Transport::tls_with_default_config());
     }
-    if !config.api_key.is_empty() {
-        opts.set_credentials(client_id.as_str(), config.api_key.as_str());
+    // Read the api_key from pairing.json on connect. If the agent
+    // re-pairs, the next reconnect will pick up the new key — we don't
+    // need a hot-swap path because rumqttc reconnects on auth failures.
+    let pairing_store = PairingStore::new(&config.pairing_path);
+    if let Ok(state) = pairing_store.load() {
+        if let Some(key) = state.api_key.as_deref() {
+            if !key.is_empty() {
+                opts.set_credentials(client_id.as_str(), key);
+            }
+        }
     }
 
     let (client, mut eventloop) = AsyncClient::new(opts, 1024);
@@ -211,23 +234,48 @@ async fn http_loop(config: CloudConfig) -> Result<(), CloudError> {
         .timeout(Duration::from_secs(10))
         .build()?;
 
-    // Exponential backoff with jitter on consecutive failures so a
-    // misconfigured convex_url stops hammering reqwest's full timeout.
-    // Reset to base interval on success.
-    let base_interval = if config.api_key.is_empty() {
-        Duration::from_secs(30)
-    } else {
-        Duration::from_secs(5)
-    };
+    let pairing_store = PairingStore::new(&config.pairing_path);
     let max_interval = Duration::from_secs(300);
     let mut consecutive_failures: u32 = 0;
 
     loop {
-        let result = if config.api_key.is_empty() {
-            send_pairing_beacon(&client, &config).await
+        // Re-read pairing state every iteration so a `ados-agent-lite pair`
+        // from another process flips us from beacon to heartbeat without
+        // requiring an agent restart.
+        let pairing_state = pairing_store.load().ok().unwrap_or_default();
+        let is_paired = pairing_state.is_paired();
+        let base_interval = if is_paired {
+            Duration::from_secs(5)
         } else {
-            send_heartbeat(&client, &config).await
+            Duration::from_secs(30)
         };
+
+        let result = if is_paired {
+            send_heartbeat(
+                &client,
+                &config,
+                pairing_state.api_key.as_deref().unwrap_or(""),
+            )
+            .await
+        } else {
+            // Mint a code on the first beacon if one isn't set yet so the
+            // operator has something to type into Mission Control.
+            let code = match pairing_state.pairing_code {
+                Some(ref c) if !c.is_empty() => c.clone(),
+                _ => match pairing_store.get_or_create_code() {
+                    Ok(c) => {
+                        tracing::info!(pairing_code = %c, "pairing code minted");
+                        c
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "could not mint pairing code; sending empty beacon");
+                        String::new()
+                    }
+                },
+            };
+            send_pairing_beacon(&client, &config, &code).await
+        };
+
         match result {
             Ok(()) => consecutive_failures = 0,
             Err(e) => {
@@ -242,8 +290,7 @@ async fn http_loop(config: CloudConfig) -> Result<(), CloudError> {
         let delay = if consecutive_failures == 0 {
             base_interval
         } else {
-            // 2^n with cap, plus 0..base/4 jitter via process-id mod.
-            let exp = consecutive_failures.min(8); // cap exponent
+            let exp = consecutive_failures.min(8);
             let scaled = base_interval.saturating_mul(1u32 << exp.min(8));
             scaled.min(max_interval)
         };
@@ -254,11 +301,12 @@ async fn http_loop(config: CloudConfig) -> Result<(), CloudError> {
 async fn send_pairing_beacon(
     client: &reqwest::Client,
     config: &CloudConfig,
+    pairing_code: &str,
 ) -> Result<(), CloudError> {
     let url = format!("{}/pairing/register", config.convex_url.trim_end_matches('/'));
     let beacon = PairingBeacon {
         device_id: &config.device_id,
-        pairing_code: "", // generated by the agent's pairing manager in the next phase
+        pairing_code,
         api_key: "",
         name: "ADOS Lite Agent",
         version: env!("CARGO_PKG_VERSION"),
@@ -271,6 +319,7 @@ async fn send_pairing_beacon(
 async fn send_heartbeat(
     client: &reqwest::Client,
     config: &CloudConfig,
+    api_key: &str,
 ) -> Result<(), CloudError> {
     let url = format!("{}/agent/status", config.convex_url.trim_end_matches('/'));
     // Minimal heartbeat shape at v0.1. The full schema in
@@ -285,7 +334,7 @@ async fn send_heartbeat(
     });
     let response = client
         .post(&url)
-        .header("X-ADOS-Key", &config.api_key)
+        .header("X-ADOS-Key", api_key)
         .json(&body)
         .send()
         .await?;
@@ -305,13 +354,13 @@ mod tests {
             mqtt_port: 8883,
             mqtt_use_tls: true,
             convex_url: "https://relay.example".into(),
-            api_key: "secret".into(),
+            pairing_path: PathBuf::from("/etc/ados/pairing.json"),
         };
         let serialized = serde_json::to_string(&original).unwrap();
         let restored: CloudConfig = serde_json::from_str(&serialized).unwrap();
         assert_eq!(restored.device_id, original.device_id);
         assert_eq!(restored.mqtt_broker, original.mqtt_broker);
-        assert_eq!(restored.api_key, original.api_key);
+        assert_eq!(restored.pairing_path, original.pairing_path);
     }
 
     #[test]
@@ -322,7 +371,7 @@ mod tests {
             mqtt_port: 8883,
             mqtt_use_tls: true,
             convex_url: "https://relay.example".into(),
-            api_key: String::new(),
+            pairing_path: PathBuf::from("/etc/ados/pairing.json"),
         };
         let (tx, _rx) = broadcast::channel(8);
         let err = spawn_cloud_client(bad, tx).expect_err("empty device_id should fail");

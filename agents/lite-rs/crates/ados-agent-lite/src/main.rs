@@ -108,6 +108,12 @@ struct CloudSection {
     mqtt_use_tls: bool,
     #[serde(default)]
     convex_url: String,
+    /// Pre-2026-05-05 versions of agent.yaml stored the per-device API
+    /// key here. The canonical location is now /etc/ados/pairing.json
+    /// (matching the Python full agent's PairingManager). The field is
+    /// retained as deserializable for back-compat — if an old agent.yaml
+    /// has it set and pairing.json is empty, we migrate it on first
+    /// boot. Going forward, all pair operations write to pairing.json.
     #[serde(default)]
     api_key: String,
 }
@@ -267,13 +273,41 @@ async fn run(config_path: PathBuf) -> Result<()> {
         }
     };
 
+    // Resolve pairing.json path. Defaults to /etc/ados/pairing.json (next
+    // to agent.yaml). Tests + dev containers override via the env var.
+    let pairing_path = std::env::var_os("ADOS_PAIRING_PATH")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            config_path
+                .parent()
+                .unwrap_or_else(|| std::path::Path::new("/etc/ados"))
+                .join("pairing.json")
+        });
+
+    // Migrate legacy agent.yaml `cloud.api_key` to pairing.json on first
+    // boot if the new file is empty. This preserves operator pairings
+    // from pre-2026-05-05 agent.yaml configs without forcing a re-pair.
+    if !config.cloud.api_key.is_empty() {
+        let store = ados_setup::pairing::PairingStore::new(&pairing_path);
+        if let Ok(existing) = store.load() {
+            if !existing.is_paired() {
+                tracing::info!(
+                    "migrating legacy cloud.api_key from agent.yaml -> pairing.json"
+                );
+                // The old field stored what was effectively a pair code;
+                // we treat it as one and let the cloud relay re-claim.
+                let _ = store.set_code(&config.cloud.api_key);
+            }
+        }
+    }
+
     let cloud_config = CloudConfig {
         device_id: config.agent.device_id.clone(),
         mqtt_broker: config.cloud.mqtt_broker.clone(),
         mqtt_port: config.cloud.mqtt_port,
         mqtt_use_tls: config.cloud.mqtt_use_tls,
         convex_url: config.cloud.convex_url.clone(),
-        api_key: config.cloud.api_key.clone(),
+        pairing_path: pairing_path.clone(),
     };
 
     // Spawn the cloud client when we have an identity. Missing MQTT broker
@@ -304,10 +338,9 @@ async fn run(config_path: PathBuf) -> Result<()> {
     // builder closure.
     let app_state_inner = Arc::new(AppState {
         device_id: config.agent.device_id.clone(),
-        paired: !config.cloud.api_key.is_empty(),
         mavlink_port: config.mavlink.port.clone(),
         mavlink_baud: config.mavlink.baud,
-        config_path: config_path.clone(),
+        pairing_path: pairing_path.clone(),
     });
 
     // Allow override via ADOS_SETUP_STATE_PATH so tests + dev containers
@@ -388,69 +421,46 @@ fn load_config(path: &std::path::Path) -> Result<AgentConfig> {
     Ok(parsed)
 }
 
-/// Persist a pair code into agent.yaml at `cloud.api_key`. Writes
-/// atomically (tempfile + rename) and signals the running service to
-/// reload by restarting the systemd / busybox / runit unit.
+/// Persist a pair code via the canonical `pairing.json` path (mirrors
+/// the Python full agent's PairingManager). The pair code goes to
+/// `pairing.json:pairing_code`, NOT to `agent.yaml:cloud.api_key` —
+/// those are different values per the proto:
+///
+/// - `pairing_code` is a short 6-char operator-readable code that gets
+///   typed into Mission Control's "Add drone" dialog.
+/// - `api_key` is the long `ados_<base64url-32>` per-device bearer
+///   the cloud relay returns AFTER a successful claim.
+///
+/// Conflating them (the prior implementation) broke the cloud relay's
+/// X-ADOS-Key header check on heartbeats — the agent was sending its
+/// short pair code as the API key.
+///
+/// On success this also signals the running service to reload by
+/// restarting via systemd / busybox sysv-rc / runit.
 async fn persist_pair_code(config_path: &std::path::Path, code: &str) -> Result<()> {
     if code.is_empty() {
         anyhow::bail!("pair code is empty");
     }
 
-    // Load + mutate as a generic YAML document so we never reformat fields
-    // the operator may have edited. serde_yaml::Value preserves the rest.
-    let raw = if config_path.exists() {
-        std::fs::read_to_string(config_path)
-            .with_context(|| format!("reading {}", config_path.display()))?
-    } else {
-        String::from("{}")
-    };
-    let mut doc: serde_yaml::Value =
-        serde_yaml::from_str(&raw).with_context(|| "parsing yaml")?;
-    if !doc.is_mapping() {
-        doc = serde_yaml::Value::Mapping(Default::default());
-    }
-    let map = doc.as_mapping_mut().expect("doc is mapping");
-    let cloud_key = serde_yaml::Value::String("cloud".into());
-    let cloud = map
-        .entry(cloud_key)
-        .or_insert_with(|| serde_yaml::Value::Mapping(Default::default()));
-    if !cloud.is_mapping() {
-        *cloud = serde_yaml::Value::Mapping(Default::default());
-    }
-    let cloud_map = cloud.as_mapping_mut().expect("cloud is mapping");
-    cloud_map.insert(
-        serde_yaml::Value::String("api_key".into()),
-        serde_yaml::Value::String(code.into()),
-    );
+    // The pairing.json path lives next to /etc/ados/agent.yaml. We derive
+    // it from the config path's parent so test runs (and dev containers)
+    // that override the config path automatically pick up a sibling
+    // pairing.json without further env wiring.
+    let pairing_path = config_path
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("/etc/ados"))
+        .join("pairing.json");
 
-    // Write atomically: write to a tempfile in the same directory, then
-    // rename. This keeps the on-disk file either the old or the new copy
-    // even if the agent is killed mid-write.
-    let parent = config_path.parent().unwrap_or_else(|| std::path::Path::new("."));
-    std::fs::create_dir_all(parent).ok();
-    let tmp = parent.join(format!(
-        ".agent.yaml.{}.tmp",
-        std::process::id()
-    ));
-    let serialized = serde_yaml::to_string(&doc).with_context(|| "serializing yaml")?;
-    std::fs::write(&tmp, serialized).with_context(|| format!("writing {}", tmp.display()))?;
-    // 0640 — readable by root + ados group; never world-readable because
-    // the file now contains the api_key.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o640)).ok();
-    }
-    std::fs::rename(&tmp, config_path)
-        .with_context(|| format!("renaming {} -> {}", tmp.display(), config_path.display()))?;
+    let store = ados_setup::pairing::PairingStore::new(&pairing_path);
+    store
+        .set_code(code)
+        .with_context(|| format!("writing {}", pairing_path.display()))?;
 
-    println!("paired and config updated at {}", config_path.display());
+    println!("pair code saved to {}", pairing_path.display());
 
-    // Best-effort: signal the running service to pick up the new config.
+    // Best-effort: signal the running service to pick up the new code.
     // Absolute paths so a subverted $PATH does not redirect to a hostile
-    // binary. We try systemd first, then busybox sysv-rc, then runit. If
-    // none succeed, the operator restarts manually — we still wrote the
-    // file.
+    // binary. We try systemd first, then busybox sysv-rc, then runit.
     let restart_attempts: &[(&str, &[&str])] = &[
         ("/usr/bin/systemctl", &["restart", "ados-agent-lite.service"]),
         ("/bin/systemctl", &["restart", "ados-agent-lite.service"]),
@@ -470,7 +480,7 @@ async fn persist_pair_code(config_path: &std::path::Path, code: &str) -> Result<
         }
     }
     println!(
-        "config saved. Restart the service to pick up the new pair code: \
+        "code saved. Restart the service to pick up the new pair code: \
          sudo systemctl restart ados-agent-lite (systemd) or \
          sudo /etc/init.d/S99ados-agent-lite restart (busybox)"
     );
@@ -480,11 +490,9 @@ async fn persist_pair_code(config_path: &std::path::Path, code: &str) -> Result<
 #[derive(Clone)]
 struct AppState {
     device_id: String,
-    paired: bool,
     mavlink_port: String,
     mavlink_baud: u32,
-    #[allow(dead_code)] // consumed by setup-rest handlers landing in B7.5
-    config_path: PathBuf,
+    pairing_path: PathBuf,
 }
 
 fn build_setup_status(
@@ -494,13 +502,17 @@ fn build_setup_status(
 ) -> Value {
     // Returns the canonical SetupStatus shape so consumers (the setup
     // webapp, Mission Control, the cloud relay) read every expected
-    // field. Empty / null sub-blocks reflect the current minimum-viable
-    // surface; richer values populate as the agent grows access to FC
-    // state, video pipeline, and remote-access providers.
+    // field. Re-reads pairing.json each call so a `ados-agent-lite pair`
+    // from another process flips paired-state on the next /status query
+    // without needing an agent restart.
     let persisted = store.load().unwrap_or_default();
+    let pairing_state = ados_setup::pairing::PairingStore::new(&state.pairing_path)
+        .load()
+        .unwrap_or_default();
+    let paired = pairing_state.is_paired();
     let next_action = if persisted.finalized {
         "ready"
-    } else if state.paired {
+    } else if paired {
         "ready"
     } else {
         "pair"
@@ -517,9 +529,9 @@ fn build_setup_status(
         "profile": profile,
         "ground_role": ground_role,
         "runtime_mode": "lite",
-        "setup_complete": persisted.finalized || state.paired,
+        "setup_complete": persisted.finalized || paired,
         "setup_finalized": persisted.finalized,
-        "completion_percent": if persisted.finalized { 100 } else if state.paired { 80 } else { 0 },
+        "completion_percent": if persisted.finalized { 100 } else if paired { 80 } else { 0 },
         "next_action": next_action,
         "steps": [],
         "skipped_steps": skipped,
@@ -555,8 +567,8 @@ fn build_setup_status(
         },
         "cloud_choice": {
             "mode": "cloud",
-            "paired": state.paired,
-            "pair_code_required": !state.paired,
+            "paired": paired,
+            "pair_code_required": !paired,
             "backend_url": "",
             "backend_reachable": false,
             "last_checked": null
@@ -650,61 +662,61 @@ api:
     }
 
     #[tokio::test]
-    async fn persist_pair_code_writes_api_key_into_existing_yaml() {
+    async fn persist_pair_code_writes_pairing_json() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("agent.yaml");
+        let agent_yaml = dir.path().join("agent.yaml");
         std::fs::write(
-            &path,
+            &agent_yaml,
             r#"agent:
   device_id: "test"
   name: "Test"
 cloud:
   mqtt_broker: ""
-  api_key: ""
 "#,
         )
         .unwrap();
 
-        persist_pair_code(&path, "ABCD1234").await.unwrap();
+        // Pair code goes to pairing.json (sibling of agent.yaml), NOT
+        // to agent.yaml's cloud.api_key. The two values are different
+        // per the proto: pair_code is a 6-char operator-typed code,
+        // api_key is the longer ados_<base64url-32> the cloud relay
+        // returns after a successful claim.
+        persist_pair_code(&agent_yaml, "ABCD1234").await.unwrap();
 
-        let raw = std::fs::read_to_string(&path).unwrap();
-        let doc: serde_yaml::Value = serde_yaml::from_str(&raw).unwrap();
-        let api_key = doc
-            .get("cloud")
-            .and_then(|c| c.get("api_key"))
-            .and_then(|k| k.as_str())
-            .unwrap();
-        assert_eq!(api_key, "ABCD1234");
-        // Other agent fields are preserved.
-        assert_eq!(
-            doc.get("agent")
-                .and_then(|a| a.get("device_id"))
-                .and_then(|v| v.as_str()),
-            Some("test")
-        );
+        let pairing_path = dir.path().join("pairing.json");
+        assert!(pairing_path.exists(), "pairing.json should be created");
+        let store = ados_setup::pairing::PairingStore::new(&pairing_path);
+        let state = store.load().unwrap();
+        assert_eq!(state.pairing_code.as_deref(), Some("ABCD1234"));
+        assert!(!state.is_paired(), "set_code clears the paired flag");
     }
 
     #[tokio::test]
-    async fn persist_pair_code_creates_cloud_section_if_missing() {
+    async fn persist_pair_code_uppercases_lowercase_input() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("agent.yaml");
-        std::fs::write(
-            &path,
-            r#"agent:
-  device_id: "test"
-"#,
-        )
-        .unwrap();
+        let agent_yaml = dir.path().join("agent.yaml");
+        std::fs::write(&agent_yaml, "agent:\n  device_id: \"x\"\n").unwrap();
+        persist_pair_code(&agent_yaml, "abcd1234").await.unwrap();
+        let pairing_path = dir.path().join("pairing.json");
+        let state = ados_setup::pairing::PairingStore::new(&pairing_path)
+            .load()
+            .unwrap();
+        // PairingStore::set_code uppercases — operator-typed lowercase
+        // and uppercase resolve to the same canonical code.
+        assert_eq!(state.pairing_code.as_deref(), Some("ABCD1234"));
+    }
 
-        persist_pair_code(&path, "WXYZ5678").await.unwrap();
-
-        let raw = std::fs::read_to_string(&path).unwrap();
-        let doc: serde_yaml::Value = serde_yaml::from_str(&raw).unwrap();
+    #[tokio::test]
+    async fn persist_pair_code_does_not_touch_agent_yaml() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent_yaml = dir.path().join("agent.yaml");
+        let original = "agent:\n  device_id: \"test\"\n  name: \"Test\"\ncloud:\n  mqtt_broker: \"broker\"\n";
+        std::fs::write(&agent_yaml, original).unwrap();
+        persist_pair_code(&agent_yaml, "ABCD1234").await.unwrap();
+        let after = std::fs::read_to_string(&agent_yaml).unwrap();
         assert_eq!(
-            doc.get("cloud")
-                .and_then(|c| c.get("api_key"))
-                .and_then(|k| k.as_str()),
-            Some("WXYZ5678")
+            after, original,
+            "agent.yaml must not be rewritten by pair (the code goes to pairing.json)"
         );
     }
 
