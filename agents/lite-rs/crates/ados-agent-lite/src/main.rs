@@ -518,9 +518,22 @@ fn build_setup_status(
         "pair"
     };
     let skipped: Vec<String> = persisted.skipped_steps.iter().cloned().collect();
-    // Read profile + ground_role from agent.yaml so the wizard's choice
-    // is reflected here rather than always saying "drone".
-    let (profile, ground_role) = read_profile_from_yaml(agent_yaml);
+    // Read everything we can from the live agent.yaml so the wizard
+    // reflects operator config + the cloud relay surface drives the
+    // GCS Lite-card plumbing correctly.
+    let yaml_view = read_yaml_view(agent_yaml);
+    let (profile, ground_role) = (yaml_view.profile.clone(), yaml_view.ground_role.clone());
+    // Hostname + local IPs for the network block (best-effort; falls
+    // back to empties on systems without these probes).
+    let hostname = sys_hostname();
+    let local_ips = sys_local_ips();
+    // api.bind parses to "host:port" — extract the port for the
+    // network.api_port surface (falls back to 8080 if parse fails).
+    let api_port = yaml_view
+        .api_bind
+        .rsplit_once(':')
+        .and_then(|(_, p)| p.parse::<u16>().ok())
+        .unwrap_or(8080);
 
     // Compute the 10-step lifecycle. Mirrors src/ados/setup/service.py
     // so the wizard sidebar surfaces identical step states regardless of
@@ -551,7 +564,7 @@ fn build_setup_status(
         "version": env!("CARGO_PKG_VERSION"),
         "agent_version": env!("CARGO_PKG_VERSION"),
         "device_id": state.device_id,
-        "device_name": "ADOS Lite Agent",
+        "device_name": yaml_view.agent_name,
         "profile": profile,
         "ground_role": ground_role,
         "runtime_mode": "lite",
@@ -563,12 +576,12 @@ fn build_setup_status(
         "skipped_steps": skipped,
         "access_urls": [],
         "network": {
-            "hostname": "",
-            "mdns_host": "",
-            "api_port": 8080,
+            "hostname": hostname,
+            "mdns_host": format!("ados-{}.local", state.device_id),
+            "api_port": api_port,
             "hotspot_enabled": false,
             "hotspot_ssid": "",
-            "local_ips": []
+            "local_ips": local_ips
         },
         "mavlink": {
             "connected": false,
@@ -592,10 +605,10 @@ fn build_setup_status(
             "error": ""
         },
         "cloud_choice": {
-            "mode": "cloud",
+            "mode": yaml_view.cloud_mode,
             "paired": paired,
             "pair_code_required": !paired,
-            "backend_url": "",
+            "backend_url": yaml_view.cloud_url,
             "backend_reachable": false,
             "last_checked": null
         },
@@ -786,31 +799,102 @@ fn build_steps(
     out
 }
 
-/// Read profile + ground_role from agent.yaml. Mirrors the helper in
-/// ados-setup so the canonical setup-status reflects the wizard's profile
-/// choice rather than hardcoding "drone".
-fn read_profile_from_yaml(path: &std::path::Path) -> (String, String) {
+/// Live view of agent.yaml that the SetupStatus surface needs. Read on
+/// every /status call so operator edits to the file flow through to
+/// Mission Control on the next heartbeat without an agent restart.
+#[derive(Debug, Clone)]
+struct YamlView {
+    agent_name: String,
+    profile: String,
+    ground_role: String,
+    cloud_mode: String,
+    cloud_url: String,
+    api_bind: String,
+}
+
+impl Default for YamlView {
+    fn default() -> Self {
+        Self {
+            agent_name: "ADOS Lite Agent".into(),
+            profile: "drone".into(),
+            ground_role: String::new(),
+            cloud_mode: "cloud".into(),
+            cloud_url: String::new(),
+            api_bind: default_api_bind(),
+        }
+    }
+}
+
+fn read_yaml_view(path: &std::path::Path) -> YamlView {
     let raw = match std::fs::read_to_string(path) {
         Ok(s) => s,
-        Err(_) => return ("drone".into(), String::new()),
+        Err(_) => return YamlView::default(),
     };
     let doc: serde_yaml::Value = match serde_yaml::from_str(&raw) {
         Ok(v) => v,
-        Err(_) => return ("drone".into(), String::new()),
+        Err(_) => return YamlView::default(),
     };
-    let profile = doc
-        .get("agent")
-        .and_then(|a| a.get("profile"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("drone")
-        .to_string();
-    let role = doc
-        .get("ground_station")
-        .and_then(|g| g.get("role"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    (profile, role)
+    let s = |path: &[&str]| -> Option<String> {
+        let mut cur = &doc;
+        for k in path {
+            cur = cur.get(k)?;
+        }
+        cur.as_str().map(String::from)
+    };
+    YamlView {
+        agent_name: s(&["agent", "name"]).unwrap_or_else(|| "ADOS Lite Agent".into()),
+        profile: s(&["agent", "profile"]).unwrap_or_else(|| "drone".into()),
+        ground_role: s(&["ground_station", "role"]).unwrap_or_default(),
+        cloud_mode: s(&["cloud", "mode"]).unwrap_or_else(|| "cloud".into()),
+        cloud_url: s(&["cloud", "convex_url"]).unwrap_or_default(),
+        api_bind: s(&["api", "bind"]).unwrap_or_else(default_api_bind),
+    }
+}
+
+/// Best-effort hostname read. Falls back to empty string on failure.
+fn sys_hostname() -> String {
+    std::fs::read_to_string("/proc/sys/kernel/hostname")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .or_else(|| {
+            // macOS / non-Linux fallback via the `hostname` shell command.
+            std::process::Command::new("hostname")
+                .output()
+                .ok()
+                .and_then(|o| String::from_utf8(o.stdout).ok())
+                .map(|s| s.trim().to_string())
+        })
+        .unwrap_or_default()
+}
+
+/// Enumerate non-loopback IPv4 + IPv6 addresses by parsing /sys/class/net.
+/// Best-effort; returns empty vec when the sysfs surface is unavailable.
+/// We avoid the `nix` crate to keep the dep tree lean — `getifaddrs`
+/// would be cleaner but for v1 reading sysfs + /proc/net/fib_trie is
+/// pragmatic.
+fn sys_local_ips() -> Vec<String> {
+    // Easiest path that works on both Linux and macOS: shell out to
+    // `hostname -I` (Linux) or `ipconfig getifaddr en0` (macOS) — but
+    // those have different surfaces. Go with `ip -4 -o addr` which
+    // exists on every Linux Buildroot rootfs.
+    let out = std::process::Command::new("ip")
+        .args(["-o", "-4", "addr", "show", "scope", "global"])
+        .output();
+    let mut ips = Vec::new();
+    if let Ok(o) = out {
+        if let Ok(text) = String::from_utf8(o.stdout) {
+            for line in text.lines() {
+                // Format: "2: wlan0    inet 192.168.200.225/24 brd ..."
+                if let Some(idx) = line.find("inet ") {
+                    let rest = &line[idx + 5..];
+                    if let Some(end) = rest.find('/') {
+                        ips.push(rest[..end].to_string());
+                    }
+                }
+            }
+        }
+    }
+    ips
 }
 
 #[cfg(test)]
