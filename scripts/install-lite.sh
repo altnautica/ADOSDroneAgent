@@ -3,9 +3,17 @@
 # ADOS Drone Agent — Lightweight Rust Backend Installer
 # Supports: Raspberry Pi OS, Buildroot rootfs (Luckfox class), and any glibc
 #           or musl Linux with init = systemd, busybox, or runit.
-# Usage:    sudo ./install-lite.sh [PAIR_CODE]
+# Usage:    sudo ./install-lite.sh                       (install unpaired)
+#           sudo ./install-lite.sh PAIRCODE              (install + pair)
+#           sudo ./install-lite.sh --pair PAIRCODE       (same, named flag)
 #           sudo ./install-lite.sh --uninstall
 # Idempotent: re-runs are safe and update in place.
+#
+# When invoked without a pairing code the agent installs in unpaired mode
+# and broadcasts a pairing beacon. Operators pair later via:
+#   - the setup webapp at http://<board-ip>:8080/setup
+#   - the CLI:  sudo ados-agent-lite pair PAIRCODE
+#   - Mission Control "Add drone" with the beacon code shown by the agent
 #
 # Verifies the prebuilt binary against an Ed25519 signature (minisign) and a
 # SHA256 checksum before installing. The public key is vendored below.
@@ -170,8 +178,20 @@ generate_device_id() {
 }
 
 write_default_config() {
+    local pair_code="${1:-}"
     if [ -f "${CONFIG_PATH}" ]; then
         log "config already present at ${CONFIG_PATH}; leaving untouched"
+        # If the operator supplied a new pair code on a re-install, persist
+        # it via the agent CLI rather than rewriting the whole config (we
+        # don't want to clobber other fields they may have edited). The CLI
+        # subcommand is best-effort here; if missing, log and continue.
+        if [ -n "${pair_code}" ] && [ -x "${INSTALL_BIN}" ]; then
+            if "${INSTALL_BIN}" pair "${pair_code}" 2>/dev/null; then
+                log "applied new pair code via ados-agent-lite pair"
+            else
+                log "warn: agent CLI did not accept pair code; edit ${CONFIG_PATH} manually"
+            fi
+        fi
         return 0
     fi
     install -d -m 0755 "${CONFIG_DIR}"
@@ -198,13 +218,17 @@ cloud:
   mqtt_port: 8883
   mqtt_use_tls: true
   convex_url: ""
-  api_key: ""
+  api_key: "${pair_code}"
 
 api:
   bind: "127.0.0.1:8080"
 EOF
     chmod 0644 "${CONFIG_PATH}"
-    log "wrote default config at ${CONFIG_PATH} (device_id: ${device_id})"
+    if [ -n "${pair_code}" ]; then
+        log "wrote config at ${CONFIG_PATH} (device_id: ${device_id}, paired)"
+    else
+        log "wrote config at ${CONFIG_PATH} (device_id: ${device_id}, unpaired)"
+    fi
 }
 
 install_systemd_unit() {
@@ -301,13 +325,63 @@ main() {
         return 0
     fi
 
-    local pair_code="${1:-}"
+    # Parse args. --pair PAIRCODE is the named form; a bare positional code
+    # at the front is also accepted for back-compat. --profile and --dry-run
+    # are silently swallowed because the parent install.sh consumed them
+    # before exec'ing this script.
+    local pair_code=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --pair)
+                shift
+                pair_code="${1:-}"
+                if [ -z "${pair_code}" ]; then
+                    die "--pair requires a CODE argument"
+                fi
+                shift
+                ;;
+            --profile)
+                # Already consumed by install.sh; tolerate here so curl-pipe
+                # callers that hit install-lite.sh directly with the same
+                # flag don't error out.
+                shift
+                shift 2>/dev/null || true
+                ;;
+            --dry-run)
+                shift
+                ;;
+            --uninstall)
+                uninstall
+                return 0
+                ;;
+            -*)
+                log "warn: ignoring unknown flag: $1"
+                shift
+                ;;
+            *)
+                # Positional pair code. Same shape as the full installer
+                # accepts (4-8 alphanumeric).
+                if [ -z "${pair_code}" ] && [[ "$1" =~ ^[A-Za-z0-9]{4,8}$ ]]; then
+                    pair_code="$1"
+                else
+                    log "warn: ignoring positional argument: $1"
+                fi
+                shift
+                ;;
+        esac
+    done
+
     local target init_system release_url artifact tmpdir
 
     target="$(detect_target)"
     init_system="$(detect_init_system)"
     log "target architecture:  ${target}"
     log "detected init system: ${init_system}"
+    if [ -n "${pair_code}" ]; then
+        log "pair code provided; agent will start paired"
+    else
+        log "no pair code provided; agent will start unpaired and broadcast a beacon"
+    fi
 
     release_url="$(resolve_release_url "${target}")"
     artifact="ados-agent-lite-*-${target}.tar.gz"
@@ -348,11 +422,7 @@ main() {
     popd >/dev/null
     rm -rf "${tmpdir}"
 
-    write_default_config
-
-    if [ -n "${pair_code}" ]; then
-        log "pairing code provided; persist via: ados-agent-lite pair ${pair_code} (subcommand pending)"
-    fi
+    write_default_config "${pair_code}"
 
     case "${init_system}" in
         systemd)  install_systemd_unit ;;
@@ -366,6 +436,43 @@ main() {
     esac
 
     log "done. Config: ${CONFIG_PATH}"
+
+    print_next_steps "${pair_code}"
+}
+
+# Final user-facing message. Tells the operator what to do next based on
+# whether they paired at install time or not.
+print_next_steps() {
+    local pair_code="${1:-}"
+    local board_ip
+    # Best-effort IP for the URL hint. Prefer the first non-loopback v4.
+    board_ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
+    [ -z "${board_ip}" ] && board_ip="$(hostname 2>/dev/null).local"
+
+    printf '\n'
+    printf '====================================================================\n'
+    if [ -n "${pair_code}" ]; then
+        printf '  ADOS Drone Agent (lite) installed and paired\n'
+        printf '====================================================================\n'
+        printf '  Service:    ados-agent-lite is running\n'
+        printf '  Pair code:  %s (persisted to %s)\n' "${pair_code}" "${CONFIG_PATH}"
+        printf '  Webapp:     http://%s:8080/setup\n' "${board_ip}"
+        printf '\n'
+        printf '  The drone will appear in Mission Control within ~30 seconds.\n'
+    else
+        printf '  ADOS Drone Agent (lite) installed (UNPAIRED)\n'
+        printf '====================================================================\n'
+        printf '  Service:    ados-agent-lite is running unpaired\n'
+        printf '  Webapp:     http://%s:8080/setup\n' "${board_ip}"
+        printf '\n'
+        printf '  To pair the drone, choose one:\n'
+        printf '    1. Visit http://%s:8080/setup and complete the wizard\n' "${board_ip}"
+        printf '    2. Run on this board:    sudo ados-agent-lite pair PAIRCODE\n'
+        printf '    3. In Mission Control "Add drone", enter the beacon code printed\n'
+        printf '       to the agent log on first boot:\n'
+        printf '          sudo journalctl -u ados-agent-lite -n 50 | grep -i beacon\n'
+    fi
+    printf '====================================================================\n'
 }
 
 main "$@"
