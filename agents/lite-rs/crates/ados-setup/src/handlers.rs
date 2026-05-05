@@ -15,7 +15,7 @@ use axum::{
 use serde_json::{json, Value};
 
 use crate::cloud::apply_cloud_choice;
-use crate::cloudflare::{install_cloudflare_token, verify_tunnel};
+use crate::cloudflare::{install_cloudflare_token, redact_log_line, verify_tunnel_async};
 use crate::hardware::run_hardware_check;
 use crate::models::{
     CloudChoiceRequest, CloudflareTokenRequest, ProfileChoiceRequest, SetupActionResult,
@@ -121,27 +121,129 @@ pub async fn post_cloudflare_install(
 }
 
 pub async fn get_cloudflare_verify(State(state): State<Arc<SetupState>>) -> Json<Value> {
-    let _ = state;
-    let resp = verify_tunnel(None);
+    let target = read_cloudflare_setup_url(&state.agent_yaml);
+    let resp = verify_tunnel_async(target.as_deref()).await;
     Json(serde_json::to_value(&resp).unwrap_or_else(|_| json!({})))
 }
 
+/// Read the operator's Cloudflare Tunnel public setup URL from
+/// agent.yaml. Mirrors the Python reference's
+/// `app.config.remote_access.cloudflare.setup_url` lookup.
+fn read_cloudflare_setup_url(path: &std::path::Path) -> Option<String> {
+    let raw = std::fs::read_to_string(path).ok()?;
+    let doc: serde_yaml::Value = serde_yaml::from_str(&raw).ok()?;
+    doc.get("remote_access")
+        .and_then(|r| r.get("cloudflare"))
+        .and_then(|c| c.get("setup_url"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+}
+
 pub async fn ws_cloudflare_logs(ws: WebSocketUpgrade) -> Response {
-    // v0.1: connect, stream a couple of placeholder lines, close. Real
-    // journalctl tail with cloudflared-aware token redaction lands in
-    // B7.7 alongside the subprocess lifecycle.
-    ws.on_upgrade(|mut socket| async move {
-        use axum::extract::ws::Message;
-        let _ = socket
-            .send(Message::Text(
-                "(cloudflared log stream — full tail in B7.7)".into(),
-            ))
-            .await;
-        let _ = socket
-            .send(Message::Text("(stub line; close after one frame)".into()))
-            .await;
-        let _ = socket.close().await;
+    // Stream cloudflared service logs over WebSocket. journalctl is the
+    // canonical source on systemd; on busybox we tail /var/log if a
+    // cloudflared.log exists. Either way we redact JWT-shaped substrings
+    // before emitting to the wizard so a future cloudflared regression
+    // that logs a bearer doesn't leak it through the WS.
+    ws.on_upgrade(|socket| async move {
+        if let Err(e) = stream_cloudflared_logs(socket).await {
+            tracing::warn!(error = %e, "cloudflared log WS exited with error");
+        }
     })
+}
+
+async fn stream_cloudflared_logs(
+    mut socket: axum::extract::ws::WebSocket,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    use axum::extract::ws::Message;
+    use tokio::io::{AsyncBufReadExt, BufReader};
+    use tokio::process::Command;
+
+    // Prefer journalctl when systemd is present.
+    let mut child = if std::path::Path::new("/run/systemd/system").is_dir() {
+        match Command::new("journalctl")
+            .args([
+                "-u",
+                "cloudflared",
+                "-f",
+                "-n",
+                "120",
+                "--no-pager",
+                "-o",
+                "short",
+            ])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+        {
+            Ok(c) => c,
+            Err(e) => {
+                let _ = socket
+                    .send(Message::Text(format!(
+                        "(journalctl failed to start: {e})"
+                    )))
+                    .await;
+                let _ = socket.close().await;
+                return Ok(());
+            }
+        }
+    } else {
+        // Best-effort fallback: tail /var/log/cloudflared.log if it
+        // exists. busybox doesn't always ship `tail -f`; coreutils users
+        // get the log live, others see a single snapshot.
+        let log_path = "/var/log/cloudflared.log";
+        if !std::path::Path::new(log_path).exists() {
+            let _ = socket
+                .send(Message::Text(
+                    "(cloudflared logs not available on this init system — install systemd or pipe logs to /var/log/cloudflared.log)".into(),
+                ))
+                .await;
+            let _ = socket.close().await;
+            return Ok(());
+        }
+        match Command::new("tail")
+            .args(["-n", "120", "-f", log_path])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+        {
+            Ok(c) => c,
+            Err(e) => {
+                let _ = socket
+                    .send(Message::Text(format!("(tail failed: {e})")))
+                    .await;
+                let _ = socket.close().await;
+                return Ok(());
+            }
+        }
+    };
+    let stdout = child.stdout.take().ok_or("no stdout")?;
+    let mut reader = BufReader::new(stdout).lines();
+
+    loop {
+        tokio::select! {
+            line = reader.next_line() => {
+                match line {
+                    Ok(Some(text)) => {
+                        let redacted = redact_log_line(&text);
+                        if socket.send(Message::Text(redacted)).await.is_err() {
+                            break; // peer disconnected
+                        }
+                    }
+                    Ok(None) => break,
+                    Err(_) => break,
+                }
+            }
+            _ = socket.recv() => {
+                // Anything inbound from the peer closes the stream.
+                break;
+            }
+        }
+    }
+    let _ = child.kill().await;
+    let _ = child.wait().await;
+    let _ = socket.close().await;
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
