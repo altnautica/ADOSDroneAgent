@@ -205,7 +205,10 @@ verify_artifact() {
 extract_binary() {
     local artifact="$1" workdir
     workdir="$(mktemp -d)"
-    tar -xzf "${artifact}" -C "${workdir}"
+    # Pipe through gzip explicitly so this works on both GNU tar (which
+    # supports -z) and busybox tar (which does not but accepts the
+    # decompressed stream on stdin via -f -).
+    gzip -dc "${artifact}" | tar -x -f - -C "${workdir}"
     [ -f "${workdir}/ados-agent-lite" ] || die "extracted artifact missing ados-agent-lite binary"
     install -m 0755 "${workdir}/ados-agent-lite" "${INSTALL_BIN}"
     rm -rf "${workdir}"
