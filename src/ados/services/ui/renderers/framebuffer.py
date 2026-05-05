@@ -149,54 +149,85 @@ class FrameBufferRenderer:
 
     @classmethod
     def probe(cls) -> "FrameBufferRenderer | None":
-        """Return a renderer if the configured framebuffer is bound, else None.
+        """Return a renderer if a matching framebuffer is bound, else None.
 
         Honors ``/etc/ados/display.conf`` written by the LCD-overlay
-        installer. Falls back to scanning for any ``fb_ili9486``-named
-        framebuffer when the conf file is absent so a manually-loaded
-        kernel module also works.
+        installer for the configured path. Also scans
+        ``/sys/class/graphics/*`` for any framebuffer whose driver name
+        matches ``framebuffer_name_expected`` (default ``fb_ili9486``).
+        On a headless rig the kernel can assign the SPI LCD to
+        ``/dev/fb0`` because the Rockchip DRM driver doesn't claim
+        ``fb0`` when no HDMI monitor is attached, so we can't hardcode
+        ``/dev/fb1``.
         """
         conf = _parse_display_conf()
-        fb_path_str = conf.get("framebuffer_path", "/dev/fb1")
-        fb_path = Path(fb_path_str)
-        if not fb_path.exists():
-            log.debug("framebuffer_absent", path=str(fb_path))
+        configured_path = conf.get("framebuffer_path", "/dev/fb1")
+        expected = (conf.get("framebuffer_name_expected") or "fb_ili9486").strip()
+
+        # Build candidate list: configured path first, then every
+        # /dev/fb* that has a /sys/class/graphics/<name>/var entry.
+        candidates: list[str] = []
+        if Path(configured_path).exists():
+            candidates.append(configured_path)
+        if SYS_FB_GLOB.exists():
+            for entry in sorted(SYS_FB_GLOB.iterdir()):
+                if not entry.name.startswith("fb"):
+                    continue
+                dev_path = f"/dev/{entry.name}"
+                if dev_path not in candidates and Path(dev_path).exists():
+                    candidates.append(dev_path)
+
+        if not candidates:
+            log.debug("framebuffer_absent", configured=configured_path)
             return None
-        fb_name = fb_path.name  # "fb1"
-        try:
-            xres, yres, bpp = _read_fb_geometry(fb_name)
-        except OSError as exc:
-            log.warning("framebuffer_geometry_unreadable", fb=fb_name, error=str(exc))
-            return None
-        driver_name = _read_fb_name(fb_name)
-        expected = conf.get("framebuffer_name_expected") or "fb_ili9486"
-        if driver_name and expected and expected not in driver_name:
-            log.warning(
-                "framebuffer_driver_mismatch",
-                fb=fb_name,
-                driver=driver_name,
-                expected=expected,
+
+        for candidate in candidates:
+            fb_name = Path(candidate).name
+            try:
+                xres, yres, bpp = _read_fb_geometry(fb_name)
+            except OSError as exc:
+                log.debug(
+                    "framebuffer_geometry_unreadable",
+                    fb=fb_name,
+                    error=str(exc),
+                )
+                continue
+            driver_name = _read_fb_name(fb_name)
+            if expected and driver_name and expected not in driver_name:
+                log.debug(
+                    "framebuffer_driver_skip",
+                    fb=fb_name,
+                    driver=driver_name,
+                    expected=expected,
+                )
+                continue
+            if bpp not in (16, 24, 32):
+                log.warning(
+                    "framebuffer_bpp_unsupported", fb=fb_name, bpp=bpp,
+                )
+                continue
+            log.info(
+                "framebuffer_probed",
+                path=candidate,
+                name=driver_name,
+                width=xres,
+                height=yres,
+                bpp=bpp,
             )
-            # Don't bail — the user may have re-pointed the conf at a
-            # different panel. Log + continue.
-        if bpp not in (16, 24, 32):
-            log.warning("framebuffer_bpp_unsupported", bpp=bpp)
-            return None
-        log.info(
-            "framebuffer_probed",
-            path=fb_path_str,
-            name=driver_name,
-            width=xres,
-            height=yres,
-            bpp=bpp,
+            return cls(
+                fb_path=candidate,
+                fb_name=fb_name,
+                actual_width=xres,
+                actual_height=yres,
+                bpp=bpp,
+            )
+
+        log.debug(
+            "framebuffer_no_match",
+            expected=expected,
+            checked=candidates,
         )
-        return cls(
-            fb_path=fb_path_str,
-            fb_name=fb_name,
-            actual_width=xres,
-            actual_height=yres,
-            bpp=bpp,
-        )
+        return None
 
     def _open(self) -> None:
         try:
