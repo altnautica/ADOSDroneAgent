@@ -127,6 +127,11 @@ pub struct BoardMetadata {
     pub soc: Option<String>,
     pub arch: Option<String>,
     pub ram_mb: Option<u32>,
+    /// Encoder API the agent should drive on this board, sourced from
+    /// `video.encoder_api_lite` in the HAL board.yaml. Values land in
+    /// `ados_video::encoder_for_board` verbatim; recognized strings are
+    /// `v4l2`, `libcamera`, `rkmpi`, `rkmedia`, `none`.
+    pub encoder_api: Option<String>,
 }
 
 /// Detect the running board. Returns whatever we could read; missing
@@ -149,6 +154,7 @@ pub fn detect_board_metadata() -> BoardMetadata {
             // still has something to render.
             meta.board_name = Some(m.to_string());
         }
+        meta.encoder_api = lookup_encoder_api(m);
     }
     meta
 }
@@ -204,6 +210,45 @@ fn lookup_board_yaml(model: &str) -> Option<(String, Option<String>)> {
                         .and_then(|v| v.as_str())
                         .map(|s| s.to_string());
                     return Some((name, soc));
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Read `video.encoder_api_lite` from the matched board's HAL YAML.
+/// Returns `None` when the board isn't catalogued or the field is
+/// absent — agent main treats both as "no video pipeline on this
+/// board" and skips the encoder task.
+pub fn lookup_encoder_api(model: &str) -> Option<String> {
+    let dir = std::env::var_os("ADOS_HAL_BOARDS_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from(BOARDS_DIR_DEFAULT));
+    if !dir.is_dir() {
+        return None;
+    }
+    let model_lower = model.to_lowercase();
+    for entry in std::fs::read_dir(&dir).ok()?.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) != Some("yaml") {
+            continue;
+        }
+        let raw = std::fs::read_to_string(&path).ok()?;
+        let doc: serde_yaml::Value = serde_yaml::from_str(&raw).ok()?;
+        let patterns = doc
+            .get("model_patterns")
+            .and_then(|v| v.as_sequence())
+            .cloned()
+            .unwrap_or_default();
+        for p in patterns {
+            if let Some(p) = p.as_str() {
+                if model_lower.contains(&p.to_lowercase()) {
+                    return doc
+                        .get("video")
+                        .and_then(|v| v.get("encoder_api_lite"))
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string());
                 }
             }
         }

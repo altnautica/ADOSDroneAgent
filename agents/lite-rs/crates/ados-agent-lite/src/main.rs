@@ -941,6 +941,68 @@ async fn run(config_path: PathBuf) -> Result<()> {
         tracing::info!("device_id missing; running offline (no mqtt, no heartbeat)");
     }
 
+    // Video pipeline. Selected by the running board's
+    // `video.encoder_api_lite` field; absent / "none" boards skip the
+    // encoder task entirely so the lite agent stays narrow on
+    // hardware that doesn't ship a supported H.264 path. The encoded
+    // frame stream is broadcast on a tokio::sync::broadcast channel
+    // so future consumers (RTSP push, WFB tee) can subscribe without
+    // re-encoding. At v0.1 the channel exists but no consumer drains
+    // it; lagged frames are dropped per broadcast semantics. The
+    // encoder is constructed eagerly so a misconfigured board YAML
+    // surfaces in journalctl at boot, not at first frame.
+    let video_encoder_api = board_meta.encoder_api.clone().unwrap_or_default();
+    let (video_frame_tx, _video_frame_rx) =
+        tokio::sync::broadcast::channel::<ados_video::EncodedFrame>(64);
+    if !video_encoder_api.is_empty() && video_encoder_api != "none" {
+        let api = video_encoder_api.clone();
+        let frame_tx = video_frame_tx.clone();
+        tokio::spawn(async move {
+            let mut encoder = ados_video::encoder_for_board(&api);
+            let cfg = ados_video::EncoderConfig::default();
+            tracing::info!(encoder_api = %api, "starting video pipeline");
+            match encoder.start(cfg).await {
+                Ok(()) => loop {
+                    match encoder.next_frame().await {
+                        Some(frame) => {
+                            if frame_tx.send(frame).is_err() {
+                                // No subscribers attached yet; that's
+                                // fine on a fresh boot. Frames are
+                                // produced as fast as the encoder
+                                // delivers; drop silently.
+                            }
+                        }
+                        None => {
+                            tracing::warn!("video encoder closed its frame stream; exiting task");
+                            break;
+                        }
+                    }
+                },
+                Err(e) => {
+                    tracing::warn!(error = %e, encoder_api = %api,
+                        "video encoder start failed; pipeline disabled");
+                }
+            }
+        });
+    } else {
+        tracing::info!(
+            encoder_api = %if video_encoder_api.is_empty() { "<none>".to_string() } else { video_encoder_api },
+            "no supported video encoder for this board; skipping video task"
+        );
+    }
+
+    // WFB-ng air-side orchestration. The REST surface for the wizard
+    // (GET /api/v1/setup/wfb, POST /configure, POST /regenerate-key)
+    // is wired into the setup router by the ados-setup crate; the
+    // dongle-watcher + wfb_tx supervision loop wires alongside the
+    // hardware-validation gate (RTL8812EU + 88XXau driver). At v0.1
+    // the agent main holds no orchestration task — operator-visible
+    // wfb state flows entirely through the REST handlers reading the
+    // shared WfbManager. Holding a video broadcast subscriber here
+    // would consume frames the watcher loop will need; defer the
+    // subscription to the watcher's spawn site.
+    let _ = &video_frame_tx;
+
     // axum HTTP server: full universal setup surface mounted from
     // ados-setup. Status snapshot reads live agent state
     // (paired/unpaired, mavlink port + baud, device_id). The crate-level

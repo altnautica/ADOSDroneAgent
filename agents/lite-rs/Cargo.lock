@@ -9,6 +9,8 @@ dependencies = [
  "ados-cloud",
  "ados-mavlink",
  "ados-setup",
+ "ados-video",
+ "ados-wfb",
  "anyhow",
  "axum",
  "clap",
