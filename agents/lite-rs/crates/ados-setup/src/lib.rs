@@ -16,6 +16,7 @@
 //! - `hardware`  — board.yaml + /proc + lsusb fingerprint engine
 //! - `cloudflare` — Cloudflare Tunnel orchestration + WebSocket log stream
 //! - `handlers`  — axum handler functions
+//! - `origin`    — same-origin gate for mutating requests
 //! - `router`    — assemble axum::Router with all 11 routes
 
 #![forbid(unsafe_code)]
@@ -26,10 +27,12 @@ pub mod cloudflare;
 pub mod handlers;
 pub mod hardware;
 pub mod models;
+pub mod origin;
 pub mod pairing;
 pub mod profile;
 pub mod router;
 pub mod state;
 pub mod webapp;
 
-pub use router::{setup_router, SetupState};
+pub use origin::OriginAllowlist;
+pub use router::{setup_router, setup_router_with_origin_check, SetupState};

@@ -169,6 +169,91 @@ re-install. To wipe state too, also `rm -rf /etc/ados/`.
 | AIC8800DC Wi-Fi disassociates randomly | Known driver / rfkill interaction on Luckfox | Check `dmesg`; toggle `rfkill unblock all`; consider patching the AIC8800DC DKMS to the latest community fork |
 | `ados-agent-lite: command not found` after install | `/usr/local/bin` not on PATH | `export PATH=$PATH:/usr/local/bin` or reload the shell |
 
+## Hardened operations
+
+Defense-in-depth knobs the lite agent exposes for operators who run it
+on shared networks or who want strict supply-chain verification on
+every upgrade.
+
+### Pinned upgrade script hash
+
+`ados-agent-lite update` fetches the install script from
+`raw.githubusercontent.com`, logs its SHA256 at INFO level, and
+proceeds. Operators who want strict verification can require an exact
+hash and fail the upgrade on mismatch:
+
+```sh
+sudo ados-agent-lite update --require-script-sha256 \
+  e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+```
+
+The hash is the SHA256 of the install script bytes the agent fetches.
+Compute it out of band (`curl -sSL <url> | sha256sum`) when the
+operator wires the upgrade into orchestration. When the flag is
+omitted the agent falls back to the unverified-but-logged behavior so
+emergency in-field upgrades over a flaky link don't fail closed.
+
+The cloudflared binary has its own SHA256 pin baked into the agent
+build; cloudflared releases that don't match the expected hash are
+rejected at install time.
+
+### Setup surface origin gate
+
+When `api.bind` is set to `0.0.0.0` (the common LAN-wizard path), the
+universal setup REST surface enforces a same-origin policy on
+mutating methods (POST / PUT / PATCH / DELETE). A POST whose `Origin`
+header is foreign to the agent's host is rejected with HTTP 403.
+
+The allowlist is built once at agent startup from the configured
+bind address + port and the device_id, and includes:
+
+- `http://<bind_host>:<port>` and the default-port form
+- `http://localhost:<port>` and `http://127.0.0.1:<port>`
+- `http://ados-<device_id>.local:<port>` (the mDNS hostname)
+- `https://` variants of all of the above for reverse-proxy operators
+
+GET / HEAD / OPTIONS requests pass through unchanged. Requests
+without an `Origin` header (curl, native HTTP clients, the wizard
+webapp's own no-CORS fetches) also pass through. The gate exists to
+stop a browser on the same LAN from being weaponized into
+reconfiguring the agent via a malicious page.
+
+The allowlist is logged at startup:
+
+```
+INFO setup origin allowlist configured bind_host=0.0.0.0 bind_port=8080 device_id=...
+```
+
+A change to `api.bind` requires an agent restart for the allowlist to
+refresh, matching how every other bind-derived value is handled.
+
+### Graceful shutdown
+
+The agent installs SIGTERM and SIGINT handlers. `systemctl stop
+ados-agent-lite` (or the equivalent busybox sysv-rc / OpenRC
+operation) drains the active tasks, flushes pending writes, and
+exits. The MQTT client publishes a final unpaired-or-paired status
+before disconnecting so Mission Control reflects the offline state
+without waiting for the heartbeat timeout. On busybox systems where
+the init script sends SIGTERM the same flow runs; SIGKILL after the
+configured grace period is the fallback.
+
+### Heartbeat fields
+
+The cloud heartbeat now carries:
+
+- `services` — array of `{ name, state }` for the in-process tasks
+  (mavlink-router / cloud-client / http-api). Today the array is
+  three rows reflecting the lite agent's process surface; future
+  phases will add `wfb-tx`, `video-encoder`, etc.
+- `fcConnected` — boolean reflecting live MAVLink heartbeat presence
+  on the FC serial port. Mission Control reads this for the fleet
+  card's link indicator without waiting for a fresh telemetry
+  snapshot.
+
+These fields are additive; older Mission Control builds that don't
+read them keep working.
+
 ## Public-repo discipline
 
 This document ships in the public OSS repo. No partner names, no

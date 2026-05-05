@@ -14,7 +14,9 @@ use std::sync::Arc;
 
 use ados_cloud::CloudConfig;
 use ados_mavlink::MavlinkConfig;
-use ados_setup::{setup_router, state::StateStore, SetupState};
+use ados_setup::{
+    setup_router_with_origin_check, state::StateStore, OriginAllowlist, SetupState,
+};
 use anyhow::{Context, Result};
 use axum::extract::DefaultBodyLimit;
 use clap::{Parser, Subcommand};
@@ -623,6 +625,67 @@ async fn run(config_path: PathBuf) -> Result<()> {
     // Cooperating tasks. Each spawns its own background work. The main
     // task waits for shutdown signal and supervises panics via Tokio's
     // catch-unwind in spawn().
+
+    // Detect board metadata once at startup. Heartbeat enrichment uses
+    // these values verbatim; re-running the probe per heartbeat tick
+    // would cost ~3 ms × every 5 s for no gain (board hardware does not
+    // change at runtime). Network identity is re-detected per tick
+    // inside the cloud client because DHCP renewals can flip lastIp.
+    let board_meta = ados_setup::hardware::detect_board_metadata();
+
+    // Resolve pairing.json path. Defaults to /etc/ados/pairing.json (next
+    // to agent.yaml). Tests + dev containers override via the env var.
+    let pairing_path = std::env::var_os("ADOS_PAIRING_PATH")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            config_path
+                .parent()
+                .unwrap_or_else(|| std::path::Path::new("/etc/ados"))
+                .join("pairing.json")
+        });
+
+    // Allow override via ADOS_SETUP_STATE_PATH so tests + dev containers
+    // don't need /var write access. Production install puts this at
+    // /var/lib/ados/setup/state.json — same path the Python full agent
+    // uses, so an operator can swap between agents without losing setup
+    // state.
+    let setup_state_path = std::env::var_os("ADOS_SETUP_STATE_PATH")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from("/var/lib/ados/setup/state.json"));
+
+    // One greppable line that names every config decision the agent made
+    // at boot. An operator opening journalctl after `systemctl restart
+    // ados-agent-lite` can correlate the running config (broker, relay
+    // URL, paths, board) without dumping individual debug lines. No
+    // secrets — pair codes, api keys, and tokens never land here.
+    tracing::info!(
+        version = env!("CARGO_PKG_VERSION"),
+        device_id = %config.agent.device_id,
+        mqtt_broker = %if config.cloud.mqtt_broker.is_empty() {
+            "<none>".to_string()
+        } else {
+            config.cloud.mqtt_broker.clone()
+        },
+        mqtt_port = config.cloud.mqtt_port,
+        mqtt_use_tls = config.cloud.mqtt_use_tls,
+        convex_url = %if config.cloud.convex_url.is_empty() {
+            "<none>".to_string()
+        } else {
+            config.cloud.convex_url.clone()
+        },
+        pairing_path = %pairing_path.display(),
+        setup_state_path = %setup_state_path.display(),
+        agent_yaml = %config_path.display(),
+        bind_addr = %config.api.bind,
+        mavlink_port = %config.mavlink.port,
+        mavlink_baud = config.mavlink.baud,
+        board_name = %board_meta.board_name.as_deref().unwrap_or("<unknown>"),
+        soc = %board_meta.soc.as_deref().unwrap_or("<unknown>"),
+        arch = %board_meta.arch.as_deref().unwrap_or("<unknown>"),
+        ram_mb = ?board_meta.ram_mb,
+        "boot configuration"
+    );
+
     let mavlink_config = MavlinkConfig {
         port: config.mavlink.port.clone(),
         baud: config.mavlink.baud,
@@ -638,17 +701,6 @@ async fn run(config_path: PathBuf) -> Result<()> {
             None
         }
     };
-
-    // Resolve pairing.json path. Defaults to /etc/ados/pairing.json (next
-    // to agent.yaml). Tests + dev containers override via the env var.
-    let pairing_path = std::env::var_os("ADOS_PAIRING_PATH")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| {
-            config_path
-                .parent()
-                .unwrap_or_else(|| std::path::Path::new("/etc/ados"))
-                .join("pairing.json")
-        });
 
     // Migrate legacy agent.yaml `cloud.api_key` to pairing.json on first
     // boot if the new file is empty. This preserves operator pairings
@@ -667,12 +719,6 @@ async fn run(config_path: PathBuf) -> Result<()> {
         }
     }
 
-    // Detect board metadata once at startup. Heartbeat enrichment uses
-    // these values verbatim; re-running the probe per heartbeat tick
-    // would cost ~3 ms × every 5 s for no gain (board hardware does not
-    // change at runtime). Network identity is re-detected per tick
-    // inside the cloud client because DHCP renewals can flip lastIp.
-    let board_meta = ados_setup::hardware::detect_board_metadata();
     let agent_meta = ados_cloud::AgentMeta {
         board_name: board_meta.board_name,
         soc: board_meta.soc,
@@ -732,14 +778,6 @@ async fn run(config_path: PathBuf) -> Result<()> {
         pairing_path: pairing_path.clone(),
     });
 
-    // Allow override via ADOS_SETUP_STATE_PATH so tests + dev containers
-    // don't need /var write access. Production install puts this at
-    // /var/lib/ados/setup/state.json — same path the Python full agent
-    // uses, so an operator can swap between agents without losing setup
-    // state.
-    let setup_state_path = std::env::var_os("ADOS_SETUP_STATE_PATH")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| std::path::PathBuf::from("/var/lib/ados/setup/state.json"));
     let setup_state_store = StateStore::new(setup_state_path);
     let snapshot_state = app_state_inner.clone();
     let snapshot_store = setup_state_store.clone();
@@ -752,12 +790,6 @@ async fn run(config_path: PathBuf) -> Result<()> {
         }),
     });
 
-    let app = setup_router(setup_state)
-        // Cap request bodies at 64 KiB. The setup surface accepts no
-        // large payloads today; this is defense-in-depth for the POST
-        // handlers.
-        .layer(DefaultBodyLimit::max(64 * 1024));
-
     let bind_addr: SocketAddr = config
         .api
         .bind
@@ -769,6 +801,30 @@ async fn run(config_path: PathBuf) -> Result<()> {
             "http api binding 0.0.0.0; setup surface is exposed to every interface"
         );
     }
+
+    // Build the same-origin allowlist for the setup REST surface. Read
+    // methods + curl-style header-less requests pass through; only
+    // cross-origin POST / PUT / PATCH / DELETE requests are rejected.
+    // This is defense-in-depth for the common operator path of binding
+    // to 0.0.0.0 so a tablet on the same LAN can run the wizard.
+    let bind_host_str = bind_addr.ip().to_string();
+    let origin_allowlist = Arc::new(OriginAllowlist::new(
+        &bind_host_str,
+        bind_addr.port(),
+        &config.agent.device_id,
+    ));
+    tracing::info!(
+        bind_host = %bind_host_str,
+        bind_port = bind_addr.port(),
+        device_id = %config.agent.device_id,
+        "setup origin allowlist configured"
+    );
+
+    let app = setup_router_with_origin_check(setup_state, origin_allowlist)
+        // Cap request bodies at 64 KiB. The setup surface accepts no
+        // large payloads today; this is defense-in-depth for the POST
+        // handlers.
+        .layer(DefaultBodyLimit::max(64 * 1024));
     let listener = tokio::net::TcpListener::bind(&bind_addr)
         .await
         .with_context(|| format!("binding HTTP server on {}", bind_addr))?;
@@ -780,17 +836,54 @@ async fn run(config_path: PathBuf) -> Result<()> {
         }
     });
 
-    // Wait for shutdown.
+    // Wait for shutdown. systemd sends SIGTERM on `systemctl stop`; an
+    // operator's terminal sends SIGINT (ctrl_c). Both must surface here
+    // so the agent logs the signal it received before unwinding — that
+    // single line is what an operator correlates against journalctl when
+    // diagnosing "why did the agent restart" later.
+    //
+    // The cloud client + mavlink router run inside spawned tasks. When
+    // this future returns, the Tokio current_thread runtime drops them
+    // cooperatively. The eventloop AbortOnDrop guard inside the cloud
+    // client cancels the rumqttc poll task immediately on parent drop,
+    // so no zombie tasks survive shutdown. Atomic-write helpers fsync
+    // before returning, so any pairing.json or setup-state.json write
+    // that returned to its caller is durable on disk.
+    #[cfg(unix)]
+    let shutdown_signal = async {
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut sigterm = match signal(SignalKind::terminate()) {
+            Ok(s) => s,
+            Err(e) => {
+                // Falling back to ctrl_c only is preferable to crashing
+                // the agent on a system that, for whatever reason, has
+                // exhausted its signal-handler slots.
+                tracing::warn!(error = %e, "could not install SIGTERM handler; falling back to SIGINT only");
+                let _ = tokio::signal::ctrl_c().await;
+                return "SIGINT".to_string();
+            }
+        };
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => "SIGINT".to_string(),
+            _ = sigterm.recv() => "SIGTERM".to_string(),
+        }
+    };
+    #[cfg(not(unix))]
+    let shutdown_signal = async {
+        let _ = tokio::signal::ctrl_c().await;
+        "SIGINT".to_string()
+    };
+
     tokio::select! {
-        _ = tokio::signal::ctrl_c() => {
-            tracing::info!("shutdown signal received");
+        signal = shutdown_signal => {
+            tracing::info!(signal = %signal, "received shutdown signal; cleaning up");
         }
         result = server => {
             tracing::warn!(?result, "http api task ended");
         }
     }
 
-    tracing::info!("ados-agent-lite stopped");
+    tracing::info!("shutdown complete");
     Ok(())
 }
 

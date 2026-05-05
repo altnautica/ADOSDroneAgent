@@ -20,3 +20,9 @@ anyhow = { workspace = true }
 thiserror = { workspace = true }
 chrono = { workspace = true }
 sysinfo = { workspace = true }
+
+[dev-dependencies]
+# Mock HTTP server for end-to-end tests of the heartbeat loop.
+wiremock = "0.6"
+tempfile = "3"
+tokio = { workspace = true, features = ["macros", "rt", "sync", "io-util", "net", "time", "signal", "process", "rt-multi-thread"] }

@@ -37,6 +37,14 @@ const DEFAULT_PAIRING_PATH: &str = "/etc/ados/pairing.json";
 /// one rather than queueing stale telemetry.
 const MQTT_PUBLISH_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// Documented capacity of the inbound MAVLink broadcast channel that the
+/// router constructs and this loop subscribes to. Mirrors the constant
+/// in the router crate. Used purely as a denominator on lag warnings so
+/// an operator reading journalctl can size the drop against the buffer.
+/// If the router and this constant ever drift, the warning's denominator
+/// is misleading but no behavior changes.
+const MAVLINK_BROADCAST_CHANNEL_CAPACITY: usize = 1024;
+
 /// Drop guard that aborts a spawned task synchronously when the guard
 /// is dropped. Used to tie the lifetime of the MQTT eventloop driver
 /// to the outer publish loop: if the parent task is cancelled, the
@@ -167,6 +175,45 @@ pub fn spawn_cloud_client(
 ) -> Result<(), CloudError> {
     if config.device_id.is_empty() {
         return Err(CloudError::Config("device_id is required".into()));
+    }
+
+    // URL-scheme validation. The convex_url and mqtt_broker fields flow
+    // from operator-supplied agent.yaml. Reject schemes that would shoot
+    // requests off into the local filesystem; warn loudly when the
+    // operator has wired plaintext transport against a non-loopback
+    // endpoint (credentials would otherwise ship in cleartext).
+    if !config.convex_url.is_empty() {
+        let url = config.convex_url.as_str();
+        if url.starts_with("https://") {
+            // Encrypted; fine.
+        } else if url.starts_with("http://") {
+            tracing::warn!(
+                convex_url = %url,
+                "convex_url uses unencrypted scheme; credentials will be \
+                 transmitted in cleartext"
+            );
+        } else {
+            return Err(CloudError::Config(
+                "convex_url must be http(s)".into(),
+            ));
+        }
+    }
+
+    // mqtt_broker is a host string (no scheme). When TLS is off and the
+    // broker is not loopback, log a one-shot warning so the operator
+    // sees the cleartext exposure in journalctl.
+    if !config.mqtt_broker.is_empty() && !config.mqtt_use_tls {
+        let host = config.mqtt_broker.as_str();
+        let is_loopback = host == "127.0.0.1"
+            || host == "localhost"
+            || host == "::1";
+        if !is_loopback {
+            tracing::warn!(
+                broker = %host,
+                "mqtt_use_tls=false on a non-loopback broker; credentials \
+                 will be transmitted in cleartext"
+            );
+        }
     }
 
     // MQTT: publish inbound MAVLink frames to ados/{device_id}/mavlink/tx,
@@ -352,8 +399,18 @@ async fn mqtt_publish_loop(
                 }
             }
             Err(broadcast::error::RecvError::Lagged(n)) => {
+                // `mavlink_rx.len()` is the number of messages still in
+                // the channel that this receiver hasn't consumed yet —
+                // a live snapshot of how far behind we are at the moment
+                // the lag was reported. `channel_capacity` is the static
+                // slot count the router allocated. Together they tell an
+                // operator whether the lag is brushing the wall (channel
+                // saturated, persistent producer pressure) or whether
+                // we briefly fell off and recovered.
                 tracing::warn!(
                     dropped = n,
+                    pending = mavlink_rx.len(),
+                    channel_capacity = MAVLINK_BROADCAST_CHANNEL_CAPACITY,
                     broker = %config.mqtt_broker,
                     topic = %topic_tx,
                     "mqtt publisher lagging behind FC frame rate"
@@ -366,6 +423,21 @@ async fn mqtt_publish_loop(
             }
         }
     }
+}
+
+/// Outcome of a single `/agent/status` POST. The dispatcher in
+/// `http_loop` uses this to distinguish a revoked-key 401/403 (which
+/// should clear the local pairing state and revert to the beacon flow)
+/// from a transient network failure (which should increment the
+/// failure counter and back off).
+#[derive(Debug, PartialEq, Eq)]
+enum HeartbeatOutcome {
+    /// 2xx — heartbeat accepted by the relay.
+    Ok,
+    /// 401 or 403 — the api_key is no longer valid. The caller should
+    /// clear pairing state via `PairingStore::unpair` so the next loop
+    /// iteration falls back to the pairing beacon path.
+    Unauthorized,
 }
 
 async fn http_loop(config: CloudConfig) -> Result<(), CloudError> {
@@ -394,68 +466,132 @@ async fn http_loop(config: CloudConfig) -> Result<(), CloudError> {
     let started_at = Instant::now();
 
     loop {
-        // Re-read pairing state every iteration so a `ados-agent-lite pair`
-        // from another process flips us from beacon to heartbeat without
-        // requiring an agent restart.
-        let pairing_state = pairing_store.load().ok().unwrap_or_default();
-        let is_paired = pairing_state.is_paired();
-        let base_interval = if is_paired {
-            Duration::from_secs(5)
-        } else {
-            Duration::from_secs(30)
-        };
+        run_http_tick(
+            &client,
+            &config,
+            &pairing_store,
+            started_at,
+            &mut consecutive_failures,
+            max_interval,
+        )
+        .await;
+    }
+}
 
-        let result = if is_paired {
-            send_heartbeat(
-                &client,
-                &config,
-                pairing_state.api_key.as_deref().unwrap_or(""),
-                started_at,
-            )
-            .await
-        } else {
-            // Mint a code on the first beacon if one isn't set yet so the
-            // operator has something to type into Mission Control.
-            let code = match pairing_state.pairing_code {
-                Some(ref c) if !c.is_empty() => c.clone(),
-                _ => match pairing_store.get_or_create_code() {
-                    Ok(c) => {
-                        // Pair code is a pre-auth bearer; logging the live
-                        // value at INFO would persist it into journalctl /
-                        // syslog. Log only the length so the operator can
-                        // confirm a code was minted without leaking it.
-                        tracing::info!(code_length = c.len(), "pairing code minted");
-                        c
-                    }
-                    Err(e) => {
-                        tracing::warn!(error = %e, "could not mint pairing code; sending empty beacon");
-                        String::new()
-                    }
-                },
-            };
-            send_pairing_beacon(&client, &config, &code).await
-        };
+/// One iteration of the HTTPS loop: read pairing state, send heartbeat
+/// or beacon, update the failure counter, and sleep the appropriate
+/// backoff. Extracted so unit tests can drive a single tick without
+/// running the unbounded `loop {}`.
+async fn run_http_tick(
+    client: &reqwest::Client,
+    config: &CloudConfig,
+    pairing_store: &PairingStore,
+    started_at: Instant,
+    consecutive_failures: &mut u32,
+    max_interval: Duration,
+) {
+    // Re-read pairing state every iteration so a `ados-agent-lite pair`
+    // from another process flips us from beacon to heartbeat without
+    // requiring an agent restart.
+    let pairing_state = pairing_store.load().ok().unwrap_or_default();
+    let is_paired = pairing_state.is_paired();
+    let base_interval = if is_paired {
+        Duration::from_secs(5)
+    } else {
+        Duration::from_secs(30)
+    };
 
-        match result {
-            Ok(()) => consecutive_failures = 0,
+    if is_paired {
+        let api_key = pairing_state.api_key.as_deref().unwrap_or("");
+        match send_heartbeat(client, config, api_key, started_at).await {
+            Ok(HeartbeatOutcome::Ok) => *consecutive_failures = 0,
+            Ok(HeartbeatOutcome::Unauthorized) => {
+                // The cloud relay rejected our api_key. Most likely the
+                // operator clicked "Remove drone" in Mission Control or
+                // rotated the device. Clearing local pairing state lets
+                // the next iteration mint a fresh pair code and emit a
+                // beacon so the operator can re-claim the device. Log
+                // only a key prefix so journalctl never carries the
+                // full bearer.
+                let key_prefix = if api_key.len() >= 13 {
+                    // `ados_` + 8 chars
+                    &api_key[..13]
+                } else {
+                    api_key
+                };
+                let url = format!(
+                    "{}/agent/status",
+                    config.convex_url.trim_end_matches('/')
+                );
+                tracing::warn!(
+                    url = %url,
+                    key_prefix = %format!("{}...", key_prefix),
+                    "cloud relay rejected api_key (401/403); clearing local \
+                     pairing state and falling back to pairing beacon"
+                );
+                if let Err(e) = pairing_store.unpair() {
+                    tracing::warn!(
+                        error = %e,
+                        "failed to clear pairing state after 401/403; \
+                         next iteration will retry"
+                    );
+                }
+                // Treat this as a recoverable handoff, not a network
+                // failure: zero the counter so the next beacon goes
+                // out on the unpaired-base interval rather than an
+                // exponentially-stretched delay.
+                *consecutive_failures = 0;
+            }
             Err(e) => {
-                consecutive_failures = consecutive_failures.saturating_add(1);
+                *consecutive_failures = consecutive_failures.saturating_add(1);
                 tracing::warn!(
                     error = %e,
-                    consecutive_failures,
-                    "cloud heartbeat / beacon failed"
+                    consecutive_failures = *consecutive_failures,
+                    "cloud heartbeat failed"
                 );
             }
         }
-        let delay = if consecutive_failures == 0 {
-            base_interval
-        } else {
-            let exp = consecutive_failures.min(8);
-            let scaled = base_interval.saturating_mul(1u32 << exp.min(8));
-            scaled.min(max_interval)
+    } else {
+        // Mint a code on the first beacon if one isn't set yet so the
+        // operator has something to type into Mission Control.
+        let code = match pairing_state.pairing_code {
+            Some(ref c) if !c.is_empty() => c.clone(),
+            _ => match pairing_store.get_or_create_code() {
+                Ok(c) => {
+                    // Pair code is a pre-auth bearer; logging the live
+                    // value at INFO would persist it into journalctl /
+                    // syslog. Log only the length so the operator can
+                    // confirm a code was minted without leaking it.
+                    tracing::info!(code_length = c.len(), "pairing code minted");
+                    c
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "could not mint pairing code; sending empty beacon");
+                    String::new()
+                }
+            },
         };
-        tokio::time::sleep(delay).await;
+        match send_pairing_beacon(client, config, &code).await {
+            Ok(()) => *consecutive_failures = 0,
+            Err(e) => {
+                *consecutive_failures = consecutive_failures.saturating_add(1);
+                tracing::warn!(
+                    error = %e,
+                    consecutive_failures = *consecutive_failures,
+                    "cloud pairing beacon failed"
+                );
+            }
+        }
     }
+
+    let delay = if *consecutive_failures == 0 {
+        base_interval
+    } else {
+        let exp = (*consecutive_failures).min(8);
+        let scaled = base_interval.saturating_mul(1u32 << exp.min(8));
+        scaled.min(max_interval)
+    };
+    tokio::time::sleep(delay).await;
 }
 
 async fn send_pairing_beacon(
@@ -490,7 +626,7 @@ async fn send_heartbeat(
     config: &CloudConfig,
     api_key: &str,
     started_at: Instant,
-) -> Result<(), CloudError> {
+) -> Result<HeartbeatOutcome, CloudError> {
     let url = format!("{}/agent/status", config.convex_url.trim_end_matches('/'));
     let body = build_heartbeat_body(config, started_at);
     let response = client
@@ -499,8 +635,17 @@ async fn send_heartbeat(
         .json(&body)
         .send()
         .await?;
-    tracing::debug!(status = %response.status(), "heartbeat sent");
-    Ok(())
+    let status = response.status();
+    tracing::debug!(status = %status, "heartbeat sent");
+    if status == reqwest::StatusCode::UNAUTHORIZED
+        || status == reqwest::StatusCode::FORBIDDEN
+    {
+        return Ok(HeartbeatOutcome::Unauthorized);
+    }
+    // Any other non-2xx becomes a CloudError::Http so the loop counts
+    // it as a transient failure and applies exponential backoff.
+    response.error_for_status()?;
+    Ok(HeartbeatOutcome::Ok)
 }
 
 /// Builds the heartbeat JSON body emitted to `/agent/status`.
@@ -684,5 +829,205 @@ mod tests {
             CloudError::Config(msg) => assert!(msg.contains("device_id")),
             _ => panic!("expected Config error, got {:?}", err),
         }
+    }
+
+    #[test]
+    fn convex_url_with_bad_scheme_is_rejected() {
+        // file:// (or any non-http(s) scheme) must be hard-rejected at
+        // spawn time. An operator-supplied agent.yaml that points at
+        // the local filesystem is a config bug we catch loudly rather
+        // than letting reqwest fail noisily on every iteration.
+        let bad = CloudConfig {
+            device_id: "test-device".into(),
+            mqtt_broker: String::new(),
+            mqtt_port: 1883,
+            mqtt_use_tls: false,
+            convex_url: "file:///tmp/foo".into(),
+            pairing_path: PathBuf::from("/etc/ados/pairing.json"),
+            agent_meta: None,
+        };
+        let (tx, _rx) = broadcast::channel(8);
+        let err = spawn_cloud_client(bad, tx, None)
+            .expect_err("file:// scheme should be rejected");
+        match err {
+            CloudError::Config(msg) => assert!(msg.contains("convex_url")),
+            _ => panic!("expected Config error, got {:?}", err),
+        }
+    }
+
+    #[test]
+    fn convex_url_http_is_accepted_with_warning() {
+        // http:// (without TLS) must still spawn — the operator may be
+        // running a local relay for dev work — but a WARN should be
+        // logged. We don't assert the log line here (tracing capture
+        // adds dependency weight); we only assert the spawn succeeds
+        // and the unencrypted scheme is not treated as a hard error.
+        let cfg = CloudConfig {
+            device_id: "test-device".into(),
+            mqtt_broker: String::new(),
+            mqtt_port: 1883,
+            mqtt_use_tls: false,
+            convex_url: "http://localhost:3210".into(),
+            pairing_path: PathBuf::from("/etc/ados/pairing.json"),
+            agent_meta: None,
+        };
+        let (tx, _rx) = broadcast::channel(8);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _guard = runtime.enter();
+        spawn_cloud_client(cfg, tx, None)
+            .expect("http:// scheme should be accepted (with warning)");
+    }
+
+    #[tokio::test]
+    async fn heartbeat_401_unpairs_local_state() {
+        // Reproduces the operator-facing failure the audit gate flagged:
+        // the cloud relay returns 401 (api_key revoked / device removed
+        // from Mission Control) and the agent had been silently
+        // hammering /agent/status forever. The fix clears local
+        // pairing state so the next loop iteration falls back to the
+        // beacon flow.
+        use ados_setup::pairing::{PairingState, PairingStore};
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let mock = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/agent/status"))
+            .respond_with(ResponseTemplate::new(401))
+            .mount(&mock)
+            .await;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let pairing_path = tmp.path().join("pairing.json");
+        let store = PairingStore::new(&pairing_path);
+        // Simulate a previously-paired device.
+        let initial = PairingState {
+            paired: true,
+            api_key: Some("ados_revoked-key-fixture-value".into()),
+            owner_id: Some("user_test".into()),
+            ..Default::default()
+        };
+        store.save(&initial).unwrap();
+        assert!(store.load().unwrap().is_paired(), "fixture is paired");
+
+        let config = CloudConfig {
+            device_id: "test-device".into(),
+            mqtt_broker: String::new(),
+            mqtt_port: 1883,
+            mqtt_use_tls: false,
+            convex_url: mock.uri(),
+            pairing_path: pairing_path.clone(),
+            agent_meta: None,
+        };
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(2))
+            .build()
+            .unwrap();
+        let mut consecutive_failures = 0u32;
+        // Drive a single tick. The 5s base sleep at the tail is the
+        // post-success interval; we stop the test before it elapses
+        // by using a short timeout — the heartbeat itself completes
+        // synchronously against the mock and the unpair() call lands
+        // before the sleep starts.
+        let _ = tokio::time::timeout(
+            Duration::from_millis(500),
+            run_http_tick(
+                &client,
+                &config,
+                &store,
+                Instant::now(),
+                &mut consecutive_failures,
+                Duration::from_secs(300),
+            ),
+        )
+        .await;
+
+        // The 401 path clears local pairing state so the next loop
+        // iteration falls back to the unpaired beacon.
+        let after = store.load().unwrap();
+        assert!(
+            !after.is_paired(),
+            "401 response should have unpaired the local state"
+        );
+        assert_eq!(after.api_key, None, "api_key cleared on 401");
+        // The unauthorized branch is a recoverable handoff, not a
+        // network failure: the failure counter stays at zero so the
+        // next beacon goes out promptly.
+        assert_eq!(
+            consecutive_failures, 0,
+            "401 should NOT increment consecutive_failures"
+        );
+    }
+
+    #[tokio::test]
+    async fn heartbeat_500_increments_failure_counter() {
+        // Counterpoint to the 401 test: a generic 5xx must bubble as a
+        // network failure so the exponential backoff kicks in. Without
+        // this assertion, a single switch from `error_for_status()` to
+        // a more permissive shape could silently kill the backoff
+        // path.
+        use ados_setup::pairing::{PairingState, PairingStore};
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let mock = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/agent/status"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&mock)
+            .await;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let pairing_path = tmp.path().join("pairing.json");
+        let store = PairingStore::new(&pairing_path);
+        let initial = PairingState {
+            paired: true,
+            api_key: Some("ados_valid-key-but-relay-down".into()),
+            owner_id: Some("user_test".into()),
+            ..Default::default()
+        };
+        store.save(&initial).unwrap();
+
+        let config = CloudConfig {
+            device_id: "test-device".into(),
+            mqtt_broker: String::new(),
+            mqtt_port: 1883,
+            mqtt_use_tls: false,
+            convex_url: mock.uri(),
+            pairing_path: pairing_path.clone(),
+            agent_meta: None,
+        };
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(2))
+            .build()
+            .unwrap();
+        let mut consecutive_failures = 0u32;
+        let _ = tokio::time::timeout(
+            Duration::from_millis(500),
+            run_http_tick(
+                &client,
+                &config,
+                &store,
+                Instant::now(),
+                &mut consecutive_failures,
+                Duration::from_secs(300),
+            ),
+        )
+        .await;
+
+        // Pairing state must NOT be cleared on a 5xx — the api_key
+        // is still valid; the relay is just down.
+        let after = store.load().unwrap();
+        assert!(
+            after.is_paired(),
+            "500 response must not clear local pairing state"
+        );
+        assert_eq!(
+            consecutive_failures, 1,
+            "500 should increment consecutive_failures"
+        );
     }
 }

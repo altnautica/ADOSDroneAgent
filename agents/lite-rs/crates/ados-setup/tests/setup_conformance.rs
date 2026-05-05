@@ -19,9 +19,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use ados_setup::{
-    setup_router,
+    setup_router, setup_router_with_origin_check,
     state::{PersistedState, StateStore},
-    SetupState,
+    OriginAllowlist, SetupState,
 };
 use axum::body::{Body, to_bytes};
 use axum::http::{Method, Request, StatusCode};
@@ -516,4 +516,122 @@ async fn route_count_matches_setup_api_yaml() {
 #[allow(dead_code)]
 fn _unused_path_marker() -> PathBuf {
     PathBuf::from("/")
+}
+
+// ---------------------------------------------------------------------------
+// Origin gate (defense-in-depth on POST / PUT / PATCH / DELETE)
+// ---------------------------------------------------------------------------
+
+async fn json_response_gated(
+    state: Arc<SetupState>,
+    allowlist: Arc<OriginAllowlist>,
+    method: Method,
+    path: &str,
+    origin: Option<&str>,
+    body: Option<Value>,
+) -> (StatusCode, Value) {
+    let router = setup_router_with_origin_check(state, allowlist);
+    let mut builder = Request::builder().method(method).uri(path);
+    if let Some(o) = origin {
+        builder = builder.header("origin", o);
+    }
+    let request = match body {
+        Some(b) => builder
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&b).unwrap()))
+            .unwrap(),
+        None => builder.body(Body::empty()).unwrap(),
+    };
+    let response = router.oneshot(request).await.unwrap();
+    let status = response.status();
+    let bytes = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+    let value: Value = if bytes.is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null)
+    };
+    (status, value)
+}
+
+#[tokio::test]
+async fn origin_gate_allows_post_without_origin_header() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = fresh_state(&dir);
+    let allowlist =
+        Arc::new(OriginAllowlist::new("0.0.0.0", 8080, "conformance-001"));
+    let (status, body) = json_response_gated(
+        state,
+        allowlist,
+        Method::POST,
+        "/api/v1/setup/profile",
+        None,
+        Some(json!({"profile": "drone"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["ok"], true);
+}
+
+#[tokio::test]
+async fn origin_gate_rejects_post_with_foreign_origin() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = fresh_state(&dir);
+    let allowlist =
+        Arc::new(OriginAllowlist::new("0.0.0.0", 8080, "conformance-001"));
+    let (status, body) = json_response_gated(
+        state,
+        allowlist,
+        Method::POST,
+        "/api/v1/setup/profile",
+        Some("http://evil.example"),
+        Some(json!({"profile": "drone"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(body["ok"], false);
+    assert!(body["error"]
+        .as_str()
+        .unwrap_or("")
+        .contains("origin"));
+}
+
+#[tokio::test]
+async fn origin_gate_allows_post_with_loopback_origin() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = fresh_state(&dir);
+    let allowlist =
+        Arc::new(OriginAllowlist::new("0.0.0.0", 8080, "conformance-001"));
+    let (status, body) = json_response_gated(
+        state,
+        allowlist,
+        Method::POST,
+        "/api/v1/setup/profile",
+        Some("http://localhost:8080"),
+        Some(json!({"profile": "drone"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["ok"], true);
+}
+
+#[tokio::test]
+async fn origin_gate_passes_get_through_with_any_origin() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = fresh_state(&dir);
+    let allowlist =
+        Arc::new(OriginAllowlist::new("0.0.0.0", 8080, "conformance-001"));
+    // Read methods are never gated. A GET with a foreign origin still
+    // returns 200 + the canonical status shape so dashboards / probes
+    // that fetch /status from elsewhere keep working. Cross-origin
+    // reads of public state are explicitly out of scope for this gate.
+    let (status, _body) = json_response_gated(
+        state,
+        allowlist,
+        Method::GET,
+        "/api/v1/setup/status",
+        Some("http://evil.example"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
 }

@@ -3,18 +3,27 @@
 //! `setup_router(state)` returns a Router scoped under `/api/v1/setup`
 //! that the agent main binary mounts onto its top-level Router. Every
 //! route documented in `proto/setup/setup-api.yaml` is wired here.
+//!
+//! `setup_router_with_origin_check(state, allowlist)` returns the same
+//! Router with a same-origin gate layered onto the `/api/v1/setup/*`
+//! routes only. The webapp fallback (`/`, `/setup/*`, `/app.js`,
+//! `/style.css`, etc.) is not gated since static asset serving on
+//! safe methods has nothing to mutate.
 
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use axum::{
+    middleware,
     routing::{get, post},
     Router,
 };
 
 use crate::handlers;
+use crate::origin::{check_origin, OriginAllowlist};
 use crate::state::StateStore;
 use crate::webapp;
+
+use std::path::PathBuf;
 
 /// State carried by the axum handlers. Holds the agent.yaml path, the
 /// persistent setup-state store, and a snapshot function the handlers
@@ -39,7 +48,11 @@ impl SetupState {
     }
 }
 
-pub fn setup_router(state: Arc<SetupState>) -> Router {
+/// Build the API-only router (the 11 routes documented in
+/// `proto/setup/setup-api.yaml`). Used internally by both
+/// `setup_router` and `setup_router_with_origin_check` so the route
+/// list stays single-source.
+fn api_routes() -> Router<Arc<SetupState>> {
     Router::new()
         .route("/api/v1/setup/status", get(handlers::get_status))
         .route("/api/v1/setup/profile", post(handlers::post_profile))
@@ -67,10 +80,30 @@ pub fn setup_router(state: Arc<SetupState>) -> Router {
             post(handlers::post_skip),
         )
         .route("/api/v1/setup/reset", post(handlers::post_reset))
+}
+
+pub fn setup_router(state: Arc<SetupState>) -> Router {
+    api_routes()
         // Fallback: any non-API path serves the embedded webapp. The
         // HTML uses absolute paths (/app.js, /style.css, /brand.svg)
         // so we mount the static webapp at the root, matching the
         // Python full agent's StaticFiles behavior.
+        .fallback(get(webapp::serve_request))
+        .with_state(state)
+}
+
+/// Same as `setup_router` but layers a same-origin gate on the
+/// `/api/v1/setup/*` routes. Mutating requests (POST / PUT / PATCH /
+/// DELETE) whose `Origin` header is outside the allowlist are
+/// rejected with HTTP 403. Read methods and missing-header requests
+/// pass through unchanged.
+pub fn setup_router_with_origin_check(
+    state: Arc<SetupState>,
+    allowlist: Arc<OriginAllowlist>,
+) -> Router {
+    let gated_api =
+        api_routes().layer(middleware::from_fn_with_state(allowlist, check_origin));
+    gated_api
         .fallback(get(webapp::serve_request))
         .with_state(state)
 }
