@@ -521,6 +521,32 @@ fn build_setup_status(
     // Read profile + ground_role from agent.yaml so the wizard's choice
     // is reflected here rather than always saying "drone".
     let (profile, ground_role) = read_profile_from_yaml(agent_yaml);
+
+    // Compute the 10-step lifecycle. Mirrors src/ados/setup/service.py
+    // so the wizard sidebar surfaces identical step states regardless of
+    // which agent half (Python full or Rust lite) is serving.
+    let steps = build_steps(
+        &profile,
+        paired,
+        persisted.finalized,
+        &persisted.skipped_steps,
+    );
+    let total_steps = steps.len();
+    let complete_count = steps
+        .iter()
+        .filter(|s| s.get("state").and_then(|v| v.as_str()) == Some("complete"))
+        .count();
+    let completion_percent = if total_steps == 0 {
+        0
+    } else {
+        ((complete_count as f64 / total_steps as f64) * 100.0).round() as i64
+    };
+    let next_action = steps
+        .iter()
+        .find(|s| s.get("state").and_then(|v| v.as_str()) == Some("needs_action"))
+        .and_then(|s| s.get("action_label").and_then(|v| v.as_str()).map(String::from))
+        .unwrap_or_else(|| if persisted.finalized { "ready".into() } else { next_action.into() });
+
     serde_json::json!({
         "version": env!("CARGO_PKG_VERSION"),
         "agent_version": env!("CARGO_PKG_VERSION"),
@@ -531,9 +557,9 @@ fn build_setup_status(
         "runtime_mode": "lite",
         "setup_complete": persisted.finalized || paired,
         "setup_finalized": persisted.finalized,
-        "completion_percent": if persisted.finalized { 100 } else if paired { 80 } else { 0 },
+        "completion_percent": if persisted.finalized { 100 } else { completion_percent },
         "next_action": next_action,
-        "steps": [],
+        "steps": steps,
         "skipped_steps": skipped,
         "access_urls": [],
         "network": {
@@ -591,6 +617,173 @@ fn build_setup_status(
         ],
         "telemetry": {}
     })
+}
+
+/// Build the 10-step wizard lifecycle list with per-step state.
+/// Mirrors `src/ados/setup/service.py:build_setup_status` step-derivation
+/// so consumers (the universal setup webapp + Mission Control) render
+/// the same progress sidebar regardless of which agent serves.
+///
+/// At Phase 1 lite v1 we have visibility into:
+/// - profile + ground_role (from agent.yaml)
+/// - paired (from pairing.json)
+/// - finalized + skipped_steps (from setup-state.json)
+///
+/// We do NOT yet have live mavlink heartbeat / video / remote-access
+/// state; those steps mark themselves `needs_action` (or `optional` if
+/// the operator skipped them). Once Phase E3 wires runtime state, the
+/// derivations below grow.
+fn build_steps(
+    profile: &str,
+    paired: bool,
+    finalized: bool,
+    skipped: &std::collections::BTreeSet<String>,
+) -> Vec<serde_json::Value> {
+    let is_drone = profile == "drone";
+    let is_ground = profile == "ground_station";
+    let mut out: Vec<serde_json::Value> = Vec::new();
+
+    let push = |out: &mut Vec<_>, id: &str, label: &str, state: &str, detail: &str, action_label: &str| {
+        let mut effective_state = state.to_string();
+        if skipped.contains(id) && state == "needs_action" {
+            effective_state = "optional".into();
+        }
+        out.push(serde_json::json!({
+            "id": id,
+            "label": label,
+            "state": effective_state,
+            "detail": detail,
+            "action_label": action_label,
+            "href": "",
+        }));
+    };
+
+    // welcome — always complete (the operator made it past the welcome screen).
+    push(&mut out, "welcome", "Welcome", "complete", "Onboarding starting.", "");
+
+    // profile — complete when one of {drone, ground_station} is set.
+    if is_drone || is_ground {
+        push(
+            &mut out,
+            "profile",
+            "Profile",
+            "complete",
+            &format!("{} profile selected.", if is_drone { "Drone" } else { "Ground station" }),
+            "",
+        );
+    } else {
+        push(
+            &mut out,
+            "profile",
+            "Profile",
+            "needs_action",
+            "Pick the role this device serves.",
+            "Choose profile",
+        );
+    }
+
+    // hardware_check — at lite v1 we treat it as needs_action by default;
+    // the operator runs the explicit /hardware-check route to populate it.
+    // Real per-component derivation lands in Phase E3 alongside the
+    // runtime hardware-check engine.
+    push(
+        &mut out,
+        "hardware_check",
+        "Hardware",
+        "needs_action",
+        "Verify the FC, camera, and Wi-Fi adapters.",
+        "Run hardware check",
+    );
+
+    // cloud_choice — surfaced after profile. Complete when paired (the
+    // pair flow implies the cloud_choice step landed first).
+    if paired {
+        push(&mut out, "cloud_choice", "Cloud", "complete", "Cloud relay configured.", "");
+    } else {
+        push(
+            &mut out,
+            "cloud_choice",
+            "Cloud",
+            "needs_action",
+            "Pick how this device reaches Mission Control.",
+            "Choose cloud mode",
+        );
+    }
+
+    // pair — operator-typed code claim.
+    if paired {
+        push(&mut out, "pair", "Pair", "complete", "Device claimed.", "");
+    } else {
+        push(
+            &mut out,
+            "pair",
+            "Pair",
+            "needs_action",
+            "Enter the pair code from Mission Control.",
+            "Pair device",
+        );
+    }
+
+    // mavlink — drone profile only. Live heartbeat probe lands in Phase E3.
+    if is_drone {
+        push(
+            &mut out,
+            "mavlink",
+            "Flight controller",
+            "needs_action",
+            "Connect a flight controller over USB or UART.",
+            "Connect FC",
+        );
+    }
+
+    // video — always emitted; lite v1 has no video pipeline so always
+    // needs_action until MSN-055 ships RKMPI / V4L2.
+    push(
+        &mut out,
+        "video",
+        "Video",
+        "needs_action",
+        "Video pipeline lands in the next phase.",
+        "Configure video",
+    );
+
+    // ground_receiver — ground_station profile only.
+    if is_ground {
+        push(
+            &mut out,
+            "ground_receiver",
+            "Ground receiver",
+            "needs_action",
+            "Configure WFB-ng receiver dongle.",
+            "Configure receiver",
+        );
+    }
+
+    // remote_access — always optional unless explicitly configured.
+    push(
+        &mut out,
+        "remote_access",
+        "Remote access",
+        "optional",
+        "Add a Cloudflare Tunnel for off-LAN access.",
+        "Configure tunnel",
+    );
+
+    // finish — complete when finalized.
+    if finalized {
+        push(&mut out, "finish", "Finish", "complete", "Setup complete.", "");
+    } else {
+        push(
+            &mut out,
+            "finish",
+            "Finish",
+            "needs_action",
+            "Confirm setup is complete.",
+            "Finish",
+        );
+    }
+
+    out
 }
 
 /// Read profile + ground_role from agent.yaml. Mirrors the helper in
