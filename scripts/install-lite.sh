@@ -210,6 +210,10 @@ extract_binary() {
     # decompressed stream on stdin via -f -).
     gzip -dc "${artifact}" | tar -x -f - -C "${workdir}"
     [ -f "${workdir}/ados-agent-lite" ] || die "extracted artifact missing ados-agent-lite binary"
+    # Buildroot rootfs (Luckfox SDK class) does not pre-create
+    # /usr/local/bin. Create the install dir if it's missing — `install`
+    # itself does not auto-mkdir parent directories on busybox.
+    install -d -m 0755 "$(dirname "${INSTALL_BIN}")"
     install -m 0755 "${workdir}/ados-agent-lite" "${INSTALL_BIN}"
     rm -rf "${workdir}"
     log "installed binary at ${INSTALL_BIN}"
