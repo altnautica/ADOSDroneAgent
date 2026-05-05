@@ -51,13 +51,42 @@ pub async fn post_profile(
 // ---------------------------------------------------------------------------
 
 pub async fn get_hardware_check(State(state): State<Arc<SetupState>>) -> Json<Value> {
-    let _ = state;
-    Json(run_hardware_check("drone", "direct"))
+    let (profile, ground_role) = read_profile_from_agent_yaml(&state.agent_yaml);
+    let status = run_hardware_check(&profile, &ground_role);
+    Json(serde_json::to_value(status).unwrap_or_else(|_| json!({})))
 }
 
 pub async fn post_hardware_check_refresh(State(state): State<Arc<SetupState>>) -> Json<Value> {
-    let _ = state;
-    Json(run_hardware_check("drone", "direct"))
+    let (profile, ground_role) = read_profile_from_agent_yaml(&state.agent_yaml);
+    let status = run_hardware_check(&profile, &ground_role);
+    Json(serde_json::to_value(status).unwrap_or_else(|_| json!({})))
+}
+
+/// Read the active profile + ground_role from agent.yaml. Defaults to
+/// "drone" / "" so the hardware-check still runs sensibly on a fresh
+/// install before the operator has confirmed a profile.
+fn read_profile_from_agent_yaml(path: &std::path::Path) -> (String, String) {
+    let raw = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(_) => return ("drone".into(), String::new()),
+    };
+    let doc: serde_yaml::Value = match serde_yaml::from_str(&raw) {
+        Ok(v) => v,
+        Err(_) => return ("drone".into(), String::new()),
+    };
+    let profile = doc
+        .get("agent")
+        .and_then(|a| a.get("profile"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("drone")
+        .to_string();
+    let role = doc
+        .get("ground_station")
+        .and_then(|g| g.get("role"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    (profile, role)
 }
 
 // ---------------------------------------------------------------------------

@@ -75,3 +75,71 @@ pub struct CloudflareVerifyResponse {
     pub target_url: Option<String>,
     pub error: Option<String>,
 }
+
+/// One row in the hardware-check step's per-component readout. Mirrors
+/// HardwareCheckItem at src/ados/setup/models.py byte-for-byte.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct HardwareCheckItem {
+    pub id: String,
+    pub label: String,
+    #[serde(default)]
+    pub required: bool,
+    pub state: String, // "ok" | "missing" | "warning" | "checking" | "unknown"
+    #[serde(default)]
+    pub detail: String,
+    #[serde(default)]
+    pub fix_hint: String,
+}
+
+impl HardwareCheckItem {
+    pub fn new(id: &str, label: &str) -> Self {
+        Self {
+            id: id.into(),
+            label: label.into(),
+            required: false,
+            state: "unknown".into(),
+            detail: String::new(),
+            fix_hint: String::new(),
+        }
+    }
+
+    pub fn required(mut self, required: bool) -> Self {
+        self.required = required;
+        self
+    }
+
+    pub fn ok(mut self, detail: impl Into<String>) -> Self {
+        self.state = "ok".into();
+        self.detail = detail.into();
+        self
+    }
+
+    pub fn missing(mut self, detail: impl Into<String>, fix_hint: impl Into<String>) -> Self {
+        self.state = "missing".into();
+        self.detail = detail.into();
+        self.fix_hint = fix_hint.into();
+        self
+    }
+
+    pub fn warning(mut self, detail: impl Into<String>, fix_hint: impl Into<String>) -> Self {
+        self.state = "warning".into();
+        self.detail = detail.into();
+        self.fix_hint = fix_hint.into();
+        self
+    }
+
+    pub fn unknown(mut self, detail: impl Into<String>) -> Self {
+        self.state = "unknown".into();
+        self.detail = detail.into();
+        self
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct HardwareCheckStatus {
+    pub profile: String,
+    #[serde(default)]
+    pub ground_role: String,
+    pub items: Vec<HardwareCheckItem>,
+    pub last_run: String,
+}
