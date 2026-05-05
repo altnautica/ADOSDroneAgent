@@ -904,6 +904,8 @@ function renderWizardStepBody(step, status, onMutate) {
       return renderVideoStepInline(status);
     case "ground_receiver":
       return renderGroundStepInline(status);
+    case "display":
+      return renderDisplayStep(status, onMutate);
     case "remote_access":
       return renderRemoteStepInline(status);
     case "pair":
@@ -2005,6 +2007,230 @@ function renderHardwareCheckStep(status, onMutate) {
     }),
   );
 }
+
+function renderDisplayStep(status, onMutate) {
+  // The display step lets the operator pick an attached SPI LCD (or
+  // explicitly skip) and triggers the install-display-overlay.sh
+  // driver via the agent's REST surface so the operator does not
+  // need to SSH in.
+  const root = el("div", { className: "page-body" });
+  const STEP = (status.steps || []).find((s) => s.id === "display") || {};
+  const variant = severityForState(STEP.state);
+
+  let options = null;       // DisplayOptionsResponse
+  let selected = null;       // selected display id, drives the Install button
+  let job = null;            // active or completed DisplayJob
+  let pollTimer = null;
+
+  const stopPolling = () => {
+    if (pollTimer) {
+      clearInterval(pollTimer);
+      pollTimer = null;
+    }
+  };
+
+  const fmtCurrent = (current) => {
+    if (!current) return null;
+    const id = current.display_id || "?";
+    if (id === "none") {
+      return el("p", { className: "muted-line" },
+        "Display step skipped — no local display attached.",
+      );
+    }
+    const bits = [];
+    if (current.controller) bits.push(current.controller);
+    if (current.resolution) bits.push(current.resolution);
+    if (current.has_touch === "true") bits.push("touch enabled");
+    if (current.rotation) bits.push(`rotation ${current.rotation}°`);
+    return el("dl", { className: "kv-grid" },
+      el("dt", {}, "Configured display"),
+      el("dd", {}, id),
+      el("dt", {}, "Specs"),
+      el("dd", {}, bits.join(" • ") || "—"),
+      el("dt", {}, "Framebuffer"),
+      el("dd", {}, current.framebuffer_path || "—"),
+      el("dt", {}, "Provisioned via"),
+      el("dd", {}, current.activated_via || current.overlay_source || "—"),
+    );
+  };
+
+  const fmtJob = (j) => {
+    if (!j) return null;
+    const tail = (j.log_tail || []).slice(-8);
+    const variantForJob =
+      j.status === "done" ? "ok"
+        : j.status === "failed" ? "err"
+        : "info";
+    return el("div", { className: "card", style: { padding: "12px", marginTop: "12px" } },
+      el("div", { className: "live-row-chips", style: { marginBottom: "8px" } },
+        chip({
+          variant: variantForJob,
+          dot: j.status !== "done" && j.status !== "failed",
+          label: `install · ${j.status}`,
+          size: "sm",
+        }),
+        j.exit_code !== null && j.exit_code !== undefined
+          ? chip({ variant: j.exit_code === 0 ? "ok" : "err", label: `exit ${j.exit_code}`, size: "sm" })
+          : null,
+      ),
+      el("pre", {
+        style: {
+          background: "var(--surface-secondary, #14161a)",
+          padding: "10px",
+          borderRadius: "6px",
+          fontSize: "11px",
+          lineHeight: "1.45",
+          margin: 0,
+          whiteSpace: "pre-wrap",
+          maxHeight: "180px",
+          overflow: "auto",
+        },
+      }, tail.join("\n") || "(no output yet)"),
+      j.status === "done"
+        ? el("p", { className: "muted-line", style: { marginTop: "10px" } },
+            "Reboot to bind the panel: ",
+            el("code", {}, "sudo reboot"),
+            ".",
+          )
+        : null,
+      j.status === "failed"
+        ? el("p", { className: "err-line", style: { marginTop: "10px" } },
+            "Install failed. Check the log above and rerun.",
+          )
+        : null,
+    );
+  };
+
+  const pickerRow = (option) => {
+    const id = `lcd-pick-${option.id}`;
+    const checked = selected === option.id;
+    const meta = [];
+    if (option.controller) meta.push(option.controller);
+    if (option.resolution) meta.push(option.resolution);
+    if (option.touch_chip) meta.push(`touch: ${option.touch_chip}`);
+    return el("label", {
+      htmlFor: id,
+      className: "live-table-row",
+      style: { cursor: "pointer", padding: "8px 12px" },
+    },
+      el("input", {
+        type: "radio",
+        name: "lcd-pick",
+        id,
+        value: option.id,
+        checked,
+        onchange: (e) => {
+          selected = e.target.value;
+          installBtn.disabled = !selected || (job && job.status === "running");
+        },
+      }),
+      el("div", { className: "live-table-name" },
+        el("span", {}, option.label),
+        meta.length ? el("span", { className: "secondary", text: meta.join(" • ") }) : null,
+      ),
+    );
+  };
+
+  const pickerContainer = el("div", { className: "live-table" });
+  const currentSlot = el("div", { className: "card-pad" });
+  const jobSlot = el("div");
+
+  const installBtn = el("button", {
+    type: "button",
+    className: "btn primary",
+    text: "Install",
+    disabled: true,
+    onclick: async () => {
+      if (!selected) return;
+      installBtn.disabled = true;
+      installBtn.textContent = "Starting…";
+      try {
+        const res = await apiFetch("/api/v1/setup/display/install", {
+          method: "POST",
+          body: JSON.stringify({ display_id: selected }),
+        });
+        if (res) {
+          job = res;
+          jobSlot.replaceChildren(fmtJob(job));
+          if (job.status !== "done" && job.status !== "failed") {
+            startPolling(job.job_id);
+          } else {
+            await onMutate();
+          }
+        }
+      } catch (err) {
+        console.error("display install failed:", err);
+        jobSlot.replaceChildren(
+          el("p", { className: "err-line" }, `Install request failed: ${err.message || err}`),
+        );
+      } finally {
+        installBtn.textContent = "Install";
+        installBtn.disabled = !selected;
+      }
+    },
+  });
+
+  const startPolling = (jobId) => {
+    stopPolling();
+    pollTimer = setInterval(async () => {
+      try {
+        const res = await apiFetch(`/api/v1/setup/display/job/${jobId}`);
+        if (!res) return;
+        job = res;
+        jobSlot.replaceChildren(fmtJob(job));
+        if (job.status === "done" || job.status === "failed") {
+          stopPolling();
+          await onMutate();
+        }
+      } catch (err) {
+        console.error("display job poll failed:", err);
+      }
+    }, 1500);
+  };
+
+  const refreshOptions = async () => {
+    options = await apiFetch("/api/v1/setup/display/options");
+    if (!options) return;
+    if (!selected && options.current && options.current.display_id) {
+      selected = options.current.display_id;
+    }
+    currentSlot.replaceChildren(fmtCurrent(options.current));
+    pickerContainer.replaceChildren(...(options.supported || []).map(pickerRow));
+    installBtn.disabled = !selected || (job && job.status === "running");
+  };
+
+  // Kick off the initial fetch. We fire it synchronously so the
+  // step appears with content right away; the wizard shell wraps
+  // this in its own poll cycle anyway.
+  refreshOptions().catch((err) => console.error("display options load failed:", err));
+
+  // Stop polling when the wizard navigates away. The next render
+  // call will replace this DOM tree, but the interval would leak
+  // otherwise.
+  if (typeof window !== "undefined") {
+    window.addEventListener("beforeunload", stopPolling, { once: true });
+  }
+
+  root.appendChild(card({
+    title: "Local display",
+    subtitle: STEP.detail || "Configure the SPI LCD attached to this ground station.",
+    severity: variant,
+    actions: [installBtn],
+    body: el("div", {},
+      currentSlot,
+      el("div", { className: "card-pad", style: { paddingTop: 0 } },
+        el("p", { className: "muted-line", style: { marginBottom: "8px" } },
+          "Pick the panel attached to the 40-pin header, or skip if no display is connected. The agent will compile or activate the right device-tree overlay and prompt you to reboot.",
+        ),
+      ),
+      pickerContainer,
+      el("div", { className: "card-pad" }, jobSlot),
+    ),
+  }));
+
+  return root;
+}
+
 
 function renderGenericStep(step, status) {
   return card({

@@ -192,7 +192,16 @@ async def trigger_display_install(request: DisplayInstallRequest) -> DisplayJob:
         raise HTTPException(status_code=400, detail="display_id is required")
 
     if request.display_id == "none":
-        display_install.write_skip_marker()
+        try:
+            display_install.write_skip_marker()
+        except PermissionError as exc:
+            raise HTTPException(
+                status_code=500,
+                detail=(
+                    "Cannot write /etc/ados/display.conf — agent must run "
+                    f"with permission to write the config dir ({exc})."
+                ),
+            ) from exc
         return DisplayJob(
             job_id="skip",
             display_id="none",
