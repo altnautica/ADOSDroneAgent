@@ -213,35 +213,52 @@ class FrameBufferRenderer:
             raise
 
     def present(self, image: "PILImage") -> None:
-        """Upscale + center the logical canvas, pack to native bpp, blit."""
+        """Blit the image to the framebuffer.
+
+        Two paths:
+
+        * If ``image.size == (actual_width, actual_height)`` the
+          image is already at native panel size — skip the upscale,
+          convert to RGB if needed, blit straight. This is the
+          dashboard renderer's path.
+        * Otherwise treat the input as the legacy 128x64 OLED
+          carousel canvas: convert to RGB, NEAREST-upscale by
+          ``self.upscale``, center on a black background of the
+          actual panel size, crop overflow.
+        """
         if self._mmap is None:
             return
-        # Upscale the 128x64 logical canvas 4x with NEAREST. Convert
-        # mode "1" mono to "RGB" before scaling so PIL's NEAREST works
-        # on a color-capable surface.
-        if image.mode != "RGB":
-            scaled_src = image.convert("RGB")
-        else:
-            scaled_src = image
-        scaled_w = self.width * self.upscale
-        scaled_h = self.height * self.upscale
-        scaled = scaled_src.resize((scaled_w, scaled_h), resample=Image.NEAREST)
 
-        # Place on the actual-size canvas, centered. If the upscaled
-        # image overflows the panel (e.g., 4x of 128 = 512 on a 480
-        # panel), crop to fit while keeping center alignment.
-        canvas = Image.new("RGB", (self.actual_width, self.actual_height), (0, 0, 0))
-        x = (self.actual_width - scaled_w) // 2
-        y = (self.actual_height - scaled_h) // 2
-        if scaled_w > self.actual_width or scaled_h > self.actual_height:
-            crop_l = max(0, -x)
-            crop_t = max(0, -y)
-            crop_r = crop_l + min(scaled_w, self.actual_width)
-            crop_b = crop_t + min(scaled_h, self.actual_height)
-            scaled = scaled.crop((crop_l, crop_t, crop_r, crop_b))
-            x = max(0, x)
-            y = max(0, y)
-        canvas.paste(scaled, (x, y))
+        if image.size == (self.actual_width, self.actual_height):
+            # Native dashboard render. No scaling, just convert mode if
+            # needed and treat the image itself as the canvas.
+            canvas = image if image.mode == "RGB" else image.convert("RGB")
+        else:
+            # Legacy upscale path for the 128x64 OLED carousel screens.
+            if image.mode != "RGB":
+                scaled_src = image.convert("RGB")
+            else:
+                scaled_src = image
+            scaled_w = self.width * self.upscale
+            scaled_h = self.height * self.upscale
+            scaled = scaled_src.resize(
+                (scaled_w, scaled_h), resample=Image.NEAREST,
+            )
+
+            canvas = Image.new(
+                "RGB", (self.actual_width, self.actual_height), (0, 0, 0),
+            )
+            x = (self.actual_width - scaled_w) // 2
+            y = (self.actual_height - scaled_h) // 2
+            if scaled_w > self.actual_width or scaled_h > self.actual_height:
+                crop_l = max(0, -x)
+                crop_t = max(0, -y)
+                crop_r = crop_l + min(scaled_w, self.actual_width)
+                crop_b = crop_t + min(scaled_h, self.actual_height)
+                scaled = scaled.crop((crop_l, crop_t, crop_r, crop_b))
+                x = max(0, x)
+                y = max(0, y)
+            canvas.paste(scaled, (x, y))
 
         if self.bpp == 16:
             buf = _pack_rgb565(canvas)

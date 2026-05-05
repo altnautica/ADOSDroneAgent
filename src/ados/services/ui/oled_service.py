@@ -61,6 +61,17 @@ from ados.services.ui.events import ButtonEventBus
 from ados.services.ui.renderers import Renderer
 from ados.services.ui.renderers.framebuffer import FrameBufferRenderer
 from ados.services.ui.touch_input import TouchInputBridge
+
+# Native-resolution dashboard renderer. Imported defensively so the
+# OLED service still starts (and falls back to the legacy 4x upscale
+# carousel) when the dashboards module fails to import for any
+# reason.
+try:
+    from ados.services.ui.dashboards.groundnode_landscape import (
+        render as render_groundnode_dashboard,
+    )
+except Exception:  # noqa: BLE001
+    render_groundnode_dashboard = None  # type: ignore[assignment]
 from ados.services.ui.screens import (
     drone as screen_drone,
     gcs as screen_gcs,
@@ -338,6 +349,10 @@ class OledService:
         # OLED. When bound, the render loop paints the same screens onto
         # this surface in addition to (or instead of) the OLED.
         self._fb_renderer: Renderer | None = None
+        # Dashboard renderer for the SPI LCD path. When bound (any
+        # truthy callable) the framebuffer paints the dashboard at
+        # native 480x320 instead of upscaling the OLED carousel.
+        self._dashboard_render = render_groundnode_dashboard
         # Optional touch-input bridge. Translates ADS7846 pen-down
         # events into synthetic ButtonEvents on the shared bus so the
         # operator can advance screens without physical buttons.
@@ -426,9 +441,35 @@ class OledService:
             )
 
     def _render_to_framebuffer(self) -> None:
-        """Paint the active screen into a 1-bit PIL canvas + present to LCD."""
+        """Paint to the SPI LCD framebuffer.
+
+        Two paths:
+
+        * Dashboard (preferred when available): pass the live state
+          dict to the native-resolution dashboard renderer and blit
+          the resulting 480x320 RGB image straight to the panel. No
+          carousel — the dashboard composes ALL critical info on one
+          screen.
+        * Legacy upscale: paint the OLED carousel screen at 128x64
+          and let the framebuffer renderer NEAREST-upscale it. This
+          path runs when the dashboard module is unavailable (older
+          agents, broken import) so the panel always shows
+          something.
+        """
         if self._fb_renderer is None:
             return
+        # Native dashboard path.
+        if self._dashboard_render is not None:
+            try:
+                img = self._dashboard_render(self._state)
+                self._fb_renderer.present(img)
+                return
+            except Exception as exc:  # noqa: BLE001
+                log.warning(
+                    "dashboard_render_failed",
+                    error=str(exc),
+                )
+                # Fall through to the carousel as a safety net.
         try:
             img = Image.new("1", (WIDTH, HEIGHT), 0)
             draw = ImageDraw.Draw(img)
