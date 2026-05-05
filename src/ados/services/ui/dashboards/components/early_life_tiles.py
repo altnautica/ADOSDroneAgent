@@ -24,6 +24,40 @@ from .status_dot import draw_dot
 from .tile import draw_tile
 
 
+def _fit_font(
+    image: Image.Image,
+    text: str,
+    family: str,
+    max_width: int,
+    max_size: int,
+    min_size: int = 9,
+) -> Any:
+    """Return the largest font in [min_size, max_size] that fits ``text`` in ``max_width``."""
+    for size in range(max_size, min_size - 1, -1):
+        font = p.font(family, size)
+        w, _ = p.text_size(image, text, font)
+        if w <= max_width:
+            return font
+    return p.font(family, min_size)
+
+
+def _truncate_to_width(
+    image: Image.Image,
+    text: str,
+    font: Any,
+    max_width: int,
+) -> str:
+    """Trim ``text`` (with an ellipsis) until it fits in ``max_width``."""
+    w, _ = p.text_size(image, text, font)
+    if w <= max_width:
+        return text
+    ellipsis = "…"
+    trimmed = text
+    while trimmed and p.text_size(image, trimmed + ellipsis, font)[0] > max_width:
+        trimmed = trimmed[:-1]
+    return (trimmed + ellipsis) if trimmed else ""
+
+
 # ──────────────────────────────────────────────────────────────────────
 # PAIR DRONE — replaces DRONE slot when no drone is paired
 # ──────────────────────────────────────────────────────────────────────
@@ -71,45 +105,39 @@ def draw_pair_drone_tile(
     )
     draw_dot(image, x + w - 70, y + 10, pulse_color, radius=3)
 
-    # Layout: QR on the left, big code + instructions on the right.
-    qr_size = bh - 8  # square; matches body height
+    # Layout: QR sized so the right-hand column is wide enough for
+    # the big pair code AND the two hint lines. Cap at 78 px so a
+    # ~115 px text column remains.
+    qr_size = min(bh - 8, 78)
     qr = render_qr(setup_url + "?pair=" + code if code else setup_url, target_px=qr_size)
     if qr is not None:
         image.paste(qr, (bx, by + 4))
-        text_x = bx + qr_size + 12
+        text_x = bx + qr_size + 10
     else:
-        # No QR lib — text-only fallback gets full width.
         text_x = bx
+    text_w = max(0, bw - (text_x - bx))
 
-    # Big pair code.
+    # Big pair code — auto-shrink so a 6-char code fits the column.
     if code:
-        code_font = p.font("mono_bold", 30)
-        cw, ch = p.text_size(image, code, code_font)
-        draw.text((text_x, by + 6), code, fill=p.TEXT_PRIMARY, font=code_font)
+        code_font = _fit_font(image, code, "mono_bold", text_w, 26, min_size=18)
+        draw.text((text_x, by + 4), code, fill=p.TEXT_PRIMARY, font=code_font)
     else:
-        # No code yet — agent still negotiating with cloud.
-        loading_font = p.font("sans_bold", 14)
+        loading_font = p.font("sans_bold", 13)
         draw.text(
-            (text_x, by + 16),
-            "waiting for pair code…",
+            (text_x, by + 14),
+            "waiting…",
             fill=p.TEXT_TERTIARY,
             font=loading_font,
         )
 
-    # Tiny one-liner under the code.
+    # Hint lines — measure-and-truncate so a long string never bleeds.
     hint_font = p.font("sans_regular", 11)
-    draw.text(
-        (text_x, by + 42),
-        "Open Mission Control →",
-        fill=p.TEXT_SECONDARY,
-        font=hint_font,
-    )
-    draw.text(
-        (text_x, by + 56),
-        '"Pair drone" → enter code',
-        fill=p.TEXT_SECONDARY,
-        font=hint_font,
-    )
+    line1 = _truncate_to_width(image, "Open Mission Control →", hint_font, text_w)
+    line2 = _truncate_to_width(image, 'Tap "Pair drone"', hint_font, text_w)
+    line3 = _truncate_to_width(image, "Enter code above", hint_font, text_w)
+    draw.text((text_x, by + 38), line1, fill=p.TEXT_SECONDARY, font=hint_font)
+    draw.text((text_x, by + 52), line2, fill=p.TEXT_SECONDARY, font=hint_font)
+    draw.text((text_x, by + 66), line3, fill=p.TEXT_SECONDARY, font=hint_font)
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -215,10 +243,11 @@ def draw_setup_wizard_tile(
     completion = state.get("completion_percent")
     next_action = state.get("next_action") or ""
 
-    # Pick the most visible URL the operator can hit. Prefer mDNS
-    # over IP; fall back to the AP IP.
+    # Pick the most visible URL the operator can hit. The agent's
+    # FastAPI server redirects "/" to the wizard SPA, so dropping the
+    # ".html" suffix is safe and saves precious horizontal pixels.
     host = network.get("mdns_host") or "groundnode"
-    url = f"http://{host}.local:8080/setup.html"
+    url = f"http://{host}.local:8080"
 
     title_right = ""
     if completion is not None:
@@ -228,28 +257,32 @@ def draw_setup_wizard_tile(
     )
     draw = ImageDraw.Draw(image)
 
-    # URL — large monospace so it's legible from across the bench.
-    url_font = p.font("mono_bold", 13)
+    # URL — biggest monospace size that fits the body width.
+    url_font = _fit_font(image, url, "mono_bold", bw, 14, min_size=10)
     draw.text((bx, by + 4), url, fill=p.TEXT_PRIMARY, font=url_font)
 
-    # Next action — what the wizard is currently waiting on.
+    # Next action — measure-and-truncate so a long string never bleeds.
     action_font = p.font("sans_bold", 12)
     label = "Next:"
     label_w, _ = p.text_size(image, label, action_font)
     draw.text((bx, by + 26), label, fill=p.TEXT_TERTIARY, font=action_font)
-    next_text = next_action[:42] + ("…" if len(next_action) > 42 else "")
+    next_avail = max(0, bw - label_w - 6)
+    next_text = _truncate_to_width(
+        image,
+        next_action or "open the URL above",
+        action_font,
+        next_avail,
+    )
     draw.text(
         (bx + label_w + 6, by + 26),
-        next_text or "open the URL above",
+        next_text,
         fill=p.TEXT_SECONDARY,
         font=action_font,
     )
 
-    # Tiny "from any device on this LAN" hint.
+    # Tiny "from any device on this LAN" hint, also safety-truncated.
     hint_font = p.font("sans_regular", 10)
-    draw.text(
-        (bx, by + 50),
-        "from any browser on this LAN",
-        fill=p.TEXT_TERTIARY,
-        font=hint_font,
+    hint = _truncate_to_width(
+        image, "from any browser on this LAN", hint_font, bw,
     )
+    draw.text((bx, by + 50), hint, fill=p.TEXT_TERTIARY, font=hint_font)
