@@ -46,7 +46,7 @@ pub fn setup_router(state: Arc<SetupState>) -> Router {
         .route("/", get(webapp::redirect_root))
         .route("/setup", get(webapp::serve_index))
         .route("/setup/", get(webapp::serve_index))
-        .route("/setup/{*path}", get(webapp::serve_asset))
+        .route("/setup/*path", get(webapp::serve_asset))
         .route("/api/v1/setup/status", get(handlers::get_status))
         .route("/api/v1/setup/profile", post(handlers::post_profile))
         .route("/api/v1/setup/hardware-check", get(handlers::get_hardware_check))
