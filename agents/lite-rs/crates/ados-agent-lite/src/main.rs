@@ -46,6 +46,14 @@ enum Command {
         json: bool,
     },
 
+    /// Persist a pair code into agent.yaml and signal the running agent
+    /// to reload. After this the cloud client switches from the unpaired
+    /// pairing-beacon flow to the paired heartbeat flow.
+    Pair {
+        /// Pair code from Mission Control "Add drone".
+        code: String,
+    },
+
     /// Print version information and exit.
     Version,
 }
@@ -157,6 +165,7 @@ async fn main() -> Result<()> {
     match cli.command.unwrap_or(Command::Run) {
         Command::Run => run(cli.config).await,
         Command::Status { json } => print_status(&cli.config, json).await,
+        Command::Pair { code } => persist_pair_code(&cli.config, &code).await,
         Command::Version => {
             println!("ados-agent-lite {}", env!("CARGO_PKG_VERSION"));
             Ok(())
@@ -266,7 +275,13 @@ async fn run(config_path: PathBuf) -> Result<()> {
         api_key: config.cloud.api_key.clone(),
     };
 
-    if !cloud_config.device_id.is_empty() && !cloud_config.mqtt_broker.is_empty() {
+    // Spawn the cloud client when we have an identity. Missing MQTT broker
+    // is handled inside the cloud client (it skips the MQTT publish loop
+    // and runs only the HTTP loop, which serves the unpaired beacon and
+    // the paired heartbeat). Missing convex_url is also tolerated — the
+    // HTTP loop logs and waits for the operator to configure it via the
+    // setup webapp or by editing agent.yaml directly.
+    if !cloud_config.device_id.is_empty() {
         let mavlink_inbound = mavlink_handles
             .as_ref()
             .map(|h| h.inbound.clone())
@@ -278,12 +293,16 @@ async fn run(config_path: PathBuf) -> Result<()> {
             tracing::warn!(error = %e, "cloud client spawn failed; running offline");
         }
     } else {
-        tracing::info!("cloud config incomplete; running offline (no mqtt, no heartbeat)");
+        tracing::info!("device_id missing; running offline (no mqtt, no heartbeat)");
     }
 
     // axum HTTP server: minimal /api/v1/setup/status stub at v0.1.
     let app_state = Arc::new(AppState {
         device_id: config.agent.device_id.clone(),
+        paired: !config.cloud.api_key.is_empty(),
+        mavlink_port: config.mavlink.port.clone(),
+        mavlink_baud: config.mavlink.baud,
+        config_path: config_path.clone(),
     });
     let app = Router::new()
         .route("/api/v1/setup/status", get(setup_status))
@@ -345,9 +364,97 @@ fn load_config(path: &std::path::Path) -> Result<AgentConfig> {
     Ok(parsed)
 }
 
+/// Persist a pair code into agent.yaml at `cloud.api_key`. Writes
+/// atomically (tempfile + rename) and signals the running service to
+/// reload by restarting the systemd / busybox / runit unit.
+async fn persist_pair_code(config_path: &std::path::Path, code: &str) -> Result<()> {
+    if code.is_empty() {
+        anyhow::bail!("pair code is empty");
+    }
+
+    // Load + mutate as a generic YAML document so we never reformat fields
+    // the operator may have edited. serde_yaml::Value preserves the rest.
+    let raw = if config_path.exists() {
+        std::fs::read_to_string(config_path)
+            .with_context(|| format!("reading {}", config_path.display()))?
+    } else {
+        String::from("{}")
+    };
+    let mut doc: serde_yaml::Value =
+        serde_yaml::from_str(&raw).with_context(|| "parsing yaml")?;
+    if !doc.is_mapping() {
+        doc = serde_yaml::Value::Mapping(Default::default());
+    }
+    let map = doc.as_mapping_mut().expect("doc is mapping");
+    let cloud_key = serde_yaml::Value::String("cloud".into());
+    let cloud = map
+        .entry(cloud_key)
+        .or_insert_with(|| serde_yaml::Value::Mapping(Default::default()));
+    if !cloud.is_mapping() {
+        *cloud = serde_yaml::Value::Mapping(Default::default());
+    }
+    let cloud_map = cloud.as_mapping_mut().expect("cloud is mapping");
+    cloud_map.insert(
+        serde_yaml::Value::String("api_key".into()),
+        serde_yaml::Value::String(code.into()),
+    );
+
+    // Write atomically: write to a tempfile in the same directory, then
+    // rename. This keeps the on-disk file either the old or the new copy
+    // even if the agent is killed mid-write.
+    let parent = config_path.parent().unwrap_or_else(|| std::path::Path::new("."));
+    std::fs::create_dir_all(parent).ok();
+    let tmp = parent.join(format!(
+        ".agent.yaml.{}.tmp",
+        std::process::id()
+    ));
+    let serialized = serde_yaml::to_string(&doc).with_context(|| "serializing yaml")?;
+    std::fs::write(&tmp, serialized).with_context(|| format!("writing {}", tmp.display()))?;
+    // 0640 — readable by root + ados group; never world-readable because
+    // the file now contains the api_key.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o640)).ok();
+    }
+    std::fs::rename(&tmp, config_path)
+        .with_context(|| format!("renaming {} -> {}", tmp.display(), config_path.display()))?;
+
+    println!("paired and config updated at {}", config_path.display());
+
+    // Best-effort: signal the running service to pick up the new config.
+    // We try systemd first, then busybox sysv-rc, then runit. If none
+    // succeed, the operator restarts manually — we still wrote the file.
+    let restart_attempts: &[(&str, &[&str])] = &[
+        ("systemctl", &["restart", "ados-agent-lite.service"]),
+        ("/etc/init.d/S99ados-agent-lite", &["restart"]),
+        ("sv", &["restart", "ados-agent-lite"]),
+    ];
+    for (program, args) in restart_attempts {
+        match std::process::Command::new(program).args(*args).status() {
+            Ok(s) if s.success() => {
+                println!("restarted service via {}", program);
+                return Ok(());
+            }
+            _ => continue,
+        }
+    }
+    println!(
+        "config saved. Restart the service to pick up the new pair code: \
+         sudo systemctl restart ados-agent-lite (systemd) or \
+         sudo /etc/init.d/S99ados-agent-lite restart (busybox)"
+    );
+    Ok(())
+}
+
 #[derive(Clone)]
 struct AppState {
     device_id: String,
+    paired: bool,
+    mavlink_port: String,
+    mavlink_baud: u32,
+    #[allow(dead_code)] // consumed by setup-rest handlers landing in B7.5
+    config_path: PathBuf,
 }
 
 async fn setup_status(
@@ -358,6 +465,7 @@ async fn setup_status(
     // field. Empty / null sub-blocks reflect the v0.1 minimum-viable
     // surface; richer values populate as the agent grows access to FC
     // state, video pipeline, and remote-access providers.
+    let next_action = if state.paired { "ready" } else { "pair" };
     Json(serde_json::json!({
         "version": env!("CARGO_PKG_VERSION"),
         "agent_version": env!("CARGO_PKG_VERSION"),
@@ -366,10 +474,10 @@ async fn setup_status(
         "profile": "drone",
         "ground_role": "",
         "runtime_mode": "lite",
-        "setup_complete": false,
-        "setup_finalized": false,
-        "completion_percent": 0,
-        "next_action": "pair",
+        "setup_complete": state.paired,
+        "setup_finalized": state.paired,
+        "completion_percent": if state.paired { 100 } else { 0 },
+        "next_action": next_action,
         "steps": [],
         "skipped_steps": [],
         "access_urls": [],
@@ -383,8 +491,8 @@ async fn setup_status(
         },
         "mavlink": {
             "connected": false,
-            "port": null,
-            "baud": null,
+            "port": state.mavlink_port,
+            "baud": state.mavlink_baud,
             "websocket_url": null,
             "public_websocket_url": null
         },
@@ -404,8 +512,8 @@ async fn setup_status(
         },
         "cloud_choice": {
             "mode": "cloud",
-            "paired": false,
-            "pair_code_required": true,
+            "paired": state.paired,
+            "pair_code_required": !state.paired,
             "backend_url": "",
             "backend_reachable": false,
             "last_checked": null
@@ -459,5 +567,73 @@ api:
         assert_eq!(parsed.cloud.mqtt_broker, "broker.example");
         assert!(!parsed.cloud.mqtt_use_tls);
         assert_eq!(parsed.api.bind, "127.0.0.1:9090");
+    }
+
+    #[tokio::test]
+    async fn persist_pair_code_writes_api_key_into_existing_yaml() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("agent.yaml");
+        std::fs::write(
+            &path,
+            r#"agent:
+  device_id: "test"
+  name: "Test"
+cloud:
+  mqtt_broker: ""
+  api_key: ""
+"#,
+        )
+        .unwrap();
+
+        persist_pair_code(&path, "ABCD1234").await.unwrap();
+
+        let raw = std::fs::read_to_string(&path).unwrap();
+        let doc: serde_yaml::Value = serde_yaml::from_str(&raw).unwrap();
+        let api_key = doc
+            .get("cloud")
+            .and_then(|c| c.get("api_key"))
+            .and_then(|k| k.as_str())
+            .unwrap();
+        assert_eq!(api_key, "ABCD1234");
+        // Other agent fields are preserved.
+        assert_eq!(
+            doc.get("agent")
+                .and_then(|a| a.get("device_id"))
+                .and_then(|v| v.as_str()),
+            Some("test")
+        );
+    }
+
+    #[tokio::test]
+    async fn persist_pair_code_creates_cloud_section_if_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("agent.yaml");
+        std::fs::write(
+            &path,
+            r#"agent:
+  device_id: "test"
+"#,
+        )
+        .unwrap();
+
+        persist_pair_code(&path, "WXYZ5678").await.unwrap();
+
+        let raw = std::fs::read_to_string(&path).unwrap();
+        let doc: serde_yaml::Value = serde_yaml::from_str(&raw).unwrap();
+        assert_eq!(
+            doc.get("cloud")
+                .and_then(|c| c.get("api_key"))
+                .and_then(|k| k.as_str()),
+            Some("WXYZ5678")
+        );
+    }
+
+    #[tokio::test]
+    async fn persist_pair_code_rejects_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("agent.yaml");
+        std::fs::write(&path, "{}").unwrap();
+        let err = persist_pair_code(&path, "").await.unwrap_err();
+        assert!(err.to_string().contains("empty"));
     }
 }

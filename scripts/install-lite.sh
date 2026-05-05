@@ -210,14 +210,15 @@ mavlink:
   baud: 115200
 
 cloud:
-  # mqtt_broker / convex_url / api_key are populated by the pairing
-  # flow. Until those values are set the agent runs offline (MAVLink
-  # router only) and the HTTPS layer emits a pairing beacon to register
-  # this device with the cloud relay.
+  # mqtt_broker is populated by the pairing flow; until paired the agent
+  # skips the MQTT publish loop. convex_url defaults to the Altnautica-
+  # hosted relay so unpaired boards can broadcast a pairing beacon out
+  # of the box. Self-hosters override this URL (and minisign-verify
+  # the install path) to point at their own relay.
   mqtt_broker: ""
   mqtt_port: 8883
   mqtt_use_tls: true
-  convex_url: ""
+  convex_url: "https://convex-site.altnautica.com"
   api_key: "${pair_code}"
 
 api:

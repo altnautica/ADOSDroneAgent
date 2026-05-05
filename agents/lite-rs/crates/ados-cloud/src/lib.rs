@@ -94,15 +94,23 @@ pub fn spawn_cloud_client(
     }
 
     // MQTT: publish inbound MAVLink frames to ados/{device_id}/mavlink/tx.
-    let mqtt_config = config.clone();
-    let mut mavlink_rx = inbound_mavlink.subscribe();
-    tokio::spawn(async move {
-        if let Err(e) = mqtt_publish_loop(mqtt_config, &mut mavlink_rx).await {
-            tracing::error!(error = %e, "mqtt publish loop exited");
-        }
-    });
+    // Skip the loop entirely when the broker is unconfigured (unpaired
+    // boot, broker URL not yet supplied by the pairing flow).
+    if !config.mqtt_broker.is_empty() {
+        let mqtt_config = config.clone();
+        let mut mavlink_rx = inbound_mavlink.subscribe();
+        tokio::spawn(async move {
+            if let Err(e) = mqtt_publish_loop(mqtt_config, &mut mavlink_rx).await {
+                tracing::error!(error = %e, "mqtt publish loop exited");
+            }
+        });
+    } else {
+        tracing::info!("mqtt_broker empty; skipping MQTT publish loop until paired");
+    }
 
     // HTTPS: heartbeat (when paired) or pairing beacon (when unpaired).
+    // Always spawned so the unpaired path keeps registering the device with
+    // the cloud relay until the operator pairs.
     let http_config = config;
     tokio::spawn(async move {
         if let Err(e) = http_loop(http_config).await {
@@ -169,6 +177,19 @@ async fn mqtt_publish_loop(
 }
 
 async fn http_loop(config: CloudConfig) -> Result<(), CloudError> {
+    // Without a relay URL we have no destination. Wait quietly and let the
+    // operator point us at the cloud relay (or future config-reload signal)
+    // rather than burning CPU on errors.
+    if config.convex_url.is_empty() {
+        tracing::info!(
+            "convex_url empty; HTTPS loop idle. Configure cloud.convex_url \
+             in agent.yaml or pair via the setup webapp"
+        );
+        loop {
+            tokio::time::sleep(Duration::from_secs(60)).await;
+        }
+    }
+
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
         .build()?;
