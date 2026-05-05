@@ -65,6 +65,10 @@ ground-station = [
     "dbus-next>=0.2.3",
     "smbus2>=0.4.3",
     "evdev>=1.6.1",
+    # Pillow is a transitive dependency of luma.oled but the agent now
+    # imports it directly for the SPI LCD framebuffer renderer, so we
+    # pin it explicitly here to keep the dependency graph stable.
+    "Pillow>=10.0.0",
 ]
 
 [project.urls]

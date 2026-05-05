@@ -53,10 +53,14 @@ import time
 from typing import Any
 
 import httpx
+from PIL import Image, ImageDraw
 
 from ados.core.config import load_config
 from ados.core.logging import configure_logging, get_logger
 from ados.services.ui.events import ButtonEventBus
+from ados.services.ui.renderers import Renderer
+from ados.services.ui.renderers.framebuffer import FrameBufferRenderer
+from ados.services.ui.touch_input import TouchInputBridge
 from ados.services.ui.screens import (
     drone as screen_drone,
     gcs as screen_gcs,
@@ -328,6 +332,16 @@ class OledService:
         self._auto_dim_enabled: bool = True
         self._brightness_active: int = CONTRAST_ACTIVE
         self._reload_requested: bool = False
+        # Optional secondary render target. Bound when /dev/fb1 carries a
+        # supported SPI LCD (e.g. ILI9486 via fbtft on Cubie A7Z + Rock
+        # 5C). Stays None on stock Pi 4B benches that only have the I2C
+        # OLED. When bound, the render loop paints the same screens onto
+        # this surface in addition to (or instead of) the OLED.
+        self._fb_renderer: Renderer | None = None
+        # Optional touch-input bridge. Translates ADS7846 pen-down
+        # events into synthetic ButtonEvents on the shared bus so the
+        # operator can advance screens without physical buttons.
+        self._touch_bridge: TouchInputBridge | None = None
         self._reload_ui_config()
 
     def _probe_device(self) -> bool:
@@ -357,6 +371,71 @@ class OledService:
                         error=str(exc),
                     )
         return False
+
+    def _probe_framebuffer(self) -> bool:
+        """Bind the SPI LCD framebuffer renderer when it is present.
+
+        Returns True if a usable framebuffer was found. The OLED can
+        still be absent in this case; the service runs as long as at
+        least one render target is bound.
+        """
+        try:
+            renderer = FrameBufferRenderer.probe()
+        except Exception as exc:  # noqa: BLE001
+            log.warning("framebuffer_probe_failed", error=str(exc))
+            return False
+        if renderer is None:
+            return False
+        self._fb_renderer = renderer
+        log.info(
+            "framebuffer_bound",
+            width=renderer.actual_width,
+            height=renderer.actual_height,
+            bpp=renderer.bpp,
+        )
+        return True
+
+    def _paint_active_screen(self, draw: Any, width: int, height: int) -> None:
+        """Dispatch the active mode/screen onto a PIL ImageDraw canvas.
+
+        Centralizes the screen-selection logic so the OLED render loop
+        and the framebuffer render loop call the same code.
+        """
+        if self._mode == "overlay" and self._overlay_module is not None:
+            overlay_state = {
+                **self._state,
+                "_overlay_state": self._overlay_state,
+            }
+            self._overlay_module.render(draw, width, height, overlay_state)
+        elif self._mode == "unset":
+            screen_mesh_unset_boot.render(draw, width, height, self._state)
+        elif self._mode == "status" and self._active_screens:
+            _, module = self._active_screens[self._screen_idx]
+            module.render(draw, width, height, self._state)
+            self._render_role_badge(draw)
+        elif self._mode == "menu":
+            screen_menu.render(
+                draw,
+                width,
+                height,
+                {
+                    "items": [n.get("label", "") for n in self._menu_items],
+                    "selected": self._menu_sel,
+                    "depth": len(self._menu_stack),
+                },
+            )
+
+    def _render_to_framebuffer(self) -> None:
+        """Paint the active screen into a 1-bit PIL canvas + present to LCD."""
+        if self._fb_renderer is None:
+            return
+        try:
+            img = Image.new("1", (WIDTH, HEIGHT), 0)
+            draw = ImageDraw.Draw(img)
+            self._paint_active_screen(draw, WIDTH, HEIGHT)
+            self._fb_renderer.present(img)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("framebuffer_render_failed", error=str(exc))
 
     def _set_contrast(self, value: int) -> None:
         if self._device is None:
@@ -765,7 +844,7 @@ class OledService:
 
     async def _render_forever(self) -> None:
         """Main draw loop. Advances status screens every AUTO_CYCLE_SECONDS."""
-        if self._device is None:
+        if self._device is None and self._fb_renderer is None:
             return
         from luma.core.render import canvas
 
@@ -813,33 +892,18 @@ class OledService:
                 self._screen_idx = (self._screen_idx + 1) % n_screens
                 last_advance = now
 
-            try:
-                with canvas(self._device) as draw:
-                    if self._mode == "overlay" and self._overlay_module is not None:
-                        overlay_state = {
-                            **self._state,
-                            "_overlay_state": self._overlay_state,
-                        }
-                        self._overlay_module.render(draw, WIDTH, HEIGHT, overlay_state)
-                    elif self._mode == "unset":
-                        screen_mesh_unset_boot.render(draw, WIDTH, HEIGHT, self._state)
-                    elif self._mode == "status" and n_screens > 0:
-                        _, module = self._active_screens[self._screen_idx]
-                        module.render(draw, WIDTH, HEIGHT, self._state)
-                        self._render_role_badge(draw)
-                    elif self._mode == "menu":
-                        screen_menu.render(
-                            draw,
-                            WIDTH,
-                            HEIGHT,
-                            {
-                                "items": [n.get("label", "") for n in self._menu_items],
-                                "selected": self._menu_sel,
-                                "depth": len(self._menu_stack),
-                            },
-                        )
-            except Exception as exc:
-                log.warning("render_failed", error=str(exc))
+            if self._device is not None:
+                try:
+                    with canvas(self._device) as draw:
+                        self._paint_active_screen(draw, WIDTH, HEIGHT)
+                except Exception as exc:
+                    log.warning("render_failed", error=str(exc))
+
+            # Mirror the same screen onto the SPI LCD when one is bound.
+            # Both surfaces can run at once on a bench rig that has both
+            # an OLED HAT and an LCD HAT plugged in; the framebuffer call
+            # is a no-op when fb_renderer is None.
+            self._render_to_framebuffer()
 
             try:
                 await asyncio.wait_for(self._stop.wait(), timeout=0.2)
@@ -847,25 +911,46 @@ class OledService:
                 continue
 
     async def run(self) -> int:
-        if not self._probe_device():
+        oled_present = self._probe_device()
+        fb_present = self._probe_framebuffer()
+        if not oled_present and not fb_present:
             log.warning(
-                "oled_not_detected",
-                msg="no SSD1306 or SH1106 found at 0x3C or 0x3D, exiting cleanly",
+                "no_display_detected",
+                msg=(
+                    "no SSD1306 / SH1106 OLED on i2c-1 and no SPI LCD "
+                    "framebuffer at /dev/fb1, exiting cleanly"
+                ),
             )
             return 0
-        log.info("oled_service_running", driver=self._driver_name)
+        log.info(
+            "oled_service_running",
+            oled=self._driver_name or None,
+            framebuffer=fb_present,
+        )
+        # When the SPI LCD is bound, the touch chip shows up as an evdev
+        # node we can listen on. Translating taps to synthetic button
+        # events gives the operator a way to advance screens on a board
+        # that has no GPIO buttons.
+        if fb_present:
+            self._touch_bridge = TouchInputBridge(self._bus)
         self._http = httpx.AsyncClient(timeout=0.9)
         tasks = [
             asyncio.create_task(self._render_forever(), name="oled_render"),
             asyncio.create_task(self._consume_buttons(), name="oled_buttons"),
             asyncio.create_task(self._poll_state_forever(), name="oled_poll"),
         ]
+        if self._touch_bridge is not None:
+            tasks.append(
+                asyncio.create_task(self._touch_bridge.run(), name="oled_touch")
+            )
         try:
             await self._stop.wait()
         finally:
             for t in tasks:
                 t.cancel()
             self._stop_pairing_poll()
+            if self._touch_bridge is not None:
+                self._touch_bridge.request_stop()
             await asyncio.gather(*tasks, return_exceptions=True)
             try:
                 if self._http is not None:
@@ -875,6 +960,11 @@ class OledService:
             try:
                 if self._device is not None:
                     self._device.cleanup()
+            except Exception:
+                pass
+            try:
+                if self._fb_renderer is not None:
+                    self._fb_renderer.cleanup()
             except Exception:
                 pass
         return 0
