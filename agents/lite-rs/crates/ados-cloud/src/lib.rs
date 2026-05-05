@@ -355,7 +355,11 @@ async fn http_loop(config: CloudConfig) -> Result<(), CloudError> {
                 Some(ref c) if !c.is_empty() => c.clone(),
                 _ => match pairing_store.get_or_create_code() {
                     Ok(c) => {
-                        tracing::info!(pairing_code = %c, "pairing code minted");
+                        // Pair code is a pre-auth bearer; logging the live
+                        // value at INFO would persist it into journalctl /
+                        // syslog. Log only the length so the operator can
+                        // confirm a code was minted without leaking it.
+                        tracing::info!(code_length = c.len(), "pairing code minted");
                         c
                     }
                     Err(e) => {
@@ -430,20 +434,22 @@ async fn send_heartbeat(
         "agentVersion": env!("CARGO_PKG_VERSION"),
         "uptimeSeconds": uptime_secs,
         "runtimeMode": "lite",
-        // Static board metadata.
+        // Static board metadata. Field names match proto/cloud/openapi.yaml
+        // and the Python full agent so the GCS fleet card renders the
+        // same shape regardless of which agent is talking.
         "boardName": meta.board_name,
-        "soc": meta.soc,
-        "arch": meta.arch,
-        "ramMb": meta.ram_mb,
+        "boardSoc": meta.soc,
+        "boardArch": meta.arch,
+        "boardRamMb": meta.ram_mb,
         // Network identity.
         "hostname": meta.hostname,
         "lastIp": meta.last_ip,
         "mdnsHost": meta.mdns_host,
-        // Live metrics.
-        "cpuPct": metrics.cpu_pct,
-        "memUsedMb": metrics.mem_used_mb,
-        "memTotalMb": metrics.mem_total_mb,
-        "socTempC": metrics.soc_temp_c,
+        // Live metrics — same keys the Python agent emits.
+        "cpuPercent": metrics.cpu_pct,
+        "memoryUsedMb": metrics.mem_used_mb,
+        "memoryTotalMb": metrics.mem_total_mb,
+        "temperature": metrics.soc_temp_c,
     });
     let response = client
         .post(&url)

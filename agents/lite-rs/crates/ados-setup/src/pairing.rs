@@ -105,20 +105,21 @@ impl PairingStore {
     }
 
     /// Apply a fresh pair code (operator typed `ados-agent-lite pair CODE`
-    /// or installed with `--pair`). Resets paired flag so the cloud relay
-    /// can re-claim cleanly.
+    /// or installed with `--pair`). Mirrors the Python `PairingManager.set_code`:
+    /// only the code + timestamp change; any prior `paired` / `api_key` /
+    /// `owner_id` is preserved so a re-paired device does not lose its
+    /// existing claim until the cloud relay confirms the new claim.
     pub fn set_code(&self, code: &str) -> Result<(), PairingError> {
         let mut state = self.load()?;
         state.pairing_code = Some(code.to_uppercase());
         state.code_created_at = Some(now_epoch());
-        state.paired = false;
-        state.api_key = None;
-        state.owner_id = None;
-        state.paired_at = None;
         self.save(&state)
     }
 
-    /// Record a successful claim from the cloud relay.
+    /// Record a successful claim from the cloud relay. Pops the pairing
+    /// code + timestamp on success so a stale code does not mislead a
+    /// future `get_or_create_code` TTL check (matches the Python
+    /// reference implementation byte-for-byte).
     pub fn claim(&self, owner_id: &str, api_key: &str) -> Result<PairingState, PairingError> {
         let mut state = self.load()?;
         if state.is_paired() {
@@ -128,6 +129,8 @@ impl PairingStore {
         state.api_key = Some(api_key.to_string());
         state.owner_id = Some(owner_id.to_string());
         state.paired_at = Some(now_epoch());
+        state.pairing_code = None;
+        state.code_created_at = None;
         self.save(&state)?;
         Ok(state)
     }
@@ -240,22 +243,40 @@ mod tests {
     }
 
     #[test]
-    fn set_code_resets_paired_flag() {
+    fn set_code_preserves_prior_claim() {
+        // Mirrors Python `core/pairing.py::set_code`: a fresh pair code
+        // does NOT clear an existing claim. The cloud relay re-claim
+        // path is what flips `paired` / `api_key`, not the local
+        // operator typing a code into the wizard.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("pairing.json");
         let store = PairingStore::new(&path);
-        // Pre-existing claimed state.
         let mut prior = PairingState::default();
         prior.paired = true;
         prior.api_key = Some("ados_old".into());
         prior.owner_id = Some("user-x".into());
         store.save(&prior).unwrap();
-        // New code arrives.
         store.set_code("xyz123").unwrap();
         let loaded = store.load().unwrap();
-        assert!(!loaded.paired);
-        assert_eq!(loaded.api_key, None);
+        assert!(loaded.paired);
+        assert_eq!(loaded.api_key.as_deref(), Some("ados_old"));
+        assert_eq!(loaded.owner_id.as_deref(), Some("user-x"));
         assert_eq!(loaded.pairing_code.as_deref(), Some("XYZ123"));
+    }
+
+    #[test]
+    fn claim_clears_pairing_code() {
+        // Match the Python reference: `claim()` pops `pairing_code` +
+        // `code_created_at` so a stale code can't mislead the next
+        // get_or_create_code TTL check.
+        let dir = tempfile::tempdir().unwrap();
+        let store = PairingStore::new(dir.path().join("pairing.json"));
+        store.set_code("AB23X4").unwrap();
+        store.claim("user-abc", "ados_secret").unwrap();
+        let loaded = store.load().unwrap();
+        assert_eq!(loaded.pairing_code, None);
+        assert_eq!(loaded.code_created_at, None);
+        assert!(loaded.is_paired());
     }
 
     #[test]

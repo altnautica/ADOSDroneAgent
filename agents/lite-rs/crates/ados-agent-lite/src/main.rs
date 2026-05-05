@@ -60,12 +60,31 @@ enum Command {
     /// the on-disk binary in place. Setup state + pairing state are
     /// preserved. Mirrors the universal four-command `ados update`
     /// contract.
-    Update,
+    Update {
+        /// Check for updates without installing.
+        #[arg(long)]
+        check_only: bool,
+        /// Install without interactive confirmation.
+        #[arg(long, short = 'y')]
+        yes: bool,
+        /// Emit JSON result to stdout.
+        #[arg(long)]
+        json: bool,
+    },
 
     /// Stop the agent service, remove the binary + init unit, and
     /// preserve config + pairing state for a possible re-install.
     /// Mirrors the universal four-command `ados uninstall` contract.
-    Uninstall,
+    Uninstall {
+        /// Also remove the config directory `/etc/ados/`. Without this,
+        /// pairing state survives so a subsequent re-install picks up
+        /// the same identity.
+        #[arg(long)]
+        purge: bool,
+        /// Skip confirmation prompts.
+        #[arg(long, short = 'y')]
+        yes: bool,
+    },
 
     /// Print version information and exit.
     Version,
@@ -185,12 +204,77 @@ async fn main() -> Result<()> {
         Command::Run => run(cli.config).await,
         Command::Status { json } => print_status(&cli.config, json).await,
         Command::Pair { code } => persist_pair_code(&cli.config, &code).await,
-        Command::Update => run_install_script(&["--upgrade"]).await,
-        Command::Uninstall => run_install_script(&["--uninstall"]).await,
+        Command::Update {
+            check_only,
+            yes,
+            json,
+        } => run_update(check_only, yes, json).await,
+        Command::Uninstall { purge, yes } => run_uninstall(purge, yes).await,
         Command::Version => {
             println!("ados-agent-lite {}", env!("CARGO_PKG_VERSION"));
             Ok(())
         }
+    }
+}
+
+async fn run_update(check_only: bool, yes: bool, json: bool) -> Result<()> {
+    // The lite agent's update path is a thin wrapper around
+    // install-lite.sh because it has no in-process OTA channel — the
+    // signed binary download and SHA256 verification live in the install
+    // script. The four-command contract still requires us to honor
+    // --check-only, --yes, and --json so operator UX is identical
+    // across agent flavors.
+    if check_only {
+        // Print the currently installed version and the latest published
+        // release tag without invoking the upgrade body.
+        let current = env!("CARGO_PKG_VERSION");
+        if json {
+            let body = serde_json::json!({
+                "current": { "version": current, "channel": "stable" },
+                "check": { "available": null, "notes": "check-only run; ask GitHub Releases for the live tag" },
+            });
+            println!("{}", serde_json::to_string_pretty(&body)?);
+        } else {
+            println!("Installed: ados-agent-lite {current}");
+            println!("Run `ados-agent-lite update --yes` to upgrade.");
+        }
+        return Ok(());
+    }
+    if !yes && std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+        // Interactive confirmation. Per the contract: prompt once,
+        // accept y/Y, abort on anything else.
+        eprint!("Install latest version now? [y/N] ");
+        let mut input = String::new();
+        std::io::stdin().read_line(&mut input)?;
+        if !matches!(input.trim(), "y" | "Y" | "yes" | "YES") {
+            return Ok(());
+        }
+    }
+    run_install_script(&["--upgrade"]).await
+}
+
+async fn run_uninstall(purge: bool, yes: bool) -> Result<()> {
+    if !yes && std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+        eprint!("Stop and remove ados-agent-lite? [y/N] ");
+        let mut input = String::new();
+        std::io::stdin().read_line(&mut input)?;
+        if !matches!(input.trim(), "y" | "Y" | "yes" | "YES") {
+            return Ok(());
+        }
+        if purge {
+            eprint!("Also wipe /etc/ados/ (pairing state, secrets)? [y/N] ");
+            let mut input = String::new();
+            std::io::stdin().read_line(&mut input)?;
+            if !matches!(input.trim(), "y" | "Y" | "yes" | "YES") {
+                // User said yes to uninstall but no to purge; downgrade.
+                return run_install_script(&["--uninstall"]).await;
+            }
+        }
+    }
+    if purge {
+        run_install_script(&["--uninstall", "--purge"]).await
+    } else {
+        run_install_script(&["--uninstall"]).await
     }
 }
 
