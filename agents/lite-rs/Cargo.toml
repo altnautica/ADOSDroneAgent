@@ -1,0 +1,64 @@
+[workspace]
+members = [
+    "crates/ados-agent-lite",
+    "crates/ados-mavlink",
+    "crates/ados-cloud",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+authors = ["Altnautica"]
+repository = "https://github.com/altnautica/ADOSDroneAgent"
+rust-version = "1.75"
+
+[workspace.dependencies]
+# Async runtime — single-thread current_thread flavor for low-RAM targets
+tokio = { version = "1", features = ["macros", "rt", "sync", "io-util", "net", "time", "signal", "process"] }
+tokio-util = "0.7"
+
+# HTTP + WebSocket
+axum = { version = "0.7", default-features = false, features = ["http1", "json", "tokio", "ws"] }
+tokio-tungstenite = "0.21"
+
+# MQTT + TLS — rustls (no openssl-sys; openssl is broken on armv7-musleabihf)
+rumqttc = { version = "0.24", default-features = false, features = ["use-rustls"] }
+rustls = { version = "0.22", default-features = false, features = ["std"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+
+# MAVLink — pure Rust, ardupilotmega dialect covers ArduPilot + Betaflight common subset
+mavlink = { version = "0.13", default-features = false, features = ["std", "ardupilotmega"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_yaml = "0.9"
+serde_json = "1"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Observability
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Errors
+anyhow = "1"
+thiserror = "1"
+
+# Time
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+
+[profile.release]
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+strip = true
+panic = "abort"
+debug = false
+incremental = false
+
+[profile.dev]
+opt-level = 0
+debug = true

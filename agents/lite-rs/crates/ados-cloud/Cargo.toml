@@ -1,0 +1,21 @@
+[package]
+name = "ados-cloud"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Cloud relay client (MQTT + HTTPS heartbeat) for the lite ADOS Drone Agent"
+
+[dependencies]
+tokio = { workspace = true }
+rumqttc = { workspace = true }
+rustls = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+chrono = { workspace = true }

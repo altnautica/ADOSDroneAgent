@@ -1,0 +1,26 @@
+[package]
+name = "ados-agent-lite"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Lightweight ADOS Drone Agent — single static binary for low-RAM SBCs"
+
+[[bin]]
+name = "ados-agent-lite"
+path = "src/main.rs"
+
+[dependencies]
+ados-mavlink = { path = "../ados-mavlink" }
+ados-cloud = { path = "../ados-cloud" }
+tokio = { workspace = true }
+axum = { workspace = true }
+clap = { workspace = true }
+serde = { workspace = true }
+serde_yaml = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
