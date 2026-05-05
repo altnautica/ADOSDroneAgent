@@ -72,21 +72,43 @@ impl StateStore {
     /// Load the persisted state. Returns `Default` when the file does not
     /// yet exist (first boot is not an error). Corrupt files are also
     /// surfaced as defaults — the next write will overwrite cleanly,
-    /// matching the Python implementation's leniency.
+    /// matching the Python implementation's leniency. The failure mode
+    /// is no longer silent: permission and read errors emit a single
+    /// `tracing::error!` with the path; corrupt JSON emits an error with
+    /// a remediation hint so an operator tailing journalctl sees why the
+    /// wizard suddenly walks them through a step they previously skipped.
     pub fn load(&self) -> Result<PersistedState, StateError> {
         if !self.path.exists() {
             return Ok(PersistedState::default());
         }
         let raw = match std::fs::read_to_string(&self.path) {
             Ok(s) => s,
-            Err(_) => return Ok(PersistedState::default()),
+            Err(e) => {
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    return Ok(PersistedState::default());
+                }
+                tracing::error!(
+                    path = %self.path.display(),
+                    error = %e,
+                    "setup state read failed; falling back to wizard defaults"
+                );
+                return Ok(PersistedState::default());
+            }
         };
         if raw.trim().is_empty() {
             return Ok(PersistedState::default());
         }
         let wire: WireState = match serde_json::from_str(&raw) {
             Ok(w) => w,
-            Err(_) => return Ok(PersistedState::default()),
+            Err(e) => {
+                tracing::error!(
+                    path = %self.path.display(),
+                    error = %e,
+                    "setup state file is corrupt; falling back to wizard defaults — \
+                     delete the file to let the wizard re-finalize cleanly"
+                );
+                return Ok(PersistedState::default());
+            }
         };
         let known: BTreeSet<&str> = KNOWN_STEP_IDS.iter().copied().collect();
         let cleaned: BTreeSet<String> = wire
@@ -292,5 +314,57 @@ mod tests {
         let loaded = store.load().unwrap();
         assert!(!loaded.finalized);
         assert!(loaded.skipped_steps.is_empty());
+    }
+
+    #[test]
+    fn corrupt_file_load_does_not_panic_on_error_formatting() {
+        // The post-K3 load path emits `tracing::error!` with the path and
+        // the parse error. A panic in that formatting code would surface
+        // here even though we don't subscribe to the tracing output. Use
+        // a payload that is parseable as a JSON value but not as the
+        // wire schema (string instead of object) to exercise the second
+        // branch.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        std::fs::write(&path, r#""not the right shape""#).unwrap();
+        let store = StateStore::new(&path);
+        let loaded = store.load().unwrap();
+        assert!(!loaded.finalized);
+        assert!(loaded.skipped_steps.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn permission_denied_resolves_to_defaults_without_panicking() {
+        // Sibling to the same-named test in pairing.rs. chmod 0 on the
+        // file must result in `Ok(default)` from `load`, not a panic and
+        // not a silently-swallowed error path. The error log is emitted
+        // via tracing.
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        std::fs::write(
+            &path,
+            r#"{"setup_finalized": true, "skipped_steps": ["video"]}"#,
+        )
+        .unwrap();
+        let mut perms = std::fs::metadata(&path).unwrap().permissions();
+        perms.set_mode(0o000);
+        std::fs::set_permissions(&path, perms).unwrap();
+        let read_attempt = std::fs::read_to_string(&path);
+        let denied = matches!(
+            read_attempt.as_ref().err().map(|e| e.kind()),
+            Some(std::io::ErrorKind::PermissionDenied)
+        );
+        let store = StateStore::new(&path);
+        let loaded = store.load().unwrap();
+        if denied {
+            assert!(!loaded.finalized);
+            assert!(loaded.skipped_steps.is_empty());
+        }
+        // Restore for tempdir cleanup.
+        let mut perms = std::fs::metadata(&path).unwrap().permissions();
+        perms.set_mode(0o644);
+        std::fs::set_permissions(&path, perms).unwrap();
     }
 }

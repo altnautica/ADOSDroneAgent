@@ -108,21 +108,44 @@ impl PairingStore {
     }
 
     /// Load. Missing or corrupt file resolves to defaults — same leniency
-    /// the Python implementation has.
+    /// the Python implementation has — but the failure mode is no longer
+    /// silent. NotFound stays quiet (first boot is not an error). Permission
+    /// or read errors emit a single `tracing::error!` with the path so an
+    /// operator tailing journalctl sees why a paired drone suddenly fell
+    /// back to unpaired beacon mode. Corrupt JSON emits an error with a
+    /// hint to delete and re-pair via the wizard.
     pub fn load(&self) -> Result<PairingState, PairingError> {
         if !self.path.exists() {
             return Ok(PairingState::default());
         }
         let raw = match std::fs::read_to_string(&self.path) {
             Ok(s) => s,
-            Err(_) => return Ok(PairingState::default()),
+            Err(e) => {
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    return Ok(PairingState::default());
+                }
+                tracing::error!(
+                    path = %self.path.display(),
+                    error = %e,
+                    "pairing state read failed; falling back to unpaired defaults"
+                );
+                return Ok(PairingState::default());
+            }
         };
         if raw.trim().is_empty() {
             return Ok(PairingState::default());
         }
         match serde_json::from_str::<PairingState>(&raw) {
             Ok(state) => Ok(state),
-            Err(_) => Ok(PairingState::default()),
+            Err(e) => {
+                tracing::error!(
+                    path = %self.path.display(),
+                    error = %e,
+                    "pairing state file is corrupt; falling back to unpaired defaults — \
+                     delete the file and re-pair via the setup wizard to recover"
+                );
+                Ok(PairingState::default())
+            }
         }
     }
 
@@ -227,6 +250,38 @@ pub fn generate_api_key() -> String {
     OsRng.fill_bytes(&mut bytes);
     let encoded = URL_SAFE_NO_PAD.encode(bytes);
     format!("ados_{encoded}")
+}
+
+/// Expected total length of `generate_api_key()` output:
+/// `"ados_"` (5) + 32 random bytes encoded as URL-safe base64 no-pad (43)
+/// = 48 chars. Exposed for `is_valid_api_key` and downstream call sites
+/// that want to budget header buffers without recomputing the math.
+pub const API_KEY_LEN: usize = 48;
+
+/// Validate that an api_key matches the byte-exact shape produced by
+/// `generate_api_key()`.
+///
+/// Checks:
+/// - starts with the literal prefix `"ados_"`
+/// - total length is exactly 48 chars
+/// - every char after the prefix is in the URL-safe base64 alphabet
+///   (`A-Za-z0-9_-`)
+///
+/// Useful as a defense-in-depth gate before the api_key reaches a
+/// network surface that would either silently choke (reqwest's
+/// `InvalidHeaderValue` on `\r\n` / `\0` / control bytes loops forever)
+/// or pass corrupted credentials to the broker. Pure shape check —
+/// does NOT confirm the cloud relay has issued this specific key.
+pub fn is_valid_api_key(key: &str) -> bool {
+    if key.len() != API_KEY_LEN {
+        return false;
+    }
+    let Some(suffix) = key.strip_prefix("ados_") else {
+        return false;
+    };
+    suffix
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
 fn now_epoch() -> f64 {
@@ -374,6 +429,45 @@ mod tests {
         assert!(!loaded.paired);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn permission_denied_resolves_to_defaults_without_panicking() {
+        // The load path should NOT silently return defaults on permission
+        // errors anymore — but it should still NOT panic. The error log is
+        // emitted via tracing, which we don't subscribe to here; this test
+        // covers the control-flow contract: chmod 0 → load returns Ok
+        // defaults, no panic, no propagation. The prior implementation
+        // would also resolve to defaults, but with no operator-visible
+        // signal. We accept that the tracing emission itself is exercised
+        // implicitly (a panic in the error formatting path would fail this).
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pairing.json");
+        std::fs::write(&path, r#"{"paired": true, "api_key": "ados_x"}"#).unwrap();
+        let mut perms = std::fs::metadata(&path).unwrap().permissions();
+        perms.set_mode(0o000);
+        std::fs::set_permissions(&path, perms).unwrap();
+        // Pre-flight: verify chmod 0 actually denies reads in this
+        // environment. Root in CI can still read 0o000 files; in that
+        // case we skip the assertion rather than emit a misleading pass.
+        let read_attempt = std::fs::read_to_string(&path);
+        let denied = matches!(
+            read_attempt.as_ref().err().map(|e| e.kind()),
+            Some(std::io::ErrorKind::PermissionDenied)
+        );
+        let store = PairingStore::new(&path);
+        let loaded = store.load().unwrap();
+        if denied {
+            // Permission was actually denied → load must fall back to defaults.
+            assert!(!loaded.paired);
+            assert_eq!(loaded.api_key, None);
+        }
+        // Restore so tempdir cleanup works.
+        let mut perms = std::fs::metadata(&path).unwrap().permissions();
+        perms.set_mode(0o600);
+        std::fs::set_permissions(&path, perms).unwrap();
+    }
+
     #[test]
     fn generate_code_returns_safe_charset_only() {
         // 100 codes, all should be 6 chars from the safe charset.
@@ -501,6 +595,58 @@ mod tests {
         assert!(rendered.contains("pairing_code: None"));
         assert!(rendered.contains("api_key: None"));
         assert!(!rendered.contains("<redacted"));
+    }
+
+    #[test]
+    fn is_valid_api_key_accepts_generator_output() {
+        // Defense-in-depth: the shape validator MUST accept the exact
+        // bytes the in-tree generator produces — anything else means
+        // a future code path will reject every freshly-claimed device.
+        for _ in 0..100 {
+            let key = generate_api_key();
+            assert!(
+                is_valid_api_key(&key),
+                "validator rejected generator output: {}",
+                key
+            );
+        }
+    }
+
+    #[test]
+    fn is_valid_api_key_rejects_bad_shapes() {
+        // Wrong prefix.
+        assert!(!is_valid_api_key("ados-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"));
+        assert!(!is_valid_api_key("nope_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"));
+        // Too short / too long.
+        assert!(!is_valid_api_key("ados_short"));
+        assert!(!is_valid_api_key(&format!("ados_{}", "A".repeat(50))));
+        // Empty.
+        assert!(!is_valid_api_key(""));
+        // Control characters that would break header construction.
+        // Length-padded to 48 so length is NOT the rejection path.
+        let with_cr = format!("ados_{}\r\n{}", "A".repeat(20), "B".repeat(21));
+        assert_eq!(with_cr.len(), 48);
+        assert!(!is_valid_api_key(&with_cr));
+        let with_nul = format!("ados_{}\0{}", "A".repeat(20), "B".repeat(22));
+        assert_eq!(with_nul.len(), 48);
+        assert!(!is_valid_api_key(&with_nul));
+        // Non-base64url char in the suffix (space).
+        let with_space = format!("ados_{} {}", "A".repeat(20), "B".repeat(22));
+        assert_eq!(with_space.len(), 48);
+        assert!(!is_valid_api_key(&with_space));
+        // Non-base64url char (=) — base64-with-padding is NOT what the
+        // generator emits.
+        let with_pad = format!("ados_{}={}", "A".repeat(20), "B".repeat(22));
+        assert_eq!(with_pad.len(), 48);
+        assert!(!is_valid_api_key(&with_pad));
+    }
+
+    #[test]
+    fn is_valid_api_key_accepts_canonical_fixture() {
+        // 32 bytes -> 43 base64url-no-pad chars; full key length 48.
+        let fixture = "ados_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+        assert_eq!(fixture.len(), API_KEY_LEN);
+        assert!(is_valid_api_key(fixture));
     }
 
     #[test]

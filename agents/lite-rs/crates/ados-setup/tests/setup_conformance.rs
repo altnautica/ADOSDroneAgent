@@ -635,3 +635,115 @@ async fn origin_gate_passes_get_through_with_any_origin() {
     .await;
     assert_eq!(status, StatusCode::OK);
 }
+
+// ---------------------------------------------------------------------------
+// Operability surface — /api/v1/health and /api/v1/diag.
+//
+// These two routes live OUTSIDE /api/v1/setup/* so the same-origin gate
+// does not apply. SREs polling from a monitoring host should not need to
+// forge an Origin header.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn health_returns_ok_with_version() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = fresh_state(&dir);
+    let (status, body) = json_response(state, Method::GET, "/api/v1/health", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["status"], "ok");
+    assert!(!body["version"].as_str().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn health_passes_through_origin_gate_without_origin_header() {
+    // The gate applies to /api/v1/setup/*. /api/v1/health must remain
+    // reachable from a monitoring host that sends no Origin header.
+    let dir = tempfile::tempdir().unwrap();
+    let state = fresh_state(&dir);
+    let allowlist =
+        Arc::new(OriginAllowlist::new("0.0.0.0", 8080, "conformance-001"));
+    let (status, body) = json_response_gated(
+        state,
+        allowlist,
+        Method::GET,
+        "/api/v1/health",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["status"], "ok");
+}
+
+#[tokio::test]
+async fn health_passes_through_origin_gate_with_foreign_origin() {
+    // Even with a foreign Origin header, /api/v1/health stays open.
+    // The gate must not extend over the operability surface.
+    let dir = tempfile::tempdir().unwrap();
+    let state = fresh_state(&dir);
+    let allowlist =
+        Arc::new(OriginAllowlist::new("0.0.0.0", 8080, "conformance-001"));
+    let (status, body) = json_response_gated(
+        state,
+        allowlist,
+        Method::GET,
+        "/api/v1/health",
+        Some("http://monitoring.example"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["status"], "ok");
+}
+
+#[tokio::test]
+async fn diag_returns_canonical_shape() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = fresh_state(&dir);
+    let (status, body) = json_response(state, Method::GET, "/api/v1/diag", None).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let obj = body.as_object().expect("diag response is a JSON object");
+    for key in &[
+        "version",
+        "uptime_seconds",
+        "device_id",
+        "paired",
+        "runtime_mode",
+        "rss_mb",
+        "mqtt",
+        "cloud_relay",
+        "mavlink",
+    ] {
+        assert!(obj.contains_key(*key), "diag missing required key: {key}");
+    }
+
+    assert_eq!(body["runtime_mode"], "lite");
+    assert_eq!(body["paired"], false);
+    assert_eq!(body["device_id"], "conformance-001");
+    // Default DiagState reports zero failures and never-published.
+    assert_eq!(body["mqtt"]["connected_recently"], false);
+    assert!(body["cloud_relay"]["last_heartbeat_at"].is_null());
+    assert_eq!(body["cloud_relay"]["consecutive_failures"], 0);
+    // No frame-rate estimator wired at v0.1.
+    assert!(body["mavlink"]["frame_rate_recent"].is_null());
+}
+
+#[tokio::test]
+async fn diag_omits_secrets() {
+    // Defense-in-depth: the diag surface must never leak pair codes,
+    // API keys, or tokens. We inspect the serialized response body for
+    // any of those literal keys.
+    let dir = tempfile::tempdir().unwrap();
+    let state = fresh_state(&dir);
+    let (status, body) = json_response(state, Method::GET, "/api/v1/diag", None).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let serialized = serde_json::to_string(&body).unwrap();
+    for forbidden in &["api_key", "pairing_code", "pair_code", "token"] {
+        assert!(
+            !serialized.contains(forbidden),
+            "diag response leaked '{forbidden}': {serialized}"
+        );
+    }
+}

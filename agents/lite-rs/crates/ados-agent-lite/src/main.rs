@@ -15,7 +15,8 @@ use std::sync::Arc;
 use ados_cloud::CloudConfig;
 use ados_mavlink::MavlinkConfig;
 use ados_setup::{
-    setup_router_with_origin_check, state::StateStore, OriginAllowlist, SetupState,
+    setup_router_with_origin_check_and_diag, state::StateStore, DiagState, OriginAllowlist,
+    SetupState,
 };
 use anyhow::{Context, Result};
 use axum::extract::DefaultBodyLimit;
@@ -98,6 +99,19 @@ enum Command {
 
     /// Print version information and exit.
     Version,
+
+    /// Validate the agent configuration file and exit. Useful before
+    /// restarting the service after editing `agent.yaml` on a live
+    /// drone. Checks YAML parse, the api.bind socket address, the
+    /// MAVLink port path, and the cloud.convex_url scheme. Exits 0 when
+    /// every check passes and 1 when any check fails.
+    Validate {
+        /// Path to the configuration file to validate. Defaults to the
+        /// top-level `--config` flag (which itself defaults to
+        /// `/etc/ados/agent.yaml`).
+        #[arg(long)]
+        config: Option<PathBuf>,
+    },
 }
 
 /// Top-level agent configuration loaded from agent.yaml.
@@ -245,7 +259,99 @@ async fn main() -> Result<()> {
             println!("ados-agent-lite {}", env!("CARGO_PKG_VERSION"));
             Ok(())
         }
+        Command::Validate { config } => {
+            let target = config.unwrap_or(cli.config);
+            let ok = run_validate_config(&target);
+            if ok {
+                Ok(())
+            } else {
+                std::process::exit(1);
+            }
+        }
     }
+}
+
+/// Validate `agent.yaml` and report results to stdout. Returns `true`
+/// when every check passed, `false` otherwise. Print is one line per
+/// check with a `[ok]` / `[fail]` prefix so the output is grep-friendly
+/// and the operator can see which check failed at a glance.
+fn run_validate_config(path: &std::path::Path) -> bool {
+    let mut ok = true;
+
+    // 1. File exists + is readable. A missing file is the most common
+    //    operator mistake (typo in the path), so we check it first and
+    //    skip the rest if absent.
+    let raw = match std::fs::read_to_string(path) {
+        Ok(s) => {
+            println!("[ok]   read {}", path.display());
+            s
+        }
+        Err(e) => {
+            println!("[fail] read {}: {}", path.display(), e);
+            return false;
+        }
+    };
+
+    // 2. YAML parses into AgentConfig.
+    let config: AgentConfig = match serde_yaml::from_str(&raw) {
+        Ok(c) => {
+            println!("[ok]   parse YAML");
+            c
+        }
+        Err(e) => {
+            println!("[fail] parse YAML: {}", e);
+            return false;
+        }
+    };
+
+    // 3. api.bind parses as a SocketAddr.
+    match config.api.bind.parse::<SocketAddr>() {
+        Ok(_) => println!("[ok]   api.bind ({})", config.api.bind),
+        Err(e) => {
+            println!("[fail] api.bind ({}): {}", config.api.bind, e);
+            ok = false;
+        }
+    }
+
+    // 4. mavlink.port exists as a filesystem device. The agent itself
+    //    opens it later — here we just confirm the path is present so a
+    //    typo does not silently fall through.
+    if config.mavlink.port.is_empty() {
+        println!("[fail] mavlink.port is empty");
+        ok = false;
+    } else if std::path::Path::new(&config.mavlink.port).exists() {
+        println!("[ok]   mavlink.port ({})", config.mavlink.port);
+    } else {
+        println!(
+            "[fail] mavlink.port ({}): no such device",
+            config.mavlink.port
+        );
+        ok = false;
+    }
+
+    // 5. cloud.convex_url scheme — empty is allowed (offline mode), but
+    //    when set it must be http:// or https://. Operators sometimes
+    //    paste the host without the scheme; surface that early.
+    if config.cloud.convex_url.is_empty() {
+        println!("[ok]   cloud.convex_url (unset; offline mode)");
+    } else if config.cloud.convex_url.starts_with("http://")
+        || config.cloud.convex_url.starts_with("https://")
+    {
+        println!("[ok]   cloud.convex_url ({})", config.cloud.convex_url);
+    } else {
+        println!(
+            "[fail] cloud.convex_url ({}): must start with http:// or https://",
+            config.cloud.convex_url
+        );
+        ok = false;
+    }
+
+    if ok {
+        println!("validation passed");
+    } else {
+        println!("validation failed");
+    }
+    ok
 }
 
 async fn run_update(
@@ -434,7 +540,16 @@ async fn run_install_script(args: &[&str], expected_sha256: Option<&str>) -> Res
     // Execute the script body via `sh <path> <args>`. We deliberately do
     // NOT use the curl-pipe pattern any more — the script lives on disk,
     // so we get the same execution semantics with a verifiable artifact.
-    let mut command = PCommand::new("sh");
+    //
+    // Defense-in-depth: resolve `sh` to an absolute path so a subverted
+    // `$PATH` cannot redirect to (e.g.) `/tmp/bin/sh`. The lite agent
+    // runs as root on Linux SBCs; `/bin/sh` is universally present. We
+    // also try a couple of fallback locations for unusual rootfs layouts
+    // before giving up rather than letting `Command::new("sh")` apply
+    // PATH-search semantics.
+    let sh_path = resolve_sh_binary()
+        .context("no sh interpreter found at /bin/sh, /usr/bin/sh, or /system/bin/sh")?;
+    let mut command = PCommand::new(sh_path);
     command.arg(&script_path).args(args);
     let status = command
         .status()
@@ -714,7 +829,19 @@ async fn run(config_path: PathBuf) -> Result<()> {
                 );
                 // The old field stored what was effectively a pair code;
                 // we treat it as one and let the cloud relay re-claim.
-                let _ = store.set_code(&config.cloud.api_key);
+                match store.set_code(&config.cloud.api_key) {
+                    Ok(_) => tracing::info!(
+                        path = %pairing_path.display(),
+                        "migrated legacy cloud.api_key to pairing.json"
+                    ),
+                    Err(e) => tracing::warn!(
+                        error = %e,
+                        path = %pairing_path.display(),
+                        "legacy cloud.api_key migration failed; pairing.json may be \
+                         unwritable (disk full, permission denied, or read-only mount) — \
+                         the agent will continue with the unpaired beacon"
+                    ),
+                }
             }
         }
     }
@@ -820,11 +947,22 @@ async fn run(config_path: PathBuf) -> Result<()> {
         "setup origin allowlist configured"
     );
 
-    let app = setup_router_with_origin_check(setup_state, origin_allowlist)
-        // Cap request bodies at 64 KiB. The setup surface accepts no
-        // large payloads today; this is defense-in-depth for the POST
-        // handlers.
-        .layer(DefaultBodyLimit::max(64 * 1024));
+    // Diagnostic state shared across the HTTP handlers and any future
+    // cloud / MAVLink task that wants to record counters. v0.1 only the
+    // diag handler reads it; future phases will hand clones to the
+    // cloud relay and MAVLink router so `mqtt.connected_recently`,
+    // `cloud_relay.last_heartbeat_at`, and consecutive-failure counts
+    // reflect live state. Today the snapshot reports the seeded values
+    // (defaults) which matches the spec's "placeholder fields are
+    // acceptable" allowance.
+    let diag_state = DiagState::shared();
+
+    let app =
+        setup_router_with_origin_check_and_diag(setup_state, origin_allowlist, diag_state.clone())
+            // Cap request bodies at 64 KiB. The setup surface accepts no
+            // large payloads today; this is defense-in-depth for the POST
+            // handlers.
+            .layer(DefaultBodyLimit::max(64 * 1024));
     let listener = tokio::net::TcpListener::bind(&bind_addr)
         .await
         .with_context(|| format!("binding HTTP server on {}", bind_addr))?;
@@ -1353,12 +1491,20 @@ fn sys_hostname() -> String {
 /// We avoid the `nix` crate to keep the dep tree lean — `getifaddrs`
 /// would be cleaner but for v1 reading sysfs + /proc/net/fib_trie is
 /// pragmatic.
+///
+/// Defense-in-depth: `ip` is resolved via an absolute-path allowlist
+/// (`/usr/sbin/ip`, `/sbin/ip`, `/usr/bin/ip`) so a subverted `$PATH`
+/// cannot redirect to a hostile binary. Returns an empty Vec if none of
+/// the allowed paths exist rather than falling back to PATH-search
+/// semantics.
 fn sys_local_ips() -> Vec<String> {
-    // Easiest path that works on both Linux and macOS: shell out to
-    // `hostname -I` (Linux) or `ipconfig getifaddr en0` (macOS) — but
-    // those have different surfaces. Go with `ip -4 -o addr` which
-    // exists on every Linux Buildroot rootfs.
-    let out = std::process::Command::new("ip")
+    // Shell out to `ip -4 -o addr show scope global` which exists on
+    // every Linux Buildroot rootfs. Resolve the binary via the
+    // absolute-path allowlist first so `$PATH` cannot redirect this.
+    let Some(ip_bin) = resolve_ip_binary() else {
+        return Vec::new();
+    };
+    let out = std::process::Command::new(ip_bin)
         .args(["-o", "-4", "addr", "show", "scope", "global"])
         .output();
     let mut ips = Vec::new();
@@ -1378,6 +1524,36 @@ fn sys_local_ips() -> Vec<String> {
     ips
 }
 
+/// Resolve the `sh` interpreter to an absolute path so the script-runner
+/// is immune to `$PATH` injection. Tries `/bin/sh` first (universally
+/// present on Linux SBCs), then `/usr/bin/sh`, then `/system/bin/sh`
+/// (Android-derived rootfs). Returns the first path that exists, or
+/// None if none do.
+fn resolve_sh_binary() -> Option<&'static str> {
+    const CANDIDATES: &[&str] = &["/bin/sh", "/usr/bin/sh", "/system/bin/sh"];
+    for candidate in CANDIDATES {
+        if std::path::Path::new(candidate).exists() {
+            return Some(*candidate);
+        }
+    }
+    None
+}
+
+/// Resolve `ip` to an absolute path. Tries `/usr/sbin/ip` (modern
+/// Buildroot), `/sbin/ip` (Debian/legacy), `/usr/bin/ip` (some
+/// distros). Returns the first path that exists, or None — the caller
+/// should treat None as "no local-IP enumeration this tick" rather than
+/// fall back to `$PATH` search.
+fn resolve_ip_binary() -> Option<&'static str> {
+    const CANDIDATES: &[&str] = &["/usr/sbin/ip", "/sbin/ip", "/usr/bin/ip"];
+    for candidate in CANDIDATES {
+        if std::path::Path::new(candidate).exists() {
+            return Some(*candidate);
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1390,6 +1566,37 @@ mod tests {
         assert_eq!(parsed.cloud.mqtt_port, 8883);
         assert!(parsed.cloud.mqtt_use_tls);
         assert_eq!(parsed.api.bind, "127.0.0.1:8080");
+    }
+
+    #[test]
+    fn resolve_sh_binary_returns_absolute_path() {
+        // /bin/sh is universally present on Linux + macOS dev hosts.
+        // The resolver must never return a relative path or None on
+        // a system that obviously has it. Catches a future refactor
+        // that flips candidate ordering or drops the canonical path.
+        let resolved = resolve_sh_binary().expect(
+            "expected /bin/sh, /usr/bin/sh, or /system/bin/sh to exist on this host",
+        );
+        assert!(resolved.starts_with('/'), "sh path must be absolute");
+        assert!(
+            std::path::Path::new(resolved).exists(),
+            "resolved path {resolved} must exist"
+        );
+    }
+
+    #[test]
+    fn resolve_ip_binary_returns_absolute_path_or_none() {
+        // The resolver must NEVER return a relative path. Either an
+        // absolute path that exists, or None when the rootfs is
+        // missing `ip` entirely. macOS dev hosts may legitimately
+        // return None — `iproute2` is Linux-only.
+        if let Some(path) = resolve_ip_binary() {
+            assert!(path.starts_with('/'), "ip path must be absolute");
+            assert!(
+                std::path::Path::new(path).exists(),
+                "resolved path {path} must exist"
+            );
+        }
     }
 
     #[test]
@@ -1519,5 +1726,66 @@ cloud:
             target.exists(),
             "disarmed TempfileGuard removed file on Drop"
         );
+    }
+
+    #[test]
+    fn validate_config_rejects_missing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("nope.yaml");
+        assert!(!run_validate_config(&missing));
+    }
+
+    #[test]
+    fn validate_config_rejects_bad_bind() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("agent.yaml");
+        // /tmp exists on every Unix host so the mavlink.port check
+        // passes; we want only the bad bind to fail validation.
+        std::fs::write(
+            &path,
+            "agent:\n  device_id: \"x\"\nmavlink:\n  port: \"/tmp\"\napi:\n  bind: \"not a socket addr\"\n",
+        )
+        .unwrap();
+        assert!(!run_validate_config(&path));
+    }
+
+    #[test]
+    fn validate_config_rejects_missing_mavlink_port() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("agent.yaml");
+        std::fs::write(
+            &path,
+            "agent:\n  device_id: \"x\"\nmavlink:\n  port: \"/dev/definitely-not-a-real-tty-zzz\"\napi:\n  bind: \"127.0.0.1:8080\"\n",
+        )
+        .unwrap();
+        assert!(!run_validate_config(&path));
+    }
+
+    #[test]
+    fn validate_config_rejects_bad_convex_url_scheme() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("agent.yaml");
+        std::fs::write(
+            &path,
+            "agent:\n  device_id: \"x\"\nmavlink:\n  port: \"/tmp\"\ncloud:\n  convex_url: \"relay.example\"\napi:\n  bind: \"127.0.0.1:8080\"\n",
+        )
+        .unwrap();
+        assert!(!run_validate_config(&path));
+    }
+
+    #[test]
+    fn validate_config_passes_well_formed_file() {
+        // /tmp is a directory, not a tty, but Path::exists() returns
+        // true for it which is what the validator checks. Production
+        // ttys live at paths like /dev/ttyACM0 which the agent itself
+        // opens at runtime; the validator stays cheap.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("agent.yaml");
+        std::fs::write(
+            &path,
+            "agent:\n  device_id: \"x\"\nmavlink:\n  port: \"/tmp\"\ncloud:\n  convex_url: \"https://relay.example\"\napi:\n  bind: \"127.0.0.1:8080\"\n",
+        )
+        .unwrap();
+        assert!(run_validate_config(&path));
     }
 }

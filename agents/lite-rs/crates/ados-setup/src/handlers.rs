@@ -8,7 +8,7 @@
 use std::sync::Arc;
 
 use axum::{
-    extract::{Path as AxumPath, State, WebSocketUpgrade},
+    extract::{Extension, Path as AxumPath, State, WebSocketUpgrade},
     http::StatusCode,
     response::{IntoResponse, Json, Response},
 };
@@ -16,6 +16,7 @@ use serde_json::{json, Value};
 
 use crate::cloud::apply_cloud_choice;
 use crate::cloudflare::{install_cloudflare_token, redact_log_line, verify_tunnel_async};
+use crate::diag::{now_unix_seconds, read_rss_mb, DiagState};
 use crate::hardware::run_hardware_check;
 use crate::models::{
     CloudChoiceRequest, CloudflareTokenRequest, ProfileChoiceRequest, SetupActionResult,
@@ -419,6 +420,130 @@ pub async fn post_reset(State(state): State<Arc<SetupState>>) -> Response {
         return action_err(&format!("could not reset state: {e}"));
     }
     Json(state.snapshot_status().await).into_response()
+}
+
+// ---------------------------------------------------------------------------
+// Health + Diag (operability surface, outside the /api/v1/setup/* gate)
+// ---------------------------------------------------------------------------
+
+/// Liveness probe. Returns `200 OK` with `{"status": "ok", "version": ...}`
+/// when the HTTP server is responsive. The lite agent at v0.1 has no live
+/// FC heartbeat probe, so the body never reports `degraded`; future
+/// phases that wire FC connectivity tracking can flip this to a 503 with
+/// a `reasons` array.
+///
+/// Intentionally outside the same-origin gate so a monitoring agent on a
+/// neighbouring host can hit the endpoint without forging an `Origin`
+/// header. It is also free of any operator-controlled mutation surface.
+pub async fn get_health() -> Json<Value> {
+    Json(json!({
+        "status": "ok",
+        "version": env!("CARGO_PKG_VERSION"),
+    }))
+}
+
+/// Diagnostic dump for deep operator debugging. Wider than `/health`:
+/// surfaces uptime, runtime mode, identity, and best-effort live counters
+/// for the cloud relay + MAVLink router. Fields the agent does not yet
+/// track (`mavlink.frame_rate_recent`) appear as `null` so a future phase
+/// can populate them without breaking consumers.
+///
+/// Never includes secrets — pair codes, API keys, and Cloudflare tokens
+/// are deliberately omitted from this surface.
+pub async fn get_diag(
+    State(state): State<Arc<SetupState>>,
+    Extension(diag): Extension<Arc<DiagState>>,
+) -> Json<Value> {
+    let yaml = read_diag_yaml(&state.agent_yaml);
+    let paired = crate::pairing::PairingStore::new(&yaml.pairing_path)
+        .load()
+        .map(|p| p.is_paired())
+        .unwrap_or(false);
+
+    let now = now_unix_seconds();
+    let cloud = diag.cloud_snapshot();
+
+    Json(json!({
+        "version": env!("CARGO_PKG_VERSION"),
+        "uptime_seconds": diag.uptime_seconds(),
+        "device_id": yaml.device_id,
+        "paired": paired,
+        "runtime_mode": "lite",
+        "rss_mb": read_rss_mb(),
+        "mqtt": {
+            "broker": yaml.mqtt_broker,
+            "connected_recently": diag.mqtt_connected_recently(now),
+        },
+        "cloud_relay": {
+            "convex_url": yaml.convex_url,
+            "last_heartbeat_at": cloud.last_heartbeat_at,
+            "consecutive_failures": cloud.consecutive_failures,
+        },
+        "mavlink": {
+            "port": yaml.mavlink_port,
+            "frame_rate_recent": Value::Null,
+        },
+    }))
+}
+
+/// Subset of agent.yaml fields the diag surface needs. Mirrors the
+/// `read_yaml_view` helper in the agent binary but lives here so the
+/// handler is self-contained and the binary does not have to thread a
+/// closure through the SetupState.
+struct DiagYaml {
+    device_id: String,
+    mqtt_broker: String,
+    convex_url: String,
+    mavlink_port: String,
+    pairing_path: std::path::PathBuf,
+}
+
+fn read_diag_yaml(agent_yaml: &std::path::Path) -> DiagYaml {
+    let pairing_path = agent_yaml
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("/etc/ados"))
+        .join("pairing.json");
+    let raw = match std::fs::read_to_string(agent_yaml) {
+        Ok(s) => s,
+        Err(_) => {
+            return DiagYaml {
+                device_id: String::new(),
+                mqtt_broker: String::new(),
+                convex_url: String::new(),
+                mavlink_port: String::new(),
+                pairing_path,
+            };
+        }
+    };
+    let doc: serde_yaml::Value = match serde_yaml::from_str(&raw) {
+        Ok(v) => v,
+        Err(_) => {
+            return DiagYaml {
+                device_id: String::new(),
+                mqtt_broker: String::new(),
+                convex_url: String::new(),
+                mavlink_port: String::new(),
+                pairing_path,
+            };
+        }
+    };
+    let s = |path: &[&str]| -> String {
+        let mut cur = &doc;
+        for k in path {
+            match cur.get(k) {
+                Some(v) => cur = v,
+                None => return String::new(),
+            }
+        }
+        cur.as_str().unwrap_or("").to_string()
+    };
+    DiagYaml {
+        device_id: s(&["agent", "device_id"]),
+        mqtt_broker: s(&["cloud", "mqtt_broker"]),
+        convex_url: s(&["cloud", "convex_url"]),
+        mavlink_port: s(&["mavlink", "port"]),
+        pairing_path,
+    }
 }
 
 // ---------------------------------------------------------------------------

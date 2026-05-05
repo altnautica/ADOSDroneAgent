@@ -137,6 +137,86 @@ Live agent logs:
 | busybox sysv-rc | tail the agent's stdout (depends on how the init script redirects; typically `/var/log/ados-agent-lite.log` if redirected, otherwise visible at the console) |
 | OpenRC | `rc-service ados-agent-lite status` and the configured log target |
 
+### Diagnostic endpoints
+
+The agent exposes two read-only operability routes outside the
+`/api/v1/setup/*` surface so monitoring agents can poll them without
+forging an `Origin` header:
+
+- `GET /api/v1/health` — liveness probe. Returns `200 OK` with
+  `{"status": "ok", "version": "<crate version>"}` while the HTTP server
+  is responsive.
+- `GET /api/v1/diag` — diagnostic dump. Returns a JSON object with
+  uptime, runtime mode, identity, and best-effort live counters for the
+  cloud relay (`last_heartbeat_at`, `consecutive_failures`) and the
+  MAVLink router (`port`, `frame_rate_recent`). `rss_mb` is read from
+  `/proc/self/status` on Linux. The endpoint contains no secrets — pair
+  codes, API keys, and Cloudflare tokens are deliberately omitted.
+
+Example use:
+
+```sh
+curl -s http://localhost:8080/api/v1/health
+# {"status":"ok","version":"0.1.0"}
+
+curl -s http://localhost:8080/api/v1/diag | jq .
+```
+
+Fields the agent does not yet track surface as `null`. Scripts that
+parse the diag response should treat `null` as "not yet available"
+rather than an error.
+
+## Debugging in production
+
+The agent honors `RUST_LOG` via the standard `tracing-subscriber` env
+filter. When the default `info` level is too coarse to chase a real
+issue, raise the level on the modules you care about and leave the rest
+alone.
+
+Available modules:
+
+- `ados_agent_lite` — main binary, config load, lifecycle, signal handling
+- `ados_cloud` — MQTT relay client, heartbeat, pairing beacon
+- `ados_mavlink` — MAVLink router, FC link
+- `ados_setup` — setup webapp, REST handlers, pairing state, Cloudflare orchestration
+
+Available levels: `error`, `warn`, `info`, `debug`, `trace`.
+
+Default when `RUST_LOG` is unset: `info`. The boot-configuration log
+line that prints the resolved config snapshot at startup is also at
+`info`, so it stays visible without any extra flags.
+
+One-off invocation (interactive debug):
+
+```sh
+sudo RUST_LOG=ados_cloud=debug,ados_mavlink=trace ados-agent-lite run
+```
+
+Persistent on systemd — append to the unit's `[Service]` block via a
+drop-in:
+
+```sh
+sudo systemctl edit ados-agent-lite
+# In the override editor:
+[Service]
+Environment=RUST_LOG=ados_cloud=debug,ados_setup=debug
+sudo systemctl restart ados-agent-lite
+```
+
+Persistent on busybox sysv-rc — set the env var before the agent
+launches in the init script (typically `/etc/init.d/S99ados-agent`):
+
+```sh
+export RUST_LOG=ados_cloud=debug,ados_setup=debug
+exec /usr/local/bin/ados-agent-lite run >>/var/log/ados-agent-lite.log 2>&1
+```
+
+`debug` and `trace` are much chattier than `info`. On low-RAM SBCs like
+Luckfox Pico Zero a sustained `trace` filter on a hot module
+(`ados_mavlink=trace`) noticeably increases CPU and log I/O. Use them
+to diagnose, then revert. For day-to-day operation, leave `RUST_LOG`
+unset and rely on the default `info` stream.
+
 ## Upgrade
 
 In-place upgrade, preserving config + pairing state:

@@ -24,6 +24,7 @@
 pub mod atomic;
 pub mod cloud;
 pub mod cloudflare;
+pub mod diag;
 pub mod handlers;
 pub mod hardware;
 pub mod models;
@@ -34,5 +35,9 @@ pub mod router;
 pub mod state;
 pub mod webapp;
 
+pub use diag::DiagState;
 pub use origin::OriginAllowlist;
-pub use router::{setup_router, setup_router_with_origin_check, SetupState};
+pub use router::{
+    setup_router, setup_router_with_diag, setup_router_with_origin_check,
+    setup_router_with_origin_check_and_diag, SetupState,
+};

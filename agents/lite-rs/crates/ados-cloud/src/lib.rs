@@ -21,7 +21,7 @@ use std::fmt;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use ados_setup::pairing::PairingStore;
+use ados_setup::pairing::{is_valid_api_key, PairingStore};
 use rumqttc::{AsyncClient, MqttOptions, QoS, Transport};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -266,11 +266,29 @@ async fn mqtt_publish_loop(
     // Read the api_key from pairing.json on connect. If the agent
     // re-pairs, the next reconnect will pick up the new key — we don't
     // need a hot-swap path because rumqttc reconnects on auth failures.
+    //
+    // Defense-in-depth: gate the credential on the byte-shape validator
+    // before passing it to rumqttc. A malformed key (control bytes,
+    // missing prefix, wrong length — say a partial write or a hand-edited
+    // pairing.json) would otherwise either flow into MQTT's CONNECT as
+    // broken creds or be silently mangled at the wire. We log a prefix
+    // (never the full bearer) and run the loop unauthenticated; the
+    // broker will close the socket and the failure will be visible.
     let pairing_store = PairingStore::new(&config.pairing_path);
     if let Ok(state) = pairing_store.load() {
         if let Some(key) = state.api_key.as_deref() {
-            if !key.is_empty() {
+            if key.is_empty() {
+                // No key set — beacon path drives pairing, not this loop.
+            } else if is_valid_api_key(key) {
                 opts.set_credentials(client_id.as_str(), key);
+            } else {
+                let key_prefix = if key.len() >= 8 { &key[..8] } else { key };
+                tracing::warn!(
+                    key_prefix = %format!("{}...", key_prefix),
+                    key_len = key.len(),
+                    "api_key shape invalid; running unauthenticated MQTT loop \
+                     (re-pair via the setup webapp or `ados-agent-lite pair`)"
+                );
             }
         }
     }
@@ -503,6 +521,35 @@ async fn run_http_tick(
 
     if is_paired {
         let api_key = pairing_state.api_key.as_deref().unwrap_or("");
+        // Defense-in-depth: shape-validate the api_key before it lands
+        // in an HTTP header. reqwest's `HeaderValue::from_str` rejects
+        // control bytes, `\r\n`, and `\0` with `InvalidHeaderValue`,
+        // which would surface as a `reqwest::Error` retried forever
+        // without ever reaching the wire. Skip the heartbeat, log a
+        // prefix-only warning, and increment consecutive_failures so
+        // the exponential backoff kicks in immediately.
+        if !is_valid_api_key(api_key) {
+            let key_prefix = if api_key.len() >= 8 {
+                &api_key[..8]
+            } else {
+                api_key
+            };
+            *consecutive_failures = consecutive_failures.saturating_add(1);
+            tracing::warn!(
+                key_prefix = %format!("{}...", key_prefix),
+                key_len = api_key.len(),
+                consecutive_failures = *consecutive_failures,
+                "api_key shape invalid; skipping heartbeat (re-pair via the \
+                 setup webapp or `ados-agent-lite pair`)"
+            );
+            let delay = {
+                let exp = (*consecutive_failures).min(8);
+                let scaled = base_interval.saturating_mul(1u32 << exp.min(8));
+                scaled.min(max_interval)
+            };
+            tokio::time::sleep(delay).await;
+            return;
+        }
         match send_heartbeat(client, config, api_key, started_at).await {
             Ok(HeartbeatOutcome::Ok) => *consecutive_failures = 0,
             Ok(HeartbeatOutcome::Unauthorized) => {
@@ -904,9 +951,15 @@ mod tests {
         let pairing_path = tmp.path().join("pairing.json");
         let store = PairingStore::new(&pairing_path);
         // Simulate a previously-paired device.
+        // Fixture api_key must pass `is_valid_api_key()`'s shape check
+        // so the heartbeat reaches the relay and we can observe the
+        // 401-response path. Real generator output: `"ados_"` (5 chars)
+        // + 43 url-safe-base64 no-pad chars = 48 total.
         let initial = PairingState {
             paired: true,
-            api_key: Some("ados_revoked-key-fixture-value".into()),
+            api_key: Some(
+                "ados_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".into(),
+            ),
             owner_id: Some("user_test".into()),
             ..Default::default()
         };
@@ -983,9 +1036,15 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let pairing_path = tmp.path().join("pairing.json");
         let store = PairingStore::new(&pairing_path);
+        // Fixture api_key must pass `is_valid_api_key()`'s shape check
+        // so the heartbeat reaches the (mocked) relay and the 5xx path
+        // is exercised end-to-end (real shape: `"ados_"` + 43 base64url
+        // no-pad chars = 48 total).
         let initial = PairingState {
             paired: true,
-            api_key: Some("ados_valid-key-but-relay-down".into()),
+            api_key: Some(
+                "ados_BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB".into(),
+            ),
             owner_id: Some("user_test".into()),
             ..Default::default()
         };
@@ -1028,6 +1087,84 @@ mod tests {
         assert_eq!(
             consecutive_failures, 1,
             "500 should increment consecutive_failures"
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_api_key_shape_skips_heartbeat_and_increments_failures() {
+        // Defense-in-depth: a malformed api_key (control bytes, wrong
+        // prefix, wrong length) must NOT reach the wire — reqwest's
+        // `HeaderValue::from_str` would otherwise either reject it
+        // with `InvalidHeaderValue` (looped forever) or pass corrupted
+        // creds. The skip path must still increment the failure
+        // counter so backoff kicks in immediately.
+        use ados_setup::pairing::{PairingState, PairingStore};
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let mock = MockServer::start().await;
+        let received = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let received_for_mock = received.clone();
+        Mock::given(method("POST"))
+            .and(path("/agent/status"))
+            .respond_with(move |_: &wiremock::Request| {
+                received_for_mock.store(true, std::sync::atomic::Ordering::SeqCst);
+                ResponseTemplate::new(200)
+            })
+            .mount(&mock)
+            .await;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let pairing_path = tmp.path().join("pairing.json");
+        let store = PairingStore::new(&pairing_path);
+        // Wrong prefix + short length — fails the shape gate.
+        let initial = PairingState {
+            paired: true,
+            api_key: Some("not_an_api_key".into()),
+            owner_id: Some("user_test".into()),
+            ..Default::default()
+        };
+        store.save(&initial).unwrap();
+
+        let config = CloudConfig {
+            device_id: "test-device".into(),
+            mqtt_broker: String::new(),
+            mqtt_port: 1883,
+            mqtt_use_tls: false,
+            convex_url: mock.uri(),
+            pairing_path: pairing_path.clone(),
+            agent_meta: None,
+        };
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(2))
+            .build()
+            .unwrap();
+        let mut consecutive_failures = 0u32;
+        let _ = tokio::time::timeout(
+            Duration::from_millis(500),
+            run_http_tick(
+                &client,
+                &config,
+                &store,
+                Instant::now(),
+                &mut consecutive_failures,
+                Duration::from_secs(300),
+            ),
+        )
+        .await;
+
+        assert!(
+            !received.load(std::sync::atomic::Ordering::SeqCst),
+            "invalid-shape api_key must NOT result in a heartbeat hitting the relay"
+        );
+        assert!(
+            store.load().unwrap().is_paired(),
+            "invalid-shape skip must NOT clear local pairing state \
+             (only a 401 from the relay does that)"
+        );
+        assert_eq!(
+            consecutive_failures, 1,
+            "invalid-shape skip should increment consecutive_failures so backoff kicks in"
         );
     }
 }

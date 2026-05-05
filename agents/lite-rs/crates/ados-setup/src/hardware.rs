@@ -432,14 +432,61 @@ struct UsbDevice {
     description: String,
 }
 
+/// Per-line cap on parsed lsusb output. A forged lsusb (subverted
+/// `$PATH`) or a vendor string with control bytes could otherwise
+/// drive unbounded memory growth in the parsing loop. 256 bytes is
+/// far above any realistic lsusb line — real entries are ~70 bytes —
+/// while still capping pathological input.
+const LSUSB_LINE_CAP: usize = 256;
+
+/// Truncate a string slice at `max_bytes` on a UTF-8 char boundary.
+/// Falls back to the original slice when it is already within budget.
+/// Used to bound parsed values from external commands so a maliciously
+/// long line cannot drive memory growth in callers that retain the
+/// resulting String.
+fn truncate_line(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
+/// Resolve `lsusb` to an absolute path so a subverted `$PATH` cannot
+/// redirect to a hostile binary that prints attacker-controlled
+/// device IDs. Tries `/usr/bin/lsusb` first (Debian / Buildroot
+/// canonical), then `/bin/lsusb` (older layouts). Returns None when
+/// neither is present — callers map that to "lsusb not available"
+/// in the hardware-check report.
+fn resolve_lsusb_binary() -> Option<&'static str> {
+    const CANDIDATES: &[&str] = &["/usr/bin/lsusb", "/bin/lsusb"];
+    for candidate in CANDIDATES {
+        if std::path::Path::new(candidate).exists() {
+            return Some(*candidate);
+        }
+    }
+    None
+}
+
 fn lsusb_devices() -> Option<Vec<UsbDevice>> {
-    let out = Command::new("lsusb").output().ok()?;
+    // Defense-in-depth: resolve via absolute-path allowlist so a
+    // hostile `$PATH` cannot pre-empt the real lsusb.
+    let lsusb_bin = resolve_lsusb_binary()?;
+    let out = Command::new(lsusb_bin).output().ok()?;
     if !out.status.success() {
         return None;
     }
     let text = String::from_utf8_lossy(&out.stdout);
     let mut devs = Vec::new();
-    for line in text.lines() {
+    for raw_line in text.lines() {
+        // Cap each line at 256 bytes BEFORE parsing so a forged lsusb
+        // (or a vendor string with control bytes) cannot drive memory
+        // growth in the loop. Real lsusb lines are ~70 bytes; 256 is
+        // a generous ceiling.
+        let line = truncate_line(raw_line, LSUSB_LINE_CAP);
         // lsusb output: "Bus 001 Device 002: ID 0bda:8812 Realtek..."
         if let Some(idx) = line.find("ID ") {
             let rest = &line[idx + 3..];
@@ -449,10 +496,16 @@ fn lsusb_devices() -> Option<Vec<UsbDevice>> {
             };
             if let Some((v, p)) = id.split_once(':') {
                 if v.len() == 4 && p.len() == 4 {
+                    // Cap the description as a second-line defense for
+                    // the unusual case where the description alone
+                    // overran the 256B line cap (it cannot, given line
+                    // truncation above, but spell it out for future
+                    // editors).
+                    let trimmed_desc = truncate_line(desc.trim(), LSUSB_LINE_CAP);
                     devs.push(UsbDevice {
                         vendor_id: v.to_string(),
                         product_id: p.to_string(),
-                        description: desc.trim().to_string(),
+                        description: trimmed_desc.to_string(),
                     });
                 }
             }
@@ -594,5 +647,41 @@ mod tests {
             .missing("nope", "plug it in");
         assert_eq!(item.state, "missing");
         assert_eq!(item.fix_hint, "plug it in");
+    }
+
+    #[test]
+    fn truncate_line_returns_short_inputs_unchanged() {
+        assert_eq!(truncate_line("hello", 256), "hello");
+        assert_eq!(truncate_line("", 256), "");
+    }
+
+    #[test]
+    fn truncate_line_caps_long_inputs() {
+        let long = "x".repeat(1024);
+        let cut = truncate_line(&long, LSUSB_LINE_CAP);
+        assert_eq!(cut.len(), LSUSB_LINE_CAP);
+    }
+
+    #[test]
+    fn truncate_line_respects_utf8_boundaries() {
+        // 4-byte UTF-8 char ('𝄞' = U+1D11E) at cap boundary — must
+        // not split mid-char or panic.
+        let s = format!("{}𝄞{}", "a".repeat(254), "b".repeat(10));
+        let cut = truncate_line(&s, 256);
+        assert!(cut.is_char_boundary(cut.len()));
+        assert!(cut.len() <= 256);
+    }
+
+    #[test]
+    fn resolve_lsusb_binary_returns_absolute_path_or_none() {
+        // Either an absolute path that exists, or None on a host
+        // without lsusb (every macOS dev box). Never a relative path.
+        if let Some(path) = resolve_lsusb_binary() {
+            assert!(path.starts_with('/'), "lsusb path must be absolute");
+            assert!(
+                std::path::Path::new(path).exists(),
+                "resolved path {path} must exist"
+            );
+        }
     }
 }

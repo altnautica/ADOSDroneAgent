@@ -87,6 +87,16 @@ pub fn install_cloudflare_token(token_or_script: &str) -> Result<(), CloudflareE
 
 fn persist_token(token: &str) -> Result<(), CloudflareError> {
     let path = token_path();
+    // Tighten the parent directory to 0o700 (owner-only rwx) BEFORE the
+    // atomic write. `create_dir_all` inside `atomic_write` would inherit
+    // the operator's umask (commonly 0o022), which leaves the directory
+    // at 0o755 — world-traversable. The token file itself is 0o600 but
+    // a 0o755 parent lets any local user `stat` the path and confirm
+    // a tunnel is provisioned. `/etc/ados/secrets/` is a secret-only
+    // directory by contract, so we lock it down here.
+    if let Some(parent) = path.parent() {
+        crate::atomic::ensure_secret_dir(parent)?;
+    }
     crate::atomic::atomic_write(&path, token.as_bytes(), 0o600)?;
     tracing::info!(path = %path.display(), "cloudflared token persisted (0600)");
     Ok(())
@@ -552,21 +562,58 @@ fn looks_like_jwt(s: &str) -> bool {
 /// Rewrite any JWT-shaped substring in a log line so cloudflared can never
 /// leak a bearer through the wizard's WS log stream. Mirrors the
 /// `if "eyJ" in text and "." in text` redaction in the Python reference.
+///
+/// Whitespace tokenization alone misses tokens that sit alongside
+/// punctuation (`token=eyJa.eyJb.eyJc`, `"token": "eyJa.eyJb.eyJc"`,
+/// `[token=eyJ...]`) because the punctuation glues onto the JWT and
+/// fails `looks_like_jwt`. We therefore split each whitespace token a
+/// second time on the common delimiters that show up in log formats:
+/// `=`, `:`, `"`, `'`, `,`. Each subtoken is checked independently and
+/// redacted in place.
 pub fn redact_log_line(line: &str) -> String {
     if !line.contains("eyJ") || !line.contains('.') {
         return line.to_string();
     }
-    // Replace each whitespace-separated word that looks like a JWT.
+    const SUBTOKEN_DELIMS: &[char] = &['=', ':', '"', '\'', ','];
     line.split_whitespace()
-        .map(|w| {
-            if looks_like_jwt(w) {
-                "(token-shaped value redacted)".to_string()
-            } else {
-                w.to_string()
-            }
-        })
+        .map(|word| redact_subtokens(word, SUBTOKEN_DELIMS))
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// Redact any JWT-shaped subtokens inside a single whitespace word,
+/// preserving the original delimiter characters so the rest of the log
+/// line stays legible (`token=[redacted-jwt]` instead of just
+/// `[redacted-jwt]`). Manual char iteration rather than a regex crate.
+fn redact_subtokens(word: &str, delims: &[char]) -> String {
+    if word.is_empty() {
+        return String::new();
+    }
+    let mut out = String::with_capacity(word.len());
+    let mut buf = String::new();
+    for ch in word.chars() {
+        if delims.contains(&ch) {
+            if !buf.is_empty() {
+                if looks_like_jwt(&buf) {
+                    out.push_str("[redacted-jwt]");
+                } else {
+                    out.push_str(&buf);
+                }
+                buf.clear();
+            }
+            out.push(ch);
+        } else {
+            buf.push(ch);
+        }
+    }
+    if !buf.is_empty() {
+        if looks_like_jwt(&buf) {
+            out.push_str("[redacted-jwt]");
+        } else {
+            out.push_str(&buf);
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -603,6 +650,49 @@ mod tests {
         let redacted = redact_log_line(line);
         assert!(!redacted.contains("eyJhbGciOi"));
         assert!(redacted.contains("redacted"));
+    }
+
+    #[test]
+    fn redact_log_line_handles_token_after_equals() {
+        // A JWT glued to a key with `=` (common in cloudflared CLI output
+        // and many env-style log lines) used to slip through whitespace
+        // tokenization because the whole `token=eyJ...` string failed
+        // `looks_like_jwt`. After the fix, the subtoken splitter catches it.
+        let line = "starting tunnel token=eyJabc1234.eyJdef5678.eyJghi9abc done";
+        let redacted = redact_log_line(line);
+        assert!(
+            !redacted.contains("eyJ"),
+            "token after `=` was not redacted: {redacted}"
+        );
+        assert!(redacted.contains("[redacted-jwt]"));
+        assert!(redacted.contains("token="));
+        assert!(redacted.contains("done"));
+    }
+
+    #[test]
+    fn redact_log_line_handles_token_in_quotes() {
+        // JSON-shaped log lines (cloudflared structured output) glue the
+        // token into `"token": "eyJ..."` — both the colon and the quote
+        // marks must split.
+        let line = r#"{"level": "info", "token": "eyJabc1234.eyJdef5678.eyJghi9abc"}"#;
+        let redacted = redact_log_line(line);
+        assert!(
+            !redacted.contains("eyJ"),
+            "token inside JSON quotes was not redacted: {redacted}"
+        );
+        assert!(redacted.contains("[redacted-jwt]"));
+        // Surrounding structure stays intact so the line is still readable.
+        assert!(redacted.contains("token"));
+        assert!(redacted.contains("info"));
+    }
+
+    #[test]
+    fn redact_log_line_handles_token_with_comma() {
+        let line = "args=[--token,eyJabc1234.eyJdef5678.eyJghi9abc,--quiet]";
+        let redacted = redact_log_line(line);
+        assert!(!redacted.contains("eyJ"));
+        assert!(redacted.contains("[redacted-jwt]"));
+        assert!(redacted.contains("--quiet"));
     }
 
     #[test]

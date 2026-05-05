@@ -16,6 +16,32 @@
 use std::io::Write;
 use std::path::Path;
 
+/// Ensure a directory exists with mode 0o700 (owner-only rwx).
+///
+/// `atomic_write` uses `std::fs::create_dir_all` which inherits the
+/// process umask — on systems where the operator's umask is 0o022 the
+/// parent directory ends up world-traversable (0o755). When the path
+/// is a secret like `/etc/ados/secrets/cloudflare-tunnel-token`, the
+/// file itself is 0o600 but the directory's o+x bit lets any local
+/// user `stat` and confirm the file exists, leaking presence metadata.
+///
+/// Call this BEFORE `atomic_write` for any path inside a secret-only
+/// directory. Idempotent: a second call is a no-op chmod when the
+/// directory is already 0o700, and creates it otherwise.
+///
+/// Unix-only behavior — on non-Unix the chmod is a no-op (the
+/// `permissions().set_mode` API is gated on `unix::fs::PermissionsExt`).
+pub fn ensure_secret_dir(parent: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(parent)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = std::fs::Permissions::from_mode(0o700);
+        std::fs::set_permissions(parent, perms)?;
+    }
+    Ok(())
+}
+
 /// Atomic-write `bytes` to `path` with the given mode (Unix; ignored on
 /// other platforms).
 ///
@@ -143,5 +169,35 @@ mod tests {
         atomic_write(&path, b"top-secret", 0o600).unwrap();
         let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "expected 0600, got 0o{:o}", mode);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_secret_dir_creates_with_0700() {
+        // Defense-in-depth: a fresh secret-only directory must be 0o700
+        // (owner-only rwx). umask-default 0o755 leaks file presence to
+        // any local user via `stat`.
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let secret = tmp.path().join("secrets");
+        ensure_secret_dir(&secret).unwrap();
+        let mode = std::fs::metadata(&secret).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700, "expected 0700, got 0o{:o}", mode);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_secret_dir_tightens_existing_dir() {
+        // Pre-existing world-traversable dir should be tightened on
+        // call. Mirrors the upgrade path where /etc/ados/secrets/
+        // already exists at 0o755 from a prior install.
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let secret = tmp.path().join("loose");
+        std::fs::create_dir(&secret).unwrap();
+        std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(0o755)).unwrap();
+        ensure_secret_dir(&secret).unwrap();
+        let mode = std::fs::metadata(&secret).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700, "expected 0700, got 0o{:o}", mode);
     }
 }

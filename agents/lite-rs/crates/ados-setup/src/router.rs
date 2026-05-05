@@ -15,9 +15,10 @@ use std::sync::Arc;
 use axum::{
     middleware,
     routing::{get, post},
-    Router,
+    Extension, Router,
 };
 
+use crate::diag::DiagState;
 use crate::handlers;
 use crate::origin::{check_origin, OriginAllowlist};
 use crate::state::StateStore;
@@ -82,14 +83,34 @@ fn api_routes() -> Router<Arc<SetupState>> {
         .route("/api/v1/setup/reset", post(handlers::post_reset))
 }
 
+/// Operability routes (`/api/v1/health`, `/api/v1/diag`) that live
+/// OUTSIDE `/api/v1/setup/*`. The same-origin gate is intentionally
+/// not applied here so monitoring agents and SREs can hit the probes
+/// from neighbouring hosts without forging an `Origin` header. Both
+/// handlers are GET and return read-only state with no secrets.
+fn operability_routes() -> Router<Arc<SetupState>> {
+    Router::new()
+        .route("/api/v1/health", get(handlers::get_health))
+        .route("/api/v1/diag", get(handlers::get_diag))
+}
+
 pub fn setup_router(state: Arc<SetupState>) -> Router {
-    api_routes()
+    setup_router_with_diag(state, DiagState::shared())
+}
+
+/// Same as `setup_router` but accepts an externally-constructed
+/// [`DiagState`] so the agent binary can also share the handle with
+/// other tasks (cloud-relay heartbeat counters, etc.).
+pub fn setup_router_with_diag(state: Arc<SetupState>, diag: Arc<DiagState>) -> Router {
+    let api = api_routes().merge(operability_routes());
+    api
         // Fallback: any non-API path serves the embedded webapp. The
         // HTML uses absolute paths (/app.js, /style.css, /brand.svg)
         // so we mount the static webapp at the root, matching the
         // Python full agent's StaticFiles behavior.
         .fallback(get(webapp::serve_request))
         .with_state(state)
+        .layer(Extension(diag))
 }
 
 /// Same as `setup_router` but layers a same-origin gate on the
@@ -97,13 +118,32 @@ pub fn setup_router(state: Arc<SetupState>) -> Router {
 /// DELETE) whose `Origin` header is outside the allowlist are
 /// rejected with HTTP 403. Read methods and missing-header requests
 /// pass through unchanged.
+///
+/// `/api/v1/health` and `/api/v1/diag` live outside the gate so
+/// monitoring agents on neighbouring hosts can hit them without
+/// forging an `Origin` header.
 pub fn setup_router_with_origin_check(
     state: Arc<SetupState>,
     allowlist: Arc<OriginAllowlist>,
 ) -> Router {
+    setup_router_with_origin_check_and_diag(state, allowlist, DiagState::shared())
+}
+
+/// Variant of [`setup_router_with_origin_check`] that lets the agent
+/// binary share its own [`DiagState`] with both the diag handler and
+/// the cloud / MAVLink tasks that update its counters.
+pub fn setup_router_with_origin_check_and_diag(
+    state: Arc<SetupState>,
+    allowlist: Arc<OriginAllowlist>,
+    diag: Arc<DiagState>,
+) -> Router {
     let gated_api =
         api_routes().layer(middleware::from_fn_with_state(allowlist, check_origin));
+    // Operability routes are merged AFTER the gate is applied so the
+    // gate does not extend over them.
     gated_api
+        .merge(operability_routes())
         .fallback(get(webapp::serve_request))
         .with_state(state)
+        .layer(Extension(diag))
 }
