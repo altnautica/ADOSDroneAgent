@@ -36,7 +36,10 @@ pub struct CloudChoiceRequest {
     pub self_hosted: Option<SelfHostedBackend>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+// Manual `Debug` impl lives in `cloud.rs` to redact the `api_key` field; a
+// future `tracing::debug!(?req)` or `tracing::error!(?config)` call must
+// never format the operator's API key into a log line.
+#[derive(Clone, Deserialize)]
 pub struct SelfHostedBackend {
     pub url: String,
     #[serde(default)]

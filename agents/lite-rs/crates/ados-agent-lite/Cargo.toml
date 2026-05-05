@@ -26,6 +26,7 @@ serde_json = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
+sha2 = "0.10"
 
 [dev-dependencies]
 tempfile = "3"

@@ -24,6 +24,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 - `cloudflared` install verifies SHA256 against the upstream-published
   `<asset>.sha256` companion file. `ADOS_CLOUDFLARED_SKIP_SHA256=1`
   bypasses for offline test environments.
+- `update` now fetches `install-lite.sh` to a tempfile, logs its SHA256
+  digest at INFO level for out-of-band verification, and accepts a
+  `--require-script-sha256 <hex>` flag for strict enforcement. Set
+  `ADOS_LITE_ALLOW_UNSIGNED=1` to bypass for offline-test scenarios.
 - WebSocket cloudflared log streamer caps sessions at 15 minutes so a
   forgotten browser tab cannot pin a `journalctl` child indefinitely.
 - `Update` and `Uninstall` CLI subcommands matching the universal

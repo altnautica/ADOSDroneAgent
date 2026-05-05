@@ -29,6 +29,27 @@ use tokio::sync::broadcast;
 
 const DEFAULT_PAIRING_PATH: &str = "/etc/ados/pairing.json";
 
+/// Per-frame ceiling on the MQTT publish call. A stalled broker (TLS
+/// handshake hang, congested upstream link, half-open socket) would
+/// otherwise let the publish future park forever while the FC keeps
+/// producing frames at ~30 Hz. After the timeout the frame is logged
+/// and dropped; the broadcast channel naturally moves on to the next
+/// one rather than queueing stale telemetry.
+const MQTT_PUBLISH_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Drop guard that aborts a spawned task synchronously when the guard
+/// is dropped. Used to tie the lifetime of the MQTT eventloop driver
+/// to the outer publish loop: if the parent task is cancelled, the
+/// inner eventloop task is cancelled with it instead of continuing
+/// to poll the broker as a zombie.
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum CloudError {
     #[error("MQTT client error: {0}")]
@@ -231,8 +252,11 @@ async fn mqtt_publish_loop(
     //   `command`       logged at INFO; v1 has no command surface
     //   `webrtc/offer`  logged at INFO; video pipeline lands separately
     //
-    // The handle is held so we can abort it when the publish loop exits,
-    // preventing zombie eventloops on agent.yaml reload.
+    // The handle is wrapped in `AbortOnDrop` so the inner task is
+    // cancelled both on a clean exit (broadcast closed) AND on an
+    // abrupt drop of the outer publish loop (parent task cancelled,
+    // agent shutdown). Without the guard the eventloop survived the
+    // outer task as a zombie until its next broker poll completed.
     let device_id_owned = config.device_id.clone();
     let topic_rx = format!("ados/{}/mavlink/rx", device_id_owned);
     let topic_command = format!("ados/{}/command", device_id_owned);
@@ -282,22 +306,44 @@ async fn mqtt_publish_loop(
         }
     });
 
+    let _eventloop_guard = AbortOnDrop(eventloop_handle);
+
     loop {
         match mavlink_rx.recv().await {
             Ok(frame) => {
-                if let Err(e) = client
-                    .publish(&topic_tx, QoS::AtMostOnce, false, frame)
-                    .await
-                {
-                    tracing::warn!(error = %e, "mqtt publish failed");
+                let frame_len = frame.len();
+                let publish_fut = client.publish(&topic_tx, QoS::AtMostOnce, false, frame);
+                match tokio::time::timeout(MQTT_PUBLISH_TIMEOUT, publish_fut).await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => {
+                        tracing::warn!(error = %e, "mqtt publish failed");
+                    }
+                    Err(_) => {
+                        // Broker stall longer than the per-frame ceiling.
+                        // Drop this frame; the broadcast channel is still
+                        // delivering, so the next iteration picks up a
+                        // fresher one rather than a backlogged stale one.
+                        tracing::warn!(
+                            broker = %config.mqtt_broker,
+                            topic = %topic_tx,
+                            bytes = frame_len,
+                            timeout_secs = MQTT_PUBLISH_TIMEOUT.as_secs(),
+                            "mqtt publish exceeded per-frame ceiling; dropping frame"
+                        );
+                    }
                 }
             }
             Err(broadcast::error::RecvError::Lagged(n)) => {
-                tracing::warn!(dropped = n, "mqtt publisher lagging behind FC frame rate");
+                tracing::warn!(
+                    dropped = n,
+                    broker = %config.mqtt_broker,
+                    topic = %topic_tx,
+                    "mqtt publisher lagging behind FC frame rate"
+                );
             }
             Err(broadcast::error::RecvError::Closed) => {
                 tracing::info!("mavlink broadcast closed; mqtt publish loop exiting");
-                eventloop_handle.abort();
+                // _eventloop_guard aborts the eventloop task on drop.
                 return Ok(());
             }
         }

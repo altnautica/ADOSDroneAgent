@@ -162,6 +162,26 @@ pub async fn ws_cloudflare_logs(ws: WebSocketUpgrade) -> Response {
     })
 }
 
+/// Absolute paths we are willing to spawn `journalctl` from. We refuse to
+/// fall back to PATH lookup so a subverted `$PATH` (operator prepended
+/// `/tmp/bin:$PATH`, attacker dropped a malicious `journalctl` there)
+/// cannot redirect the subprocess.
+const JOURNALCTL_CANDIDATES: &[&str] =
+    &["/usr/bin/journalctl", "/bin/journalctl", "/sbin/journalctl"];
+
+/// Absolute paths we are willing to spawn `tail` from. Same rationale as
+/// `JOURNALCTL_CANDIDATES`.
+const TAIL_CANDIDATES: &[&str] = &["/usr/bin/tail", "/bin/tail"];
+
+/// Return the first candidate that exists on disk, or `None` if no
+/// trusted absolute path is available.
+fn find_absolute<'a>(candidates: &'a [&'a str]) -> Option<&'a str> {
+    candidates
+        .iter()
+        .copied()
+        .find(|p| std::path::Path::new(p).exists())
+}
+
 async fn stream_cloudflared_logs(
     mut socket: axum::extract::ws::WebSocket,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -169,23 +189,23 @@ async fn stream_cloudflared_logs(
     use tokio::io::{AsyncBufReadExt, BufReader};
     use tokio::process::Command;
 
-    // Prefer journalctl when systemd is present. Use the absolute path so
-    // a subverted $PATH does not redirect us to a hostile binary, and
-    // null-redirect stderr so the child never blocks on a full kernel
-    // pipe buffer (~64 KiB) when journalctl writes warnings.
-    let journalctl_path = if std::path::Path::new("/usr/bin/journalctl").exists() {
-        "/usr/bin/journalctl"
-    } else {
-        "journalctl"
-    };
-    let tail_path = if std::path::Path::new("/usr/bin/tail").exists() {
-        "/usr/bin/tail"
-    } else if std::path::Path::new("/bin/tail").exists() {
-        "/bin/tail"
-    } else {
-        "tail"
-    };
     let mut child = if std::path::Path::new("/run/systemd/system").is_dir() {
+        // Resolve journalctl from a fixed allowlist of absolute paths;
+        // refuse to inherit `$PATH`. Also null-redirect stderr so the
+        // child never blocks on a full kernel pipe buffer (~64 KiB) when
+        // journalctl writes warnings.
+        let journalctl_path = match find_absolute(JOURNALCTL_CANDIDATES) {
+            Some(p) => p,
+            None => {
+                let _ = socket
+                    .send(Message::Text(
+                        "(journalctl not found at /usr/bin, /bin, or /sbin — cannot stream cloudflared logs)".into(),
+                    ))
+                    .await;
+                let _ = socket.close().await;
+                return Ok(());
+            }
+        };
         match Command::new(journalctl_path)
             .args([
                 "-u",
@@ -226,6 +246,20 @@ async fn stream_cloudflared_logs(
             let _ = socket.close().await;
             return Ok(());
         }
+        // Resolve tail from a fixed allowlist of absolute paths; refuse
+        // to inherit `$PATH` for the same reason as journalctl above.
+        let tail_path = match find_absolute(TAIL_CANDIDATES) {
+            Some(p) => p,
+            None => {
+                let _ = socket
+                    .send(Message::Text(
+                        "(tail not found at /usr/bin or /bin — cannot stream cloudflared logs)".into(),
+                    ))
+                    .await;
+                let _ = socket.close().await;
+                return Ok(());
+            }
+        };
         match Command::new(tail_path)
             .args(["-n", "120", "-f", log_path])
             .stdout(std::process::Stdio::piped())
@@ -369,4 +403,40 @@ fn action_err(message: &str) -> Response {
         }),
     )
         .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn find_absolute_returns_first_existing() {
+        // /usr/bin and /bin (or one of them) exists on every Unix
+        // host that runs this test; pick whichever is present.
+        let candidates: &[&str] = &["/nonexistent/foo/bar", "/usr/bin", "/bin"];
+        let found = find_absolute(candidates);
+        assert!(found == Some("/usr/bin") || found == Some("/bin"));
+    }
+
+    #[test]
+    fn find_absolute_returns_none_when_all_missing() {
+        let candidates: &[&str] = &[
+            "/nonexistent/aaa",
+            "/nonexistent/bbb",
+            "/nonexistent/ccc",
+        ];
+        assert_eq!(find_absolute(candidates), None);
+    }
+
+    #[test]
+    fn journalctl_candidates_are_absolute_paths() {
+        // No relative paths or bare names — refusing PATH lookup is the
+        // whole point of the allowlist.
+        for p in JOURNALCTL_CANDIDATES {
+            assert!(p.starts_with('/'), "non-absolute candidate: {p}");
+        }
+        for p in TAIL_CANDIDATES {
+            assert!(p.starts_with('/'), "non-absolute candidate: {p}");
+        }
+    }
 }

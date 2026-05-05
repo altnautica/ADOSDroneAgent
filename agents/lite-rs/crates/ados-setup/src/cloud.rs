@@ -15,6 +15,21 @@ use thiserror::Error;
 
 use crate::models::SelfHostedBackend;
 
+// Custom `Debug` for `SelfHostedBackend` so the operator's `api_key` is
+// never formatted into a log line. The shape stays printable for
+// debug-by-print: every other field renders verbatim, only the secret is
+// replaced with a length-only placeholder.
+impl std::fmt::Debug for SelfHostedBackend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SelfHostedBackend")
+            .field("url", &self.url)
+            .field("mqtt_broker", &self.mqtt_broker)
+            .field("mqtt_port", &self.mqtt_port)
+            .field("api_key", &format_args!("<redacted; {} chars>", self.api_key.len()))
+            .finish()
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum CloudError {
     #[error("invalid mode: {0}")]
@@ -204,5 +219,40 @@ mod tests {
         let path = dir.path().join("agent.yaml");
         let err = apply_cloud_choice(&path, "self_hosted", None).unwrap_err();
         assert!(matches!(err, CloudError::MissingSelfHosted));
+    }
+
+    #[test]
+    fn debug_self_hosted_redacts_api_key() {
+        let sh = SelfHostedBackend {
+            url: "https://relay.example".into(),
+            mqtt_broker: "broker.example".into(),
+            mqtt_port: 1883,
+            api_key: "supersecret".into(),
+        };
+        let rendered = format!("{sh:?}");
+        // The secret value must never appear.
+        assert!(
+            !rendered.contains("supersecret"),
+            "api_key value leaked into Debug output: {rendered}"
+        );
+        // The shape stays useful for debug-by-print.
+        assert!(rendered.contains("SelfHostedBackend"));
+        assert!(rendered.contains("https://relay.example"));
+        assert!(rendered.contains("broker.example"));
+        assert!(rendered.contains("1883"));
+        // Length-only placeholder confirms presence and size.
+        assert!(rendered.contains("<redacted; 11 chars>"));
+    }
+
+    #[test]
+    fn debug_self_hosted_redacts_empty_api_key() {
+        let sh = SelfHostedBackend {
+            url: "https://relay.example".into(),
+            mqtt_broker: String::new(),
+            mqtt_port: 8883,
+            api_key: String::new(),
+        };
+        let rendered = format!("{sh:?}");
+        assert!(rendered.contains("<redacted; 0 chars>"));
     }
 }

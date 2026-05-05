@@ -70,6 +70,14 @@ enum Command {
         /// Emit JSON result to stdout.
         #[arg(long)]
         json: bool,
+        /// Require the fetched install script to match this SHA256 hex
+        /// digest before executing it. When omitted, the agent fetches
+        /// the script, logs its hash at INFO level for out-of-band
+        /// verification, and proceeds. When set, a hash mismatch aborts
+        /// the upgrade. Operators who want strict verification on every
+        /// run should wire this flag into their orchestration.
+        #[arg(long, value_name = "HEX")]
+        require_script_sha256: Option<String>,
     },
 
     /// Stop the agent service, remove the binary + init unit, and
@@ -208,7 +216,8 @@ async fn main() -> Result<()> {
             check_only,
             yes,
             json,
-        } => run_update(check_only, yes, json).await,
+            require_script_sha256,
+        } => run_update(check_only, yes, json, require_script_sha256).await,
         Command::Uninstall { purge, yes } => run_uninstall(purge, yes).await,
         Command::Version => {
             println!("ados-agent-lite {}", env!("CARGO_PKG_VERSION"));
@@ -217,7 +226,12 @@ async fn main() -> Result<()> {
     }
 }
 
-async fn run_update(check_only: bool, yes: bool, json: bool) -> Result<()> {
+async fn run_update(
+    check_only: bool,
+    yes: bool,
+    json: bool,
+    require_script_sha256: Option<String>,
+) -> Result<()> {
     // The lite agent's update path is a thin wrapper around
     // install-lite.sh because it has no in-process OTA channel — the
     // signed binary download and SHA256 verification live in the install
@@ -250,7 +264,7 @@ async fn run_update(check_only: bool, yes: bool, json: bool) -> Result<()> {
             return Ok(());
         }
     }
-    run_install_script(&["--upgrade"]).await
+    run_install_script(&["--upgrade"], require_script_sha256.as_deref()).await
 }
 
 async fn run_uninstall(purge: bool, yes: bool) -> Result<()> {
@@ -267,14 +281,14 @@ async fn run_uninstall(purge: bool, yes: bool) -> Result<()> {
             std::io::stdin().read_line(&mut input)?;
             if !matches!(input.trim(), "y" | "Y" | "yes" | "YES") {
                 // User said yes to uninstall but no to purge; downgrade.
-                return run_install_script(&["--uninstall"]).await;
+                return run_install_script(&["--uninstall"], None).await;
             }
         }
     }
     if purge {
-        run_install_script(&["--uninstall", "--purge"]).await
+        run_install_script(&["--uninstall", "--purge"], None).await
     } else {
-        run_install_script(&["--uninstall"]).await
+        run_install_script(&["--uninstall"], None).await
     }
 }
 
@@ -283,47 +297,174 @@ async fn run_uninstall(purge: bool, yes: bool) -> Result<()> {
 /// signed static binary — operator state lives in /etc/ados/, not in
 /// the agent process. Falls back to a local copy at /usr/local/bin/
 /// install-lite.sh when present (developer override).
-async fn run_install_script(args: &[&str]) -> Result<()> {
+///
+/// Integrity story: the binary that the install script downloads is
+/// already SHA256-verified + minisign-checked inside the script itself.
+/// The script ITSELF, however, is the bootstrap that decides which URL
+/// to fetch and which signature to trust. A hostile substitution at the
+/// raw.githubusercontent.com edge (or, more realistically, on the
+/// network path of a misconfigured operator with a transparent proxy)
+/// could swap the script for one that bypasses signature checks.
+///
+/// We close that gap by fetching the script to a tempfile, computing its
+/// SHA256, and logging the digest at INFO level so an operator can
+/// compare against the canonical hash out-of-band. When `expected_sha256`
+/// is supplied (via `--require-script-sha256`), a mismatch aborts the
+/// run before the script is executed. `ADOS_LITE_ALLOW_UNSIGNED=1`
+/// bypasses the requirement for offline-test scenarios.
+///
+/// Local copies under `/usr/local/share/ados/install-lite.sh` or
+/// `/usr/local/bin/install-lite.sh` (developer override) skip the fetch
+/// path entirely and therefore the network-substitution threat does not
+/// apply; we still hash + log them so a tampered local copy is visible
+/// in journalctl.
+async fn run_install_script(args: &[&str], expected_sha256: Option<&str>) -> Result<()> {
     use std::process::Command as PCommand;
     const URL: &str =
         "https://raw.githubusercontent.com/altnautica/ADOSDroneAgent/main/scripts/install-lite.sh";
-    // Prefer a sibling install-lite.sh if the operator put one there
-    // for testing. Otherwise curl-pipe the canonical URL.
+
+    // Decide where the script body comes from. Local override wins; this
+    // is what developers use when iterating on the install script itself
+    // without pushing to GitHub.
     let local_paths = [
         "/usr/local/share/ados/install-lite.sh",
         "/usr/local/bin/install-lite.sh",
     ];
-    let mut command = if let Some(path) = local_paths.iter().find(|p| std::path::Path::new(p).exists()) {
-        let mut c = PCommand::new("sh");
-        c.arg(path).args(args);
-        c
+    let local_override = local_paths
+        .iter()
+        .find(|p| std::path::Path::new(p).exists())
+        .map(|p| std::path::PathBuf::from(*p));
+
+    // Land the script at a deterministic tempfile path so a panic mid-run
+    // leaves a forensics artifact for `journalctl` + `ls /tmp/ados-*`.
+    // tempfile crate is dev-only; std::env::temp_dir + a per-pid suffix
+    // keeps the runtime dep tree small.
+    let tmp = std::env::temp_dir().join(format!("ados-install-lite-{}.sh", std::process::id()));
+
+    let script_path: std::path::PathBuf = if let Some(local) = local_override {
+        // Copy the local override into the tempfile path so the rest of
+        // the flow (hash, log, exec) is uniform regardless of source.
+        std::fs::copy(&local, &tmp)
+            .with_context(|| format!("copying {} -> {}", local.display(), tmp.display()))?;
+        tracing::info!(
+            source = %local.display(),
+            "using local install-lite.sh override"
+        );
+        tmp.clone()
     } else {
-        // Curl-pipe: `curl ... | sh -s -- <args>` with explicit args
-        // separator. Falls back to wget on Buildroot rootfs without
-        // curl (mirrors the install-script's own fetch helper).
-        let fetch = if std::path::Path::new("/usr/bin/curl").exists() {
-            format!("curl -fsSL {URL}")
-        } else {
-            format!("wget -q -O - {URL}")
-        };
-        let mut c = PCommand::new("sh");
-        c.arg("-c").arg(format!(
-            "{} | sh -s -- {}",
-            fetch,
-            args.iter()
-                .map(|a| format!("'{}'", a.replace('\'', "'\\''")))
-                .collect::<Vec<_>>()
-                .join(" ")
-        ));
-        c
+        fetch_install_script(URL, &tmp).await?;
+        tracing::info!(url = URL, "fetched install-lite.sh");
+        tmp.clone()
     };
+
+    // Hash the script and surface the digest so operators can verify the
+    // canonical hash out-of-band against the published release.
+    let actual_hash = sha256_file(&script_path)
+        .with_context(|| format!("hashing {}", script_path.display()))?;
+    tracing::info!(
+        sha256 = %actual_hash,
+        path = %script_path.display(),
+        "install-lite.sh sha256 (verify out-of-band against the published release)"
+    );
+
+    // Strict verification: when --require-script-sha256 is set we abort
+    // on mismatch unless the offline-test bypass is in effect. The bypass
+    // mirrors ADOS_CLOUDFLARED_SKIP_SHA256 in the cloudflare module so
+    // operator muscle memory carries over.
+    if let Some(expected) = expected_sha256 {
+        let expected_norm = expected.trim().to_lowercase();
+        if std::env::var_os("ADOS_LITE_ALLOW_UNSIGNED").is_some() {
+            tracing::warn!(
+                expected = %expected_norm,
+                actual = %actual_hash,
+                "ADOS_LITE_ALLOW_UNSIGNED set; skipping install-lite.sh sha256 enforcement"
+            );
+        } else if actual_hash != expected_norm {
+            // Best-effort cleanup so a hostile script body does not sit
+            // around for a later accidental exec.
+            let _ = std::fs::remove_file(&script_path);
+            anyhow::bail!(
+                "install-lite.sh sha256 mismatch: expected {}, got {} \
+                 (set ADOS_LITE_ALLOW_UNSIGNED=1 to bypass for offline-test)",
+                expected_norm,
+                actual_hash
+            );
+        } else {
+            tracing::info!(sha256 = %actual_hash, "install-lite.sh sha256 verified");
+        }
+    }
+
+    // Execute the script body via `sh <path> <args>`. We deliberately do
+    // NOT use the curl-pipe pattern any more — the script lives on disk,
+    // so we get the same execution semantics with a verifiable artifact.
+    let mut command = PCommand::new("sh");
+    command.arg(&script_path).args(args);
     let status = command
         .status()
         .with_context(|| format!("running install-lite.sh {}", args.join(" ")))?;
-    if !status.success() {
+
+    // Clean up the tempfile on success. On failure we leave it in place
+    // so the operator can inspect what ran.
+    if status.success() {
+        let _ = std::fs::remove_file(&script_path);
+        Ok(())
+    } else {
+        tracing::warn!(
+            path = %script_path.display(),
+            "install-lite.sh failed; tempfile retained for inspection"
+        );
         anyhow::bail!("install-lite.sh exited with code {:?}", status.code());
     }
+}
+
+/// Fetch the install script over HTTPS using reqwest with rustls. We
+/// avoid shelling out to curl/wget here so the body lands directly in a
+/// Rust-controlled buffer (no shell-pipe race window between fetch and
+/// hash).
+async fn fetch_install_script(url: &str, dest: &std::path::Path) -> Result<()> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(60))
+        .build()
+        .with_context(|| "building reqwest client for install-lite.sh fetch")?;
+    let resp = client
+        .get(url)
+        .send()
+        .await
+        .with_context(|| format!("fetching {url}"))?;
+    if !resp.status().is_success() {
+        anyhow::bail!("fetching {url} returned HTTP {}", resp.status());
+    }
+    let body = resp
+        .bytes()
+        .await
+        .with_context(|| format!("reading body of {url}"))?;
+    std::fs::write(dest, &body)
+        .with_context(|| format!("writing install-lite.sh to {}", dest.display()))?;
     Ok(())
+}
+
+/// Stream the file through SHA256 and return the lowercase hex digest.
+/// Mirrors the helper in `crates/ados-setup/src/cloudflare.rs` so the
+/// agent has a single internal convention for binary integrity hashes.
+fn sha256_file(path: &std::path::Path) -> std::io::Result<String> {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+    let mut file = std::fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let n = file.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    let digest = hasher.finalize();
+    let mut out = String::with_capacity(digest.len() * 2);
+    for b in digest.iter() {
+        out.push_str(&format!("{b:02x}"));
+    }
+    Ok(out)
 }
 
 fn init_tracing() {
