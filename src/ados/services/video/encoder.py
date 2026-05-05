@@ -228,6 +228,17 @@ def _build_rpicam_command(
         # downstream ffmpeg muxer can recover from any mid-stream parse
         # without restarting the whole pipeline.
         "--inline",
+        # Force Constrained Baseline profile for WebRTC compatibility.
+        # Default rpicam-vid behaviour is High, which Chromium accepts
+        # but intermittently drops the session because the negotiated
+        # SDP advertises baseline as preferred. Baseline is the safe
+        # least-common-denominator across all WebRTC stacks (Chromium,
+        # Safari, Firefox, mobile WebView).
+        "--profile", "baseline",
+        "--level", "4",
+        # Tighter intra interval so a dropped frame recovers within
+        # ~1s instead of waiting for the encoder's default ~2-5s GOP.
+        "--intra", "30",
     ]
     if source and source != "-":
         # rpicam-vid expects camera index (0, 1, ...) not device path
