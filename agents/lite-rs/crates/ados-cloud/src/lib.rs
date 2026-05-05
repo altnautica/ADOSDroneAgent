@@ -210,15 +210,16 @@ async fn mqtt_publish_loop(
     let (client, mut eventloop) = AsyncClient::new(opts, 1024);
     let topic_tx = format!("ados/{}/mavlink/tx", config.device_id);
 
-    // Subscribe to inbound topics per proto/cloud/mqtt-topics.md. Handler
-    // bodies are TODO at v0.1; the subscription itself is required so the
-    // broker routes inbound traffic to this client.
-    for sub_topic in [
-        format!("ados/{}/mavlink/rx", config.device_id),
-        format!("ados/{}/command", config.device_id),
-        format!("ados/{}/webrtc/offer", config.device_id),
+    // Subscribe to inbound topics per proto/cloud/mqtt-topics.md. Per-topic
+    // QoS matches the spec: mavlink/rx is QoS 0 (fire-and-forget — broker
+    // queueing defeats real-time framing), command + webrtc/offer are
+    // QoS 1 (acks required for delivery).
+    for (sub_topic, qos) in [
+        (format!("ados/{}/mavlink/rx", config.device_id), QoS::AtMostOnce),
+        (format!("ados/{}/command", config.device_id), QoS::AtLeastOnce),
+        (format!("ados/{}/webrtc/offer", config.device_id), QoS::AtLeastOnce),
     ] {
-        if let Err(e) = client.subscribe(&sub_topic, QoS::AtLeastOnce).await {
+        if let Err(e) = client.subscribe(&sub_topic, qos).await {
             tracing::warn!(topic = %sub_topic, error = %e, "mqtt subscribe failed");
         }
     }
@@ -399,11 +400,20 @@ async fn send_pairing_beacon(
     pairing_code: &str,
 ) -> Result<(), CloudError> {
     let url = format!("{}/pairing/register", config.convex_url.trim_end_matches('/'));
+    // Beacon name prefers the operator-set board name (e.g. "Luckfox
+    // Pico Zero") so the Mission Control "Add drone" dialog shows
+    // something the operator recognises. Falls back to a generic label
+    // when no board metadata is populated yet.
+    let display_name = config
+        .agent_meta
+        .as_ref()
+        .and_then(|m| m.board_name.as_deref())
+        .unwrap_or("ADOS Lite Agent");
     let beacon = PairingBeacon {
         device_id: &config.device_id,
         pairing_code,
         api_key: "",
-        name: "ADOS Lite Agent",
+        name: display_name,
         version: env!("CARGO_PKG_VERSION"),
     };
     let response = client.post(&url).json(&beacon).send().await?;

@@ -145,6 +145,22 @@ components:
         missionControlUrl:
           type: string
           nullable: true
+        runtimeMode:
+          type: string
+          enum: [full, lite]
+          description: |
+            Indicates which agent flavor is reporting. `full` = the
+            Python multi-process supervisor at `src/ados/`. `lite` =
+            the single Rust binary at `agents/lite-rs/`. Mission
+            Control reads this to render the "Lite" pill on the fleet
+            card and to gate Plugins / Peripherals / Scripting / ROS
+            tabs at the Command-page level when the agent doesn't
+            ship those subsystems.
+        hostname:
+          type: string
+          description: |
+            Operator-set hostname (or kernel default), surfaced so the
+            GCS can build mDNS-aware deep links without re-querying.
 
     PendingCommand:
       type: object

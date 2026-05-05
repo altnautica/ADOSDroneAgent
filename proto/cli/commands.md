@@ -102,6 +102,10 @@ Exit code 0 on success, non-zero on error.
 
 `ados demo` exists as a development entrypoint but is hidden from `--help`. It accepts a `--port` flag (default 8080) and starts the agent in demo mode with simulated telemetry. Backends are not required to implement this command.
 
+## Optional commands
+
+`<cmd> version` prints the agent version string to stdout and exits 0. This is conventional surface for any CLI built with `clap` (`#[command(version)]` derives the flag automatically), so backends MAY ship it. The Python full agent surfaces version via `<cmd> --version`; the Rust lite agent surfaces both `--version` and the `version` subcommand. Either form is conformant; backends are not required to ship both.
+
 ## Subgroups
 
 `ados plugin {install, enable, disable, remove, list, info, perms, logs, test}` is registered as a click subgroup imported by `src/ados/cli/main.py` from a separate plugin CLI module. The subgroup is conditional on the agent shipping the plugin host runtime; backends without a plugin host omit the subgroup entirely. Operators see "command not found" on a backend that does not ship plugins. Backends that DO ship plugins must implement all nine subcommands with the documented arguments to avoid partial-implementation drift.

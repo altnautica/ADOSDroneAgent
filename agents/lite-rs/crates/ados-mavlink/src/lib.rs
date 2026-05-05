@@ -155,15 +155,23 @@ async fn router_loop(
                 // Bound the accumulator. If the stream is mis-baud'd
                 // or carrying garbage with no 0xFD sync, the buffer
                 // could otherwise grow unbounded on a 256 MB SBC.
-                // Cap at 8 max-frames worth and drop the front when
-                // exceeded so we keep the most recent bytes (which may
-                // contain a fresh sync we haven't fully drained yet).
+                // Cap at 8 max-frames worth. On overflow, drain
+                // everything before the last sync byte we can find so
+                // the parser keeps a candidate frame start to work with;
+                // if there's no sync at all, drain the front half so the
+                // tail keeps room for a fresh sync to arrive.
                 const MAX_BUF_BYTES: usize = MAX_FRAME_BYTES * 8;
                 if frame_buf.len() > MAX_BUF_BYTES {
-                    let drop_n = frame_buf.len() - MAX_FRAME_BYTES;
+                    let last_sync = frame_buf.iter().rposition(|&b| b == 0xFD);
+                    let drop_n = match last_sync {
+                        Some(pos) if pos > 0 => pos,
+                        _ => frame_buf.len() / 2,
+                    };
                     frame_buf.drain(..drop_n);
                     tracing::warn!(
                         bytes_dropped = drop_n,
+                        kept_bytes = frame_buf.len(),
+                        had_sync = last_sync.is_some(),
                         "mavlink frame buffer overflow; check FC baud rate"
                     );
                 }

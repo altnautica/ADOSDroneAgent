@@ -174,19 +174,28 @@ verify_artifact() {
         return 0
     fi
     # When the build still carries the placeholder key, the CI release
-    # pipeline hasn't been provisioned with the real signing key yet. In
-    # that case we cannot meaningfully run minisign (it would reject every
-    # real signature with a parse error). Log a clear notice and skip
-    # signature verification — SHA256 is still mandatory and stays
-    # verified above. Once the CI pipeline embeds the real public key in
-    # this script on tag release, this branch stops being reached and
-    # minisign verification becomes mandatory automatically.
+    # pipeline hasn't been provisioned with the real signing key yet.
+    # On the rolling main channel we tolerate this — operators on
+    # `lite-agent-main` are explicitly opting into the bleeding edge.
+    # On stable releases (`lite-v*` tags) the placeholder check is a
+    # build error: the CI workflow is supposed to substitute the real
+    # public key before the tag is cut. Refuse to install rather than
+    # silently degrade to SHA256-only on a stable tag the operator
+    # chose specifically because they expected signed binaries.
     if [ "${MINISIGN_PUBLIC_KEY}" = "${PLACEHOLDER_KEY}" ]; then
-        log "notice: minisign public key not yet provisioned in this build of"
-        log "install-lite.sh — signature verification skipped for ${base}."
-        log "SHA256 was verified above; the binary's integrity is checked."
-        log "(this notice goes away once CI embeds the real key on stable release)"
-        return 0
+        if [ "${RELEASE_CHANNEL}" = "main" ]; then
+            log "notice: minisign public key still placeholder on rolling main"
+            log "install-lite.sh — signature verification skipped for ${base}."
+            log "SHA256 was verified above; the binary's integrity is checked."
+            log "(this notice goes away once CI embeds the real key on stable release)"
+            return 0
+        fi
+        die "minisign public key in install-lite.sh is still the placeholder value
+this should never happen on a stable lite-v* release; the CI workflow
+is supposed to substitute the real key before the tag is cut.
+abort to avoid installing a binary whose Ed25519 signature cannot be
+verified. set ADOS_RELEASE_CHANNEL=main to install the rolling build,
+or wait for the next stable release."
     fi
     if ! command -v minisign >/dev/null 2>&1; then
         log "minisign is required but not installed"
