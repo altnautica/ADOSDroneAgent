@@ -214,5 +214,104 @@ class TestJobTracker:
             "_resolve_driver_script",
             lambda: None,
         )
-        with pytest.raises(FileNotFoundError):
+        with pytest.raises(FileNotFoundError) as exc_info:
             await display_install.start_install("waveshare35a")
+        # The error message must be operator-actionable — surface the
+        # exact recovery command rather than the cryptic original.
+        msg = str(exc_info.value)
+        assert "install.sh" in msg
+        assert "--upgrade" in msg
+
+
+# ---------------------------------------------------------------------------
+# Reboot route — schedules a reboot and returns success quickly
+# ---------------------------------------------------------------------------
+class TestRebootRoute:
+    @pytest.mark.asyncio
+    async def test_reboot_route_returns_ok_and_does_not_block(self, monkeypatch):
+        # Stub the actual reboot helper so the test doesn't actually try
+        # to reboot the test host.
+        from ados.api.routes import setup as setup_routes
+
+        called = {"count": 0}
+
+        async def _stub_delay(_seconds: float) -> None:
+            called["count"] += 1
+
+        monkeypatch.setattr(setup_routes, "_reboot_after_delay", _stub_delay)
+
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+
+        app = FastAPI()
+        app.include_router(setup_routes.router)
+        client = TestClient(app)
+
+        resp = client.post("/v1/setup/reboot")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["ok"] is True
+        assert "Reboot" in body["message"] or "reboot" in body["message"]
+        # Wait long enough for the scheduled task to actually call our stub.
+        # The route fires `asyncio.create_task(_reboot_after_delay(3.0))`
+        # before returning, so by the time we get here the task has been
+        # scheduled. Yield to the loop so it actually runs.
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        # Note: the stub gets called inside the task; since we never await
+        # the task, we can't rely on `called["count"] == 1` here. The
+        # important assertion is that the route returned 200 quickly
+        # without blocking on the 3-second delay.
+
+
+# ---------------------------------------------------------------------------
+# install.sh persistence — smoke check the source contains the new step
+# ---------------------------------------------------------------------------
+class TestInstallShellPersistence:
+    def test_install_sh_persists_repo_artifacts(self):
+        """install.sh must call persist_repo_artifacts before tmp-repo cleanup.
+
+        The wizard's display step depends on
+        /opt/ados/source/scripts/drivers/install-display-overlay.sh being
+        present at runtime. Without the persistence step, the temp clone
+        gets rm -rf'd and the agent has no way to find the driver script.
+        """
+        from pathlib import Path
+
+        repo_root = Path(__file__).resolve().parents[1]
+        script = repo_root / "scripts" / "install.sh"
+        assert script.exists(), f"install.sh missing at {script}"
+        text = script.read_text()
+        # The function definition must exist...
+        assert "persist_repo_artifacts()" in text
+        # ...and it must be called from somewhere (both fresh-install and --upgrade paths).
+        # Two distinct call sites: one in the upgrade branch, one in the fresh-install branch.
+        assert text.count("persist_repo_artifacts") >= 3, (
+            "expected persist_repo_artifacts to be defined and called from at "
+            "least two places (upgrade + fresh-install branches)"
+        )
+        # And the function must reference the canonical persistence root.
+        assert "/opt/ados/source" in text
+
+    def test_display_install_resolver_prefers_persisted_path(self):
+        """display_install._resolve_driver_script lists the persisted path first."""
+        # The resolver iterates a fixed candidate list. The first entry is
+        # the production path; the third is the dev-checkout fallback.
+        # Read the source so the assertion isn't tied to import-time disk
+        # state on the test host.
+        from pathlib import Path
+
+        src = (
+            Path(__file__).resolve().parents[1]
+            / "src"
+            / "ados"
+            / "setup"
+            / "display_install.py"
+        ).read_text()
+        # The persisted production path is the first candidate.
+        idx_prod = src.find("/opt/ados/source/scripts/drivers")
+        idx_dev = src.find("Path(__file__).resolve()")
+        assert idx_prod > 0 and idx_dev > 0
+        assert idx_prod < idx_dev, (
+            "persisted /opt/ados/source path must come before the dev checkout fallback"
+        )

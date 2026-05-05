@@ -282,6 +282,48 @@ def _now_iso() -> str:
     )
 
 
+@router.post("/reboot", response_model=SetupActionResult)
+async def trigger_reboot() -> SetupActionResult:
+    """Reboot the agent host on a short delay so the response delivers first.
+
+    Wired so the wizard's display step can follow a successful overlay
+    install with a single click. The 3-second delay is enough for the
+    HTTP response to make it back to the browser before systemd-shutdown
+    closes the socket; the wizard then polls /v1/setup/status until the
+    agent comes back online.
+    """
+    asyncio.create_task(_reboot_after_delay(3.0))
+    log.info("reboot_scheduled", delay_seconds=3)
+    return SetupActionResult(
+        ok=True,
+        message="Reboot scheduled in 3 seconds. The wizard will reconnect automatically.",
+    )
+
+
+async def _reboot_after_delay(seconds: float) -> None:
+    """Sleep then issue the reboot. Tries systemctl first, falls back to /sbin/reboot."""
+    await asyncio.sleep(seconds)
+    candidates: list[list[str]] = [
+        ["systemctl", "reboot"],
+        ["/sbin/reboot"],
+        ["reboot"],
+    ]
+    for cmd in candidates:
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            await proc.wait()
+            return
+        except FileNotFoundError:
+            continue
+        except Exception as exc:  # noqa: BLE001
+            log.warning("reboot_command_failed", cmd=cmd, error=str(exc))
+    log.error("reboot_all_commands_failed")
+
+
 @router.post("/cloud-choice", response_model=SetupActionResult)
 async def configure_cloud_choice(request: CloudChoiceRequest) -> SetupActionResult:
     """Set the agent's cloud posture (cloud / self_hosted / local).

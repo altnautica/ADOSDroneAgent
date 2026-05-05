@@ -146,8 +146,13 @@ async def start_install(display_id: str) -> _JobHandle:
         script = _resolve_driver_script()
         if script is None:
             raise FileNotFoundError(
-                "install-display-overlay.sh not found on disk. "
-                "Re-run install.sh to refresh /opt/ados/source/."
+                "The display-overlay installer script is not present on this "
+                "agent. SSH into the box and run "
+                "`curl -fsSL https://raw.githubusercontent.com/altnautica/"
+                "ADOSDroneAgent/main/scripts/install.sh | sudo bash -s -- "
+                "--upgrade` once to persist the driver scripts under "
+                "/opt/ados/source/, then click Install again. This is a "
+                "one-time fix per agent."
             )
         job_id = uuid.uuid4().hex[:12]
         handle = _JobHandle(job_id=job_id, display_id=display_id)

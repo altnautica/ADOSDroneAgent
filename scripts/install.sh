@@ -1133,12 +1133,75 @@ install_ground_station_driver() {
 # for next boot. Operator can override with ADOS_DISPLAY=<id> or
 # ADOS_DISPLAY=none. Failure is non-fatal so a missing LCD or missing
 # kernel headers does not block the rest of the install.
+# Persist driver scripts and overlay sources from the cloned repo into a
+# stable system path so the running agent can re-invoke them later (the
+# wizard's "Local display" step in particular needs install-display-overlay.sh
+# at runtime). Without this step the temp repo gets deleted at the end of
+# install.sh and the agent has no way to compile or activate a DT overlay
+# without another curl-pipe install. Idempotent: the install -m calls
+# overwrite the targets cleanly on every run.
+persist_repo_artifacts() {
+    local src_root=""
+    if [ -n "${FRESH_REPO_DIR:-}" ] && [ -d "${FRESH_REPO_DIR}/repo/scripts/drivers" ]; then
+        src_root="${FRESH_REPO_DIR}/repo"
+    elif [ -d "$(dirname "$0" 2>/dev/null)/.." ]; then
+        # Dev path — running install.sh from a checked-out repo. Only use
+        # this when we can resolve the parent absolutely.
+        local maybe_root
+        maybe_root="$(cd "$(dirname "$0")/.." 2>/dev/null && pwd)"
+        if [ -n "${maybe_root}" ] && [ -d "${maybe_root}/scripts/drivers" ]; then
+            src_root="${maybe_root}"
+        fi
+    fi
+    if [ -z "${src_root}" ]; then
+        warn "Cannot locate source tree to persist driver scripts; skipping."
+        return 0
+    fi
+
+    local persist_root="/opt/ados/source"
+    info "Persisting driver scripts and overlays to ${persist_root}/"
+    install -d -m 0755 "${persist_root}/scripts/drivers"
+    install -d -m 0755 "${persist_root}/data/overlays/upstream"
+
+    # Driver shell scripts (install-display-overlay.sh, install-rtl8812eu.sh, ...)
+    if [ -d "${src_root}/scripts/drivers" ]; then
+        find "${src_root}/scripts/drivers" -maxdepth 1 -type f -name '*.sh' -print0 \
+            | while IFS= read -r -d '' f; do
+                install -m 0755 "$f" "${persist_root}/scripts/drivers/"
+            done
+    fi
+
+    # Repo-shipped device-tree overlay sources (compiled at install time).
+    if [ -d "${src_root}/data/overlays" ]; then
+        find "${src_root}/data/overlays" -maxdepth 1 -type f \( -name '*.dts' -o -name '*.dtsi' \) -print0 \
+            | while IFS= read -r -d '' f; do
+                install -m 0644 "$f" "${persist_root}/data/overlays/"
+            done
+    fi
+
+    # Vendored upstream overlay sources used as a fallback when the BSP
+    # overlay package is absent.
+    if [ -d "${src_root}/data/overlays/upstream" ]; then
+        find "${src_root}/data/overlays/upstream" -maxdepth 1 -type f -print0 \
+            | while IFS= read -r -d '' f; do
+                install -m 0644 "$f" "${persist_root}/data/overlays/upstream/"
+            done
+    fi
+
+    info "Driver scripts + overlay sources persisted (drivers + overlays + upstream)."
+}
+
 install_display_driver() {
     local script_path=""
     if [ -n "${FRESH_REPO_DIR:-}" ] && [ -x "${FRESH_REPO_DIR}/repo/scripts/drivers/install-display-overlay.sh" ]; then
         script_path="${FRESH_REPO_DIR}/repo/scripts/drivers/install-display-overlay.sh"
     elif [ -x "$(dirname "$0" 2>/dev/null)/drivers/install-display-overlay.sh" ] 2>/dev/null; then
         script_path="$(cd "$(dirname "$0")/drivers" && pwd)/install-display-overlay.sh"
+    elif [ -x /opt/ados/source/scripts/drivers/install-display-overlay.sh ]; then
+        # Persisted path — present after persist_repo_artifacts has run at
+        # least once. Lets `install.sh --upgrade` run the LCD overlay step
+        # cleanly even when invoked outside a fresh git clone.
+        script_path="/opt/ados/source/scripts/drivers/install-display-overlay.sh"
     fi
     if [ -z "${script_path}" ] || [ ! -x "${script_path}" ]; then
         warn "LCD overlay installer not found; skipping display provisioning."
@@ -1545,6 +1608,11 @@ if is_installed && $DO_UPGRADE && ! $DO_FORCE; then
         FRESH_REPO_DIR="${tmp_repo}" install_display_driver
     fi
 
+    # Persist driver scripts + overlay sources to /opt/ados/source/ so the
+    # wizard's display step (and any future CLI re-runs) can find them
+    # without a fresh git clone.
+    FRESH_REPO_DIR="${tmp_repo}" persist_repo_artifacts
+
     # Clean up temp repo
     rm -rf "${tmp_repo}"
 
@@ -1687,6 +1755,11 @@ fi
 
 # Install systemd service
 install_systemd_service
+
+# Persist driver scripts + overlay sources to /opt/ados/source/ so the
+# running agent can re-invoke them later (in particular the wizard's
+# display step). Runs from the freshly-cloned tree before cleanup.
+persist_repo_artifacts
 
 # Clean up temp repo if we cloned one
 if [ -n "${FRESH_REPO_DIR}" ]; then
