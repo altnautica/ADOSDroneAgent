@@ -25,6 +25,7 @@ pub mod cloudflare;
 pub mod handlers;
 pub mod hardware;
 pub mod models;
+pub mod pairing;
 pub mod profile;
 pub mod router;
 pub mod state;

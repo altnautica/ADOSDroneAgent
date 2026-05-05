@@ -311,11 +311,13 @@ async fn run(config_path: PathBuf) -> Result<()> {
     });
 
     // Allow override via ADOS_SETUP_STATE_PATH so tests + dev containers
-    // don't need /etc write access. Production install puts this at
-    // /etc/ados/setup-state.yaml owned by the agent user.
+    // don't need /var write access. Production install puts this at
+    // /var/lib/ados/setup/state.json — same path the Python full agent
+    // uses, so an operator can swap between agents without losing setup
+    // state.
     let setup_state_path = std::env::var_os("ADOS_SETUP_STATE_PATH")
         .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| std::path::PathBuf::from("/etc/ados/setup-state.yaml"));
+        .unwrap_or_else(|| std::path::PathBuf::from("/var/lib/ados/setup/state.json"));
     let setup_state_store = StateStore::new(setup_state_path);
     let snapshot_state = app_state_inner.clone();
     let snapshot_store = setup_state_store.clone();
