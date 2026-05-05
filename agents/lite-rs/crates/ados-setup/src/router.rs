@@ -14,6 +14,7 @@ use axum::{
 
 use crate::handlers;
 use crate::state::StateStore;
+use crate::webapp;
 
 /// State carried by the axum handlers. Holds the agent.yaml path, the
 /// persistent setup-state store, and a snapshot function the handlers
@@ -40,6 +41,12 @@ impl SetupState {
 
 pub fn setup_router(state: Arc<SetupState>) -> Router {
     Router::new()
+        // Universal setup webapp (web/setup/) embedded at compile time.
+        // Operators visit http://<board-ip>:8080/setup/ in a browser.
+        .route("/", get(webapp::redirect_root))
+        .route("/setup", get(webapp::serve_index))
+        .route("/setup/", get(webapp::serve_index))
+        .route("/setup/{*path}", get(webapp::serve_asset))
         .route("/api/v1/setup/status", get(handlers::get_status))
         .route("/api/v1/setup/profile", post(handlers::post_profile))
         .route("/api/v1/setup/hardware-check", get(handlers::get_hardware_check))

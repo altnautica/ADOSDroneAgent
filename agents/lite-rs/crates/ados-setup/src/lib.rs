@@ -29,5 +29,6 @@ pub mod pairing;
 pub mod profile;
 pub mod router;
 pub mod state;
+pub mod webapp;
 
 pub use router::{setup_router, SetupState};
