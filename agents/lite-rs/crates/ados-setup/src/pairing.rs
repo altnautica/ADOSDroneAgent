@@ -222,7 +222,7 @@ mod tests {
         store.set_code("AB23X4").unwrap();
         store.claim("user-1", "ados_k1").unwrap();
         let err = store.claim("user-2", "ados_k2").unwrap_err();
-        matches!(err, PairingError::AlreadyPaired);
+        assert!(matches!(err, PairingError::AlreadyPaired));
     }
 
     #[test]

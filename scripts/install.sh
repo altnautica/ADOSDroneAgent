@@ -160,13 +160,22 @@ if [ "${_DRY_RUN}" = "true" ]; then
 fi
 
 if [ "${_PROFILE}" = "lite-rs" ]; then
-    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)" || SCRIPT_DIR=""
+    # Resolve the lite installer. Two modes:
+    #   - Local checkout: this script lives on disk; its sibling is too.
+    #   - Curl-pipe: this script ran from stdin (BASH_SOURCE[0]="bash"),
+    #     and there is no sibling. Fetch from main.
+    # We only trust SCRIPT_DIR if BASH_SOURCE[0] is a real on-disk file —
+    # otherwise dirname resolves to "." and we'd happily exec a random
+    # `./install-lite.sh` from the operator's cwd, which is a script
+    # injection trap.
     LITE_INSTALLER=""
-    if [ -n "${SCRIPT_DIR}" ] && [ -x "${SCRIPT_DIR}/install-lite.sh" ]; then
-        LITE_INSTALLER="${SCRIPT_DIR}/install-lite.sh"
-    else
-        # Curl-pipe install: the script ran from stdin and the sibling
-        # script is not on disk. Fetch it from main.
+    if [ -f "${BASH_SOURCE[0]:-}" ]; then
+        SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)" || SCRIPT_DIR=""
+        if [ -n "${SCRIPT_DIR}" ] && [ -x "${SCRIPT_DIR}/install-lite.sh" ]; then
+            LITE_INSTALLER="${SCRIPT_DIR}/install-lite.sh"
+        fi
+    fi
+    if [ -z "${LITE_INSTALLER}" ]; then
         LITE_INSTALLER="$(mktemp)"
         curl -fsSL \
             "https://raw.githubusercontent.com/altnautica/ADOSDroneAgent/main/scripts/install-lite.sh" \

@@ -321,11 +321,12 @@ async fn run(config_path: PathBuf) -> Result<()> {
     let setup_state_store = StateStore::new(setup_state_path);
     let snapshot_state = app_state_inner.clone();
     let snapshot_store = setup_state_store.clone();
+    let snapshot_yaml = config_path.clone();
     let setup_state = Arc::new(SetupState {
         agent_yaml: config_path.clone(),
         store: setup_state_store,
         status_builder: Box::new(move || {
-            build_setup_status(&snapshot_state, &snapshot_store)
+            build_setup_status(&snapshot_state, &snapshot_store, &snapshot_yaml)
         }),
     });
 
@@ -446,14 +447,20 @@ async fn persist_pair_code(config_path: &std::path::Path, code: &str) -> Result<
     println!("paired and config updated at {}", config_path.display());
 
     // Best-effort: signal the running service to pick up the new config.
-    // We try systemd first, then busybox sysv-rc, then runit. If none
-    // succeed, the operator restarts manually — we still wrote the file.
+    // Absolute paths so a subverted $PATH does not redirect to a hostile
+    // binary. We try systemd first, then busybox sysv-rc, then runit. If
+    // none succeed, the operator restarts manually — we still wrote the
+    // file.
     let restart_attempts: &[(&str, &[&str])] = &[
-        ("systemctl", &["restart", "ados-agent-lite.service"]),
+        ("/usr/bin/systemctl", &["restart", "ados-agent-lite.service"]),
+        ("/bin/systemctl", &["restart", "ados-agent-lite.service"]),
         ("/etc/init.d/S99ados-agent-lite", &["restart"]),
-        ("sv", &["restart", "ados-agent-lite"]),
+        ("/usr/bin/sv", &["restart", "ados-agent-lite"]),
     ];
     for (program, args) in restart_attempts {
+        if !std::path::Path::new(program).exists() {
+            continue;
+        }
         match std::process::Command::new(program).args(*args).status() {
             Ok(s) if s.success() => {
                 println!("restarted service via {}", program);
@@ -480,7 +487,11 @@ struct AppState {
     config_path: PathBuf,
 }
 
-fn build_setup_status(state: &Arc<AppState>, store: &StateStore) -> Value {
+fn build_setup_status(
+    state: &Arc<AppState>,
+    store: &StateStore,
+    agent_yaml: &std::path::Path,
+) -> Value {
     // Returns the canonical SetupStatus shape so consumers (the setup
     // webapp, Mission Control, the cloud relay) read every expected
     // field. Empty / null sub-blocks reflect the current minimum-viable
@@ -494,14 +505,17 @@ fn build_setup_status(state: &Arc<AppState>, store: &StateStore) -> Value {
     } else {
         "pair"
     };
-    let skipped: Vec<String> = persisted.skipped_steps.into_iter().collect();
+    let skipped: Vec<String> = persisted.skipped_steps.iter().cloned().collect();
+    // Read profile + ground_role from agent.yaml so the wizard's choice
+    // is reflected here rather than always saying "drone".
+    let (profile, ground_role) = read_profile_from_yaml(agent_yaml);
     serde_json::json!({
         "version": env!("CARGO_PKG_VERSION"),
         "agent_version": env!("CARGO_PKG_VERSION"),
         "device_id": state.device_id,
         "device_name": "ADOS Lite Agent",
-        "profile": "drone",
-        "ground_role": "",
+        "profile": profile,
+        "ground_role": ground_role,
         "runtime_mode": "lite",
         "setup_complete": persisted.finalized || state.paired,
         "setup_finalized": persisted.finalized,
@@ -547,14 +561,51 @@ fn build_setup_status(state: &Arc<AppState>, store: &StateStore) -> Value {
             "backend_reachable": false,
             "last_checked": null
         },
-        "profile_suggestion": null,
+        "profile_suggestion": {
+            "detected": "unconfigured",
+            "ground_role_hint": "direct",
+            "ground_score": 0,
+            "air_score": 0,
+            "mesh_capable": false,
+            "signals": {},
+            "confirmed": false,
+            "detected_at": null
+        },
         "hardware_check": null,
         "services": [
             { "name": "mavlink-router", "state": "running" },
             { "name": "cloud-client",   "state": "running" },
             { "name": "http-api",       "state": "running" }
-        ]
+        ],
+        "telemetry": {}
     })
+}
+
+/// Read profile + ground_role from agent.yaml. Mirrors the helper in
+/// ados-setup so the canonical setup-status reflects the wizard's profile
+/// choice rather than hardcoding "drone".
+fn read_profile_from_yaml(path: &std::path::Path) -> (String, String) {
+    let raw = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(_) => return ("drone".into(), String::new()),
+    };
+    let doc: serde_yaml::Value = match serde_yaml::from_str(&raw) {
+        Ok(v) => v,
+        Err(_) => return ("drone".into(), String::new()),
+    };
+    let profile = doc
+        .get("agent")
+        .and_then(|a| a.get("profile"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("drone")
+        .to_string();
+    let role = doc
+        .get("ground_station")
+        .and_then(|g| g.get("role"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    (profile, role)
 }
 
 #[cfg(test)]

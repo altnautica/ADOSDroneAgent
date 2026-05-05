@@ -152,6 +152,21 @@ async fn router_loop(
                 }
                 frame_buf.extend_from_slice(&read_buf[..n]);
                 drain_frames(&mut frame_buf, inbound);
+                // Bound the accumulator. If the stream is mis-baud'd
+                // or carrying garbage with no 0xFD sync, the buffer
+                // could otherwise grow unbounded on a 256 MB SBC.
+                // Cap at 8 max-frames worth and drop the front when
+                // exceeded so we keep the most recent bytes (which may
+                // contain a fresh sync we haven't fully drained yet).
+                const MAX_BUF_BYTES: usize = MAX_FRAME_BYTES * 8;
+                if frame_buf.len() > MAX_BUF_BYTES {
+                    let drop_n = frame_buf.len() - MAX_FRAME_BYTES;
+                    frame_buf.drain(..drop_n);
+                    tracing::warn!(
+                        bytes_dropped = drop_n,
+                        "mavlink frame buffer overflow; check FC baud rate"
+                    );
+                }
             }
             // Outbound command path: forward to FC.
             cmd = outbound.recv() => {

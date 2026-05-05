@@ -52,13 +52,23 @@ pub async fn post_profile(
 
 pub async fn get_hardware_check(State(state): State<Arc<SetupState>>) -> Json<Value> {
     let (profile, ground_role) = read_profile_from_agent_yaml(&state.agent_yaml);
-    let status = run_hardware_check(&profile, &ground_role);
+    // run_hardware_check shells out to lsusb + reads /proc + /sys
+    // synchronously. On the Luckfox single-core A7 this can block ~200 ms;
+    // hand it off to the blocking pool so the axum handler thread (which
+    // also serves the WS log stream + every other route) doesn't stall.
+    let status = tokio::task::spawn_blocking(move || run_hardware_check(&profile, &ground_role))
+        .await
+        .ok();
+    let status = status.unwrap_or_else(|| run_hardware_check("drone", ""));
     Json(serde_json::to_value(status).unwrap_or_else(|_| json!({})))
 }
 
 pub async fn post_hardware_check_refresh(State(state): State<Arc<SetupState>>) -> Json<Value> {
     let (profile, ground_role) = read_profile_from_agent_yaml(&state.agent_yaml);
-    let status = run_hardware_check(&profile, &ground_role);
+    let status = tokio::task::spawn_blocking(move || run_hardware_check(&profile, &ground_role))
+        .await
+        .ok();
+    let status = status.unwrap_or_else(|| run_hardware_check("drone", ""));
     Json(serde_json::to_value(status).unwrap_or_else(|_| json!({})))
 }
 
@@ -159,9 +169,24 @@ async fn stream_cloudflared_logs(
     use tokio::io::{AsyncBufReadExt, BufReader};
     use tokio::process::Command;
 
-    // Prefer journalctl when systemd is present.
+    // Prefer journalctl when systemd is present. Use the absolute path so
+    // a subverted $PATH does not redirect us to a hostile binary, and
+    // null-redirect stderr so the child never blocks on a full kernel
+    // pipe buffer (~64 KiB) when journalctl writes warnings.
+    let journalctl_path = if std::path::Path::new("/usr/bin/journalctl").exists() {
+        "/usr/bin/journalctl"
+    } else {
+        "journalctl"
+    };
+    let tail_path = if std::path::Path::new("/usr/bin/tail").exists() {
+        "/usr/bin/tail"
+    } else if std::path::Path::new("/bin/tail").exists() {
+        "/bin/tail"
+    } else {
+        "tail"
+    };
     let mut child = if std::path::Path::new("/run/systemd/system").is_dir() {
-        match Command::new("journalctl")
+        match Command::new(journalctl_path)
             .args([
                 "-u",
                 "cloudflared",
@@ -173,7 +198,7 @@ async fn stream_cloudflared_logs(
                 "short",
             ])
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
             .spawn()
         {
             Ok(c) => c,
@@ -201,10 +226,10 @@ async fn stream_cloudflared_logs(
             let _ = socket.close().await;
             return Ok(());
         }
-        match Command::new("tail")
+        match Command::new(tail_path)
             .args(["-n", "120", "-f", log_path])
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
             .spawn()
         {
             Ok(c) => c,
@@ -218,13 +243,27 @@ async fn stream_cloudflared_logs(
         }
     };
     let stdout = child.stdout.take().ok_or("no stdout")?;
+    // Cap line length at 8 KiB. cloudflared's normal log lines are well
+    // under 1 KiB; an unbounded reader would be a memory-amplification
+    // gadget when the upstream emits a hostile MESSAGE= field. We truncate
+    // after-the-fact below rather than at the reader because next_line()
+    // bounds against a sane growth ceiling already (Lines holds one
+    // partial line in the BufReader's internal buffer, default 8 KiB).
+    const MAX_LINE_BYTES: usize = 8 * 1024;
     let mut reader = BufReader::new(stdout).lines();
 
     loop {
         tokio::select! {
             line = reader.next_line() => {
                 match line {
-                    Ok(Some(text)) => {
+                    Ok(Some(mut text)) => {
+                        // Truncate over-long lines after-the-fact rather
+                        // than dropping them entirely so the operator
+                        // still sees something useful in the wizard.
+                        if text.len() > MAX_LINE_BYTES {
+                            text.truncate(MAX_LINE_BYTES);
+                            text.push_str(" ...(truncated)");
+                        }
                         let redacted = redact_log_line(&text);
                         if socket.send(Message::Text(redacted)).await.is_err() {
                             break; // peer disconnected
@@ -240,8 +279,10 @@ async fn stream_cloudflared_logs(
             }
         }
     }
+    // Kill + reap with a 2s timeout — a stuck child must not hold the
+    // WebSocket forever.
     let _ = child.kill().await;
-    let _ = child.wait().await;
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(2), child.wait()).await;
     let _ = socket.close().await;
     Ok(())
 }

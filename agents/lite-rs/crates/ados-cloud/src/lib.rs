@@ -72,8 +72,10 @@ impl fmt::Debug for CloudConfig {
 }
 
 /// Pairing beacon payload posted to `{convex_url}/pairing/register` every
-/// 30 s when the agent is unpaired.
+/// 30 s when the agent is unpaired. Field names are camelCase per
+/// `proto/cloud/openapi.yaml` so the cloud relay parses them correctly.
 #[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PairingBeacon<'a> {
     pub device_id: &'a str,
     pub pairing_code: &'a str,
@@ -141,9 +143,23 @@ async fn mqtt_publish_loop(
     let (client, mut eventloop) = AsyncClient::new(opts, 1024);
     let topic_tx = format!("ados/{}/mavlink/tx", config.device_id);
 
-    // Drive the eventloop in the background; handle errors with reconnect
-    // backoff.
-    tokio::spawn(async move {
+    // Subscribe to inbound topics per proto/cloud/mqtt-topics.md. Handler
+    // bodies are TODO at v0.1; the subscription itself is required so the
+    // broker routes inbound traffic to this client.
+    for sub_topic in [
+        format!("ados/{}/mavlink/rx", config.device_id),
+        format!("ados/{}/command", config.device_id),
+        format!("ados/{}/webrtc/offer", config.device_id),
+    ] {
+        if let Err(e) = client.subscribe(&sub_topic, QoS::AtLeastOnce).await {
+            tracing::warn!(topic = %sub_topic, error = %e, "mqtt subscribe failed");
+        }
+    }
+
+    // Drive the eventloop in the background. The handle is held so we can
+    // abort it when the publish loop exits — preventing zombie eventloops
+    // on agent.yaml reload.
+    let eventloop_handle = tokio::spawn(async move {
         loop {
             match eventloop.poll().await {
                 Ok(_event) => continue,
@@ -170,6 +186,7 @@ async fn mqtt_publish_loop(
             }
             Err(broadcast::error::RecvError::Closed) => {
                 tracing::info!("mavlink broadcast closed; mqtt publish loop exiting");
+                eventloop_handle.abort();
                 return Ok(());
             }
         }
@@ -194,20 +211,43 @@ async fn http_loop(config: CloudConfig) -> Result<(), CloudError> {
         .timeout(Duration::from_secs(10))
         .build()?;
 
-    if config.api_key.is_empty() {
-        loop {
-            if let Err(e) = send_pairing_beacon(&client, &config).await {
-                tracing::warn!(error = %e, "pairing beacon failed");
-            }
-            tokio::time::sleep(Duration::from_secs(30)).await;
-        }
+    // Exponential backoff with jitter on consecutive failures so a
+    // misconfigured convex_url stops hammering reqwest's full timeout.
+    // Reset to base interval on success.
+    let base_interval = if config.api_key.is_empty() {
+        Duration::from_secs(30)
     } else {
-        loop {
-            if let Err(e) = send_heartbeat(&client, &config).await {
-                tracing::warn!(error = %e, "heartbeat failed");
+        Duration::from_secs(5)
+    };
+    let max_interval = Duration::from_secs(300);
+    let mut consecutive_failures: u32 = 0;
+
+    loop {
+        let result = if config.api_key.is_empty() {
+            send_pairing_beacon(&client, &config).await
+        } else {
+            send_heartbeat(&client, &config).await
+        };
+        match result {
+            Ok(()) => consecutive_failures = 0,
+            Err(e) => {
+                consecutive_failures = consecutive_failures.saturating_add(1);
+                tracing::warn!(
+                    error = %e,
+                    consecutive_failures,
+                    "cloud heartbeat / beacon failed"
+                );
             }
-            tokio::time::sleep(Duration::from_secs(5)).await;
         }
+        let delay = if consecutive_failures == 0 {
+            base_interval
+        } else {
+            // 2^n with cap, plus 0..base/4 jitter via process-id mod.
+            let exp = consecutive_failures.min(8); // cap exponent
+            let scaled = base_interval.saturating_mul(1u32 << exp.min(8));
+            scaled.min(max_interval)
+        };
+        tokio::time::sleep(delay).await;
     }
 }
 

@@ -30,10 +30,14 @@ CONFIG_PATH="${CONFIG_DIR}/agent.yaml"
 SYSTEMD_UNIT="/etc/systemd/system/ados-agent-lite.service"
 SYSV_INIT_SCRIPT="/etc/init.d/S99ados-agent-lite"
 
-# Vendored Ed25519 public key for release-artifact verification. Replace the
-# placeholder below with the real public key produced from the team's
-# minisign keypair generation.
-MINISIGN_PUBLIC_KEY="${ADOS_LITE_MINISIGN_PUBLIC_KEY:-RWQz4jK8YjK8YjK8YjK8YjK8YjK8YjK8YjK8YjK8YjK8YjK8YjK8YjK8}"
+# Vendored Ed25519 public key for release-artifact verification. The CI
+# release pipeline replaces this string with the real public key on tag.
+# We deliberately do NOT accept an env override for the public key — that
+# would let an attacker who controls the operator's environment substitute
+# their own signing key and pass verification on a malicious binary.
+# Rotation is a code change + git push, not a runtime knob.
+MINISIGN_PUBLIC_KEY="RWQz4jK8YjK8YjK8YjK8YjK8YjK8YjK8YjK8YjK8YjK8YjK8YjK8YjK8"
+PLACEHOLDER_KEY="RWQz4jK8YjK8YjK8YjK8YjK8YjK8YjK8YjK8YjK8YjK8YjK8YjK8YjK8"
 
 log() { printf '[install-lite] %s\n' "$*" >&2; }
 die() { log "error: $*"; exit 1; }
@@ -137,6 +141,17 @@ verify_artifact() {
         log "warn: ADOS_LITE_ALLOW_UNSIGNED=1 set; skipping minisign signature verification"
         return 0
     fi
+    # Refuse to verify against the unprovisioned placeholder key — minisign
+    # would reject every real signature with a confusing parse error, and
+    # quietly accepting "verification passed" against a placeholder in some
+    # future code change would be a quiet security regression.
+    if [ "${MINISIGN_PUBLIC_KEY}" = "${PLACEHOLDER_KEY}" ]; then
+        log "minisign public key is the placeholder; this build of install-lite.sh"
+        log "was not produced by the CI release pipeline. To install anyway, set"
+        log "ADOS_LITE_ALLOW_UNSIGNED=1 — but understand you are skipping signature"
+        log "verification entirely."
+        die "minisign public key not provisioned in this build"
+    fi
     if ! command -v minisign >/dev/null 2>&1; then
         log "minisign is required but not installed"
         log "install via: apt-get install -y minisign  (Debian/Ubuntu)"
@@ -224,7 +239,10 @@ cloud:
 api:
   bind: "127.0.0.1:8080"
 EOF
-    chmod 0644 "${CONFIG_PATH}"
+    # Tighten to 0640 — file holds cloud.api_key when paired, so it
+    # must not be world-readable on multi-user SBCs. Owned by root, the
+    # service runs as root, no separate ados user yet.
+    chmod 0640 "${CONFIG_PATH}"
     if [ -n "${pair_code}" ]; then
         log "wrote config at ${CONFIG_PATH} (device_id: ${device_id}, paired)"
     else

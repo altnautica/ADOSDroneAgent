@@ -204,7 +204,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("agent.yaml");
         let err = apply_cloud_choice(&path, "tealf", None).unwrap_err();
-        matches!(err, CloudError::InvalidMode(_));
+        assert!(matches!(err, CloudError::InvalidMode(_)));
     }
 
     #[test]
@@ -212,6 +212,6 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("agent.yaml");
         let err = apply_cloud_choice(&path, "self_hosted", None).unwrap_err();
-        matches!(err, CloudError::MissingSelfHosted);
+        assert!(matches!(err, CloudError::MissingSelfHosted));
     }
 }

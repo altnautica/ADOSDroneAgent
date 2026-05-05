@@ -152,7 +152,7 @@ mod tests {
         let path = dir.path().join("agent.yaml");
         std::fs::write(&path, "agent:\n  device_id: \"test\"\n").unwrap();
         let err = apply_profile(&path, "ground_station", None).unwrap_err();
-        matches!(err, ProfileError::GroundRoleRequired);
+        assert!(matches!(err, ProfileError::GroundRoleRequired));
     }
 
     #[test]
@@ -176,6 +176,6 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("agent.yaml");
         let err = apply_profile(&path, "starship", None).unwrap_err();
-        matches!(err, ProfileError::InvalidProfile(_));
+        assert!(matches!(err, ProfileError::InvalidProfile(_)));
     }
 }
