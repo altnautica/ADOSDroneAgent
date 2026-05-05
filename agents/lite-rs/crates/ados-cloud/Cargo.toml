@@ -11,7 +11,6 @@ description = "Cloud relay client (MQTT + HTTPS heartbeat) for the lite ADOS Dro
 [dependencies]
 tokio = { workspace = true }
 rumqttc = { workspace = true }
-rustls = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

@@ -19,16 +19,23 @@ rust-version = "1.75"
 tokio = { version = "1", features = ["macros", "rt", "sync", "io-util", "net", "time", "signal", "process"] }
 tokio-util = "0.7"
 
-# HTTP + WebSocket
-axum = { version = "0.7", default-features = false, features = ["http1", "json", "tokio", "ws"] }
+# HTTP + WebSocket. axum 0.7 dropped the legacy "tokio" feature; "http1",
+# "json", and "ws" are the right baseline.
+axum = { version = "0.7", default-features = false, features = ["http1", "json", "ws"] }
 tokio-tungstenite = "0.21"
 
-# MQTT + TLS — rustls (no openssl-sys; openssl is broken on armv7-musleabihf)
+# MQTT + TLS — rumqttc with rustls (no openssl-sys; openssl is broken on
+# armv7-musleabihf). The TLS stack comes transitively from rumqttc and
+# reqwest; we do not pin a direct rustls version here to avoid duplicate
+# resolutions across the dep tree. Add a direct dep when a crate
+# constructs ClientConfig itself.
 rumqttc = { version = "0.24", default-features = false, features = ["use-rustls"] }
-rustls = { version = "0.22", default-features = false, features = ["std"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 
-# MAVLink — pure Rust, ardupilotmega dialect covers ArduPilot + Betaflight common subset
+# MAVLink — pure Rust dialect codegen. "ardupilotmega" implements the
+# protocol surface compatible with ArduPilot + Betaflight common subset.
+# TODO: narrow dialect features in the next phase once the router shape
+# is known; the full message set adds binary size we don't all need.
 mavlink = { version = "0.13", default-features = false, features = ["std", "ardupilotmega"] }
 
 # Serialization

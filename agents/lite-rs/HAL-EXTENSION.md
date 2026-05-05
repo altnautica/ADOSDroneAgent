@@ -33,10 +33,15 @@ The Pydantic `BoardProfile` model uses default `extra="ignore"` configuration, s
 |---|---|---|---|
 | `compute.min_ram_mb` | int | none | Absolute minimum RAM (in MB) required to boot the lite agent on this board |
 
-## Example — Luckfox Pico Zero (constrained ARMv7 board)
+## Example — constrained ARMv7 board (planned, not yet landed)
+
+The lite-specific fields below are not yet present in `rv1106-g3.yaml`;
+the YAML continues to load cleanly because every new field has a safe
+default. The values here illustrate what a populated YAML looks like
+once the lightweight backend's video pipeline integration adds them.
 
 ```yaml
-# excerpt from src/ados/hal/boards/rv1106-g3.yaml after extension
+# planned excerpt for src/ados/hal/boards/rv1106-g3.yaml
 libc: "uclibc"
 init_system: "busybox"
 target_rust_triple: "armv7-unknown-linux-musleabihf"
@@ -55,7 +60,7 @@ video:
   vendor_lib_loader: "rkmpi-subprocess"
 ```
 
-## Example — Pi Zero 2 W (moderately-constrained ARMv8 board)
+## Example — Pi Zero 2 W (current state of `pi-zero-2w.yaml`)
 
 ```yaml
 # excerpt from src/ados/hal/boards/pi-zero-2w.yaml
