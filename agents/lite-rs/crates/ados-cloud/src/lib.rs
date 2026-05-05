@@ -99,22 +99,31 @@ pub struct PairingBeacon<'a> {
 /// Spawn the cloud client tasks: MQTT publish loop, HTTPS heartbeat, and
 /// pairing beacon. Returns immediately. The tasks run until the inbound
 /// broadcast `Sender` is dropped or the agent process exits.
+///
+/// `outbound_fc` is the FC writer channel — frames received from the
+/// cloud relay on `ados/{device_id}/mavlink/rx` are forwarded to this
+/// sender, which the MAVLink router then writes to the FC serial.
+/// Pass `None` if no FC is connected; cloud-received frames are then
+/// logged at WARN and dropped.
 pub fn spawn_cloud_client(
     config: CloudConfig,
     inbound_mavlink: broadcast::Sender<Vec<u8>>,
+    outbound_fc: Option<tokio::sync::mpsc::Sender<Vec<u8>>>,
 ) -> Result<(), CloudError> {
     if config.device_id.is_empty() {
         return Err(CloudError::Config("device_id is required".into()));
     }
 
-    // MQTT: publish inbound MAVLink frames to ados/{device_id}/mavlink/tx.
-    // Skip the loop entirely when the broker is unconfigured (unpaired
-    // boot, broker URL not yet supplied by the pairing flow).
+    // MQTT: publish inbound MAVLink frames to ados/{device_id}/mavlink/tx,
+    // and route incoming MQTT messages on subscribed topics. Skip the loop
+    // entirely when the broker is unconfigured (unpaired boot, broker URL
+    // not yet supplied by the pairing flow).
     if !config.mqtt_broker.is_empty() {
         let mqtt_config = config.clone();
         let mut mavlink_rx = inbound_mavlink.subscribe();
+        let fc_writer = outbound_fc.clone();
         tokio::spawn(async move {
-            if let Err(e) = mqtt_publish_loop(mqtt_config, &mut mavlink_rx).await {
+            if let Err(e) = mqtt_publish_loop(mqtt_config, &mut mavlink_rx, fc_writer).await {
                 tracing::error!(error = %e, "mqtt publish loop exited");
             }
         });
@@ -138,6 +147,7 @@ pub fn spawn_cloud_client(
 async fn mqtt_publish_loop(
     config: CloudConfig,
     mavlink_rx: &mut broadcast::Receiver<Vec<u8>>,
+    outbound_fc: Option<tokio::sync::mpsc::Sender<Vec<u8>>>,
 ) -> Result<(), CloudError> {
     let client_id = format!("ados-{}", config.device_id);
     let mut opts = MqttOptions::new(&client_id, &config.mqtt_broker, config.mqtt_port);
@@ -179,12 +189,55 @@ async fn mqtt_publish_loop(
         }
     }
 
-    // Drive the eventloop in the background. The handle is held so we can
-    // abort it when the publish loop exits — preventing zombie eventloops
-    // on agent.yaml reload.
+    // Drive the eventloop in the background. Routes inbound publishes
+    // by topic suffix:
+    //
+    //   `mavlink/rx`    forwarded to FC writer (drops on full queue)
+    //   `command`       logged at INFO; v1 has no command surface
+    //   `webrtc/offer`  logged at INFO; video pipeline lands in MSN-055
+    //
+    // The handle is held so we can abort it when the publish loop exits,
+    // preventing zombie eventloops on agent.yaml reload.
+    let device_id_owned = config.device_id.clone();
+    let topic_rx = format!("ados/{}/mavlink/rx", device_id_owned);
+    let topic_command = format!("ados/{}/command", device_id_owned);
+    let topic_offer = format!("ados/{}/webrtc/offer", device_id_owned);
     let eventloop_handle = tokio::spawn(async move {
         loop {
             match eventloop.poll().await {
+                Ok(rumqttc::Event::Incoming(rumqttc::Packet::Publish(p))) => {
+                    let topic = p.topic.as_str();
+                    if topic == topic_rx {
+                        if let Some(ref fc) = outbound_fc {
+                            // try_send so a backed-up FC writer never
+                            // stalls the cloud client. Drops are logged.
+                            if let Err(e) = fc.try_send(p.payload.to_vec()) {
+                                tracing::warn!(
+                                    error = %e,
+                                    bytes = p.payload.len(),
+                                    "fc writer queue full; dropping cloud-relayed mavlink frame"
+                                );
+                            }
+                        } else {
+                            tracing::debug!(
+                                bytes = p.payload.len(),
+                                "received mavlink/rx frame but no FC writer wired"
+                            );
+                        }
+                    } else if topic == topic_command {
+                        tracing::info!(
+                            bytes = p.payload.len(),
+                            "received cloud command (no handler at v1 — dropped)"
+                        );
+                    } else if topic == topic_offer {
+                        tracing::info!(
+                            bytes = p.payload.len(),
+                            "received webrtc/offer (video lands in MSN-055)"
+                        );
+                    } else {
+                        tracing::debug!(topic = %topic, "received message on unexpected topic");
+                    }
+                }
                 Ok(_event) => continue,
                 Err(e) => {
                     tracing::warn!(error = %e, "mqtt eventloop poll error; backing off");
@@ -374,7 +427,7 @@ mod tests {
             pairing_path: PathBuf::from("/etc/ados/pairing.json"),
         };
         let (tx, _rx) = broadcast::channel(8);
-        let err = spawn_cloud_client(bad, tx).expect_err("empty device_id should fail");
+        let err = spawn_cloud_client(bad, tx, None).expect_err("empty device_id should fail");
         match err {
             CloudError::Config(msg) => assert!(msg.contains("device_id")),
             _ => panic!("expected Config error, got {:?}", err),

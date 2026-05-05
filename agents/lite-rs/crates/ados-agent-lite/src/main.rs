@@ -324,7 +324,13 @@ async fn run(config_path: PathBuf) -> Result<()> {
                 let (tx, _rx) = tokio::sync::broadcast::channel(16);
                 tx
             });
-        if let Err(e) = ados_cloud::spawn_cloud_client(cloud_config, mavlink_inbound) {
+        // FC writer for cloud-received MAVLink frames. Pass through only
+        // when a real router is up; otherwise the cloud client logs +
+        // drops inbound mavlink/rx publishes.
+        let fc_writer = mavlink_handles.as_ref().map(|h| h.outbound.clone());
+        if let Err(e) =
+            ados_cloud::spawn_cloud_client(cloud_config, mavlink_inbound, fc_writer)
+        {
             tracing::warn!(error = %e, "cloud client spawn failed; running offline");
         }
     } else {
