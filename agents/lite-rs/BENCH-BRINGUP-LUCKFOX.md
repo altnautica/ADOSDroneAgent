@@ -63,7 +63,7 @@ installer requires reachability to GitHub Releases.
 From the board's shell:
 
 ```sh
-curl -sSL https://altnautica.com/install.sh | sudo bash
+curl -sSL https://raw.githubusercontent.com/altnautica/ADOSDroneAgent/main/scripts/install.sh | sudo bash
 ```
 
 That's it. No env var, no flag, no pair code. The script:
