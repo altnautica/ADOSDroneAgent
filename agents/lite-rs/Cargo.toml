@@ -18,6 +18,7 @@ rust-version = "1.75"
 # Async runtime — single-thread current_thread flavor for low-RAM targets
 tokio = { version = "1", features = ["macros", "rt", "sync", "io-util", "net", "time", "signal", "process"] }
 tokio-util = "0.7"
+tokio-serial = "5.4"
 
 # HTTP + WebSocket. axum 0.7 dropped the legacy "tokio" feature; "http1",
 # "json", and "ws" are the right baseline.
