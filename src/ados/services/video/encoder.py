@@ -239,6 +239,13 @@ def _build_rpicam_command(
 
     if output.startswith("rtsp://"):
         # Pipe through ffmpeg with explicit TCP RTSP transport.
+        # The h264_metadata bsf injects BT.709 colour primaries /
+        # transfer / matrix flags into the SPS VUI block. rpicam-vid's
+        # encoder leaves these "unspecified" in the bitstream which
+        # browsers then interpret as identity (gbr) or a fallback,
+        # giving a magenta/pink cast on screen even though the YUV
+        # data is correct. Setting them explicitly to BT.709 (1) and
+        # limited range (0) makes browsers render natural colour.
         rpicam_args.extend(["-o", "-"])
         ffmpeg_args = [
             "ffmpeg",
@@ -248,6 +255,12 @@ def _build_rpicam_command(
             "-f", "h264",
             "-i", "-",
             "-c", "copy",
+            "-bsf:v",
+            "h264_metadata="
+            "colour_primaries=1:"
+            "transfer_characteristics=1:"
+            "matrix_coefficients=1:"
+            "video_full_range_flag=0",
             "-f", "rtsp",
             "-rtsp_transport", "tcp",
             output,

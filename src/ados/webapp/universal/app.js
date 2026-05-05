@@ -578,12 +578,42 @@ function setupStepFor(status, mode) {
   return null; // revisit chrome shows the full list
 }
 
+// Tracks the last rendered wizard signature so the 5s status poll does
+// not tear down stable in-step DOM (chiefly the WebRTC iframe in the
+// video step). Re-render only when the operator-visible state changes.
+let _lastWizardSignature = null;
+
+function _wizardSignature(status, stepId) {
+  // Anything that changes the meaningful contents of the step body, the
+  // stepper dots, or the footer state. NOT polled-but-incidental fields
+  // like RSSI or counters.
+  return JSON.stringify({
+    step: stepId,
+    setup_complete: !!status.setup_complete,
+    setup_finalized: !!status.setup_finalized,
+    profile: status.profile || "",
+    ground_role: status.ground_role || "",
+    skipped: (status.skipped_steps || []).slice().sort(),
+    states: (status.steps || []).map((s) => `${s.id}:${s.state}`),
+    video_state: status.video?.state || "",
+    cloud_mode: status.cloud_choice?.mode || "",
+    cloud_paired: !!status.cloud_choice?.paired,
+    mavlink_connected: !!status.mavlink?.connected,
+    remote_status: status.remote_access?.status || "",
+  });
+}
+
 function renderSetup() {
   subscribe((status) => {
     const mode = setupModeFor(status);
     if (mode === "wizard") {
-      renderWizard(status, setupStepFor(status, mode));
+      const stepId = setupStepFor(status, mode);
+      const sig = _wizardSignature(status, stepId);
+      if (sig === _lastWizardSignature) return;
+      _lastWizardSignature = sig;
+      renderWizard(status, stepId);
     } else {
+      _lastWizardSignature = null;
       renderRevisit(status);
     }
   });
@@ -1092,7 +1122,10 @@ function renderVideoStepInline(status) {
           const cur = currentStatus?.video;
           if (cur?.state === "running") {
             startStatus.textContent = "Pipeline is running.";
-            // Re-render the wizard to show the preview iframe.
+            // Force a re-render to swap in the preview iframe. Reset
+            // the signature gate so the subscribe path sees the change
+            // and does not skip the same status as a no-op.
+            _lastWizardSignature = null;
             renderWizard(currentStatus, "video");
             return;
           }
