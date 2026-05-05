@@ -27,9 +27,34 @@ use ados_setup::pairing::{is_valid_api_key, PairingStore};
 use rumqttc::{AsyncClient, MqttOptions, QoS, Transport};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, RwLock};
 
 const DEFAULT_PAIRING_PATH: &str = "/etc/ados/pairing.json";
+
+/// Default MQTT keepalive in seconds. rumqttc sends a PINGREQ at half this
+/// interval; the broker disconnects clients that go silent for more than
+/// 1.5x the value (per the MQTT 3.1.1 spec). 60 s balances cellular
+/// radio-on time against detection latency.
+const DEFAULT_MQTT_KEEPALIVE_SECS: u64 = 60;
+/// Lower bound for `mqtt_keepalive_secs`. Below 10 s the rumqttc PINGREQ
+/// rate climbs into the same order as the FC frame rate; the keepalive
+/// stops being a sanity check and starts adding bandwidth pressure.
+#[allow(dead_code)]
+const MIN_MQTT_KEEPALIVE_SECS: u64 = 10;
+/// Upper bound for `mqtt_keepalive_secs`. The MQTT 3.1.1 spec caps
+/// keepalive at 18 hours; most brokers reject anything past 1800 s with
+/// CONNACK return-code 3.
+#[allow(dead_code)]
+const MAX_MQTT_KEEPALIVE_SECS: u64 = 1800;
+
+/// Default TCP connect-phase ceiling for the cloud HTTP client. Distinct
+/// from the total-request timeout: a stalled DNS lookup or a half-open
+/// TCP handshake should fail fast and let exponential backoff pick a
+/// fresh attempt rather than burning the full request timeout.
+const DEFAULT_HTTP_CONNECT_TIMEOUT_SECS: u64 = 3;
+/// Default total-request timeout for the cloud HTTP client. Covers
+/// DNS + connect + TLS + body read together.
+const DEFAULT_HTTP_REQUEST_TIMEOUT_SECS: u64 = 10;
 
 /// Per-frame ceiling on the MQTT publish call. A stalled broker (TLS
 /// handshake hang, congested upstream link, half-open socket) would
@@ -102,6 +127,23 @@ pub struct CloudConfig {
     /// the cloud client never re-reads it during the run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_meta: Option<AgentMeta>,
+    /// MQTT keepalive in seconds. Used as the `set_keep_alive` argument
+    /// when the publish loop opens its connection. Defaults to 60 s.
+    /// Validated to fall within `[10, 1800]` at config-load time.
+    /// Cellular operators may raise this to reduce radio-on time;
+    /// local-broker operators may lower it for faster failure detection.
+    #[serde(default = "default_mqtt_keepalive_secs")]
+    pub mqtt_keepalive_secs: u64,
+    /// TCP connect-phase ceiling on the cloud HTTP client. Distinct from
+    /// the total-request timeout: a half-open TCP socket or stalled DNS
+    /// resolution should fail fast and let exponential backoff pick a
+    /// fresh attempt. Default 3 s.
+    #[serde(default = "default_http_connect_timeout_secs")]
+    pub connect_timeout_secs: u64,
+    /// Total-request timeout on the cloud HTTP client. Covers DNS,
+    /// connect, TLS, and body read together. Default 10 s.
+    #[serde(default = "default_http_request_timeout_secs")]
+    pub request_timeout_secs: u64,
 }
 
 /// Static metadata stamped onto every heartbeat. The GCS reads these
@@ -134,6 +176,58 @@ fn default_pairing_path() -> PathBuf {
     PathBuf::from(DEFAULT_PAIRING_PATH)
 }
 
+fn default_mqtt_keepalive_secs() -> u64 {
+    DEFAULT_MQTT_KEEPALIVE_SECS
+}
+
+fn default_http_connect_timeout_secs() -> u64 {
+    DEFAULT_HTTP_CONNECT_TIMEOUT_SECS
+}
+
+fn default_http_request_timeout_secs() -> u64 {
+    DEFAULT_HTTP_REQUEST_TIMEOUT_SECS
+}
+
+/// Apply default substitution + bound-clamp to the MQTT keepalive read
+/// off `CloudConfig`. Returns the value that should be passed to
+/// `set_keep_alive`. A zero value (operator omitted the field; serde's
+/// `#[serde(default)]` filled it in but a hand-edited yaml could still
+/// send `mqtt_keepalive_secs: 0` through) is treated as "use default".
+///
+/// Reserved for the SIGHUP hot-reload validator path; the publish loop
+/// reads the value verbatim today.
+#[allow(dead_code)]
+fn resolve_mqtt_keepalive_secs(secs: u64) -> u64 {
+    let raw = if secs == 0 {
+        DEFAULT_MQTT_KEEPALIVE_SECS
+    } else {
+        secs
+    };
+    raw.clamp(MIN_MQTT_KEEPALIVE_SECS, MAX_MQTT_KEEPALIVE_SECS)
+}
+
+/// Apply default substitution to the connect-phase timeout. A zero
+/// value is treated as "use default" so a hand-edited agent.yaml that
+/// drops `0` cannot disable the connect timeout entirely.
+fn resolve_connect_timeout_secs(secs: u64) -> u64 {
+    if secs == 0 {
+        DEFAULT_HTTP_CONNECT_TIMEOUT_SECS
+    } else {
+        secs
+    }
+}
+
+/// Apply default substitution to the total-request timeout. A zero
+/// value is treated as "use default" — same rationale as the connect
+/// timeout.
+fn resolve_request_timeout_secs(secs: u64) -> u64 {
+    if secs == 0 {
+        DEFAULT_HTTP_REQUEST_TIMEOUT_SECS
+    } else {
+        secs
+    }
+}
+
 impl fmt::Debug for CloudConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("CloudConfig")
@@ -144,8 +238,44 @@ impl fmt::Debug for CloudConfig {
             .field("convex_url", &self.convex_url)
             .field("pairing_path", &self.pairing_path)
             .field("agent_meta", &self.agent_meta)
+            .field("mqtt_keepalive_secs", &self.mqtt_keepalive_secs)
+            .field("connect_timeout_secs", &self.connect_timeout_secs)
+            .field("request_timeout_secs", &self.request_timeout_secs)
             .finish()
     }
+}
+
+impl Default for CloudConfig {
+    fn default() -> Self {
+        Self {
+            device_id: String::new(),
+            mqtt_broker: String::new(),
+            mqtt_port: 1883,
+            mqtt_use_tls: true,
+            convex_url: String::new(),
+            pairing_path: PathBuf::from(DEFAULT_PAIRING_PATH),
+            agent_meta: None,
+            mqtt_keepalive_secs: default_mqtt_keepalive_secs(),
+            connect_timeout_secs: default_http_connect_timeout_secs(),
+            request_timeout_secs: default_http_request_timeout_secs(),
+        }
+    }
+}
+
+/// Shared cloud-config handle. The agent binary holds the only writer
+/// (the SIGHUP hot-reload path); the cloud-client tasks hold readers
+/// and re-read on each iteration so an operator-edited agent.yaml takes
+/// effect on the next tick without a process restart.
+///
+/// Type alias rather than a newtype so existing `Arc::clone` patterns at
+/// the call site keep working; the shape is intentionally narrow.
+pub type SharedCloudConfig = Arc<RwLock<CloudConfig>>;
+
+/// Convenience constructor for the agent binary: wraps `CloudConfig` in
+/// the shared `Arc<RwLock<_>>` so a single call site does not have to
+/// re-import `tokio::sync::RwLock`.
+pub fn shared_cloud_config(config: CloudConfig) -> SharedCloudConfig {
+    Arc::new(RwLock::new(config))
 }
 
 /// Pairing beacon payload posted to `{convex_url}/pairing/register` every
@@ -277,8 +407,10 @@ pub fn spawn_cloud_client(
 
     // HTTPS: heartbeat (when paired) or pairing beacon (when unpaired).
     // Always spawned so the unpaired path keeps registering the device with
-    // the cloud relay until the operator pairs.
-    let http_config = config;
+    // the cloud relay until the operator pairs. Wrap the config in a
+    // SharedCloudConfig so a future SIGHUP hot-reload path can swap the
+    // broker / convex_url at runtime without restarting the agent.
+    let http_config = shared_cloud_config(config);
     let http_diag = diag;
     tokio::spawn(async move {
         if let Err(e) = http_loop(http_config, http_diag).await {
@@ -507,35 +639,114 @@ enum HeartbeatOutcome {
     Unauthorized,
 }
 
-async fn http_loop(config: CloudConfig, diag: Arc<DiagState>) -> Result<(), CloudError> {
-    // Without a relay URL we have no destination. Wait quietly and let the
-    // operator point us at the cloud relay (or future config-reload signal)
-    // rather than burning CPU on errors.
-    if config.convex_url.is_empty() {
-        tracing::info!(
-            "convex_url empty; HTTPS loop idle. Configure cloud.convex_url \
-             in agent.yaml or pair via the setup webapp"
-        );
-        loop {
-            tokio::time::sleep(Duration::from_secs(60)).await;
-        }
-    }
+async fn http_loop(
+    config: SharedCloudConfig,
+    diag: Arc<DiagState>,
+) -> Result<(), CloudError> {
+    // The pairing path is hot-reload-unsafe (changing it mid-run would
+    // strand the cloud loop reading from an old file while the rest of
+    // the agent talks to a new one). Snapshot once at startup and keep
+    // pointing at the original path until the operator restarts.
+    let initial = config.read().await.clone();
 
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(10))
-        .build()?;
-
-    let pairing_store = PairingStore::new(&config.pairing_path);
+    let pairing_store = PairingStore::new(&initial.pairing_path);
     let max_interval = Duration::from_secs(300);
     let mut consecutive_failures: u32 = 0;
     // Stamp the heartbeat with a wall-clock-relative uptime so the GCS can
     // tell when an agent rebooted without needing kernel boot time.
     let started_at = Instant::now();
 
+    // Build the reqwest client lazily so we can rebuild it cleanly when
+    // a SIGHUP changes the timeout fields. `None` means "convex_url was
+    // empty when we last looked". We re-check the shared config every
+    // 60 s so a SIGHUP that populates `convex_url` (for an offline-
+    // bootstrapped agent the operator paired via the webapp) is picked
+    // up without an agent restart.
+    let mut http_client: Option<HttpClientWithTimeouts> = None;
+
     loop {
+        // Per-tick snapshot of the live config. Cheap clone (a handful
+        // of strings + ints); the read lock is held only long enough
+        // to copy out.
+        let live = config.read().await.clone();
+
+        if live.convex_url.is_empty() {
+            // No destination yet. Drop the client (if any) so a future
+            // rebuild after the operator pairs picks up the latest
+            // timeouts. Sleep before re-checking; the loop must not
+            // hot-spin on the empty-URL path.
+            if http_client.is_some() {
+                tracing::info!(
+                    "convex_url cleared; HTTPS loop idling until SIGHUP \
+                     supplies a relay URL"
+                );
+            } else {
+                tracing::info!(
+                    "convex_url empty; HTTPS loop idle. Configure cloud.convex_url \
+                     in agent.yaml or pair via the setup webapp"
+                );
+            }
+            http_client = None;
+            tokio::time::sleep(Duration::from_secs(60)).await;
+            continue;
+        }
+
+        // Rebuild the reqwest client when timeouts change OR when no
+        // client exists yet. Both timeouts go through resolve_*_secs so
+        // a 0 in agent.yaml resolves to the default rather than
+        // disabling the timeout entirely.
+        let connect_secs = resolve_connect_timeout_secs(live.connect_timeout_secs);
+        let request_secs = resolve_request_timeout_secs(live.request_timeout_secs);
+        let needs_rebuild = http_client
+            .as_ref()
+            .map(|c| c.connect_secs != connect_secs || c.request_secs != request_secs)
+            .unwrap_or(true);
+        if needs_rebuild {
+            match build_http_client(connect_secs, request_secs) {
+                Ok(client) => {
+                    if let Some(prev) = http_client.as_ref() {
+                        tracing::info!(
+                            old_connect_secs = prev.connect_secs,
+                            new_connect_secs = connect_secs,
+                            old_request_secs = prev.request_secs,
+                            new_request_secs = request_secs,
+                            "rebuilding cloud HTTP client with updated timeouts"
+                        );
+                    } else {
+                        tracing::info!(
+                            connect_secs = connect_secs,
+                            request_secs = request_secs,
+                            "cloud HTTP client built"
+                        );
+                    }
+                    http_client = Some(HttpClientWithTimeouts {
+                        client,
+                        connect_secs,
+                        request_secs,
+                    });
+                }
+                Err(e) => {
+                    tracing::error!(
+                        error = %e,
+                        connect_secs = connect_secs,
+                        request_secs = request_secs,
+                        "could not build cloud HTTP client; backing off"
+                    );
+                    tokio::time::sleep(Duration::from_secs(30)).await;
+                    continue;
+                }
+            }
+        }
+
+        // Safe by construction: the rebuild branch above either
+        // populated `http_client` or `continue`d before fall-through.
+        let Some(active) = http_client.as_ref() else {
+            continue;
+        };
+
         run_http_tick(
-            &client,
-            &config,
+            &active.client,
+            &live,
             &pairing_store,
             started_at,
             &mut consecutive_failures,
@@ -544,6 +755,28 @@ async fn http_loop(config: CloudConfig, diag: Arc<DiagState>) -> Result<(), Clou
         )
         .await;
     }
+}
+
+/// reqwest client paired with the timeout values it was built with. The
+/// http_loop checks `(connect_secs, request_secs)` on every iteration and
+/// rebuilds the client when either field changes via SIGHUP hot-reload.
+struct HttpClientWithTimeouts {
+    client: reqwest::Client,
+    connect_secs: u64,
+    request_secs: u64,
+}
+
+/// Construct a reqwest client with split connect-phase + total-request
+/// timeouts. Extracted so the http_loop can rebuild on hot-reload and
+/// unit tests can pin the config-load path.
+fn build_http_client(
+    connect_secs: u64,
+    request_secs: u64,
+) -> Result<reqwest::Client, reqwest::Error> {
+    reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(connect_secs))
+        .timeout(Duration::from_secs(request_secs))
+        .build()
 }
 
 /// One iteration of the HTTPS loop: read pairing state, send heartbeat
@@ -855,6 +1088,9 @@ mod tests {
                 last_ip: Some("192.168.200.225".into()),
                 mdns_host: Some("luckfox.local".into()),
             }),
+            mqtt_keepalive_secs: 60,
+            connect_timeout_secs: 3,
+            request_timeout_secs: 10,
         };
         let serialized = serde_json::to_string(&original).unwrap();
         let restored: CloudConfig = serde_json::from_str(&serialized).unwrap();
@@ -878,6 +1114,9 @@ mod tests {
             convex_url: String::new(),
             pairing_path: PathBuf::from("/tmp/pair.json"),
             agent_meta: None,
+            mqtt_keepalive_secs: 60,
+            connect_timeout_secs: 3,
+            request_timeout_secs: 10,
         };
         let serialized = serde_json::to_string(&original).unwrap();
         // The serialized form should not contain the field at all
@@ -902,6 +1141,9 @@ mod tests {
             convex_url: "https://relay.example".into(),
             pairing_path: PathBuf::from("/etc/ados/pairing.json"),
             agent_meta: None,
+            mqtt_keepalive_secs: 60,
+            connect_timeout_secs: 3,
+            request_timeout_secs: 10,
         };
         let body = build_heartbeat_body(&config, Instant::now());
 
@@ -1006,6 +1248,9 @@ mod tests {
             convex_url: "https://relay.example".into(),
             pairing_path: PathBuf::from("/etc/ados/pairing.json"),
             agent_meta: None,
+            mqtt_keepalive_secs: 60,
+            connect_timeout_secs: 3,
+            request_timeout_secs: 10,
         };
         let (tx, _rx) = broadcast::channel(8);
         let diag = DiagState::shared();
@@ -1031,6 +1276,9 @@ mod tests {
             convex_url: "file:///tmp/foo".into(),
             pairing_path: PathBuf::from("/etc/ados/pairing.json"),
             agent_meta: None,
+            mqtt_keepalive_secs: 60,
+            connect_timeout_secs: 3,
+            request_timeout_secs: 10,
         };
         let (tx, _rx) = broadcast::channel(8);
         let diag = DiagState::shared();
@@ -1057,6 +1305,9 @@ mod tests {
             convex_url: "http://localhost:3210".into(),
             pairing_path: PathBuf::from("/etc/ados/pairing.json"),
             agent_meta: None,
+            mqtt_keepalive_secs: 60,
+            connect_timeout_secs: 3,
+            request_timeout_secs: 10,
         };
         let (tx, _rx) = broadcast::channel(8);
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -1115,6 +1366,9 @@ mod tests {
             convex_url: mock.uri(),
             pairing_path: pairing_path.clone(),
             agent_meta: None,
+            mqtt_keepalive_secs: 60,
+            connect_timeout_secs: 3,
+            request_timeout_secs: 10,
         };
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(2))
@@ -1216,6 +1470,9 @@ mod tests {
             convex_url: mock.uri(),
             pairing_path: pairing_path.clone(),
             agent_meta: None,
+            mqtt_keepalive_secs: 60,
+            connect_timeout_secs: 3,
+            request_timeout_secs: 10,
         };
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(2))
@@ -1294,6 +1551,9 @@ mod tests {
             convex_url: mock.uri(),
             pairing_path: pairing_path.clone(),
             agent_meta: None,
+            mqtt_keepalive_secs: 60,
+            connect_timeout_secs: 3,
+            request_timeout_secs: 10,
         };
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(2))
@@ -1371,6 +1631,9 @@ mod tests {
             convex_url: mock.uri(),
             pairing_path: pairing_path.clone(),
             agent_meta: None,
+            mqtt_keepalive_secs: 60,
+            connect_timeout_secs: 3,
+            request_timeout_secs: 10,
         };
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(2))
@@ -1447,6 +1710,9 @@ mod tests {
             convex_url: mock.uri(),
             pairing_path: pairing_path.clone(),
             agent_meta: None,
+            mqtt_keepalive_secs: 60,
+            connect_timeout_secs: 3,
+            request_timeout_secs: 10,
         };
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(2))

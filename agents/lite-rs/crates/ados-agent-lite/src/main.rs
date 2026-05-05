@@ -176,7 +176,22 @@ struct CloudSection {
     /// boot. Going forward, all pair operations write to pairing.json.
     #[serde(default)]
     api_key: String,
+    /// HTTP connect-phase timeout in seconds. Operator-tunable so a
+    /// half-open TCP doesn't burn the full request budget. Default 3 s.
+    #[serde(default = "default_connect_timeout_secs")]
+    connect_timeout_secs: u64,
+    /// HTTP total request timeout in seconds. Default 10 s.
+    #[serde(default = "default_request_timeout_secs")]
+    request_timeout_secs: u64,
+    /// MQTT keepalive interval in seconds. Operator-tunable so cellular
+    /// links can stretch the radio-on cycle. Default 60 s.
+    #[serde(default = "default_mqtt_keepalive_secs")]
+    mqtt_keepalive_secs: u64,
 }
+
+fn default_connect_timeout_secs() -> u64 { 3 }
+fn default_request_timeout_secs() -> u64 { 10 }
+fn default_mqtt_keepalive_secs() -> u64 { 60 }
 
 impl std::fmt::Debug for CloudSection {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -201,6 +216,9 @@ impl Default for CloudSection {
             mqtt_use_tls: default_true(),
             convex_url: String::new(),
             api_key: String::new(),
+            connect_timeout_secs: default_connect_timeout_secs(),
+            request_timeout_secs: default_request_timeout_secs(),
+            mqtt_keepalive_secs: default_mqtt_keepalive_secs(),
         }
     }
 }
@@ -867,6 +885,9 @@ async fn run(config_path: PathBuf) -> Result<()> {
         convex_url: config.cloud.convex_url.clone(),
         pairing_path: pairing_path.clone(),
         agent_meta: Some(agent_meta),
+        connect_timeout_secs: config.cloud.connect_timeout_secs,
+        request_timeout_secs: config.cloud.request_timeout_secs,
+        mqtt_keepalive_secs: config.cloud.mqtt_keepalive_secs,
     };
 
     // Diagnostic state shared across the HTTP handlers and the cloud /

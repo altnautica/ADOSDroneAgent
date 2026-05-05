@@ -22,6 +22,61 @@ use tokio_serial::{SerialPortBuilderExt, SerialStream};
 /// Maximum size of a single MAVLink v2 frame.
 const MAX_FRAME_BYTES: usize = 280;
 
+/// Spec ceiling on the LEN field (u8). MAVLink encodes the payload size in
+/// a single byte for both v1 and v2; anything past 255 is unrepresentable
+/// in the wire format and indicates either a parser bug or an attacker
+/// trying to overrun the read buffer.
+///
+/// Kept as a named constant rather than inlined so the audit finding
+/// ("no test for oversized payload") has an obvious target to pin
+/// behavior against.
+const MAX_PAYLOAD_BYTES: usize = 255;
+
+/// MAVLink v1 sync byte. The router accepts both v1 and v2 frames so a
+/// dual-stack FC (some Betaflight/iNav builds still emit v1 by default
+/// even when MAVLink v2 is requested by the GCS) does not appear silent
+/// to the cloud relay.
+const MAVLINK_V1_STX: u8 = 0xFE;
+
+/// MAVLink v2 sync byte.
+const MAVLINK_V2_STX: u8 = 0xFD;
+
+/// X.25-style CRC used by MAVLink. Polynomial 0x1021, initial value
+/// 0xFFFF, byte-by-byte; appended with a per-message-id `crc_extra`
+/// constant from the dialect XML so a frame reordering bug at the FC
+/// surfaces as a CRC mismatch rather than a silent decode of the wrong
+/// message type.
+fn crc_x25(bytes: &[u8]) -> u16 {
+    let mut crc: u16 = 0xFFFF;
+    for &b in bytes {
+        let mut tmp = b ^ (crc as u8);
+        tmp ^= tmp << 4;
+        crc = (crc >> 8) ^ ((tmp as u16) << 8) ^ ((tmp as u16) << 3) ^ ((tmp as u16) >> 4);
+    }
+    crc
+}
+
+/// Per-message `CRC_EXTRA` constant from the MAVLink dialect XML. Returns
+/// `Some(crc_extra)` for message ids the router knows; `None` for ids it
+/// has not been taught about. Unknown ids pass through without CRC
+/// validation so a fresh dialect message from a newer FC firmware does
+/// not get silently dropped — the router is a transport, not a decoder.
+///
+/// Only the message ids actually surfaced in unit tests are populated
+/// today. The MAVLink common + ardupilotmega dialects between them define
+/// hundreds of ids; the `mavlink` crate (currently commented out in the
+/// workspace `Cargo.toml`) carries a generated table. Adding it costs
+/// non-trivial code size on the lite agent, which is the wrong trade for
+/// a transport that broadcasts opaque blobs. When typed decoding lands
+/// the table comes with it.
+fn crc_extra_for(msgid: u32) -> Option<u8> {
+    match msgid {
+        0 => Some(50),  // HEARTBEAT (MAVLink common)
+        1 => Some(124), // SYS_STATUS (MAVLink common)
+        _ => None,
+    }
+}
+
 /// Capacity of the broadcast channel that fans frames out to in-process
 /// consumers. Slow consumers fall behind and lose frames — they get
 /// `RecvError::Lagged` and must catch up. The cloud relay is the primary
@@ -162,7 +217,9 @@ async fn router_loop(
                 // tail keeps room for a fresh sync to arrive.
                 const MAX_BUF_BYTES: usize = MAX_FRAME_BYTES * 8;
                 if frame_buf.len() > MAX_BUF_BYTES {
-                    let last_sync = frame_buf.iter().rposition(|&b| b == 0xFD);
+                    let last_sync = frame_buf
+                        .iter()
+                        .rposition(|&b| b == MAVLINK_V2_STX || b == MAVLINK_V1_STX);
                     let drop_n = match last_sync {
                         Some(pos) if pos > 0 => pos,
                         _ => frame_buf.len() / 2,
@@ -188,14 +245,23 @@ async fn router_loop(
     }
 }
 
-/// Walk the accumulator buffer looking for MAVLink v2 frame starts (`0xFD`),
-/// determine each frame's length from the header, and broadcast complete
-/// frames. Drops bytes ahead of the first sync byte. Leaves partial trailing
-/// frames in place for the next read.
+/// Walk the accumulator buffer looking for MAVLink frame starts (`0xFD`
+/// for v2 or `0xFE` for v1), determine each frame's length from the
+/// header, validate the CRC for known message ids, and broadcast
+/// complete frames. Drops bytes ahead of the first sync byte. Leaves
+/// partial trailing frames in place for the next read.
+///
+/// CRC failures advance one byte past the bad sync and retry — the
+/// candidate sync was almost certainly a payload byte that happened to
+/// equal 0xFD/0xFE, and the real frame start is further into the buffer.
 fn drain_frames(frame_buf: &mut Vec<u8>, inbound: &broadcast::Sender<Vec<u8>>) {
     loop {
-        // Discard everything before the next v2 sync byte (0xFD).
-        let Some(start) = frame_buf.iter().position(|&b| b == 0xFD) else {
+        // Discard everything before the next sync byte. Accept both v2
+        // (0xFD) and v1 (0xFE) starts — pick whichever appears first.
+        let next_sync = frame_buf
+            .iter()
+            .position(|&b| b == MAVLINK_V2_STX || b == MAVLINK_V1_STX);
+        let Some(start) = next_sync else {
             frame_buf.clear();
             return;
         };
@@ -203,24 +269,119 @@ fn drain_frames(frame_buf: &mut Vec<u8>, inbound: &broadcast::Sender<Vec<u8>>) {
             frame_buf.drain(..start);
         }
 
-        // v2 header layout: STX(0xFD) LEN INC_FLAGS CMP_FLAGS SEQ SYSID COMPID MSGID(3) PAYLOAD CHECKSUM(2) SIG?(13).
-        // Need at least 10 bytes for header + 2 for checksum.
-        if frame_buf.len() < 12 {
-            return;
+        let stx = frame_buf[0];
+        let outcome = match stx {
+            MAVLINK_V2_STX => parse_v2_frame(frame_buf),
+            MAVLINK_V1_STX => parse_v1_frame(frame_buf),
+            _ => unreachable!("position filter restricted stx to V1/V2"),
+        };
+        match outcome {
+            FrameOutcome::Need => return,
+            FrameOutcome::BadCrc | FrameOutcome::TooLarge => {
+                // The candidate sync byte was likely payload (or a header
+                // claim past the spec ceiling); drop it and keep scanning
+                // for a real frame start.
+                frame_buf.drain(..1);
+                continue;
+            }
+            FrameOutcome::Ready(total_len) => {
+                let frame: Vec<u8> = frame_buf.drain(..total_len).collect();
+                // Best-effort broadcast. If no consumers are subscribed,
+                // the send returns Err and we drop the frame on the
+                // floor — that's fine.
+                let _ = inbound.send(frame);
+            }
         }
-
-        let payload_len = frame_buf[1] as usize;
-        let incompat_flags = frame_buf[2];
-        let total_len = 10 + payload_len + 2 + if incompat_flags & 0x01 != 0 { 13 } else { 0 };
-        if frame_buf.len() < total_len {
-            return;
-        }
-
-        let frame: Vec<u8> = frame_buf.drain(..total_len).collect();
-        // Best-effort broadcast. If no consumers are subscribed, the send
-        // returns Err and we drop the frame on the floor — that's fine.
-        let _ = inbound.send(frame);
     }
+}
+
+/// Result of inspecting the head of `frame_buf` against a candidate sync
+/// byte. The parse helpers do not mutate the buffer; the caller drains
+/// based on the variant.
+enum FrameOutcome {
+    /// More bytes needed before a verdict can be reached.
+    Need,
+    /// CRC mismatch on a known message id; caller drops 1 byte and retries.
+    BadCrc,
+    /// Header claimed a payload past the spec ceiling; caller drops 1
+    /// byte and retries.
+    TooLarge,
+    /// Frame is complete and CRC-valid (or msgid is unknown so CRC
+    /// checking is not enforced); caller drains `total_len` bytes.
+    Ready(usize),
+}
+
+/// v2 header layout: STX(0xFD) LEN INC_FLAGS CMP_FLAGS SEQ SYSID COMPID
+/// MSGID(3) PAYLOAD CHECKSUM(2) SIG?(13). Total = 10 + LEN + 2 + (sig?13).
+fn parse_v2_frame(frame_buf: &[u8]) -> FrameOutcome {
+    if frame_buf.len() < 12 {
+        return FrameOutcome::Need;
+    }
+    let payload_len = frame_buf[1] as usize;
+    if payload_len > MAX_PAYLOAD_BYTES {
+        return FrameOutcome::TooLarge;
+    }
+    let incompat_flags = frame_buf[2];
+    let signed = incompat_flags & 0x01 != 0;
+    let total_len = 10 + payload_len + 2 + if signed { 13 } else { 0 };
+    if total_len > MAX_FRAME_BYTES {
+        return FrameOutcome::TooLarge;
+    }
+    if frame_buf.len() < total_len {
+        return FrameOutcome::Need;
+    }
+    // CRC is computed over LEN..end-of-payload (header + payload, skipping
+    // the 0xFD sync byte) plus the per-message CRC_EXTRA byte. Located at
+    // bytes [10 + payload_len .. 12 + payload_len]; signature, if any,
+    // sits past the CRC and is NOT covered.
+    let msgid =
+        (frame_buf[7] as u32) | ((frame_buf[8] as u32) << 8) | ((frame_buf[9] as u32) << 16);
+    if let Some(extra) = crc_extra_for(msgid) {
+        let crc_start = 10 + payload_len;
+        let claimed = u16::from_le_bytes([frame_buf[crc_start], frame_buf[crc_start + 1]]);
+        let computed = crc_x25_with_extra(&frame_buf[1..crc_start], extra);
+        if claimed != computed {
+            return FrameOutcome::BadCrc;
+        }
+    }
+    FrameOutcome::Ready(total_len)
+}
+
+/// v1 header layout: STX(0xFE) LEN SEQ SYSID COMPID MSGID PAYLOAD
+/// CHECKSUM(2). Total = 6 + LEN + 2.
+fn parse_v1_frame(frame_buf: &[u8]) -> FrameOutcome {
+    if frame_buf.len() < 8 {
+        return FrameOutcome::Need;
+    }
+    let payload_len = frame_buf[1] as usize;
+    if payload_len > MAX_PAYLOAD_BYTES {
+        return FrameOutcome::TooLarge;
+    }
+    let total_len = 6 + payload_len + 2;
+    if frame_buf.len() < total_len {
+        return FrameOutcome::Need;
+    }
+    let msgid = frame_buf[5] as u32;
+    if let Some(extra) = crc_extra_for(msgid) {
+        let crc_start = 6 + payload_len;
+        let claimed = u16::from_le_bytes([frame_buf[crc_start], frame_buf[crc_start + 1]]);
+        let computed = crc_x25_with_extra(&frame_buf[1..crc_start], extra);
+        if claimed != computed {
+            return FrameOutcome::BadCrc;
+        }
+    }
+    FrameOutcome::Ready(total_len)
+}
+
+/// Compute the X.25 CRC over `bytes` and then accumulate the per-message
+/// `crc_extra` byte. Helper around `crc_x25` so the v1 + v2 paths share
+/// the dialect-extra fold and the unit tests can call the same routine.
+fn crc_x25_with_extra(bytes: &[u8], extra: u8) -> u16 {
+    let mut crc = crc_x25(bytes);
+    let mut tmp = extra ^ (crc as u8);
+    tmp ^= tmp << 4;
+    crc = (crc >> 8) ^ ((tmp as u16) << 8) ^ ((tmp as u16) << 3) ^ ((tmp as u16) >> 4);
+    crc
 }
 
 #[cfg(test)]
@@ -229,8 +390,11 @@ mod tests {
 
     #[test]
     fn drain_frames_extracts_one_complete_v2_frame() {
-        // Minimal valid v2 frame: STX, LEN=1, INCOMPAT=0, COMPAT=0, SEQ=0, SYS=1, COMP=1, MSGID=0,0,0, PAYLOAD=0xAB, CRC=0,0
-        let frame: &[u8] = &[0xFD, 0x01, 0x00, 0x00, 0x00, 0x01, 0x01, 0x00, 0x00, 0x00, 0xAB, 0x00, 0x00];
+        // Minimal valid v2 frame with msgid=99 (unknown to crc_extra_for so
+        // CRC validation is bypassed per the parser's pass-through policy
+        // for unknown dialects). STX, LEN=1, INCOMPAT=0, COMPAT=0, SEQ=0,
+        // SYS=1, COMP=1, MSGID=99,0,0, PAYLOAD=0xAB, CRC=0,0.
+        let frame: &[u8] = &[0xFD, 0x01, 0x00, 0x00, 0x00, 0x01, 0x01, 0x63, 0x00, 0x00, 0xAB, 0x00, 0x00];
         let mut buf = frame.to_vec();
         let (tx, mut rx) = broadcast::channel(8);
         drain_frames(&mut buf, &tx);
@@ -241,7 +405,8 @@ mod tests {
 
     #[test]
     fn drain_frames_skips_garbage_before_sync_byte() {
-        let frame: &[u8] = &[0xFD, 0x01, 0x00, 0x00, 0x00, 0x01, 0x01, 0x00, 0x00, 0x00, 0xAB, 0x00, 0x00];
+        // Same unknown msgid=99 to skip CRC validation.
+        let frame: &[u8] = &[0xFD, 0x01, 0x00, 0x00, 0x00, 0x01, 0x01, 0x63, 0x00, 0x00, 0xAB, 0x00, 0x00];
         let mut buf = vec![0xAA, 0xBB, 0xCC]; // garbage
         buf.extend_from_slice(frame);
         let (tx, mut rx) = broadcast::channel(8);
@@ -261,8 +426,9 @@ mod tests {
 
     #[test]
     fn drain_frames_handles_signed_frame_length() {
-        // Signed v2 frame: incompat_flags=0x01 means +13 signature bytes.
-        let mut frame = vec![0xFD, 0x01, 0x01, 0x00, 0x00, 0x01, 0x01, 0x00, 0x00, 0x00, 0xAB, 0x00, 0x00];
+        // Signed v2 frame with msgid=99 (CRC-bypass dialect).
+        // incompat_flags=0x01 means +13 signature bytes.
+        let mut frame = vec![0xFD, 0x01, 0x01, 0x00, 0x00, 0x01, 0x01, 0x63, 0x00, 0x00, 0xAB, 0x00, 0x00];
         frame.extend_from_slice(&[0u8; 13]); // signature bytes
         let mut buf = frame.clone();
         let (tx, mut rx) = broadcast::channel(8);
