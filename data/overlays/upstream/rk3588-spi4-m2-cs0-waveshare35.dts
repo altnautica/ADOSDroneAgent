@@ -1,0 +1,43 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+/*
+ * Activate the 480x320 ILI9486 SPI LCD on the SPI4 controller's M2 pad
+ * mux. On boards that route SPI4_M2 onto the 40-pin expansion header at
+ * the same physical pin positions as the Raspberry Pi puts SPI0 (Rock 5A
+ * / Rock 5C / Rock 5D), this lets a Pi-style 3.5" LCD HAT plug in
+ * directly. Touch is enabled. The XPT2046/ADS7846 PENIRQ line is open-
+ * drain (low when pen down), so the IRQ trigger is FALLING-edge and
+ * pendown-gpio is ACTIVE_LOW.
+ */
+
+#define DISPLAY_SPI spi4
+#include "waveshare35-lcd.dtsi"
+
+/ {
+    metadata {
+        title = "Enable Waveshare 3.5inch RPi LCD on SPI4";
+        compatible = "radxa,rock-5a", "radxa,rock-5c", "radxa,rock-5d";
+        category = "misc";
+        exclusive = "GPIO1_A2", "GPIO1_A0", "GPIO1_A1", "GPIO1_A3", "GPIO1_B0", "GPIO1_B5", "GPIO4_B3";
+        description = "Enable the 480x320 ILI9486 SPI LCD on SPI4 with ADS7846 resistive touch.";
+    };
+};
+
+&DISPLAY_SPI {
+    pinctrl-0 = <&spi4m2_pins>;
+    num-cs = <2>;
+    cs-gpios = <&gpio1 RK_PA3 GPIO_ACTIVE_LOW
+                &gpio1 RK_PA4 GPIO_ACTIVE_LOW>;
+};
+
+&ili9486 {
+    reset-gpios = <&gpio1 RK_PB5 GPIO_ACTIVE_LOW>;
+    dc-gpios = <&gpio1 RK_PB0 GPIO_ACTIVE_HIGH>;
+};
+
+&ads7846 {
+    status = "okay";
+    interrupt-parent = <&gpio4>;
+    interrupts = <RK_PB3 IRQ_TYPE_EDGE_FALLING>;
+    pendown-gpio = <&gpio4 RK_PB3 GPIO_ACTIVE_LOW>;
+    touchscreen-max-pressure = <255>;
+};

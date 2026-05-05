@@ -6,10 +6,10 @@ import platform
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from ados.core.logging import get_logger
 from ados.core.paths import BOARD_OVERRIDE_PATH as _BOARD_OVERRIDE_PATH
@@ -18,6 +18,59 @@ log = get_logger("hal")
 
 BOARDS_DIR = Path(__file__).parent / "boards"
 BOARD_OVERRIDE_PATH = _BOARD_OVERRIDE_PATH
+
+
+class DisplayGpio(BaseModel):
+    """One GPIO pin claimed by a display binding.
+
+    ``pin`` carries the SoC-native pin name (e.g. ``GPIO1_B0`` on Rockchip,
+    ``PJ25`` on Allwinner). ``pinctrl`` selects which pin controller block
+    drives the pad; Allwinner SoCs split a few pins into a separate AO
+    controller addressed as ``r_pio`` while the bulk of the pins live on
+    the default ``pio`` block. ``header_pin`` is the physical position on
+    the 40-pin expansion header so a board's wiring can be traced from
+    YAML alone without cross-referencing a pin-mux PDF.
+    """
+
+    pin: str
+    pinctrl: str = "default"
+    header_pin: int
+    direction: Literal["out", "in"]
+
+
+class DisplayBinding(BaseModel):
+    """One supported display and the wiring it claims on this board.
+
+    Fields cover both the install-time provisioning (``overlay_source``,
+    ``overlay_ref``, ``modules_required``) and the runtime contract that
+    the on-board UI service needs to render to the right framebuffer
+    (``resolution``, ``default_rotation``, ``gpio``).
+
+    ``overlay_source = "repo"`` means the agent ships the DTS in
+    ``data/overlays/<overlay_ref>`` and compiles + installs it during
+    ``install-display-overlay.sh``. ``overlay_source = "upstream"`` means
+    the BSP already provides a compiled DTBO and the installer activates
+    it; the fallback path vendors a copy of the upstream source under
+    ``data/overlays/upstream/`` when the BSP overlay set is absent.
+    """
+
+    id: str
+    type: Literal["spi-lcd", "hdmi", "dpi", "mipi-dsi"]
+    controller: str
+    touch_chip: str | None = None
+    bus: str
+    resolution: str
+    overlay_source: Literal["repo", "upstream"] = "repo"
+    overlay_ref: str
+    gpio: dict[str, DisplayGpio] = Field(default_factory=dict)
+    default_rotation: int = 0
+    modules_required: list[str] = Field(default_factory=list)
+
+
+class DisplaysSection(BaseModel):
+    """All displays a board can drive, plus future top-level knobs."""
+
+    supported: list[DisplayBinding] = Field(default_factory=list)
 
 
 class BoardProfile(BaseModel):
@@ -40,6 +93,11 @@ class BoardProfile(BaseModel):
     target_rust_triple: str | None = None
     min_kernel_version: str | None = None
     wifi_chip_driver: str | None = None
+
+    # Optional displays section consumed by the LCD-overlay installer and
+    # by the renderer-adapter UI service. Boards without any local display
+    # leave this absent and resolve to an empty supported list.
+    displays: DisplaysSection = Field(default_factory=DisplaysSection)
 
 
 @dataclass

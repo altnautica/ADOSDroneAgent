@@ -1,0 +1,11 @@
+The device-tree overlay sources in this directory are licensed under
+GPL-2.0-or-later, the same license that covers the in-tree Linux kernel
+device-tree sources they extend. They are vendored here so the
+LCD-overlay installer can compile and install a working DTBO on
+distributions whose BSP package set lacks a pre-built one.
+
+A copy of the GNU General Public License version 2 is available at:
+  https://www.gnu.org/licenses/old-licenses/gpl-2.0.html
+
+Each source file carries an SPDX header indicating the license that
+applies to that file specifically.

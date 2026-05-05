@@ -134,6 +134,51 @@ ros:
   supported: true
   max_profile: vio          # 16 GB RAM, 6 TOPS NPU. VIO fits comfortably.
 
+# 40-pin header signal positions are Pi-pinout-compatible at the SPI4-M2
+# pad mux (GPIO1_A0..A4 → physical pins 21/19/23/24/26), so a Waveshare
+# 3.5" RPi LCD HAT plugs in directly. The BSP ships a compiled overlay
+# at /boot/dtbo/rk3588-spi4-m2-cs0-waveshare35.dtbo whose metadata
+# declares ``radxa,rock-5c`` compatible — the LCD-overlay installer
+# activates that DTBO when present, and falls back to compiling a
+# vendored copy of the source when the BSP overlay set is absent
+# (third-party Rockchip images such as Armbian / Ubuntu-Rockchip / DietPi).
+displays:
+  supported:
+    - id: waveshare35a
+      type: spi-lcd
+      controller: ILI9486
+      touch_chip: ADS7846
+      bus: spi4
+      resolution: 480x320
+      overlay_source: upstream
+      overlay_ref: rk3588-spi4-m2-cs0-waveshare35
+      gpio:
+        dc:
+          pin: GPIO1_B0
+          pinctrl: default
+          header_pin: 18
+          direction: out
+        reset:
+          pin: GPIO1_B5
+          pinctrl: default
+          header_pin: 22
+          direction: out
+        irq:
+          pin: GPIO4_B3
+          pinctrl: default
+          header_pin: 11
+          direction: in
+        cs_touch:
+          pin: GPIO1_A4
+          pinctrl: default
+          header_pin: 26
+          direction: out
+      default_rotation: 90
+      modules_required:
+        - fbtft
+        - fb_ili9486
+        - ads7846
+
 profiles:
   tier: pro
   max_features:
