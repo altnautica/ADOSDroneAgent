@@ -906,43 +906,129 @@ enable_universal_units() {
 
 # ─── Ground-station Profile ───────────────────────────────────────────────
 
-# Resolve agent profile. Honors /etc/ados/profile.conf if present, otherwise
-# tries `python -m ados.bootstrap.profile_detect`. Falls back to "drone" so
-# a missing detector never turns a drone into a ground station.
+# Resolve agent profile. Priority:
+#
+#   1. --profile flag (from the pre-parser at line ~50). Persists to
+#      /etc/ados/profile.conf AND updates /etc/ados/config.yaml's
+#      agent.profile + ground_station block so the choice survives
+#      reboots and so the agent itself reports the right profile via
+#      its REST API.
+#   2. /etc/ados/profile.conf — supports both YAML (`profile: X`) and
+#      legacy key=value (`profile=X`) so older installs don't break.
+#   3. python -m ados.bootstrap.profile_detect — auto-detect from
+#      board fingerprint.
+#   4. Fallback: "drone".
+#
+# The fix in priority #1 is the one that closes the long-standing
+# regression where `--profile ground-station` got silently dropped on
+# every --upgrade because nothing wrote the choice to disk.
 resolve_profile() {
     local profile_file="${CONFIG_DIR}/profile.conf"
     local valid_re='^(auto|drone|ground_station|ground-station|unconfigured)$'
 
+    # Priority 1 — explicit --profile flag (already in _PROFILE_OVERRIDE).
+    if [ -n "${_PROFILE_OVERRIDE:-}" ] \
+        && [ "${_PROFILE_OVERRIDE}" != "auto" ] \
+        && [[ "${_PROFILE_OVERRIDE}" =~ ${valid_re} ]]; then
+        # Normalize "ground-station" → "ground_station" for the on-disk
+        # canonical form. The agent's setup contract uses the
+        # underscore form everywhere internally; install.sh accepts
+        # both for ergonomics.
+        local normalized="${_PROFILE_OVERRIDE//-/_}"
+        mkdir -p "${CONFIG_DIR}"
+        cat > "${profile_file}" <<EOF
+profile: ${normalized}
+EOF
+        # Push the same value into config.yaml's agent.profile so the
+        # running agent reports it through the REST API. ground_station
+        # role defaults to "direct" — operator can change later via the
+        # wizard's profile step.
+        _persist_profile_to_config "${normalized}"
+        echo "${normalized}"
+        return 0
+    fi
+
+    # Priority 2 — on-disk profile.conf. Try YAML first, then legacy.
     if [ -f "${profile_file}" ]; then
-        # profile.conf is a trivial `profile=<name>` file. Reject anything
-        # that is not one of the known profile names so a corrupt file
-        # left behind by an older install does not propagate.
         local val
-        val="$(grep -E '^profile=' "${profile_file}" 2>/dev/null | cut -d= -f2 | tr -d '[:space:]' || true)"
+        # YAML form: `profile: X`
+        val="$(grep -E '^profile:[[:space:]]+' "${profile_file}" 2>/dev/null \
+            | head -n1 | sed -E 's/^profile:[[:space:]]+//' | tr -d '[:space:]' || true)"
+        if [ -z "${val}" ]; then
+            # Legacy key=value form: `profile=X`
+            val="$(grep -E '^profile=' "${profile_file}" 2>/dev/null \
+                | cut -d= -f2 | tr -d '[:space:]' || true)"
+        fi
         if [[ "${val}" =~ ${valid_re} ]]; then
-            echo "${val}"
+            local normalized="${val//-/_}"
+            echo "${normalized}"
             return 0
         fi
         warn "Ignoring unrecognized profile.conf contents."
     fi
 
+    # Priority 3 — auto-detect via the agent's profile_detect.
     if "${VENV_DIR}/bin/python" -c "import ados.bootstrap.profile_detect" 2>/dev/null; then
-        # Use detect_profile() directly so only the profile string lands
-        # on stdout. The previous shelling-out to `python -m ...` mixed
-        # YAML and any structlog output that escaped to stdout, which
-        # squashed into a corrupt one-liner under tr -d.
         local detected
         detected="$("${VENV_DIR}/bin/python" -c \
             'from ados.bootstrap.profile_detect import detect_profile; print(detect_profile()["profile"])' \
             2>/dev/null | tr -d '[:space:]' || true)"
         if [[ "${detected}" =~ ${valid_re} ]]; then
             mkdir -p "${CONFIG_DIR}"
-            echo "profile=${detected}" > "${profile_file}"
-            echo "${detected}"
+            cat > "${profile_file}" <<EOF
+profile: ${detected//-/_}
+EOF
+            echo "${detected//-/_}"
             return 0
         fi
     fi
+
+    # Priority 4 — fallback.
     echo "drone"
+}
+
+# Persist agent.profile (and a default ground_station block when
+# applicable) into /etc/ados/config.yaml. Uses python because YAML
+# editing in pure shell is fragile. Idempotent — overwrites the
+# field rather than appending.
+_persist_profile_to_config() {
+    local target_profile="$1"
+    local config_file="${CONFIG_DIR}/config.yaml"
+    if [ ! -x "${VENV_DIR}/bin/python" ]; then
+        # Venv not built yet (very early --force install). Skip; the
+        # profile will be re-applied on the post-install resolve.
+        return 0
+    fi
+    "${VENV_DIR}/bin/python" - "${config_file}" "${target_profile}" <<'PY' || \
+        warn "Could not update config.yaml agent.profile; do it via the wizard."
+import sys
+from pathlib import Path
+import yaml  # type: ignore[import-not-found]
+
+cfg_path = Path(sys.argv[1])
+target = sys.argv[2]
+
+cfg = {}
+if cfg_path.exists():
+    try:
+        cfg = yaml.safe_load(cfg_path.read_text()) or {}
+    except Exception:
+        cfg = {}
+
+agent = cfg.setdefault("agent", {})
+agent["profile"] = target
+
+# When promoting to ground_station, seed a default role so the agent
+# has something to work with before the operator opens the wizard.
+# Idempotent — never overwrites a role the operator has already set.
+if target == "ground_station":
+    gs = cfg.setdefault("ground_station", {})
+    gs.setdefault("role", "direct")
+    gs.setdefault("mesh_capable", False)
+
+cfg_path.parent.mkdir(parents=True, exist_ok=True)
+cfg_path.write_text(yaml.safe_dump(cfg, sort_keys=False, default_flow_style=False))
+PY
 }
 
 # Extra apt deps needed for the ground-station profile. Idempotent.
