@@ -89,9 +89,13 @@ detect_profile() {
 
     # Fetch the lite-eligible board manifest. 5s timeout so a network blip
     # doesn't stall every install. Failure falls through to the RAM failsafe.
+    # Prefers curl, falls back to wget so this works on Buildroot rootfs
+    # images (Luckfox SDK, etc.) that ship wget but not curl.
     local manifest=""
     if command -v curl >/dev/null 2>&1; then
         manifest="$(curl -fsSL --max-time 5 "${LITE_BOARDS_MANIFEST_URL}" 2>/dev/null || true)"
+    elif command -v wget >/dev/null 2>&1; then
+        manifest="$(wget -q -T 5 -O - "${LITE_BOARDS_MANIFEST_URL}" 2>/dev/null || true)"
     fi
 
     if [ -n "${manifest}" ] && [ -n "${model_lower}" ]; then
@@ -177,9 +181,19 @@ if [ "${_PROFILE}" = "lite-rs" ]; then
     fi
     if [ -z "${LITE_INSTALLER}" ]; then
         LITE_INSTALLER="$(mktemp)"
-        curl -fsSL \
-            "https://raw.githubusercontent.com/altnautica/ADOSDroneAgent/main/scripts/install-lite.sh" \
-            -o "${LITE_INSTALLER}"
+        # Prefer curl, fall back to wget. Buildroot rootfs images ship wget
+        # only — the Luckfox Pico Zero is the canonical example.
+        if command -v curl >/dev/null 2>&1; then
+            curl -fsSL --retry 3 --retry-delay 2 \
+                "https://raw.githubusercontent.com/altnautica/ADOSDroneAgent/main/scripts/install-lite.sh" \
+                -o "${LITE_INSTALLER}"
+        elif command -v wget >/dev/null 2>&1; then
+            wget -q --tries=3 -O "${LITE_INSTALLER}" \
+                "https://raw.githubusercontent.com/altnautica/ADOSDroneAgent/main/scripts/install-lite.sh"
+        else
+            echo "ERROR: neither curl nor wget is installed; cannot fetch install-lite.sh" >&2
+            exit 1
+        fi
         chmod +x "${LITE_INSTALLER}"
     fi
     exec "${LITE_INSTALLER}" "$@"
