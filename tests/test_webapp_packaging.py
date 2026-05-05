@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-WEBAPP_DIR = Path(__file__).resolve().parent.parent / "src" / "ados" / "webapp" / "universal"
+WEBAPP_DIR = Path(__file__).resolve().parent.parent / "web" / "setup"
 
 REQUIRED_PAGES = (
     "index.html",
@@ -65,11 +65,14 @@ def test_each_asset_present(asset: str) -> None:
 
 
 def test_no_legacy_static_dirs() -> None:
-    """Legacy static and static-ground directories were retired with the
-    universal webapp consolidation."""
+    """The legacy webapp tree under src/ados/webapp/ is retired; assets
+    now live at the top-level web/setup/ canonical location."""
+    repo_root = WEBAPP_DIR.parent.parent
+    legacy_root = repo_root / "src" / "ados" / "webapp"
+    assert not legacy_root.exists(), "legacy src/ados/webapp/ should be removed"
     parent = WEBAPP_DIR.parent
-    assert not (parent / "static").exists(), "legacy webapp/static/ should be removed"
-    assert not (parent / "static-ground").exists(), "legacy webapp/static-ground/ should be removed"
+    assert not (parent / "static").exists(), "no legacy web/static/ should exist"
+    assert not (parent / "static-ground").exists(), "no legacy web/static-ground/ should exist"
 
 
 def test_app_js_dispatches_by_data_page() -> None:

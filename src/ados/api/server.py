@@ -120,11 +120,22 @@ def create_app(agent: Any) -> FastAPI:
     app.include_router(plugins.router, prefix="/api")
 
     # Universal setup webapp. Mounted AFTER every router above so API routes
-    # match first and `/` serves the captive/local browser entry. The
-    # webapp must be present in the package; if it is not, that is a
-    # packaging regression and we surface it as a startup error instead of
-    # silently falling back.
-    static_dir = Path(__file__).resolve().parent.parent / "webapp" / "universal"
+    # match first and `/` serves the captive/local browser entry. Assets live
+    # at the top-level ``web.setup`` package so multiple agent backends in
+    # this repository can serve them from the same canonical location.
+    # Resolved via ``importlib.resources`` so editable installs and wheel
+    # installs both find the directory. If the package is missing, that is
+    # a packaging regression and we surface it as a startup error instead
+    # of silently falling back.
+    from importlib.resources import files
+    try:
+        import web.setup as _web_setup_pkg
+    except ImportError as exc:
+        raise RuntimeError(
+            "Universal setup webapp package 'web.setup' is missing. "
+            "Reinstall the agent package or rebuild from source."
+        ) from exc
+    static_dir = Path(str(files(_web_setup_pkg)))
     if not static_dir.exists():
         raise RuntimeError(
             f"Universal setup webapp directory missing at {static_dir}. "
