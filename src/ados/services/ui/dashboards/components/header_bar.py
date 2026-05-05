@@ -101,5 +101,33 @@ def draw_header(
         font=clock_font,
     )
 
+    # Broadcasting indicator — small pulsing dot to the LEFT of the
+    # clock when the agent is actively beaconing a pair code (i.e.
+    # not yet paired with Mission Control). Confirms the rig is
+    # discoverable from across the bench without the operator
+    # having to dig into logs. Pulse phase is derived from current
+    # second so it visibly alternates without per-render state.
+    cloud = state.get("cloud") or {}
+    broadcasting = bool(
+        cloud.get("broadcasting")
+        or (state.get("pairing", {}) or {}).get("code")
+    ) and not bool(cloud.get("paired"))
+    if broadcasting:
+        broadcast_x = x + w - 28 - clock_w
+        # Even-second = bright, odd-second = dim — produces a 1 Hz pulse.
+        phase = int(time.time()) % 2 if now_str is None else 0
+        bright = phase == 0
+        broadcast_color = (
+            p.STATUS_SUCCESS if bright else (0x0E, 0x4D, 0x26)
+        )
+        draw_dot(image, broadcast_x, y + h // 2, broadcast_color, radius=4)
+        small_font = p.font("sans_bold", 10)
+        draw.text(
+            (broadcast_x + 8, y + 11),
+            "BCAST",
+            fill=p.TEXT_TERTIARY,
+            font=small_font,
+        )
+
     # 1 px divider under the bar.
     draw.line((x, y + h, x + w - 1, y + h), fill=p.BORDER_DEFAULT)

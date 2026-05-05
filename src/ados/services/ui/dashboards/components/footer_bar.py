@@ -1,13 +1,12 @@
 """Bottom-of-dashboard system metrics bar.
 
 28 px tall, full-width band that pins the dashboard. Contents
-left to right: CPU, RAM used/total, temp, uptime, agent version.
+left to right: CPU+sparkline, RAM, temp+sparkline, uptime, version.
 Threshold colors highlight when CPU > 80%, RAM > 80%, temp > 75 C.
 
-This row is what tells the operator the host SBC itself is healthy
-(distinct from the radio/mesh tiles which talk about the mission
-side of things). Even when nothing's wrong this row shows live
-numbers, which is reassuring on its own.
+The CPU and temp values get a 30x14 sparkline next to the number
+showing the last 60 seconds of history — same data, but the trend
+catches the eye faster than a rising number alone.
 """
 
 from __future__ import annotations
@@ -17,9 +16,12 @@ from typing import Any
 from PIL import Image, ImageDraw
 
 from . import primitives as p
+from .sparkline import draw_sparkline, history, push
 
 
 FOOTER_HEIGHT = 28
+SPARK_W = 30
+SPARK_H = 14
 
 
 def _format_uptime(seconds: int | None) -> str:
@@ -99,11 +101,47 @@ def draw_footer(
         vw, _ = p.text_size(image, value, value_font)
         cursor_x += vw + 16
 
+    # Push current samples into the rolling history before drawing.
+    # Each render tick adds one sample; sparklines reflect the last
+    # 60 ticks (= 60 s at the standard 1 Hz render cadence).
+    push("cpu", float(cpu) if cpu is not None else None)
+    push("temp", float(temp) if temp is not None else None)
+
     cpu_str = f"{int(cpu)}%" if cpu is not None else "—"
     _emit("CPU", cpu_str, cpu_color)
+    # CPU sparkline pinned to 0-100 so flat-line at 5% reads small,
+    # not full-tile.
+    spark_y = y + (h - SPARK_H) // 2
+    draw_sparkline(
+        image,
+        cursor_x - 12,
+        spark_y,
+        SPARK_W,
+        SPARK_H,
+        history("cpu"),
+        color=cpu_color,
+        y_min=0,
+        y_max=100,
+    )
+    cursor_x += SPARK_W + 8
+
     _emit("RAM", _format_ram(ram_used, ram_total), ram_color)
+
     temp_str = f"{int(temp)}°C" if temp is not None else "—"
     _emit("T", temp_str, temp_color)
+    # Temp sparkline auto-scaled to the observed range so a 1°C
+    # climb registers visibly. No fixed cap.
+    draw_sparkline(
+        image,
+        cursor_x - 12,
+        spark_y,
+        SPARK_W,
+        SPARK_H,
+        history("temp"),
+        color=temp_color,
+    )
+    cursor_x += SPARK_W + 8
+
     _emit("UP", _format_uptime(uptime), p.TEXT_SECONDARY)
 
     # Version pinned right.

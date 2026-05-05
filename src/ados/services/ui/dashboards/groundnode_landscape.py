@@ -31,6 +31,11 @@ from typing import Any
 from PIL import Image
 
 from .components import primitives as p
+from .components.early_life_tiles import (
+    draw_hardware_tile,
+    draw_pair_drone_tile,
+    draw_setup_wizard_tile,
+)
 from .components.footer_bar import FOOTER_HEIGHT, draw_footer
 from .components.header_bar import HEADER_HEIGHT, draw_header
 from .components.tiles import (
@@ -53,6 +58,80 @@ def _read_hostname() -> str:
         return Path("/etc/hostname").read_text().strip()
     except OSError:
         return "groundnode"
+
+
+def _route_tiles(state: dict[str, Any]) -> tuple:
+    """Pick the four tile renderers for a given state snapshot.
+
+    Heuristics:
+
+    * Top-left = RADIO LINK by default. When ``link.rssi_dbm`` is
+      None (no WFB radio adapter detected) swap to HARDWARE so the
+      operator sees what to plug in.
+    * Top-right = DRONE by default. When no drone has phoned home
+      (no ``drone.device_id`` AND no battery / GPS) swap to PAIR
+      DRONE so the operator sees the code + QR.
+    * Bottom-left = MESH by default. When the wizard hasn't been
+      finalized yet (``setup_finalized=false``) OR role is unset,
+      swap to SETUP WIZARD so the operator gets a nudge.
+    * Bottom-right = UPLINK / CLOUD always. The uplink status is
+      relevant in every life-cycle stage — never gets swapped out.
+
+    Returns a 4-tuple of callables suitable for direct invocation:
+    ``(top_left, top_right, bottom_left, bottom_right)``.
+    """
+    link = state.get("link") or {}
+    drone = state.get("drone") or {}
+    mesh = state.get("mesh") or {}
+    role = state.get("role") or {}
+    cloud = state.get("cloud") or {}
+
+    # LINK slot: only swap to HARDWARE on a clear early-life signal
+    # (no rssi_dbm AND no bitrate AND not paired). Once the WFB
+    # adapter is up, even silence == "0 dBm" rather than missing.
+    no_link_signal = (
+        link.get("rssi_dbm") is None
+        and link.get("bitrate_mbps") is None
+    )
+    radio_missing_in_hw_check = False
+    hw = state.get("hardware_check") or {}
+    for it in (hw.get("items") or []):
+        if isinstance(it, dict) and it.get("id") == "wfb_radio":
+            if (it.get("state") or "").lower() in ("missing", "warning"):
+                radio_missing_in_hw_check = True
+            break
+    top_left = (
+        draw_hardware_tile
+        if (no_link_signal and radio_missing_in_hw_check)
+        else draw_radio_link_tile
+    )
+
+    # DRONE slot: swap to PAIR DRONE when nothing about a drone is
+    # known. The PAIR tile remains useful even after the operator
+    # has started the pairing flow because it shows the code + QR.
+    drone_unpaired = (
+        not drone.get("device_id")
+        and drone.get("battery_pct") is None
+        and drone.get("gps_sats") is None
+        and not bool(cloud.get("paired"))
+    )
+    top_right = draw_pair_drone_tile if drone_unpaired else draw_drone_tile
+
+    # MESH slot: swap to SETUP WIZARD when the wizard hasn't been
+    # finalized OR role is unset. Once the operator has walked the
+    # wizard and chosen a role, MESH earns its slot.
+    wizard_pending = (
+        not bool(state.get("setup_finalized"))
+        or (role.get("current") or "").lower() in ("", "unset")
+    )
+    bottom_left = (
+        draw_setup_wizard_tile if wizard_pending else draw_mesh_tile
+    )
+
+    # UPLINK / CLOUD always.
+    bottom_right = draw_uplink_tile
+
+    return top_left, top_right, bottom_left, bottom_right
 
 
 def render(
@@ -100,12 +179,15 @@ def render(
     row_a_y = rows_y + 4
     row_b_y = row_a_y + tile_h + TILE_GAP
 
-    # Top row.
-    draw_radio_link_tile(img, col_a_x, row_a_y, tile_w, tile_h, state)
-    draw_drone_tile(img, col_b_x, row_a_y, tile_w, tile_h, state)
-    # Bottom row.
-    draw_mesh_tile(img, col_a_x, row_b_y, tile_w, tile_h, state)
-    draw_uplink_tile(img, col_b_x, row_b_y, tile_w, tile_h, state)
+    # Tile router. Each slot picks the most useful tile for the
+    # current state — early-life variants take over when their
+    # primary data is missing so the dashboard never wastes a tile
+    # on an empty placeholder.
+    top_left, top_right, bottom_left, bottom_right = _route_tiles(state)
+    top_left(img, col_a_x, row_a_y, tile_w, tile_h, state)
+    top_right(img, col_b_x, row_a_y, tile_w, tile_h, state)
+    bottom_left(img, col_a_x, row_b_y, tile_w, tile_h, state)
+    bottom_right(img, col_b_x, row_b_y, tile_w, tile_h, state)
 
     # Footer band — drawn last so its top divider lands cleanly above
     # any tile content that might bleed.
@@ -168,8 +250,22 @@ def _mock_state() -> dict[str, Any]:
             "paired": False,
             "pair_code": "7YTFC7",
             "latency_ms": 12,
+            "broadcasting": True,
+            "pair_url": "altnautica.com/command",
         },
         "pairing": {"code": "7YTFC7"},
+        "setup_finalized": True,
+        "completion_percent": 70,
+        "next_action": "pair with Mission Control",
+        "hardware_check": {
+            "items": [
+                {"id": "board", "state": "ok", "label": "Companion compute"},
+                {"id": "wfb_radio", "state": "missing", "label": "WFB radio adapter",
+                 "fix_hint": "plug RTL8812EU/AU USB adapter"},
+                {"id": "mesh_dongle", "state": "warning", "label": "Mesh dongle"},
+                {"id": "display", "state": "ok", "label": "Local display"},
+            ],
+        },
     }
 
 

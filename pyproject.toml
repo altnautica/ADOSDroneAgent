@@ -69,6 +69,12 @@ ground-station = [
     # imports it directly for the SPI LCD framebuffer renderer, so we
     # pin it explicitly here to keep the dependency graph stable.
     "Pillow>=10.0.0",
+    # qrcode renders the pair-code QR on the dashboard's PAIR DRONE
+    # tile so an operator can scan from their phone instead of typing
+    # the 6-char code by hand. Tiny pure-Python lib (~30 KB), no C
+    # build deps. The dashboard falls back to text-only when this is
+    # absent so the install isn't strictly blocking.
+    "qrcode>=7.4",
 ]
 
 [project.urls]
