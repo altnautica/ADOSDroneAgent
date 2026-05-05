@@ -1,0 +1,111 @@
+name: "Raspberry Pi Zero 2 W"
+vendor: "Raspberry Pi"
+soc: "BCM2710A1"
+arch: "aarch64"
+model_patterns:
+  - "Raspberry Pi Zero 2"
+  - "Raspberry Pi Zero 2 W"
+  - "Raspberry Pi Zero 2W"
+  - "BCM2710A1"
+default_tier: 2
+gpio_pins:
+  - 2   # SDA1 (I2C0)
+  - 3   # SCL1 (I2C0)
+  - 14  # UART TX (UART0)
+  - 15  # UART RX (UART0)
+  - 17  # GPIO17
+  - 27  # GPIO27
+uart_paths:
+  - /dev/ttyAMA0
+  - /dev/ttyS0
+hw_video_codecs:
+  - h264_dec
+  # h264_enc deferred until VideoCore IV encode capability verified on
+  # target firmware + kernel combination. Standard Raspberry Pi OS Lite
+  # may not expose hardware encode on VideoCore IV.
+
+board:
+  id: pi-zero-2w
+  manufacturer: "Raspberry Pi"
+  status: testing
+
+compute:
+  cores: 4
+  core_type: "Cortex-A53 @ 1.0 GHz"
+  max_freq_mhz: 1000
+  gpu: "VideoCore IV"
+  npu_tops: 0
+  hw_encoder: []
+  hw_decoder: ["h264"]
+  ram_mb: 512
+  ram_type: LPDDR2
+  min_ram_mb: 96
+
+storage:
+  emmc: false
+  sd_card: true
+  nand: false
+
+buses:
+  uart:
+    - id: uart0
+      path: /dev/ttyAMA0
+      baud: 115200
+      fc_capable: true
+  usb:
+    - id: usb_otg
+      type: usb2_otg
+      notes: "Mini USB OTG; single port"
+  i2c:
+    - id: i2c0
+      path: /dev/i2c-1
+      speed_hz: 100000
+  spi: []
+
+network:
+  wifi: true
+  wifi_chip: "Cypress CYW43436"
+  wifi_standard: "802.11b/g/n"
+  wifi_bands: "2.4 GHz"
+  bluetooth: true
+  bluetooth_version: "5.0"
+  ethernet: false
+
+video:
+  csi_ports: 1
+  csi_connector: "22-pin MIPI CSI-2 (2-lane)"
+  max_encode_resolution: null
+  max_encode_fps: null
+  encoder_api: "none"
+  encoder_api_lite: "libcamera"
+  vendor_lib_loader: "none"
+  isp: "VideoCore IV ISP"
+
+power:
+  typical_watts: 1.2
+  max_watts: 2.5
+  voltage: 5.0
+
+thermal:
+  cooling: passive
+
+# Lite-backend metadata (additive to the base schema; documented at
+# agents/lite-rs/HAL-EXTENSION.md).
+libc: "glibc"
+init_system: "systemd"
+target_rust_triple: "aarch64-unknown-linux-gnu"
+min_kernel_version: "5.10"
+wifi_chip_driver: "brcmfmac"
+
+ros:
+  supported: false
+
+profiles:
+  tier: lite
+  max_features:
+    - mavlink_proxy
+    - mqtt_gateway
+    - rest_api
+  video_capable: false
+  memory_budget_mb: 96
+  notes: "Supported lightweight target. Standard glibc + systemd userspace makes installation straightforward. Video pipeline integration depends on VideoCore IV H.264 encode availability on the target kernel + firmware combination."

@@ -33,6 +33,14 @@ class BoardProfile(BaseModel):
     uart_paths: list[str] = []
     hw_video_codecs: list[str] = []
 
+    # Optional fields read by the lightweight Rust backend at agents/lite-rs/.
+    # All default to safe values so existing YAMLs without them load unchanged.
+    libc: str = "glibc"
+    init_system: str = "systemd"
+    target_rust_triple: str | None = None
+    min_kernel_version: str | None = None
+    wifi_chip_driver: str | None = None
+
 
 @dataclass
 class BoardInfo:
