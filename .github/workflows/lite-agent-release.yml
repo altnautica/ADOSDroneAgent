@@ -38,6 +38,12 @@ jobs:
   build:
     name: build (${{ matrix.target }})
     runs-on: ubuntu-latest
+    # Lift the signing secret into a job-level env so the step-level
+    # `if:` condition can read it. The `secrets` context is not
+    # available to step-level `if:` directly.
+    env:
+      MINISIGN_KEY: ${{ secrets.LITE_AGENT_MINISIGN_KEY }}
+      MINISIGN_PASSWORD: ${{ secrets.LITE_AGENT_MINISIGN_PASSWORD }}
     strategy:
       fail-fast: false
       matrix:
@@ -111,14 +117,12 @@ jobs:
           echo "artifact=${ARTIFACT}" >> "$GITHUB_OUTPUT"
 
       - name: Sign artifact (minisign Ed25519)
-        # Step-level if: cannot read step-level env, so gate on the
-        # secret directly. When the secret is unset (forks, dry-runs)
-        # the signing step is skipped entirely and the upload step
-        # uploads the unsigned artifact.
-        if: ${{ secrets.LITE_AGENT_MINISIGN_KEY != '' }}
-        env:
-          MINISIGN_KEY: ${{ secrets.LITE_AGENT_MINISIGN_KEY }}
-          MINISIGN_PASSWORD: ${{ secrets.LITE_AGENT_MINISIGN_PASSWORD }}
+        # The job-level env block above lifts the secret into env so
+        # step-level `if:` can gate on it. When the secret is unset
+        # (forks, dry-runs) the step is skipped cleanly and the upload
+        # step uploads the unsigned artifact with `if-no-files-found:
+        # warn`.
+        if: ${{ env.MINISIGN_KEY != '' }}
         run: |
           ARTIFACT="${{ steps.stage.outputs.artifact }}"
           KEY_FILE="$(mktemp)"
@@ -167,13 +171,17 @@ jobs:
         id: meta
         run: |
           if [[ "${GITHUB_REF}" == refs/tags/lite-v* ]]; then
-            echo "tag=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
-            echo "name=Lightweight agent ${GITHUB_REF#refs/tags/lite-v}" >> "$GITHUB_OUTPUT"
-            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+            {
+              echo "tag=${GITHUB_REF#refs/tags/}"
+              echo "name=Lightweight agent ${GITHUB_REF#refs/tags/lite-v}"
+              echo "prerelease=false"
+            } >> "$GITHUB_OUTPUT"
           else
-            echo "tag=lite-agent-main" >> "$GITHUB_OUTPUT"
-            echo "name=Lightweight agent (rolling main)" >> "$GITHUB_OUTPUT"
-            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+            {
+              echo "tag=lite-agent-main"
+              echo "name=Lightweight agent (rolling main)"
+              echo "prerelease=true"
+            } >> "$GITHUB_OUTPUT"
           fi
 
       - name: Publish GitHub Release
