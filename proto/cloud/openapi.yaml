@@ -75,8 +75,16 @@ components:
       required: [deviceId]
       properties:
         deviceId: { type: string }
-        version: { type: string }
-        agentVersion: { type: string }
+        version:
+          type: string
+          description: |
+            Agent version string. Carries the same value as agentVersion
+            below; the Python full agent emits both fields for legacy
+            reasons. Backends should populate both with the same value
+            until the cloud relay drops one.
+        agentVersion:
+          type: string
+          description: Agent version string (canonical name; see also `version`).
         uptimeSeconds: { type: integer }
         boardName: { type: string }
         boardTier: { type: integer }

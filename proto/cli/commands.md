@@ -91,7 +91,7 @@ Exit code 0 on success, non-zero on error.
 
 ## Subgroups
 
-`ados plugin {install, enable, disable, remove, list, info, perms, logs, test}` is documented in the plugin system spec. Backends that ship the plugin host must implement these subcommands; backends that do not (the lightweight Rust backend at v0.1) skip them entirely. Operators see a "command not found" error on a backend that does not ship the plugin host.
+`ados plugin {install, enable, disable, remove, list, info, perms, logs, test}` is registered as a click subgroup imported by `src/ados/cli/main.py` from a separate plugin CLI module. The subgroup is conditional on the agent shipping the plugin host runtime; backends without a plugin host omit the subgroup entirely. Operators see "command not found" on a backend that does not ship plugins. Backends that DO ship plugins must implement all nine subcommands with the documented arguments to avoid partial-implementation drift.
 
 ## Output conventions
 

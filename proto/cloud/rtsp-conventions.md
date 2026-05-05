@@ -18,17 +18,17 @@ The local server lets on-device clients (the WebRTC bridge, future plugins) cons
 
 ## Cloud RTSP push
 
-The agent pushes the encoded stream to the cloud relay over TCP.
+The agent pushes the encoded stream to whatever URL is set in `config.video.cloud_relay_url`. The agent does NOT impose a path structure on the push target; the cloud relay (or whatever endpoint the operator configures) decides the URL shape.
 
 | Field | Value |
 |---|---|
-| URL pattern | `rtsp://{relay_host}:{relay_port}/{device_id}/{stream_name}` |
+| Push target | full RTSP URL from `config.video.cloud_relay_url`; push is disabled when unset |
 | Transport | TCP (not UDP) — failures surface as TCP errors |
 | Codec | H.264 passthrough (`-c copy`) — no re-encoding in the push path |
-| Authentication | none at the RTSP layer; pairing API key authorizes the device upstream |
+| Authentication | none at the RTSP layer; the operator includes any required credentials directly in the URL or relies on the cloud relay's pairing-key authentication on the control plane |
 | Connect timeout | 5 s (passed to ffmpeg via `-timeout 5000000` µs) |
 
-The cloud relay terminates the RTSP push, multiplexes the H.264 stream onto WHEP (WebRTC-HTTP Egress Protocol), and serves it to ground control stations as a low-latency WebRTC track.
+A typical cloud-relay endpoint terminates the RTSP push, multiplexes the H.264 stream onto WHEP (WebRTC-HTTP Egress Protocol), and serves it to ground control stations as a low-latency WebRTC track. The Altnautica reference relay uses paths derived from the device's pairing identity, but the agent does not assume that shape — it pushes to the configured URL verbatim.
 
 ## Reconnect policy
 
@@ -57,7 +57,7 @@ H.265 is reserved for future use; the cloud relay path is H.264-only at this ver
 
 A backend producing video must:
 
-1. Push to the documented URL pattern with the device's `device_id` and a stream name from the agreed set.
+1. Read the push target from `config.video.cloud_relay_url`. Treat empty / unset as "cloud push disabled" and serve the local RTSP path only.
 2. Use TCP transport.
 3. Pass H.264 unchanged from the encoder to the RTSP push (no re-encoding in this hop).
 4. Honor the reconnect-with-exponential-backoff policy.

@@ -15,7 +15,7 @@ All topics are device-scoped under `ados/{device_id}/...` where
 
 | Setting | Value | Notes |
 |---|---|---|
-| Protocol | MQTT v5 | clients fall back to v3.1.1 if broker rejects v5 |
+| Protocol | MQTT v5 | the relay services (mavlink_relay, webrtc_signaling) connect with `MQTTv5` explicitly; the gateway path uses paho's default callback API and falls back to v3.1.1 if the broker rejects v5 |
 | Transport | TCP or WebSocket | per `config.server.mqtt_transport` |
 | WebSocket path | `/mqtt` | when transport is WebSocket |
 | Default broker port (TLS) | 8883 | TLS required for cloud mode |

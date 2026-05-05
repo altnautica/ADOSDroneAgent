@@ -69,10 +69,6 @@ components:
           type: string
           enum: [direct, relay, receiver]
           description: Required when profile is "ground_station".
-        runtime_mode:
-          type: string
-          enum: [full, lite]
-          description: Optional runtime variant; backends may ignore when not applicable.
 
     CloudChoiceRequest:
       type: object
