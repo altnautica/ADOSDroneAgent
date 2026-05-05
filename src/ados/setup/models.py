@@ -133,6 +133,61 @@ class SetupActionResult(BaseModel):
     data: dict[str, object] = Field(default_factory=dict)
 
 
+class DisplayOption(BaseModel):
+    """One supported display the wizard offers in the picker.
+
+    Mirrors a subset of the agent-side ``DisplayBinding`` shape from
+    ``ados.hal.detect`` plus a synthetic ``id="none"`` option the wizard
+    surfaces so the operator can explicitly skip without leaving the
+    step in ``needs_action``.
+    """
+
+    id: str
+    label: str
+    controller: str | None = None
+    touch_chip: str | None = None
+    resolution: str | None = None
+
+
+class DisplayOptionsResponse(BaseModel):
+    """Read-only options payload consumed by the wizard's display step."""
+
+    board_id: str
+    current: dict[str, str] | None = None  # parsed /etc/ados/display.conf, or None
+    supported: list[DisplayOption] = Field(default_factory=list)
+
+
+class DisplayInstallRequest(BaseModel):
+    """Operator's choice on the wizard's display step.
+
+    ``display_id="none"`` is the explicit-skip path — the route writes a
+    minimal ``display.conf`` with ``display_id=none`` and does not spawn
+    the overlay installer.
+    """
+
+    display_id: str
+
+
+DisplayJobStatus = Literal["queued", "running", "done", "failed"]
+
+
+class DisplayJob(BaseModel):
+    """Snapshot of a single ``install-display-overlay.sh`` job.
+
+    The wizard polls the job endpoint at 1-2 Hz while ``status`` is
+    ``queued`` or ``running`` and renders the trailing ``log_tail`` so
+    the operator can watch the install progress in real time.
+    """
+
+    job_id: str
+    status: DisplayJobStatus
+    display_id: str
+    started_at: str
+    finished_at: str | None = None
+    exit_code: int | None = None
+    log_tail: list[str] = Field(default_factory=list)
+
+
 class SetupStatus(BaseModel):
     version: str
     device_id: str

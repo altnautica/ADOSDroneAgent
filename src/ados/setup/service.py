@@ -148,6 +148,50 @@ def _cloudflared_running(service_name: str) -> bool:
     return False
 
 
+def _resolve_display_step(
+    hardware_check: HardwareCheckStatus,
+) -> tuple[str, str]:
+    """Map the hardware-check ``display`` row onto wizard step state + detail.
+
+    Returns ``(state, detail)`` where ``state`` is one of the
+    ``SetupStepState`` literal values. The wizard step is the action
+    surface; the table row in the hardware-check step provides the same
+    information as a diagnostic readout, so both stay in sync because
+    they read from the same probe.
+    """
+    item = next(
+        (i for i in hardware_check.items if i.id == "display"),
+        None,
+    )
+    if item is None:
+        return "needs_action", "Plug a supported SPI LCD to configure local display."
+    detail = item.detail or item.label
+    # Probe states defined in `_check_display`:
+    #   - ok: configured + bound + driver matches
+    #   - warning: configured but fb1 absent OR driver mismatch
+    #   - unknown: no display.conf at all (or display_id=none after skip)
+    if item.state == "ok":
+        return "complete", detail
+    if item.state == "unknown":
+        # Check whether the operator explicitly skipped (display_id=none).
+        # The hardware-check probe reports state="unknown" both for
+        # "never configured" and for the explicit-skip path; the wizard
+        # distinguishes via /etc/ados/display.conf.
+        from ados.core.paths import DISPLAY_CONF_PATH
+
+        if DISPLAY_CONF_PATH.exists():
+            try:
+                text = DISPLAY_CONF_PATH.read_text()
+            except OSError:
+                text = ""
+            if "display_id=none" in text:
+                return "optional", "Display step skipped"
+        return "needs_action", detail or "No local display configured"
+    if item.state == "warning":
+        return "needs_action", detail
+    return "needs_action", detail or "Configure local display"
+
+
 def _setup_steps(
     *,
     profile: str,
@@ -327,6 +371,23 @@ def _setup_steps(
                 detail="WFB receiver and mesh role configuration",
                 action_label="Open Ground station",
                 href="/ground.html",
+            )
+        )
+        # Local-display step. Surfaces an SPI LCD attached over the
+        # 40-pin expansion header (Waveshare 3.5" RPi LCD on Cubie A7Z
+        # or Rock 5C ground-station builds). State is derived from the
+        # same hardware-check item that the diagnostic table uses, so
+        # the two surfaces stay in sync. Hidden on drone profile
+        # because no LCD path exists on air-side rigs in this revision.
+        display_state, display_detail = _resolve_display_step(hardware_check)
+        steps.append(
+            SetupStep(
+                id="display",
+                label="Local display",
+                state=display_state,  # type: ignore[arg-type]
+                detail=display_detail,
+                action_label="Configure display",
+                href="/setup.html?step=display",
             )
         )
 
