@@ -43,7 +43,14 @@ pub enum PairingError {
 
 /// On-disk shape. `serde(default)` everywhere so a partial file (mid-flow)
 /// reads back as the right defaults instead of failing.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+///
+/// Manual `Debug` impl below redacts the two secret-bearing fields
+/// (`pairing_code` and `api_key`). The pairing code is short-lived but
+/// still actionable inside its TTL window, and the api_key is the
+/// per-device cloud relay bearer. Either one in a log line is a leak.
+/// Every other field renders verbatim so `tracing::debug!(?state)`
+/// stays useful for shape inspection.
+#[derive(Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct PairingState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pairing_code: Option<String>,
@@ -57,6 +64,31 @@ pub struct PairingState {
     pub owner_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub paired_at: Option<f64>,
+}
+
+impl std::fmt::Debug for PairingState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PairingState")
+            .field(
+                "pairing_code",
+                &self
+                    .pairing_code
+                    .as_ref()
+                    .map(|c| format!("<redacted; {} chars>", c.len())),
+            )
+            .field("code_created_at", &self.code_created_at)
+            .field("paired", &self.paired)
+            .field(
+                "api_key",
+                &self
+                    .api_key
+                    .as_ref()
+                    .map(|k| format!("<redacted; {} chars>", k.len())),
+            )
+            .field("owner_id", &self.owner_id)
+            .field("paired_at", &self.paired_at)
+            .finish()
+    }
 }
 
 impl PairingState {
@@ -414,6 +446,54 @@ mod tests {
         let fresh = store.get_or_create_code().unwrap();
         assert_ne!(fresh, "ABCDEF");
         assert_eq!(fresh.len(), CODE_LENGTH);
+    }
+
+    #[test]
+    fn debug_pairing_state_redacts_api_key_and_code() {
+        // Both secret-bearing fields must NOT appear in the Debug
+        // rendering. A future `tracing::debug!(?state)` would otherwise
+        // leak the per-device cloud relay bearer into journalctl.
+        let mut state = PairingState::default();
+        state.pairing_code = Some("AB23X4".into());
+        state.code_created_at = Some(1735660000.0);
+        state.paired = true;
+        state.api_key = Some("ados_supersecretliveapikey_neverlogthis".into());
+        state.owner_id = Some("user-abc".into());
+        state.paired_at = Some(1735660030.0);
+
+        let rendered = format!("{state:?}");
+
+        // Live secrets must not appear verbatim.
+        assert!(
+            !rendered.contains("ados_supersecretliveapikey_neverlogthis"),
+            "api_key value leaked into Debug output: {rendered}"
+        );
+        assert!(
+            !rendered.contains("AB23X4"),
+            "pairing_code value leaked into Debug output: {rendered}"
+        );
+
+        // Length-only placeholders confirm presence and shape.
+        assert!(rendered.contains("<redacted; 39 chars>"));
+        assert!(rendered.contains("<redacted; 6 chars>"));
+
+        // Non-secret fields stay legible.
+        assert!(rendered.contains("PairingState"));
+        assert!(rendered.contains("user-abc"));
+        assert!(rendered.contains("1735660030"));
+    }
+
+    #[test]
+    fn debug_pairing_state_handles_none_fields() {
+        // Default state: both Options are None — Debug must render
+        // them as `None`, not as the redacted placeholder, so an
+        // operator looking at journalctl can distinguish "unset" from
+        // "set but redacted".
+        let state = PairingState::default();
+        let rendered = format!("{state:?}");
+        assert!(rendered.contains("pairing_code: None"));
+        assert!(rendered.contains("api_key: None"));
+        assert!(!rendered.contains("<redacted"));
     }
 
     #[test]

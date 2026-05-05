@@ -186,7 +186,7 @@ async fn stream_cloudflared_logs(
     mut socket: axum::extract::ws::WebSocket,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     use axum::extract::ws::Message;
-    use tokio::io::{AsyncBufReadExt, BufReader};
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
     use tokio::process::Command;
 
     let mut child = if std::path::Path::new("/run/systemd/system").is_dir() {
@@ -277,14 +277,19 @@ async fn stream_cloudflared_logs(
         }
     };
     let stdout = child.stdout.take().ok_or("no stdout")?;
-    // Cap line length at 8 KiB. cloudflared's normal log lines are well
-    // under 1 KiB; an unbounded reader would be a memory-amplification
-    // gadget when the upstream emits a hostile MESSAGE= field. We truncate
-    // after-the-fact below rather than at the reader because next_line()
-    // bounds against a sane growth ceiling already (Lines holds one
-    // partial line in the BufReader's internal buffer, default 8 KiB).
+    // Cap per-line growth at 8 KiB. cloudflared's normal log lines are
+    // well under 1 KiB; an unbounded reader (e.g. AsyncBufReadExt::lines,
+    // which calls read_line internally and grows the line buffer until
+    // \n is seen) is a memory-amplification gadget when the upstream
+    // emits a hostile MESSAGE= field with no newline. We use an explicit
+    // read_until against a take(MAX_LINE_BYTES) limiter so a single
+    // pathological line can never push the buffer past the ceiling. When
+    // the cap is hit without a trailing \n we drain the rest of the
+    // over-long line into io::sink() and tag the emitted prefix as
+    // truncated so the operator still sees something useful.
     const MAX_LINE_BYTES: usize = 8 * 1024;
-    let mut reader = BufReader::new(stdout).lines();
+    let mut reader = BufReader::new(stdout);
+    let mut line_buf: Vec<u8> = Vec::with_capacity(MAX_LINE_BYTES);
     // Hard cap on the WS connection. Operators that walk away with the
     // setup wizard tab open should not keep a journalctl subprocess
     // running forever; reconnect for a fresh 15-minute window.
@@ -294,22 +299,58 @@ async fn stream_cloudflared_logs(
 
     loop {
         tokio::select! {
-            line = reader.next_line() => {
-                match line {
-                    Ok(Some(mut text)) => {
-                        // Truncate over-long lines after-the-fact rather
-                        // than dropping them entirely so the operator
-                        // still sees something useful in the wizard.
-                        if text.len() > MAX_LINE_BYTES {
-                            text.truncate(MAX_LINE_BYTES);
+            read_result = async {
+                let mut limited = (&mut reader).take(MAX_LINE_BYTES as u64);
+                limited.read_until(b'\n', &mut line_buf).await
+            } => {
+                match read_result {
+                    Ok(0) => break, // EOF
+                    Ok(_) => {
+                        // The line either ended with \n (the last byte is
+                        // \n) or it was truncated at exactly
+                        // MAX_LINE_BYTES because the take() limiter cut
+                        // us off before a newline appeared. In the
+                        // truncated case we drain the rest of the
+                        // over-long line into a fixed scratch buffer so
+                        // the next iteration lines up on the next real
+                        // logical line boundary, without any unbounded
+                        // allocation.
+                        let truncated = !line_buf.ends_with(b"\n");
+                        if line_buf.ends_with(b"\n") {
+                            line_buf.pop();
+                            if line_buf.ends_with(b"\r") {
+                                line_buf.pop();
+                            }
+                        }
+                        let mut text = String::from_utf8_lossy(&line_buf).into_owned();
+                        line_buf.clear();
+                        if truncated {
                             text.push_str(" ...(truncated)");
+                            // Drain forward to the next \n (or EOF) using
+                            // a fixed-size scratch that we clear between
+                            // iterations. Memory ceiling = MAX_LINE_BYTES
+                            // for this scratch, regardless of how long
+                            // the rest of the over-long line runs.
+                            let mut scratch: Vec<u8> = Vec::with_capacity(MAX_LINE_BYTES);
+                            loop {
+                                scratch.clear();
+                                let drained = (&mut reader)
+                                    .take(MAX_LINE_BYTES as u64)
+                                    .read_until(b'\n', &mut scratch)
+                                    .await;
+                                match drained {
+                                    Ok(0) => break, // EOF mid-overline
+                                    Ok(_) if scratch.ends_with(b"\n") => break,
+                                    Ok(_) => continue, // still no newline; keep draining
+                                    Err(_) => break,
+                                }
+                            }
                         }
                         let redacted = redact_log_line(&text);
                         if socket.send(Message::Text(redacted)).await.is_err() {
                             break; // peer disconnected
                         }
                     }
-                    Ok(None) => break,
                     Err(_) => break,
                 }
             }

@@ -137,7 +137,12 @@ impl Default for MavlinkSection {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+/// Manual `Debug` impl below redacts `api_key` so a future
+/// `tracing::debug!(?cfg.cloud)` cannot leak the cloud relay bearer
+/// into journalctl. The field stays deserializable for back-compat
+/// migration off pre-2026-05-05 agent.yaml shapes; only the format
+/// trait is custom.
+#[derive(Clone, Deserialize)]
 struct CloudSection {
     #[serde(default)]
     mqtt_broker: String,
@@ -155,6 +160,21 @@ struct CloudSection {
     /// boot. Going forward, all pair operations write to pairing.json.
     #[serde(default)]
     api_key: String,
+}
+
+impl std::fmt::Debug for CloudSection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CloudSection")
+            .field("mqtt_broker", &self.mqtt_broker)
+            .field("mqtt_port", &self.mqtt_port)
+            .field("mqtt_use_tls", &self.mqtt_use_tls)
+            .field("convex_url", &self.convex_url)
+            .field(
+                "api_key",
+                &format_args!("<redacted; {} chars>", self.api_key.len()),
+            )
+            .finish()
+    }
 }
 
 impl Default for CloudSection {
@@ -338,14 +358,28 @@ async fn run_install_script(args: &[&str], expected_sha256: Option<&str>) -> Res
     // Land the script at a deterministic tempfile path so a panic mid-run
     // leaves a forensics artifact for `journalctl` + `ls /tmp/ados-*`.
     // tempfile crate is dev-only; std::env::temp_dir + a per-pid suffix
-    // keeps the runtime dep tree small.
+    // keeps the runtime dep tree small. The atomic-write helper does
+    // O_CREAT|O_EXCL with mode-at-create so a pre-existing symlink at
+    // this path cannot be followed into a privileged write target.
     let tmp = std::env::temp_dir().join(format!("ados-install-lite-{}.sh", std::process::id()));
 
+    // RAII guard: on the happy path we explicitly disarm the guard
+    // before successful exec, and on the explicit forensic-retention
+    // path (script execution failure) we also disarm so the operator
+    // can inspect the tempfile via journalctl. Any other early-exit
+    // path (panic, ?, ctrl_c) hits Drop and removes the tempfile.
+    let mut tmp_guard = TempfileGuard::new(tmp.clone());
+
     let script_path: std::path::PathBuf = if let Some(local) = local_override {
-        // Copy the local override into the tempfile path so the rest of
-        // the flow (hash, log, exec) is uniform regardless of source.
-        std::fs::copy(&local, &tmp)
-            .with_context(|| format!("copying {} -> {}", local.display(), tmp.display()))?;
+        // Copy the local override into the tempfile path. We can't use
+        // fs::copy because it would create the destination at the
+        // umask-default mode and follow a pre-existing symlink. Read
+        // the source bytes and route them through atomic_write at 0o700
+        // so the tempfile is created securely with executable mode.
+        let bytes = std::fs::read(&local)
+            .with_context(|| format!("reading local override {}", local.display()))?;
+        ados_setup::atomic::atomic_write(&tmp, &bytes, 0o700)
+            .with_context(|| format!("writing local override to {}", tmp.display()))?;
         tracing::info!(
             source = %local.display(),
             "using local install-lite.sh override"
@@ -380,9 +414,10 @@ async fn run_install_script(args: &[&str], expected_sha256: Option<&str>) -> Res
                 "ADOS_LITE_ALLOW_UNSIGNED set; skipping install-lite.sh sha256 enforcement"
             );
         } else if actual_hash != expected_norm {
-            // Best-effort cleanup so a hostile script body does not sit
-            // around for a later accidental exec.
-            let _ = std::fs::remove_file(&script_path);
+            // Hostile script body: the RAII guard will unlink the tempfile
+            // on the bail!() unwind so it cannot sit around for a later
+            // accidental exec. Nothing to do here beyond surfacing the
+            // mismatch.
             anyhow::bail!(
                 "install-lite.sh sha256 mismatch: expected {}, got {} \
                  (set ADOS_LITE_ALLOW_UNSIGNED=1 to bypass for offline-test)",
@@ -404,16 +439,57 @@ async fn run_install_script(args: &[&str], expected_sha256: Option<&str>) -> Res
         .with_context(|| format!("running install-lite.sh {}", args.join(" ")))?;
 
     // Clean up the tempfile on success. On failure we leave it in place
-    // so the operator can inspect what ran.
+    // so the operator can inspect what ran — disarm the guard so Drop
+    // does NOT remove it, then return the failure.
     if status.success() {
+        // Happy-path cleanup: remove the file proactively, then disarm
+        // the guard so Drop is a no-op. (Disarming first then removing
+        // would also work but this order makes the cleanup explicit.)
         let _ = std::fs::remove_file(&script_path);
+        tmp_guard.disarm();
         Ok(())
     } else {
         tracing::warn!(
             path = %script_path.display(),
             "install-lite.sh failed; tempfile retained for inspection"
         );
+        // Forensic-retention path: keep the tempfile on disk so the
+        // operator can inspect the failing body.
+        tmp_guard.disarm();
         anyhow::bail!("install-lite.sh exited with code {:?}", status.code());
+    }
+}
+
+/// RAII guard that unlinks a tempfile on Drop unless explicitly disarmed.
+///
+/// Mirrors the AbortOnDrop pattern used elsewhere in the agent: the
+/// happy path (and any explicit retention path) calls `disarm()` so
+/// Drop is a no-op; every other early-exit path — panic, `?`-bubbled
+/// error between fetch and exec, ctrl_c — falls through Drop and the
+/// tempfile gets cleaned up. This closes the leak window where a
+/// fetched script body would otherwise persist on disk after a fault.
+struct TempfileGuard {
+    path: Option<std::path::PathBuf>,
+}
+
+impl TempfileGuard {
+    fn new(path: std::path::PathBuf) -> Self {
+        Self { path: Some(path) }
+    }
+
+    /// Disarm the guard so Drop becomes a no-op. Used when the caller
+    /// has either already cleaned up the tempfile or wants to retain
+    /// it deliberately (forensic inspection on script failure).
+    fn disarm(&mut self) {
+        self.path = None;
+    }
+}
+
+impl Drop for TempfileGuard {
+    fn drop(&mut self) {
+        if let Some(path) = self.path.take() {
+            let _ = std::fs::remove_file(&path);
+        }
     }
 }
 
@@ -438,7 +514,10 @@ async fn fetch_install_script(url: &str, dest: &std::path::Path) -> Result<()> {
         .bytes()
         .await
         .with_context(|| format!("reading body of {url}"))?;
-    std::fs::write(dest, &body)
+    // Route through the atomic-write helper so the tempfile is created
+    // with O_CREAT|O_EXCL and 0o700 mode-at-create. A pre-existing
+    // symlink at the destination causes EEXIST rather than a follow.
+    ados_setup::atomic::atomic_write(dest, &body, 0o700)
         .with_context(|| format!("writing install-lite.sh to {}", dest.display()))?;
     Ok(())
 }
@@ -1315,5 +1394,39 @@ cloud:
         std::fs::write(&path, "{}").unwrap();
         let err = persist_pair_code(&path, "").await.unwrap_err();
         assert!(err.to_string().contains("empty"));
+    }
+
+    #[test]
+    fn tempfile_guard_unlinks_on_drop() {
+        // Defense-in-depth: armed guard removes the underlying file on
+        // Drop. Any early-exit path between fetch and exec relies on
+        // this so a fetched script body cannot persist on disk after
+        // a panic or `?`-bubbled error.
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("install-script.sh");
+        std::fs::write(&target, b"#!/bin/sh\necho hi\n").unwrap();
+        assert!(target.exists());
+        {
+            let _guard = TempfileGuard::new(target.clone());
+        }
+        assert!(!target.exists(), "TempfileGuard did not remove file on Drop");
+    }
+
+    #[test]
+    fn tempfile_guard_disarm_retains_file() {
+        // The forensic-retention path on script-execution failure
+        // disarms the guard so Drop becomes a no-op and the operator
+        // can inspect the failing body.
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("install-script.sh");
+        std::fs::write(&target, b"#!/bin/sh\necho hi\n").unwrap();
+        {
+            let mut guard = TempfileGuard::new(target.clone());
+            guard.disarm();
+        }
+        assert!(
+            target.exists(),
+            "disarmed TempfileGuard removed file on Drop"
+        );
     }
 }

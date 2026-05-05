@@ -106,7 +106,11 @@ fn set_string(map: &mut serde_yaml::Mapping, key: &str, value: &str) {
 
 fn write_atomic(path: &Path, doc: &Value) -> Result<(), ProfileError> {
     let serialized = serde_yaml::to_string(doc)?;
-    crate::atomic::atomic_write(path, serialized.as_bytes(), 0o640)?;
+    // agent.yaml carries operator secrets in self_hosted mode (the
+    // cloud relay bearer in `cloud.api_key`); mode tight enough that
+    // only root can read. Keep the same mode here so the profile-write
+    // path doesn't loosen the file from a prior cloud-write call.
+    crate::atomic::atomic_write(path, serialized.as_bytes(), 0o600)?;
     Ok(())
 }
 

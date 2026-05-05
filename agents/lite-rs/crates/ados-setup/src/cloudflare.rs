@@ -117,7 +117,39 @@ fn ensure_cloudflared_binary() -> Result<(), CloudflareError> {
     if let Some(parent) = target.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let tmp = target.with_extension(format!("dl.{}", std::process::id()));
+    // Build a tempfile path that includes a nanosecond suffix so a
+    // hostile prior process cannot pre-place a symlink at the
+    // predictable PID-only path between attempts. The PID-plus-nanos
+    // pattern matches the convention in ados_setup::atomic.
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let tmp = target.with_extension(format!("dl.{}.{}", std::process::id(), nanos));
+
+    // Pre-create the tempfile under our control with O_CREAT|O_EXCL
+    // and 0o600 mode-at-create. If a symlink or stale file already
+    // sits at this path, create_new fails with AlreadyExists and we
+    // refuse to follow. We then close the handle so curl's subsequent
+    // open(O_WRONLY|O_TRUNC) overwrites the same inode we created —
+    // curl truncates rather than unlinks, so the mode survives.
+    {
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        let handle = opts.open(&tmp).map_err(|e| {
+            CloudflareError::Download(format!(
+                "tempfile pre-create at {} failed: {e}",
+                tmp.display()
+            ))
+        })?;
+        drop(handle);
+    }
+
     // Prefer curl over reqwest here so the agent doesn't pay reqwest's
     // TLS init cost just to grab the binary once. The download path is
     // operator-initiated, not a hot loop.
@@ -141,6 +173,23 @@ fn ensure_cloudflared_binary() -> Result<(), CloudflareError> {
             status.code()
         )));
     }
+
+    // Belt-and-suspenders: verify curl preserved our mode. If a
+    // future curl flag change unlinks-and-recreates instead of
+    // truncating, the mode could drift from 0o600 back to umask
+    // default. Refuse the install if so.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let observed = std::fs::metadata(&tmp)?.permissions().mode() & 0o777;
+        if observed != 0o600 {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(CloudflareError::Download(format!(
+                "tempfile mode drifted to 0o{observed:o} after curl write (expected 0o600)"
+            )));
+        }
+    }
+
     if let Err(e) = verify_cloudflared_sha256(&tmp, &asset) {
         // Clean up the unverified binary so a stale tempfile cannot
         // surface as a "cached" install on the next attempt.
@@ -578,6 +627,50 @@ mod tests {
         let resp = runtime.block_on(verify_tunnel_async(Some("ftp://example.com")));
         assert!(!resp.reachable);
         assert!(resp.error.unwrap().contains("http://"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tempfile_pre_create_refuses_existing_symlink() {
+        // Defense-in-depth: simulate a hostile actor pre-placing a
+        // symlink at the predictable tempfile path. The pre-create
+        // step uses O_CREAT|O_EXCL so create_new must error with
+        // AlreadyExists rather than follow the symlink into a
+        // privileged write target.
+        use std::os::unix::fs::OpenOptionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let bait = dir.path().join("bait");
+        std::fs::write(&bait, b"victim").unwrap();
+        let tmp = dir.path().join("attacker-tmp");
+        std::os::unix::fs::symlink(&bait, &tmp).unwrap();
+
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create_new(true).mode(0o600);
+        let result = opts.open(&tmp);
+        assert!(result.is_err(), "pre-create followed symlink: {result:?}");
+        assert_eq!(
+            result.unwrap_err().kind(),
+            std::io::ErrorKind::AlreadyExists,
+            "expected AlreadyExists when symlink occupies tempfile path"
+        );
+        // Bait file untouched.
+        assert_eq!(std::fs::read(&bait).unwrap(), b"victim");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tempfile_pre_create_sets_0600_mode() {
+        // The pre-create path must apply 0o600 at open(2) time so the
+        // file never briefly exists at the umask default.
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let dir = tempfile::tempdir().unwrap();
+        let tmp = dir.path().join("dl.tmp");
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create_new(true).mode(0o600);
+        let f = opts.open(&tmp).unwrap();
+        drop(f);
+        let mode = std::fs::metadata(&tmp).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "expected 0o600 mode-at-create, got 0o{mode:o}");
     }
 
     #[test]

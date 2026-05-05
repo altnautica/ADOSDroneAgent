@@ -262,9 +262,19 @@ async fn mqtt_publish_loop(
     let topic_command = format!("ados/{}/command", device_id_owned);
     let topic_offer = format!("ados/{}/webrtc/offer", device_id_owned);
     let eventloop_handle = tokio::spawn(async move {
+        // Capped exponential backoff for poll errors. A hard broker outage
+        // (DNS down, TLS negotiation failing, link gone) would otherwise
+        // storm reconnects every few seconds indefinitely. Start at 1s,
+        // double on each consecutive error, ceiling at 60s. Reset on the
+        // first successful poll. The progression is 1, 2, 4, 8, 16, 32,
+        // 60, 60, ... — seven attempts in the first ~2 minutes, then
+        // one per minute steady state.
+        let mut backoff = Duration::from_secs(1);
+        const MAX_BACKOFF: Duration = Duration::from_secs(60);
         loop {
             match eventloop.poll().await {
                 Ok(rumqttc::Event::Incoming(rumqttc::Packet::Publish(p))) => {
+                    backoff = Duration::from_secs(1);
                     let topic = p.topic.as_str();
                     if topic == topic_rx {
                         if let Some(ref fc) = outbound_fc {
@@ -297,10 +307,18 @@ async fn mqtt_publish_loop(
                         tracing::debug!(topic = %topic, "received message on unexpected topic");
                     }
                 }
-                Ok(_event) => continue,
+                Ok(_event) => {
+                    backoff = Duration::from_secs(1);
+                    continue;
+                }
                 Err(e) => {
-                    tracing::warn!(error = %e, "mqtt eventloop poll error; backing off");
-                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    tracing::warn!(
+                        error = %e,
+                        backoff_secs = backoff.as_secs(),
+                        "mqtt eventloop poll error; backing off"
+                    );
+                    tokio::time::sleep(backoff).await;
+                    backoff = (backoff * 2).min(MAX_BACKOFF);
                 }
             }
         }

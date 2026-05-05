@@ -3,10 +3,9 @@
 //! Three modes — cloud (Altnautica-hosted relay, the default), self_hosted
 //! (operator-supplied Convex + MQTT coordinates), and local (no cloud at
 //! all). The `api_key` field, when supplied, never appears in any
-//! response or log line; it lands in `agent.yaml` cloud.api_key. Future
-//! future enhancement: split secrets into a separate root-owned 0600
-//! file under /etc/ados/secrets/ and reference them by path from
-//! agent.yaml so the YAML itself can stay 0644.
+//! response or log line; it lands in `agent.yaml` cloud.api_key. The
+//! file itself is written at mode 0600 so the bearer is only readable
+//! by root.
 
 use std::path::Path;
 
@@ -138,7 +137,11 @@ pub fn apply_cloud_choice(
     }
 
     let serialized = serde_yaml::to_string(&doc)?;
-    crate::atomic::atomic_write(agent_yaml, serialized.as_bytes(), 0o640)?;
+    // agent.yaml carries operator secrets in self_hosted mode (the
+    // cloud relay bearer in `cloud.api_key`); mode tight enough that
+    // only root can read. Group-readable would expose the bearer to
+    // any non-root group member of the file's group.
+    crate::atomic::atomic_write(agent_yaml, serialized.as_bytes(), 0o600)?;
     Ok(())
 }
 
