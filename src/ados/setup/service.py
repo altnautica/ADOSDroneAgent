@@ -206,20 +206,22 @@ def _setup_steps(
         )
     )
 
-    steps.append(
-        SetupStep(
-            id="network",
-            label="Network",
-            state="complete" if network_complete else "needs_action",
-            detail=(
-                "Local access is available"
-                if network_complete
-                else "Enable hotspot, LAN, or USB access"
-            ),
-            action_label="Open Network",
-            href="/network.html",
+    # Network readout used to be its own step. The wizard's welcome step
+    # now surfaces the same data inline as a chip row, so we no longer
+    # render a dedicated network step. The /network.html surface stays as
+    # the standalone diagnostic page; only the wizard step is dropped.
+    # The network_complete signal is still computed above and consumed by
+    # the welcome step state below.
+
+    # Welcome state is upgraded to needs_action when there is no usable
+    # local network so the operator does not coast past the chip row.
+    if not network_complete and steps:
+        steps[0] = SetupStep(
+            id="welcome",
+            label="Welcome",
+            state="needs_action",
+            detail="Bring up Wi-Fi, hotspot, USB tether, or LAN to continue.",
         )
-    )
 
     steps.append(
         SetupStep(
@@ -254,16 +256,11 @@ def _setup_steps(
         )
     )
 
-    if cloud_local:
-        steps.append(
-            SetupStep(
-                id="pair",
-                label="Pair with Mission Control",
-                state="not_applicable",
-                detail="No cloud relay; Mission Control connects directly over LAN.",
-            )
-        )
-    else:
+    # Pair step is only meaningful when the device is set up to talk to a
+    # cloud or self-hosted backend. Local-only deployments hide it entirely
+    # so the wizard does not waste an operator's attention on a step they
+    # have nothing to do on.
+    if not cloud_local:
         steps.append(
             SetupStep(
                 id="pair",
@@ -272,9 +269,9 @@ def _setup_steps(
                 detail=(
                     "Device is paired."
                     if cloud_paired
-                    else "Enter a pairing code from Mission Control."
+                    else "Show this device's code or accept one from Mission Control."
                 ),
-                action_label="Enter pairing code",
+                action_label="Pair this device",
                 href="/setup.html?step=pair",
             )
         )

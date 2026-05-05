@@ -51,19 +51,42 @@ def _read_raw() -> dict:
     return data if isinstance(data, dict) else {}
 
 
+# Legitimate step ids the wizard can persist as skipped. Anything else
+# in skipped_steps is dropped on load so old state files written by a
+# wizard that has since dropped a step (e.g. the read-only network
+# readout) do not pollute the in-memory set forever.
+_KNOWN_STEP_IDS: frozenset[str] = frozenset(
+    {
+        "welcome",
+        "profile",
+        "hardware_check",
+        "cloud_choice",
+        "pair",
+        "mavlink",
+        "video",
+        "ground_receiver",
+        "remote_access",
+        "finish",
+    }
+)
+
+
 def read_state() -> SetupRunState:
     """Read the persisted state from disk.
 
     Returns a populated :class:`SetupRunState`. A missing or corrupt
-    file resolves to defaults.
+    file resolves to defaults. Step ids that no longer exist are
+    silently dropped so a wizard that retired a step never has to
+    cope with stale entries.
     """
     raw = _read_raw()
     skipped = raw.get("skipped_steps") or []
     if not isinstance(skipped, list):
         skipped = []
+    cleaned = {str(s) for s in skipped if isinstance(s, str) and str(s) in _KNOWN_STEP_IDS}
     return SetupRunState(
         setup_finalized=bool(raw.get("setup_finalized", False)),
-        skipped_steps={str(s) for s in skipped if isinstance(s, str)},
+        skipped_steps=cleaned,
     )
 
 

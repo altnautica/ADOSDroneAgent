@@ -4,6 +4,16 @@
 // renderer. All API data is rendered with textContent / DOM creation; no
 // API string is ever passed to innerHTML.
 
+import {
+  chip,
+  statusDot,
+  liveRow,
+  streamConsole,
+  verifyButton,
+  parseMavlinkFrame,
+  decodeMavlinkPayload,
+} from "./components.js";
+
 const SETUP_TOKEN_KEY = "ados.setup.token";
 const POLL_INTERVAL_MS = 5000;
 
@@ -708,7 +718,24 @@ function renderWizardShell(content) {
 // on each wizard render so a stale hook from a prior step never fires.
 let wizardBeforeNextHook = null;
 
+// Per-step cleanup callbacks (timers, WebSocket disposers, AbortControllers).
+// Steps push handlers in via wizardOnDispose(...). The wizard fires every
+// queued handler on the next render so stale intervals do not leak when a
+// status update re-renders the body.
+let _wizardDisposers = [];
+function wizardOnDispose(fn) {
+  if (typeof fn === "function") _wizardDisposers.push(fn);
+}
+function _runWizardDisposers() {
+  const all = _wizardDisposers;
+  _wizardDisposers = [];
+  for (const fn of all) {
+    try { fn(); } catch (err) { console.error("wizard disposer failed:", err); }
+  }
+}
+
 function renderWizard(status, currentStepId) {
+  _runWizardDisposers();
   wizardBeforeNextHook = null;
   const steps = status.steps || [];
   const currentIdx = Math.max(0, steps.findIndex((s) => s.id === currentStepId));
@@ -724,8 +751,11 @@ function renderWizard(status, currentStepId) {
   const isSkippable = !isLast && (
     currentStep.state === "optional"
     || currentStep.state === "not_applicable"
-    || ["mavlink", "video", "remote_access", "ground_receiver", "pair", "hardware_check"].includes(currentStep.id)
+    || ["mavlink", "video", "remote_access", "ground_receiver", "hardware_check"].includes(currentStep.id)
   );
+  // Pair has its own "Pair later" affordance inside the step body. Skipping
+  // it from the wizard header would bypass the auto-flip-to-local helper
+  // that keeps cloud_choice and pairing intent in sync.
   const skippedCount = (status.skipped_steps || []).length;
 
   const stepperDots = steps.map((s, idx) => {
@@ -814,20 +844,44 @@ function renderWizard(status, currentStepId) {
           if (!isFirst) goTo(steps[currentIdx - 1].id);
         },
       }),
-      btn(finishLabel, {
-        variant: "primary",
-        onclick: async () => {
-          if (isLast) {
-            void finishWizard();
-            return;
-          }
-          if (wizardBeforeNextHook) {
-            const ok = await wizardBeforeNextHook();
-            if (!ok) return;
-          }
-          goTo(steps[currentIdx + 1].id);
-        },
-      }),
+      (() => {
+        // Double-click guard: while a step's beforeNext hook is in flight,
+        // disable the button + swap the label so the operator sees state.
+        // Without this, two quick clicks fire the hook twice and produce
+        // ghost saves on cloud-choice and profile.
+        const continueBtn = btn(finishLabel, {
+          variant: "primary",
+          onclick: async () => {
+            if (continueBtn.dataset.busy === "true") return;
+            continueBtn.dataset.busy = "true";
+            const restoreLabel = continueBtn.textContent;
+            try {
+              continueBtn.disabled = true;
+              continueBtn.textContent = isLast ? "Finishing…" : "Saving…";
+              if (isLast) {
+                await finishWizard();
+                return;
+              }
+              if (wizardBeforeNextHook) {
+                const ok = await wizardBeforeNextHook();
+                if (!ok) {
+                  continueBtn.disabled = false;
+                  continueBtn.textContent = restoreLabel;
+                  continueBtn.dataset.busy = "false";
+                  return;
+                }
+              }
+              goTo(steps[currentIdx + 1].id);
+            } catch (err) {
+              continueBtn.disabled = false;
+              continueBtn.textContent = restoreLabel;
+              continueBtn.dataset.busy = "false";
+              throw err;
+            }
+          },
+        });
+        return continueBtn;
+      })(),
     ),
   ];
 
@@ -842,8 +896,6 @@ function renderWizardStepBody(step, status, onMutate) {
       return renderProfileStep(status, onMutate);
     case "cloud_choice":
       return renderCloudChoiceStep(status, onMutate);
-    case "network":
-      return renderNetworkStep(status);
     case "hardware_check":
       return renderHardwareCheckStep(status, onMutate);
     case "mavlink":
@@ -855,7 +907,7 @@ function renderWizardStepBody(step, status, onMutate) {
     case "remote_access":
       return renderRemoteStepInline(status);
     case "pair":
-      return renderPairStep(status);
+      return renderPairStep(status, onMutate);
     case "finish":
       return renderFinishStep(status);
     default:
@@ -865,90 +917,107 @@ function renderWizardStepBody(step, status, onMutate) {
 
 function renderWelcomeStep(status) {
   const isGround = status.profile === "ground_station";
-  return card({
-    title: "Local-first setup",
-    body: el("div", { className: "card-pad" },
-      el("p", { style: { color: "var(--text-secondary)", fontSize: "13px", marginBottom: "12px" } },
-        `This wizard configures ${status.device_name || "this device"} for ${isGround ? "a ground station" : "a drone"}. Setup is local-first: MAVLink and video work over LAN, hotspot, or USB tether before any cloud step is required. You can exit at any time and pick up later from the Setup page.`),
-      el("div", { className: "dl-rows" },
-        dlRow("Device name", status.device_name),
-        dlRow("Profile", pretty(status.profile)),
-        dlRow("Version", status.version),
-        dlRow("Device ID", status.device_id),
+  const network = status.network || {};
+  const localIps = network.local_ips || [];
+  const networkOk = localIps.length > 0 || network.hotspot_enabled;
+  const hostname = network.hostname || status.device_name || "this device";
+  const mdns = network.mdns_host || "";
+  const hotspotLabel = network.hotspot_enabled
+    ? `hotspot · ${network.hotspot_ssid || "active"}`
+    : "hotspot off";
+
+  const networkChips = [
+    chip({ variant: "muted", label: hostname, icon: "host" }),
+    mdns ? chip({ variant: "muted", label: mdns }) : null,
+    chip({ variant: network.hotspot_enabled ? "ok" : "muted", dot: true, label: hotspotLabel }),
+    ...(localIps.length
+      ? localIps.slice(0, 3).map((ip) => chip({ variant: "ok", dot: true, label: ip }))
+      : [chip({ variant: "warn", dot: true, label: "no LAN" })]),
+  ].filter(Boolean);
+
+  const identityChips = [
+    chip({ variant: "info", label: pretty(status.profile) || (isGround ? "ground" : "drone") }),
+    chip({ variant: "muted", label: `v${status.version || "?"}` }),
+    chip({ variant: "muted", label: `id ${(status.device_id || "—").slice(0, 8)}` }),
+  ];
+
+  return el("div", { className: "page-body" },
+    card({
+      title: "What this wizard does",
+      severity: networkOk ? "ok" : "warn",
+      body: el("div", { className: "card-pad" },
+        el("p", { style: { color: "var(--text-secondary)", fontSize: "13.5px", marginBottom: "10px", lineHeight: "1.55" } },
+          `This is the one-time setup for ${status.device_name || "this device"}, an ADOS ` +
+          `${isGround ? "ground station" : "drone"} agent. Each step picks a piece of the runtime: which role the device plays, what hardware it has, where it talks to Mission Control, and how it streams video and telemetry.`),
+        el("p", { style: { color: "var(--text-secondary)", fontSize: "13.5px", marginBottom: "10px", lineHeight: "1.55" } },
+          "Setup is local-first. MAVLink and video work over LAN, hotspot, or USB tether before any cloud step is required. Every choice you make here can be changed later from Settings."),
+        !networkOk
+          ? el("p", { style: { color: "var(--status-warning)", fontSize: "12.5px", marginTop: "8px", marginBottom: "0" } },
+              "No usable network detected yet. Bring up Wi-Fi, plug in a USB tether, or join a LAN before continuing.")
+          : null,
       ),
-    ),
-  });
+    }),
+    card({
+      title: "This device",
+      body: el("div", {},
+        liveRow({ label: "Identity", chips: identityChips }),
+        liveRow({ label: "Network", chips: networkChips, hint: networkOk ? null : "Mission Control reaches the wizard at any of the IPs above." }),
+      ),
+    }),
+  );
 }
 
 function renderCloudChoiceStep(status, onMutate) {
   const current = status.cloud_choice?.mode || "cloud";
   let selected = current;
-  let resultMessage = "";
-  let resultClass = "";
 
-  const buildForm = () => {
-    const sh = el("div", { className: "wizard-form", style: selected === "self_hosted" ? {} : { display: "none" } });
-    const urlInput = el("input", { type: "url", name: "url", placeholder: "https://convex.example.com", autocomplete: "off", value: status.cloud_choice?.backend_url || "" });
-    const brokerInput = el("input", { type: "text", name: "mqtt_broker", placeholder: "mqtt.example.com", autocomplete: "off" });
-    const portInput = el("input", { type: "number", name: "mqtt_port", min: "1", max: "65535", value: "8883" });
+  // Self-hosted form fields. Held outside buildForm so the values persist
+  // across mode changes and re-renders.
+  const fields = {
+    url: status.cloud_choice?.backend_url || "",
+    mqtt_broker: "",
+    mqtt_port: "8883",
+    api_key: "",
+  };
+
+  const errorChip = el("div", { style: { minHeight: "0" } });
+  const clearError = () => errorChip.replaceChildren();
+  const setError = (label) => {
+    errorChip.replaceChildren(chip({ variant: "err", dot: true, label }));
+  };
+
+  const buildSelfHostedForm = () => {
+    const wrap = el("div", { className: "wizard-form" });
+    const urlInput = el("input", { type: "url", name: "url", placeholder: "https://convex.your-domain.com", autocomplete: "off", value: fields.url });
+    const brokerInput = el("input", { type: "text", name: "mqtt_broker", placeholder: "mqtt.your-domain.com", autocomplete: "off", value: fields.mqtt_broker });
+    const portInput = el("input", { type: "number", name: "mqtt_port", min: "1", max: "65535", value: fields.mqtt_port });
     const apiKeyInput = el("input", { type: "password", name: "api_key", placeholder: "Optional. Stored 0600 on device.", autocomplete: "off" });
-    sh.append(
-      el("label", {}, el("span", {}, "Convex URL"), urlInput),
+
+    urlInput.addEventListener("input", () => { fields.url = urlInput.value; clearError(); });
+    brokerInput.addEventListener("input", () => { fields.mqtt_broker = brokerInput.value; });
+    portInput.addEventListener("input", () => { fields.mqtt_port = portInput.value; });
+    apiKeyInput.addEventListener("input", () => { fields.api_key = apiKeyInput.value; });
+
+    wrap.append(
+      el("label", {}, el("span", {}, "Deployment URL"), urlInput),
       el("label", {}, el("span", {}, "MQTT broker"), brokerInput),
       el("label", {}, el("span", {}, "MQTT port"), portInput),
       el("label", {}, el("span", {}, "API key (optional)"), apiKeyInput),
+      el("div", { style: { padding: "0 0 4px 0" } },
+        chip({ variant: "info", label: "API key is written to a root-owned file and never echoed back" })),
     );
-
-    const result = el("div", { className: `form-result ${resultClass}`.trim() }, resultMessage);
-
-    const submitBtn = btn("Save cloud posture", {
-      variant: "primary",
-      onclick: async () => {
-        const body = { mode: selected };
-        if (selected === "self_hosted") {
-          body.self_hosted = {
-            url: urlInput.value.trim(),
-            mqtt_broker: brokerInput.value.trim(),
-            mqtt_port: parseInt(portInput.value || "8883", 10),
-            api_key: apiKeyInput.value || "",
-          };
-        }
-        result.textContent = "Saving…";
-        result.className = "form-result";
-        try {
-          const res = await apiFetch("/api/v1/setup/cloud-choice", {
-            method: "POST",
-            body: JSON.stringify(body),
-          });
-          apiKeyInput.value = "";
-          resultMessage = res?.message || "Saved.";
-          resultClass = res?.ok === false ? "err" : "ok";
-          result.textContent = resultMessage;
-          result.className = `form-result ${resultClass}`;
-          await onMutate();
-        } catch (err) {
-          apiKeyInput.value = "";
-          resultMessage = `Failed: ${err.message || err}`;
-          resultClass = "err";
-          result.textContent = resultMessage;
-          result.className = "form-result err";
-        }
-      },
-    });
-
-    return el("div", {},
-      sh,
-      el("div", { className: "btn-row", style: { padding: "16px" } }, submitBtn),
-      result,
-    );
+    return wrap;
   };
 
   const formContainer = el("div", {});
-  formContainer.append(buildForm());
+  const updateForm = () => {
+    formContainer.replaceChildren(selected === "self_hosted" ? buildSelfHostedForm() : el("div"));
+  };
+  updateForm();
 
-  const renderRadio = (mode, title, blurb) => {
+  const renderRadio = (mode, title, blurb, accentChip) => {
     const isSelected = selected === mode;
-    const card = el("label", { className: `cloud-card ${isSelected ? "selected" : ""}`.trim() },
+    return el("label", { className: `cloud-card ${isSelected ? "selected" : ""}`.trim() },
       el("input", {
         type: "radio",
         name: "cloud_mode",
@@ -956,16 +1025,16 @@ function renderCloudChoiceStep(status, onMutate) {
         checked: isSelected,
         onchange: () => {
           selected = mode;
-          formContainer.replaceChildren(buildForm());
+          clearError();
+          updateForm();
           renderCardClasses();
         },
       }),
       el("div", { className: "cloud-card-body" },
-        el("strong", {}, title),
+        el("strong", { style: { display: "inline-flex", alignItems: "center", gap: "8px" } }, title, accentChip || null),
         el("p", {}, blurb),
       ),
     );
-    return card;
   };
 
   const cards = el("div", { className: "cloud-cards" });
@@ -976,77 +1045,237 @@ function renderCloudChoiceStep(status, onMutate) {
     });
   };
   cards.append(
-    renderRadio("cloud", "Altnautica cloud (default)",
-      "Sign in with your Altnautica account on Mission Control. Your devices show up there from anywhere."),
-    renderRadio("self_hosted", "Self-hosted backend",
-      "Point this device at your own Convex deployment and MQTT broker. Useful for OEMs and operators behind a firewall."),
-    renderRadio("local", "Local only",
-      "No cloud relay. Mission Control connects directly over LAN, hotspot, or USB tether. You can still enable Cloudflare Tunnel later."),
+    renderRadio(
+      "cloud",
+      "Altnautica cloud",
+      "Connects this device to Altnautica's managed backend. Mission Control sees your fleet from anywhere. The next step generates a code so you can pair it with a Mission Control account.",
+      chip({ variant: "info", label: "dev preview", size: "sm" }),
+    ),
+    renderRadio(
+      "self_hosted",
+      "Self-hosted backend",
+      "Point this device at your own Convex deployment and MQTT broker. The pair step still uses a 6-character code, but it goes through your deployment instead of the Altnautica backend.",
+      null,
+    ),
+    renderRadio(
+      "local",
+      "Local only",
+      "No cloud relay. Mission Control reaches this device directly over LAN, hotspot, or USB tether. The pair step is hidden in this mode. You can still enable Cloudflare Tunnel later for remote access.",
+      chip({ variant: "muted", label: "no cloud", size: "sm" }),
+    ),
   );
+
+  // Single beforeNext hook drives both validation and the save POST so the
+  // wizard's Continue button is the one and only commit affordance on this
+  // step. No second "Save cloud posture" button.
+  wizardBeforeNextHook = async () => {
+    clearError();
+    if (!selected) {
+      setError("Pick a cloud posture before continuing.");
+      return false;
+    }
+    const body = { mode: selected };
+    if (selected === "self_hosted") {
+      const url = (fields.url || "").trim();
+      if (!url) {
+        setError("Self-hosted mode needs a deployment URL.");
+        return false;
+      }
+      try { new URL(url); } catch {
+        setError("Deployment URL must include https:// and a hostname.");
+        return false;
+      }
+      body.self_hosted = {
+        url,
+        mqtt_broker: (fields.mqtt_broker || "").trim(),
+        mqtt_port: parseInt(fields.mqtt_port || "8883", 10),
+        api_key: fields.api_key || "",
+      };
+    }
+    try {
+      const res = await apiFetch("/api/v1/setup/cloud-choice", {
+        method: "POST",
+        body: JSON.stringify(body),
+      });
+      // Wipe the typed key out of memory once the agent has it on disk.
+      fields.api_key = "";
+      if (res?.ok === false) {
+        setError(res.message || "Could not save the choice.");
+        return false;
+      }
+      await onMutate();
+      return true;
+    } catch (err) {
+      setError(`Could not save: ${err.message || err}`);
+      return false;
+    }
+  };
 
   return el("div", { className: "page-body" },
     card({
-      title: "Choose a cloud posture",
-      subtitle: status.cloud_choice?.mode
-        ? `Currently set to ${pretty(status.cloud_choice.mode)}.`
-        : "How should this device talk to Mission Control?",
+      title: "Where does this device send telemetry?",
+      subtitle: "Pick one. Continue saves the choice.",
       body: el("div", { className: "card-pad" }, cards),
     }),
     selected === "self_hosted" ? card({
-      title: "Self-hosted endpoints",
-      subtitle: "API key is written to a root-owned secret file and never echoed back.",
+      title: "Deployment endpoints",
       body: formContainer,
     }) : null,
-    selected !== "self_hosted" ? card({
-      title: "Confirm",
-      body: formContainer,
-    }) : null,
+    card({
+      body: el("div", { className: "card-pad", style: { display: "flex", flexDirection: "column", gap: "8px" } },
+        el("div", { style: { display: "flex", gap: "8px", flexWrap: "wrap" } },
+          chip({ variant: "info", icon: "i", label: "All settings can be changed later from Settings → Cloud" }),
+        ),
+        errorChip,
+      ),
+    }),
   );
-}
-
-function renderNetworkStep(status) {
-  const n = status.network || {};
-  const sev = severityForNetwork(status);
-  return card({
-    title: "Local network",
-    severity: sev,
-    body: el("div", {},
-      el("div", { className: "card-pad" },
-        el("p", { style: { color: "var(--text-secondary)", fontSize: "13px" } },
-          sev === "ok"
-            ? "The agent is reachable on the network. Continue to choose a cloud posture."
-            : "No usable network detected yet. Bring up a hotspot, plug in a USB tether, or join a Wi-Fi network."),
-      ),
-      el("div", { className: "dl-rows" },
-        dlRow("Hostname", n.hostname),
-        dlRow("mDNS", n.mdns_host),
-        dlRow("Hotspot", n.hotspot_enabled ? `Enabled (${n.hotspot_ssid || "—"})` : "Disabled"),
-        dlRow("Local IPs", (n.local_ips || []).join(", ")),
-      ),
-    ),
-  });
 }
 
 function renderMavlinkStepInline(status) {
   const m = status.mavlink || {};
-  return card({
-    title: "Flight controller",
-    severity: severityForMavlink(m),
-    body: el("div", {},
-      el("div", { className: "card-pad" },
-        el("p", { style: { color: "var(--text-secondary)", fontSize: "13px", marginBottom: "12px" } },
-          m.connected
-            ? `Connected on ${m.port || "?"} at ${m.baud || "?"} baud.`
-            : "No flight controller is currently connected. Power the FC, plug in the USB or UART cable, and refresh."),
-        el("div", { className: "btn-row" }, btn("Open MAVLink", { href: "/mavlink.html" })),
-      ),
-      el("div", { className: "dl-rows" },
-        dlRow("Port", pretty(m.port)),
-        dlRow("Baud", pretty(m.baud)),
-        dlRow("WebSocket", m.websocket_url),
-      ),
-    ),
+  const portChip = chip({ variant: "muted", label: `port ${m.port || "—"}`, size: "sm" });
+  const baudChip = chip({ variant: "muted", label: `${m.baud || "—"} baud`, size: "sm" });
+  const linkChip = chip({
+    variant: m.connected ? "ok" : "warn",
+    dot: true,
+    pulse: m.connected,
+    label: m.connected ? "Connected" : "FC not detected",
   });
+
+  // Live chip row. Updated by the MAVLink WebSocket subscriber below.
+  const slots = {
+    heartbeat: el("span", {}, chip({ variant: "muted", label: "heartbeat —", size: "sm" })),
+    mode: el("span", {}, chip({ variant: "muted", label: "mode —", size: "sm" })),
+    armed: el("span", {}, chip({ variant: "muted", label: "armed —", size: "sm" })),
+    gps: el("span", {}, chip({ variant: "muted", label: "GPS —", size: "sm" })),
+    sats: el("span", {}, chip({ variant: "muted", label: "sats —", size: "sm" })),
+    battery: el("span", {}, chip({ variant: "muted", label: "battery —", size: "sm" })),
+    attitude: el("span", {}, chip({ variant: "muted", label: "attitude —", size: "sm" })),
+  };
+  const replace = (slot, opts) => slot.replaceChildren(chip({ size: "sm", ...opts }));
+
+  const capsContainer = el("div", { className: "live-row-chips", style: { justifyContent: "flex-start" } });
+  const capsObserved = new Set();
+  capsContainer.appendChild(chip({ variant: "muted", label: "Listening for AUTOPILOT_VERSION…", size: "sm" }));
+
+  // Raw frame console reuses the same WebSocket. The streamConsole helper
+  // does ANSI strip + autoscroll + reconnect; we provide a parser hook
+  // that turns binary MAVLink frames into one-line summaries.
+  const wsUrl = m.websocket_url || `ws://${location.hostname}:8765`;
+  let lastHbAt = 0;
+  let hbWindow = [];
+  const observed = (msgId) => {
+    const names = { 0: "HEARTBEAT", 1: "SYS_STATUS", 24: "GPS_RAW_INT", 30: "ATTITUDE", 148: "AUTOPILOT_VERSION" };
+    return names[msgId] || `MSG ${msgId}`;
+  };
+
+  const parser = (data) => {
+    let bytes;
+    if (data instanceof ArrayBuffer) bytes = new Uint8Array(data);
+    else if (data instanceof Uint8Array) bytes = data;
+    else if (typeof data === "string") return data;
+    else return null;
+    const frame = parseMavlinkFrame(bytes);
+    if (!frame) return null;
+    const decoded = decodeMavlinkPayload(frame);
+    const ts = new Date().toISOString().split("T")[1].replace("Z", "");
+    if (!decoded) return `${ts}  ${observed(frame.msgId)}`;
+    if (decoded.type === "heartbeat") {
+      const now = Date.now();
+      hbWindow.push(now);
+      hbWindow = hbWindow.filter((t) => now - t < 5000);
+      const rate = hbWindow.length / 5;
+      lastHbAt = now;
+      replace(slots.heartbeat, { variant: rate > 0.5 ? "ok" : "warn", dot: true, label: `heartbeat ${rate.toFixed(1)} Hz` });
+      replace(slots.mode, { variant: "info", label: `${decoded.autopilot} · ${decoded.vehicle}` });
+      replace(slots.armed, { variant: decoded.armed ? "warn" : "ok", dot: true, label: decoded.armed ? "ARMED" : "disarmed" });
+      return `${ts}  HEARTBEAT  ${decoded.autopilot}  ${decoded.armed ? "ARMED" : "disarmed"}`;
+    }
+    if (decoded.type === "gps") {
+      const okFix = decoded.fix >= 3;
+      replace(slots.gps, { variant: okFix ? "ok" : "warn", dot: true, label: `GPS ${decoded.fix_label}` });
+      replace(slots.sats, { variant: decoded.sats >= 6 ? "ok" : "warn", label: `${decoded.sats} sats` });
+      return `${ts}  GPS_RAW_INT  ${decoded.fix_label}  sats=${decoded.sats}`;
+    }
+    if (decoded.type === "sys_status") {
+      const v = decoded.voltage_v;
+      replace(slots.battery, {
+        variant: v > 14 ? "ok" : v > 11 ? "warn" : "err",
+        label: `${v.toFixed(1)} V${decoded.battery_remaining != null ? ` · ${decoded.battery_remaining}%` : ""}`,
+      });
+      return `${ts}  SYS_STATUS  ${v.toFixed(2)}V  ${decoded.current_a.toFixed(1)}A`;
+    }
+    if (decoded.type === "attitude") {
+      const deg = (r) => (r * 180 / Math.PI).toFixed(0);
+      replace(slots.attitude, { variant: "info", label: `r${deg(decoded.roll)}° p${deg(decoded.pitch)}° y${deg(decoded.yaw)}°` });
+      return null; // attitude is too chatty for the console
+    }
+    if (decoded.type === "autopilot_version") {
+      capsObserved.clear();
+      capsContainer.replaceChildren();
+      decoded.supported.forEach((label) => {
+        capsObserved.add(label);
+        capsContainer.appendChild(chip({ variant: "ok", label, size: "sm" }));
+      });
+      if (capsObserved.size === 0) {
+        capsContainer.appendChild(chip({ variant: "warn", label: "FC reported zero capabilities", size: "sm" }));
+      }
+      return `${ts}  AUTOPILOT_VERSION  ${decoded.supported.length} capabilities`;
+    }
+    return `${ts}  ${observed(frame.msgId)}`;
+  };
+
+  // Heartbeat staleness tick — if no HEARTBEAT for 6s, surface that.
+  const stalenessTimer = setInterval(() => {
+    if (!lastHbAt) return;
+    if (Date.now() - lastHbAt > 6000) {
+      replace(slots.heartbeat, { variant: "warn", dot: true, label: "heartbeat stale" });
+    }
+  }, 2000);
+
+  const console_ = streamConsole({ wsUrl, height: 280, parser });
+  wizardOnDispose(() => { if (console_.dispose) console_.dispose(); });
+  wizardOnDispose(() => clearInterval(stalenessTimer));
+
+  return el("div", { className: "page-body" },
+    card({
+      title: "Flight controller",
+      severity: severityForMavlink(m),
+      body: el("div", {},
+        el("div", { className: "card-pad", style: { display: "flex", flexDirection: "column", gap: "10px" } },
+          el("p", { style: { color: "var(--text-secondary)", fontSize: "13px", margin: 0 } },
+            m.connected
+              ? "MAVLink is live. The chips below update from frames received over the FC link."
+              : "No flight controller is talking yet. Power the FC, plug in the USB or UART cable, and the link will come up automatically."),
+          el("div", { style: { display: "flex", flexWrap: "wrap", gap: "6px" } },
+            linkChip, portChip, baudChip,
+          ),
+        ),
+        el("div", {},
+          liveRow({ label: "Heartbeat", chips: [slots.heartbeat, slots.mode, slots.armed] }),
+          liveRow({ label: "GPS", chips: [slots.gps, slots.sats] }),
+          liveRow({ label: "Battery", chips: [slots.battery] }),
+          liveRow({ label: "Attitude", chips: [slots.attitude] }),
+        ),
+      ),
+    }),
+    card({
+      title: "Capabilities",
+      subtitle: "What this firmware advertises in AUTOPILOT_VERSION.",
+      body: el("div", { className: "card-pad" }, capsContainer),
+    }),
+    card({
+      title: "MAVLink stream",
+      subtitle: "Live frames from the FC. Scroll up to pause auto-follow.",
+      body: el("div", { className: "card-pad" },
+        console_,
+        el("div", { className: "btn-row", style: { marginTop: "10px" } },
+          btn("Open MAVLink page", { href: "/mavlink.html" }),
+        ),
+      ),
+    }),
+  );
 }
 
 function renderVideoStepInline(status) {
@@ -1189,39 +1418,338 @@ function renderGroundStepInline(status) {
 }
 
 function renderRemoteStepInline(status) {
-  return card({
-    title: "Remote access (optional)",
-    severity: severityForRemote(status),
-    body: el("div", { className: "card-pad" },
-      el("p", { style: { color: "var(--text-secondary)", fontSize: "13px", marginBottom: "12px" } },
-        "Cloudflare Tunnel exposes this agent to remote support without opening router ports. Skip if you do not need external access."),
-      el("div", { className: "btn-row" }, btn("Open Remote access", { href: "/remote.html", variant: "primary" })),
-    ),
+  const remote = status.remote_access || {};
+  const cf = remote.cloudflare || {};
+  const tokenInstalled = remote.configured;
+  const running = remote.status === "running";
+  const setupUrl = (cf.setup_url || "").trim();
+
+  const tokenChip = chip({ variant: tokenInstalled ? "ok" : "muted", dot: true, label: tokenInstalled ? "token installed" : "no token" });
+  const runChip = chip({ variant: running ? "ok" : "warn", dot: true, pulse: running, label: running ? "cloudflared running" : "cloudflared stopped" });
+  const reachChipSlot = el("span", {}, chip({ variant: "muted", label: "reachability unchecked" }));
+
+  // Token textarea + install button.
+  const tokenInput = el("textarea", {
+    placeholder: "Paste the connector token from your Cloudflare dashboard, or paste the full install command.",
+    spellcheck: false,
+    autocomplete: "off",
   });
+  const installResult = el("div", { style: { minHeight: "20px" } });
+  const installBtn = btn("Install token", {
+    variant: "primary",
+    onclick: async () => {
+      const value = (tokenInput.value || "").trim();
+      if (!value) {
+        installResult.replaceChildren(chip({ variant: "warn", dot: true, label: "Paste a token first" }));
+        return;
+      }
+      installResult.replaceChildren(chip({ variant: "info", dot: true, pulse: true, label: "Installing…" }));
+      try {
+        const res = await apiFetch("/api/v1/setup/remote-access/cloudflare", {
+          method: "POST",
+          body: JSON.stringify({ token_or_script: value }),
+        });
+        tokenInput.value = "";
+        if (res?.ok === false) {
+          installResult.replaceChildren(chip({ variant: "err", dot: true, label: res.message || "Install failed" }));
+        } else {
+          installResult.replaceChildren(chip({ variant: "ok", dot: true, label: res?.message || "Token installed. Restart cloudflared to connect." }));
+        }
+      } catch (err) {
+        installResult.replaceChildren(chip({ variant: "err", dot: true, label: err.message || "Install failed" }));
+      }
+    },
+  });
+
+  // Verify reachability button — uses the new GET endpoint.
+  const verify = verifyButton({
+    label: "Verify reachability",
+    busyLabel: "Probing tunnel…",
+    successLabel: "Reachable",
+    endpoint: "/api/v1/setup/cloudflare/verify",
+    onResult: (body, ok) => {
+      if (ok && body?.reachable) {
+        reachChipSlot.replaceChildren(chip({ variant: "ok", dot: true, label: `reachable · ${body.latency_ms ?? "?"}ms` }));
+      } else if (ok) {
+        reachChipSlot.replaceChildren(chip({ variant: "warn", dot: true, label: body?.error || "unreachable" }));
+      } else {
+        reachChipSlot.replaceChildren(chip({ variant: "err", dot: true, label: body?.error || "verify failed" }));
+      }
+    },
+  });
+
+  // Live cloudflared journal log.
+  const console_ = streamConsole({ wsUrl: "/api/v1/setup/cloudflare/logs", height: 220 });
+  wizardOnDispose(() => { if (console_.dispose) console_.dispose(); });
+
+  return el("div", { className: "page-body" },
+    card({
+      title: "Remote access (optional)",
+      severity: severityForRemote(status),
+      body: el("div", {},
+        el("div", { className: "card-pad", style: { display: "flex", flexDirection: "column", gap: "10px" } },
+          el("p", { style: { color: "var(--text-secondary)", fontSize: "13.5px", margin: 0 } },
+            "Cloudflare Tunnel exposes this device to Mission Control without opening router ports. Optional. Skip the step if you only need LAN access."),
+          el("div", { style: { display: "flex", gap: "6px", flexWrap: "wrap" } }, tokenChip, runChip, reachChipSlot),
+          setupUrl
+            ? liveRow({ label: "Public URL", chips: [chip({ variant: "info", label: setupUrl })] })
+            : null,
+        ),
+      ),
+    }),
+    card({
+      title: "Install or rotate the token",
+      subtitle: "Create a tunnel in your Cloudflare dashboard, copy the connector token, paste it below.",
+      body: el("div", { className: "card-pad", style: { display: "flex", flexDirection: "column", gap: "10px" } },
+        tokenInput,
+        el("div", { className: "btn-row" }, installBtn,
+          btn("Cloudflare dashboard", { href: "https://one.dash.cloudflare.com/", external: true }),
+        ),
+        installResult,
+      ),
+    }),
+    tokenInstalled ? card({
+      title: "Verify reachability",
+      subtitle: "Confirms the public URL routes back to this device.",
+      body: el("div", { className: "card-pad", style: { display: "flex", flexDirection: "column", gap: "10px" } },
+        verify,
+        setupUrl
+          ? null
+          : chip({ variant: "warn", dot: true, label: "Configure your tunnel hostname before verifying." }),
+      ),
+    }) : null,
+    card({
+      title: "cloudflared journal",
+      subtitle: "Live tail of the cloudflared service.",
+      body: el("div", { className: "card-pad" }, console_),
+    }),
+  );
 }
 
-function renderPairStep(status) {
+function renderPairStep(status, onMutate) {
   const cc = status.cloud_choice || {};
   if (cc.mode === "local") {
     return card({
       title: "Pairing not required",
       body: el("div", { className: "card-pad" },
         el("p", { style: { color: "var(--text-secondary)", fontSize: "13px" } },
-          "Local-only mode is active. Mission Control connects directly over the LAN; no pairing code is needed."),
+          "Local-only mode is active. Mission Control reaches this device directly over the LAN."),
       ),
     });
   }
-  return card({
-    title: "Pair with Mission Control",
-    body: el("div", { className: "card-pad" },
-      el("p", { style: { color: "var(--text-secondary)", fontSize: "13px", marginBottom: "12px" } },
-        cc.paired
-          ? "This device is already paired with a Mission Control account."
-          : "Open Mission Control, go to Settings → Devices → Add device, copy the pairing code, and enter it on this device."),
-      el("p", { style: { color: "var(--text-tertiary)", fontSize: "12px" } },
-        "Pairing entry is exposed through the agent CLI (`ados status` shows the pairing flow) and through Mission Control's Hardware tab. The wizard surfaces this step so the order of operations is clear; you can pair from any of those surfaces."),
-    ),
+
+  if (cc.paired) {
+    return card({
+      title: "Paired",
+      severity: "ok",
+      body: el("div", { className: "card-pad", style: { display: "flex", flexDirection: "column", gap: "10px" } },
+        chip({ variant: "ok", dot: true, label: "Mission Control is connected" }),
+        el("p", { style: { color: "var(--text-secondary)", fontSize: "13px" } },
+          "This device is already paired with a Mission Control account. You can continue, or unpair from Settings → Devices on Mission Control."),
+      ),
+    });
+  }
+
+  const network = status.network || {};
+  const mdnsHost = network.mdns_host || "";
+  const isSelfHosted = cc.mode === "self_hosted";
+  const deploymentUrl = (cc.backend_url || "").replace(/\/$/, "");
+  const altnauticaPair = "https://altnautica.com/pair";
+  const deepLink = (code) => {
+    const params = new URLSearchParams();
+    if (code) params.set("code", code);
+    if (mdnsHost) params.set("host", mdnsHost);
+    const base = isSelfHosted
+      ? (deploymentUrl ? `${deploymentUrl}/pair` : "")
+      : altnauticaPair;
+    return base ? `${base}?${params.toString()}` : "";
+  };
+
+  // Agent-generated code panel (left). Live countdown + copy + deep link.
+  const codeBox = el("div", { className: "code-chip", text: "------" });
+  const countdownChip = el("span", {}, chip({ variant: "muted", label: "expires in —", size: "sm" }));
+  const copyBtn = btn("Copy code", { onclick: async () => {
+    if (!codeBox.textContent || codeBox.textContent === "------") return;
+    try { await navigator.clipboard.writeText(codeBox.textContent); } catch { /* clipboard denied */ }
+  }});
+  const deepLinkSlot = el("div", { className: "btn-row", style: { marginTop: "10px" } });
+  const renderDeepLinkButton = (code) => {
+    deepLinkSlot.replaceChildren();
+    const url = deepLink(code);
+    if (url) {
+      deepLinkSlot.appendChild(btn("Open in ADOS GCS", { href: url, external: true, variant: "primary" }));
+      deepLinkSlot.appendChild(copyBtn);
+    } else {
+      deepLinkSlot.appendChild(chip({ variant: "warn", dot: true, label: "Open Mission Control on your deployment to claim this code" }));
+      deepLinkSlot.appendChild(copyBtn);
+    }
+  };
+  renderDeepLinkButton(null);
+
+  let codeState = { code: null, expiresAt: null };
+  const refreshCode = async () => {
+    try {
+      const res = await apiFetch("/api/pairing/code");
+      if (res?.code) {
+        codeBox.textContent = res.code;
+        codeState = { code: res.code, expiresAt: Date.now() + 15 * 60 * 1000 };
+        renderDeepLinkButton(res.code);
+      }
+    } catch (err) {
+      codeBox.textContent = "------";
+      countdownChip.replaceChildren(chip({ variant: "err", dot: true, label: "Could not load code", size: "sm" }));
+    }
+  };
+
+  let countdownTimer = null;
+  const tickCountdown = () => {
+    if (!codeState.expiresAt) return;
+    const remaining = Math.max(0, codeState.expiresAt - Date.now());
+    if (remaining <= 0) {
+      countdownChip.replaceChildren(chip({ variant: "warn", dot: true, label: "regenerating…", size: "sm" }));
+      refreshCode();
+      return;
+    }
+    const mm = String(Math.floor(remaining / 60000)).padStart(2, "0");
+    const ss = String(Math.floor((remaining % 60000) / 1000)).padStart(2, "0");
+    countdownChip.replaceChildren(chip({ variant: "muted", label: `expires in ${mm}:${ss}`, size: "sm" }));
+  };
+  refreshCode().then(tickCountdown);
+  countdownTimer = setInterval(tickCountdown, 1000);
+  wizardOnDispose(() => { if (countdownTimer) clearInterval(countdownTimer); });
+
+  // GCS-pre-generated code panel (right). Operator types the code, agent
+  // claims itself.
+  const acceptInput = el("input", {
+    className: "code-input",
+    type: "text",
+    maxlength: "8",
+    placeholder: "------",
+    autocomplete: "off",
+    spellcheck: false,
+    inputmode: "text",
   });
+  const acceptStatus = el("div", { style: { minHeight: "20px", marginTop: "8px" } });
+  let acceptInFlight = false;
+  let acceptAbort = null;
+  const setAcceptStatus = (variant, label, withDot = true) => {
+    acceptStatus.replaceChildren(chip({ variant, dot: withDot, label, size: "sm" }));
+  };
+  const submitAccepted = async () => {
+    const raw = (acceptInput.value || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+    if (raw.length !== 6) {
+      setAcceptStatus("warn", "Code must be 6 characters");
+      return;
+    }
+    if (acceptInFlight) return;
+    acceptInFlight = true;
+    acceptInput.disabled = true;
+    setAcceptStatus("info", "Verifying…", true);
+    acceptAbort = new AbortController();
+    try {
+      const res = await fetch("/api/pairing/accept", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ code: raw }),
+        signal: acceptAbort.signal,
+      });
+      const body = res.headers.get("content-type")?.includes("application/json") ? await res.json() : null;
+      if (res.ok && body?.ok) {
+        setAcceptStatus("ok", "Paired");
+        await onMutate();
+      } else {
+        setAcceptStatus("err", body?.message || `Failed (${res.status})`);
+      }
+    } catch (err) {
+      if (err.name !== "AbortError") {
+        setAcceptStatus("err", err.message || "Network error");
+      }
+    } finally {
+      acceptInFlight = false;
+      acceptInput.disabled = false;
+    }
+  };
+  acceptInput.addEventListener("input", () => {
+    const cleaned = (acceptInput.value || "").toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 6);
+    acceptInput.value = cleaned;
+    if (cleaned.length === 6) submitAccepted();
+  });
+  acceptInput.addEventListener("keydown", (ev) => {
+    if (ev.key === "Enter") submitAccepted();
+  });
+
+  // Polling watches the agent-generated code path. If Mission Control
+  // claims via the deep link, this catches it and auto-advances. We stop
+  // the timer when the wizard tab leaves the step (the wizard re-renders
+  // on every step change, which clears this body and its timers via the
+  // disposal pattern wired into wizardBeforeNextHook below).
+  const pollTimer = setInterval(async () => {
+    try {
+      const info = await apiFetch("/api/pairing/info");
+      if (info?.paired) {
+        clearInterval(pollTimer);
+        if (countdownTimer) clearInterval(countdownTimer);
+        setAcceptStatus("ok", "Paired");
+        await onMutate();
+      }
+    } catch { /* keep polling */ }
+  }, 3000);
+  wizardOnDispose(() => clearInterval(pollTimer));
+  wizardOnDispose(() => { if (acceptAbort) acceptAbort.abort(); });
+
+  const pairLater = btn("Pair later (switch to local mode)", {
+    variant: "ghost",
+    onclick: async () => {
+      if (acceptAbort) acceptAbort.abort();
+      if (countdownTimer) clearInterval(countdownTimer);
+      clearInterval(pollTimer);
+      try {
+        await apiFetch("/api/v1/setup/cloud-choice", {
+          method: "POST",
+          body: JSON.stringify({ mode: "local" }),
+        });
+        await onMutate();
+      } catch (err) {
+        setAcceptStatus("err", `Could not switch to local: ${err.message || err}`);
+      }
+    },
+  });
+
+  return el("div", { className: "page-body" },
+    card({
+      body: el("div", { className: "card-pad", style: { display: "flex", flexDirection: "column", gap: "10px" } },
+        el("p", { style: { color: "var(--text-secondary)", fontSize: "13.5px" } },
+          isSelfHosted
+            ? "Pair this device with your self-hosted Mission Control. Use either side: show this device's code in your deployment, or paste a code from your deployment into this device."
+            : "Pair this device with Mission Control. Use either side: open Altnautica in a browser to claim this device's code, or paste a code Mission Control gave you."),
+      ),
+    }),
+    el("div", { className: "two-pane" },
+      card({
+        title: "Show this device's code",
+        subtitle: "Copy or open in Mission Control to claim it.",
+        body: el("div", { className: "card-pad", style: { display: "flex", flexDirection: "column", gap: "10px" } },
+          el("div", { style: { display: "flex", justifyContent: "center" } }, codeBox),
+          el("div", { style: { display: "flex", justifyContent: "center" } }, countdownChip),
+          deepLinkSlot,
+        ),
+      }),
+      card({
+        title: "Got a code from Mission Control?",
+        subtitle: "Paste it here.",
+        body: el("div", { className: "card-pad", style: { display: "flex", flexDirection: "column", gap: "10px" } },
+          acceptInput,
+          acceptStatus,
+        ),
+      }),
+    ),
+    card({
+      body: el("div", { className: "card-pad", style: { display: "flex", justifyContent: "space-between", alignItems: "center", gap: "12px", flexWrap: "wrap" } },
+        chip({ variant: "muted", label: "Pairing waits for either side to complete. Polling every 3s." }),
+        pairLater,
+      ),
+    }),
+  );
 }
 
 function renderFinishStep(status) {
@@ -1286,8 +1814,8 @@ function renderProfileStep(status, onMutate) {
         },
       }),
       el("div", { className: "cloud-card-body" },
-        el("strong", {}, title,
-          isDetected ? el("span", { className: "pill ok", style: { marginLeft: "8px" } }, "Detected") : null,
+        el("strong", { style: { display: "inline-flex", alignItems: "center", gap: "8px" } }, title,
+          isDetected ? chip({ variant: "ok", dot: true, pulse: true, label: "Detected", size: "sm" }) : null,
         ),
         el("p", {}, blurb),
       ),
@@ -1396,14 +1924,14 @@ function renderProfileStep(status, onMutate) {
 function renderHardwareCheckStep(status, onMutate) {
   let snapshot = status.hardware_check || { items: [], profile: status.profile, last_run: "" };
 
-  const stateClassFor = (state) => {
+  const variantFor = (state) => {
     if (state === "ok") return "ok";
     if (state === "missing") return "err";
     if (state === "warning") return "warn";
+    if (state === "checking") return "info";
     return "muted";
   };
-
-  const stateLabel = (state) => {
+  const labelFor = (state) => {
     if (state === "ok") return "OK";
     if (state === "missing") return "Missing";
     if (state === "warning") return "Warning";
@@ -1411,73 +1939,85 @@ function renderHardwareCheckStep(status, onMutate) {
     return "Unknown";
   };
 
-  const itemRow = (item) => el("div", { className: "dl-row" },
-    el("dt", {},
-      dot(stateClassFor(item.state)),
-      el("span", { style: { marginLeft: "8px" } }, item.label),
-      item.required
-        ? el("span", { className: "pill", style: { marginLeft: "8px", fontSize: "10px" } }, "Required")
+  const itemRow = (item) => el("div", { className: "live-table-row" },
+    statusDot(variantFor(item.state), item.state === "checking"),
+    el("div", { className: "live-table-name" },
+      el("span", {}, item.label,
+        item.required ? chip({ variant: "info", label: "required", size: "sm" }) : null,
+      ),
+      item.fix_hint
+        ? el("span", { className: "secondary", text: item.fix_hint })
         : null,
     ),
-    el("dd", {},
-      el("div", {}, el("strong", {}, stateLabel(item.state))),
-      el("div", { style: { color: "var(--text-secondary)", fontSize: "12px", marginTop: "2px" } }, item.detail || "—"),
-      item.fix_hint
-        ? el("div", { style: { color: "var(--text-tertiary)", fontSize: "12px", marginTop: "2px" } }, item.fix_hint)
-        : null,
+    el("div", { className: "live-table-detail", text: item.detail || "—" }),
+    el("div", { className: "live-table-actions" },
+      chip({ variant: variantFor(item.state), dot: true, label: labelFor(item.state), size: "sm" }),
     ),
   );
 
-  const requiredCount = (snapshot.items || []).filter((i) => i.required).length;
-  const requiredOk = (snapshot.items || []).filter((i) => i.required && i.state === "ok").length;
-  const allRequiredOk = requiredCount === 0 || requiredOk === requiredCount;
+  const counts = () => {
+    const items = snapshot.items || [];
+    const required = items.filter((i) => i.required);
+    const ok = required.filter((i) => i.state === "ok").length;
+    return { required: required.length, ok };
+  };
 
-  const itemsContainer = el("div", { className: "dl-rows" },
+  const summaryChips = () => {
+    const c = counts();
+    const profileLabel = `${snapshot.profile || "?"}${snapshot.ground_role ? ` · ${snapshot.ground_role}` : ""}`;
+    const allOk = c.required === 0 || c.ok === c.required;
+    return [
+      chip({ variant: "info", label: profileLabel }),
+      chip({ variant: allOk ? "ok" : "warn", dot: true, label: `${c.ok} / ${c.required} required` }),
+      snapshot.last_run ? chip({ variant: "muted", label: `last run ${snapshot.last_run}`, size: "sm" }) : null,
+    ].filter(Boolean);
+  };
+
+  const itemsContainer = el("div", { className: "live-table" },
     ...((snapshot.items || []).map(itemRow)),
   );
+  const summarySlot = el("div", { className: "live-row-chips", style: { justifyContent: "flex-start" } }, ...summaryChips());
 
-  const summary = el("div", { className: "card-pad" },
-    el("p", { style: { color: "var(--text-secondary)", fontSize: "13px" } },
-      `Profile: ${snapshot.profile}${snapshot.ground_role ? ` (${snapshot.ground_role})` : ""}. ` +
-      `${requiredOk} of ${requiredCount} required components detected.`),
-    snapshot.last_run
-      ? el("p", { style: { color: "var(--text-tertiary)", fontSize: "12px", marginTop: "4px" } },
-          `Last run ${snapshot.last_run}.`)
-      : null,
-  );
-
-  const refresh = btn("Refresh", {
+  const refreshBtn = el("button", {
+    type: "button",
+    className: "btn",
+    text: "Refresh",
     onclick: async () => {
+      refreshBtn.disabled = true;
+      const original = refreshBtn.textContent;
+      refreshBtn.textContent = "Refreshing…";
       try {
         const res = await apiFetch("/api/v1/setup/hardware-check/refresh", { method: "POST" });
         if (res) {
           snapshot = res;
           itemsContainer.replaceChildren(...((snapshot.items || []).map(itemRow)));
-          summary.replaceChildren(
-            el("p", { style: { color: "var(--text-secondary)", fontSize: "13px" } },
-              `Profile: ${snapshot.profile}${snapshot.ground_role ? ` (${snapshot.ground_role})` : ""}. ` +
-              `${(snapshot.items || []).filter((i) => i.required && i.state === "ok").length} of ` +
-              `${(snapshot.items || []).filter((i) => i.required).length} required components detected.`),
-            el("p", { style: { color: "var(--text-tertiary)", fontSize: "12px", marginTop: "4px" } },
-              `Last run ${snapshot.last_run || ""}.`),
-          );
+          summarySlot.replaceChildren(...summaryChips());
         }
         await onMutate();
       } catch (err) {
         console.error("hardware check refresh failed:", err);
+      } finally {
+        refreshBtn.disabled = false;
+        refreshBtn.textContent = original;
       }
     },
   });
 
+  const c = counts();
+  const allOk = c.required === 0 || c.ok === c.required;
+
   return el("div", { className: "page-body" },
     card({
       title: "Hardware check",
-      subtitle: allRequiredOk
-        ? "All required components detected. Continue to cloud posture."
+      subtitle: allOk
+        ? "All required components detected. Continue when ready."
         : "Some required components are missing. Plug them in and refresh, or continue without them.",
-      severity: allRequiredOk ? "ok" : "warn",
-      actions: [refresh],
-      body: el("div", {}, summary, itemsContainer),
+      severity: allOk ? "ok" : "warn",
+      actions: [refreshBtn],
+      body: el("div", {},
+        el("div", { className: "card-pad" }, summarySlot),
+        itemsContainer,
+      ),
     }),
   );
 }

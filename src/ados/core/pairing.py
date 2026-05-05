@@ -129,3 +129,143 @@ class PairingManager:
             "paired": False,
             "pairing_code": self.get_or_create_code(),
         }
+
+
+async def claim_with_external_code(app: object, code: str) -> dict:
+    """Try to register this agent against a code generated elsewhere.
+
+    Mission Control can pre-allocate a pairing code (so an operator
+    types it directly into this device instead of typing the device
+    code into Mission Control). This helper runs the matching POST to
+    the cloud handshake endpoint, then flips local pairing state when
+    the response confirms a match.
+
+    Returns a dict with ``ok: bool`` plus a structured ``error`` /
+    ``owner_id`` / ``paired_at`` payload. Network failures and bad
+    codes both surface as ``ok: false`` so the wizard can render a
+    single error chip.
+    """
+
+    import httpx
+
+    cleaned = "".join(ch for ch in (code or "").upper() if ch.isalnum())
+    if len(cleaned) != CODE_LENGTH:
+        return {
+            "ok": False,
+            "error": "invalid_code",
+            "message": "Pairing code must be 6 characters.",
+        }
+
+    pairing_manager = getattr(app, "pairing_manager", None)
+    config = getattr(app, "config", None)
+    if pairing_manager is None or config is None:
+        return {
+            "ok": False,
+            "error": "agent_not_ready",
+            "message": "Agent is not initialised.",
+        }
+
+    if pairing_manager.is_paired:
+        return {
+            "ok": False,
+            "error": "already_paired",
+            "message": "This device is already paired. Unpair first.",
+        }
+
+    server = getattr(config, "server", None)
+    convex_url = ""
+    if server is not None:
+        if getattr(server, "mode", "") == "self_hosted":
+            self_hosted = getattr(server, "self_hosted", None)
+            convex_url = (getattr(self_hosted, "url", "") or "").rstrip("/")
+        else:
+            cloud = getattr(server, "cloud", None)
+            convex_url = (getattr(cloud, "url", "") or "").rstrip("/")
+    if not convex_url:
+        return {
+            "ok": False,
+            "error": "no_backend",
+            "message": "Cloud backend URL is not configured.",
+        }
+
+    discovery = getattr(app, "discovery_service", None)
+    short_id = config.agent.device_id[:6].lower()
+    mdns_host = discovery.mdns_hostname if discovery else f"ados-{short_id}.local"
+    api_key = pairing_manager.generate_api_key()
+    board_obj = getattr(app, "board", None)
+    board_name = getattr(board_obj, "name", None) or getattr(app, "board_name", "unknown")
+    tier = getattr(board_obj, "tier", 0) or 0
+
+    body = {
+        "deviceId": config.agent.device_id,
+        "pairingCode": cleaned,
+        "apiKey": api_key,
+        "name": getattr(config.agent, "name", "ADOS Agent"),
+        "version": getattr(app, "version", ""),
+        "board": board_name,
+        "tier": tier,
+        "mdnsHost": mdns_host,
+        "localIp": "",
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.post(f"{convex_url}/pairing/register", json=body)
+    except httpx.HTTPError as exc:
+        log.warning("pairing_external_register_failed", error=str(exc))
+        return {
+            "ok": False,
+            "error": "network",
+            "message": f"Could not reach the cloud backend: {exc}",
+        }
+
+    if resp.status_code != 200:
+        return {
+            "ok": False,
+            "error": "backend_error",
+            "message": f"Backend returned {resp.status_code}.",
+        }
+
+    try:
+        result = resp.json()
+    except ValueError:
+        return {"ok": False, "error": "bad_response", "message": "Backend response was not JSON."}
+
+    if isinstance(result, dict) and result.get("error"):
+        err = result["error"]
+        msg_map = {
+            "device_pending_with_different_code": (
+                "This device is already pending a different code. Unpair first."
+            ),
+            "pairing_code_expired": (
+                "The pairing code has expired. Generate a fresh one."
+            ),
+        }
+        return {"ok": False, "error": err, "message": msg_map.get(err, err)}
+
+    matched = bool(result.get("autoMatched") or result.get("alreadyClaimed"))
+    if not matched:
+        return {
+            "ok": False,
+            "error": "code_unknown",
+            "message": (
+                "No Mission Control session is waiting on that code yet. "
+                "Ask Mission Control to generate a code and try again."
+            ),
+        }
+
+    owner_id = result.get("userId") or result.get("ownerId") or "cloud"
+    pairing_manager.claim(owner_id, api_key)
+
+    if discovery is not None:
+        try:
+            await discovery.update_txt(paired=True, owner=owner_id)
+        except Exception:
+            log.debug("mdns_txt_update_failed_after_external_claim")
+
+    return {
+        "ok": True,
+        "owner_id": owner_id,
+        "paired_at": pairing_manager._state.get("paired_at"),
+        "device_id": config.agent.device_id,
+    }
