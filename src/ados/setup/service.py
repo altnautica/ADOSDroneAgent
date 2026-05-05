@@ -597,6 +597,18 @@ def _mission_control_url(*, host_name: str, config: Any) -> str:
     return ""
 
 
+def _setup_path(base: str) -> str:
+    """Append the wizard path to a host:port base URL.
+
+    The kind="setup" entries in access_urls are presented as "open the
+    setup webapp" links in Mission Control and the local sidebar. Without
+    the path, the link lands on the dashboard, so an operator who already
+    finalized the wizard would get the dashboard instead of the setup
+    page they asked for.
+    """
+    return base.rstrip("/") + "/setup.html"
+
+
 def _usb_setup_url(*, port: int) -> str | None:
     """Best-effort USB tether setup URL.
 
@@ -623,17 +635,19 @@ def _access_urls(
         SetupAccessUrl(
             kind="setup",
             label="Setup webapp",
-            url=base_url,
+            url=_setup_path(base_url),
             source="local",
             primary=True,
         ),
         SetupAccessUrl(
             kind="setup",
             label="mDNS setup",
-            url=f"http://{mdns_host}:{port}",
+            url=_setup_path(f"http://{mdns_host}:{port}"),
             source="mdns",
         ),
-        SetupAccessUrl(kind="setup", label="Hotspot setup", url=_HOTSPOT_URL, source="hotspot"),
+        SetupAccessUrl(
+            kind="setup", label="Hotspot setup", url=_setup_path(_HOTSPOT_URL), source="hotspot"
+        ),
         SetupAccessUrl(kind="api", label="Local API", url=f"{base_url}/api", source="local"),
     ]
     # Only advertise the USB gadget URL when the agent actually serves on
@@ -643,7 +657,7 @@ def _access_urls(
         if usb_url:
             urls.append(
                 SetupAccessUrl(
-                    kind="setup", label="USB setup", url=usb_url, source="usb"
+                    kind="setup", label="USB setup", url=_setup_path(usb_url), source="usb"
                 )
             )
     if mission_control_url:
@@ -660,7 +674,7 @@ def _access_urls(
             SetupAccessUrl(
                 kind="setup",
                 label=f"LAN setup {ip}",
-                url=f"http://{ip}:{port}",
+                url=_setup_path(f"http://{ip}:{port}"),
                 source="local",
             )
         )
@@ -705,7 +719,7 @@ def _access_urls(
             SetupAccessUrl(
                 kind="setup",
                 label="Tunnel setup",
-                url=config.remote_access.cloudflare.setup_url,
+                url=_setup_path(config.remote_access.cloudflare.setup_url),
                 source="cloud",
             )
         )
