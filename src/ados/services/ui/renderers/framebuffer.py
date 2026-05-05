@@ -56,14 +56,31 @@ SYS_FB_GLOB = Path("/sys/class/graphics")
 def _read_fb_geometry(fb_name: str) -> tuple[int, int, int]:
     """Return ``(xres, yres, bits_per_pixel)`` for a framebuffer.
 
-    Reads ``/sys/class/graphics/<fb>/var`` which holds the active
-    fb_var_screeninfo structure as a single space-separated line.
+    Reads the standard sysfs framebuffer attributes. Newer kernels
+    expose ``virtual_size`` (``WIDTH,HEIGHT``) and ``bits_per_pixel``
+    as individual files. Older kernels (and a few fbtft builds) only
+    expose the legacy ``var`` blob — try that as a fallback.
     """
-    var_path = SYS_FB_GLOB / fb_name / "var"
+    fb_dir = SYS_FB_GLOB / fb_name
+    vsize_path = fb_dir / "virtual_size"
+    bpp_path = fb_dir / "bits_per_pixel"
+    if vsize_path.exists() and bpp_path.exists():
+        vsize = vsize_path.read_text().strip()
+        if "," in vsize:
+            w_str, h_str = vsize.split(",", 1)
+        else:
+            parts = vsize.split()
+            if len(parts) < 2:
+                raise OSError(f"unexpected virtual_size format: {vsize!r}")
+            w_str, h_str = parts[0], parts[1]
+        xres = int(w_str.strip())
+        yres = int(h_str.strip())
+        bpp = int(bpp_path.read_text().strip())
+        return xres, yres, bpp
+    # Legacy fallback: parse the show_var() blob.
+    var_path = fb_dir / "var"
     text = var_path.read_text().strip()
     parts = text.split()
-    # The kernel's fb_var_screeninfo show_var() format puts xres,
-    # yres at indices 0, 1 and bits_per_pixel at index 6.
     if len(parts) < 7:
         raise OSError(f"unexpected /sys/class/graphics/{fb_name}/var format")
     xres = int(parts[0])
