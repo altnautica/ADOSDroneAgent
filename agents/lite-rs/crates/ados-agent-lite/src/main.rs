@@ -14,8 +14,9 @@ use std::sync::Arc;
 
 use ados_cloud::CloudConfig;
 use ados_mavlink::MavlinkConfig;
+use ados_setup::{setup_router, state::StateStore, SetupState};
 use anyhow::{Context, Result};
-use axum::{extract::DefaultBodyLimit, response::Json, routing::get, Router};
+use axum::extract::DefaultBodyLimit;
 use clap::{Parser, Subcommand};
 use serde::Deserialize;
 use serde_json::Value;
@@ -296,21 +297,41 @@ async fn run(config_path: PathBuf) -> Result<()> {
         tracing::info!("device_id missing; running offline (no mqtt, no heartbeat)");
     }
 
-    // axum HTTP server: minimal /api/v1/setup/status stub at v0.1.
-    let app_state = Arc::new(AppState {
+    // axum HTTP server: full DEC-141 setup surface mounted from ados-setup.
+    // Status snapshot reads live agent state (paired/unpaired, mavlink
+    // port + baud, device_id). The crate-level state owns the agent.yaml
+    // path + setup-state.yaml store; this binary supplies the snapshot
+    // builder closure.
+    let app_state_inner = Arc::new(AppState {
         device_id: config.agent.device_id.clone(),
         paired: !config.cloud.api_key.is_empty(),
         mavlink_port: config.mavlink.port.clone(),
         mavlink_baud: config.mavlink.baud,
         config_path: config_path.clone(),
     });
-    let app = Router::new()
-        .route("/api/v1/setup/status", get(setup_status))
+
+    // Allow override via ADOS_SETUP_STATE_PATH so tests + dev containers
+    // don't need /etc write access. Production install puts this at
+    // /etc/ados/setup-state.yaml owned by the agent user.
+    let setup_state_path = std::env::var_os("ADOS_SETUP_STATE_PATH")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from("/etc/ados/setup-state.yaml"));
+    let setup_state_store = StateStore::new(setup_state_path);
+    let snapshot_state = app_state_inner.clone();
+    let snapshot_store = setup_state_store.clone();
+    let setup_state = Arc::new(SetupState {
+        agent_yaml: config_path.clone(),
+        store: setup_state_store,
+        status_builder: Box::new(move || {
+            build_setup_status(&snapshot_state, &snapshot_store)
+        }),
+    });
+
+    let app = setup_router(setup_state)
         // Cap request bodies at 64 KiB. The setup surface accepts no
         // large payloads today; this is defense-in-depth for the POST
-        // handlers that land in subsequent versions.
-        .layer(DefaultBodyLimit::max(64 * 1024))
-        .with_state(app_state);
+        // handlers.
+        .layer(DefaultBodyLimit::max(64 * 1024));
 
     let bind_addr: SocketAddr = config
         .api
@@ -457,16 +478,22 @@ struct AppState {
     config_path: PathBuf,
 }
 
-async fn setup_status(
-    axum::extract::State(state): axum::extract::State<Arc<AppState>>,
-) -> Json<Value> {
+fn build_setup_status(state: &Arc<AppState>, store: &StateStore) -> Value {
     // Returns the canonical SetupStatus shape so consumers (the setup
     // webapp, Mission Control, the cloud relay) read every expected
-    // field. Empty / null sub-blocks reflect the v0.1 minimum-viable
+    // field. Empty / null sub-blocks reflect the current minimum-viable
     // surface; richer values populate as the agent grows access to FC
     // state, video pipeline, and remote-access providers.
-    let next_action = if state.paired { "ready" } else { "pair" };
-    Json(serde_json::json!({
+    let persisted = store.load().unwrap_or_default();
+    let next_action = if persisted.finalized {
+        "ready"
+    } else if state.paired {
+        "ready"
+    } else {
+        "pair"
+    };
+    let skipped: Vec<String> = persisted.skipped_steps.into_iter().collect();
+    serde_json::json!({
         "version": env!("CARGO_PKG_VERSION"),
         "agent_version": env!("CARGO_PKG_VERSION"),
         "device_id": state.device_id,
@@ -474,12 +501,12 @@ async fn setup_status(
         "profile": "drone",
         "ground_role": "",
         "runtime_mode": "lite",
-        "setup_complete": state.paired,
-        "setup_finalized": state.paired,
-        "completion_percent": if state.paired { 100 } else { 0 },
+        "setup_complete": persisted.finalized || state.paired,
+        "setup_finalized": persisted.finalized,
+        "completion_percent": if persisted.finalized { 100 } else if state.paired { 80 } else { 0 },
         "next_action": next_action,
         "steps": [],
-        "skipped_steps": [],
+        "skipped_steps": skipped,
         "access_urls": [],
         "network": {
             "hostname": "",
@@ -525,7 +552,7 @@ async fn setup_status(
             { "name": "cloud-client",   "state": "running" },
             { "name": "http-api",       "state": "running" }
         ]
-    }))
+    })
 }
 
 #[cfg(test)]

@@ -1,0 +1,183 @@
+//! Axum handlers for the universal setup REST surface.
+//!
+//! Every handler returns response shapes byte-for-byte compatible with
+//! the Python reference at `src/ados/api/routes/setup.py`. A conformance
+//! test suite (B7.9) replays Python responses against this implementation
+//! to keep the two halves in sync.
+
+use std::sync::Arc;
+
+use axum::{
+    extract::{Path as AxumPath, State, WebSocketUpgrade},
+    http::StatusCode,
+    response::{IntoResponse, Json, Response},
+};
+use serde_json::{json, Value};
+
+use crate::cloud::apply_cloud_choice;
+use crate::cloudflare::{install_cloudflare_token, verify_tunnel};
+use crate::hardware::run_hardware_check;
+use crate::models::{
+    CloudChoiceRequest, CloudflareTokenRequest, ProfileChoiceRequest, SetupActionResult,
+    REQUIRED_STEP_IDS, VALID_STEP_IDS,
+};
+use crate::profile::apply_profile;
+use crate::router::SetupState;
+
+// ---------------------------------------------------------------------------
+// Status
+// ---------------------------------------------------------------------------
+
+pub async fn get_status(State(state): State<Arc<SetupState>>) -> Json<Value> {
+    Json(state.snapshot_status().await)
+}
+
+// ---------------------------------------------------------------------------
+// Profile
+// ---------------------------------------------------------------------------
+
+pub async fn post_profile(
+    State(state): State<Arc<SetupState>>,
+    Json(req): Json<ProfileChoiceRequest>,
+) -> Response {
+    match apply_profile(&state.agent_yaml, &req.profile, req.ground_role.as_deref()) {
+        Ok(()) => action_ok("profile saved", state.snapshot_status().await),
+        Err(e) => action_err(&format!("invalid profile request: {e}")),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Hardware check
+// ---------------------------------------------------------------------------
+
+pub async fn get_hardware_check(State(state): State<Arc<SetupState>>) -> Json<Value> {
+    let _ = state;
+    Json(run_hardware_check("drone", "direct"))
+}
+
+pub async fn post_hardware_check_refresh(State(state): State<Arc<SetupState>>) -> Json<Value> {
+    let _ = state;
+    Json(run_hardware_check("drone", "direct"))
+}
+
+// ---------------------------------------------------------------------------
+// Cloud choice
+// ---------------------------------------------------------------------------
+
+pub async fn post_cloud_choice(
+    State(state): State<Arc<SetupState>>,
+    Json(req): Json<CloudChoiceRequest>,
+) -> Response {
+    match apply_cloud_choice(&state.agent_yaml, &req.mode, req.self_hosted.as_ref()) {
+        Ok(()) => action_ok("cloud choice saved", state.snapshot_status().await),
+        Err(e) => action_err(&format!("invalid cloud choice: {e}")),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Cloudflare Tunnel
+// ---------------------------------------------------------------------------
+
+pub async fn post_cloudflare_install(
+    State(state): State<Arc<SetupState>>,
+    Json(req): Json<CloudflareTokenRequest>,
+) -> Response {
+    match install_cloudflare_token(&req.token_or_script) {
+        Ok(()) => action_ok(
+            "cloudflared token persisted; service start lands in B7.7",
+            state.snapshot_status().await,
+        ),
+        Err(e) => action_err(&format!("could not install token: {e}")),
+    }
+}
+
+pub async fn get_cloudflare_verify(State(state): State<Arc<SetupState>>) -> Json<Value> {
+    let _ = state;
+    let resp = verify_tunnel(None);
+    Json(serde_json::to_value(&resp).unwrap_or_else(|_| json!({})))
+}
+
+pub async fn ws_cloudflare_logs(ws: WebSocketUpgrade) -> Response {
+    // v0.1: connect, stream a couple of placeholder lines, close. Real
+    // journalctl tail with cloudflared-aware token redaction lands in
+    // B7.7 alongside the subprocess lifecycle.
+    ws.on_upgrade(|mut socket| async move {
+        use axum::extract::ws::Message;
+        let _ = socket
+            .send(Message::Text(
+                "(cloudflared log stream — full tail in B7.7)".into(),
+            ))
+            .await;
+        let _ = socket
+            .send(Message::Text("(stub line; close after one frame)".into()))
+            .await;
+        let _ = socket.close().await;
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Wizard navigation
+// ---------------------------------------------------------------------------
+
+pub async fn post_finish(State(state): State<Arc<SetupState>>) -> Response {
+    if let Err(e) = state.store.mark_finalized() {
+        return action_err(&format!("could not persist finalized state: {e}"));
+    }
+    Json(state.snapshot_status().await).into_response()
+}
+
+pub async fn post_skip(
+    State(state): State<Arc<SetupState>>,
+    AxumPath(step_id): AxumPath<String>,
+) -> Response {
+    if !VALID_STEP_IDS.contains(&step_id.as_str()) {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "detail": format!("Unknown step id: {step_id}") })),
+        )
+            .into_response();
+    }
+    if REQUIRED_STEP_IDS.contains(&step_id.as_str()) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "detail": format!("Step '{step_id}' cannot be skipped") })),
+        )
+            .into_response();
+    }
+    if let Err(e) = state.store.mark_skipped(&step_id) {
+        return action_err(&format!("could not persist skip: {e}"));
+    }
+    Json(state.snapshot_status().await).into_response()
+}
+
+pub async fn post_reset(State(state): State<Arc<SetupState>>) -> Response {
+    if let Err(e) = state.store.reset() {
+        return action_err(&format!("could not reset state: {e}"));
+    }
+    Json(state.snapshot_status().await).into_response()
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+fn action_ok(message: &str, status: Value) -> Response {
+    Json(SetupActionResult {
+        ok: true,
+        message: Some(message.to_string()),
+        status,
+    })
+    .into_response()
+}
+
+fn action_err(message: &str) -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(SetupActionResult {
+            ok: false,
+            message: Some(message.to_string()),
+            status: Value::Null,
+        }),
+    )
+        .into_response()
+}

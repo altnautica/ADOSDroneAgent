@@ -15,6 +15,7 @@ path = "src/main.rs"
 [dependencies]
 ados-mavlink = { path = "../ados-mavlink" }
 ados-cloud = { path = "../ados-cloud" }
+ados-setup = { path = "../ados-setup" }
 tokio = { workspace = true }
 axum = { workspace = true }
 clap = { workspace = true }

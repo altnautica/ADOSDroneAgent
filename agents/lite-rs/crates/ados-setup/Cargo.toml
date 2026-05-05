@@ -1,0 +1,26 @@
+[package]
+name = "ados-setup"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Universal setup REST surface for the lightweight ADOS Drone Agent"
+
+[dependencies]
+tokio = { workspace = true }
+axum = { workspace = true, features = ["http1", "json", "ws"] }
+serde = { workspace = true }
+serde_yaml = { workspace = true }
+serde_json = { workspace = true }
+reqwest = { workspace = true }
+tracing = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+chrono = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
+tower = "0.5"
+http-body-util = "0.1"

@@ -3,6 +3,7 @@ members = [
     "crates/ados-agent-lite",
     "crates/ados-mavlink",
     "crates/ados-cloud",
+    "crates/ados-setup",
 ]
 resolver = "2"
 
