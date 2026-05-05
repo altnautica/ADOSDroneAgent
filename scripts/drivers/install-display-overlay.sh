@@ -240,7 +240,10 @@ activate_overlay_sun55i() {
 }
 
 # ----------------------------------------------------------------------------
-# Rockchip activation: prefer overlays-list, fall back to update-u-boot
+# Rockchip activation. Three supported styles in priority order:
+#   1. Radxa OS Bookworm (rsdk-b1+): managed.list + u-boot-update
+#   2. Older Radxa OS / Debian: /boot/dtb/rockchip/overlays-list
+#   3. Armbian / Ubuntu-Rockchip: armbianEnv.txt + update-u-boot
 # ----------------------------------------------------------------------------
 activate_overlay_rk3588() {
     local overlay_name="$1"   # "rk3588-spi4-m2-cs0-waveshare35"
@@ -251,8 +254,41 @@ activate_overlay_rk3588() {
         return 1
     fi
 
-    # Radxa OS / Debian Rockchip style: a plain text list of overlays
-    # the boot script applies on each boot.
+    # Radxa OS Bookworm (rsdk-b1+): u-boot-update reads /boot/dtbo/
+    # and regenerates /boot/extlinux/extlinux.conf with fdtoverlays
+    # lines for every .dtbo (without .disabled suffix). managed.list
+    # tracks which entries the system "owns" so rsetup can rebuild
+    # cleanly across kernel upgrades. The disabled state is the
+    # ".dtbo.disabled" filename suffix; we keep the bare .dtbo we
+    # already installed.
+    if [ -f /boot/dtbo/managed.list ] && command -v u-boot-update >/dev/null 2>&1; then
+        local entry="${overlay_name}.dtbo"
+        if grep -qx "${entry}" /boot/dtbo/managed.list; then
+            info "managed.list already references ${entry}; skipping append."
+        else
+            echo "${entry}" >> /boot/dtbo/managed.list
+            info "Appended ${entry} to /boot/dtbo/managed.list"
+        fi
+        # Defensive: rsetup convention is to keep INACTIVE overlays as
+        # ".dtbo.disabled" and ACTIVE ones as bare ".dtbo". Our install
+        # step already wrote the bare name so this is a no-op, but if
+        # an older state lingered we drop the .disabled twin.
+        rm -f "/boot/dtbo/${overlay_name}.dtbo.disabled"
+        info "Running u-boot-update to regenerate extlinux.conf..."
+        u-boot-update || {
+            error "u-boot-update failed."
+            return 1
+        }
+        # Confirm the fdtoverlays line landed.
+        if grep -q "${overlay_name}" /boot/extlinux/extlinux.conf; then
+            info "Overlay reference present in extlinux.conf."
+        else
+            warn "u-boot-update ran but extlinux.conf does not mention ${overlay_name} — check /etc/default/u-boot."
+        fi
+        return 0
+    fi
+
+    # Older Radxa OS / Debian Rockchip style.
     if [ -f /boot/dtb/rockchip/overlays-list ]; then
         if grep -qx "${overlay_name}" /boot/dtb/rockchip/overlays-list; then
             info "overlays-list already references ${overlay_name}; skipping."
@@ -263,7 +299,7 @@ activate_overlay_rk3588() {
         return 0
     fi
 
-    # Armbian Rockchip style
+    # Armbian Rockchip style.
     if command -v update-u-boot >/dev/null 2>&1; then
         if [ -f /boot/armbianEnv.txt ]; then
             if grep -q "${overlay_name}" /boot/armbianEnv.txt; then
@@ -376,26 +412,30 @@ case "${BOARD_ID}" in
     rock-5c-lite|rock-5c)
         case "${DISPLAY_ID}" in
             waveshare35a)
-                # Try BSP-shipped DTBO first
+                # Pick the activation-mechanism label up front so both
+                # the BSP-DTBO path and the vendored-fallback path tag
+                # /etc/ados/display.conf consistently.
+                detect_activation_method() {
+                    if [ -f /boot/dtbo/managed.list ] && command -v u-boot-update >/dev/null 2>&1; then
+                        echo "u-boot-update"
+                    elif [ -f /boot/dtb/rockchip/overlays-list ]; then
+                        echo "overlays-list"
+                    else
+                        echo "armbianEnv"
+                    fi
+                }
+                # Try BSP-shipped DTBO first.
                 if activate_overlay_rk3588 "rk3588-spi4-m2-cs0-waveshare35"; then
                     OVERLAY_SOURCE="upstream"
                     OVERLAY_REF="rk3588-spi4-m2-cs0-waveshare35"
-                    if [ -f /boot/dtb/rockchip/overlays-list ]; then
-                        ACTIVATED_VIA="overlays-list"
-                    else
-                        ACTIVATED_VIA="update-u-boot"
-                    fi
+                    ACTIVATED_VIA="$(detect_activation_method)"
                 else
                     info "Falling back to vendored upstream source."
                     compile_and_install_upstream_dtbo "rk3588-spi4-m2-cs0-waveshare35"
                     if activate_overlay_rk3588 "rk3588-spi4-m2-cs0-waveshare35"; then
                         OVERLAY_SOURCE="upstream-vendored"
                         OVERLAY_REF="rk3588-spi4-m2-cs0-waveshare35"
-                        if [ -f /boot/dtb/rockchip/overlays-list ]; then
-                            ACTIVATED_VIA="overlays-list"
-                        else
-                            ACTIVATED_VIA="update-u-boot"
-                        fi
+                        ACTIVATED_VIA="$(detect_activation_method)"
                     else
                         error "Could not activate overlay even after vendored install."
                         exit 3
