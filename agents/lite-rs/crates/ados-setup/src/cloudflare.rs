@@ -87,17 +87,7 @@ pub fn install_cloudflare_token(token_or_script: &str) -> Result<(), CloudflareE
 
 fn persist_token(token: &str) -> Result<(), CloudflareError> {
     let path = token_path();
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let tmp_path = path.with_extension(format!("tmp.{}", std::process::id()));
-    std::fs::write(&tmp_path, token)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o600))?;
-    }
-    std::fs::rename(&tmp_path, &path)?;
+    crate::atomic::atomic_write(&path, token.as_bytes(), 0o600)?;
     tracing::info!(path = %path.display(), "cloudflared token persisted (0600)");
     Ok(())
 }
@@ -118,8 +108,9 @@ fn ensure_cloudflared_binary() -> Result<(), CloudflareError> {
             )))
         }
     };
+    let asset = format!("cloudflared-linux-{arch}");
     let url = format!(
-        "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-{arch}"
+        "https://github.com/cloudflare/cloudflared/releases/latest/download/{asset}"
     );
     tracing::info!(url = %url, "downloading cloudflared binary");
     let target = bin_path();
@@ -144,10 +135,17 @@ fn ensure_cloudflared_binary() -> Result<(), CloudflareError> {
         .status()
         .map_err(|e| CloudflareError::Download(format!("curl failed: {e}")))?;
     if !status.success() {
+        let _ = std::fs::remove_file(&tmp);
         return Err(CloudflareError::Download(format!(
             "curl exit {:?} for {url}",
             status.code()
         )));
+    }
+    if let Err(e) = verify_cloudflared_sha256(&tmp, &asset) {
+        // Clean up the unverified binary so a stale tempfile cannot
+        // surface as a "cached" install on the next attempt.
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
     }
     #[cfg(unix)]
     {
@@ -157,6 +155,99 @@ fn ensure_cloudflared_binary() -> Result<(), CloudflareError> {
     std::fs::rename(&tmp, &target)?;
     tracing::info!(path = %target.display(), "cloudflared binary installed");
     Ok(())
+}
+
+/// Verify the downloaded cloudflared binary's SHA256 against the
+/// upstream-published `<asset>.sha256` file. Cloudflare publishes per-asset
+/// `.sha256` files alongside every release artifact (e.g.
+/// `cloudflared-linux-arm64.sha256` next to `cloudflared-linux-arm64`), so
+/// we fetch the matching `.sha256` for the just-downloaded asset and compare.
+///
+/// Set `ADOS_CLOUDFLARED_SKIP_SHA256=1` (intended for offline test
+/// environments) to bypass; otherwise a mismatch or fetch failure aborts
+/// the install. The default is fail-closed.
+fn verify_cloudflared_sha256(
+    tmp_binary: &std::path::Path,
+    asset: &str,
+) -> Result<(), CloudflareError> {
+    if std::env::var_os("ADOS_CLOUDFLARED_SKIP_SHA256").is_some() {
+        tracing::warn!(
+            "ADOS_CLOUDFLARED_SKIP_SHA256 set — skipping SHA256 verification of cloudflared binary"
+        );
+        return Ok(());
+    }
+
+    // Compute the local hash. Stream the file rather than reading it all
+    // at once — cloudflared is ~30 MB stripped.
+    let actual_hash = sha256_file(tmp_binary)
+        .map_err(|e| CloudflareError::Download(format!("hashing failed: {e}")))?;
+
+    // Fetch the published `.sha256` companion file for this asset.
+    let sha_url = format!(
+        "https://github.com/cloudflare/cloudflared/releases/latest/download/{asset}.sha256"
+    );
+    let output = Command::new("curl")
+        .args([
+            "-fsSL",
+            "--retry",
+            "3",
+            "--max-time",
+            "30",
+            sha_url.as_str(),
+        ])
+        .output()
+        .map_err(|e| CloudflareError::Download(format!("sha256 fetch failed: {e}")))?;
+    if !output.status.success() {
+        return Err(CloudflareError::Download(format!(
+            "could not fetch {sha_url} (exit {:?})",
+            output.status.code()
+        )));
+    }
+    let published = String::from_utf8_lossy(&output.stdout);
+    // Format is `<hex>  <filename>` per coreutils sha256sum convention.
+    let expected_hash = published
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .to_lowercase();
+    if expected_hash.is_empty() {
+        return Err(CloudflareError::Download(
+            "published sha256 file is empty".into(),
+        ));
+    }
+
+    if actual_hash != expected_hash {
+        return Err(CloudflareError::Download(format!(
+            "sha256 mismatch: expected {expected_hash}, got {actual_hash}"
+        )));
+    }
+    tracing::info!(asset = %asset, "cloudflared sha256 verified");
+    Ok(())
+}
+
+fn sha256_file(path: &std::path::Path) -> std::io::Result<String> {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+    let mut file = std::fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let n = file.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    let digest = hasher.finalize();
+    Ok(hex_lower(&digest))
+}
+
+fn hex_lower(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        out.push_str(&format!("{b:02x}"));
+    }
+    out
 }
 
 /// Drop an init unit appropriate for the running init system. systemd is
@@ -335,8 +426,8 @@ pub async fn verify_tunnel_async(target_url: Option<&str>) -> CloudflareVerifyRe
 }
 
 /// Sync wrapper that returns a pre-baked "no public URL configured"
-/// response when the handler has no async runtime context. Used by the
-/// stub path; B7.7 callers should prefer verify_tunnel_async.
+/// response when the handler has no async runtime context. Callers with
+/// an active runtime should prefer `verify_tunnel_async` for a real probe.
 pub fn verify_tunnel(target_url: Option<&str>) -> CloudflareVerifyResponse {
     match target_url {
         Some(url) if !url.is_empty() => CloudflareVerifyResponse {

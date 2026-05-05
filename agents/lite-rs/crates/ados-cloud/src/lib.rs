@@ -10,14 +10,16 @@
 //! emits a heartbeat every 5 seconds. Inbound MQTT subscription
 //! (`mavlink/rx`, `command`, `webrtc/offer`) is wired structurally but
 //! handler bodies are TODOs — the v0.1 surface only needs the outbound
-//! path for Phase 1 validation. Pairing beacon emits every 30 seconds
+//! path the control-plane validation needs. Pairing beacon emits every 30 seconds
 //! when the agent has no API key.
 
 #![forbid(unsafe_code)]
 
+pub mod sysmetrics;
+
 use std::fmt;
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use ados_setup::pairing::PairingStore;
 use rumqttc::{AsyncClient, MqttOptions, QoS, Transport};
@@ -64,6 +66,37 @@ pub struct CloudConfig {
     /// the Python full agent. Tests override this to a tempdir.
     #[serde(default = "default_pairing_path")]
     pub pairing_path: PathBuf,
+    /// Static board + agent metadata reported on each heartbeat. Filled
+    /// in once at agent startup from `agent.yaml` plus board fingerprint;
+    /// the cloud client never re-reads it during the run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_meta: Option<AgentMeta>,
+}
+
+/// Static metadata stamped onto every heartbeat. The GCS reads these
+/// fields from `cmd_droneStatus` to render the fleet card subtitle (e.g.
+/// "Luckfox Pico Zero • RV1106G3 • 256 MB"), the setup-webapp deep link,
+/// and the per-drone capability matrix.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentMeta {
+    /// Human-readable board name from `boards/<id>/board.yaml display_name`.
+    pub board_name: Option<String>,
+    /// SoC variant string, e.g. `rv1106g3`, `bcm2710a1`.
+    pub soc: Option<String>,
+    /// Architecture, e.g. `armv7`, `aarch64`. Mirrors `uname -m`.
+    pub arch: Option<String>,
+    /// Total physical RAM in megabytes — static, sourced from board.yaml.
+    pub ram_mb: Option<u32>,
+    /// Hostname (derived once at startup; rarely changes mid-run).
+    pub hostname: Option<String>,
+    /// First non-loopback IPv4 the agent observed at startup. Used by
+    /// the GCS to construct the setup-webapp URL when the operator
+    /// clicks "Open setup wizard". Re-detected on each heartbeat so a
+    /// DHCP renewal flips the URL without an agent restart.
+    pub last_ip: Option<String>,
+    /// mDNS hostname (`<host>.local`) for operators on the same LAN.
+    pub mdns_host: Option<String>,
 }
 
 fn default_pairing_path() -> PathBuf {
@@ -79,6 +112,7 @@ impl fmt::Debug for CloudConfig {
             .field("mqtt_use_tls", &self.mqtt_use_tls)
             .field("convex_url", &self.convex_url)
             .field("pairing_path", &self.pairing_path)
+            .field("agent_meta", &self.agent_meta)
             .finish()
     }
 }
@@ -194,7 +228,7 @@ async fn mqtt_publish_loop(
     //
     //   `mavlink/rx`    forwarded to FC writer (drops on full queue)
     //   `command`       logged at INFO; v1 has no command surface
-    //   `webrtc/offer`  logged at INFO; video pipeline lands in MSN-055
+    //   `webrtc/offer`  logged at INFO; video pipeline lands separately
     //
     // The handle is held so we can abort it when the publish loop exits,
     // preventing zombie eventloops on agent.yaml reload.
@@ -232,7 +266,7 @@ async fn mqtt_publish_loop(
                     } else if topic == topic_offer {
                         tracing::info!(
                             bytes = p.payload.len(),
-                            "received webrtc/offer (video lands in MSN-055)"
+                            "received webrtc/offer (no video pipeline at this scope)"
                         );
                     } else {
                         tracing::debug!(topic = %topic, "received message on unexpected topic");
@@ -290,6 +324,9 @@ async fn http_loop(config: CloudConfig) -> Result<(), CloudError> {
     let pairing_store = PairingStore::new(&config.pairing_path);
     let max_interval = Duration::from_secs(300);
     let mut consecutive_failures: u32 = 0;
+    // Stamp the heartbeat with a wall-clock-relative uptime so the GCS can
+    // tell when an agent rebooted without needing kernel boot time.
+    let started_at = Instant::now();
 
     loop {
         // Re-read pairing state every iteration so a `ados-agent-lite pair`
@@ -308,6 +345,7 @@ async fn http_loop(config: CloudConfig) -> Result<(), CloudError> {
                 &client,
                 &config,
                 pairing_state.api_key.as_deref().unwrap_or(""),
+                started_at,
             )
             .await
         } else {
@@ -373,17 +411,39 @@ async fn send_heartbeat(
     client: &reqwest::Client,
     config: &CloudConfig,
     api_key: &str,
+    started_at: Instant,
 ) -> Result<(), CloudError> {
     let url = format!("{}/agent/status", config.convex_url.trim_end_matches('/'));
-    // Minimal heartbeat shape at v0.1. The full schema in
-    // proto/cloud/openapi.yaml lands as the agent grows access to FC
-    // state, board info, video state, etc.
+    // Heartbeat body. Static fields (board / soc / arch / ramMb /
+    // hostname) come from `agent_meta` populated at agent startup.
+    // Dynamic fields (cpuPct / memUsedMb / memTotalMb / socTempC) come
+    // from a fresh sysmetrics tick. Network identity (lastIp, mdnsHost)
+    // is re-detected each tick so a DHCP renewal flips the GCS deep-link
+    // without an agent restart.
+    let metrics = sysmetrics::collect();
+    let uptime_secs = started_at.elapsed().as_secs();
+    let meta = config.agent_meta.clone().unwrap_or_default();
+
     let body = serde_json::json!({
         "deviceId": config.device_id,
         "version": env!("CARGO_PKG_VERSION"),
         "agentVersion": env!("CARGO_PKG_VERSION"),
-        "uptimeSeconds": 0,
+        "uptimeSeconds": uptime_secs,
         "runtimeMode": "lite",
+        // Static board metadata.
+        "boardName": meta.board_name,
+        "soc": meta.soc,
+        "arch": meta.arch,
+        "ramMb": meta.ram_mb,
+        // Network identity.
+        "hostname": meta.hostname,
+        "lastIp": meta.last_ip,
+        "mdnsHost": meta.mdns_host,
+        // Live metrics.
+        "cpuPct": metrics.cpu_pct,
+        "memUsedMb": metrics.mem_used_mb,
+        "memTotalMb": metrics.mem_total_mb,
+        "socTempC": metrics.soc_temp_c,
     });
     let response = client
         .post(&url)
@@ -408,12 +468,45 @@ mod tests {
             mqtt_use_tls: true,
             convex_url: "https://relay.example".into(),
             pairing_path: PathBuf::from("/etc/ados/pairing.json"),
+            agent_meta: Some(AgentMeta {
+                board_name: Some("Luckfox Pico Zero".into()),
+                soc: Some("rv1106g3".into()),
+                arch: Some("armv7".into()),
+                ram_mb: Some(256),
+                hostname: Some("luckfox".into()),
+                last_ip: Some("192.168.200.225".into()),
+                mdns_host: Some("luckfox.local".into()),
+            }),
         };
         let serialized = serde_json::to_string(&original).unwrap();
         let restored: CloudConfig = serde_json::from_str(&serialized).unwrap();
         assert_eq!(restored.device_id, original.device_id);
         assert_eq!(restored.mqtt_broker, original.mqtt_broker);
         assert_eq!(restored.pairing_path, original.pairing_path);
+        let meta = restored.agent_meta.expect("agent_meta survives round-trip");
+        assert_eq!(meta.board_name.as_deref(), Some("Luckfox Pico Zero"));
+        assert_eq!(meta.ram_mb, Some(256));
+    }
+
+    #[test]
+    fn cloud_config_omits_agent_meta_when_unset() {
+        // Older agent.yaml files won't have the metadata block. The
+        // config must still serialize and deserialize cleanly.
+        let original = CloudConfig {
+            device_id: "test-device".into(),
+            mqtt_broker: String::new(),
+            mqtt_port: 1883,
+            mqtt_use_tls: false,
+            convex_url: String::new(),
+            pairing_path: PathBuf::from("/tmp/pair.json"),
+            agent_meta: None,
+        };
+        let serialized = serde_json::to_string(&original).unwrap();
+        // The serialized form should not contain the field at all
+        // (skip_serializing_if).
+        assert!(!serialized.contains("agentMeta"));
+        let restored: CloudConfig = serde_json::from_str(&serialized).unwrap();
+        assert!(restored.agent_meta.is_none());
     }
 
     #[test]
@@ -425,6 +518,7 @@ mod tests {
             mqtt_use_tls: true,
             convex_url: "https://relay.example".into(),
             pairing_path: PathBuf::from("/etc/ados/pairing.json"),
+            agent_meta: None,
         };
         let (tx, _rx) = broadcast::channel(8);
         let err = spawn_cloud_client(bad, tx, None).expect_err("empty device_id should fail");

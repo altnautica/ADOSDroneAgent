@@ -59,6 +59,10 @@ thiserror = "1"
 # Time
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 
+# System metrics (cpu, memory, temperature) for the heartbeat
+# enrichment. Cross-platform; reads /proc on Linux, sysctl on macOS.
+sysinfo = { version = "0.32", default-features = false, features = ["system"] }
+
 [profile.release]
 opt-level = "z"
 lto = "fat"

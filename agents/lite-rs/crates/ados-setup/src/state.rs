@@ -11,7 +11,7 @@
 //! agent on the same board without losing setup state.
 
 use std::collections::BTreeSet;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -100,12 +100,10 @@ impl StateStore {
         })
     }
 
-    /// Persist via tempfile + rename. Compact JSON, sorted keys, trailing
-    /// newline — byte-for-byte equivalent to Python's
+    /// Persist via the shared atomic-write helper. Compact JSON, sorted
+    /// keys, trailing newline — byte-for-byte equivalent to Python's
     /// `json.dumps(obj, sort_keys=True)` followed by `fh.write("\n")`.
     pub fn save(&self, state: &PersistedState) -> Result<(), StateError> {
-        let parent = self.path.parent().unwrap_or_else(|| Path::new("."));
-        std::fs::create_dir_all(parent)?;
         let wire = WireState {
             setup_finalized: state.finalized,
             skipped_steps: state.skipped_steps.iter().cloned().collect(),
@@ -113,14 +111,7 @@ impl StateStore {
         let value = serde_json::to_value(&wire)?;
         let mut out = serde_json::to_string(&sort_value(&value))?;
         out.push('\n');
-        let tmp = parent.join(format!(".state.json.{}.tmp", std::process::id()));
-        std::fs::write(&tmp, out)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o644)).ok();
-        }
-        std::fs::rename(&tmp, &self.path)?;
+        crate::atomic::atomic_write(&self.path, out.as_bytes(), 0o644)?;
         Ok(())
     }
 

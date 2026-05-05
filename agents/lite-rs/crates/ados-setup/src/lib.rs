@@ -13,13 +13,14 @@
 //! - `models`    — request and response shapes mirroring the Python Pydantic models
 //! - `profile`   — apply profile + ground role to agent.yaml
 //! - `cloud`     — apply cloud choice (cloud / self_hosted / local) to agent.yaml
-//! - `hardware`  — board.yaml + /proc + lsusb fingerprint engine (B7.6 fills it in)
-//! - `cloudflare` — Cloudflare Tunnel orchestration + WebSocket log stream (B7.7 fills it in)
+//! - `hardware`  — board.yaml + /proc + lsusb fingerprint engine
+//! - `cloudflare` — Cloudflare Tunnel orchestration + WebSocket log stream
 //! - `handlers`  — axum handler functions
 //! - `router`    — assemble axum::Router with all 11 routes
 
 #![forbid(unsafe_code)]
 
+pub mod atomic;
 pub mod cloud;
 pub mod cloudflare;
 pub mod handlers;

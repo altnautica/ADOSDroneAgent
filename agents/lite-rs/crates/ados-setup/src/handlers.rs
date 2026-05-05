@@ -2,7 +2,7 @@
 //!
 //! Every handler returns response shapes byte-for-byte compatible with
 //! the Python reference at `src/ados/api/routes/setup.py`. A conformance
-//! test suite (B7.9) replays Python responses against this implementation
+//! conformance test suite replays Python responses against this implementation
 //! to keep the two halves in sync.
 
 use std::sync::Arc;
@@ -123,7 +123,7 @@ pub async fn post_cloudflare_install(
 ) -> Response {
     match install_cloudflare_token(&req.token_or_script) {
         Ok(()) => action_ok(
-            "cloudflared token persisted; service start lands in B7.7",
+            "cloudflared token persisted; tunnel service starts via the orchestration module",
             state.snapshot_status().await,
         ),
         Err(e) => action_err(&format!("could not install token: {e}")),
@@ -251,6 +251,12 @@ async fn stream_cloudflared_logs(
     // partial line in the BufReader's internal buffer, default 8 KiB).
     const MAX_LINE_BYTES: usize = 8 * 1024;
     let mut reader = BufReader::new(stdout).lines();
+    // Hard cap on the WS connection. Operators that walk away with the
+    // setup wizard tab open should not keep a journalctl subprocess
+    // running forever; reconnect for a fresh 15-minute window.
+    const MAX_SESSION: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+    let session_deadline = tokio::time::sleep(MAX_SESSION);
+    tokio::pin!(session_deadline);
 
     loop {
         tokio::select! {
@@ -275,6 +281,17 @@ async fn stream_cloudflared_logs(
             }
             _ = socket.recv() => {
                 // Anything inbound from the peer closes the stream.
+                break;
+            }
+            _ = &mut session_deadline => {
+                // 15 minutes elapsed; close politely so a forgotten tab
+                // does not hold a subprocess forever. The wizard can
+                // reconnect to resume tailing.
+                let _ = socket
+                    .send(Message::Text(
+                        "(session timeout — refresh the wizard to resume log streaming)".into(),
+                    ))
+                    .await;
                 break;
             }
         }

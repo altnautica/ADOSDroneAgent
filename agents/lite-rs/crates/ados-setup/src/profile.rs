@@ -105,17 +105,8 @@ fn set_string(map: &mut serde_yaml::Mapping, key: &str, value: &str) {
 }
 
 fn write_atomic(path: &Path, doc: &Value) -> Result<(), ProfileError> {
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    std::fs::create_dir_all(parent)?;
-    let tmp = parent.join(format!(".agent.yaml.{}.tmp", std::process::id()));
     let serialized = serde_yaml::to_string(doc)?;
-    std::fs::write(&tmp, serialized)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o640)).ok();
-    }
-    std::fs::rename(&tmp, path)?;
+    crate::atomic::atomic_write(path, serialized.as_bytes(), 0o640)?;
     Ok(())
 }
 

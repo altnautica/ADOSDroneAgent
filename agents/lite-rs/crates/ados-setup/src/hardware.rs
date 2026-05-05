@@ -118,6 +118,100 @@ fn read_meminfo_total_kb() -> Option<u64> {
     None
 }
 
+/// Static board metadata for the heartbeat enrichment. Populated once at
+/// agent startup from the same `/proc` probes the wizard uses, plus a
+/// best-effort match against the HAL board registry to recover the
+/// human-readable name + SoC string.
+#[derive(Debug, Clone, Default)]
+pub struct BoardMetadata {
+    pub board_name: Option<String>,
+    pub soc: Option<String>,
+    pub arch: Option<String>,
+    pub ram_mb: Option<u32>,
+}
+
+/// Detect the running board. Returns whatever we could read; missing
+/// fields stay `None`. Cheap (~couple ms) — three `/proc` reads + one
+/// HAL directory walk.
+pub fn detect_board_metadata() -> BoardMetadata {
+    let mut meta = BoardMetadata::default();
+    let model = read_device_tree_model().or_else(read_cpuinfo_hardware);
+    let ram_kb = read_meminfo_total_kb().unwrap_or(0);
+    if ram_kb > 0 {
+        meta.ram_mb = Some((ram_kb / 1024) as u32);
+    }
+    meta.arch = uname_machine();
+    if let Some(m) = model.as_deref() {
+        if let Some((display_name, soc)) = lookup_board_yaml(m) {
+            meta.board_name = Some(display_name);
+            meta.soc = soc;
+        } else {
+            // No HAL match — surface the raw model string so the GCS
+            // still has something to render.
+            meta.board_name = Some(m.to_string());
+        }
+    }
+    meta
+}
+
+fn uname_machine() -> Option<String> {
+    // Cheaper than spawning `uname -m`. Falls back to the compile-time
+    // arch when both fail.
+    if let Ok(raw) = std::fs::read_to_string("/proc/sys/kernel/arch") {
+        let trimmed = raw.trim().to_string();
+        if !trimmed.is_empty() {
+            return Some(trimmed);
+        }
+    }
+    Some(std::env::consts::ARCH.to_string())
+}
+
+fn lookup_board_yaml(model: &str) -> Option<(String, Option<String>)> {
+    let dir = std::env::var_os("ADOS_HAL_BOARDS_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from(BOARDS_DIR_DEFAULT));
+    if !dir.is_dir() {
+        return None;
+    }
+    let model_lower = model.to_lowercase();
+    for entry in std::fs::read_dir(&dir).ok()?.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) != Some("yaml") {
+            continue;
+        }
+        let raw = match std::fs::read_to_string(&path) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        let doc: serde_yaml::Value = match serde_yaml::from_str(&raw) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let patterns = doc
+            .get("model_patterns")
+            .and_then(|v| v.as_sequence())
+            .cloned()
+            .unwrap_or_default();
+        for p in patterns {
+            if let Some(p) = p.as_str() {
+                if model_lower.contains(&p.to_lowercase()) {
+                    let name = doc
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| model.to_string());
+                    let soc = doc
+                        .get("soc")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string());
+                    return Some((name, soc));
+                }
+            }
+        }
+    }
+    None
+}
+
 fn match_board_id(model: &str) -> Option<String> {
     let dir = std::env::var_os("ADOS_HAL_BOARDS_DIR")
         .map(std::path::PathBuf::from)

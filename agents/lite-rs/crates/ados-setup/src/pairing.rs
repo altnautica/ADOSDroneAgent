@@ -94,24 +94,13 @@ impl PairingStore {
         }
     }
 
-    /// Save via tempfile + rename. Pretty-printed (indent=2) to match the
-    /// Python agent's `json.dumps(state, indent=2)`. Permissions tightened
-    /// to 0600 because the file holds the device API key.
+    /// Save via the shared atomic-write helper. Pretty-printed (indent=2)
+    /// to match the Python agent's `json.dumps(state, indent=2)`. The
+    /// helper applies mode 0600 at create time so the file never briefly
+    /// exists at the umask default while it holds the device API key.
     pub fn save(&self, state: &PairingState) -> Result<(), PairingError> {
-        let parent = self
-            .path
-            .parent()
-            .unwrap_or_else(|| std::path::Path::new("."));
-        std::fs::create_dir_all(parent)?;
         let serialized = serde_json::to_string_pretty(state)?;
-        let tmp = parent.join(format!(".pairing.json.{}.tmp", std::process::id()));
-        std::fs::write(&tmp, serialized)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
-        }
-        std::fs::rename(&tmp, &self.path)?;
+        crate::atomic::atomic_write(&self.path, serialized.as_bytes(), 0o600)?;
         Ok(())
     }
 

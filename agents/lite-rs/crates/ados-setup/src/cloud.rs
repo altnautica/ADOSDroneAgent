@@ -4,7 +4,7 @@
 //! (operator-supplied Convex + MQTT coordinates), and local (no cloud at
 //! all). The `api_key` field, when supplied, never appears in any
 //! response or log line; it lands in `agent.yaml` cloud.api_key. Future
-//! enhancement (B7.7+): split secrets into a separate root-owned 0600
+//! future enhancement: split secrets into a separate root-owned 0600
 //! file under /etc/ados/secrets/ and reference them by path from
 //! agent.yaml so the YAML itself can stay 0644.
 
@@ -122,17 +122,8 @@ pub fn apply_cloud_choice(
         _ => unreachable!(),
     }
 
-    let parent = agent_yaml.parent().unwrap_or_else(|| Path::new("."));
-    std::fs::create_dir_all(parent)?;
-    let tmp = parent.join(format!(".agent.yaml.{}.tmp", std::process::id()));
     let serialized = serde_yaml::to_string(&doc)?;
-    std::fs::write(&tmp, serialized)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o640)).ok();
-    }
-    std::fs::rename(&tmp, agent_yaml)?;
+    crate::atomic::atomic_write(agent_yaml, serialized.as_bytes(), 0o640)?;
     Ok(())
 }
 

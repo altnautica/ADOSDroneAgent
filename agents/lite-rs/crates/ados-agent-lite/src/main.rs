@@ -58,13 +58,13 @@ enum Command {
     /// Re-run the install script in upgrade mode. Pulls the latest
     /// signed binary from GitHub Releases, verifies SHA256, and replaces
     /// the on-disk binary in place. Setup state + pairing state are
-    /// preserved. Mirrors `ados update` from the DEC-141 four-command
-    /// CLI contract.
+    /// preserved. Mirrors the universal four-command `ados update`
+    /// contract.
     Update,
 
     /// Stop the agent service, remove the binary + init unit, and
     /// preserve config + pairing state for a possible re-install.
-    /// Mirrors `ados uninstall` from the DEC-141 contract.
+    /// Mirrors the universal four-command `ados uninstall` contract.
     Uninstall,
 
     /// Print version information and exit.
@@ -363,6 +363,22 @@ async fn run(config_path: PathBuf) -> Result<()> {
         }
     }
 
+    // Detect board metadata once at startup. Heartbeat enrichment uses
+    // these values verbatim; re-running the probe per heartbeat tick
+    // would cost ~3 ms × every 5 s for no gain (board hardware does not
+    // change at runtime). Network identity is re-detected per tick
+    // inside the cloud client because DHCP renewals can flip lastIp.
+    let board_meta = ados_setup::hardware::detect_board_metadata();
+    let agent_meta = ados_cloud::AgentMeta {
+        board_name: board_meta.board_name,
+        soc: board_meta.soc,
+        arch: board_meta.arch,
+        ram_mb: board_meta.ram_mb,
+        hostname: Some(sys_hostname()),
+        last_ip: sys_local_ips().into_iter().next(),
+        mdns_host: Some(format!("ados-{}.local", config.agent.device_id)),
+    };
+
     let cloud_config = CloudConfig {
         device_id: config.agent.device_id.clone(),
         mqtt_broker: config.cloud.mqtt_broker.clone(),
@@ -370,6 +386,7 @@ async fn run(config_path: PathBuf) -> Result<()> {
         mqtt_use_tls: config.cloud.mqtt_use_tls,
         convex_url: config.cloud.convex_url.clone(),
         pairing_path: pairing_path.clone(),
+        agent_meta: Some(agent_meta),
     };
 
     // Spawn the cloud client when we have an identity. Missing MQTT broker
@@ -399,11 +416,11 @@ async fn run(config_path: PathBuf) -> Result<()> {
         tracing::info!("device_id missing; running offline (no mqtt, no heartbeat)");
     }
 
-    // axum HTTP server: full DEC-141 setup surface mounted from ados-setup.
-    // Status snapshot reads live agent state (paired/unpaired, mavlink
-    // port + baud, device_id). The crate-level state owns the agent.yaml
-    // path + setup-state.yaml store; this binary supplies the snapshot
-    // builder closure.
+    // axum HTTP server: full universal setup surface mounted from
+    // ados-setup. Status snapshot reads live agent state
+    // (paired/unpaired, mavlink port + baud, device_id). The crate-level
+    // state owns the agent.yaml path + setup-state.yaml store; this
+    // binary supplies the snapshot builder closure.
     let app_state_inner = Arc::new(AppState {
         device_id: config.agent.device_id.clone(),
         mavlink_port: config.mavlink.port.clone(),
@@ -705,7 +722,7 @@ fn build_setup_status(
 /// so consumers (the universal setup webapp + Mission Control) render
 /// the same progress sidebar regardless of which agent serves.
 ///
-/// At Phase 1 lite v1 we have visibility into:
+/// At the lite control-plane level we have visibility into:
 /// - profile + ground_role (from agent.yaml)
 /// - paired (from pairing.json)
 /// - finalized + skipped_steps (from setup-state.json)
@@ -817,8 +834,9 @@ fn build_steps(
         );
     }
 
-    // video — always emitted; lite v1 has no video pipeline so always
-    // needs_action until MSN-055 ships RKMPI / V4L2.
+    // video — always emitted; the lite control plane has no video
+    // pipeline today, so the step stays needs_action until the encoder
+    // backend ships.
     push(
         &mut out,
         "video",
