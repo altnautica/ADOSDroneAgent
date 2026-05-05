@@ -101,30 +101,38 @@ def draw_header(
         font=clock_font,
     )
 
-    # Broadcasting indicator — small pulsing dot to the LEFT of the
-    # clock when the agent is actively beaconing a pair code (i.e.
-    # not yet paired with Mission Control). Confirms the rig is
-    # discoverable from across the bench without the operator
-    # having to dig into logs. Pulse phase is derived from current
-    # second so it visibly alternates without per-render state.
+    # Broadcasting indicator — small pulsing dot + label to the LEFT
+    # of the clock when the agent is actively beaconing a pair code
+    # (i.e. not yet paired with Mission Control). Pulse phase is
+    # derived from the current second so it visibly alternates
+    # without per-render state. Layout walks right-to-left from the
+    # clock's left edge, reserving real width for the BCAST label so
+    # nothing collides regardless of clock font metrics.
     cloud = state.get("cloud") or {}
     broadcasting = bool(
         cloud.get("broadcasting")
         or (state.get("pairing", {}) or {}).get("code")
     ) and not bool(cloud.get("paired"))
     if broadcasting:
-        broadcast_x = x + w - 28 - clock_w
+        small_font = p.font("sans_bold", 10)
+        bcast_label = "BCAST"
+        bcast_w, _ = p.text_size(image, bcast_label, small_font)
+        clock_left = x + w - 8 - clock_w
+        gap_to_clock = 8
+        bcast_text_x = clock_left - gap_to_clock - bcast_w
+        dot_radius = 4
+        dot_to_text_gap = 6
+        dot_cx = bcast_text_x - dot_to_text_gap - dot_radius
         # Even-second = bright, odd-second = dim — produces a 1 Hz pulse.
         phase = int(time.time()) % 2 if now_str is None else 0
         bright = phase == 0
         broadcast_color = (
             p.STATUS_SUCCESS if bright else (0x0E, 0x4D, 0x26)
         )
-        draw_dot(image, broadcast_x, y + h // 2, broadcast_color, radius=4)
-        small_font = p.font("sans_bold", 10)
+        draw_dot(image, dot_cx, y + h // 2, broadcast_color, radius=dot_radius)
         draw.text(
-            (broadcast_x + 8, y + 11),
-            "BCAST",
+            (bcast_text_x, y + 11),
+            bcast_label,
             fill=p.TEXT_TERTIARY,
             font=small_font,
         )
