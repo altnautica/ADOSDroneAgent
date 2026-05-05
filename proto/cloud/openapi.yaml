@@ -1,0 +1,251 @@
+openapi: 3.0.3
+info:
+  title: ADOS Cloud Relay HTTP API
+  description: |
+    HTTP surface every backend speaks to the ADOS cloud relay. Defines the
+    pairing beacon, agent status heartbeat, and command polling endpoints.
+    Source of truth: src/ados/services/cloud/__main__.py in the Python
+    full agent. Backends in this repository conform to this surface
+    byte-for-byte.
+  version: "1.0.0"
+  license:
+    name: GPL-3.0-or-later
+
+servers:
+  - url: "{convex_url}"
+    variables:
+      convex_url:
+        default: "https://relay.example/.cloud"
+        description: Cloud relay base URL, configured at pair time
+
+components:
+  securitySchemes:
+    AdosKey:
+      type: apiKey
+      in: header
+      name: X-ADOS-Key
+      description: Per-device API key issued at pair time. Treated as a bearer credential.
+
+  schemas:
+    PairingBeacon:
+      type: object
+      required: [deviceId, pairingCode, apiKey]
+      properties:
+        deviceId:
+          type: string
+          description: Persistent device identifier (config.agent.device_id)
+        pairingCode:
+          type: string
+          description: Short human-readable pairing code shown to the operator
+        apiKey:
+          type: string
+          description: Per-device API key the cloud relay records on claim
+        name:
+          type: string
+          description: Operator-visible device name
+          default: "ADOS Agent"
+        version:
+          type: string
+          description: Agent version string
+        board:
+          type: string
+          default: "unknown"
+        tier:
+          type: integer
+          default: 0
+        mdnsHost:
+          type: string
+          default: ""
+        localIp:
+          type: string
+
+    PairingBeaconResponse:
+      type: object
+      properties:
+        alreadyClaimed:
+          type: boolean
+        autoMatched:
+          type: boolean
+        userId:
+          type: string
+          nullable: true
+
+    AgentHeartbeat:
+      type: object
+      required: [deviceId]
+      properties:
+        deviceId: { type: string }
+        version: { type: string }
+        agentVersion: { type: string }
+        uptimeSeconds: { type: integer }
+        boardName: { type: string }
+        boardTier: { type: integer }
+        boardSoc: { type: string }
+        boardArch: { type: string }
+        boardRamMb: { type: integer }
+        cpuCores: { type: integer }
+        cpuPercent: { type: number, format: float }
+        memoryPercent: { type: number, format: float }
+        diskPercent: { type: number, format: float }
+        temperature: { type: number, format: float, nullable: true }
+        memoryUsedMb: { type: integer }
+        memoryTotalMb: { type: integer }
+        diskUsedGb: { type: number, format: float }
+        diskTotalGb: { type: number, format: float }
+        cpuHistory:
+          type: array
+          items: { type: number, format: float }
+          description: Rolling deque of last 60 CPU% samples
+        memoryHistory:
+          type: array
+          items: { type: number, format: float }
+        fcConnected:
+          type: boolean
+          description: True when last FC heartbeat is younger than 10 s
+        fcPort: { type: string }
+        fcBaud: { type: integer }
+        services:
+          type: array
+          items:
+            type: object
+            properties:
+              name: { type: string }
+              status: { type: string }
+              cpuPercent: { type: number, format: float }
+              memoryMb: { type: number, format: float }
+              uptimeSeconds: { type: integer }
+              category: { type: string }
+              pid: { type: integer, nullable: true }
+        lastIp: { type: string }
+        mdnsHost: { type: string }
+        setupUrl: { type: string }
+        apiUrl: { type: string }
+        videoState:
+          type: string
+          enum: [running, stopped]
+        videoWhepPort: { type: integer }
+        videoWhepUrl: { type: string }
+        mavlinkWsPort: { type: integer }
+        mavlinkWsUrl: { type: string }
+        remoteAccess:
+          type: object
+          properties:
+            provider: { type: string }
+            publicUrls:
+              type: array
+              items: { type: string }
+        missionControlUrl:
+          type: string
+          nullable: true
+
+    PendingCommand:
+      type: object
+      properties:
+        _id: { type: string }
+        command: { type: string }
+        args:
+          type: object
+          additionalProperties: true
+
+    CommandList:
+      type: object
+      properties:
+        commands:
+          type: array
+          items: { $ref: "#/components/schemas/PendingCommand" }
+
+    CommandAck:
+      type: object
+      required: [commandId, deviceId, status]
+      properties:
+        commandId: { type: string }
+        deviceId: { type: string }
+        status:
+          type: string
+          enum: [completed, failed]
+        result:
+          type: object
+          additionalProperties: true
+          nullable: true
+        data:
+          type: object
+          additionalProperties: true
+          nullable: true
+
+paths:
+  /pairing/register:
+    post:
+      summary: Pairing beacon emitted when the device is unpaired
+      description: |
+        Posted every 30 s by an unpaired agent. Cloud relay records the
+        pairing code so an operator can claim the device. Agent treats
+        the call as fire-and-forget; failures do not retry on a
+        backoff (the next beacon is the retry).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PairingBeacon" }
+      responses:
+        "200":
+          description: Beacon accepted; response indicates current claim state
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PairingBeaconResponse" }
+
+  /agent/status:
+    post:
+      summary: Agent status heartbeat
+      description: |
+        Posted every 5 s by a paired agent. Carries the full device,
+        health, FC, video, and services snapshot. Cloud relay upserts
+        cmd_droneStatus on this surface.
+      security:
+        - AdosKey: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AgentHeartbeat" }
+      responses:
+        "200":
+          description: Heartbeat accepted
+
+  /agent/commands:
+    get:
+      summary: Poll for pending cloud-issued commands
+      description: |
+        Polled every 5 s by a paired agent. Returns the queue of
+        commands the cloud relay has accepted on the operator's behalf
+        and not yet acknowledged.
+      security:
+        - AdosKey: []
+      parameters:
+        - in: query
+          name: deviceId
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Pending commands (possibly empty)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CommandList" }
+
+  /agent/commands/ack:
+    post:
+      summary: Acknowledge a command
+      description: |
+        Marks a command terminal — completed or failed — so the cloud
+        relay does not return it on the next poll. Agent keeps a local
+        de-dup set of acknowledged command ids.
+      security:
+        - AdosKey: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CommandAck" }
+      responses:
+        "200":
+          description: Acknowledgment recorded
