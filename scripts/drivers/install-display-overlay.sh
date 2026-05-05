@@ -63,7 +63,37 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 OVERLAY_DIR="${REPO_ROOT}/data/overlays"
 UPSTREAM_DIR="${OVERLAY_DIR}/upstream"
-BUILD_DIR="$(mktemp -d -t ados-display-overlay.XXXXXX)"
+
+# Pick the first writable temp-dir candidate. The agent runs sandboxed
+# under systemd (PrivateTmp + ProtectSystem) which can render /tmp
+# read-only when this script is invoked as a subprocess by the wizard.
+# /run/ados is the agent's tmpfs and always writable; /var/tmp is the
+# distro fallback; /tmp only works when we're called from a regular
+# shell. Pick whichever lands first.
+_choose_build_root() {
+    local candidates=(
+        "/run/ados"
+        "/var/tmp"
+        "${TMPDIR:-/tmp}"
+        "/tmp"
+    )
+    for c in "${candidates[@]}"; do
+        if [ -d "$c" ] && [ -w "$c" ]; then
+            echo "$c"
+            return 0
+        fi
+        # Try creating it — /run/ados may not exist on a stripped image
+        # but is writable once we mkdir it.
+        if mkdir -p "$c" 2>/dev/null && [ -w "$c" ]; then
+            echo "$c"
+            return 0
+        fi
+    done
+    echo "/tmp"
+}
+BUILD_PARENT="$(_choose_build_root)"
+BUILD_DIR="$(mktemp -d "${BUILD_PARENT}/ados-display-overlay.XXXXXX" 2>/dev/null \
+    || mktemp -d "${BUILD_PARENT}/ados-display-overlay-$$")"
 trap 'rm -rf "${BUILD_DIR}"' EXIT
 
 DISPLAY_CONF=/etc/ados/display.conf

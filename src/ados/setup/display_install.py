@@ -167,15 +167,52 @@ async def start_install(display_id: str) -> _JobHandle:
 async def _run_job(
     handle: _JobHandle, script: Path, display_id: str
 ) -> None:
-    """Drive a single install run end-to-end."""
+    """Drive a single install run end-to-end.
+
+    The agent runs sandboxed (``ProtectSystem=strict``, narrow
+    ``ReadWritePaths``) so a direct subprocess can't write to /boot,
+    /etc/modules-load.d, or /etc/ados — all of which the installer
+    needs. ``systemd-run`` spawns a transient unit parented by PID 1,
+    which runs OUTSIDE the calling unit's sandbox; the new unit
+    inherits root permissions with no FS protections. ``--pipe``
+    connects stdin/stdout/stderr back to us so we can stream the log
+    tail live; ``--collect`` cleans up the transient unit after exit.
+    """
     global _active_job_id
     handle.status = "running"
-    handle.log_tail.append(f"[{_now_iso()}] starting {script} --display {display_id}")
-    try:
-        proc = await asyncio.create_subprocess_exec(
+    handle.log_tail.append(
+        f"[{_now_iso()}] starting {script} --display {display_id}"
+    )
+
+    # Build the argv. systemd-run is the preferred path because it
+    # escapes the agent's sandbox cleanly. Falls back to a direct
+    # exec when systemd-run is unavailable (non-systemd hosts, unit
+    # tests, etc.); the direct path will hit the read-only-fs
+    # exception on production agents but keeps the dev box happy.
+    use_systemd_run = bool(shutil_which("systemd-run"))
+    if use_systemd_run:
+        argv = [
+            "systemd-run",
+            "--quiet",
+            "--pipe",
+            "--collect",
+            "--unit",
+            f"ados-display-install-{handle.job_id}",
             str(script),
             "--display",
             display_id,
+        ]
+        handle.log_tail.append(
+            "[runner] systemd-run transient unit "
+            f"(ados-display-install-{handle.job_id})"
+        )
+    else:
+        argv = [str(script), "--display", display_id]
+        handle.log_tail.append("[runner] direct subprocess (no systemd-run)")
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *argv,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
         )
@@ -202,6 +239,10 @@ async def _run_job(
         async with _lock:
             if _active_job_id == handle.job_id:
                 _active_job_id = None
+
+
+# Late shutil import — keeps the module hot-path import-light.
+from shutil import which as shutil_which  # noqa: E402
 
 
 def write_skip_marker() -> None:
