@@ -83,15 +83,26 @@ fn api_routes() -> Router<Arc<SetupState>> {
         .route("/api/v1/setup/reset", post(handlers::post_reset))
 }
 
-/// Operability routes (`/api/v1/health`, `/api/v1/diag`) that live
-/// OUTSIDE `/api/v1/setup/*`. The same-origin gate is intentionally
-/// not applied here so monitoring agents and SREs can hit the probes
-/// from neighbouring hosts without forging an `Origin` header. Both
-/// handlers are GET and return read-only state with no secrets.
+/// Unauthenticated probe (`/api/v1/health`) that lives OUTSIDE the
+/// same-origin gate so monitoring agents and SREs can hit it from
+/// neighbouring hosts without forging an `Origin` header. The handler
+/// is GET-only and returns `{status, version}` with no operator state.
 fn operability_routes() -> Router<Arc<SetupState>> {
-    Router::new()
-        .route("/api/v1/health", get(handlers::get_health))
-        .route("/api/v1/diag", get(handlers::get_diag))
+    Router::new().route("/api/v1/health", get(handlers::get_health))
+}
+
+/// Diagnostic dump (`/api/v1/diag`) — kept in its own router block so
+/// it can be merged INTO the same-origin gated branch alongside the
+/// `/api/v1/setup/*` routes. The endpoint surfaces broker URL, Convex
+/// URL, device_id, paired bool, MAVLink port, RSS, uptime, and
+/// `consecutive_failures`. Each field is non-secret per spec but
+/// collectively they are reconnaissance for a targeted attack, so a
+/// browser on the same LAN should not be able to scrape them via a
+/// hostile page. Native callers without an `Origin` header (curl, SRE
+/// scripts, monitoring agents) still pass through — see
+/// `check_origin` for the pass-through contract.
+fn diag_routes() -> Router<Arc<SetupState>> {
+    Router::new().route("/api/v1/diag", get(handlers::get_diag))
 }
 
 pub fn setup_router(state: Arc<SetupState>) -> Router {
@@ -102,7 +113,13 @@ pub fn setup_router(state: Arc<SetupState>) -> Router {
 /// [`DiagState`] so the agent binary can also share the handle with
 /// other tasks (cloud-relay heartbeat counters, etc.).
 pub fn setup_router_with_diag(state: Arc<SetupState>, diag: Arc<DiagState>) -> Router {
-    let api = api_routes().merge(operability_routes());
+    // No origin gate variant: every route is exposed without a same-
+    // origin check. `/api/v1/diag` is merged in here alongside the
+    // setup routes and `/api/v1/health` so callers see no behavioural
+    // difference from the pre-gate world.
+    let api = api_routes()
+        .merge(operability_routes())
+        .merge(diag_routes());
     api
         // Fallback: any non-API path serves the embedded webapp. The
         // HTML uses absolute paths (/app.js, /style.css, /brand.svg)
@@ -114,14 +131,24 @@ pub fn setup_router_with_diag(state: Arc<SetupState>, diag: Arc<DiagState>) -> R
 }
 
 /// Same as `setup_router` but layers a same-origin gate on the
-/// `/api/v1/setup/*` routes. Mutating requests (POST / PUT / PATCH /
-/// DELETE) whose `Origin` header is outside the allowlist are
-/// rejected with HTTP 403. Read methods and missing-header requests
-/// pass through unchanged.
+/// `/api/v1/setup/*` routes plus `/api/v1/diag`. The middleware also
+/// recognizes WebSocket upgrade handshakes (HTTP GET +
+/// `Upgrade: websocket`) and gates them on the same allowlist so a
+/// hostile page on the LAN cannot open
+/// `/api/v1/setup/cloudflare/logs` from a foreign origin.
 ///
-/// `/api/v1/health` and `/api/v1/diag` live outside the gate so
-/// monitoring agents on neighbouring hosts can hit them without
-/// forging an `Origin` header.
+/// Pass-through (no allowlist check):
+/// - All other reads under `/api/v1/setup/*` (`status`, etc.).
+/// - Any request with no `Origin` header — curl, native SDKs, the
+///   wizard webapp's own no-CORS fetches.
+/// - `/api/v1/health` — the SRE liveness probe lives outside the gate
+///   so monitoring agents on neighbouring hosts can poll it without
+///   forging an `Origin` header.
+///
+/// Reject (HTTP 403):
+/// - Any of the gated classes (mutating method, WebSocket upgrade, or
+///   GET on `/api/v1/diag`) with an `Origin` header that is not in
+///   the allowlist.
 pub fn setup_router_with_origin_check(
     state: Arc<SetupState>,
     allowlist: Arc<OriginAllowlist>,
@@ -137,11 +164,17 @@ pub fn setup_router_with_origin_check_and_diag(
     allowlist: Arc<OriginAllowlist>,
     diag: Arc<DiagState>,
 ) -> Router {
-    let gated_api =
-        api_routes().layer(middleware::from_fn_with_state(allowlist, check_origin));
-    // Operability routes are merged AFTER the gate is applied so the
-    // gate does not extend over them.
-    gated_api
+    // Setup routes + diag share the same-origin gate. The middleware
+    // is aware of three gated classes (mutating methods, WebSocket
+    // upgrades, GET on /api/v1/diag) and the diag handler lives inside
+    // this layered group so the path-based check in the middleware
+    // matches a real route.
+    let gated = api_routes()
+        .merge(diag_routes())
+        .layer(middleware::from_fn_with_state(allowlist, check_origin));
+    // Health stays UNGATED so SRE liveness probes from neighbouring
+    // hosts work without an Origin header.
+    gated
         .merge(operability_routes())
         .fallback(get(webapp::serve_request))
         .with_state(state)

@@ -140,18 +140,24 @@ Live agent logs:
 ### Diagnostic endpoints
 
 The agent exposes two read-only operability routes outside the
-`/api/v1/setup/*` surface so monitoring agents can poll them without
-forging an `Origin` header:
+`/api/v1/setup/*` surface:
 
 - `GET /api/v1/health` — liveness probe. Returns `200 OK` with
   `{"status": "ok", "version": "<crate version>"}` while the HTTP server
-  is responsive.
+  is responsive. **Unauthenticated**, no same-origin check; the typical
+  SRE liveness endpoint that monitoring tools poll without forging an
+  `Origin` header.
 - `GET /api/v1/diag` — diagnostic dump. Returns a JSON object with
   uptime, runtime mode, identity, and best-effort live counters for the
   cloud relay (`last_heartbeat_at`, `consecutive_failures`) and the
   MAVLink router (`port`, `frame_rate_recent`). `rss_mb` is read from
   `/proc/self/status` on Linux. The endpoint contains no secrets — pair
   codes, API keys, and Cloudflare tokens are deliberately omitted.
+  **Same-origin gated**: a request with a foreign `Origin` header is
+  rejected with HTTP 403, but a request with no `Origin` header
+  (curl, native HTTP clients, monitoring agents on neighbouring hosts)
+  passes through unchanged. See "Hardened operations / Setup surface
+  origin gate" below for the full behaviour.
 
 Example use:
 
@@ -280,9 +286,22 @@ rejected at install time.
 ### Setup surface origin gate
 
 When `api.bind` is set to `0.0.0.0` (the common LAN-wizard path), the
-universal setup REST surface enforces a same-origin policy on
-mutating methods (POST / PUT / PATCH / DELETE). A POST whose `Origin`
-header is foreign to the agent's host is rejected with HTTP 403.
+universal setup REST surface enforces a same-origin policy on the
+following classes of request:
+
+- **Mutating methods** (POST / PUT / PATCH / DELETE) on
+  `/api/v1/setup/*` — the wizard reconfiguration surface.
+- **WebSocket upgrades** (HTTP GET with `Upgrade: websocket`) such as
+  `/api/v1/setup/cloudflare/logs` — long-lived event streams that
+  browsers can open from any page on the LAN without a CORS preflight.
+- **`GET /api/v1/diag`** — the diagnostic dump exposes broker URL,
+  Convex URL, identity, and network counters. Each field is
+  non-secret, but collectively they are reconnaissance for a targeted
+  attack so a hostile page on the LAN must not be able to scrape them
+  via `fetch()`.
+
+A request in any of those classes whose `Origin` header is foreign to
+the agent's host is rejected with HTTP 403.
 
 The allowlist is built once at agent startup from the configured
 bind address + port and the device_id, and includes:
@@ -292,16 +311,33 @@ bind address + port and the device_id, and includes:
 - `http://ados-<device_id>.local:<port>` (the mDNS hostname)
 - `https://` variants of all of the above for reverse-proxy operators
 
-GET / HEAD / OPTIONS requests pass through unchanged. Requests
-without an `Origin` header (curl, native HTTP clients, the wizard
-webapp's own no-CORS fetches) also pass through. The gate exists to
-stop a browser on the same LAN from being weaponized into
-reconfiguring the agent via a malicious page.
+Pass-through (no allowlist check):
+
+- All other reads under `/api/v1/setup/*` (`status`, profile reads,
+  hardware-check polling, etc.) — these exist to be polled and are
+  public state.
+- Requests in any gated class with **no `Origin` header** — the
+  typical native-client path (curl, SRE scripts, native SDKs, the
+  wizard webapp's own no-CORS fetches). This keeps
+  `curl http://board:8080/api/v1/diag` working for monitoring agents
+  on neighbouring hosts and lets a CLI tail the cloudflared WS log
+  stream without forging a header.
+- **`GET /api/v1/health`** — the SRE liveness probe is intentionally
+  outside the gate so monitoring tools polling from a neighbouring
+  host work without any header configuration. The handler returns
+  `{status, version}` and exposes no operator state.
 
 The allowlist is logged at startup:
 
 ```
 INFO setup origin allowlist configured bind_host=0.0.0.0 bind_port=8080 device_id=...
+```
+
+When the gate rejects a request it logs the offending origin, method,
+path, and class:
+
+```
+WARN rejecting cross-origin request on gated class origin=http://evil.example method=GET path=/api/v1/diag kind=diag-read
 ```
 
 A change to `api.bind` requires an agent restart for the allowlist to

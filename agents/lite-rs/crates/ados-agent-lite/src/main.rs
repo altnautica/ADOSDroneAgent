@@ -820,6 +820,11 @@ async fn run(config_path: PathBuf) -> Result<()> {
     // Migrate legacy agent.yaml `cloud.api_key` to pairing.json on first
     // boot if the new file is empty. This preserves operator pairings
     // from pre-2026-05-05 agent.yaml configs without forcing a re-pair.
+    //
+    // The legacy field carried a `ados_<base64url>` per-device key, NOT
+    // an operator-typed pair code, so we route through `migrate_legacy_api_key`
+    // (which preserves byte-exact case) rather than `set_code` (which
+    // uppercases for operator typo tolerance and would corrupt the key).
     if !config.cloud.api_key.is_empty() {
         let store = ados_setup::pairing::PairingStore::new(&pairing_path);
         if let Ok(existing) = store.load() {
@@ -827,9 +832,7 @@ async fn run(config_path: PathBuf) -> Result<()> {
                 tracing::info!(
                     "migrating legacy cloud.api_key from agent.yaml -> pairing.json"
                 );
-                // The old field stored what was effectively a pair code;
-                // we treat it as one and let the cloud relay re-claim.
-                match store.set_code(&config.cloud.api_key) {
+                match store.migrate_legacy_api_key(&config.cloud.api_key) {
                     Ok(_) => tracing::info!(
                         path = %pairing_path.display(),
                         "migrated legacy cloud.api_key to pairing.json"
@@ -866,6 +869,12 @@ async fn run(config_path: PathBuf) -> Result<()> {
         agent_meta: Some(agent_meta),
     };
 
+    // Diagnostic state shared across the HTTP handlers and the cloud /
+    // MAVLink tasks that record counters. The same Arc clone is handed
+    // to the diag-aware router below so the /api/v1/diag handler reads
+    // the live counters the cloud client updates.
+    let diag_state = DiagState::shared();
+
     // Spawn the cloud client when we have an identity. Missing MQTT broker
     // is handled inside the cloud client (it skips the MQTT publish loop
     // and runs only the HTTP loop, which serves the unpaired beacon and
@@ -884,9 +893,12 @@ async fn run(config_path: PathBuf) -> Result<()> {
         // when a real router is up; otherwise the cloud client logs +
         // drops inbound mavlink/rx publishes.
         let fc_writer = mavlink_handles.as_ref().map(|h| h.outbound.clone());
-        if let Err(e) =
-            ados_cloud::spawn_cloud_client(cloud_config, mavlink_inbound, fc_writer)
-        {
+        if let Err(e) = ados_cloud::spawn_cloud_client(
+            cloud_config,
+            mavlink_inbound,
+            fc_writer,
+            diag_state.clone(),
+        ) {
             tracing::warn!(error = %e, "cloud client spawn failed; running offline");
         }
     } else {
@@ -947,15 +959,12 @@ async fn run(config_path: PathBuf) -> Result<()> {
         "setup origin allowlist configured"
     );
 
-    // Diagnostic state shared across the HTTP handlers and any future
-    // cloud / MAVLink task that wants to record counters. v0.1 only the
-    // diag handler reads it; future phases will hand clones to the
-    // cloud relay and MAVLink router so `mqtt.connected_recently`,
+    // `diag_state` was constructed above (before the cloud client spawn)
+    // so the same Arc clone reaches both the cloud relay tasks and the
+    // /api/v1/diag handler. The diag handler reads the live counters the
+    // cloud relay updates so `mqtt.connected_recently`,
     // `cloud_relay.last_heartbeat_at`, and consecutive-failure counts
-    // reflect live state. Today the snapshot reports the seeded values
-    // (defaults) which matches the spec's "placeholder fields are
-    // acceptable" allowance.
-    let diag_state = DiagState::shared();
+    // reflect runtime state.
 
     let app =
         setup_router_with_origin_check_and_diag(setup_state, origin_allowlist, diag_state.clone())

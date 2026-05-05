@@ -5,15 +5,28 @@
 //! over the LAN) the setup surface becomes accessible to any browser on
 //! the same network. A user on that LAN visiting a malicious page can
 //! cross-origin POST `/api/v1/setup/profile`, `/api/v1/setup/cloudflare/install`,
-//! or `/api/v1/setup/finish` and reconfigure the agent.
+//! or `/api/v1/setup/finish` and reconfigure the agent. The same browser
+//! can also open a WebSocket against `/api/v1/setup/cloudflare/logs` and
+//! tail cloudflared install logs to harvest reconnaissance.
 //!
 //! This module ships an axum middleware that enforces a same-origin
-//! policy on POST / PUT / PATCH / DELETE requests under
-//! `/api/v1/setup/*`. Read methods (GET / HEAD / OPTIONS) and requests
-//! that arrive without an `Origin` header (curl / native HTTP clients /
-//! the wizard webapp's own no-CORS fetches) are passed through; only
-//! cross-origin POSTs that explicitly declare a foreign origin are
-//! rejected.
+//! policy on three classes of request:
+//!
+//! - POST / PUT / PATCH / DELETE under `/api/v1/setup/*` — the mutating
+//!   surface that can reconfigure the agent.
+//! - WebSocket upgrade requests (HTTP GET with `Upgrade: websocket`) —
+//!   long-lived event streams that browsers can open without CORS
+//!   preflight from any page on the LAN.
+//! - The `/api/v1/diag` endpoint — a read-only diagnostic dump that
+//!   surfaces reconnaissance (broker URL, identity, network counters)
+//!   and is gated even though it is a plain GET.
+//!
+//! All three classes pass through unchanged when no `Origin` header is
+//! present (curl, native HTTP clients, the wizard webapp's own no-CORS
+//! fetches). Only requests that explicitly declare a foreign origin are
+//! rejected. Other read methods on the setup surface (GET on
+//! `/api/v1/setup/status`, etc.) and `/api/v1/health` are not gated; the
+//! health probe remains the canonical unauthenticated liveness check.
 //!
 //! The allowlist is built once at agent startup from the configured
 //! `api.bind` host + port and the device_id. An update to `agent.yaml`
@@ -111,17 +124,49 @@ impl OriginAllowlist {
     }
 }
 
-/// axum middleware: rejects mutating requests whose `Origin` header is
-/// outside the allowlist.
+/// Returns true when the request looks like a WebSocket upgrade
+/// handshake: HTTP GET carrying `Upgrade: websocket`. Browsers are the
+/// only clients that initiate cross-origin WebSocket upgrades from a
+/// hostile context, and they DO send `Origin` on the handshake; native
+/// clients (CLI / curl) typically do not, which lets them connect for
+/// debugging without forging a header.
+fn is_websocket_upgrade(request: &Request) -> bool {
+    if request.method() != Method::GET {
+        return false;
+    }
+    request
+        .headers()
+        .get("upgrade")
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.eq_ignore_ascii_case("websocket"))
+        .unwrap_or(false)
+}
+
+/// axum middleware: rejects requests whose `Origin` header is outside
+/// the allowlist when the request is one of:
+///
+/// - A mutating method (POST / PUT / PATCH / DELETE) — the original
+///   defense against cross-origin reconfiguration POSTs.
+/// - A WebSocket upgrade (HTTP GET with `Upgrade: websocket`) — long-
+///   lived event streams that browsers can open from any page on the
+///   LAN. Browsers send `Origin` on the handshake, so the gate has the
+///   data it needs.
+/// - A GET to `/api/v1/diag` — the diagnostic dump exposes
+///   reconnaissance (broker URL, identity, network counters) and is
+///   gated even though it is a read method.
 ///
 /// Pass-through cases:
-/// - GET / HEAD / OPTIONS — read methods; no state mutation possible.
-/// - Missing `Origin` header — same-host curl / native clients, plus
-///   the wizard webapp's own fetches when the browser elides the header
-///   on no-CORS same-origin requests.
+/// - All other GET / HEAD / OPTIONS requests on the setup surface —
+///   `/api/v1/setup/status`, profile reads, etc. exist to be polled
+///   and are public state.
+/// - Missing `Origin` header on any of the above three classes — the
+///   typical native-client path (curl / native HTTP / SDK probes) so a
+///   monitoring agent on a neighbouring host can still reach `/diag`
+///   and so a CLI can still tail cloudflared WS logs.
 ///
 /// Reject case (HTTP 403):
-/// - The header is present and the value is NOT in the allowlist.
+/// - The request is in one of the three gated classes AND the `Origin`
+///   header is present AND its value is NOT in the allowlist.
 pub async fn check_origin(
     State(allowlist): State<Arc<OriginAllowlist>>,
     request: Request,
@@ -132,18 +177,29 @@ pub async fn check_origin(
         method,
         &Method::POST | &Method::PUT | &Method::PATCH | &Method::DELETE
     );
-    if !mutating {
+    let websocket = is_websocket_upgrade(&request);
+    let is_diag_get = method == Method::GET && request.uri().path() == "/api/v1/diag";
+
+    if !(mutating || websocket || is_diag_get) {
         return next.run(request).await;
     }
 
     if let Some(origin) = request.headers().get("origin") {
         let s = origin.to_str().unwrap_or("");
         if !allowlist.contains(s) {
+            let kind = if websocket {
+                "websocket-upgrade"
+            } else if is_diag_get {
+                "diag-read"
+            } else {
+                "mutating"
+            };
             tracing::warn!(
                 origin = %s,
                 method = %method,
                 path = %request.uri().path(),
-                "rejecting cross-origin mutating request"
+                kind = %kind,
+                "rejecting cross-origin request on gated class"
             );
             return (
                 StatusCode::FORBIDDEN,
@@ -202,5 +258,56 @@ mod tests {
         assert!(!a.contains("http://ados-.local:8080"));
         // Loopback entries still present.
         assert!(a.contains("http://localhost:8080"));
+    }
+
+    #[test]
+    fn websocket_upgrade_detected_case_insensitive() {
+        // Browsers may send `WebSocket`, `websocket`, or `WEBSOCKET`
+        // in the upgrade header per RFC 6455 token rules. The gate
+        // must recognize all forms or it will leak the WS handshake.
+        for variant in ["websocket", "WebSocket", "WEBSOCKET"] {
+            let request = Request::builder()
+                .method(Method::GET)
+                .uri("/api/v1/setup/cloudflare/logs")
+                .header("upgrade", variant)
+                .body(axum::body::Body::empty())
+                .unwrap();
+            assert!(
+                is_websocket_upgrade(&request),
+                "upgrade={variant} should be recognized as a websocket upgrade"
+            );
+        }
+    }
+
+    #[test]
+    fn non_websocket_upgrade_not_flagged() {
+        // A plain GET with no upgrade header is a regular read; a GET
+        // with `Upgrade: h2c` is an HTTP/2-cleartext upgrade we don't
+        // route through the WS handler. Neither should trip the gate.
+        let plain_get = Request::builder()
+            .method(Method::GET)
+            .uri("/api/v1/setup/status")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        assert!(!is_websocket_upgrade(&plain_get));
+
+        let h2c_upgrade = Request::builder()
+            .method(Method::GET)
+            .uri("/api/v1/setup/status")
+            .header("upgrade", "h2c")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        assert!(!is_websocket_upgrade(&h2c_upgrade));
+
+        // A POST with the websocket upgrade header set (which would be
+        // a malformed handshake) is also not treated as a WS upgrade —
+        // the WS class is GET-only.
+        let post_with_upgrade = Request::builder()
+            .method(Method::POST)
+            .uri("/api/v1/setup/cloudflare/logs")
+            .header("upgrade", "websocket")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        assert!(!is_websocket_upgrade(&post_with_upgrade));
     }
 }

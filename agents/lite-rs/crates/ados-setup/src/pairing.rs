@@ -195,6 +195,45 @@ impl PairingStore {
         self.save(&PairingState::default())
     }
 
+    /// Migrate a legacy `cloud.api_key` field (carried inline in older
+    /// agent.yaml files, before the pairing.json store existed) into the
+    /// new persistent state. The full agent has the same migration path
+    /// in `src/ados/setup/pairing.py`; we mirror its behavior so an
+    /// operator who upgrades from a pre-2026-05-05 agent.yaml does not
+    /// have to re-pair.
+    ///
+    /// Critical: the legacy value is a `ados_<base64url>` per-device key
+    /// with mixed case (URL-safe base64 alphabet includes both upper- and
+    /// lower-case ASCII). It must NOT be funneled through `set_code` —
+    /// that path uppercases the input to match operator-typed pair codes
+    /// and would corrupt every key whose suffix carries a lowercase
+    /// letter. The downstream shape gate (`is_valid_api_key`) would then
+    /// reject the corrupted value and the agent would run unauthenticated
+    /// indefinitely.
+    ///
+    /// Idempotent: if a paired state already exists on disk, return Ok
+    /// without overwriting. This lets the migration run unconditionally
+    /// at every boot without clobbering a fresh pair operation.
+    pub fn migrate_legacy_api_key(&self, key: &str) -> Result<(), PairingError> {
+        let mut state = self.load()?;
+        if state.is_paired() {
+            // A previous boot already migrated (or the operator paired
+            // through the wizard since). Don't touch the live state.
+            return Ok(());
+        }
+        // Preserve byte-exact case; do NOT uppercase the way set_code
+        // does for operator-typed pair codes.
+        state.api_key = Some(key.to_string());
+        state.paired = true;
+        state.paired_at = Some(now_epoch());
+        state.owner_id = Some("legacy-migration".to_string());
+        // Drop any stale pair code; the migrated state is already
+        // claimed and the wizard should not present a code for it.
+        state.pairing_code = None;
+        state.code_created_at = None;
+        self.save(&state)
+    }
+
     /// Return the current pair code if it is still within its TTL,
     /// otherwise mint a fresh one and persist it. Mirrors Python's
     /// `PairingManager.get_or_create_code()`. The pair code is what
@@ -647,6 +686,74 @@ mod tests {
         let fixture = "ados_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
         assert_eq!(fixture.len(), API_KEY_LEN);
         assert!(is_valid_api_key(fixture));
+    }
+
+    #[test]
+    fn migrate_legacy_api_key_preserves_case_byte_exact() {
+        // Legacy agent.yaml carried `cloud.api_key` inline as a
+        // mixed-case `ados_<base64url>` value. The new migration path
+        // must store the bytes verbatim — the prior set_code-based path
+        // uppercased the value (matching operator-typed pair codes) and
+        // corrupted every key whose suffix had a lowercase character.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pairing.json");
+        let store = PairingStore::new(&path);
+        // Real generator output: prefix + 43 base64url-no-pad chars =
+        // 48 total. Mix in lowercase + digits + URL-safe symbols so any
+        // accidental uppercase or charset coercion would surface.
+        let legacy = "ados_abc-DEF_xyz0123456789AbCdEfGhIjKlMnOpQrStUv";
+        assert_eq!(legacy.len(), API_KEY_LEN);
+        store
+            .migrate_legacy_api_key(legacy)
+            .expect("migration succeeds on a fresh pairing.json");
+        let after = store.load().unwrap();
+        assert!(after.is_paired(), "migrated state is paired");
+        assert_eq!(
+            after.api_key.as_deref(),
+            Some(legacy),
+            "api_key bytes must be preserved verbatim — no uppercasing"
+        );
+        assert_eq!(
+            after.owner_id.as_deref(),
+            Some("legacy-migration"),
+            "owner_id is stamped so operators can spot migrated rows"
+        );
+        assert!(
+            after.paired_at.is_some(),
+            "paired_at is stamped so the heartbeat reports a real timestamp"
+        );
+        assert!(
+            is_valid_api_key(after.api_key.as_deref().unwrap()),
+            "shape validator accepts the byte-exact migrated key"
+        );
+    }
+
+    #[test]
+    fn migrate_legacy_api_key_is_idempotent_on_already_paired() {
+        // Running the migration on a device that's already paired
+        // through the wizard must NOT overwrite the live api_key.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pairing.json");
+        let store = PairingStore::new(&path);
+        store.set_code("AB23X4").unwrap();
+        store.claim("user-existing", "ados_existing_already_paired_key_AAAAAAAAA").unwrap();
+        let before = store.load().unwrap();
+        assert!(before.is_paired());
+
+        // Now attempt to migrate. The store should refuse to clobber.
+        store
+            .migrate_legacy_api_key("ados_legacy_value_should_be_ignored_xxxxxxxxx")
+            .expect("migration is a no-op when already paired");
+        let after = store.load().unwrap();
+        assert_eq!(
+            after.api_key, before.api_key,
+            "already-paired state must NOT be overwritten by the migration"
+        );
+        assert_eq!(
+            after.owner_id.as_deref(),
+            Some("user-existing"),
+            "owner_id is preserved (no legacy-migration overwrite)"
+        );
     }
 
     #[test]

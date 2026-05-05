@@ -19,8 +19,10 @@ pub mod sysmetrics;
 
 use std::fmt;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use ados_setup::diag::{now_unix_seconds, DiagState};
 use ados_setup::pairing::{is_valid_api_key, PairingStore};
 use rumqttc::{AsyncClient, MqttOptions, QoS, Transport};
 use serde::{Deserialize, Serialize};
@@ -149,6 +151,15 @@ impl fmt::Debug for CloudConfig {
 /// Pairing beacon payload posted to `{convex_url}/pairing/register` every
 /// 30 s when the agent is unpaired. Field names are camelCase per
 /// `proto/cloud/openapi.yaml` so the cloud relay parses them correctly.
+///
+/// The optional fields (`board`, `tier`, `mdns_host`, `local_ip`) mirror
+/// what the Python full agent emits so Mission Control's "Add drone"
+/// dialog can render the same unpaired card regardless of which agent is
+/// reporting. `local_ip` is what the GCS uses to construct the deep-link
+/// "Open setup wizard" button on the unpaired card; `mdns_host` is the
+/// fallback when the operator is on the same LAN with mDNS available.
+/// Skip-when-None keeps the beacon body byte-compatible with older
+/// relays that didn't expect these keys.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PairingBeacon<'a> {
@@ -157,6 +168,26 @@ pub struct PairingBeacon<'a> {
     pub api_key: &'a str,
     pub name: &'a str,
     pub version: &'a str,
+    /// Structured board identifier (e.g. `"Luckfox Pico Zero"`). The
+    /// `name` field stays human-readable; this is the value the GCS
+    /// fleet card uses for the subtitle pill once the device pairs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub board: Option<&'a str>,
+    /// Capability tier (`0`/`1`/`2`/`3`). The lite agent does not yet
+    /// compute a tier value — the field is reserved for the upcoming
+    /// video pipeline mission to populate. Stays `None` at v0.1 so the
+    /// beacon body simply omits the key.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tier: Option<i32>,
+    /// mDNS hostname (`<host>.local`) for operators on the same LAN.
+    /// Lifted from `agent_meta.mdns_host`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mdns_host: Option<&'a str>,
+    /// First non-loopback IPv4 the agent observed at startup. Used by
+    /// the GCS deep-link to construct the setup-webapp URL on the
+    /// unpaired drone card.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub local_ip: Option<&'a str>,
 }
 
 /// Spawn the cloud client tasks: MQTT publish loop, HTTPS heartbeat, and
@@ -168,10 +199,18 @@ pub struct PairingBeacon<'a> {
 /// sender, which the MAVLink router then writes to the FC serial.
 /// Pass `None` if no FC is connected; cloud-received frames are then
 /// logged at WARN and dropped.
+///
+/// `diag` is the shared diagnostic state the agent binary constructs
+/// for the `/api/v1/diag` handler. The MQTT publish loop and HTTPS
+/// heartbeat update its atomic counters so `mqtt.connected_recently`,
+/// `cloud_relay.last_heartbeat_at`, and `cloud_relay.consecutive_failures`
+/// reflect the live cloud-relay path instead of staying at the seeded
+/// default values forever.
 pub fn spawn_cloud_client(
     config: CloudConfig,
     inbound_mavlink: broadcast::Sender<Vec<u8>>,
     outbound_fc: Option<tokio::sync::mpsc::Sender<Vec<u8>>>,
+    diag: Arc<DiagState>,
 ) -> Result<(), CloudError> {
     if config.device_id.is_empty() {
         return Err(CloudError::Config("device_id is required".into()));
@@ -224,8 +263,11 @@ pub fn spawn_cloud_client(
         let mqtt_config = config.clone();
         let mut mavlink_rx = inbound_mavlink.subscribe();
         let fc_writer = outbound_fc.clone();
+        let mqtt_diag = diag.clone();
         tokio::spawn(async move {
-            if let Err(e) = mqtt_publish_loop(mqtt_config, &mut mavlink_rx, fc_writer).await {
+            if let Err(e) =
+                mqtt_publish_loop(mqtt_config, &mut mavlink_rx, fc_writer, mqtt_diag).await
+            {
                 tracing::error!(error = %e, "mqtt publish loop exited");
             }
         });
@@ -237,8 +279,9 @@ pub fn spawn_cloud_client(
     // Always spawned so the unpaired path keeps registering the device with
     // the cloud relay until the operator pairs.
     let http_config = config;
+    let http_diag = diag;
     tokio::spawn(async move {
-        if let Err(e) = http_loop(http_config).await {
+        if let Err(e) = http_loop(http_config, http_diag).await {
             tracing::error!(error = %e, "https loop exited");
         }
     });
@@ -250,6 +293,7 @@ async fn mqtt_publish_loop(
     config: CloudConfig,
     mavlink_rx: &mut broadcast::Receiver<Vec<u8>>,
     outbound_fc: Option<tokio::sync::mpsc::Sender<Vec<u8>>>,
+    diag: Arc<DiagState>,
 ) -> Result<(), CloudError> {
     let client_id = format!("ados-{}", config.device_id);
     let mut opts = MqttOptions::new(&client_id, &config.mqtt_broker, config.mqtt_port);
@@ -397,7 +441,12 @@ async fn mqtt_publish_loop(
                 let frame_len = frame.len();
                 let publish_fut = client.publish(&topic_tx, QoS::AtMostOnce, false, frame);
                 match tokio::time::timeout(MQTT_PUBLISH_TIMEOUT, publish_fut).await {
-                    Ok(Ok(())) => {}
+                    Ok(Ok(())) => {
+                        // Stamp the diag state so `/api/v1/diag` reports
+                        // `mqtt.connected_recently=true`. Cheap atomic
+                        // store on the publish hot path.
+                        diag.record_mqtt_publish(now_unix_seconds());
+                    }
                     Ok(Err(e)) => {
                         tracing::warn!(error = %e, "mqtt publish failed");
                     }
@@ -458,7 +507,7 @@ enum HeartbeatOutcome {
     Unauthorized,
 }
 
-async fn http_loop(config: CloudConfig) -> Result<(), CloudError> {
+async fn http_loop(config: CloudConfig, diag: Arc<DiagState>) -> Result<(), CloudError> {
     // Without a relay URL we have no destination. Wait quietly and let the
     // operator point us at the cloud relay (or future config-reload signal)
     // rather than burning CPU on errors.
@@ -491,6 +540,7 @@ async fn http_loop(config: CloudConfig) -> Result<(), CloudError> {
             started_at,
             &mut consecutive_failures,
             max_interval,
+            &diag,
         )
         .await;
     }
@@ -507,6 +557,7 @@ async fn run_http_tick(
     started_at: Instant,
     consecutive_failures: &mut u32,
     max_interval: Duration,
+    diag: &Arc<DiagState>,
 ) {
     // Re-read pairing state every iteration so a `ados-agent-lite pair`
     // from another process flips us from beacon to heartbeat without
@@ -551,7 +602,14 @@ async fn run_http_tick(
             return;
         }
         match send_heartbeat(client, config, api_key, started_at).await {
-            Ok(HeartbeatOutcome::Ok) => *consecutive_failures = 0,
+            Ok(HeartbeatOutcome::Ok) => {
+                *consecutive_failures = 0;
+                // Stamp the diag state so `/api/v1/diag` reports the
+                // live cloud-relay heartbeat instead of the seeded
+                // never-published default. record_cloud_heartbeat also
+                // resets the consecutive-failure atomic counter.
+                diag.record_cloud_heartbeat(now_unix_seconds());
+            }
             Ok(HeartbeatOutcome::Unauthorized) => {
                 // The cloud relay rejected our api_key. Most likely the
                 // operator clicked "Remove drone" in Mission Control or
@@ -586,8 +644,12 @@ async fn run_http_tick(
                 // Treat this as a recoverable handoff, not a network
                 // failure: zero the counter so the next beacon goes
                 // out on the unpaired-base interval rather than an
-                // exponentially-stretched delay.
+                // exponentially-stretched delay. Record the failure on
+                // the diag side so an operator hitting `/api/v1/diag`
+                // during the unpair handoff sees a non-zero counter
+                // (the diag state survives the local-counter reset).
                 *consecutive_failures = 0;
+                diag.record_cloud_failure();
             }
             Err(e) => {
                 *consecutive_failures = consecutive_failures.saturating_add(1);
@@ -596,6 +658,7 @@ async fn run_http_tick(
                     consecutive_failures = *consecutive_failures,
                     "cloud heartbeat failed"
                 );
+                diag.record_cloud_failure();
             }
         }
     } else {
@@ -656,12 +719,24 @@ async fn send_pairing_beacon(
         .as_ref()
         .and_then(|m| m.board_name.as_deref())
         .unwrap_or("ADOS Lite Agent");
+    // Structured metadata mirrored to Mission Control's "Add drone"
+    // dialog: `board` for the subtitle pill, `mdns_host` + `local_ip`
+    // for the deep-link "Open setup wizard" button. Tier is reserved
+    // for a future capability-detection pass and stays `None` at v0.1.
+    let meta = config.agent_meta.as_ref();
+    let board = meta.and_then(|m| m.board_name.as_deref());
+    let mdns_host = meta.and_then(|m| m.mdns_host.as_deref());
+    let local_ip = meta.and_then(|m| m.last_ip.as_deref());
     let beacon = PairingBeacon {
         device_id: &config.device_id,
         pairing_code,
         api_key: "",
         name: display_name,
         version: env!("CARGO_PKG_VERSION"),
+        board,
+        tier: None,
+        mdns_host,
+        local_ip,
     };
     let response = client.post(&url).json(&beacon).send().await?;
     tracing::debug!(status = %response.status(), "pairing beacon sent");
@@ -860,6 +935,68 @@ mod tests {
     }
 
     #[test]
+    fn pairing_beacon_serializes_optional_fields_camelcase() {
+        // The "Add drone" dialog in Mission Control reads four optional
+        // fields off the unpaired beacon to render the deep-link "Open
+        // setup wizard" button. Pin the JSON shape so a future refactor
+        // that drops a field surfaces here instead of silently breaking
+        // the dialog. All four optional fields populated.
+        let beacon = PairingBeacon {
+            device_id: "test-device",
+            pairing_code: "ABC123",
+            api_key: "",
+            name: "Luckfox Pico Zero",
+            version: "0.1.0",
+            board: Some("Luckfox Pico Zero"),
+            tier: Some(2),
+            mdns_host: Some("luckfox.local"),
+            local_ip: Some("192.168.200.225"),
+        };
+        let json = serde_json::to_value(&beacon).unwrap();
+        let obj = json.as_object().expect("beacon serializes to an object");
+        // Existing five fields are unchanged.
+        assert_eq!(obj.get("deviceId").and_then(|v| v.as_str()), Some("test-device"));
+        assert_eq!(obj.get("pairingCode").and_then(|v| v.as_str()), Some("ABC123"));
+        assert_eq!(obj.get("apiKey").and_then(|v| v.as_str()), Some(""));
+        assert_eq!(obj.get("name").and_then(|v| v.as_str()), Some("Luckfox Pico Zero"));
+        assert_eq!(obj.get("version").and_then(|v| v.as_str()), Some("0.1.0"));
+        // New optional fields surface as camelCase keys.
+        assert_eq!(obj.get("board").and_then(|v| v.as_str()), Some("Luckfox Pico Zero"));
+        assert_eq!(obj.get("tier").and_then(|v| v.as_i64()), Some(2));
+        assert_eq!(obj.get("mdnsHost").and_then(|v| v.as_str()), Some("luckfox.local"));
+        assert_eq!(obj.get("localIp").and_then(|v| v.as_str()), Some("192.168.200.225"));
+        // The serialized object should expose exactly nine keys when
+        // every optional is populated. Pinning the count guards against
+        // a stray extra key landing in the wire format.
+        assert_eq!(obj.len(), 9, "fully-populated beacon has 9 keys");
+    }
+
+    #[test]
+    fn pairing_beacon_omits_optional_fields_when_unset() {
+        // Older relays don't expect the new keys; skip-when-None keeps
+        // the beacon body byte-compatible.
+        let beacon = PairingBeacon {
+            device_id: "test-device",
+            pairing_code: "ABC123",
+            api_key: "",
+            name: "ADOS Lite Agent",
+            version: "0.1.0",
+            board: None,
+            tier: None,
+            mdns_host: None,
+            local_ip: None,
+        };
+        let serialized = serde_json::to_string(&beacon).unwrap();
+        assert!(!serialized.contains("\"board\""), "board omitted when None");
+        assert!(!serialized.contains("\"tier\""), "tier omitted when None");
+        assert!(!serialized.contains("\"mdnsHost\""), "mdnsHost omitted when None");
+        assert!(!serialized.contains("\"localIp\""), "localIp omitted when None");
+        // The five required fields are still present.
+        assert!(serialized.contains("\"deviceId\":\"test-device\""));
+        assert!(serialized.contains("\"name\":\"ADOS Lite Agent\""));
+    }
+
+    #[test]
     fn empty_device_id_is_rejected() {
         let bad = CloudConfig {
             device_id: String::new(),
@@ -871,7 +1008,9 @@ mod tests {
             agent_meta: None,
         };
         let (tx, _rx) = broadcast::channel(8);
-        let err = spawn_cloud_client(bad, tx, None).expect_err("empty device_id should fail");
+        let diag = DiagState::shared();
+        let err = spawn_cloud_client(bad, tx, None, diag)
+            .expect_err("empty device_id should fail");
         match err {
             CloudError::Config(msg) => assert!(msg.contains("device_id")),
             _ => panic!("expected Config error, got {:?}", err),
@@ -894,7 +1033,8 @@ mod tests {
             agent_meta: None,
         };
         let (tx, _rx) = broadcast::channel(8);
-        let err = spawn_cloud_client(bad, tx, None)
+        let diag = DiagState::shared();
+        let err = spawn_cloud_client(bad, tx, None, diag)
             .expect_err("file:// scheme should be rejected");
         match err {
             CloudError::Config(msg) => assert!(msg.contains("convex_url")),
@@ -924,7 +1064,8 @@ mod tests {
             .build()
             .unwrap();
         let _guard = runtime.enter();
-        spawn_cloud_client(cfg, tx, None)
+        let diag = DiagState::shared();
+        spawn_cloud_client(cfg, tx, None, diag)
             .expect("http:// scheme should be accepted (with warning)");
     }
 
@@ -980,6 +1121,7 @@ mod tests {
             .build()
             .unwrap();
         let mut consecutive_failures = 0u32;
+        let diag = DiagState::shared();
         // Drive a single tick. The 5s base sleep at the tail is the
         // post-success interval; we stop the test before it elapses
         // by using a short timeout — the heartbeat itself completes
@@ -994,6 +1136,7 @@ mod tests {
                 Instant::now(),
                 &mut consecutive_failures,
                 Duration::from_secs(300),
+                &diag,
             ),
         )
         .await;
@@ -1012,6 +1155,21 @@ mod tests {
         assert_eq!(
             consecutive_failures, 0,
             "401 should NOT increment consecutive_failures"
+        );
+        // The diag-side counter DOES record the 401 so an operator
+        // hitting `/api/v1/diag` during the unpair handoff sees a
+        // non-zero value. The two counters serve different audiences:
+        // the local one drives the next-tick backoff; the diag one
+        // surfaces "we tried and the relay rejected us" to operators.
+        assert_eq!(
+            diag.cloud_snapshot().consecutive_failures,
+            1,
+            "diag should record the 401 as a cloud-relay failure"
+        );
+        assert_eq!(
+            diag.cloud_snapshot().last_heartbeat_at,
+            None,
+            "no heartbeat ever succeeded in this test"
         );
     }
 
@@ -1064,6 +1222,7 @@ mod tests {
             .build()
             .unwrap();
         let mut consecutive_failures = 0u32;
+        let diag = DiagState::shared();
         let _ = tokio::time::timeout(
             Duration::from_millis(500),
             run_http_tick(
@@ -1073,6 +1232,7 @@ mod tests {
                 Instant::now(),
                 &mut consecutive_failures,
                 Duration::from_secs(300),
+                &diag,
             ),
         )
         .await;
@@ -1140,6 +1300,7 @@ mod tests {
             .build()
             .unwrap();
         let mut consecutive_failures = 0u32;
+        let diag = DiagState::shared();
         let _ = tokio::time::timeout(
             Duration::from_millis(500),
             run_http_tick(
@@ -1149,6 +1310,7 @@ mod tests {
                 Instant::now(),
                 &mut consecutive_failures,
                 Duration::from_secs(300),
+                &diag,
             ),
         )
         .await;
@@ -1165,6 +1327,157 @@ mod tests {
         assert_eq!(
             consecutive_failures, 1,
             "invalid-shape skip should increment consecutive_failures so backoff kicks in"
+        );
+    }
+
+    #[tokio::test]
+    async fn heartbeat_success_stamps_diag_last_heartbeat_at() {
+        // The Phase L1 fix wires `record_cloud_heartbeat` into the
+        // 2xx branch of run_http_tick so `/api/v1/diag` reports a
+        // live `cloud_relay.last_heartbeat_at` instead of the seeded
+        // `null` placeholder. Without this assertion a future
+        // refactor that drops the call would silently regress the
+        // diag surface to its v0.1 behavior — placeholders forever.
+        use ados_setup::pairing::{PairingState, PairingStore};
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let mock = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/agent/status"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&mock)
+            .await;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let pairing_path = tmp.path().join("pairing.json");
+        let store = PairingStore::new(&pairing_path);
+        // Real api_key shape so the heartbeat actually fires.
+        let initial = PairingState {
+            paired: true,
+            api_key: Some(
+                "ados_CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC".into(),
+            ),
+            owner_id: Some("user_test".into()),
+            ..Default::default()
+        };
+        store.save(&initial).unwrap();
+
+        let config = CloudConfig {
+            device_id: "test-device".into(),
+            mqtt_broker: String::new(),
+            mqtt_port: 1883,
+            mqtt_use_tls: false,
+            convex_url: mock.uri(),
+            pairing_path: pairing_path.clone(),
+            agent_meta: None,
+        };
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(2))
+            .build()
+            .unwrap();
+        let mut consecutive_failures = 0u32;
+        let diag = DiagState::shared();
+        // Seed a non-zero failure on the diag side so the success
+        // branch's reset-to-zero is observable.
+        diag.record_cloud_failure();
+        diag.record_cloud_failure();
+        assert_eq!(diag.cloud_snapshot().consecutive_failures, 2);
+
+        let _ = tokio::time::timeout(
+            Duration::from_millis(500),
+            run_http_tick(
+                &client,
+                &config,
+                &store,
+                Instant::now(),
+                &mut consecutive_failures,
+                Duration::from_secs(300),
+                &diag,
+            ),
+        )
+        .await;
+
+        let snap = diag.cloud_snapshot();
+        assert!(
+            snap.last_heartbeat_at.is_some(),
+            "successful heartbeat must stamp last_heartbeat_at"
+        );
+        assert_eq!(
+            snap.consecutive_failures, 0,
+            "successful heartbeat must reset the diag failure counter"
+        );
+        assert_eq!(consecutive_failures, 0);
+    }
+
+    #[tokio::test]
+    async fn heartbeat_5xx_records_cloud_failure_in_diag() {
+        // Counterpoint to the success test: a 5xx must increment the
+        // diag-side counter alongside the local one. Pins the wiring
+        // for the third K2.2-flagged call site.
+        use ados_setup::pairing::{PairingState, PairingStore};
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let mock = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/agent/status"))
+            .respond_with(ResponseTemplate::new(503))
+            .mount(&mock)
+            .await;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let pairing_path = tmp.path().join("pairing.json");
+        let store = PairingStore::new(&pairing_path);
+        let initial = PairingState {
+            paired: true,
+            api_key: Some(
+                "ados_DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD".into(),
+            ),
+            owner_id: Some("user_test".into()),
+            ..Default::default()
+        };
+        store.save(&initial).unwrap();
+
+        let config = CloudConfig {
+            device_id: "test-device".into(),
+            mqtt_broker: String::new(),
+            mqtt_port: 1883,
+            mqtt_use_tls: false,
+            convex_url: mock.uri(),
+            pairing_path: pairing_path.clone(),
+            agent_meta: None,
+        };
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(2))
+            .build()
+            .unwrap();
+        let mut consecutive_failures = 0u32;
+        let diag = DiagState::shared();
+
+        let _ = tokio::time::timeout(
+            Duration::from_millis(500),
+            run_http_tick(
+                &client,
+                &config,
+                &store,
+                Instant::now(),
+                &mut consecutive_failures,
+                Duration::from_secs(300),
+                &diag,
+            ),
+        )
+        .await;
+
+        assert_eq!(
+            diag.cloud_snapshot().consecutive_failures,
+            1,
+            "5xx should increment the diag failure counter"
+        );
+        assert_eq!(
+            diag.cloud_snapshot().last_heartbeat_at,
+            None,
+            "no successful heartbeat in this test"
         );
     }
 }

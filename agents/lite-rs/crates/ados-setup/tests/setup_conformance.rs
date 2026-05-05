@@ -477,12 +477,16 @@ async fn unknown_route_returns_404() {
 
 #[tokio::test]
 async fn route_count_matches_setup_api_yaml() {
-    // 11 routes documented in proto/setup/setup-api.yaml. The router
-    // mounts /api/v1/setup/{status, profile, hardware-check,
+    // 11 setup routes documented under /api/v1/setup/* in
+    // proto/setup/setup-api.yaml. The router mounts
+    // /api/v1/setup/{status, profile, hardware-check,
     // hardware-check/refresh, cloud-choice, remote-access/cloudflare,
     // cloudflare/verify, cloudflare/logs, finish, step/:id/skip, reset}.
-    // We verify each responds (any status code) so we never accidentally
-    // drop a route.
+    // The two top-level operability routes (/api/v1/health and
+    // /api/v1/diag) are documented in the same YAML but live outside
+    // the setup tree and are exercised by their own tests.
+    // We verify each setup route responds (any status code) so we never
+    // accidentally drop one.
     let dir = tempfile::tempdir().unwrap();
     let state = fresh_state(&dir);
     let routes: &[(Method, &str, Option<Value>)] = &[
@@ -746,4 +750,144 @@ async fn diag_omits_secrets() {
             "diag response leaked '{forbidden}': {serialized}"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// Diag origin-gating + WebSocket origin-gating (defense-in-depth on the
+// reconnaissance + long-lived-stream surfaces).
+//
+// Diag exposes broker URL, Convex URL, identity, and counters — non-secret
+// per spec but reconnaissance-rich, so a browser on the LAN should not be
+// able to scrape it from a hostile origin. Native callers without an
+// `Origin` header (curl, SRE scripts) still pass through.
+//
+// WebSocket upgrade requests are HTTP GET + `Upgrade: websocket`, so the
+// previous mutating-only gate let them through. Browsers send Origin on
+// the handshake, so the gate has the data it needs.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn diag_passes_through_origin_gate_without_origin_header() {
+    // Curl-style probes (no Origin header) must keep working so SRE
+    // monitoring scripts and native clients can poll diag without
+    // forging a header.
+    let dir = tempfile::tempdir().unwrap();
+    let state = fresh_state(&dir);
+    let allowlist =
+        Arc::new(OriginAllowlist::new("0.0.0.0", 8080, "conformance-001"));
+    let (status, body) = json_response_gated(
+        state,
+        allowlist,
+        Method::GET,
+        "/api/v1/diag",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["runtime_mode"], "lite");
+    assert_eq!(body["device_id"], "conformance-001");
+}
+
+#[tokio::test]
+async fn diag_with_foreign_origin_is_rejected() {
+    // A page on a hostile origin trying to scrape reconnaissance over
+    // fetch() must be rejected with HTTP 403, even though diag is a
+    // GET. This is the new behaviour vs Phase J3.
+    let dir = tempfile::tempdir().unwrap();
+    let state = fresh_state(&dir);
+    let allowlist =
+        Arc::new(OriginAllowlist::new("0.0.0.0", 8080, "conformance-001"));
+    let (status, body) = json_response_gated(
+        state,
+        allowlist,
+        Method::GET,
+        "/api/v1/diag",
+        Some("http://evil.example"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(body["ok"], false);
+    assert!(body["error"]
+        .as_str()
+        .unwrap_or("")
+        .contains("origin"));
+}
+
+#[tokio::test]
+async fn diag_with_loopback_origin_passes() {
+    // A wizard tab on the agent's own host fetching diag for the
+    // operator's debug panel must work as before.
+    let dir = tempfile::tempdir().unwrap();
+    let state = fresh_state(&dir);
+    let allowlist =
+        Arc::new(OriginAllowlist::new("0.0.0.0", 8080, "conformance-001"));
+    let (status, body) = json_response_gated(
+        state,
+        allowlist,
+        Method::GET,
+        "/api/v1/diag",
+        Some("http://localhost:8080"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["device_id"], "conformance-001");
+}
+
+#[tokio::test]
+async fn websocket_upgrade_with_foreign_origin_is_rejected() {
+    // A hostile page on the LAN cannot open
+    // `new WebSocket("ws://board:8080/api/v1/setup/cloudflare/logs")`
+    // from a foreign origin. Browsers DO send Origin on the WS
+    // handshake, so the gate has the data it needs.
+    let dir = tempfile::tempdir().unwrap();
+    let state = fresh_state(&dir);
+    let allowlist =
+        Arc::new(OriginAllowlist::new("0.0.0.0", 8080, "conformance-001"));
+    let router = setup_router_with_origin_check(state, allowlist);
+    let request = Request::builder()
+        .method(Method::GET)
+        .uri("/api/v1/setup/cloudflare/logs")
+        .header("upgrade", "websocket")
+        .header("connection", "Upgrade")
+        .header("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ==")
+        .header("sec-websocket-version", "13")
+        .header("origin", "http://evil.example")
+        .body(Body::empty())
+        .unwrap();
+    let response = router.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn websocket_upgrade_without_origin_passes_through_gate() {
+    // CLI clients that tail the WS without forging an Origin header
+    // must continue to reach the WebSocketUpgrade extractor. The gate
+    // does not return 403; whatever status axum's extractor returns
+    // for the synthetic request is allowed (it will not be 403).
+    let dir = tempfile::tempdir().unwrap();
+    let state = fresh_state(&dir);
+    let allowlist =
+        Arc::new(OriginAllowlist::new("0.0.0.0", 8080, "conformance-001"));
+    let router = setup_router_with_origin_check(state, allowlist);
+    let request = Request::builder()
+        .method(Method::GET)
+        .uri("/api/v1/setup/cloudflare/logs")
+        .header("upgrade", "websocket")
+        .header("connection", "Upgrade")
+        .header("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ==")
+        .header("sec-websocket-version", "13")
+        .body(Body::empty())
+        .unwrap();
+    let response = router.oneshot(request).await.unwrap();
+    // The gate must NOT return 403. Anything else (101 upgrade or a
+    // 4xx from axum's extractor when the synthetic upgrade fails) is
+    // acceptable; what matters is the gate did not block the request.
+    assert_ne!(
+        response.status(),
+        StatusCode::FORBIDDEN,
+        "header-less WebSocket upgrade was incorrectly blocked by the origin gate"
+    );
 }

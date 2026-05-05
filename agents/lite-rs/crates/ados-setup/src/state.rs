@@ -11,6 +11,7 @@
 //! agent on the same board without losing setup state.
 
 use std::collections::BTreeSet;
+use std::io;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -122,18 +123,25 @@ impl StateStore {
         })
     }
 
-    /// Persist via the shared atomic-write helper. Compact JSON, sorted
-    /// keys, trailing newline — byte-for-byte equivalent to Python's
-    /// `json.dumps(obj, sort_keys=True)` followed by `fh.write("\n")`.
+    /// Persist via the shared atomic-write helper. Sorted keys, Python-default
+    /// separators (`, ` between items and `: ` between key/value), trailing
+    /// newline — byte-for-byte equivalent to Python's `json.dump(obj, fh,
+    /// sort_keys=True)` followed by `fh.write("\n")`. The full agent in
+    /// `src/ados/setup/state.py` writes the same byte sequence, so a
+    /// state.json round-trips between Python and Rust without producing
+    /// a diff that would confuse anyone tail-reading the file.
     pub fn save(&self, state: &PersistedState) -> Result<(), StateError> {
         let wire = WireState {
             setup_finalized: state.finalized,
             skipped_steps: state.skipped_steps.iter().cloned().collect(),
         };
-        let value = serde_json::to_value(&wire)?;
-        let mut out = serde_json::to_string(&sort_value(&value))?;
-        out.push('\n');
-        crate::atomic::atomic_write(&self.path, out.as_bytes(), 0o644)?;
+        let value = sort_value(&serde_json::to_value(&wire)?);
+        let mut buf = Vec::new();
+        let mut ser =
+            serde_json::Serializer::with_formatter(&mut buf, PythonDefaultFormatter);
+        Serialize::serialize(&value, &mut ser)?;
+        buf.push(b'\n');
+        crate::atomic::atomic_write(&self.path, &buf, 0o644)?;
         Ok(())
     }
 
@@ -177,6 +185,50 @@ fn sort_value(value: &serde_json::Value) -> serde_json::Value {
     }
 }
 
+/// Custom serde_json formatter that emits Python's default `json.dump`
+/// separators: `", "` between items and `": "` between a key and its
+/// value. serde_json's default formatter uses `","` and `":"` (no
+/// spaces); the standard library's `to_string_pretty` adds newlines and
+/// indentation, which Python only produces when `indent=` is set. This
+/// formatter sits in the gap so the on-disk bytes match what Python
+/// writes by default with `json.dump(obj, fh, sort_keys=True)`.
+///
+/// Scope: this is intentionally narrow. Pairing-state writes
+/// (`pairing.rs`) keep using `to_string_pretty`; only `state.json` needs
+/// the byte-for-byte cross-compat with the Python full agent.
+struct PythonDefaultFormatter;
+
+impl serde_json::ser::Formatter for PythonDefaultFormatter {
+    fn begin_array_value<W>(&mut self, writer: &mut W, first: bool) -> io::Result<()>
+    where
+        W: ?Sized + io::Write,
+    {
+        if first {
+            Ok(())
+        } else {
+            writer.write_all(b", ")
+        }
+    }
+
+    fn begin_object_key<W>(&mut self, writer: &mut W, first: bool) -> io::Result<()>
+    where
+        W: ?Sized + io::Write,
+    {
+        if first {
+            Ok(())
+        } else {
+            writer.write_all(b", ")
+        }
+    }
+
+    fn begin_object_value<W>(&mut self, writer: &mut W) -> io::Result<()>
+    where
+        W: ?Sized + io::Write,
+    {
+        writer.write_all(b": ")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -203,6 +255,41 @@ mod tests {
         store.save(&state).unwrap();
         let loaded = store.load().unwrap();
         assert_eq!(loaded, state);
+    }
+
+    #[test]
+    fn save_emits_python_default_byte_exact_output() {
+        // The doc comment on `save()` claims the on-disk bytes match
+        // Python's `json.dump(obj, fh, sort_keys=True)` exactly. Pin
+        // that down: any future serializer swap that introduces compact
+        // separators (`,`/`:`) or pretty newlines would break this
+        // assertion before any operator notices a state.json diff.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let store = StateStore::new(&path);
+        let mut state = PersistedState {
+            finalized: true,
+            ..Default::default()
+        };
+        // BTreeSet in PersistedState already iterates in sorted order;
+        // the wire-side `sort_value` re-sorts as a defense-in-depth
+        // guard. Pick two known step ids that will clearly land in
+        // alphabetical order on disk.
+        state.skipped_steps.insert("welcome".into());
+        state.skipped_steps.insert("hardware_check".into());
+        store.save(&state).unwrap();
+        let raw = std::fs::read(&path).unwrap();
+        // Python: json.dump({"setup_finalized": True, "skipped_steps":
+        //   ["hardware_check", "welcome"]}, fh, sort_keys=True) +
+        //   fh.write("\n")
+        let expected: &[u8] =
+            b"{\"setup_finalized\": true, \"skipped_steps\": [\"hardware_check\", \"welcome\"]}\n";
+        assert_eq!(
+            raw, expected,
+            "state.json bytes must match Python json.dump default separators verbatim — \
+             got {:?}",
+            String::from_utf8_lossy(&raw)
+        );
     }
 
     #[test]

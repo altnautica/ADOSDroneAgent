@@ -109,6 +109,132 @@ components:
         target_url: { type: string }
         error: { type: string, nullable: true }
 
+    HealthResponse:
+      type: object
+      description: |
+        Liveness probe body for /api/v1/health. Lite-specific: the Python
+        full agent ships a different /healthz shape and is not bound by
+        this schema.
+      required: [status, version]
+      properties:
+        status:
+          type: string
+          enum: [ok, degraded]
+          description: |
+            `ok` when the HTTP server is responsive. `degraded` is
+            reserved for a future phase that wires FC-connectivity
+            tracking; v0.1 of the lite agent always reports `ok` because
+            it has no live FC heartbeat probe.
+        version:
+          type: string
+          description: Agent semver, sourced from the binary's CARGO_PKG_VERSION at build time.
+
+    DiagMqttSection:
+      type: object
+      description: MQTT relay slice of the diag snapshot.
+      required: [broker, connected_recently]
+      properties:
+        broker:
+          type: string
+          description: Configured MQTT broker host (no scheme). Empty string when the agent has not yet been pointed at a broker.
+        connected_recently:
+          type: boolean
+          description: |
+            True when a successful publish landed within the last
+            30 s. Derived from a wall-clock timestamp the publish loop
+            updates on each successful publish.
+
+    DiagCloudRelaySection:
+      type: object
+      description: Convex cloud-relay slice of the diag snapshot.
+      required: [convex_url, consecutive_failures]
+      properties:
+        convex_url:
+          type: string
+          description: Configured Convex URL. Empty string when the agent has not yet been pointed at a relay.
+        last_heartbeat_at:
+          type: integer
+          format: int64
+          nullable: true
+          description: |
+            UNIX seconds of the last heartbeat that returned 2xx.
+            `null` when no heartbeat has ever succeeded since the
+            agent started.
+        consecutive_failures:
+          type: integer
+          minimum: 0
+          description: |
+            Heartbeat failures since the last success. Saturates at
+            `u32::MAX` so a long outage cannot wrap.
+
+    DiagMavlinkSection:
+      type: object
+      description: MAVLink router slice of the diag snapshot.
+      required: [port]
+      properties:
+        port:
+          type: string
+          description: Configured FC serial port (e.g. `/dev/serial0`). Empty string when no port is configured.
+        frame_rate_recent:
+          type: number
+          format: float
+          nullable: true
+          description: |
+            Recent FC frame rate in Hz. `null` at v0.1 — the lite agent
+            does not yet wire a frame-rate estimator. Populated by a
+            later phase.
+
+    DiagResponse:
+      type: object
+      description: |
+        Diagnostic snapshot body for /api/v1/diag. Lite-specific. Field
+        names are snake_case to match the diag handler's JSON output.
+        Pair codes, API keys, and Cloudflare Tunnel tokens are NEVER
+        included in this surface.
+      required:
+        - version
+        - uptime_seconds
+        - device_id
+        - paired
+        - runtime_mode
+        - mqtt
+        - cloud_relay
+        - mavlink
+      properties:
+        version:
+          type: string
+          description: Agent semver from CARGO_PKG_VERSION.
+        uptime_seconds:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Seconds since the agent process booted.
+        device_id:
+          type: string
+          description: Stable device identifier read from agent.yaml. Empty string when agent.yaml is missing or malformed.
+        paired:
+          type: boolean
+          description: True when pairing.json contains a valid api_key.
+        runtime_mode:
+          type: string
+          enum: [lite, full]
+          description: Which agent flavor is reporting. Always `lite` for backends that serve this exact response shape.
+        rss_mb:
+          type: integer
+          format: int64
+          nullable: true
+          minimum: 0
+          description: |
+            Process resident-set size in megabytes, read live from
+            `/proc/self/status`. `null` on non-Linux hosts (dev mac
+            builds) where /proc is unavailable.
+        mqtt:
+          $ref: "#/components/schemas/DiagMqttSection"
+        cloud_relay:
+          $ref: "#/components/schemas/DiagCloudRelaySection"
+        mavlink:
+          $ref: "#/components/schemas/DiagMavlinkSection"
+
 paths:
   /status:
     get:
@@ -272,3 +398,62 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/SetupStatus" }
+
+  # ---------------------------------------------------------------------------
+  # Operability surface (lite-specific extension).
+  #
+  # The two routes below sit OUTSIDE the /api/v1/setup/* tree because they
+  # are agent-wide diagnostics rather than wizard mutations. They are a
+  # lite-specific extension: the Python full agent ships a separate
+  # /healthz surface and does not expose this exact shape. Backends are
+  # not required to implement these routes; if implemented, the response
+  # bodies must match the schemas below so a single Mission Control
+  # client can read either backend without branching.
+  # ---------------------------------------------------------------------------
+
+  /api/v1/health:
+    get:
+      summary: Liveness probe (lite-specific)
+      description: |
+        Returns 200 with `{"status": "ok", "version": ...}` when the HTTP
+        server is responsive. No authentication required: the route is
+        deliberately outside the same-origin gate so an external
+        monitoring agent on a neighbouring host can hit it without
+        forging an Origin header. The route exposes no operator-controlled
+        mutation surface, so the open posture is safe.
+
+        Lite-specific. Backends are not required to implement; if
+        implemented, the response shape must match this schema. The
+        Python full agent ships /healthz separately with its own shape,
+        which is not a contract requirement for `lite`.
+      responses:
+        "200":
+          description: Agent is responsive
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/HealthResponse" }
+
+  /api/v1/diag:
+    get:
+      summary: Diagnostic dump for operator debugging (lite-specific)
+      description: |
+        Wider than `/health`: surfaces uptime, runtime mode, identity, and
+        best-effort live counters for the cloud relay and MAVLink router.
+        Fields the agent does not yet track (`mavlink.frame_rate_recent`)
+        appear as `null` so future phases can populate them without
+        breaking consumers.
+
+        Sits behind the same-origin gate (loopback or matching Host).
+        Pair codes, API keys, and Cloudflare Tunnel tokens are
+        deliberately omitted from this surface — operators get enough
+        detail to debug connectivity without the response carrying
+        bearer credentials into a journalctl scrape.
+
+        Lite-specific. Backends are not required to implement; if
+        implemented, the response shape must match this schema.
+      responses:
+        "200":
+          description: Diagnostic snapshot
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DiagResponse" }
