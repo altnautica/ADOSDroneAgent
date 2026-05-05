@@ -1,0 +1,183 @@
+# Lightweight Rust agent release pipeline.
+#
+# Triggers:
+#   - push to main          → rolling 'lite-agent-main' GitHub Release (replaced each push)
+#   - push of tag 'lite-v*' → permanent stable GitHub Release
+#
+# Build matrix:
+#   armv7-unknown-linux-musleabihf  — primary low-RAM target (Luckfox class)
+#   aarch64-unknown-linux-gnu       — Pi Zero 2 W, Pi 4B-class glibc
+#   aarch64-unknown-linux-musl      — generic aarch64 musl
+#   x86_64-unknown-linux-musl       — dev-container testing
+#
+# Each artifact is signed with Ed25519 via minisign. The public key is
+# vendored in scripts/install-lite.sh so install paths verify before
+# extracting. SHA256SUMS is generated for fast integrity checks.
+
+name: lite-agent-release
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "agents/lite-rs/**"
+      - ".github/workflows/lite-agent-release.yml"
+  push:
+    tags:
+      - "lite-v*"
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: build (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: armv7-unknown-linux-musleabihf
+            short: armv7-musl
+          - target: aarch64-unknown-linux-gnu
+            short: aarch64-gnu
+          - target: aarch64-unknown-linux-musl
+            short: aarch64-musl
+          - target: x86_64-unknown-linux-musl
+            short: x86_64-musl
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross
+        run: cargo install cross --git https://github.com/cross-rs/cross --rev v0.2.5 --locked
+
+      - name: Install minisign
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y minisign
+
+      - name: Resolve version
+        id: version
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/lite-v* ]]; then
+            VERSION="${GITHUB_REF#refs/tags/lite-v}"
+          else
+            # Rolling main: read Cargo.toml workspace.package.version + short SHA
+            CARGO_VERSION=$(grep -m1 '^version\s*=' agents/lite-rs/Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')
+            SHORT_SHA=$(git rev-parse --short HEAD)
+            VERSION="${CARGO_VERSION}-main-${SHORT_SHA}"
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Resolved version: ${VERSION}"
+
+      - name: Cross-compile release binary
+        working-directory: agents/lite-rs
+        run: cross build --release --target ${{ matrix.target }} -p ados-agent-lite
+
+      - name: Stage artifact
+        id: stage
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          TARGET="${{ matrix.target }}"
+          STAGING="$(mktemp -d)"
+          BIN_NAME="ados-agent-lite"
+          ARTIFACT="ados-agent-lite-${VERSION}-${TARGET}.tar.gz"
+
+          install -m 0755 \
+            "agents/lite-rs/target/${TARGET}/release/${BIN_NAME}" \
+            "${STAGING}/${BIN_NAME}"
+          install -m 0644 LICENSE "${STAGING}/LICENSE" 2>/dev/null || true
+          install -m 0644 agents/lite-rs/README.md "${STAGING}/README.md" 2>/dev/null || true
+
+          tar -czf "${ARTIFACT}" -C "${STAGING}" .
+          sha256sum "${ARTIFACT}" > "${ARTIFACT}.sha256"
+          echo "artifact=${ARTIFACT}" >> "$GITHUB_OUTPUT"
+
+      - name: Sign artifact (minisign Ed25519)
+        env:
+          MINISIGN_KEY: ${{ secrets.LITE_AGENT_MINISIGN_KEY }}
+          MINISIGN_PASSWORD: ${{ secrets.LITE_AGENT_MINISIGN_PASSWORD }}
+        if: ${{ env.MINISIGN_KEY != '' }}
+        run: |
+          ARTIFACT="${{ steps.stage.outputs.artifact }}"
+          KEY_FILE="$(mktemp)"
+          printf '%s' "${MINISIGN_KEY}" > "${KEY_FILE}"
+          echo "${MINISIGN_PASSWORD}" | minisign -S -s "${KEY_FILE}" -m "${ARTIFACT}"
+          shred -u "${KEY_FILE}"
+          ls -l "${ARTIFACT}.minisig"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lite-agent-${{ matrix.short }}
+          path: |
+            ${{ steps.stage.outputs.artifact }}
+            ${{ steps.stage.outputs.artifact }}.sha256
+            ${{ steps.stage.outputs.artifact }}.minisig
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    name: publish release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Build SHA256SUMS
+        working-directory: artifacts
+        run: |
+          # Single SUMS file across all matrix targets.
+          rm -f SHA256SUMS
+          for f in ados-agent-lite-*.tar.gz; do
+            [ -e "$f" ] || continue
+            sha256sum "$f" >> SHA256SUMS
+          done
+          cat SHA256SUMS
+
+      - name: Determine release metadata
+        id: meta
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/lite-v* ]]; then
+            echo "tag=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+            echo "name=Lightweight agent ${GITHUB_REF#refs/tags/lite-v}" >> "$GITHUB_OUTPUT"
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=lite-agent-main" >> "$GITHUB_OUTPUT"
+            echo "name=Lightweight agent (rolling main)" >> "$GITHUB_OUTPUT"
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.meta.outputs.tag }}
+          name: ${{ steps.meta.outputs.name }}
+          prerelease: ${{ steps.meta.outputs.prerelease }}
+          files: |
+            artifacts/ados-agent-lite-*.tar.gz
+            artifacts/ados-agent-lite-*.sha256
+            artifacts/ados-agent-lite-*.minisig
+            artifacts/SHA256SUMS
+          body: |
+            Prebuilt static binaries of the lightweight Rust agent.
+
+            Verify before installing:
+              minisign -V -p <vendored-public-key> -m <artifact.tar.gz>
+              sha256sum -c SHA256SUMS
+
+            Installation: see scripts/install-lite.sh in the repository.

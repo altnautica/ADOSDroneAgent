@@ -29,6 +29,28 @@ export NEEDRESTART_SUSPEND=1
 export DEBIAN_FRONTEND=noninteractive
 export DEBCONF_NOWARNINGS=yes
 
+# Profile dispatch. When ADOS_PROFILE=lite-rs is set, exec the lightweight
+# Rust agent installer instead of the Python full-agent path. The lite
+# installer downloads a prebuilt signed binary from GitHub Releases; the
+# Python installer below remains the default for full-feature deployments
+# on Pi 4B / Pi 5 / Rock 5C / 1 GB+ class boards.
+if [ "${ADOS_PROFILE:-}" = "lite-rs" ] || [ "${ADOS_PROFILE:-}" = "lite" ]; then
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)" || SCRIPT_DIR=""
+    LITE_INSTALLER=""
+    if [ -n "${SCRIPT_DIR}" ] && [ -x "${SCRIPT_DIR}/install-lite.sh" ]; then
+        LITE_INSTALLER="${SCRIPT_DIR}/install-lite.sh"
+    else
+        # Curl-pipe install: the script ran from stdin and the sibling
+        # script is not on disk. Fetch it from main.
+        LITE_INSTALLER="$(mktemp)"
+        curl -fsSL \
+            "https://raw.githubusercontent.com/altnautica/ADOSDroneAgent/main/scripts/install-lite.sh" \
+            -o "${LITE_INSTALLER}"
+        chmod +x "${LITE_INSTALLER}"
+    fi
+    exec "${LITE_INSTALLER}" "$@"
+fi
+
 REPO_URL="https://github.com/altnautica/ADOSDroneAgent.git"
 BRANCH_NAME=""  # optional feature branch for --branch flag
 INSTALL_DIR="/opt/ados"
