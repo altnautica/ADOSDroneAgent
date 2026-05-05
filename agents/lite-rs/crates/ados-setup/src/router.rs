@@ -41,12 +41,6 @@ impl SetupState {
 
 pub fn setup_router(state: Arc<SetupState>) -> Router {
     Router::new()
-        // Universal setup webapp (web/setup/) embedded at compile time.
-        // Operators visit http://<board-ip>:8080/setup/ in a browser.
-        .route("/", get(webapp::redirect_root))
-        .route("/setup", get(webapp::serve_index))
-        .route("/setup/", get(webapp::serve_index))
-        .route("/setup/*path", get(webapp::serve_asset))
         .route("/api/v1/setup/status", get(handlers::get_status))
         .route("/api/v1/setup/profile", post(handlers::post_profile))
         .route("/api/v1/setup/hardware-check", get(handlers::get_hardware_check))
@@ -73,5 +67,10 @@ pub fn setup_router(state: Arc<SetupState>) -> Router {
             post(handlers::post_skip),
         )
         .route("/api/v1/setup/reset", post(handlers::post_reset))
+        // Fallback: any non-API path serves the embedded webapp. The
+        // HTML uses absolute paths (/app.js, /style.css, /brand.svg)
+        // so we mount the static webapp at the root, matching the
+        // Python full agent's StaticFiles behavior.
+        .fallback(get(webapp::serve_request))
         .with_state(state)
 }

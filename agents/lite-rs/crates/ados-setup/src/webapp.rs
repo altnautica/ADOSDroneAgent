@@ -15,9 +15,9 @@
 //! rootfs serves the entire wizard.
 
 use axum::{
-    extract::Path,
+    extract::Request,
     http::{header, StatusCode},
-    response::{IntoResponse, Redirect, Response},
+    response::{IntoResponse, Response},
 };
 use include_dir::{include_dir, Dir};
 
@@ -34,53 +34,63 @@ use include_dir::{include_dir, Dir};
 // build-time fetch.
 static SETUP_WEBAPP: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/web-setup");
 
-/// `GET /` redirects to the wizard.
-pub async fn redirect_root() -> Redirect {
-    Redirect::temporary("/setup/")
-}
-
-/// `GET /setup` and `GET /setup/` both serve `index.html`.
-pub async fn serve_index() -> Response {
-    serve_path("index.html").await
-}
-
-/// `GET /setup/{path}` serves a file from the embedded webapp directory.
-pub async fn serve_asset(Path(path): Path<String>) -> Response {
-    serve_path(&path).await
-}
-
-async fn serve_path(path: &str) -> Response {
-    // Strip a leading slash (from path-segment captures) + reject
-    // path-traversal attempts (`..`) so a curl with a hostile URL can
-    // never escape the embedded dir.
+/// Fallback handler — serves any non-API request from the embedded
+/// webapp dir. Mirrors the Python full agent's `StaticFiles` mount at
+/// the root so the same `web/setup/index.html` works unchanged
+/// (HTML uses absolute paths like `/style.css`, `/app.js`).
+///
+/// Behavior:
+/// - `/` → `web-setup/index.html`
+/// - `/<asset>` → `web-setup/<asset>` if it exists
+/// - everything else → `web-setup/index.html` (SPA-style fallback so
+///   client-side routes like `/setup` and `/network` still load the
+///   wizard shell, which then dispatches via JavaScript)
+pub async fn serve_request(req: Request) -> Response {
+    let path = req.uri().path();
     let cleaned = path.trim_start_matches('/');
+
+    // Defense-in-depth: reject any path-traversal attempts before we
+    // hit the embedded dir lookup.
     if cleaned.contains("..") {
         return (StatusCode::BAD_REQUEST, "invalid path").into_response();
     }
-    // Empty path resolves to index.html.
-    let lookup_path = if cleaned.is_empty() {
+
+    // API namespace stays strict — an unmatched /api/* route is a 404
+    // that should not be swallowed by the webapp fallback. The wizard
+    // never lives under /api/, only the JSON + WS surface does.
+    if path.starts_with("/api/") {
+        return (StatusCode::NOT_FOUND, "not found").into_response();
+    }
+
+    // Empty path or trailing-slash-only paths serve index.html.
+    let lookup_path = if cleaned.is_empty() || cleaned.ends_with('/') {
         "index.html"
     } else {
         cleaned
     };
 
-    match SETUP_WEBAPP.get_file(lookup_path) {
+    // Try the requested asset; if missing, fall back to index.html so
+    // the JavaScript dispatcher in app.js can route on its own.
+    let file = SETUP_WEBAPP
+        .get_file(lookup_path)
+        .or_else(|| SETUP_WEBAPP.get_file("index.html"));
+
+    match file {
         Some(file) => {
             let body = file.contents();
-            let mime = guess_mime(lookup_path);
+            let mime = guess_mime(file.path().to_string_lossy().as_ref());
             (
                 StatusCode::OK,
                 [
                     (header::CONTENT_TYPE, mime),
-                    // Webapp assets are static + signed via the binary
-                    // signature itself. A 5-min cache is reasonable.
+                    // Webapp assets are tied to the binary signature.
                     (header::CACHE_CONTROL, "public, max-age=300"),
                 ],
                 body,
             )
                 .into_response()
         }
-        None => (StatusCode::NOT_FOUND, format!("not found: {lookup_path}")).into_response(),
+        None => (StatusCode::NOT_FOUND, "not found").into_response(),
     }
 }
 
