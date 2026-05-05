@@ -1155,10 +1155,6 @@ function renderMavlinkStepInline(status) {
   };
   const replace = (slot, opts) => slot.replaceChildren(chip({ size: "sm", ...opts }));
 
-  const capsContainer = el("div", { className: "live-row-chips", style: { justifyContent: "flex-start" } });
-  const capsObserved = new Set();
-  capsContainer.appendChild(chip({ variant: "muted", label: "Listening for AUTOPILOT_VERSION…", size: "sm" }));
-
   // Raw frame console reuses the same WebSocket. The streamConsole helper
   // does ANSI strip + autoscroll + reconnect; we provide a parser hook
   // that turns binary MAVLink frames into one-line summaries.
@@ -1212,15 +1208,6 @@ function renderMavlinkStepInline(status) {
       return null; // attitude is too chatty for the console
     }
     if (decoded.type === "autopilot_version") {
-      capsObserved.clear();
-      capsContainer.replaceChildren();
-      decoded.supported.forEach((label) => {
-        capsObserved.add(label);
-        capsContainer.appendChild(chip({ variant: "ok", label, size: "sm" }));
-      });
-      if (capsObserved.size === 0) {
-        capsContainer.appendChild(chip({ variant: "warn", label: "FC reported zero capabilities", size: "sm" }));
-      }
       return `${ts}  AUTOPILOT_VERSION  ${decoded.supported.length} capabilities`;
     }
     return `${ts}  ${observed(frame.msgId)}`;
@@ -1234,7 +1221,9 @@ function renderMavlinkStepInline(status) {
     }
   }, 2000);
 
-  const console_ = streamConsole({ wsUrl, height: 280, parser });
+  // Short console: this is a "data is flowing" indicator, not a full
+  // analyser. The standalone /mavlink page is for that.
+  const console_ = streamConsole({ wsUrl, height: 120, parser });
   wizardOnDispose(() => { if (console_.dispose) console_.dispose(); });
   wizardOnDispose(() => clearInterval(stalenessTimer));
 
@@ -1259,11 +1248,6 @@ function renderMavlinkStepInline(status) {
           liveRow({ label: "Attitude", chips: [slots.attitude] }),
         ),
       ),
-    }),
-    card({
-      title: "Capabilities",
-      subtitle: "What this firmware advertises in AUTOPILOT_VERSION.",
-      body: el("div", { className: "card-pad" }, capsContainer),
     }),
     card({
       title: "MAVLink stream",
