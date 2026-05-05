@@ -69,6 +69,24 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   blank screen on Luckfox. Fixed with a root-mount fallback in the
   Rust router; CI parity check guards future drift.
 
+### Security
+- Bumped `rumqttc` from 0.24 to 0.25.1, which pulls in `tokio-rustls`
+  0.26 -> `rustls` 0.23 -> `rustls-webpki` 0.103.13. The TLS
+  verification path no longer uses the vulnerable 0.102.8 line.
+- Residual: `cargo audit` still reports four advisories
+  (RUSTSEC-2026-0049 / 0098 / 0099 / 0104) plus an unmaintained
+  warning on rustls-pemfile 2.2.0 (RUSTSEC-2025-0134) because rumqttc
+  0.25.1 carries direct deps pinned to those exact versions for an
+  Error type re-export gated on `use-rustls-no-provider`. The variant
+  is never constructed at runtime, so the residual is unreachable in
+  the lite agent's MQTT-over-TLS path. A `[patch.crates-io]` redirect
+  to 0.103.13 was attempted and rejected by the resolver (rumqttc's
+  `^0.102.8` semver constraint is not satisfiable by 0.103.x and
+  there is no 0.102.x backport release). Tracking upstream at
+  https://github.com/bytebeamio/rumqttc; a future rumqttc bump will
+  drop the residuals automatically. See `Cargo.toml` block above
+  `[profile.release]` for the technical context.
+
 ### Test
 - 88 tests across 4 crates (ados-mavlink 6, ados-cloud 6, ados-setup
   unit 56, ados-setup integration 16, ados-agent-lite 4). All green.

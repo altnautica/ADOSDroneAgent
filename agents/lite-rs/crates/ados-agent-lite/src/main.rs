@@ -899,9 +899,7 @@ fn build_setup_status(
         .load()
         .unwrap_or_default();
     let paired = pairing_state.is_paired();
-    let next_action = if persisted.finalized {
-        "ready"
-    } else if paired {
+    let next_action = if persisted.finalized || paired {
         "ready"
     } else {
         "pair"

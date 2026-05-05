@@ -96,7 +96,7 @@ fn read_cpuinfo_hardware() -> Option<String> {
     let raw = std::fs::read_to_string("/proc/cpuinfo").ok()?;
     for line in raw.lines() {
         if let Some(rest) = line.strip_prefix("Hardware") {
-            if let Some(value) = rest.splitn(2, ':').nth(1) {
+            if let Some((_, value)) = rest.split_once(':') {
                 return Some(value.trim().to_string());
             }
         }
@@ -109,7 +109,6 @@ fn read_meminfo_total_kb() -> Option<u64> {
     for line in raw.lines() {
         if let Some(rest) = line.strip_prefix("MemTotal:") {
             return rest
-                .trim()
                 .split_whitespace()
                 .next()
                 .and_then(|n| n.parse().ok());

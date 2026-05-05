@@ -31,7 +31,7 @@ tokio-tungstenite = "0.21"
 # reqwest; we do not pin a direct rustls version here to avoid duplicate
 # resolutions across the dep tree. Add a direct dep when a crate
 # constructs ClientConfig itself.
-rumqttc = { version = "0.24", default-features = false, features = ["use-rustls"] }
+rumqttc = { version = "0.25", default-features = false, features = ["use-rustls"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 
 # MAVLink dialect codegen — added when the router needs typed message
@@ -62,6 +62,34 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "serd
 # System metrics (cpu, memory, temperature) for the heartbeat
 # enrichment. Cross-platform; reads /proc on Linux, sysctl on macOS.
 sysinfo = { version = "0.32", default-features = false, features = ["system"] }
+
+# Residual rustls-webpki 0.102.8 advisory chain
+# ---------------------------------------------
+# `cargo audit` reports four advisories against rustls-webpki 0.102.8
+# (RUSTSEC-2026-0049 / 0098 / 0099 / 0104) plus an unmaintained warning
+# on rustls-pemfile 2.2.0 (RUSTSEC-2025-0134). All five trace through
+# `rumqttc 0.25.1`, which carries direct deps pinned to those exact
+# versions.
+#
+# **The actual TLS verification path is NOT vulnerable.** Real cert /
+# CRL / name-constraint validation runs through `tokio-rustls 0.26 ->
+# rustls 0.23 -> rustls-webpki 0.103.13` (the patched line). The
+# 0.102.8 copy is in the binary because rumqttc's `tls.rs` declares a
+# `WebPki(#[from] webpki::Error)` Error variant gated on
+# `use-rustls-no-provider`; that variant is never constructed at
+# runtime (errors surface as `rustls::Error`), but the type re-export
+# alone is enough for cargo's resolver to keep the crate.
+#
+# A `[patch.crates-io]` redirect to 0.103 was attempted and rejected
+# by the resolver: rumqttc's `^0.102.8` semver constraint cannot be
+# satisfied by any 0.103.x version, and there is no 0.102.x backport
+# release that carries the fixes. The clean fix lands when rumqttc
+# bumps its rustls-webpki dep upstream (tracked at
+# https://github.com/bytebeamio/rumqttc — wave at the `[Security]`
+# section in `agents/lite-rs/CHANGELOG.md` for the residual).
+#
+# Do not enable a partial fix that would either downgrade rumqttc
+# or disable TLS — this constraint is non-negotiable.
 
 [profile.release]
 opt-level = "z"

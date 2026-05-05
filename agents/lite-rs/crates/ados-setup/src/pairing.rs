@@ -283,10 +283,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("pairing.json");
         let store = PairingStore::new(&path);
-        let mut prior = PairingState::default();
-        prior.paired = true;
-        prior.api_key = Some("ados_old".into());
-        prior.owner_id = Some("user-x".into());
+        let prior = PairingState {
+            paired: true,
+            api_key: Some("ados_old".into()),
+            owner_id: Some("user-x".into()),
+            ..Default::default()
+        };
         store.save(&prior).unwrap();
         store.set_code("xyz123").unwrap();
         let loaded = store.load().unwrap();
@@ -350,10 +352,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("pairing.json");
         let store = PairingStore::new(&path);
-        let mut state = PairingState::default();
-        state.paired = true;
-        state.api_key = Some("ados_test".into());
-        state.owner_id = Some("user".into());
+        let state = PairingState {
+            paired: true,
+            api_key: Some("ados_test".into()),
+            owner_id: Some("user".into()),
+            ..Default::default()
+        };
         store.save(&state).unwrap();
         let raw = std::fs::read_to_string(&path).unwrap();
         // Pretty printed: contains a newline + 2-space indent before "api_key" et al.
@@ -438,9 +442,11 @@ mod tests {
         let path = dir.path().join("pairing.json");
         let store = PairingStore::new(&path);
         // Seed an "old" code by writing one with code_created_at far in the past.
-        let mut state = PairingState::default();
-        state.pairing_code = Some("ABCDEF".into());
-        state.code_created_at = Some(0.0); // way pre-1970-equivalent in TTL terms
+        let state = PairingState {
+            pairing_code: Some("ABCDEF".into()),
+            code_created_at: Some(0.0), // way pre-1970-equivalent in TTL terms
+            ..Default::default()
+        };
         store.save(&state).unwrap();
         // New call should regenerate (because (now - 0) > 900 seconds).
         let fresh = store.get_or_create_code().unwrap();
@@ -453,13 +459,14 @@ mod tests {
         // Both secret-bearing fields must NOT appear in the Debug
         // rendering. A future `tracing::debug!(?state)` would otherwise
         // leak the per-device cloud relay bearer into journalctl.
-        let mut state = PairingState::default();
-        state.pairing_code = Some("AB23X4".into());
-        state.code_created_at = Some(1735660000.0);
-        state.paired = true;
-        state.api_key = Some("ados_supersecretliveapikey_neverlogthis".into());
-        state.owner_id = Some("user-abc".into());
-        state.paired_at = Some(1735660030.0);
+        let state = PairingState {
+            pairing_code: Some("AB23X4".into()),
+            code_created_at: Some(1735660000.0),
+            paired: true,
+            api_key: Some("ados_supersecretliveapikey_neverlogthis".into()),
+            owner_id: Some("user-abc".into()),
+            paired_at: Some(1735660030.0),
+        };
 
         let rendered = format!("{state:?}");
 

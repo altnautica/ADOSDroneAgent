@@ -172,8 +172,10 @@ mod tests {
     fn save_then_load_round_trips() {
         let dir = tempfile::tempdir().unwrap();
         let store = StateStore::new(dir.path().join("state.json"));
-        let mut state = PersistedState::default();
-        state.finalized = true;
+        let mut state = PersistedState {
+            finalized: true,
+            ..Default::default()
+        };
         state.skipped_steps.insert("hardware_check".into());
         state.skipped_steps.insert("video".into());
         store.save(&state).unwrap();
@@ -185,8 +187,10 @@ mod tests {
     fn save_emits_sorted_keys_and_trailing_newline() {
         let dir = tempfile::tempdir().unwrap();
         let store = StateStore::new(dir.path().join("state.json"));
-        let mut state = PersistedState::default();
-        state.finalized = true;
+        let mut state = PersistedState {
+            finalized: true,
+            ..Default::default()
+        };
         state.skipped_steps.insert("video".into());
         state.skipped_steps.insert("hardware_check".into());
         store.save(&state).unwrap();

@@ -2087,14 +2087,42 @@ function renderDisplayStep(status, onMutate) {
         },
       }, tail.join("\n") || "(no output yet)"),
       j.status === "done"
-        ? el("p", { className: "muted-line", style: { marginTop: "10px" } },
-            "Reboot to bind the panel: ",
-            el("code", {}, "sudo reboot"),
-            ".",
+        ? el("div", { style: { marginTop: "10px", display: "flex", gap: "10px", alignItems: "center", flexWrap: "wrap" } },
+            el("p", { className: "muted-line", style: { margin: 0 } },
+              "Reboot to bind the panel:",
+            ),
+            el("button", {
+              type: "button",
+              className: "btn primary",
+              text: "Reboot now",
+              onclick: async (ev) => {
+                ev.target.disabled = true;
+                ev.target.textContent = "Rebooting…";
+                try {
+                  await apiFetch("/api/v1/setup/reboot", { method: "POST" });
+                  jobSlot.replaceChildren(
+                    el("p", { className: "muted-line", style: { marginTop: "8px" } },
+                      "Rebooting now. Refresh this page in ~60 seconds — the wizard will pick up where it left off.",
+                    ),
+                  );
+                } catch (err) {
+                  console.error("reboot request failed:", err);
+                  ev.target.disabled = false;
+                  ev.target.textContent = "Reboot now";
+                  jobSlot.appendChild(
+                    el("p", { className: "err-line", style: { marginTop: "10px" } },
+                      `Reboot request failed: ${err.message || err}. Reboot manually with `,
+                      el("code", {}, "sudo reboot"),
+                      ".",
+                    ),
+                  );
+                }
+              },
+            }),
           )
         : null,
       j.status === "failed"
-        ? el("p", { className: "err-line", style: { marginTop: "10px" } },
+        ? el("p", { className: "err-line", style: { marginTop: "10px", whiteSpace: "pre-wrap" } },
             "Install failed. Check the log above and rerun.",
           )
         : null,
@@ -2191,11 +2219,48 @@ function renderDisplayStep(status, onMutate) {
   const refreshOptions = async () => {
     options = await apiFetch("/api/v1/setup/display/options");
     if (!options) return;
+
+    // Selection precedence:
+    //   1. operator already clicked a radio in this session (preserved)
+    //   2. current display.conf names a configured display (rerun-the-wizard case)
+    //   3. first non-"none" supported display for this board
+    //      → makes the common case "click Install" instead of "scan list, click radio, click Install"
     if (!selected && options.current && options.current.display_id) {
       selected = options.current.display_id;
     }
-    currentSlot.replaceChildren(fmtCurrent(options.current));
-    pickerContainer.replaceChildren(...(options.supported || []).map(pickerRow));
+    if (!selected) {
+      const firstReal = (options.supported || []).find(
+        (o) => o && o.id && o.id !== "none",
+      );
+      if (firstReal) selected = firstReal.id;
+    }
+
+    // Empty-state fallback: when the agent hasn't written /etc/ados/display.conf
+    // yet, fmtCurrent returns null. Replacing children with null produces literal
+    // "null" text in some browsers — wrap with an explicit empty-state node.
+    const currentNode = fmtCurrent(options.current);
+    currentSlot.replaceChildren(
+      currentNode ?? el("p", {
+        className: "muted-line",
+        style: { margin: "0 0 4px 0" },
+      },
+        "No display configured yet. Pick a panel below and click Install — the agent will provision the device-tree overlay and prompt you to reboot.",
+      ),
+    );
+
+    // Defensive: if displays.supported is empty (board has no profile), tell
+    // the operator instead of rendering an empty list.
+    const supported = options.supported || [];
+    if (supported.length === 0) {
+      pickerContainer.replaceChildren(
+        el("p", { className: "muted-line", style: { padding: "12px" } },
+          "This board has no auto-detect display profile. Skip this step or open an issue at github.com/altnautica/ADOSDroneAgent.",
+        ),
+      );
+    } else {
+      pickerContainer.replaceChildren(...supported.map(pickerRow));
+    }
+
     installBtn.disabled = !selected || (job && job.status === "running");
   };
 

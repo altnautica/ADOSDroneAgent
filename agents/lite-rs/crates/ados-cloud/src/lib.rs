@@ -492,17 +492,45 @@ async fn send_heartbeat(
     started_at: Instant,
 ) -> Result<(), CloudError> {
     let url = format!("{}/agent/status", config.convex_url.trim_end_matches('/'));
-    // Heartbeat body. Static fields (board / soc / arch / ramMb /
-    // hostname) come from `agent_meta` populated at agent startup.
-    // Dynamic fields (cpuPct / memUsedMb / memTotalMb / socTempC) come
-    // from a fresh sysmetrics tick. Network identity (lastIp, mdnsHost)
-    // is re-detected each tick so a DHCP renewal flips the GCS deep-link
-    // without an agent restart.
+    let body = build_heartbeat_body(config, started_at);
+    let response = client
+        .post(&url)
+        .header("X-ADOS-Key", api_key)
+        .json(&body)
+        .send()
+        .await?;
+    tracing::debug!(status = %response.status(), "heartbeat sent");
+    Ok(())
+}
+
+/// Builds the heartbeat JSON body emitted to `/agent/status`.
+///
+/// Static fields (board / soc / arch / ramMb / hostname) come from
+/// `agent_meta` populated at agent startup. Dynamic fields (cpuPct /
+/// memUsedMb / memTotalMb / socTempC) come from a fresh sysmetrics
+/// tick. Network identity (lastIp, mdnsHost) is re-detected each tick
+/// so a DHCP renewal flips the GCS deep-link without an agent restart.
+///
+/// The lite agent currently emits 16 of the 26 fields documented in
+/// `proto/cloud/openapi.yaml::AgentHeartbeat`. The remaining 10 fields
+/// (video state, disk usage, cpu/memory history, peripherals, remote
+/// access, fcPort/fcBaud) require subsystems the lite binary does not
+/// host yet and are deferred to the video-pipeline mission.
+///
+/// The `services` array is a static three-element snapshot because the
+/// lite agent is a single tokio process: it does not supervise
+/// separate systemd units the way the Python agent does, so the
+/// optional cpuPercent/memoryMb/uptimeSeconds/pid per-entry fields are
+/// not meaningful here.
+///
+/// `fcConnected` is hardcoded to `false` until a live MAVLink router
+/// probe is wired in alongside the FC heartbeat work.
+fn build_heartbeat_body(config: &CloudConfig, started_at: Instant) -> serde_json::Value {
     let metrics = sysmetrics::collect();
     let uptime_secs = started_at.elapsed().as_secs();
     let meta = config.agent_meta.clone().unwrap_or_default();
 
-    let body = serde_json::json!({
+    serde_json::json!({
         "deviceId": config.device_id,
         "version": env!("CARGO_PKG_VERSION"),
         "agentVersion": env!("CARGO_PKG_VERSION"),
@@ -524,15 +552,18 @@ async fn send_heartbeat(
         "memoryUsedMb": metrics.mem_used_mb,
         "memoryTotalMb": metrics.mem_total_mb,
         "temperature": metrics.soc_temp_c,
-    });
-    let response = client
-        .post(&url)
-        .header("X-ADOS-Key", api_key)
-        .json(&body)
-        .send()
-        .await?;
-    tracing::debug!(status = %response.status(), "heartbeat sent");
-    Ok(())
+        // Static composition snapshot. The lite agent is a single
+        // process; these names map to internal tokio tasks rather
+        // than systemd units.
+        "services": [
+            {"name": "mavlink-router", "status": "running", "category": "system"},
+            {"name": "cloud-client", "status": "running", "category": "system"},
+            {"name": "http-api", "status": "running", "category": "system"}
+        ],
+        // No live FC heartbeat probe at v0.1; flips dynamic when the
+        // MAVLink router exposes connection state.
+        "fcConnected": false,
+    })
 }
 
 #[cfg(test)]
@@ -587,6 +618,53 @@ mod tests {
         assert!(!serialized.contains("agentMeta"));
         let restored: CloudConfig = serde_json::from_str(&serialized).unwrap();
         assert!(restored.agent_meta.is_none());
+    }
+
+    #[test]
+    fn heartbeat_body_includes_services_and_fc_connected() {
+        // Defense-in-depth: the GCS fleet card relies on these two
+        // fields to render the services panel and the FC-connected
+        // badge. A future refactor that drops them silently would
+        // regress the GCS without surfacing in unit-test output
+        // unless we pin the shape here.
+        let config = CloudConfig {
+            device_id: "test-device".into(),
+            mqtt_broker: "broker.example".into(),
+            mqtt_port: 8883,
+            mqtt_use_tls: true,
+            convex_url: "https://relay.example".into(),
+            pairing_path: PathBuf::from("/etc/ados/pairing.json"),
+            agent_meta: None,
+        };
+        let body = build_heartbeat_body(&config, Instant::now());
+
+        // fcConnected is the static `false` placeholder until a live
+        // MAVLink router probe lands.
+        assert_eq!(body.get("fcConnected"), Some(&serde_json::Value::Bool(false)));
+
+        // services is a 3-element array; each entry has name + status
+        // + category, matching the OpenAPI schema.
+        let services = body
+            .get("services")
+            .and_then(|v| v.as_array())
+            .expect("services field is an array");
+        assert_eq!(services.len(), 3);
+        let names: Vec<&str> = services
+            .iter()
+            .filter_map(|s| s.get("name").and_then(|n| n.as_str()))
+            .collect();
+        assert_eq!(names, vec!["mavlink-router", "cloud-client", "http-api"]);
+        for entry in services {
+            assert_eq!(entry.get("status").and_then(|v| v.as_str()), Some("running"));
+            assert_eq!(entry.get("category").and_then(|v| v.as_str()), Some("system"));
+        }
+
+        // runtimeMode is "lite" so the GCS knows which agent flavor
+        // is reporting and renders the right pill.
+        assert_eq!(
+            body.get("runtimeMode").and_then(|v| v.as_str()),
+            Some("lite")
+        );
     }
 
     #[test]
