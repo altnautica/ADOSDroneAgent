@@ -27,6 +27,10 @@ on:
       # fire regardless of paths.
       - "agents/lite-rs/**"
       - ".github/workflows/lite-agent-release.yml"
+      - "scripts/emit_lite_boards_manifest.py"
+      - "src/ados/hal/boards/**"
+      - "scripts/install.sh"
+      - "scripts/install-lite.sh"
 
 permissions:
   contents: write
@@ -156,12 +160,28 @@ jobs:
           path: artifacts
           merge-multiple: true
 
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Generate lite-boards.json manifest
+        # Manifest enumerates lite-eligible boards from
+        # src/ados/hal/boards/*.yaml. Published alongside the binaries so
+        # install.sh can fingerprint the running SBC and dispatch to the
+        # right install body.
+        run: |
+          python -m pip install --quiet pyyaml
+          python scripts/emit_lite_boards_manifest.py artifacts/lite-boards.json
+          echo "Manifest contents:"
+          cat artifacts/lite-boards.json
+
       - name: Build SHA256SUMS
         working-directory: artifacts
         run: |
-          # Single SUMS file across all matrix targets.
+          # Single SUMS file across all matrix targets + manifest.
           rm -f SHA256SUMS
-          for f in ados-agent-lite-*.tar.gz; do
+          for f in ados-agent-lite-*.tar.gz lite-boards.json; do
             [ -e "$f" ] || continue
             sha256sum "$f" >> SHA256SUMS
           done
@@ -194,6 +214,7 @@ jobs:
             artifacts/ados-agent-lite-*.tar.gz
             artifacts/ados-agent-lite-*.sha256
             artifacts/ados-agent-lite-*.minisig
+            artifacts/lite-boards.json
             artifacts/SHA256SUMS
           body: |
             Prebuilt static binaries of the lightweight Rust agent.
