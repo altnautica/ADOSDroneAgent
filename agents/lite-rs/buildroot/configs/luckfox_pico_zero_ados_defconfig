@@ -71,6 +71,13 @@ BR2_PACKAGE_AIC8800=y
 BR2_PACKAGE_WIRELESS_TOOLS=y
 BR2_PACKAGE_IW=y
 
+# First-boot AP fallback: when the agent sees no wpa_supplicant association
+# within 30 s of boot it stands up hostapd + dnsmasq on wlan0 with the pair
+# code as the WPA2 passphrase so an operator without a UART cable can join
+# the soft-AP and reach the setup webapp at http://192.168.4.1:8080.
+BR2_PACKAGE_HOSTAPD=y
+BR2_PACKAGE_DNSMASQ=y
+
 #
 # === Hardware enablement ===
 #

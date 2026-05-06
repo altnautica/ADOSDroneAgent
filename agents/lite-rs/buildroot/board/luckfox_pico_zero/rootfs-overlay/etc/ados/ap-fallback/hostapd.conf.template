@@ -1,0 +1,17 @@
+# ADOS lite agent first-boot AP fallback. Substituted at runtime by the
+# agent's wifi_supervisor when no wpa_supplicant association is seen
+# within 30 s of boot. Operator joins this SSID, opens the setup webapp
+# at http://192.168.4.1:8080, and configures the real network there.
+interface=wlan0
+driver=nl80211
+ssid=__SSID__
+hw_mode=g
+channel=6
+country_code=US
+ieee80211n=1
+auth_algs=1
+wpa=2
+wpa_passphrase=__PASSPHRASE__
+wpa_key_mgmt=WPA-PSK
+rsn_pairwise=CCMP
+ignore_broadcast_ssid=0

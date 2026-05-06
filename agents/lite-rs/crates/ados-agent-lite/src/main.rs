@@ -24,6 +24,8 @@ use clap::{Parser, Subcommand};
 use serde::Deserialize;
 use serde_json::Value;
 
+mod wifi_supervisor;
+
 #[derive(Parser, Debug)]
 #[command(name = "ados-agent-lite")]
 #[command(about = "Lightweight ADOS Drone Agent for low-RAM SBCs")]
@@ -951,6 +953,38 @@ async fn run(config_path: PathBuf) -> Result<()> {
         tracing::info!("device_id missing; running offline (no mqtt, no heartbeat)");
     }
 
+    // Wi-Fi AP fallback: if no wpa_supplicant association is seen on
+    // wlan0 within 30 s of boot, the supervisor stands up hostapd +
+    // dnsmasq with the agent's pair code as the WPA2 passphrase so an
+    // operator without a UART cable can reach the setup webapp at
+    // http://192.168.4.1:8080. Linux-only; the module compiles to a
+    // no-op stub on dev builds. The handle is intentionally leaked
+    // into the binary's lifetime: aborting the supervisor would tear
+    // down the AP, which is the operator's only path back if the FC
+    // is rebooting and the cloud relay is down.
+    #[cfg(target_os = "linux")]
+    {
+        let pair_code = match ados_setup::pairing::PairingStore::new(&pairing_path).load() {
+            Ok(state) => state.pairing_code.unwrap_or_default(),
+            Err(_) => String::new(),
+        };
+        let mac_suffix = sys_mac_last_4("wlan0").unwrap_or_else(|| "0000".to_string());
+        if !pair_code.is_empty() {
+            let supervisor = wifi_supervisor::WifiSupervisor::spawn(pair_code, mac_suffix);
+            // Keep the supervisor alive for the lifetime of the
+            // process. Box::leak avoids cancelling the background task
+            // when this scope ends; the kernel reaps the children when
+            // the agent itself terminates (kill_on_drop is set on each
+            // child handle inside the supervisor).
+            Box::leak(Box::new(supervisor));
+        } else {
+            tracing::info!(
+                "wifi_supervisor: pairing_code unset; AP fallback disabled until \
+                 `ados pair --autogen` runs"
+            );
+        }
+    }
+
     // Video pipeline. Selected by the running board's
     // `video.encoder_api_lite` field; absent / "none" boards skip the
     // encoder task entirely so the lite agent stays narrow on
@@ -1784,6 +1818,26 @@ fn sys_local_ips() -> Vec<String> {
         }
     }
     ips
+}
+
+/// Read the last 4 hex characters of a network interface's MAC address
+/// from sysfs and return them lowercased without separators. Used by
+/// the AP-fallback supervisor to derive a deterministic SSID suffix
+/// (`ados-XXXX`) so two boards on the same bench advertise distinct
+/// soft-APs.
+///
+/// Returns `None` when sysfs is unavailable or the address file is
+/// missing or malformed; the caller falls back to a literal `"0000"`.
+#[allow(dead_code)]
+fn sys_mac_last_4(iface: &str) -> Option<String> {
+    let path = format!("/sys/class/net/{iface}/address");
+    let raw = std::fs::read_to_string(&path).ok()?;
+    let trimmed = raw.trim();
+    let hex: String = trimmed.chars().filter(|c| c.is_ascii_hexdigit()).collect();
+    if hex.len() < 4 {
+        return None;
+    }
+    Some(hex[hex.len() - 4..].to_lowercase())
 }
 
 /// Resolve the `sh` interpreter to an absolute path so the script-runner
