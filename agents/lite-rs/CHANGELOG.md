@@ -5,6 +5,20 @@ versions independently of the Python full agent at `src/ados/`.
 
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
+## [0.1.5] - 2026-05-06
+
+### Fixed
+- Release pipeline: dropped the `aarch64-unknown-linux-gnu` target
+  from the build matrix. The cross image for that target shipped an
+  ancient libclang that broke the `v4l2-sys` bindgen step. Coverage
+  for Pi Zero 2 W, Pi 4B, and other glibc aarch64 systems is
+  preserved via the `aarch64-unknown-linux-musl` artifact, which is
+  statically linked and runs on either libc.
+- Release pipeline: rotated the vendored minisign signing trust
+  anchor (new fingerprint `5CE557C6F564AD29`). Operators verifying
+  release artifacts should compare against the new public key
+  printed by `install-lite.sh --show-key`.
+
 ## [0.1.4] - 2026-05-06
 
 ### Fixed
