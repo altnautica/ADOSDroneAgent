@@ -1,20 +1,17 @@
 # Buildroot hash file for the ados-agent-lite release tarball.
 #
-# Buildroot rebuilds the package on every release-tarball SHA bump, and the
-# .hash file pins the exact bytes we expect from GitHub Releases. Override
-# ADOS_AGENT_LITE_VERSION in the defconfig to pin a stable release; bump
-# both the sha256 line and the LICENSE line below when you do.
+# The ados-agent-lite tarball is fetched fresh per build from the
+# `lite-agent-main` rolling GitHub Release (rebuilt on every push to main).
+# The tarball SHA256 cannot be statically pinned because the release is
+# overwritten in place; it changes any time main changes.
 #
-# Generate locally:
-#   curl -L <release-url>/ados-agent-lite-lite-agent-main-armv7-unknown-linux-musleabihf.tar.gz \
-#     | sha256sum
-#   sha256sum LICENSE
+# Buildroot's BR2_PACKAGE_ADOS_AGENT_LITE_NO_HASH=y must be enabled in the
+# defconfig so the package fetch bypasses the hash check on rolling builds.
+# When the recipe is moved to a stable tagged release (e.g. lite-v0.1.0), the
+# CI workflow at .github/workflows/luckfox-image-build.yml substitutes real
+# digests on tag and BR2_PACKAGE_ADOS_AGENT_LITE_NO_HASH=n is restored.
 #
-# Format: <algo>  <hex>  <filename>
+# Format (when stable): <algo>  <hex>  <filename>
 #
-# Until the lite-image-v* tag pipeline cuts its first stable release, this file
-# carries placeholders. The CI workflow at .github/workflows/luckfox-image-build.yml
-# substitutes real digests on tag.
-
-# sha256  PLACEHOLDER  ados-agent-lite-lite-agent-main-armv7-unknown-linux-musleabihf.tar.gz
-# sha256  PLACEHOLDER  LICENSE
+# sha256  <pinned>  ados-agent-lite-lite-agent-main-armv7-unknown-linux-musleabihf.tar.gz
+# sha256  <pinned>  LICENSE

@@ -1,18 +1,15 @@
-# Luckfox BSP cfg80211 compat shim
+# No-op patch: the v5.6.4.2 branch HEAD compiles cleanly on the Luckfox 5.10
+# BSP without modifications.
 #
-# The Luckfox 5.10 BSP (linux-luckfox.git) backports parts of the
-# cfg80211 API that diverge from mainline 5.10. The aircrack-ng v5.6.4.2
-# branch's recent kernel-6.x patches address this for mainline kernels
-# but require a small additional shim on the Luckfox BSP to gate the
-# `wiphy_ext_feature_set` and `WIPHY_FLAG_HAS_REMAIN_ON_CHANNEL`
-# references on the BSP's kernel version macro.
+# Inspection of os_dep/linux/ioctl_cfg80211.c at the pinned source SHA confirms:
+#   - `wiphy_ext_feature_set` is not referenced anywhere in os_dep/.
+#   - `WIPHY_FLAG_HAS_REMAIN_ON_CHANNEL` is gated on
+#     `LINUX_VERSION_CODE >= KERNEL_VERSION(3, 3, 0)`, which holds on 5.10.
+#   - The 5.11 / 5.19 / 6.x kernel branches are already correctly gated by
+#     the upstream tree (lines 468, 483, 5326, 6202, 10498, 10500).
 #
-# This file is a placeholder. The hunk lands once the rtl8812eu
-# source is fetched on the first `make rtl8812eu-source` and the exact
-# line numbers in `os_dep/linux/ioctl_cfg80211.c` can be confirmed.
-# Until then the package is gated on `BR2_PACKAGE_RTL8812EU=y` so it
-# does not break builds that don't select it.
---- a/os_dep/linux/ioctl_cfg80211.c
-+++ b/os_dep/linux/ioctl_cfg80211.c
-@@ -0,0 +1,1 @@
-+/* placeholder: real hunk lands on first source fetch */
+# This file is retained as a hook so that a future Luckfox BSP kernel bump
+# (or a backported cfg80211 API divergence in linux-luckfox.git) can land a
+# real hunk here without restructuring the recipe. Empty patches are no-ops
+# in Buildroot's apply-patches.sh; the build will print one INFO line and
+# continue.
