@@ -88,14 +88,29 @@ jobs:
         if: steps.gate.outputs.build == 'true'
         run: |
           sudo apt-get update
+          # Baseline: tools every recipe needs (clones, archives,
+          # checksum + signing).
           sudo apt-get install -y --no-install-recommends \
             build-essential libncurses-dev rsync bc cpio file unzip \
             xz-utils python3 python3-yaml git bison flex wget \
             minisign
-          # pi-gen path requires extra host tooling — installed
-          # unconditionally so the matrix doesn't need per-board
-          # branching here. Cheap on the cache; ~30 s on a fresh
-          # runner.
+          # Luckfox vendor SDK + Buildroot 2023.02.6 host deps. Without
+          # device-tree-compiler the post-kernel DTB assembly fails;
+          # without u-boot-tools the boot.img mkimage step fails. The
+          # rest cover rootfs assembly, post-image utilities, and
+          # autotools-based Buildroot packages.
+          sudo apt-get install -y --no-install-recommends \
+            device-tree-compiler u-boot-tools \
+            gcc-multilib g++-multilib module-assistant \
+            gawk texinfo libssl-dev openssl cmake gperf \
+            autoconf automake fakeroot \
+            python-is-python3 \
+            bsdmainutils lz4 \
+            genext2fs mtd-utils \
+            libncurses5-dev pkg-config
+          # pi-gen path requires extra host tooling for chroot +
+          # debootstrap + image manipulation. Cheap to install on a
+          # fresh runner.
           if [ "${{ matrix.board }}" = "pi-zero-2w" ]; then
             sudo apt-get install -y --no-install-recommends \
               coreutils quilt parted qemu-user-static binfmt-support \
