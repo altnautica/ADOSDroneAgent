@@ -1470,3 +1470,145 @@ details > .body {
     font-size: 20px;
   }
 }
+
+/* ----- wfb radio config tile ------------------------------------------- */
+
+.wfb-tile {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.wfb-state-row {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.wfb-state-line {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+
+.wfb-form {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 14px;
+}
+
+.wfb-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.wfb-field-label {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 6px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-size: 11px;
+  color: var(--text-tertiary);
+}
+
+.wfb-power-value {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-primary);
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.wfb-select {
+  width: 100%;
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-strong);
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-size: 13px;
+  font-family: var(--font-body);
+  cursor: pointer;
+  transition: border-color 80ms ease;
+}
+
+.wfb-select:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.wfb-select:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.wfb-range {
+  width: 100%;
+  margin: 0;
+  cursor: pointer;
+}
+
+.wfb-range:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.wfb-power-default {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--text-tertiary);
+  text-transform: none;
+  letter-spacing: 0;
+  cursor: pointer;
+}
+
+.wfb-power-default input[type="checkbox"] {
+  margin: 0;
+  cursor: pointer;
+}
+
+.wfb-key-row {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.wfb-import-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.wfb-import-textarea {
+  width: 100%;
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-strong);
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  resize: vertical;
+  min-height: 64px;
+  transition: border-color 80ms ease;
+}
+
+.wfb-import-textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.wfb-apply-row {
+  justify-content: flex-end;
+}
+
+.wfb-result {
+  font-size: 12px;
+}

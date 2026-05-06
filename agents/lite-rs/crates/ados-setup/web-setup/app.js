@@ -1964,6 +1964,45 @@ function renderHardwareCheckStep(status, onMutate) {
   );
   const summarySlot = el("div", { className: "live-row-chips", style: { justifyContent: "flex-start" } }, ...summaryChips());
 
+  // WFB driver pre-flight tile. Lite agents emit a top-level
+  // `wfb_driver` field on the hardware-check payload; older clients
+  // ignore it. We render it as a synthetic row matching the shape of
+  // an item from `snapshot.items` so the existing tile styling
+  // applies without a parallel layout.
+  const wfbDriverRow = (driver) => {
+    if (!driver || typeof driver !== "object") return null;
+    const variant = driver.status === "ok"
+      ? "ok"
+      : driver.status === "error"
+        ? "err"
+        : "warn";
+    const label = driver.status === "ok"
+      ? "OK"
+      : driver.status === "error"
+        ? "Error"
+        : "Warning";
+    return el("div", { className: "live-table-row" },
+      statusDot(variant, false),
+      el("div", { className: "live-table-name" },
+        el("span", {}, "WFB-ng driver",
+          chip({ variant: "info", label: "pre-flight", size: "sm" }),
+        ),
+        el("span", { className: "secondary", text: driver.message || "" }),
+      ),
+      el("div", { className: "live-table-detail", text:
+        `driver=${driver.rtl8812eu_loaded ? "loaded" : "missing"} · wfb_tx=${driver.wfb_tx_available ? "found" : "missing"} · udev=${driver.udev_rule_present ? "present" : "absent"}` }),
+      el("div", { className: "live-table-actions" },
+        chip({ variant, dot: true, label, size: "sm" }),
+      ),
+    );
+  };
+  const wfbDriverContainer = el("div", { className: "live-table" });
+  const renderWfbDriver = () => {
+    const row = wfbDriverRow(snapshot.wfb_driver);
+    wfbDriverContainer.replaceChildren(...(row ? [row] : []));
+  };
+  renderWfbDriver();
+
   const refreshBtn = el("button", {
     type: "button",
     className: "btn",
@@ -1978,6 +2017,7 @@ function renderHardwareCheckStep(status, onMutate) {
           snapshot = res;
           itemsContainer.replaceChildren(...((snapshot.items || []).map(itemRow)));
           summarySlot.replaceChildren(...summaryChips());
+          renderWfbDriver();
         }
         await onMutate();
       } catch (err) {
@@ -2003,6 +2043,7 @@ function renderHardwareCheckStep(status, onMutate) {
       body: el("div", {},
         el("div", { className: "card-pad" }, summarySlot),
         itemsContainer,
+        wfbDriverContainer,
       ),
     }),
   );
@@ -2403,6 +2444,342 @@ function renderVideo() {
 // Page: network
 // ---------------------------------------------------------------------------
 
+// Channel list. 2.4 GHz 1..13, then 5 GHz UNII subset commonly used by
+// WFB-ng deployments (DFS channels included; the operator picks based
+// on their regulatory domain).
+const WFB_CHANNELS_24 = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13];
+const WFB_CHANNELS_5 = [
+  36, 40, 44, 48, 52, 56, 60, 64,
+  100, 104, 108, 112, 116, 120, 124, 128, 132, 136, 140,
+  149, 153, 157, 161, 165,
+];
+
+const MCS_DESCRIPTIONS = {
+  0: "0 — most robust",
+  1: "1",
+  2: "2",
+  3: "3 — balanced",
+  4: "4",
+  5: "5",
+  6: "6",
+  7: "7 — highest throughput",
+};
+
+function shortFingerprint(fp) {
+  if (!fp || typeof fp !== "string") return "—";
+  // Accept either raw hex or a "sha256:..." prefixed form.
+  const cleaned = fp.includes(":") ? fp.split(":").pop() : fp;
+  return cleaned.length > 8 ? `${cleaned.slice(0, 8)}…` : cleaned;
+}
+
+function renderWfbTile() {
+  // Card-local state. The state row reflects the most recent GET; the
+  // form controls reflect operator intent. Apply pushes the form
+  // values back; regenerate-key refreshes the fingerprint without
+  // changing channel/MCS/power.
+  let snapshot = null;
+  let lastFingerprint = null;
+
+  const stateRow = el("div", { className: "wfb-state-row" });
+
+  const channelSelect = el("select", { className: "wfb-select", id: "wfb-channel" });
+  for (const ch of WFB_CHANNELS_24) {
+    channelSelect.appendChild(el("option", { value: String(ch) }, `${ch} (2.4 GHz)`));
+  }
+  for (const ch of WFB_CHANNELS_5) {
+    channelSelect.appendChild(el("option", { value: String(ch) }, `${ch} (5 GHz)`));
+  }
+
+  const mcsSelect = el("select", { className: "wfb-select", id: "wfb-mcs" });
+  for (let i = 0; i <= 7; i++) {
+    mcsSelect.appendChild(el("option", { value: String(i) }, MCS_DESCRIPTIONS[i]));
+  }
+
+  const powerValue = el("span", { className: "wfb-power-value" }, "—");
+  const powerSlider = el("input", {
+    className: "wfb-range",
+    id: "wfb-power",
+    type: "range",
+    min: "0",
+    max: "30",
+    step: "1",
+    value: "20",
+  });
+  const powerDefault = el("input", {
+    type: "checkbox",
+    id: "wfb-power-default",
+  });
+  powerSlider.addEventListener("input", () => {
+    if (powerDefault.checked) return;
+    powerValue.textContent = `${powerSlider.value} dBm`;
+  });
+  powerDefault.addEventListener("change", () => {
+    if (powerDefault.checked) {
+      powerSlider.disabled = true;
+      powerValue.textContent = "default";
+    } else {
+      powerSlider.disabled = false;
+      powerValue.textContent = `${powerSlider.value} dBm`;
+    }
+  });
+
+  const importToggle = el("button", {
+    type: "button",
+    className: "btn ghost wfb-import-toggle",
+    text: "Import passphrase (advanced)",
+  });
+  const importTextarea = el("textarea", {
+    className: "wfb-import-textarea",
+    placeholder: "Paste a passphrase. The agent derives the broadcast key from it; only the derived key is written to disk.",
+    spellcheck: false,
+    autocomplete: "off",
+    rows: 3,
+  });
+  const importPanel = el("div", {
+    className: "wfb-import-panel",
+    style: { display: "none" },
+  }, importTextarea);
+
+  const result = el("div", { className: "wfb-result", style: { minHeight: "20px" } });
+
+  const setBusy = (busy, label) => {
+    applyBtn.disabled = busy;
+    regenBtn.disabled = busy;
+    importBtn.disabled = busy;
+    importToggle.disabled = busy;
+    if (busy) {
+      result.replaceChildren(chip({ variant: "info", dot: true, pulse: true, label: label || "Working…" }));
+    }
+  };
+
+  const setResult = (variant, label) => {
+    result.replaceChildren(chip({ variant, dot: true, label }));
+  };
+
+  const renderStateRow = () => {
+    const cs = (snapshot && snapshot.config_summary) || {};
+    const st = (snapshot && snapshot.state) || {};
+    const stateName = (typeof st === "object" && st.state) ? st.state : "unknown";
+    const stateVariant = stateName === "running" ? "ok"
+      : stateName === "dongle_detected" ? "info"
+      : stateName === "crashed" ? "err"
+      : "muted";
+    const iface = (st && st.iface) || cs.interface || "no dongle";
+    const fpLabel = lastFingerprint ? shortFingerprint(lastFingerprint) : "not seen";
+    const txLabel = cs.tx_power_dbm == null
+      ? "—"
+      : (cs.tx_power_dbm < 0 ? "default" : `${cs.tx_power_dbm} dBm`);
+    stateRow.replaceChildren(
+      el("div", { className: "wfb-state-line" },
+        chip({ variant: stateVariant, dot: true, label: String(stateName).replace(/_/g, " ") }),
+        chip({ variant: "muted", label: `iface: ${iface}` }),
+        chip({ variant: "muted", label: `ch ${cs.channel ?? "—"}` }),
+        chip({ variant: "muted", label: `MCS ${cs.mcs_index ?? "—"}` }),
+        chip({ variant: "muted", label: `tx ${txLabel}` }),
+        chip({ variant: "muted", label: `key fp: ${fpLabel}` }),
+        cs.binary_present === false
+          ? chip({ variant: "warn", dot: true, label: "wfb_tx not installed" })
+          : null,
+      ),
+    );
+  };
+
+  const refreshSnapshot = async () => {
+    try {
+      const data = await apiFetch("/api/v1/setup/wfb");
+      snapshot = data || {};
+      const cs = snapshot.config_summary || {};
+      if (typeof cs.channel === "number") channelSelect.value = String(cs.channel);
+      if (typeof cs.mcs_index === "number") mcsSelect.value = String(cs.mcs_index);
+      if (typeof cs.tx_power_dbm === "number") {
+        if (cs.tx_power_dbm < 0) {
+          powerDefault.checked = true;
+          powerSlider.disabled = true;
+          powerValue.textContent = "default";
+        } else {
+          powerDefault.checked = false;
+          powerSlider.disabled = false;
+          powerSlider.value = String(Math.max(0, Math.min(30, cs.tx_power_dbm)));
+          powerValue.textContent = `${powerSlider.value} dBm`;
+        }
+      }
+      renderStateRow();
+    } catch (err) {
+      stateRow.replaceChildren(
+        el("div", { className: "wfb-state-line" },
+          chip({ variant: "err", dot: true, label: `Could not load radio state: ${err.message || err}` }),
+        ),
+      );
+    }
+  };
+
+  // Apply pushes channel + MCS + tx_power. The REST contract requires
+  // a non-empty passphrase on every configure POST. Until the contract
+  // grows a "rotate=false" flag, the operator-driven Apply path uses a
+  // sentinel marker; rotation lives behind the explicit Regenerate /
+  // Import controls. Documented stop-gap; backend follow-up tracked
+  // separately.
+  const applyBtn = btn("Apply radio config", {
+    variant: "primary",
+    onclick: async () => {
+      const channel = parseInt(channelSelect.value, 10);
+      const mcs = parseInt(mcsSelect.value, 10);
+      const power = powerDefault.checked ? -1 : parseInt(powerSlider.value, 10);
+      const body = {
+        channel,
+        mcs_index: mcs,
+        tx_power_dbm: power,
+        key_passphrase: "_keep_existing_",
+      };
+      setBusy(true, "Applying…");
+      try {
+        const res = await apiFetch("/api/v1/setup/wfb/configure", {
+          method: "POST",
+          body: JSON.stringify(body),
+        });
+        if (res && res.state) {
+          snapshot = res.state;
+          renderStateRow();
+        }
+        setResult("ok", res?.message || "Radio config applied");
+        await refreshSnapshot();
+      } catch (err) {
+        if (err && err.message && /reach|network|fetch/i.test(err.message)) {
+          setResult("err", "Could not reach the agent");
+        } else {
+          setResult("err", err.message || "Apply failed");
+        }
+      } finally {
+        setBusy(false);
+      }
+    },
+  });
+
+  const regenBtn = btn("Regenerate key", {
+    onclick: async () => {
+      setBusy(true, "Regenerating…");
+      try {
+        const res = await apiFetch("/api/v1/setup/wfb/regenerate-key", { method: "POST" });
+        if (res && res.key_fingerprint) {
+          lastFingerprint = res.key_fingerprint;
+        }
+        await refreshSnapshot();
+        setResult("ok", `New key fingerprint ${shortFingerprint(lastFingerprint)}. Pair the ground station with this key.`);
+      } catch (err) {
+        if (err && err.message && /reach|network|fetch/i.test(err.message)) {
+          setResult("err", "Could not reach the agent");
+        } else {
+          setResult("err", err.message || "Regenerate failed");
+        }
+      } finally {
+        setBusy(false);
+      }
+    },
+  });
+
+  const importBtn = btn("Import passphrase", {
+    onclick: async () => {
+      const value = (importTextarea.value || "").trim();
+      if (!value) {
+        setResult("warn", "Paste a passphrase first");
+        return;
+      }
+      const cs = (snapshot && snapshot.config_summary) || {};
+      const channel = parseInt(channelSelect.value, 10) || cs.channel || 161;
+      const mcs = parseInt(mcsSelect.value, 10);
+      const power = powerDefault.checked ? -1 : parseInt(powerSlider.value, 10);
+      setBusy(true, "Importing key…");
+      try {
+        const res = await apiFetch("/api/v1/setup/wfb/configure", {
+          method: "POST",
+          body: JSON.stringify({
+            channel,
+            mcs_index: Number.isFinite(mcs) ? mcs : (cs.mcs_index ?? 1),
+            tx_power_dbm: Number.isFinite(power) ? power : (cs.tx_power_dbm ?? -1),
+            key_passphrase: value,
+          }),
+        });
+        importTextarea.value = "";
+        importPanel.style.display = "none";
+        importActions.style.display = "none";
+        importToggle.textContent = "Import passphrase (advanced)";
+        if (res && res.state) {
+          snapshot = res.state;
+          renderStateRow();
+        }
+        setResult("ok", res?.message || "Passphrase imported, new key derived");
+        await refreshSnapshot();
+      } catch (err) {
+        if (err && err.message && /reach|network|fetch/i.test(err.message)) {
+          setResult("err", "Could not reach the agent");
+        } else {
+          setResult("err", err.message || "Import failed");
+        }
+      } finally {
+        setBusy(false);
+      }
+    },
+  });
+
+  const importActions = el("div", { className: "btn-row wfb-import-actions", style: { display: "none" } }, importBtn);
+
+  importToggle.addEventListener("click", () => {
+    const open = importPanel.style.display !== "none";
+    importPanel.style.display = open ? "none" : "block";
+    importActions.style.display = open ? "none" : "flex";
+    importToggle.textContent = open ? "Import passphrase (advanced)" : "Hide import";
+  });
+
+  // Initial paint placeholder + async load.
+  stateRow.replaceChildren(
+    el("div", { className: "wfb-state-line" },
+      chip({ variant: "muted", dot: true, label: "loading radio state…" }),
+    ),
+  );
+  refreshSnapshot();
+
+  const body = el("div", { className: "wfb-tile card-pad" },
+    stateRow,
+    el("div", { className: "wfb-form" },
+      el("label", { className: "wfb-field", "for": "wfb-channel" },
+        el("span", { className: "wfb-field-label" }, "Channel"),
+        channelSelect,
+      ),
+      el("label", { className: "wfb-field", "for": "wfb-mcs" },
+        el("span", { className: "wfb-field-label" }, "MCS index"),
+        mcsSelect,
+      ),
+      el("label", { className: "wfb-field wfb-field-power", "for": "wfb-power" },
+        el("span", { className: "wfb-field-label" },
+          el("span", {}, "TX power"),
+          powerValue,
+        ),
+        powerSlider,
+        el("label", { className: "wfb-power-default", "for": "wfb-power-default" },
+          powerDefault,
+          el("span", {}, "Use driver default (-1)"),
+        ),
+      ),
+    ),
+    el("div", { className: "wfb-key-row" },
+      el("div", { className: "btn-row" },
+        regenBtn,
+        importToggle,
+      ),
+      importPanel,
+      importActions,
+    ),
+    el("div", { className: "btn-row wfb-apply-row" }, applyBtn),
+    result,
+  );
+
+  return card({
+    title: "Radio (WFB-ng)",
+    subtitle: "Channel, MCS, transmit power, and broadcast key for the air-to-ground long-range link.",
+    body,
+  });
+}
+
 function renderNetwork() {
   subscribe((status) => {
     const n = status.network || {};
@@ -2439,6 +2816,7 @@ function renderNetwork() {
           ),
         ),
       }),
+      renderWfbTile(),
     ];
 
     renderShell("network", content);
