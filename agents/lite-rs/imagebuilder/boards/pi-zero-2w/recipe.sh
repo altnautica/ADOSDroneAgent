@@ -40,19 +40,22 @@ recipe::sdk_configure() {
 IMG_NAME=${IMG_BASENAME}
 DEPLOY_COMPRESSION=gz
 COMPRESSION_LEVEL=6
+# SSH is disabled at first boot. The agent's setup webapp at
+# port 8080 owns onboarding; SSH gets enabled (with an operator-
+# supplied key) from the webapp once the device is paired.
+# PUBKEY_ONLY_SSH was tempting but requires PUBKEY_SSH_FIRST_USER to
+# be a real key — pi-gen aborts otherwise — so leave it off.
 ENABLE_SSH=0
-PUBKEY_ONLY_SSH=1
 LOCALE_DEFAULT=en_GB.UTF-8
 TARGET_HOSTNAME=ados
 DISABLE_FIRST_BOOT_USER_RENAME=1
 FIRST_USER_NAME=ados
-# pi-gen requires FIRST_USER_PASS to be set explicitly; without it the
-# build aborts with "Not setting FIRST_USER_PASS makes your system
-# vulnerable...". The ADOS image SHIPS a default password the operator
-# is REQUIRED to change on first pair via the agent's setup webapp;
-# the bench runbook documents this. Sourcing the password from a CI
-# secret would be cleaner long-term but the default-then-rotate flow
-# keeps the rolling-image build reproducible.
+# pi-gen requires FIRST_USER_PASS to be set explicitly. The ADOS
+# image ships a default password the operator is REQUIRED to change
+# on first pair via the agent's setup webapp; the bench runbook
+# documents this. Sourcing the password from a CI secret would be
+# cleaner long-term but the default-then-rotate flow keeps the
+# rolling-image build reproducible.
 FIRST_USER_PASS=ados-default-change-me
 EOF
 
