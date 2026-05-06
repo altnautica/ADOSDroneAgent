@@ -40,3 +40,7 @@ rmp-serde = { workspace = true }
 # the lib; promote the dep to dev-deps so the tests compile without
 # pulling the lib's `[dependencies]` block into doc-test scope.
 tokio-util = { workspace = true, features = ["rt"] }
+# In-process RTSP server fixture for the round-trip integration test.
+# Lets the suite drive `run_push_loop` against a real loopback socket
+# without needing an external mediamtx instance.
+ados-test-mocks = { path = "../ados-test-mocks" }

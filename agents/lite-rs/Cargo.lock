@@ -108,6 +108,7 @@ dependencies = [
 name = "ados-video"
 version = "0.1.0"
 dependencies = [
+ "ados-test-mocks",
  "async-trait",
  "bytes",
  "rmp-serde",
