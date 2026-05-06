@@ -21,6 +21,15 @@ serde_json = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
 
+# Shared low-level primitives (atomic file write).
+ados-core = { path = "../ados-core" }
+
+# Encoded H.264 frame type produced by the agent's video pipeline. The
+# wfb manager exposes a tee that consumes the broadcast channel of
+# `EncodedFrame`s and writes the Annex-B byte stream into the running
+# `wfb_tx` subprocess's stdin.
+ados-video = { path = "../ados-video" }
+
 # Curve25519 + AEAD + SHA-256 for the WFB-ng broadcast key derivation.
 # All three live in the workspace deps so `ados-wfb` and any future
 # crate that needs the same crypto primitives pin identical versions.

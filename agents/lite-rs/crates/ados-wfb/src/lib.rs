@@ -308,47 +308,19 @@ impl WfbManager {
     }
 }
 
-/// Atomic-write a keypair file at mode 0600. Mirrors the shape of
-/// `ados_setup::atomic::atomic_write` but lives here to avoid pulling
-/// in a setup-crate dep on the wfb crate.
+/// Atomic-write a keypair file at mode 0600. Delegates to the
+/// canonical helper in `ados_core::atomic` so the keypair file gets
+/// the same crash-safe rename + tempfile-cleanup contract as every
+/// other persisted artefact in the agent.
 fn write_keypair_atomic(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
-    use std::io::Write;
-    let parent = path.parent().unwrap_or_else(|| std::path::Path::new("."));
-    std::fs::create_dir_all(parent)?;
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let tmp = parent.join(format!(
-        ".{}.{}.{}.tmp",
-        path.file_name().and_then(|n| n.to_str()).unwrap_or("tmp"),
-        std::process::id(),
-        nanos
-    ));
-    let mut opts = std::fs::OpenOptions::new();
-    opts.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        opts.mode(0o600);
+    match ados_core::atomic::write_atomic_secret(path, bytes) {
+        Ok(()) => Ok(()),
+        Err(ados_core::atomic::AtomicWriteError::Io(e)) => Err(e),
+        Err(ados_core::atomic::AtomicWriteError::InvalidMode(m)) => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("invalid mode 0o{m:o}"),
+        )),
     }
-    let mut f = match opts.open(&tmp) {
-        Ok(f) => f,
-        Err(e) => {
-            let _ = std::fs::remove_file(&tmp);
-            return Err(e);
-        }
-    };
-    if let Err(e) = f.write_all(bytes).and_then(|_| f.sync_all()) {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(e);
-    }
-    drop(f);
-    if let Err(e) = std::fs::rename(&tmp, path) {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(e);
-    }
-    Ok(())
 }
 
 fn validate_config(cfg: &WfbConfig) -> Result<(), WfbError> {

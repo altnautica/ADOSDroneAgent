@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/ados-agent-lite",
+    "crates/ados-core",
     "crates/ados-mavlink",
     "crates/ados-cloud",
     "crates/ados-setup",
