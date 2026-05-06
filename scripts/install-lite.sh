@@ -39,14 +39,14 @@ SYSV_INIT_SCRIPT="/etc/init.d/S99ados-agent-lite"
 # would let an attacker who controls the operator's environment substitute
 # their own signing key and pass verification on a malicious binary.
 # Rotation is a code change + git push, not a runtime knob.
-MINISIGN_PUBLIC_KEY="RWQz4jK8YjK8YjK8YjK8YjK8YjK8YjK8YjK8YjK8YjK8YjK8YjK8YjK8"
+MINISIGN_PUBLIC_KEY="RWR+yLdssguv/iqfINd5cFsiC5+cUKLGvFggEfBS0O94KLWcjAvIczE7"
 PLACEHOLDER_KEY="RWQz4jK8YjK8YjK8YjK8YjK8YjK8YjK8YjK8YjK8YjK8YjK8YjK8YjK8"
 
 # Short fingerprint of the active public key. The CI release pipeline
 # replaces this string with the real fingerprint at tag time. Operators
 # can read it via `./install-lite.sh --show-key` and compare to the
 # fingerprint printed at the top of the release notes.
-MINISIGN_PUBLIC_KEY_FINGERPRINT="placeholder-fingerprint"
+MINISIGN_PUBLIC_KEY_FINGERPRINT="FEAF0BB26CB7C87E"
 
 log() { printf '[install-lite] %s\n' "$*" >&2; }
 die() { log "error: $*"; exit 1; }

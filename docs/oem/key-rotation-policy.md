@@ -9,6 +9,24 @@ For developer-focused key handling (CI provisioning, generating a
 keypair, replacing the embedded value in `install-lite.sh`), see
 `docs/oem/lite-agent-key-rotation.md`.
 
+## Currently active signing key
+
+**Fingerprint:** `FEAF0BB26CB7C87E`
+**Active since:** 2026-05-06
+**Issuing party:** Altnautica Pvt Ltd
+
+This is the public key embedded in `scripts/install-lite.sh` and
+referenced in CI workflows `.github/workflows/lite-agent-release.yml`
+and `.github/workflows/luckfox-image-build.yml`. Operators who
+download release artifacts from GitHub Releases verify against this
+fingerprint.
+
+To verify a release artifact:
+
+    minisign -V -P "RWR+yLdssguv/iqfINd5cFsiC5+cUKLGvFggEfBS0O94KLWcjAvIczE7" -m <artifact>
+
+The artifact's `.minisig` file accompanies it in the GitHub Release.
+
 ## Why we rotate
 
 Long-lived signing keys accumulate risk:
