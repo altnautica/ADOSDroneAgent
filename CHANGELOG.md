@@ -4,6 +4,29 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.13.0] - 2026-05-07
+
+### Added
+
+- **Ground-profile dashboard panels.** WFB-RX (adapter, channel,
+  frequency, per-stream RSSI chips, packet loss, FEC stats, RSSI
+  sparkline), mesh status (role badge, batman-adv peer table with
+  link quality and last-seen, gateway node, partition state),
+  stream sources (aggregated bitrate sparkline, per-source FEC and
+  dedup stats), local display (device, kiosk URL, refresh rate,
+  current content), OLED + buttons (current screen, brightness,
+  per-button mapping, last button event), joystick (HID identity,
+  axis bars, button chips).
+- **Role-based panel composition.** The dashboard view selects the
+  ground panel set by `ground_role`: `direct` shows wfb_rx +
+  display + oled_buttons + joystick; `relay` adds mesh; `receiver`
+  adds mesh + sources. The view rebuilds when role flips, not just
+  when profile flips.
+- **Snapshot extension.** `/api/v1/dashboard/snapshot` now carries
+  seven new keys (wfb_rx, mesh, sources, display, oled, buttons,
+  joystick) alongside the eight Phase C keys. Helpers fall back to
+  config-derived defaults when a runtime summary method is missing.
+
 ## [0.12.9] - 2026-05-07
 
 ### Added

@@ -167,6 +167,166 @@ def _network_slice(app: Any) -> dict[str, Any]:
     return {}
 
 
+def _wfb_rx_slice(app: Any) -> dict[str, Any]:
+    """WFB receive stats. Best-effort pull from wfb_summary() and the
+    ground_station + video.wfb config blocks. Streams default to an
+    empty list when the runtime hasn't populated them yet."""
+    summary = _safe(lambda: app.wfb_summary(), None)
+    if isinstance(summary, dict) and summary:
+        out = dict(summary)
+    else:
+        out = {}
+
+    cfg = _safe(lambda: app.config, None)
+    if cfg is not None:
+        wfb_cfg = _safe(lambda: cfg.video.wfb, None)
+        if wfb_cfg is not None:
+            out.setdefault("adapter", _safe(lambda: str(wfb_cfg.interface or ""), ""))
+            out.setdefault("channel", _safe(lambda: int(wfb_cfg.channel or 0), 0))
+        gs_cfg = _safe(lambda: cfg.ground_station, None)
+        if gs_cfg is not None:
+            # Prefer the ground-station-side adapter override if the
+            # runtime exposed one, otherwise fall back to the air-side
+            # WfbConfig.interface field already set above.
+            iface_override = _safe(lambda: getattr(gs_cfg, "rx_interface", None), None)
+            if iface_override:
+                out["adapter"] = str(iface_override)
+
+    out.setdefault("freq_mhz", None)
+    out.setdefault("rssi_dbm", None)
+    out.setdefault("packet_loss_pct", None)
+    out.setdefault("fec_recovered", None)
+    out.setdefault("fec_failed", None)
+    out.setdefault("bitrate_kbps", None)
+    streams = out.get("streams")
+    if not isinstance(streams, list):
+        out["streams"] = []
+    return out
+
+
+def _mesh_slice(app: Any) -> dict[str, Any]:
+    """Local batman-adv mesh state. Role drives the ground panel filter,
+    so the role from config is the authoritative fallback when the
+    runtime helper is missing."""
+    summary = _safe(lambda: app.mesh_summary(), None)
+    if isinstance(summary, dict) and summary:
+        out = dict(summary)
+    else:
+        out = {}
+
+    cfg = _safe(lambda: app.config, None)
+    if cfg is not None:
+        gs_cfg = _safe(lambda: cfg.ground_station, None)
+        if gs_cfg is not None:
+            out.setdefault("role", _safe(lambda: str(gs_cfg.role or "direct"), "direct"))
+
+    out.setdefault("role", "direct")
+    peers = out.get("batman_peers")
+    if not isinstance(peers, list):
+        out["batman_peers"] = []
+    out.setdefault("gateway_node", None)
+    out.setdefault("partition_state", None)
+    out.setdefault("mesh_addr", None)
+    return out
+
+
+def _sources_slice(app: Any) -> dict[str, Any]:
+    """Aggregated stream-source stats. Receiver-only; the panel checks
+    the role itself, so we always return the dict shape."""
+    summary = _safe(lambda: app.wfb_summary(), None)
+    if isinstance(summary, dict):
+        candidate = summary.get("sources")
+        if isinstance(candidate, dict):
+            out = dict(candidate)
+        else:
+            out = {}
+    else:
+        out = {}
+    out.setdefault("aggregated_kbps", None)
+    out.setdefault("frames_combined", None)
+    out.setdefault("frames_dedup", None)
+    per = out.get("per_source")
+    if not isinstance(per, list):
+        out["per_source"] = []
+    return out
+
+
+def _display_slice(app: Any) -> dict[str, Any]:
+    """Local kiosk / HDMI display state. Pulled from the optional
+    `app.config.display` block when present."""
+    cfg = _safe(lambda: app.config, None)
+    if cfg is None:
+        return {}
+    disp = _safe(lambda: getattr(cfg, "display", None), None)
+    if disp is None:
+        return {}
+    return {
+        "device": _safe(lambda: str(getattr(disp, "device", "") or ""), ""),
+        "kiosk_url": _safe(lambda: str(getattr(disp, "kiosk_url", "") or ""), ""),
+        "width": _safe(lambda: int(getattr(disp, "width", 0) or 0), 0),
+        "height": _safe(lambda: int(getattr(disp, "height", 0) or 0), 0),
+        "refresh_hz": _safe(lambda: int(getattr(disp, "refresh_hz", 0) or 0), 0),
+        "content": _safe(lambda: str(getattr(disp, "content", "") or ""), ""),
+    }
+
+
+def _peripheral_dict(app: Any) -> dict[str, Any]:
+    summary = _safe(lambda: app.peripheral_summary(), None)
+    if isinstance(summary, dict):
+        return summary
+    return {}
+
+
+def _oled_slice(app: Any) -> dict[str, Any]:
+    peri = _peripheral_dict(app)
+    oled = peri.get("oled") if isinstance(peri, dict) else None
+    if not isinstance(oled, dict):
+        return {}
+    return {
+        "screen": oled.get("screen"),
+        "brightness": oled.get("brightness"),
+        "contrast": oled.get("contrast"),
+    }
+
+
+def _buttons_slice(app: Any) -> dict[str, Any]:
+    peri = _peripheral_dict(app)
+    btn = peri.get("buttons") if isinstance(peri, dict) else None
+    if not isinstance(btn, dict):
+        # The button mapping also lives on the ground_station ui config
+        # block; surface it from there when the runtime helper is silent.
+        cfg = _safe(lambda: app.config, None)
+        if cfg is not None:
+            ui = _safe(lambda: cfg.ground_station.ui, None)
+            if ui is not None:
+                mapping = _safe(lambda: dict(ui.buttons or {}), {}) or {}
+                return {"mapping": mapping, "last_event": None}
+        return {}
+    mapping = btn.get("mapping")
+    if not isinstance(mapping, dict):
+        mapping = {}
+    last = btn.get("last_event")
+    if not isinstance(last, dict):
+        last = None
+    return {"mapping": mapping, "last_event": last}
+
+
+def _joystick_slice(app: Any) -> dict[str, Any]:
+    peri = _peripheral_dict(app)
+    js = peri.get("joystick") if isinstance(peri, dict) else None
+    if not isinstance(js, dict):
+        return {}
+    axes = js.get("axes") if isinstance(js.get("axes"), list) else []
+    buttons = js.get("buttons") if isinstance(js.get("buttons"), list) else []
+    return {
+        "device": js.get("device"),
+        "vendor": js.get("vendor"),
+        "product": js.get("product"),
+        "axes": [a for a in axes if isinstance(a, dict)],
+        "buttons": [b for b in buttons if isinstance(b, dict)],
+    }
+
+
 @router.get("/snapshot")
 async def get_dashboard_snapshot() -> dict[str, Any]:
     """Combined dashboard snapshot. 1 Hz polling target."""
@@ -180,4 +340,11 @@ async def get_dashboard_snapshot() -> dict[str, Any]:
         "plugins": _plugins_slice(app),
         "cloud": _cloud_slice(app),
         "network": _network_slice(app),
+        "wfb_rx": _wfb_rx_slice(app),
+        "mesh": _mesh_slice(app),
+        "sources": _sources_slice(app),
+        "display": _display_slice(app),
+        "oled": _oled_slice(app),
+        "buttons": _buttons_slice(app),
+        "joystick": _joystick_slice(app),
     }

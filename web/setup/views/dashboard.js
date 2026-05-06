@@ -1,9 +1,9 @@
 // Dashboard view. Renders a stat-tile row plus a panel grid. Profile-
-// conditional panels swap based on store.status.profile. Drone-profile
-// and common panels are now data-driven; ground-profile panels remain
-// placeholders until the next iteration.
+// conditional panels swap based on store.status.profile. Drone, ground,
+// and common panels are all data-driven and read from
+// store.state.dashboard.
 
-import { el, panel, statTile } from "../components.js";
+import { el, statTile } from "../components.js";
 import { apiFetch } from "../state.js";
 import { toast } from "../components/toast.js";
 import { attachPullToRefresh, attachLongPress } from "../components/gestures.js";
@@ -14,6 +14,12 @@ import {
   renderCameraPanel,
   renderSensorsPanel,
   renderPluginsPanel,
+  renderWfbRxPanel,
+  renderMeshPanel,
+  renderSourcesPanel,
+  renderDisplayPanel,
+  renderOledButtonsPanel,
+  renderJoystickPanel,
   renderCloudPanel,
   renderNetworkPanel,
   renderServicesPanel,
@@ -21,13 +27,18 @@ import {
 
 const STAT_LABELS = ["MAV", "VID", "NET", "CLD", "PAIR"];
 
-function placeholder(text) {
-  return el("p", { className: "panel-empty text-faint", text });
-}
-
 function profileOf(status) {
   if (!status) return null;
   return status.profile || status.detected_profile || null;
+}
+
+function groundRoleOf(status) {
+  if (!status) return "direct";
+  const role = status.ground_role;
+  if (typeof role !== "string") return "direct";
+  const r = role.toLowerCase();
+  if (r === "direct" || r === "relay" || r === "receiver") return r;
+  return "direct";
 }
 
 function dronePanels(store, opts) {
@@ -41,23 +52,23 @@ function dronePanels(store, opts) {
   ];
 }
 
-function groundPanels() {
-  // Ground-profile panels are still placeholders. The next iteration
-  // wires WFB-RX, mesh, sources, display, OLED+buttons, and joystick.
-  return [
-    { node: panel({ title: "wfb-rx", span: 6, expandable: true, severity: "idle",
-      body: placeholder("WFB receive stats land in a later iteration.") }), dispose: () => {} },
-    { node: panel({ title: "mesh", span: 6, expandable: true, severity: "idle",
-      body: placeholder("batman-adv peer list lands in a later iteration.") }), dispose: () => {} },
-    { node: panel({ title: "stream sources", span: 6, expandable: true, severity: "idle",
-      body: placeholder("Aggregated stream sources land in a later iteration.") }), dispose: () => {} },
-    { node: panel({ title: "local display", span: 6, expandable: true, severity: "idle",
-      body: placeholder("Display panel lands in a later iteration.") }), dispose: () => {} },
-    { node: panel({ title: "oled + buttons", span: 6, expandable: true, severity: "idle",
-      body: placeholder("OLED screen and button mapping lands in a later iteration.") }), dispose: () => {} },
-    { node: panel({ title: "joystick", span: 6, expandable: true, severity: "idle",
-      body: placeholder("Joystick HID preview lands in a later iteration.") }), dispose: () => {} },
+function groundPanels(store, opts, role) {
+  // Always-on ground panels.
+  const out = [
+    renderWfbRxPanel(store, opts),
+    renderDisplayPanel(store, opts),
+    renderOledButtonsPanel(store, opts),
+    renderJoystickPanel(store, opts),
   ];
+  // Mesh panel only makes sense for relay and receiver roles.
+  if (role === "relay" || role === "receiver") {
+    out.splice(1, 0, renderMeshPanel(store, opts));
+  }
+  // Sources panel is receiver-only.
+  if (role === "receiver") {
+    out.splice(2, 0, renderSourcesPanel(store, opts));
+  }
+  return out;
 }
 
 function commonPanels(store, opts) {
@@ -95,10 +106,11 @@ export function renderDashboard(targetEl, { store, palette, router }) {
   );
 
   // The live panels each own a subscription. We rebuild them only when
-  // the profile flips, so steady-state re-renders happen inside the
-  // panels themselves and not in the view.
+  // the profile or ground role flips, so steady-state re-renders happen
+  // inside the panels themselves and not in the view.
   let activePanels = [];
   let activeProfile = null;
+  let activeRole = null;
 
   const panelOpts = { palette, router };
 
@@ -109,23 +121,33 @@ export function renderDashboard(targetEl, { store, palette, router }) {
     activePanels = [];
   };
 
-  const buildForProfile = (profile) => {
+  const buildFor = (profile, role) => {
     disposeActive();
     grid.replaceChildren();
-    const profilePanels = profile === "ground_station" ? groundPanels() : dronePanels(store, panelOpts);
+    const profilePanels = profile === "ground_station"
+      ? groundPanels(store, panelOpts, role)
+      : dronePanels(store, panelOpts);
     const common = commonPanels(store, panelOpts);
     activePanels = [...profilePanels, ...common];
     for (const p of activePanels) grid.appendChild(p.node);
     activeProfile = profile;
+    activeRole = role;
   };
 
   const onState = () => {
-    const profile = profileOf(store.get().status);
-    if (profile !== activeProfile) buildForProfile(profile);
+    const status = store.get().status;
+    const profile = profileOf(status);
+    const role = groundRoleOf(status);
+    if (profile !== activeProfile || (profile === "ground_station" && role !== activeRole)) {
+      buildFor(profile, role);
+    }
   };
 
   const unsub = store.subscribe(onState);
-  buildForProfile(profileOf(store.get().status));
+  {
+    const initStatus = store.get().status;
+    buildFor(profileOf(initStatus), groundRoleOf(initStatus));
+  }
 
   targetEl.replaceChildren(root);
 
