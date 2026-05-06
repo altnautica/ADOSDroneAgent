@@ -52,10 +52,23 @@ class ApiRuntimeTestDouble:
         self.model_manager = None
         self.pairing_manager = MagicMock()
         self.pairing_manager.is_paired = False
+        self.raw_runtime = _RawRuntimeStub()
 
     @property
     def uptime_seconds(self) -> float:
         return self._uptime_seconds
+
+
+class _RawRuntimeStub:
+    """Minimal stand-in for the agent runtime wrapper.
+
+    Setup setters call ``runtime.raw_runtime.save_config()`` to persist
+    config changes. The double ships a no-op so the route-level tests
+    can drive the full apply flow without touching the filesystem.
+    """
+
+    def save_config(self) -> None:
+        return None
 
 
 def disconnected_fc_connection() -> MagicMock:

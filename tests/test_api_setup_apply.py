@@ -1,0 +1,161 @@
+"""Tests for POST /api/v1/setup/apply (batch settings apply)."""
+
+from __future__ import annotations
+
+import pytest
+from fastapi.testclient import TestClient
+
+from ados.api.server import create_app
+from tests.api_runtime_utils import build_api_runtime
+
+
+@pytest.fixture
+def agent_app():
+    return build_api_runtime()
+
+
+@pytest.fixture
+def client(agent_app):
+    fastapi_app = create_app(agent_app)
+    return TestClient(fastapi_app)
+
+
+def test_apply_empty_body_returns_ok_with_no_sections(client) -> None:
+    resp = client.post("/api/v1/setup/apply", json={})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["overall"] is True
+    assert data["sections"] == {}
+    assert data["rolled_back"] == []
+
+
+def test_apply_profile_only_applies_and_returns_ok(client, agent_app) -> None:
+    resp = client.post(
+        "/api/v1/setup/apply",
+        json={"profile": {"profile": "ground_station", "ground_role": "relay"}},
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["overall"] is True
+    assert "profile" in data["sections"]
+    assert data["sections"]["profile"]["ok"] is True
+    assert agent_app.config.agent.profile == "ground_station"
+    assert agent_app.config.ground_station.role == "relay"
+
+
+def test_apply_profile_and_cloud_both_apply(client, agent_app) -> None:
+    resp = client.post(
+        "/api/v1/setup/apply",
+        json={
+            "profile": {"profile": "drone"},
+            "cloud": {"mode": "local"},
+        },
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["overall"] is True
+    assert data["sections"]["profile"]["ok"] is True
+    assert data["sections"]["cloud"]["ok"] is True
+    assert agent_app.config.agent.profile == "drone"
+    assert agent_app.config.server.mode == "local"
+
+
+def test_apply_advanced_bad_log_level_rolls_back_profile(client, agent_app) -> None:
+    # Capture pre-state so we can assert rollback restored it.
+    prior_profile = agent_app.config.agent.profile
+
+    resp = client.post(
+        "/api/v1/setup/apply",
+        json={
+            "profile": {"profile": "ground_station", "ground_role": "direct"},
+            "advanced": {"log_level": "tachyon"},
+        },
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["overall"] is False
+    assert data["sections"]["profile"]["ok"] is True
+    assert data["sections"]["advanced"]["ok"] is False
+    # Rollback list contains the section that succeeded then was reverted.
+    assert "profile" in data["rolled_back"]
+    # Live config is back to where it was before the call.
+    assert agent_app.config.agent.profile == prior_profile
+
+
+def test_apply_never_raises_500_on_bad_pydantic_input(client) -> None:
+    # The profile field must be one of the literal values; an invalid
+    # literal trips Pydantic and the route surfaces 422 (validation),
+    # never an unhandled 500.
+    resp = client.post(
+        "/api/v1/setup/apply",
+        json={"profile": {"profile": "definitely-not-a-valid-profile"}},
+    )
+    assert resp.status_code == 422
+    body = resp.json()
+    assert "detail" in body
+
+
+def test_apply_unknown_top_level_field_is_ignored(client) -> None:
+    # Pydantic's default behaviour is to ignore unknown fields, so a
+    # caller that ships extra keys gets a clean ok response with no
+    # sections processed.
+    resp = client.post(
+        "/api/v1/setup/apply",
+        json={"banana": {"flavor": "yellow"}},
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["overall"] is True
+    assert data["sections"] == {}
+
+
+def test_apply_cloud_self_hosted_missing_url_is_structured_failure(
+    client,
+) -> None:
+    # Bad self-hosted payload (missing url) returns a structured
+    # per-section failure, not a 5xx.
+    resp = client.post(
+        "/api/v1/setup/apply",
+        json={"cloud": {"mode": "self_hosted"}},
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["overall"] is False
+    assert data["sections"]["cloud"]["ok"] is False
+
+
+def test_apply_network_writes_to_live_config(client, agent_app) -> None:
+    resp = client.post(
+        "/api/v1/setup/apply",
+        json={"network": {"wifi_ssid": "skynet", "hotspot_enabled": False}},
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["overall"] is True
+    assert data["sections"]["network"]["ok"] is True
+    assert agent_app.config.network.wifi_client.ssid == "skynet"
+    assert agent_app.config.network.hotspot.enabled is False
+
+
+def test_apply_advanced_factory_reset_is_queued_only(client) -> None:
+    resp = client.post(
+        "/api/v1/setup/apply",
+        json={"advanced": {"factory_reset": True}},
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["overall"] is True
+    section = data["sections"]["advanced"]
+    assert section["ok"] is True
+    assert section["data"].get("factory_reset_queued") is True
+
+
+def test_apply_advanced_rejects_bad_board_override(client) -> None:
+    resp = client.post(
+        "/api/v1/setup/apply",
+        json={"advanced": {"board_override": "../etc/passwd"}},
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["overall"] is False
+    assert data["sections"]["advanced"]["ok"] is False

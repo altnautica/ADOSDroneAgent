@@ -16,16 +16,20 @@ from ados.core.logging import get_logger
 from ados.core.paths import DISPLAY_CONF_PATH
 from ados.hal.detect import _load_board_profiles, detect_board
 from ados.setup import display_install, state as setup_state
+from ados.setup.advanced import apply_advanced
 from ados.setup.hardware_check import run_hardware_check
 from ados.setup.models import (
+    AdvancedApplyRequest,
     DisplayInstallRequest,
     DisplayJob,
     DisplayOption,
     DisplayOptionsResponse,
     HardwareCheckStatus,
+    NetworkApplyRequest,
     SetupActionResult,
     SetupStatus,
 )
+from ados.setup.network import apply_network
 from ados.setup.profile import apply_profile
 from ados.setup.service import (
     apply_cloud_choice,
@@ -75,6 +79,40 @@ class CloudChoiceRequest(BaseModel):
 class ProfileChoiceRequest(BaseModel):
     profile: Literal["drone", "ground_station"]
     ground_role: Literal["direct", "relay", "receiver"] | None = Field(default=None)
+
+
+class ApplyRequest(BaseModel):
+    """Combined batch-apply payload sent by the settings sheet.
+
+    Each field is optional. The route iterates the present sections in
+    a fixed dependency order, calls each section's setter, and rolls
+    back completed sections in reverse order on the first failure.
+    """
+
+    profile: ProfileChoiceRequest | None = None
+    cloud: CloudChoiceRequest | None = None
+    network: NetworkApplyRequest | None = None
+    display: DisplayInstallRequest | None = None
+    advanced: AdvancedApplyRequest | None = None
+
+
+class ApplyResultSection(BaseModel):
+    ok: bool
+    message: str
+    data: dict[str, object] = Field(default_factory=dict)
+
+
+class ApplyResponse(BaseModel):
+    """Per-section apply outcome.
+
+    ``overall`` is True only when every present section returned ok.
+    ``rolled_back`` lists sections that succeeded and were then
+    reverted because a later section failed.
+    """
+
+    overall: bool
+    sections: dict[str, ApplyResultSection] = Field(default_factory=dict)
+    rolled_back: list[str] = Field(default_factory=list)
 
 
 @router.get("/status", response_model=SetupStatus)
@@ -338,6 +376,260 @@ async def configure_cloud_choice(request: CloudChoiceRequest) -> SetupActionResu
         mode=request.mode,
         self_hosted=self_hosted,
     )
+
+
+@router.post("/apply", response_model=ApplyResponse)
+async def batch_apply_settings(request: ApplyRequest) -> ApplyResponse:
+    """Apply a batch settings delta in one shot.
+
+    Iterates the present sections in a fixed dependency order
+    (profile, network, cloud, display, advanced), calls each per-
+    section setter, and rolls back completed sections in reverse
+    order if a later section fails. Returns a structured per-section
+    result so the UI can show partial-success cleanly.
+    """
+    runtime = get_agent_app()
+
+    sections: dict[str, ApplyResultSection] = {}
+    completed: list[tuple[str, dict[str, object]]] = []
+    rolled_back: list[str] = []
+
+    order: list[tuple[str, object]] = [
+        ("profile", request.profile),
+        ("network", request.network),
+        ("cloud", request.cloud),
+        ("display", request.display),
+        ("advanced", request.advanced),
+    ]
+
+    overall_ok = True
+    for name, payload in order:
+        if payload is None:
+            continue
+        snapshot = _capture_section_snapshot(runtime, name)
+        try:
+            result = await _apply_single_section(runtime, name, payload)
+        except Exception as exc:  # noqa: BLE001 (never raise 500 from /apply)
+            log.warning("apply_section_raised", section=name, error=str(exc))
+            result = SetupActionResult(
+                ok=False,
+                message=f"Failed to apply {name}: {exc}",
+            )
+        section = ApplyResultSection(
+            ok=bool(result.ok),
+            message=str(result.message or ""),
+            data=dict(result.data or {}),
+        )
+        sections[name] = section
+        if section.ok:
+            completed.append((name, snapshot))
+        else:
+            overall_ok = False
+            rolled_back = _rollback_completed(runtime, completed)
+            break
+
+    return ApplyResponse(
+        overall=overall_ok,
+        sections=sections,
+        rolled_back=rolled_back,
+    )
+
+
+async def _apply_single_section(
+    runtime, name: str, payload
+) -> SetupActionResult:
+    """Dispatch one section to its setter."""
+    if name == "profile":
+        return apply_profile(
+            runtime,
+            profile=payload.profile,
+            ground_role=payload.ground_role,
+        )
+    if name == "network":
+        return apply_network(runtime, payload)
+    if name == "cloud":
+        self_hosted = payload.self_hosted.model_dump() if payload.self_hosted else None
+        return apply_cloud_choice(
+            runtime,
+            mode=payload.mode,
+            self_hosted=self_hosted,
+        )
+    if name == "display":
+        if not payload.display_id:
+            return SetupActionResult(
+                ok=False,
+                message="display_id is required",
+            )
+        if payload.display_id == "none":
+            try:
+                display_install.write_skip_marker()
+            except PermissionError as exc:
+                return SetupActionResult(
+                    ok=False,
+                    message=(
+                        "Cannot write display marker: "
+                        f"{exc}"
+                    ),
+                )
+            return SetupActionResult(
+                ok=True,
+                message="Display step skipped.",
+                data={"display_id": "none"},
+            )
+        try:
+            handle = await display_install.start_install(payload.display_id)
+        except RuntimeError as exc:
+            return SetupActionResult(ok=False, message=str(exc))
+        except FileNotFoundError as exc:
+            return SetupActionResult(ok=False, message=str(exc))
+        return SetupActionResult(
+            ok=True,
+            message=f"Display install queued ({payload.display_id}).",
+            data={"job_id": handle.job_id, "display_id": payload.display_id},
+        )
+    if name == "advanced":
+        return apply_advanced(runtime, payload)
+    return SetupActionResult(
+        ok=False,
+        message=f"Unknown section: {name}",
+    )
+
+
+def _capture_section_snapshot(runtime, name: str) -> dict[str, object]:
+    """Best-effort snapshot of the live config slice a section touches.
+
+    Used to revert that slice when a later section fails. Sections
+    that have no clean undo (display install kicks off a subprocess)
+    record an empty snapshot and are skipped on rollback.
+    """
+    config = getattr(runtime, "config", None)
+    snap: dict[str, object] = {}
+    if config is None:
+        return snap
+    try:
+        if name == "profile":
+            agent = getattr(config, "agent", None)
+            ground = getattr(config, "ground_station", None)
+            snap["profile"] = str(getattr(agent, "profile", "") or "")
+            snap["ground_role"] = str(getattr(ground, "role", "") or "")
+        elif name == "cloud":
+            server = getattr(config, "server", None)
+            snap["mode"] = str(getattr(server, "mode", "") or "")
+            sh = getattr(server, "self_hosted", None)
+            snap["self_hosted_url"] = str(getattr(sh, "url", "") or "")
+            snap["self_hosted_mqtt_broker"] = str(
+                getattr(sh, "mqtt_broker", "") or ""
+            )
+            snap["self_hosted_mqtt_port"] = int(
+                getattr(sh, "mqtt_port", 0) or 0
+            )
+        elif name == "network":
+            net = getattr(config, "network", None)
+            wifi = getattr(net, "wifi_client", None)
+            hotspot = getattr(net, "hotspot", None)
+            snap["wifi_ssid"] = str(getattr(wifi, "ssid", "") or "")
+            snap["wifi_password"] = str(getattr(wifi, "password", "") or "")
+            snap["hotspot_enabled"] = bool(
+                getattr(hotspot, "enabled", False)
+            )
+        elif name == "advanced":
+            agent = getattr(config, "agent", None)
+            snap["log_level"] = str(getattr(agent, "log_level", "") or "")
+    except Exception as exc:  # noqa: BLE001 (defensive)
+        log.warning("snapshot_failed", section=name, error=str(exc))
+    return snap
+
+
+def _rollback_completed(
+    runtime, completed: list[tuple[str, dict[str, object]]]
+) -> list[str]:
+    """Restore sections in reverse order. Returns the list of sections
+    that were successfully reverted.
+
+    Display installs cannot be undone trivially; the snapshot for
+    display is empty and the section is skipped here. The returned
+    list mirrors that behaviour.
+    """
+    reverted: list[str] = []
+    for name, snap in reversed(completed):
+        try:
+            if name == "profile":
+                _restore_profile(runtime, snap)
+            elif name == "cloud":
+                _restore_cloud(runtime, snap)
+            elif name == "network":
+                _restore_network(runtime, snap)
+            elif name == "advanced":
+                _restore_advanced(runtime, snap)
+            else:
+                continue
+            reverted.append(name)
+        except Exception as exc:  # noqa: BLE001 (best-effort rollback)
+            log.warning("rollback_failed", section=name, error=str(exc))
+    saver = getattr(getattr(runtime, "raw_runtime", None), "save_config", None)
+    if reverted and callable(saver):
+        try:
+            saver()
+        except Exception:
+            pass
+    return reverted
+
+
+def _restore_profile(runtime, snap: dict[str, object]) -> None:
+    config = runtime.config
+    agent = getattr(config, "agent", None)
+    if agent is not None and "profile" in snap:
+        agent.profile = str(snap.get("profile") or "")
+    ground = getattr(config, "ground_station", None)
+    if ground is not None and "ground_role" in snap:
+        prior = str(snap.get("ground_role") or "")
+        if prior:
+            ground.role = prior  # type: ignore[assignment]
+
+
+def _restore_cloud(runtime, snap: dict[str, object]) -> None:
+    config = runtime.config
+    server = getattr(config, "server", None)
+    if server is None:
+        return
+    if "mode" in snap:
+        prior = str(snap.get("mode") or "cloud")
+        if prior in ("cloud", "self_hosted", "local"):
+            server.mode = prior  # type: ignore[assignment]
+    sh = getattr(server, "self_hosted", None)
+    if sh is not None:
+        if "self_hosted_url" in snap:
+            sh.url = str(snap.get("self_hosted_url") or "")
+        if "self_hosted_mqtt_broker" in snap:
+            sh.mqtt_broker = str(snap.get("self_hosted_mqtt_broker") or "")
+        if "self_hosted_mqtt_port" in snap:
+            try:
+                sh.mqtt_port = int(snap.get("self_hosted_mqtt_port") or 0)
+            except (TypeError, ValueError):
+                pass
+
+
+def _restore_network(runtime, snap: dict[str, object]) -> None:
+    config = runtime.config
+    net = getattr(config, "network", None)
+    if net is None:
+        return
+    wifi = getattr(net, "wifi_client", None)
+    if wifi is not None:
+        if "wifi_ssid" in snap:
+            wifi.ssid = str(snap.get("wifi_ssid") or "")
+        if "wifi_password" in snap:
+            wifi.password = str(snap.get("wifi_password") or "")
+    hotspot = getattr(net, "hotspot", None)
+    if hotspot is not None and "hotspot_enabled" in snap:
+        hotspot.enabled = bool(snap.get("hotspot_enabled"))
+
+
+def _restore_advanced(runtime, snap: dict[str, object]) -> None:
+    config = runtime.config
+    agent = getattr(config, "agent", None)
+    if agent is not None and hasattr(agent, "log_level") and "log_level" in snap:
+        agent.log_level = str(snap.get("log_level") or "")
 
 
 @router.post("/finish", response_model=SetupStatus)

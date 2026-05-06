@@ -4,6 +4,30 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.13.1] - 2026-05-07
+
+### Added
+
+- **Batch settings apply.** New `POST /api/v1/setup/apply` accepts a
+  combined delta (profile, network, cloud, display, advanced) and
+  runs each section's setter inside a single try/rollback block.
+  Per-section results return as a structured `ApplyResponse` so the
+  UI can show partial-success cleanly. Rollback restores the live
+  config slice in reverse order when a later section fails.
+- **Network and advanced section setters.** New
+  `src/ados/setup/network.py` writes WiFi SSID + password +
+  hotspot toggle onto `runtime.config.network`. New
+  `src/ados/setup/advanced.py` validates log level + board override
+  + factory-reset flag. Each setter handles a None payload as a
+  no-op success so the apply route can iterate without
+  special-casing absent sections.
+- **Settings sheet form controls.** Each of the five sections at
+  `web/setup/views/settings/{profile,cloud,network,display,advanced}.js`
+  renders real form controls bound to a per-section dirty tracker.
+  The Apply button label updates reactively as `apply (n changes)`,
+  posts ONCE to `/api/v1/setup/apply`, and toasts per-section
+  results. Cancel resets every tracker.
+
 ## [0.13.0] - 2026-05-07
 
 ### Added

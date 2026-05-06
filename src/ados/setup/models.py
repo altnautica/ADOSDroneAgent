@@ -136,6 +136,33 @@ class SetupActionResult(BaseModel):
     data: dict[str, object] = Field(default_factory=dict)
 
 
+class NetworkApplyRequest(BaseModel):
+    """Network section of the batch-apply payload.
+
+    Every field is optional so the caller only sends the slice they
+    actually changed. ``wifi_password`` is write-only and is never
+    echoed back through the response.
+    """
+
+    wifi_ssid: str | None = None
+    wifi_password: str | None = None
+    hotspot_enabled: bool | None = None
+
+
+class AdvancedApplyRequest(BaseModel):
+    """Advanced section of the batch-apply payload.
+
+    ``factory_reset`` queues a reset that takes effect on the next
+    reboot; this iteration of the route does not actually wipe state.
+    ``board_override`` and ``log_level`` are validated here and
+    persisted by the corresponding setter.
+    """
+
+    factory_reset: bool | None = None
+    board_override: str | None = None
+    log_level: str | None = None
+
+
 class DisplayOption(BaseModel):
     """One supported display the wizard offers in the picker.
 
