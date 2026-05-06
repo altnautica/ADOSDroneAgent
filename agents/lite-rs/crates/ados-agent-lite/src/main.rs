@@ -1484,6 +1484,8 @@ fn build_setup_status(
         "runtime_mode": "lite",
         "setup_complete": persisted.finalized || paired,
         "setup_finalized": persisted.finalized,
+        "setup_state": "configured",
+        "profile_source": "default",
         "completion_percent": if persisted.finalized { 100 } else { completion_percent },
         "next_action": next_action,
         "steps": steps,
@@ -1527,7 +1529,8 @@ fn build_setup_status(
             "last_checked": null
         },
         "profile_suggestion": {
-            "detected": "unconfigured",
+            "detected": "drone",
+            "source": "default",
             "ground_role_hint": "direct",
             "ground_score": 0,
             "air_score": 0,

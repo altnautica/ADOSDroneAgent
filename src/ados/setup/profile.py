@@ -35,13 +35,18 @@ def build_profile_suggestion(config: Any) -> ProfileSuggestion:
         result = detect_profile(config_override=None)
     except Exception:
         return ProfileSuggestion(
-            detected="unconfigured",
+            detected="drone",
+            source="default",
             confirmed=confirmed,
         )
 
-    detected = str(result.get("profile") or "unconfigured")
-    if detected not in ("drone", "ground_station", "unconfigured"):
-        detected = "unconfigured"
+    detected = str(result.get("profile") or "drone")
+    if detected not in ("drone", "ground_station"):
+        detected = "drone"
+
+    source = str(result.get("source") or "detected")
+    if source not in ("detected", "tiebreaker", "override", "default"):
+        source = "detected"
 
     ground_role = str(getattr(config.ground_station, "role", "direct") or "direct")
     if ground_role not in ("direct", "relay", "receiver"):
@@ -49,6 +54,7 @@ def build_profile_suggestion(config: Any) -> ProfileSuggestion:
 
     return ProfileSuggestion(
         detected=detected,  # type: ignore[arg-type]
+        source=source,  # type: ignore[arg-type]
         ground_role_hint=ground_role,  # type: ignore[arg-type]
         ground_score=int(result.get("ground_score", 0) or 0),
         air_score=int(result.get("air_score", 0) or 0),

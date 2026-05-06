@@ -48,6 +48,24 @@ def test_get_setup_status(client):
     assert "access_urls" in data
     assert "mavlink" in data
     assert "video" in data
+    # A live agent always reports "configured". Auto-detect commits a
+    # profile at install, the operator can override via the webapp at
+    # any time, and there is no intermediate "needs review" state.
+    assert data["setup_state"] == "configured"
+    assert data["profile_source"] in (
+        "detected",
+        "tiebreaker",
+        "override",
+        "default",
+        "user",
+    )
+    assert data["profile_suggestion"]["detected"] in ("drone", "ground_station")
+    assert data["profile_suggestion"]["source"] in (
+        "detected",
+        "tiebreaker",
+        "override",
+        "default",
+    )
 
 
 def test_get_telemetry(client):

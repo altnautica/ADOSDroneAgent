@@ -929,15 +929,14 @@ enable_universal_units() {
 #   2. /etc/ados/profile.conf — supports both YAML (`profile: X`) and
 #      legacy key=value (`profile=X`) so older installs don't break.
 #   3. python -m ados.bootstrap.profile_detect — auto-detect from
-#      board fingerprint.
+#      board fingerprint. Always returns a usable value.
 #   4. Fallback: "drone".
 #
-# The fix in priority #1 is the one that closes the long-standing
-# regression where `--profile ground-station` got silently dropped on
-# every --upgrade because nothing wrote the choice to disk.
+# A stale "unconfigured" written by an older agent fails the regex
+# below and falls through to priority 3 so the install self-heals.
 resolve_profile() {
     local profile_file="${CONFIG_DIR}/profile.conf"
-    local valid_re='^(auto|drone|ground_station|ground-station|unconfigured)$'
+    local valid_re='^(auto|drone|ground_station|ground-station)$'
 
     # Priority 1 — explicit --profile flag (already in _PROFILE_OVERRIDE).
     if [ -n "${_PROFILE_OVERRIDE:-}" ] \

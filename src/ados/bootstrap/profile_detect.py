@@ -1,14 +1,14 @@
 """Profile auto-detect for ADOS Drone Agent.
 
-Runs a hardware fingerprint and picks `drone` or `ground_station`. If the
-signals are ambiguous the result is `unconfigured` and a human picks via
-OLED or the setup webapp.
+Runs a hardware fingerprint and always returns a usable profile (`drone`
+or `ground_station`). The decision tail is a strict argmax on the live
+probes, with a stable tiebreaker on the last persisted profile and a
+final `drone` default so a fresh-flashed board with no signals still
+boots into a known state.
 
-Full design: product/specs/ados-ground-agent/04-profile-autodetect.md
-
-This module has no hard runtime dependencies beyond the stdlib. `smbus2`
-and `gpiozero` are used when available; otherwise we fall back to
-shelling out to `i2cdetect` and to skipping the GPIO probe.
+This module has no hard runtime dependencies beyond the stdlib. `smbus2`,
+`gpiozero`, and `pyserial` are used when available; otherwise the
+matching probes silently contribute zero points.
 
 Run a dry-run from a shell:
 
@@ -17,9 +17,12 @@ Run a dry-run from a shell:
 
 from __future__ import annotations
 
+import json
 import os
 import re
+import socket
 import subprocess
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
@@ -185,16 +188,112 @@ def probe_mavlink_serial() -> tuple[int, int, bool]:
     return 0, 0, False
 
 
-def probe_gps_serial() -> tuple[int, int, bool]:
-    """Placeholder: future GPS UART detection. Returns zero for now."""
-    # TODO: enumerate /dev/ttyAMA* and /dev/serial* that are not claimed
-    # by the FC and probe for NMEA or UBX frames.
+_GPS_CANDIDATE_PATHS = [
+    "/dev/ttyAMA0",
+    "/dev/ttyAMA1",
+    "/dev/ttyAMA2",
+    "/dev/ttyS0",
+    "/dev/ttyS1",
+    "/dev/ttyS2",
+    "/dev/serial1",
+    "/dev/serial2",
+]
+
+_NMEA_PREFIXES = (b"$GP", b"$GN", b"$GL", b"$GA", b"$GB")
+_UBX_SYNC = b"\xb5\x62"
+
+
+def probe_gps_serial(timeout: float = 2.0) -> tuple[int, int, bool]:
+    """Sample candidate UARTs for an NMEA or UBX frame.
+
+    Walks plausible serial devices that are not already in use as the
+    primary FC link, opens each at 9600 baud, samples for up to a few
+    hundred milliseconds, and returns on the first match. A receiver
+    that is talking at a non-default baud will not match here, which
+    is acceptable: the probe is one signal in a seven-signal vote, not
+    a full GPS configurator.
+    """
+    try:
+        import serial  # type: ignore
+    except ImportError:
+        return 0, 0, False
+
+    fc_paths = {p for p in _MAVLINK_SERIAL_PATHS if Path(p).exists()}
+    candidates = [
+        p for p in _GPS_CANDIDATE_PATHS if Path(p).exists() and p not in fc_paths
+    ]
+    if not candidates:
+        return 0, 0, False
+
+    per_port_timeout = max(timeout / len(candidates), 0.15)
+
+    for path in candidates:
+        try:
+            with serial.Serial(
+                path,
+                baudrate=9600,
+                timeout=per_port_timeout,
+                exclusive=True,
+            ) as port:
+                buf = port.read(256)
+        except (OSError, ValueError, serial.SerialException):  # type: ignore[attr-defined]
+            continue
+        if not buf:
+            continue
+        if any(buf.find(prefix) >= 0 for prefix in _NMEA_PREFIXES):
+            return 0, 3, True
+        if buf.find(_UBX_SYNC) >= 0:
+            return 0, 3, True
+
     return 0, 0, False
 
 
-def probe_fc_heartbeat() -> tuple[int, int, bool]:
-    """Placeholder: real detection happens after the mavlink service starts."""
-    # TODO: read the agent state IPC socket for a recent FC heartbeat.
+def probe_fc_heartbeat(timeout: float = 1.5) -> tuple[int, int, bool]:
+    """Read the agent state socket for a live FC heartbeat.
+
+    The mavlink service publishes a 10 Hz state snapshot to the unix
+    socket at `/run/ados/state.sock`. The first line on connect is the
+    most recent snapshot, so a single short read is enough to tell us
+    whether the FC is connected. On a brand-new boot the socket may
+    not exist yet; that's expected and the probe returns zero so the
+    decision falls back to the persistence tiebreaker.
+    """
+    state_sock = "/run/ados/state.sock"
+    if not Path(state_sock).exists():
+        return 0, 0, False
+
+    deadline = time.monotonic() + timeout
+    buf = bytearray()
+    try:
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            sock.settimeout(timeout)
+            sock.connect(state_sock)
+            while time.monotonic() < deadline and b"\n" not in buf:
+                remaining = max(0.05, deadline - time.monotonic())
+                sock.settimeout(remaining)
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                buf.extend(chunk)
+        finally:
+            try:
+                sock.close()
+            except OSError:
+                pass
+    except (OSError, socket.timeout):
+        return 0, 0, False
+
+    line, _, _ = bytes(buf).partition(b"\n")
+    if not line:
+        return 0, 0, False
+    try:
+        data = json.loads(line)
+    except json.JSONDecodeError:
+        return 0, 0, False
+
+    if isinstance(data, dict) and bool(data.get("fc_connected")):
+        return 0, 3, True
     return 0, 0, False
 
 
@@ -268,16 +367,26 @@ def probe_mesh_capable() -> bool:
 def detect_profile(config_override: str | None = None) -> dict[str, Any]:
     """Run all probes and decide the profile.
 
-    config_override: explicit value from /etc/ados/config.yaml. If it is
-    "drone" or "ground_station" that value is returned without running
-    any probes.
+    Always returns a usable profile (`drone` or `ground_station`). The
+    decision tail is a strict argmax on the live probes, with a stable
+    tiebreaker on the last persisted profile and a final `drone`
+    default for a fresh-flashed board with no signals. The result
+    includes a `source` field marking which branch of the decision
+    produced the profile so the setup status can surface "auto" vs
+    "needs review" cleanly.
+
+    config_override: explicit value from /etc/ados/config.yaml. If it
+    is "drone" or "ground_station" that value is returned without
+    running any probes.
     """
     if config_override in ("drone", "ground_station"):
         return {
             "profile": config_override,
+            "source": "override",
             "ground_score": 0,
             "air_score": 0,
             "signals": {"override": config_override},
+            "mesh_capable": False,
             "detected_at": _now_iso(),
         }
 
@@ -308,31 +417,26 @@ def detect_profile(config_override: str | None = None) -> dict[str, Any]:
     ground_score = sum(g for g, _a, _d in probes.values())
     air_score = sum(a for _g, a, _d in probes.values())
 
-    if ground_score >= 4 and air_score <= 2:
-        profile = "ground_station"
-    elif air_score >= 4 and ground_score <= 2:
+    if air_score > ground_score:
         profile = "drone"
+        source = "detected"
+    elif ground_score > air_score:
+        profile = "ground_station"
+        source = "detected"
     else:
-        profile = "unconfigured"
-
-    # Stable tiebreaker: when the live probes are ambiguous, fall back to
-    # the last persisted profile from /etc/ados/profile.conf. Avoids
-    # flipping the role across reboots on boards that wear both an FC
-    # and an OLED. The persisted value only wins when the current scores
-    # are inconclusive AND the prior profile is still consistent with
-    # the strongest current signal class (no air_score dominance picking
-    # ground, and vice versa).
-    if profile == "unconfigured":
         prior = _read_last_known_profile()
-        if prior == "ground_station" and air_score < 3:
-            profile = "ground_station"
-        elif prior == "drone" and ground_score < 3:
+        if prior in ("drone", "ground_station"):
+            profile = prior
+            source = "tiebreaker"
+        else:
             profile = "drone"
+            source = "default"
 
     signals = {name: detected for name, (_g, _a, detected) in probes.items()}
 
     result = {
         "profile": profile,
+        "source": source,
         "ground_score": ground_score,
         "air_score": air_score,
         "signals": signals,
@@ -345,6 +449,7 @@ def detect_profile(config_override: str | None = None) -> dict[str, Any]:
         log.info(
             "profile_detect_result",
             profile=profile,
+            source=source,
             ground_score=ground_score,
             air_score=air_score,
         )
@@ -368,10 +473,10 @@ def _now_iso() -> str:
 def _read_last_known_profile(path: str = str(PROFILE_CONF)) -> str | None:
     """Return the profile recorded in profile.conf, or None on any error.
 
-    Used as a tiebreaker when the live probes are ambiguous. Failures
+    Used as a tiebreaker when the live probes are exactly tied. Failures
     (file missing, yaml unavailable, parse error) collapse to None so
-    the caller falls through to "unconfigured" and the human picks via
-    OLED or the setup webapp.
+    the caller falls through to the "drone" default and the operator can
+    review the auto-pick from the dashboard.
     """
     target = Path(path)
     if not target.is_file():

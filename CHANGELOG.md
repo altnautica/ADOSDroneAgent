@@ -4,6 +4,39 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.12.7] - 2026-05-07
+
+### Added
+
+- **Profile auto-detect always commits a usable value.** The decision
+  tail in `ados.bootstrap.profile_detect.detect_profile` is now a
+  strict argmax on the live probes, with a stable tiebreaker on the
+  last persisted profile and a `drone` default. The legacy
+  `unconfigured` outcome that forced first-boot operators through a
+  captive-portal wizard is gone. The result includes a new `source`
+  field marking which branch of the decision produced the profile
+  (`detected` / `tiebreaker` / `override` / `default`).
+- **GPS UART probe.** `probe_gps_serial` opens candidate UARTs that
+  are not in use by the FC link and looks for an NMEA prefix or a
+  UBX sync. A match contributes 3 air points to the score.
+- **FC heartbeat probe.** `probe_fc_heartbeat` reads one snapshot
+  from `/run/ados/state.sock` and contributes 3 air points when
+  `fc_connected` is true.
+- **`setup_state` and `profile_source` on the setup status.** The
+  REST `GET /api/v1/setup/status` response carries these alongside
+  the existing `profile_suggestion` payload so the dashboard banner
+  and the cloud heartbeat can show how a profile was picked.
+
+### Changed
+
+- `scripts/install.sh:resolve_profile` no longer accepts the legacy
+  `unconfigured` value; a stale write from an older agent falls
+  through to the auto-detect step which always returns a usable
+  profile.
+- `ProfileSuggestion.detected` is now `Literal["drone",
+  "ground_station"]`. The agent webapp and the lite-rs setup mock
+  no longer reference the legacy third value.
+
 ## [0.12.6] - 2026-05-06
 
 Consolidated entry covering 0.10.1 through 0.12.6. The headline themes

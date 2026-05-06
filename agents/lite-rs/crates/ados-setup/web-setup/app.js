@@ -1830,10 +1830,10 @@ function renderProfileStep(status, onMutate) {
       .join("  ·  ");
   };
 
-  const detected = suggestion.detected || "unconfigured";
+  const detected = suggestion.detected === "ground_station" ? "ground_station" : "drone";
   const detectedLabel = detected === "ground_station"
     ? `ground station (${suggestion.ground_role_hint || "direct"})`
-    : detected === "drone" ? "drone" : "unconfigured";
+    : "drone";
 
   const cards = el("div", { className: "cloud-cards" });
   const renderRadio = (key, title, blurb, isDetected) => {

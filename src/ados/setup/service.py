@@ -526,11 +526,7 @@ async def build_setup_status(runtime: Any, host_header: str | None = None) -> Se
     profile_suggestion = build_profile_suggestion(config)
     profile_for_check = str(config.agent.profile)
     if profile_for_check == "auto":
-        profile_for_check = (
-            profile_suggestion.detected
-            if profile_suggestion.detected != "unconfigured"
-            else "drone"
-        )
+        profile_for_check = profile_suggestion.detected
     ground_role = str(getattr(config.ground_station, "role", "direct") or "direct")
     hardware_check = run_hardware_check(
         runtime,
@@ -584,6 +580,18 @@ async def build_setup_status(runtime: Any, host_header: str | None = None) -> Se
     natural_complete = not any(step.state == "needs_action" for step in steps)
     setup_complete = persisted.setup_finalized or natural_complete
 
+    # After install the profile is always committed by `detect_profile`
+    # (auto-detect) or by the operator (`apply_profile`). A live agent
+    # is therefore always "configured" from the dashboard's point of
+    # view; the operator can review or override via the webapp at any
+    # time. `profile_source` carries the how so the GCS can show an
+    # inline "auto-detected" hint without gating any UI.
+    setup_state = "configured"
+    explicit_profile = str(config.agent.profile) in ("drone", "ground_station")
+    profile_source = (
+        "user" if explicit_profile else profile_suggestion.source
+    )
+
     return SetupStatus(
         version=__version__,
         device_id=config.agent.device_id,
@@ -592,6 +600,8 @@ async def build_setup_status(runtime: Any, host_header: str | None = None) -> Se
         ground_role=ground_role,
         setup_complete=setup_complete,
         setup_finalized=persisted.setup_finalized,
+        setup_state=setup_state,  # type: ignore[arg-type]
+        profile_source=profile_source,  # type: ignore[arg-type]
         completion_percent=completion_percent,
         next_action=next_action,
         steps=steps,

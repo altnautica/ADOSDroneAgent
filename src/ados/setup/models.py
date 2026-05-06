@@ -94,10 +94,13 @@ class ProfileSuggestion(BaseModel):
     The wizard's profile step pre-selects ``detected`` and shows the per-
     signal map so the operator can sanity-check the auto-pick before
     confirming. ``confirmed`` flips true once the operator submits the
-    profile step at least once for the active config value.
+    profile step at least once for the active config value. ``source``
+    marks which branch of the decision tail produced the profile so the
+    dashboard can show "auto" vs "needs review" affordances cleanly.
     """
 
-    detected: Literal["drone", "ground_station", "unconfigured"] = "unconfigured"
+    detected: Literal["drone", "ground_station"] = "drone"
+    source: Literal["detected", "tiebreaker", "override", "default"] = "detected"
     ground_role_hint: Literal["direct", "relay", "receiver"] = "direct"
     ground_score: int = 0
     air_score: int = 0
@@ -196,6 +199,8 @@ class SetupStatus(BaseModel):
     ground_role: str = ""
     setup_complete: bool
     setup_finalized: bool = False
+    setup_state: Literal["auto", "needs_review", "configured"] = "auto"
+    profile_source: Literal["detected", "tiebreaker", "override", "default", "user"] = "detected"
     completion_percent: int
     next_action: str
     steps: list[SetupStep]
