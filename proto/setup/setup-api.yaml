@@ -56,7 +56,59 @@ components:
       description: |
         Per-component readiness for the selected profile. Populated by
         the hardware check engine reading /proc and lsusb against the
-        board YAML's documented requirements.
+        board YAML's documented requirements. Lite backends additively
+        attach a `wfb_driver` field carrying the pre-flight WFB-ng
+        driver-stack readout (see `WfbDriverCheck`); clients that only
+        consume the canonical `items` array continue to work unchanged.
+      properties:
+        wfb_driver:
+          $ref: "#/components/schemas/WfbDriverCheck"
+
+    WfbDriverCheck:
+      type: object
+      description: |
+        Pre-flight readout for the WFB-ng broadcast driver stack.
+        Surfaced in the hardware-check response so the wizard can warn
+        the operator before they reach the radio configuration step.
+        Lite-specific extension; the Python full agent does not yet
+        emit this field.
+      required:
+        - rtl8812eu_loaded
+        - wfb_tx_available
+        - udev_rule_present
+        - status
+        - message
+      properties:
+        rtl8812eu_loaded:
+          type: boolean
+          description: |
+            True when /proc/modules contains a line whose driver token
+            starts with `8812` or `88xxau` (case-insensitive). Matches
+            the upstream out-of-tree DKMS variants.
+        wfb_tx_available:
+          type: boolean
+          description: |
+            True when the userland `wfb_tx` binary resolves on a
+            trusted absolute path. The probe never inherits `$PATH`.
+        udev_rule_present:
+          type: boolean
+          description: |
+            Best-effort: true when a file under /etc/udev/rules.d/
+            references the Realtek vendor id `0bda`. False on
+            Buildroot rootfs that bake the rule into initramfs and
+            never write to /etc/udev/rules.d/. Informational only;
+            does not feed into the rollup `status`.
+        status:
+          type: string
+          enum: [ok, warning, error]
+          description: |
+            Aggregate severity. `ok` when both the driver and the
+            binary are present; `warning` when exactly one is missing;
+            `error` when both are missing (the agent has no radio
+            capability on this host).
+        message:
+          type: string
+          description: Human-readable summary of the observed signal pair.
 
     ProfileChoiceRequest:
       type: object

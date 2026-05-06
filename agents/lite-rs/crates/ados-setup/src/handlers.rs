@@ -24,6 +24,7 @@ use crate::models::{
 };
 use crate::profile::apply_profile;
 use crate::router::SetupState;
+use crate::wfb_driver::check_wfb_driver;
 
 // ---------------------------------------------------------------------------
 // Status
@@ -53,24 +54,57 @@ pub async fn post_profile(
 
 pub async fn get_hardware_check(State(state): State<Arc<SetupState>>) -> Json<Value> {
     let (profile, ground_role) = read_profile_from_agent_yaml(&state.agent_yaml);
-    // run_hardware_check shells out to lsusb + reads /proc + /sys
-    // synchronously. On the Luckfox single-core A7 this can block ~200 ms;
-    // hand it off to the blocking pool so the axum handler thread (which
-    // also serves the WS log stream + every other route) doesn't stall.
-    let status = tokio::task::spawn_blocking(move || run_hardware_check(&profile, &ground_role))
-        .await
-        .ok();
-    let status = status.unwrap_or_else(|| run_hardware_check("drone", ""));
-    Json(serde_json::to_value(status).unwrap_or_else(|_| json!({})))
+    Json(run_hardware_check_blocking(profile, ground_role).await)
 }
 
 pub async fn post_hardware_check_refresh(State(state): State<Arc<SetupState>>) -> Json<Value> {
     let (profile, ground_role) = read_profile_from_agent_yaml(&state.agent_yaml);
-    let status = tokio::task::spawn_blocking(move || run_hardware_check(&profile, &ground_role))
-        .await
-        .ok();
-    let status = status.unwrap_or_else(|| run_hardware_check("drone", ""));
-    Json(serde_json::to_value(status).unwrap_or_else(|_| json!({})))
+    Json(run_hardware_check_blocking(profile, ground_role).await)
+}
+
+/// Run the hardware-check sweep + WFB driver pre-flight on the blocking
+/// pool and return the merged JSON body. The hardware-check shells out
+/// to lsusb + reads /proc + /sys synchronously; the WFB driver probe
+/// reads /proc/modules and /etc/udev/rules.d. On the Luckfox single-core
+/// A7 the combined latency lands at ~250 ms, well clear of the axum
+/// handler thread which also serves the WS log stream and every other
+/// route. The merged body adds a `wfb_driver` field at the top level
+/// alongside the canonical HardwareCheckStatus shape; older clients
+/// that ignore unknown fields stay wire-compatible.
+async fn run_hardware_check_blocking(profile: String, ground_role: String) -> Value {
+    let merged = tokio::task::spawn_blocking(move || {
+        let status = run_hardware_check(&profile, &ground_role);
+        let driver = check_wfb_driver();
+        merge_hardware_check_payload(&status, &driver)
+    })
+    .await;
+    match merged {
+        Ok(v) => v,
+        Err(_) => {
+            // Fall back to a synchronous run on the handler thread when
+            // the blocking pool spawn fails (effectively impossible on
+            // a healthy tokio runtime, but handle it without panicking).
+            let status = run_hardware_check("drone", "");
+            let driver = check_wfb_driver();
+            merge_hardware_check_payload(&status, &driver)
+        }
+    }
+}
+
+/// Combine the canonical `HardwareCheckStatus` body with the WFB
+/// driver pre-flight tile. Failure paths collapse to an empty object
+/// rather than 500 — the wizard renders an "unknown" tile in that
+/// case rather than blocking the operator.
+fn merge_hardware_check_payload(
+    status: &crate::models::HardwareCheckStatus,
+    driver: &crate::wfb_driver::WfbDriverCheck,
+) -> Value {
+    let mut body = serde_json::to_value(status).unwrap_or_else(|_| json!({}));
+    if let Some(map) = body.as_object_mut() {
+        let driver_value = serde_json::to_value(driver).unwrap_or_else(|_| json!({}));
+        map.insert("wfb_driver".to_string(), driver_value);
+    }
+    body
 }
 
 /// Read the active profile + ground_role from agent.yaml. Defaults to
@@ -469,7 +503,7 @@ pub async fn get_diag(
         "device_id": yaml.device_id,
         "paired": paired,
         "runtime_mode": "lite",
-        "rss_mb": read_rss_mb(),
+        "rss_mb": read_rss_mb(None),
         "mqtt": {
             "broker": yaml.mqtt_broker,
             "connected_recently": diag.mqtt_connected_recently(now),
