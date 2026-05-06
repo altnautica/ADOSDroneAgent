@@ -30,20 +30,44 @@ component when there is no serial device, which is the correct outcome.
 
 ---
 
-## 1. Image flash (operator side, not us)
+## 1. Image flash
 
-This is on you. A flashable Buildroot image is a separate release
-artifact and is not in scope for this runbook. For now, flash the
-Luckfox SDK Buildroot image using Luckfox's documented flow:
+Download the latest signed ADOS image from GitHub Releases and verify
+the signature before flashing.
 
-- Windows: SocToolKit (Luckfox's flashing utility)
-- Linux/Mac: `dd if=luckfox-pico-zero.img of=/dev/sdX bs=4M conv=fsync`
+```sh
+# Download from the latest lite-image-v* release
+gh release download lite-image-v0.1.0 \
+    -R altnautica/ADOSDroneAgent \
+    -p 'ados-luckfox-pico-zero-*.img.gz' \
+    -p 'ados-luckfox-pico-zero-*.img.gz.sha256' \
+    -p 'ados-luckfox-pico-zero-*.img.gz.minisig'
 
-Vendor docs: <https://wiki.luckfox.com/Luckfox-Pico/Luckfox-Pico-quick-start>
+# Verify the signature against the embedded public key.
+PUBKEY=$(curl -sSL https://raw.githubusercontent.com/altnautica/ADOSDroneAgent/main/scripts/install-lite.sh \
+         | grep -oE 'RW[A-Za-z0-9+/=]+' | head -n1)
+minisign -V -P "${PUBKEY}" -m ados-luckfox-pico-zero-0.1.0.img.gz
+
+# Verify the SHA256 matches the sidecar.
+sha256sum -c ados-luckfox-pico-zero-0.1.0.img.gz.sha256
+```
+
+Then flash to a microSD:
+
+- Windows: balenaEtcher (drag-and-drop the `.img.gz`, balenaEtcher
+  handles decompression internally).
+- Linux / macOS:
+  ```sh
+  gunzip ados-luckfox-pico-zero-0.1.0.img.gz
+  sudo dd if=ados-luckfox-pico-zero-0.1.0.img of=/dev/diskN bs=4M conv=fsync
+  ```
+  (Replace `diskN` with the actual SD card device — `lsblk` on Linux,
+  `diskutil list` on macOS.)
 
 Confirm the board boots: connect USB-C, watch for the device to enumerate
 as a serial console at `/dev/cu.usbmodem*` (Mac) or `/dev/ttyACM*`
-(Linux). Default user: `root`, no password.
+(Linux). Default user on the ADOS image: `root`, password disabled
+(SSH key-only).
 
 ## 2. Networking the board (operator side)
 

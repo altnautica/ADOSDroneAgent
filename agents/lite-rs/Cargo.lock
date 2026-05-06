@@ -4,7 +4,7 @@ version = 3
 
 [[package]]
 name = "ados-agent-lite"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "ados-cloud",
  "ados-mavlink",
@@ -27,7 +27,7 @@ dependencies = [
 
 [[package]]
 name = "ados-cloud"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "ados-setup",
  "ados-test-mocks",
@@ -49,7 +49,7 @@ dependencies = [
 
 [[package]]
 name = "ados-core"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "tempfile",
  "thiserror 1.0.69",
@@ -57,7 +57,7 @@ dependencies = [
 
 [[package]]
 name = "ados-mavlink"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "anyhow",
  "serde",
@@ -70,7 +70,7 @@ dependencies = [
 
 [[package]]
 name = "ados-setup"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "ados-core",
  "ados-wfb",
@@ -107,7 +107,7 @@ dependencies = [
 
 [[package]]
 name = "ados-video"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "ados-test-mocks",
  "async-trait",
@@ -124,7 +124,7 @@ dependencies = [
 
 [[package]]
 name = "ados-wfb"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "ados-core",
  "ados-video",

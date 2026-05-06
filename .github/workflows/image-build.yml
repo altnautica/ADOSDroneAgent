@@ -92,6 +92,17 @@ jobs:
             build-essential libncurses-dev rsync bc cpio file unzip \
             xz-utils python3 python3-yaml git bison flex wget \
             minisign
+          # pi-gen path requires extra host tooling — installed
+          # unconditionally so the matrix doesn't need per-board
+          # branching here. Cheap on the cache; ~30 s on a fresh
+          # runner.
+          if [ "${{ matrix.board }}" = "pi-zero-2w" ]; then
+            sudo apt-get install -y --no-install-recommends \
+              coreutils quilt parted qemu-user-static binfmt-support \
+              debootstrap zerofree zip dosfstools e2fsprogs \
+              libarchive-tools libcap2-bin grep rsync curl gpg pigz \
+              xxd arch-test bmap-tools kmod
+          fi
 
       - name: Run image build via universal orchestrator
         if: steps.gate.outputs.build == 'true'
