@@ -1,10 +1,10 @@
 # Lite agent bench bringup — Luckfox Pico Zero
 
-This runbook walks through the end-to-end validation gate for Phase 1 of
-the lite-agent track. Goal: prove that a stock Luckfox Pico Zero,
-flashed with the vendor SDK Buildroot image, completes the full DEC-141
-setup wizard locally — no Python full agent on the rootfs, no manual
-edits, no operator intervention beyond the wizard form itself.
+This runbook walks through the lite agent's first-release validation
+gate. Goal: prove that a stock Luckfox Pico Zero, flashed with the
+vendor SDK Buildroot image, completes the full universal setup wizard
+locally — no Python full agent on the rootfs, no manual edits, no
+operator intervention beyond the wizard form itself.
 
 Estimated time on the bench: 60–90 minutes the first time, 15 minutes
 on a re-run.
@@ -29,9 +29,9 @@ component when there is no serial device, which is the correct outcome.
 
 ## 1. Image flash (operator side, not us)
 
-This is on you. We do not ship a flashable image at Phase 1 (that lands
-in MSN-058). For now, flash the Luckfox SDK Buildroot image using
-Luckfox's documented flow:
+This is on you. A flashable Buildroot image is a separate release
+artifact and is not in scope for this runbook. For now, flash the
+Luckfox SDK Buildroot image using Luckfox's documented flow:
 
 - Windows: SocToolKit (Luckfox's flashing utility)
 - Linux/Mac: `dd if=luckfox-pico-zero.img of=/dev/sdX bs=4M conv=fsync`
@@ -242,7 +242,7 @@ Pass criteria for step 8: no OOM, no restart, RSS stable.
 
 ## Closeout checklist
 
-When all eight steps above pass, B7.10 (and MSN-054 Phase 1) is
+When all eight steps above pass, the first-release bench gate is
 complete:
 
 - [ ] Step 1 — image flashed
@@ -254,5 +254,6 @@ complete:
 - [ ] Step 7 — Cloudflare Tunnel comes up + verify responds (optional)
 - [ ] Step 8 — 1-hour soak with no OOM + no restart (optional)
 
-After this, DEC-142 flips DRAFT → REVIEW. FINAL is gated on MSN-055
-landing the video pipeline.
+After this, the lite agent track moves from initial release into
+review. Stable promotion is gated on the video pipeline landing in a
+follow-on release.

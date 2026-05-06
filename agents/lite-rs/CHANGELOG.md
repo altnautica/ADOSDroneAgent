@@ -91,7 +91,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 - 88 tests across 4 crates (ados-mavlink 6, ados-cloud 6, ados-setup
   unit 56, ados-setup integration 16, ados-agent-lite 4). All green.
 
-## [0.1.0] — 2026-05-05 — Phase 1 control plane
+## [0.1.0] — 2026-05-05 — Initial release
 
 First validated release. Control plane only — no video, no WFB-ng. The
 binary runs end-to-end on a Luckfox Pico Zero (Rockchip RV1106G3,
