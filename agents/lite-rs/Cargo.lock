@@ -30,6 +30,7 @@ name = "ados-cloud"
 version = "0.1.0"
 dependencies = [
  "ados-setup",
+ "ados-test-mocks",
  "anyhow",
  "chrono",
  "lru",

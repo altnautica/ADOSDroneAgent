@@ -38,3 +38,4 @@ nix = { version = "0.29", default-features = false, features = ["reboot"] }
 wiremock = "0.6"
 tempfile = "3"
 tokio = { workspace = true, features = ["macros", "rt", "sync", "io-util", "net", "time", "signal", "process", "rt-multi-thread"] }
+ados-test-mocks = { path = "../ados-test-mocks" }
