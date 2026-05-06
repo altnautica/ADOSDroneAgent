@@ -5,6 +5,18 @@ versions independently of the Python full agent at `src/ados/`.
 
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
+## [0.1.4] - 2026-05-06
+
+### Fixed
+- Cross-compile builds no longer pull `libudev`. The `udev` crate is
+  now an optional dependency behind the `netlink-udev` feature; the
+  default build path uses the always-available sysfs polling backend
+  on every target. Hosts with `libudev.pc` available can opt back into
+  the netlink backend with `--features netlink-udev`. Unblocks the
+  release pipeline for `armv7-unknown-linux-musleabihf`,
+  `aarch64-unknown-linux-musl`, and `x86_64-unknown-linux-musl` where
+  no libudev is present in the cross image.
+
 ## [0.1.3] - 2026-05-06
 
 ### Added

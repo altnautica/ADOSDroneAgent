@@ -13,6 +13,12 @@ default = []
 # Exposes the in-memory mock udev source so tests can drive add/remove
 # events without touching /sys.
 mock = []
+# Opts into the netlink-backed udev monitor. Pulls in `libudev`, which
+# the host build environment must provide. When this feature is off the
+# lib falls back to the always-present sysfs polling backend on every
+# platform, including Linux. Cross-compile environments without
+# `libudev.pc` for the target should leave the feature off.
+netlink-udev = ["dep:udev", "dep:tokio-stream"]
 
 [dependencies]
 tokio = { workspace = true, features = ["fs"] }
@@ -43,15 +49,12 @@ sha2 = { workspace = true }
 # same kernel-blessed source.
 rand_core = { version = "0.6", features = ["getrandom"] }
 
+# Optional udev netlink monitor. Linux-only, requires libudev. The
+# polling SysfsUdev backend is the always-available default; netlink
+# is an opt-in optimisation enabled by the `netlink-udev` feature.
+udev = { version = "0.9", optional = true }
+tokio-stream = { version = "0.1", optional = true }
+
 [dev-dependencies]
 tempfile = "3"
 tokio = { workspace = true, features = ["macros", "rt", "sync", "io-util", "net", "time", "signal", "process", "rt-multi-thread", "fs"] }
-
-# Real udev netlink monitor on Linux. The crate links libudev which is
-# Linux-only, so the dep is target-gated so `ados-wfb` still compiles
-# cleanly on macOS dev hosts where the polling SysfsUdev backend is the
-# only path. The udev backend lives behind `#[cfg(target_os = "linux")]`
-# in `udev.rs` and the factory function picks the right one.
-[target.'cfg(target_os = "linux")'.dependencies]
-udev = "0.9"
-tokio-stream = "0.1"

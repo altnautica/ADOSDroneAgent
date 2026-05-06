@@ -61,7 +61,7 @@ pub enum UdevBackend {
 /// the polling sysfs backend. On every other platform the sysfs
 /// backend is the only path.
 pub fn spawn_udev() -> Result<(mpsc::Receiver<DongleEvent>, UdevBackend), UdevError> {
-    #[cfg(target_os = "linux")]
+    #[cfg(all(target_os = "linux", feature = "netlink-udev"))]
     {
         match netlink::NetlinkUdev::new()?.spawn() {
             Ok(rx) => Ok((rx, UdevBackend::Netlink)),
@@ -72,7 +72,7 @@ pub fn spawn_udev() -> Result<(mpsc::Receiver<DongleEvent>, UdevBackend), UdevEr
             }
         }
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(all(target_os = "linux", feature = "netlink-udev")))]
     {
         let rx = SysfsUdev::new().spawn()?;
         Ok((rx, UdevBackend::Sysfs))
@@ -397,7 +397,7 @@ mod tests {
     /// (no privileges, sandbox), so we verify the construction path
     /// at least doesn't panic. A live netlink test runs on the
     /// hardware-bench rig.
-    #[cfg(target_os = "linux")]
+    #[cfg(all(target_os = "linux", feature = "netlink-udev"))]
     #[test]
     fn netlink_backend_constructible_on_linux() {
         // `NetlinkUdev::new()` only fails when libudev itself cannot
@@ -413,7 +413,7 @@ mod tests {
 // Netlink backend — Linux only.
 // ---------------------------------------------------------------------------
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "netlink-udev"))]
 pub mod netlink {
     //! Real udev events over an `AF_NETLINK` socket.
     //!
