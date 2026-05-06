@@ -1,0 +1,29 @@
+Append additional userspace packages to the Luckfox buildroot defconfig.
+
+These packages are pulled in for the lite agent's runtime: hostapd and
+dnsmasq drive the Wi-Fi soft-AP fallback when no station association
+holds for 30 s; minisign verifies signed agent + image artifacts during
+in-band updates; libcurl is the HTTP client the agent uses for its
+heartbeat and signed-asset fetches; dropbear gives the operator a
+recoverable SSH path on bench rigs without pulling in a full OpenSSH
+stack; chrony keeps the system clock close enough to wall time for TLS
+handshakes against the cloud relay to succeed on first boot.
+
+Out-of-tree kernel modules (RTL8812EU Wi-Fi adapter, AIC8800DC on-board
+Wi-Fi 6) are NOT enabled here — they are cross-built by the per-driver
+recipes under boards/luckfox-pico-zero/drivers/ and dropped into the
+rootfs as pre-built .ko files in post_overlay.
+
+--- a/sysdrv/tools/board/buildroot/luckfox_pico_defconfig
++++ b/sysdrv/tools/board/buildroot/luckfox_pico_defconfig
+@@ -74,3 +74,10 @@
+ BR2_PACKAGE_UTIL_LINUX_LIBMOUNT=y
+ BR2_PACKAGE_NANO=y
+ BR2_PACKAGE_HOST_DTC=y
++BR2_PACKAGE_HOSTAPD=y
++BR2_PACKAGE_DNSMASQ=y
++BR2_PACKAGE_MINISIGN=y
++BR2_PACKAGE_LIBCURL=y
++BR2_PACKAGE_LIBCURL_CURL=y
++BR2_PACKAGE_DROPBEAR=y
++BR2_PACKAGE_CHRONY=y
