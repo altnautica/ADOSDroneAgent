@@ -46,18 +46,22 @@ recipe::sdk_configure() {
     recipe::_sdk_paths
 
     # The vendor SDK's choose_target_board() prompts interactively and
-    # symlinks the chosen project/cfg/BoardConfig_IPC/<config>.mk to
-    # ${SDK_DIR}/.BoardConfig.mk. Bypass the picker by symlinking
-    # directly. The "EMMC-Buildroot-RV1106_Luckfox_Pico_Zero-IPC"
-    # variant is the right one for SD-card boot off the Pico Zero.
+    # writes ${SDK_DIR}/.BoardConfig.mk on selection (the file is
+    # sourced by build.sh — `BOARD_CONFIG=$SDK_ROOT_DIR/.BoardConfig.mk`
+    # at build.sh:24). We bypass the picker by writing the file
+    # directly. Use plain `cp` instead of `ln -s` — symlinks are
+    # flaky on case-insensitive filesystems, on Windows-mounted CI
+    # caches, and break some CI restore-from-cache flows. The SDK
+    # only sources the file once at the start of each build.sh
+    # invocation, so a copy is functionally equivalent.
     local board_cfg="${SDK_DIR}/project/cfg/BoardConfig_IPC/BoardConfig-EMMC-Buildroot-RV1106_Luckfox_Pico_Zero-IPC.mk"
     if [ ! -f "${board_cfg}" ]; then
         imgbuild::log_error "BoardConfig file not found at ${board_cfg}"
-        ls "${SDK_DIR}/project/cfg/BoardConfig_IPC/" 2>/dev/null | head -20 >&2
+        find "${SDK_DIR}/project/cfg/BoardConfig_IPC/" -maxdepth 1 -type f 2>/dev/null | head -20 >&2
         return 1
     fi
-    imgbuild::log_info "Symlinking BoardConfig.mk → ${board_cfg##${SDK_DIR}/}"
-    ln -sf "${board_cfg}" "${SDK_DIR}/.BoardConfig.mk"
+    imgbuild::log_info "Copying BoardConfig.mk from ${board_cfg##"${SDK_DIR}"/}"
+    cp -f "${board_cfg}" "${SDK_DIR}/.BoardConfig.mk"
 
     # Bootstrap the vendor cross-toolchain. The SDK ships an
     # `env_install_toolchain.sh` that installs the
