@@ -68,11 +68,51 @@ def build_profile_suggestion(config: Any) -> ProfileSuggestion:
     )
 
 
+def _restart_supervisor() -> tuple[bool, str]:
+    """Restart `ados-supervisor` via systemd, with a subprocess fallback.
+
+    Returns ``(ok, message)`` so callers can surface the failure mode
+    cleanly. The D-Bus path is preferred when available; the subprocess
+    fallback uses ``systemctl --no-block restart`` so the API process
+    isn't itself killed before the response can be sent.
+    """
+    try:
+        import dbus  # type: ignore
+
+        bus = dbus.SystemBus()
+        systemd = bus.get_object(
+            "org.freedesktop.systemd1", "/org/freedesktop/systemd1"
+        )
+        manager = dbus.Interface(systemd, "org.freedesktop.systemd1.Manager")
+        manager.RestartUnit("ados-supervisor.service", "replace")
+        return True, "supervisor restart dispatched via systemd"
+    except Exception:  # pragma: no cover - dbus unavailable on dev hosts
+        pass
+
+    try:
+        import subprocess
+
+        result = subprocess.run(
+            ["systemctl", "--no-block", "restart", "ados-supervisor.service"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode == 0:
+            return True, "supervisor restart dispatched via systemctl"
+        stderr = (result.stderr or "").strip()
+        return False, f"systemctl restart failed: {stderr}"
+    except Exception as exc:
+        return False, f"supervisor restart unavailable: {exc}"
+
+
 def apply_profile(
     runtime: Any,
     *,
     profile: str,
     ground_role: str | None = None,
+    auto_restart: bool = False,
 ) -> SetupActionResult:
     """Persist the operator's profile choice to ``config.agent.profile``.
 
@@ -84,6 +124,11 @@ def apply_profile(
     steps that no longer apply) are intentionally left alone. The wizard
     re-derives every step's state from the live config, so a stale skip
     flag for the now-hidden step does no harm.
+
+    When ``auto_restart`` is true and the profile actually changed,
+    dispatch a supervisor restart so the new profile's services come up
+    without the operator having to SSH in. The restart is non-blocking,
+    so the route response lands before the agent goes down.
     """
     if profile not in ("drone", "ground_station"):
         return SetupActionResult(
@@ -131,7 +176,17 @@ def apply_profile(
         message = "Profile set to drone."
     else:
         message = f"Profile set to ground station ({role})."
-    if data.get("restart_required"):
+
+    if auto_restart and data.get("restart_required"):
+        ok_restart, restart_msg = _restart_supervisor()
+        data["auto_restart_attempted"] = True
+        data["auto_restart_ok"] = ok_restart
+        data["auto_restart_message"] = restart_msg
+        if ok_restart:
+            message += " Restarting agent."
+        else:
+            message += f" Restart failed: {restart_msg}."
+    elif data.get("restart_required"):
         message += " Restart the agent to apply."
 
     return SetupActionResult(ok=True, message=message, data=data)

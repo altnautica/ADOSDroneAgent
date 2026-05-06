@@ -79,6 +79,14 @@ class CloudChoiceRequest(BaseModel):
 class ProfileChoiceRequest(BaseModel):
     profile: Literal["drone", "ground_station"]
     ground_role: Literal["direct", "relay", "receiver"] | None = Field(default=None)
+    auto_restart: bool = Field(
+        default=False,
+        description=(
+            "When true and the profile actually changed, dispatch a "
+            "non-blocking ados-supervisor restart so the new profile's "
+            "services come up without operator follow-up."
+        ),
+    )
 
 
 class ApplyRequest(BaseModel):
@@ -141,6 +149,7 @@ async def configure_profile(request: ProfileChoiceRequest) -> SetupActionResult:
         get_agent_app(),
         profile=request.profile,
         ground_role=request.ground_role,
+        auto_restart=request.auto_restart,
     )
 
 
@@ -444,6 +453,7 @@ async def _apply_single_section(
             runtime,
             profile=payload.profile,
             ground_role=payload.ground_role,
+            auto_restart=payload.auto_restart,
         )
     if name == "network":
         return apply_network(runtime, payload)

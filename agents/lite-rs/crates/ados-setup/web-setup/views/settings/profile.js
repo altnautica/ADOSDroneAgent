@@ -84,7 +84,7 @@ export function renderProfileSection({ store, onChange }) {
       const diff = tracker.payload();
       if (!Object.keys(diff).length) return null;
       const profile = tracker.read("profile");
-      const out = { profile };
+      const out = { profile, auto_restart: true };
       if (profile === "ground_station") {
         out.ground_role = tracker.read("ground_role");
       }

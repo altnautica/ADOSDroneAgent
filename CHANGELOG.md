@@ -4,6 +4,27 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.13.2] - 2026-05-07
+
+### Added
+
+- **Live profile switch with auto-restart.** `apply_profile()` accepts
+  an optional `auto_restart=True`. When the profile actually changed,
+  the agent dispatches `systemctl --no-block restart
+  ados-supervisor.service` (D-Bus first, subprocess fallback) so the
+  new profile's services come up without an SSH follow-up. The
+  response surfaces `auto_restart_attempted`, `auto_restart_ok`, and
+  `auto_restart_message` fields under the section's `data`.
+- **Reconnect sheet on profile change.** When the settings sheet
+  receives a successful apply with a profile-restart attempted, the
+  webapp opens a non-dismissable sheet that polls
+  `/api/v1/setup/status` at 2 s intervals for up to 60 s, waits for
+  the new profile to appear, then routes back to the dashboard. A
+  "go to dashboard now" escape hatch is always available. If the
+  agent does not return in time the sheet surfaces an error toast.
+- The settings profile section now sets `auto_restart: true` on its
+  apply payload by default.
+
 ## [0.13.1] - 2026-05-07
 
 ### Added

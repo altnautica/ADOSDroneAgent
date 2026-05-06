@@ -4,7 +4,7 @@
 // Apply button collects every dirty payload and posts ONCE to
 // /api/v1/setup/apply, then surfaces per-section results as toasts.
 
-import { el, toast } from "../../components.js";
+import { el, toast, sheet } from "../../components.js";
 import { apiFetch } from "../../state.js";
 import { renderProfileSection } from "./profile.js";
 import { renderCloudSection } from "./cloud.js";
@@ -141,8 +141,22 @@ export function renderSettings(targetEl, { store, params }) {
         severity: "warn",
       });
     }
+
+    const profileResult = sections.profile;
+    const restartAttempted = !!(
+      profileResult?.data?.auto_restart_attempted &&
+      profileResult.data.auto_restart_ok
+    );
+    const requestedProfile = profileResult?.data?.profile;
+
+    if (res?.overall && restartAttempted && requestedProfile) {
+      for (const m of mounted) m.reset?.();
+      updateApplyLabel();
+      reconnectThenGoHome(requestedProfile);
+      return;
+    }
+
     if (res?.overall) {
-      // Reset trackers so the dashboard picks up clean state next render.
       for (const m of mounted) m.reset?.();
       updateApplyLabel();
       try {
@@ -154,6 +168,76 @@ export function renderSettings(targetEl, { store, params }) {
     } else {
       updateApplyLabel();
     }
+  };
+
+  const reconnectThenGoHome = (requestedProfile) => {
+    // Profile flipped and the agent is restarting its supervisor. Show a
+    // sheet that polls /api/v1/setup/status until the new profile is
+    // reported, then navigates back to the dashboard. Cap the wait so a
+    // permanently broken restart does not freeze the UI.
+    let attempts = 0;
+    const maxAttempts = 30;
+    const delayMs = 2000;
+
+    const status = el("p", {
+      className: "sheet-body-text mono",
+      text: `waiting for agent... 0 / ${maxAttempts}`,
+    });
+    const sheetCtl = sheet({
+      title: `restarting agent (${requestedProfile})`,
+      body: el("div", {},
+        el("p", { text: "the supervisor is restarting to apply the new profile." }),
+        status,
+      ),
+      footer: el("button", {
+        type: "button",
+        className: "btn",
+        text: "go to dashboard now",
+        onclick: () => {
+          sheetCtl.close();
+          go("/");
+        },
+      }),
+      dismissable: false,
+    });
+
+    const go = (path) => {
+      try {
+        history.pushState({}, "", path);
+        window.dispatchEvent(new PopStateEvent("popstate"));
+      } catch {
+        // best-effort; user can navigate manually
+      }
+    };
+
+    const poll = async () => {
+      attempts += 1;
+      status.textContent = `waiting for agent... ${attempts} / ${maxAttempts}`;
+      try {
+        const data = await apiFetch("/api/v1/setup/status");
+        if (data && data.profile === requestedProfile) {
+          status.textContent = "agent online with new profile.";
+          setTimeout(() => {
+            sheetCtl.close();
+            go("/");
+          }, 600);
+          return;
+        }
+      } catch {
+        // restart in flight, keep polling
+      }
+      if (attempts >= maxAttempts) {
+        toast({
+          message: "agent did not come back in time. check service logs.",
+          severity: "err",
+        });
+        sheetCtl.close();
+        return;
+      }
+      setTimeout(poll, delayMs);
+    };
+
+    setTimeout(poll, delayMs);
   };
 
   const sections = mounted.map((m) => accordion({
