@@ -23,7 +23,7 @@ on:
       boards:
         description: "Comma-separated board slugs (or 'all')"
         required: false
-        default: "all"
+        default: "luckfox-pico-zero"
       version:
         description: "Image version tag (without lite-image-v prefix)"
         required: false
@@ -42,7 +42,9 @@ jobs:
       matrix:
         board:
           - luckfox-pico-zero
-          - pi-zero-2w
+          # pi-zero-2w archived under boards/_archived/. The Pi Zero 2 W
+          # install path is the curl one-liner running on stock RPi OS Lite,
+          # not a flashable image.
 
     env:
       IMGBUILD_OUTPUT: ${{ github.workspace }}/output
@@ -108,16 +110,8 @@ jobs:
             bsdmainutils lz4 \
             genext2fs mtd-utils \
             libncurses5-dev pkg-config
-          # pi-gen path requires extra host tooling for chroot +
-          # debootstrap + image manipulation. Cheap to install on a
-          # fresh runner.
-          if [ "${{ matrix.board }}" = "pi-zero-2w" ]; then
-            sudo apt-get install -y --no-install-recommends \
-              coreutils quilt parted qemu-user-static binfmt-support \
-              debootstrap zerofree zip dosfstools e2fsprogs \
-              libarchive-tools libcap2-bin grep rsync curl gpg pigz \
-              xxd arch-test bmap-tools kmod
-          fi
+          # pi-gen path was needed by the archived pi-zero-2w recipe.
+          # Removed since the matrix now only builds Luckfox.
 
       - name: Run image build via universal orchestrator
         if: steps.gate.outputs.build == 'true'
