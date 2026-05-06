@@ -112,6 +112,9 @@ include = ["ados*", "web*"]
 "web.setup.components" = ["*"]
 "web.setup.views" = ["*"]
 "web.setup.views.settings" = ["*"]
+"web.setup.panels" = ["*"]
+"web.setup.panels.drone" = ["*"]
+"web.setup.panels.common" = ["*"]
 
 
 [tool.ruff]

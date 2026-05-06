@@ -16,6 +16,7 @@ from ados.api.middleware.auth import ApiKeyAuthMiddleware
 from ados.api.routes import (
     commands,
     config,
+    dashboard,
     features,
     fleet,
     ground_station,
@@ -103,6 +104,7 @@ def create_app(agent: Any) -> FastAPI:
     app.include_router(pairing.router, prefix="/api")
     app.include_router(system.router, prefix="/api")
     app.include_router(setup.router, prefix="/api")
+    app.include_router(dashboard.router, prefix="/api")
     app.include_router(peripherals.router, prefix="/api")
     # Peripheral Manager plugin registry. Lives alongside the legacy
     # /api/peripherals hardware scan route.

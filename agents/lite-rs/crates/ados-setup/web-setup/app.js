@@ -52,16 +52,34 @@ router
 
 router.start();
 
-// Seed the store with one snapshot before polling kicks in. Keep going on
-// failure so a fresh agent without /status still boots the dashboard.
+// Seed both snapshots before polling kicks in. Keep going on failure so a
+// fresh agent without one or both endpoints still boots the dashboard.
 apiFetch("/api/v1/setup/status")
   .then((data) => store.set({ status: data }))
   .catch((err) => console.warn("seed status failed", err && err.message));
+apiFetch("/api/v1/dashboard/snapshot")
+  .then((data) => store.set({ dashboard: data }))
+  .catch((err) => console.warn("seed dashboard failed", err && err.message));
 
-const polling = new Polling({
+const statusPolling = new Polling({
   url: "/api/v1/setup/status",
   intervalMs: 5000,
+  hiddenIntervalMs: 30000,
   store,
   key: "status",
 });
-polling.start();
+statusPolling.start();
+
+const dashboardPolling = new Polling({
+  url: "/api/v1/dashboard/snapshot",
+  intervalMs: 1000,
+  hiddenIntervalMs: 15000,
+  store,
+  key: "dashboard",
+});
+dashboardPolling.start();
+
+window.addEventListener("beforeunload", () => {
+  try { statusPolling.dispose(); } catch {}
+  try { dashboardPolling.dispose(); } catch {}
+});

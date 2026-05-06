@@ -4,6 +4,31 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.12.9] - 2026-05-07
+
+### Added
+
+- **Drone-profile dashboard panels.** Live video (WebRTC primary, HLS
+  fallback, MJPEG snapshot last-resort, fullscreen and snapshot
+  verbs), flight controller (vehicle, firmware, mode, armed, GPS, RC,
+  battery, link, prearm, 60s link sparkline), MAVLink rates table
+  (HEARTBEAT, ATTITUDE, GLOBAL_POSITION_INT, RC_CHANNELS, SYS_STATUS
+  with per-row sparklines), camera pipeline (codec, resolution, fps,
+  bitrate, encoder cpu, restart verb), sensors (IMU/BARO/MAG/GPS chip
+  row), plugins (per-plugin state and capabilities).
+- **Common dashboard panels.** Cloud relay (mqtt + http state, RTT
+  sparkline, masked pairing code with click-to-reveal, Mission
+  Control deep-link), network uplink matrix (WiFi AP + client,
+  Ethernet, USB tether, 4G modem), services table (cpu, RSS,
+  per-row tail-logs, failed-only filter).
+- **`GET /api/v1/dashboard/snapshot` endpoint.** Combined 1 Hz
+  read-only snapshot of every panel slice. Best-effort: missing
+  upstreams render as blank fields rather than failing the request.
+- **Two-track polling.** The webapp now runs separate pollers for
+  the slow setup status (5 s, backs off to 30 s when hidden) and
+  the fast dashboard snapshot (1 s, backs off to 15 s when hidden),
+  both wired to dispose on `beforeunload`.
+
 ## [0.12.8] - 2026-05-07
 
 ### Added
