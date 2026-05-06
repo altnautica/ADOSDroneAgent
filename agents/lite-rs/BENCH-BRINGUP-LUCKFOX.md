@@ -1,12 +1,15 @@
 # Lite agent bench bringup — Luckfox Pico Zero
 
 This runbook walks through the lite agent's first-release validation
-gate. Goal: prove that a stock Luckfox Pico Zero, flashed with the
-vendor SDK Buildroot image, completes the full universal setup wizard
-locally — no Python full agent on the rootfs, no manual edits, no
-operator intervention beyond the wizard form itself.
+gate. Goal: prove that a stock Luckfox Pico Zero — flashed with the
+ADOS lite image — completes the full universal setup wizard, plus
+exercises every advertised runtime feature: cloud relay pairing with
+the "Lite" pill rendered in Mission Control, AP fallback for operators
+without a UART cable, hardware H.264 video pipeline via the RKMPI
+subprocess, WFB-ng broadcast on a hot-plugged RTL8812EU dongle, and a
+combined memory soak under the 256 MB envelope.
 
-Estimated time on the bench: 60–90 minutes the first time, 15 minutes
+Estimated time on the bench: 90–120 minutes the first time, 30 minutes
 on a re-run.
 
 ---
@@ -225,6 +228,128 @@ Control. Watch for:
 
 Pass criteria for step 8: no OOM, no restart, RSS stable.
 
+## 9. AP fallback validation (no UART path)
+
+The agent stands up a soft-AP on `wlan0` after 30 s of no Wi-Fi
+association. Validate this without a UART cable:
+
+1. Flash a fresh microSD with the ADOS lite image (do not pre-populate
+   `/etc/wpa_supplicant.conf`).
+2. Insert the SD card, apply power. Wait 45 s.
+3. From a phone or laptop: scan for Wi-Fi networks. A new SSID
+   `ados-XXXX` should appear (the four hex chars are the last four
+   characters of the device's MAC address, lowercase).
+4. Join the SSID. The WPA2 passphrase is the device's pair code.
+   Find it on UART OR (if you intentionally have no UART) by
+   pre-flashing a microSD with a known machine-id and recomputing
+   the deterministic pair code from `/etc/machine-id`.
+5. Open `http://192.168.4.1:8080` in a browser.
+6. The setup webapp landing page renders the pair code in a banner
+   at the top.
+7. Walk through the wizard's network step. Pick a real Wi-Fi network.
+   Submit credentials. The agent tears down the AP and reconnects
+   via `wpa_supplicant`.
+
+Pass criteria for step 9: SSID `ados-XXXX` advertised within 45 s of
+boot, pair code visible in webapp banner, transition from AP →
+real-Wi-Fi takes ≤ 30 s, agent reaches `paired heartbeat` state on
+the new network without a fresh pair code.
+
+## 10. Video pipeline soak (RKMPI subprocess)
+
+Validates the hardware H.264 path on Luckfox.
+
+1. Connect a CSI camera to the Luckfox camera port (or a USB UVC
+   camera to the OTG port — the V4L2 backend covers UVC; the RKMPI
+   path covers MIPI CSI).
+2. Confirm the agent starts the encoder pipeline:
+   ```sh
+   journalctl -u ados-agent-lite | grep -i 'starting video pipeline'
+   # expected: starts with encoder_api=rkmpi (or libcamera/v4l2 for UVC)
+   ```
+3. Confirm the rkmpi-wrapper subprocess is alive:
+   ```sh
+   pgrep -fa rkmpi-wrapper
+   # expected: one PID matching /usr/lib/ados/rkmpi-wrapper
+   ```
+4. Open the Mission Control fleet card → Video tab. The RTSP push
+   from the agent should land at the cloud relay, and the GCS should
+   render the live stream.
+5. Sample latency: glass-to-glass ≤ 120 ms at 1080p30. Use a clock
+   on the camera subject and compare to the GCS-rendered frame.
+6. Run a 10-minute soak. Watch:
+   ```sh
+   sudo agents/lite-rs/tools/luckfox-mem-profile.sh 600
+   # expected: PASS at the end with peak combined RSS ≤ 220 MB
+   ```
+7. Confirm the supervisor handles a forced wrapper crash:
+   ```sh
+   sudo pkill -SEGV rkmpi-wrapper
+   # expected: agent log shows wrapper_signal_exit, then within ~5 s,
+   # wrapper_spawned + wrapper_ready. Mission Control video stream
+   # recovers automatically.
+   ```
+
+Pass criteria for step 10: stream lands in Mission Control, latency
+≤ 120 ms, supervisor respawns the wrapper after SIGSEGV without a
+manual restart, 10 min soak shows no agent restart.
+
+## 11. WFB-ng air-side hot-plug
+
+Validates the WFB-ng broadcast path on a hot-plugged RTL8812EU dongle.
+
+1. Plug an RTL8812EU USB dongle into the Luckfox USB-C port.
+   Confirm via `dmesg | grep -i 8812au`.
+2. Within 5 s, the agent should detect the dongle via the udev
+   netlink path:
+   ```sh
+   journalctl -u ados-agent-lite | grep -i 'dongle.*added'
+   ```
+3. The agent then spawns `wfb_tx`:
+   ```sh
+   pgrep -fa wfb_tx
+   # expected: one PID with the channel/MCS/tx_power flags from
+   # /etc/ados/agent.yaml or whatever the wizard configured
+   ```
+4. Confirm the encoder broadcast tee:
+   ```sh
+   curl -s http://127.0.0.1:8080/api/v1/setup/wfb | jq .
+   # expected: state.state == "Running"
+   ```
+5. Use a second RTL8812EU receiver (or another Luckfox in receiver
+   profile) to sniff the broadcast frames. Confirm the configured
+   channel matches.
+6. Unplug the dongle. The agent should:
+   - Detect the removal within 5 s
+   - Tear down `wfb_tx` cleanly (no zombie process)
+   - Continue cloud RTSP push without interruption
+7. Re-plug the dongle. The agent should re-spawn `wfb_tx`
+   automatically.
+
+Pass criteria for step 11: hot-plug detect ≤ 5 s, broadcast frames
+visible on a separate receiver, unplug graceful (no agent restart),
+re-plug auto-recovers.
+
+## 12. Combined memory soak
+
+Final memory budget validation under combined load.
+
+1. With cloud RTSP push live (step 10) AND WFB-ng broadcasting
+   (step 11), run the profiler harness:
+   ```sh
+   sudo agents/lite-rs/tools/luckfox-mem-profile.sh 300
+   ```
+2. Expected output: `PASS` with peak combined RSS ≤ 220 MB across
+   `ados-agent-lite` + `rkmpi-wrapper` + `wfb_tx`.
+3. Cross-check against the device's free memory:
+   ```sh
+   free -m
+   # expected: at least 30 MB free
+   ```
+
+Pass criteria for step 12: profiler PASS, free memory > 30 MB
+sustained.
+
 ---
 
 ## Failure triage
@@ -242,8 +367,8 @@ Pass criteria for step 8: no OOM, no restart, RSS stable.
 
 ## Closeout checklist
 
-When all eight steps above pass, the first-release bench gate is
-complete:
+When every step below passes, the lite agent's full-feature bench
+gate is complete:
 
 - [ ] Step 1 — image flashed
 - [ ] Step 2 — board on the network
@@ -252,8 +377,10 @@ complete:
 - [ ] Step 5 — every wizard screen renders + persists state
 - [ ] Step 6 — drone shows up in Mission Control with "Lite" badge
 - [ ] Step 7 — Cloudflare Tunnel comes up + verify responds (optional)
-- [ ] Step 8 — 1-hour soak with no OOM + no restart (optional)
+- [ ] Step 8 — 1-hour soak with no OOM + no restart
+- [ ] Step 9 — AP fallback brings up `ados-XXXX` SSID + webapp banner
+- [ ] Step 10 — RTSP video stream renders in Mission Control, supervisor respawns wrapper after SIGSEGV
+- [ ] Step 11 — RTL8812EU hot-plug spawns `wfb_tx`, unplug tears it down cleanly, re-plug recovers
+- [ ] Step 12 — combined memory soak PASSes the 220 MB ceiling
 
-After this, the lite agent track moves from initial release into
-review. Stable promotion is gated on the video pipeline landing in a
-follow-on release.
+After this, the lite agent track moves to FINAL.
