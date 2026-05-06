@@ -4,6 +4,18 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.13.3] - 2026-05-07
+
+### Added
+
+- **Heartbeat carries setup_state + profile_source.** The cloud
+  heartbeat payload now includes `setupState` (always
+  `"configured"` for a live agent) and `profileSource`
+  (`"detected"`, `"tiebreaker"`, `"override"`, `"default"`, or
+  `"user"`). Mission Control reads these to render an
+  "auto-configured" pill on drone cards whose profile was picked
+  by the boot-time detect rather than the operator.
+
 ## [0.13.2] - 2026-05-07
 
 ### Added

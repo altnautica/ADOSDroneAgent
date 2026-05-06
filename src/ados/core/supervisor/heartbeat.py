@@ -50,6 +50,44 @@ class HeartbeatMixin:
 
         board = detect_board()
 
+        # Setup state and profile source. Surfaced so the GCS fleet view
+        # can show an "auto-configured" pill on cards whose profile was
+        # picked by the boot-time detect rather than the operator. Both
+        # fields are optional: the GCS handles a heartbeat that lacks
+        # them gracefully.
+        setup_state = "configured"
+        profile_source: str | None = None
+        try:
+            cfg = getattr(self, "config", None)
+            agent_profile = (
+                str(getattr(cfg.agent, "profile", "") or "") if cfg else ""
+            )
+            explicit = agent_profile in ("drone", "ground_station")
+            if explicit:
+                profile_source = "user"
+            else:
+                from ados.bootstrap.profile_detect import _read_last_known_profile
+                from pathlib import Path
+
+                from ados.core.paths import PROFILE_CONF
+
+                if Path(str(PROFILE_CONF)).is_file():
+                    try:
+                        import yaml
+
+                        data = yaml.safe_load(
+                            Path(str(PROFILE_CONF)).read_text(encoding="utf-8")
+                        )
+                        if isinstance(data, dict):
+                            src = data.get("source")
+                            if src in ("detected", "tiebreaker", "override", "default"):
+                                profile_source = src
+                    except Exception:
+                        profile_source = None
+        except Exception:
+            setup_state = "configured"
+            profile_source = None
+
         # Sum process-level metrics
         total_cpu = sum(s.cpu_percent for s in self._services.values())
         total_mem = sum(s.memory_mb for s in self._services.values())
@@ -77,4 +115,6 @@ class HeartbeatMixin:
             "memoryHistory": list(self._memory_history),
             "services": self.get_services_status(),
             "activeSuite": self._active_suite,
+            "setupState": setup_state,
+            "profileSource": profile_source,
         }
