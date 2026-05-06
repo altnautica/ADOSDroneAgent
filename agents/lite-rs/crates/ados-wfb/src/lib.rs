@@ -26,10 +26,19 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
+use ados_video::EncodedFrame;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tokio::sync::Mutex;
-use tracing::{info, warn};
+use tokio::io::{AsyncWrite, AsyncWriteExt};
+use tokio::sync::{broadcast, Mutex};
+use tracing::{debug, info, warn};
+
+/// Type-erased async writer the manager pipes encoded frames into. In
+/// production the supervisor stuffs a `tokio::process::ChildStdin` here
+/// once `wfb_tx` is running; tests use an in-memory writer (e.g. a
+/// `tokio::io::DuplexStream` half) so the tee path can be exercised
+/// without a real subprocess.
+pub type WfbTxStdin = Box<dyn AsyncWrite + Send + Unpin>;
 
 pub use keys::{
     derive_key, derive_keypair, generate_keypair, generate_passphrase, key_fingerprint,
@@ -168,6 +177,14 @@ pub struct ConfigSummary {
 pub struct WfbManager {
     config: Arc<Mutex<WfbConfig>>,
     state: Arc<Mutex<InternalState>>,
+    /// Async writer that points at the running `wfb_tx` child's stdin.
+    /// `None` when no child is alive — frames sent through the tee path
+    /// are silently dropped in that state. The supervisor that owns the
+    /// subprocess installs and clears the handle through
+    /// [`WfbManager::set_wfb_tx_stdin`] across the spawn / restart
+    /// boundary so [`WfbManager::tee_to_wfb_tx`] never holds a stale
+    /// child stdin past the subprocess's lifetime.
+    wfb_tx_stdin: Arc<Mutex<Option<WfbTxStdin>>>,
 }
 
 #[derive(Debug)]
@@ -191,6 +208,7 @@ impl WfbManager {
                 public: WfbState::Idle,
                 updated_at: Instant::now(),
             })),
+            wfb_tx_stdin: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -305,6 +323,79 @@ impl WfbManager {
         bytes.extend_from_slice(&public);
         write_keypair_atomic(&cfg.keypair_path, &bytes)?;
         Ok(public)
+    }
+
+    /// Install (or clear) the writer that points at the live `wfb_tx`
+    /// child's stdin. The supervisor calls this with `Some(stdin)` after
+    /// a successful spawn and with `None` before a restart so the tee
+    /// loop drops frames cleanly across the gap rather than panicking on
+    /// a half-closed pipe.
+    pub async fn set_wfb_tx_stdin(&self, stdin: Option<WfbTxStdin>) {
+        let mut guard = self.wfb_tx_stdin.lock().await;
+        *guard = stdin;
+    }
+
+    /// Drive the encoder broadcast channel into the running `wfb_tx`
+    /// subprocess.
+    ///
+    /// Each access unit from the encoder is written as one Annex-B byte
+    /// stream in a single `write_all` call. When no subprocess is
+    /// running (`set_wfb_tx_stdin(None)`) frames are silently dropped:
+    /// the tee never buffers and never blocks the encoder. When the
+    /// stdin pipe errors out (broken pipe on `wfb_tx` exit) the writer
+    /// is cleared and the loop continues, so the next supervisor restart
+    /// can install a fresh handle without a dangling FD on the manager.
+    ///
+    /// Lagged frames produce a warn-level log line and are skipped per
+    /// `tokio::sync::broadcast` semantics. The function returns when
+    /// the broadcast `Sender` is dropped (encoder pipeline exit).
+    pub async fn tee_to_wfb_tx(
+        &self,
+        mut rx: broadcast::Receiver<EncodedFrame>,
+    ) -> Result<(), WfbError> {
+        loop {
+            match rx.recv().await {
+                Ok(frame) => {
+                    // Lock briefly, take a snapshot of whether a writer
+                    // is installed, write while holding the lock, then
+                    // drop. The write itself is a single Annex-B blob;
+                    // the upstream `wfb_tx` reads framed messages from
+                    // its UDP socket in production, so writing through
+                    // stdin is the supervised pre-encode tee path used
+                    // by the air-side recorder + future debug shims.
+                    let mut guard = self.wfb_tx_stdin.lock().await;
+                    let writer = match guard.as_mut() {
+                        Some(w) => w,
+                        None => {
+                            // No subprocess attached. Drop the frame
+                            // silently — the encoder must NOT stall on
+                            // an offline tee. The broadcast channel
+                            // capacity caps the worst case at 64 frames
+                            // before the lagged-frame fast path kicks
+                            // in for any other consumer.
+                            continue;
+                        }
+                    };
+                    if let Err(e) = writer.write_all(&frame.bytes).await {
+                        warn!(
+                            error = %e,
+                            "wfb_tx stdin write failed; clearing handle until supervisor reinstalls"
+                        );
+                        *guard = None;
+                        continue;
+                    }
+                }
+                Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                    warn!(skipped, "wfb tee consumer lagged; some frames dropped");
+                    continue;
+                }
+                Err(broadcast::error::RecvError::Closed) => {
+                    debug!("wfb tee: encoder broadcast closed; tee loop exiting");
+                    break;
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -465,5 +556,201 @@ mod tests {
             Err(other) => panic!("expected InvalidPower, got {other:?}"),
             Ok(_) => panic!("expected error, got Ok(WfbManager)"),
         }
+    }
+
+    /// `tee_to_wfb_tx` writes the encoded byte stream to the installed
+    /// stdin handle in one shot. We hand the manager one half of a
+    /// duplex stream as the mock stdin, push two frames through the
+    /// broadcast channel, drop the sender, and assert the bytes
+    /// arrived in order on the read half.
+    #[tokio::test]
+    async fn tee_writes_frames_to_installed_stdin() {
+        use ados_video::EncodedFrame;
+        use tokio::io::AsyncReadExt;
+
+        let m = Arc::new(WfbManager::new(cfg()).expect("ctor"));
+        let (mock_stdin, mut reader) = tokio::io::duplex(1024);
+        m.set_wfb_tx_stdin(Some(Box::new(mock_stdin))).await;
+
+        let (tx, rx) = tokio::sync::broadcast::channel::<EncodedFrame>(8);
+
+        let m_run = m.clone();
+        let tee = tokio::spawn(async move { m_run.tee_to_wfb_tx(rx).await });
+
+        let frame_one = EncodedFrame {
+            bytes: vec![0x00, 0x00, 0x00, 0x01, 0x67, 0x42, 0x00, 0x1e],
+            is_keyframe: true,
+            pts_ms: 0,
+        };
+        let frame_two = EncodedFrame {
+            bytes: vec![0x00, 0x00, 0x00, 0x01, 0x41, 0xe0],
+            is_keyframe: false,
+            pts_ms: 33,
+        };
+        tx.send(frame_one.clone()).expect("send 1");
+        tx.send(frame_two.clone()).expect("send 2");
+        drop(tx); // close the channel so the tee returns
+
+        // Drain the tee task first, then drop the writer half so the
+        // reader observes EOF. Holding the writer alive while reading
+        // would race read_to_end against an unfinishable producer.
+        tee.await.expect("tee join").expect("tee result");
+        m.set_wfb_tx_stdin(None).await;
+
+        let mut buf = Vec::new();
+        let read_res = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            reader.read_to_end(&mut buf),
+        )
+        .await
+        .expect("read timeout")
+        .expect("read err");
+        assert_eq!(read_res, frame_one.bytes.len() + frame_two.bytes.len());
+
+        let mut expected = Vec::new();
+        expected.extend_from_slice(&frame_one.bytes);
+        expected.extend_from_slice(&frame_two.bytes);
+        assert_eq!(buf, expected);
+    }
+
+    /// With no stdin handle installed the tee silently drops every
+    /// frame and exits cleanly when the channel closes. Models the
+    /// pre-supervisor boot window when the encoder is producing but
+    /// `wfb_tx` has not been spawned yet.
+    #[tokio::test]
+    async fn tee_drops_frames_when_no_stdin_attached() {
+        use ados_video::EncodedFrame;
+
+        let m = Arc::new(WfbManager::new(cfg()).expect("ctor"));
+        let (tx, rx) = tokio::sync::broadcast::channel::<EncodedFrame>(8);
+
+        let m_run = m.clone();
+        let tee = tokio::spawn(async move { m_run.tee_to_wfb_tx(rx).await });
+
+        for i in 0..4u8 {
+            let f = EncodedFrame {
+                bytes: vec![i; 16],
+                is_keyframe: i == 0,
+                pts_ms: i as u64 * 33,
+            };
+            tx.send(f).expect("send");
+        }
+        drop(tx);
+
+        tokio::time::timeout(std::time::Duration::from_secs(2), tee)
+            .await
+            .expect("join timeout")
+            .expect("join")
+            .expect("tee result");
+    }
+
+    /// Overrun the broadcast channel beyond its capacity and confirm
+    /// the consumer logs a Lagged warning, skips the missed frames,
+    /// and continues receiving the next live frame instead of
+    /// panicking. The capacity is small enough to make Lagged trivial
+    /// to reproduce without a flake.
+    #[tokio::test]
+    async fn tee_handles_lagged_recv_without_panic() {
+        use ados_video::EncodedFrame;
+        use tokio::io::AsyncReadExt;
+
+        let m = Arc::new(WfbManager::new(cfg()).expect("ctor"));
+        let (mock_stdin, mut reader) = tokio::io::duplex(1024);
+        m.set_wfb_tx_stdin(Some(Box::new(mock_stdin))).await;
+
+        // Capacity 2 so any third send before a recv lands forces a
+        // Lagged event the next time the consumer wakes.
+        let (tx, rx) = tokio::sync::broadcast::channel::<EncodedFrame>(2);
+
+        // Pre-fill before the consumer spawns. Three sends with a
+        // capacity of 2 means the oldest frame falls off and the next
+        // recv returns Lagged(1).
+        for i in 0..3u8 {
+            tx.send(EncodedFrame {
+                bytes: vec![0xAA + i, 0xBB + i],
+                is_keyframe: false,
+                pts_ms: i as u64,
+            })
+            .expect("preload send");
+        }
+
+        let m_run = m.clone();
+        let tee = tokio::spawn(async move { m_run.tee_to_wfb_tx(rx).await });
+
+        // Yield long enough for the consumer to observe the Lagged path
+        // and drain the remaining buffered frames.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // Now send one more frame post-lag. The consumer must still be
+        // alive and write this one to the mock stdin.
+        let live = EncodedFrame {
+            bytes: vec![0xDE, 0xAD, 0xBE, 0xEF],
+            is_keyframe: true,
+            pts_ms: 999,
+        };
+        tx.send(live.clone()).expect("post-lag send");
+        drop(tx);
+
+        // Wait for the tee to drain the channel and exit; then close
+        // the writer so the reader's `read_to_end` resolves.
+        tee.await.expect("tee join").expect("tee result");
+        m.set_wfb_tx_stdin(None).await;
+
+        let mut buf = Vec::new();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            reader.read_to_end(&mut buf),
+        )
+        .await
+        .expect("read timeout")
+        .expect("read err");
+
+        // The trailing 4 bytes must be the live post-lag frame; the
+        // bytes before are the surviving buffered frames after the
+        // Lagged drop. We only assert the suffix to keep the test
+        // robust against the exact size of the lag window.
+        assert!(
+            buf.ends_with(&live.bytes),
+            "expected live frame at tail, got {:x?}",
+            buf
+        );
+    }
+
+    /// A broken-pipe error on the stdin write clears the installed
+    /// handle so the next supervisor restart can plug a fresh one in.
+    /// We force the error by closing the read half of the duplex
+    /// before the consumer has a chance to write.
+    #[tokio::test]
+    async fn tee_clears_stdin_on_write_error() {
+        use ados_video::EncodedFrame;
+
+        let m = Arc::new(WfbManager::new(cfg()).expect("ctor"));
+        // Tiny duplex buffer + immediate read-half drop so the first
+        // write_all sees a broken pipe.
+        let (mock_stdin, reader) = tokio::io::duplex(8);
+        drop(reader);
+        m.set_wfb_tx_stdin(Some(Box::new(mock_stdin))).await;
+
+        let (tx, rx) = tokio::sync::broadcast::channel::<EncodedFrame>(4);
+        let m_run = m.clone();
+        let tee = tokio::spawn(async move { m_run.tee_to_wfb_tx(rx).await });
+
+        // Send a frame larger than the duplex buffer so write_all hits
+        // the closed read end deterministically.
+        tx.send(EncodedFrame {
+            bytes: vec![0u8; 64],
+            is_keyframe: false,
+            pts_ms: 0,
+        })
+        .expect("send");
+        drop(tx);
+
+        tee.await.expect("tee join").expect("tee result");
+
+        let guard = m.wfb_tx_stdin.lock().await;
+        assert!(
+            guard.is_none(),
+            "stdin handle must be cleared after a broken pipe"
+        );
     }
 }

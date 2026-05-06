@@ -5,6 +5,7 @@ members = [
     "crates/ados-mavlink",
     "crates/ados-cloud",
     "crates/ados-setup",
+    "crates/ados-test-mocks",
     "crates/ados-video",
     "crates/ados-wfb",
 ]

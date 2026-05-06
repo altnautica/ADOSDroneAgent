@@ -305,6 +305,10 @@ impl DiagState {
             mavlink: MavlinkRateSnapshot {
                 frames_per_sec: self.mavlink_frames_per_sec.load(Ordering::Relaxed),
             },
+            // The supervisor publishes its own snapshot via a separate
+            // accessor; the diag handler is free to merge that in. Keep
+            // the metrics-only path null-safe.
+            rkmpi: None,
         }
     }
 
@@ -384,6 +388,37 @@ pub struct MavlinkRateSnapshot {
     pub frames_per_sec: u32,
 }
 
+/// RKMPI subprocess supervisor snapshot exposed on the diag surface.
+/// Every field is optional / nullable so the JSON shape stays stable
+/// for boards that do not run the rkmpi backend at all (`running ==
+/// false`, every other field defaulted / `None`).
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, Default)]
+pub struct RkmpiSupervisorSnapshot {
+    /// True while a wrapper child is alive and producing frames.
+    pub running: bool,
+    /// Wall-clock seconds since the current child started. 0 when
+    /// `running == false`.
+    pub uptime_secs: u64,
+    /// Number of respawns since program start (or the most recent
+    /// circuit-breaker reset).
+    pub restart_count: u32,
+    /// Exit code of the most recently reaped child, or `None` when the
+    /// child was killed by signal / no child has exited yet.
+    pub last_exit_code: Option<i32>,
+    /// Symbolic name of the signal that killed the most recently reaped
+    /// child (e.g. `"SIGKILL"`), or `None`.
+    pub last_exit_signal: Option<String>,
+    /// UNIX seconds of the most recent respawn.
+    pub last_restart_unix: Option<u64>,
+    /// Resident-set-size of the current child in kilobytes, read live
+    /// from `/proc/<pid>/status`.
+    pub rss_kb: Option<u64>,
+    /// True when the circuit breaker is in its holdoff window.
+    pub circuit_breaker_open: bool,
+    /// UNIX seconds of the most recent `Frame` response.
+    pub last_frame_unix: Option<u64>,
+}
+
 /// Top-level metrics block for `/api/v1/diag`. Mirrors the `metrics`
 /// section of `proto/setup/setup-api.yaml::DiagResponse`.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq, Default)]
@@ -391,27 +426,52 @@ pub struct MetricsDiagSnapshot {
     pub heartbeat_rtt_ms: LatencyHistogramSnapshot,
     pub mqtt_publish_ms: LatencyHistogramSnapshot,
     pub mavlink: MavlinkRateSnapshot,
+    /// RKMPI supervisor state. `None` on boards / agents that never
+    /// register a supervisor; the JSON serialiser emits the field as
+    /// `null` so the response shape stays stable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rkmpi: Option<RkmpiSupervisorSnapshot>,
 }
 
-/// Read RSS in megabytes from `/proc/self/status`. Returns `None` on
-/// non-Linux hosts or when the field is absent. The MB unit is the same
-/// one operators see in `top` / `htop`, which keeps the diag surface
-/// directly comparable to system tools.
+/// Read VmRSS for either the calling process (`pid = None`) or an
+/// arbitrary pid from `/proc/<pid>/status`. The default unit is
+/// megabytes — matching what operators see in `top` / `htop` — so the
+/// existing `/api/v1/diag` shape stays directly comparable to system
+/// tools.
 ///
-/// `/proc/self/status` `VmRSS` is reported in kilobytes per the Linux
-/// proc(5) man page (the suffix is " kB" but the value is binary KiB).
-/// We divide by 1024 for the MB conversion.
-pub fn read_rss_mb() -> Option<u64> {
-    // On macOS / dev hosts /proc/self/status does not exist. Bail
+/// `/proc/self/status` and `/proc/<pid>/status` report VmRSS in
+/// kilobytes per the Linux proc(5) man page (the suffix is " kB" but
+/// the value is binary KiB). The function divides by 1024 for the MB
+/// conversion. Callers that need raw kilobytes (e.g. the rkmpi
+/// supervisor's child snapshot) should use [`read_rss_kb`] instead.
+///
+/// Returns `None` on non-Linux hosts, when the pid has gone away, or
+/// when the VmRSS line is absent.
+pub fn read_rss_mb(pid: Option<u32>) -> Option<u64> {
+    let kb = read_rss_kb(pid)?;
+    Some(kb / 1024)
+}
+
+/// Read VmRSS in kilobytes for either the calling process (`pid =
+/// None`) or an arbitrary pid. Same semantics as [`read_rss_mb`] but
+/// without the unit conversion, so the rkmpi supervisor can publish a
+/// kilobyte value for its child wrapper without doing a round-trip
+/// multiply.
+pub fn read_rss_kb(pid: Option<u32>) -> Option<u64> {
+    let path = match pid {
+        None => "/proc/self/status".to_string(),
+        Some(p) => format!("/proc/{p}/status"),
+    };
+    // On macOS / dev hosts /proc/<pid>/status does not exist. Bail
     // silently; the diag response surfaces the absence as `null`.
-    let raw = std::fs::read_to_string("/proc/self/status").ok()?;
+    let raw = std::fs::read_to_string(&path).ok()?;
     for line in raw.lines() {
         if let Some(rest) = line.strip_prefix("VmRSS:") {
             // Format: "VmRSS:\t   12345 kB"
             let trimmed = rest.trim();
             let kb_str = trimmed.split_whitespace().next()?;
             let kb: u64 = kb_str.parse().ok()?;
-            return Some(kb / 1024);
+            return Some(kb);
         }
     }
     None
@@ -609,8 +669,28 @@ mod tests {
         // panic and must not return Some(0) on Linux (that would imply
         // a parse bug).
         if std::path::Path::new("/proc/self/status").exists() {
-            let rss = read_rss_mb().expect("VmRSS should be parsable on Linux");
+            let rss = read_rss_mb(None).expect("VmRSS should be parsable on Linux");
             assert!(rss > 0, "VmRSS should be a positive MB value");
         }
+    }
+
+    #[test]
+    fn read_rss_kb_self_matches_mb_within_unit_rounding() {
+        if std::path::Path::new("/proc/self/status").exists() {
+            let kb = read_rss_kb(None).expect("VmRSS kb should be parsable on Linux");
+            let mb = read_rss_mb(None).expect("VmRSS mb should be parsable on Linux");
+            // mb is kb / 1024 with floor; the two readings can fall on
+            // either side of a kilobyte boundary, so we just check that
+            // the floor relationship holds within one MB of slack.
+            assert!(kb / 1024 >= mb.saturating_sub(1));
+            assert!(kb / 1024 <= mb.saturating_add(1));
+        }
+    }
+
+    #[test]
+    fn read_rss_kb_returns_none_for_bogus_pid() {
+        // u32::MAX is reserved by the kernel and never used as a pid.
+        assert_eq!(read_rss_kb(Some(u32::MAX)), None);
+        assert_eq!(read_rss_mb(Some(u32::MAX)), None);
     }
 }

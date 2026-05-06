@@ -10,6 +10,10 @@ description = "Hardware-encoded H.264 video pipeline for the lite ADOS Drone Age
 
 [dependencies]
 tokio = { workspace = true }
+# `tokio-util` is workspace-pinned; we add the `rt` feature here so the
+# supervisor module can use `CancellationToken` without dragging the
+# feature flag onto every other consumer of the workspace crate.
+tokio-util = { workspace = true, features = ["rt"] }
 serde = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
@@ -25,3 +29,14 @@ v4l = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt", "sync", "io-util", "net", "time", "signal", "process", "rt-multi-thread"] }
+# Per-test sandboxes for the supervisor integration tests — each test
+# writes a small fake wrapper binary into a tempdir, invokes the
+# supervisor against it, and lets `TempDir::drop` clean up.
+tempfile = "3"
+# Integration tests build msgpack response frames at test time so the
+# bytes track any change to the wire format without a hand-edit.
+rmp-serde = { workspace = true }
+# CancellationToken is exercised from the integration tests, not just
+# the lib; promote the dep to dev-deps so the tests compile without
+# pulling the lib's `[dependencies]` block into doc-test scope.
+tokio-util = { workspace = true, features = ["rt"] }

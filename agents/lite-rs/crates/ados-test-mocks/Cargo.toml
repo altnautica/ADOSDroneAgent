@@ -6,12 +6,6 @@ license = "GPL-3.0-or-later"
 publish = false
 description = "Dev-only in-process MQTT broker and minimal RTSP server fixtures for the lite ADOS Drone Agent test suite"
 
-# Detached from the parent workspace until the consolidation pass
-# registers this crate under `agents/lite-rs/Cargo.toml` workspace
-# members. The empty `[workspace]` table keeps `cargo` from walking up
-# and refusing to build a member that is not yet listed.
-[workspace]
-
 [dependencies]
 tokio = { version = "1", features = ["full"] }
 bytes = "1"

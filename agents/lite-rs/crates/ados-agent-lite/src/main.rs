@@ -202,6 +202,10 @@ struct CloudSection {
     /// links can stretch the radio-on cycle. Default 60 s.
     #[serde(default = "default_mqtt_keepalive_secs")]
     mqtt_keepalive_secs: u64,
+    /// Permit cloud-issued `reboot` commands to invoke the system
+    /// reboot path. Defaults to false; operator opts in per device.
+    #[serde(default)]
+    allow_reboot: bool,
 }
 
 fn default_connect_timeout_secs() -> u64 { 3 }
@@ -234,6 +238,7 @@ impl Default for CloudSection {
             connect_timeout_secs: default_connect_timeout_secs(),
             request_timeout_secs: default_request_timeout_secs(),
             mqtt_keepalive_secs: default_mqtt_keepalive_secs(),
+            allow_reboot: false,
         }
     }
 }
@@ -903,6 +908,7 @@ async fn run(config_path: PathBuf) -> Result<()> {
         connect_timeout_secs: config.cloud.connect_timeout_secs,
         request_timeout_secs: config.cloud.request_timeout_secs,
         mqtt_keepalive_secs: config.cloud.mqtt_keepalive_secs,
+        allow_reboot: config.cloud.allow_reboot,
     };
 
     // Diagnostic state shared across the HTTP handlers and the cloud /
@@ -932,7 +938,11 @@ async fn run(config_path: PathBuf) -> Result<()> {
         if let Err(e) = ados_cloud::spawn_cloud_client(
             cloud_config,
             mavlink_inbound,
-            fc_writer,
+            ados_cloud::InboundChannels {
+                fc_writer,
+                heartbeat_trigger: None,
+                webrtc_route: None,
+            },
             diag_state.clone(),
         ) {
             tracing::warn!(error = %e, "cloud client spawn failed; running offline");
@@ -946,14 +956,34 @@ async fn run(config_path: PathBuf) -> Result<()> {
     // encoder task entirely so the lite agent stays narrow on
     // hardware that doesn't ship a supported H.264 path. The encoded
     // frame stream is broadcast on a tokio::sync::broadcast channel
-    // so future consumers (RTSP push, WFB tee) can subscribe without
-    // re-encoding. At v0.1 the channel exists but no consumer drains
-    // it; lagged frames are dropped per broadcast semantics. The
-    // encoder is constructed eagerly so a misconfigured board YAML
-    // surfaces in journalctl at boot, not at first frame.
+    // with capacity 64 so two downstream consumers (RTSP push, wfb_tx
+    // tee) can subscribe independently. Slow consumers see RecvError::
+    // Lagged on their next recv and drop the missed frames instead of
+    // stalling the encoder. The encoder is constructed eagerly so a
+    // misconfigured board YAML surfaces in journalctl at boot, not at
+    // first frame.
     let video_encoder_api = board_meta.encoder_api.clone().unwrap_or_default();
     let (video_frame_tx, _video_frame_rx) =
         tokio::sync::broadcast::channel::<ados_video::EncodedFrame>(64);
+
+    // Shared WFB-ng manager. The setup REST surface inspects this and
+    // the future dongle-watcher loop drives state transitions. The same
+    // handle owns the (currently empty) child stdin slot the tee
+    // consumer below pipes encoded frames into once `wfb_tx` is alive.
+    let wfb_manager = match ados_wfb::WfbManager::new(ados_wfb::WfbConfig::default()) {
+        Ok(m) => Some(Arc::new(m)),
+        Err(e) => {
+            tracing::warn!(error = %e, "wfb manager init failed; tee disabled");
+            None
+        }
+    };
+
+    // Shutdown signal for the long-running consumer tasks. `false` is
+    // the live state; main flips it to `true` before unwinding so the
+    // RTSP push loop tears down its TCP session cleanly rather than
+    // being dropped mid-write.
+    let (shutdown_tx, _shutdown_rx) = tokio::sync::watch::channel(false);
+
     if !video_encoder_api.is_empty() && video_encoder_api != "none" {
         let api = video_encoder_api.clone();
         let frame_tx = video_frame_tx.clone();
@@ -984,6 +1014,73 @@ async fn run(config_path: PathBuf) -> Result<()> {
                 }
             }
         });
+
+        // Consumer 1 — RTSP push. Subscribes to the encoder broadcast
+        // and pushes RTP-over-TCP frames to the configured relay URL.
+        // The URL is read from the `ADOS_RTSP_URL` environment variable
+        // for now; an `agent.yaml` block lands when the rest of the
+        // video config surface is plumbed. An empty URL skips the
+        // consumer so the loop does not spin in a connect-error
+        // backoff against a missing endpoint.
+        let rtsp_url = std::env::var("ADOS_RTSP_URL").unwrap_or_default();
+        if !rtsp_url.is_empty() {
+            let push_cfg = ados_video::rtsp::PushConfig {
+                url: rtsp_url,
+                ..ados_video::rtsp::PushConfig::default()
+            };
+            let rx = video_frame_tx.subscribe();
+            let mut shutdown_rx = shutdown_tx.subscribe();
+            tokio::spawn(async move {
+                let shutdown = async move {
+                    // Wait for the shared shutdown flag to flip true.
+                    // A `Lagged` error on the watch channel means we
+                    // missed an update; treat any update as shutdown
+                    // since `true` is the only non-default value we
+                    // ever publish.
+                    while shutdown_rx.changed().await.is_ok() {
+                        if *shutdown_rx.borrow() {
+                            break;
+                        }
+                    }
+                };
+                ados_video::rtsp::run_push_loop(push_cfg, rx, shutdown).await;
+                tracing::info!("rtsp push consumer task exited");
+            });
+        } else {
+            tracing::info!(
+                "rtsp push disabled (ADOS_RTSP_URL unset); skipping RTSP consumer"
+            );
+        }
+
+        // Consumer 2 — wfb_tx stdin tee. Subscribes to the same
+        // broadcast and forwards encoded Annex-B byte streams to the
+        // running `wfb_tx` child's stdin (when the supervisor has one
+        // attached; until then frames drop silently inside the
+        // manager's tee loop).
+        if let Some(mgr) = wfb_manager.as_ref().cloned() {
+            let rx = video_frame_tx.subscribe();
+            let mut shutdown_rx = shutdown_tx.subscribe();
+            tokio::spawn(async move {
+                tokio::select! {
+                    res = mgr.tee_to_wfb_tx(rx) => {
+                        if let Err(e) = res {
+                            tracing::warn!(error = %e, "wfb tee consumer ended with error");
+                        } else {
+                            tracing::info!("wfb tee consumer exited cleanly");
+                        }
+                    }
+                    _ = async {
+                        while shutdown_rx.changed().await.is_ok() {
+                            if *shutdown_rx.borrow() {
+                                break;
+                            }
+                        }
+                    } => {
+                        tracing::info!("wfb tee consumer received shutdown");
+                    }
+                }
+            });
+        }
     } else {
         tracing::info!(
             encoder_api = %if video_encoder_api.is_empty() { "<none>".to_string() } else { video_encoder_api },
@@ -995,13 +1092,13 @@ async fn run(config_path: PathBuf) -> Result<()> {
     // (GET /api/v1/setup/wfb, POST /configure, POST /regenerate-key)
     // is wired into the setup router by the ados-setup crate; the
     // dongle-watcher + wfb_tx supervision loop wires alongside the
-    // hardware-validation gate (RTL8812EU + 88XXau driver). At v0.1
-    // the agent main holds no orchestration task — operator-visible
-    // wfb state flows entirely through the REST handlers reading the
-    // shared WfbManager. Holding a video broadcast subscriber here
-    // would consume frames the watcher loop will need; defer the
-    // subscription to the watcher's spawn site.
+    // hardware-validation gate (RTL8812EU + 88XXau driver). The video
+    // tee consumer above already subscribes to the encoder broadcast,
+    // so the watcher does NOT need to take a separate subscription
+    // when it lands — it only sets the manager's stdin handle on
+    // spawn and clears it on exit.
     let _ = &video_frame_tx;
+    let _ = &wfb_manager;
 
     // axum HTTP server: full universal setup surface mounted from
     // ados-setup. Status snapshot reads live agent state
@@ -1127,6 +1224,13 @@ async fn run(config_path: PathBuf) -> Result<()> {
             tracing::warn!(?result, "http api task ended");
         }
     }
+
+    // Notify long-running consumer tasks (rtsp push, wfb tee) that the
+    // process is unwinding so they tear down cleanly. The watch send
+    // is best-effort; if every receiver has already dropped (e.g. no
+    // video pipeline on this board) the call returns Err and we
+    // continue.
+    let _ = shutdown_tx.send(true);
 
     tracing::info!("shutdown complete");
     Ok(())

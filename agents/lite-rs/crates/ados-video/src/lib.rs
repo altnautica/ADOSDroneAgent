@@ -33,8 +33,11 @@ pub mod libcamera;
 pub mod nal;
 pub mod null;
 pub mod rkmpi_subprocess;
+pub mod rkmpi_supervisor;
 pub mod rtsp;
 pub mod v4l2;
+
+pub use rkmpi_supervisor::{RkmpiSnapshot, RkmpiSupervisor};
 
 /// Configuration applied at encoder start. The values describe the desired
 /// output stream; backends translate them into the appropriate vendor

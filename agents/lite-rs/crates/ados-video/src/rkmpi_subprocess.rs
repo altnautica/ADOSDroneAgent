@@ -164,7 +164,7 @@ const STOP_GRACE: Duration = Duration::from_secs(2);
 /// declaring the start handshake failed. The C wrapper opens the
 /// vendor library + initializes the encoder + allocates buffers in
 /// this window; 5s is comfortable on Cortex-A7 + RKMPI cold start.
-const READY_TIMEOUT: Duration = Duration::from_secs(5);
+pub const READY_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Capacity of the internal mpsc that the reader task uses to hand
 /// encoded frames to `next_frame`. The encoder produces at the FC
