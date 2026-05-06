@@ -45,12 +45,40 @@ recipe::sdk_clone() {
 recipe::sdk_configure() {
     recipe::_sdk_paths
 
-    # The vendor SDK's choose_target_board() (project/build.sh) prompts
-    # interactively and writes ${SDK_DIR}/.BoardConfig.mk on selection.
-    # Bypass the picker by writing the same selector directly.
-    imgbuild::log_info "Pinning lunch target to ${LUCKFOX_LUNCH_TARGET}"
-    printf 'export RK_BUILD_TARGET_BOARD=%s\n' "${LUCKFOX_LUNCH_TARGET}" \
-        > "${SDK_DIR}/.BoardConfig.mk"
+    # The vendor SDK's choose_target_board() prompts interactively and
+    # symlinks the chosen project/cfg/BoardConfig_IPC/<config>.mk to
+    # ${SDK_DIR}/.BoardConfig.mk. Bypass the picker by symlinking
+    # directly. The "EMMC-Buildroot-RV1106_Luckfox_Pico_Zero-IPC"
+    # variant is the right one for SD-card boot off the Pico Zero.
+    local board_cfg="${SDK_DIR}/project/cfg/BoardConfig_IPC/BoardConfig-EMMC-Buildroot-RV1106_Luckfox_Pico_Zero-IPC.mk"
+    if [ ! -f "${board_cfg}" ]; then
+        imgbuild::log_error "BoardConfig file not found at ${board_cfg}"
+        ls "${SDK_DIR}/project/cfg/BoardConfig_IPC/" 2>/dev/null | head -20 >&2
+        return 1
+    fi
+    imgbuild::log_info "Symlinking BoardConfig.mk → ${board_cfg##${SDK_DIR}/}"
+    ln -sf "${board_cfg}" "${SDK_DIR}/.BoardConfig.mk"
+
+    # Bootstrap the vendor cross-toolchain. The SDK ships an
+    # `env_install_toolchain.sh` that installs the
+    # arm-rockchip830-linux-uclibcgnueabihf toolchain into PATH for
+    # the current shell; the SDK's build.sh then resolves
+    # CROSS_COMPILE off PATH. We source it to populate the env vars
+    # build.sh expects.
+    if [ -f "${SDK_DIR}/tools/linux/toolchain/env_install_toolchain.sh" ]; then
+        imgbuild::log_info "Sourcing vendor toolchain env"
+        # shellcheck disable=SC1091
+        ( cd "${SDK_DIR}/tools/linux/toolchain" && \
+          set -- ; . ./env_install_toolchain.sh ) || true
+        # The script just sets PATH inside its own subshell; the
+        # toolchain bin is at a fixed location, so prepend explicitly.
+    fi
+    export PATH="${LUCKFOX_TOOLCHAIN_DIR}/bin:${PATH}"
+    if ! command -v arm-rockchip830-linux-uclibcgnueabihf-gcc >/dev/null 2>&1; then
+        imgbuild::log_error "vendor toolchain not on PATH after env_install_toolchain.sh"
+        ls "${LUCKFOX_TOOLCHAIN_DIR}/bin" 2>/dev/null | head -10 >&2
+        return 1
+    fi
 
     # Patch the buildroot defconfig in place. The patch is a unified
     # diff against the upstream defconfig at the pinned SDK SHA; if the
