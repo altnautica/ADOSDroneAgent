@@ -5,7 +5,7 @@ versions independently of the Python full agent at `src/ados/`.
 
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
-## [Unreleased]
+## [0.1.3] - 2026-05-06
 
 ### Added
 - Centralized `atomic_write` helper at `crates/ados-setup/src/atomic.rs`

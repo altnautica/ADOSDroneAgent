@@ -130,7 +130,7 @@ pub fn setup_router(state: Arc<SetupState>) -> Router {
 /// Variant of [`setup_router`] that includes the WFB-ng routes. The
 /// production wiring uses this when the agent has a `WfbManager` to
 /// share; tests can call [`setup_router`] alone when they want the
-/// pre-MSN-056 surface.
+/// control-plane surface without radio orchestration.
 pub fn setup_router_with_wfb(
     state: Arc<SetupState>,
     wfb_manager: SharedWfbManager,
@@ -230,7 +230,7 @@ pub fn setup_router_with_origin_check_and_diag(
 
 /// Variant that bundles the same-origin gate, the diag handle, and
 /// the WFB-ng manager. This is the production wiring the agent binary
-/// uses once the MSN-056 wfb crate is wired in.
+/// uses when the radio crate is part of the build.
 pub fn setup_router_with_origin_check_diag_and_wfb(
     state: Arc<SetupState>,
     allowlist: Arc<OriginAllowlist>,

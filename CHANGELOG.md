@@ -4,6 +4,99 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.12.6] - 2026-05-06
+
+Consolidated entry covering 0.10.1 through 0.12.6. The headline themes
+since 0.10.0 are: SPI LCD auto-provisioning end-to-end, the lightweight
+Rust agent profile shipping in parallel via a separate release channel,
+the universal setup webapp moving to a top-level `web.setup` package,
+and the install script gaining board-fingerprint auto-detection so a
+single curl one-liner installs the right binary on every supported SBC.
+
+### Added
+
+- **SPI LCD auto-provisioning.** Fresh installs detect a supported SPI
+  display, install the overlay, and spin up the local dashboard with
+  zero follow-up commands. Setup wizard gains a Local display step that
+  renders driver-install controls in the universal webapp, persists the
+  driver script, pre-selects the matching panel, and exposes a Reboot
+  button. The install scripts spawn the overlay-activation helper via
+  `systemd-run` to escape the agent sandbox, support u-boot-update for
+  Radxa OS Bookworm, and report the attached panel in the heartbeat.
+- **Native 480×320 dashboard for SPI LCDs.** Tile router with early-life
+  tiles, footer sparklines, and a header that reserves width for the
+  BCAST label so it never collides with the clock. Framebuffer renderer
+  reads geometry from `virtual_size` + `bits_per_pixel` and scans
+  `/sys/class/graphics` for the matching driver.
+- **Touch-input bridge for SPI LCDs** wired to the OLED service so the
+  dashboard responds to taps without a separate input service.
+- **Displays schema on the board profile** (`displays:` block) plus the
+  Waveshare 3.5" LCD overlay shipped for Cubie A7Z and Rock 5C.
+- **Lightweight backend fields on the board schema** (`libc`,
+  `init_system`, `target_rust_triple`, `min_kernel_version`,
+  `video.encoder_api_lite`, `video.vendor_lib_loader`,
+  `wifi_chip_driver`, `compute.min_ram_mb`) so the lite Rust agent
+  reads the same YAML registry as the full agent without a parallel HAL.
+- **Pi Zero 2 W board profile** added.
+- **RV1106 board profiles** updated to surface `wifi: true` and the
+  lightweight encoder API hint.
+- **Install script board-fingerprint auto-detect.** `install.sh` reads
+  `/proc/device-tree/model` and `/proc/cpuinfo`, fetches the live
+  `lite-boards.json` manifest from the lite-agent rolling release, and
+  dispatches to `install-lite.sh` for Pi Zero 2 W and Luckfox-class
+  boards or continues with the full agent for the rest. New flags:
+  `--profile {auto,full,lite}`, `--dry-run`.
+- **`--profile` persistence.** The install script remembers the profile
+  across upgrades so subsequent runs do not re-prompt or re-detect.
+- **Wget-only Buildroot rootfs support** for Luckfox SDK class systems
+  that ship without curl. The lite installer falls back from curl to
+  wget.
+- **Pinned install URLs to release assets** so a curl one-liner always
+  resolves to a reproducible artifact instead of a moving HEAD.
+- **Setup wizard redesign** with chip vocabulary, two-pane pairing, and
+  inline Cloudflare flow. Profile choice and hardware-check steps
+  added; profile step folds into a single Continue CTA. The webapp
+  rebuilt with shared design tokens. Universal setup webapp relocated
+  from `src/ados/webapp/universal/` to a top-level `web.setup` package
+  so the lite Rust agent and the Python full agent serve identical
+  files via `importlib.resources` and `include_dir!` respectively.
+- **Onboarding gating.** The full webapp does not surface until
+  onboarding completes.
+- **Setup advertised URLs** now point at `/setup.html` and use absolute
+  forms so the cloud-relay companion can pick them up directly.
+- **CLI:** `ados uninstall` prompts for config purge.
+- **Install:** SSH login banner + MOTD now display the setup URL so
+  fresh-flashed devices show a clear next step on first login.
+- **Network:** ground-station AP passphrase falls back to a known
+  default when not yet customized.
+
+### Fixed
+
+- Video pipeline stability: forced constrained-baseline H.264 for WebRTC
+  stability, corrected H.264 colour metadata, stopped a wizard
+  re-render loop on the video tab, populated the cameras list in
+  `/api/video` multi-process branch, fixed an RTSP race during pipeline
+  restart, fixed the HAL filter on the wizard preview.
+- Video pipeline now pipes `rpicam-vid` through `ffmpeg` for RTSP to
+  `mediamtx` so the encoder output stays standard regardless of the
+  source binary.
+- Install: MOTD source, profile-config parse, and a missing wait for
+  the API ready signal that occasionally caused the wizard to land on
+  a 404.
+- Setup: trimmed the flight-controller step to live chips and a short
+  console; set `ArrayBuffer` binary type on the wizard log WebSocket
+  so packed frames render correctly.
+- Header: reserve width for the BCAST label so it never collides with
+  the clock.
+- Dashboard: stop early-life tiles overflowing the tile bounds.
+
+### Changed
+
+- Heartbeat now reports the attached display panel alongside the rest
+  of the peripheral set.
+- Universal setup webapp lives at `web/setup/` (top-level package) so
+  both Python and Rust agents serve from the same canonical source.
+
 ## [0.10.0] - 2026-05-04
 
 This is a setup-experience overhaul. The agent now owns onboarding for
