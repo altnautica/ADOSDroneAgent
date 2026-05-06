@@ -6,8 +6,8 @@
 #
 # Build matrix:
 #   armv7-unknown-linux-musleabihf  — primary low-RAM target (Luckfox class)
-#   aarch64-unknown-linux-gnu       — Pi Zero 2 W, Pi 4B-class glibc
-#   aarch64-unknown-linux-musl      — generic aarch64 musl
+#   aarch64-unknown-linux-musl      — covers Pi Zero 2 W / Pi 4B glibc systems
+#                                     too (musl-static binary is libc-agnostic)
 #   x86_64-unknown-linux-musl       — dev-container testing
 #
 # Each artifact is signed with Ed25519 via minisign. The public key is
@@ -54,8 +54,6 @@ jobs:
         include:
           - target: armv7-unknown-linux-musleabihf
             short: armv7-musl
-          - target: aarch64-unknown-linux-gnu
-            short: aarch64-gnu
           - target: aarch64-unknown-linux-musl
             short: aarch64-musl
           - target: x86_64-unknown-linux-musl
