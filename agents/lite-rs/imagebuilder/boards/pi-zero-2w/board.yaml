@@ -1,0 +1,40 @@
+slug: pi-zero-2w
+name: "Raspberry Pi Zero 2 W"
+soc: "BCM2710A1"
+arch: aarch64
+libc: glibc
+init_system: systemd
+target_triple: aarch64-unknown-linux-gnu
+
+ram_mb: 512
+storage:
+  type: microsd
+  min_class: "Class 10 / A1"
+
+sdk:
+  type: pi-gen
+  repo: "https://github.com/RPi-Distro/pi-gen"
+  ref: "bookworm-arm64"
+  release: "bookworm"
+  arch: arm64
+
+# Out-of-tree kernel modules and userspace firmware blobs go here when
+# they cannot be sourced from Debian. Pi Zero 2 W's onboard Cypress
+# CYW43436 Wi-Fi is mainline; nothing required at v0.1.
+drivers: []
+firmware: []
+
+# Userspace packages we need beyond what stage1 + stage2 already pull
+# in. Layered as a stage2 sub-stage at stage-overrides/stage2/04-ados-userspace.
+extra_packages:
+  - hostapd
+  - dnsmasq
+  - iw
+  - wireless-regdb
+  - chrony
+
+notes:
+  - "Cypress CYW43436 Wi-Fi driver is in mainline kernel. No out-of-tree module needed at install time."
+  - "WFB-ng support requires an RTL8812EU or AIC8800 USB dongle plus the matching out-of-tree driver, installed by the operator on first boot."
+  - "Image is built via the upstream pi-gen flow on its bookworm-arm64 branch."
+  - "Final image deploy lands at ${SDK_DIR}/deploy/<date>-ados-pi-zero-2w-lite.img.gz before being repacked with the universal overlay."
