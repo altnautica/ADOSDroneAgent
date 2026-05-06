@@ -129,6 +129,33 @@ The code is regenerated on every fresh boot until the device pairs.
 Once paired, the code is consumed and the device starts emitting
 heartbeats to the cloud relay.
 
+### No UART cable? Use the Wi-Fi AP fallback
+
+If the device boots and does not associate to a Wi-Fi network within
+30 seconds, the agent stands up a temporary soft-AP on `wlan0` so an
+operator can complete the setup wizard from a phone or laptop.
+
+1. Wait ~45 seconds after applying power.
+2. Scan for Wi-Fi networks. A new SSID `ados-XXXX` appears (the four
+   characters are the last four hex digits of the device's MAC, in
+   lowercase).
+3. Join the SSID. The WPA2 passphrase is the **device's pair code**
+   (six uppercase letters and digits — the same string that would have
+   appeared on UART).
+4. Open `http://192.168.4.1:8080` in a browser. The setup webapp
+   displays the pair code at the top of the page and walks through
+   network configuration.
+5. Once the operator picks a real Wi-Fi network in the wizard and
+   submits, the agent tears down the soft-AP and reconnects via
+   `wpa_supplicant`. The device is then reachable from Mission Control
+   on its new IP.
+
+The pair-code-as-passphrase pattern means an attacker would need
+physical proximity AND the device's pair code (which never leaves the
+operator's hands except via UART or the soft-AP itself) to join the
+fallback AP. This is intentional: the AP is meant to bootstrap a
+single legitimate operator, not to provide an open hotspot.
+
 ## Pair via Mission Control
 
 1. Open Mission Control.
