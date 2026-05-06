@@ -7,7 +7,9 @@
 #           sudo ./install-lite.sh PAIRCODE              (install + pair)
 #           sudo ./install-lite.sh --pair PAIRCODE       (same, named flag)
 #           sudo ./install-lite.sh --upgrade             (re-pull latest binary, preserve config)
+#           sudo ./install-lite.sh --skip-verify         (development only; bypass signature check)
 #           sudo ./install-lite.sh --uninstall
+#                ./install-lite.sh --show-key            (print embedded public key + fingerprint)
 # Idempotent: re-runs are safe and update in place.
 #
 # When invoked without a pairing code the agent installs in unpaired mode
@@ -39,6 +41,12 @@ SYSV_INIT_SCRIPT="/etc/init.d/S99ados-agent-lite"
 # Rotation is a code change + git push, not a runtime knob.
 MINISIGN_PUBLIC_KEY="RWQz4jK8YjK8YjK8YjK8YjK8YjK8YjK8YjK8YjK8YjK8YjK8YjK8YjK8"
 PLACEHOLDER_KEY="RWQz4jK8YjK8YjK8YjK8YjK8YjK8YjK8YjK8YjK8YjK8YjK8YjK8YjK8"
+
+# Short fingerprint of the active public key. The CI release pipeline
+# replaces this string with the real fingerprint at tag time. Operators
+# can read it via `./install-lite.sh --show-key` and compare to the
+# fingerprint printed at the top of the release notes.
+MINISIGN_PUBLIC_KEY_FINGERPRINT="placeholder-fingerprint"
 
 log() { printf '[install-lite] %s\n' "$*" >&2; }
 die() { log "error: $*"; exit 1; }
@@ -389,6 +397,15 @@ uninstall() {
 }
 
 main() {
+    # --show-key is read-only; runs without sudo and exits before the
+    # install path begins. Lets operators confirm which signing key the
+    # installer trusts before they download or pair anything.
+    if [ "${1:-}" = "--show-key" ]; then
+        printf 'public key:  %s\n' "${MINISIGN_PUBLIC_KEY}"
+        printf 'fingerprint: %s\n' "${MINISIGN_PUBLIC_KEY_FINGERPRINT}"
+        return 0
+    fi
+
     require_root
 
     if [ "${1:-}" = "--uninstall" ]; then
@@ -434,6 +451,15 @@ main() {
                 # contract is documented and so a future sub-flow can
                 # branch on it (e.g. skip the pair-code prompt).
                 log "upgrade mode: existing config preserved"
+                shift
+                ;;
+            --skip-verify)
+                # Development-only escape hatch. Equivalent to setting
+                # ADOS_LITE_ALLOW_UNSIGNED=1 in the environment. Loud
+                # warning emitted at verify time. Default is verify-on.
+                log "WARN: --skip-verify set; signature verification disabled. Do not use this in production."
+                ADOS_LITE_ALLOW_UNSIGNED=1
+                export ADOS_LITE_ALLOW_UNSIGNED
                 shift
                 ;;
             -*)

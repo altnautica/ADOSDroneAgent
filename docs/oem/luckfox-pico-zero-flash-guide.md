@@ -26,35 +26,62 @@ Latest stable images are published to GitHub Releases under tags matching
 https://github.com/altnautica/ADOSDroneAgent/releases
 ```
 
-The release carries three artifacts per version:
+The release carries these artifacts per version:
 
 | File | Purpose |
 |---|---|
 | `ados-luckfox-pico-zero-vX.Y.Z.img.gz` | Compressed flashable image |
-| `ados-luckfox-pico-zero-vX.Y.Z.img.gz.minisig` | Ed25519 signature (minisign) |
-| `ados-luckfox-pico-zero-vX.Y.Z.img.gz.sha256` | SHA256 checksum |
+| `ados-luckfox-pico-zero-vX.Y.Z.img.gz.minisig` | Per-file Ed25519 signature (minisign) |
+| `ados-luckfox-pico-zero-vX.Y.Z.img.gz.sha256` | Per-file SHA256 checksum |
+| `SHA256SUMS` | Aggregated checksum manifest covering every artifact in the release |
+| `SHA256SUMS.minisig` | Ed25519 signature over `SHA256SUMS` |
 
-Download all three to the same directory.
+Download `SHA256SUMS`, `SHA256SUMS.minisig`, and the matching image
+file to the same directory.
 
 ## Verify the image
 
 Always verify before flashing. The minisign Ed25519 signature is the
 strong check; SHA256 is a fast integrity check.
 
-```sh
-# SHA256
-sha256sum -c ados-luckfox-pico-zero-vX.Y.Z.img.gz.sha256
+Install `minisign` from your package manager (Debian/Ubuntu:
+`apt-get install minisign`; Alpine: `apk add minisign`; macOS:
+`brew install minisign`). Upstream source and docs:
+[`jedisct1/minisign`](https://github.com/jedisct1/minisign).
 
-# Ed25519 (vendored public key matches the lite-agent binary release key)
-minisign -V -p <vendored-public-key.pub> \
+Confirm the public key the installer trusts:
+
+```sh
+./scripts/install-lite.sh --show-key
+```
+
+The fingerprint printed should match the fingerprint listed at the top
+of the GitHub Release notes for the version you are flashing. See
+`docs/oem/key-rotation-policy.md` for what to do if it doesn't.
+
+Verify the SHA256 list against the public key's signature, then verify
+the image against the SHA256 list:
+
+```sh
+# Verify the SHA256 list itself was signed by the trusted key
+minisign -Vm SHA256SUMS -P "$(./scripts/install-lite.sh --show-key | awk '/public key/ {print $3}')"
+
+# Verify the image bytes match the signed SHA256 entry
+sha256sum -c SHA256SUMS
+```
+
+Per-artifact `.minisig` files are also published for operators who
+prefer signing each file directly:
+
+```sh
+minisign -V \
+  -P "$(./scripts/install-lite.sh --show-key | awk '/public key/ {print $3}')" \
   -m ados-luckfox-pico-zero-vX.Y.Z.img.gz \
   -x ados-luckfox-pico-zero-vX.Y.Z.img.gz.minisig
 ```
 
-The vendored public key is the same key used by the prebuilt lite-agent
-binary release, embedded in `scripts/install-lite.sh`. Operators who
-need to re-derive it can read the value from a known-good install of
-that script.
+`Signature and comment signature verified` confirms a clean candidate.
+Anything else means the file is tampered or the wrong key was supplied.
 
 If either check fails, do not flash — re-download.
 
