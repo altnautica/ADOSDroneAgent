@@ -290,7 +290,7 @@ const CAPABILITY_FLAGS = [
 ];
 
 export function parseMavlinkFrame(buf) {
-  // Accept ArrayBuffer / Uint8Array / Blob (skipped — caller decodes blob).
+  // Accept ArrayBuffer or Uint8Array. Blob input is the caller's job.
   let bytes = buf instanceof Uint8Array ? buf : (buf instanceof ArrayBuffer ? new Uint8Array(buf) : null);
   if (!bytes || bytes.length < 8) return null;
 
@@ -396,3 +396,334 @@ export function decodeMavlinkPayload(frame) {
       return { type: "other", msgId };
   }
 }
+
+// ---------------------------------------------------------------------------
+// Dashboard primitives (panel, statTile, sparkline, sheet, contextMenu, ...)
+// ---------------------------------------------------------------------------
+
+export function cn(...args) {
+  return args.filter(Boolean).join(" ");
+}
+
+export function clamp(v, min, max) {
+  return Math.max(min, Math.min(max, v));
+}
+
+export function debounce(fn, ms) {
+  let t = null;
+  return (...args) => {
+    if (t != null) clearTimeout(t);
+    t = setTimeout(() => fn(...args), ms);
+  };
+}
+
+export function formatRelative(iso) {
+  if (!iso) return "never";
+  const t = typeof iso === "number" ? iso : Date.parse(iso);
+  if (Number.isNaN(t)) return "never";
+  const s = Math.max(0, Math.floor((Date.now() - t) / 1000));
+  if (s < 60) return `${s}s ago`;
+  if (s < 3600) return `${Math.floor(s / 60)}m ago`;
+  if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
+  return `${Math.floor(s / 86400)}d ago`;
+}
+
+export function formatRate(hz) {
+  if (hz == null || Number.isNaN(hz)) return "-";
+  if (hz >= 100) return `${hz.toFixed(0)} Hz`;
+  if (hz >= 10) return `${hz.toFixed(1)} Hz`;
+  return `${hz.toFixed(2)} Hz`;
+}
+
+export async function copyText(value) {
+  try {
+    await navigator.clipboard.writeText(String(value));
+    if (navigator.vibrate) {
+      try { navigator.vibrate(10); } catch { /* noop */ }
+    }
+    toast({ message: "copied", severity: "ok", ttlMs: 1200 });
+    return true;
+  } catch (err) {
+    toast({ message: `copy failed: ${err.message || err}`, severity: "err", ttlMs: 2000 });
+    return false;
+  }
+}
+
+// Panel chrome. body and footer can be a Node, an array of Nodes, or null.
+export function panel({ title, span, expandable, body, footer, actions, severity, id }) {
+  const head = el("header", { className: "panel-head" });
+  if (severity) head.appendChild(statusDot(severity));
+  head.appendChild(el("h2", { className: "panel-title", text: title || "" }));
+  if (actions) {
+    const act = el("div", { className: "panel-actions" });
+    for (const a of [].concat(actions)) {
+      if (a instanceof Node) act.appendChild(a);
+    }
+    head.appendChild(act);
+  }
+  if (expandable) {
+    head.appendChild(el("button", {
+      type: "button",
+      className: "panel-expand",
+      "aria-label": "toggle panel",
+      text: "[+]",
+      onclick: (ev) => {
+        const root = ev.currentTarget.closest(".panel");
+        if (root) root.classList.toggle("panel--collapsed");
+      },
+    }));
+  }
+
+  const bodyEl = el("div", { className: "panel-body" });
+  appendChildren(bodyEl, body);
+
+  const node = el("section", {
+    className: cn("panel", span ? `panel--span-${span}` : null),
+    id: id || null,
+  }, head, bodyEl);
+
+  if (footer) {
+    const foot = el("footer", { className: "panel-foot" });
+    appendChildren(foot, footer);
+    node.appendChild(foot);
+  }
+  return node;
+}
+
+function appendChildren(host, children) {
+  if (children == null) return;
+  for (const c of [].concat(children)) {
+    if (c == null || c === false) continue;
+    if (typeof c === "string" || typeof c === "number") {
+      host.appendChild(document.createTextNode(String(c)));
+    } else if (c instanceof Node) {
+      host.appendChild(c);
+    }
+  }
+}
+
+// Stat tile with mono value, sparkline, severity dot, optional hotkey label.
+export function statTile({ label, value, sparkPoints, severity, hotkey, sub }) {
+  const head = el("div", { className: "stat-tile-head" });
+  head.appendChild(el("span", { className: "stat-tile-label", text: label || "" }));
+  if (hotkey) head.appendChild(el("kbd", { className: "stat-tile-key", text: hotkey }));
+  if (severity) head.appendChild(statusDot(severity));
+
+  const valueEl = el("div", { className: "stat-tile-value mono", text: value != null ? String(value) : "-" });
+  const subEl = sub ? el("div", { className: "stat-tile-sub mono", text: String(sub) }) : null;
+
+  const sparkEl = sparkline(sparkPoints || [], { width: 96, height: 22 });
+
+  return el("button", {
+    type: "button",
+    className: cn("stat-tile", severity ? `stat-tile--${severity}` : null),
+  }, head, valueEl, subEl, sparkEl);
+}
+
+// Inline SVG sparkline. Accepts up to 60 points.
+export function sparkline(points, opts = {}) {
+  const width = opts.width || 96;
+  const height = opts.height || 22;
+  const stroke = opts.stroke || "currentColor";
+  const fill = opts.fill || "none";
+
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("class", "sparkline");
+  svg.setAttribute("width", width);
+  svg.setAttribute("height", height);
+  svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
+  svg.setAttribute("aria-hidden", "true");
+
+  const arr = Array.isArray(points) ? points.slice(-60) : [];
+  if (arr.length < 2) return svg;
+
+  const min = Math.min(...arr);
+  const max = Math.max(...arr);
+  const span = max - min || 1;
+  const step = width / (arr.length - 1);
+
+  let d = "";
+  arr.forEach((v, i) => {
+    const x = i * step;
+    const y = height - ((v - min) / span) * (height - 2) - 1;
+    d += (i === 0 ? "M" : "L") + x.toFixed(1) + "," + y.toFixed(1);
+  });
+
+  const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+  path.setAttribute("d", d);
+  path.setAttribute("stroke", stroke);
+  path.setAttribute("fill", fill);
+  path.setAttribute("stroke-width", "1");
+  path.setAttribute("stroke-linecap", "round");
+  path.setAttribute("stroke-linejoin", "round");
+  svg.appendChild(path);
+  return svg;
+}
+
+// Sheet primitive. Full-screen on mobile, modal on desktop. Esc to close.
+// Returns { node, close, setBody }.
+export function sheet({ title, body, footer, onDismiss, dismissable }) {
+  const close = () => {
+    if (onDismiss) onDismiss();
+    document.removeEventListener("keydown", onKey, true);
+    if (node.parentNode) node.parentNode.removeChild(node);
+  };
+  const onKey = (ev) => {
+    if (ev.key === "Escape" && dismissable !== false) {
+      ev.preventDefault();
+      close();
+      return;
+    }
+    if (ev.key === "Tab" && node) {
+      const focusables = node.querySelectorAll(
+        'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
+      );
+      if (!focusables.length) {
+        ev.preventDefault();
+        return;
+      }
+      const first = focusables[0];
+      const last = focusables[focusables.length - 1];
+      const activeEl = document.activeElement;
+      if (ev.shiftKey && activeEl === first) {
+        ev.preventDefault();
+        last.focus();
+      } else if (!ev.shiftKey && activeEl === last) {
+        ev.preventDefault();
+        first.focus();
+      }
+    }
+  };
+
+  const head = el("header", { className: "sheet-head" },
+    el("h2", { className: "sheet-title", text: title || "" }),
+    dismissable === false ? null : el("button", {
+      type: "button",
+      className: "sheet-close",
+      "aria-label": "close",
+      text: "esc",
+      onclick: close,
+    }),
+  );
+
+  const bodyEl = el("div", { className: "sheet-body" });
+  appendChildren(bodyEl, body);
+
+  const inner = el("div", { className: "sheet-inner" }, head, bodyEl);
+  if (footer) {
+    const foot = el("footer", { className: "sheet-foot" });
+    appendChildren(foot, footer);
+    inner.appendChild(foot);
+  }
+
+  const node = el("div", {
+    className: "sheet-host",
+    role: "dialog",
+    "aria-modal": "true",
+    onclick: (ev) => {
+      if (ev.target === node && dismissable !== false) close();
+    },
+  }, inner);
+
+  document.addEventListener("keydown", onKey, true);
+  document.body.appendChild(node);
+
+  // Move focus into the sheet for focus-trap-lite.
+  queueMicrotask(() => {
+    const focusable = inner.querySelector("button,[href],input,select,textarea,[tabindex]");
+    if (focusable) focusable.focus();
+  });
+
+  const setBody = (next) => {
+    bodyEl.replaceChildren();
+    appendChildren(bodyEl, next);
+  };
+
+  return { node, close, setBody };
+}
+
+// Toast strip lives at the top. Singleton host is created lazily.
+let toastHost = null;
+
+export function setToastHost(host) {
+  toastHost = host;
+}
+
+export function toast({ message, severity, ttlMs }) {
+  if (!toastHost) {
+    toastHost = el("div", { className: "toast-host", role: "status", "aria-live": "polite" });
+    document.body.appendChild(toastHost);
+  }
+  const node = el("div", {
+    className: cn("toast", severity ? `toast--${severity}` : null),
+  }, statusDot(severity || "info"), el("span", { className: "toast-msg", text: String(message || "") }));
+  toastHost.appendChild(node);
+  const ttl = ttlMs || 4000;
+  setTimeout(() => node.classList.add("toast--leave"), ttl - 200);
+  setTimeout(() => {
+    if (node.parentNode) node.parentNode.removeChild(node);
+  }, ttl);
+}
+
+// Anchored popover with arrow-key + Esc support.
+// items: [{ label, hotkey, onSelect, severity }]
+export function contextMenu(target, items, opts = {}) {
+  const list = el("ul", { className: "context-menu", role: "menu" });
+  let active = 0;
+
+  const close = () => {
+    document.removeEventListener("keydown", onKey, true);
+    document.removeEventListener("pointerdown", onPointer, true);
+    if (list.parentNode) list.parentNode.removeChild(list);
+    if (opts.onClose) opts.onClose();
+  };
+
+  const select = (i) => {
+    const item = items[i];
+    if (!item) return;
+    close();
+    try { item.onSelect && item.onSelect(); } catch (err) { console.warn(err); }
+  };
+
+  const onKey = (ev) => {
+    if (ev.key === "Escape") { ev.preventDefault(); close(); return; }
+    if (ev.key === "ArrowDown") { ev.preventDefault(); active = (active + 1) % items.length; render(); return; }
+    if (ev.key === "ArrowUp") { ev.preventDefault(); active = (active - 1 + items.length) % items.length; render(); return; }
+    if (ev.key === "Enter") { ev.preventDefault(); select(active); return; }
+  };
+
+  const onPointer = (ev) => {
+    if (!list.contains(ev.target)) close();
+  };
+
+  const render = () => {
+    list.replaceChildren();
+    items.forEach((item, i) => {
+      const li = el("li", {
+        className: cn("context-menu-item", i === active ? "is-active" : null, item.severity ? `is-${item.severity}` : null),
+        role: "menuitem",
+        onclick: () => select(i),
+        onmouseenter: () => { active = i; render(); },
+      },
+        el("span", { className: "context-menu-label", text: item.label || "" }),
+        item.hotkey ? el("kbd", { className: "context-menu-key", text: item.hotkey }) : null,
+      );
+      list.appendChild(li);
+    });
+  };
+  render();
+
+  // Anchor to target.
+  const rect = target.getBoundingClientRect();
+  list.style.position = "fixed";
+  list.style.top = `${Math.round(rect.bottom + 4)}px`;
+  list.style.left = `${Math.round(rect.left)}px`;
+  document.body.appendChild(list);
+
+  document.addEventListener("keydown", onKey, true);
+  // Defer pointer listener so the click that opened the menu doesn't close it.
+  setTimeout(() => document.addEventListener("pointerdown", onPointer, true), 0);
+
+  return { close };
+}
+

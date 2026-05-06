@@ -4,6 +4,51 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.12.8] - 2026-05-07
+
+### Added
+
+- **One-pager dashboard shell.** The agent's port-8080 webapp is now a
+  History-API SPA. A single `index.html` mounts a header, a stat-tile
+  row, a panel grid, a bottom dock (mobile only), a settings route, a
+  logs route, and a command palette. The visual system ships in a new
+  `dashboard.css` with mobile, tablet, and desktop refinements via CSS
+  container queries; the five-color status palette is the only thing
+  that earns hue.
+- **Component vocabulary.** `panel`, `statTile`, `sparkline`, `sheet`,
+  `toast`, `contextMenu`, plus helpers `cn`, `clamp`, `debounce`,
+  `copyText`, `formatRelative`, `formatRate`. The legacy `el`, `chip`,
+  `statusDot`, `liveRow`, `verifyButton`, `streamConsole`,
+  `parseMavlinkFrame`, and `decodeMavlinkPayload` carry over unchanged.
+- **Keyboard + gestures.** A small key handler binds `?`, `g d / g s
+  / g l`, `1-9`, `r`, `j/k`, `p`, and `Esc` on desktop. Mobile gets
+  pull-to-refresh, long-press for panel expand, and swipe registration
+  hooks.
+- **Theme + density.** Dark default, automatic light, opt-in
+  high-contrast outdoor mode, persisted in `localStorage`.
+- **Accessibility.** Five-color WCAG AA palette, focus-visible rings,
+  focus-trap on the command palette and the sheet, ARIA roles on the
+  header, dock, palette, sheet, and toasts, `aria-label` on every
+  icon-only button, `prefers-reduced-motion` respected.
+- **Polling visibility-aware.** Status poll backs off to a slower rate
+  when the tab is hidden and disposes cleanly on shutdown.
+
+### Removed
+
+- The eight legacy wizard HTML files (`setup.html`, `mavlink.html`,
+  `video.html`, `network.html`, `remote.html`, `ground.html`,
+  `system.html`, `advanced.html`). Their content collapses into the
+  single SPA shell with section accordions under `/settings`.
+- The 1670-line wizard stylesheet `style.css`.
+
+### Changed
+
+- `pyproject.toml` package-data extended to include the new
+  `web/setup/components/`, `web/setup/views/`, and
+  `web/setup/views/settings/` Python sub-packages so the wheel build
+  carries the JS modules.
+- Webapp packaging contract test rewritten for the SPA shape.
+
 ## [0.12.7] - 2026-05-07
 
 ### Added

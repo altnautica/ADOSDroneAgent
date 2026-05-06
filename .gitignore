@@ -51,3 +51,4 @@ logs/
 # Distribution
 *.tar.gz
 *.whl
+.claude/

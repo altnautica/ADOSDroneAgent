@@ -109,6 +109,9 @@ include = ["ados*", "web*"]
 "ados.hal" = ["boards/*.yaml"]
 "ados.core" = ["defaults.yaml"]
 "web.setup" = ["*"]
+"web.setup.components" = ["*"]
+"web.setup.views" = ["*"]
+"web.setup.views.settings" = ["*"]
 
 
 [tool.ruff]

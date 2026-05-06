@@ -1,19 +1,22 @@
-"""Universal setup webapp assets — vanilla HTML / CSS / JS.
+"""Universal setup webapp assets, vanilla HTML, CSS, and ES modules.
 
-Mobile-first browser interface served by the agent's REST API at
-``/api/v1/setup/*``. Pages share a single ES module dispatcher (app.js)
-and a single stylesheet (style.css). Multiple agent backends in this
-repository serve these assets from this canonical location, so the
-operator UX stays identical regardless of which backend is running.
+Browser-side surface for the agent's REST API at ``/api/v1/setup/*``.
+A single ``index.html`` shell loads ``app.js``, which routes (History
+API) into per-view modules under ``views/`` and per-component modules
+under ``components/``. Multiple agent backends in this repository
+serve these assets from this canonical location, so the operator UX
+stays identical regardless of which backend is running.
 
-Pages:
-  - index.html    — Status dashboard (FC, GPS, battery, system, services)
-  - network.html  — WiFi AP settings, 4G modem status
-  - video.html    — Camera preview, resolution / codec / bitrate
-  - mavlink.html  — FC connection settings, proxy ports
-  - system.html   — Resource gauges, agent info, reboot / reset, logs
-  - setup.html    — First-boot setup wizard
-  - ground.html   — Ground-station controls
-  - remote.html   — Remote access (cloud relay, Cloudflare Tunnel)
-  - advanced.html — Power-user controls
+Tree:
+
+  - index.html               SPA shell, single mount point
+  - dashboard.css            Mobile, tablet, and desktop visual system
+  - app.js                   Bootstrap, route table, polling
+  - router.js                History API client router
+  - state.js                 Pub-sub store and polling helper
+  - components.js            DOM helpers (el, chip, statTile, panel, ...)
+  - components/              Header, bottom dock, command palette, sheets
+  - views/dashboard.js       The one-pager
+  - views/logs.js            Log streaming view
+  - views/settings/          Profile, cloud, network, display, advanced
 """
