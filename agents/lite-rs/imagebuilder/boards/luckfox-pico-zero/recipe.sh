@@ -88,58 +88,36 @@ recipe::sdk_configure() {
         < "${BOARD_DIR}/patches/0001-add-our-packages-to-defconfig.patch"
 }
 
-recipe::build_drivers() {
-    recipe::_sdk_paths
-
-    if [ ! -d "${LUCKFOX_TOOLCHAIN_DIR}" ]; then
-        imgbuild::log_error "vendor toolchain missing at ${LUCKFOX_TOOLCHAIN_DIR}"
-        return 1
-    fi
-
-    # The SDK builds the kernel as part of `./build.sh allsave`. To
-    # cross-compile out-of-tree modules against THAT kernel we run the
-    # kernel stage first so ${SDK_DIR}/sysdrv/source/objs_kernel/ is
-    # populated, then build each driver against it.
-    imgbuild::log_step "Building Luckfox SDK kernel (driver dependency)"
-    (
-        cd "${SDK_DIR}"
-        ./build.sh kernel
-    )
-
-    if [ ! -d "${LUCKFOX_KERNEL_OBJ_DIR}" ]; then
-        imgbuild::log_error "kernel objects not found at ${LUCKFOX_KERNEL_OBJ_DIR}"
-        return 1
-    fi
-
-    # Each driver recipe is a standalone bash script that takes
-    # KDIR + TOOLCHAIN_DIR + DRIVER_BUILD_ROOT as positional args, clones
-    # its own upstream at a pinned SHA, and emits the resulting .ko (and
-    # any firmware blobs) at a known path under DRIVER_BUILD_ROOT.
-    mkdir -p "${LUCKFOX_DRIVER_BUILD_DIR}"
-
-    bash "${BOARD_DIR}/drivers/rtl8812eu/recipe.sh" \
-        "${LUCKFOX_KERNEL_OBJ_DIR}" \
-        "${LUCKFOX_TOOLCHAIN_DIR}" \
-        "${LUCKFOX_DRIVER_BUILD_DIR}/rtl8812eu"
-
-    bash "${BOARD_DIR}/drivers/aic8800/recipe.sh" \
-        "${LUCKFOX_KERNEL_OBJ_DIR}" \
-        "${LUCKFOX_TOOLCHAIN_DIR}" \
-        "${LUCKFOX_DRIVER_BUILD_DIR}/aic8800"
-}
+# build_drivers intentionally NOT defined for v0.1.
+#
+# AIC8800DC (the on-board Wi-Fi chip) ships in-tree at
+# sysdrv/drv_ko/wifi/aic8800_netdrv/ and gets built by `./build.sh
+# allsave` as part of the kernel modules — no out-of-tree work needed
+# for the AP fallback path or any built-in Wi-Fi feature.
+#
+# RTL8812EU (the USB-attached dongle for WFB-ng broadcast) is operator-
+# supplied hardware, only needed when WFB-ng is in use. The aircrack-ng
+# v5.6.4.2 fork does NOT compile cleanly against the Luckfox 5.10 BSP
+# kernel — its struct sta_info expectations (auth_len / pauth_frame),
+# its NL80211_AUTHTYPE_SAE redefinition, and its `-Wno-stringop-overread`
+# flag all clash with the older kernel + GCC 8.x toolchain the SDK
+# pins. Sideloading the .ko post-flash via dkms or a separate package
+# is the v0.1 path; v0.2 picks an upstream branch that's verified
+# against kernel 5.10.
 
 recipe::sdk_build() {
     recipe::_sdk_paths
 
-    # Kernel is already built by recipe::build_drivers — the rest of the
-    # SDK pipeline (buildroot rootfs, U-Boot, image pack) goes here.
-    imgbuild::log_step "Building Luckfox SDK rootfs / U-Boot / image"
+    # The SDK builds the kernel as part of `./build.sh allsave`, plus
+    # buildroot rootfs, U-Boot, and image pack — one shot.
+    imgbuild::log_step "Building Luckfox SDK kernel / rootfs / U-Boot / image"
     (
         cd "${SDK_DIR}"
-        ./build.sh rootfs
-        ./build.sh uboot
-        ./build.sh media
-        ./build.sh all
+        # `allsave` is the SDK's documented one-shot — kernel + U-Boot +
+        # buildroot rootfs + media + image pack. Faster than running
+        # the stages individually because the SDK shares object caches
+        # across stages internally.
+        ./build.sh allsave
     )
 }
 
