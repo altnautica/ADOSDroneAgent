@@ -1,0 +1,47 @@
+name: install-lite-tests
+
+on:
+  pull_request:
+    paths:
+      - 'scripts/install-lite.sh'
+      - 'scripts/lib/detect-target.sh'
+      - 'scripts/test/**'
+      - '.github/workflows/install-lite-tests.yml'
+      - 'agents/lite-rs/buildroot/configs/**'
+  push:
+    branches: [main]
+    paths:
+      - 'scripts/install-lite.sh'
+      - 'scripts/lib/detect-target.sh'
+      - 'scripts/test/**'
+      - '.github/workflows/install-lite-tests.yml'
+      - 'agents/lite-rs/buildroot/configs/**'
+
+jobs:
+  shell-tests:
+    name: shell test harness
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install bats and minisign
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends bats minisign shellcheck
+
+      - name: shellcheck library and test scripts
+        run: |
+          shellcheck scripts/install-lite.sh
+          shellcheck scripts/lib/detect-target.sh
+          shellcheck scripts/test/run_dispatcher_tests.sh
+          shellcheck scripts/test/defconfig_reproducibility.sh
+          shellcheck scripts/test/minisign_verify_smoke.sh
+
+      - name: dispatcher bats suite
+        run: bash scripts/test/run_dispatcher_tests.sh
+
+      - name: defconfig reproducibility
+        run: bash scripts/test/defconfig_reproducibility.sh
+
+      - name: minisign verify smoke
+        run: bash scripts/test/minisign_verify_smoke.sh
