@@ -45,42 +45,38 @@ recipe::sdk_clone() {
 recipe::sdk_configure() {
     recipe::_sdk_paths
 
-    # The vendor SDK's choose_target_board() prompts interactively and
-    # writes ${SDK_DIR}/.BoardConfig.mk on selection (the file is
-    # sourced by build.sh — `BOARD_CONFIG=$SDK_ROOT_DIR/.BoardConfig.mk`
-    # at build.sh:24). We bypass the picker by writing the file
-    # directly. Use plain `cp` instead of `ln -s` — symlinks are
-    # flaky on case-insensitive filesystems, on Windows-mounted CI
-    # caches, and break some CI restore-from-cache flows. The SDK
-    # only sources the file once at the start of each build.sh
-    # invocation, so a copy is functionally equivalent.
+    # The vendor SDK's choose_target_board() runs `ln -rfs` from
+    # project/cfg/BoardConfig_IPC/<config>.mk to .BoardConfig.mk and
+    # build.sh later guards on `[ -L "$BOARD_CONFIG" ] && source $BOARD_CONFIG`
+    # at build.sh:2776 — meaning IF .BoardConfig.mk is not a symlink,
+    # the SDK NEVER sources it and the kernel build fails with
+    # "Not found toolchain -gcc for [] !!!" (RK_CHIP / RK_KERNEL_DTS /
+    # toolchain prefix all unset). So a symlink is mandatory, not
+    # optional. CI runs on ext4 — symlinks are fine. Local dev on
+    # macOS / Linux is fine. WSL2 is fine. The earlier preemptive
+    # switch to `cp` broke the toolchain dispatch.
     local board_cfg="${SDK_DIR}/project/cfg/BoardConfig_IPC/BoardConfig-EMMC-Buildroot-RV1106_Luckfox_Pico_Zero-IPC.mk"
     if [ ! -f "${board_cfg}" ]; then
         imgbuild::log_error "BoardConfig file not found at ${board_cfg}"
         find "${SDK_DIR}/project/cfg/BoardConfig_IPC/" -maxdepth 1 -type f 2>/dev/null | head -20 >&2
         return 1
     fi
-    imgbuild::log_info "Copying BoardConfig.mk from ${board_cfg##"${SDK_DIR}"/}"
-    cp -f "${board_cfg}" "${SDK_DIR}/.BoardConfig.mk"
-
-    # Bootstrap the vendor cross-toolchain. The SDK ships an
-    # `env_install_toolchain.sh` that installs the
-    # arm-rockchip830-linux-uclibcgnueabihf toolchain into PATH for
-    # the current shell; the SDK's build.sh then resolves
-    # CROSS_COMPILE off PATH. We source it to populate the env vars
-    # build.sh expects.
-    if [ -f "${SDK_DIR}/tools/linux/toolchain/env_install_toolchain.sh" ]; then
-        imgbuild::log_info "Sourcing vendor toolchain env"
-        # shellcheck disable=SC1091
-        ( cd "${SDK_DIR}/tools/linux/toolchain" && \
-          set -- ; . ./env_install_toolchain.sh ) || true
-        # The script just sets PATH inside its own subshell; the
-        # toolchain bin is at a fixed location, so prepend explicitly.
+    imgbuild::log_info "Symlinking .BoardConfig.mk → ${board_cfg##"${SDK_DIR}"/}"
+    ln -rfs "${board_cfg}" "${SDK_DIR}/.BoardConfig.mk"
+    if [ ! -L "${SDK_DIR}/.BoardConfig.mk" ]; then
+        imgbuild::log_error "filesystem rejected the symlink — SDK build.sh:2776 requires \\`-L\\`"
+        return 1
     fi
+
+    # Vendor cross-toolchain — already extracted in the SDK tree.
+    # The env_install_toolchain.sh script appends to ~/.bashrc which
+    # doesn't help us in a non-interactive subshell. Just prepend
+    # the bin dir explicitly. The toolchain lives nested one level
+    # deeper than the toolchain root (under <toolchain-cross>/bin).
     export PATH="${LUCKFOX_TOOLCHAIN_DIR}/bin:${PATH}"
     if ! command -v arm-rockchip830-linux-uclibcgnueabihf-gcc >/dev/null 2>&1; then
-        imgbuild::log_error "vendor toolchain not on PATH after env_install_toolchain.sh"
-        ls "${LUCKFOX_TOOLCHAIN_DIR}/bin" 2>/dev/null | head -10 >&2
+        imgbuild::log_error "vendor toolchain not on PATH (looked in ${LUCKFOX_TOOLCHAIN_DIR}/bin)"
+        find "${LUCKFOX_TOOLCHAIN_DIR}/bin" -maxdepth 1 -type f 2>/dev/null | head -10 >&2
         return 1
     fi
 

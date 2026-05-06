@@ -46,6 +46,14 @@ LOCALE_DEFAULT=en_GB.UTF-8
 TARGET_HOSTNAME=ados
 DISABLE_FIRST_BOOT_USER_RENAME=1
 FIRST_USER_NAME=ados
+# pi-gen requires FIRST_USER_PASS to be set explicitly; without it the
+# build aborts with "Not setting FIRST_USER_PASS makes your system
+# vulnerable...". The ADOS image SHIPS a default password the operator
+# is REQUIRED to change on first pair via the agent's setup webapp;
+# the bench runbook documents this. Sourcing the password from a CI
+# secret would be cleaner long-term but the default-then-rotate flow
+# keeps the rolling-image build reproducible.
+FIRST_USER_PASS=ados-default-change-me
 EOF
 
     # Headless image — drop the desktop and recommended-apps stages
