@@ -32,7 +32,10 @@ env:
   # board kernel or BSP. The actions/cache key below is keyed on this
   # value, so a bump invalidates the cache and forces a fresh clone.
   LUCKFOX_SDK_REPO: "https://github.com/LuckfoxTECH/luckfox-pico"
-  LUCKFOX_SDK_REF: "a37e54c4e07e16b4f3e93eb0db6e29a3f5b3a8b4"
+  # Current HEAD of main (2026-03-22). Includes Pico Zero support landed
+  # in upstream PR #310 (commit 9942437) plus subsequent backlight + BSP
+  # fixes. Bump deliberately when we want a newer kernel or BSP.
+  LUCKFOX_SDK_REF: "824b817f889c"
   # The defconfig name from the upstream Luckfox SDK that we layer
   # our BR2_EXTERNAL deltas on top of. The SDK ships per-board
   # defconfigs; `luckfox_pico_zero_buildroot_defconfig` is the closest
