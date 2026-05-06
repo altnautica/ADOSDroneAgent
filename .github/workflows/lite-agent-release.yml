@@ -165,28 +165,6 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Generate lite-boards.json manifest
-        # Manifest enumerates lite-eligible boards from
-        # src/ados/hal/boards/*.yaml. Published alongside the binaries so
-        # install.sh can fingerprint the running SBC and dispatch to the
-        # right install body.
-        run: |
-          python -m pip install --quiet pyyaml
-          python scripts/emit_lite_boards_manifest.py artifacts/lite-boards.json
-          echo "Manifest contents:"
-          cat artifacts/lite-boards.json
-
-      - name: Build SHA256SUMS
-        working-directory: artifacts
-        run: |
-          # Single SUMS file across all matrix targets + manifest.
-          rm -f SHA256SUMS
-          for f in ados-agent-lite-*.tar.gz lite-boards.json; do
-            [ -e "$f" ] || continue
-            sha256sum "$f" >> SHA256SUMS
-          done
-          cat SHA256SUMS
-
       - name: Determine release metadata
         id: meta
         run: |
@@ -204,6 +182,47 @@ jobs:
             } >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Generate lite-boards.json manifest
+        # Manifest enumerates lite-eligible boards from
+        # src/ados/hal/boards/*.yaml. Published alongside the binaries so
+        # install.sh can fingerprint the running SBC and dispatch to the
+        # right install body.
+        run: |
+          python -m pip install --quiet pyyaml
+          python scripts/emit_lite_boards_manifest.py artifacts/lite-boards.json
+          echo "Manifest contents:"
+          cat artifacts/lite-boards.json
+
+      - name: Generate ados-agent-manifest.json
+        # The Mission Control Flash Tool fetches this catalog. Pin install
+        # URLs to the resolved release tag so each install body is the
+        # exact one tested at release time, not whatever happens to be on
+        # main when the operator runs it.
+        run: |
+          python scripts/emit_ados_agent_manifest.py \
+            artifacts/ados-agent-manifest.json \
+            --release-tag "${{ steps.meta.outputs.tag }}"
+          echo "Manifest size: $(wc -c < artifacts/ados-agent-manifest.json) bytes"
+
+      - name: Stage install scripts as release assets
+        # Ship the install scripts alongside the binaries so the manifest
+        # can pin per-tag URLs (releases/download/<tag>/install*.sh) and
+        # the install body cannot drift between manifest fetches.
+        run: |
+          install -m 0755 scripts/install-lite.sh artifacts/install-lite.sh
+          install -m 0755 scripts/install.sh      artifacts/install.sh
+
+      - name: Build SHA256SUMS
+        working-directory: artifacts
+        run: |
+          # Single SUMS file across all matrix targets + manifests + install scripts.
+          rm -f SHA256SUMS
+          for f in ados-agent-lite-*.tar.gz lite-boards.json ados-agent-manifest.json install-lite.sh install.sh; do
+            [ -e "$f" ] || continue
+            sha256sum "$f" >> SHA256SUMS
+          done
+          cat SHA256SUMS
+
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -215,6 +234,9 @@ jobs:
             artifacts/ados-agent-lite-*.sha256
             artifacts/ados-agent-lite-*.minisig
             artifacts/lite-boards.json
+            artifacts/ados-agent-manifest.json
+            artifacts/install-lite.sh
+            artifacts/install.sh
             artifacts/SHA256SUMS
           body: |
             Prebuilt static binaries of the lightweight Rust agent.

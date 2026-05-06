@@ -11,11 +11,17 @@ and uses it to populate the board picker for the "ADOS Drone Agent" and
 
 Run as:
 
-    python scripts/emit_ados_agent_manifest.py [output_path]
+    python scripts/emit_ados_agent_manifest.py [output_path] [--release-tag TAG]
 
 Default output is dist/ados-agent-manifest.json. The local release flow
 uploads this file as a GitHub Release asset on altnautica/ADOSDroneAgent
 and the GCS proxy picks it up from the latest-release URL.
+
+The --release-tag argument (or RELEASE_TAG env var) pins the install URLs
+to release assets. When omitted or set to "latest", URLs use the
+releases/latest/download/... form which 302s to the latest stable release.
+For dev or pre-release builds, pass a concrete tag like lite-v0.1.4 so the
+emitted manifest pins exactly that release.
 
 The script reads:
   - src/ados/hal/boards/*.yaml   for the SoC + RAM + arch board catalog
@@ -30,10 +36,12 @@ until the next release fills them in.
 
 from __future__ import annotations
 
+import argparse
 import base64
 import datetime
 import hashlib
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -46,18 +54,33 @@ CARGO_TOML = ROOT / "agents" / "lite-rs" / "Cargo.toml"
 DIST_DIR = ROOT / "dist"
 DEFAULT_OUTPUT = DIST_DIR / "ados-agent-manifest.json"
 
-LITE_INSTALL_CMD = (
-    "curl -sSL https://raw.githubusercontent.com/altnautica/ADOSDroneAgent/"
-    "main/scripts/install-lite.sh | sudo bash"
-)
-FULL_INSTALL_CMD = (
-    "curl -sSL https://raw.githubusercontent.com/altnautica/ADOSDroneAgent/"
-    "main/scripts/install.sh | sudo bash"
-)
-FULL_INSTALL_GROUND_CMD = (
-    "curl -sSL https://raw.githubusercontent.com/altnautica/ADOSDroneAgent/"
-    "main/scripts/install.sh | sudo bash -s -- --profile ground-station"
-)
+# When release_tag is "latest" (or unset), URLs use the releases/latest/
+# download/... form which always 302-redirects to the most recent stable
+# release. When release_tag is a concrete tag (e.g. "lite-v0.1.4"), URLs
+# pin to that specific release so the manifest is reproducible across
+# rebuilds and the install body can't drift between fetches.
+RELEASE_BASE = "https://github.com/altnautica/ADOSDroneAgent/releases"
+
+
+def install_script_url(script_name: str, release_tag: str) -> str:
+    if release_tag == "latest" or not release_tag:
+        return f"{RELEASE_BASE}/latest/download/{script_name}"
+    return f"{RELEASE_BASE}/download/{release_tag}/{script_name}"
+
+
+def lite_install_cmd(release_tag: str) -> str:
+    url = install_script_url("install-lite.sh", release_tag)
+    return f"curl -sSL {url} | sudo bash"
+
+
+def full_install_cmd(release_tag: str) -> str:
+    url = install_script_url("install.sh", release_tag)
+    return f"curl -sSL {url} | sudo bash"
+
+
+def full_install_ground_cmd(release_tag: str) -> str:
+    url = install_script_url("install.sh", release_tag)
+    return f"curl -sSL {url} | sudo bash -s -- --profile ground-station"
 
 # Boards the Flash Tool can write from the browser via Rockchip rockusb.
 # Each entry maps a HAL board id to its bootrom USB IDs and the slug used
@@ -69,6 +92,16 @@ WEB_FLASH_BOARDS: dict[str, dict] = {
         "bootrom": {"vendorId": 0x2207, "productId": 0x110C},
     },
 }
+
+# Optional downloadable rockusb loader blobs keyed by imagebuilder slug.
+# Boards with blank eMMC need a loader blob written to RAM before the GCS
+# can address eMMC over rockusb. Default to no entry (blob not required);
+# add a slug here when a board ships with a downloadable loader artifact.
+# Each entry: { "filename": str }. The file is expected as a release asset
+# alongside the .img.gz. URL is derived from release_tag the same way the
+# image URL is derived. When the artifact is missing on disk during emit,
+# the optional fields are omitted from the install entry entirely.
+WEB_FLASH_LOADER_BLOBS: dict[str, dict] = {}
 
 # Minimum RAM (MB) for ground-agent eligibility when the HAL YAML doesn't
 # carry an explicit ground_station block. Below this the WFB-ng + mesh
@@ -146,48 +179,45 @@ def read_minisig(sig_path: Path) -> str:
     return base64.b64encode(raw).decode("ascii")
 
 
-def build_curl_install(stack: str, tier: str | None) -> dict:
+def build_curl_install(stack: str, tier: str | None, release_tag: str) -> dict:
     is_lite = tier in LITE_AGENT_TIERS
     if stack == "ados-ground-agent":
         return {
             "method": "curl",
-            "command": FULL_INSTALL_GROUND_CMD,
+            "command": full_install_ground_cmd(release_tag),
             "notes": [
                 "Run on a board already booted into its vendor OS.",
                 "Plug in your RTL8812EU adapter, OLED, and buttons before "
                 "running so they auto-detect.",
             ],
         }
+    cmd = lite_install_cmd(release_tag) if is_lite else full_install_cmd(
+        release_tag,
+    )
     return {
         "method": "curl",
-        "command": LITE_INSTALL_CMD if is_lite else FULL_INSTALL_CMD,
+        "command": cmd,
         "notes": ["Run on a board already booted into its vendor OS."],
     }
 
 
-def build_web_flash_install(image_artifact: Path | None) -> dict:
+def image_release_url(filename: str, release_tag: str) -> str:
+    if release_tag == "latest" or not release_tag:
+        return f"{RELEASE_BASE}/latest/download/{filename}"
+    return f"{RELEASE_BASE}/download/{release_tag}/{filename}"
+
+
+def build_web_flash_install(
+    image_artifact: Path | None,
+    loader_blob_artifact: Path | None,
+    release_tag: str,
+) -> dict:
     notes = [
         "Hold the BOOT button while plugging USB-C into your computer to "
         "enter bootrom mode.",
         "Image flash erases the eMMC. Back up any user data first.",
     ]
-    if image_artifact and image_artifact.exists():
-        size, sha = hash_artifact(image_artifact)
-        sig = read_minisig(
-            image_artifact.with_suffix(image_artifact.suffix + ".minisig"),
-        )
-        return {
-            "method": "web-flash",
-            "imageUrl": (
-                "https://github.com/altnautica/ADOSDroneAgent/releases/"
-                f"latest/download/{image_artifact.name}"
-            ),
-            "sha256": sha,
-            "minisignSignature": sig,
-            "imageSizeBytes": size,
-            "notes": notes,
-        }
-    return {
+    install: dict = {
         "method": "web-flash",
         "imageUrl": "",
         "sha256": "",
@@ -195,6 +225,33 @@ def build_web_flash_install(image_artifact: Path | None) -> dict:
         "imageSizeBytes": 0,
         "notes": notes,
     }
+    if image_artifact and image_artifact.exists():
+        size, sha = hash_artifact(image_artifact)
+        sig = read_minisig(
+            image_artifact.with_suffix(image_artifact.suffix + ".minisig"),
+        )
+        install["imageUrl"] = image_release_url(image_artifact.name, release_tag)
+        install["sha256"] = sha
+        install["minisignSignature"] = sig
+        install["imageSizeBytes"] = size
+
+    # Loader blob fields are optional and ONLY emitted when an artifact is
+    # actually present. Boards that flash from an alive vendor OS or that
+    # already carry the loader in their bootrom never see these fields.
+    if loader_blob_artifact and loader_blob_artifact.exists():
+        _, blob_sha = hash_artifact(loader_blob_artifact)
+        blob_sig = read_minisig(
+            loader_blob_artifact.with_suffix(
+                loader_blob_artifact.suffix + ".minisig",
+            ),
+        )
+        install["loaderBlobUrl"] = image_release_url(
+            loader_blob_artifact.name, release_tag,
+        )
+        install["loaderBlobSha256"] = blob_sha
+        install["loaderBlobMinisignSignature"] = blob_sig
+
+    return install
 
 
 def find_image_artifact(slug: str, version: str, dist_dir: Path) -> Path | None:
@@ -206,8 +263,26 @@ def find_image_artifact(slug: str, version: str, dist_dir: Path) -> Path | None:
     return fallback[-1] if fallback else None
 
 
+def find_loader_blob_artifact(
+    slug: str, dist_dir: Path,
+) -> Path | None:
+    """Locate the rockusb loader blob for a slug, if one was published."""
+    entry = WEB_FLASH_LOADER_BLOBS.get(slug)
+    if not entry:
+        return None
+    filename = entry.get("filename")
+    if not filename:
+        return None
+    candidate = dist_dir / filename
+    return candidate if candidate.exists() else None
+
+
 def project_board(
-    board: dict, version: str, dist_dir: Path, fallback_id: str,
+    board: dict,
+    version: str,
+    dist_dir: Path,
+    fallback_id: str,
+    release_tag: str = "latest",
 ) -> dict | None:
     board_meta = board.get("board") or {}
     board_id = board_meta.get("id") or fallback_id
@@ -239,14 +314,16 @@ def project_board(
 
     if board_id in WEB_FLASH_BOARDS:
         wf = WEB_FLASH_BOARDS[board_id]
-        artifact = find_image_artifact(
-            wf["imagebuilder_slug"], version, dist_dir,
-        )
+        slug = wf["imagebuilder_slug"]
+        artifact = find_image_artifact(slug, version, dist_dir)
+        loader = find_loader_blob_artifact(slug, dist_dir)
         installs = {
-            "ados-drone-agent": build_web_flash_install(artifact),
+            "ados-drone-agent": build_web_flash_install(
+                artifact, loader, release_tag,
+            ),
         }
         result = {
-            "id": wf["imagebuilder_slug"],
+            "id": slug,
             "label": wf["label"],
             "soc": soc,
             "arch": arch,
@@ -260,7 +337,7 @@ def project_board(
 
     installs: dict[str, dict] = {}
     for stack in stacks:
-        installs[stack] = build_curl_install(stack, tier)
+        installs[stack] = build_curl_install(stack, tier, release_tag)
 
     result = {
         "id": board_id,
@@ -275,23 +352,56 @@ def project_board(
     return result
 
 
-def collect_boards(boards_dir: Path, version: str, dist_dir: Path) -> list[dict]:
+def collect_boards(
+    boards_dir: Path,
+    version: str,
+    dist_dir: Path,
+    release_tag: str,
+) -> list[dict]:
     boards: list[dict] = []
     for path in sorted(boards_dir.glob("*.yaml")):
         with path.open() as fp:
             data = yaml.safe_load(fp)
         if not isinstance(data, dict):
             continue
-        projected = project_board(data, version, dist_dir, fallback_id=path.stem)
+        projected = project_board(
+            data, version, dist_dir,
+            fallback_id=path.stem,
+            release_tag=release_tag,
+        )
         if projected:
             boards.append(projected)
     return boards
 
 
-def main() -> int:
-    output = Path(sys.argv[1]) if len(sys.argv) > 1 else DEFAULT_OUTPUT
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Emit the ADOS Agent firmware manifest.",
+    )
+    parser.add_argument(
+        "output",
+        nargs="?",
+        default=str(DEFAULT_OUTPUT),
+        help="Output JSON path (default: dist/ados-agent-manifest.json).",
+    )
+    parser.add_argument(
+        "--release-tag",
+        default=os.environ.get("RELEASE_TAG", "latest"),
+        help=(
+            "Release tag to pin install URLs to (e.g. lite-v0.1.4). When "
+            "set to 'latest' (the default), URLs use the releases/latest "
+            "form which 302-redirects to the most recent stable release."
+        ),
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(sys.argv[1:] if argv is None else argv)
+    output = Path(args.output)
+    release_tag = args.release_tag or "latest"
     version = read_cargo_version(CARGO_TOML)
-    boards = collect_boards(BOARDS_DIR, version, DIST_DIR)
+    boards = collect_boards(BOARDS_DIR, version, DIST_DIR, release_tag)
     boards.sort(key=lambda b: b["id"])
 
     manifest = {
@@ -307,7 +417,7 @@ def main() -> int:
     with output.open("w") as fp:
         json.dump(manifest, fp, indent=2, sort_keys=False)
         fp.write("\n")
-    print(f"Wrote {len(boards)} boards to {output}")
+    print(f"Wrote {len(boards)} boards to {output} (release_tag={release_tag})")
     return 0
 
 

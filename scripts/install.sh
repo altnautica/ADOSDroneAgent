@@ -181,15 +181,28 @@ if [ "${_PROFILE}" = "lite-rs" ]; then
     fi
     if [ -z "${LITE_INSTALLER}" ]; then
         LITE_INSTALLER="$(mktemp)"
+        # The install-lite.sh script ships as a GitHub Release asset so the
+        # bootstrap pin matches whatever release the operator's invocation
+        # came from. ADOS_RELEASE_CHANNEL=main resolves to the rolling
+        # lite-agent-main pre-release; default and "stable" resolve to the
+        # latest stable lite-v* release via the releases/latest redirect.
+        case "${ADOS_RELEASE_CHANNEL:-stable}" in
+            main)
+                LITE_BOOTSTRAP_URL="https://github.com/altnautica/ADOSDroneAgent/releases/download/lite-agent-main/install-lite.sh"
+                ;;
+            *)
+                LITE_BOOTSTRAP_URL="https://github.com/altnautica/ADOSDroneAgent/releases/latest/download/install-lite.sh"
+                ;;
+        esac
         # Prefer curl, fall back to wget. Buildroot rootfs images ship wget
         # only — the Luckfox Pico Zero is the canonical example.
         if command -v curl >/dev/null 2>&1; then
-            curl -fsSL --retry 3 --retry-delay 2 \
-                "https://raw.githubusercontent.com/altnautica/ADOSDroneAgent/main/scripts/install-lite.sh" \
+            curl -fsSL --retry 3 --retry-delay 2 -L \
+                "${LITE_BOOTSTRAP_URL}" \
                 -o "${LITE_INSTALLER}"
         elif command -v wget >/dev/null 2>&1; then
             wget -q --tries=3 -O "${LITE_INSTALLER}" \
-                "https://raw.githubusercontent.com/altnautica/ADOSDroneAgent/main/scripts/install-lite.sh"
+                "${LITE_BOOTSTRAP_URL}"
         else
             echo "ERROR: neither curl nor wget is installed; cannot fetch install-lite.sh" >&2
             exit 1

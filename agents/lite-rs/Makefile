@@ -77,10 +77,19 @@ image-luckfox: pre-flight
 	@mkdir -p $(DIST)
 	IMGBUILD_VERSION=$(VERSION) IMGBUILD_OUTPUT=$(DIST) \
 		bash $(LITE_DIR)/imagebuilder/lib/build-driver.sh luckfox-pico-zero
-	@cp $(DIST)/luckfox-pico-zero/ados-luckfox-pico-zero-*.img.gz $(DIST)/ 2>/dev/null || true
+	@set -e; \
+	src=$$(ls $(DIST)/luckfox-pico-zero/ados-luckfox-pico-zero-*.img.gz 2>/dev/null | head -n1); \
+	if [ -z "$$src" ]; then \
+		echo "expected $(DIST)/luckfox-pico-zero/ados-luckfox-pico-zero-*.img.gz to exist; imagebuilder did not produce it" >&2; \
+		exit 1; \
+	fi; \
+	cp "$$src" $(DIST)/
 
 manifest: pre-flight
-	python3 $(REPO_ROOT)/scripts/emit_ados_agent_manifest.py $(DIST)/ados-agent-manifest.json
+	python3 $(REPO_ROOT)/scripts/emit_ados_agent_manifest.py \
+		$(DIST)/ados-agent-manifest.json --release-tag $(TAG)
+	@install -m 0755 $(REPO_ROOT)/scripts/install-lite.sh $(DIST)/install-lite.sh
+	@install -m 0755 $(REPO_ROOT)/scripts/install.sh      $(DIST)/install.sh
 
 sign: pre-flight
 	@echo "Signing artifacts under $(DIST)/"

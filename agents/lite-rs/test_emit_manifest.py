@@ -93,17 +93,17 @@ class ResolveInstallTierTests(unittest.TestCase):
 
 class BuildCurlInstallTests(unittest.TestCase):
     def test_drone_agent_lite_uses_install_lite_script(self) -> None:
-        out = emit.build_curl_install("ados-drone-agent", "budget")
+        out = emit.build_curl_install("ados-drone-agent", "budget", "latest")
         self.assertEqual(out["method"], "curl")
         self.assertIn("install-lite.sh", out["command"])
         self.assertNotIn("--profile", out["command"])
 
     def test_drone_agent_lite_tier_alias_also_uses_lite_script(self) -> None:
-        out = emit.build_curl_install("ados-drone-agent", "lite")
+        out = emit.build_curl_install("ados-drone-agent", "lite", "latest")
         self.assertIn("install-lite.sh", out["command"])
 
     def test_drone_agent_full_uses_install_script_without_profile_flag(self) -> None:
-        out = emit.build_curl_install("ados-drone-agent", None)
+        out = emit.build_curl_install("ados-drone-agent", None, "latest")
         self.assertEqual(out["method"], "curl")
         # Must be the full installer, not the lite one.
         self.assertIn("install.sh", out["command"])
@@ -113,11 +113,29 @@ class BuildCurlInstallTests(unittest.TestCase):
     def test_ground_agent_always_uses_profile_ground_station(self) -> None:
         for tier in (None, "budget", "lite", "premium", "standard"):
             with self.subTest(tier=tier):
-                out = emit.build_curl_install("ados-ground-agent", tier)
+                out = emit.build_curl_install(
+                    "ados-ground-agent", tier, "latest",
+                )
                 self.assertEqual(out["method"], "curl")
                 self.assertIn("--profile ground-station", out["command"])
                 # Ground always installs the full agent, never the lite one.
                 self.assertNotIn("install-lite.sh", out["command"])
+
+    def test_latest_tag_uses_releases_latest_download_form(self) -> None:
+        out = emit.build_curl_install("ados-drone-agent", None, "latest")
+        self.assertIn("releases/latest/download/", out["command"])
+        self.assertNotIn("raw.githubusercontent.com", out["command"])
+
+    def test_concrete_release_tag_pins_specific_release(self) -> None:
+        out = emit.build_curl_install(
+            "ados-drone-agent", None, "lite-v0.1.4",
+        )
+        self.assertIn("releases/download/lite-v0.1.4/", out["command"])
+        self.assertNotIn("releases/latest/", out["command"])
+
+    def test_empty_release_tag_falls_back_to_latest(self) -> None:
+        out = emit.build_curl_install("ados-drone-agent", None, "")
+        self.assertIn("releases/latest/download/", out["command"])
 
 
 class ProjectBoardTests(unittest.TestCase):
@@ -167,6 +185,7 @@ class ProjectBoardTests(unittest.TestCase):
             version="0.0.0",
             dist_dir=self.empty_dist,
             fallback_id="rv1106-g3",
+            release_tag="latest",
         )
         self.assertIsNotNone(result)
         assert result is not None
@@ -177,6 +196,10 @@ class ProjectBoardTests(unittest.TestCase):
         self.assertEqual(install["method"], "web-flash")
         # No image artifact in the empty dist dir => empty URL placeholder.
         self.assertEqual(install["imageUrl"], "")
+        # Loader blob fields are omitted when no blob artifact exists.
+        self.assertNotIn("loaderBlobUrl", install)
+        self.assertNotIn("loaderBlobSha256", install)
+        self.assertNotIn("loaderBlobMinisignSignature", install)
 
 
 if __name__ == "__main__":
