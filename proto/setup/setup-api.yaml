@@ -303,7 +303,7 @@ components:
         Channel / MCS / passphrase / power update request for the
         WFB-ng broadcast pipeline. The passphrase is `writeOnly` so
         operators cannot read it back from the GET surface.
-      required: [channel, mcs_index, tx_power_dbm, key_passphrase]
+      required: [channel, mcs_index, tx_power_dbm]
       properties:
         channel:
           type: integer
@@ -321,9 +321,11 @@ components:
           type: string
           writeOnly: true
           description: |
-            Operator-supplied passphrase. The agent runs the documented
-            KDF (SHA-256 → Curve25519 → SHA-256) to mint the 32-byte
-            broadcast key, never persisting the passphrase in clear.
+            Optional. Omit to keep the existing keypair; provide a
+            non-empty string to derive a new keypair. When supplied,
+            the agent runs the documented KDF (SHA-256 → Curve25519
+            → SHA-256) to mint the 32-byte broadcast key, never
+            persisting the passphrase in clear.
 
     WfbConfigureResponse:
       type: object

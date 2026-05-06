@@ -1612,3 +1612,59 @@ details > .body {
 .wfb-result {
   font-size: 12px;
 }
+
+/* Pair-code banner. Sits above the active page's main content while the
+   agent is unpaired so an operator on the AP fallback can read the code
+   without UART. Subtle accent border, rounded card, ~80 px tall. */
+.pair-code-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  margin: 0 0 20px 0;
+  padding: 16px 20px;
+  min-height: 80px;
+  border: 1px solid var(--accent);
+  border-radius: 12px;
+  background: var(--accent-soft);
+  color: var(--text-primary);
+  flex-wrap: wrap;
+}
+
+.pair-code-banner-text {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.pair-code-banner-title {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.pair-code-banner-subtitle {
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.pair-code-banner-code-wrap {
+  display: flex;
+  align-items: center;
+  flex: 0 0 auto;
+}
+
+.pair-code-banner-code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 28px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  color: var(--text-primary);
+  padding: 6px 14px;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.25);
+  user-select: all;
+}

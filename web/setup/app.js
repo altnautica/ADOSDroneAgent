@@ -230,6 +230,7 @@ function renderShell(activePage, content) {
 
   const status = currentStatus;
   const completion = status ? `${status.completion_percent || 0}%` : "—";
+  const pairBanner = renderPairCodeBanner(status);
   const navItems = NAV.map((item) => {
     const sev = pageSeverity(item.id, status);
     return el(
@@ -284,9 +285,58 @@ function renderShell(activePage, content) {
         className: "sidebar-backdrop",
         onclick: () => document.body.classList.remove("menu-open"),
       }),
-      el("main", { className: "content" }, content),
+      el("main", { className: "content" },
+        pairBanner ? pairBanner : null,
+        content,
+      ),
     ),
   );
+}
+
+// Pair-code banner. Renders above every page's main content while the
+// agent is unpaired so an operator on the AP fallback (or any browser
+// without UART access) can read the code straight off the landing page.
+// Reads `paired` and `pair_code` from the SetupStatus payload; the
+// status_builder surfaces both fields under `cloud_choice` (status root
+// also carries `paired` as a synonym for older consumers). Returns
+// `null` when paired or when no pair code is available so the caller
+// can drop the banner cleanly.
+function renderPairCodeBanner(status) {
+  if (!status) return null;
+  const cloud = status.cloud_choice || {};
+  const paired = cloud.paired === true || status.paired === true;
+  if (paired) return null;
+  const code = pickPairCode(status);
+  if (!code) return null;
+  return el(
+    "section",
+    {
+      className: "pair-code-banner",
+      role: "status",
+      "aria-live": "polite",
+    },
+    el("div", { className: "pair-code-banner-text" },
+      el("h2", { className: "pair-code-banner-title" }, "Pair this drone"),
+      el("div", { className: "pair-code-banner-subtitle" },
+        "Enter this code in Mission Control to connect."),
+    ),
+    el("div", { className: "pair-code-banner-code-wrap" },
+      el("code", { className: "pair-code-banner-code" }, code),
+    ),
+  );
+}
+
+// Return the visible pair code from the status payload, if present.
+// Tolerates the field landing under either `cloud_choice.pair_code`
+// (preferred) or a top-level `pair_code` so the webapp ships ahead of
+// the backend wiring without breaking once the field appears.
+function pickPairCode(status) {
+  const cloud = status.cloud_choice || {};
+  const candidates = [cloud.pair_code, cloud.pairing_code, status.pair_code, status.pairing_code];
+  for (const c of candidates) {
+    if (typeof c === "string" && c.trim() !== "") return c.trim();
+  }
+  return null;
 }
 
 function pageHeader({ eyebrow, title, subtitle, actions }) {
@@ -2613,12 +2663,11 @@ function renderWfbTile() {
     }
   };
 
-  // Apply pushes channel + MCS + tx_power. The REST contract requires
-  // a non-empty passphrase on every configure POST. Until the contract
-  // grows a "rotate=false" flag, the operator-driven Apply path uses a
-  // sentinel marker; rotation lives behind the explicit Regenerate /
-  // Import controls. Documented stop-gap; backend follow-up tracked
-  // separately.
+  // Apply pushes channel + MCS + tx_power without rotating the keypair.
+  // The configure REST contract treats `key_passphrase` as optional; an
+  // omitted or empty value tells the backend to keep the existing keypair
+  // on disk. Rotation lives behind the explicit Regenerate / Import
+  // controls below.
   const applyBtn = btn("Apply radio config", {
     variant: "primary",
     onclick: async () => {
@@ -2629,7 +2678,6 @@ function renderWfbTile() {
         channel,
         mcs_index: mcs,
         tx_power_dbm: power,
-        key_passphrase: "_keep_existing_",
       };
       setBusy(true, "Applying…");
       try {

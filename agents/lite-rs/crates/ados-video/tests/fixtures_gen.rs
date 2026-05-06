@@ -132,10 +132,10 @@ fn build_split() -> Vec<u8> {
             out.extend(build_nal(NAL_HEADER_PPS, &PPS_BODY));
             // Small IDR slice: 200 bytes of filler. Stays well under
             // MTU so each frame is one RTP packet.
-            out.extend(build_nal(NAL_HEADER_IDR, &vec![0xAA; 200]));
+            out.extend(build_nal(NAL_HEADER_IDR, &[0xAA; 200]));
         } else {
             // Non-IDR slice: 100 bytes of filler.
-            out.extend(build_nal(NAL_HEADER_NON_IDR, &vec![0xBB; 100]));
+            out.extend(build_nal(NAL_HEADER_NON_IDR, &[0xBB; 100]));
         }
     }
     out
@@ -173,8 +173,8 @@ fn large_fixture_forces_fu_a() {
         bytes.len() > expected_idr,
         "large fixture missing IDR body"
     );
-    // The trailing IDR body is at least 4× MTU.
-    assert!(6000 >= 4 * 1400);
+    // The trailing IDR body is at least 4× MTU. const_assert via const eval:
+    const _: () = assert!(6000 >= 4 * 1400);
 }
 
 #[test]

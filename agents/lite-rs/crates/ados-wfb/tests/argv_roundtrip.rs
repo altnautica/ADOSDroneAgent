@@ -195,18 +195,14 @@ async fn build_args_returns_none_until_dongle_bound() {
 }
 
 #[tokio::test]
-async fn build_args_errors_on_empty_passphrase_after_binding() {
-    // The composer-via-manager path validates the passphrase before
-    // returning argv. An empty passphrase is the most common operator
-    // mistake on first boot; surfacing it as a typed `Key(EmptyPassphrase)`
-    // here means the wizard renders the right error rather than a
-    // SpawnFailed at exec time. This is the closest equivalent to "argv
-    // build errors when secret material is missing" — the keypair file
-    // itself does not exist on disk in this test (tempdir), but the
-    // validation runs before any disk read so the absent file is
-    // irrelevant. A future change that defers the passphrase check past
-    // argv composition would surface as a hard failure here.
-    use ados_wfb::{DongleEvent, KeyError, WfbError};
+async fn build_args_with_empty_passphrase_returns_args_after_binding() {
+    // An empty passphrase signals "keep the existing keypair file on
+    // disk untouched" — the path operators take when retuning channel /
+    // MCS / power without rotating the broadcast secret. The argv
+    // composer therefore must NOT treat empty as a typed error; it
+    // returns Ok(Some(_)) with the channel/MCS/power baked in and
+    // wfb_tx reads the keypair bytes already on disk via -K.
+    use ados_wfb::DongleEvent;
     let cfg = WfbConfig {
         channel: 161,
         mcs_index: 1,
@@ -220,8 +216,12 @@ async fn build_args_errors_on_empty_passphrase_after_binding() {
     let mgr = WfbManager::new(cfg).expect("construct");
     mgr.handle_dongle_event(DongleEvent::Added("wlan0".to_string()))
         .await;
-    match mgr.build_args().await {
-        Err(WfbError::Key(KeyError::EmptyPassphrase)) => {}
-        other => panic!("expected EmptyPassphrase, got {other:?}"),
-    }
+    let args = mgr
+        .build_args()
+        .await
+        .expect("build_args ok with empty passphrase")
+        .expect("interface bound -> Some");
+    assert_eq!(args.channel, 161);
+    assert_eq!(args.mcs_index, 1);
+    assert_eq!(args.tx_power_dbm, 25);
 }

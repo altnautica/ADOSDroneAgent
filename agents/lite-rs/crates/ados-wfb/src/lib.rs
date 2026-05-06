@@ -68,6 +68,13 @@ pub struct WfbConfig {
     /// Operator-supplied passphrase. Hashed via the [`keys`] module
     /// before it crosses any process boundary; never stored in the
     /// clear in any persistent file.
+    ///
+    /// An empty string means "keep the existing keypair file on disk
+    /// untouched": no derive runs, no key persistence happens, and
+    /// `wfb_tx` keeps reading the bytes that are already at
+    /// `keypair_path`. This is the path operators take when they want
+    /// to retune channel/MCS/power without rotating the broadcast
+    /// secret.
     pub key_passphrase: String,
     /// Filesystem path to the `wfb_tx` userland binary. Defaults to
     /// [`process::DEFAULT_WFB_TX_PATH`].
@@ -294,11 +301,15 @@ impl WfbManager {
             Some(i) => i,
             None => return Ok(None),
         };
-        // Validate the passphrase up-front so a missing key surfaces as
-        // a typed error rather than a SpawnFailed at exec time. The
-        // derived bytes themselves are not part of the argv any more —
-        // wfb_tx reads them from the keypair file via -K.
-        let _ = derive_key(&cfg.key_passphrase)?;
+        // When a passphrase is set, validate it up-front so a malformed
+        // key surfaces as a typed error rather than a SpawnFailed at
+        // exec time. An empty passphrase signals "keep the existing
+        // keypair file on disk", so the validate step is skipped — the
+        // file itself becomes the source of truth and `wfb_tx` reads
+        // the bytes already there via `-K`.
+        if !cfg.key_passphrase.is_empty() {
+            let _ = derive_key(&cfg.key_passphrase)?;
+        }
         Ok(Some(WfbTxArgs {
             interface: iface,
             channel: cfg.channel,
@@ -315,6 +326,11 @@ impl WfbManager {
     /// `wfb_tx -K` consumes. The file is created with mode 0600; the
     /// caller is expected to have already locked the parent directory
     /// to 0700 via `ensure_secret_dir` from the setup crate.
+    ///
+    /// Requires a non-empty passphrase in the in-memory config. The
+    /// "keep current keypair" path is served by
+    /// [`WfbManager::persist_keypair_if_passphrase_set`] which short-
+    /// circuits to a no-op when the passphrase is empty.
     pub async fn persist_keypair_file(&self) -> Result<[u8; PUBLIC_KEY_LEN], WfbError> {
         let cfg = self.config.lock().await;
         let (public, broadcast) = derive_keypair(&cfg.key_passphrase)?;
@@ -323,6 +339,24 @@ impl WfbManager {
         bytes.extend_from_slice(&public);
         write_keypair_atomic(&cfg.keypair_path, &bytes)?;
         Ok(public)
+    }
+
+    /// Persist the keypair file only when the in-memory passphrase is
+    /// set. With an empty passphrase the call is a no-op and the
+    /// existing keypair file on disk is left untouched, which is the
+    /// path operators take when they retune channel/MCS/power without
+    /// rotating the broadcast secret. Returns `Ok(None)` in that case;
+    /// returns the freshly-minted public bytes when a write actually
+    /// happened.
+    pub async fn persist_keypair_if_passphrase_set(
+        &self,
+    ) -> Result<Option<[u8; PUBLIC_KEY_LEN]>, WfbError> {
+        let is_empty = self.config.lock().await.key_passphrase.is_empty();
+        if is_empty {
+            return Ok(None);
+        }
+        let public = self.persist_keypair_file().await?;
+        Ok(Some(public))
     }
 
     /// Install (or clear) the writer that points at the live `wfb_tx`

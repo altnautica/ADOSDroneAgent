@@ -42,11 +42,20 @@ pub type SharedWfbManager = Arc<Mutex<WfbManager>>;
 
 /// Request body for `POST /api/v1/setup/wfb/configure`. Mirrors the
 /// `WfbConfigureRequest` schema in the OpenAPI spec.
+///
+/// `key_passphrase` is optional in the wire JSON. Omit the field (or
+/// pass an empty string) to keep the existing broadcast keypair on
+/// disk untouched while still applying a fresh channel / MCS /
+/// tx-power tuple. Pass a non-empty string to derive a new keypair
+/// from the supplied passphrase. Defaults to an empty string when the
+/// JSON omits the field, so callers building the struct directly can
+/// continue to assign a `String` without wrapping in `Option`.
 #[derive(Debug, Deserialize)]
 pub struct WfbConfigureRequest {
     pub channel: u8,
     pub mcs_index: u8,
     pub tx_power_dbm: i8,
+    #[serde(default)]
     pub key_passphrase: String,
 }
 
@@ -78,9 +87,19 @@ pub async fn post_wfb_configure(
     Extension(mgr): Extension<SharedWfbManager>,
     Json(req): Json<WfbConfigureRequest>,
 ) -> Response {
-    if req.key_passphrase.trim().is_empty() {
-        return error_response("key_passphrase must not be empty");
-    }
+    // Normalize the passphrase. Empty / whitespace means "keep the
+    // existing keypair file on disk untouched" so an operator who
+    // only wants to retune channel / MCS / power does not have to
+    // rotate the broadcast secret. A non-empty passphrase continues
+    // to derive + persist a fresh keypair.
+    let passphrase: String = {
+        let trimmed = req.key_passphrase.trim();
+        if trimmed.is_empty() {
+            String::new()
+        } else {
+            trimmed.to_string()
+        }
+    };
     // Validate envelopes up-front so the caller sees a 400 rather than
     // a vaguely-typed Invariant later.
     if !((1..=13).contains(&req.channel) || (36..=165).contains(&req.channel)) {
@@ -111,7 +130,7 @@ pub async fn post_wfb_configure(
             channel: req.channel,
             mcs_index: req.mcs_index,
             tx_power_dbm: req.tx_power_dbm,
-            key_passphrase: req.key_passphrase.clone(),
+            key_passphrase: passphrase.clone(),
             wfb_tx_path: std::path::PathBuf::from(ados_wfb::DEFAULT_WFB_TX_PATH),
             interface: snap.config_summary.interface.clone(),
             keypair_path: std::path::PathBuf::from(ados_wfb::DEFAULT_KEYPAIR_PATH),
@@ -130,11 +149,14 @@ pub async fn post_wfb_configure(
     let apply = mgr.lock().await.apply_config(new_cfg.clone()).await;
     match apply {
         Ok(()) => {
-            // Materialise the keypair file so the next wfb_tx spawn
-            // has the bytes on disk. Best-effort — a failure here is
-            // recoverable (the operator can rerun configure) but we
-            // surface it in the message.
-            let kp_msg = match mgr.lock().await.persist_keypair_file().await {
+            // Materialise the keypair file only when the operator
+            // supplied a fresh passphrase. With no passphrase the
+            // existing keypair file on disk is left untouched and the
+            // next wfb_tx spawn picks up the same bytes via -K.
+            // Best-effort — a failure here is recoverable (the
+            // operator can rerun configure) but we surface it in the
+            // message.
+            let kp_msg = match mgr.lock().await.persist_keypair_if_passphrase_set().await {
                 Ok(_) => None,
                 Err(e) => Some(format!("(keypair file not persisted: {e})")),
             };
