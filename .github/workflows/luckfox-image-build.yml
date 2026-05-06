@@ -98,12 +98,12 @@ jobs:
           set -eux
           mkdir -p "${{ runner.temp }}/luckfox-sdk"
           cd "${{ runner.temp }}/luckfox-sdk"
-          git init
-          git remote add origin "${LUCKFOX_SDK_REPO}"
-          # Fetch only the pinned commit + just enough history for the
-          # checkout. Saves bandwidth + disk on a fresh runner.
-          git fetch --depth=1 origin "${LUCKFOX_SDK_REF}"
-          git checkout FETCH_HEAD
+          # GitHub does not allow `git fetch <sha>` for arbitrary
+          # commits on the public Luckfox repo (uploadpack.allow-
+          # ReachableSHA1InWant is not set). Clone the default branch
+          # and check out the pinned SHA from local history.
+          git clone "${LUCKFOX_SDK_REPO}" .
+          git checkout "${LUCKFOX_SDK_REF}"
           git submodule update --init --recursive --depth=1 || true
 
       - name: Verify SDK checkout
@@ -152,20 +152,36 @@ jobs:
           BR2_EXTERNAL: ${{ github.workspace }}/agents/lite-rs/buildroot
         run: |
           set -eux
-          # Land the ADOS-augmented defconfig as the active config.
-          # The base picks up everything from the upstream stock, then
-          # the BR2_EXTERNAL tree's defconfig overlay layers our
-          # additive deltas. The merged tree is what `make` consumes.
+          # 1. Start from the upstream Luckfox stock defconfig — this
+          #    gives us the toolchain triplet, kernel headers, init
+          #    system, rootfs format we deliberately do NOT duplicate
+          #    in our delta file.
           make "${{ steps.defconfig.outputs.name }}"
-          # Apply the ADOS overlay if Buildroot supports the merge
-          # macro (BR2_DEFCONFIG_FRAGMENT_FILES); otherwise rely on
-          # BR2_EXTERNAL's package selection picking up our entries.
-          if grep -q '^BR2_PACKAGE_ADOS_AGENT_LITE' .config 2>/dev/null; then
-            echo "BR2_PACKAGE_ADOS_AGENT_LITE already enabled"
-          else
-            echo 'BR2_PACKAGE_ADOS_AGENT_LITE=y' >> .config
-            yes "" | make olddefconfig || true
+          # 2. Append every selection from our delta defconfig and
+          #    re-resolve. `olddefconfig` keeps existing answers and
+          #    fills new ones with their defaults, which is exactly
+          #    what we want for additive package selection.
+          ADOS_DEFCONFIG="${{ github.workspace }}/agents/lite-rs/buildroot/configs/luckfox_pico_zero_ados_defconfig"
+          if [ ! -f "${ADOS_DEFCONFIG}" ]; then
+            echo "ERROR: ADOS defconfig not found at ${ADOS_DEFCONFIG}" >&2
+            exit 1
           fi
+          # Strip comments + blank lines so .config doesn't accumulate
+          # noise; only real BR2_* settings get appended.
+          grep -E '^[[:space:]]*BR2_' "${ADOS_DEFCONFIG}" >> .config
+          yes "" | make olddefconfig
+          # 3. Sanity-check the merge: every package we declared in
+          #    the ADOS delta MUST be present in the resolved .config.
+          for pkg in BR2_PACKAGE_ADOS_AGENT_LITE BR2_PACKAGE_ADOS_RKMPI_WRAPPER \
+                     BR2_PACKAGE_RTL8812EU BR2_PACKAGE_AIC8800 \
+                     BR2_PACKAGE_HOSTAPD BR2_PACKAGE_DNSMASQ; do
+            if ! grep -qE "^${pkg}=y" .config; then
+              echo "ERROR: ${pkg} did not survive olddefconfig merge" >&2
+              grep "${pkg}" .config || true
+              exit 1
+            fi
+          done
+          echo "All ADOS packages selected in resolved .config."
 
       - name: Build image
         working-directory: ${{ steps.defconfig.outputs.buildroot_dir }}
