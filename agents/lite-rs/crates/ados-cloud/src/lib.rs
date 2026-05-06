@@ -15,6 +15,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod handlers;
 pub mod sysmetrics;
 
 use std::fmt;
@@ -28,6 +29,10 @@ use rumqttc::{AsyncClient, MqttOptions, QoS, Transport};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::sync::{broadcast, RwLock};
+
+pub use handlers::{
+    CommandHandler, CommandOutcome, RebootProvider, SystemRebootProvider, WebRtcOffer,
+};
 
 const DEFAULT_PAIRING_PATH: &str = "/etc/ados/pairing.json";
 
@@ -144,6 +149,13 @@ pub struct CloudConfig {
     /// connect, TLS, and body read together. Default 10 s.
     #[serde(default = "default_http_request_timeout_secs")]
     pub request_timeout_secs: u64,
+    /// Runtime gate for the inbound `reboot` cloud command. Defaults
+    /// to `false` so a stock install never reboots the host on a
+    /// stray cloud message; an operator opts in by editing
+    /// `agent.yaml`. Field name mirrors `cloud.allow_reboot` in the
+    /// Python full agent's config schema.
+    #[serde(default)]
+    pub allow_reboot: bool,
 }
 
 /// Static metadata stamped onto every heartbeat. The GCS reads these
@@ -241,6 +253,7 @@ impl fmt::Debug for CloudConfig {
             .field("mqtt_keepalive_secs", &self.mqtt_keepalive_secs)
             .field("connect_timeout_secs", &self.connect_timeout_secs)
             .field("request_timeout_secs", &self.request_timeout_secs)
+            .field("allow_reboot", &self.allow_reboot)
             .finish()
     }
 }
@@ -258,6 +271,7 @@ impl Default for CloudConfig {
             mqtt_keepalive_secs: default_mqtt_keepalive_secs(),
             connect_timeout_secs: default_http_connect_timeout_secs(),
             request_timeout_secs: default_http_request_timeout_secs(),
+            allow_reboot: false,
         }
     }
 }
@@ -320,15 +334,39 @@ pub struct PairingBeacon<'a> {
     pub local_ip: Option<&'a str>,
 }
 
+/// Optional channels the cloud client routes inbound MQTT messages onto.
+/// Bundled into a struct so the public `spawn_cloud_client` signature
+/// stays narrow as new inbound topic handlers are added (today: command
+/// + webrtc/offer; future: peer-to-peer LAN signaling).
+#[derive(Default)]
+pub struct InboundChannels {
+    /// FC writer mpsc. Frames received on `ados/{device_id}/mavlink/rx`
+    /// are forwarded here; the MAVLink router then writes them to the
+    /// FC serial. `None` makes the dispatcher log + drop inbound
+    /// MAVLink traffic.
+    pub fc_writer: Option<tokio::sync::mpsc::Sender<Vec<u8>>>,
+    /// Heartbeat trigger mpsc. The `command` handler fires this on a
+    /// `status_request` envelope so an immediate heartbeat goes out
+    /// instead of waiting for the next 5 s tick. `None` makes
+    /// `status_request` a no-op (logged at INFO).
+    pub heartbeat_trigger: Option<tokio::sync::mpsc::Sender<()>>,
+    /// WebRTC offer route. Reserved for the future video mission;
+    /// today the lite agent does not host a peer so this is always
+    /// `None`. When `None` the `webrtc/offer` handler synthesizes a
+    /// `rejected` answer with `webrtc-not-supported-on-lite`.
+    pub webrtc_route: Option<tokio::sync::mpsc::Sender<WebRtcOffer>>,
+}
+
 /// Spawn the cloud client tasks: MQTT publish loop, HTTPS heartbeat, and
 /// pairing beacon. Returns immediately. The tasks run until the inbound
 /// broadcast `Sender` is dropped or the agent process exits.
 ///
-/// `outbound_fc` is the FC writer channel — frames received from the
-/// cloud relay on `ados/{device_id}/mavlink/rx` are forwarded to this
-/// sender, which the MAVLink router then writes to the FC serial.
-/// Pass `None` if no FC is connected; cloud-received frames are then
-/// logged at WARN and dropped.
+/// `inbound_mavlink` is the broadcast channel the FC reader publishes
+/// frames on. The MQTT publish loop subscribes and forwards each
+/// frame to the cloud relay on `ados/{device_id}/mavlink/tx`.
+///
+/// `inbound_channels` carries the optional handler routes for inbound
+/// MQTT topics. See `InboundChannels` for per-field semantics.
 ///
 /// `diag` is the shared diagnostic state the agent binary constructs
 /// for the `/api/v1/diag` handler. The MQTT publish loop and HTTPS
@@ -339,7 +377,7 @@ pub struct PairingBeacon<'a> {
 pub fn spawn_cloud_client(
     config: CloudConfig,
     inbound_mavlink: broadcast::Sender<Vec<u8>>,
-    outbound_fc: Option<tokio::sync::mpsc::Sender<Vec<u8>>>,
+    inbound_channels: InboundChannels,
     diag: Arc<DiagState>,
 ) -> Result<(), CloudError> {
     if config.device_id.is_empty() {
@@ -392,11 +430,20 @@ pub fn spawn_cloud_client(
     if !config.mqtt_broker.is_empty() {
         let mqtt_config = config.clone();
         let mut mavlink_rx = inbound_mavlink.subscribe();
-        let fc_writer = outbound_fc.clone();
+        let fc_writer = inbound_channels.fc_writer.clone();
+        let heartbeat_trigger = inbound_channels.heartbeat_trigger.clone();
+        let webrtc_route = inbound_channels.webrtc_route.clone();
         let mqtt_diag = diag.clone();
         tokio::spawn(async move {
-            if let Err(e) =
-                mqtt_publish_loop(mqtt_config, &mut mavlink_rx, fc_writer, mqtt_diag).await
+            if let Err(e) = mqtt_publish_loop(
+                mqtt_config,
+                &mut mavlink_rx,
+                fc_writer,
+                heartbeat_trigger,
+                webrtc_route,
+                mqtt_diag,
+            )
+            .await
             {
                 tracing::error!(error = %e, "mqtt publish loop exited");
             }
@@ -425,6 +472,8 @@ async fn mqtt_publish_loop(
     config: CloudConfig,
     mavlink_rx: &mut broadcast::Receiver<Vec<u8>>,
     outbound_fc: Option<tokio::sync::mpsc::Sender<Vec<u8>>>,
+    heartbeat_trigger: Option<tokio::sync::mpsc::Sender<()>>,
+    webrtc_route: Option<tokio::sync::mpsc::Sender<handlers::WebRtcOffer>>,
     diag: Arc<DiagState>,
 ) -> Result<(), CloudError> {
     let client_id = format!("ados-{}", config.device_id);
@@ -490,8 +539,10 @@ async fn mqtt_publish_loop(
     // by topic suffix:
     //
     //   `mavlink/rx`    forwarded to FC writer (drops on full queue)
-    //   `command`       logged at INFO; v1 has no command surface
-    //   `webrtc/offer`  logged at INFO; video pipeline lands separately
+    //   `command`       JSON envelope decoded; reboot + status_request
+    //                   handled, dedup'd by request_id
+    //   `webrtc/offer`  rejected on lite (no peer); answer published
+    //                   on `webrtc/answer` with the right reason code
     //
     // The handle is wrapped in `AbortOnDrop` so the inner task is
     // cancelled both on a clean exit (broadcast closed) AND on an
@@ -502,6 +553,26 @@ async fn mqtt_publish_loop(
     let topic_rx = format!("ados/{}/mavlink/rx", device_id_owned);
     let topic_command = format!("ados/{}/command", device_id_owned);
     let topic_offer = format!("ados/{}/webrtc/offer", device_id_owned);
+    let topic_answer = format!("ados/{}/webrtc/answer", device_id_owned);
+
+    // Stateful command handler. Built once per publish-loop instance
+    // so the dedup cache survives across reconnects (a re-pair would
+    // build a new client + new handler; that is desired, the cache
+    // need not span re-pair operations).
+    let reboot_provider: Arc<dyn handlers::RebootProvider> =
+        Arc::new(handlers::SystemRebootProvider);
+    let command_handler = Arc::new(handlers::CommandHandler::new(
+        heartbeat_trigger,
+        reboot_provider,
+        config.allow_reboot,
+    ));
+
+    // Publish handle for the eventloop's webrtc/answer reply path.
+    // `AsyncClient` is `Clone` (rumqttc 0.25); the second handle
+    // shares the same outbound queue.
+    let answer_client = client.clone();
+    let outbound_fc_eventloop = outbound_fc.clone();
+
     let eventloop_handle = tokio::spawn(async move {
         // Capped exponential backoff for poll errors. A hard broker outage
         // (DNS down, TLS negotiation failing, link gone) would otherwise
@@ -518,32 +589,47 @@ async fn mqtt_publish_loop(
                     backoff = Duration::from_secs(1);
                     let topic = p.topic.as_str();
                     if topic == topic_rx {
-                        if let Some(ref fc) = outbound_fc {
-                            // try_send so a backed-up FC writer never
-                            // stalls the cloud client. Drops are logged.
-                            if let Err(e) = fc.try_send(p.payload.to_vec()) {
-                                tracing::warn!(
-                                    error = %e,
-                                    bytes = p.payload.len(),
-                                    "fc writer queue full; dropping cloud-relayed mavlink frame"
-                                );
-                            }
-                        } else {
-                            tracing::debug!(
-                                bytes = p.payload.len(),
-                                "received mavlink/rx frame but no FC writer wired"
-                            );
-                        }
+                        handlers::handle_mavlink_rx(
+                            p.payload.to_vec(),
+                            outbound_fc_eventloop.as_ref(),
+                        );
                     } else if topic == topic_command {
-                        tracing::info!(
+                        let outcome = command_handler.dispatch(&p.payload).await;
+                        tracing::debug!(
+                            ?outcome,
                             bytes = p.payload.len(),
-                            "received cloud command (no handler at v1 — dropped)"
+                            "command dispatch complete"
                         );
                     } else if topic == topic_offer {
-                        tracing::info!(
-                            bytes = p.payload.len(),
-                            "received webrtc/offer (no video pipeline at this scope)"
-                        );
+                        let answer =
+                            handlers::handle_webrtc_offer(&p.payload, webrtc_route.as_ref());
+                        if !answer.is_null() {
+                            // Best-effort publish of the answer. The
+                            // reject path is fire-and-forget; the
+                            // operator-facing failure is "GCS shows a
+                            // pending offer that never resolved" which
+                            // already has a GCS-side timeout.
+                            let body = match serde_json::to_vec(&answer) {
+                                Ok(b) => b,
+                                Err(e) => {
+                                    tracing::warn!(
+                                        error = %e,
+                                        "failed to serialize webrtc/answer; skipping publish"
+                                    );
+                                    continue;
+                                }
+                            };
+                            if let Err(e) = answer_client
+                                .publish(&topic_answer, QoS::AtLeastOnce, false, body)
+                                .await
+                            {
+                                tracing::warn!(
+                                    error = %e,
+                                    topic = %topic_answer,
+                                    "failed to publish webrtc/answer reject"
+                                );
+                            }
+                        }
                     } else {
                         tracing::debug!(topic = %topic, "received message on unexpected topic");
                     }
@@ -1091,6 +1177,7 @@ mod tests {
             mqtt_keepalive_secs: 60,
             connect_timeout_secs: 3,
             request_timeout_secs: 10,
+            allow_reboot: false,
         };
         let serialized = serde_json::to_string(&original).unwrap();
         let restored: CloudConfig = serde_json::from_str(&serialized).unwrap();
@@ -1117,6 +1204,7 @@ mod tests {
             mqtt_keepalive_secs: 60,
             connect_timeout_secs: 3,
             request_timeout_secs: 10,
+            allow_reboot: false,
         };
         let serialized = serde_json::to_string(&original).unwrap();
         // The serialized form should not contain the field at all
@@ -1144,6 +1232,7 @@ mod tests {
             mqtt_keepalive_secs: 60,
             connect_timeout_secs: 3,
             request_timeout_secs: 10,
+            allow_reboot: false,
         };
         let body = build_heartbeat_body(&config, Instant::now());
 
@@ -1251,10 +1340,11 @@ mod tests {
             mqtt_keepalive_secs: 60,
             connect_timeout_secs: 3,
             request_timeout_secs: 10,
+            allow_reboot: false,
         };
         let (tx, _rx) = broadcast::channel(8);
         let diag = DiagState::shared();
-        let err = spawn_cloud_client(bad, tx, None, diag)
+        let err = spawn_cloud_client(bad, tx, InboundChannels::default(), diag)
             .expect_err("empty device_id should fail");
         match err {
             CloudError::Config(msg) => assert!(msg.contains("device_id")),
@@ -1279,10 +1369,11 @@ mod tests {
             mqtt_keepalive_secs: 60,
             connect_timeout_secs: 3,
             request_timeout_secs: 10,
+            allow_reboot: false,
         };
         let (tx, _rx) = broadcast::channel(8);
         let diag = DiagState::shared();
-        let err = spawn_cloud_client(bad, tx, None, diag)
+        let err = spawn_cloud_client(bad, tx, InboundChannels::default(), diag)
             .expect_err("file:// scheme should be rejected");
         match err {
             CloudError::Config(msg) => assert!(msg.contains("convex_url")),
@@ -1308,6 +1399,7 @@ mod tests {
             mqtt_keepalive_secs: 60,
             connect_timeout_secs: 3,
             request_timeout_secs: 10,
+            allow_reboot: false,
         };
         let (tx, _rx) = broadcast::channel(8);
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -1316,7 +1408,7 @@ mod tests {
             .unwrap();
         let _guard = runtime.enter();
         let diag = DiagState::shared();
-        spawn_cloud_client(cfg, tx, None, diag)
+        spawn_cloud_client(cfg, tx, InboundChannels::default(), diag)
             .expect("http:// scheme should be accepted (with warning)");
     }
 
@@ -1369,6 +1461,7 @@ mod tests {
             mqtt_keepalive_secs: 60,
             connect_timeout_secs: 3,
             request_timeout_secs: 10,
+            allow_reboot: false,
         };
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(2))
@@ -1473,6 +1566,7 @@ mod tests {
             mqtt_keepalive_secs: 60,
             connect_timeout_secs: 3,
             request_timeout_secs: 10,
+            allow_reboot: false,
         };
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(2))
@@ -1554,6 +1648,7 @@ mod tests {
             mqtt_keepalive_secs: 60,
             connect_timeout_secs: 3,
             request_timeout_secs: 10,
+            allow_reboot: false,
         };
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(2))
@@ -1634,6 +1729,7 @@ mod tests {
             mqtt_keepalive_secs: 60,
             connect_timeout_secs: 3,
             request_timeout_secs: 10,
+            allow_reboot: false,
         };
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(2))
@@ -1713,6 +1809,7 @@ mod tests {
             mqtt_keepalive_secs: 60,
             connect_timeout_secs: 3,
             request_timeout_secs: 10,
+            allow_reboot: false,
         };
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(2))
