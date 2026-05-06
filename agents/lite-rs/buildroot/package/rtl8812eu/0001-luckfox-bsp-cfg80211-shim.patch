@@ -1,0 +1,18 @@
+# Luckfox BSP cfg80211 compat shim
+#
+# The Luckfox 5.10 BSP (linux-luckfox.git) backports parts of the
+# cfg80211 API that diverge from mainline 5.10. The aircrack-ng v5.6.4.2
+# branch's recent kernel-6.x patches address this for mainline kernels
+# but require a small additional shim on the Luckfox BSP to gate the
+# `wiphy_ext_feature_set` and `WIPHY_FLAG_HAS_REMAIN_ON_CHANNEL`
+# references on the BSP's kernel version macro.
+#
+# This file is a placeholder. The hunk lands once the rtl8812eu
+# source is fetched on the first `make rtl8812eu-source` and the exact
+# line numbers in `os_dep/linux/ioctl_cfg80211.c` can be confirmed.
+# Until then the package is gated on `BR2_PACKAGE_RTL8812EU=y` so it
+# does not break builds that don't select it.
+--- a/os_dep/linux/ioctl_cfg80211.c
++++ b/os_dep/linux/ioctl_cfg80211.c
+@@ -0,0 +1,1 @@
++/* placeholder: real hunk lands on first source fetch */

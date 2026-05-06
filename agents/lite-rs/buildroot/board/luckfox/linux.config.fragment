@@ -1,0 +1,16 @@
+# Linux kernel config fragment for the Luckfox Pico Zero lite image.
+#
+# Layered on top of the stock Luckfox SDK kernel defconfig. Buildroot
+# applies this fragment via BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES when
+# the upstream defconfig already covers everything else.
+#
+# Symbols below cover the cfg80211/mac80211 stack that the rtl8812eu
+# and aic8800 out-of-tree modules depend on, plus the USB / firmware
+# loader paths the drivers walk at probe time.
+
+CONFIG_CFG80211=m
+CONFIG_MAC80211=m
+CONFIG_USB=y
+CONFIG_USB_USBNET=m
+CONFIG_RFKILL=y
+CONFIG_FW_LOADER=y

@@ -54,12 +54,22 @@ BR2_PACKAGE_DROPBEAR=y
 #
 
 # RTL8812AU/EU out-of-tree driver, used for WFB-ng broadcast on the air side.
-# The Buildroot package name varies across SDK forks. The Luckfox SDK does
-# not ship this package today; it must be added as a Buildroot patch alongside
-# the WFB-ng orchestration work. Until then this line is a TODO marker; the
-# kernel module is loaded out-of-tree at install time on a regular Buildroot
-# image, and bench operators can sideload via the same path.
-# BR2_PACKAGE_RTL8812AU=y
+# Recipe lives at $(BR2_EXTERNAL_ADOS_PATH)/package/rtl8812eu/. The aircrack-ng
+# fork at the SHA pinned in rtl8812eu.mk is the supported tree; the Luckfox
+# 5.10 BSP picks up a small cfg80211 compat shim via the package's
+# 0001-luckfox-bsp-cfg80211-shim.patch (placeholder hunk; lands on first
+# source fetch).
+BR2_PACKAGE_RTL8812EU=y
+
+# Aicsemi AIC8800 / AIC8800DC USB Wi-Fi 6 driver (Radxa fork). Recipe lives
+# at $(BR2_EXTERNAL_ADOS_PATH)/package/aic8800/. Firmware blobs under the
+# upstream tree are non-redistributable proprietary binaries copied verbatim
+# into /lib/firmware/aic8800DC/ at install time.
+BR2_PACKAGE_AIC8800=y
+
+# Userspace Wi-Fi tooling needed to bring up either driver.
+BR2_PACKAGE_WIRELESS_TOOLS=y
+BR2_PACKAGE_IW=y
 
 #
 # === Hardware enablement ===

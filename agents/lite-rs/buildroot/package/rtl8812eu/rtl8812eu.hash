@@ -1,0 +1,12 @@
+# Buildroot hash file for rtl8812eu.
+#
+# Placeholder — populate after first `make rtl8812eu-source` produces
+# dl/rtl8812eu/rtl8812eu-734485506a30d6237c2deaad666a19f8ca5379f2.tar.gz
+# in the build tree. The CI workflow (luckfox-image-build.yml) needs the
+# real SHA pasted here on the first stable run; until then Buildroot will
+# fail the package fetch on hash mismatch by design.
+#
+# Format: <algo>  <hex>  <filename>
+#
+# sha256  TBD  rtl8812eu-734485506a30d6237c2deaad666a19f8ca5379f2.tar.gz
+sha256  8177f97513213526df2cf6184d8ff986c675afb514d4e68a404010521b880643  LICENSE

@@ -1,0 +1,9 @@
+config BR2_PACKAGE_AIC8800
+    bool "aic8800"
+    depends on BR2_LINUX_KERNEL
+    depends on BR2_USE_MMU
+    help
+      Aicsemi AIC8800 / AIC8800DC / AIC8800DW / AIC8800FC USB Wi-Fi
+      driver (Radxa fork). Provides Wi-Fi 6 support on the Luckfox
+      Pico Zero target. Note: firmware blobs are non-redistributable
+      proprietary binaries shipped by the upstream repo.

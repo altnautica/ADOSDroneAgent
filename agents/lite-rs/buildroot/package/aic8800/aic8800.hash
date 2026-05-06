@@ -1,0 +1,11 @@
+# Buildroot hash file for aic8800.
+#
+# Placeholder — populate after first `make aic8800-source` produces
+# dl/aic8800/aic8800-7f42b22913b462ab6c658dfc075bae1dbfe9a71a.tar.gz
+# in the build tree. The CI workflow (luckfox-image-build.yml) needs the
+# real SHA pasted here on the first stable run; until then Buildroot will
+# fail the package fetch on hash mismatch by design.
+#
+# Format: <algo>  <hex>  <filename>
+#
+# sha256  TBD  aic8800-7f42b22913b462ab6c658dfc075bae1dbfe9a71a.tar.gz
