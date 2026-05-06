@@ -171,23 +171,14 @@ jobs:
         working-directory: ${{ steps.defconfig.outputs.buildroot_dir }}
         env:
           BR2_EXTERNAL: ${{ github.workspace }}/agents/lite-rs/buildroot
+          # SDK_ROOT is consumed by the ados-rkmpi-wrapper package recipe,
+          # which links against the closed-source Rockchip RKMPI library
+          # using the SDK's pinned uclibc cross-toolchain. Without this
+          # env var the wrapper build fails with a clear error rather
+          # than silently producing an unbuildable host-toolchain link.
+          SDK_ROOT: ${{ runner.temp }}/luckfox-sdk
         run: |
           set -eux
-          # TODO (first-run hash population):
-          #   The rtl8812eu and aic8800 out-of-tree driver packages ship
-          #   with placeholder .hash entries (TBD lines) until a real
-          #   Buildroot run downloads the upstream tarballs and produces
-          #   stable digests. The first CI run on a fresh tag will fail
-          #   the package fetch on hash mismatch by design — that is the
-          #   signal to:
-          #     1. Run `make rtl8812eu-source aic8800-source` locally,
-          #     2. `sha256sum dl/rtl8812eu/*.tar.gz dl/aic8800/*.tar.gz`,
-          #     3. Paste the digests into the matching .hash files,
-          #     4. Commit and re-tag.
-          #   We deliberately do NOT auto-replace the hashes in CI. The
-          #   bytes have to be reviewed once by a human; baking that
-          #   step in would defeat the supply-chain check.
-          #
           # Buildroot's `make` is single-target by default; -j is
           # honored only when a per-package parallelism is configured.
           # We let Buildroot pick its own parallelism off the host's

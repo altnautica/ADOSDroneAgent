@@ -5,5 +5,6 @@
 # options" submenu.
 
 source "$BR2_EXTERNAL_ADOS_PATH/package/ados-agent-lite/Config.in"
+source "$BR2_EXTERNAL_ADOS_PATH/package/ados-rkmpi-wrapper/Config.in"
 source "$BR2_EXTERNAL_ADOS_PATH/package/rtl8812eu/Config.in"
 source "$BR2_EXTERNAL_ADOS_PATH/package/aic8800/Config.in"

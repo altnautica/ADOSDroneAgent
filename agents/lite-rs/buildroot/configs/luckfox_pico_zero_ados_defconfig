@@ -95,6 +95,10 @@ BR2_PACKAGE_EUDEV=y
 BR2_PACKAGE_LIBCURL=y
 BR2_PACKAGE_LIBCURL_CURL=y
 
+# rkmpi-wrapper subprocess for the lite Rust agent's hardware H.264 path.
+# Built against the Luckfox SDK toolchain via SDK_ROOT (see CI workflow).
+BR2_PACKAGE_ADOS_RKMPI_WRAPPER=y
+
 # minisign for OTA verification (matches scripts/install-lite.sh contract).
 # If the upstream Buildroot tree doesn't carry a minisign package, vendor it
 # under a BR2_EXTERNAL_ADOS_PATH/package/minisign/ recipe instead.
