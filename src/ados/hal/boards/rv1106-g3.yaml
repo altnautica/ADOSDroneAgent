@@ -53,8 +53,8 @@ buses:
   spi: []
 
 network:
-  wifi: false
-  ethernet: true
+  wifi: true              # AIC8800DC onboard, RTL8812EU via USB
+  ethernet: false         # Pico Zero has no Ethernet jack
   bluetooth: false
 
 video:
@@ -62,6 +62,7 @@ video:
   max_encode_resolution: "1920x1080"
   max_encode_fps: 30
   encoder_api: rkmedia
+  encoder_api_lite: rkmpi  # Rust lite agent reads this; routes to the rkmpi-wrapper subprocess
 
 power:
   typical_watts: 0.9

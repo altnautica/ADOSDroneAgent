@@ -56,7 +56,7 @@ buses:
   spi: []
 
 network:
-  wifi: false
+  wifi: true              # AIC8800DC variants; Pico Pro/Max also exposes Ethernet via the metal back plate
   ethernet: true
   bluetooth: false
 
@@ -65,6 +65,7 @@ video:
   max_encode_resolution: "1920x1080"
   max_encode_fps: 30
   encoder_api: rkmedia
+  encoder_api_lite: rkmpi  # Rust lite agent reads this; routes to the rkmpi-wrapper subprocess
 
 power:
   typical_watts: 1.0
