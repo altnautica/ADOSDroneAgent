@@ -23,7 +23,7 @@ fingerprint.
 
 To verify a release artifact:
 
-    minisign -V -P "RWR+yLdssguv/iqfINd5cFsiC5+cUKLGvFggEfBS0O94KLWcjAvIczE7" -m <artifact>
+    minisign -V -P "RWQprWT1xlflXCT6CLpuSHyw8UuXlji88f+8JrW9V9E9ynE2iJX7LlfW" -m <artifact>
 
 The artifact's `.minisig` file accompanies it in the GitHub Release.
 
