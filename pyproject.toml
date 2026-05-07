@@ -108,7 +108,7 @@ include = ["ados*"]
 [tool.setuptools.package-data]
 "ados.hal" = ["boards/*.yaml"]
 "ados.core" = ["defaults.yaml"]
-"ados.dashboard" = ["dist/**/*"]
+"ados.dashboard" = ["static/**/*"]
 
 
 [tool.ruff]

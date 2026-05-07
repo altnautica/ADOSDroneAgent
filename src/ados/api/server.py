@@ -135,10 +135,10 @@ def create_app(agent: Any) -> FastAPI:
             "Dashboard package 'ados.dashboard' is missing. "
             "Reinstall the agent package or rebuild from source."
         ) from exc
-    static_dir = Path(str(files(_dashboard_pkg))) / "dist"
+    static_dir = Path(str(files(_dashboard_pkg))) / "static"
     if not static_dir.exists():
         raise RuntimeError(
-            f"Dashboard dist directory missing at {static_dir}. "
+            f"Dashboard static directory missing at {static_dir}. "
             "Run scripts/build-dashboard.sh or reinstall the agent package."
         )
     app.mount(

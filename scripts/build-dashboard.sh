@@ -20,7 +20,7 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "$0")/.." && pwd)"
 dashboard_src="${repo_root}/dashboard"
-stage_dir="${repo_root}/src/ados/dashboard/dist"
+stage_dir="${repo_root}/src/ados/dashboard/static"
 
 if [ ! -d "${dashboard_src}" ]; then
     echo "[build-dashboard] dashboard/ directory not found at ${dashboard_src}" >&2
