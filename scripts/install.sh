@@ -475,6 +475,7 @@ install_system_deps() {
         libyaml-dev \
         libsodium-dev \
         libpcap-dev \
+        libevent-dev \
         build-essential \
         git \
         curl \
@@ -1893,7 +1894,7 @@ if is_installed && $DO_UPGRADE && ! $DO_FORCE; then
     # temp-repo cleanup so vendor/wfb-ng/ is still on disk. Build deps
     # are best-effort; the function bails clean if anything is missing.
     DEBIAN_FRONTEND=noninteractive apt-get install -y \
-        libsodium-dev libpcap-dev python3-setuptools 2>&1 | tail -2 || true
+        libsodium-dev libpcap-dev libevent-dev python3-setuptools 2>&1 | tail -2 || true
     FRESH_REPO_DIR="${tmp_repo}" install_wfb_ng_from_vendor
 
     # Clean up temp repo
