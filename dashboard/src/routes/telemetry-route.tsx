@@ -8,6 +8,7 @@ import { ConfirmDialog } from "@/components/settings/confirm-dialog";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+import { useDirtyGuard } from "@/hooks/use-dirty-guard";
 import { useResource } from "@/hooks/use-resource";
 import { useSnapshot } from "@/hooks/use-snapshot";
 import { ApiError, apiFetch } from "@/lib/api";
@@ -131,6 +132,7 @@ function ParametersTab() {
   });
 
   const dirtyCount = drafts.size;
+  useDirtyGuard(dirtyCount > 0);
 
   async function saveAll() {
     const items = Array.from(drafts.entries());

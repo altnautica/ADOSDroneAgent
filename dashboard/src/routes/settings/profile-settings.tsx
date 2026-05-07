@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { RadioCardGroup } from "@/components/ui/radio-card-group";
 import { Switch } from "@/components/ui/switch";
+import { useDirtyGuard } from "@/hooks/use-dirty-guard";
 import { useStatus } from "@/hooks/use-status";
 import { toast, toastFromError } from "@/lib/toast";
 import {
@@ -71,6 +72,7 @@ export function ProfileSettings() {
   const dirty =
     profile !== initialProfile ||
     (profile === "ground_station" && role !== initialRole);
+  useDirtyGuard(dirty || busy);
 
   async function handleApply() {
     setBusy(true);

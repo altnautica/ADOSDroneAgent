@@ -7,6 +7,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { RadioCardGroup } from "@/components/ui/radio-card-group";
+import { useDirtyGuard } from "@/hooks/use-dirty-guard";
 import { useStatus } from "@/hooks/use-status";
 import { toast, toastFromError } from "@/lib/toast";
 import { cloudSectionSchema, postApply } from "@/lib/apply-actions";
@@ -68,6 +69,7 @@ export function CloudSettings() {
         broker !== initialBroker ||
         port !== String(initialPort) ||
         apiKey !== ""));
+  useDirtyGuard(dirty || busy);
 
   function validate(): boolean {
     const payload =
