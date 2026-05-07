@@ -38,6 +38,7 @@ from ados.api.routes import (
     version,
     video,
     wfb,
+    whep,
 )
 from ados.api.runtime import ensure_api_runtime
 
@@ -120,6 +121,13 @@ def create_app(agent: Any) -> FastAPI:
     app.include_router(signing.router, prefix="/api")
     # Plugin lifecycle: install / enable / disable / remove.
     app.include_router(plugins.router, prefix="/api")
+
+    # WHEP reverse-proxy mounted at root (no /api prefix) so WebRTC
+    # clients reach the offer/answer exchange at the same host:port as
+    # the rest of the agent's REST + WS surface. The proxy forwards to
+    # the local MediaMTX WHEP endpoint and is profile-gated to the
+    # ground station.
+    app.include_router(whep.router)
 
     # Browser dashboard. Mounted AFTER every router above so API routes
     # match first and `/` serves the SPA entry. The TypeScript source
