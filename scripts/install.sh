@@ -1558,6 +1558,10 @@ print_pairing_code() {
 # install, then render the per-item state inline. Keeps the bench
 # operator from having to open the GCS just to confirm "all required
 # components ok" right after install.
+#
+# The python parser is invoked via a quoted heredoc (<<'PYEOF') so
+# bash performs zero variable / backslash interpolation. This avoids
+# escaping pitfalls when the script is delivered through `curl | sudo bash`.
 print_hardware_summary() {
     [ "$(uname -s)" = "Linux" ] || return 0
     local body
@@ -1566,32 +1570,34 @@ print_hardware_summary() {
     [ -n "${body}" ] || return 0
 
     local rendered
-    rendered=$(printf '%s' "${body}" | python3 -c "
+    rendered=$(printf '%s' "${body}" | python3 - <<'PYEOF' 2>/dev/null || true
 import json, sys
 try:
     d = json.load(sys.stdin)
 except Exception:
     sys.exit(0)
-items = d.get('items') or []
+items = d.get("items") or []
 if not items:
     sys.exit(0)
-icon = {'ok': 'OK ', 'warning': 'WARN', 'missing': 'MISS', 'unknown': '?   ', 'checking': '... '}
-required = [i for i in items if i.get('required')]
-optional = [i for i in items if not i.get('required')]
-print('  Required:')
-for i in required:
-    state = i.get('state', 'unknown')
-    label = i.get('label', i.get('id', '?'))
-    detail = (i.get('detail') or '').splitlines()[0][:64]
-    print(f\"    [{icon.get(state, '?  ')}] {label:30s} {detail}\")
+icon = {"ok": "OK ", "warning": "WARN", "missing": "MISS", "unknown": "?   ", "checking": "... "}
+required = [i for i in items if i.get("required")]
+optional = [i for i in items if not i.get("required")]
+
+def render(rows):
+    for i in rows:
+        state = i.get("state", "unknown")
+        label = i.get("label", i.get("id", "?"))
+        detail = (i.get("detail") or "").splitlines()[0][:64]
+        print(f"    [{icon.get(state, '?   ')}] {label:30s} {detail}")
+
+if required:
+    print("  Required:")
+    render(required)
 if optional:
-    print('  Optional:')
-    for i in optional:
-        state = i.get('state', 'unknown')
-        label = i.get('label', i.get('id', '?'))
-        detail = (i.get('detail') or '').splitlines()[0][:64]
-        print(f\"    [{icon.get(state, '?  ')}] {label:30s} {detail}\")
-" 2>/dev/null || true)
+    print("  Optional:")
+    render(optional)
+PYEOF
+)
     [ -n "${rendered}" ] || return 0
 
     echo ""
