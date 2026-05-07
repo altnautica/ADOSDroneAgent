@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 
+import { summarizeHardware } from "@/components/panels/hardware-item-list";
 import { Card, CardContent } from "@/components/ui/card";
 import { RadioCardGroup } from "@/components/ui/radio-card-group";
 import { useHeartbeat } from "@/hooks/use-heartbeat";
@@ -134,8 +135,12 @@ export function ProfileStep({ onChange }: Props) {
                 Hardware check
               </div>
               <div className="font-mono">
-                {status.data?.hardware_check?.detected ?? "—"} /{" "}
-                {status.data?.hardware_check?.required ?? "—"} required
+                {(() => {
+                  const items = status.data?.hardware_check?.items ?? [];
+                  if (items.length === 0) return "scanning…";
+                  const s = summarizeHardware(items);
+                  return `${s.requiredOk} / ${s.requiredTotal} required ok`;
+                })()}
               </div>
             </div>
           </div>

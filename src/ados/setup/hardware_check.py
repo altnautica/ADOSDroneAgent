@@ -16,7 +16,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
+from ados.core.logging import get_logger
 from ados.setup.models import HardwareCheckItem, HardwareCheckStatus
+
+log = get_logger("setup.hardware_check")
 
 
 def _now_iso() -> str:
@@ -109,6 +112,7 @@ def _check_camera() -> HardwareCheckItem:
 
         cameras = discover_cameras()
     except Exception as exc:
+        log.warning("camera_probe_failed", error=str(exc))
         return HardwareCheckItem(
             id="camera",
             label="Camera",
@@ -432,15 +436,13 @@ def _check_hdmi() -> HardwareCheckItem:
 
 def _check_uplink(runtime: Any) -> HardwareCheckItem:
     """Any-uplink-up summary across ethernet / WiFi / USB tether / 4G."""
-    from ados.bootstrap.profile_detect import probe_uplink_type
+    from ados.bootstrap.profile_detect import probe_uplink_kinds
 
     detected_kinds: list[str] = []
     try:
-        _g, _a, has_basic = probe_uplink_type()
-        if has_basic:
-            detected_kinds.append("ethernet/USB")
-    except Exception:
-        pass
+        detected_kinds.extend(probe_uplink_kinds())
+    except Exception as exc:
+        log.warning("uplink_probe_failed", error=str(exc))
 
     try:
         from ados.hal.modem import detect_modem
@@ -448,21 +450,23 @@ def _check_uplink(runtime: Any) -> HardwareCheckItem:
         modem = detect_modem()
         if modem and modem.connection_state.lower() in ("connected", "registered"):
             detected_kinds.append("4G")
-    except Exception:
-        pass
+    except Exception as exc:
+        log.warning("modem_probe_failed", error=str(exc))
 
     if detected_kinds:
         return HardwareCheckItem(
             id="uplink",
             label="Uplink to internet",
+            required=False,
             state="ok",
             detail=f"Active via {', '.join(detected_kinds)}.",
         )
     return HardwareCheckItem(
         id="uplink",
         label="Uplink to internet",
+        required=False,
         state="warning",
-        detail="No active uplink detected (ethernet, USB tether, or 4G).",
+        detail="No active uplink detected (ethernet, WiFi, USB tether, or 4G).",
         fix_hint=(
             "Optional. Cloud relay and Mission Control pairing need an uplink."
         ),
@@ -530,6 +534,7 @@ def _drone_items(runtime: Any) -> Iterable[HardwareCheckItem]:
     yield _check_board()
     yield _check_fc(runtime)
     yield _check_camera()
+    yield _check_uplink(runtime)
     yield _check_radio_wfb(required=False)
     yield _check_4g()
     yield _check_gps()

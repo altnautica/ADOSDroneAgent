@@ -211,3 +211,53 @@ def test_fc_heartbeat_probe_returns_zero_when_socket_missing(monkeypatch) -> Non
 
     monkeypatch.setattr(profile_detect, "Path", _NoFile)
     assert profile_detect.probe_fc_heartbeat(timeout=0.1) == (0, 0, False)
+
+
+def _route_sysnet(monkeypatch, sysnet_root: Path) -> None:
+    """Reroute reads of /sys/class/net/* under a tmp tree.
+
+    probe_uplink_type / probe_uplink_kinds construct ``Path("/sys/...")``
+    directly, so we patch the local Path symbol with a wrapper that
+    swaps the leading prefix.
+    """
+    real = Path
+
+    def _Patched(arg, *args, **kwargs):
+        if isinstance(arg, str) and arg.startswith("/sys/class/net"):
+            return real(str(sysnet_root) + arg[len("/sys/class/net"):])
+        return real(arg, *args, **kwargs)
+
+    monkeypatch.setattr(profile_detect, "Path", _Patched)
+
+
+def test_probe_uplink_kinds_wlan_only(tmp_path, monkeypatch) -> None:
+    sysnet = tmp_path
+    (sysnet / "wlan0").mkdir()
+    (sysnet / "wlan0" / "operstate").write_text("up\n")
+    _route_sysnet(monkeypatch, sysnet)
+    assert profile_detect.probe_uplink_kinds() == ["WiFi"]
+    assert profile_detect.probe_uplink_type() == (1, 0, True)
+
+
+def test_probe_uplink_kinds_eth_only(tmp_path, monkeypatch) -> None:
+    sysnet = tmp_path
+    (sysnet / "eth0").mkdir()
+    (sysnet / "eth0" / "carrier").write_text("1\n")
+    _route_sysnet(monkeypatch, sysnet)
+    assert profile_detect.probe_uplink_kinds() == ["ethernet"]
+
+
+def test_probe_uplink_kinds_eth_and_wlan(tmp_path, monkeypatch) -> None:
+    sysnet = tmp_path
+    (sysnet / "eth0").mkdir()
+    (sysnet / "eth0" / "carrier").write_text("1\n")
+    (sysnet / "wlan0").mkdir()
+    (sysnet / "wlan0" / "operstate").write_text("up\n")
+    _route_sysnet(monkeypatch, sysnet)
+    assert profile_detect.probe_uplink_kinds() == ["ethernet", "WiFi"]
+
+
+def test_probe_uplink_kinds_dark(tmp_path, monkeypatch) -> None:
+    _route_sysnet(monkeypatch, tmp_path)
+    assert profile_detect.probe_uplink_kinds() == []
+    assert profile_detect.probe_uplink_type() == (0, 0, False)

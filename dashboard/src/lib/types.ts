@@ -93,10 +93,32 @@ export interface VideoInfo {
   bitrate_kbps?: number;
 }
 
+// Mirrors `HardwareCheckItem` on the agent (setup/models.py).
+// One row per probed component. `state` order of severity:
+//   "ok" < "warning" < "missing" < "checking" < "unknown".
+// `required=true` items count toward setup completion; the rest
+// are optional add-ons (radios, modem, GPS, etc.).
+export type HardwareItemState =
+  | "ok"
+  | "warning"
+  | "missing"
+  | "checking"
+  | "unknown";
+
+export interface HardwareItem {
+  id: string;
+  label: string;
+  required: boolean;
+  state: HardwareItemState;
+  detail?: string;
+  fix_hint?: string;
+}
+
 export interface HardwareCheck {
-  detected?: number;
-  required?: number;
-  state?: string;
+  profile?: string;
+  ground_role?: string;
+  items?: HardwareItem[];
+  last_run?: string;
 }
 
 export interface RemoteAccess {

@@ -298,7 +298,13 @@ def probe_fc_heartbeat(timeout: float = 1.5) -> tuple[int, int, bool]:
 
 
 def probe_uplink_type() -> tuple[int, int, bool]:
-    """Check for an ethernet link or active USB gadget uplink."""
+    """Check for any active uplink: ethernet, USB tether, or WiFi.
+
+    Returns (ground_score, air_score, detected). The score columns
+    are unchanged from the original scoring contract; only the third
+    boolean is consumed by the hardware-check uplink probe, and it
+    now also flips to True when wlan* is up.
+    """
     eth_carrier = Path("/sys/class/net/eth0/carrier")
     usb_state = Path("/sys/class/net/usb0/operstate")
 
@@ -318,7 +324,48 @@ def probe_uplink_type() -> tuple[int, int, bool]:
         except OSError:
             pass
 
+    if not detected:
+        try:
+            for wlan_dir in sorted(Path("/sys/class/net").glob("wlan*")):
+                op = wlan_dir / "operstate"
+                if op.is_file() and op.read_text().strip().lower() == "up":
+                    detected = True
+                    break
+        except OSError:
+            pass
+
     return (1, 0, True) if detected else (0, 0, False)
+
+
+def probe_uplink_kinds() -> list[str]:
+    """Return a list of active uplink kinds: ``ethernet``, ``usb-tether``, ``wifi``.
+
+    Empty list when nothing is up. Used by the hardware-check uplink
+    probe so it can show ``Active via WiFi`` instead of a generic
+    ``ethernet/USB`` blob.
+    """
+    kinds: list[str] = []
+    try:
+        eth = Path("/sys/class/net/eth0/carrier")
+        if eth.is_file() and eth.read_text().strip() == "1":
+            kinds.append("ethernet")
+    except OSError:
+        pass
+    try:
+        usb = Path("/sys/class/net/usb0/operstate")
+        if usb.is_file() and usb.read_text().strip().lower() == "up":
+            kinds.append("USB tether")
+    except OSError:
+        pass
+    try:
+        for wlan_dir in sorted(Path("/sys/class/net").glob("wlan*")):
+            op = wlan_dir / "operstate"
+            if op.is_file() and op.read_text().strip().lower() == "up":
+                kinds.append("WiFi")
+                break
+    except OSError:
+        pass
+    return kinds
 
 
 def probe_mesh_capable() -> bool:
