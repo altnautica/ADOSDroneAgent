@@ -151,11 +151,20 @@ case "$(uname -m)" in
     armv6l|armv7l) export ARCH=arm ;;
 esac
 
-# The vendored source sets EXTRA_CFLAGS += -Werror, which gcc 12+
-# (Debian Bookworm) rejects on a few legitimate-looking indentation
-# warnings the upstream code carries. Relax via KCFLAGS so the build
-# does not abort on warnings the upstream maintainer has not patched.
-export KCFLAGS="${KCFLAGS:-} -Wno-error -Wno-misleading-indentation -Wno-address-of-packed-member"
+# The Pi 4B Trixie kernel and the Rock 5C BSP kernel both enable
+# -Werror=misleading-indentation, -Werror=address-of-packed-member,
+# and -Werror=date-time at KBUILD_CFLAGS scope. The vendored module
+# source has all three patterns. KCFLAGS is overwritten by dkms in
+# some versions so we route the relax flags via USER_EXTRA_CFLAGS in
+# dkms.conf, which the module Makefile picks up at line 1 and appends
+# to its own EXTRA_CFLAGS — the LAST -W flag wins, so -Wno-error
+# overrides the kernel's promotion of these warnings.
+RELAX_CFLAGS="-Wno-error -Wno-misleading-indentation -Wno-address-of-packed-member -Wno-date-time"
+DKMS_CONF="${VENDOR_DIR}/dkms.conf"
+if ! grep -q "USER_EXTRA_CFLAGS" "${DKMS_CONF}"; then
+    info "Patching dkms.conf with relax cflags."
+    sed -i.bak "s|^MAKE=\"'make' \(.*\)\"|MAKE=\"'make' \1 USER_EXTRA_CFLAGS='${RELAX_CFLAGS}'\"|" "${DKMS_CONF}"
+fi
 
 # Build + install for current kernel (idempotent: dkms skips if already built)
 info "dkms build ${DKMS_NAME} (ARCH=${ARCH:-unset})"
