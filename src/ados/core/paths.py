@@ -147,6 +147,11 @@ SETUP_STATE_DIR = ADOS_VAR_DIR / "setup"
 SETUP_STATE_PATH = SETUP_STATE_DIR / "state.json"
 ACTIVE_SUITE_PATH = STATE_DIR / "active_suite"
 
+# Hardware-check snapshot. Written at first-boot, on operator
+# Rescan, and on a successful TTL-bounded refresh inside the
+# cached runner. Owned by the agent; readable by the GCS.
+HARDWARE_STATE_PATH = SETUP_STATE_DIR / "hardware-state.json"
+
 # ROS recordings + compose file
 ROS_DIR = ADOS_VAR_DIR / "ros"
 ROS_COMPOSE_PATH = ROS_DIR / "docker-compose.yml"

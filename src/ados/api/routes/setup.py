@@ -17,7 +17,11 @@ from ados.core.paths import DISPLAY_CONF_PATH
 from ados.hal.detect import _load_board_profiles, detect_board
 from ados.setup import display_install, state as setup_state
 from ados.setup.advanced import apply_advanced
-from ados.setup.hardware_check import run_hardware_check
+from ados.setup.hardware_check import (
+    run_hardware_check,
+    run_hardware_check_fresh,
+)
+from ados.setup import hardware_state
 from ados.setup.models import (
     AdvancedApplyRequest,
     DisplayInstallRequest,
@@ -167,10 +171,11 @@ async def get_hardware_check() -> HardwareCheckStatus:
 
 @router.post("/hardware-check/refresh", response_model=HardwareCheckStatus)
 async def refresh_hardware_check() -> HardwareCheckStatus:
-    """Re-run the hardware sweep on demand (no caching).
+    """Re-run the hardware sweep on demand and persist the snapshot.
 
-    Wired so the wizard can offer a Refresh button after the operator
-    hot-plugs a USB device or swaps a camera mid-onboarding.
+    Wired so the wizard can offer a Rescan button after the operator
+    hot-plugs a USB device or swaps a camera mid-onboarding. Bypasses
+    the read-path cache and always writes a fresh snapshot.
     """
     runtime = get_agent_app()
     config = runtime.config
@@ -178,7 +183,9 @@ async def refresh_hardware_check() -> HardwareCheckStatus:
     if profile == "auto":
         profile = "drone"
     role = str(getattr(config.ground_station, "role", "direct") or "direct")
-    return run_hardware_check(runtime, profile=profile, ground_role=role)
+    fresh = run_hardware_check_fresh(runtime, profile=profile, ground_role=role)
+    hardware_state.write(fresh)
+    return fresh
 
 
 @router.get("/display/options", response_model=DisplayOptionsResponse)

@@ -556,13 +556,13 @@ def _ground_items(role: str) -> Iterable[HardwareCheckItem]:
     yield _check_uplink(runtime=None)
 
 
-def run_hardware_check(
+def run_hardware_check_fresh(
     runtime: Any | None,
     *,
     profile: str,
     ground_role: str | None = None,
 ) -> HardwareCheckStatus:
-    """Run the full per-profile hardware-check sweep.
+    """Run the full per-profile hardware-check sweep, no caching.
 
     The orchestrator never raises. A failed probe yields an item in the
     ``warning`` or ``unknown`` state with a human-readable hint.
@@ -580,6 +580,63 @@ def run_hardware_check(
         ground_role=role_norm,
         items=items,
         last_run=_now_iso(),
+    )
+
+
+def run_hardware_check_cached(
+    runtime: Any | None,
+    *,
+    profile: str,
+    ground_role: str | None = None,
+    ttl_seconds: int | None = None,
+) -> HardwareCheckStatus:
+    """Return the cached snapshot when fresh; probe + persist otherwise.
+
+    Used on the read path (``GET /api/v1/setup/status``,
+    ``GET /api/v1/setup/hardware-check``) so the dashboard's 8 s
+    polling loop doesn't re-spawn rpicam-hello / v4l2-ctl / lsusb
+    on every tick. The write path
+    (``POST /api/v1/setup/hardware-check/refresh``) always calls
+    ``run_hardware_check_fresh`` directly.
+    """
+    from ados.setup import hardware_state
+
+    profile_norm = profile if profile in ("drone", "ground_station") else "drone"
+    role_norm = (ground_role or "direct") if profile_norm == "ground_station" else ""
+    ttl = (
+        ttl_seconds
+        if ttl_seconds is not None
+        else hardware_state.DEFAULT_TTL_SECONDS
+    )
+
+    cached = hardware_state.read()
+    if (
+        cached is not None
+        and hardware_state.matches(
+            cached, profile=profile_norm, ground_role=role_norm
+        )
+        and hardware_state.is_fresh(cached, ttl_seconds=ttl)
+    ):
+        return cached
+
+    fresh = run_hardware_check_fresh(
+        runtime, profile=profile_norm, ground_role=role_norm
+    )
+    hardware_state.write(fresh)
+    return fresh
+
+
+# Backwards-compat wrapper so callers that haven't been updated keep
+# working. The default is now the cached path. Tests + the explicit
+# refresh route call ``run_hardware_check_fresh`` directly.
+def run_hardware_check(
+    runtime: Any | None,
+    *,
+    profile: str,
+    ground_role: str | None = None,
+) -> HardwareCheckStatus:
+    return run_hardware_check_cached(
+        runtime, profile=profile, ground_role=ground_role
     )
 
 
