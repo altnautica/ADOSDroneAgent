@@ -40,6 +40,12 @@ class DemoWfbManager:
         self._channel = 149
         self._running = False
         self._start_time = 0.0
+        # Surface the same TX power knobs as the real manager so the
+        # routes layer can introspect them uniformly during tests.
+        self._tx_power_dbm: int = 5
+        self._tx_power_max_dbm: int = 15
+        self._mcs_index: int = 1
+        self._topology: str = "host_vbus"
 
     @property
     def state(self) -> LinkState:
@@ -79,7 +85,22 @@ class DemoWfbManager:
             "bitrate_kbps": stats.bitrate_kbps,
             "restart_count": 0,
             "samples": self._monitor.sample_count,
+            "tx_power_dbm": self._tx_power_dbm,
+            "tx_power_max_dbm": self._tx_power_max_dbm,
+            "mcs_index": self._mcs_index,
+            "topology": self._topology,
         }
+
+    @property
+    def effective_tx_power_dbm(self) -> int | None:
+        """Last accepted TX power in dBm — demo always reports the stored value."""
+        return self._tx_power_dbm
+
+    def apply_tx_power(self, dbm: int) -> int | None:
+        """Pretend to apply a TX power. Mirrors the real manager's clamp."""
+        clamped = max(1, min(int(dbm), self._tx_power_max_dbm))
+        self._tx_power_dbm = clamped
+        return clamped
 
     def _generate_stats(self, elapsed: float) -> LinkStats:
         """Generate a realistic-looking LinkStats sample."""

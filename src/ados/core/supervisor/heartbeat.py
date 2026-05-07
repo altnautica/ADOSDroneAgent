@@ -2,6 +2,129 @@
 
 from __future__ import annotations
 
+from typing import Any
+
+# 5 GHz channel → centre-frequency map. Covers the WFB-ng channel set
+# the agent advertises today; values outside this map yield None and the
+# GCS draws a blank cell.
+_CHANNEL_TO_FREQ_MHZ: dict[int, int] = {
+    36: 5180,
+    48: 5240,
+    149: 5745,
+    153: 5765,
+    157: 5785,
+    161: 5805,
+    165: 5825,
+}
+
+
+def _channel_to_freq(channel: object) -> int | None:
+    """Return the centre frequency in MHz for a known 5 GHz channel."""
+    try:
+        ch_int = int(channel)
+    except (TypeError, ValueError):
+        return None
+    return _CHANNEL_TO_FREQ_MHZ.get(ch_int)
+
+
+def _detect_radio_driver_name(interface: str | None) -> str | None:
+    """Best-effort kernel driver name for the WFB monitor interface.
+
+    Reads `/sys/class/net/<iface>/device/uevent` for the `DRIVER=` line.
+    Returns the short name (e.g. "8812eu") or None if the iface is empty
+    or the file is unreadable.
+    """
+    if not interface:
+        return None
+    try:
+        from pathlib import Path
+
+        path = Path("/sys/class/net") / interface / "device" / "uevent"
+        if not path.is_file():
+            return None
+        for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+            if line.startswith("DRIVER="):
+                return line.split("=", 1)[1].strip() or None
+    except OSError:
+        return None
+    return None
+
+
+def build_radio_block(wfb_status: dict[str, Any] | None) -> dict[str, Any]:
+    """Shape a forward-compatible `radio` heartbeat block.
+
+    `wfb_status` is the dict returned by `WfbManager.get_status()` (or
+    None when the manager is absent — drone profile but the wfb service
+    crashed, RTL not plugged in, ground-station profile, etc.). The GCS
+    keys off the presence of the block, not the values; absent state is
+    rendered as a "no radio" badge.
+    """
+    if not wfb_status:
+        return {
+            "state": "absent",
+            "iface": None,
+            "driver": None,
+            "channel": None,
+            "freq_mhz": None,
+            "bandwidth_mhz": None,
+            "tx_power_dbm": None,
+            "tx_power_max_dbm": None,
+            "topology": None,
+            "rssi_dbm": None,
+            "bitrate_kbps": None,
+            "fec_recovered": None,
+            "fec_lost": None,
+            "packets_lost": None,
+        }
+
+    iface = wfb_status.get("interface") or None
+    channel = wfb_status.get("channel") or None
+    rssi = wfb_status.get("rssi_dbm")
+    # The link-quality monitor seeds RSSI at -100 dBm before the first
+    # real sample lands. Treat that sentinel as "no reading yet".
+    if rssi == -100.0:
+        rssi = None
+    bitrate = wfb_status.get("bitrate_kbps") or None
+
+    return {
+        "state": wfb_status.get("state"),
+        "iface": iface,
+        "driver": _detect_radio_driver_name(iface),
+        "channel": channel,
+        "freq_mhz": _channel_to_freq(channel),
+        "bandwidth_mhz": 20,
+        "tx_power_dbm": wfb_status.get("tx_power_dbm"),
+        "tx_power_max_dbm": wfb_status.get("tx_power_max_dbm"),
+        "topology": wfb_status.get("topology"),
+        "rssi_dbm": rssi,
+        "bitrate_kbps": bitrate,
+        "fec_recovered": wfb_status.get("fec_recovered"),
+        "fec_lost": wfb_status.get("fec_failed"),
+        "packets_lost": wfb_status.get("packets_lost"),
+    }
+
+
+def fetch_wfb_status_via_http(host: str = "127.0.0.1", port: int = 8080) -> dict[str, Any] | None:
+    """HTTP fallback when no in-process WfbManager is available.
+
+    Used by subprocess-mode heartbeat senders that can't import the
+    running manager directly. Best-effort: any failure returns None and
+    the caller emits an `absent` radio block.
+    """
+    try:
+        import httpx
+
+        with httpx.Client(timeout=0.2) as client:
+            resp = client.get(f"http://{host}:{port}/api/wfb")
+            if resp.status_code != 200:
+                return None
+            data = resp.json()
+            if not isinstance(data, dict):
+                return None
+            return data
+    except Exception:
+        return None
+
 
 class HeartbeatMixin:
     """Status reporting for the Supervisor."""
@@ -20,6 +143,25 @@ class HeartbeatMixin:
                 "uptimeSeconds": round(spec.uptime_seconds),
             })
         return result
+
+    def _get_radio_block(self) -> dict[str, Any]:
+        """Pull a `WfbManager.get_status()` view, falling back to localhost.
+
+        The supervisor itself does not own a WfbManager (the agent
+        process does). When unavailable, we ask the agent's REST surface
+        on localhost; on any failure we emit an `absent` block so the
+        GCS can render a neutral state.
+        """
+        wfb = getattr(self, "_wfb_manager", None)
+        status: dict[str, Any] | None = None
+        if wfb is not None:
+            try:
+                status = wfb.get_status()
+            except Exception:
+                status = None
+        if status is None:
+            status = fetch_wfb_status_via_http()
+        return build_radio_block(status)
 
     def get_heartbeat_payload(self) -> dict:
         """Build full heartbeat payload for cloud status push."""
@@ -66,7 +208,6 @@ class HeartbeatMixin:
             if explicit:
                 profile_source = "user"
             else:
-                from ados.bootstrap.profile_detect import _read_last_known_profile
                 from pathlib import Path
 
                 from ados.core.paths import PROFILE_CONF
@@ -117,4 +258,6 @@ class HeartbeatMixin:
             "activeSuite": self._active_suite,
             "setupState": setup_state,
             "profileSource": profile_source,
+            # Forward-compatible radio link block; older GCS ignore it.
+            "radio": self._get_radio_block(),
         }

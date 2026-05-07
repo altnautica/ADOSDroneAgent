@@ -2,10 +2,17 @@
 
 from __future__ import annotations
 
+import os
+import subprocess
+from pathlib import Path
+from typing import Any
+
+import yaml
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from ados.api.deps import get_agent_app
+from ados.core.paths import CONFIG_YAML
 from ados.services.wfb.channel import STANDARD_CHANNELS, get_channel
 
 router = APIRouter()
@@ -17,11 +24,84 @@ class ChannelRequest(BaseModel):
     channel: int
 
 
+class TxPowerRequest(BaseModel):
+    """Request body for runtime TX power change.
+
+    The driver applies the value via `iw dev <iface> set txpower fixed`.
+    Operators override the boot default at runtime; the new value is
+    persisted to /etc/ados/config.yaml so it survives a service restart.
+    """
+
+    tx_power_dbm: int = Field(..., description="Requested TX power in dBm.")
+
+
+def _read_regulatory_domain() -> str:
+    """Best-effort `iw reg get` first-line parse. Returns 'unknown' on failure."""
+    try:
+        result = subprocess.run(
+            ["iw", "reg", "get"],
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+        if result.returncode != 0:
+            return "unknown"
+        for line in result.stdout.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("country "):
+                # Format: "country US: DFS-FCC" — keep the two-letter code.
+                rest = stripped.split("country ", 1)[1]
+                code = rest.split(":", 1)[0].strip()
+                return code or "unknown"
+            if stripped.startswith("global"):
+                return "global"
+        return "unknown"
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return "unknown"
+
+
+def _persist_tx_power(dbm: int) -> bool:
+    """Atomically write `video.wfb.tx_power_dbm` to the on-disk config.
+
+    Mirrors the tmp-write + os.replace idiom used elsewhere in the agent.
+    Returns True on success, False if the file is unreadable or unwritable.
+    """
+    path = Path(str(CONFIG_YAML))
+    try:
+        data: dict[str, Any] = {}
+        if path.is_file():
+            with open(path, encoding="utf-8") as fh:
+                loaded = yaml.safe_load(fh)
+            if isinstance(loaded, dict):
+                data = loaded
+        video = data.get("video")
+        if not isinstance(video, dict):
+            video = {}
+        wfb_section = video.get("wfb")
+        if not isinstance(wfb_section, dict):
+            wfb_section = {}
+        wfb_section["tx_power_dbm"] = int(dbm)
+        video["wfb"] = wfb_section
+        data["video"] = video
+
+        body = yaml.safe_dump(data, sort_keys=False, default_flow_style=False)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = path.with_suffix(path.suffix + ".tmp")
+        tmp_path.write_text(body, encoding="utf-8")
+        os.replace(str(tmp_path), str(path))
+        return True
+    except (OSError, yaml.YAMLError):
+        return False
+
+
 @router.get("/wfb")
 async def get_wfb_status():
     """Current WFB-ng link status: state, RSSI, channel, packet stats, adapter info."""
     app = get_agent_app()
     wfb = app.wfb_manager()
+    cfg = app.config
+    wfb_cfg = getattr(cfg.video, "wfb", None) if cfg is not None else None
+
     if wfb is None:
         return {
             "state": "disabled",
@@ -45,6 +125,11 @@ async def get_wfb_status():
             "bitrate_kbps": 0,
             "restart_count": 0,
             "samples": 0,
+            "tx_power_dbm": getattr(wfb_cfg, "tx_power_dbm", None),
+            "tx_power_max_dbm": getattr(wfb_cfg, "tx_power_max_dbm", None),
+            "topology": getattr(wfb_cfg, "topology", None),
+            "mcs_index": getattr(wfb_cfg, "mcs_index", None),
+            "regulatory_domain": _read_regulatory_domain(),
         }
     status = wfb.get_status()
 
@@ -56,6 +141,23 @@ async def get_wfb_status():
     else:
         status["frequency_mhz"] = 0
         status["bandwidth_mhz"] = 0
+
+    # Live runtime TX power preferred over stored value, falling back to
+    # the persisted YAML if the manager hasn't applied anything yet.
+    effective = getattr(wfb, "effective_tx_power_dbm", None)
+    if effective is not None:
+        status["tx_power_dbm"] = effective
+    elif "tx_power_dbm" not in status or status.get("tx_power_dbm") is None:
+        status["tx_power_dbm"] = getattr(wfb_cfg, "tx_power_dbm", None)
+
+    if "tx_power_max_dbm" not in status or status.get("tx_power_max_dbm") is None:
+        status["tx_power_max_dbm"] = getattr(wfb_cfg, "tx_power_max_dbm", None)
+    if "topology" not in status or status.get("topology") is None:
+        status["topology"] = getattr(wfb_cfg, "topology", None)
+    if "mcs_index" not in status or status.get("mcs_index") is None:
+        status["mcs_index"] = getattr(wfb_cfg, "mcs_index", None)
+
+    status["regulatory_domain"] = _read_regulatory_domain()
 
     # Enrich with adapter details if available
     adapter_info: dict[str, object] = {
@@ -131,4 +233,70 @@ async def set_wfb_channel(request: ChannelRequest):
         "status": "ok",
         "channel": request.channel,
         "frequency_mhz": ch.frequency_mhz,
+    }
+
+
+@router.put("/wfb/tx-power")
+async def set_wfb_tx_power(request: TxPowerRequest):
+    """Set the WFB-ng TX power at runtime.
+
+    Body:
+        tx_power_dbm: Requested TX power in dBm.
+
+    Validation:
+        * Refuses values below 1 dBm.
+        * Refuses values above the configured `tx_power_max_dbm` ceiling.
+
+    On accept the running manager applies the value via the kernel,
+    persists `video.wfb.tx_power_dbm` to /etc/ados/config.yaml, and
+    returns the requested + effective dBm reported by the driver.
+    """
+    app = get_agent_app()
+    cfg = app.config
+    wfb_cfg = getattr(cfg.video, "wfb", None) if cfg is not None else None
+
+    requested = int(request.tx_power_dbm)
+    ceiling = (
+        int(getattr(wfb_cfg, "tx_power_max_dbm", 15))
+        if wfb_cfg is not None
+        else 15
+    )
+
+    if requested < 1:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": "below_floor", "min": 1},
+        )
+    if requested > ceiling:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": "above_ceiling", "max": ceiling},
+        )
+
+    wfb = app.wfb_manager()
+    if wfb is None:
+        raise HTTPException(status_code=503, detail="WFB-ng service not running")
+
+    apply = getattr(wfb, "apply_tx_power", None)
+    effective: int | None = None
+    if callable(apply):
+        try:
+            effective = apply(requested)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=500,
+                detail={"error": "apply_failed", "message": str(exc)},
+            ) from exc
+
+    # Persist regardless of driver outcome; on a fresh boot the manager
+    # may not have an interface up yet but the operator's preference
+    # should still be remembered.
+    if wfb_cfg is not None:
+        wfb_cfg.tx_power_dbm = requested
+    _persist_tx_power(requested)
+
+    return {
+        "requested_dbm": requested,
+        "effective_dbm": effective,
+        "tx_power_max_dbm": ceiling,
     }

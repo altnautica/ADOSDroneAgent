@@ -536,6 +536,19 @@ async def main() -> None:
                     if _attached_display is not None:
                         payload["peripherals"] = [_attached_display]
 
+                    # Forward-compatible radio link block. The cloud
+                    # subprocess does not own the WfbManager directly,
+                    # so we ask the agent's REST surface on localhost
+                    # with a tight budget. Any failure produces an
+                    # `absent` block; the GCS keys off presence.
+                    from ados.core.supervisor.heartbeat import (
+                        build_radio_block,
+                        fetch_wfb_status_via_http,
+                    )
+                    payload["radio"] = build_radio_block(
+                        fetch_wfb_status_via_http()
+                    )
+
                     async with httpx.AsyncClient(timeout=10.0) as client:
                         resp = await client.post(
                             f"{convex_url}/agent/status",

@@ -116,3 +116,113 @@ def test_wfb_set_channel_no_manager(client):
     """POST /api/wfb/channel without manager returns 503."""
     resp = client.post("/api/wfb/channel", json={"channel": 149})
     assert resp.status_code == 503
+
+
+def test_wfb_status_includes_tx_power_fields(agent_app):
+    """GET /api/wfb surfaces tx_power_dbm/max/topology/mcs_index."""
+    demo = DemoWfbManager()
+    agent_app.wfb_manager_handle = demo
+
+    fastapi_app = create_app(agent_app)
+    client = TestClient(fastapi_app)
+
+    resp = client.get("/api/wfb")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "tx_power_dbm" in data
+    assert "tx_power_max_dbm" in data
+    assert "topology" in data
+    assert "mcs_index" in data
+    assert "regulatory_domain" in data
+
+
+def test_wfb_status_falls_back_to_config_when_no_manager(agent_app):
+    """GET /api/wfb without a manager still returns config-derived defaults."""
+    fastapi_app = create_app(agent_app)
+    client = TestClient(fastapi_app)
+    resp = client.get("/api/wfb")
+    assert resp.status_code == 200
+    data = resp.json()
+    # tx_power_max_dbm sourced from config defaults (15 dBm).
+    assert data["tx_power_max_dbm"] == 15
+    assert data["topology"] == "host_vbus"
+
+
+def test_wfb_set_tx_power_below_floor(agent_app):
+    """PUT /api/wfb/tx-power with 0 returns 400 below_floor."""
+    demo = DemoWfbManager()
+    agent_app.wfb_manager_handle = demo
+
+    fastapi_app = create_app(agent_app)
+    client = TestClient(fastapi_app)
+
+    resp = client.put("/api/wfb/tx-power", json={"tx_power_dbm": 0})
+    assert resp.status_code == 400
+    detail = resp.json()["detail"]
+    assert detail["error"] == "below_floor"
+    assert detail["min"] == 1
+
+
+def test_wfb_set_tx_power_above_ceiling(agent_app):
+    """PUT /api/wfb/tx-power with 99 returns 400 above_ceiling with the configured max."""
+    demo = DemoWfbManager()
+    agent_app.wfb_manager_handle = demo
+
+    fastapi_app = create_app(agent_app)
+    client = TestClient(fastapi_app)
+
+    resp = client.put("/api/wfb/tx-power", json={"tx_power_dbm": 99})
+    assert resp.status_code == 400
+    detail = resp.json()["detail"]
+    assert detail["error"] == "above_ceiling"
+    # Default ceiling on a fresh ADOSConfig is 15 dBm.
+    assert detail["max"] == 15
+
+
+def test_wfb_set_tx_power_accepts_in_range(agent_app, tmp_path, monkeypatch):
+    """PUT /api/wfb/tx-power within range applies via the manager and returns 200."""
+    # Redirect persistence away from /etc/ados during tests.
+    fake_config = tmp_path / "config.yaml"
+    monkeypatch.setattr(
+        "ados.api.routes.wfb.CONFIG_YAML",
+        fake_config,
+    )
+
+    demo = DemoWfbManager()
+    agent_app.wfb_manager_handle = demo
+
+    fastapi_app = create_app(agent_app)
+    client = TestClient(fastapi_app)
+
+    resp = client.put("/api/wfb/tx-power", json={"tx_power_dbm": 7})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["requested_dbm"] == 7
+    # Demo manager echoes back the clamped value.
+    assert body["effective_dbm"] == 7
+    assert body["tx_power_max_dbm"] == 15
+    # Persisted on disk.
+    assert fake_config.exists()
+
+
+def test_wfb_set_tx_power_no_manager(client):
+    """PUT /api/wfb/tx-power without a manager returns 503."""
+    resp = client.put("/api/wfb/tx-power", json={"tx_power_dbm": 5})
+    assert resp.status_code == 503
+
+
+def test_wfb_set_tx_power_apply_failure(agent_app):
+    """PUT /api/wfb/tx-power surfaces a 500 when the driver call raises."""
+    class BrokenDemo(DemoWfbManager):
+        def apply_tx_power(self, dbm: int):
+            raise RuntimeError("driver rejected")
+
+    agent_app.wfb_manager_handle = BrokenDemo()
+
+    fastapi_app = create_app(agent_app)
+    client = TestClient(fastapi_app)
+
+    resp = client.put("/api/wfb/tx-power", json={"tx_power_dbm": 5})
+    assert resp.status_code == 500
+    detail = resp.json()["detail"]
+    assert detail["error"] == "apply_failed"

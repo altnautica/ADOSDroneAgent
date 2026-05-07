@@ -528,6 +528,18 @@ class AgentApp:
                         "publicUrls": self.config.remote_access.public_urls,
                     }
 
+                    # Forward-compatible radio link block — sourced from
+                    # the in-process WfbManager directly when present.
+                    from ados.core.supervisor.heartbeat import build_radio_block
+                    wfb = getattr(self, "_wfb_manager", None)
+                    wfb_status: dict | None = None
+                    if wfb is not None:
+                        try:
+                            wfb_status = wfb.get_status()
+                        except Exception:
+                            wfb_status = None
+                    payload["radio"] = build_radio_block(wfb_status)
+
                     async with httpx.AsyncClient(timeout=10.0) as client:
                         await client.post(
                             f"{convex_url}/agent/status",
