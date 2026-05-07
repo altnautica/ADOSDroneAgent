@@ -41,6 +41,20 @@ export function fmtRssi(dbm: number | null | undefined): string {
   return `${dbm} dBm`;
 }
 
+// Compact relative time: "12s ago", "3m ago", "2h ago", "1d ago".
+// Used by panels that display a `last_run` or `updated_at` timestamp.
+export function fmtRelativeTime(timestampMs: number): string {
+  const diff = Math.max(0, Date.now() - timestampMs);
+  const s = Math.floor(diff / 1000);
+  if (s < 60) return `${s}s ago`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h ago`;
+  const d = Math.floor(h / 24);
+  return `${d}d ago`;
+}
+
 export function severityFromState(state: string | null | undefined): Severity {
   if (!state) return "idle";
   const s = state.toLowerCase();

@@ -1,5 +1,14 @@
-import { type LucideIcon, Radio, Video, Wifi, Cloud, KeyRound } from "lucide-react";
+import {
+  type LucideIcon,
+  Cloud,
+  Cpu,
+  KeyRound,
+  Radio,
+  Video,
+  Wifi,
+} from "lucide-react";
 
+import { summarizeHardware } from "@/components/panels/hardware-item-list";
 import { useSnapshot } from "@/hooks/use-snapshot";
 import { useStatus } from "@/hooks/use-status";
 import { fmtBitrate, severityClasses, severityFromState } from "@/lib/format";
@@ -12,6 +21,7 @@ interface Tile {
   value: string;
   sub: string;
   severity: Severity;
+  title?: string;
 }
 
 function tiles(
@@ -30,6 +40,33 @@ function tiles(
     value: sats != null ? String(sats) : fcConnected ? "—" : "off",
     sub: fcConnected ? `${sats != null ? "sats" : "no gps"}` : "no fc",
     severity: fcConnected ? "ok" : "idle",
+  };
+
+  // HW — required-component summary from /api/v1/setup/status
+  const hwItems = cfg?.hardware_check?.items ?? [];
+  const hwSum = summarizeHardware(hwItems);
+  const hwSev: Severity =
+    hwItems.length === 0
+      ? "idle"
+      : hwSum.worstState === "missing"
+        ? "err"
+        : hwSum.worstState === "warning" || hwSum.worstState === "checking"
+          ? "warn"
+          : "ok";
+  const failingNames = hwItems
+    .filter((i) => i.required && i.state !== "ok")
+    .map((i) => i.label)
+    .join(", ");
+  const hw: Tile = {
+    label: "HW",
+    icon: Cpu,
+    value:
+      hwItems.length === 0
+        ? "—"
+        : `${hwSum.requiredOk}/${hwSum.requiredTotal}`,
+    sub: hwItems.length === 0 ? "scanning" : failingNames || "all required ok",
+    severity: hwSev,
+    title: failingNames ? `Failing required: ${failingNames}` : undefined,
   };
 
   // VID
@@ -80,7 +117,7 @@ function tiles(
     severity: code ? "info" : finalized ? "ok" : "idle",
   };
 
-  return [mav, vid, net, cld, pair];
+  return [mav, hw, vid, net, cld, pair];
 }
 
 function StatusTile({ tile, isLoading }: { tile: Tile; isLoading: boolean }) {
@@ -88,7 +125,10 @@ function StatusTile({ tile, isLoading }: { tile: Tile; isLoading: boolean }) {
   const sev = severityClasses(tile.severity);
 
   return (
-    <div className="rounded-lg border border-border bg-card p-3 flex flex-col gap-1">
+    <div
+      className="rounded-lg border border-border bg-card p-3 flex flex-col gap-1"
+      title={tile.title}
+    >
       <div className="flex items-center justify-between text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
         <span className="inline-flex items-center gap-1.5">
           <Icon className={cn("h-3 w-3", sev.text)} />
@@ -113,7 +153,7 @@ export function StatusTiles() {
   const ts = tiles(snap, status);
 
   return (
-    <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
+    <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
       {ts.map((t) => (
         <StatusTile key={t.label} tile={t} isLoading={isLoading} />
       ))}

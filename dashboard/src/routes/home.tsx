@@ -2,6 +2,7 @@ import { CloudOff, RefreshCw } from "lucide-react";
 
 import { CloudPanel } from "@/components/panels/cloud-panel";
 import { FcPanel } from "@/components/panels/fc-panel";
+import { HardwarePanel } from "@/components/panels/hardware-panel";
 import { MeshPanel } from "@/components/panels/mesh-panel";
 import { NetworkPanel } from "@/components/panels/network-panel";
 import { ServicesPanel } from "@/components/panels/services-panel";
@@ -85,13 +86,16 @@ function DroneHome() {
         <div className="lg:col-span-5 xl:col-span-4">
           <FcPanel />
         </div>
-        <div className="lg:col-span-4">
+        <div className="lg:col-span-6 xl:col-span-4">
+          <HardwarePanel />
+        </div>
+        <div className="lg:col-span-3 xl:col-span-4">
           <NetworkPanel />
         </div>
-        <div className="lg:col-span-4">
+        <div className="lg:col-span-3 xl:col-span-4">
           <CloudPanel />
         </div>
-        <div className="lg:col-span-4">
+        <div className="lg:col-span-12 xl:col-span-12">
           <ServicesPanel />
         </div>
       </div>
@@ -136,13 +140,16 @@ function GroundHome({ role }: { role: "direct" | "relay" | "receiver" }) {
           </div>
         )}
 
-        <div className="lg:col-span-4">
+        <div className="lg:col-span-6 xl:col-span-4">
+          <HardwarePanel />
+        </div>
+        <div className="lg:col-span-3 xl:col-span-4">
           <NetworkPanel />
         </div>
-        <div className="lg:col-span-4">
+        <div className="lg:col-span-3 xl:col-span-4">
           <CloudPanel />
         </div>
-        <div className="lg:col-span-4">
+        <div className="lg:col-span-12 xl:col-span-12">
           <ServicesPanel />
         </div>
       </div>
