@@ -141,8 +141,18 @@ else
     info "DKMS source already registered."
 fi
 
+# The vendored Makefile resolves ARCH from `uname -m`. On aarch64 hosts
+# that yields the literal "aarch64", which the kernel build rejects
+# because it expects "arm64". Same for armv7 (kernel uses "arm").
+# Translate before invoking dkms so the kernel build finds the right
+# arch/<name>/Makefile.
+case "$(uname -m)" in
+    aarch64)  export ARCH=arm64 ;;
+    armv6l|armv7l) export ARCH=arm ;;
+esac
+
 # Build + install for current kernel (idempotent: dkms skips if already built)
-info "dkms build ${DKMS_NAME}"
+info "dkms build ${DKMS_NAME} (ARCH=${ARCH:-unset})"
 dkms build "${DKMS_NAME}" -k "${KERNEL}" || {
     error "dkms build failed. See /var/lib/dkms/${DKMS_PACKAGE}/${DRIVER_VERSION}/build/make.log"
     exit 2
