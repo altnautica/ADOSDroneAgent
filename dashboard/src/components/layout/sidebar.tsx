@@ -35,7 +35,7 @@ interface NavItem {
 const COMMON_TOP: NavItem[] = [{ to: "/", label: "Home", icon: Home, enabled: true }];
 
 const COMMON_BOTTOM: NavItem[] = [
-  { to: "/pairing", label: "Pairing", icon: Link2, enabled: false },
+  { to: "/pairing", label: "Pairing", icon: Link2, enabled: true },
   { to: "/plugins", label: "Plugins", icon: Plug, enabled: false },
   { to: "/peripherals", label: "Peripherals", icon: Cpu, enabled: false },
   { to: "/suites", label: "Suites", icon: Package, enabled: false },

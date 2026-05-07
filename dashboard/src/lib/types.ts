@@ -19,6 +19,7 @@ export interface SetupStatus {
   setup_finalized: boolean;
   setup_state?: string;
   profile_source?: string;
+  profile_suggestion?: Profile;
   completion_percent: number;
   next_action?: string;
   steps?: SetupStep[];

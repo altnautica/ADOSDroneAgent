@@ -55,7 +55,10 @@ export function ServicesPanel() {
           </p>
         )}
         {q.data && services.length === 0 && (
-          <p className="text-xs text-muted-foreground">no ados-* services</p>
+          <p className="text-xs text-muted-foreground">
+            service inventory unavailable — check{" "}
+            <span className="font-mono">journalctl -u ados-supervisor</span>
+          </p>
         )}
         <ul className="divide-y divide-border/50">
           {services.map((s) => {

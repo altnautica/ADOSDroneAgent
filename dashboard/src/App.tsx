@@ -5,6 +5,9 @@ import { ThemeProvider } from "@/components/theme-provider";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { ComingSoonRoute } from "@/routes/coming-soon";
 import { HomeRoute } from "@/routes/home";
+import { IndexRedirect } from "@/routes/index-redirect";
+import { PairingRoute } from "@/routes/pairing-route";
+import { SetupRoute } from "@/routes/setup-route";
 
 export function App() {
   return (
@@ -12,17 +15,10 @@ export function App() {
       <TooltipProvider delayDuration={200}>
         <Routes>
           <Route element={<AppShell />}>
-            <Route index element={<HomeRoute />} />
-            <Route
-              path="/setup"
-              element={
-                <ComingSoonRoute
-                  title="Setup"
-                  description="The 4-step setup wizard rebuild lands next."
-                  shipsIn="v0.14.2"
-                />
-              }
-            />
+            <Route index element={<IndexRedirect />} />
+            <Route path="/home" element={<HomeRoute />} />
+            <Route path="/setup" element={<SetupRoute />} />
+            <Route path="/pairing" element={<PairingRoute />} />
             <Route
               path="/settings"
               element={
