@@ -151,6 +151,12 @@ case "$(uname -m)" in
     armv6l|armv7l) export ARCH=arm ;;
 esac
 
+# The vendored source sets EXTRA_CFLAGS += -Werror, which gcc 12+
+# (Debian Bookworm) rejects on a few legitimate-looking indentation
+# warnings the upstream code carries. Relax via KCFLAGS so the build
+# does not abort on warnings the upstream maintainer has not patched.
+export KCFLAGS="${KCFLAGS:-} -Wno-error -Wno-misleading-indentation -Wno-address-of-packed-member"
+
 # Build + install for current kernel (idempotent: dkms skips if already built)
 info "dkms build ${DKMS_NAME} (ARCH=${ARCH:-unset})"
 dkms build "${DKMS_NAME}" -k "${KERNEL}" || {
