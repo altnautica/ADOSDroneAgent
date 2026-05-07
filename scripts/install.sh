@@ -805,29 +805,57 @@ install_motd() {
     info "SSH login banner installed at /etc/update-motd.d/30-ados."
 }
 
-# Block until the agent's REST API is reachable on localhost:8080,
-# or the timeout expires. Used so install.sh can honor Rule 26: every
-# manual step a bench operator might have to perform is a bug. The
-# operator should be able to type `ados` immediately after the install
-# returns and have a working agent.
+# Block until the agent's REST API is reachable on localhost:8080, or the
+# timeout expires. Used so install.sh can honor Rule 26: every manual step
+# a bench operator might have to perform is a bug. The operator should be
+# able to type `ados` immediately after the install returns and have a
+# working agent.
+#
+# On Pi 4B class hardware the API binds at ~70-80s after service start
+# because the API process does HAL board fingerprinting, USB enumeration,
+# CSI camera scan, profile auto-detect, feature manager init, and IPC
+# socket setup before listening on 8080. Lower-RAM SBCs are slower. The
+# default timeout is therefore generous (180s); callers that know they
+# can be stricter pass a smaller value.
+#
+# On success this function also captures the running agent's version
+# string from the API into the global AGENT_API_VERSION so the
+# post-install summary can print it. /api/status is used instead of
+# /api/v1/setup/status because the former is a fast snapshot endpoint
+# and the latter does additional setup-state introspection that takes
+# multiple seconds per call.
+AGENT_API_VERSION=""
 wait_for_api_ready() {
     [ "$(uname -s)" = "Linux" ] || return 0
-    local timeout="${1:-30}"
+    local timeout="${1:-180}"
     local start
     start=$(date +%s)
     local now
+    local body
     while :; do
-        if curl -fsS --max-time 1 http://127.0.0.1:8080/api/v1/setup/status \
-            >/dev/null 2>&1; then
-            info "Agent REST API reachable on 127.0.0.1:8080."
-            return 0
+        body=$(curl -fsS --max-time 2 http://127.0.0.1:8080/api/status 2>/dev/null || true)
+        if [ -n "${body}" ]; then
+            AGENT_API_VERSION=$(printf '%s' "${body}" | python3 -c \
+                'import json,sys
+try:
+    print(json.load(sys.stdin).get("version", ""))
+except Exception:
+    pass' 2>/dev/null || true)
+            if [ -n "${AGENT_API_VERSION}" ]; then
+                info "Agent REST API reachable on 127.0.0.1:8080 (version ${AGENT_API_VERSION})."
+                return 0
+            fi
         fi
         now=$(date +%s)
         if [ $((now - start)) -ge "${timeout}" ]; then
-            warn "Agent REST API did not come up within ${timeout}s; check 'sudo journalctl -u ados-supervisor -n 100'."
+            warn "Agent REST API did not come up within ${timeout}s."
+            warn "Last 30 lines of ados-api journal:"
+            journalctl -u ados-api -n 30 --no-pager 2>&1 | sed 's/^/  /' || true
+            warn "Last 30 lines of ados-supervisor journal:"
+            journalctl -u ados-supervisor -n 30 --no-pager 2>&1 | sed 's/^/  /' || true
             return 1
         fi
-        sleep 1
+        sleep 2
     done
 }
 
@@ -1509,8 +1537,9 @@ print_status() {
     # Block until the agent is actually serving requests so the operator
     # can run `ados` immediately after this returns. Per Rule 26 every
     # post-install manual step is a bug; if we exit before 8080 is
-    # bound, the operator races the supervisor's startup.
-    wait_for_api_ready 30 || true
+    # bound, the operator races the supervisor's startup. Pi 4B class
+    # hardware needs ~75s; budget plenty of headroom for slower SBCs.
+    wait_for_api_ready 180 || true
 
     echo ""
     echo -e "${BOLD}=== Installation Complete ===${NC}"
@@ -1530,10 +1559,22 @@ print_status() {
     echo "  Diagnostics:  ados diag"
     echo ""
 
-    # Quick version check
-    if [ -x "${VENV_DIR}/bin/ados" ]; then
-        echo "  Version:      $(${VENV_DIR}/bin/ados version 2>/dev/null || echo 'unknown')"
+    # Print the running agent's version. Prefer the value captured from
+    # /api/status during readiness polling; fall back to the package
+    # metadata (stable, no subprocess startup overhead) if the API didn't
+    # come up in time. The CLI does not expose a `version` subcommand, so
+    # we never shell out to `ados version` here.
+    local pkg_version=""
+    if [ -x "${VENV_DIR}/bin/python" ]; then
+        pkg_version=$("${VENV_DIR}/bin/python" -c \
+            'from importlib.metadata import version, PackageNotFoundError
+try:
+    print(version("ados-drone-agent"))
+except PackageNotFoundError:
+    pass' 2>/dev/null || true)
     fi
+    local shown_version="${AGENT_API_VERSION:-${pkg_version:-unknown}}"
+    echo "  Version:      ${shown_version}"
     echo ""
 }
 
