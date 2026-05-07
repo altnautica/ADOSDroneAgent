@@ -1583,52 +1583,29 @@ print_pairing_code() {
 # escaping pitfalls when the script is delivered through `curl | sudo bash`.
 print_hardware_summary() {
     [ "$(uname -s)" = "Linux" ] || return 0
-    local body
-    body=$(curl -fsS --max-time 8 -X POST \
-        http://127.0.0.1:8080/api/v1/setup/hardware-check/refresh 2>/dev/null || true)
-    [ -n "${body}" ] || return 0
 
-    # Write the parser to a temp file. Heredoc-inside-command-substitution
-    # is fragile under `curl ... | sudo bash` on some bash builds; the
-    # tmp-file form avoids the parser ambiguity entirely.
-    local parser
-    parser=$(mktemp /tmp/ados-hw-parser.XXXXXX.py)
-    cat > "${parser}" <<'PYEOF'
-import json, sys
-try:
-    d = json.load(sys.stdin)
-except Exception:
-    sys.exit(0)
-items = d.get("items") or []
-if not items:
-    sys.exit(0)
-icon = {"ok": "OK ", "warning": "WARN", "missing": "MISS", "unknown": "?   ", "checking": "... "}
-required = [i for i in items if i.get("required")]
-optional = [i for i in items if not i.get("required")]
+    # Use the agent's own CLI to print the snapshot. The `ados hardware
+    # show` subcommand reads /var/ados/setup/hardware-state.json and
+    # renders a per-item table identical to what the dashboard shows,
+    # which keeps install.sh free of inline Python (curl|bash paths
+    # have historically choked on heredoc-inside-command-substitution
+    # patterns; sourcing the CLI bypasses all of that).
+    local ados_bin="${VENV_DIR}/bin/ados"
+    [ -x "${ados_bin}" ] || return 0
 
-def render(rows):
-    for i in rows:
-        state = i.get("state", "unknown")
-        label = i.get("label", i.get("id", "?"))
-        detail = (i.get("detail") or "").splitlines()[0][:64]
-        print(f"    [{icon.get(state, '?   ')}] {label:30s} {detail}")
-
-if required:
-    print("  Required:")
-    render(required)
-if optional:
-    print("  Optional:")
-    render(optional)
-PYEOF
+    # Force-write a fresh snapshot so we capture whatever was
+    # hot-plugged during install. Best-effort.
+    curl -fsS --max-time 8 -X POST \
+        http://127.0.0.1:8080/api/v1/setup/hardware-check/refresh \
+        > /dev/null 2>&1 || true
 
     local rendered
-    rendered=$(printf '%s' "${body}" | python3 "${parser}" 2>/dev/null)
-    rm -f "${parser}"
+    rendered=$("${ados_bin}" hardware show 2>/dev/null) || true
     [ -n "${rendered}" ] || return 0
 
     echo ""
     echo -e "${BOLD}--- Hardware probe ---${NC}"
-    printf '%s\n' "${rendered}"
+    printf '%s\n' "${rendered}" | sed 's/^/  /'
 }
 
 # ─── Print Status Summary ───────────────────────────────────────────────────
