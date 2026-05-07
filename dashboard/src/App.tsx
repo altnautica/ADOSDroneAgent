@@ -21,6 +21,7 @@ import { PeripheralsRoute } from "@/routes/peripherals-route";
 import { PluginsRoute } from "@/routes/plugins-route";
 import { RosRoute } from "@/routes/ros-route";
 import { SetupRoute } from "@/routes/setup-route";
+import { TelemetryRoute } from "@/routes/telemetry-route";
 import { AdvancedSettings } from "@/routes/settings/advanced-settings";
 import { CloudSettings } from "@/routes/settings/cloud-settings";
 import { DisplaySettings } from "@/routes/settings/display-settings";
@@ -49,6 +50,7 @@ export function App() {
               <Route path="/logs" element={<LogsRoute />} />
               <Route path="/ros" element={<RosRoute />} />
               <Route path="/diagnostics" element={<DiagnosticsRoute />} />
+              <Route path="/telemetry" element={<TelemetryRoute />} />
               <Route path="/settings" element={<SettingsLayout />}>
                 <Route index element={<Navigate to="profile" replace />} />
                 <Route path="profile" element={<ProfileSettings />} />

@@ -50,7 +50,7 @@ function droneItems(): NavItem[] {
   // empty state when the overlay isn't present, which is friendlier
   // than hiding the link and leaving operators wondering where to go.
   return [
-    { to: "/telemetry", label: "Telemetry", icon: Radio, enabled: false },
+    { to: "/telemetry", label: "Telemetry", icon: Radio, enabled: true },
     { to: "/video", label: "Video", icon: Video, enabled: false },
     { to: "/ros", label: "ROS", icon: Bot, enabled: true },
   ];
