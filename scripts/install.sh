@@ -517,7 +517,10 @@ install_wfb_ng_from_vendor() {
     fi
 
     info "Building wfb-ng from vendored source at ${vendor_dir}..."
-    if ! ( cd "${vendor_dir}" && make all_bin >/tmp/wfb-ng-build.log 2>&1 ); then
+    # Build the full set setup.py expects in its data_files: the five
+    # binaries from all_bin plus wfb_rtsp and gs.key. Skipping any of
+    # these makes `setup.py install` bail with "can't copy ...".
+    if ! ( cd "${vendor_dir}" && make all_bin wfb_rtsp gs.key >/tmp/wfb-ng-build.log 2>&1 ); then
         warn "wfb-ng build failed; see /tmp/wfb-ng-build.log."
         return 0
     fi
