@@ -7,8 +7,8 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useConfig } from "@/hooks/use-config";
-import { ApiError } from "@/lib/api";
 import { advancedSectionSchema, postApply } from "@/lib/apply-actions";
+import { toast, toastFromError } from "@/lib/toast";
 
 const LOG_LEVELS = ["debug", "info", "warning", "error", "critical"] as const;
 type LogLevel = (typeof LOG_LEVELS)[number];
@@ -25,10 +25,6 @@ export function AdvancedSettings() {
   const [resetConfirmOpen, setResetConfirmOpen] = useState(false);
   const [overrideConfirmOpen, setOverrideConfirmOpen] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [feedback, setFeedback] = useState<{
-    kind: "ok" | "err";
-    text: string;
-  } | null>(null);
   const [validationError, setValidationError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -41,66 +37,36 @@ export function AdvancedSettings() {
   async function applyLogLevel(next: LogLevel) {
     const previous = logLevel;
     setLogLevel(next);
-    setFeedback(null);
     try {
       const res = await postApply({ advanced: { log_level: next } });
       const section = res.sections.advanced;
       if (!res.overall || !section?.ok) {
         setLogLevel(previous);
-        setFeedback({
-          kind: "err",
-          text: section?.message ?? "Log level update failed.",
-        });
+        toast.err(section?.message ?? "Log level update failed.");
       } else {
-        setFeedback({
-          kind: "ok",
-          text: section.message || `Log level set to ${next}.`,
-        });
+        toast.ok(section.message || `Log level set to ${next}.`);
       }
     } catch (err) {
       setLogLevel(previous);
-      setFeedback({
-        kind: "err",
-        text:
-          err instanceof ApiError
-            ? `${err.status}: ${err.message}`
-            : err instanceof Error
-              ? err.message
-              : String(err),
-      });
+      toastFromError(err, "Log level update failed.");
     }
   }
 
   async function applyOverride() {
     setBusy(true);
-    setFeedback(null);
     try {
       const res = await postApply({
         advanced: { board_override: boardOverride },
       });
       const section = res.sections.advanced;
       if (res.overall && section?.ok) {
-        setFeedback({
-          kind: "ok",
-          text: section.message || "Board override saved.",
-        });
+        toast.ok(section.message || "Board override saved.");
         config.refetch();
       } else {
-        setFeedback({
-          kind: "err",
-          text: section?.message ?? "Apply failed.",
-        });
+        toast.err(section?.message ?? "Apply failed.");
       }
     } catch (err) {
-      setFeedback({
-        kind: "err",
-        text:
-          err instanceof ApiError
-            ? `${err.status}: ${err.message}`
-            : err instanceof Error
-              ? err.message
-              : String(err),
-      });
+      toastFromError(err, "Apply failed.");
     } finally {
       setBusy(false);
     }
@@ -108,31 +74,16 @@ export function AdvancedSettings() {
 
   async function applyFactoryReset() {
     setBusy(true);
-    setFeedback(null);
     try {
       const res = await postApply({ advanced: { factory_reset: true } });
       const section = res.sections.advanced;
       if (res.overall && section?.ok) {
-        setFeedback({
-          kind: "ok",
-          text: section.message || "Factory reset queued. Reboot to apply.",
-        });
+        toast.ok(section.message || "Factory reset queued.", "Reboot to apply.");
       } else {
-        setFeedback({
-          kind: "err",
-          text: section?.message ?? "Apply failed.",
-        });
+        toast.err(section?.message ?? "Apply failed.");
       }
     } catch (err) {
-      setFeedback({
-        kind: "err",
-        text:
-          err instanceof ApiError
-            ? `${err.status}: ${err.message}`
-            : err instanceof Error
-              ? err.message
-              : String(err),
-      });
+      toastFromError(err, "Apply failed.");
     } finally {
       setBusy(false);
     }
@@ -213,7 +164,7 @@ export function AdvancedSettings() {
           </div>
 
           {validationError && (
-            <div className="rounded-md border border-red-500/40 bg-red-500/10 px-3 py-2 text-xs text-red-700 dark:text-red-300">
+            <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">
               {validationError}
             </div>
           )}
@@ -234,7 +185,7 @@ export function AdvancedSettings() {
 
       <Card>
         <CardContent className="pt-5 pb-5 space-y-3">
-          <div className="flex items-center gap-2 text-sm font-semibold text-red-600 dark:text-red-400">
+          <div className="flex items-center gap-2 text-sm font-semibold text-destructive">
             Factory reset
             <RiskBadge tone="manual" />
           </div>
@@ -254,18 +205,6 @@ export function AdvancedSettings() {
           </div>
         </CardContent>
       </Card>
-
-      {feedback && (
-        <div
-          className={`rounded-md border px-3 py-2 text-sm ${
-            feedback.kind === "ok"
-              ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"
-              : "border-red-500/40 bg-red-500/10 text-red-700 dark:text-red-300"
-          }`}
-        >
-          {feedback.text}
-        </div>
-      )}
 
       <ConfirmDialog
         open={overrideConfirmOpen}

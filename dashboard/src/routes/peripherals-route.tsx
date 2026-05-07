@@ -83,11 +83,11 @@ export function PeripheralsRoute() {
                   <span
                     className={`ml-auto text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded border ${
                       tone === "ok"
-                        ? "border-emerald-500/40 text-emerald-500"
+                        ? "border-ok/40 text-ok"
                         : tone === "warn"
-                          ? "border-amber-500/40 text-amber-500"
+                          ? "border-warn/40 text-warn"
                           : tone === "err"
-                            ? "border-red-500/40 text-red-500"
+                            ? "border-destructive/40 text-destructive"
                             : "border-muted-foreground/40 text-muted-foreground"
                     }`}
                   >

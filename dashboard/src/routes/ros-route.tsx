@@ -6,7 +6,8 @@ import { ConfirmDialog } from "@/components/settings/confirm-dialog";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { useResource } from "@/hooks/use-resource";
-import { ApiError, apiFetch } from "@/lib/api";
+import { apiFetch } from "@/lib/api";
+import { toast, toastFromError } from "@/lib/toast";
 
 interface RosStatus {
   state?: string;
@@ -44,34 +45,23 @@ export function RosRoute() {
   );
 
   const [confirm, setConfirm] = useState<null | "init" | "stop">(null);
-  const [feedback, setFeedback] = useState<{ kind: "ok" | "err"; text: string } | null>(
-    null,
-  );
   const [busy, setBusy] = useState(false);
 
   async function dispatch(kind: "init" | "stop") {
     setBusy(true);
-    setFeedback(null);
     try {
       await apiFetch(`/api/ros/${kind}`, { method: "POST" });
-      setFeedback({
-        kind: "ok",
-        text:
-          kind === "init"
-            ? "ROS environment starting. The container takes 5–15 seconds to come up."
-            : "ROS environment stopping.",
-      });
+      toast.ok(
+        kind === "init"
+          ? "ROS environment starting."
+          : "ROS environment stopping.",
+        kind === "init"
+          ? "The container takes 5–15 seconds to come up."
+          : undefined,
+      );
       status.refetch();
     } catch (err) {
-      setFeedback({
-        kind: "err",
-        text:
-          err instanceof ApiError
-            ? `${err.status}: ${err.message}`
-            : err instanceof Error
-              ? err.message
-              : String(err),
-      });
+      toastFromError(err, "ROS dispatch failed.");
     } finally {
       setBusy(false);
     }
@@ -119,25 +109,13 @@ export function RosRoute() {
         </Button>
       }
     >
-      {feedback && (
-        <div
-          className={`rounded-md border px-3 py-2 text-sm ${
-            feedback.kind === "ok"
-              ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"
-              : "border-red-500/40 bg-red-500/10 text-red-700 dark:text-red-300"
-          }`}
-        >
-          {feedback.text}
-        </div>
-      )}
-
       <Card>
         <CardContent className="pt-5 pb-5 grid grid-cols-2 gap-x-6 gap-y-2 text-sm">
           <div className="text-xs text-muted-foreground">state</div>
           <div className="font-mono">
             {status.data?.state ?? (isRunning ? "running" : "stopped")}
             {isRunning && (
-              <span className="ml-2 text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded border border-emerald-500/40 text-emerald-500">
+              <span className="ml-2 text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded border border-ok/40 text-ok">
                 live
               </span>
             )}
@@ -180,7 +158,7 @@ export function RosRoute() {
           {status.data?.error && (
             <>
               <div className="text-xs text-muted-foreground">error</div>
-              <div className="font-mono text-xs text-red-500">
+              <div className="font-mono text-xs text-destructive">
                 {status.data.error}
               </div>
             </>

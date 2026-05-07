@@ -28,9 +28,9 @@ type Level = (typeof LEVELS)[number];
 const TONE: Record<string, string> = {
   DEBUG: "text-muted-foreground/70",
   INFO: "text-foreground",
-  WARNING: "text-amber-500",
-  ERROR: "text-red-500",
-  CRITICAL: "text-red-600 font-semibold",
+  WARNING: "text-warn",
+  ERROR: "text-destructive",
+  CRITICAL: "text-destructive font-semibold",
 };
 
 function fmtTs(ts: LogEntry["timestamp"]): string {

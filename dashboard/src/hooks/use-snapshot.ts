@@ -9,6 +9,5 @@ export function useSnapshot() {
     queryFn: ({ signal }) =>
       apiFetch<DashboardSnapshot>("/api/v1/dashboard/snapshot", { signal }),
     refetchInterval: 1_000,
-    refetchOnWindowFocus: true,
   });
 }

@@ -8,6 +8,5 @@ export function useHeartbeat() {
     queryKey: ["agent-heartbeat"],
     queryFn: ({ signal }) => apiFetch<AgentHeartbeat>("/api/status", { signal }),
     refetchInterval: 5_000,
-    refetchOnWindowFocus: true,
   });
 }

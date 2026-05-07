@@ -1,3 +1,5 @@
+import { CloudOff, RefreshCw } from "lucide-react";
+
 import { CloudPanel } from "@/components/panels/cloud-panel";
 import { FcPanel } from "@/components/panels/fc-panel";
 import { MeshPanel } from "@/components/panels/mesh-panel";
@@ -8,18 +10,59 @@ import { SparklinesRow } from "@/components/panels/sparklines-row";
 import { StatusTiles } from "@/components/panels/status-tiles";
 import { VideoPanel } from "@/components/panels/video-panel";
 import { WfbRxPanel } from "@/components/panels/wfb-rx-panel";
+import { Button } from "@/components/ui/button";
+import { useHeartbeat } from "@/hooks/use-heartbeat";
 import { useStatus } from "@/hooks/use-status";
 
 export function HomeRoute() {
   const status = useStatus();
+  const heartbeat = useHeartbeat();
   const profile = status.data?.profile ?? "auto";
   const role = status.data?.ground_role ?? "direct";
+
+  // Coherent agent-offline state: when the heartbeat has errored AND
+  // we have no cached data, render a single page-level message instead
+  // of a grid of "—" panels that look broken.
+  const offline =
+    heartbeat.isError && !heartbeat.data && status.isError && !status.data;
+  if (offline) {
+    return <OfflineHome onRetry={() => {
+      heartbeat.refetch();
+      status.refetch();
+    }} />;
+  }
 
   if (profile === "ground_station") {
     return <GroundHome role={role} />;
   }
 
   return <DroneHome />;
+}
+
+function OfflineHome({ onRetry }: { onRetry: () => void }) {
+  return (
+    <div className="max-w-2xl mx-auto py-12">
+      <div className="rounded-lg border border-border bg-muted/20 p-8 flex flex-col items-center text-center space-y-4">
+        <div className="h-12 w-12 rounded-full bg-destructive/10 flex items-center justify-center">
+          <CloudOff className="h-6 w-6 text-destructive" />
+        </div>
+        <div>
+          <h1 className="text-xl font-semibold tracking-tight">
+            Agent unreachable
+          </h1>
+          <p className="text-sm text-muted-foreground mt-2 max-w-sm">
+            The dashboard couldn't reach the agent's REST API. Check that the
+            board is powered, on the network, and that{" "}
+            <span className="font-mono">ados-supervisor</span> is running.
+          </p>
+        </div>
+        <Button variant="outline" size="sm" onClick={onRetry}>
+          <RefreshCw className="h-3.5 w-3.5" />
+          Retry
+        </Button>
+      </div>
+    </div>
+  );
 }
 
 function DroneHome() {

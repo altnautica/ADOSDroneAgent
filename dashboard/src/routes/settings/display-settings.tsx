@@ -68,7 +68,7 @@ export function DisplaySettings() {
                   >
                     <span className="font-mono text-foreground">{d.id}</span>
                     {d.id === current && (
-                      <span className="text-[9px] uppercase tracking-wider text-emerald-600 dark:text-emerald-400">
+                      <span className="text-[9px] uppercase tracking-wider text-ok">
                         active
                       </span>
                     )}

@@ -7,7 +7,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { RadioCardGroup } from "@/components/ui/radio-card-group";
 import { Switch } from "@/components/ui/switch";
 import { useStatus } from "@/hooks/use-status";
-import { ApiError } from "@/lib/api";
+import { toast, toastFromError } from "@/lib/toast";
 import {
   groundRoleFromStatus,
   postApply,
@@ -58,10 +58,6 @@ export function ProfileSettings() {
   const [autoRestart, setAutoRestart] = useState(true);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [feedback, setFeedback] = useState<{
-    kind: "ok" | "err";
-    text: string;
-  } | null>(null);
 
   useEffect(() => {
     if (status.data) {
@@ -78,7 +74,6 @@ export function ProfileSettings() {
 
   async function handleApply() {
     setBusy(true);
-    setFeedback(null);
     try {
       const res = await postApply({
         profile: {
@@ -89,26 +84,12 @@ export function ProfileSettings() {
       });
       const section = res.sections.profile;
       if (res.overall && section?.ok) {
-        setFeedback({
-          kind: "ok",
-          text: section.message || "Profile saved.",
-        });
+        toast.ok(section.message || "Profile saved.");
       } else {
-        setFeedback({
-          kind: "err",
-          text: section?.message ?? "Apply failed.",
-        });
+        toast.err(section?.message ?? "Apply failed.");
       }
     } catch (err) {
-      setFeedback({
-        kind: "err",
-        text:
-          err instanceof ApiError
-            ? `${err.status}: ${err.message}`
-            : err instanceof Error
-              ? err.message
-              : String(err),
-      });
+      toastFromError(err, "Apply failed.");
     } finally {
       setBusy(false);
     }
@@ -188,18 +169,6 @@ export function ProfileSettings() {
           />
         </CardContent>
       </Card>
-
-      {feedback && (
-        <div
-          className={`rounded-md border px-3 py-2 text-sm ${
-            feedback.kind === "ok"
-              ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"
-              : "border-red-500/40 bg-red-500/10 text-red-700 dark:text-red-300"
-          }`}
-        >
-          {feedback.text}
-        </div>
-      )}
 
       <div className="flex items-center justify-end gap-3">
         {dirty && (

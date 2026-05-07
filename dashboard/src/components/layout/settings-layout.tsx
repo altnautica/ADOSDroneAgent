@@ -55,7 +55,7 @@ export function SettingsLayout() {
   return (
     <div className="container mx-auto px-4 py-6 max-w-5xl">
       <header className="mb-6 flex items-start gap-3">
-        <ShieldAlert className="h-6 w-6 text-amber-500 mt-0.5 shrink-0" />
+        <ShieldAlert className="h-6 w-6 text-warn mt-0.5 shrink-0" />
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">Settings</h1>
           <p className="text-sm text-muted-foreground mt-1">

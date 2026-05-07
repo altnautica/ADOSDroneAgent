@@ -81,7 +81,7 @@ export function VideoPanel() {
       <CardHeader>
         <CardTitle className="flex items-center gap-2">
           {state === "live" ? (
-            <Video className="h-3.5 w-3.5 text-emerald-500" />
+            <Video className="h-3.5 w-3.5 text-ok" />
           ) : (
             <Video className="h-3.5 w-3.5" />
           )}
@@ -124,7 +124,7 @@ export function VideoPanel() {
               {state === "error" && (
                 <>
                   <VideoOff className="h-6 w-6 opacity-60" />
-                  <div className="text-red-300/90">
+                  <div className="text-destructive/90">
                     {error || "Stream unavailable."}
                   </div>
                   <Button

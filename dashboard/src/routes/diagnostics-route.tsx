@@ -13,9 +13,10 @@ import { ConfirmDialog } from "@/components/settings/confirm-dialog";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { useResource } from "@/hooks/use-resource";
-import { ApiError, apiFetch } from "@/lib/api";
+import { apiFetch } from "@/lib/api";
 import { fmtNum } from "@/lib/format";
 import { rebootAgent } from "@/lib/setup-actions";
+import { toast, toastFromError } from "@/lib/toast";
 
 interface SystemSnapshot {
   cpu_percent: number;
@@ -59,29 +60,17 @@ export function DiagnosticsRoute() {
     | { kind: "restart-service"; name: string }
     | null
   >(null);
-  const [feedback, setFeedback] = useState<{ kind: "ok" | "err"; text: string } | null>(
-    null,
-  );
 
   async function restartService(name: string) {
     setBusy(`restart:${name}`);
-    setFeedback(null);
     try {
       await apiFetch(`/api/services/${encodeURIComponent(name)}/restart`, {
         method: "POST",
       });
-      setFeedback({ kind: "ok", text: `${name} restart queued.` });
+      toast.ok(`${name} restart queued.`);
       services.refetch();
     } catch (err) {
-      setFeedback({
-        kind: "err",
-        text:
-          err instanceof ApiError
-            ? `${err.status}: ${err.message}`
-            : err instanceof Error
-              ? err.message
-              : String(err),
-      });
+      toastFromError(err, "Service restart failed.");
     } finally {
       setBusy(null);
     }
@@ -89,23 +78,14 @@ export function DiagnosticsRoute() {
 
   async function rebootBoard() {
     setBusy("reboot");
-    setFeedback(null);
     try {
       await rebootAgent();
-      setFeedback({
-        kind: "ok",
-        text: "Reboot queued. The dashboard will reconnect when the board comes back.",
-      });
+      toast.ok(
+        "Reboot queued.",
+        "The dashboard will reconnect when the board comes back.",
+      );
     } catch (err) {
-      setFeedback({
-        kind: "err",
-        text:
-          err instanceof ApiError
-            ? `${err.status}: ${err.message}`
-            : err instanceof Error
-              ? err.message
-              : String(err),
-      });
+      toastFromError(err, "Reboot failed.");
     } finally {
       setBusy(null);
     }
@@ -144,18 +124,6 @@ export function DiagnosticsRoute() {
         </Button>
       }
     >
-      {feedback && (
-        <div
-          className={`rounded-md border px-3 py-2 text-sm ${
-            feedback.kind === "ok"
-              ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"
-              : "border-red-500/40 bg-red-500/10 text-red-700 dark:text-red-300"
-          }`}
-        >
-          {feedback.text}
-        </div>
-      )}
-
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
         <MetricTile
           icon={Cpu}
@@ -259,8 +227,8 @@ export function DiagnosticsRoute() {
                   <span
                     className={`text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded border ${
                       svc.active
-                        ? "border-emerald-500/40 text-emerald-500"
-                        : "border-red-500/40 text-red-500"
+                        ? "border-ok/40 text-ok"
+                        : "border-destructive/40 text-destructive"
                     }`}
                   >
                     {svc.state}
@@ -342,9 +310,9 @@ function MetricTile({ icon: Icon, label, value, sub, tone }: TileProps) {
         <div
           className={`font-mono text-xl tabular-nums ${
             tone === "err"
-              ? "text-red-500"
+              ? "text-destructive"
               : tone === "warn"
-                ? "text-amber-500"
+                ? "text-warn"
                 : ""
           }`}
         >

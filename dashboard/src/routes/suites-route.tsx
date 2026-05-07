@@ -6,7 +6,8 @@ import { ConfirmDialog } from "@/components/settings/confirm-dialog";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { useResource } from "@/hooks/use-resource";
-import { ApiError, apiFetch } from "@/lib/api";
+import { apiFetch } from "@/lib/api";
+import { toast, toastFromError } from "@/lib/toast";
 
 interface SuiteEntry {
   id: string;
@@ -38,28 +39,16 @@ export function SuitesRoute() {
     suite: SuiteEntry;
     action: "activate" | "deactivate";
   } | null>(null);
-  const [feedback, setFeedback] = useState<{ kind: "ok" | "err"; text: string } | null>(
-    null,
-  );
 
   async function applyAction(suite: SuiteEntry, action: "activate" | "deactivate") {
-    setFeedback(null);
     try {
       await apiFetch(`/api/suites/${encodeURIComponent(suite.id)}/${action}`, {
         method: "POST",
       });
-      setFeedback({ kind: "ok", text: `${suite.id} ${action}d.` });
+      toast.ok(`${suite.id} ${action}d.`);
       list.refetch();
     } catch (err) {
-      setFeedback({
-        kind: "err",
-        text:
-          err instanceof ApiError
-            ? `${err.status}: ${err.message}`
-            : err instanceof Error
-              ? err.message
-              : String(err),
-      });
+      toastFromError(err, `Suite ${action} failed.`);
     }
   }
 
@@ -73,18 +62,6 @@ export function SuitesRoute() {
         </Button>
       }
     >
-      {feedback && (
-        <div
-          className={`rounded-md border px-3 py-2 text-sm ${
-            feedback.kind === "ok"
-              ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"
-              : "border-red-500/40 bg-red-500/10 text-red-700 dark:text-red-300"
-          }`}
-        >
-          {feedback.text}
-        </div>
-      )}
-
       {list.isLoading && (
         <p className="text-sm text-muted-foreground">loading…</p>
       )}
@@ -122,7 +99,7 @@ export function SuitesRoute() {
                     <span
                       className={`text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded border ${
                         active
-                          ? "border-emerald-500/40 text-emerald-500"
+                          ? "border-ok/40 text-ok"
                           : "border-muted-foreground/40 text-muted-foreground"
                       }`}
                     >

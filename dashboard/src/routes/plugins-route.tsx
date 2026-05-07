@@ -6,7 +6,8 @@ import { ConfirmDialog } from "@/components/settings/confirm-dialog";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { useResource } from "@/hooks/use-resource";
-import { ApiError, apiFetch } from "@/lib/api";
+import { apiFetch } from "@/lib/api";
+import { toast, toastFromError } from "@/lib/toast";
 
 interface PluginEntry {
   id: string;
@@ -36,31 +37,16 @@ export function PluginsRoute() {
     plugin: PluginEntry;
     action: "enable" | "disable";
   } | null>(null);
-  const [feedback, setFeedback] = useState<{ kind: "ok" | "err"; text: string } | null>(
-    null,
-  );
 
   async function applyAction(plugin: PluginEntry, action: "enable" | "disable") {
-    setFeedback(null);
     try {
       await apiFetch(`/api/plugins/${encodeURIComponent(plugin.id)}/${action}`, {
         method: "POST",
       });
-      setFeedback({
-        kind: "ok",
-        text: `${plugin.id} ${action}d.`,
-      });
+      toast.ok(`${plugin.id} ${action}d.`);
       list.refetch();
     } catch (err) {
-      setFeedback({
-        kind: "err",
-        text:
-          err instanceof ApiError
-            ? `${err.status}: ${err.message}`
-            : err instanceof Error
-              ? err.message
-              : String(err),
-      });
+      toastFromError(err, `Plugin ${action} failed.`);
     }
   }
 
@@ -76,18 +62,6 @@ export function PluginsRoute() {
     >
       {list.isLoading && (
         <p className="text-sm text-muted-foreground">loading…</p>
-      )}
-
-      {feedback && (
-        <div
-          className={`rounded-md border px-3 py-2 text-sm ${
-            feedback.kind === "ok"
-              ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"
-              : "border-red-500/40 bg-red-500/10 text-red-700 dark:text-red-300"
-          }`}
-        >
-          {feedback.text}
-        </div>
       )}
 
       {!list.isLoading && plugins.length === 0 && (
@@ -125,7 +99,7 @@ export function PluginsRoute() {
                     <span
                       className={`text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded border ${
                         enabled
-                          ? "border-emerald-500/40 text-emerald-500"
+                          ? "border-ok/40 text-ok"
                           : "border-muted-foreground/40 text-muted-foreground"
                       }`}
                     >

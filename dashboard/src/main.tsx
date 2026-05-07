@@ -9,7 +9,10 @@ import "./styles/globals.css";
 const queryClient = new QueryClient({
   defaultOptions: {
     queries: {
-      staleTime: 1_000,
+      // 5s staleTime keeps panels stable across remounts and tab focus
+      // events while leaving room for explicit polling intervals at the
+      // hook level for hot data (status / snapshot / heartbeat).
+      staleTime: 5_000,
       refetchOnWindowFocus: false,
       retry: 1,
     },

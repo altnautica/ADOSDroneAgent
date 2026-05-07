@@ -8,8 +8,8 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { useStatus } from "@/hooks/use-status";
-import { ApiError } from "@/lib/api";
 import { networkSectionSchema, postApply } from "@/lib/apply-actions";
+import { toast, toastFromError } from "@/lib/toast";
 
 export function NetworkSettings() {
   const status = useStatus();
@@ -22,10 +22,6 @@ export function NetworkSettings() {
   const [hotspot, setHotspot] = useState(initialHotspot);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [feedback, setFeedback] = useState<{
-    kind: "ok" | "err";
-    text: string;
-  } | null>(null);
   const [validationError, setValidationError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -59,7 +55,6 @@ export function NetworkSettings() {
 
   async function applyWifi() {
     setBusy(true);
-    setFeedback(null);
     try {
       const res = await postApply({
         network: {
@@ -69,27 +64,13 @@ export function NetworkSettings() {
       });
       const section = res.sections.network;
       if (res.overall && section?.ok) {
-        setFeedback({
-          kind: "ok",
-          text: section.message || "Wi-Fi credentials saved.",
-        });
+        toast.ok(section.message || "Wi-Fi credentials saved.");
         setPassword("");
       } else {
-        setFeedback({
-          kind: "err",
-          text: section?.message ?? "Apply failed.",
-        });
+        toast.err(section?.message ?? "Apply failed.");
       }
     } catch (err) {
-      setFeedback({
-        kind: "err",
-        text:
-          err instanceof ApiError
-            ? `${err.status}: ${err.message}`
-            : err instanceof Error
-              ? err.message
-              : String(err),
-      });
+      toastFromError(err, "Apply failed.");
     } finally {
       setBusy(false);
     }
@@ -103,24 +84,13 @@ export function NetworkSettings() {
       if (!res.overall || !section?.ok) {
         // Roll back the toggle locally if the apply failed.
         setHotspot(!next);
-        setFeedback({
-          kind: "err",
-          text: section?.message ?? "Hotspot toggle failed.",
-        });
+        toast.err(section?.message ?? "Hotspot toggle failed.");
       } else {
-        setFeedback({ kind: "ok", text: section.message || "Hotspot updated." });
+        toast.ok(section.message || "Hotspot updated.");
       }
     } catch (err) {
       setHotspot(!next);
-      setFeedback({
-        kind: "err",
-        text:
-          err instanceof ApiError
-            ? `${err.status}: ${err.message}`
-            : err instanceof Error
-              ? err.message
-              : String(err),
-      });
+      toastFromError(err, "Hotspot toggle failed.");
     }
   }
 
@@ -172,7 +142,7 @@ export function NetworkSettings() {
           </div>
 
           {validationError && (
-            <div className="rounded-md border border-red-500/40 bg-red-500/10 px-3 py-2 text-xs text-red-700 dark:text-red-300">
+            <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">
               {validationError}
             </div>
           )}
@@ -214,18 +184,6 @@ export function NetworkSettings() {
           />
         </CardContent>
       </Card>
-
-      {feedback && (
-        <div
-          className={`rounded-md border px-3 py-2 text-sm ${
-            feedback.kind === "ok"
-              ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"
-              : "border-red-500/40 bg-red-500/10 text-red-700 dark:text-red-300"
-          }`}
-        >
-          {feedback.text}
-        </div>
-      )}
 
       {hotspotDirty && (
         <p className="text-[11px] text-muted-foreground text-right">

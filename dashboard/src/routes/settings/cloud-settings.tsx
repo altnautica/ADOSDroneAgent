@@ -8,7 +8,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { RadioCardGroup } from "@/components/ui/radio-card-group";
 import { useStatus } from "@/hooks/use-status";
-import { ApiError } from "@/lib/api";
+import { toast, toastFromError } from "@/lib/toast";
 import { cloudSectionSchema, postApply } from "@/lib/apply-actions";
 
 type CloudMode = "cloud" | "self_hosted" | "local";
@@ -50,10 +50,6 @@ export function CloudSettings() {
 
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [feedback, setFeedback] = useState<{
-    kind: "ok" | "err";
-    text: string;
-  } | null>(null);
   const [validationError, setValidationError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -98,7 +94,6 @@ export function CloudSettings() {
 
   async function handleApply() {
     setBusy(true);
-    setFeedback(null);
     try {
       const res = await postApply({
         cloud:
@@ -116,27 +111,13 @@ export function CloudSettings() {
       });
       const section = res.sections.cloud;
       if (res.overall && section?.ok) {
-        setFeedback({
-          kind: "ok",
-          text: section.message || "Cloud posture saved.",
-        });
+        toast.ok(section.message || "Cloud posture saved.");
         setApiKey("");
       } else {
-        setFeedback({
-          kind: "err",
-          text: section?.message ?? "Apply failed.",
-        });
+        toast.err(section?.message ?? "Apply failed.");
       }
     } catch (err) {
-      setFeedback({
-        kind: "err",
-        text:
-          err instanceof ApiError
-            ? `${err.status}: ${err.message}`
-            : err instanceof Error
-              ? err.message
-              : String(err),
-      });
+      toastFromError(err, "Apply failed.");
     } finally {
       setBusy(false);
     }
@@ -227,24 +208,12 @@ export function CloudSettings() {
             </div>
 
             {validationError && (
-              <div className="rounded-md border border-red-500/40 bg-red-500/10 px-3 py-2 text-xs text-red-700 dark:text-red-300">
+              <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">
                 {validationError}
               </div>
             )}
           </CardContent>
         </Card>
-      )}
-
-      {feedback && (
-        <div
-          className={`rounded-md border px-3 py-2 text-sm ${
-            feedback.kind === "ok"
-              ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"
-              : "border-red-500/40 bg-red-500/10 text-red-700 dark:text-red-300"
-          }`}
-        >
-          {feedback.text}
-        </div>
       )}
 
       <div className="flex items-center justify-end gap-3">

@@ -8,6 +8,5 @@ export function useStatus() {
     queryKey: ["setup-status"],
     queryFn: ({ signal }) => apiFetch<SetupStatus>("/api/v1/setup/status", { signal }),
     refetchInterval: 8_000,
-    refetchOnWindowFocus: true,
   });
 }

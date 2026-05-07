@@ -68,9 +68,9 @@ export function WfbRxPanel() {
             <div
               className={`font-mono ${
                 lossSeverity === "err"
-                  ? "text-red-500"
+                  ? "text-destructive"
                   : lossSeverity === "warn"
-                    ? "text-amber-500"
+                    ? "text-warn"
                     : ""
               }`}
             >

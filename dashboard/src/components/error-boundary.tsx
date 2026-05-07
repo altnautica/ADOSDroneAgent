@@ -31,9 +31,9 @@ export class ErrorBoundary extends Component<Props, State> {
 
     return (
       <div className="container mx-auto px-4 py-10 max-w-2xl">
-        <div className="rounded-lg border border-red-500/40 bg-red-500/5 p-6 space-y-4">
+        <div className="rounded-lg border border-destructive/40 bg-destructive/5 p-6 space-y-4">
           <div className="flex items-start gap-3">
-            <AlertTriangle className="h-5 w-5 text-red-500 mt-0.5 shrink-0" />
+            <AlertTriangle className="h-5 w-5 text-destructive mt-0.5 shrink-0" />
             <div>
               <h2 className="text-base font-semibold">Something went wrong.</h2>
               <p className="text-sm text-muted-foreground mt-1">

@@ -50,11 +50,11 @@ export function MeshPanel() {
           <div
             className={`font-mono text-xs ${
               partitionTone === "ok"
-                ? "text-emerald-500"
+                ? "text-ok"
                 : partitionTone === "err"
-                  ? "text-red-500"
+                  ? "text-destructive"
                   : partitionTone === "warn"
-                    ? "text-amber-500"
+                    ? "text-warn"
                     : ""
             }`}
           >
