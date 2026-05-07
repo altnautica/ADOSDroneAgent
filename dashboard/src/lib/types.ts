@@ -139,9 +139,9 @@ export interface VideoSnapshot {
 }
 
 export interface FcSnapshot {
-  vehicle: string;
-  firmware: string;
-  mode: string;
+  vehicle: string | null;
+  firmware: string | null;
+  mode: string | null;
   armed: boolean;
   gps: { fix_type: number | null; satellites_visible: number | null; hdop: number | null };
   battery: { voltage: number | null; remaining: number | null };

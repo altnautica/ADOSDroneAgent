@@ -620,16 +620,24 @@ async def build_setup_status(runtime: Any, host_header: str | None = None) -> Se
 
 
 async def _video_access(runtime: Any, host_name: str) -> VideoAccess:
+    """Build the VideoAccess slice with WebRTC WHEP + HLS URLs.
+
+    HLS lives on a different mediamtx port (8888 by default) so it
+    bypasses CORS and works as a fallback when WebRTC is blocked.
+    The dashboard's video panel falls back to HLS when WHEP fails.
+    """
     pipeline = runtime.video_pipeline()
     if pipeline is not None:
         status = pipeline.get_status()
         mtx = status.get("mediamtx", {})
         running = bool(mtx.get("running"))
         webrtc_port = int(mtx.get("webrtc_port", 8889))
+        hls_port = int(mtx.get("hls_port", 8888))
         recorder = status.get("recorder", {})
         return VideoAccess(
             state="running" if running else str(status.get("state", "stopped")),
             whep_url=f"http://{host_name}:{webrtc_port}/main/whep" if running else None,
+            hls_url=f"http://{host_name}:{hls_port}/main/index.m3u8" if running else None,
             recording=bool(recorder.get("recording", False)),
         )
 
@@ -639,9 +647,11 @@ async def _video_access(runtime: Any, host_name: str) -> VideoAccess:
         mtx = await _probe_mediamtx()
         if mtx and mtx.get("ready"):
             webrtc_port = int(mtx.get("webrtc_port", 8889))
+            hls_port = int(mtx.get("hls_port", 8888))
             return VideoAccess(
                 state="running",
                 whep_url=f"http://{host_name}:{webrtc_port}/main/whep",
+                hls_url=f"http://{host_name}:{hls_port}/main/index.m3u8",
                 recording=False,
             )
     except Exception:

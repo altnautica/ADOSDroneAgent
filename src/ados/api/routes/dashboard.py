@@ -60,10 +60,18 @@ def _fc_slice(app: Any) -> dict[str, Any]:
     battery = veh.get("battery") if isinstance(veh, dict) else {}
     if not isinstance(battery, dict):
         battery = {}
+    # Return None for missing string fields so the dashboard can
+    # distinguish "FC connected but waiting for telemetry" from
+    # "FC reported empty values". Empty strings render as visible
+    # blanks in the UI rather than triggering the "—" fallback.
     return {
-        "vehicle": str(veh.get("vehicle_type") or ""),
-        "firmware": str(veh.get("autopilot") or ""),
-        "mode": str(veh.get("flight_mode") or veh.get("mode") or ""),
+        "vehicle": (str(veh.get("vehicle_type")) if veh.get("vehicle_type") else None),
+        "firmware": (str(veh.get("autopilot")) if veh.get("autopilot") else None),
+        "mode": (
+            str(veh.get("flight_mode") or veh.get("mode"))
+            if (veh.get("flight_mode") or veh.get("mode"))
+            else None
+        ),
         "armed": bool(veh.get("armed", False)),
         "gps": {
             "fix_type": gps.get("fix_type"),

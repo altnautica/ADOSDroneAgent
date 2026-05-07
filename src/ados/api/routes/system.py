@@ -38,14 +38,18 @@ async def get_system_resources():
             "temperatures": temps,
         }
     except ImportError:
+        # psutil missing — return null fields so the dashboard can
+        # render "—" rather than misleading zeros that look like an
+        # idle but live system.
         return {
-            "cpu_percent": 0,
-            "cpu_count": 1,
-            "memory_total_mb": 0,
-            "memory_used_mb": 0,
-            "memory_percent": 0,
-            "disk_total_gb": 0,
-            "disk_used_gb": 0,
-            "disk_percent": 0,
+            "cpu_percent": None,
+            "cpu_count": None,
+            "memory_total_mb": None,
+            "memory_used_mb": None,
+            "memory_percent": None,
+            "disk_total_gb": None,
+            "disk_used_gb": None,
+            "disk_percent": None,
             "temperatures": {},
+            "available": False,
         }

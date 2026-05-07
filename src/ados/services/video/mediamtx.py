@@ -179,7 +179,18 @@ class MediamtxManager:
             "webrtcICEServers2": [
                 {"url": stun_url} for stun_url in _DEFAULT_STUN_SERVERS
             ],
-            "hls": False,
+            # HLS is enabled so the dashboard's video player has a
+            # fallback when WebRTC (WHEP) is blocked by corporate
+            # networks or unsupported in the client browser. mediamtx
+            # serves HLS-LL on the same port as the dashboard proxy
+            # (8888 by default; see hlsAddress below).
+            "hls": True,
+            "hlsAddress": ":8888",
+            "hlsAlwaysRemux": True,
+            "hlsVariant": "lowLatency",
+            "hlsSegmentCount": 7,
+            "hlsSegmentDuration": "1s",
+            "hlsAllowOrigin": "*",
             "paths": {},
         }
         if lan_ips:

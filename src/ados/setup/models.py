@@ -41,6 +41,8 @@ class VideoAccess(BaseModel):
     state: str = "not_initialized"
     whep_url: str | None = None
     public_whep_url: str | None = None
+    hls_url: str | None = None
+    public_hls_url: str | None = None
     recording: bool = False
 
 
