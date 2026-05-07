@@ -244,11 +244,17 @@ error() { echo -e "${RED}[ERROR]${NC} $*"; }
 # ─── Installation Detection ─────────────────────────────────────────────────
 
 is_installed() {
-    [ -x "${VENV_DIR}/bin/ados" ] && "${VENV_DIR}/bin/ados" version &>/dev/null
+    # The CLI's `ados version` subcommand does not exist; checking the
+    # CLI binary's presence is enough to know the agent has been
+    # deployed to /opt/ados. The Python package always ships an
+    # __init__.py with the version constant.
+    [ -x "${VENV_DIR}/bin/ados" ] && [ -d "${VENV_DIR}/lib" ]
 }
 
 get_installed_version() {
-    "${VENV_DIR}/bin/ados" version 2>/dev/null | awk '{print $NF}' || echo "unknown"
+    # Read the version straight from the package's __init__.py rather
+    # than going through the CLI, which has no version subcommand.
+    "${VENV_DIR}/bin/python" -c "import ados; print(ados.__version__)" 2>/dev/null || echo "unknown"
 }
 
 # ─── Uninstall ───────────────────────────────────────────────────────────────
