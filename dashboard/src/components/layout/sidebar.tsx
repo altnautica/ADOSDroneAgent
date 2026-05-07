@@ -57,14 +57,14 @@ function droneItems(rosInstalled: boolean): NavItem[] {
 
 function groundItems(role: GroundRole): NavItem[] {
   const items: NavItem[] = [
-    { to: "/receive", label: "Receive", icon: Antenna, enabled: false },
+    { to: "/receive", label: "Receive", icon: Antenna, enabled: true },
     { to: "/io", label: "Display & Joystick", icon: Gamepad2, enabled: false },
   ];
   if (role === "relay" || role === "receiver") {
-    items.push({ to: "/mesh", label: "Mesh", icon: Network, enabled: false });
+    items.push({ to: "/mesh", label: "Mesh", icon: Network, enabled: true });
   }
   if (role === "receiver") {
-    items.push({ to: "/sources", label: "Sources", icon: Layers, enabled: false });
+    items.push({ to: "/sources", label: "Sources", icon: Layers, enabled: true });
   }
   return items;
 }

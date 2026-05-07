@@ -5,6 +5,11 @@ import { SettingsLayout } from "@/components/layout/settings-layout";
 import { ThemeProvider } from "@/components/theme-provider";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { ComingSoonRoute } from "@/routes/coming-soon";
+import {
+  MeshRoute,
+  ReceiveRoute,
+  SourcesRoute,
+} from "@/routes/ground-pages";
 import { HomeRoute } from "@/routes/home";
 import { IndexRedirect } from "@/routes/index-redirect";
 import { PairingRoute } from "@/routes/pairing-route";
@@ -25,6 +30,9 @@ export function App() {
             <Route path="/home" element={<HomeRoute />} />
             <Route path="/setup" element={<SetupRoute />} />
             <Route path="/pairing" element={<PairingRoute />} />
+            <Route path="/receive" element={<ReceiveRoute />} />
+            <Route path="/mesh" element={<MeshRoute />} />
+            <Route path="/sources" element={<SourcesRoute />} />
             <Route path="/settings" element={<SettingsLayout />}>
               <Route index element={<Navigate to="profile" replace />} />
               <Route path="profile" element={<ProfileSettings />} />
