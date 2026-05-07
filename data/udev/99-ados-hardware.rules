@@ -1,0 +1,33 @@
+# ADOS hardware-cache invalidation on USB hot-plug.
+#
+# Drives the per-item readiness on the dashboard's Hardware panel.
+# When the operator plugs or unplugs a camera, FC, ethernet adapter,
+# or LTE modem, the persisted snapshot at
+# /var/ados/setup/hardware-state.json is busted so the next API
+# call re-probes. The agent's cached runner re-reads on the next
+# /api/v1/setup/status hit (default poll cadence ~8 s).
+#
+# Match strategy: rather than hard-code vendor:product IDs (which
+# vary across cameras, FCs, USB-Ethernet dongles), trigger on USB
+# class. Class 14 (0x0e) = video, class 02 = communications/CDC
+# (modems, USB ethernet), class 02 + subclass 02 also covers ACM
+# serial commonly used by FCs.
+#
+# Each rule fires `ados hardware bust-cache --quiet` via systemd-run
+# so udev itself isn't blocked on the click invocation.
+
+ACTION=="add|remove", SUBSYSTEM=="usb", ATTR{bDeviceClass}=="0e", \
+    RUN+="/usr/bin/systemd-run --no-block /usr/local/bin/ados hardware bust-cache --quiet"
+
+ACTION=="add|remove", SUBSYSTEM=="usb", ATTR{bDeviceClass}=="02", \
+    RUN+="/usr/bin/systemd-run --no-block /usr/local/bin/ados hardware bust-cache --quiet"
+
+# USB serial subsystem: covers ACM (FCs running ArduPilot/Betaflight)
+# and FTDI/CP210x adapters. Filter on tty subsystem add/remove.
+ACTION=="add|remove", SUBSYSTEM=="tty", KERNEL=="ttyACM*|ttyUSB*", \
+    RUN+="/usr/bin/systemd-run --no-block /usr/local/bin/ados hardware bust-cache --quiet"
+
+# v4l2 nodes: covers any path that creates a /dev/video* node, including
+# CSI-attached cameras enumerating after a libcamera/rpicam restart.
+ACTION=="add|remove", SUBSYSTEM=="video4linux", \
+    RUN+="/usr/bin/systemd-run --no-block /usr/local/bin/ados hardware bust-cache --quiet"

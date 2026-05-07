@@ -1454,6 +1454,25 @@ enable_ground_station_units() {
         warn "Input udev rules source not found; skipping 99-ados-input.rules install."
     fi
 
+    # Install hardware-cache invalidation rules. udev fires
+    # `ados hardware bust-cache` on USB add/remove for cameras, FCs,
+    # USB ethernet, and v4l2 nodes so the dashboard reflects the
+    # change within one polling tick instead of waiting on the
+    # 30-second TTL. Always-on (no env gate) because every profile
+    # benefits.
+    local hw_udev_src=""
+    if [ -n "${FRESH_REPO_DIR:-}" ] && [ -f "${FRESH_REPO_DIR}/repo/data/udev/99-ados-hardware.rules" ]; then
+        hw_udev_src="${FRESH_REPO_DIR}/repo/data/udev/99-ados-hardware.rules"
+    elif [ -f "$(dirname "$0" 2>/dev/null)/../data/udev/99-ados-hardware.rules" ] 2>/dev/null; then
+        hw_udev_src="$(cd "$(dirname "$0")/../data/udev" && pwd)/99-ados-hardware.rules"
+    fi
+    if [ -n "${hw_udev_src}" ] && [ -f "${hw_udev_src}" ]; then
+        install -m 0644 "${hw_udev_src}" "/etc/udev/rules.d/99-ados-hardware.rules"
+        info "Hardware-cache udev rules installed."
+    else
+        warn "Hardware-cache udev rules source not found; skipping."
+    fi
+
     # Install modem hot-plug udev rule when the modem stack is enabled.
     # Gated on ADOS_ENABLE_MODEM=1 (matches the modemmanager apt install gate).
     if [ "${ADOS_ENABLE_MODEM:-0}" = "1" ]; then

@@ -423,5 +423,12 @@ def demo(port: int) -> None:
         loop.close()
 
 
+# Wire subcommand groups. Done at import time so the entry point in
+# pyproject.toml (ados = ados.cli.main:cli) sees the full command tree.
+from ados.cli.hardware import hardware_group  # noqa: E402
+
+cli.add_command(hardware_group)
+
+
 if __name__ == "__main__":
     cli()
