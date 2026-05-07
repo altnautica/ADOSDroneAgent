@@ -469,9 +469,12 @@ install_system_deps() {
         python3-venv \
         python3-pip \
         python3-dev \
+        python3-setuptools \
         libcap-dev \
         libsystemd-dev \
         libyaml-dev \
+        libsodium-dev \
+        libpcap-dev \
         build-essential \
         git \
         curl \
@@ -485,24 +488,54 @@ install_system_deps() {
         iw \
         wireless-regdb
 
-    # WFB-ng userspace (wfb_tx, wfb_rx, wfb_keygen). Available as
-    # `wfb-ng` apt package on Debian Bookworm/Trixie. Best-effort: a
-    # missing apt entry falls back to pip into the system Python so the
-    # binaries land on PATH. Both code paths put `wfb_tx` etc. in
-    # /usr/bin/ or /usr/local/bin/, on PATH for the agent.
-    if ! command -v wfb_tx >/dev/null 2>&1; then
-        if apt-cache show wfb-ng >/dev/null 2>&1; then
-            DEBIAN_FRONTEND=noninteractive apt-get install -y wfb-ng || \
-                warn "apt install wfb-ng failed; the agent's WFB services will not start."
-        else
-            info "wfb-ng not in apt, installing via pip..."
-            pip3 install --break-system-packages wfb-ng 2>/dev/null || \
-                pip3 install wfb-ng 2>/dev/null || \
-                warn "pip install wfb-ng failed; install manually via 'pip install wfb-ng'."
+    info "System dependencies installed."
+}
+
+# Build and install wfb-ng userspace (wfb_tx, wfb_rx, wfb_keygen,
+# wfb_tx_cmd, wfb_tun) from the vendored source tree at
+# vendor/wfb-ng/. Idempotent: skips if wfb_tx is already on PATH.
+# Installs to /usr/bin/ via the upstream setup.py data_files mapping,
+# so the binaries are reachable from the systemd unit's default PATH
+# without any extra Environment= directive.
+install_wfb_ng_from_vendor() {
+    if command -v wfb_tx >/dev/null 2>&1; then
+        info "wfb-ng already installed: $(command -v wfb_tx)"
+        return 0
+    fi
+
+    local vendor_dir=""
+    if [ -n "${FRESH_REPO_DIR:-}" ] && [ -d "${FRESH_REPO_DIR}/repo/vendor/wfb-ng" ]; then
+        vendor_dir="${FRESH_REPO_DIR}/repo/vendor/wfb-ng"
+    elif [ -d "$(dirname "$0" 2>/dev/null)/../vendor/wfb-ng" ] 2>/dev/null; then
+        vendor_dir="$(cd "$(dirname "$0")/../vendor/wfb-ng" && pwd)"
+    fi
+
+    if [ -z "${vendor_dir}" ] || [ ! -f "${vendor_dir}/Makefile" ]; then
+        warn "wfb-ng vendored source not found at vendor/wfb-ng/; ensure submodules were cloned."
+        return 0
+    fi
+
+    info "Building wfb-ng from vendored source at ${vendor_dir}..."
+    if ! ( cd "${vendor_dir}" && make all_bin >/tmp/wfb-ng-build.log 2>&1 ); then
+        warn "wfb-ng build failed; see /tmp/wfb-ng-build.log."
+        return 0
+    fi
+
+    info "Installing wfb-ng binaries to /usr/bin..."
+    if ! ( cd "${vendor_dir}" && /usr/bin/python3 setup.py install --root=/ --install-layout=deb >/tmp/wfb-ng-install.log 2>&1 ); then
+        # Fall back to standard install if --install-layout=deb is not
+        # available (debian helpers absent on some Radxa BSP images).
+        if ! ( cd "${vendor_dir}" && /usr/bin/python3 setup.py install >/tmp/wfb-ng-install.log 2>&1 ); then
+            warn "wfb-ng install failed; see /tmp/wfb-ng-install.log."
+            return 0
         fi
     fi
 
-    info "System dependencies installed."
+    if command -v wfb_tx >/dev/null 2>&1; then
+        info "wfb-ng installed: $(command -v wfb_tx)"
+    else
+        warn "wfb-ng install ran but wfb_tx not on PATH; check setup.py data_files paths."
+    fi
 }
 
 # ─── MediaMTX Installation ─────────────────────────────────────────────────
@@ -1819,9 +1852,9 @@ if is_installed && $DO_UPGRADE && ! $DO_FORCE; then
     # honor --branch for feature-branch installs
     if [ -n "$BRANCH_NAME" ]; then
         info "Using branch: ${BRANCH_NAME}"
-        git clone --depth 1 --quiet --branch "${BRANCH_NAME}" "${REPO_URL}" "${tmp_repo}/repo"
+        git clone --depth 1 --recurse-submodules --shallow-submodules --quiet --branch "${BRANCH_NAME}" "${REPO_URL}" "${tmp_repo}/repo"
     else
-        git clone --depth 1 --quiet "${REPO_URL}" "${tmp_repo}/repo"
+        git clone --depth 1 --recurse-submodules --shallow-submodules --quiet "${REPO_URL}" "${tmp_repo}/repo"
     fi
 
     # Upgrade pip package from cloned source (ensures version match)
@@ -1856,6 +1889,13 @@ if is_installed && $DO_UPGRADE && ! $DO_FORCE; then
     # without a fresh git clone.
     FRESH_REPO_DIR="${tmp_repo}" persist_repo_artifacts
 
+    # wfb-ng userspace from the vendored source — must run BEFORE the
+    # temp-repo cleanup so vendor/wfb-ng/ is still on disk. Build deps
+    # are best-effort; the function bails clean if anything is missing.
+    DEBIAN_FRONTEND=noninteractive apt-get install -y \
+        libsodium-dev libpcap-dev python3-setuptools 2>&1 | tail -2 || true
+    FRESH_REPO_DIR="${tmp_repo}" install_wfb_ng_from_vendor
+
     # Clean up temp repo
     rm -rf "${tmp_repo}"
 
@@ -1885,23 +1925,13 @@ if is_installed && $DO_UPGRADE && ! $DO_FORCE; then
         install_ground_station_driver
     fi
 
-    # iw + wfb-ng userspace on upgrade. Both are required by the WFB
-    # services; older install.sh versions did not provision them on the
-    # drone profile, so existing rigs need this catch-up. Idempotent.
+    # iw on upgrade. Required by WFB services for TX power control.
     if ! command -v iw >/dev/null 2>&1; then
         DEBIAN_FRONTEND=noninteractive apt-get install -y iw wireless-regdb || \
             warn "iw install failed; WFB services will not be able to set TX power."
     fi
-    if ! command -v wfb_tx >/dev/null 2>&1; then
-        if apt-cache show wfb-ng >/dev/null 2>&1; then
-            DEBIAN_FRONTEND=noninteractive apt-get install -y wfb-ng || \
-                warn "apt install wfb-ng failed; install manually with 'pip install wfb-ng'."
-        else
-            pip3 install --break-system-packages wfb-ng 2>/dev/null || \
-                pip3 install wfb-ng 2>/dev/null || \
-                warn "pip install wfb-ng failed; install manually."
-        fi
-    fi
+    # wfb-ng install moved earlier in the upgrade flow so it can reach
+    # the temp-repo's vendor/wfb-ng/ tree before cleanup.
 
     echo ""
     info "Upgrade complete."
@@ -1963,9 +1993,9 @@ if [ ! -d "$(dirname "$0" 2>/dev/null)/../data/systemd" ] 2>/dev/null; then
     # honor --branch for feature-branch installs
     if [ -n "$BRANCH_NAME" ]; then
         info "Using branch: ${BRANCH_NAME}"
-        git clone --depth 1 --quiet --branch "${BRANCH_NAME}" "${REPO_URL}" "${FRESH_REPO_DIR}/repo"
+        git clone --depth 1 --recurse-submodules --shallow-submodules --quiet --branch "${BRANCH_NAME}" "${REPO_URL}" "${FRESH_REPO_DIR}/repo"
     else
-        git clone --depth 1 --quiet "${REPO_URL}" "${FRESH_REPO_DIR}/repo"
+        git clone --depth 1 --recurse-submodules --shallow-submodules --quiet "${REPO_URL}" "${FRESH_REPO_DIR}/repo"
     fi
     SYSTEMD_SRC_DIR="${FRESH_REPO_DIR}/repo/data/systemd"
 fi
@@ -2040,6 +2070,11 @@ install_systemd_service
 # running agent can re-invoke them later (in particular the wizard's
 # display step). Runs from the freshly-cloned tree before cleanup.
 persist_repo_artifacts
+
+# wfb-ng userspace from the vendored source. Runs BEFORE the temp-repo
+# cleanup so vendor/wfb-ng/ is still on disk. Idempotent — skips when
+# wfb_tx is already present from a previous install.
+install_wfb_ng_from_vendor
 
 # Clean up temp repo if we cloned one
 if [ -n "${FRESH_REPO_DIR}" ]; then

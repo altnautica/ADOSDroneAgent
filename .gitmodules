@@ -1,3 +1,6 @@
 [submodule "vendor/rtl8812eu"]
 	path = vendor/rtl8812eu
 	url = https://github.com/svpcom/rtl8812eu.git
+[submodule "vendor/wfb-ng"]
+	path = vendor/wfb-ng
+	url = https://github.com/svpcom/wfb-ng.git
