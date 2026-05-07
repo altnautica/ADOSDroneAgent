@@ -1,0 +1,23 @@
+<?xml version="1.0" standalone='no'?>
+<!DOCTYPE service-group SYSTEM "avahi-service.dtd">
+<!--
+  Static fallback advertisement for the ground-station agent REST/WS
+  surface on the AP subnet. The agent process also registers the same
+  service in-process via the zeroconf library so TXT records carry the
+  current device_id and version. avahi-daemon picks up this file at
+  startup and re-publishes it whenever the daemon restarts, which keeps
+  discovery responsive even if the agent is briefly down.
+
+  Per-interface scoping is handled at runtime by the agent registration
+  (binds to wlan0's IP). avahi-daemon publishes globally; that is fine
+  because the AP subnet is only reachable through wlan0 anyway.
+-->
+<service-group>
+  <name replace-wildcards="yes">ADOS Ground Station on %h</name>
+  <service>
+    <type>_ados._tcp</type>
+    <port>8080</port>
+    <txt-record>profile=ground_station</txt-record>
+    <txt-record>path=/api/v1/ground-station</txt-record>
+  </service>
+</service-group>

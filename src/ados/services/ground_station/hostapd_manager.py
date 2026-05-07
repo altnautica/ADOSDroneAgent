@@ -29,17 +29,21 @@ import re
 import signal
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 import structlog
 
+if TYPE_CHECKING:
+    from ados.services.ground_station.mdns_announce import APAnnouncer
+
 from ados.core.config import load_config
 from ados.core.logging import configure_logging, get_logger
-from ados.core.subprocess import CmdTimeout, run_cmd_sync
 from ados.core.paths import (
     AP_PASSPHRASE_PATH,
     DNSMASQ_CONF_PATH,
     HOSTAPD_CONF_PATH,
 )
+from ados.core.subprocess import CmdTimeout, run_cmd_sync
 
 log = get_logger("ground_station.hostapd")
 
@@ -408,8 +412,45 @@ class HostapdManager:
         return True
 
 
+async def _run_ap_announcer(
+    announcer: APAnnouncer,
+    shutdown: asyncio.Event,
+    slog: Any,
+    initial_delay: float = 2.0,
+    retry_interval: float = 5.0,
+) -> None:
+    """Background task: keep an mDNS announcement alive while the AP is up.
+
+    Polls the wlan0 address until it matches the expected AP IP, then
+    registers the service. If the IP disappears later (interface flap,
+    operator turning the AP off), unregisters and waits for it to come
+    back. Runs until `shutdown` is set.
+    """
+    await asyncio.sleep(initial_delay)
+    registered = False
+    while not shutdown.is_set():
+        ap_up = announcer.is_ap_up()
+        if ap_up and not registered:
+            registered = announcer.start()
+            if not registered:
+                slog.warning("ap_announce_start_failed_will_retry")
+        elif not ap_up and registered:
+            announcer.stop()
+            registered = False
+            slog.info("ap_announce_paused_iface_down")
+        try:
+            await asyncio.wait_for(shutdown.wait(), timeout=retry_interval)
+        except TimeoutError:
+            continue
+    if registered:
+        announcer.stop()
+
+
 async def main() -> None:
     """Service entry point. Invoked by systemd via `python -m`."""
+    from ados import __version__ as agent_version
+    from ados.services.ground_station.mdns_announce import APAnnouncer
+
     config = load_config()
     configure_logging(config.logging.level)
     slog = structlog.get_logger()
@@ -448,9 +489,29 @@ async def main() -> None:
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, shutdown.set)
 
+    # Advertise the agent REST/WS surface on the AP so the Android
+    # client and any other LAN consumer can discover the endpoint
+    # without hardcoding the IP. Announcement lifecycle follows wlan0.
+    announcer = APAnnouncer(
+        port=8080,
+        device_id=device_id,
+        version=agent_version,
+        iface=manager.interface,
+    )
+    announcer_task = asyncio.create_task(
+        _run_ap_announcer(announcer, shutdown, slog)
+    )
+
     await shutdown.wait()
 
     slog.info("ground_hostapd_service_stopping")
+    announcer_task.cancel()
+    try:
+        await announcer_task
+    except asyncio.CancelledError:
+        pass
+    except Exception:
+        pass
     manager.stop()
     slog.info("ground_hostapd_service_stopped")
 
