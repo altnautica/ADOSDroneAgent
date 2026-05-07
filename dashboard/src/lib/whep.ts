@@ -47,10 +47,21 @@ export async function startWhep(
 
   const close = async () => {
     if (resourceUrl) {
+      // The handshake-time `signal` is typically already aborted by the
+      // time close() runs (cleanup aborts it before calling close).
+      // Use a fresh, short-lived signal so the DELETE actually reaches
+      // mediamtx and frees the consumer slot.
+      const deleteAc = new AbortController();
+      const t = setTimeout(() => deleteAc.abort(), 2000);
       try {
-        await fetch(resourceUrl, { method: "DELETE", signal });
+        await fetch(resourceUrl, {
+          method: "DELETE",
+          signal: deleteAc.signal,
+        });
       } catch {
         // ignore — connection is being torn down anyway
+      } finally {
+        clearTimeout(t);
       }
     }
     pc.getSenders().forEach((s) => s.track?.stop());

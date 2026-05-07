@@ -1,5 +1,6 @@
 import { Navigate, Route, Routes } from "react-router-dom";
 
+import { ErrorBoundary } from "@/components/error-boundary";
 import { AppShell } from "@/components/layout/app-shell";
 import { SettingsLayout } from "@/components/layout/settings-layout";
 import { ThemeProvider } from "@/components/theme-provider";
@@ -31,42 +32,44 @@ export function App() {
   return (
     <ThemeProvider>
       <TooltipProvider delayDuration={200}>
-        <Routes>
-          <Route element={<AppShell />}>
-            <Route index element={<IndexRedirect />} />
-            <Route path="/home" element={<HomeRoute />} />
-            <Route path="/setup" element={<SetupRoute />} />
-            <Route path="/pairing" element={<PairingRoute />} />
-            <Route path="/receive" element={<ReceiveRoute />} />
-            <Route path="/mesh" element={<MeshRoute />} />
-            <Route path="/sources" element={<SourcesRoute />} />
-            <Route path="/plugins" element={<PluginsRoute />} />
-            <Route path="/peripherals" element={<PeripheralsRoute />} />
-            <Route path="/suites" element={<SuitesRoute />} />
-            <Route path="/ota" element={<OtaRoute />} />
-            <Route path="/logs" element={<LogsRoute />} />
-            <Route path="/ros" element={<RosRoute />} />
-            <Route path="/diagnostics" element={<DiagnosticsRoute />} />
-            <Route path="/settings" element={<SettingsLayout />}>
-              <Route index element={<Navigate to="profile" replace />} />
-              <Route path="profile" element={<ProfileSettings />} />
-              <Route path="network" element={<NetworkSettings />} />
-              <Route path="cloud" element={<CloudSettings />} />
-              <Route path="display" element={<DisplaySettings />} />
-              <Route path="advanced" element={<AdvancedSettings />} />
+        <ErrorBoundary>
+          <Routes>
+            <Route element={<AppShell />}>
+              <Route index element={<IndexRedirect />} />
+              <Route path="/home" element={<HomeRoute />} />
+              <Route path="/setup" element={<SetupRoute />} />
+              <Route path="/pairing" element={<PairingRoute />} />
+              <Route path="/receive" element={<ReceiveRoute />} />
+              <Route path="/mesh" element={<MeshRoute />} />
+              <Route path="/sources" element={<SourcesRoute />} />
+              <Route path="/plugins" element={<PluginsRoute />} />
+              <Route path="/peripherals" element={<PeripheralsRoute />} />
+              <Route path="/suites" element={<SuitesRoute />} />
+              <Route path="/ota" element={<OtaRoute />} />
+              <Route path="/logs" element={<LogsRoute />} />
+              <Route path="/ros" element={<RosRoute />} />
+              <Route path="/diagnostics" element={<DiagnosticsRoute />} />
+              <Route path="/settings" element={<SettingsLayout />}>
+                <Route index element={<Navigate to="profile" replace />} />
+                <Route path="profile" element={<ProfileSettings />} />
+                <Route path="network" element={<NetworkSettings />} />
+                <Route path="cloud" element={<CloudSettings />} />
+                <Route path="display" element={<DisplaySettings />} />
+                <Route path="advanced" element={<AdvancedSettings />} />
+              </Route>
+              <Route
+                path="*"
+                element={
+                  <ComingSoonRoute
+                    title="Coming soon"
+                    description="This page hasn't been wired into the new dashboard yet."
+                  />
+                }
+              />
             </Route>
-            <Route
-              path="*"
-              element={
-                <ComingSoonRoute
-                  title="Coming soon"
-                  description="This page hasn't been wired into the new dashboard yet."
-                />
-              }
-            />
-          </Route>
-          <Route path="*" element={<Navigate to="/" replace />} />
-        </Routes>
+            <Route path="*" element={<Navigate to="/" replace />} />
+          </Routes>
+        </ErrorBoundary>
       </TooltipProvider>
     </ThemeProvider>
   );

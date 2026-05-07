@@ -154,7 +154,14 @@ export function SetupRoute() {
           });
         }
         await finishMut.mutateAsync();
-        navigate("/", { replace: true });
+        // Force the setup-status cache to refresh BEFORE navigating
+        // so IndexRedirect sees setup_finalized=true and routes
+        // straight to /home (no flash of the wizard).
+        await qc.invalidateQueries({
+          queryKey: ["setup-status"],
+          refetchType: "all",
+        });
+        navigate("/home", { replace: true });
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);

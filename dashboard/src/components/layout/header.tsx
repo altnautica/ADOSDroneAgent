@@ -59,7 +59,7 @@ function CopyHost({ host }: { host: string }) {
 export function Header() {
   const status = useStatus();
   const heartbeat = useHeartbeat();
-  const toggleSidebar = useUiStore((s) => s.toggleSidebar);
+  const toggleMobileNav = useUiStore((s) => s.toggleMobileNav);
 
   const host = status.data?.device_name ?? "device";
   const profile = status.data?.profile ?? "auto";
@@ -77,7 +77,7 @@ export function Header() {
           size="icon"
           className="lg:hidden"
           aria-label="toggle navigation"
-          onClick={toggleSidebar}
+          onClick={toggleMobileNav}
         >
           <Menu />
         </Button>

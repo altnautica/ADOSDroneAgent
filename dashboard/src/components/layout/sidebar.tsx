@@ -45,7 +45,7 @@ const COMMON_BOTTOM: NavItem[] = [
   { to: "/settings", label: "Settings", icon: SettingsIcon, enabled: true },
 ];
 
-function droneItems(_rosInstalled: boolean): NavItem[] {
+function droneItems(): NavItem[] {
   // ROS is always linked — the route itself shows an "install ROS"
   // empty state when the overlay isn't present, which is friendlier
   // than hiding the link and leaving operators wondering where to go.
@@ -70,12 +70,8 @@ function groundItems(role: GroundRole): NavItem[] {
   return items;
 }
 
-function itemsForProfile(
-  profile: Profile,
-  role: GroundRole,
-  rosInstalled: boolean,
-): NavItem[] {
-  if (profile === "drone") return droneItems(rosInstalled);
+function itemsForProfile(profile: Profile, role: GroundRole): NavItem[] {
+  if (profile === "drone") return droneItems();
   if (profile === "ground_station") return groundItems(role);
   return [];
 }
@@ -132,39 +128,82 @@ function SidebarLink({ item, collapsed }: SidebarLinkProps) {
 export function Sidebar() {
   const status = useStatus();
   const collapsed = useUiStore((s) => s.sidebarCollapsed);
+  const mobileNavOpen = useUiStore((s) => s.mobileNavOpen);
+  const closeMobileNav = useUiStore((s) => s.closeMobileNav);
 
   const profile: Profile = (status.data?.profile as Profile) ?? "auto";
   const role: GroundRole = status.data?.ground_role ?? "direct";
-  const rosInstalled = false;
 
-  const profileItems = itemsForProfile(profile, role, rosInstalled);
+  const profileItems = itemsForProfile(profile, role);
+
+  // Auto-close the mobile drawer on navigation (NavLink click).
+  // Implementation: every SidebarLink calls closeMobileNav on click.
+
+  const navList = (mobileMode: boolean) => (
+    <nav
+      className="flex-1 py-3 px-2 space-y-0.5 overflow-y-auto"
+      onClick={mobileMode ? closeMobileNav : undefined}
+    >
+      {COMMON_TOP.map((item) => (
+        <SidebarLink
+          key={item.to}
+          item={item}
+          collapsed={mobileMode ? false : collapsed}
+        />
+      ))}
+
+      {profileItems.length > 0 && (
+        <>
+          <Separator className="my-2" />
+          {profileItems.map((item) => (
+            <SidebarLink
+              key={item.to}
+              item={item}
+              collapsed={mobileMode ? false : collapsed}
+            />
+          ))}
+        </>
+      )}
+
+      <Separator className="my-2" />
+      {COMMON_BOTTOM.map((item) => (
+        <SidebarLink
+          key={item.to}
+          item={item}
+          collapsed={mobileMode ? false : collapsed}
+        />
+      ))}
+    </nav>
+  );
 
   return (
-    <aside
-      className={cn(
-        "hidden lg:flex flex-col border-r border-border bg-background/40 transition-[width]",
-        collapsed ? "w-16" : "w-56",
-      )}
-    >
-      <nav className="flex-1 py-3 px-2 space-y-0.5 overflow-y-auto">
-        {COMMON_TOP.map((item) => (
-          <SidebarLink key={item.to} item={item} collapsed={collapsed} />
-        ))}
-
-        {profileItems.length > 0 && (
-          <>
-            <Separator className="my-2" />
-            {profileItems.map((item) => (
-              <SidebarLink key={item.to} item={item} collapsed={collapsed} />
-            ))}
-          </>
+    <>
+      {/* Desktop sidebar — always-visible at lg+, width controlled by collapsed */}
+      <aside
+        className={cn(
+          "hidden lg:flex flex-col border-r border-border bg-background/40 transition-[width]",
+          collapsed ? "w-16" : "w-56",
         )}
+      >
+        {navList(false)}
+      </aside>
 
-        <Separator className="my-2" />
-        {COMMON_BOTTOM.map((item) => (
-          <SidebarLink key={item.to} item={item} collapsed={collapsed} />
-        ))}
-      </nav>
-    </aside>
+      {/* Mobile drawer — overlay below lg, controlled by mobileNavOpen */}
+      {mobileNavOpen && (
+        <>
+          <div
+            className="lg:hidden fixed inset-0 z-40 bg-black/60 backdrop-blur-sm"
+            aria-hidden
+            onClick={closeMobileNav}
+          />
+          <aside
+            className="lg:hidden fixed inset-y-0 left-0 z-50 flex w-64 flex-col border-r border-border bg-background"
+            aria-label="navigation"
+          >
+            {navList(true)}
+          </aside>
+        </>
+      )}
+    </>
   );
 }
