@@ -65,7 +65,7 @@ def _make_sha_text(version: str = "0.2.0") -> str:
 
 
 def _patched_client(
-    release_payload: dict,
+    release_payload: dict | list,
     sha_text: str | None = None,
     release_status: int = 200,
 ):
@@ -75,7 +75,15 @@ def _patched_client(
     for the release JSON, one for the SHA256SUMS text. Each open spins
     up a fresh client. We use a module-scoped counter so each factory
     call returns the correct staged response.
+
+    `release_payload` may be either a single release dict (which is wrapped
+    in a list to match the GitHub /releases endpoint shape the checker now
+    consumes) or a pre-built list of release dicts when tests need to
+    exercise multi-release filtering.
     """
+    if isinstance(release_payload, dict):
+        release_payload = [release_payload]
+
     release_resp = MagicMock()
     release_resp.status_code = release_status
     release_resp.json.return_value = release_payload
@@ -116,6 +124,15 @@ def test_version_tuple_comparison():
     assert _version_tuple("0.2.0") > _version_tuple("0.1.0")
     assert _version_tuple("1.0.0") > _version_tuple("0.99.99")
     assert _version_tuple("0.1.0") == _version_tuple("0.1.0")
+
+
+def test_version_tuple_returns_none_on_bad_input():
+    # Tags that don't fit the semver shape return None rather than silently
+    # coercing to (0, ...). Callers must treat None as a hard skip.
+    assert _version_tuple("lite-v0.1.5") is None
+    assert _version_tuple("not-a-version") is None
+    assert _version_tuple("1.2.beta") is None
+    assert _version_tuple("") is None
 
 
 @pytest.mark.asyncio
@@ -213,6 +230,78 @@ async def test_check_handles_missing_wheel_asset():
 
     # No wheel asset means the release is unusable; checker returns None.
     assert result is None
+
+
+@pytest.mark.asyncio
+async def test_check_skips_lite_tag_and_picks_full_agent_release():
+    """When a lite-vX.Y.Z release sits ahead of a vX.Y.Z full-agent release
+    in the /releases listing (lite ships from the same repo with newer
+    chronology), the checker must skip the lite entry and select the
+    full-agent one.
+    """
+    config = OtaConfig()
+    checker = UpdateChecker(config)
+
+    lite_release = _make_release("0.1.5")
+    lite_release["tag_name"] = "lite-v0.1.5"  # override default v-prefixed tag
+    full_release = _make_release("0.13.4")
+
+    with patch(
+        "ados.services.ota.checker.httpx.AsyncClient",
+        side_effect=_patched_client(
+            [lite_release, full_release], _make_sha_text("0.13.4")
+        ),
+    ):
+        result = await checker.check_for_update("0.11.3")
+
+    assert result is not None
+    assert result.version == "0.13.4"
+
+
+@pytest.mark.asyncio
+async def test_check_returns_none_when_only_lite_tags_present():
+    """If every published release is for a different tag line (e.g. only
+    lite-v* and lite-image-v* tags exist), the checker must return None
+    instead of falling back to a misleading "no update" against parsed-as-0
+    versions.
+    """
+    config = OtaConfig()
+    checker = UpdateChecker(config)
+
+    lite = _make_release("0.1.5")
+    lite["tag_name"] = "lite-v0.1.5"
+    image = _make_release("0.1.0")
+    image["tag_name"] = "lite-image-v0.1.0"
+
+    with patch(
+        "ados.services.ota.checker.httpx.AsyncClient",
+        side_effect=_patched_client([lite, image]),
+    ):
+        result = await checker.check_for_update("0.11.3")
+
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_check_skips_drafts_and_prereleases_on_stable():
+    config = OtaConfig()  # default channel = "stable"
+    checker = UpdateChecker(config)
+
+    draft = _make_release("0.14.0", draft=True)
+    prerelease = _make_release("0.13.5")
+    prerelease["prerelease"] = True
+    stable = _make_release("0.13.4")
+
+    with patch(
+        "ados.services.ota.checker.httpx.AsyncClient",
+        side_effect=_patched_client(
+            [draft, prerelease, stable], _make_sha_text("0.13.4")
+        ),
+    ):
+        result = await checker.check_for_update("0.11.3")
+
+    assert result is not None
+    assert result.version == "0.13.4"
 
 
 @pytest.mark.asyncio

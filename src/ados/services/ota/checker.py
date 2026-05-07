@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from collections.abc import Callable
 
 import httpx
@@ -15,15 +16,24 @@ log = get_logger("ota-checker")
 
 GITHUB_API = "https://api.github.com"
 
+# Full-agent release tags only. Other tag lines (e.g. lite agent at
+# `lite-vX.Y.Z`, image builds at `lite-image-vX.Y.Z`) ship from the same
+# repo and must not be considered as upgrade candidates for the full agent.
+_FULL_AGENT_TAG = re.compile(r"^v\d+\.\d+\.\d+$")
 
-def _version_tuple(version: str) -> tuple[int, ...]:
-    """Parse a semver string into a comparable tuple."""
+
+def _version_tuple(version: str) -> tuple[int, ...] | None:
+    """Parse a strict semver string into a comparable tuple.
+
+    Returns None if any segment is not a non-negative integer. Callers must
+    treat None as a hard failure rather than silently comparing 0s.
+    """
     parts: list[int] = []
     for segment in version.lstrip("v").split("."):
         try:
             parts.append(int(segment))
         except ValueError:
-            parts.append(0)
+            return None
     return tuple(parts)
 
 
@@ -53,10 +63,11 @@ class UpdateChecker:
         repo = self._config.github_repo
         channel = self._config.channel
 
-        if channel == "stable":
-            url = f"{GITHUB_API}/repos/{repo}/releases/latest"
-        else:
-            url = f"{GITHUB_API}/repos/{repo}/releases"
+        # Always list releases. The /releases/latest endpoint returns the
+        # newest non-prerelease across every release line in the repo,
+        # which is wrong as soon as more than one tag scheme ships from
+        # the same repo (full agent + lite agent + image builds).
+        url = f"{GITHUB_API}/repos/{repo}/releases"
 
         log.info("checking_for_update", url=url, current=current_version, channel=channel)
 
@@ -72,8 +83,16 @@ class UpdateChecker:
                 if resp.status_code == 304:
                     log.info("github_cache_hit", msg="no changes since last check")
                     if self._cached_manifest:
-                        cached_ver = self._cached_manifest.version
-                        if _version_tuple(cached_ver) > _version_tuple(current_version):
+                        cached_tuple = _version_tuple(self._cached_manifest.version)
+                        current_tuple = _version_tuple(current_version)
+                        if cached_tuple is None or current_tuple is None:
+                            log.warning(
+                                "version_parse_failed_on_cache_hit",
+                                cached=self._cached_manifest.version,
+                                current=current_version,
+                            )
+                            return None
+                        if cached_tuple > current_tuple:
                             return self._cached_manifest
                         return None
                     return None
@@ -95,25 +114,46 @@ class UpdateChecker:
             log.warning("update_check_failed", error=str(exc))
             return None
 
-        # For non-stable channels, pick first non-draft release (may be prerelease)
-        if channel != "stable" and isinstance(data, list):
-            release = None
-            for r in data:
-                if not r.get("draft", False):
-                    release = r
-                    break
-            if not release:
-                log.info("no_releases_found")
-                return None
-        else:
-            release = data
+        if not isinstance(data, list):
+            log.warning("releases_response_not_list", type=type(data).__name__)
+            return None
+
+        # Walk newest-first (GitHub orders by created_at desc) and pick the
+        # first non-draft release that matches the full-agent tag pattern.
+        # Stable channel additionally rejects prereleases. Lite agent and
+        # image-build releases ship from this same repo with their own tag
+        # prefixes and must be skipped here.
+        release = None
+        for r in data:
+            if r.get("draft", False):
+                continue
+            if channel == "stable" and r.get("prerelease", False):
+                continue
+            tag = r.get("tag_name", "")
+            if not _FULL_AGENT_TAG.match(tag):
+                continue
+            release = r
+            break
+
+        if release is None:
+            log.info("no_eligible_release", channel=channel, candidates=len(data))
+            return None
 
         release_version = release.get("tag_name", "").lstrip("v")
         if not release_version:
             log.warning("release_missing_tag")
             return None
 
-        if _version_tuple(release_version) <= _version_tuple(current_version):
+        release_tuple = _version_tuple(release_version)
+        current_tuple = _version_tuple(current_version)
+        if release_tuple is None or current_tuple is None:
+            log.warning(
+                "version_parse_failed",
+                latest=release_version,
+                current=current_version,
+            )
+            return None
+        if release_tuple <= current_tuple:
             log.info("no_update_available", latest=release_version, current=current_version)
             return None
 
