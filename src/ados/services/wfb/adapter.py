@@ -288,6 +288,67 @@ def set_monitor_mode(interface: str) -> bool:
     return True
 
 
+def set_tx_power(interface: str, dbm: int) -> int | None:
+    """Set TX power on a WiFi interface via `iw`. Returns effective dBm.
+
+    `iw dev <iface> set txpower fixed <mBm>` where mBm is millibel-milliwatts
+    (1 dBm = 100 mBm). The driver may reject very low values depending on
+    the regulatory domain; on rejection this falls back through 1 → 5 → 7
+    → 10 dBm and returns whichever step succeeded, or None if all failed.
+    """
+    system = platform.system()
+    if system != "Linux":
+        log.warning("set_tx_power_unsupported", platform=system)
+        return None
+
+    _validate_interface_name(interface)
+
+    ramp = [dbm]
+    for fallback in (5, 7, 10):
+        if fallback > dbm and fallback not in ramp:
+            ramp.append(fallback)
+
+    for candidate_dbm in ramp:
+        mbm = int(candidate_dbm) * 100
+        cmd = ["iw", "dev", interface, "set", "txpower", "fixed", str(mbm)]
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if result.returncode == 0:
+                if candidate_dbm != dbm:
+                    log.warning(
+                        "wfb_txpower_fallback",
+                        requested_dbm=dbm,
+                        applied_dbm=candidate_dbm,
+                    )
+                else:
+                    log.info(
+                        "wfb_txpower_applied",
+                        interface=interface,
+                        dbm=candidate_dbm,
+                    )
+                return candidate_dbm
+            log.debug(
+                "wfb_txpower_rejected",
+                interface=interface,
+                dbm=candidate_dbm,
+                stderr=result.stderr.strip(),
+            )
+        except FileNotFoundError:
+            log.error("wfb_txpower_tool_missing", cmd=cmd[0])
+            return None
+        except subprocess.TimeoutExpired:
+            log.error("wfb_txpower_timeout", interface=interface)
+            return None
+
+    log.error("wfb_txpower_all_steps_rejected", interface=interface, requested_dbm=dbm)
+    return None
+
+
 def set_managed_mode(interface: str) -> bool:
     """Restore a WiFi interface to managed mode.
 

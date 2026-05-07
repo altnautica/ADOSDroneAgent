@@ -481,7 +481,26 @@ install_system_deps() {
         gstreamer1.0-tools \
         gstreamer1.0-plugins-base \
         gstreamer1.0-plugins-good \
-        gstreamer1.0-rtsp
+        gstreamer1.0-rtsp \
+        iw \
+        wireless-regdb
+
+    # WFB-ng userspace (wfb_tx, wfb_rx, wfb_keygen). Available as
+    # `wfb-ng` apt package on Debian Bookworm/Trixie. Best-effort: a
+    # missing apt entry falls back to pip into the system Python so the
+    # binaries land on PATH. Both code paths put `wfb_tx` etc. in
+    # /usr/bin/ or /usr/local/bin/, on PATH for the agent.
+    if ! command -v wfb_tx >/dev/null 2>&1; then
+        if apt-cache show wfb-ng >/dev/null 2>&1; then
+            DEBIAN_FRONTEND=noninteractive apt-get install -y wfb-ng || \
+                warn "apt install wfb-ng failed; the agent's WFB services will not start."
+        else
+            info "wfb-ng not in apt, installing via pip..."
+            pip3 install --break-system-packages wfb-ng 2>/dev/null || \
+                pip3 install wfb-ng 2>/dev/null || \
+                warn "pip install wfb-ng failed; install manually via 'pip install wfb-ng'."
+        fi
+    fi
 
     info "System dependencies installed."
 }
@@ -1856,6 +1875,34 @@ if is_installed && $DO_UPGRADE && ! $DO_FORCE; then
         install_mesh_deps
     fi
 
+    # RTL8812EU DKMS driver on upgrade for both drone and ground_station
+    # profiles. Idempotent: the installer no-ops when the module is
+    # already loaded. Earlier releases shipped this for ground-station
+    # only, so existing drone rigs need a one-time catch-up here.
+    if [ "${ADOS_PROFILE:-}" = "ground_station" ] \
+       || [ "${ADOS_PROFILE:-}" = "ground-station" ] \
+       || [ "${ADOS_PROFILE:-}" = "drone" ]; then
+        install_ground_station_driver
+    fi
+
+    # iw + wfb-ng userspace on upgrade. Both are required by the WFB
+    # services; older install.sh versions did not provision them on the
+    # drone profile, so existing rigs need this catch-up. Idempotent.
+    if ! command -v iw >/dev/null 2>&1; then
+        DEBIAN_FRONTEND=noninteractive apt-get install -y iw wireless-regdb || \
+            warn "iw install failed; WFB services will not be able to set TX power."
+    fi
+    if ! command -v wfb_tx >/dev/null 2>&1; then
+        if apt-cache show wfb-ng >/dev/null 2>&1; then
+            DEBIAN_FRONTEND=noninteractive apt-get install -y wfb-ng || \
+                warn "apt install wfb-ng failed; install manually with 'pip install wfb-ng'."
+        else
+            pip3 install --break-system-packages wfb-ng 2>/dev/null || \
+                pip3 install wfb-ng 2>/dev/null || \
+                warn "pip install wfb-ng failed; install manually."
+        fi
+    fi
+
     echo ""
     info "Upgrade complete."
     print_pairing_code
@@ -1941,6 +1988,15 @@ info "Agent profile: ${ADOS_PROFILE}"
 if [ "${ADOS_PROFILE}" = "ground_station" ] || [ "${ADOS_PROFILE}" = "ground-station" ]; then
     install_ground_station_deps
     install_ground_station_driver
+
+# Drone profile also needs the RTL8812EU DKMS driver (it's the air side
+# of the WFB-ng radio pair, transmitting). Same idempotent installer
+# the ground-station path uses.
+elif [ "${ADOS_PROFILE}" = "drone" ]; then
+    install_ground_station_driver
+fi
+
+if [ "${ADOS_PROFILE}" = "ground_station" ] || [ "${ADOS_PROFILE}" = "ground-station" ]; then
     info "Installing ground-station Python extras..."
     if [ -n "${FRESH_REPO_DIR}" ]; then
         "${VENV_DIR}/bin/pip" install "${FRESH_REPO_DIR}/repo[ground-station]" --quiet || \

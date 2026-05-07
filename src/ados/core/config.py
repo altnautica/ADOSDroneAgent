@@ -83,9 +83,53 @@ class MavlinkConfig(BaseModel):
 class WfbConfig(BaseModel):
     interface: str = ""
     channel: int = 149
-    tx_power: int = 25
+    # TX power in dBm. RTL8812EU + USB host VBUS topology browns out
+    # the dongle above ~18 dBm sustained. Default is the floor for
+    # bench bring-up; raise via PUT /api/wfb/tx-power once the link is
+    # validated. Hard ceiling is enforced at validation time.
+    tx_power_dbm: int = 5
+    tx_power_max_dbm: int = 15
+    # MCS index passed to wfb_tx -M. Default 1 (low-bitrate, robust).
+    # Distinct from tx_power_dbm — earlier code conflated the two.
+    mcs_index: int = 1
+    # Power-supply topology hint for the WFB radio. Drives the brownout
+    # warning in GCS/LCD. host_vbus = USB-A VBUS straight to dongle
+    # VDD5.0 (default; what most bench rigs do). powered_hub = external
+    # 5 V hub between SBC and dongle. external_5v = dongle has its own
+    # 5 V rail wired directly.
+    topology: Literal["host_vbus", "powered_hub", "external_5v"] = "host_vbus"
     fec_k: int = 8
     fec_n: int = 12
+
+    @model_validator(mode="before")
+    @classmethod
+    def _migrate_legacy_tx_power(cls, values):
+        """Bridge the old `tx_power` YAML field to `tx_power_dbm`.
+
+        Earlier releases shipped `tx_power: 25` but fed the value to
+        `wfb_tx -M`, which is the MCS index, not radio power. Real TX
+        power was never set; the dongle ran at driver default (often
+        17-20 dBm, the brownout band on host-VBUS topology). The legacy
+        value is therefore meaningless and is dropped, not migrated.
+        Operators get the new safe default unless they have already
+        written `tx_power_dbm` explicitly.
+        """
+        if not isinstance(values, dict):
+            return values
+        if "tx_power" in values and "tx_power_dbm" not in values:
+            values.pop("tx_power", None)
+        elif "tx_power" in values:
+            # Both present — drop the legacy alias, keep the new field.
+            values.pop("tx_power", None)
+        return values
+
+    @model_validator(mode="after")
+    def _clamp_tx_power(self):
+        if self.tx_power_dbm > self.tx_power_max_dbm:
+            self.tx_power_dbm = self.tx_power_max_dbm
+        if self.tx_power_dbm < 1:
+            self.tx_power_dbm = 1
+        return self
 
 
 class CameraConfig(BaseModel):

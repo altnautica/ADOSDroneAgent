@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 
 from ados.core.logging import get_logger
 from ados.core.paths import WFB_KEY_DIR
-from ados.services.wfb.adapter import detect_wfb_adapters, set_monitor_mode
+from ados.services.wfb.adapter import detect_wfb_adapters, set_monitor_mode, set_tx_power
 from ados.services.wfb.key_mgr import get_key_paths, key_exists
 from ados.services.wfb.link_quality import LinkQualityMonitor, LinkStats
 
@@ -46,6 +46,7 @@ class WfbManager:
         self._monitor = LinkQualityMonitor()
         self._interface: str = ""
         self._channel: int = config.channel
+        self._effective_tx_power_dbm: int | None = None
         self._running = False
         self._restart_count = 0
         self._max_restarts = 10
@@ -88,7 +89,34 @@ class WfbManager:
             "bitrate_kbps": stats.bitrate_kbps,
             "restart_count": self._restart_count,
             "samples": self._monitor.sample_count,
+            "tx_power_dbm": self._effective_tx_power_dbm,
+            "tx_power_max_dbm": self._config.tx_power_max_dbm,
+            "mcs_index": self._config.mcs_index,
+            "topology": self._config.topology,
         }
+
+    @property
+    def effective_tx_power_dbm(self) -> int | None:
+        """Last effective TX power applied via iw, or None if never set."""
+        return self._effective_tx_power_dbm
+
+    def apply_tx_power(self, dbm: int) -> int | None:
+        """Apply a TX power setting against the live monitor interface.
+
+        Clamps to [1, tx_power_max_dbm]. Returns the effective dBm
+        reported by the driver, or None if no interface is up yet.
+        """
+        if not self._interface:
+            log.warning("wfb_apply_txpower_no_interface")
+            return None
+        clamped = max(1, min(int(dbm), self._config.tx_power_max_dbm))
+        if clamped != dbm:
+            log.info("wfb_txpower_clamped", requested=dbm, clamped=clamped)
+        effective = set_tx_power(self._interface, clamped)
+        if effective is not None:
+            self._effective_tx_power_dbm = effective
+            self._config.tx_power_dbm = effective
+        return effective
 
     async def start_tx(self, interface: str, channel: int) -> bool:
         """Launch wfb_tx subprocess.
@@ -108,7 +136,7 @@ class WfbManager:
             "-K", tx_key,
             "-B", str(self._config.fec_k),
             "-r", str(self._config.fec_n),
-            "-M", str(self._config.tx_power),
+            "-M", str(self._config.mcs_index),
             interface,
         ]
 
@@ -245,6 +273,21 @@ class WfbManager:
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, 30.0)
                 continue
+
+            # Step 2b: Apply TX power on the monitor interface BEFORE
+            # wfb_tx starts. wfb_tx itself does not set radio power; it
+            # is set on the netdev via `iw set txpower fixed`. Without
+            # this, the dongle runs at driver default (~17-20 dBm) and
+            # browns out on host-VBUS topology within seconds of the
+            # first sustained TX burst.
+            effective = set_tx_power(interface, self._config.tx_power_dbm)
+            self._effective_tx_power_dbm = effective
+            if effective is None:
+                log.warning(
+                    "wfb_txpower_not_applied",
+                    interface=interface,
+                    requested=self._config.tx_power_dbm,
+                )
 
             # Step 3: Check for encryption keys
             if not key_exists():

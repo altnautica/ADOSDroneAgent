@@ -12,7 +12,7 @@ from ados.services.wfb.manager import LinkState, WfbManager
 
 @pytest.fixture
 def wfb_config() -> WfbConfig:
-    return WfbConfig(interface="wlan0", channel=149, tx_power=25, fec_k=8, fec_n=12)
+    return WfbConfig(interface="wlan0", channel=149, tx_power_dbm=5, fec_k=8, fec_n=12)
 
 
 @pytest.fixture
@@ -109,3 +109,58 @@ def test_update_state_connecting(manager: WfbManager):
     stats = LinkStats(rssi_dbm=-55.0, loss_percent=0.0, packets_received=0)
     manager._update_state_from_stats(stats)
     assert manager.state == LinkState.CONNECTING
+
+
+def test_wfb_config_legacy_tx_power_dropped():
+    """Old YAML field `tx_power` was MCS-index in disguise; drop it on load."""
+    cfg = WfbConfig.model_validate({"tx_power": 25})
+    assert cfg.tx_power_dbm == 5
+    assert cfg.mcs_index == 1
+    assert cfg.topology == "host_vbus"
+
+
+def test_wfb_config_clamps_to_ceiling():
+    cfg = WfbConfig(tx_power_dbm=99)
+    assert cfg.tx_power_dbm == cfg.tx_power_max_dbm == 15
+
+
+def test_wfb_config_clamps_to_floor():
+    cfg = WfbConfig(tx_power_dbm=0)
+    assert cfg.tx_power_dbm == 1
+
+
+def test_get_status_carries_tx_power(manager: WfbManager):
+    status = manager.get_status()
+    assert status["tx_power_dbm"] is None  # never applied yet
+    assert status["tx_power_max_dbm"] == 15
+    assert status["topology"] == "host_vbus"
+    assert status["mcs_index"] == 1
+
+
+def test_apply_tx_power_no_interface(manager: WfbManager):
+    assert manager.apply_tx_power(5) is None
+
+
+def test_apply_tx_power_clamps_above_ceiling(manager: WfbManager):
+    manager._interface = "wlan1"
+    with patch("ados.services.wfb.manager.set_tx_power", return_value=15) as mock_set:
+        effective = manager.apply_tx_power(99)
+    assert effective == 15
+    mock_set.assert_called_once_with("wlan1", 15)
+    assert manager.effective_tx_power_dbm == 15
+
+
+def test_apply_tx_power_clamps_below_floor(manager: WfbManager):
+    manager._interface = "wlan1"
+    with patch("ados.services.wfb.manager.set_tx_power", return_value=1) as mock_set:
+        effective = manager.apply_tx_power(0)
+    assert effective == 1
+    mock_set.assert_called_once_with("wlan1", 1)
+
+
+def test_apply_tx_power_returns_none_on_driver_reject(manager: WfbManager):
+    manager._interface = "wlan1"
+    with patch("ados.services.wfb.manager.set_tx_power", return_value=None):
+        effective = manager.apply_tx_power(5)
+    assert effective is None
+    assert manager.effective_tx_power_dbm is None
