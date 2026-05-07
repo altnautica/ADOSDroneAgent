@@ -523,10 +523,23 @@ install_wfb_ng_from_vendor() {
     fi
 
     info "Installing wfb-ng binaries to /usr/bin..."
-    if ! ( cd "${vendor_dir}" && /usr/bin/python3 setup.py install --root=/ --install-layout=deb >/tmp/wfb-ng-install.log 2>&1 ); then
+    # setup.py expects VERSION + COMMIT env vars; the upstream Makefile
+    # exports them via git describe but we invoke setup.py directly,
+    # so derive both from the vendored .git tree (or fall back when
+    # the submodule was cloned with --depth 1 and lacks tags).
+    local _wfb_commit _wfb_version _wfb_epoch
+    _wfb_commit="$( cd "${vendor_dir}" && git rev-parse HEAD 2>/dev/null || echo release )"
+    _wfb_epoch="$( cd "${vendor_dir}" && git show -s --format='%ct' HEAD 2>/dev/null || date +%s )"
+    _wfb_version="$( cd "${vendor_dir}" && /usr/bin/python3 ./version.py "${_wfb_epoch}" stable 2>/dev/null || echo 0.0.0 )"
+    info "wfb-ng version=${_wfb_version} commit=${_wfb_commit:0:8}"
+    if ! ( cd "${vendor_dir}" && \
+           VERSION="${_wfb_version}" COMMIT="${_wfb_commit}" SOURCE_DATE_EPOCH="${_wfb_epoch}" \
+           /usr/bin/python3 setup.py install --root=/ --install-layout=deb >/tmp/wfb-ng-install.log 2>&1 ); then
         # Fall back to standard install if --install-layout=deb is not
         # available (debian helpers absent on some Radxa BSP images).
-        if ! ( cd "${vendor_dir}" && /usr/bin/python3 setup.py install >/tmp/wfb-ng-install.log 2>&1 ); then
+        if ! ( cd "${vendor_dir}" && \
+               VERSION="${_wfb_version}" COMMIT="${_wfb_commit}" SOURCE_DATE_EPOCH="${_wfb_epoch}" \
+               /usr/bin/python3 setup.py install >/tmp/wfb-ng-install.log 2>&1 ); then
             warn "wfb-ng install failed; see /tmp/wfb-ng-install.log."
             return 0
         fi
