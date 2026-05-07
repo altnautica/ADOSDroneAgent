@@ -113,6 +113,14 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         return direct_ip
 
     async def dispatch(self, request: Request, call_next: Callable) -> Response:  # type: ignore[type-arg]
+        # Static-asset and webapp paths bypass the limiter. Browsers fan
+        # out 30+ parallel module fetches when first loading the
+        # one-pager dashboard SPA, which would otherwise blow past the
+        # token bucket on a perfectly normal visit and blank the page.
+        # The limiter exists to protect the actual REST surface.
+        if not request.url.path.startswith("/api/"):
+            return await call_next(request)
+
         client_ip = self._get_client_ip(request)
 
         if not self._limiter.allow(client_ip):
