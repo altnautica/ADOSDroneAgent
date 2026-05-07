@@ -5,6 +5,7 @@ import { SettingsLayout } from "@/components/layout/settings-layout";
 import { ThemeProvider } from "@/components/theme-provider";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { ComingSoonRoute } from "@/routes/coming-soon";
+import { DiagnosticsRoute } from "@/routes/diagnostics-route";
 import {
   MeshRoute,
   ReceiveRoute,
@@ -12,13 +13,17 @@ import {
 } from "@/routes/ground-pages";
 import { HomeRoute } from "@/routes/home";
 import { IndexRedirect } from "@/routes/index-redirect";
+import { OtaRoute } from "@/routes/ota-route";
 import { PairingRoute } from "@/routes/pairing-route";
+import { PeripheralsRoute } from "@/routes/peripherals-route";
+import { PluginsRoute } from "@/routes/plugins-route";
 import { SetupRoute } from "@/routes/setup-route";
 import { AdvancedSettings } from "@/routes/settings/advanced-settings";
 import { CloudSettings } from "@/routes/settings/cloud-settings";
 import { DisplaySettings } from "@/routes/settings/display-settings";
 import { NetworkSettings } from "@/routes/settings/network-settings";
 import { ProfileSettings } from "@/routes/settings/profile-settings";
+import { SuitesRoute } from "@/routes/suites-route";
 
 export function App() {
   return (
@@ -33,6 +38,11 @@ export function App() {
             <Route path="/receive" element={<ReceiveRoute />} />
             <Route path="/mesh" element={<MeshRoute />} />
             <Route path="/sources" element={<SourcesRoute />} />
+            <Route path="/plugins" element={<PluginsRoute />} />
+            <Route path="/peripherals" element={<PeripheralsRoute />} />
+            <Route path="/suites" element={<SuitesRoute />} />
+            <Route path="/ota" element={<OtaRoute />} />
+            <Route path="/diagnostics" element={<DiagnosticsRoute />} />
             <Route path="/settings" element={<SettingsLayout />}>
               <Route index element={<Navigate to="profile" replace />} />
               <Route path="profile" element={<ProfileSettings />} />

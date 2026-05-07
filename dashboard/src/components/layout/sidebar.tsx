@@ -36,12 +36,12 @@ const COMMON_TOP: NavItem[] = [{ to: "/", label: "Home", icon: Home, enabled: tr
 
 const COMMON_BOTTOM: NavItem[] = [
   { to: "/pairing", label: "Pairing", icon: Link2, enabled: true },
-  { to: "/plugins", label: "Plugins", icon: Plug, enabled: false },
-  { to: "/peripherals", label: "Peripherals", icon: Cpu, enabled: false },
-  { to: "/suites", label: "Suites", icon: Package, enabled: false },
-  { to: "/ota", label: "Updates", icon: ArrowUpFromLine, enabled: false },
+  { to: "/plugins", label: "Plugins", icon: Plug, enabled: true },
+  { to: "/peripherals", label: "Peripherals", icon: Cpu, enabled: true },
+  { to: "/suites", label: "Suites", icon: Package, enabled: true },
+  { to: "/ota", label: "Updates", icon: ArrowUpFromLine, enabled: true },
   { to: "/logs", label: "Logs", icon: ScrollText, enabled: false },
-  { to: "/diagnostics", label: "Diagnostics", icon: Wrench, enabled: false },
+  { to: "/diagnostics", label: "Diagnostics", icon: Wrench, enabled: true },
   { to: "/settings", label: "Settings", icon: SettingsIcon, enabled: true },
 ];
 
