@@ -1474,6 +1474,31 @@ enable_ground_station_units() {
     # Single reload + trigger after all rule copies (efficient).
     udevadm control --reload 2>/dev/null || true
     udevadm trigger 2>/dev/null || true
+
+    # Static avahi service file so `_ados._tcp` is browseable even when
+    # the agent process is restarting. The agent also registers the same
+    # service in-process via the zeroconf library with live TXT records
+    # (device_id, version); this static copy is a fallback baseline.
+    local avahi_src=""
+    if [ -n "${FRESH_REPO_DIR:-}" ] && [ -f "${FRESH_REPO_DIR}/repo/data/avahi/ados-gs-ap.service" ]; then
+        avahi_src="${FRESH_REPO_DIR}/repo/data/avahi/ados-gs-ap.service"
+    elif [ -f "$(dirname "$0" 2>/dev/null)/../data/avahi/ados-gs-ap.service" ] 2>/dev/null; then
+        avahi_src="$(cd "$(dirname "$0")/../data/avahi" && pwd)/ados-gs-ap.service"
+    fi
+    if [ -n "${avahi_src}" ] && [ -f "${avahi_src}" ]; then
+        install -d -m 0755 /etc/avahi/services
+        install -m 0644 "${avahi_src}" /etc/avahi/services/ados-gs-ap.service
+        info "Avahi service file installed."
+        # Reload avahi so the new service file is picked up without a
+        # full daemon restart (sending SIGHUP is the documented way).
+        if systemctl is-active avahi-daemon >/dev/null 2>&1; then
+            systemctl reload avahi-daemon 2>/dev/null \
+                || systemctl restart avahi-daemon 2>/dev/null \
+                || true
+        fi
+    else
+        warn "Avahi service source not found; skipping ados-gs-ap.service install."
+    fi
 }
 
 # ─── Global Symlinks ──────────────────────────────────────────────────────
@@ -1526,6 +1551,54 @@ print_pairing_code() {
     fi
 }
 
+# ─── Print Hardware Summary ─────────────────────────────────────────────────
+
+# Force a fresh probe via POST /api/v1/setup/hardware-check/refresh so
+# the persisted snapshot reflects whatever was hot-plugged during the
+# install, then render the per-item state inline. Keeps the bench
+# operator from having to open the GCS just to confirm "all required
+# components ok" right after install.
+print_hardware_summary() {
+    [ "$(uname -s)" = "Linux" ] || return 0
+    local body
+    body=$(curl -fsS --max-time 8 -X POST \
+        http://127.0.0.1:8080/api/v1/setup/hardware-check/refresh 2>/dev/null || true)
+    [ -n "${body}" ] || return 0
+
+    local rendered
+    rendered=$(printf '%s' "${body}" | python3 -c "
+import json, sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+items = d.get('items') or []
+if not items:
+    sys.exit(0)
+icon = {'ok': 'OK ', 'warning': 'WARN', 'missing': 'MISS', 'unknown': '?   ', 'checking': '... '}
+required = [i for i in items if i.get('required')]
+optional = [i for i in items if not i.get('required')]
+print('  Required:')
+for i in required:
+    state = i.get('state', 'unknown')
+    label = i.get('label', i.get('id', '?'))
+    detail = (i.get('detail') or '').splitlines()[0][:64]
+    print(f\"    [{icon.get(state, '?  ')}] {label:30s} {detail}\")
+if optional:
+    print('  Optional:')
+    for i in optional:
+        state = i.get('state', 'unknown')
+        label = i.get('label', i.get('id', '?'))
+        detail = (i.get('detail') or '').splitlines()[0][:64]
+        print(f\"    [{icon.get(state, '?  ')}] {label:30s} {detail}\")
+" 2>/dev/null || true)
+    [ -n "${rendered}" ] || return 0
+
+    echo ""
+    echo -e "${BOLD}--- Hardware probe ---${NC}"
+    printf '%s\n' "${rendered}"
+}
+
 # ─── Print Status Summary ───────────────────────────────────────────────────
 
 print_status() {
@@ -1540,6 +1613,8 @@ print_status() {
     # bound, the operator races the supervisor's startup. Pi 4B class
     # hardware needs ~75s; budget plenty of headroom for slower SBCs.
     wait_for_api_ready 180 || true
+
+    print_hardware_summary
 
     echo ""
     echo -e "${BOLD}=== Installation Complete ===${NC}"
