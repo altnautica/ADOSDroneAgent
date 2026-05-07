@@ -32,9 +32,19 @@ from ados.api.routes.ground_station.mavlink_ws import router as _mavlink_ws_rout
 from ados.api.routes.ground_station.mesh import router as _mesh_router
 from ados.api.routes.ground_station.network import router as _network_router
 from ados.api.routes.ground_station.pairing import router as _pairing_router
+from ados.api.routes.ground_station.recording import router as _recording_router
 from ados.api.routes.ground_station.status import router as _status_router
 from ados.api.routes.ground_station.ui import router as _ui_router
 from ados.api.routes.ground_station.wfb import router as _wfb_router
+
+
+# Singleton accessor for the ground-station recorder. Exposed on the
+# package so tests can monkeypatch it via `setattr(gs, "_recorder", ...)`
+# the same way `_pair_manager`, `_ethernet_mgr`, etc. work.
+def _recorder():
+    from ados.services.ground_station.recorder import get_recorder
+
+    return get_recorder()
 
 
 router = APIRouter()
@@ -45,6 +55,7 @@ router.include_router(_ui_router)
 router.include_router(_mesh_router)
 router.include_router(_pairing_router)
 router.include_router(_mavlink_ws_router)
+router.include_router(_recording_router)
 
 
 __all__ = ["router"]

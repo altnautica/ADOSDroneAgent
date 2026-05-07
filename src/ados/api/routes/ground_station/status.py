@@ -87,6 +87,15 @@ async def get_ground_station_status() -> dict[str, Any]:
     except Exception:
         pass
 
+    # Live recorder state. Wrapped in a try/except so a recorder
+    # subsystem fault never crashes the /status endpoint that drives
+    # the OLED + GCS Hardware tab.
+    recording_active = False
+    try:
+        recording_active = bool(_gs._recorder().is_active())
+    except Exception:
+        recording_active = False
+
     return {
         "profile": "ground_station",
         "paired_drone": {
@@ -100,7 +109,7 @@ async def get_ground_station_status() -> dict[str, Any]:
         "gcs": {"clients": [], "pic_id": None},
         "network": _gs._network_view(app),
         "system": _gs._system_snapshot(),
-        "recording": False,
+        "recording": recording_active,
         "role": role_block,
         "mesh": mesh_block,
     }
