@@ -13,10 +13,12 @@ import {
 } from "@/routes/ground-pages";
 import { HomeRoute } from "@/routes/home";
 import { IndexRedirect } from "@/routes/index-redirect";
+import { LogsRoute } from "@/routes/logs-route";
 import { OtaRoute } from "@/routes/ota-route";
 import { PairingRoute } from "@/routes/pairing-route";
 import { PeripheralsRoute } from "@/routes/peripherals-route";
 import { PluginsRoute } from "@/routes/plugins-route";
+import { RosRoute } from "@/routes/ros-route";
 import { SetupRoute } from "@/routes/setup-route";
 import { AdvancedSettings } from "@/routes/settings/advanced-settings";
 import { CloudSettings } from "@/routes/settings/cloud-settings";
@@ -42,6 +44,8 @@ export function App() {
             <Route path="/peripherals" element={<PeripheralsRoute />} />
             <Route path="/suites" element={<SuitesRoute />} />
             <Route path="/ota" element={<OtaRoute />} />
+            <Route path="/logs" element={<LogsRoute />} />
+            <Route path="/ros" element={<RosRoute />} />
             <Route path="/diagnostics" element={<DiagnosticsRoute />} />
             <Route path="/settings" element={<SettingsLayout />}>
               <Route index element={<Navigate to="profile" replace />} />

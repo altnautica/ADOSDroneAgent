@@ -40,18 +40,19 @@ const COMMON_BOTTOM: NavItem[] = [
   { to: "/peripherals", label: "Peripherals", icon: Cpu, enabled: true },
   { to: "/suites", label: "Suites", icon: Package, enabled: true },
   { to: "/ota", label: "Updates", icon: ArrowUpFromLine, enabled: true },
-  { to: "/logs", label: "Logs", icon: ScrollText, enabled: false },
+  { to: "/logs", label: "Logs", icon: ScrollText, enabled: true },
   { to: "/diagnostics", label: "Diagnostics", icon: Wrench, enabled: true },
   { to: "/settings", label: "Settings", icon: SettingsIcon, enabled: true },
 ];
 
-function droneItems(rosInstalled: boolean): NavItem[] {
+function droneItems(_rosInstalled: boolean): NavItem[] {
+  // ROS is always linked — the route itself shows an "install ROS"
+  // empty state when the overlay isn't present, which is friendlier
+  // than hiding the link and leaving operators wondering where to go.
   return [
     { to: "/telemetry", label: "Telemetry", icon: Radio, enabled: false },
     { to: "/video", label: "Video", icon: Video, enabled: false },
-    ...(rosInstalled
-      ? [{ to: "/ros", label: "ROS", icon: Bot, enabled: false } as NavItem]
-      : []),
+    { to: "/ros", label: "ROS", icon: Bot, enabled: true },
   ];
 }
 
