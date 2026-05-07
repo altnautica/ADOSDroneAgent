@@ -19,7 +19,7 @@ export interface SetupStatus {
   setup_finalized: boolean;
   setup_state?: string;
   profile_source?: string;
-  profile_suggestion?: Profile;
+  profile_suggestion?: ProfileSuggestion;
   completion_percent: number;
   next_action?: string;
   steps?: SetupStep[];
@@ -31,6 +31,18 @@ export interface SetupStatus {
   hardware_check?: HardwareCheck;
   remote_access?: RemoteAccess;
   access_urls?: AccessUrls;
+}
+
+export interface ProfileSuggestion {
+  detected: Profile;
+  source: string;
+  ground_role_hint?: GroundRole;
+  ground_score?: number;
+  air_score?: number;
+  mesh_capable?: boolean;
+  signals?: Record<string, unknown>;
+  confirmed?: boolean;
+  detected_at?: string;
 }
 
 export interface SetupStep {

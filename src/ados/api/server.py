@@ -124,9 +124,17 @@ def create_app(agent: Any) -> FastAPI:
     # Browser dashboard. Mounted AFTER every router above so API routes
     # match first and `/` serves the SPA entry. The TypeScript source
     # lives at ADOSDroneAgent/dashboard/; CI builds it and copies the
-    # output into the ``ados.dashboard.dist`` package on the wheel.
+    # output into the ``ados.dashboard.static`` package on the wheel.
     # Resolved via ``importlib.resources`` so editable installs and
     # wheel installs both find the same files.
+    #
+    # The dashboard is a client-routed SPA (react-router): direct URL
+    # loads of paths like /setup or /pairing must resolve to index.html
+    # so the router can take over. StaticFiles in html=True mode only
+    # serves index.html for directories, not arbitrary missing paths.
+    # SpaStaticFiles below adds a 404 → index.html fallback for any
+    # request that doesn't map to a real asset and isn't an /api/* path
+    # (those are handled earlier in the middleware chain).
     from importlib.resources import files
     try:
         import ados.dashboard as _dashboard_pkg
@@ -141,9 +149,38 @@ def create_app(agent: Any) -> FastAPI:
             f"Dashboard static directory missing at {static_dir}. "
             "Run scripts/build-dashboard.sh or reinstall the agent package."
         )
+
+    from starlette.exceptions import HTTPException as StarletteHTTPException
+    from starlette.responses import FileResponse, Response
+
+    class SpaStaticFiles(StaticFiles):
+        """StaticFiles + SPA fallback. Unknown paths return index.html
+        (200) so the React router can resolve client-side routes; real
+        asset 404s still bubble up because they live under /assets/* and
+        404 there is a packaging bug, not a missing route.
+        """
+
+        index_path: Path
+
+        def __init__(self, *, directory: str, **kwargs: Any) -> None:
+            super().__init__(directory=directory, html=True, **kwargs)
+            self.index_path = Path(directory) / "index.html"
+
+        async def get_response(self, path: str, scope: dict) -> Response:  # type: ignore[override]
+            try:
+                return await super().get_response(path, scope)
+            except StarletteHTTPException as exc:
+                if exc.status_code != 404:
+                    raise
+                # Don't fall back for asset paths — those should 404 cleanly
+                # so the user sees missing files instead of a silent index.
+                if path.startswith("assets/") or "." in path.rsplit("/", 1)[-1]:
+                    raise
+                return FileResponse(self.index_path)
+
     app.mount(
         "/",
-        StaticFiles(directory=str(static_dir), html=True),
+        SpaStaticFiles(directory=str(static_dir)),
         name="dashboard_static",
     )
 

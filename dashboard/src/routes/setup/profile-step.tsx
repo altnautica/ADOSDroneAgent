@@ -63,12 +63,17 @@ function suggestedFrom(status: SetupStatus | undefined): {
   role: GroundRole;
   source: string;
 } {
-  const profile = (status?.profile_suggestion as Profile) ?? status?.profile ?? "drone";
-  const role = status?.ground_role ?? "direct";
+  const fromSuggestion = status?.profile_suggestion?.detected;
+  const fromStatus = status?.profile;
+  const profile: Profile = fromSuggestion ?? fromStatus ?? "drone";
+  const role: GroundRole =
+    status?.profile_suggestion?.ground_role_hint ??
+    status?.ground_role ??
+    "direct";
   return {
     profile: profile === "auto" || profile === "unknown" ? "drone" : profile,
     role,
-    source: status?.profile_source ?? "unknown",
+    source: status?.profile_suggestion?.source ?? status?.profile_source ?? "unknown",
   };
 }
 
