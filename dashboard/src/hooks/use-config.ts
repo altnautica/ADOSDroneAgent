@@ -1,0 +1,40 @@
+import { useQuery } from "@tanstack/react-query";
+
+import { apiFetch } from "@/lib/api";
+
+// Loose shape — the agent returns a Pydantic dump with secrets redacted.
+// We only consume the agent slice for log level and a couple of advanced
+// fields. Everything else is opaque pass-through and ignored.
+export interface AgentConfig {
+  agent?: {
+    profile?: string;
+    log_level?: string;
+    board_override?: string;
+  };
+  ground_station?: {
+    role?: string;
+  };
+  network?: {
+    wifi_client?: { ssid?: string };
+    hotspot?: { enabled?: boolean };
+  };
+  server?: {
+    mode?: string;
+    self_hosted?: {
+      url?: string;
+      mqtt_broker?: string;
+      mqtt_port?: number;
+      api_key?: string;
+    };
+  };
+  [key: string]: unknown;
+}
+
+export function useConfig() {
+  return useQuery<AgentConfig>({
+    queryKey: ["config"],
+    queryFn: () => apiFetch<AgentConfig>("/api/config"),
+    staleTime: 30_000,
+    refetchOnWindowFocus: false,
+  });
+}

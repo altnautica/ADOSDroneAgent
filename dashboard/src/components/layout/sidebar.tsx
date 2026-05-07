@@ -42,7 +42,7 @@ const COMMON_BOTTOM: NavItem[] = [
   { to: "/ota", label: "Updates", icon: ArrowUpFromLine, enabled: false },
   { to: "/logs", label: "Logs", icon: ScrollText, enabled: false },
   { to: "/diagnostics", label: "Diagnostics", icon: Wrench, enabled: false },
-  { to: "/settings", label: "Settings", icon: SettingsIcon, enabled: false },
+  { to: "/settings", label: "Settings", icon: SettingsIcon, enabled: true },
 ];
 
 function droneItems(rosInstalled: boolean): NavItem[] {
