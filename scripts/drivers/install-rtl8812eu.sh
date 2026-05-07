@@ -124,22 +124,22 @@ else
     warn "Mesh-enable patch not found at ${PATCH_FILE}. 802.11s mesh mode will not be compiled in."
 fi
 
-# Register source tree with DKMS (idempotent)
-if ! dkms status "${DKMS_PACKAGE}" 2>/dev/null | grep -q "${DRIVER_VERSION}"; then
-    info "dkms add ${VENDOR_DIR}"
-    dkms add "${VENDOR_DIR}" || {
-        # A stale /var/lib/dkms/${DKMS_PACKAGE} from a prior install is the usual culprit
-        warn "dkms add failed; attempting remove + retry."
-        dkms remove "${DKMS_NAME}" --all 2>/dev/null || true
-        rm -rf "/var/lib/dkms/${DKMS_PACKAGE}/${DRIVER_VERSION}" 2>/dev/null || true
-        dkms add "${VENDOR_DIR}" || {
-            error "dkms add failed after retry."
-            exit 2
-        }
-    }
-else
-    info "DKMS source already registered."
+# Register source tree with DKMS. When the source is already registered
+# we remove + re-add so that any updates to dkms.conf in the vendored
+# tree (including the USER_EXTRA_CFLAGS patch above) take effect on the
+# next build. dkms copies the source at `add` time and never re-reads it
+# until the entry is removed.
+if dkms status "${DKMS_PACKAGE}" 2>/dev/null | grep -q "${DRIVER_VERSION}"; then
+    info "Refreshing existing DKMS source registration."
+    dkms remove "${DKMS_NAME}" --all 2>/dev/null || true
+    rm -rf "/var/lib/dkms/${DKMS_PACKAGE}/${DRIVER_VERSION}" 2>/dev/null || true
 fi
+
+info "dkms add ${VENDOR_DIR}"
+dkms add "${VENDOR_DIR}" || {
+    error "dkms add failed."
+    exit 2
+}
 
 # The vendored Makefile resolves ARCH from `uname -m`. On aarch64 hosts
 # that yields the literal "aarch64", which the kernel build rejects
