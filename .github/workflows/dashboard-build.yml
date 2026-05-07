@@ -1,0 +1,45 @@
+name: dashboard-build
+
+on:
+  push:
+    paths:
+      - "dashboard/**"
+      - "scripts/build-dashboard.sh"
+      - ".github/workflows/dashboard-build.yml"
+  pull_request:
+    paths:
+      - "dashboard/**"
+      - "scripts/build-dashboard.sh"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: dashboard/package-lock.json
+
+      - name: Install dependencies
+        working-directory: dashboard
+        run: npm ci --no-audit --no-fund
+
+      - name: Type check
+        working-directory: dashboard
+        run: npm run typecheck
+
+      - name: Build
+        working-directory: dashboard
+        run: npm run build
+
+      - name: Verify dist
+        run: |
+          test -f dashboard/dist/index.html
+          test -d dashboard/dist/assets || true
+          ls -la dashboard/dist
+          du -sh dashboard/dist

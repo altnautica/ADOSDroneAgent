@@ -102,13 +102,13 @@ mavlink-inspector = "ados.plugins.builtin.mavlink_inspector"
 version = {attr = "ados.__version__"}
 
 [tool.setuptools.packages.find]
-where = ["src", "."]
-include = ["ados*", "web*"]
+where = ["src"]
+include = ["ados*"]
 
 [tool.setuptools.package-data]
 "ados.hal" = ["boards/*.yaml"]
 "ados.core" = ["defaults.yaml"]
-"web.setup" = ["**/*"]
+"ados.dashboard" = ["dist/**/*"]
 
 
 [tool.ruff]

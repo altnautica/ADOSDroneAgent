@@ -121,32 +121,30 @@ def create_app(agent: Any) -> FastAPI:
     # Plugin lifecycle: install / enable / disable / remove.
     app.include_router(plugins.router, prefix="/api")
 
-    # Universal setup webapp. Mounted AFTER every router above so API routes
-    # match first and `/` serves the captive/local browser entry. Assets live
-    # at the top-level ``web.setup`` package so multiple agent backends in
-    # this repository can serve them from the same canonical location.
-    # Resolved via ``importlib.resources`` so editable installs and wheel
-    # installs both find the directory. If the package is missing, that is
-    # a packaging regression and we surface it as a startup error instead
-    # of silently falling back.
+    # Browser dashboard. Mounted AFTER every router above so API routes
+    # match first and `/` serves the SPA entry. The TypeScript source
+    # lives at ADOSDroneAgent/dashboard/; CI builds it and copies the
+    # output into the ``ados.dashboard.dist`` package on the wheel.
+    # Resolved via ``importlib.resources`` so editable installs and
+    # wheel installs both find the same files.
     from importlib.resources import files
     try:
-        import web.setup as _web_setup_pkg
+        import ados.dashboard as _dashboard_pkg
     except ImportError as exc:
         raise RuntimeError(
-            "Universal setup webapp package 'web.setup' is missing. "
+            "Dashboard package 'ados.dashboard' is missing. "
             "Reinstall the agent package or rebuild from source."
         ) from exc
-    static_dir = Path(str(files(_web_setup_pkg)))
+    static_dir = Path(str(files(_dashboard_pkg))) / "dist"
     if not static_dir.exists():
         raise RuntimeError(
-            f"Universal setup webapp directory missing at {static_dir}. "
-            "Reinstall the agent package or rebuild from source."
+            f"Dashboard dist directory missing at {static_dir}. "
+            "Run scripts/build-dashboard.sh or reinstall the agent package."
         )
     app.mount(
         "/",
         StaticFiles(directory=str(static_dir), html=True),
-        name="setup_static",
+        name="dashboard_static",
     )
 
     return app

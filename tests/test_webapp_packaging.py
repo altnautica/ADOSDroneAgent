@@ -1,136 +1,53 @@
-"""Universal webapp packaging contract.
+"""Dashboard packaging contract.
 
-The agent's universal setup webapp is a History-API SPA with a single
-``index.html`` shell, a single CSS file, a small bootstrap ``app.js``,
-and per-component / per-view ES modules under ``components/`` and
-``views/``. Anything that ships in the wheel must show up here so a
-broken package layout fails the build, not the user.
+The browser dashboard ships as a Vite-built SPA staged into
+``src/ados/dashboard/dist/``. ``scripts/build-dashboard.sh`` copies the
+``dashboard/dist/`` Vite output into the staging path before
+``uv build --wheel`` runs, so the wheel always carries a built dist.
+A placeholder ``dist/index.html`` ships in the source tree so a fresh
+checkout (without a CI build) still serves something rather than 404.
+
+This test enforces the contract that the staged dist exists and is
+non-empty whenever the wheel is being built or tests run.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
-WEBAPP_DIR = Path(__file__).resolve().parent.parent / "web" / "setup"
-
-REQUIRED_FILES = (
-    "index.html",
-    "app.js",
-    "router.js",
-    "state.js",
-    "components.js",
-    "dashboard.css",
-)
-
-REQUIRED_COMPONENTS = (
-    "header.js",
-    "bottom-dock.js",
-    "command-palette.js",
-    "context-menu.js",
-    "gestures.js",
-    "keyboard.js",
-    "sheet.js",
-    "theme.js",
-    "toast.js",
-)
-
-REQUIRED_VIEWS = (
-    "dashboard.js",
-    "logs.js",
-)
-
-REQUIRED_SETTINGS_VIEWS = (
-    "index.js",
-    "profile.js",
-    "cloud.js",
-    "network.js",
-    "display.js",
-    "advanced.js",
-)
+DASHBOARD_PKG = Path(__file__).resolve().parent.parent / "src" / "ados" / "dashboard"
 
 
-def test_universal_webapp_dir_exists() -> None:
-    assert WEBAPP_DIR.is_dir(), f"missing webapp directory: {WEBAPP_DIR}"
+def test_dashboard_package_marker_exists() -> None:
+    """src/ados/dashboard/__init__.py must exist so setuptools registers
+    the package and picks up the package-data glob.
+    """
+    init = DASHBOARD_PKG / "__init__.py"
+    assert init.is_file(), f"missing dashboard package marker at {init}"
 
 
-@pytest.mark.parametrize("path", REQUIRED_FILES)
-def test_each_top_level_asset_present(path: str) -> None:
-    target = WEBAPP_DIR / path
-    assert target.is_file(), f"missing webapp asset: {target}"
-    assert target.stat().st_size > 0, f"empty webapp asset: {target}"
+def test_dashboard_dist_directory_exists() -> None:
+    """src/ados/dashboard/dist/ must exist with at least an index.html so
+    the FastAPI StaticFiles mount can serve the dashboard root. CI builds
+    overwrite this with the real Vite output; the placeholder ships in
+    the source tree so editable installs are never broken.
+    """
+    dist = DASHBOARD_PKG / "dist"
+    assert dist.is_dir(), f"missing dashboard dist directory at {dist}"
+    index = dist / "index.html"
+    assert index.is_file(), f"missing dashboard index.html at {index}"
+    assert index.stat().st_size > 0, "dashboard index.html is empty"
 
 
-@pytest.mark.parametrize("name", REQUIRED_COMPONENTS)
-def test_each_component_module_present(name: str) -> None:
-    target = WEBAPP_DIR / "components" / name
-    assert target.is_file(), f"missing component module: {target}"
-    assert target.stat().st_size > 0, f"empty component module: {target}"
+def test_dashboard_resolves_via_importlib_resources() -> None:
+    """The FastAPI mount uses importlib.resources.files() to locate the
+    dist directory. This test mirrors that resolution path so a packaging
+    regression fails here instead of at runtime on the agent.
+    """
+    from importlib.resources import files
 
+    import ados.dashboard as pkg
 
-@pytest.mark.parametrize("name", REQUIRED_VIEWS)
-def test_each_top_level_view_present(name: str) -> None:
-    target = WEBAPP_DIR / "views" / name
-    assert target.is_file(), f"missing view module: {target}"
-    assert target.stat().st_size > 0, f"empty view module: {target}"
-
-
-@pytest.mark.parametrize("name", REQUIRED_SETTINGS_VIEWS)
-def test_each_settings_view_present(name: str) -> None:
-    target = WEBAPP_DIR / "views" / "settings" / name
-    assert target.is_file(), f"missing settings view: {target}"
-    assert target.stat().st_size > 0, f"empty settings view: {target}"
-
-
-def test_index_references_bootstrap_assets() -> None:
-    text = (WEBAPP_DIR / "index.html").read_text(encoding="utf-8")
-    assert "/app.js" in text, "index.html does not reference /app.js"
-    assert "/dashboard.css" in text, "index.html does not reference /dashboard.css"
-
-
-def test_app_js_starts_router_and_polls_status() -> None:
-    text = (WEBAPP_DIR / "app.js").read_text(encoding="utf-8")
-    assert "Router" in text, "app.js must instantiate the History-API router"
-    assert "/api/v1/setup/status" in text, (
-        "app.js must seed or poll the setup status endpoint"
-    )
-    for view in ("renderDashboard", "renderSettings", "renderLogs"):
-        assert view in text, f"app.js missing import for {view}"
-
-
-def test_legacy_pages_are_gone() -> None:
-    """The 8 legacy wizard HTML pages were collapsed into the SPA shell.
-    A stray copy means the old surface is still reachable in the bundle."""
-    legacy = (
-        "setup.html",
-        "mavlink.html",
-        "video.html",
-        "network.html",
-        "remote.html",
-        "ground.html",
-        "system.html",
-        "advanced.html",
-    )
-    for name in legacy:
-        target = WEBAPP_DIR / name
-        assert not target.exists(), f"legacy page still in webapp: {target}"
-
-
-def test_no_legacy_static_dirs() -> None:
-    """An earlier layout kept the webapp at src/ados/webapp/. That tree
-    is retired; everything ships from the top-level web/setup/ package."""
-    repo_root = WEBAPP_DIR.parent.parent
-    legacy_root = repo_root / "src" / "ados" / "webapp"
-    assert not legacy_root.exists(), "legacy src/ados/webapp/ should be removed"
-    parent = WEBAPP_DIR.parent
-    assert not (parent / "static").exists(), "no legacy web/static/ should exist"
-    assert not (parent / "static-ground").exists(), (
-        "no legacy web/static-ground/ should exist"
-    )
-
-
-def test_no_legacy_stylesheet() -> None:
-    """The wizard-era ``style.css`` was replaced by ``dashboard.css``."""
-    target = WEBAPP_DIR / "style.css"
-    assert not target.exists(), f"legacy stylesheet still present: {target}"
+    dist = Path(str(files(pkg))) / "dist"
+    assert dist.is_dir(), f"importlib.resources can't reach dist at {dist}"
+    assert (dist / "index.html").is_file()
