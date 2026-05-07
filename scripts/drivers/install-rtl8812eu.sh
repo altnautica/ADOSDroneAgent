@@ -124,23 +124,6 @@ else
     warn "Mesh-enable patch not found at ${PATCH_FILE}. 802.11s mesh mode will not be compiled in."
 fi
 
-# Register source tree with DKMS. When the source is already registered
-# we remove + re-add so that any updates to dkms.conf in the vendored
-# tree (including the USER_EXTRA_CFLAGS patch above) take effect on the
-# next build. dkms copies the source at `add` time and never re-reads it
-# until the entry is removed.
-if dkms status "${DKMS_PACKAGE}" 2>/dev/null | grep -q "${DRIVER_VERSION}"; then
-    info "Refreshing existing DKMS source registration."
-    dkms remove "${DKMS_NAME}" --all 2>/dev/null || true
-    rm -rf "/var/lib/dkms/${DKMS_PACKAGE}/${DRIVER_VERSION}" 2>/dev/null || true
-fi
-
-info "dkms add ${VENDOR_DIR}"
-dkms add "${VENDOR_DIR}" || {
-    error "dkms add failed."
-    exit 2
-}
-
 # The vendored Makefile resolves ARCH from `uname -m`. On aarch64 hosts
 # that yields the literal "aarch64", which the kernel build rejects
 # because it expects "arm64". Same for armv7 (kernel uses "arm").
@@ -158,13 +141,31 @@ esac
 # some versions so we route the relax flags via USER_EXTRA_CFLAGS in
 # dkms.conf, which the module Makefile picks up at line 1 and appends
 # to its own EXTRA_CFLAGS — the LAST -W flag wins, so -Wno-error
-# overrides the kernel's promotion of these warnings.
+# overrides the kernel's promotion of these warnings. This patch must
+# happen BEFORE dkms add because dkms copies the source at add time
+# and never re-reads it.
 RELAX_CFLAGS="-Wno-error -Wno-misleading-indentation -Wno-address-of-packed-member -Wno-date-time"
 DKMS_CONF="${VENDOR_DIR}/dkms.conf"
 if ! grep -q "USER_EXTRA_CFLAGS" "${DKMS_CONF}"; then
     info "Patching dkms.conf with relax cflags."
     sed -i.bak "s|^MAKE=\"'make' \(.*\)\"|MAKE=\"'make' \1 USER_EXTRA_CFLAGS='${RELAX_CFLAGS}'\"|" "${DKMS_CONF}"
 fi
+
+# Register source tree with DKMS. When the source is already registered
+# we remove + re-add so updates to dkms.conf above take effect on the
+# next build. dkms copies the source at `add` time and never re-reads
+# it until the entry is removed.
+if dkms status "${DKMS_PACKAGE}" 2>/dev/null | grep -q "${DRIVER_VERSION}"; then
+    info "Refreshing existing DKMS source registration."
+    dkms remove "${DKMS_NAME}" --all 2>/dev/null || true
+    rm -rf "/var/lib/dkms/${DKMS_PACKAGE}/${DRIVER_VERSION}" 2>/dev/null || true
+fi
+
+info "dkms add ${VENDOR_DIR}"
+dkms add "${VENDOR_DIR}" || {
+    error "dkms add failed."
+    exit 2
+}
 
 # Build + install for current kernel (idempotent: dkms skips if already built)
 info "dkms build ${DKMS_NAME} (ARCH=${ARCH:-unset})"

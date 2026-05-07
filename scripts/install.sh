@@ -523,14 +523,21 @@ install_wfb_ng_from_vendor() {
     fi
 
     info "Installing wfb-ng binaries to /usr/bin..."
-    # setup.py expects VERSION + COMMIT env vars; the upstream Makefile
-    # exports them via git describe but we invoke setup.py directly,
-    # so derive both from the vendored .git tree (or fall back when
-    # the submodule was cloned with --depth 1 and lacks tags).
-    local _wfb_commit _wfb_version _wfb_epoch
-    _wfb_commit="$( cd "${vendor_dir}" && git rev-parse HEAD 2>/dev/null || echo release )"
-    _wfb_epoch="$( cd "${vendor_dir}" && git show -s --format='%ct' HEAD 2>/dev/null || date +%s )"
-    _wfb_version="$( cd "${vendor_dir}" && /usr/bin/python3 ./version.py "${_wfb_epoch}" stable 2>/dev/null || echo 0.0.0 )"
+    # setup.py asserts that VERSION and COMMIT are present in the
+    # environment; the upstream Makefile derives them via git describe
+    # and exports both. Use `make version` to harvest the same KEY=VALUE
+    # pairs and source them into our shell. Fall back to safe defaults
+    # if anything in the chain fails.
+    set +e
+    local _wfb_make_env _wfb_version _wfb_commit _wfb_epoch
+    _wfb_make_env="$( cd "${vendor_dir}" && make version 2>/dev/null )"
+    _wfb_version="$( printf '%s\n' "${_wfb_make_env}" | awk -F= '/^VERSION=/{print $2; exit}' )"
+    _wfb_commit="$(  printf '%s\n' "${_wfb_make_env}" | awk -F= '/^COMMIT=/{print $2; exit}'  )"
+    _wfb_epoch="$(   printf '%s\n' "${_wfb_make_env}" | awk -F= '/^SOURCE_DATE_EPOCH=/{print $2; exit}' )"
+    set -e
+    : "${_wfb_version:=0.0.0}"
+    : "${_wfb_commit:=release}"
+    : "${_wfb_epoch:=$(date +%s)}"
     info "wfb-ng version=${_wfb_version} commit=${_wfb_commit:0:8}"
     if ! ( cd "${vendor_dir}" && \
            VERSION="${_wfb_version}" COMMIT="${_wfb_commit}" SOURCE_DATE_EPOCH="${_wfb_epoch}" \
