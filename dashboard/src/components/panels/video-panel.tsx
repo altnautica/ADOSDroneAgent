@@ -30,8 +30,22 @@ export function VideoPanel() {
   const pipelineState = v?.state ?? "unknown";
   const g2g = v?.glass_to_glass_ms;
 
+  // Only attempt the WHEP handshake when the agent says the pipeline
+  // is actively publishing. Otherwise mediamtx's "no source" magenta
+  // test pattern leaks through and looks like a broken stream.
+  const pipelineRunning = pipelineState === "running";
+  const canStream = pipelineRunning && whepUrl.length > 0;
+
   useEffect(() => {
-    if (!whepUrl || !videoRef.current) return;
+    if (!canStream || !videoRef.current) {
+      // Tear down any prior session if the pipeline drops out.
+      const prior = sessionRef.current;
+      sessionRef.current = null;
+      if (prior) prior.close().catch(() => undefined);
+      setState("idle");
+      setError(null);
+      return;
+    }
 
     const ac = new AbortController();
     let cancelled = false;
@@ -58,7 +72,7 @@ export function VideoPanel() {
         session.close().catch(() => undefined);
       }
     };
-  }, [whepUrl, retryToken]);
+  }, [canStream, whepUrl, retryToken]);
 
   const showOverlay = state !== "live";
 
@@ -88,11 +102,19 @@ export function VideoPanel() {
           />
           {showOverlay && (
             <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 bg-black/60 text-xs text-muted-foreground">
-              {state === "idle" && !whepUrl && (
+              {state === "idle" && (
                 <>
                   <VideoOff className="h-6 w-6 opacity-60" />
-                  <div>No camera detected.</div>
-                  <div className="text-[10px]">
+                  <div>
+                    {pipelineState === "error"
+                      ? "Pipeline error."
+                      : pipelineState === "starting"
+                        ? "Pipeline starting…"
+                        : !whepUrl
+                          ? "No camera detected."
+                          : "Pipeline idle."}
+                  </div>
+                  <div className="text-[10px] max-w-xs text-center">
                     Plug in a camera and the agent will publish a WHEP stream
                     automatically.
                   </div>
