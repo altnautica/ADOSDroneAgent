@@ -28,6 +28,7 @@ for _name in dir(_c):
 
 # Sub-router modules. Imported after the bulk re-export so any access
 # they perform on the package at request time finds the helpers above.
+from ados.api.routes.ground_station.mavlink_ws import router as _mavlink_ws_router
 from ados.api.routes.ground_station.mesh import router as _mesh_router
 from ados.api.routes.ground_station.network import router as _network_router
 from ados.api.routes.ground_station.pairing import router as _pairing_router
@@ -43,6 +44,7 @@ router.include_router(_network_router)
 router.include_router(_ui_router)
 router.include_router(_mesh_router)
 router.include_router(_pairing_router)
+router.include_router(_mavlink_ws_router)
 
 
 __all__ = ["router"]
