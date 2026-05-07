@@ -28,6 +28,7 @@ for _name in dir(_c):
 
 # Sub-router modules. Imported after the bulk re-export so any access
 # they perform on the package at request time finds the helpers above.
+from ados.api.routes.ground_station.camera import router as _camera_router
 from ados.api.routes.ground_station.mavlink_ws import router as _mavlink_ws_router
 from ados.api.routes.ground_station.mesh import router as _mesh_router
 from ados.api.routes.ground_station.network import router as _network_router
@@ -47,6 +48,18 @@ def _recorder():
     return get_recorder()
 
 
+# Paired-drone camera count accessor. Stays at the package level so
+# tests and downstream wiring can override it without reaching into the
+# camera sub-module. Default returns the placeholder value (1) until
+# the drone-side capability surface lands.
+def _paired_drone_camera_count() -> int:
+    from ados.api.routes.ground_station.camera import (
+        _paired_drone_camera_count as _impl,
+    )
+
+    return _impl()
+
+
 router = APIRouter()
 router.include_router(_status_router)
 router.include_router(_wfb_router)
@@ -56,6 +69,7 @@ router.include_router(_mesh_router)
 router.include_router(_pairing_router)
 router.include_router(_mavlink_ws_router)
 router.include_router(_recording_router)
+router.include_router(_camera_router)
 
 
 __all__ = ["router"]
