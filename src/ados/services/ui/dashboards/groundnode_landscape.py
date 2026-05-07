@@ -210,6 +210,10 @@ def _mock_state() -> dict[str, Any]:
             "fec_recovered": 1247,
             "fec_lost": 3,
             "channel": 161,
+            "tx_power_dbm": 5,
+        },
+        "radio": {
+            "topology": "host_vbus",
         },
         "drone": {
             "device_id": "drone-AABBCC42F1",

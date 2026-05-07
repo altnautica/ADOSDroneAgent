@@ -293,6 +293,32 @@ def _now() -> float:
     return time.monotonic()
 
 
+def _normalize_radio_fields(data: dict[str, Any]) -> dict[str, Any]:
+    """Backfill ``link.tx_power_dbm`` and ``radio.topology`` defaults.
+
+    The dashboard tile + OLED link screen both reach into
+    ``state["link"]["tx_power_dbm"]`` and
+    ``state["radio"]["topology"]``. Older agent builds (or any build
+    that hasn't taken the WFB-status REST exposure yet) won't carry
+    these keys; left missing, the renderers paint ``--`` placeholders.
+    Filling defensively here means downstream code can rely on a
+    stable shape regardless of which side ships first.
+
+    Mutates and returns the same dict for caller convenience. The
+    transformation is shallow and additive — we never overwrite a
+    value the agent already supplied.
+    """
+    link = data.get("link")
+    if isinstance(link, dict):
+        link.setdefault("tx_power_dbm", None)
+    radio = data.get("radio")
+    if not isinstance(radio, dict):
+        radio = {}
+        data["radio"] = radio
+    radio.setdefault("topology", "host_vbus")
+    return data
+
+
 class OledService:
     """Owns the OLED device, the render loop, and menu state."""
 
@@ -692,7 +718,7 @@ class OledService:
                         # endpoint does not carry it and a naive
                         # overwrite would wipe live overlay state.
                         existing_pair = self._state.get("pairing")
-                        self._state = data
+                        self._state = _normalize_radio_fields(data)
                         if existing_pair is not None:
                             self._state["pairing"] = existing_pair
             except Exception:

@@ -119,6 +119,10 @@ class TouchInputBridge:
         """Read events from the device until cancelled or it errors."""
         from .events import ButtonEvent
 
+        # TODO: tap on the radio-link tile area should drill into a
+        # TX power adjust screen. Needs hit-test math against the
+        # dashboard layout + an overlay screen for the slider; for
+        # now every tap remains a generic "next screen" advance.
         async for event in device.async_read_loop():
             if self._stop.is_set():
                 return
