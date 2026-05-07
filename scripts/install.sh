@@ -1588,8 +1588,12 @@ print_hardware_summary() {
         http://127.0.0.1:8080/api/v1/setup/hardware-check/refresh 2>/dev/null || true)
     [ -n "${body}" ] || return 0
 
-    local rendered
-    rendered=$(printf '%s' "${body}" | python3 - <<'PYEOF' 2>/dev/null || true
+    # Write the parser to a temp file. Heredoc-inside-command-substitution
+    # is fragile under `curl ... | sudo bash` on some bash builds; the
+    # tmp-file form avoids the parser ambiguity entirely.
+    local parser
+    parser=$(mktemp /tmp/ados-hw-parser.XXXXXX.py)
+    cat > "${parser}" <<'PYEOF'
 import json, sys
 try:
     d = json.load(sys.stdin)
@@ -1616,7 +1620,10 @@ if optional:
     print("  Optional:")
     render(optional)
 PYEOF
-)
+
+    local rendered
+    rendered=$(printf '%s' "${body}" | python3 "${parser}" 2>/dev/null)
+    rm -f "${parser}"
     [ -n "${rendered}" ] || return 0
 
     echo ""
