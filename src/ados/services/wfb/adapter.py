@@ -13,18 +13,31 @@ from ados.hal.usb import UsbCategory, discover_usb_devices
 log = get_logger("wfb.adapter")
 
 # Known WFB-ng compatible chipsets by VID:PID.
-# RTL8812AU family (0x8812, 0x881A-C) and RTL8812EU / RTL8822E (0xB812)
-# are both served by the vendored DKMS driver and both support monitor
-# mode with frame injection. Other chipsets in the Realtek family are
-# out of scope for WFB-ng.
+# RTL8812AU family (0x8812, 0x881A-C), RTL8812EU / RTL8822E (0xB812 /
+# 0xA81A), and TP-Link rebadges all share the vendored DKMS driver and
+# support monitor mode with frame injection.
 WFB_COMPATIBLE: dict[tuple[int, int], str] = {
     (0x0BDA, 0x8812): "RTL8812AU",
     (0x0BDA, 0x881A): "RTL8812AU (alt)",
     (0x0BDA, 0x881B): "RTL8812AU (alt)",
     (0x0BDA, 0x881C): "RTL8812AU (alt)",
+    (0x0BDA, 0xA81A): "RTL8812AU (a81a)",
     (0x0BDA, 0xB812): "RTL8812EU",
     (0x2357, 0x0120): "RTL8812AU (TP-Link)",
     (0x2357, 0x0101): "RTL8812AU (TP-Link alt)",
+}
+
+# Driver-name fallback for boards whose VID:PID is not yet in the table
+# above. The DKMS module exposes itself under one of these names; if
+# any matches, treat the adapter as WFB-ng compatible regardless of
+# the USB ID lookup. Future Realtek rebadges automatically work.
+WFB_COMPATIBLE_DRIVERS: set[str] = {
+    "8812au",
+    "8812eu",
+    "rtl8812au",
+    "rtl8812eu",
+    "rtl88x2eu",
+    "rtl88xxau",
 }
 
 
@@ -219,6 +232,15 @@ def detect_wfb_adapters() -> list[WifiAdapterInfo]:
                     chipset = WFB_COMPATIBLE[(vid, pid)]
                     is_compat = True
                     break
+
+        # Driver-name fallback: when the USB ID lookup misses (e.g. the
+        # adapter has been renamed by udev to a wlxMAC name and no usb
+        # entry was correlated), accept the adapter when the kernel
+        # driver matches one of the known WFB-ng modules.
+        if not is_compat and driver and driver.lower() in WFB_COMPATIBLE_DRIVERS:
+            is_compat = True
+            if not chipset or chipset == driver:
+                chipset = driver
 
         adapter = WifiAdapterInfo(
             interface_name=name,
