@@ -19,7 +19,9 @@ CLI to start auto-binding again.
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 
+from ados.core.atomic import atomic_write_json
 from ados.core.logging import get_logger
 
 log = get_logger("wfb.auto_pair")
@@ -35,6 +37,17 @@ START_DELAY_S = 15.0
 # becomes reachable on the radio.
 RETRY_BACKOFF_S = 60.0
 
+# Cap on consecutive local-bind attempts before flipping the failover
+# sidecar to "cloud_relay". An operator can re-arm via the GCS or CLI
+# to start the local-bind loop again from a known state.
+MAX_LOCAL_BIND_ATTEMPTS = 10
+
+# Sidecar file shared with the ados-api process, which exposes the
+# value via GET /api/wfb/pair/failover-status. The auto_pair supervisor
+# lives in ados-cloud, so a file in /run/ados is the simplest way to
+# bridge the two processes without a new IPC channel.
+FAILOVER_STATE_PATH = Path("/run/ados/wfb_failover.json")
+
 
 class AutoPairSupervisor:
     """Background task that drives the first-boot auto-bind loop."""
@@ -47,10 +60,33 @@ class AutoPairSupervisor:
         self._role = role
         self._task: asyncio.Task | None = None
         self._stop = asyncio.Event()
+        # Tracks whether the rig is still trying to bind locally or
+        # has given up and asked the operator to fall back to the
+        # cloud relay. Mirror is persisted to a sidecar file so the
+        # ados-api process can serve it over REST.
+        self._failover_state: str = "local"
 
     @property
     def role(self) -> str:
         return self._role
+
+    @property
+    def failover_state(self) -> str:
+        return self._failover_state
+
+    def _persist_failover_state(self, state: str) -> None:
+        """Write the failover state to /run/ados so the API can read it.
+
+        Called whenever the supervisor flips between local-bind retries
+        and cloud-relay fallback. The sidecar is read by
+        GET /api/wfb/pair/failover-status which lives in a different
+        process.
+        """
+        self._failover_state = state
+        try:
+            atomic_write_json(FAILOVER_STATE_PATH, {"state": state}, mode=0o644)
+        except OSError as exc:
+            log.warning("wfb_failover_state_persist_failed", error=str(exc))
 
     def start(self) -> None:
         """Spawn the supervisor task. Idempotent."""
@@ -93,6 +129,11 @@ class AutoPairSupervisor:
 
         pm = get_pair_manager()
         orch = get_bind_orchestrator()
+
+        # A fresh run resets the failover sidecar to "local" so that
+        # an operator who re-armed auto-pair from the cloud-relay
+        # fallback sees the rig retry local bind on the dashboard.
+        self._persist_failover_state("local")
 
         attempt = 0
         while not self._stop.is_set():
@@ -162,6 +203,8 @@ class AutoPairSupervisor:
                 )
             except BindBusyError:
                 log.info("auto_pair_busy_retry")
+                if self._maybe_failover(attempt):
+                    return
                 if await self._sleep_or_stop(RETRY_BACKOFF_S):
                     return
                 continue
@@ -172,11 +215,15 @@ class AutoPairSupervisor:
                     error=str(exc),
                     backoff_s=RETRY_BACKOFF_S,
                 )
+                if self._maybe_failover(attempt):
+                    return
                 if await self._sleep_or_stop(RETRY_BACKOFF_S):
                     return
                 continue
             except Exception as exc:  # noqa: BLE001
                 log.exception("auto_pair_unexpected", error=str(exc))
+                if self._maybe_failover(attempt):
+                    return
                 if await self._sleep_or_stop(RETRY_BACKOFF_S):
                     return
                 continue
@@ -187,6 +234,11 @@ class AutoPairSupervisor:
                     attempts=attempt,
                     fingerprint=result.get("fingerprint"),
                 )
+                # Successful pair: keep the sidecar at "local" and
+                # let the caller exit the run loop. Idempotent re-write
+                # so a rig that flipped to cloud_relay and then bound
+                # later ends up in the consistent state.
+                self._persist_failover_state("local")
                 # apply_keypair already flipped auto_pair_enabled to
                 # false during pair persistence, so the next config
                 # load above would exit; we exit here directly to
@@ -202,8 +254,24 @@ class AutoPairSupervisor:
                 error=result.get("error"),
                 backoff_s=RETRY_BACKOFF_S,
             )
+            if self._maybe_failover(attempt):
+                return
             if await self._sleep_or_stop(RETRY_BACKOFF_S):
                 return
+
+    def _maybe_failover(self, attempt: int) -> bool:
+        """Flip the sidecar to ``cloud_relay`` after the attempt cap.
+
+        Returns True when the supervisor should give up the local
+        bind loop and fall back to the cloud relay. The cap fires on
+        the Nth consecutive non-paired terminal exit so that an
+        operator on a flaky bench is not stuck in a forever-retry.
+        """
+        if attempt >= MAX_LOCAL_BIND_ATTEMPTS:
+            self._persist_failover_state("cloud_relay")
+            log.warning("wfb_failover_to_cloud_relay", attempts=attempt)
+            return True
+        return False
 
     async def _sleep_or_stop(self, seconds: float) -> bool:
         """Sleep `seconds` or return early when stop is signalled.
