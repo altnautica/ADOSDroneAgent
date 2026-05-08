@@ -1,5 +1,8 @@
 """OTA update API routes."""
 
+# Auth: routes here are gated by ApiKeyAuthMiddleware via the /api/ prefix
+# when the agent is paired. Add new OTA routes under /api/ to inherit auth.
+
 from __future__ import annotations
 
 from fastapi import APIRouter, Query
