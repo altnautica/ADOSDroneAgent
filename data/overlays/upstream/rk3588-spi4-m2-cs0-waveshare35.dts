@@ -4,12 +4,19 @@
  * mux. On boards that route SPI4_M2 onto the 40-pin expansion header at
  * the same physical pin positions as the Raspberry Pi puts SPI0 (Rock 5A
  * / Rock 5C / Rock 5D), this lets a Pi-style 3.5" LCD HAT plug in
- * directly. Touch is enabled. The XPT2046/ADS7846 PENIRQ line is open-
- * drain (low when pen down), so the IRQ trigger is FALLING-edge and
- * pendown-gpio is ACTIVE_LOW. The pendown pin needs an explicit pinctrl
- * entry that selects the GPIO function and enables the internal pull-up,
- * otherwise the SoC leaves the pin in whatever default state it powered
- * up in (often actively driving high) and the IRQ never fires.
+ * directly. Touch is enabled.
+ *
+ * Polarity note (Rockchip convention): even though the XPT2046/ADS7846
+ * PENIRQ line is electrically open-drain pull-low, every working Rockchip
+ * Linux config (Radxa Rock 3B docs and the rk3568 spi3 waveshare35
+ * overlay both ship pendown-gpio = GPIO_ACTIVE_HIGH paired with
+ * IRQ_TYPE_EDGE_FALLING) treats the gpio flag as ACTIVE_HIGH on this
+ * platform. The IRQ trigger stays EDGE_FALLING because the IRQ
+ * controller still sees the physical hi -> lo transition produced by
+ * pen contact; only the pendown-gpio flag gets the platform-convention
+ * value. Older versions of this overlay shipped ACTIVE_LOW, which never
+ * fired (verified on Rock 5C Lite via /proc/interrupts ads7846 = 0
+ * across all CPUs).
  */
 
 #define DISPLAY_SPI spi4
@@ -25,23 +32,6 @@
     };
 };
 
-/*
- * Pinctrl entry that pins GPIO4_B3 to the GPIO function with pull-up
- * bias. Without this, the SoC's pin default for GPIO4_B3 leaves the line
- * driven (verified on Rock 5C Lite via /sys/kernel/debug/pinctrl/
- * pinctrl-rockchip-pinctrl/pinconf-pins, which reported "pin output
- * (1 level)" before this entry was added). Driven-high masks the
- * open-drain pull-low produced by the touch controller's PENIRQ pin, so
- * no falling edge ever reaches the IRQ controller and /proc/interrupts
- * shows zero ads7846 hits for the lifetime of the boot.
- */
-&pinctrl {
-    ts {
-        ts_irq_pin: ts-irq-pin {
-            rockchip,pins = <4 RK_PB3 RK_FUNC_GPIO &pcfg_pull_up>;
-        };
-    };
-};
 
 &DISPLAY_SPI {
     pinctrl-0 = <&spi4m2_pins>;
@@ -57,10 +47,8 @@
 
 &ads7846 {
     status = "okay";
-    pinctrl-names = "default";
-    pinctrl-0 = <&ts_irq_pin>;
     interrupt-parent = <&gpio4>;
     interrupts = <RK_PB3 IRQ_TYPE_EDGE_FALLING>;
-    pendown-gpio = <&gpio4 RK_PB3 GPIO_ACTIVE_LOW>;
+    pendown-gpio = <&gpio4 RK_PB3 GPIO_ACTIVE_HIGH>;
     touchscreen-max-pressure = <255>;
 };
