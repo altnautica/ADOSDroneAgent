@@ -593,20 +593,24 @@ async def main() -> None:
                     api_key = pairing.generate_api_key()
                     local_ip = _get_local_ip()
 
+                    beacon_body = {
+                        "deviceId": config.agent.device_id,
+                        "pairingCode": code,
+                        "apiKey": api_key,
+                        "name": getattr(config.agent, "name", "ADOS Agent"),
+                        "version": __version__,
+                        "board": board.name if board else "unknown",
+                        "tier": board.tier if board else 0,
+                        "mdnsHost": "",
+                        "localIp": local_ip,
+                    }
+                    exp = pairing.code_expires_at()
+                    if exp is not None:
+                        beacon_body["pairingCodeExpiresAt"] = exp
                     async with httpx.AsyncClient(timeout=10.0) as client:
                         resp = await client.post(
                             f"{convex_url}/pairing/register",
-                            json={
-                                "deviceId": config.agent.device_id,
-                                "pairingCode": code,
-                                "apiKey": api_key,
-                                "name": getattr(config.agent, "name", "ADOS Agent"),
-                                "version": __version__,
-                                "board": board.name if board else "unknown",
-                                "tier": board.tier if board else 0,
-                                "mdnsHost": "",
-                                "localIp": local_ip,
-                            },
+                            json=beacon_body,
                         )
                         if resp.status_code == 200:
                             result = resp.json()

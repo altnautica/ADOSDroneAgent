@@ -68,3 +68,38 @@ def test_no_temp_files_left_after_save(state_file: Path) -> None:
     mgr.get_or_create_code()
     leftovers = [p for p in state_file.parent.iterdir() if p.suffix == ".tmp"]
     assert leftovers == []
+
+
+def test_code_expires_at_none_when_no_code_active(state_file: Path) -> None:
+    mgr = PairingManager(state_path=str(state_file))
+    # Fresh manager, nothing on disk → no code yet → no expiry.
+    assert mgr.code_expires_at() is None
+
+
+def test_code_expires_at_returns_creation_plus_ttl(state_file: Path) -> None:
+    from ados.core.pairing import CODE_TTL
+
+    mgr = PairingManager(state_path=str(state_file))
+    mgr.get_or_create_code()
+    created_at = mgr._state["code_created_at"]
+    exp = mgr.code_expires_at()
+    assert exp == int(created_at) + CODE_TTL
+
+
+def test_code_expires_at_set_code_path(state_file: Path) -> None:
+    from ados.core.pairing import CODE_TTL
+
+    mgr = PairingManager(state_path=str(state_file))
+    mgr.set_code("ABC234")
+    created_at = mgr._state["code_created_at"]
+    exp = mgr.code_expires_at()
+    assert exp == int(created_at) + CODE_TTL
+
+
+def test_code_expires_at_clears_after_claim(state_file: Path) -> None:
+    """`claim()` removes `code_created_at` from state, so expiry reads None."""
+    mgr = PairingManager(state_path=str(state_file))
+    mgr.get_or_create_code()
+    assert mgr.code_expires_at() is not None
+    mgr.claim("user-1")
+    assert mgr.code_expires_at() is None

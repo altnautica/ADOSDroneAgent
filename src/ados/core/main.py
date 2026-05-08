@@ -345,19 +345,23 @@ class AgentApp:
                         mdns_host = self.discovery_service.mdns_hostname
 
                     api_key = self.pairing_manager.generate_api_key()
+                    body = {
+                        "deviceId": self.config.agent.device_id,
+                        "pairingCode": code,
+                        "apiKey": api_key,
+                        "name": self.config.agent.name,
+                        "version": __version__,
+                        "board": self.board_name,
+                        "mdnsHost": mdns_host,
+                        "localIp": local_ip,
+                    }
+                    exp = self.pairing_manager.code_expires_at()
+                    if exp is not None:
+                        body["pairingCodeExpiresAt"] = exp
                     async with httpx.AsyncClient(timeout=10.0) as client:
                         await client.post(
                             f"{convex_url}/pairing/register",
-                            json={
-                                "deviceId": self.config.agent.device_id,
-                                "pairingCode": code,
-                                "apiKey": api_key,
-                                "name": self.config.agent.name,
-                                "version": __version__,
-                                "board": self.board_name,
-                                "mdnsHost": mdns_host,
-                                "localIp": local_ip,
-                            },
+                            json=body,
                         )
                     log.debug("pairing_beacon_sent", code=code)
                 except Exception:
