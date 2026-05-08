@@ -2,10 +2,33 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import sys
 
 import structlog
+
+_SECRET_SUFFIXES = ("key", "code", "token", "password", "secret")
+_REDACT_PREFIX = "redacted:"  # idempotency sentinel
+
+
+def redact_secrets(_logger, _method, event_dict):
+    """structlog processor: hash any field whose key looks secret-bearing.
+
+    Skips ints/bools/None. Idempotent: already-redacted values pass through
+    unchanged so a value that traverses the chain twice does not double-hash.
+    """
+    for k, v in list(event_dict.items()):
+        if not isinstance(v, str) or not v:
+            continue
+        if v.startswith(_REDACT_PREFIX):
+            continue
+        kl = k.lower()
+        if any(kl.endswith(s) or kl == s for s in _SECRET_SUFFIXES):
+            head = v[:4]
+            digest = hashlib.sha256(v.encode("utf-8", errors="replace")).hexdigest()[:8]
+            event_dict[k] = f"{_REDACT_PREFIX}{head}...{digest}"
+    return event_dict
 
 
 def configure_logging(
@@ -31,6 +54,7 @@ def configure_logging(
             structlog.processors.TimeStamper(fmt="iso"),
             structlog.processors.StackInfoRenderer(),
             structlog.processors.format_exc_info,
+            redact_secrets,
             structlog.processors.UnicodeDecoder(),
             renderer,
         ],
