@@ -15,6 +15,11 @@ EnvironmentFile=-/etc/ados/env
 
 NoNewPrivileges=yes
 ProtectSystem=strict
+# Private /tmp for the bind orchestrator. wfb_bind_client.sh +
+# wfb_bind_server.sh both use `mktemp -d` to stage the tar.gz of
+# config + drone.key during the bind protocol. Without PrivateTmp,
+# ProtectSystem=strict makes /tmp read-only and mktemp fails.
+PrivateTmp=yes
 # /etc is in the writable set because the WFB bind orchestrator hosted
 # in this service spawns wfb_keygen + the upstream bind-protocol scripts
 # which write /etc/drone.key, /etc/gs.key, /etc/wifibroadcast.cfg, and
