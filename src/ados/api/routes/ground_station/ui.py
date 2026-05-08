@@ -211,14 +211,14 @@ async def post_factory_reset(
     pm = _gs._pair_manager()
 
     try:
-        current = await pm.status()
+        current = await pm.status("gs")
     except Exception as exc:
         raise HTTPException(
             status_code=500,
             detail={"error": {"code": "E_PAIR_STATUS_FAILED", "message": str(exc)}},
         ) from exc
 
-    expected = current.get("key_fingerprint") or _gs._stock_confirm_token()
+    expected = current.get("fingerprint") or _gs._stock_confirm_token()
     if confirm != expected:
         raise HTTPException(
             status_code=400,
@@ -268,7 +268,7 @@ async def post_factory_reset(
         ) from exc
 
     try:
-        result = await pm.factory_reset()
+        result = await pm.factory_reset("gs")
     except Exception as exc:
         raise HTTPException(
             status_code=500,

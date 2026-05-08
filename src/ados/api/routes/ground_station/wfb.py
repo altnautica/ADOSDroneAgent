@@ -54,13 +54,44 @@ async def put_ground_station_wfb(update: WfbUpdate) -> dict[str, Any]:
 
 @router.post("/wfb/pair")
 async def post_wfb_pair(req: PairRequest) -> dict[str, Any]:
-    """Install a drone pair key. 409 if already paired."""
+    """Install a 64-byte rx-side wfb-ng key on the GS.
+
+    Used by the cloud-relay path: the orchestrator running in the GCS
+    forwards a base64-encoded blob produced by `wfb_keygen` on the
+    paired drone (or by the GS itself when it is the keypair authority
+    and is shipping the matching key remotely).
+
+    For the local-bind protocol, callers should hit
+    `POST /api/wfb/pair/local-bind` instead.
+    """
+    import base64
+
     _gs._require_ground_profile()
+
+    if req.pair_key and not req.blob_b64:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": {
+                    "code": "E_PAIR_KEY_DEPRECATED",
+                    "message": (
+                        "typed pair_key is no longer supported; pass blob_b64 "
+                        "(base64 of 64-byte wfb-ng key) or use POST "
+                        "/api/wfb/pair/local-bind"
+                    ),
+                }
+            },
+        )
+    if not req.blob_b64:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": {"code": "E_BLOB_REQUIRED"}},
+        )
 
     pm = _gs._pair_manager()
 
     try:
-        current = await pm.status()
+        current = await pm.status("gs")
     except Exception:
         current = {"paired": False}
 
@@ -71,20 +102,25 @@ async def post_wfb_pair(req: PairRequest) -> dict[str, Any]:
                 "error": {
                     "code": "E_ALREADY_PAIRED",
                     "message": "unpair before pairing a new drone",
-                    "paired_drone_id": current.get("paired_drone_id"),
+                    "paired_with_device_id": current.get("paired_with_device_id"),
                 }
             },
         )
 
     try:
-        result = await pm.pair(
-            pair_key=req.pair_key,
-            drone_device_id=req.drone_device_id,
-        )
+        blob = base64.b64decode(req.blob_b64, validate=True)
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": {"code": "E_BLOB_BASE64", "message": str(exc)}},
+        ) from exc
+
+    try:
+        return await pm.apply_keypair(blob, "gs", req.drone_device_id)
     except ValueError as exc:
         raise HTTPException(
             status_code=400,
-            detail={"error": {"code": "E_INVALID_PAIR_KEY", "message": str(exc)}},
+            detail={"error": {"code": "E_INVALID_KEY_BLOB", "message": str(exc)}},
         ) from exc
     except Exception as exc:
         raise HTTPException(
@@ -92,17 +128,15 @@ async def post_wfb_pair(req: PairRequest) -> dict[str, Any]:
             detail={"error": {"code": "E_PAIR_FAILED", "message": str(exc)}},
         ) from exc
 
-    return result
-
 
 @router.delete("/wfb/pair")
 async def delete_wfb_pair() -> dict[str, Any]:
-    """Remove the installed pair key."""
+    """Remove the installed pair key on the GS side."""
     _gs._require_ground_profile()
 
     pm = _gs._pair_manager()
     try:
-        return await pm.unpair()
+        return await pm.unpair("gs")
     except Exception as exc:
         raise HTTPException(
             status_code=500,

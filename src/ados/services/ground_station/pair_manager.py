@@ -1,91 +1,62 @@
-"""Pair key manager for the ground-station profile.
+"""Pair-state manager for the WFB radio link.
 
-The ground station and the paired drone share a WFB-ng keypair. The
-drone is provisioned with a tx key, the ground station with a matching
-rx key. This module owns the rx-side keypair for the ground station:
-writing `/etc/ados/wfb/rx.key` and `/etc/ados/wfb/rx.key.pub`
-atomically, tracking which drone is paired in agent config, signalling
-`ados-wfb-rx` to pick up the new keys, and dropping the setup-complete
-sentinel so the captive DNS responder can shut itself down.
+This module owns the persisted "are these two rigs paired" state on
+either side of the link. The actual key bytes come from `wfb_keygen`
+via `ados.services.wfb.key_mgr` (during a local bind window or a
+cloud-relay handshake) and reach this module pre-formed; the manager
+writes them atomically to `/etc/ados/wfb/{tx,rx}.key`, persists the
+peer device-id + paired timestamp to `/etc/ados/config.yaml`, and
+signals the appropriate wfb systemd unit to pick up the new keys.
 
-Pair triggers:
-- Long-press B3 on the front-panel OLED (spec 05).
-- POST `/wfb/pair` on the agent REST API (spec 11).
+Trigger surfaces:
+- Local bind orchestrator (auto-pair on first boot or operator-driven
+  bind window). The orchestrator hands a 64-byte blob to
+  `apply_keypair()`.
+- Cloud-relay command handlers (`wfb_pair_init_remote` /
+  `wfb_pair_apply_remote`). Same call, different transport.
+- Long-press B3 on the ground-station LCD (kicks the orchestrator).
+- POST `/api/wfb/pair/...` REST routes.
 
-POC behavior: `wfb_keygen` (the upstream tool) generates fresh random
-keypairs and does not accept an input seed. So the pair flow here is
-"user supplied 32 bytes of shared key material, write those bytes
-straight into rx.key and publish a public fingerprint." This is
-acceptable for bench pairing. A future revision switches to a real
-NaCl keypair exchange over the webapp QR path.
-
-Key paths come from `ados.services.wfb.key_mgr.get_key_paths()` so air
-and ground sides stay wire-compatible with a single source of truth.
+The legacy "user-typed shared-key string -> SHA-256 -> 32-byte rx.key"
+path was a POC and is gone. The wire format wfb-ng requires is the
+64-byte libsodium crypto_box keypair file produced by `wfb_keygen`.
+Anything else fails decryption silently.
 """
 
 from __future__ import annotations
 
 import asyncio
-import hashlib
-import math
 import os
-import re
 import subprocess
-from collections import Counter
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any, Literal
 
 import yaml
 
 from ados.core.logging import get_logger
 from ados.core.paths import AP_PASSPHRASE_PATH, CONFIG_YAML
-from ados.services.wfb.key_mgr import get_key_paths
+from ados.services.wfb.key_mgr import (
+    WFB_KEY_FILE_BYTES,
+    get_key_paths,
+    read_public_fingerprint,
+)
 
 log = get_logger("ground_station.pair_manager")
 
 _SETUP_COMPLETE_PATH = Path("/var/lib/ados/setup-complete")
 _AP_PASSPHRASE_PATH = AP_PASSPHRASE_PATH
 _CONFIG_PATH = CONFIG_YAML
-_WFB_RX_UNIT = "ados-wfb-rx.service"
 
-_HEX_RE = re.compile(r"^[0-9a-fA-F]+$")
-_BASE58_RE = re.compile(r"^[1-9A-HJ-NP-Za-km-z]+$")
+_WFB_DRONE_UNIT = "ados-wfb.service"
+_WFB_GS_UNIT = "ados-wfb-rx.service"
 
-_MIN_KEY_LEN = 16
-_WFB_KEY_BYTES = 32
+Role = Literal["drone", "gs"]
 
 
 def _iso_now() -> str:
     """Return the current UTC timestamp in ISO 8601 form."""
     return datetime.now(UTC).isoformat(timespec="seconds")
-
-
-def _fingerprint(public_key_bytes: bytes) -> str:
-    """Return the first 16 chars of the SHA-256 hex digest of the public key."""
-    return hashlib.sha256(public_key_bytes).hexdigest()[:16]
-
-
-def _decode_pair_key(pair_key: str) -> bytes:
-    """Decode a pair_key string into raw 32-byte key material.
-
-    Accepts 32-byte hex (64 chars), raw hex of any >= 16 char length
-    (zero-padded or truncated to 32 bytes), or a best-effort UTF-8 byte
-    expansion for non-hex inputs. Falls back to SHA-256 of the input
-    bytes to always yield a stable 32-byte key. POC behavior.
-    """
-    if _HEX_RE.match(pair_key) and len(pair_key) % 2 == 0:
-        try:
-            raw = bytes.fromhex(pair_key)
-            if len(raw) == _WFB_KEY_BYTES:
-                return raw
-            # Short or long hex: normalize via SHA-256 so we always get 32 bytes.
-            return hashlib.sha256(raw).digest()
-        except ValueError:
-            pass
-
-    # Non-hex or mixed input: derive deterministically via SHA-256. Also
-    # handles base58 input without pulling in a base58 dep for the POC.
-    return hashlib.sha256(pair_key.encode("utf-8")).digest()
 
 
 def _atomic_write(path: Path, data: bytes, mode: int = 0o600) -> None:
@@ -112,7 +83,7 @@ def _atomic_write(path: Path, data: bytes, mode: int = 0o600) -> None:
     os.rename(tmp_path, path)
 
 
-def _load_config_dict() -> dict:
+def _load_config_dict() -> dict[str, Any]:
     """Load `/etc/ados/config.yaml` as a raw dict, tolerating absence."""
     if not _CONFIG_PATH.is_file():
         return {}
@@ -126,12 +97,11 @@ def _load_config_dict() -> dict:
     return {}
 
 
-def _save_config_dict(data: dict) -> bool:
+def _save_config_dict(data: dict[str, Any]) -> bool:
     """Atomically rewrite `/etc/ados/config.yaml` with the given dict.
 
-    H8/M1: mode is 0o600 because this file carries secrets
-    (server.self_hosted.api_key, security.hmac_secret, mqtt_password,
-    pairing state). Only root should read it.
+    mode 0o600 because this file carries secrets (mqtt_password,
+    api_key, hmac_secret, pair fingerprints).
     """
     try:
         body = yaml.safe_dump(data, sort_keys=False, default_flow_style=False)
@@ -142,63 +112,61 @@ def _save_config_dict(data: dict) -> bool:
         return False
 
 
-def _set_paired_drone_id(drone_id: str | None) -> str | None:
-    """Persist `ground_station.paired_drone_id` to config.
+def _get_section(data: dict[str, Any], key: str) -> dict[str, Any]:
+    section = data.get(key)
+    if not isinstance(section, dict):
+        section = {}
+        data[key] = section
+    return section
 
-    Returns the previous value, or None if unset. Passing None clears
-    the field. Leaves the rest of the config untouched.
+
+def _get_video_wfb_section(data: dict[str, Any]) -> dict[str, Any]:
+    """Walk to `video.wfb` in the raw dict, materializing missing levels."""
+    video = _get_section(data, "video")
+    return _get_section(video, "wfb")
+
+
+def _persist_pair_state(
+    *,
+    role: Role,
+    peer_device_id: str | None,
+    paired_at: str | None,
+    auto_pair_enabled: bool | None = None,
+) -> None:
+    """Update the persisted pair fields under `video.wfb` (canonical) and
+    mirror onto `ground_station.paired_drone_id` / `paired_at` for the GS
+    profile so older code paths that read the legacy fields keep working.
     """
     data = _load_config_dict()
-    gs_section = data.get("ground_station")
-    if not isinstance(gs_section, dict):
-        gs_section = {}
-        data["ground_station"] = gs_section
+    wfb = _get_video_wfb_section(data)
 
-    previous = gs_section.get("paired_drone_id")
-    if drone_id is None:
-        gs_section.pop("paired_drone_id", None)
+    if peer_device_id is None:
+        wfb.pop("paired_with_device_id", None)
     else:
-        gs_section["paired_drone_id"] = drone_id
+        wfb["paired_with_device_id"] = peer_device_id
 
-    _save_config_dict(data)
-    return previous if isinstance(previous, str) else None
-
-
-def _get_paired_drone_id() -> str | None:
-    data = _load_config_dict()
-    gs_section = data.get("ground_station")
-    if isinstance(gs_section, dict):
-        drone_id = gs_section.get("paired_drone_id")
-        if isinstance(drone_id, str) and drone_id:
-            return drone_id
-    return None
-
-
-def _get_paired_at() -> str | None:
-    data = _load_config_dict()
-    gs_section = data.get("ground_station")
-    if isinstance(gs_section, dict):
-        ts = gs_section.get("paired_at")
-        if isinstance(ts, str) and ts:
-            return ts
-    return None
-
-
-def _set_paired_at(ts: str | None) -> None:
-    data = _load_config_dict()
-    gs_section = data.get("ground_station")
-    if not isinstance(gs_section, dict):
-        gs_section = {}
-        data["ground_station"] = gs_section
-    if ts is None:
-        gs_section.pop("paired_at", None)
+    if paired_at is None:
+        wfb.pop("paired_at", None)
     else:
-        gs_section["paired_at"] = ts
+        wfb["paired_at"] = paired_at
+
+    if auto_pair_enabled is not None:
+        wfb["auto_pair_enabled"] = bool(auto_pair_enabled)
+
+    if role == "gs":
+        gs = _get_section(data, "ground_station")
+        if peer_device_id is None:
+            gs.pop("paired_drone_id", None)
+            gs.pop("paired_at", None)
+        else:
+            gs["paired_drone_id"] = peer_device_id
+            gs["paired_at"] = paired_at
+
     _save_config_dict(data)
 
 
 def _systemctl(action: str, unit: str) -> bool:
-    """Thin wrapper around `systemctl <action> <unit>`. Mirrors hostapd_manager."""
+    """Thin wrapper around `systemctl <action> <unit>`."""
     try:
         result = subprocess.run(
             ["systemctl", action, unit],
@@ -222,126 +190,91 @@ def _systemctl(action: str, unit: str) -> bool:
 
 
 class PairKeyError(ValueError):
-    """Raised when a pair_key fails validation."""
+    """Raised when a key blob fails the format check."""
 
 
-def _validate_pair_key(pair_key: str) -> None:
-    """Reject blank, too-short, or obviously malformed pair keys.
-
-    Accepts hex or base58 strings of at least 16 chars. Raises
-    PairKeyError with a human-readable message on failure.
-    """
-    if not isinstance(pair_key, str):
-        raise PairKeyError("pair_key must be a string")
-
-    stripped = pair_key.strip()
-    if not stripped:
-        raise PairKeyError("pair_key is blank")
-
-    if len(stripped) < _MIN_KEY_LEN:
+def _validate_blob(blob: bytes) -> None:
+    if not isinstance(blob, (bytes, bytearray)):
+        raise PairKeyError("key blob must be bytes")
+    if len(blob) != WFB_KEY_FILE_BYTES:
         raise PairKeyError(
-            f"pair_key too short: {len(stripped)} chars, minimum {_MIN_KEY_LEN}"
+            f"key blob is {len(blob)} bytes, expected {WFB_KEY_FILE_BYTES}"
         )
-
-    if not (_HEX_RE.match(stripped) or _BASE58_RE.match(stripped)):
-        raise PairKeyError(
-            "pair_key must be hex or base58 characters only"
-        )
-
-    # Entropy guard: block trivial all-alphanumeric short keys and
-    # low-diversity strings (e.g. "aaaaaaaaaaaaaaaaaa"). Shannon
-    # entropy per character below 4.0 bits indicates weak keying.
-    if stripped.isalnum() and len(stripped) < 24:
-        raise PairKeyError("pair key entropy too low")
-    counts = Counter(stripped)
-    total = len(stripped)
-    entropy = -sum((c / total) * math.log2(c / total) for c in counts.values())
-    if entropy < 4.0:
-        raise PairKeyError("pair key entropy too low")
 
 
 class PairManager:
-    """Drone pair key exchange for the ground-station profile.
+    """WFB pair-state manager.
 
-    Single instance per agent. Consumed by the REST routes
-    (`POST /wfb/pair`) and by the long-press B3 handler. All
+    Single instance per agent. Both drone-profile and ground-station
+    profile use the same manager; the role is supplied per call. All
     operations are async for API symmetry even though the underlying
     file and subprocess work is synchronous.
     """
 
     def __init__(self, key_dir: str | None = None) -> None:
         tx_path, rx_path = get_key_paths(key_dir)
-        # Ground-side RX key is the private half. The public half sits
-        # alongside it so both the webapp and the paired drone can
-        # reference a stable fingerprint.
-        self._rx_key_path = Path(rx_path)
-        self._rx_pub_path = Path(rx_path + ".pub")
         self._tx_key_path = Path(tx_path)
+        self._rx_key_path = Path(rx_path)
+
+    @property
+    def tx_key_path(self) -> Path:
+        return self._tx_key_path
 
     @property
     def rx_key_path(self) -> Path:
         return self._rx_key_path
 
-    @property
-    def rx_pub_path(self) -> Path:
-        return self._rx_pub_path
+    def _key_path_for_role(self, role: Role) -> Path:
+        # Drone profile keeps the air-side file (drone.key from
+        # wfb_keygen → tx.key here). GS profile keeps gs.key → rx.key.
+        return self._tx_key_path if role == "drone" else self._rx_key_path
 
-    def _current_fingerprint(self) -> str | None:
-        """Return the fingerprint of the on-disk public key, if present."""
-        if not self._rx_pub_path.is_file():
-            return None
-        try:
-            pub_bytes = self._rx_pub_path.read_bytes()
-            if not pub_bytes:
-                return None
-            return _fingerprint(pub_bytes)
-        except OSError as exc:
-            log.debug("pair_pub_read_failed", error=str(exc))
-            return None
+    def _wfb_unit_for_role(self, role: Role) -> str:
+        return _WFB_DRONE_UNIT if role == "drone" else _WFB_GS_UNIT
 
-    async def pair(
+    async def apply_keypair(
         self,
-        pair_key: str,
-        drone_device_id: str | None = None,
-    ) -> dict:
-        """Install a shared pair key and mark the ground station as paired.
+        blob: bytes,
+        role: Role,
+        peer_device_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Persist an inbound 64-byte wfb-ng key file.
 
         Args:
-            pair_key: Shared key material from the drone, minimum 16 hex
-                or base58 chars. See the module docstring for the Phase
-                1 POC semantics.
-            drone_device_id: Optional device-id of the drone being
-                paired. Persisted to agent config for UI display.
+            blob: Raw 64-byte libsodium crypto_box keypair (from
+                `wfb_keygen` on the peer or from the cloud relay).
+            role: `"drone"` writes the blob to `tx.key`, `"gs"` writes
+                it to `rx.key`. Determines which systemd unit gets
+                reloaded too.
+            peer_device_id: Optional device-id of the paired peer.
+                Persisted to config for UI display and cross-rig
+                fingerprint cross-check.
 
         Returns:
-            Dict with keys: paired_drone_id, paired_at, key_fingerprint.
+            Dict with `paired`, `paired_with_device_id`, `paired_at`,
+            `fingerprint`, `role`.
 
         Raises:
-            PairKeyError: If the pair_key is blank, too short, or has
-                invalid characters.
+            PairKeyError: If `blob` is the wrong shape.
         """
-        _validate_pair_key(pair_key)
+        _validate_blob(blob)
 
-        raw_key = _decode_pair_key(pair_key.strip())
-        # Public half: SHA-256 of the private key. Not a real NaCl
-        # public key, but stable and good enough as a fingerprint
-        # anchor for now. A future revision replaces this with the
-        # real libsodium `crypto_scalarmult_base` derivation.
-        pub_bytes = hashlib.sha256(raw_key).digest()
-        fingerprint = _fingerprint(pub_bytes)
-
-        # Atomic write both files. Private key stays 0600, public key
-        # can be 0644 so the webapp can read the fingerprint without
-        # escalating.
-        _atomic_write(self._rx_key_path, raw_key, mode=0o600)
-        _atomic_write(self._rx_pub_path, pub_bytes, mode=0o644)
-
+        target = self._key_path_for_role(role)
+        _atomic_write(target, bytes(blob), mode=0o600)
+        fingerprint = read_public_fingerprint(target)
         paired_at = _iso_now()
-        _set_paired_drone_id(drone_device_id or "unknown")
-        _set_paired_at(paired_at)
+
+        # auto_pair flips off at the moment a pair lands. The supervisor
+        # observes the persisted value and exits its retry loop.
+        _persist_pair_state(
+            role=role,
+            peer_device_id=peer_device_id,
+            paired_at=paired_at,
+            auto_pair_enabled=False,
+        )
 
         # Drop the setup-complete sentinel so captive_dns.py stops
-        # redirecting. Best-effort: failure here does not unpair.
+        # redirecting. Best-effort on the GS side; harmless on drone.
         try:
             _atomic_write(
                 _SETUP_COMPLETE_PATH,
@@ -355,88 +288,147 @@ class PairManager:
                 error=str(exc),
             )
 
-        # Reload wfb-rx so the running service picks up the new keys.
-        # If the unit is not running yet, reload will fail; that is OK,
-        # the next start reads the keys from disk anyway.
-        reloaded = _systemctl("reload", _WFB_RX_UNIT)
-        if not reloaded:
+        unit = self._wfb_unit_for_role(role)
+        # restart over reload: WfbManager waits in the unpaired loop
+        # until keys appear, but it samples key existence on its own
+        # backoff cadence. A unit restart is the prompt path to a new
+        # spawn cycle that picks up the freshly written file.
+        if not _systemctl("restart", unit):
             log.info(
-                "wfb_rx_reload_skipped",
-                unit=_WFB_RX_UNIT,
+                "wfb_unit_restart_skipped",
+                unit=unit,
                 note="unit may not be active yet, keys will be picked up on next start",
             )
 
         log.info(
             "pair_complete",
-            drone_device_id=drone_device_id or "unknown",
-            key_fingerprint=fingerprint,
+            role=role,
+            peer_device_id=peer_device_id or "unknown",
+            fingerprint=fingerprint,
             paired_at=paired_at,
         )
 
         return {
-            "paired_drone_id": drone_device_id or "unknown",
+            "paired": True,
+            "paired_with_device_id": peer_device_id,
             "paired_at": paired_at,
-            "key_fingerprint": fingerprint,
+            "fingerprint": fingerprint,
+            "role": role,
         }
 
-    async def unpair(self) -> dict:
-        """Remove the pair key and clear the paired_drone_id.
+    async def unpair(self, role: Role) -> dict[str, Any]:
+        """Wipe both key files and clear persisted pair state.
 
-        Leaves `/var/lib/ados/setup-complete` in place so the device
-        does not fall back into captive setup. The operator can run
-        `factory_reset()` to wipe that too.
+        Leaves `auto_pair_enabled = False` so the rig does not silently
+        re-bind to a different peer. Operator must re-arm explicitly.
         """
-        previous = _get_paired_drone_id()
-
-        for path in (self._rx_key_path, self._rx_pub_path):
+        # Always wipe BOTH files even on a single-role rig: a stale
+        # rx.key on a drone (or stale tx.key on a GS) would never be
+        # used in normal operation, but it leaks crypto material on
+        # disk and confuses the heartbeat surface.
+        for path in (self._tx_key_path, self._rx_key_path):
             try:
                 if path.is_file():
                     path.unlink()
             except OSError as exc:
                 log.warning(
-                    "pair_key_delete_failed",
+                    "key_delete_failed",
                     path=str(path),
                     error=str(exc),
                 )
 
-        _set_paired_drone_id(None)
-        _set_paired_at(None)
+        _persist_pair_state(
+            role=role,
+            peer_device_id=None,
+            paired_at=None,
+            auto_pair_enabled=False,
+        )
 
-        _systemctl("reload", _WFB_RX_UNIT)
+        unit = self._wfb_unit_for_role(role)
+        _systemctl("restart", unit)
 
-        log.info("unpair_complete", previous_drone_id=previous)
+        log.warning("unpair_complete", role=role)
 
         return {
-            "unpaired": True,
-            "previous_drone_id": previous,
+            "paired": False,
+            "role": role,
         }
 
-    async def status(self) -> dict:
-        """Return live pair status.
+    async def status(self, role: Role) -> dict[str, Any]:
+        """Return live pair status for the given role.
 
-        Fields: paired (bool), paired_drone_id, paired_at, key_fingerprint.
+        Fields: paired, paired_with_device_id, paired_at, fingerprint,
+        auto_pair_enabled, role.
         """
-        fingerprint = self._current_fingerprint()
-        drone_id = _get_paired_drone_id()
-        paired_at = _get_paired_at()
-        paired = self._rx_key_path.is_file() and fingerprint is not None
+        target = self._key_path_for_role(role)
+        paired = target.is_file() and target.stat().st_size == WFB_KEY_FILE_BYTES
+        fingerprint: str | None = None
+        if paired:
+            try:
+                fingerprint = read_public_fingerprint(target)
+            except (OSError, ValueError) as exc:
+                log.debug("fingerprint_read_failed", path=str(target), error=str(exc))
+                paired = False
+
+        cfg = _load_config_dict()
+        wfb_section = cfg.get("video", {}).get("wfb", {}) if isinstance(cfg.get("video"), dict) else {}
+        peer = wfb_section.get("paired_with_device_id")
+        paired_at = wfb_section.get("paired_at")
+        auto_pair_enabled = bool(wfb_section.get("auto_pair_enabled", True))
+
+        # GS-profile fallback: a rig migrated from a pre-0.16 config may
+        # still carry pair state under ground_station.* without the new
+        # video.wfb.* mirror. Read both, prefer the canonical spot.
+        if role == "gs" and peer is None:
+            gs = cfg.get("ground_station") if isinstance(cfg.get("ground_station"), dict) else {}
+            peer = gs.get("paired_drone_id") if isinstance(gs, dict) else None
+            if paired_at is None and isinstance(gs, dict):
+                paired_at = gs.get("paired_at")
 
         return {
             "paired": paired,
-            "paired_drone_id": drone_id,
-            "paired_at": paired_at,
-            "key_fingerprint": fingerprint,
+            "paired_with_device_id": peer if isinstance(peer, str) else None,
+            "paired_at": paired_at if isinstance(paired_at, str) else None,
+            "fingerprint": fingerprint,
+            "auto_pair_enabled": auto_pair_enabled,
+            "role": role,
         }
 
-    async def factory_reset(self) -> dict:
-        """Wipe pair keys, setup sentinel, and AP passphrase.
+    async def set_auto_pair(self, enabled: bool, role: Role) -> dict[str, Any]:
+        """Toggle the persisted auto_pair_enabled flag.
 
-        Forces the device back into first-boot posture: captive DNS
-        responder will fire again, hostapd_manager will regenerate a
-        fresh passphrase on next start, and the operator re-runs the
-        setup webapp flow.
+        Re-arming on a rig that's already paired is a no-op + a
+        warning; the operator must `unpair` first to clear pair state
+        before auto-bind can run again.
         """
-        await self.unpair()
+        current = await self.status(role)
+        if enabled and current["paired"]:
+            log.warning(
+                "auto_pair_rearm_blocked_while_paired",
+                role=role,
+                peer=current.get("paired_with_device_id"),
+            )
+            return {**current, "auto_pair_enabled": False, "rearm_blocked": True}
+
+        _persist_pair_state(
+            role=role,
+            peer_device_id=current.get("paired_with_device_id"),
+            paired_at=current.get("paired_at"),
+            auto_pair_enabled=enabled,
+        )
+
+        log.info("auto_pair_set", enabled=enabled, role=role)
+        return {**current, "auto_pair_enabled": enabled}
+
+    async def factory_reset(self, role: Role) -> dict[str, Any]:
+        """Wipe pair keys, setup sentinel, AP passphrase. Re-arm auto-pair.
+
+        Forces the rig back to first-boot posture: captive DNS will fire
+        again, hostapd_manager regenerates a fresh passphrase, the
+        operator re-runs the setup webapp flow, and auto-bind is armed
+        for the next boot.
+        """
+        await self.unpair(role)
 
         for path in (_SETUP_COMPLETE_PATH, _AP_PASSPHRASE_PATH):
             try:
@@ -449,22 +441,22 @@ class PairManager:
                     error=str(exc),
                 )
 
+        # Re-arm auto-pair so the next boot binds again.
+        _persist_pair_state(
+            role=role,
+            peer_device_id=None,
+            paired_at=None,
+            auto_pair_enabled=True,
+        )
+
         ts = _iso_now()
-        log.warning("factory_reset_performed", timestamp=ts)
-
-        return {
-            "reset": True,
-            "timestamp": ts,
-        }
+        log.warning("factory_reset_performed", role=role, timestamp=ts)
+        return {"reset": True, "timestamp": ts, "auto_pair_enabled": True}
 
 
-# ----------------------------------------------------------------------
+# ---------------------------------------------------------------------
 # Module-level singleton
-# ----------------------------------------------------------------------
-# Match the pattern used by get_input_manager(), get_pic_arbiter(),
-# get_modem_manager(). Prior to this, callers instantiated
-# PairManager() directly, which worked but fragmented state and
-# made test teardown awkward.
+# ---------------------------------------------------------------------
 _instance: "PairManager | None" = None
 
 
@@ -482,7 +474,21 @@ def _reset_for_tests() -> None:
     _instance = None
 
 
-# No systemd entry point. PairManager is consumed in-process by the
-# REST API service and the physical UI handler. A `__main__` block is
-# intentionally omitted; for bench testing use
-# `python -c "import asyncio; from ados.services.ground_station.pair_manager import get_pair_manager; print(asyncio.run(get_pair_manager().status()))"`.
+# Convenience for callers that already have an event loop:
+async def apply_drone_keypair(
+    blob: bytes, peer_device_id: str | None = None
+) -> dict[str, Any]:
+    return await get_pair_manager().apply_keypair(blob, "drone", peer_device_id)
+
+
+async def apply_gs_keypair(
+    blob: bytes, peer_device_id: str | None = None
+) -> dict[str, Any]:
+    return await get_pair_manager().apply_keypair(blob, "gs", peer_device_id)
+
+
+# Sync wrappers for callers outside an event loop (CLI, install hooks).
+def apply_keypair_sync(
+    blob: bytes, role: Role, peer_device_id: str | None = None
+) -> dict[str, Any]:
+    return asyncio.run(get_pair_manager().apply_keypair(blob, role, peer_device_id))

@@ -22,6 +22,9 @@ class LinkState(StrEnum):
     """WFB-ng link connection state."""
 
     DISCONNECTED = "disconnected"
+    UNPAIRED = "unpaired"
+    AUTO_PAIRING = "auto_pairing"
+    BINDING = "binding"
     CONNECTING = "connecting"
     CONNECTED = "connected"
     DEGRADED = "degraded"
@@ -74,6 +77,50 @@ class WfbManager:
     def get_status(self) -> dict:
         """Get current link status as a dictionary."""
         stats = self._monitor.get_current()
+        # Pair state is canonically held by PairManager, which reads
+        # the persisted /etc/ados/config.yaml. Read it lazily here so
+        # the heartbeat reflects post-pair state without a config
+        # reload race. Best-effort: failures fall through to None.
+        paired = False
+        peer_id: str | None = None
+        paired_at: str | None = None
+        fingerprint: str | None = None
+        auto_pair_enabled = bool(
+            getattr(self._config, "auto_pair_enabled", False)
+        )
+        try:
+            from ados.services.ground_station.pair_manager import get_pair_manager
+
+            pm = get_pair_manager()
+            # Drone-side wfb manager reads tx.key, GS-side reads rx.key.
+            # `WfbManager` is the air-side path; the GS path is
+            # `ground_station.wfb_rx.WfbRxManager` (which has its own
+            # `stats()` shape). Hardcoding "drone" here is correct for
+            # this class.
+            from ados.services.wfb.key_mgr import read_public_fingerprint
+
+            try:
+                fingerprint = read_public_fingerprint(pm.tx_key_path)
+                paired = True
+            except (FileNotFoundError, ValueError):
+                paired = False
+        except Exception:  # noqa: BLE001
+            paired = False
+
+        try:
+            from ados.core.config import load_config
+
+            cfg = load_config()
+            wfb_cfg = getattr(cfg.video, "wfb", None) if cfg else None
+            if wfb_cfg is not None:
+                peer_id = getattr(wfb_cfg, "paired_with_device_id", None)
+                paired_at = getattr(wfb_cfg, "paired_at", None)
+                auto_pair_enabled = bool(
+                    getattr(wfb_cfg, "auto_pair_enabled", auto_pair_enabled)
+                )
+        except Exception:  # noqa: BLE001
+            pass
+
         return {
             "state": self._state.value,
             "interface": self._interface,
@@ -93,7 +140,21 @@ class WfbManager:
             "tx_power_max_dbm": self._config.tx_power_max_dbm,
             "mcs_index": self._config.mcs_index,
             "topology": self._config.topology,
+            "paired": paired,
+            "paired_with_device_id": peer_id,
+            "paired_at": paired_at,
+            "public_key_fingerprint": fingerprint,
+            "auto_pair_enabled": auto_pair_enabled,
         }
+
+    def force_state(self, state: LinkState) -> None:
+        """Override link state externally.
+
+        The bind orchestrator flips this to BINDING before stopping the
+        wfb subprocesses and to UNPAIRED on a clean teardown so the
+        heartbeat stays accurate during the bind window. Idempotent.
+        """
+        self._state = state
 
     @property
     def effective_tx_power_dbm(self) -> int | None:
@@ -243,11 +304,29 @@ class WfbManager:
         """Main service loop: detect adapter, set monitor mode, start wfb processes.
 
         Auto-restarts failed processes with exponential backoff up to max_restarts.
+        Blocks (does not spawn) when no encryption keypair is on disk so we
+        do not produce a restart loop while the rig is waiting to pair.
         """
         self._running = True
         backoff = 1.0
+        unpaired_logged = False
 
         while self._running:
+            # Step 0: Block until a wfb-ng keypair is present. The
+            # auto_pair supervisor + the local bind orchestrator both
+            # land keys at WFB_KEY_DIR; until they do, there is no
+            # point bringing up wfb_tx/wfb_rx — they would just print
+            # "key not found" and exit, and systemd would restart-loop
+            # us into the ground.
+            if not key_exists():
+                if not unpaired_logged:
+                    log.info("wfb_blocked_unpaired", expected=f"{WFB_KEY_DIR}/")
+                    unpaired_logged = True
+                self._state = LinkState.UNPAIRED
+                await asyncio.sleep(5.0)
+                continue
+            unpaired_logged = False
+
             self._state = LinkState.CONNECTING
 
             # Step 1: Find a compatible adapter
@@ -289,9 +368,9 @@ class WfbManager:
                     requested=self._config.tx_power_dbm,
                 )
 
-            # Step 3: Check for encryption keys
-            if not key_exists():
-                log.warning("wfb_keys_missing", expected=f"{WFB_KEY_DIR}/")
+            # Step 3 (key existence): already enforced at the top of the
+            # loop. If keys disappeared between then and now, the
+            # subprocess will exit on its own and we re-enter the loop.
 
             # Step 4: Start wfb_tx and wfb_rx
             tx_ok = await self.start_tx(interface, self._channel)

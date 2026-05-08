@@ -100,6 +100,19 @@ class WfbConfig(BaseModel):
     topology: Literal["host_vbus", "powered_hub", "external_5v"] = "host_vbus"
     fec_k: int = 8
     fec_n: int = 12
+    # When true, the agent's auto_pair supervisor opens a local bind
+    # window on first boot and pairs to whichever unpaired peer responds
+    # first on the radio. Flips to false the moment a pair lands so the
+    # rig does not silently re-bind to another device after an unpair.
+    # Re-enabling requires explicit operator action (REST / CLI / GCS).
+    auto_pair_enabled: bool = True
+    # Peer device-id and pair timestamp persist on both profiles (drone
+    # holds the GS device-id, GS holds the drone device-id). The
+    # ground-station-side fields under ground_station.paired_drone_id
+    # remain for backward compat with field rigs running older configs;
+    # the canonical surface for fresh installs is here.
+    paired_with_device_id: str | None = None
+    paired_at: str | None = None  # iso timestamp
 
     @model_validator(mode="before")
     @classmethod

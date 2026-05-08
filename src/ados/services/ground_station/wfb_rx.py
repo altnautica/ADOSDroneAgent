@@ -45,6 +45,9 @@ class LinkState(StrEnum):
     """Ground-side link connection state (mirror of air LinkState)."""
 
     DISCONNECTED = "disconnected"
+    UNPAIRED = "unpaired"
+    AUTO_PAIRING = "auto_pairing"
+    BINDING = "binding"
     CONNECTING = "connecting"
     CONNECTED = "connected"
     DEGRADED = "degraded"
@@ -189,11 +192,54 @@ class WfbRxManager:
     def stats(self) -> dict:
         """Return the ground-side link stats shape.
 
-        Schema: rssi_dbm, bitrate_mbps, fec_rec, fec_lost, channel.
-        Additional fields from the shared monitor are included for
-        parity with the air-side status payload.
+        Schema: rssi_dbm, bitrate_mbps, fec_rec, fec_lost, channel,
+        plus pair-state fields parity with the air-side status payload
+        so heartbeat consumers see the same surface from either side.
         """
         snap: LinkStats = self._monitor.get_current()
+
+        paired = False
+        peer_id: str | None = None
+        paired_at: str | None = None
+        fingerprint: str | None = None
+        auto_pair_enabled = bool(
+            getattr(self._config, "auto_pair_enabled", False)
+        )
+        try:
+            from ados.services.ground_station.pair_manager import get_pair_manager
+            from ados.services.wfb.key_mgr import read_public_fingerprint
+
+            pm = get_pair_manager()
+            try:
+                fingerprint = read_public_fingerprint(pm.rx_key_path)
+                paired = True
+            except (FileNotFoundError, ValueError):
+                paired = False
+        except Exception:  # noqa: BLE001
+            paired = False
+
+        try:
+            from ados.core.config import load_config
+
+            cfg = load_config()
+            wfb_cfg = getattr(cfg.video, "wfb", None) if cfg else None
+            if wfb_cfg is not None:
+                peer_id = getattr(wfb_cfg, "paired_with_device_id", None)
+                paired_at = getattr(wfb_cfg, "paired_at", None)
+                auto_pair_enabled = bool(
+                    getattr(wfb_cfg, "auto_pair_enabled", auto_pair_enabled)
+                )
+            # Legacy fall-back: GS profile may carry pair state under
+            # ground_station.* on rigs migrating from a pre-0.16 config.
+            if peer_id is None:
+                gs = getattr(cfg, "ground_station", None) if cfg else None
+                if gs is not None:
+                    peer_id = getattr(gs, "paired_drone_id", None)
+                    if paired_at is None:
+                        paired_at = getattr(gs, "paired_at", None)
+        except Exception:  # noqa: BLE001
+            pass
+
         return {
             "state": self._state.value,
             "interface": self._interface,
@@ -201,6 +247,8 @@ class WfbRxManager:
             "rssi_dbm": snap.rssi_dbm,
             "bitrate_mbps": round(snap.bitrate_kbps / 1000.0, 3),
             "bitrate_kbps": snap.bitrate_kbps,
+            "fec_recovered": snap.fec_recovered,
+            "fec_failed": snap.fec_failed,
             "fec_rec": snap.fec_recovered,
             "fec_lost": snap.fec_failed,
             "packets_received": snap.packets_received,
@@ -209,6 +257,18 @@ class WfbRxManager:
             "snr_db": snap.snr_db,
             "restart_count": self._restart_count,
             "samples": self._monitor.sample_count,
+            # Mirror WfbConfig fields onto the same heartbeat shape the
+            # air side emits so `build_radio_block` works without a
+            # role branch.
+            "tx_power_dbm": getattr(self._config, "tx_power_dbm", None),
+            "tx_power_max_dbm": getattr(self._config, "tx_power_max_dbm", None),
+            "mcs_index": getattr(self._config, "mcs_index", None),
+            "topology": getattr(self._config, "topology", None),
+            "paired": paired,
+            "paired_with_device_id": peer_id,
+            "paired_at": paired_at,
+            "public_key_fingerprint": fingerprint,
+            "auto_pair_enabled": auto_pair_enabled,
         }
 
     async def _read_rx_output(self) -> None:
@@ -241,8 +301,24 @@ class WfbRxManager:
         """Main service loop with adapter detection and auto-restart."""
         self._running = True
         backoff = 1.0
+        unpaired_logged = False
 
         while self._running:
+            # Block when no key is on disk. Pairing (local bind, cloud
+            # relay, or operator) lands keys at WFB_KEY_DIR; until then,
+            # there is no point spawning wfb_rx.
+            if not key_exists():
+                if not unpaired_logged:
+                    log.info(
+                        "ground_wfb_blocked_unpaired",
+                        expected=f"{WFB_KEY_DIR}/",
+                    )
+                    unpaired_logged = True
+                self._state = LinkState.UNPAIRED
+                await asyncio.sleep(5.0)
+                continue
+            unpaired_logged = False
+
             self._state = LinkState.CONNECTING
 
             interface = self.detect_adapter()
@@ -268,8 +344,9 @@ class WfbRxManager:
                 backoff = min(backoff * 2, 30.0)
                 continue
 
-            if not key_exists():
-                log.warning("ground_wfb_keys_missing", expected=f"{WFB_KEY_DIR}/")
+            # Key existence already enforced at top of loop. If the key
+            # disappeared between then and now (unpair raced with us)
+            # the subprocess will exit and we re-enter the loop.
 
             rx_ok = await self.start_rx(interface, self._channel)
             if not rx_ok:
@@ -349,6 +426,16 @@ async def main() -> None:
     manager = WfbRxManager(config.video.wfb)
     manager_task = asyncio.create_task(manager.run(), name="ground-wfb-rx")
 
+    # Spawn the auto-pair supervisor: drives RubyFPV-style first-boot
+    # bind. Self-disarms once a pair lands and is a cheap no-op when
+    # already paired. Lives inside this process so it shares the
+    # service's lifecycle. Survives wfb_rx adapter-detect bailouts
+    # because systemd restarts the unit and we re-spawn.
+    from ados.services.wfb.auto_pair import get_auto_pair_supervisor
+
+    auto_pair = get_auto_pair_supervisor("gs")
+    auto_pair.start()
+
     slog.info("ground_wfb_rx_service_ready")
 
     # Shut down if either signal fires or the manager returns (adapter
@@ -359,6 +446,7 @@ async def main() -> None:
     )
 
     slog.info("ground_wfb_rx_service_stopping")
+    await auto_pair.stop()
     manager_task.cancel()
     await asyncio.gather(manager_task, return_exceptions=True)
     await manager.stop_rx()

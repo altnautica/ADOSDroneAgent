@@ -28,14 +28,14 @@ async def get_ground_station_status() -> dict[str, Any]:
     app = _gs._require_ground_profile()
 
     # Surface the current pair key fingerprint alongside the paired
-    # drone id. Source is PairManager.status().
+    # drone id. Source is PairManager.status("gs").
     paired_drone_id: str | None = None
     key_fingerprint: str | None = None
     try:
-        pair_status = await _gs._pair_manager().status()
+        pair_status = await _gs._pair_manager().status("gs")
         if pair_status.get("paired"):
-            paired_drone_id = pair_status.get("paired_drone_id")
-        key_fingerprint = pair_status.get("key_fingerprint")
+            paired_drone_id = pair_status.get("paired_with_device_id")
+        key_fingerprint = pair_status.get("fingerprint")
     except Exception:
         pass
 

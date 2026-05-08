@@ -75,6 +75,11 @@ def build_radio_block(wfb_status: dict[str, Any] | None) -> dict[str, Any]:
             "fec_recovered": None,
             "fec_lost": None,
             "packets_lost": None,
+            "paired": False,
+            "paired_with_device_id": None,
+            "paired_at": None,
+            "public_key_fingerprint": None,
+            "auto_pair_enabled": None,
         }
 
     iface = wfb_status.get("interface") or None
@@ -101,6 +106,16 @@ def build_radio_block(wfb_status: dict[str, Any] | None) -> dict[str, Any]:
         "fec_recovered": wfb_status.get("fec_recovered"),
         "fec_lost": wfb_status.get("fec_failed"),
         "packets_lost": wfb_status.get("packets_lost"),
+        # Pair-state surface. Source: the on-disk WfbConfig fields,
+        # echoed back through WfbManager.get_status() at the top of
+        # this module. Heartbeat consumers (GCS, LCD, Convex schema)
+        # display these directly. Forward-compatible: omitted on
+        # older agent versions, the GCS treats absent as `false`.
+        "paired": bool(wfb_status.get("paired", False)),
+        "paired_with_device_id": wfb_status.get("paired_with_device_id"),
+        "paired_at": wfb_status.get("paired_at"),
+        "public_key_fingerprint": wfb_status.get("public_key_fingerprint"),
+        "auto_pair_enabled": wfb_status.get("auto_pair_enabled"),
     }
 
 

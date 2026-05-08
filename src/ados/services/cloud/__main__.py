@@ -675,6 +675,114 @@ async def main() -> None:
                 # For now, just acknowledge - supervisor handles restarts
                 return "completed", {"success": True, "message": f"Restart requested for {name}"}, None
 
+            elif command == "wfb_pair_init_remote":
+                # Cloud-relay path. The GS rig generates a fresh
+                # libsodium keypair and ships the matching peer half
+                # back via the command result. The GCS forwards that
+                # blob to the drone via wfb_pair_apply_remote.
+                #
+                # Only valid on a GS rig. A drone rig responds with
+                # `failed` so the orchestrator action surfaces the
+                # error instead of silently corrupting state.
+                import base64
+
+                if config.agent.profile == "drone":
+                    return "failed", {
+                        "success": False,
+                        "message": "wfb_pair_init_remote runs on the GS rig only",
+                    }, None
+
+                from ados.services.ground_station.pair_manager import (
+                    apply_gs_keypair,
+                )
+
+                try:
+                    # Generate the keypair into a tmpdir, persist the
+                    # GS half locally as rx.key, return the drone half
+                    # as a base64 blob for the GCS to relay.
+                    import tempfile
+                    from pathlib import Path
+
+                    from ados.services.wfb.key_mgr import generate_key_pair
+
+                    with tempfile.TemporaryDirectory() as tmp:
+                        tx_path, rx_path = generate_key_pair(tmp)
+                        # generate_key_pair renames to tx.key/rx.key.
+                        # On the GS, the rx half stays here, the tx
+                        # half (== drone.key bytes) goes to the peer.
+                        drone_blob = Path(tx_path).read_bytes()
+                        gs_blob = Path(rx_path).read_bytes()
+
+                    peer_id = args.get("peerDeviceId") or args.get("peer_device_id")
+                    pair_state = await apply_gs_keypair(gs_blob, peer_id)
+
+                    return "completed", {"success": True, "message": "ok"}, {
+                        "blobB64": base64.b64encode(drone_blob).decode("ascii"),
+                        "fingerprint": pair_state.get("fingerprint"),
+                        "gsDeviceId": config.agent.device_id,
+                        "pairedAt": pair_state.get("paired_at"),
+                    }
+                except Exception as exc:  # noqa: BLE001
+                    return "failed", {"success": False, "message": str(exc)}, None
+
+            elif command == "wfb_pair_apply_remote":
+                # Drone side. Receive the matching `drone.key` blob
+                # produced by the GS's wfb_pair_init_remote and
+                # persist it via PairManager. GS-only rigs reject.
+                import base64
+
+                if config.agent.profile != "drone":
+                    return "failed", {
+                        "success": False,
+                        "message": "wfb_pair_apply_remote runs on the drone rig only",
+                    }, None
+
+                blob_b64 = args.get("blobB64") or args.get("blob_b64")
+                peer_id = args.get("peerDeviceId") or args.get("peer_device_id")
+                if not blob_b64:
+                    return "failed", {
+                        "success": False,
+                        "message": "blobB64 required",
+                    }, None
+
+                try:
+                    blob = base64.b64decode(blob_b64, validate=True)
+                except (TypeError, ValueError) as exc:
+                    return "failed", {
+                        "success": False,
+                        "message": f"blob_b64 decode failed: {exc}",
+                    }, None
+
+                try:
+                    from ados.services.ground_station.pair_manager import (
+                        apply_drone_keypair,
+                    )
+
+                    pair_state = await apply_drone_keypair(blob, peer_id)
+                    return "completed", {"success": True, "message": "ok"}, {
+                        "paired": True,
+                        "fingerprint": pair_state.get("fingerprint"),
+                        "pairedAt": pair_state.get("paired_at"),
+                    }
+                except Exception as exc:  # noqa: BLE001
+                    return "failed", {"success": False, "message": str(exc)}, None
+
+            elif command == "wfb_pair_unpair":
+                # Either side. Wipe the local key and restart the
+                # appropriate wfb unit. Used by the GCS's
+                # `pairRigsRemote` action to roll back on fingerprint
+                # mismatch and by an explicit operator unpair button.
+                try:
+                    from ados.services.ground_station.pair_manager import (
+                        get_pair_manager,
+                    )
+
+                    role = "drone" if config.agent.profile == "drone" else "gs"
+                    result = await get_pair_manager().unpair(role)
+                    return "completed", {"success": True, "message": "ok"}, result
+                except Exception as exc:  # noqa: BLE001
+                    return "failed", {"success": False, "message": str(exc)}, None
+
             else:
                 return "failed", {"success": False, "message": f"Unknown command: {command}"}, None
 

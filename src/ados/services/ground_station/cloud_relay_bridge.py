@@ -472,7 +472,7 @@ def _build_default_bridge() -> "CloudRelayBridge":
             except RuntimeError:
                 _running_loop = None
             if _running_loop is None:
-                pair_status = asyncio.run(pair.status())
+                pair_status = asyncio.run(pair.status("gs"))
             else:
                 pair_status = {}
                 log.debug(
@@ -480,7 +480,7 @@ def _build_default_bridge() -> "CloudRelayBridge":
                     note="deferring to async status refresh at runtime",
                 )
             if isinstance(pair_status, dict) and pair_status.get("paired"):
-                drone_id = pair_status.get("paired_drone_id") or None
+                drone_id = pair_status.get("paired_with_device_id") or None
             if not drone_id:
                 gs = getattr(config, "ground_station", None)
                 if gs is not None:

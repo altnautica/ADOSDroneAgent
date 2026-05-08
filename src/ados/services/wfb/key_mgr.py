@@ -1,8 +1,17 @@
-"""WFB-ng encryption key management."""
+"""WFB-ng encryption key management.
+
+The wire format is libsodium crypto_box: each key file is 64 bytes, the
+first 32 a NaCl secret key and the last 32 the matched peer's public
+key. `wfb_keygen` produces a paired `gs.key` + `drone.key` pair. The
+agent persists the receiver-side bytes at `/etc/ados/wfb/rx.key` and
+the transmitter-side bytes at `/etc/ados/wfb/tx.key`. Loading code
+treats these as opaque blobs except when computing a public-key
+fingerprint for display + cross-rig pair verification.
+"""
 
 from __future__ import annotations
 
-import os
+import hashlib
 import subprocess
 from pathlib import Path
 
@@ -15,8 +24,8 @@ DEFAULT_KEY_DIR = str(WFB_KEY_DIR)
 TX_KEY_NAME = "tx.key"
 RX_KEY_NAME = "rx.key"
 
-# WFB-ng key file size: 32 bytes (NaCl crypto_box keypair seed)
-WFB_KEY_SIZE = 32
+WFB_KEY_FILE_BYTES = 64
+WFB_PUBLIC_HALF_OFFSET = 32
 
 
 def key_exists(key_dir: str | None = None) -> bool:
@@ -52,72 +61,40 @@ def load_key(path: str) -> bytes:
     return data
 
 
-def _generate_with_wfb_keygen(output_dir: Path) -> tuple[str, str]:
-    """Generate keys using the wfb_keygen binary (preferred method).
+def read_public_fingerprint(path: str | Path) -> str:
+    """Compute a stable 16-hex-char fingerprint of the peer's public key.
 
-    WFB-ng ships with `wfb_keygen` that produces a compatible keypair.
-    The binary writes gs.key and drone.key to the current directory.
-    We rename them to tx.key and rx.key.
+    The peer-public half is the second 32 bytes of a 64-byte wfb-ng key
+    file. The fingerprint is `blake2b(pub, digest_size=8)` rendered as
+    16 lowercase hex characters. Both rigs of a pair compute the same
+    fingerprint from their respective key files, so heartbeat
+    cross-checks reduce to a string compare.
+
+    Raises:
+        FileNotFoundError: If the file does not exist.
+        ValueError: If the file is not exactly 64 bytes.
     """
-    result = subprocess.run(
-        ["wfb_keygen"],
-        capture_output=True,
-        text=True,
-        timeout=10,
-        cwd=str(output_dir),
-    )
+    key_path = Path(path)
+    if not key_path.is_file():
+        raise FileNotFoundError(f"Key file not found: {path}")
 
-    if result.returncode != 0:
-        raise RuntimeError(f"wfb_keygen failed: {result.stderr.strip()}")
-
-    # wfb_keygen creates gs.key and drone.key
-    gs_key = output_dir / "gs.key"
-    drone_key = output_dir / "drone.key"
-
-    tx_path = output_dir / TX_KEY_NAME
-    rx_path = output_dir / RX_KEY_NAME
-
-    if gs_key.is_file():
-        gs_key.rename(tx_path)
-    if drone_key.is_file():
-        drone_key.rename(rx_path)
-
-    return str(tx_path), str(rx_path)
-
-
-def _generate_with_cryptography(output_dir: Path) -> tuple[str, str]:
-    """Generate keys using the Python cryptography library (fallback).
-
-    Produces 32-byte random keys compatible with WFB-ng's NaCl encryption.
-    This is a fallback when wfb_keygen is not installed.
-    """
-    tx_path = output_dir / TX_KEY_NAME
-    rx_path = output_dir / RX_KEY_NAME
-
-    tx_key = os.urandom(WFB_KEY_SIZE)
-    rx_key = os.urandom(WFB_KEY_SIZE)
-
-    # Write key files with restrictive permissions from creation (no race window).
-    # os.open with O_CREAT|O_WRONLY and mode 0o600 sets permissions atomically.
-    for key_path, key_data in [(tx_path, tx_key), (rx_path, rx_key)]:
-        fd = os.open(
-            str(key_path),
-            os.O_CREAT | os.O_WRONLY | os.O_TRUNC,
-            0o600,
+    data = key_path.read_bytes()
+    if len(data) != WFB_KEY_FILE_BYTES:
+        raise ValueError(
+            f"Key file at {path} is {len(data)} bytes, expected "
+            f"{WFB_KEY_FILE_BYTES}"
         )
-        try:
-            os.write(fd, key_data)
-        finally:
-            os.close(fd)
 
-    return str(tx_path), str(rx_path)
+    pub = data[WFB_PUBLIC_HALF_OFFSET:]
+    return hashlib.blake2b(pub, digest_size=8).hexdigest()
 
 
 def generate_key_pair(output_dir: str | None = None) -> tuple[str, str]:
-    """Generate a WFB-ng tx/rx key pair.
+    """Generate a WFB-ng tx/rx key pair via the upstream `wfb_keygen` tool.
 
-    Tries wfb_keygen first (produces fully compatible keys). Falls back to
-    Python cryptography library if wfb_keygen is not available.
+    `wfb_keygen` writes `gs.key` and `drone.key` (64 bytes each) into the
+    current directory. The function renames them to `tx.key` and
+    `rx.key` in `output_dir`.
 
     Args:
         output_dir: Directory to write keys to. Defaults to /etc/ados/wfb/.
@@ -126,25 +103,60 @@ def generate_key_pair(output_dir: str | None = None) -> tuple[str, str]:
         Tuple of (tx_key_path, rx_key_path).
 
     Raises:
+        FileNotFoundError: If `wfb_keygen` is not on PATH.
+        RuntimeError: If `wfb_keygen` exits non-zero or its output is
+            missing or the wrong size.
         OSError: If the output directory cannot be created.
     """
     base = Path(output_dir or DEFAULT_KEY_DIR)
     base.mkdir(parents=True, exist_ok=True)
 
-    # Try wfb_keygen first
     try:
-        tx_path, rx_path = _generate_with_wfb_keygen(base)
-        log.info("keys_generated", method="wfb_keygen", dir=str(base))
-        return tx_path, rx_path
-    except FileNotFoundError:
-        log.info("wfb_keygen_not_found", fallback="cryptography")
-    except (RuntimeError, subprocess.TimeoutExpired) as e:
-        log.warning("wfb_keygen_failed", error=str(e), fallback="cryptography")
+        result = subprocess.run(
+            ["wfb_keygen"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            cwd=str(base),
+        )
+    except FileNotFoundError as exc:
+        log.error("wfb_keygen_not_installed")
+        raise FileNotFoundError(
+            "wfb_keygen binary not found on PATH. install.sh provisions "
+            "wfb-ng with the keygen tool; rerun the installer."
+        ) from exc
 
-    # Fallback to Python-generated keys
-    tx_path, rx_path = _generate_with_cryptography(base)
-    log.info("keys_generated", method="cryptography", dir=str(base))
-    return tx_path, rx_path
+    if result.returncode != 0:
+        raise RuntimeError(f"wfb_keygen failed: {result.stderr.strip()}")
+
+    gs_key = base / "gs.key"
+    drone_key = base / "drone.key"
+    tx_path = base / TX_KEY_NAME
+    rx_path = base / RX_KEY_NAME
+
+    if not gs_key.is_file() or not drone_key.is_file():
+        raise RuntimeError(
+            "wfb_keygen ran but did not produce both gs.key and drone.key "
+            f"in {base}"
+        )
+
+    for path in (gs_key, drone_key):
+        size = path.stat().st_size
+        if size != WFB_KEY_FILE_BYTES:
+            raise RuntimeError(
+                f"wfb_keygen produced {path.name} of size {size}, "
+                f"expected {WFB_KEY_FILE_BYTES}"
+            )
+
+    # The agent normalizes everywhere to tx.key / rx.key so the same
+    # WfbManager spawn code works on both profiles. The rename is the
+    # only step that picks a side; the bytes themselves are
+    # role-identified by which half (private + peer-public) is in front.
+    gs_key.rename(tx_path)
+    drone_key.rename(rx_path)
+
+    log.info("keys_generated", method="wfb_keygen", dir=str(base))
+    return str(tx_path), str(rx_path)
 
 
 def get_key_paths(key_dir: str | None = None) -> tuple[str, str]:

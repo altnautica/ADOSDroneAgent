@@ -300,3 +300,142 @@ async def set_wfb_tx_power(request: TxPowerRequest):
         "effective_dbm": effective,
         "tx_power_max_dbm": ceiling,
     }
+
+
+# ---------------------------------------------------------------------
+# Pair lifecycle: local-radio bind, status, unpair, auto-pair toggle.
+# ---------------------------------------------------------------------
+
+
+def _agent_role_from_profile(profile: str) -> str:
+    """Map the agent profile string to the bind-protocol role.
+
+    Drone profile = `drone` (runs wfb_bind_server). Anything else
+    (ground_station, auto-resolved-as-gs at boot) is treated as `gs`
+    (runs wfb_bind_client).
+    """
+    return "drone" if profile == "drone" else "gs"
+
+
+class LocalBindRequest(BaseModel):
+    """POST body for `/wfb/pair/local-bind`."""
+
+    role: str | None = Field(
+        default=None,
+        description="`drone` or `gs`. Defaults to the agent's configured profile.",
+    )
+    peer_device_id: str | None = Field(
+        default=None,
+        description="Optional peer device-id to persist with the pair state.",
+    )
+
+
+class AutoPairToggleRequest(BaseModel):
+    """PUT body for `/wfb/pair/auto-pair`."""
+
+    enabled: bool
+
+
+@router.get("/wfb/pair")
+async def get_wfb_pair_status() -> dict[str, Any]:
+    """Pair-state snapshot (paired, peer device-id, fingerprint, auto-pair)."""
+    app = get_agent_app()
+    role = _agent_role_from_profile(app.config.agent.profile)
+
+    from ados.services.ground_station.pair_manager import get_pair_manager
+
+    pm = get_pair_manager()
+    return await pm.status(role)
+
+
+@router.post("/wfb/pair/local-bind")
+async def post_wfb_pair_local_bind(request: LocalBindRequest) -> dict[str, Any]:
+    """Open a local-radio bind window via the upstream wfb-ng protocol.
+
+    Returns a session dict (`session_id`, `state`, `started_at`,
+    `finished_at`, `error`, `fingerprint`, `peer_device_id`, `source`).
+    The endpoint is synchronous: the entire bind protocol runs to
+    completion within the request, capped at 60 seconds. Long-poll
+    clients should issue this and treat the response as the terminal
+    state. Concurrent calls fail-fast with a 409.
+    """
+    app = get_agent_app()
+    role = (
+        request.role
+        if request.role in ("drone", "gs")
+        else _agent_role_from_profile(app.config.agent.profile)
+    )
+
+    from ados.services.wfb.bind_orchestrator import (
+        BindBusyError,
+        BindError,
+        get_bind_orchestrator,
+    )
+
+    orch = get_bind_orchestrator()
+    try:
+        return await orch.start_local_bind(
+            role=role,
+            peer_device_id=request.peer_device_id,
+            source="operator",
+        )
+    except BindBusyError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={"error": {"code": "E_BIND_IN_PROGRESS", "message": str(exc)}},
+        ) from exc
+    except BindError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail={"error": {"code": "E_BIND_FAILED", "message": str(exc)}},
+        ) from exc
+
+
+@router.get("/wfb/pair/local-bind")
+async def get_wfb_pair_local_bind() -> dict[str, Any]:
+    """Latest bind-session snapshot, or `{}` if none has run since boot."""
+    from ados.services.wfb.bind_orchestrator import get_bind_orchestrator
+
+    snap = await get_bind_orchestrator().status()
+    return snap or {}
+
+
+@router.post("/wfb/pair/unpair")
+async def post_wfb_pair_unpair() -> dict[str, Any]:
+    """Wipe both key files, clear pair state, restart the wfb service.
+
+    Leaves `auto_pair_enabled = false` so the rig does not silently
+    re-bind. The operator must explicitly re-arm to start auto-bind
+    again.
+    """
+    app = get_agent_app()
+    role = _agent_role_from_profile(app.config.agent.profile)
+
+    from ados.services.ground_station.pair_manager import get_pair_manager
+
+    pm = get_pair_manager()
+    return await pm.unpair(role)
+
+
+@router.put("/wfb/pair/auto-pair")
+async def put_wfb_pair_auto_pair(request: AutoPairToggleRequest) -> dict[str, Any]:
+    """Toggle `wfb.auto_pair_enabled`.
+
+    Re-arming on a paired rig returns `rearm_blocked: true`; the
+    operator must `unpair` first.
+    """
+    app = get_agent_app()
+    role = _agent_role_from_profile(app.config.agent.profile)
+
+    from ados.services.ground_station.pair_manager import get_pair_manager
+
+    pm = get_pair_manager()
+    result = await pm.set_auto_pair(bool(request.enabled), role)
+
+    # Mirror onto the live config object so the auto_pair supervisor
+    # observes the change without a config reload race.
+    wfb_cfg = getattr(app.config.video, "wfb", None) if app.config is not None else None
+    if wfb_cfg is not None:
+        wfb_cfg.auto_pair_enabled = bool(result.get("auto_pair_enabled", False))
+
+    return result

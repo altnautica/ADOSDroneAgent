@@ -568,6 +568,53 @@ install_wfb_ng_from_vendor() {
     else
         warn "wfb-ng install ran but wfb_tx not on PATH; check setup.py data_files paths."
     fi
+
+    # Provision artifacts for the local-radio bind protocol:
+    #   /etc/bind.key      hardcoded default shared key (matches upstream)
+    #   /etc/bind.yaml     wfb-server profiles for drone_bind / gs_bind
+    #   wifibroadcast@.service  systemd template for the bind profile
+    # These let `systemctl start wifibroadcast@gs_bind` (or @drone_bind)
+    # bring up the L3 tunnel that the Python bind orchestrator drives.
+    if [ ! -f /etc/bind.key ]; then
+        info "Writing default /etc/bind.key (upstream wfb-ng shared bind key)"
+        echo "RvrSKeUVjoU/xXaYTWC+7AtlVdhvuQlhw5UvdlkM84L80RfATVid7J7y/dVnm48LCsmB1hRhPtgkxNe0kmB9Dg==" \
+            | base64 -d > /etc/bind.key
+        chmod 0644 /etc/bind.key
+    fi
+
+    if [ ! -f /etc/bind.yaml ] && command -v wfb-server >/dev/null 2>&1; then
+        info "Generating /etc/bind.yaml via wfb-server --gen-bind-yaml"
+        if ! wfb-server --gen-bind-yaml --profiles drone drone_bind gs gs_bind \
+             > /etc/bind.yaml.tmp 2>/dev/null; then
+            warn "wfb-server --gen-bind-yaml failed; bind protocol unavailable."
+            rm -f /etc/bind.yaml.tmp
+        else
+            mv /etc/bind.yaml.tmp /etc/bind.yaml
+            chmod 0644 /etc/bind.yaml
+        fi
+    fi
+
+    # Install the wfb-ng template unit so `wifibroadcast@drone_bind` and
+    # `wifibroadcast@gs_bind` are addressable via systemctl. The setup.py
+    # path that ships this in the deb layout lands at
+    # /usr/lib/systemd/system/wifibroadcast@.service, but Radxa BSP and
+    # bare-bones rootfs builds sometimes ignore that directory; mirror
+    # to /etc/systemd/system to make the unit unambiguously visible.
+    local _wfb_unit_src
+    if [ -f /usr/lib/systemd/system/wifibroadcast@.service ]; then
+        _wfb_unit_src="/usr/lib/systemd/system/wifibroadcast@.service"
+    elif [ -f "${vendor_dir}/scripts/systemd/wifibroadcast@.service" ]; then
+        _wfb_unit_src="${vendor_dir}/scripts/systemd/wifibroadcast@.service"
+    else
+        _wfb_unit_src=""
+    fi
+    if [ -n "${_wfb_unit_src}" ] && [ ! -f /etc/systemd/system/wifibroadcast@.service ]; then
+        info "Installing wifibroadcast@.service template from ${_wfb_unit_src}"
+        install -m 0644 "${_wfb_unit_src}" /etc/systemd/system/wifibroadcast@.service
+    fi
+    if [ -f /etc/systemd/system/wifibroadcast@.service ] || [ -f /usr/lib/systemd/system/wifibroadcast@.service ]; then
+        systemctl daemon-reload >/dev/null 2>&1 || true
+    fi
 }
 
 # ─── MediaMTX Installation ─────────────────────────────────────────────────
