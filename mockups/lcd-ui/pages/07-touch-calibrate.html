@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>07 — Touch calibration</title>
+<link rel="stylesheet" href="../styles.css">
+</head>
+<body>
+<div class="screen">
+
+  <!-- Calibration takes the FULL panel — no chrome, no tab bar. -->
+  <div class="calibrate" style="position: absolute; inset: 0;">
+
+    <!-- Top-left target (done) -->
+    <div class="target done" style="top: 30px; left: 30px;">
+      <div class="ring"></div>
+    </div>
+
+    <!-- Top-right target (done) -->
+    <div class="target done" style="top: 30px; left: 450px;">
+      <div class="ring"></div>
+    </div>
+
+    <!-- Center target (active, current step) -->
+    <div class="target active" style="top: 160px; left: 240px;">
+      <div class="ring"></div>
+    </div>
+
+    <!-- Bottom-left target (pending) -->
+    <div class="target" style="top: 290px; left: 30px;">
+      <div class="ring" style="opacity: 0.4;"></div>
+    </div>
+
+    <!-- Bottom-right target (pending) -->
+    <div class="target" style="top: 290px; left: 450px;">
+      <div class="ring" style="opacity: 0.4;"></div>
+    </div>
+
+    <!-- Centered legend (offset down so it doesn't clash with center target) -->
+    <div class="legend" style="top: 220px;">
+      <div class="step">STEP 3 / 5</div>
+      <div class="title">Tap the centre crosshair</div>
+      <div class="hint">Hold the stylus steady. We'll save the calibration once all five points are tapped.</div>
+    </div>
+
+    <div class="skip">tap any corner to skip</div>
+  </div>
+
+</div>
+</body>
+</html>

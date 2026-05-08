@@ -1,0 +1,744 @@
+/* ──────────────────────────────────────────────────────────────────
+ * LCD UI mockup tokens — mirror src/ados/services/ui/dashboards/
+ * components/primitives.py so the HTML mockup pixel-matches what
+ * the agent renders at runtime (PIL/RGB565).
+ * ────────────────────────────────────────────────────────────────── */
+
+:root {
+  --bg-primary: #000000;
+  --bg-secondary: #0A0A0A;
+  --bg-tertiary: #141414;
+
+  --text-primary: #FAFAFA;
+  --text-secondary: #A0A0A0;
+  --text-tertiary: #666666;
+
+  --accent-primary: #3A82FF;
+  --accent-secondary: #DFF140;
+
+  --status-success: #22C55E;
+  --status-warning: #F59E0B;
+  --status-error: #EF4444;
+
+  --border-default: #1A1A1A;
+  --border-strong: #2A2A2A;
+
+  /* Layout constants */
+  --top-bar-h: 32px;
+  --tab-bar-h: 44px;
+  --content-h: 244px; /* 320 - 32 - 44 */
+
+  --tap-min: 48px;
+
+  /* Fonts — DejaVu is on the device; the web stack uses close
+   * fallbacks so the mockup reads true to runtime. */
+  --font-sans: "DejaVu Sans", -apple-system, "Helvetica Neue", Arial, sans-serif;
+  --font-mono: "DejaVu Sans Mono", "SF Mono", Menlo, "Roboto Mono", monospace;
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  /* Resistive LCD has no anti-alias smoothing — mockups read
+   * sharper if we kill it, but most browsers ignore on small
+   * fixed sizes. We keep it on for readability. */
+}
+
+html, body {
+  width: 480px;
+  height: 320px;
+  overflow: hidden;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 1;
+}
+
+.screen {
+  width: 480px;
+  height: 320px;
+  position: relative;
+  overflow: hidden;
+  background: var(--bg-primary);
+}
+
+/* ──────────────────────────────────────────────────────────────────
+ * Top status bar — adapted from footer_bar.py + header_bar.py
+ * Left: hostname + role badge. Center: CPU/RAM/temp. Right: clock.
+ * 32 px tall, 1 px divider underneath.
+ * ────────────────────────────────────────────────────────────────── */
+
+.top-bar {
+  position: absolute;
+  top: 0; left: 0;
+  width: 480px;
+  height: var(--top-bar-h);
+  background: var(--bg-primary);
+  border-bottom: 1px solid var(--border-default);
+  display: flex;
+  align-items: center;
+  padding: 0 8px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.top-bar .hostname {
+  font-family: var(--font-sans);
+  font-weight: 700;
+  font-size: 14px;
+  color: var(--text-primary);
+  margin-right: 12px;
+}
+
+.top-bar .role {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--font-sans);
+  font-weight: 700;
+  font-size: 11px;
+  letter-spacing: 0.4px;
+  color: var(--text-primary);
+}
+.top-bar .role .dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--status-success);
+  box-shadow: 0 0 4px rgba(34, 197, 94, 0.4);
+}
+.top-bar .role.relay .dot { background: var(--accent-primary); }
+.top-bar .role.direct .dot { background: var(--text-secondary); }
+.top-bar .role.unset .dot { background: var(--status-warning); }
+
+.top-bar .sysmetrics {
+  display: flex;
+  gap: 10px;
+  margin-left: auto;
+  margin-right: 8px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+.top-bar .sysmetrics .pair {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.top-bar .sysmetrics .label { color: var(--text-tertiary); }
+.top-bar .sysmetrics .val { font-weight: 700; color: var(--text-primary); }
+.top-bar .sysmetrics .val.warn { color: var(--status-warning); }
+.top-bar .sysmetrics .val.err { color: var(--status-error); }
+
+.top-bar .clock {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+/* ──────────────────────────────────────────────────────────────────
+ * Bottom tab bar — 56 px tall, 4 tabs at 120 px each.
+ * Icon-only style at 28 px (visual size; tap zone is the full 120x56).
+ * Active tab gets an accent strip on top + lighter BG fill.
+ * ────────────────────────────────────────────────────────────────── */
+
+.tab-bar {
+  position: absolute;
+  left: 0;
+  top: calc(320px - var(--tab-bar-h));
+  width: 480px;
+  height: var(--tab-bar-h);
+  background: var(--bg-secondary);
+  border-top: 1px solid var(--border-default);
+  display: flex;
+  align-items: stretch;
+}
+
+.tab-bar .tab {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  border-right: 1px solid var(--border-default);
+}
+.tab-bar .tab:last-child { border-right: none; }
+
+.tab-bar .tab svg {
+  display: block;
+  width: 24px;
+  height: 24px;
+  stroke-width: 2;
+  fill: none;
+  stroke: currentColor;
+  flex-shrink: 0;
+}
+
+.tab-bar .tab.active {
+  color: var(--text-primary);
+  background: var(--bg-tertiary);
+}
+.tab-bar .tab.active::before {
+  content: "";
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  height: 2px;
+  background: var(--accent-primary);
+}
+
+/* Tap-feedback inverse-fill (one-frame visual, used in 08) */
+.tab-bar .tab.tapped {
+  background: var(--accent-primary);
+  color: var(--bg-primary);
+}
+
+/* ──────────────────────────────────────────────────────────────────
+ * Content area — 480x232 between top bar and tab bar
+ * ────────────────────────────────────────────────────────────────── */
+
+.content {
+  position: absolute;
+  top: var(--top-bar-h);
+  left: 0;
+  width: 480px;
+  height: var(--content-h);
+  overflow: hidden;
+}
+
+/* ──────────────────────────────────────────────────────────────────
+ * Dashboard tile grid — 2x2 inside the 480x232 content area.
+ * 8 px outer margin, 8 px gap. Tiles ≈ 228 x 100 px each.
+ * ────────────────────────────────────────────────────────────────── */
+
+.tile-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  grid-template-rows: 1fr 1fr;
+  gap: 8px;
+  padding: 8px;
+  width: 100%;
+  height: 100%;
+}
+
+.tile {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-default);
+  border-radius: 4px;
+  padding: 6px 8px;
+  position: relative;
+  overflow: hidden;
+}
+
+.tile .tile-title {
+  font-family: var(--font-sans);
+  font-weight: 700;
+  font-size: 9px;
+  letter-spacing: 0.6px;
+  color: var(--text-tertiary);
+  text-transform: uppercase;
+  margin-bottom: 2px;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.tile .tile-title .status-dot {
+  width: 6px; height: 6px; border-radius: 50%;
+}
+
+.tile .big {
+  font-family: var(--font-mono);
+  font-weight: 700;
+  font-size: 24px;
+  color: var(--text-primary);
+  line-height: 1;
+  margin-top: 2px;
+}
+.tile .big .unit {
+  font-size: 11px;
+  color: var(--text-secondary);
+  font-weight: 400;
+  margin-left: 3px;
+}
+
+.tile .row {
+  display: flex;
+  justify-content: space-between;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-secondary);
+  margin-top: 3px;
+}
+.tile .row .label { color: var(--text-tertiary); }
+.tile .row .val { color: var(--text-primary); }
+
+.tile .bar {
+  width: 100%;
+  height: 4px;
+  background: var(--bg-tertiary);
+  border-radius: 2px;
+  margin-top: 4px;
+  overflow: hidden;
+}
+.tile .bar > span {
+  display: block;
+  height: 100%;
+  background: var(--status-success);
+}
+
+/* Status colours */
+.s-ok { color: var(--status-success); }
+.s-warn { color: var(--status-warning); }
+.s-err { color: var(--status-error); }
+.bg-ok { background: var(--status-success); }
+.bg-warn { background: var(--status-warning); }
+.bg-err { background: var(--status-error); }
+
+/* ──────────────────────────────────────────────────────────────────
+ * Video page — 480x176 video region + 56 px metrics strip
+ * ────────────────────────────────────────────────────────────────── */
+
+.video-region {
+  width: 480px;
+  height: 176px;
+  background: #050505;
+  position: relative;
+  overflow: hidden;
+}
+
+.video-region .frame {
+  width: 100%; height: 100%;
+  background:
+    linear-gradient(135deg, #1a2a3a 0%, #0a1018 100%),
+    repeating-linear-gradient(45deg, rgba(255,255,255,0.02) 0 4px, transparent 4px 8px);
+  background-blend-mode: lighten;
+  position: relative;
+}
+/* Mock H.264 frame: faux horizon + reticle so the screenshot reads
+ * like a live feed without needing a real video element. */
+.video-region .horizon {
+  position: absolute; left: 0; right: 0; top: 50%;
+  height: 1px;
+  background: rgba(255,255,255,0.1);
+}
+.video-region .reticle {
+  position: absolute; top: 50%; left: 50%;
+  transform: translate(-50%, -50%);
+  width: 28px; height: 28px;
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  border-radius: 50%;
+}
+.video-region .reticle::before,
+.video-region .reticle::after {
+  content: "";
+  position: absolute;
+  background: rgba(255, 255, 255, 0.25);
+}
+.video-region .reticle::before {
+  left: 50%; top: -6px; bottom: -6px;
+  width: 1px; transform: translateX(-50%);
+}
+.video-region .reticle::after {
+  top: 50%; left: -6px; right: -6px;
+  height: 1px; transform: translateY(-50%);
+}
+
+.video-region .corner-tag {
+  position: absolute;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: rgba(255, 255, 255, 0.5);
+  padding: 4px 6px;
+}
+.video-region .corner-tag.tl { top: 4px; left: 6px; }
+.video-region .corner-tag.tr { top: 4px; right: 6px; }
+.video-region .corner-tag.bl { bottom: 4px; left: 6px; }
+.video-region .corner-tag.br { bottom: 4px; right: 6px; }
+
+.video-region .rec-dot {
+  width: 8px; height: 8px;
+  background: var(--status-error);
+  border-radius: 50%;
+  display: inline-block;
+  margin-right: 5px;
+  vertical-align: middle;
+}
+
+.video-no-link {
+  width: 100%; height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-tertiary);
+  font-family: var(--font-sans);
+  background: var(--bg-secondary);
+}
+.video-no-link .glyph {
+  font-size: 28px;
+  margin-bottom: 6px;
+  color: var(--status-warning);
+}
+.video-no-link .title {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text-secondary);
+  margin-bottom: 3px;
+}
+.video-no-link .hint {
+  font-size: 11px;
+  color: var(--text-tertiary);
+}
+
+.metrics-strip {
+  width: 480px;
+  height: 56px;
+  background: var(--bg-secondary);
+  border-top: 1px solid var(--border-default);
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  grid-template-rows: 1fr 1fr;
+  padding: 4px 8px;
+  gap: 0;
+}
+.metrics-strip .metric {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  font-family: var(--font-mono);
+}
+.metrics-strip .metric .lbl {
+  font-size: 9px;
+  color: var(--text-tertiary);
+  letter-spacing: 0.4px;
+  text-transform: uppercase;
+}
+.metrics-strip .metric .val {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+/* ──────────────────────────────────────────────────────────────────
+ * Settings list (48 px rows)
+ * ────────────────────────────────────────────────────────────────── */
+
+.settings-list {
+  width: 100%; height: 100%;
+  overflow: hidden;
+}
+
+.settings-list .row {
+  height: 48px;
+  display: flex;
+  align-items: center;
+  padding: 0 12px 0 14px;
+  border-bottom: 1px solid var(--border-default);
+  background: var(--bg-primary);
+}
+
+.settings-list .row .icon {
+  width: 22px; height: 22px;
+  margin-right: 10px;
+  color: var(--text-secondary);
+  flex-shrink: 0;
+}
+.settings-list .row .icon svg {
+  width: 100%; height: 100%; stroke: currentColor; fill: none; stroke-width: 1.6;
+}
+
+.settings-list .row .label {
+  flex: 1;
+  font-family: var(--font-sans);
+  font-size: 14px;
+  color: var(--text-primary);
+}
+
+.settings-list .row .value {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin-right: 8px;
+}
+
+.settings-list .row .chevron {
+  color: var(--text-tertiary);
+  font-size: 16px;
+  font-family: var(--font-mono);
+}
+
+.settings-list .row.toggle .switch {
+  width: 36px; height: 20px;
+  border-radius: 10px;
+  background: var(--bg-tertiary);
+  position: relative;
+  border: 1px solid var(--border-strong);
+}
+.settings-list .row.toggle .switch::after {
+  content: "";
+  position: absolute;
+  width: 16px; height: 16px;
+  border-radius: 50%;
+  background: var(--text-secondary);
+  top: 1px;
+  left: 1px;
+  transition: all 0.1s ease;
+}
+.settings-list .row.toggle .switch.on {
+  background: var(--accent-primary);
+  border-color: var(--accent-primary);
+}
+.settings-list .row.toggle .switch.on::after {
+  background: var(--text-primary);
+  left: 18px;
+}
+
+/* Reboot banner */
+.reboot-banner {
+  height: 28px;
+  background: rgba(245, 158, 11, 0.15);
+  border-bottom: 1px solid var(--status-warning);
+  color: var(--status-warning);
+  font-family: var(--font-sans);
+  font-size: 11px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  padding: 0 12px;
+  letter-spacing: 0.3px;
+}
+
+/* ──────────────────────────────────────────────────────────────────
+ * Modal (enum picker, e.g. channel select). Sits inside content area.
+ * ────────────────────────────────────────────────────────────────── */
+
+.modal {
+  position: absolute;
+  inset: 0; /* fills the .content area (480 x 232) */
+  background: rgba(0, 0, 0, 0.92);
+  display: flex;
+  flex-direction: column;
+}
+.modal .header {
+  height: 36px;
+  display: flex;
+  align-items: center;
+  padding: 0 14px;
+  border-bottom: 1px solid var(--border-default);
+  background: var(--bg-secondary);
+}
+.modal .header .back {
+  font-family: var(--font-mono);
+  font-size: 14px;
+  color: var(--accent-primary);
+  margin-right: 12px;
+}
+.modal .header .title {
+  font-family: var(--font-sans);
+  font-weight: 700;
+  font-size: 13px;
+  color: var(--text-primary);
+  flex: 1;
+  text-align: center;
+  margin-right: 24px; /* offset for the back glyph */
+}
+
+.modal .options {
+  flex: 1;
+  overflow: hidden;
+}
+.modal .options .opt {
+  height: 48px;
+  display: flex;
+  align-items: center;
+  padding: 0 14px;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  border-bottom: 1px solid var(--border-default);
+  color: var(--text-primary);
+}
+.modal .options .opt .check {
+  margin-left: auto;
+  color: var(--accent-primary);
+  font-size: 16px;
+}
+.modal .options .opt.dim { color: var(--text-tertiary); }
+
+/* ──────────────────────────────────────────────────────────────────
+ * On-screen keyboard (Wi-Fi password / SSID entry)
+ * 4 rows of 12 keys at ~40x44, plus a top input field.
+ * ────────────────────────────────────────────────────────────────── */
+
+.keyboard {
+  width: 100%; height: 100%;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-secondary);
+}
+.keyboard .input-strip {
+  height: 32px;
+  display: flex;
+  align-items: center;
+  padding: 0 10px;
+  background: var(--bg-tertiary);
+  border-bottom: 1px solid var(--border-default);
+  font-family: var(--font-mono);
+  font-size: 13px;
+  color: var(--text-primary);
+}
+.keyboard .input-strip .lbl {
+  color: var(--text-tertiary);
+  font-size: 10px;
+  margin-right: 8px;
+  letter-spacing: 0.4px;
+}
+.keyboard .input-strip .field {
+  flex: 1;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-strong);
+  height: 22px;
+  padding: 0 6px;
+  display: flex;
+  align-items: center;
+  border-radius: 2px;
+  letter-spacing: 1px;
+  color: var(--text-primary);
+}
+.keyboard .input-strip .field .caret {
+  display: inline-block;
+  width: 1px; height: 14px;
+  background: var(--accent-primary);
+  margin-left: 1px;
+}
+
+.keyboard .keys {
+  flex: 1;
+  display: grid;
+  grid-template-rows: repeat(4, 1fr);
+  padding: 4px;
+  gap: 4px;
+}
+.keyboard .keys .row {
+  display: grid;
+  grid-template-columns: repeat(12, 1fr);
+  gap: 3px;
+}
+.keyboard .keys .row .key {
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-default);
+  border-radius: 3px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--font-sans);
+  font-size: 12px;
+  color: var(--text-primary);
+}
+.keyboard .keys .row .key.wide-2 { grid-column: span 2; font-size: 10px; }
+.keyboard .keys .row .key.wide-3 { grid-column: span 3; font-size: 10px; }
+.keyboard .keys .row .key.wide-6 { grid-column: span 6; font-size: 10px; }
+.keyboard .keys .row .key.action {
+  background: var(--bg-secondary);
+  color: var(--accent-primary);
+  border-color: var(--border-strong);
+}
+.keyboard .keys .row .key.primary {
+  background: var(--accent-primary);
+  color: var(--bg-primary);
+  border-color: var(--accent-primary);
+  font-weight: 700;
+}
+
+/* ──────────────────────────────────────────────────────────────────
+ * Touch calibration wizard — 5-point tap, big crosshair on screen.
+ * ────────────────────────────────────────────────────────────────── */
+
+.calibrate {
+  width: 100%; height: 100%;
+  position: relative;
+  background: var(--bg-primary);
+  font-family: var(--font-sans);
+}
+.calibrate .target {
+  position: absolute;
+  width: 40px; height: 40px;
+  transform: translate(-50%, -50%);
+}
+.calibrate .target::before,
+.calibrate .target::after {
+  content: "";
+  position: absolute;
+  background: var(--accent-primary);
+}
+.calibrate .target::before {
+  left: 50%; top: 0; bottom: 0;
+  width: 2px; transform: translateX(-50%);
+}
+.calibrate .target::after {
+  top: 50%; left: 0; right: 0;
+  height: 2px; transform: translateY(-50%);
+}
+.calibrate .target .ring {
+  position: absolute;
+  inset: 12px;
+  border: 2px solid var(--accent-primary);
+  border-radius: 50%;
+}
+.calibrate .target.active .ring {
+  border-color: var(--status-success);
+  box-shadow: 0 0 8px rgba(34, 197, 94, 0.6);
+}
+.calibrate .target.done::before,
+.calibrate .target.done::after { background: var(--status-success); }
+.calibrate .target.done .ring { border-color: var(--status-success); opacity: 0.4; }
+
+.calibrate .legend {
+  position: absolute;
+  top: 50%; left: 50%;
+  transform: translate(-50%, -50%);
+  text-align: center;
+}
+.calibrate .legend .step {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-tertiary);
+  letter-spacing: 0.4px;
+}
+.calibrate .legend .title {
+  font-family: var(--font-sans);
+  font-weight: 700;
+  font-size: 16px;
+  color: var(--text-primary);
+  margin-top: 4px;
+}
+.calibrate .legend .hint {
+  font-family: var(--font-sans);
+  font-size: 11px;
+  color: var(--text-secondary);
+  margin-top: 4px;
+}
+.calibrate .skip {
+  position: absolute;
+  bottom: 6px; right: 8px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-tertiary);
+}
+
+/* ──────────────────────────────────────────────────────────────────
+ * Permanent HUD overlay on the video region (subtle, always visible).
+ * The detailed tap-to-toggle HUD is drawn separately when needed.
+ * ────────────────────────────────────────────────────────────────── */
+
+.video-hud {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: rgba(255, 255, 255, 0.8);
+}

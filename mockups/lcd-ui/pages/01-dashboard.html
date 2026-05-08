@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>01 — Dashboard</title>
+<link rel="stylesheet" href="../styles.css">
+</head>
+<body>
+<div class="screen">
+
+  <div class="top-bar">
+    <span class="hostname">groundnode</span>
+    <span class="role">
+      <span class="dot"></span>
+      RECEIVER
+    </span>
+    <div class="sysmetrics">
+      <span class="pair"><span class="label">CPU</span><span class="val">18%</span></span>
+      <span class="pair"><span class="label">RAM</span><span class="val">1.2/4G</span></span>
+      <span class="pair"><span class="label">T</span><span class="val">42°C</span></span>
+    </div>
+    <span class="clock">14:32:08</span>
+  </div>
+
+  <div class="content">
+    <div class="tile-grid">
+
+      <!-- Radio Link tile -->
+      <div class="tile">
+        <div class="tile-title">
+          <span class="status-dot bg-ok"></span>
+          RADIO LINK
+        </div>
+        <div class="big">−54 <span class="unit">dBm</span></div>
+        <div class="row"><span class="label">CH</span><span class="val">5745 / 20</span></div>
+        <div class="row"><span class="label">TX</span><span class="val">5 dBm · MCS 3</span></div>
+        <div class="row"><span class="label">FEC</span><span class="val s-ok">0 / 1024</span></div>
+      </div>
+
+      <!-- Drone tile -->
+      <div class="tile">
+        <div class="tile-title">
+          <span class="status-dot bg-ok"></span>
+          DRONE · skynode
+        </div>
+        <div class="big">88<span class="unit">% bat</span></div>
+        <div class="row"><span class="label">GPS</span><span class="val s-ok">12 sat · 3D</span></div>
+        <div class="row"><span class="label">MODE</span><span class="val">LOITER</span></div>
+        <div class="bar"><span style="width: 88%"></span></div>
+      </div>
+
+      <!-- Mesh tile -->
+      <div class="tile">
+        <div class="tile-title">
+          <span class="status-dot bg-ok"></span>
+          MESH
+        </div>
+        <div class="big">3 <span class="unit">nodes</span></div>
+        <div class="row"><span class="label">ID</span><span class="val">…A4F2C9</span></div>
+        <div class="row"><span class="label">GW</span><span class="val">groundnode</span></div>
+        <div class="row"><span class="label">STATE</span><span class="val s-ok">healthy</span></div>
+      </div>
+
+      <!-- Uplink tile -->
+      <div class="tile">
+        <div class="tile-title">
+          <span class="status-dot bg-ok"></span>
+          UPLINK
+        </div>
+        <div class="big">4G <span class="unit">LTE</span></div>
+        <div class="row"><span class="label">RSRP</span><span class="val">−92 dBm</span></div>
+        <div class="row"><span class="label">CLOUD</span><span class="val s-ok">connected</span></div>
+        <div class="row"><span class="label">TX</span><span class="val">2.1 Mb/s</span></div>
+      </div>
+
+    </div>
+  </div>
+
+  <div class="tab-bar">
+    <div class="tab active">
+      <svg viewBox="0 0 24 24" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/>
+        <rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/>
+      </svg>
+    </div>
+    <div class="tab">
+      <svg viewBox="0 0 24 24" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="2" y="6" width="14" height="12" rx="2"/><path d="M16 10l5-3v10l-5-3z"/>
+      </svg>
+    </div>
+    <div class="tab">
+      <svg viewBox="0 0 24 24" stroke-linecap="round" stroke-linejoin="round">
+        <line x1="3" y1="7" x2="21" y2="7"/>
+        <circle cx="9" cy="7" r="2"/>
+        <line x1="3" y1="12" x2="21" y2="12"/>
+        <circle cx="15" cy="12" r="2"/>
+        <line x1="3" y1="17" x2="21" y2="17"/>
+        <circle cx="7" cy="17" r="2"/>
+      </svg>
+    </div>
+    <div class="tab">
+      <svg viewBox="0 0 24 24" stroke-linecap="round" stroke-linejoin="round">
+        <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
+      </svg>
+    </div>
+  </div>
+
+</div>
+</body>
+</html>

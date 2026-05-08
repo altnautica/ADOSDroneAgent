@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>ADOS LCD UI mockups</title>
+<style>
+  body {
+    font-family: -apple-system, "Helvetica Neue", Arial, sans-serif;
+    background: #1a1a1a;
+    color: #e8e8e8;
+    margin: 0;
+    padding: 24px;
+  }
+  h1 { font-weight: 600; font-size: 18px; margin: 0 0 4px; }
+  .sub { color: #888; font-size: 12px; margin-bottom: 24px; }
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, 480px);
+    gap: 24px;
+  }
+  .card {
+    background: #0d0d0d;
+    border: 1px solid #2a2a2a;
+    border-radius: 6px;
+    padding: 12px;
+  }
+  .card h3 {
+    font-size: 13px;
+    font-weight: 600;
+    margin: 0 0 8px;
+    color: #fafafa;
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+  }
+  .card h3 .num {
+    color: #3A82FF;
+    font-family: "SF Mono", Menlo, monospace;
+    font-size: 11px;
+  }
+  .card iframe {
+    width: 480px;
+    height: 320px;
+    border: 0;
+    display: block;
+    image-rendering: pixelated;
+  }
+  .card .note {
+    color: #888;
+    font-size: 11px;
+    margin-top: 8px;
+    line-height: 1.4;
+  }
+</style>
+</head>
+<body>
+<h1>ADOS Ground Station LCD UI mockups</h1>
+<div class="sub">480 × 320 SPI LCD (Waveshare 3.5" RPi LCD A) · resistive touch · top status bar + bottom tab bar</div>
+
+<div class="grid">
+
+<div class="card">
+  <h3><span class="num">00</span> Chrome shell (empty)</h3>
+  <iframe src="pages/00-chrome-shell.html"></iframe>
+  <div class="note">Top status bar + bottom tab bar with empty content. Sets the chrome contract every page inherits.</div>
+</div>
+
+<div class="card">
+  <h3><span class="num">01</span> Dashboard</h3>
+  <iframe src="pages/01-dashboard.html"></iframe>
+  <div class="note">Existing 4-tile dashboard refit into the new chrome. Tiles: Radio Link · Drone · Mesh · Uplink.</div>
+</div>
+
+<div class="card">
+  <h3><span class="num">02</span> Video — link up</h3>
+  <iframe src="pages/02-video-link-up.html"></iframe>
+  <div class="note">Live H.264 frame at 480×176 + permanent 56 px metrics strip (latency · RSSI · bitrate · FEC · FPS · channel).</div>
+</div>
+
+<div class="card">
+  <h3><span class="num">03</span> Video — link down</h3>
+  <iframe src="pages/03-video-no-link.html"></iframe>
+  <div class="note">Fail-soft when no stream is available. Centered hint card, metrics strip dimmed.</div>
+</div>
+
+<div class="card">
+  <h3><span class="num">04</span> Settings — root</h3>
+  <iframe src="pages/04-settings-root.html"></iframe>
+  <div class="note">Flat 48 px scrollable list. Mix of toggle / enum / slider / text rows backed by the existing /api/v1/setup/apply REST surface.</div>
+</div>
+
+<div class="card">
+  <h3><span class="num">05</span> Settings — channel picker (enum modal)</h3>
+  <iframe src="pages/05-settings-enum-modal.html"></iframe>
+  <div class="note">Enum picker modal with 48 px option rows. Used for Channel, Role, MCS, Topology, etc.</div>
+</div>
+
+<div class="card">
+  <h3><span class="num">06</span> Settings — Wi-Fi password keyboard</h3>
+  <iframe src="pages/06-settings-keyboard.html"></iframe>
+  <div class="note">On-screen keyboard for text fields. 4 rows × 12 keys at ~40×44. Resistive-touch-friendly key sizing.</div>
+</div>
+
+<div class="card">
+  <h3><span class="num">07</span> Touch calibration wizard</h3>
+  <iframe src="pages/07-touch-calibrate.html"></iframe>
+  <div class="note">First-boot 5-point tap. Stores 3×3 affine to /etc/ados/touch.calib. Skippable.</div>
+</div>
+
+<div class="card">
+  <h3><span class="num">08</span> Tap feedback (active tab + inverse fill)</h3>
+  <iframe src="pages/08-tap-feedback.html"></iframe>
+  <div class="note">Single-frame inverse-fill on the touched tab. Makes resistive tap feel responsive even before the page swap renders.</div>
+</div>
+
+</div>
+</body>
+</html>
