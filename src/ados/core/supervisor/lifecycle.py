@@ -16,6 +16,7 @@ from pathlib import Path
 
 import structlog
 
+from ados.core.asyncio_util import log_task_exceptions
 from ados.core.paths import SUITES_DIR
 from ados.hal.hotplug import HotplugMonitor
 from ados.hal.usb import UsbDevice  # noqa: F401  (used via HotplugMixin)
@@ -358,6 +359,7 @@ class Supervisor(HotplugMixin, MonitorMixin, HeartbeatMixin):
         # start hot-plug monitor
         self._hotplug_monitor = HotplugMonitor()
         self._hotplug_task = asyncio.create_task(self._run_hotplug_monitor())
+        self._hotplug_task.add_done_callback(log_task_exceptions)
         log.info(
             "hotplug_monitor_wired",
             debounce_secs=self._hotplug_debounce_secs,
