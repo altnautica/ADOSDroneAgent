@@ -104,6 +104,7 @@ class MavlinkMqttRelay:
             "frames_dropped_queue_full": 0,
             "frames_dropped_not_connected": 0,
             "publish_errors": 0,
+            "ipc_send_errors": 0,
         }
         self._last_metric_log: float = 0.0
 
@@ -138,7 +139,10 @@ class MavlinkMqttRelay:
                 try:
                     self._ipc.send(msg.payload)
                 except Exception:
-                    pass
+                    # Tolerate per-message decode/send failures; the
+                    # publisher is fanning broadcast frames and a single
+                    # bad payload should not tear down the relay.
+                    self._metrics["ipc_send_errors"] += 1
 
         def on_connect(_client, _userdata, _flags, _reason, _properties=None):
             log.info("mavlink_relay_mqtt_connected", broker=self._broker)
@@ -149,9 +153,12 @@ class MavlinkMqttRelay:
 
         try:
             self._mqtt.connect(self._broker, self._port, keepalive=60)
-        except Exception as e:
+        except (OSError, ConnectionError, TimeoutError, mqtt_client.WebsocketConnectionError) as e:
+            # Re-raise so the systemd unit exits non-zero and the
+            # supervisor restarts it. A silent return here previously
+            # left the relay alive but disconnected forever.
             log.error("mavlink_relay_mqtt_connect_failed", error=str(e))
-            return
+            raise
 
         self._mqtt.loop_start()
 
