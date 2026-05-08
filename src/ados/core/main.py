@@ -52,6 +52,10 @@ class AgentApp:
         self._param_cache = None
         self._video_pipeline = None
         self._wfb_manager = None
+        # Tracks the last `mavlinkWsUrl` we emitted on a heartbeat so we
+        # can surface the previous value as `mavlinkWsUrlPrev` for one tick
+        # whenever the URL rotates (e.g. config reload, tunnel re-issue).
+        self._last_mavlink_ws_url: str | None = None
         self._command_executor = None
         self._script_runner = None
         self._demo_scripting = None
@@ -528,6 +532,18 @@ class AgentApp:
             payload["videoWhepUrl"] = remote.video_whep_url
         if remote.mavlink_ws_url:
             payload["mavlinkWsUrl"] = remote.mavlink_ws_url
+        # Surface the prior URL on the tick the value changes so the GCS can
+        # drain stale connections without waiting for a new dial. Only the
+        # config-driven URL is tracked here; live rotation observation is
+        # future work.
+        current_mavlink_ws_url = payload.get("mavlinkWsUrl")
+        if current_mavlink_ws_url is not None:
+            if (
+                self._last_mavlink_ws_url is not None
+                and self._last_mavlink_ws_url != current_mavlink_ws_url
+            ):
+                payload["mavlinkWsUrlPrev"] = self._last_mavlink_ws_url
+            self._last_mavlink_ws_url = current_mavlink_ws_url
         payload["missionControlUrl"] = self.config.server.cloud.url
         payload["remoteAccess"] = {
             "provider": self.config.remote_access.provider,

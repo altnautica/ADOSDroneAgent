@@ -43,3 +43,34 @@ def test_heartbeat_payload_video_restart_attempts_reflected() -> None:
     app._video_pipeline = FakePipeline()
     payload = app._build_heartbeat_payload()
     assert payload["videoRestartAttempts"] == 3
+
+
+def test_heartbeat_payload_mavlink_ws_url_prev_on_rotation() -> None:
+    """Previous URL appears for one tick when the configured value changes."""
+    app = _fresh_app()
+    remote = app.config.remote_access.cloudflare
+
+    # First tick: original URL, no prev.
+    remote.mavlink_ws_url = "wss://example.invalid/mavlink-1"
+    first = app._build_heartbeat_payload()
+    assert first["mavlinkWsUrl"] == "wss://example.invalid/mavlink-1"
+    assert "mavlinkWsUrlPrev" not in first
+
+    # Second tick: rotated URL, prev surfaces.
+    remote.mavlink_ws_url = "wss://example.invalid/mavlink-2"
+    second = app._build_heartbeat_payload()
+    assert second["mavlinkWsUrl"] == "wss://example.invalid/mavlink-2"
+    assert second["mavlinkWsUrlPrev"] == "wss://example.invalid/mavlink-1"
+
+    # Third tick: same URL, prev gone.
+    third = app._build_heartbeat_payload()
+    assert third["mavlinkWsUrl"] == "wss://example.invalid/mavlink-2"
+    assert "mavlinkWsUrlPrev" not in third
+
+
+def test_heartbeat_payload_mavlink_ws_url_prev_absent_when_unset() -> None:
+    """No URL configured → tracker stays None and prev never appears."""
+    app = _fresh_app()
+    payload = app._build_heartbeat_payload()
+    assert "mavlinkWsUrl" not in payload
+    assert "mavlinkWsUrlPrev" not in payload
