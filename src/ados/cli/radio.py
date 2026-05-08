@@ -419,6 +419,30 @@ def pair_local(role: str | None, peer_device_id: str | None) -> None:
         raise click.exceptions.Exit(code=1)
 
 
+@pair_group.command(
+    "failover-status",
+    help="Show local-bind to cloud-relay failover state.",
+)
+@click.option("--json", "as_json", is_flag=True, help="Emit JSON.")
+def pair_failover_status(as_json: bool) -> None:
+    _, body = _request("GET", "/api/wfb/pair/failover-status")
+    if as_json:
+        click.echo(json.dumps(body, indent=2, sort_keys=True))
+        return
+    state = body.get("failover_state", "local")
+    if state == "local":
+        click.echo("Local bind active.")
+    elif state == "cloud_relay":
+        click.echo(
+            "Failover to cloud relay. "
+            "Run `ados radio pair auto on` to retry local bind."
+        )
+    elif state == "failed":
+        click.echo("Pairing failed.")
+    else:
+        click.echo(f"Unknown state: {state}")
+
+
 @pair_group.command("unpair", help="Wipe pair keys and clear pair state.")
 @click.option("--yes", is_flag=True, help="Skip the confirmation prompt.")
 def pair_unpair(yes: bool) -> None:
