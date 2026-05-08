@@ -638,6 +638,14 @@ async def main() -> None:
         _svc_refresh_counter = 0
         _SVC_REFRESH_INTERVAL = 6  # refresh every 6 heartbeats
 
+        # Track the previous radio.paired flag so we can emit one
+        # extra heartbeat 1s after the value changes. Without the
+        # follow-up the GCS waits ~5s for the next regular tick to
+        # see the new state, which reads as a UI flicker between
+        # "pairing now" and "paired".
+        _last_paired_flag: bool | None = None
+        _emit_followup_at: float | None = None
+
         while not shutdown.is_set():
             # Re-check pairing state each iteration (may change via beacon)
             if pairing.is_paired and convex_url:
@@ -809,6 +817,26 @@ async def main() -> None:
                         fetch_wfb_status_via_http()
                     )
 
+                    # Pair-flag transition detection. When the radio
+                    # crosses paired/unpaired we schedule a single
+                    # follow-up heartbeat 1 s out so the GCS sees the
+                    # new state without waiting on the next regular
+                    # 5 s tick. Without this the UI lingers in the
+                    # "pairing now" state long after the bind landed.
+                    current_paired = bool(
+                        payload.get("radio", {}).get("paired")
+                    )
+                    if (
+                        _last_paired_flag is not None
+                        and current_paired != _last_paired_flag
+                    ):
+                        _emit_followup_at = time.monotonic() + 1.0
+                        log.info(
+                            "pairing_transition_detected",
+                            paired=current_paired,
+                        )
+                    _last_paired_flag = current_paired
+
                     # Surface the SPI LCD's active page so the GCS
                     # thumbnail can highlight which page is open. The
                     # OLED service writes ``/run/ados/lcd-state.json``
@@ -869,7 +897,19 @@ async def main() -> None:
                             )
                 except Exception as exc:
                     log.debug("cloud_heartbeat_failed", error=str(exc))
-            await asyncio.sleep(5)
+
+            # Honour the pending follow-up tick when one was scheduled
+            # by the transition detector above. Otherwise fall through
+            # to the regular 5 s cadence.
+            sleep_for = 5.0
+            if _emit_followup_at is not None:
+                remaining = _emit_followup_at - time.monotonic()
+                if 0 < remaining < sleep_for:
+                    sleep_for = remaining
+                    _emit_followup_at = None  # consume
+                elif remaining <= 0:
+                    _emit_followup_at = None
+            await asyncio.sleep(sleep_for)
 
     tasks.append(asyncio.create_task(heartbeat_loop(), name="heartbeat"))
 
