@@ -509,6 +509,7 @@ install_system_deps() {
 install_wfb_ng_from_vendor() {
     if command -v wfb_tx >/dev/null 2>&1; then
         info "wfb-ng already installed: $(command -v wfb_tx)"
+        provision_wfb_bind_artifacts ""
         return 0
     fi
 
@@ -569,12 +570,20 @@ install_wfb_ng_from_vendor() {
         warn "wfb-ng install ran but wfb_tx not on PATH; check setup.py data_files paths."
     fi
 
-    # Provision artifacts for the local-radio bind protocol:
-    #   /etc/bind.key      hardcoded default shared key (matches upstream)
-    #   /etc/bind.yaml     wfb-server profiles for drone_bind / gs_bind
-    #   wifibroadcast@.service  systemd template for the bind profile
-    # These let `systemctl start wifibroadcast@gs_bind` (or @drone_bind)
-    # bring up the L3 tunnel that the Python bind orchestrator drives.
+    provision_wfb_bind_artifacts "${vendor_dir}"
+}
+
+# Provision artifacts for the local-radio bind protocol used by the
+# Python bind orchestrator (services/wfb/bind_orchestrator.py):
+#   /etc/bind.key      hardcoded default shared key (matches upstream)
+#   /etc/bind.yaml     wfb-server profiles for drone_bind / gs_bind
+#   wifibroadcast@.service  systemd template for the bind profile
+# Idempotent. Runs both on a fresh wfb-ng build and on every upgrade
+# (the install_wfb_ng_from_vendor early-return path also calls this so
+# rigs that had wfb-ng before v0.16 land the bind artifacts on upgrade).
+provision_wfb_bind_artifacts() {
+    local vendor_dir="$1"
+
     if [ ! -f /etc/bind.key ]; then
         info "Writing default /etc/bind.key (upstream wfb-ng shared bind key)"
         echo "RvrSKeUVjoU/xXaYTWC+7AtlVdhvuQlhw5UvdlkM84L80RfATVid7J7y/dVnm48LCsmB1hRhPtgkxNe0kmB9Dg==" \
@@ -595,18 +604,16 @@ install_wfb_ng_from_vendor() {
     fi
 
     # Install the wfb-ng template unit so `wifibroadcast@drone_bind` and
-    # `wifibroadcast@gs_bind` are addressable via systemctl. The setup.py
-    # path that ships this in the deb layout lands at
-    # /usr/lib/systemd/system/wifibroadcast@.service, but Radxa BSP and
-    # bare-bones rootfs builds sometimes ignore that directory; mirror
-    # to /etc/systemd/system to make the unit unambiguously visible.
-    local _wfb_unit_src
+    # `wifibroadcast@gs_bind` are addressable via systemctl. setup.py
+    # ships it in the deb layout at /usr/lib/systemd/system/, but Radxa
+    # BSP and bare-bones rootfs builds sometimes ignore that directory;
+    # mirror to /etc/systemd/system to make the unit unambiguously
+    # visible.
+    local _wfb_unit_src=""
     if [ -f /usr/lib/systemd/system/wifibroadcast@.service ]; then
         _wfb_unit_src="/usr/lib/systemd/system/wifibroadcast@.service"
-    elif [ -f "${vendor_dir}/scripts/systemd/wifibroadcast@.service" ]; then
+    elif [ -n "${vendor_dir}" ] && [ -f "${vendor_dir}/scripts/systemd/wifibroadcast@.service" ]; then
         _wfb_unit_src="${vendor_dir}/scripts/systemd/wifibroadcast@.service"
-    else
-        _wfb_unit_src=""
     fi
     if [ -n "${_wfb_unit_src}" ] && [ ! -f /etc/systemd/system/wifibroadcast@.service ]; then
         info "Installing wifibroadcast@.service template from ${_wfb_unit_src}"
