@@ -786,6 +786,17 @@ class OledService:
             self._page_navigator.record_tap(zone_id, int(_now() * 1000))
             return
         self._page_navigator.record_tap(zone_id, int(_now() * 1000))
+        # A tab-bar tap from inside any drilldown should pop the
+        # entire modal stack first so the operator returns to the
+        # tab's root page instead of landing on a stale modal that
+        # belonged to a different tab. The pop is best-effort: if
+        # any on_leave callback throws we still continue to go().
+        while self._page_navigator.modal_stack:
+            try:
+                await self._page_navigator.pop_modal(ctx=self._page_context)
+            except Exception as exc:  # noqa: BLE001
+                log.debug("tab_tap_modal_pop_failed", error=str(exc))
+                break
         await self._page_navigator.go(page_id, ctx=self._page_context)
 
     async def _handle_calibration_gesture(self, gesture: TouchGesture) -> None:

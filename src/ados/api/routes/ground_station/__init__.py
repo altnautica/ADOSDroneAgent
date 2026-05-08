@@ -31,6 +31,7 @@ for _name in dir(_c):
 from ados.api.routes.ground_station.camera import router as _camera_router
 from ados.api.routes.ground_station.mavlink_ws import router as _mavlink_ws_router
 from ados.api.routes.ground_station.mesh import router as _mesh_router
+from ados.api.routes.ground_station.modem import router as _modem_router
 from ados.api.routes.ground_station.network import router as _network_router
 from ados.api.routes.ground_station.pairing import router as _pairing_router
 from ados.api.routes.ground_station.recording import router as _recording_router
@@ -70,6 +71,7 @@ router.include_router(_pairing_router)
 router.include_router(_mavlink_ws_router)
 router.include_router(_recording_router)
 router.include_router(_camera_router)
+router.include_router(_modem_router)
 
 
 __all__ = ["router"]

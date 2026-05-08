@@ -145,12 +145,12 @@ async def test_dashboard_page_renders_end_to_end(tmp_path: Path):
     assert img.size == (480, 244)
     zones = page.hit_zones(ctx)
     assert len(zones) == 4
-    # Quadrant ids match the documented contract.
+    # Tile zone ids match the dashboard drilldown contract.
     assert {z.id for z in zones} == {
-        "dashboard.tile.radio",
-        "dashboard.tile.drone",
-        "dashboard.tile.mesh",
-        "dashboard.tile.uplink",
+        "tile.radio_link",
+        "tile.drone",
+        "tile.mesh",
+        "tile.uplink",
     }
 
 

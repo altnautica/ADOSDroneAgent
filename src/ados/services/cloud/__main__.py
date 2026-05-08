@@ -549,6 +549,29 @@ async def main() -> None:
                         fetch_wfb_status_via_http()
                     )
 
+                    # Surface the SPI LCD's active page so the GCS
+                    # thumbnail can highlight which page is open. The
+                    # OLED service writes ``/run/ados/lcd-state.json``
+                    # on every navigator transition (including modal
+                    # push/pop). Best-effort; the cloud subprocess
+                    # does not own the navigator directly.
+                    if _attached_display is not None:
+                        try:
+                            import json as _json_lcd
+                            from ados.core.paths import LCD_STATE_PATH
+
+                            blob = _json_lcd.loads(LCD_STATE_PATH.read_text())
+                            if isinstance(blob, dict):
+                                modal_stack = blob.get("modal_stack")
+                                if isinstance(modal_stack, list) and modal_stack:
+                                    payload["lcdActivePage"] = str(modal_stack[-1])
+                                else:
+                                    active = blob.get("active_page_id")
+                                    if isinstance(active, str) and active:
+                                        payload["lcdActivePage"] = active
+                        except Exception:
+                            pass
+
                     async with httpx.AsyncClient(timeout=10.0) as client:
                         resp = await client.post(
                             f"{convex_url}/agent/status",

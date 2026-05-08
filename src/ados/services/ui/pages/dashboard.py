@@ -1,23 +1,30 @@
-"""Placeholder Dashboard page.
+"""Dashboard page — 4-tile live status grid + drilldown taps.
 
-The full 4-tile refit lands in the next commit. This page exists in
-C2 so the page system is exercisable end-to-end on real hardware:
-the navigator can go("dashboard"), the chrome paints around it, and
-tile-quadrant taps reach :meth:`on_touch` and log structurally.
+Renders the chrome-less 480x244 inset version of the groundnode
+landscape dashboard and surfaces four hit zones (one per tile). A
+tap on a tile pushes the matching detail page onto the navigator's
+modal stack so the operator can drill in without losing the active
+tab.
 
-Layout: a 480x244 panel split into four 240x122 tile zones. Each tap
-on a quadrant logs a ``dashboard_quadrant_tap`` event with the zone
-id so an integrator can verify hit-test plumbing on the bench
-without waiting for the full tile renderers to ship.
+Tile geometry mirrors :func:`render_landscape_inset`:
+
+  * outer margin 8 px on all sides
+  * 8 px gap between tiles
+  * tile size = (480 - 16 - 8) / 2 by (244 - 16 - 8) / 2 = 228 x 110 px
+
+Hit-zone coordinates are page-local (y=0 is the top of the 480x244
+content area, not the LCD-global y=32).
 """
 
 from __future__ import annotations
 
 from typing import ClassVar
 
-from PIL import Image, ImageDraw
+from PIL import Image
 
-from ados.services.ui.dashboards.components import primitives as p
+from ados.services.ui.dashboards.groundnode_landscape import (
+    render_landscape_inset,
+)
 from ados.services.ui.touch.events import TouchGesture
 
 from .base import HitZone, PageContext
@@ -27,16 +34,19 @@ PAGE_H = 244
 
 
 class DashboardPage:
-    """4-quadrant placeholder page registered as ``dashboard``."""
+    """Live 4-tile dashboard registered as ``dashboard``."""
 
     id: ClassVar[str] = "dashboard"
     refresh_hz: ClassVar[float] = 5.0
 
+    # Hit zones in page-local coordinates. The values match the tile
+    # rectangles laid out by ``render_landscape_inset`` so a tap on a
+    # tile lands in its matching zone reliably across themes.
     _ZONES: ClassVar[tuple[tuple[str, int, int, int, int], ...]] = (
-        ("dashboard.tile.radio", 0, 0, 240, 122),
-        ("dashboard.tile.drone", 240, 0, 240, 122),
-        ("dashboard.tile.mesh", 0, 122, 240, 122),
-        ("dashboard.tile.uplink", 240, 122, 240, 122),
+        ("tile.radio_link", 8, 8, 228, 110),
+        ("tile.drone", 244, 8, 228, 110),
+        ("tile.mesh", 8, 126, 228, 110),
+        ("tile.uplink", 244, 126, 228, 110),
     )
 
     async def on_enter(self, ctx: PageContext) -> None:
@@ -46,38 +56,13 @@ class DashboardPage:
         ctx.logger.info("dashboard_leave")
 
     async def render(self, ctx: PageContext) -> Image.Image:
-        palette = ctx.palette
-        img = Image.new("RGB", (PAGE_W, PAGE_H), palette.bg_primary)
-        draw = ImageDraw.Draw(img)
-
-        # Outline the four tile zones in border_default so the
-        # quadrants are visually obvious during bring-up.
-        for _, x, y, w, h in self._ZONES:
-            draw.rectangle(
-                (x + 2, y + 2, x + w - 2, y + h - 2),
-                outline=palette.border_default,
-                width=1,
-            )
-
-        title_font = p.font("sans_bold", 18)
-        body_font = p.font("sans_regular", 12)
-        title_text = "Dashboard"
-        body_text = "Tile detail renderers land in the next commit."
-        title_w, _ = p.text_size(img, title_text, title_font)
-        body_w, _ = p.text_size(img, body_text, body_font)
-        draw.text(
-            ((PAGE_W - title_w) // 2, PAGE_H // 2 - 22),
-            title_text,
-            fill=palette.text_primary,
-            font=title_font,
+        return render_landscape_inset(
+            ctx.state,
+            ctx.hostname,
+            palette=ctx.palette,
+            width=PAGE_W,
+            height=PAGE_H,
         )
-        draw.text(
-            ((PAGE_W - body_w) // 2, PAGE_H // 2 + 4),
-            body_text,
-            fill=palette.text_secondary,
-            font=body_font,
-        )
-        return img
 
     def hit_zones(self, ctx: PageContext) -> list[HitZone]:
         return [
@@ -91,10 +76,26 @@ class DashboardPage:
         zone: HitZone,
         gesture: TouchGesture,
     ) -> None:
+        if gesture.kind != "tap":
+            return
+        # Local imports keep the page module load cheap and avoid the
+        # detail-page modules pulling in the dashboard at import time.
+        from .details.drone import DroneDetailPage
+        from .details.mesh import MeshDetailPage
+        from .details.radio_link import RadioLinkDetailPage
+        from .details.uplink import UplinkDetailPage
+
         ctx.logger.info(
-            "dashboard_quadrant_tap",
+            "dashboard_tile_tap",
             zone_id=zone.id,
-            kind=gesture.kind,
             x=gesture.start_x,
             y=gesture.start_y,
         )
+        if zone.id == "tile.radio_link":
+            await ctx.navigator.push_modal(RadioLinkDetailPage(), ctx=ctx)
+        elif zone.id == "tile.drone":
+            await ctx.navigator.push_modal(DroneDetailPage(), ctx=ctx)
+        elif zone.id == "tile.mesh":
+            await ctx.navigator.push_modal(MeshDetailPage(), ctx=ctx)
+        elif zone.id == "tile.uplink":
+            await ctx.navigator.push_modal(UplinkDetailPage(), ctx=ctx)

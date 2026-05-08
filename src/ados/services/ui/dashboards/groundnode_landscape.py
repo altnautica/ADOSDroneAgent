@@ -30,6 +30,8 @@ from typing import Any
 
 from PIL import Image
 
+from ados.services.ui.theme import Palette, current_palette
+
 from .components import primitives as p
 from .components.early_life_tiles import (
     draw_hardware_tile,
@@ -50,6 +52,17 @@ CANVAS_H = 320
 
 OUTER_MARGIN = 8
 TILE_GAP = 8
+
+# Inset (page-content) layout. The page navigator owns the chrome
+# (32 px top status bar + 44 px bottom tab bar) and gives the dashboard
+# a 480x244 content region. Inside that region we still apply an outer
+# margin and tile gap, so each tile is roughly:
+#   tile_w = (480 - 16 - 8) / 2 = 228 px
+#   tile_h = (244 - 16 - 8) / 2 = 110 px
+INSET_W = 480
+INSET_H = 244
+INSET_OUTER_MARGIN = 8
+INSET_TILE_GAP = 8
 
 
 def _read_hostname() -> str:
@@ -133,6 +146,51 @@ def _route_tiles(state: dict[str, Any]) -> tuple:
     return top_left, top_right, bottom_left, bottom_right
 
 
+def render_landscape_inset(
+    state: dict[str, Any],
+    hostname: str | None = None,
+    *,
+    palette: Palette | None = None,
+    width: int = INSET_W,
+    height: int = INSET_H,
+) -> Image.Image:
+    """Paint the 4-tile dashboard grid into a chrome-less inset.
+
+    Used by :class:`ados.services.ui.pages.dashboard.DashboardPage`,
+    which owns the surrounding chrome (top status bar + bottom tab
+    bar). The inset variant draws the same four tiles selected by
+    :func:`_route_tiles` but without the dashboard's own header/footer
+    bars; those are now the responsibility of the page chrome.
+
+    ``palette`` overrides the live palette (used by tests). ``width``
+    and ``height`` allow the caller to render at a smaller size for
+    legacy ports — defaults are the page-system 480x244 region.
+    """
+    pal = palette if palette is not None else current_palette()
+    img = Image.new("RGB", (width, height), pal.bg_primary)
+
+    # Tile geometry. We honour the same outer margin + tile gap the
+    # full-canvas renderer uses so dashboards rendered inset and
+    # rendered full-canvas line up visually when stacked.
+    tile_w = (width - INSET_OUTER_MARGIN * 2 - INSET_TILE_GAP) // 2
+    tile_h = (height - INSET_OUTER_MARGIN * 2 - INSET_TILE_GAP) // 2
+
+    col_a_x = INSET_OUTER_MARGIN
+    col_b_x = INSET_OUTER_MARGIN + tile_w + INSET_TILE_GAP
+    row_a_y = INSET_OUTER_MARGIN
+    row_b_y = INSET_OUTER_MARGIN + tile_h + INSET_TILE_GAP
+
+    top_left, top_right, bottom_left, bottom_right = _route_tiles(state)
+    top_left(img, col_a_x, row_a_y, tile_w, tile_h, state)
+    top_right(img, col_b_x, row_a_y, tile_w, tile_h, state)
+    bottom_left(img, col_a_x, row_b_y, tile_w, tile_h, state)
+    bottom_right(img, col_b_x, row_b_y, tile_w, tile_h, state)
+    # Hostname is part of the page-level top status bar (see chrome
+    # module); the inset variant intentionally does not paint it again.
+    _ = hostname
+    return img
+
+
 def render(
     state: dict[str, Any],
     *,
@@ -146,6 +204,11 @@ def render(
     /etc/hostname read (handy for tests). ``now_str`` overrides the
     wall-clock displayed in the header bar (handy for snapshot tests
     that need a deterministic clock).
+
+    Backward-compat: callers (the legacy OLED service inset path) keep
+    getting the full 480x320 image with header + footer. New code that
+    renders inside the page system should call
+    :func:`render_landscape_inset` instead.
     """
     img = Image.new("RGB", (CANVAS_W, CANVAS_H), p.BG_PRIMARY)
 
