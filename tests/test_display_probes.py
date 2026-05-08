@@ -113,16 +113,16 @@ class TestCheckDisplay:
 
 class TestCollectAttachedDisplay:
     def test_no_conf_returns_none(self, monkeypatch, tmp_path: Path):
-        from ados.services.cloud import __main__ as cloud_main
+        from ados.services.cloud import heartbeat as cloud_main
 
         bogus = tmp_path / "absent.conf"
         monkeypatch.setattr(cloud_main, "DISPLAY_CONF_PATH", bogus)
-        assert cloud_main._collect_attached_display() is None
+        assert cloud_main.collect_attached_display() is None
 
     def test_conf_present_returns_peripheral_dict(
         self, monkeypatch, tmp_path: Path
     ):
-        from ados.services.cloud import __main__ as cloud_main
+        from ados.services.cloud import heartbeat as cloud_main
 
         conf = tmp_path / "display.conf"
         conf.write_text(
@@ -141,7 +141,7 @@ class TestCollectAttachedDisplay:
         )
         monkeypatch.setattr(cloud_main, "DISPLAY_CONF_PATH", conf)
 
-        result = cloud_main._collect_attached_display()
+        result = cloud_main.collect_attached_display()
         assert result is not None
         assert result["category"] == "display"
         assert result["type"] == "spi-lcd"
@@ -162,19 +162,19 @@ class TestCollectAttachedDisplay:
     def test_unknown_display_id_falls_through_to_id_string(
         self, monkeypatch, tmp_path: Path
     ):
-        from ados.services.cloud import __main__ as cloud_main
+        from ados.services.cloud import heartbeat as cloud_main
 
         conf = tmp_path / "display.conf"
         conf.write_text("display_id=mystery_panel_v1\n")
         monkeypatch.setattr(cloud_main, "DISPLAY_CONF_PATH", conf)
-        result = cloud_main._collect_attached_display()
+        result = cloud_main.collect_attached_display()
         assert result is not None
         assert result["name"] == "mystery_panel_v1"
 
     def test_empty_conf_returns_none(self, monkeypatch, tmp_path: Path):
-        from ados.services.cloud import __main__ as cloud_main
+        from ados.services.cloud import heartbeat as cloud_main
 
         conf = tmp_path / "display.conf"
         conf.write_text("# only a comment\n\n")
         monkeypatch.setattr(cloud_main, "DISPLAY_CONF_PATH", conf)
-        assert cloud_main._collect_attached_display() is None
+        assert cloud_main.collect_attached_display() is None

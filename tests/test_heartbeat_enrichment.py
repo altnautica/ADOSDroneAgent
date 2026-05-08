@@ -18,7 +18,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from ados.core.config import ADOSConfig
-from ados.services.cloud import __main__ as cloud_main
+from ados.services.cloud import heartbeat as cloud_main
 
 
 def _write_display_conf(path: Path, *, rotation: int = 0) -> None:
@@ -58,9 +58,9 @@ def test_enrichment_omits_lcd_fields_when_no_display(tmp_path: Path) -> None:
     with patch.object(cloud_main, "DISPLAY_CONF_PATH", tmp_path / "display.conf"), \
          patch.object(cloud_main, "TOUCH_CALIB_PATH", tmp_path / "touch.calib"), \
          patch.object(cloud_main, "LCD_VIDEO_TAP_PATH", tmp_path / "lcd-video-tap.json"), \
-         patch.object(cloud_main, "_read_recent_touch", return_value=None), \
-         patch.object(cloud_main, "_read_video_recording_state", return_value=None):
-        enrich = cloud_main._build_display_enrichment(
+         patch.object(cloud_main, "read_recent_touch", return_value=None), \
+         patch.object(cloud_main, "read_video_recording_state", return_value=None):
+        enrich = cloud_main.build_display_enrichment(
             ADOSConfig(),
             has_attached_display=False,
             local_ip="10.0.0.5",
@@ -102,9 +102,9 @@ def test_enrichment_populates_all_fields_when_sources_present(
     with patch.object(cloud_main, "DISPLAY_CONF_PATH", display_conf), \
          patch.object(cloud_main, "TOUCH_CALIB_PATH", touch_calib), \
          patch.object(cloud_main, "LCD_VIDEO_TAP_PATH", tap_status), \
-         patch.object(cloud_main, "_read_recent_touch", return_value=fake_touch), \
-         patch.object(cloud_main, "_read_video_recording_state", return_value=True):
-        enrich = cloud_main._build_display_enrichment(
+         patch.object(cloud_main, "read_recent_touch", return_value=fake_touch), \
+         patch.object(cloud_main, "read_video_recording_state", return_value=True):
+        enrich = cloud_main.build_display_enrichment(
             ADOSConfig(),
             has_attached_display=True,
             local_ip="10.0.0.5",
@@ -136,9 +136,9 @@ def test_enrichment_lcd_calibrated_false_with_skip_marker(
     with patch.object(cloud_main, "DISPLAY_CONF_PATH", display_conf), \
          patch.object(cloud_main, "TOUCH_CALIB_PATH", touch_calib), \
          patch.object(cloud_main, "LCD_VIDEO_TAP_PATH", tmp_path / "tap.json"), \
-         patch.object(cloud_main, "_read_recent_touch", return_value=None), \
-         patch.object(cloud_main, "_read_video_recording_state", return_value=None):
-        enrich = cloud_main._build_display_enrichment(
+         patch.object(cloud_main, "read_recent_touch", return_value=None), \
+         patch.object(cloud_main, "read_video_recording_state", return_value=None):
+        enrich = cloud_main.build_display_enrichment(
             ADOSConfig(),
             has_attached_display=True,
             local_ip="10.0.0.5",
@@ -164,9 +164,9 @@ def test_enrichment_drops_stale_tap_snapshot(tmp_path: Path) -> None:
     with patch.object(cloud_main, "DISPLAY_CONF_PATH", tmp_path / "display.conf"), \
          patch.object(cloud_main, "TOUCH_CALIB_PATH", tmp_path / "touch.calib"), \
          patch.object(cloud_main, "LCD_VIDEO_TAP_PATH", tap_status), \
-         patch.object(cloud_main, "_read_recent_touch", return_value=None), \
-         patch.object(cloud_main, "_read_video_recording_state", return_value=None):
-        enrich = cloud_main._build_display_enrichment(
+         patch.object(cloud_main, "read_recent_touch", return_value=None), \
+         patch.object(cloud_main, "read_video_recording_state", return_value=None):
+        enrich = cloud_main.build_display_enrichment(
             ADOSConfig(),
             has_attached_display=False,
             local_ip="10.0.0.5",
@@ -184,9 +184,9 @@ def test_enrichment_uses_light_theme_when_configured(tmp_path: Path) -> None:
     with patch.object(cloud_main, "DISPLAY_CONF_PATH", tmp_path / "display.conf"), \
          patch.object(cloud_main, "TOUCH_CALIB_PATH", tmp_path / "touch.calib"), \
          patch.object(cloud_main, "LCD_VIDEO_TAP_PATH", tmp_path / "tap.json"), \
-         patch.object(cloud_main, "_read_recent_touch", return_value=None), \
-         patch.object(cloud_main, "_read_video_recording_state", return_value=None):
-        enrich = cloud_main._build_display_enrichment(
+         patch.object(cloud_main, "read_recent_touch", return_value=None), \
+         patch.object(cloud_main, "read_video_recording_state", return_value=None):
+        enrich = cloud_main.build_display_enrichment(
             config,
             has_attached_display=False,
             local_ip="10.0.0.5",
