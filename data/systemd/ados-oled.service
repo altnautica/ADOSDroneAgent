@@ -2,7 +2,12 @@
 Description=ADOS OLED UI (ground-station profile)
 After=ados-supervisor.service
 PartOf=ados-supervisor.service
-ConditionPathExistsGlob=/dev/i2c-*
+# Start when EITHER an I2C bus exists (small OLED carousel) OR a SPI
+# framebuffer is bound (LCD page mode). systemd treats multiple
+# ConditionPathExistsGlob lines as OR-of-any-match, so listing both
+# means the service starts on a board with EITHER surface present.
+ConditionPathExistsGlob=|/dev/i2c-*
+ConditionPathExistsGlob=|/dev/fb*
 StartLimitInterval=60s
 StartLimitBurst=5
 
