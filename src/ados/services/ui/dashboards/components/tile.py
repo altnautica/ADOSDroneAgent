@@ -13,7 +13,6 @@ from PIL import Image, ImageDraw
 
 from . import primitives as p
 
-
 TITLE_PAD_X = 8
 TITLE_BAR_H = 18  # height reserved for the caps title at top of tile
 

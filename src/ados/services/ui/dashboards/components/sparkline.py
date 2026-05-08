@@ -14,17 +14,15 @@ deque. No I/O, no thread safety needed (single-threaded asyncio).
 from __future__ import annotations
 
 from collections import deque
-from typing import Deque
 
 from PIL import Image, ImageDraw
 
 from . import primitives as p
 
-
 # 60 seconds @ 1 Hz polling = 60 samples
 HISTORY_LEN = 60
 
-_history: dict[str, Deque[float | None]] = {}
+_history: dict[str, deque[float | None]] = {}
 
 
 def push(metric: str, value: float | None) -> None:

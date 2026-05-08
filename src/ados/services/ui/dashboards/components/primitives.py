@@ -33,7 +33,6 @@ from PIL import ImageFont
 
 from ados.services.ui.theme import Palette, current_palette
 
-
 # ──────────────────────────────────────────────────────────────────────
 # Colors — resolved lazily from the active palette
 # ──────────────────────────────────────────────────────────────────────

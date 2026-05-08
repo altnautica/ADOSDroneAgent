@@ -18,11 +18,10 @@ from typing import Any
 from PIL import Image, ImageDraw
 
 from . import primitives as p
-from .big_number import draw_big_number
 from .bar_meter import draw_bar
+from .big_number import draw_big_number
 from .status_dot import draw_dot
 from .tile import draw_tile
-
 
 # Cap used for the bitrate meter. WFB-ng on RTL8812EU tops out around
 # 35 Mbps in our reference rigs; tweak per board if needed.

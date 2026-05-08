@@ -45,7 +45,6 @@ from .components.tiles import (
     draw_uplink_tile,
 )
 
-
 CANVAS_W = 480
 CANVAS_H = 320
 

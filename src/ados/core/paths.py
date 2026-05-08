@@ -45,6 +45,11 @@ AP_WAS_ENABLED_FLAG = ADOS_RUN_DIR / "ap-was-enabled"
 DNSMASQ_USB0_CONF = ADOS_RUN_DIR / "dnsmasq-usb0.conf"
 DNSMASQ_USB0_PID = ADOS_RUN_DIR / "dnsmasq-usb0.pid"
 
+# Live LCD shell state — current page id and modal stack identifiers,
+# persisted across service restarts so the operator returns to the
+# screen they last left after a reboot. Atomic-write JSON.
+LCD_STATE_PATH = ADOS_RUN_DIR / "lcd-state.json"
+
 # ---------------------------------------------------------------------------
 # Config directory: /etc/ados/
 # Persistent operator-owned configuration. Written by the installer,
@@ -63,6 +68,12 @@ DISPLAY_CONF_PATH = ADOS_ETC_DIR / "display.conf"
 ENV_FILE = ADOS_ETC_DIR / "env"
 FIREWALL_RULES_PATH = ADOS_ETC_DIR / "firewall.rules"
 AP_PASSPHRASE_PATH = ADOS_ETC_DIR / "ap-passphrase"
+
+# Touchscreen calibration matrix saved by the LCD calibration wizard.
+# JSON-serialized affine + metadata. Loaded by the touch input bridge
+# at startup; absence triggers the wizard on first run when the touch
+# chip is present.
+TOUCH_CALIB_PATH = ADOS_ETC_DIR / "touch.calib"
 
 # Secret material written by setup flows. Files under this directory should
 # be created with owner-only permissions and must never be returned by APIs.

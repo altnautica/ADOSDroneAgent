@@ -57,9 +57,17 @@ from PIL import Image, ImageDraw
 
 from ados.core.config import load_config
 from ados.core.logging import configure_logging, get_logger
+from ados.core.paths import TOUCH_CALIB_PATH
+from ados.services.ui.chrome import bottom_tab_bar, top_status_bar
 from ados.services.ui.events import ButtonEventBus
+from ados.services.ui.pages import PageContext, PageNavigator
+from ados.services.ui.pages.dashboard import DashboardPage
 from ados.services.ui.renderers import Renderer
 from ados.services.ui.renderers.framebuffer import FrameBufferRenderer
+from ados.services.ui.theme import current_palette
+from ados.services.ui.touch.calibrate import CalibrationWizard
+from ados.services.ui.touch.events import TouchGesture
+from ados.services.ui.touch.transform import load as load_calib
 from ados.services.ui.touch_input import TouchInputBridge
 
 # Native-resolution dashboard renderer. Imported defensively so the
@@ -74,23 +82,53 @@ except Exception:  # noqa: BLE001
     render_groundnode_dashboard = None  # type: ignore[assignment]
 from ados.services.ui.screens import (
     drone as screen_drone,
+)
+from ados.services.ui.screens import (
     gcs as screen_gcs,
+)
+from ados.services.ui.screens import (
     link as screen_link,
+)
+from ados.services.ui.screens import (
     menu as screen_menu,
+)
+from ados.services.ui.screens import (
     net as screen_net,
+)
+from ados.services.ui.screens import (
     system as screen_system,
 )
 from ados.services.ui.screens.mesh import (
     accept_window as screen_mesh_accept_window,
+)
+from ados.services.ui.screens.mesh import (
     error_states as screen_mesh_error_states,
+)
+from ados.services.ui.screens.mesh import (
     hub_unreachable as screen_mesh_hub_unreachable,
+)
+from ados.services.ui.screens.mesh import (
     join_request_inflight as screen_mesh_join_request_inflight,
+)
+from ados.services.ui.screens.mesh import (
     join_scan as screen_mesh_join_scan,
+)
+from ados.services.ui.screens.mesh import (
     joined_status as screen_mesh_joined_status,
+)
+from ados.services.ui.screens.mesh import (
     leave_confirm as screen_mesh_leave_confirm,
+)
+from ados.services.ui.screens.mesh import (
     mesh_unavailable as screen_mesh_unavailable,
+)
+from ados.services.ui.screens.mesh import (
     neighbors as screen_mesh_neighbors,
+)
+from ados.services.ui.screens.mesh import (
     role_picker as screen_mesh_role_picker,
+)
+from ados.services.ui.screens.mesh import (
     unset_boot as screen_mesh_unset_boot,
 )
 
@@ -379,10 +417,20 @@ class OledService:
         # truthy callable) the framebuffer paints the dashboard at
         # native 480x320 instead of upscaling the OLED carousel.
         self._dashboard_render = render_groundnode_dashboard
-        # Optional touch-input bridge. Translates ADS7846 pen-down
-        # events into synthetic ButtonEvents on the shared bus so the
-        # operator can advance screens without physical buttons.
+        # Optional touch-input bridge. Translates ADS7846 events into
+        # gestures and synthetic legacy button events. The mode is
+        # flipped by the run loop based on whether the LCD is large
+        # enough to host the page system.
         self._touch_bridge: TouchInputBridge | None = None
+        # Page-system state. Bound only when the framebuffer
+        # geometry can host the 480x320 page UI. The navigator owns
+        # the active route and modal stack; the wizard owns
+        # calibration. Both are None when the carousel is in charge.
+        self._page_navigator: PageNavigator | None = None
+        self._page_context: PageContext | None = None
+        self._calibration_wizard: CalibrationWizard | None = None
+        self._calibration_failure_until_ms: int = 0
+        self._touch_consumer_task: asyncio.Task | None = None
         self._reload_ui_config()
 
     def _probe_device(self) -> bool:
@@ -503,6 +551,317 @@ class OledService:
             self._fb_renderer.present(img)
         except Exception as exc:  # noqa: BLE001
             log.warning("framebuffer_render_failed", error=str(exc))
+
+    # ── lcd_page mode helpers ──────────────────────────────────
+
+    def _bootstrap_page_system(self) -> None:
+        """Construct the navigator, register pages, and pick initial mode.
+
+        Called once during ``run()`` after the framebuffer probe
+        succeeds and the framebuffer reports a geometry the page UI
+        can host. Triggers the calibration wizard when the touch
+        chip is present and no calibration file exists yet.
+        """
+        if self._fb_renderer is None:
+            return
+        geom_ok = (
+            getattr(self._fb_renderer, "actual_width", 0) >= 480
+            and getattr(self._fb_renderer, "actual_height", 0) >= 320
+        )
+        if not geom_ok:
+            return
+        navigator = PageNavigator()
+        navigator.register(DashboardPage())
+        self._page_navigator = navigator
+        self._page_context = PageContext(
+            state=self._state,
+            palette=current_palette(),
+            hostname=self._read_hostname(),
+            http=None,  # bound later in run() once httpx client is alive
+            framebuffer=self._fb_renderer,
+            navigator=navigator,
+            logger=log,
+        )
+        # If a touch chip exists and no calibration file (or skip
+        # marker) is present, launch the wizard before landing on the
+        # dashboard. The wizard takes over the full panel until it
+        # completes or the operator skips.
+        if self._touch_present() and load_calib(TOUCH_CALIB_PATH) is None:
+            self._calibration_wizard = CalibrationWizard()
+            self._calibration_wizard.start()
+            self._mode = "calibrate"
+            log.info("lcd_calibration_wizard_started")
+        else:
+            self._mode = "lcd_page"
+            log.info(
+                "lcd_page_mode_engaged",
+                page_id=navigator.active_page_id,
+            )
+
+    def _read_hostname(self) -> str:
+        try:
+            from pathlib import Path
+            return Path("/etc/hostname").read_text().strip() or "groundnode"
+        except OSError:
+            return "groundnode"
+
+    def _touch_present(self) -> bool:
+        """Best-effort check whether an evdev touch device is bound."""
+        try:
+            from evdev import InputDevice, ecodes, list_devices
+        except ImportError:
+            return False
+        for path in list_devices():
+            try:
+                dev = InputDevice(path)
+            except OSError:
+                continue
+            try:
+                caps = dev.capabilities().get(ecodes.EV_KEY, [])
+                if ecodes.BTN_TOUCH in caps:
+                    return True
+            finally:
+                try:
+                    dev.close()
+                except Exception:  # noqa: BLE001
+                    pass
+        return False
+
+    async def _render_lcd_page(self) -> None:
+        """Paint chrome + active page onto the framebuffer.
+
+        Async because the page protocol's :meth:`render` is async.
+        Called from the async ``_render_forever`` loop directly.
+        """
+        if self._fb_renderer is None or self._page_navigator is None:
+            return
+        palette = current_palette()
+        # Refresh context state every tick — palette flip and state
+        # poll updates need to reach the page without restart.
+        if self._page_context is not None:
+            self._page_context.palette = palette
+            self._page_context.state = self._state
+        canvas = Image.new("RGB", (480, 320), palette.bg_primary)
+        # Top status bar.
+        top_status_bar.draw(
+            canvas,
+            0,
+            0,
+            480,
+            palette=palette,
+            hostname=self._page_context.hostname if self._page_context else "groundnode",
+            state=self._state,
+        )
+        # Active page paints into the 480x244 region just below the
+        # 32 px chrome. Modal stack is rendered on top by the
+        # current_page() resolution.
+        page = self._page_navigator.current_page()
+        page_img: Image.Image | None = None
+        try:
+            page_img = await page.render(self._page_context)  # type: ignore[arg-type]
+        except Exception as exc:  # noqa: BLE001
+            log.warning("page_render_failed", page_id=page.id, error=str(exc))
+        if page_img is not None:
+            canvas.paste(page_img, (0, 32))
+        # Bottom tab bar with any active feedback flashes.
+        bottom_tab_bar.draw(
+            canvas,
+            0,
+            320 - 44,
+            480,
+            palette=palette,
+            active=self._page_navigator.active_page_id,
+            tapped_at_ms=self._page_navigator.tap_feedback(),
+        )
+        try:
+            self._fb_renderer.present(canvas)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("framebuffer_present_failed", error=str(exc))
+
+    def _render_calibration(self) -> None:
+        """Paint the active calibration wizard (or failure card)."""
+        if self._fb_renderer is None or self._calibration_wizard is None:
+            return
+        palette = current_palette()
+        now_ms = int(_now() * 1000)
+        if (
+            self._calibration_failure_until_ms
+            and now_ms < self._calibration_failure_until_ms
+        ):
+            img = self._calibration_wizard.render_failure(
+                palette,
+                rms_px=getattr(self, "_calibration_failure_rms", 0.0),
+            )
+        else:
+            img = self._calibration_wizard.render(palette)
+            self._calibration_failure_until_ms = 0
+        try:
+            self._fb_renderer.present(img)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("framebuffer_present_failed", error=str(exc))
+
+    async def _consume_touch_gestures(self) -> None:
+        """Dispatch TouchGesture events to the active page or wizard."""
+        if self._touch_bridge is None:
+            return
+        async for gesture in self._touch_bridge.gesture_bus.subscribe():
+            if self._stop.is_set():
+                return
+            try:
+                await self._dispatch_gesture(gesture)
+            except Exception as exc:  # noqa: BLE001
+                log.warning(
+                    "touch_dispatch_failed",
+                    error=str(exc),
+                    kind=gesture.kind,
+                )
+
+    async def _dispatch_gesture(self, gesture: TouchGesture) -> None:
+        if self._mode == "calibrate" and self._calibration_wizard is not None:
+            await self._handle_calibration_gesture(gesture)
+            return
+        if self._mode != "lcd_page" or self._page_navigator is None:
+            return
+        navigator = self._page_navigator
+        ctx = self._page_context
+        # Tab bar zones live at y=276..320 on the LCD canvas.
+        if gesture.start_y >= 320 - 44 and gesture.kind == "tap":
+            await self._handle_tab_tap(gesture)
+            return
+        # Otherwise dispatch to active page or topmost modal.
+        if ctx is None:
+            return
+        page = navigator.current_page()
+        # Translate to page-local coords (subtract chrome offset).
+        local_x = gesture.start_x
+        local_y = gesture.start_y - 32
+        for zone in page.hit_zones(ctx):
+            if zone.contains(local_x, local_y):
+                navigator.record_tap(zone.id, int(_now() * 1000))
+                try:
+                    await page.on_touch(ctx, zone, gesture)
+                except Exception as exc:  # noqa: BLE001
+                    log.warning(
+                        "page_on_touch_failed",
+                        page_id=page.id,
+                        zone=zone.id,
+                        error=str(exc),
+                    )
+                return
+
+    async def _handle_tab_tap(self, gesture: TouchGesture) -> None:
+        if self._page_navigator is None:
+            return
+        # Re-derive zones using the same layout the renderer uses.
+        # We recompute rather than caching them so a different chrome
+        # height in the future does not get a stale dispatch.
+        from ados.services.ui.chrome.bottom_tab_bar import (
+            HEIGHT as TAB_HEIGHT,
+        )
+        from ados.services.ui.chrome.bottom_tab_bar import (
+            TAB_COUNT,
+            TAB_WIDTH,
+            page_id_for_zone,
+        )
+        if gesture.start_y < 320 - TAB_HEIGHT:
+            return
+        index = max(0, min(TAB_COUNT - 1, gesture.start_x // TAB_WIDTH))
+        # The zone ids are stable; rebuild via the helper map.
+        zone_ids = (
+            "tab.dashboard",
+            "tab.video",
+            "tab.settings",
+            "tab.more",
+        )
+        zone_id = zone_ids[index]
+        page_id = page_id_for_zone(zone_id)
+        if page_id is None:
+            return
+        if not self._page_navigator.has(page_id):
+            log.info(
+                "tab_tapped_unregistered_page",
+                page_id=page_id,
+                zone=zone_id,
+            )
+            self._page_navigator.record_tap(zone_id, int(_now() * 1000))
+            return
+        self._page_navigator.record_tap(zone_id, int(_now() * 1000))
+        await self._page_navigator.go(page_id, ctx=self._page_context)
+
+    async def _handle_calibration_gesture(self, gesture: TouchGesture) -> None:
+        wizard = self._calibration_wizard
+        if wizard is None:
+            return
+        # If we're showing a failure card, any tap restarts the
+        # wizard. Otherwise process the tap as a sample.
+        now_ms = int(_now() * 1000)
+        if self._calibration_failure_until_ms and now_ms < self._calibration_failure_until_ms:
+            if gesture.kind == "tap":
+                wizard.reset_for_retry()
+                self._calibration_failure_until_ms = 0
+            return
+        if gesture.kind == "long_press":
+            wizard.skip()
+            self._exit_calibration()
+            return
+        if gesture.kind != "tap":
+            return
+        # Map the LCD-pixel tap back to raw ADC coordinates by
+        # recovering the last raw sample from the bridge. The bridge
+        # stored it in the gesture's samples sequence — but those are
+        # already LCD-space. For the wizard's submit_sample contract
+        # we need raw ADC. The bridge keeps the raw last-x/last-y in
+        # its private state; expose it via a small helper rather
+        # than reaching in.
+        raw = self._touch_bridge_raw_for(gesture)
+        wizard.submit_sample(wizard.step, raw[0], raw[1])
+        if wizard.is_done:
+            result = wizard.complete()
+            if result.success:
+                # Reload the bridge so live gestures use the new map.
+                if self._touch_bridge is not None:
+                    self._touch_bridge.reload_calibration()
+                log.info(
+                    "lcd_calibration_complete",
+                    rms_px=result.rms_px,
+                )
+                self._exit_calibration()
+            else:
+                log.warning(
+                    "lcd_calibration_rejected",
+                    rms_px=result.rms_px,
+                    error=result.error,
+                )
+                self._calibration_failure_rms = result.rms_px
+                # Show the failure card for 4 seconds, then auto-retry.
+                self._calibration_failure_until_ms = now_ms + 4000
+
+    def _touch_bridge_raw_for(self, gesture: TouchGesture) -> tuple[int, int]:
+        """Return the last raw ADC sample the bridge captured.
+
+        The wizard fits raw -> LCD; gesture coordinates are already
+        LCD-space (post-transform). For the first tap before any
+        calibration exists, the bridge is using the identity transform
+        so feeding the LCD tap-position back as if it were raw would
+        produce a near-identity matrix. To get a meaningful fit, we
+        read the bridge's most recent raw values.
+        """
+        if self._touch_bridge is None:
+            return (gesture.start_x, gesture.start_y)
+        return (
+            getattr(self._touch_bridge, "_last_x_raw", gesture.start_x),
+            getattr(self._touch_bridge, "_last_y_raw", gesture.start_y),
+        )
+
+    def _exit_calibration(self) -> None:
+        self._calibration_wizard = None
+        self._calibration_failure_until_ms = 0
+        if self._page_navigator is not None:
+            self._mode = "lcd_page"
+            log.info("lcd_calibration_exit_to_page")
+        else:
+            self._mode = "status"
+            log.info("lcd_calibration_exit_to_status")
 
     def _set_contrast(self, value: int) -> None:
         if self._device is None:
@@ -696,7 +1055,7 @@ class OledService:
                 pass
             try:
                 await asyncio.wait_for(self._stop.wait(), timeout=PAIRING_POLL_SECONDS)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 continue
 
     async def _poll_state_forever(self) -> None:
@@ -729,7 +1088,7 @@ class OledService:
                 await asyncio.wait_for(
                     self._stop.wait(), timeout=POLL_PERIOD_SECONDS
                 )
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 continue
 
     async def _consume_buttons(self) -> None:
@@ -959,7 +1318,10 @@ class OledService:
                 self._screen_idx = (self._screen_idx + 1) % n_screens
                 last_advance = now
 
-            if self._device is not None:
+            if self._device is not None and self._mode not in (
+                "lcd_page",
+                "calibrate",
+            ):
                 try:
                     with canvas(self._device) as draw:
                         self._paint_active_screen(draw, WIDTH, HEIGHT)
@@ -970,11 +1332,24 @@ class OledService:
             # Both surfaces can run at once on a bench rig that has both
             # an OLED HAT and an LCD HAT plugged in; the framebuffer call
             # is a no-op when fb_renderer is None.
-            self._render_to_framebuffer()
+            if self._mode == "lcd_page":
+                await self._render_lcd_page()
+            elif self._mode == "calibrate":
+                self._render_calibration()
+            else:
+                self._render_to_framebuffer()
 
+            # Refresh cadence: pages declare a preferred Hz; carousel
+            # stays at the historical 5 Hz.
+            tick_period = 0.2
+            if self._mode == "lcd_page" and self._page_navigator is not None:
+                page = self._page_navigator.current_page()
+                hz = float(getattr(page, "refresh_hz", 5.0) or 5.0)
+                if hz > 0:
+                    tick_period = max(0.02, 1.0 / hz)
             try:
-                await asyncio.wait_for(self._stop.wait(), timeout=0.2)
-            except asyncio.TimeoutError:
+                await asyncio.wait_for(self._stop.wait(), timeout=tick_period)
+            except TimeoutError:
                 continue
 
     async def run(self) -> int:
@@ -995,12 +1370,25 @@ class OledService:
             framebuffer=fb_present,
         )
         # When the SPI LCD is bound, the touch chip shows up as an evdev
-        # node we can listen on. Translating taps to synthetic button
-        # events gives the operator a way to advance screens on a board
-        # that has no GPIO buttons.
+        # node we can listen on. Translating taps to gestures (in lcd_page
+        # mode) or to synthetic button events (in oled_compat mode) gives
+        # the operator a way to drive the UI on a board that has no
+        # physical buttons.
         if fb_present:
             self._touch_bridge = TouchInputBridge(self._bus)
+            # Decide whether the framebuffer can host the page UI.
+            # The bootstrap may flip _mode to "calibrate" or
+            # "lcd_page". Touch bridge mode follows.
+            self._bootstrap_page_system()
+            if self._mode in ("lcd_page", "calibrate"):
+                self._touch_bridge.mode = "lcd_page"
+            else:
+                self._touch_bridge.mode = "oled_compat"
         self._http = httpx.AsyncClient(timeout=0.9)
+        # Hand the http client to the page context so pages can make
+        # REST calls without each one constructing its own pool.
+        if self._page_context is not None:
+            self._page_context.http = self._http
         tasks = [
             asyncio.create_task(self._render_forever(), name="oled_render"),
             asyncio.create_task(self._consume_buttons(), name="oled_buttons"),
@@ -1010,6 +1398,15 @@ class OledService:
             tasks.append(
                 asyncio.create_task(self._touch_bridge.run(), name="oled_touch")
             )
+            # Gesture consumer dispatches taps/swipes/long-presses to
+            # the active page or calibration wizard. Only useful when
+            # the bridge is in lcd_page mode; in oled_compat mode the
+            # bridge republishes legacy ButtonEvents and this consumer
+            # simply sits idle (the bus has no producers).
+            self._touch_consumer_task = asyncio.create_task(
+                self._consume_touch_gestures(), name="oled_touch_dispatch",
+            )
+            tasks.append(self._touch_consumer_task)
         try:
             await self._stop.wait()
         finally:

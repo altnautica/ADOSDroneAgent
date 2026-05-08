@@ -22,8 +22,9 @@ Contract:
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from typing import AsyncIterator, Literal
+from typing import Literal
 
 __all__ = ["ButtonEvent", "ButtonEventBus"]
 

@@ -23,7 +23,6 @@ from PIL import Image, ImageDraw
 from . import primitives as p
 from .status_dot import draw_dot
 
-
 HEADER_HEIGHT = 32
 
 

@@ -76,6 +76,14 @@ ground-station = [
     # absent so the install isn't strictly blocking.
     "qrcode>=7.4",
 ]
+# Tooling extras for refreshing build-time generated assets such as the
+# rasterized LCD tab-bar icons. Not required at runtime; only needed
+# when an editor wants to re-run `scripts/render-lcd-icons.py` after an
+# SVG edit. CairoSVG ships its own libcairo build via pycairo, so this
+# stays out of the base install footprint.
+icon-tools = [
+    "cairosvg>=2.7",
+]
 
 [project.urls]
 Homepage = "https://altnautica.com/drone-agent"
@@ -109,6 +117,7 @@ include = ["ados*"]
 "ados.hal" = ["boards/*.yaml"]
 "ados.core" = ["defaults.yaml"]
 "ados.dashboard" = ["static/**/*"]
+"ados.services.ui.chrome._icons" = ["*.png"]
 
 
 [tool.ruff]

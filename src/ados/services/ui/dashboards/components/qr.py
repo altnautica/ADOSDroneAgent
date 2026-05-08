@@ -17,8 +17,6 @@ caller can render a text-only fallback.
 
 from __future__ import annotations
 
-from typing import Optional
-
 from PIL import Image
 
 
@@ -27,7 +25,7 @@ def render_qr(
     *,
     target_px: int = 96,
     border_modules: int = 2,
-) -> Optional[Image.Image]:
+) -> Image.Image | None:
     """Render ``text`` as a QR code, scaled to ~``target_px`` square.
 
     Returns a PIL Image (mode "1", black-on-white) of the QR with a

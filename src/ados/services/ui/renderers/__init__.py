@@ -37,7 +37,7 @@ class Renderer(Protocol):
     width: int
     height: int
 
-    def present(self, image: "Image") -> None:
+    def present(self, image: Image) -> None:
         """Display the image. Called from the render loop at ~5 Hz."""
 
     def cleanup(self) -> None:

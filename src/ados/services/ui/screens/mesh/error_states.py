@@ -7,7 +7,8 @@ is unknown. B4 clears the overlay.
 
 from __future__ import annotations
 
-from typing import Any, Awaitable, Callable
+from collections.abc import Awaitable, Callable
+from typing import Any
 
 _MESSAGES: dict[str, tuple[str, str]] = {
     "E_NOT_PAIRED": ("Not paired", "Pair with a receiver first"),

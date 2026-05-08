@@ -30,8 +30,6 @@ from PIL import Image
 from ados.core.logging import get_logger
 from ados.core.paths import DISPLAY_CONF_PATH
 
-from . import Renderer
-
 if TYPE_CHECKING:  # pragma: no cover
     from PIL.Image import Image as PILImage
 
@@ -115,7 +113,7 @@ def _parse_display_conf() -> dict[str, str]:
     return out
 
 
-def _pack_rgb565(image: "PILImage") -> bytes:
+def _pack_rgb565(image: PILImage) -> bytes:
     """Convert an RGB PIL image to packed RGB565 little-endian bytes."""
     rgb = image.convert("RGB")
     pixels = rgb.tobytes()
@@ -165,7 +163,7 @@ class FrameBufferRenderer:
         self._open()
 
     @classmethod
-    def probe(cls) -> "FrameBufferRenderer | None":
+    def probe(cls) -> FrameBufferRenderer | None:
         """Return a renderer if a matching framebuffer is bound, else None.
 
         Honors ``/etc/ados/display.conf`` written by the LCD-overlay
@@ -260,7 +258,7 @@ class FrameBufferRenderer:
             self._fd = -1
             raise
 
-    def present(self, image: "PILImage") -> None:
+    def present(self, image: PILImage) -> None:
         """Blit the image to the framebuffer.
 
         Two paths:

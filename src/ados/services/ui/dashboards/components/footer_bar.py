@@ -18,7 +18,6 @@ from PIL import Image, ImageDraw
 from . import primitives as p
 from .sparkline import draw_sparkline, history, push
 
-
 FOOTER_HEIGHT = 28
 SPARK_W = 30
 SPARK_H = 14

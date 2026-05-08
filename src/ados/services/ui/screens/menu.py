@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from typing import Any
 
-
 ROW_HEIGHT = 12
 VISIBLE_ROWS = 5
 
