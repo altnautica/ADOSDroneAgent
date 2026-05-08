@@ -426,15 +426,11 @@ async def main() -> None:
     manager = WfbRxManager(config.video.wfb)
     manager_task = asyncio.create_task(manager.run(), name="ground-wfb-rx")
 
-    # Spawn the auto-pair supervisor: drives RubyFPV-style first-boot
-    # bind. Self-disarms once a pair lands and is a cheap no-op when
-    # already paired. Lives inside this process so it shares the
-    # service's lifecycle. Survives wfb_rx adapter-detect bailouts
-    # because systemd restarts the unit and we re-spawn.
-    from ados.services.wfb.auto_pair import get_auto_pair_supervisor
-
-    auto_pair = get_auto_pair_supervisor("gs")
-    auto_pair.start()
+    # NOTE: the auto_pair supervisor is hosted in ados-cloud, not here.
+    # Hosting it inside ados-wfb-rx would create a self-kill loop —
+    # the bind orchestrator stops ados-wfb-rx to flip wfb-ng profiles,
+    # which kills the supervisor running inside it before the bind can
+    # finish. ados-cloud is always-running and doesn't own the radio.
 
     slog.info("ground_wfb_rx_service_ready")
 
@@ -446,7 +442,6 @@ async def main() -> None:
     )
 
     slog.info("ground_wfb_rx_service_stopping")
-    await auto_pair.stop()
     manager_task.cancel()
     await asyncio.gather(manager_task, return_exceptions=True)
     await manager.stop_rx()

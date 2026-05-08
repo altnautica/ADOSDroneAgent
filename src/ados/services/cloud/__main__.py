@@ -842,6 +842,24 @@ async def main() -> None:
 
     tasks.append(asyncio.create_task(command_poll_loop(), name="command-poll"))
 
+    # ── WFB Auto-Pair Supervisor ──────────────────────
+    # Runs the RubyFPV-style first-boot auto-bind loop here in ados-cloud
+    # rather than inside ados-wfb / ados-wfb-rx because the bind
+    # orchestrator stops + starts those wfb units to flip wfb-ng
+    # profiles. Hosting the supervisor in the same service it's stopping
+    # produces a self-kill loop. ados-cloud doesn't touch the radio so
+    # it can systemctl-stop the wfb units without dying.
+
+    try:
+        from ados.services.wfb.auto_pair import get_auto_pair_supervisor
+
+        ap_role = "drone" if config.agent.profile == "drone" else "gs"
+        ap_supervisor = get_auto_pair_supervisor(ap_role)
+        ap_supervisor.start()
+        log.info("auto_pair_supervisor_spawned", role=ap_role)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("auto_pair_supervisor_spawn_failed", error=str(exc))
+
     # ── MAVLink MQTT Relay (when paired) ──────────────────────
 
     async def mavlink_relay_task() -> None:

@@ -29,7 +29,6 @@ async def main() -> None:
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, shutdown.set)
 
-    from ados.services.wfb.auto_pair import get_auto_pair_supervisor
     from ados.services.wfb.manager import WfbManager
 
     manager = WfbManager(config.video.wfb)
@@ -37,20 +36,16 @@ async def main() -> None:
     # Run the WFB manager (handles adapter detection, monitor mode, process lifecycle)
     manager_task = asyncio.create_task(manager.run(), name="wfb-manager")
 
-    # Spawn the auto-pair supervisor on a freshly installed unpaired
-    # rig. Self-disarms once a pair lands; cheap no-op when already
-    # paired or auto_pair_enabled is false.
-    role = "drone" if config.agent.profile == "drone" else "gs"
-    auto_pair = get_auto_pair_supervisor(role)
-    auto_pair.start()
+    # NOTE: the auto_pair supervisor is hosted in ados-cloud, not here.
+    # The bind orchestrator stops + starts ados-wfb to flip profiles, so
+    # if auto_pair ran here the orchestrator would kill its own host.
 
-    log.info("wfb_service_ready", profile=config.agent.profile, auto_pair_role=role)
+    log.info("wfb_service_ready", profile=config.agent.profile)
 
     # Wait for shutdown
     await shutdown.wait()
 
     log.info("wfb_service_stopping")
-    await auto_pair.stop()
     manager_task.cancel()
     await asyncio.gather(manager_task, return_exceptions=True)
     await manager.stop()
