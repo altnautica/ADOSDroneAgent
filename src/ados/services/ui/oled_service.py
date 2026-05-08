@@ -61,6 +61,7 @@ from ados.core.config import load_config
 from ados.core.logging import configure_logging, get_logger
 from ados.core.paths import LCD_PAGE_REQUEST_PATH, TOUCH_CALIB_PATH
 from ados.services.ui.chrome import bottom_tab_bar, top_status_bar
+from ados.services.ui.display_conf import read_rotation
 from ados.services.ui.events import ButtonEventBus
 from ados.services.ui.pages import PageContext, PageNavigator
 from ados.services.ui.pages.dashboard import DashboardPage
@@ -676,6 +677,61 @@ class OledService:
                 except Exception:  # noqa: BLE001
                     pass
         return False
+
+    def _verify_calibration_rotation(self, current_rotation: int) -> None:
+        """Warn + arm a recalibrate flag when the on-disk calib is stale.
+
+        The wizard saves ``rotation_applied_at_save`` alongside the
+        affine matrix. When the operator later changes display
+        rotation from the settings page, the saved matrix no longer
+        maps raw ADC reads to the new orientation correctly. Detect
+        the mismatch on startup, write
+        ``/run/ados/recalibrate.flag`` (the same one-shot flag the
+        settings page uses) so the next run of the bootstrap launches
+        the wizard, and log a warning.
+
+        The flag is written but NOT consumed here — bootstrap unlinks
+        it on read. That ordering is intentional: this method runs
+        before bootstrap, so the flag we write is picked up on the
+        same boot.
+        """
+        if not TOUCH_CALIB_PATH.exists():
+            return
+        try:
+            blob = json.loads(TOUCH_CALIB_PATH.read_text())
+        except (OSError, ValueError):
+            return
+        if not isinstance(blob, dict):
+            return
+        if not blob.get("calibrated"):
+            return
+        saved = blob.get("rotation_applied_at_save")
+        try:
+            saved_int = int(saved) % 360
+        except (TypeError, ValueError):
+            return
+        if saved_int == int(current_rotation) % 360:
+            return
+        log.warning(
+            "touch_calibration_stale",
+            saved_rotation=saved_int,
+            current_rotation=current_rotation,
+            msg=(
+                "touch.calib was saved at a different rotation than "
+                "the panel is configured for now; arming recalibrate "
+                "flag so the wizard runs on the next bootstrap"
+            ),
+        )
+        flag_path = Path("/run/ados/recalibrate.flag")
+        try:
+            flag_path.parent.mkdir(parents=True, exist_ok=True)
+            flag_path.write_text("rotation_changed\n")
+        except OSError as exc:
+            log.warning(
+                "recalibrate_flag_write_failed",
+                path=str(flag_path),
+                error=str(exc),
+            )
 
     async def _render_lcd_page(self) -> None:
         """Paint chrome + active page onto the framebuffer.
@@ -1640,7 +1696,17 @@ class OledService:
         # the operator a way to drive the UI on a board that has no
         # physical buttons.
         if fb_present:
-            self._touch_bridge = TouchInputBridge(self._bus)
+            # Read the configured rotation once so the touch bridge's
+            # default identity transform matches what is actually being
+            # blitted to the panel. Without this the bridge falls back
+            # to rotation=0 even when the panel is mounted at 90 / 180
+            # / 270, which lands every tap 12-16 px off-axis on a
+            # Waveshare 3.5" RPi LCD A in portrait.
+            rotation = read_rotation()
+            self._verify_calibration_rotation(rotation)
+            self._touch_bridge = TouchInputBridge(
+                self._bus, rotation=rotation,
+            )
             # Decide whether the framebuffer can host the page UI.
             # The bootstrap may flip _mode to "calibrate" or
             # "lcd_page". Touch bridge mode follows.

@@ -299,6 +299,61 @@ def _read_display_rotation() -> int | None:
     return None
 
 
+def _read_json_with_retry(
+    path: Path, attempts: int = 3, delay_s: float = 0.005,
+) -> dict | None:
+    """Read a JSON sidecar file with a small retry on partial writes.
+
+    The OLED service writes these sidecars atomically (tmpfile +
+    rename), but a reader that catches the inode mid-rename can still
+    see an empty file. Mirror the retry pattern used by the REST
+    surface in ``api/routes/display.py::_read_lcd_state``: try up to
+    ``attempts`` times with ``delay_s`` between attempts. Returns the
+    decoded dict on success, ``None`` on persistent absence, empty,
+    or malformed content.
+    """
+    if not path.exists():
+        return None
+    import json as _json
+
+    for attempt in range(max(1, attempts)):
+        try:
+            text = path.read_text()
+        except OSError:
+            return None
+        if not text.strip():
+            if attempt < attempts - 1:
+                time.sleep(delay_s)
+                continue
+            return None
+        try:
+            blob = _json.loads(text)
+        except _json.JSONDecodeError:
+            if attempt < attempts - 1:
+                time.sleep(delay_s)
+                continue
+            return None
+        if not isinstance(blob, dict):
+            return None
+        return blob
+    return None
+
+
+def _read_lcd_state_blob() -> dict | None:
+    """Read ``/run/ados/lcd-state.json`` with the standard retry loop.
+
+    Used by the heartbeat builder to surface the SPI LCD's active
+    page. The retry covers the rare race where the cloud subprocess
+    catches the OLED service's atomic-write rename in flight and
+    sees an empty file. Returns the decoded dict on success, ``None``
+    when the file is genuinely absent / empty / malformed even after
+    retries.
+    """
+    from ados.core.paths import LCD_STATE_PATH
+
+    return _read_json_with_retry(LCD_STATE_PATH)
+
+
 def _read_lcd_video_tap() -> dict | None:
     """Read ``/run/ados/lcd-video-tap.json`` published by the OLED video page.
 
@@ -306,16 +361,13 @@ def _read_lcd_video_tap() -> dict | None:
     visited yet). Returns ``None`` in that case so the caller can omit
     the related heartbeat fields entirely instead of advertising
     ``False`` for "decoder active" on a board with no LCD.
-    """
-    if not LCD_VIDEO_TAP_PATH.exists():
-        return None
-    try:
-        import json as _json
 
-        blob = _json.loads(LCD_VIDEO_TAP_PATH.read_text())
-    except (OSError, ValueError):
-        return None
-    if not isinstance(blob, dict):
+    Uses the same retry loop as :func:`_read_lcd_state_blob` so a
+    reader that catches an in-flight atomic rename does not silently
+    drop the decoder block from the heartbeat.
+    """
+    blob = _read_json_with_retry(LCD_VIDEO_TAP_PATH)
+    if blob is None:
         return None
     # Tap snapshots older than 30 s are stale (operator left the
     # video page over half a minute ago, the metrics loop is no
@@ -758,22 +810,24 @@ async def main() -> None:
                     # on every navigator transition (including modal
                     # push/pop). Best-effort; the cloud subprocess
                     # does not own the navigator directly.
+                    #
+                    # Atomic-write semantics on the writer side mean a
+                    # reader that catches the inode mid-rename can
+                    # still see an empty file. Mirror the small retry
+                    # loop the REST surface uses (see api/routes/
+                    # display.py::_read_lcd_state) so a single race
+                    # does not silently drop the field from the
+                    # heartbeat.
                     if _attached_display is not None:
-                        try:
-                            import json as _json_lcd
-                            from ados.core.paths import LCD_STATE_PATH
-
-                            blob = _json_lcd.loads(LCD_STATE_PATH.read_text())
-                            if isinstance(blob, dict):
-                                modal_stack = blob.get("modal_stack")
-                                if isinstance(modal_stack, list) and modal_stack:
-                                    payload["lcdActivePage"] = str(modal_stack[-1])
-                                else:
-                                    active = blob.get("active_page_id")
-                                    if isinstance(active, str) and active:
-                                        payload["lcdActivePage"] = active
-                        except Exception:
-                            pass
+                        blob = _read_lcd_state_blob()
+                        if isinstance(blob, dict):
+                            modal_stack = blob.get("modal_stack")
+                            if isinstance(modal_stack, list) and modal_stack:
+                                payload["lcdActivePage"] = str(modal_stack[-1])
+                            else:
+                                active = blob.get("active_page_id")
+                                if isinstance(active, str) and active:
+                                    payload["lcdActivePage"] = active
 
                     # Display + decoder + theme enrichment for the
                     # GCS Display sub-view. Each field is optional —

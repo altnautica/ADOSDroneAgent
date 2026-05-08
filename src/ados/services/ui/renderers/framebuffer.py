@@ -29,6 +29,7 @@ from PIL import Image
 
 from ados.core.logging import get_logger
 from ados.core.paths import DISPLAY_CONF_PATH
+from ados.services.ui.display_conf import read_rotation
 
 if TYPE_CHECKING:  # pragma: no cover
     from PIL.Image import Image as PILImage
@@ -147,6 +148,7 @@ class FrameBufferRenderer:
         actual_height: int = 320,
         bpp: int = 16,
         upscale: int = DEFAULT_UPSCALE,
+        rotation: int = 0,
     ) -> None:
         self._fb_path = fb_path
         self._fb_name = fb_name
@@ -157,6 +159,12 @@ class FrameBufferRenderer:
         # Logical canvas size the service paints onto.
         self.width = LOGICAL_WIDTH
         self.height = LOGICAL_HEIGHT
+        # Display rotation in degrees (0 / 90 / 180 / 270). Applied to
+        # the canvas in present() before mmap write so a panel mounted
+        # rotated 90 degrees physically still renders the UI right-way-up.
+        self.rotation: int = int(rotation) % 360 if int(rotation) % 360 in (
+            0, 90, 180, 270,
+        ) else 0
         self._fd: int = -1
         self._mmap: mmap.mmap | None = None
         self._frame_bytes = actual_width * actual_height * (bpp // 8)
@@ -178,6 +186,11 @@ class FrameBufferRenderer:
         conf = _parse_display_conf()
         configured_path = conf.get("framebuffer_path", "/dev/fb1")
         expected = (conf.get("framebuffer_name_expected") or "fb_ili9486").strip()
+        # Honor the rotation key the LCD-overlay installer wrote (and
+        # the settings page may have toggled). 0 / 90 / 180 / 270 are
+        # the only legal values; the display_conf helper returns 0 on
+        # any malformed input.
+        rotation = read_rotation()
 
         # Build candidate list: configured path first, then every
         # /dev/fb* that has a /sys/class/graphics/<name>/var entry.
@@ -228,6 +241,7 @@ class FrameBufferRenderer:
                 width=xres,
                 height=yres,
                 bpp=bpp,
+                rotation=rotation,
             )
             return cls(
                 fb_path=candidate,
@@ -235,6 +249,7 @@ class FrameBufferRenderer:
                 actual_width=xres,
                 actual_height=yres,
                 bpp=bpp,
+                rotation=rotation,
             )
 
         log.debug(
@@ -271,6 +286,18 @@ class FrameBufferRenderer:
           carousel canvas: convert to RGB, NEAREST-upscale by
           ``self.upscale``, center on a black background of the
           actual panel size, crop overflow.
+
+        After compositing, ``self.rotation`` is applied so a panel
+        mounted physically rotated still renders right-way-up. PIL's
+        ``rotate(angle)`` is counter-clockwise by convention; we want
+        the contents to compensate for a clockwise physical mount, so
+        the angle is negated. ``expand=False`` keeps the canvas
+        dimensions matched to the framebuffer geometry — at 90 / 270
+        the contents simply lose the corners of the long axis, which
+        is fine because at those rotations the panel's logical width
+        and height match the canvas anyway (the renderer is
+        constructed at ``actual_width`` / ``actual_height`` that the
+        kernel reports for the physical orientation).
         """
         if self._mmap is None:
             return
@@ -305,6 +332,12 @@ class FrameBufferRenderer:
                 x = max(0, x)
                 y = max(0, y)
             canvas.paste(scaled, (x, y))
+
+        if self.rotation in (90, 180, 270):
+            # PIL rotates counter-clockwise, so negate the configured
+            # clockwise rotation. expand=False keeps the canvas size
+            # locked to the framebuffer geometry.
+            canvas = canvas.rotate(-self.rotation, expand=False)
 
         if self.bpp == 16:
             buf = _pack_rgb565(canvas)
