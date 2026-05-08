@@ -190,13 +190,22 @@ class WfbManager:
             True if the process started successfully.
         """
         tx_key, _rx_key = get_key_paths()
+        # wfb_tx flags (vendored wfb-ng v26.4):
+        #   -k <RS_K>  Reed-Solomon K (FEC k, default 8)
+        #   -n <RS_N>  Reed-Solomon N (FEC n, default 12)
+        #   -B <BW>    bandwidth in MHz (20 or 40)
+        #   -M <idx>   MCS index
+        # The previous code used -B for fec_k and -r for fec_n which
+        # were the wrong flags entirely; -r isn't a valid option in
+        # the vendored build and wfb_tx exited immediately.
         cmd = [
             "wfb_tx",
             "-p", "0",
             "-u", "5600",
             "-K", tx_key,
-            "-B", str(self._config.fec_k),
-            "-r", str(self._config.fec_n),
+            "-k", str(self._config.fec_k),
+            "-n", str(self._config.fec_n),
+            "-B", "20",
             "-M", str(self._config.mcs_index),
             interface,
         ]
