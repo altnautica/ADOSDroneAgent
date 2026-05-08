@@ -304,14 +304,15 @@ class WfbRxManager:
         unpaired_logged = False
 
         while self._running:
-            # Block when no key is on disk. Pairing (local bind, cloud
-            # relay, or operator) lands keys at WFB_KEY_DIR; until then,
-            # there is no point spawning wfb_rx.
-            if not key_exists():
+            # Block when no GS-side key (rx.key) is on disk. Pairing
+            # (local bind, cloud relay, or operator) lands it at
+            # WFB_KEY_DIR after a successful bind. WfbRxManager runs
+            # on the GS side, so we pass role="gs".
+            if not key_exists(role="gs"):
                 if not unpaired_logged:
                     log.info(
                         "ground_wfb_blocked_unpaired",
-                        expected=f"{WFB_KEY_DIR}/",
+                        expected=f"{WFB_KEY_DIR}/rx.key",
                     )
                     unpaired_logged = True
                 self._state = LinkState.UNPAIRED

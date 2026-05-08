@@ -312,15 +312,15 @@ class WfbManager:
         unpaired_logged = False
 
         while self._running:
-            # Step 0: Block until a wfb-ng keypair is present. The
-            # auto_pair supervisor + the local bind orchestrator both
-            # land keys at WFB_KEY_DIR; until they do, there is no
-            # point bringing up wfb_tx/wfb_rx — they would just print
-            # "key not found" and exit, and systemd would restart-loop
-            # us into the ground.
-            if not key_exists():
+            # Step 0: Block until the drone-side keypair (tx.key) is
+            # present. The auto_pair supervisor + bind orchestrator
+            # land it at WFB_KEY_DIR after a successful bind. Until
+            # then, there is no point bringing up wfb_tx — it would
+            # just print "key not found" and exit. WfbManager runs on
+            # the drone side, so we pass role="drone".
+            if not key_exists(role="drone"):
                 if not unpaired_logged:
-                    log.info("wfb_blocked_unpaired", expected=f"{WFB_KEY_DIR}/")
+                    log.info("wfb_blocked_unpaired", expected=f"{WFB_KEY_DIR}/tx.key")
                     unpaired_logged = True
                 self._state = LinkState.UNPAIRED
                 await asyncio.sleep(5.0)

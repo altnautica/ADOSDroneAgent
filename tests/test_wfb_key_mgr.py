@@ -37,15 +37,26 @@ def test_key_exists_false(tmp_path: Path) -> None:
     assert key_exists(str(tmp_path)) is False
 
 
-def test_key_exists_partial(tmp_path: Path) -> None:
+def test_key_exists_partial_default_is_true(tmp_path: Path) -> None:
+    """Default (no role) accepts either file as paired — the bind
+    protocol writes only one side per rig."""
     _write_64b(tmp_path / "tx.key")
-    assert key_exists(str(tmp_path)) is False
+    assert key_exists(str(tmp_path)) is True
+
+
+def test_key_exists_partial_role_specific(tmp_path: Path) -> None:
+    """Drone profile needs tx.key, GS profile needs rx.key."""
+    _write_64b(tmp_path / "tx.key")
+    assert key_exists(str(tmp_path), role="drone") is True
+    assert key_exists(str(tmp_path), role="gs") is False
 
 
 def test_key_exists_true(tmp_path: Path) -> None:
     _write_64b(tmp_path / "tx.key")
     _write_64b(tmp_path / "rx.key")
     assert key_exists(str(tmp_path)) is True
+    assert key_exists(str(tmp_path), role="drone") is True
+    assert key_exists(str(tmp_path), role="gs") is True
 
 
 def test_load_key_success(tmp_path: Path) -> None:

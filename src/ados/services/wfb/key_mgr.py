@@ -28,12 +28,25 @@ WFB_KEY_FILE_BYTES = 64
 WFB_PUBLIC_HALF_OFFSET = 32
 
 
-def key_exists(key_dir: str | None = None) -> bool:
-    """Check if both tx.key and rx.key exist in the key directory."""
+def key_exists(key_dir: str | None = None, role: str | None = None) -> bool:
+    """Check if the role-appropriate key file is present.
+
+    Drone profile reads tx.key (used as wfb_tx -K). GS profile reads
+    rx.key (used as wfb_rx -K). The bind protocol writes ONE side per
+    rig, so requiring both files would make GS rigs (and drone rigs)
+    look unpaired forever after a successful bind.
+
+    Without an explicit role, accept either key file as a "paired"
+    signal. Callers that know their role should pass it.
+    """
     base = Path(key_dir or DEFAULT_KEY_DIR)
     tx_path = base / TX_KEY_NAME
     rx_path = base / RX_KEY_NAME
-    return tx_path.is_file() and rx_path.is_file()
+    if role == "drone":
+        return tx_path.is_file()
+    if role == "gs":
+        return rx_path.is_file()
+    return tx_path.is_file() or rx_path.is_file()
 
 
 def load_key(path: str) -> bytes:
