@@ -244,6 +244,84 @@ def test_parse_rejects_malformed_archive(client, supervisor):
     assert body["code"] == 12
 
 
+def test_revoke_unknown_plugin_returns_404(client, supervisor):
+    resp = client.delete(
+        "/api/plugins/com.example.absent/perms/event.publish"
+    )
+    assert resp.status_code == 404
+    body = resp.json()
+    assert body["ok"] is False
+    assert body["code"] == 14
+    assert body["kind"] == "not_found"
+
+
+def test_revoke_ungranted_permission_is_ok(
+    client, supervisor, tmp_path: Path
+):
+    archive_path = _build_archive(tmp_path)
+    raw = archive_path.read_bytes()
+    with patch("ados.plugins.supervisor.subprocess.run") as run_mock:
+        run_mock.return_value = MagicMock(returncode=0, stderr="")
+        client.post(
+            "/api/plugins/install",
+            files={
+                "file": (
+                    "com.example.basic.adosplug",
+                    raw,
+                    "application/zip",
+                )
+            },
+        )
+    # Permission was never granted; revoking succeeds with empty grant set.
+    resp = client.delete(
+        "/api/plugins/com.example.basic/perms/event.publish"
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is True
+    assert body["plugin_id"] == "com.example.basic"
+    assert body["granted"] == []
+    assert body["requires_restart"] is False
+
+
+def test_grant_then_revoke_shrinks_granted_set(
+    client, supervisor, tmp_path: Path
+):
+    archive_path = _build_archive(tmp_path)
+    raw = archive_path.read_bytes()
+    with patch("ados.plugins.supervisor.subprocess.run") as run_mock:
+        run_mock.return_value = MagicMock(returncode=0, stderr="")
+        client.post(
+            "/api/plugins/install",
+            files={
+                "file": (
+                    "com.example.basic.adosplug",
+                    raw,
+                    "application/zip",
+                )
+            },
+        )
+    grant_resp = client.post(
+        "/api/plugins/com.example.basic/grant",
+        json={"permission_id": "event.publish"},
+    )
+    assert grant_resp.status_code == 200
+    detail = client.get("/api/plugins/com.example.basic").json()
+    assert detail["install"]["permissions"]["event.publish"]["granted"] is True
+    revoke_resp = client.delete(
+        "/api/plugins/com.example.basic/perms/event.publish"
+    )
+    assert revoke_resp.status_code == 200
+    body = revoke_resp.json()
+    assert body["ok"] is True
+    assert body["plugin_id"] == "com.example.basic"
+    assert body["granted"] == []
+    detail = client.get("/api/plugins/com.example.basic").json()
+    assert (
+        detail["install"]["permissions"]["event.publish"]["granted"] is False
+    )
+
+
 def test_full_lifecycle_install_grant_enable_disable_remove(
     client, supervisor, tmp_path: Path
 ):

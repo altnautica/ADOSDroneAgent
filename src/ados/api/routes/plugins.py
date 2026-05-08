@@ -325,3 +325,26 @@ async def remove_plugin(plugin_id: str, keep_data: bool = False):
             return _err(14, "not_found", str(exc), 404)
         return _err(20, "host_io_error", str(exc), 500)
     return {"ok": True}
+
+
+@router.delete("/plugins/{plugin_id}/perms/{permission_id}")
+async def revoke_plugin_permission(plugin_id: str, permission_id: str):
+    sup = _get_supervisor()
+    try:
+        sup.revoke_permission(plugin_id, permission_id)
+    except SupervisorError as exc:
+        if "not installed" in str(exc):
+            return _err(14, "not_found", str(exc), 404)
+        return _err(20, "host_io_error", str(exc), 500)
+    install = sup.find_install(plugin_id)
+    granted = (
+        sorted(p for p, g in install.permissions.items() if g.granted)
+        if install is not None
+        else []
+    )
+    return {
+        "ok": True,
+        "plugin_id": plugin_id,
+        "granted": granted,
+        "requires_restart": False,
+    }
