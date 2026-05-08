@@ -1043,6 +1043,17 @@ class OledService:
     def _exit_calibration(self) -> None:
         self._calibration_wizard = None
         self._calibration_failure_until_ms = 0
+        # Transition out of calibrate mode. Without this the render
+        # loop keeps hitting the calibrate branch, _render_calibration
+        # sees wizard=None and returns early, and the LCD freezes on
+        # whatever frame was last painted (verified bench-side post
+        # v0.18.13: 5/5 wizard frame stuck after a successful fit).
+        # Flip to the page system when the framebuffer + navigator
+        # are alive; fall back to the OLED carousel otherwise.
+        if self._fb_renderer is not None and self._page_navigator is not None:
+            self._mode = "lcd_page"
+        else:
+            self._mode = "status"
         # Mirror the terminal state into the shared session so a
         # remote /status poll sees in_progress=False after a tap-
         # driven completion path. The wizard.complete() success
