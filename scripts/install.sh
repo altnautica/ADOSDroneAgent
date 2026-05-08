@@ -507,10 +507,23 @@ install_system_deps() {
 # so the binaries are reachable from the systemd unit's default PATH
 # without any extra Environment= directive.
 install_wfb_ng_from_vendor() {
-    if command -v wfb_tx >/dev/null 2>&1; then
+    # The bind protocol needs wfb-server (the Python orchestrator from
+    # setup.py) AND the wifibroadcast@.service template, not just the
+    # `make all_bin` C binaries. Earlier installs that built only
+    # `wfb_tx` / `wfb_rx` / `wfb_keygen` are insufficient — they pass the
+    # legacy `command -v wfb_tx` gate but lack everything the local
+    # bind window needs. Treat that case as a partial install and
+    # force a rebuild so setup.py runs end-to-end.
+    if command -v wfb_tx >/dev/null 2>&1 \
+        && command -v wfb-server >/dev/null 2>&1 \
+        && { [ -f /usr/lib/systemd/system/wifibroadcast@.service ] \
+             || [ -f /etc/systemd/system/wifibroadcast@.service ]; }; then
         info "wfb-ng already installed: $(command -v wfb_tx)"
         provision_wfb_bind_artifacts ""
         return 0
+    fi
+    if command -v wfb_tx >/dev/null 2>&1; then
+        info "wfb-ng partial install detected (missing wfb-server or unit template); rebuilding"
     fi
 
     local vendor_dir=""
