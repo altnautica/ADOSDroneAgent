@@ -364,6 +364,174 @@ class AgentApp:
                     log.debug("pairing_beacon_failed")
             await asyncio.sleep(interval)
 
+    def _build_heartbeat_payload(self) -> dict:
+        """Build the cloud heartbeat payload dict.
+
+        Extracted from `_cloud_heartbeat_loop` for direct testability.
+        """
+        local_ip = _get_local_ip()
+        mdns_host = ""
+        if self.discovery_service:
+            mdns_host = self.discovery_service.mdns_hostname
+
+        fc_connected = False
+        fc_port = ""
+        fc_baud = 0
+        if self._fc_connection:
+            fc_connected = getattr(self._fc_connection, "connected", False)
+            fc_port = getattr(self.config.mavlink, "port", "")
+            fc_baud = getattr(self.config.mavlink, "baud", 0)
+
+        # Board info from detection
+        board = getattr(self, "_board", None)
+        board_tier = board.tier if board else 0
+        board_soc = board.soc if board else ""
+        board_arch = board.arch if board else ""
+
+        # Health info from monitor
+        health = self.health
+        cpu_percent = getattr(health, "cpu_percent", 0.0)
+        memory_percent = getattr(health, "memory_percent", 0.0)
+        disk_percent = getattr(health, "disk_percent", 0.0)
+        temperature = getattr(health, "temperature", None)
+
+        # Service states with accurate operational status
+        service_list: list[dict] = []
+        all_services = self.services.get_all()
+
+        # Infer true state from runtime conditions
+        def _svc_state(name: str, state: ServiceState) -> str:
+            s = state.value
+            if s != "running":
+                return s
+            if name == "fc-connection":
+                fc = getattr(self, "_fc_connection", None)
+                if fc and not getattr(fc, "connected", False):
+                    return "degraded"
+            elif name == "video-pipeline":
+                if getattr(self.config.video, "mode", "disabled") == "disabled":
+                    return "stopped"
+            elif name == "wfb-link":
+                wfb = getattr(self, "_wfb_manager", None)
+                if wfb and not getattr(wfb, "has_adapter", False):
+                    return "degraded"
+            elif name == "pairing-beacon":
+                if self.pairing_manager.is_paired:
+                    return "stopped"
+            return s
+
+        # Get process-level metrics (single process, all services share)
+        proc_cpu = 0.0
+        proc_rss_mb = 0.0
+        mem_used_mb = 0
+        mem_total_mb = 0
+        disk_used_gb = 0.0
+        disk_total_gb = 0.0
+        cpu_cores = 0
+        try:
+            import os as _os
+
+            import psutil as _psutil
+            _proc = _psutil.Process(_os.getpid())
+            proc_cpu = _proc.cpu_percent(interval=0)
+            proc_rss_mb = _proc.memory_info().rss / (1024 * 1024)
+            _vm = _psutil.virtual_memory()
+            mem_used_mb = round(_vm.used / (1024 * 1024))
+            mem_total_mb = round(_vm.total / (1024 * 1024))
+            _disk = _psutil.disk_usage("/")
+            disk_used_gb = round(_disk.used / (1024**3), 1)
+            disk_total_gb = round(_disk.total / (1024**3), 1)
+            cpu_cores = _psutil.cpu_count() or 0
+        except Exception:
+            pass
+
+        # Track CPU/memory history for sparkline charts (5s interval, 5 min window)
+        self._cpu_history.append(cpu_percent)
+        self._memory_history.append(memory_percent)
+
+        # Per-service data with real uptime (no fake CPU/RAM distribution)
+        now_mono = time.monotonic()
+        for svc_name, svc_state in all_services.items():
+            real_state = _svc_state(svc_name, svc_state)
+            # Compute per-service uptime from transition history
+            svc_uptime = 0.0
+            transitions = self.services.get_transitions(svc_name)
+            if transitions:
+                for ts, st in reversed(transitions):
+                    if st == ServiceState.RUNNING:
+                        svc_uptime = now_mono - ts
+                        break
+            service_list.append({
+                "name": svc_name,
+                "status": real_state,
+                "uptimeSeconds": round(svc_uptime),
+            })
+
+        payload: dict = {
+            "deviceId": self.config.agent.device_id,
+            "version": __version__,
+            "runtimeMode": "full",
+            "uptimeSeconds": self.uptime_seconds,
+            "boardName": self.board_name,
+            "boardTier": board_tier,
+            "boardSoc": board_soc,
+            "boardArch": board_arch,
+            "cpuPercent": cpu_percent,
+            "memoryPercent": memory_percent,
+            "diskPercent": disk_percent,
+            "temperature": temperature,
+            # Absolute resource values
+            "memoryUsedMb": mem_used_mb,
+            "memoryTotalMb": mem_total_mb,
+            "diskUsedGb": disk_used_gb,
+            "diskTotalGb": disk_total_gb,
+            "cpuCores": cpu_cores,
+            "boardRamMb": mem_total_mb,
+            # Process-level totals (single-process architecture)
+            "processCpuPercent": round(proc_cpu, 1),
+            "processMemoryMb": round(proc_rss_mb, 1),
+            # History arrays for sparkline charts
+            "cpuHistory": list(self._cpu_history),
+            "memoryHistory": list(self._memory_history),
+            "fcConnected": fc_connected,
+            "fcPort": fc_port,
+            "fcBaud": fc_baud,
+            "services": service_list,
+            "lastIp": local_ip,
+            "mdnsHost": mdns_host,
+            "setupUrl": f"http://{local_ip}:8080",
+            "apiUrl": f"http://{local_ip}:8080/api",
+            "agentVersion": __version__,
+        }
+
+        remote = self.config.remote_access.cloudflare
+        if remote.setup_url:
+            payload["setupUrl"] = remote.setup_url
+        if remote.api_url:
+            payload["apiUrl"] = remote.api_url
+        if remote.video_whep_url:
+            payload["videoWhepUrl"] = remote.video_whep_url
+        if remote.mavlink_ws_url:
+            payload["mavlinkWsUrl"] = remote.mavlink_ws_url
+        payload["missionControlUrl"] = self.config.server.cloud.url
+        payload["remoteAccess"] = {
+            "provider": self.config.remote_access.provider,
+            "publicUrls": self.config.remote_access.public_urls,
+        }
+
+        # Forward-compatible radio link block — sourced from
+        # the in-process WfbManager directly when present.
+        from ados.core.supervisor.heartbeat import build_radio_block
+        wfb = getattr(self, "_wfb_manager", None)
+        wfb_status: dict | None = None
+        if wfb is not None:
+            try:
+                wfb_status = wfb.get_status()
+            except Exception:
+                wfb_status = None
+        payload["radio"] = build_radio_block(wfb_status)
+        return payload
+
     async def _cloud_heartbeat_loop(self) -> None:
         """When paired, periodically POST full status to Convex."""
         import httpx
@@ -373,173 +541,7 @@ class AgentApp:
         while not self._shutdown.is_set():
             if self.pairing_manager.is_paired and convex_url:
                 try:
-                    local_ip = _get_local_ip()
-                    mdns_host = ""
-                    if self.discovery_service:
-                        mdns_host = self.discovery_service.mdns_hostname
-
-                    fc_connected = False
-                    fc_port = ""
-                    fc_baud = 0
-                    if self._fc_connection:
-                        fc_connected = getattr(self._fc_connection, "connected", False)
-                        fc_port = getattr(self.config.mavlink, "port", "")
-                        fc_baud = getattr(self.config.mavlink, "baud", 0)
-
-                    # Board info from detection
-                    board = getattr(self, "_board", None)
-                    board_tier = board.tier if board else 0
-                    board_soc = board.soc if board else ""
-                    board_arch = board.arch if board else ""
-
-                    # Health info from monitor
-                    health = self.health
-                    cpu_percent = getattr(health, "cpu_percent", 0.0)
-                    memory_percent = getattr(health, "memory_percent", 0.0)
-                    disk_percent = getattr(health, "disk_percent", 0.0)
-                    temperature = getattr(health, "temperature", None)
-
-                    # Service states with accurate operational status
-                    service_list = []
-                    all_services = self.services.get_all()
-
-                    # Infer true state from runtime conditions
-                    def _svc_state(name: str, state: ServiceState) -> str:
-                        s = state.value
-                        if s != "running":
-                            return s
-                        if name == "fc-connection":
-                            fc = getattr(self, "_fc_connection", None)
-                            if fc and not getattr(fc, "connected", False):
-                                return "degraded"
-                        elif name == "video-pipeline":
-                            if getattr(self.config.video, "mode", "disabled") == "disabled":
-                                return "stopped"
-                        elif name == "wfb-link":
-                            wfb = getattr(self, "_wfb_manager", None)
-                            if wfb and not getattr(wfb, "has_adapter", False):
-                                return "degraded"
-                        elif name == "pairing-beacon":
-                            if self.pairing_manager.is_paired:
-                                return "stopped"
-                        return s
-
-                    running_count = 0
-                    for svc_name, svc_state in all_services.items():
-                        real_state = _svc_state(svc_name, svc_state)
-                        if real_state == "running":
-                            running_count += 1
-
-                    # Get process-level metrics (single process, all services share)
-                    proc_cpu = 0.0
-                    proc_rss_mb = 0.0
-                    mem_used_mb = 0
-                    mem_total_mb = 0
-                    disk_used_gb = 0.0
-                    disk_total_gb = 0.0
-                    cpu_cores = 0
-                    try:
-                        import os as _os
-
-                        import psutil as _psutil
-                        _proc = _psutil.Process(_os.getpid())
-                        proc_cpu = _proc.cpu_percent(interval=0)
-                        proc_rss_mb = _proc.memory_info().rss / (1024 * 1024)
-                        _vm = _psutil.virtual_memory()
-                        mem_used_mb = round(_vm.used / (1024 * 1024))
-                        mem_total_mb = round(_vm.total / (1024 * 1024))
-                        _disk = _psutil.disk_usage("/")
-                        disk_used_gb = round(_disk.used / (1024**3), 1)
-                        disk_total_gb = round(_disk.total / (1024**3), 1)
-                        cpu_cores = _psutil.cpu_count() or 0
-                    except Exception:
-                        pass
-
-                    # Track CPU/memory history for sparkline charts (5s interval, 5 min window)
-                    self._cpu_history.append(cpu_percent)
-                    self._memory_history.append(memory_percent)
-
-                    # Per-service data with real uptime (no fake CPU/RAM distribution)
-                    now_mono = time.monotonic()
-                    for svc_name, svc_state in all_services.items():
-                        real_state = _svc_state(svc_name, svc_state)
-                        # Compute per-service uptime from transition history
-                        svc_uptime = 0.0
-                        transitions = self.services.get_transitions(svc_name)
-                        if transitions:
-                            for ts, st in reversed(transitions):
-                                if st == ServiceState.RUNNING:
-                                    svc_uptime = now_mono - ts
-                                    break
-                        service_list.append({
-                            "name": svc_name,
-                            "status": real_state,
-                            "uptimeSeconds": round(svc_uptime),
-                        })
-
-                    payload = {
-                        "deviceId": self.config.agent.device_id,
-                        "version": __version__,
-                        "uptimeSeconds": self.uptime_seconds,
-                        "boardName": self.board_name,
-                        "boardTier": board_tier,
-                        "boardSoc": board_soc,
-                        "boardArch": board_arch,
-                        "cpuPercent": cpu_percent,
-                        "memoryPercent": memory_percent,
-                        "diskPercent": disk_percent,
-                        "temperature": temperature,
-                        # Absolute resource values
-                        "memoryUsedMb": mem_used_mb,
-                        "memoryTotalMb": mem_total_mb,
-                        "diskUsedGb": disk_used_gb,
-                        "diskTotalGb": disk_total_gb,
-                        "cpuCores": cpu_cores,
-                        "boardRamMb": mem_total_mb,
-                        # Process-level totals (single-process architecture)
-                        "processCpuPercent": round(proc_cpu, 1),
-                        "processMemoryMb": round(proc_rss_mb, 1),
-                        # History arrays for sparkline charts
-                        "cpuHistory": list(self._cpu_history),
-                        "memoryHistory": list(self._memory_history),
-                        "fcConnected": fc_connected,
-                        "fcPort": fc_port,
-                        "fcBaud": fc_baud,
-                        "services": service_list,
-                        "lastIp": local_ip,
-                        "mdnsHost": mdns_host,
-                        "setupUrl": f"http://{local_ip}:8080",
-                        "apiUrl": f"http://{local_ip}:8080/api",
-                        "agentVersion": __version__,
-                    }
-
-                    remote = self.config.remote_access.cloudflare
-                    if remote.setup_url:
-                        payload["setupUrl"] = remote.setup_url
-                    if remote.api_url:
-                        payload["apiUrl"] = remote.api_url
-                    if remote.video_whep_url:
-                        payload["videoWhepUrl"] = remote.video_whep_url
-                    if remote.mavlink_ws_url:
-                        payload["mavlinkWsUrl"] = remote.mavlink_ws_url
-                    payload["missionControlUrl"] = self.config.server.cloud.url
-                    payload["remoteAccess"] = {
-                        "provider": self.config.remote_access.provider,
-                        "publicUrls": self.config.remote_access.public_urls,
-                    }
-
-                    # Forward-compatible radio link block — sourced from
-                    # the in-process WfbManager directly when present.
-                    from ados.core.supervisor.heartbeat import build_radio_block
-                    wfb = getattr(self, "_wfb_manager", None)
-                    wfb_status: dict | None = None
-                    if wfb is not None:
-                        try:
-                            wfb_status = wfb.get_status()
-                        except Exception:
-                            wfb_status = None
-                    payload["radio"] = build_radio_block(wfb_status)
-
+                    payload = self._build_heartbeat_payload()
                     async with httpx.AsyncClient(timeout=10.0) as client:
                         await client.post(
                             f"{convex_url}/agent/status",

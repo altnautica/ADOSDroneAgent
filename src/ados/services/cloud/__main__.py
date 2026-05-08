@@ -693,6 +693,7 @@ async def main() -> None:
                     payload = {
                         "deviceId": config.agent.device_id,
                         "version": __version__,
+                        "runtimeMode": "full",
                         "uptimeSeconds": round(uptime),
                         "boardName": board.name if board else "unknown",
                         "boardTier": board.tier if board else 0,

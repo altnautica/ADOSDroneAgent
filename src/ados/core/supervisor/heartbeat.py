@@ -250,6 +250,7 @@ class HeartbeatMixin:
 
         return {
             "version": __version__,
+            "runtimeMode": "full",
             "uptimeSeconds": self.uptime_seconds,
             "boardName": board.name if board else "unknown",
             "boardTier": board.tier if board else 0,
