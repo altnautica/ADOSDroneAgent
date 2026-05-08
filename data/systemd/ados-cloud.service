@@ -15,7 +15,18 @@ EnvironmentFile=-/etc/ados/env
 
 NoNewPrivileges=yes
 ProtectSystem=strict
-ReadWritePaths=/var/ados /run/ados /etc/ados
+# /etc is in the writable set because the WFB bind orchestrator hosted
+# in this service spawns wfb_keygen + the upstream bind-protocol scripts
+# which write /etc/drone.key, /etc/gs.key, /etc/wifibroadcast.cfg, and
+# /etc/bind.yaml. Loosens the sandbox during the (rare) bind window.
+ReadWritePaths=/var/ados /run/ados /etc/ados /etc
+
+# The bind orchestrator calls `systemctl stop ados-wfb` /
+# `systemctl start wifibroadcast@gs_bind` to flip wfb-ng profiles. Those
+# hops require CAP_SYS_ADMIN via PID 1; bumping the bounding set is
+# the systemd-friendly way to permit it without dropping ProtectSystem.
+CapabilityBoundingSet=CAP_SYS_ADMIN CAP_NET_ADMIN
+AmbientCapabilities=CAP_SYS_ADMIN CAP_NET_ADMIN
 
 MemoryMax=40M
 CPUQuota=10%
