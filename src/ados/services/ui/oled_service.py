@@ -577,8 +577,10 @@ class OledService:
         # for "settings" resolves to it. Imported locally to avoid
         # cycles with the page __init__ during early startup.
         from ados.services.ui.pages.settings import SettingsPage
+        from ados.services.ui.pages.video import VideoPage
 
         navigator.register(SettingsPage())
+        navigator.register(VideoPage())
         self._page_navigator = navigator
         # Surface the bridge's touch buses on the context so any page
         # that needs live drag tracking (settings list, slider modal,
@@ -717,6 +719,34 @@ class OledService:
             self._fb_renderer.present(canvas)
         except Exception as exc:  # noqa: BLE001
             log.warning("framebuffer_present_failed", error=str(exc))
+
+    async def _maybe_tear_down_video_tap(self) -> None:
+        """Tear down the video page's local tap after the inactivity grace.
+
+        The video page can't observe its own absence; the render loop
+        drives the timer based on whether the active page is the
+        ``video`` page. We call ``maybe_teardown_idle_tap`` on the
+        registered VideoPage instance whenever the active route is
+        elsewhere — the helper short-circuits when the inactivity
+        threshold hasn't elapsed yet, so the cost is one method call
+        per tick when the operator is on a different tab.
+        """
+        if (
+            self._page_navigator is None
+            or self._page_context is None
+            or self._page_navigator.active_page_id == "video"
+        ):
+            return
+        video_page = self._page_navigator.page("video")
+        if video_page is None:
+            return
+        helper = getattr(video_page, "maybe_teardown_idle_tap", None)
+        if helper is None:
+            return
+        try:
+            await helper(self._page_context)
+        except Exception as exc:  # noqa: BLE001
+            log.debug("video_tap_idle_teardown_failed", error=str(exc))
 
     def _render_calibration(self) -> None:
         """Paint the active calibration wizard (or failure card)."""
@@ -1385,6 +1415,11 @@ class OledService:
             # is a no-op when fb_renderer is None.
             if self._mode == "lcd_page":
                 await self._render_lcd_page()
+                # Tear down the video tap when the operator has been
+                # off the Video tab for the inactivity grace. Keeps
+                # the rest of the LCD UI snappy when video isn't in
+                # use without forcing a cold start every tab switch.
+                await self._maybe_tear_down_video_tap()
             elif self._mode == "calibrate":
                 self._render_calibration()
             else:

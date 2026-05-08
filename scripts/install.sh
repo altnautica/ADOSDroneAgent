@@ -471,6 +471,12 @@ install_system_deps() {
     # Use v4l-utils (the Debian Bookworm package); v4l2-utils is wrong and
     # breaks the install. Do not hide apt errors with 2>/dev/null; let
     # failures surface to the install log.
+    # python3-gi + gir typelib give us the in-process gstreamer binding
+    # the LCD video page uses to attach an appsink to MediaMTX. The
+    # gstreamer1.0-plugins-bad / -ugly + gstreamer1.0-libav bundles
+    # provide rtph264depay, avdec_h264, and the v4l2 H.264 decoder used
+    # on Allwinner / Amlogic boards that ship a working V4L2 stateful
+    # decoder. Hardware Rockchip MPP support is opt-in below.
     apt-get install -y \
         python3-venv \
         python3-pip \
@@ -481,6 +487,8 @@ install_system_deps() {
         python3-jinja2 \
         python3-msgpack \
         python3-pyroute2 \
+        python3-gi \
+        gir1.2-gstreamer-1.0 \
         socat \
         libcap-dev \
         libsystemd-dev \
@@ -499,9 +507,27 @@ install_system_deps() {
         gstreamer1.0-tools \
         gstreamer1.0-plugins-base \
         gstreamer1.0-plugins-good \
+        gstreamer1.0-plugins-bad \
+        gstreamer1.0-plugins-ugly \
+        gstreamer1.0-libav \
         gstreamer1.0-rtsp \
         iw \
         wireless-regdb
+
+    # Try the Rockchip MPP plugin opportunistically. The package only
+    # exists on Radxa BSP repos that have shipped a build for the SoC
+    # at hand; an Orange Pi or generic-arm64 rootfs simply doesn't have
+    # it, and we fall through to the upstream V4L2 decoder. The "|| true"
+    # makes apt failure non-fatal so a missing package does not break
+    # the rest of the install.
+    if [ -r /proc/device-tree/model ]; then
+        _install_model="$(tr -d '\000' < /proc/device-tree/model 2>/dev/null || true)"
+        if printf '%s' "${_install_model}" | grep -qiE 'rockchip|rk3588|rk3568|rk3566|rk3582|rk3576'; then
+            info "Rockchip board detected, attempting hardware MPP plugin install"
+            apt-get install -y gstreamer1.0-rockchip-mpp || \
+                info "gstreamer1.0-rockchip-mpp not available for this board (software decode will be used)"
+        fi
+    fi
 
     info "System dependencies installed."
 }
