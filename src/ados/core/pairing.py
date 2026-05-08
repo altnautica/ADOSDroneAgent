@@ -7,6 +7,7 @@ import secrets
 import time
 from pathlib import Path
 
+from ados.core.atomic import atomic_write_json
 from ados.core.logging import get_logger
 from ados.core.paths import PAIRING_JSON
 
@@ -39,10 +40,7 @@ class PairingManager:
             self._state = {}
 
     def _save_state(self) -> None:
-        self._state_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self._state_path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(self._state, indent=2))
-        tmp.rename(self._state_path)
+        atomic_write_json(self._state_path, self._state, indent=2)
         log.debug("pairing_state_saved")
 
     @staticmethod
