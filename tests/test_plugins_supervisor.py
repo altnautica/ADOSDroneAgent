@@ -169,6 +169,52 @@ def test_remove_unknown_plugin_raises(isolated_paths):
         sup.remove("com.example.absent")
 
 
+def test_revoke_permission_shrinks_granted_set(
+    isolated_paths, tmp_path: Path
+):
+    archive = _build_archive(tmp_path)
+    sup = PluginSupervisor(
+        install_dir=isolated_paths["install_dir"],
+        require_signed=False,
+    )
+    sup.discover()
+    with patch("ados.plugins.supervisor.subprocess.run") as run_mock:
+        run_mock.return_value = MagicMock(returncode=0, stderr="")
+        sup.install_archive(archive)
+        sup.grant_permission("com.example.basic", "event.publish")
+    install = sup.find_install("com.example.basic")
+    assert install is not None
+    assert install.permissions["event.publish"].granted is True
+    sup.revoke_permission("com.example.basic", "event.publish")
+    assert install.permissions["event.publish"].granted is False
+
+
+def test_revoke_permission_unknown_plugin_raises(isolated_paths):
+    sup = PluginSupervisor(
+        install_dir=isolated_paths["install_dir"], require_signed=False
+    )
+    sup.discover()
+    with pytest.raises(SupervisorError):
+        sup.revoke_permission("com.example.absent", "event.publish")
+
+
+def test_revoke_permission_unknown_id_is_noop(isolated_paths, tmp_path: Path):
+    archive = _build_archive(tmp_path)
+    sup = PluginSupervisor(
+        install_dir=isolated_paths["install_dir"],
+        require_signed=False,
+    )
+    sup.discover()
+    with patch("ados.plugins.supervisor.subprocess.run") as run_mock:
+        run_mock.return_value = MagicMock(returncode=0, stderr="")
+        sup.install_archive(archive)
+    # Permission was never granted; revoking is silently a no-op.
+    sup.revoke_permission("com.example.basic", "vehicle.command")
+    install = sup.find_install("com.example.basic")
+    assert install is not None
+    assert "vehicle.command" not in install.permissions
+
+
 def test_compatibility_blocks_install_when_constraint_excludes(
     isolated_paths, tmp_path: Path, monkeypatch
 ):

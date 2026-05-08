@@ -68,6 +68,7 @@ from ados.plugins.state import (
     grant_permission,
     load_state,
     remove_install,
+    revoke_permission,
     save_state,
     state_lock,
     upsert_install,
@@ -244,6 +245,17 @@ class PluginSupervisor:
                     f"plugin {plugin_id} did not declare permission {permission_id}"
                 )
             grant_permission(install, permission_id)
+            save_state(self._installs)
+
+    def revoke_permission(self, plugin_id: str, permission_id: str) -> None:
+        """Revoke a granted permission on a plugin.
+
+        The plugin loses access on the next token rotation; existing
+        tokens keep their grant until natural expiry.
+        """
+        with state_lock():
+            install = self._require_install(plugin_id)
+            revoke_permission(install, permission_id)
             save_state(self._installs)
 
     def enable(self, plugin_id: str) -> None:
