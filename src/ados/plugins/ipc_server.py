@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Awaitable, Callable
 
+from ados.core.asyncio_util import log_task_exceptions
 from ados.core.logging import get_logger
 from ados.plugins.events import (
     Event,
@@ -258,9 +259,10 @@ class PluginIpcServer:
             return {"already_subscribed": True}
         session.subscriptions.add(topic_pattern)
         # Spawn a fan-out task that pushes events to the plugin.
-        asyncio.create_task(
+        pump = asyncio.create_task(
             self._pump_subscription(session, topic_pattern)
         )
+        pump.add_done_callback(log_task_exceptions)
         return {"subscribed": True}
 
     async def _pump_subscription(
