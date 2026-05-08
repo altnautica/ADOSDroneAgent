@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 SetupStepState = Literal[
     "complete", "needs_action", "optional", "blocked", "not_applicable"
@@ -163,6 +163,32 @@ class AdvancedApplyRequest(BaseModel):
     factory_reset: bool | None = None
     board_override: str | None = None
     log_level: str | None = None
+
+
+class UiConfig(BaseModel):
+    """UI section persisted on disk under ``ui:`` in config.yaml.
+
+    Holds operator-facing presentation choices that the dashboard reads
+    on every render tick. Theming is the only field today; future
+    additions (page order, footer density, etc.) belong here. Strict
+    schema (extra keys rejected) so a stale field on disk surfaces as
+    a structured error instead of a silent ignore.
+    """
+
+    theme: Literal["dark", "light"] = "dark"
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class UiApplyRequest(BaseModel):
+    """UI section of the batch-apply payload.
+
+    Every field is optional so the caller only sends the slice they
+    actually changed. ``theme`` flips the dashboard palette live; the
+    next render tick uses the new palette without a service restart.
+    """
+
+    theme: Literal["dark", "light"] | None = None
 
 
 class DisplayOption(BaseModel):

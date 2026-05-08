@@ -15,13 +15,13 @@ from ados.api.deps import get_agent_app
 from ados.core.logging import get_logger
 from ados.core.paths import DISPLAY_CONF_PATH
 from ados.hal.detect import _load_board_profiles, detect_board
-from ados.setup import display_install, state as setup_state
+from ados.setup import display_install, hardware_state
+from ados.setup import state as setup_state
 from ados.setup.advanced import apply_advanced
 from ados.setup.hardware_check import (
     run_hardware_check,
     run_hardware_check_fresh,
 )
-from ados.setup import hardware_state
 from ados.setup.models import (
     AdvancedApplyRequest,
     DisplayInstallRequest,
@@ -32,9 +32,10 @@ from ados.setup.models import (
     NetworkApplyRequest,
     SetupActionResult,
     SetupStatus,
+    UiApplyRequest,
 )
 from ados.setup.network import apply_network
-from ados.setup.profile import apply_profile
+from ados.setup.profile import apply_profile, apply_ui
 from ados.setup.service import (
     apply_cloud_choice,
     build_setup_status,
@@ -104,6 +105,7 @@ class ApplyRequest(BaseModel):
     profile: ProfileChoiceRequest | None = None
     cloud: CloudChoiceRequest | None = None
     network: NetworkApplyRequest | None = None
+    ui: UiApplyRequest | None = None
     display: DisplayInstallRequest | None = None
     advanced: AdvancedApplyRequest | None = None
 
@@ -414,6 +416,7 @@ async def batch_apply_settings(request: ApplyRequest) -> ApplyResponse:
         ("profile", request.profile),
         ("network", request.network),
         ("cloud", request.cloud),
+        ("ui", request.ui),
         ("display", request.display),
         ("advanced", request.advanced),
     ]
@@ -471,6 +474,8 @@ async def _apply_single_section(
             mode=payload.mode,
             self_hosted=self_hosted,
         )
+    if name == "ui":
+        return apply_ui(runtime, payload)
     if name == "display":
         if not payload.display_id:
             return SetupActionResult(
@@ -549,6 +554,9 @@ def _capture_section_snapshot(runtime, name: str) -> dict[str, object]:
             snap["hotspot_enabled"] = bool(
                 getattr(hotspot, "enabled", False)
             )
+        elif name == "ui":
+            ui = getattr(config, "ui", None)
+            snap["theme"] = str(getattr(ui, "theme", "") or "")
         elif name == "advanced":
             agent = getattr(config, "agent", None)
             snap["log_level"] = str(getattr(agent, "log_level", "") or "")
@@ -576,6 +584,8 @@ def _rollback_completed(
                 _restore_cloud(runtime, snap)
             elif name == "network":
                 _restore_network(runtime, snap)
+            elif name == "ui":
+                _restore_ui(runtime, snap)
             elif name == "advanced":
                 _restore_advanced(runtime, snap)
             else:
@@ -640,6 +650,17 @@ def _restore_network(runtime, snap: dict[str, object]) -> None:
     hotspot = getattr(net, "hotspot", None)
     if hotspot is not None and "hotspot_enabled" in snap:
         hotspot.enabled = bool(snap.get("hotspot_enabled"))
+
+
+def _restore_ui(runtime, snap: dict[str, object]) -> None:
+    config = runtime.config
+    ui = getattr(config, "ui", None)
+    if ui is None:
+        return
+    if "theme" in snap:
+        prior = str(snap.get("theme") or "")
+        if prior in ("dark", "light"):
+            ui.theme = prior  # type: ignore[assignment]
 
 
 def _restore_advanced(runtime, snap: dict[str, object]) -> None:

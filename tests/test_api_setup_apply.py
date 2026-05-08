@@ -159,3 +159,58 @@ def test_apply_advanced_rejects_bad_board_override(client) -> None:
     data = resp.json()
     assert data["overall"] is False
     assert data["sections"]["advanced"]["ok"] is False
+
+
+def test_apply_ui_theme_writes_to_live_config(client, agent_app) -> None:
+    # Default config theme is "dark"; flipping to "light" via /apply must
+    # land on the live config and report through the section response.
+    assert agent_app.config.ui.theme == "dark"
+    resp = client.post(
+        "/api/v1/setup/apply",
+        json={"ui": {"theme": "light"}},
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["overall"] is True
+    section = data["sections"]["ui"]
+    assert section["ok"] is True
+    assert section["data"]["changed"] is True
+    assert section["data"]["theme"] == "light"
+    assert agent_app.config.ui.theme == "light"
+
+
+def test_apply_ui_theme_rejects_unknown_value(client, agent_app) -> None:
+    # Unknown literal trips Pydantic validation at the request boundary
+    # and surfaces 422, not a 500.
+    resp = client.post(
+        "/api/v1/setup/apply",
+        json={"ui": {"theme": "not-a-real-theme"}},
+    )
+    assert resp.status_code == 422
+    body = resp.json()
+    assert "detail" in body
+    # Live config is untouched.
+    assert agent_app.config.ui.theme == "dark"
+
+
+def test_apply_ui_then_failing_advanced_rolls_back_theme(
+    client, agent_app
+) -> None:
+    # Capture the prior theme so we can prove rollback restored it.
+    prior_theme = agent_app.config.ui.theme
+    assert prior_theme == "dark"
+    resp = client.post(
+        "/api/v1/setup/apply",
+        json={
+            "ui": {"theme": "light"},
+            "advanced": {"log_level": "tachyon"},
+        },
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["overall"] is False
+    assert data["sections"]["ui"]["ok"] is True
+    assert data["sections"]["advanced"]["ok"] is False
+    # The succeeded ui section must be reverted in reverse order.
+    assert "ui" in data["rolled_back"]
+    assert agent_app.config.ui.theme == prior_theme

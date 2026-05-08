@@ -527,6 +527,25 @@ class GroundStationConfig(BaseModel):
     mesh: MeshConfig = MeshConfig()
 
 
+# --- UI ---
+
+# Mirrors `ados.setup.models.UiConfig` shape so the persisted YAML
+# round-trips through both the setup-facade payload model and the
+# top-level config model. Defined inline (not imported from setup) so
+# `ados.core.config` stays free of inbound dependencies on the setup
+# package and the import graph remains a tree, not a cycle.
+class UiConfig(BaseModel):
+    """UI presentation settings persisted on disk.
+
+    `theme` drives the SPI LCD dashboard palette. Reads happen on every
+    render tick via `ados.services.ui.theme.current_palette()`, so a
+    flip from `dark` to `light` takes effect immediately without a
+    service restart.
+    """
+
+    theme: Literal["dark", "light"] = "dark"
+
+
 # --- Top-level ---
 
 class ADOSConfig(BaseModel):
@@ -547,6 +566,7 @@ class ADOSConfig(BaseModel):
     swarm: SwarmConfig = SwarmConfig()
     ground_station: GroundStationConfig = GroundStationConfig()
     ros: RosConfig = RosConfig()
+    ui: UiConfig = Field(default_factory=UiConfig)
 
     model_config = {"extra": "ignore"}
 

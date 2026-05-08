@@ -11,7 +11,11 @@ from __future__ import annotations
 
 from typing import Any
 
-from ados.setup.models import ProfileSuggestion, SetupActionResult
+from ados.setup.models import (
+    ProfileSuggestion,
+    SetupActionResult,
+    UiApplyRequest,
+)
 
 
 def build_profile_suggestion(config: Any) -> ProfileSuggestion:
@@ -189,4 +193,66 @@ def apply_profile(
     elif data.get("restart_required"):
         message += " Restart the agent to apply."
 
+    return SetupActionResult(ok=True, message=message, data=data)
+
+
+def apply_ui(
+    runtime: Any,
+    request: UiApplyRequest | None,
+) -> SetupActionResult:
+    """Persist a UI section update onto ``runtime.config.ui``.
+
+    The LCD dashboards read the active palette through
+    ``ados.services.ui.theme.current_palette()`` on every render tick,
+    so a theme flip takes effect on the next paint without a service
+    restart.
+
+    Returns ``ok=True`` even when the request is empty so the batch
+    apply route can iterate sections without special-casing absent
+    payloads.
+    """
+    if request is None:
+        return SetupActionResult(
+            ok=True,
+            message="No UI changes requested.",
+            data={"changed": False},
+        )
+
+    config = runtime.config
+    ui = getattr(config, "ui", None)
+    if ui is None:
+        return SetupActionResult(
+            ok=False,
+            message="UI configuration is not available on this agent.",
+        )
+
+    changed_fields: list[str] = []
+
+    if request.theme is not None:
+        new_theme = str(request.theme)
+        if new_theme not in ("dark", "light"):
+            return SetupActionResult(
+                ok=False,
+                message="theme must be 'dark' or 'light'.",
+            )
+        if str(ui.theme) != new_theme:
+            ui.theme = new_theme  # type: ignore[assignment]
+            changed_fields.append("theme")
+
+    saver = getattr(getattr(runtime, "raw_runtime", None), "save_config", None)
+    if changed_fields and callable(saver):
+        try:
+            saver()
+        except Exception:
+            pass
+
+    data: dict[str, object] = {
+        "changed": bool(changed_fields),
+        "fields": changed_fields,
+        "theme": str(ui.theme),
+    }
+    if changed_fields:
+        message = f"UI updated ({', '.join(changed_fields)})."
+    else:
+        message = "No UI changes detected."
     return SetupActionResult(ok=True, message=message, data=data)

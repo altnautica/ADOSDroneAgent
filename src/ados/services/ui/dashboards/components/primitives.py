@@ -1,10 +1,13 @@
 """Color tokens + font cache for the LCD dashboards.
 
-Colors mirror the ADOS design tokens published in
-``web/design-tokens/tokens.css`` and the brand visual identity guide.
-Naming intentionally matches the CSS variable names so a designer can
-trace a swatch from the website to a dashboard pixel without a
-translation step.
+Colors are sourced from the active theme palette (see
+``ados.services.ui.theme``). The dashboard primitives historically read
+module-level color constants such as ``primitives.BG_PRIMARY``; that
+pattern is preserved here through a module-level ``__getattr__`` that
+resolves each name against the current palette on every access. A theme
+flip from ``dark`` to ``light`` therefore takes effect on the next
+render tick without changing any caller and without restarting the
+service.
 
 Fonts are loaded from the Debian-bundled DejaVu set
 (``/usr/share/fonts/truetype/dejavu/``) which is present on every
@@ -25,35 +28,58 @@ from __future__ import annotations
 
 import functools
 from pathlib import Path
-from typing import Final
 
 from PIL import ImageFont
 
+from ados.services.ui.theme import Palette, current_palette
+
 
 # ──────────────────────────────────────────────────────────────────────
-# Colors
+# Colors — resolved lazily from the active palette
 # ──────────────────────────────────────────────────────────────────────
 
-# Each value is an RGB tuple — PIL works with tuples natively, and we
-# avoid hex parsing on every paint call.
+# Module-level color names map to attributes on the active ``Palette``.
+# The mapping is the source of truth for the legacy constant API; any
+# attribute access ``primitives.<NAME>`` flows through ``__getattr__``
+# below and reads the live palette. Keeping the indirection in one
+# table means a new color shipped on the palette only needs an entry
+# here to become available as a module constant for legacy callers.
+_COLOR_NAME_TO_PALETTE_ATTR: dict[str, str] = {
+    "BG_PRIMARY": "bg_primary",
+    "BG_SECONDARY": "bg_secondary",
+    "BG_TERTIARY": "bg_tertiary",
+    "TEXT_PRIMARY": "text_primary",
+    "TEXT_SECONDARY": "text_secondary",
+    "TEXT_TERTIARY": "text_tertiary",
+    "ACCENT_PRIMARY": "accent_primary",
+    "ACCENT_SECONDARY": "accent_secondary",
+    "BORDER_DEFAULT": "border_default",
+    "BORDER_STRONG": "border_strong",
+    "STATUS_SUCCESS": "status_success",
+    "STATUS_WARNING": "status_warning",
+    "STATUS_ERROR": "status_error",
+}
 
-BG_PRIMARY: Final[tuple[int, int, int]] = (0x00, 0x00, 0x00)
-BG_SECONDARY: Final[tuple[int, int, int]] = (0x0A, 0x0A, 0x0A)
-BG_TERTIARY: Final[tuple[int, int, int]] = (0x14, 0x14, 0x14)
 
-TEXT_PRIMARY: Final[tuple[int, int, int]] = (0xFA, 0xFA, 0xFA)
-TEXT_SECONDARY: Final[tuple[int, int, int]] = (0xA0, 0xA0, 0xA0)
-TEXT_TERTIARY: Final[tuple[int, int, int]] = (0x66, 0x66, 0x66)
+def __getattr__(name: str) -> tuple[int, int, int]:
+    """Resolve a legacy color constant against the current palette.
 
-ACCENT_PRIMARY: Final[tuple[int, int, int]] = (0x3A, 0x82, 0xFF)
-ACCENT_SECONDARY: Final[tuple[int, int, int]] = (0xDF, 0xF1, 0x40)
+    Dashboards historically referenced module-level constants such as
+    ``primitives.BG_PRIMARY``. Those constants are no longer assigned
+    at module import; they are resolved on every attribute access by
+    looking up the current palette. This preserves the call sites
+    while making theme changes take effect on the next render tick.
 
-STATUS_SUCCESS: Final[tuple[int, int, int]] = (0x22, 0xC5, 0x5E)
-STATUS_WARNING: Final[tuple[int, int, int]] = (0xF5, 0x9E, 0x0B)
-STATUS_ERROR: Final[tuple[int, int, int]] = (0xEF, 0x44, 0x44)
-
-BORDER_DEFAULT: Final[tuple[int, int, int]] = (0x1A, 0x1A, 0x1A)
-BORDER_STRONG: Final[tuple[int, int, int]] = (0x2A, 0x2A, 0x2A)
+    A name outside ``_COLOR_NAME_TO_PALETTE_ATTR`` raises ``AttributeError``
+    so unrelated dotted access does not silently return a tuple.
+    """
+    attr = _COLOR_NAME_TO_PALETTE_ATTR.get(name)
+    if attr is None:
+        raise AttributeError(
+            f"module 'primitives' has no attribute {name!r}"
+        )
+    palette = current_palette()
+    return getattr(palette, attr)
 
 
 def threshold_color(
@@ -62,6 +88,7 @@ def threshold_color(
     success_at: float,
     warning_at: float,
     direction: str = "higher_is_better",
+    palette: Palette | None = None,
 ) -> tuple[int, int, int]:
     """Return success/warning/error color based on a numeric threshold.
 
@@ -74,20 +101,24 @@ def threshold_color(
 
     None values render in tertiary grey so the operator sees "no data"
     rather than a misleading status color.
+
+    ``palette`` overrides the active palette for the call. Defaults to
+    ``current_palette()`` so existing callers do not need to change.
     """
+    pal = palette if palette is not None else current_palette()
     if value is None:
-        return TEXT_TERTIARY
+        return pal.text_tertiary
     if direction == "higher_is_better":
         if value >= success_at:
-            return STATUS_SUCCESS
+            return pal.status_success
         if value >= warning_at:
-            return STATUS_WARNING
-        return STATUS_ERROR
+            return pal.status_warning
+        return pal.status_error
     if value <= success_at:
-        return STATUS_SUCCESS
+        return pal.status_success
     if value <= warning_at:
-        return STATUS_WARNING
-    return STATUS_ERROR
+        return pal.status_warning
+    return pal.status_error
 
 
 # ──────────────────────────────────────────────────────────────────────
