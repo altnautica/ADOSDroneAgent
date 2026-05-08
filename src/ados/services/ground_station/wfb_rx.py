@@ -368,6 +368,46 @@ class WfbRxManager:
             # call here avoids re-running iw on an interface that's
             # already in monitor mode.
 
+            # Apply TX power on the monitor interface BEFORE wfb_rx
+            # spawns. Same rationale as the air side: without this the
+            # dongle runs at driver default (~17-20 dBm) and risks
+            # brownout on host-VBUS USB topology.
+            from ados.services.wfb.adapter import set_tx_power as _set_tx_power
+            effective = _set_tx_power(interface, self._config.tx_power_dbm)
+            if effective is None:
+                log.warning(
+                    "ground_wfb_txpower_not_applied",
+                    interface=interface,
+                    requested=self._config.tx_power_dbm,
+                )
+
+            # Set the radio channel. wfb_rx listens on whatever channel
+            # the netdev is set to; it does not change channel itself.
+            # Without this, the rig sits on whatever the bind profile
+            # or driver default left the radio at.
+            try:
+                import subprocess as _sp
+                ch_result = _sp.run(
+                    ["iw", interface, "set", "channel", str(self._channel)],
+                    capture_output=True,
+                    timeout=5,
+                )
+                if ch_result.returncode != 0:
+                    log.warning(
+                        "ground_wfb_channel_set_failed",
+                        interface=interface,
+                        channel=self._channel,
+                        stderr=ch_result.stderr.decode(errors="replace").strip(),
+                    )
+                else:
+                    log.info(
+                        "ground_wfb_channel_set",
+                        interface=interface,
+                        channel=self._channel,
+                    )
+            except (FileNotFoundError, _sp.TimeoutExpired) as exc:
+                log.warning("ground_wfb_channel_set_error", error=str(exc))
+
             # Key existence already enforced at top of loop. If the key
             # disappeared between then and now (unpair raced with us)
             # the subprocess will exit and we re-enter the loop.

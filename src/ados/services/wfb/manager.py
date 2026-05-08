@@ -368,13 +368,55 @@ class WfbManager:
                     requested=self._config.tx_power_dbm,
                 )
 
+            # Step 2c: Set the radio channel via iw. wfb_tx/wfb_rx
+            # themselves do not change channel; they listen/transmit
+            # on whatever the netdev is currently set to. Without this
+            # call the radio sits on whatever the bind profile (or
+            # driver default) left it at, which may not be the
+            # configured wfb channel.
+            try:
+                import subprocess as _sp
+                ch_result = _sp.run(
+                    ["iw", interface, "set", "channel", str(self._channel)],
+                    capture_output=True,
+                    timeout=5,
+                )
+                if ch_result.returncode != 0:
+                    log.warning(
+                        "wfb_channel_set_failed",
+                        interface=interface,
+                        channel=self._channel,
+                        stderr=ch_result.stderr.decode(errors="replace").strip(),
+                    )
+                else:
+                    log.info(
+                        "wfb_channel_set",
+                        interface=interface,
+                        channel=self._channel,
+                    )
+            except (FileNotFoundError, _sp.TimeoutExpired) as exc:
+                log.warning("wfb_channel_set_error", error=str(exc))
+
             # Step 3 (key existence): already enforced at the top of the
             # loop. If keys disappeared between then and now, the
             # subprocess will exit on its own and we re-enter the loop.
 
-            # Step 4: Start wfb_tx and wfb_rx
+            # Step 4: Start wfb_tx (always) and wfb_rx (only if rx.key
+            # is present — on drone-only rigs we don't have rx.key and
+            # wfb_rx would crash immediately, dragging the manager
+            # into a restart loop that hits max_restarts and gives up).
             tx_ok = await self.start_tx(interface, self._channel)
-            rx_ok = await self.start_rx(interface, self._channel)
+            from pathlib import Path as _P
+            from ados.core.paths import WFB_KEY_DIR as _WD
+            rx_key_present = _P(str(_WD)) / "rx.key"
+            rx_ok = False
+            if rx_key_present.is_file():
+                rx_ok = await self.start_rx(interface, self._channel)
+            else:
+                log.info(
+                    "wfb_rx_skipped_no_rx_key",
+                    note="drone-only rig; uplink RX disabled",
+                )
 
             if not tx_ok and not rx_ok:
                 log.error("wfb_both_failed_to_start")
