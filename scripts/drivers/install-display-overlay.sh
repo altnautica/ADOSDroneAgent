@@ -139,6 +139,9 @@ detect_board() {
             *"rock 5c lite"*) echo "rock-5c-lite"; return ;;
             *"rock 5c"*)      echo "rock-5c-lite"; return ;;
             *"rk3582"*)       echo "rock-5c-lite"; return ;;
+            *"raspberry pi 4"*) echo "rpi4b"; return ;;
+            *"raspberry pi 5"*) echo "rpi5"; return ;;
+            *"raspberry pi zero 2"*) echo "pi-zero-2w"; return ;;
         esac
     fi
     if [ -f /proc/cpuinfo ]; then
@@ -147,6 +150,8 @@ detect_board() {
         case "$(echo "${hw}" | tr '[:upper:]' '[:lower:]')" in
             *"cubie a7z"*|*"a733"*) echo "cubie-a7z"; return ;;
             *"rock 5c"*|*"rk3582"*) echo "rock-5c-lite"; return ;;
+            *"raspberry pi 4"*) echo "rpi4b"; return ;;
+            *"raspberry pi 5"*) echo "rpi5"; return ;;
         esac
     fi
     echo ""
@@ -167,7 +172,7 @@ fi
 # ----------------------------------------------------------------------------
 if [ "${DISPLAY_ID}" = "auto" ]; then
     case "${BOARD_ID}" in
-        cubie-a7z|rock-5c-lite|rock-5c)
+        cubie-a7z|rock-5c-lite|rock-5c|rpi4b|rpi5|pi-zero-2w)
             DISPLAY_ID="waveshare35a"
             ;;
         *)
@@ -442,6 +447,66 @@ case "${BOARD_ID}" in
                     error "Could not activate vendored overlay."
                     exit 3
                 fi
+                ;;
+            *)
+                error "Display ${DISPLAY_ID} is not supported on ${BOARD_ID}."
+                exit 4
+                ;;
+        esac
+        ;;
+
+    rpi4b|rpi5|pi-zero-2w|raspberrypi)
+        case "${DISPLAY_ID}" in
+            waveshare35a)
+                # Pi OS Bookworm ships waveshare35a.dtbo natively in
+                # /boot/firmware/overlays/. Configuration is two lines
+                # in /boot/firmware/config.txt: dtparam=spi=on and
+                # dtoverlay=waveshare35a. The vc4-kms-v3d overlay
+                # claims fb0 + conflicts with the SPI fb so we comment
+                # it out. Reference:
+                # https://www.waveshare.com/wiki/3.5inch_RPi_LCD_(A)_Manual_Configuration
+                if [ -f /boot/firmware/config.txt ]; then
+                    PI_CONFIG="/boot/firmware/config.txt"
+                elif [ -f /boot/config.txt ]; then
+                    PI_CONFIG="/boot/config.txt"
+                else
+                    error "Pi config.txt not found at /boot/firmware/config.txt or /boot/config.txt."
+                    exit 3
+                fi
+                # Sanity: the dtbo must exist. Pi OS Bookworm ships it.
+                PI_OVERLAYS_DIR="$(dirname "${PI_CONFIG}")/overlays"
+                if [ ! -f "${PI_OVERLAYS_DIR}/waveshare35a.dtbo" ]; then
+                    error "${PI_OVERLAYS_DIR}/waveshare35a.dtbo missing."
+                    error "Run: apt-get install --reinstall raspberrypi-bootloader"
+                    error "or fetch the dtbo from https://files.waveshare.com/wiki/common/Waveshare35a.zip"
+                    exit 3
+                fi
+                info "Editing ${PI_CONFIG} for Waveshare 3.5 LCD."
+                # Idempotently ensure dtparam=spi=on. Match a commented or
+                # uncommented variant; if missing, append.
+                if grep -qE '^[[:space:]]*#?[[:space:]]*dtparam=spi=on' "${PI_CONFIG}"; then
+                    sed -i 's|^[[:space:]]*#[[:space:]]*dtparam=spi=on|dtparam=spi=on|' "${PI_CONFIG}"
+                else
+                    printf '\n# Enabled by ADOS LCD overlay installer.\ndtparam=spi=on\n' >> "${PI_CONFIG}"
+                fi
+                # Idempotently ensure dtoverlay=waveshare35a.
+                if grep -qE '^[[:space:]]*#?[[:space:]]*dtoverlay=waveshare35a' "${PI_CONFIG}"; then
+                    sed -i 's|^[[:space:]]*#[[:space:]]*dtoverlay=waveshare35a|dtoverlay=waveshare35a|' "${PI_CONFIG}"
+                else
+                    printf 'dtoverlay=waveshare35a\n' >> "${PI_CONFIG}"
+                fi
+                # Comment out vc4-kms-v3d if active. It claims fb0 and
+                # competes with the SPI fb. Replace any uncommented
+                # dtoverlay=vc4-kms-v3d (with optional ,trailing args)
+                # with a commented version. Don't double-comment if
+                # already commented.
+                if grep -qE '^[[:space:]]*dtoverlay=vc4-kms-v3d' "${PI_CONFIG}"; then
+                    sed -i 's|^\([[:space:]]*\)dtoverlay=vc4-kms-v3d|\1# dtoverlay=vc4-kms-v3d  # disabled by ADOS LCD installer (claims fb0)|' "${PI_CONFIG}"
+                fi
+                OVERLAY_SOURCE="raspberrypi"
+                OVERLAY_REF="waveshare35a"
+                ACTIVATED_VIA="config.txt"
+                info "Edits applied. Reboot to load the overlay."
                 ;;
             *)
                 error "Display ${DISPLAY_ID} is not supported on ${BOARD_ID}."

@@ -78,3 +78,40 @@ profiles:
       - mesh_relay
       - mesh_receiver
       - batman_adv
+
+# SPI LCD support. Pi has first-class Waveshare 35A overlay shipped
+# in Raspberry Pi OS Bookworm at /boot/firmware/overlays/
+# waveshare35a.dtbo. install-display-overlay.sh edits /boot/firmware
+# /config.txt to add dtparam=spi=on + dtoverlay=waveshare35a and to
+# comment out dtoverlay=vc4-kms-v3d (which claims fb0 + conflicts
+# with the SPI fb). ADS7846 + ILI9486 wire to canonical BCM pins
+# (T_IRQ = BCM 17 = pin 11, DC = BCM 24 = pin 18, RESET = BCM 25 =
+# pin 22).
+displays:
+  supported:
+    - id: waveshare35a
+      type: spi-lcd
+      controller: ILI9486
+      touch_chip: ADS7846
+      bus: spi0
+      resolution: 480x320
+      default_rotation: 90
+      overlay_source: raspberrypi
+      overlay_ref: waveshare35a
+      gpio:
+        dc:
+          pin: GPIO24
+          header_pin: 18
+          direction: out
+        reset:
+          pin: GPIO25
+          header_pin: 22
+          direction: out
+        touch_irq:
+          pin: GPIO17
+          header_pin: 11
+          direction: in
+      modules_required:
+        - fbtft
+        - fb_ili9486
+        - ads7846

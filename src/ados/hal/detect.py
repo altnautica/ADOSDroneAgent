@@ -60,7 +60,7 @@ class DisplayBinding(BaseModel):
     touch_chip: str | None = None
     bus: str
     resolution: str
-    overlay_source: Literal["repo", "upstream"] = "repo"
+    overlay_source: Literal["repo", "upstream", "upstream-vendored", "raspberrypi"] = "repo"
     overlay_ref: str
     gpio: dict[str, DisplayGpio] = Field(default_factory=dict)
     default_rotation: int = 0
