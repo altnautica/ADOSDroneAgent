@@ -47,6 +47,7 @@ Manual bench soak for the 10-minute pixel-invert cycle:
 from __future__ import annotations
 
 import asyncio
+import json
 import signal
 import sys
 import time
@@ -58,7 +59,7 @@ from PIL import Image, ImageDraw
 
 from ados.core.config import load_config
 from ados.core.logging import configure_logging, get_logger
-from ados.core.paths import TOUCH_CALIB_PATH
+from ados.core.paths import LCD_PAGE_REQUEST_PATH, TOUCH_CALIB_PATH
 from ados.services.ui.chrome import bottom_tab_bar, top_status_bar
 from ados.services.ui.events import ButtonEventBus
 from ados.services.ui.pages import PageContext, PageNavigator
@@ -68,6 +69,8 @@ from ados.services.ui.renderers.framebuffer import FrameBufferRenderer
 from ados.services.ui.theme import current_palette
 from ados.services.ui.touch.calibrate import CalibrationWizard
 from ados.services.ui.touch.events import TouchGesture
+from ados.services.ui.touch.recent import record_touch
+from ados.services.ui.touch.session import get_session_registry
 from ados.services.ui.touch.transform import load as load_calib
 from ados.services.ui.touch_input import TouchInputBridge
 
@@ -432,6 +435,11 @@ class OledService:
         self._calibration_wizard: CalibrationWizard | None = None
         self._calibration_failure_until_ms: int = 0
         self._touch_consumer_task: asyncio.Task | None = None
+        # Last-seen generation counter on the shared calibration
+        # session. The render loop watches this so a remote
+        # ``POST /api/v1/display/calibrate/start`` engages calibrate
+        # mode on the next tick without waiting for a panel tap.
+        self._last_calibration_generation: int = 0
         self._reload_ui_config()
 
     def _probe_device(self) -> bool:
@@ -787,6 +795,23 @@ class OledService:
                 )
 
     async def _dispatch_gesture(self, gesture: TouchGesture) -> None:
+        # Record every dispatched gesture in the recent-touches ring
+        # so the GCS Display sub-view can show a tail of activity.
+        try:
+            active_page = (
+                self._page_navigator.active_page_id
+                if self._page_navigator is not None
+                else self._mode
+            )
+            record_touch(
+                kind=gesture.kind,
+                x=int(gesture.start_x),
+                y=int(gesture.start_y),
+                page=active_page,
+                timestamp_ms=int(gesture.start_t_ms),
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.debug("touch_recent_record_failed", error=str(exc))
         if self._mode == "calibrate" and self._calibration_wizard is not None:
             await self._handle_calibration_gesture(gesture)
             return
@@ -896,6 +921,17 @@ class OledService:
         # than reaching in.
         raw = self._touch_bridge_raw_for(gesture)
         wizard.submit_sample(wizard.step, raw[0], raw[1])
+        # Mirror the on-LCD progression into the shared session so a
+        # remote /calibrate/status poll sees the live step counter
+        # without racing the wizard's private state.
+        try:
+            registry = get_session_registry()
+            registry.mirror_step(
+                step=wizard.step,
+                samples=list(getattr(wizard, "_samples", [])),
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.debug("calibration_mirror_step_failed", error=str(exc))
         if wizard.is_done:
             result = wizard.complete()
             if result.success:
@@ -906,6 +942,13 @@ class OledService:
                     "lcd_calibration_complete",
                     rms_px=result.rms_px,
                 )
+                try:
+                    get_session_registry().mirror_complete(
+                        rms_residual_px=result.rms_px,
+                        success=True,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    log.debug("calibration_mirror_complete_failed", error=str(exc))
                 self._exit_calibration()
             else:
                 log.warning(
@@ -913,6 +956,13 @@ class OledService:
                     rms_px=result.rms_px,
                     error=result.error,
                 )
+                try:
+                    get_session_registry().mirror_complete(
+                        rms_residual_px=result.rms_px,
+                        success=False,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    log.debug("calibration_mirror_failed_failed", error=str(exc))
                 self._calibration_failure_rms = result.rms_px
                 # Show the failure card for 4 seconds, then auto-retry.
                 self._calibration_failure_until_ms = now_ms + 4000
@@ -937,6 +987,121 @@ class OledService:
     def _exit_calibration(self) -> None:
         self._calibration_wizard = None
         self._calibration_failure_until_ms = 0
+        # Mirror the terminal state into the shared session so a
+        # remote /status poll sees in_progress=False after a tap-
+        # driven completion path. The wizard.complete() success
+        # already wrote the calibration file on disk; we only need
+        # to flip the in_progress flag here.
+        try:
+            registry = get_session_registry()
+            snap = registry.snapshot()
+            if snap.in_progress:
+                # Use mirror_complete with the previously-recorded
+                # rms (or 0.0 fallback) and success=True so the
+                # session settles cleanly. The on-disk calibration
+                # file is the source of truth for "calibrated".
+                registry.mirror_complete(
+                    rms_residual_px=snap.rms_residual_px or 0.0,
+                    success=True,
+                )
+        except Exception as exc:  # noqa: BLE001
+            log.debug("calibration_session_mirror_failed", error=str(exc))
+
+    def _maybe_engage_remote_calibration(self) -> None:
+        """Engage calibrate mode if the REST surface armed a new run.
+
+        The shared session's ``generation`` counter increments on every
+        ``POST /calibrate/start``. When the OLED service sees a higher
+        generation than the last one it acted on, it constructs a
+        fresh wizard, switches mode, and bumps the watermark so the
+        same arm doesn't fire twice.
+        """
+        try:
+            registry = get_session_registry()
+            snap = registry.snapshot()
+        except Exception as exc:  # noqa: BLE001
+            log.debug("calibration_session_read_failed", error=str(exc))
+            return
+        if snap.generation <= self._last_calibration_generation:
+            return
+        self._last_calibration_generation = snap.generation
+        if not snap.in_progress:
+            return
+        # Build a fresh wizard at step 0. Even if a wizard was already
+        # running we replace it so the GCS-armed run takes precedence.
+        self._calibration_wizard = CalibrationWizard()
+        self._calibration_wizard.start()
+        self._mode = "calibrate"
+        if self._touch_bridge is not None:
+            self._touch_bridge.mode = "lcd_page"
+        log.info("lcd_calibration_armed_remotely", generation=snap.generation)
+
+    async def _maybe_apply_page_request(self) -> None:
+        """Honor a remote ``POST /api/v1/display/page`` request.
+
+        Reads ``/run/ados/lcd-page-request.json``, routes the
+        navigator to the requested page, and unlinks the file so the
+        same request can't reapply on the next tick. Best-effort:
+        any malformed payload is silently dropped and the file is
+        unlinked so the watcher doesn't loop on it.
+        """
+        if not LCD_PAGE_REQUEST_PATH.exists():
+            return
+        if self._page_navigator is None:
+            try:
+                LCD_PAGE_REQUEST_PATH.unlink()
+            except OSError:
+                pass
+            return
+        try:
+            blob = json.loads(LCD_PAGE_REQUEST_PATH.read_text())
+        except (OSError, json.JSONDecodeError) as exc:
+            log.debug("lcd_page_request_unreadable", error=str(exc))
+            try:
+                LCD_PAGE_REQUEST_PATH.unlink()
+            except OSError:
+                pass
+            return
+        page_id = ""
+        if isinstance(blob, dict):
+            raw = blob.get("page")
+            if isinstance(raw, str):
+                page_id = raw.strip()
+        if not page_id or not self._page_navigator.has(page_id):
+            log.warning(
+                "lcd_page_request_invalid",
+                requested=page_id or "<missing>",
+            )
+            try:
+                LCD_PAGE_REQUEST_PATH.unlink()
+            except OSError:
+                pass
+            return
+        # Pop any open modal so a remote tab switch lands at the
+        # requested page's root, mirroring the on-LCD tab-tap UX.
+        while self._page_navigator.modal_stack:
+            try:
+                await self._page_navigator.pop_modal(ctx=self._page_context)
+            except Exception:  # noqa: BLE001
+                break
+        try:
+            await self._page_navigator.go(page_id, ctx=self._page_context)
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "lcd_page_request_apply_failed",
+                page_id=page_id,
+                error=str(exc),
+            )
+        try:
+            LCD_PAGE_REQUEST_PATH.unlink()
+        except OSError:
+            pass
+        # If we were in calibrate mode, a remote page set returns the
+        # operator to lcd_page so the requested page renders.
+        if self._mode == "calibrate":
+            self._exit_calibration()
+        self._mode = "lcd_page"
+        log.info("lcd_page_set_remotely", page_id=page_id)
         if self._page_navigator is not None:
             self._mode = "lcd_page"
             log.info("lcd_calibration_exit_to_page")
@@ -1364,6 +1529,20 @@ class OledService:
                 self._reload_requested = False
                 self._reload_ui_config()
                 last_advance = now
+
+            # Pick up REST-arm of the calibration wizard. The shared
+            # session bumps its generation counter every time a remote
+            # POST /calibrate/start fires; if we are in lcd_page mode
+            # and the counter advanced, engage the wizard so the
+            # operator on the bench sees the targets.
+            if self._page_navigator is not None and self._fb_renderer is not None:
+                self._maybe_engage_remote_calibration()
+
+            # Pick up REST-driven page-set requests. Same pattern: the
+            # REST handler atomically writes the request file, this
+            # watcher consumes + unlinks it on the next render tick.
+            if self._page_navigator is not None:
+                await self._maybe_apply_page_request()
 
             # First-boot unset override: when the node is mesh-capable
             # but role is still unset, take over the status cycle until

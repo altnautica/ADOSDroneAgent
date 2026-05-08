@@ -243,6 +243,42 @@ class VideoPage:
                     )
         except Exception as exc:  # noqa: BLE001
             ctx.logger.debug("video_metrics_cameras_failed", error=str(exc))
+        # Publish a tiny tap-status snapshot to /run/ados/lcd-video-tap.json
+        # so the cloud heartbeat enricher can surface decoder state to
+        # the GCS without reaching into the OLED service's process.
+        try:
+            self._publish_tap_status()
+        except Exception as exc:  # noqa: BLE001
+            ctx.logger.debug("video_tap_status_publish_failed", error=str(exc))
+
+    def _publish_tap_status(self) -> None:
+        """Atomic-write a tap-status JSON for the heartbeat enricher.
+
+        The payload is intentionally minimal: just the four fields the
+        GCS Display sub-view reads (active, decoder, fps, recording).
+        Written every metrics tick (~1 Hz) so the heartbeat — which
+        also runs at 5 s — never reads more than a 1 s old snapshot.
+        """
+        from ados.core.paths import LCD_VIDEO_TAP_PATH
+
+        active = False
+        decoder: str | None = None
+        fps: float = 0.0
+        if self._tap is not None:
+            stats = self._tap.stats()
+            pipeline_state = str(stats.get("pipeline_state") or "")
+            active = pipeline_state == "playing"
+            decoder = stats.get("decoder_type") or None
+            fps_val = stats.get("fps")
+            fps = float(fps_val) if isinstance(fps_val, (int, float)) else 0.0
+        blob: dict[str, Any] = {
+            "active": active,
+            "decoder": decoder,
+            "fps": round(fps, 2),
+            "recording": bool(self._recording),
+            "updated_at_ms": int(time.time() * 1000),
+        }
+        _write_tap_status(LCD_VIDEO_TAP_PATH, blob)
 
     def _update_bitrate(self, mediamtx_blob: dict) -> None:
         bytes_received = mediamtx_blob.get("bytesReceived")
@@ -622,3 +658,35 @@ class VideoPage:
             ),
             ctx=ctx,
         )
+
+
+def _write_tap_status(path: Any, blob: dict) -> None:
+    """Atomic-write a JSON blob to ``path``.
+
+    Helper for ``VideoPage._publish_tap_status``. Kept module-level so
+    the import graph stays acyclic (the page should not depend on the
+    cloud heartbeat module to write a sidecar file).
+    """
+    import json
+    import os
+    import tempfile
+    from pathlib import Path as _Path
+
+    target = _Path(str(path))
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(
+            prefix=target.name + ".",
+            suffix=".tmp",
+            dir=str(target.parent),
+        )
+        with os.fdopen(fd, "w") as fh:
+            json.dump(blob, fh, separators=(",", ":"))
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, target)
+    except OSError:
+        try:
+            os.unlink(tmp)  # type: ignore[name-defined]
+        except (OSError, NameError):
+            pass

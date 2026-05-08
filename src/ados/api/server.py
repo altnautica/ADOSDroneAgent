@@ -18,6 +18,7 @@ from ados.api.routes import (
     config,
     dashboard,
     diagnostics,
+    display,
     features,
     fleet,
     ground_station,
@@ -108,6 +109,7 @@ def create_app(agent: Any) -> FastAPI:
     app.include_router(setup.router, prefix="/api")
     app.include_router(dashboard.router, prefix="/api")
     app.include_router(diagnostics.router, prefix="/api")
+    app.include_router(display.router, prefix="/api")
     app.include_router(peripherals.router, prefix="/api")
     # Peripheral Manager plugin registry. Lives alongside the legacy
     # /api/peripherals hardware scan route.

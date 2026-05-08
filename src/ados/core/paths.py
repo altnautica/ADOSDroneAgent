@@ -50,6 +50,19 @@ DNSMASQ_USB0_PID = ADOS_RUN_DIR / "dnsmasq-usb0.pid"
 # screen they last left after a reboot. Atomic-write JSON.
 LCD_STATE_PATH = ADOS_RUN_DIR / "lcd-state.json"
 
+# Remote page-set request file. Written by the REST surface
+# (``POST /api/v1/display/page``) and consumed by the OLED service's
+# navigator watcher. Atomic-write JSON; the watcher unlinks after
+# applying so the same request is not reapplied on every tick.
+LCD_PAGE_REQUEST_PATH = ADOS_RUN_DIR / "lcd-page-request.json"
+
+# Local-video-tap stats published by the OLED service's video page on
+# every tick. Consumed by the cloud heartbeat so the GCS Display
+# sub-view can show whether the LCD is currently decoding video and
+# at what FPS, without making the cloud subprocess reach into the
+# OLED service's private state directly.
+LCD_VIDEO_TAP_PATH = ADOS_RUN_DIR / "lcd-video-tap.json"
+
 # ---------------------------------------------------------------------------
 # Config directory: /etc/ados/
 # Persistent operator-owned configuration. Written by the installer,

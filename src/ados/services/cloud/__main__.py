@@ -19,6 +19,7 @@ import socket
 import sys
 import time
 from collections import deque
+from typing import Any
 
 import structlog
 
@@ -29,8 +30,10 @@ from ados.core.logging import configure_logging
 from ados.core.paths import (
     DISPLAY_CONF_PATH,
     HEALTH_JSON,
+    LCD_VIDEO_TAP_PATH,
     SCRIPTS_DIR,
     SUITES_DIR,
+    TOUCH_CALIB_PATH,
 )
 
 
@@ -246,6 +249,206 @@ def _get_services_status() -> list[dict]:
             pass
 
     return services
+
+
+def _read_touch_calib_status() -> dict:
+    """Read the touch calibration file to determine calibrated/skipped state.
+
+    Returns ``{"calibrated": bool, "skipped": bool}``. Used by the
+    heartbeat enricher so the GCS Display sub-view can show whether
+    the operator has calibrated the touchscreen, has explicitly
+    skipped, or has not yet been prompted.
+    """
+    if not TOUCH_CALIB_PATH.exists():
+        return {"calibrated": False, "skipped": False}
+    try:
+        import json as _json
+
+        blob = _json.loads(TOUCH_CALIB_PATH.read_text())
+    except (OSError, ValueError):
+        return {"calibrated": False, "skipped": False}
+    if not isinstance(blob, dict):
+        return {"calibrated": False, "skipped": False}
+    return {
+        "calibrated": bool(blob.get("calibrated", False)),
+        "skipped": bool(blob.get("skipped", False)),
+    }
+
+
+def _read_display_rotation() -> int | None:
+    """Return the configured display rotation, or ``None`` when unknown."""
+    if not DISPLAY_CONF_PATH.exists():
+        return None
+    try:
+        text = DISPLAY_CONF_PATH.read_text()
+    except OSError:
+        return None
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, _, v = line.partition("=")
+        if k.strip() == "rotation":
+            try:
+                value = int(v.strip())
+            except ValueError:
+                return None
+            if value in (0, 90, 180, 270):
+                return value
+            return None
+    return None
+
+
+def _read_lcd_video_tap() -> dict | None:
+    """Read ``/run/ados/lcd-video-tap.json`` published by the OLED video page.
+
+    The file may be absent (LCD service not running, video page never
+    visited yet). Returns ``None`` in that case so the caller can omit
+    the related heartbeat fields entirely instead of advertising
+    ``False`` for "decoder active" on a board with no LCD.
+    """
+    if not LCD_VIDEO_TAP_PATH.exists():
+        return None
+    try:
+        import json as _json
+
+        blob = _json.loads(LCD_VIDEO_TAP_PATH.read_text())
+    except (OSError, ValueError):
+        return None
+    if not isinstance(blob, dict):
+        return None
+    # Tap snapshots older than 30 s are stale (operator left the
+    # video page over half a minute ago, the metrics loop is no
+    # longer ticking). Drop them so the GCS doesn't show frozen
+    # decoder state.
+    updated_at = blob.get("updated_at_ms")
+    if isinstance(updated_at, (int, float)):
+        age_ms = (time.time() * 1000) - float(updated_at)
+        if age_ms > 30_000:
+            return None
+    return blob
+
+
+def _read_recent_touch() -> dict | None:
+    """Return the most recent touch event published by the OLED service.
+
+    The OLED service holds the ring buffer in process memory, so the
+    cloud subprocess cannot read it directly. We hit the local API
+    surface (port 8080) the same way the radio block fetcher does,
+    with a tight 0.2 s budget.
+    """
+    try:
+        import httpx
+
+        with httpx.Client(timeout=0.2) as client:
+            resp = client.get(
+                "http://127.0.0.1:8080/api/v1/display/touches"
+            )
+            if resp.status_code != 200:
+                return None
+            data = resp.json()
+            events = data.get("events") if isinstance(data, dict) else None
+            if not isinstance(events, list) or not events:
+                return None
+            last = events[-1]
+            if not isinstance(last, dict):
+                return None
+            return last
+    except Exception:
+        return None
+
+
+def _read_video_recording_state() -> bool | None:
+    """Ask the local agent whether the recorder is currently active.
+
+    Mirrors the precedent set by the radio block fetcher: the cloud
+    subprocess does not own the video pipeline, so it queries the
+    agent's REST surface on localhost. ``None`` means we couldn't
+    tell (API unreachable, response malformed) — the heartbeat
+    enricher then omits the field entirely.
+    """
+    try:
+        import httpx
+
+        with httpx.Client(timeout=0.2) as client:
+            resp = client.get("http://127.0.0.1:8080/api/video")
+            if resp.status_code != 200:
+                return None
+            data = resp.json()
+            if not isinstance(data, dict):
+                return None
+            if "recording" in data:
+                return bool(data["recording"])
+            return None
+    except Exception:
+        return None
+
+
+def _build_display_enrichment(
+    config: Any,
+    *,
+    has_attached_display: bool,
+    local_ip: str,
+    api_port: int,
+) -> dict:
+    """Return the optional display + UI fields the heartbeat will fold in.
+
+    Each field is omitted when its source is unavailable, mirroring
+    the existing pattern for ``temperature`` / ``peripherals``.
+    Callers ``payload.update(enrich)`` so missing keys do not clobber
+    previously-set heartbeat fields.
+    """
+    enrich: dict[str, Any] = {}
+
+    # Theme (always read from config; defaults to "dark" if the block
+    # is missing, which is the documented default).
+    try:
+        theme = getattr(getattr(config, "ui", None), "theme", "dark")
+        if isinstance(theme, str) and theme in ("dark", "light"):
+            enrich["uiTheme"] = theme
+    except Exception:
+        pass
+
+    # Display-rooted fields are only meaningful when an LCD is bound.
+    if has_attached_display:
+        calib = _read_touch_calib_status()
+        # "calibrated" maps to whether the affine is on disk and
+        # actively used. The skip marker is NOT calibrated.
+        enrich["lcdTouchCalibrated"] = bool(calib.get("calibrated"))
+        rotation = _read_display_rotation()
+        if rotation is not None:
+            enrich["lcdRotation"] = rotation
+        snapshot_url = (
+            f"http://{local_ip}:{api_port}/api/v1/display/snapshot"
+        )
+        enrich["lcdSnapshotUrl"] = snapshot_url
+        last_touch = _read_recent_touch()
+        if last_touch is not None:
+            t_ms = last_touch.get("t")
+            if isinstance(t_ms, (int, float)):
+                enrich["lcdLastTouchAt"] = int(t_ms)
+            kind = last_touch.get("kind")
+            if isinstance(kind, str) and kind:
+                enrich["lcdLastGesture"] = kind
+
+    # Local-decoder + recording state. Sourced via the lcd-video-tap.json
+    # snapshot for decoder + fps + active flag (which depends on the
+    # OLED video page running), and a separate /api/video poll for the
+    # recording flag (the recorder is pipeline-owned, independent of
+    # the LCD page).
+    tap = _read_lcd_video_tap()
+    if tap is not None:
+        enrich["videoLocalDecoderActive"] = bool(tap.get("active"))
+        decoder = tap.get("decoder")
+        if isinstance(decoder, str) and decoder:
+            enrich["videoLocalDecoderType"] = decoder
+        fps = tap.get("fps")
+        if isinstance(fps, (int, float)):
+            enrich["videoLocalDecoderFps"] = float(fps)
+    recording = _read_video_recording_state()
+    if recording is not None:
+        enrich["videoRecording"] = bool(recording)
+    return enrich
 
 
 def _get_local_ip() -> str:
@@ -571,6 +774,25 @@ async def main() -> None:
                                         payload["lcdActivePage"] = active
                         except Exception:
                             pass
+
+                    # Display + decoder + theme enrichment for the
+                    # GCS Display sub-view. Each field is optional —
+                    # the helper returns only the keys it can fill in
+                    # from the relevant local source (display.conf,
+                    # touch.calib, lcd-video-tap.json, /api/video).
+                    try:
+                        enrich = _build_display_enrichment(
+                            config,
+                            has_attached_display=_attached_display is not None,
+                            local_ip=payload.get("lastIp", _get_local_ip()),
+                            api_port=config.scripting.rest_api.port,
+                        )
+                        payload.update(enrich)
+                    except Exception as exc:
+                        log.debug(
+                            "heartbeat_display_enrichment_failed",
+                            error=str(exc),
+                        )
 
                     async with httpx.AsyncClient(timeout=10.0) as client:
                         resp = await client.post(
