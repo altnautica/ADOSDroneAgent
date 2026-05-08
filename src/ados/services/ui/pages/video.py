@@ -187,22 +187,48 @@ class VideoPage:
                     self._update_bitrate(blob)
         except Exception as exc:  # noqa: BLE001
             ctx.logger.debug("video_metrics_mediamtx_failed", error=str(exc))
-        # WFB telemetry — full RSSI / FEC wiring lands in a later commit.
-        try:
-            r = await client.get("/api/wfb", timeout=1.5)
-            if getattr(r, "status_code", None) == 200:
-                blob = r.json() if callable(getattr(r, "json", None)) else {}
-                if isinstance(blob, dict):
-                    self._metrics_cache["channel"] = blob.get("channel")
-                    self._metrics_cache["mcs_index"] = blob.get("mcs_index")
-                    rssi = blob.get("rssi_dbm")
-                    if isinstance(rssi, (int, float)):
-                        self._metrics_cache["rssi_dbm"] = float(rssi)
-                    drops = blob.get("fec_drops")
-                    if isinstance(drops, (int, float)):
-                        self._metrics_cache["fec_drops"] = int(drops)
-        except Exception as exc:  # noqa: BLE001
-            ctx.logger.debug("video_metrics_wfb_failed", error=str(exc))
+        # RSSI / FEC drops: prefer the in-process LinkQualityMonitor
+        # because the data is already in memory and never racy with the
+        # REST surface. Channel / MCS still come from the REST blob —
+        # those values originate from config, not the rx parser.
+        wfb_blob = await self._load_wfb_blob(ctx, client)
+        if wfb_blob is not None:
+            self._metrics_cache["channel"] = wfb_blob.get("channel")
+            self._metrics_cache["mcs_index"] = wfb_blob.get("mcs_index")
+            rssi = wfb_blob.get("rssi_dbm")
+            if isinstance(rssi, (int, float)):
+                # The REST surface emits -100.0 as a "no signal" sentinel
+                # rather than null; let it through so the operator sees
+                # something rather than "—" indefinitely on a healthy
+                # but quiet link. The metrics formatter renders it as
+                # "-100 dBm" which the operator can read at a glance.
+                self._metrics_cache["rssi_dbm"] = float(rssi)
+            fec_recovered = wfb_blob.get("fec_recovered")
+            fec_failed = wfb_blob.get("fec_failed")
+            if isinstance(fec_recovered, (int, float)) and isinstance(
+                fec_failed, (int, float),
+            ):
+                lost = int(fec_failed)
+                rec = int(fec_recovered)
+                total = rec + lost
+                self._metrics_cache["fec_drops"] = (lost, total)
+            else:
+                # Some legacy callers emit a plain int "fec_drops" key.
+                drops = wfb_blob.get("fec_drops")
+                if isinstance(drops, tuple) and len(drops) == 2:
+                    self._metrics_cache["fec_drops"] = drops
+                elif isinstance(drops, (int, float)):
+                    self._metrics_cache["fec_drops"] = (int(drops), int(drops))
+        # Latency comes from the local tap's SEI parser; refresh the
+        # cached value so a paused tab still shows the most recent
+        # number rather than a flat None.
+        if self._tap is not None:
+            stats = self._tap.stats()
+            latency_ms = stats.get("latency_ms")
+            if isinstance(latency_ms, (int, float)):
+                self._metrics_cache["latency_ms"] = float(latency_ms)
+            else:
+                self._metrics_cache["latency_ms"] = None
         # Recording state from the consolidated status endpoint.
         try:
             r = await client.get("/api/status/full", timeout=1.5)
@@ -280,9 +306,73 @@ class VideoPage:
         }
         _write_tap_status(LCD_VIDEO_TAP_PATH, blob)
 
+    async def _load_wfb_blob(
+        self,
+        ctx: PageContext,
+        client: Any,
+    ) -> dict | None:
+        """Return a {channel, mcs_index, rssi_dbm, fec_*} dict.
+
+        Tries the in-process ``LinkQualityMonitor`` first because the
+        OLED service runs in the same process as the agent core when
+        the ``ados-oled`` unit is colocated with ``ados-agent``. When
+        the lookup fails — typical inside the test suite where
+        ``get_agent_app`` is uninitialized — falls back to the
+        ``/api/wfb`` REST endpoint via the supplied HTTP client.
+        """
+        # Try in-process first.
+        try:
+            from ados.api.deps import get_agent_app
+
+            app = get_agent_app()
+            wfb = app.wfb_manager()
+            if wfb is not None:
+                monitor = getattr(wfb, "monitor", None)
+                cfg = getattr(app, "config", None)
+                wfb_cfg = (
+                    getattr(getattr(cfg, "video", None), "wfb", None)
+                    if cfg is not None
+                    else None
+                )
+                channel = getattr(wfb, "_channel", None)
+                if channel is None and wfb_cfg is not None:
+                    channel = getattr(wfb_cfg, "channel", None)
+                mcs_index = (
+                    getattr(wfb_cfg, "mcs_index", None)
+                    if wfb_cfg is not None
+                    else None
+                )
+                if monitor is not None:
+                    snap = monitor.get_current()
+                    return {
+                        "channel": channel,
+                        "mcs_index": mcs_index,
+                        "rssi_dbm": float(snap.rssi_dbm),
+                        "fec_recovered": int(snap.fec_recovered),
+                        "fec_failed": int(snap.fec_failed),
+                    }
+        except (AssertionError, ImportError, AttributeError, Exception) as exc:  # noqa: BLE001
+            ctx.logger.debug("video_metrics_wfb_inproc_failed", error=str(exc))
+        # Fall back to REST.
+        try:
+            r = await client.get("/api/wfb", timeout=1.5)
+            if getattr(r, "status_code", None) == 200:
+                blob = r.json() if callable(getattr(r, "json", None)) else {}
+                if isinstance(blob, dict):
+                    return blob
+        except Exception as exc:  # noqa: BLE001
+            ctx.logger.debug("video_metrics_wfb_failed", error=str(exc))
+        return None
+
     def _update_bitrate(self, mediamtx_blob: dict) -> None:
+        # MediaMTX has used both ``bytesReceived`` (v1.0+) and
+        # ``bytes_received`` (older builds shipped via apt). Accept
+        # either, ignoring NaN / negative deltas (which can happen if
+        # MediaMTX restarts and the counter resets).
         bytes_received = mediamtx_blob.get("bytesReceived")
         if not isinstance(bytes_received, (int, float)):
+            bytes_received = mediamtx_blob.get("bytes_received")
+        if not isinstance(bytes_received, (int, float)) or bytes_received < 0:
             return
         now = time.monotonic()
         prev_bytes = self._mediamtx_prev_bytes
@@ -294,7 +384,11 @@ class VideoPage:
         dt = now - prev_at
         if dt <= 0:
             return
-        delta = max(0, int(bytes_received) - prev_bytes)
+        raw_delta = int(bytes_received) - prev_bytes
+        # A counter reset (MediaMTX restart) shows up as a large
+        # negative; clip to 0 so the next tick shows the fresh
+        # counter delta rather than a giant spike.
+        delta = max(0, raw_delta)
         kbps = (delta * 8.0 / 1000.0) / dt
         self._metrics_cache["bitrate_kbps"] = kbps
         self._bitrate_history.append(kbps)
@@ -450,42 +544,65 @@ class VideoPage:
         fps = 0.0
         frames_decoded = 0
         frames_dropped = 0
+        pipeline_latency_ms: Any = None
+        decode_cpu: Any = None
         if self._tap is not None:
             stats = self._tap.stats()
             decoder = stats.get("decoder_type") or "--"
             fps = float(stats.get("fps") or 0.0)
             frames_decoded = int(stats.get("frames_decoded") or 0)
             frames_dropped = int(stats.get("frames_dropped") or 0)
+            pipeline_latency_ms = stats.get("pipeline_latency_ms")
+            decode_cpu = stats.get("decode_cpu_percent")
         draw.text(
             (16, 12),
             "DECODER",
             fill=palette.accent_primary,
             font=title_font,
         )
+
+        def _fmt_ms(value: Any) -> str:
+            if isinstance(value, (int, float)):
+                return f"{int(value)} ms"
+            return "--"
+
+        def _fmt_pct(value: Any) -> str:
+            if isinstance(value, (int, float)):
+                return f"{float(value):.0f} %"
+            return "--"
+
         lines = [
             f"path     {decoder}",
             f"fps      {fps:.1f}",
             f"frames   {frames_decoded}",
             f"dropped  {frames_dropped}",
             f"bitrate  {self._format_bitrate(self._metrics_cache.get('bitrate_kbps'))}",
+            f"pipe lat {_fmt_ms(pipeline_latency_ms)}",
+            f"cpu      {_fmt_pct(decode_cpu)}",
         ]
         for i, ln in enumerate(lines):
             draw.text(
-                (16, 32 + i * 16),
+                (16, 30 + i * 14),
                 ln,
                 fill=palette.text_primary,
                 font=body_font,
             )
-        # Right side: bitrate sparkline.
+        # Right side: bitrate sparkline + FEC histogram strip.
         if len(self._bitrate_history) >= 2:
             from ados.services.ui.dashboards.components.sparkline import (
                 draw_sparkline,
             )
 
             spark_x = 260
-            spark_y = 32
+            spark_y = 30
             spark_w = PAGE_W - spark_x - 24
-            spark_h = VIDEO_H - 64
+            spark_h = 56
+            draw.text(
+                (spark_x, spark_y - 14),
+                "BITRATE 60s",
+                fill=palette.text_tertiary,
+                font=p.font("sans_bold", 9),
+            )
             draw_sparkline(
                 canvas,
                 spark_x,
@@ -495,6 +612,55 @@ class VideoPage:
                 list(self._bitrate_history),
                 color=palette.accent_secondary,
             )
+        # FEC histogram below the bitrate sparkline. Pulls the rolling
+        # ``loss_percent`` history if the in-process LinkQualityMonitor
+        # is reachable; otherwise renders a thin "no data" line.
+        fec_history = self._collect_fec_history()
+        if fec_history:
+            from ados.services.ui.dashboards.components.sparkline import (
+                draw_sparkline,
+            )
+
+            hist_x = 260
+            hist_y = 102
+            hist_w = PAGE_W - hist_x - 24
+            hist_h = 42
+            draw.text(
+                (hist_x, hist_y - 14),
+                "FEC LOSS 60s",
+                fill=palette.text_tertiary,
+                font=p.font("sans_bold", 9),
+            )
+            draw_sparkline(
+                canvas,
+                hist_x,
+                hist_y,
+                hist_w,
+                hist_h,
+                fec_history,
+                color=palette.status_warning,
+            )
+
+    def _collect_fec_history(self) -> list[float]:
+        """Pull a 60 s ``loss_percent`` slice from the in-process monitor.
+
+        Returns an empty list when the agent app or monitor is not
+        reachable (typical in unit tests). The detail HUD renders a
+        graceful empty state in that case.
+        """
+        try:
+            from ados.api.deps import get_agent_app
+
+            wfb = get_agent_app().wfb_manager()
+            if wfb is None:
+                return []
+            monitor = getattr(wfb, "monitor", None)
+            if monitor is None:
+                return []
+            samples = monitor.get_history(seconds=60)
+            return [float(s.loss_percent) for s in samples]
+        except Exception:  # noqa: BLE001
+            return []
 
     @staticmethod
     def _format_latency(value: Any) -> str:
@@ -519,6 +685,16 @@ class VideoPage:
 
     @staticmethod
     def _format_drops(value: Any) -> str:
+        # Tuple form: (lost, total) renders as "lost / total" so the
+        # operator sees both the loss count and the denominator. Bare
+        # int form falls through to the legacy "lost" display so older
+        # cached values do not crash the renderer.
+        if isinstance(value, tuple) and len(value) == 2:
+            lost, total = value
+            try:
+                return f"{int(lost)} / {int(total)}"
+            except (TypeError, ValueError):
+                return "--"
         if isinstance(value, (int, float)):
             return str(int(value))
         return "--"

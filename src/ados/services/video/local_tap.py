@@ -50,6 +50,7 @@ black.
 from __future__ import annotations
 
 import asyncio
+import os
 import shutil
 import subprocess
 import threading
@@ -62,6 +63,31 @@ from PIL import Image
 from ados.core.logging import get_logger
 
 log = get_logger("video.local_tap")
+
+# 16-byte UUID prefix the air-side encoder will embed in a SEI of type
+# 5 (user_data_unregistered) followed by an 8-byte big-endian uint64 of
+# the encoder's monotonic-time-ns. Picking a stable random UUID here
+# (rather than referencing some external value) so the air and ground
+# encoders can agree by importing this constant.
+ADOS_LATENCY_SEI_UUID = bytes.fromhex("ad05140e9c2c4f6e8a31f0e5b7d4c8a2")
+assert len(ADOS_LATENCY_SEI_UUID) == 16
+
+# Latency sanity bounds. A negative value means the air-side and
+# ground-side monotonic clocks have drifted relative to each other (the
+# clocks are different processes so they have different epochs); a
+# value above 5 s implies a stale buffer or a bogus SEI payload.
+_LATENCY_MIN_MS = 0.0
+_LATENCY_MAX_MS = 5_000.0
+
+# EWMA smoothing factor for both FPS and latency. 0.2 gives a half-life
+# of roughly 3 samples — fast enough to track real load swings without
+# bouncing on a single dropped frame.
+_EWMA_ALPHA = 0.2
+
+# FPS emit cadence. The renderer reads `stats()` at 1 Hz so the value
+# is recomputed at the same cadence. We track a frame counter that is
+# converted into instantaneous fps on every sample, then EWMA-smoothed.
+_FPS_TICK_SECONDS = 1.0
 
 # Default MediaMTX path the encoder publishes to. Matches the URL the
 # cloud-relay pusher and the websocket relay both consume so the LCD
@@ -200,6 +226,150 @@ def _detect_soc() -> str:
         return ""
 
 
+def _iter_nal_units(stream: bytes) -> Any:
+    """Yield ``(nal_type, payload)`` tuples from an Annex-B H.264 bytestream.
+
+    Annex-B framing is the on-the-wire byte layout: each NAL unit is
+    preceded by either ``00 00 00 01`` or ``00 00 01``. ``h264parse``
+    can output either AVC (length-prefixed) or Annex-B; the agent's
+    pipeline does not enforce a stream-format, so the parser handles
+    both. AVC is detected by the absence of any start code: if no
+    start-code prefix is found, we treat the input as length-prefixed
+    NAL units with a 4-byte big-endian length header.
+
+    The function is intentionally lenient — a malformed buffer yields
+    nothing rather than raising, because the SEI parser is on the hot
+    path and a cooked H.264 stream from a real encoder should not
+    produce parser exceptions.
+    """
+    n = len(stream)
+    if n < 4:
+        return
+
+    # Detect Annex-B: scan for the first 00 00 01 / 00 00 00 01.
+    annexb_idx = -1
+    i = 0
+    while i + 2 < n:
+        if stream[i] == 0 and stream[i + 1] == 0:
+            if stream[i + 2] == 1:
+                annexb_idx = i
+                break
+            if (
+                i + 3 < n
+                and stream[i + 2] == 0
+                and stream[i + 3] == 1
+            ):
+                annexb_idx = i
+                break
+        i += 1
+
+    if annexb_idx >= 0:
+        # Annex-B: split on start codes.
+        positions: list[int] = []
+        i = annexb_idx
+        while i + 2 < n:
+            if stream[i] == 0 and stream[i + 1] == 0:
+                if stream[i + 2] == 1:
+                    positions.append(i + 3)
+                    i += 3
+                    continue
+                if (
+                    i + 3 < n
+                    and stream[i + 2] == 0
+                    and stream[i + 3] == 1
+                ):
+                    positions.append(i + 4)
+                    i += 4
+                    continue
+            i += 1
+        for idx, start in enumerate(positions):
+            end = (
+                positions[idx + 1] - 4
+                if idx + 1 < len(positions)
+                else n
+            )
+            # Trim a trailing 00 00 in case the next start code is
+            # 00 00 01 (3-byte form).
+            while end > start and stream[end - 1] == 0:
+                end -= 1
+            if end <= start:
+                continue
+            header = stream[start]
+            nal_type = header & 0x1F
+            payload = stream[start + 1 : end]
+            yield nal_type, payload
+        return
+
+    # Length-prefixed (AVC). 4-byte big-endian length header per NAL.
+    i = 0
+    while i + 4 <= n:
+        length = int.from_bytes(stream[i : i + 4], "big")
+        i += 4
+        if length <= 0 or i + length > n:
+            return
+        if length < 1:
+            continue
+        header = stream[i]
+        nal_type = header & 0x1F
+        payload = stream[i + 1 : i + length]
+        yield nal_type, payload
+        i += length
+
+
+def parse_sei_latency_ns(stream: bytes) -> int | None:
+    """Extract the air-side encoder's monotonic-time-ns from a SEI marker.
+
+    Scans ``stream`` for an H.264 SEI NAL unit (NAL type 6) that
+    contains a user-data-unregistered payload (payload type 5) whose
+    16-byte UUID matches :data:`ADOS_LATENCY_SEI_UUID`. The next 8
+    bytes are interpreted as a big-endian uint64 of the encoder's
+    ``time.monotonic_ns()`` at frame-encode time.
+
+    Returns the encoded ns value, or ``None`` if no matching SEI is
+    present in the buffer.
+    """
+    for nal_type, payload in _iter_nal_units(stream):
+        if nal_type != 6:
+            continue
+        if not payload:
+            continue
+        # SEI message structure: <payload_type> <payload_size> <data>.
+        # payload_type and payload_size are each ff-extended bytes per
+        # the spec but in practice fit in one byte for our markers.
+        idx = 0
+        plen = len(payload)
+        while idx < plen:
+            ptype = 0
+            while idx < plen and payload[idx] == 0xFF:
+                ptype += 0xFF
+                idx += 1
+            if idx >= plen:
+                break
+            ptype += payload[idx]
+            idx += 1
+            psize = 0
+            while idx < plen and payload[idx] == 0xFF:
+                psize += 0xFF
+                idx += 1
+            if idx >= plen:
+                break
+            psize += payload[idx]
+            idx += 1
+            if idx + psize > plen:
+                break
+            data = payload[idx : idx + psize]
+            idx += psize
+            if (
+                ptype == 5
+                and len(data) >= 16 + 8
+                and data[:16] == ADOS_LATENCY_SEI_UUID
+            ):
+                ns = int.from_bytes(data[16 : 16 + 8], "big", signed=False)
+                return ns
+        # Continue to the next NAL unit in case there are multiple.
+    return None
+
+
 def build_pipeline_string(
     *,
     source_url: str,
@@ -258,7 +428,26 @@ class LocalVideoTap:
         self._frames_dropped: int = 0
         self._first_frame_at: float | None = None
         self._last_frame_at: float | None = None
-        self._fps_window: deque[float] = deque(maxlen=30)
+
+        # FPS bookkeeping. ``_fps_tick_count`` accumulates new-sample
+        # callbacks since the last 1 Hz tick; ``_fps_tick_at`` is the
+        # monotonic timestamp of the most recent tick. ``_fps_ewma`` is
+        # the smoothed value the renderer reads. All three reset to
+        # zero on ``stop()`` so a paused tap does not show stale FPS
+        # after a restart.
+        self._fps_tick_count: int = 0
+        self._fps_tick_at: float | None = None
+        self._fps_ewma: float = 0.0
+
+        # Glass-to-glass latency bookkeeping. ``_latency_ewma`` is None
+        # until at least one valid SEI marker is observed; once a
+        # sample is rejected by the sanity guard we keep the previous
+        # smoothed value so a single bogus buffer does not blank the
+        # metric.
+        self._latency_ewma: float | None = None
+        self._latency_last_sample_at: float | None = None
+        self._latency_samples: int = 0
+
         self._decoder_type: str | None = None
         self._pipeline_state: str = "idle"
         self._restart_failures: deque[float] = deque(maxlen=_MAX_RESTART_ATTEMPTS)
@@ -269,6 +458,8 @@ class LocalVideoTap:
         self._GLib: Any | None = None
         self._pipeline: Any | None = None
         self._appsink: Any | None = None
+        self._h264parse: Any | None = None
+        self._h264parse_probe_id: int | None = None
         self._loop: Any | None = None
         self._thread: threading.Thread | None = None
         self._stop_requested = threading.Event()
@@ -340,6 +531,28 @@ class LocalVideoTap:
             bus.add_signal_watch()
             bus.connect("message", self._on_bus_message)
 
+            # Best-effort pad probe on the h264parse src pad for SEI
+            # latency markers. The element is unnamed in the pipeline
+            # string; iterate the pipeline to find it. If it cannot be
+            # located the rest of the tap still works — latency just
+            # stays unset.
+            h264parse = self._find_h264parse(pipeline)
+            if h264parse is not None:
+                src_pad = h264parse.get_static_pad("src")
+                if src_pad is not None:
+                    try:
+                        probe_mask = Gst.PadProbeType.BUFFER
+                        probe_id = src_pad.add_probe(
+                            probe_mask, self._on_h264_buffer, None,
+                        )
+                        self._h264parse = h264parse
+                        self._h264parse_probe_id = probe_id
+                    except Exception as exc:  # noqa: BLE001
+                        self._logger.debug(
+                            "local_tap_h264_probe_install_failed",
+                            error=str(exc),
+                        )
+
             self._pipeline = pipeline
             self._appsink = appsink
             self._stop_requested.clear()
@@ -378,8 +591,23 @@ class LocalVideoTap:
         thread = self._thread
         gst = self._Gst
         if pipeline is None:
+            self._reset_stats()
             return
         self._stop_requested.set()
+        # Remove the h264parse probe before any state change so the
+        # callback can no longer fire on a half-torn-down pipeline.
+        h264parse = self._h264parse
+        probe_id = self._h264parse_probe_id
+        if h264parse is not None and probe_id is not None:
+            try:
+                src_pad = h264parse.get_static_pad("src")
+                if src_pad is not None:
+                    src_pad.remove_probe(probe_id)
+            except Exception as exc:  # noqa: BLE001
+                self._logger.debug(
+                    "local_tap_h264_probe_remove_failed",
+                    error=str(exc),
+                )
         try:
             if gst is not None:
                 pipeline.send_event(gst.Event.new_eos())
@@ -402,10 +630,22 @@ class LocalVideoTap:
         with self._lock:
             self._pipeline = None
             self._appsink = None
+            self._h264parse = None
+            self._h264parse_probe_id = None
             self._loop = None
             self._thread = None
             self._pipeline_state = "stopped"
+        self._reset_stats()
         self._logger.info("local_tap_stopped")
+
+    def _reset_stats(self) -> None:
+        """Zero out FPS / latency state on stop so a restart starts clean."""
+        self._fps_tick_count = 0
+        self._fps_tick_at = None
+        self._fps_ewma = 0.0
+        self._latency_ewma = None
+        self._latency_last_sample_at = None
+        self._latency_samples = 0
 
     async def pause(self) -> None:
         """Transition the pipeline to PAUSED without tearing down."""
@@ -449,19 +689,183 @@ class LocalVideoTap:
             "first_frame_at": first,
             "ms_since_first_frame": ms_since,
             "pipeline_state": self._pipeline_state,
+            "latency_ms": self._latency_ewma,
+            "latency_samples": self._latency_samples,
+            "pipeline_latency_ms": self._query_pipeline_latency_ms(),
+            "decode_cpu_percent": self._read_decode_cpu_percent(),
         }
 
     # ── internals ──────────────────────────────────────────────
 
     def _compute_fps(self) -> float:
-        """Average FPS across the rolling 30-sample window."""
-        window = list(self._fps_window)
-        if len(window) < 2:
-            return 0.0
-        span = window[-1] - window[0]
-        if span <= 0:
-            return 0.0
-        return (len(window) - 1) / span
+        """Return the EWMA-smoothed FPS as of the last 1 Hz tick.
+
+        The new-sample callback maintains ``_fps_tick_count`` and the
+        per-tick wall clock; this method folds the count into the EWMA
+        whenever at least ``_FPS_TICK_SECONDS`` have elapsed since the
+        previous tick. Calling order is unimportant — the renderer
+        reads at 1 Hz and the new-sample callback bumps the counter
+        many times per tick on a 30 fps stream.
+        """
+        now = time.monotonic()
+        last = self._fps_tick_at
+        if last is None:
+            # First call after start — seed the tick clock without
+            # emitting a value so a single early-arriving frame doesn't
+            # show as 60 fps.
+            self._fps_tick_at = now
+            return self._fps_ewma
+        elapsed = now - last
+        if elapsed < _FPS_TICK_SECONDS:
+            return self._fps_ewma
+        instant = self._fps_tick_count / elapsed if elapsed > 0 else 0.0
+        if self._fps_ewma <= 0:
+            self._fps_ewma = instant
+        else:
+            self._fps_ewma = (
+                _EWMA_ALPHA * instant + (1.0 - _EWMA_ALPHA) * self._fps_ewma
+            )
+        self._fps_tick_count = 0
+        self._fps_tick_at = now
+        return self._fps_ewma
+
+    @staticmethod
+    def _find_h264parse(pipeline: Any) -> Any | None:
+        """Locate the ``h264parse`` element inside ``pipeline``.
+
+        Iterates the pipeline's bin children — the element is created
+        by ``Gst.parse_launch`` from the unnamed ``! h264parse !`` token
+        in the pipeline string.
+        """
+        try:
+            iterator = pipeline.iterate_elements()
+        except Exception:  # noqa: BLE001
+            return None
+        # ``Iterator`` returns one of (Gst.IteratorResult.OK,
+        # Gst.IteratorResult.DONE, ...) but we only consume the value
+        # so a small loop is enough.
+        while True:
+            try:
+                result = iterator.next()
+            except Exception:  # noqa: BLE001
+                return None
+            # Result is (status, value) on PyGObject 3.x.
+            if not isinstance(result, tuple) or len(result) != 2:
+                return None
+            status, element = result
+            # Status 0 == OK, 2 == DONE; bail on anything else.
+            try:
+                done = int(status) != 0
+            except (TypeError, ValueError):
+                done = True
+            if element is None or done:
+                return None
+            try:
+                factory = element.get_factory()
+                name = factory.get_name() if factory is not None else ""
+            except Exception:  # noqa: BLE001
+                name = ""
+            if name == "h264parse":
+                return element
+
+    def _on_h264_buffer(self, _pad: Any, info: Any, _user: Any) -> int:
+        """Pad-probe callback. Scans the buffer for our SEI marker.
+
+        Runs on the gstreamer streaming thread. Keep it fast — the
+        SEI parser early-exits on the first non-matching NAL header
+        byte, so even a 1080p I-frame with no SEI is parsed in a few
+        microseconds.
+        """
+        gst = self._Gst
+        if gst is None:
+            return 1  # Gst.PadProbeReturn.OK
+        try:
+            buf = info.get_buffer()
+        except Exception:  # noqa: BLE001
+            return 1
+        if buf is None:
+            return 1
+        success, mapinfo = buf.map(gst.MapFlags.READ)
+        if not success:
+            return 1
+        try:
+            stream = bytes(mapinfo.data)
+        except Exception:  # noqa: BLE001
+            buf.unmap(mapinfo)
+            return 1
+        try:
+            encoded_ns = parse_sei_latency_ns(stream)
+        except Exception as exc:  # noqa: BLE001
+            self._logger.debug("local_tap_sei_parse_failed", error=str(exc))
+            encoded_ns = None
+        finally:
+            buf.unmap(mapinfo)
+        if encoded_ns is None:
+            return 1
+        self._record_latency_sample(encoded_ns)
+        return 1
+
+    def _record_latency_sample(self, encoded_ns: int) -> None:
+        """Apply sanity guard + EWMA on a fresh latency sample."""
+        now_ns = time.monotonic_ns()
+        delta_ms = (now_ns - encoded_ns) / 1_000_000.0
+        if delta_ms < _LATENCY_MIN_MS or delta_ms > _LATENCY_MAX_MS:
+            self._logger.debug(
+                "local_tap_latency_rejected",
+                delta_ms=delta_ms,
+            )
+            return
+        if self._latency_ewma is None:
+            self._latency_ewma = delta_ms
+        else:
+            self._latency_ewma = (
+                _EWMA_ALPHA * delta_ms
+                + (1.0 - _EWMA_ALPHA) * self._latency_ewma
+            )
+        self._latency_last_sample_at = time.monotonic()
+        self._latency_samples += 1
+
+    def _query_pipeline_latency_ms(self) -> float | None:
+        """Best-effort gstreamer pipeline latency query.
+
+        Posts a ``Gst.Query.new_latency()`` to the pipeline; if the
+        upstream element can answer, returns the *minimum* latency in
+        milliseconds. Failures (no Gst, no pipeline, query refused)
+        return ``None`` so the renderer can show "—".
+        """
+        gst = self._Gst
+        pipeline = self._pipeline
+        if gst is None or pipeline is None:
+            return None
+        try:
+            query = gst.Query.new_latency()
+            if not pipeline.query(query):
+                return None
+            _live, min_latency_ns, _max = query.parse_latency()
+        except Exception:  # noqa: BLE001
+            return None
+        try:
+            return float(min_latency_ns) / 1_000_000.0
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _read_decode_cpu_percent() -> float | None:
+        """Best-effort current-process CPU-percent reading.
+
+        The gstreamer pipeline runs on a daemon thread inside this
+        Python process, so the agent's own CPU usage is the closest
+        practical proxy for "decode-thread CPU". A more granular
+        per-thread reading would require mining ``/proc/self/task/*``
+        directly, which is more code than the metric merits at this
+        cadence (1 Hz). Returns ``None`` if psutil is missing.
+        """
+        try:
+            import psutil
+
+            return float(psutil.Process(os.getpid()).cpu_percent(interval=0))
+        except Exception:  # noqa: BLE001
+            return None
 
     def _run_loop_thread(self) -> None:
         """Owns the ``GMainLoop`` and bumps the pipeline to PLAYING."""
@@ -514,7 +918,9 @@ class LocalVideoTap:
                 return 0
             self._frame_holder.set(img)
             now = time.monotonic()
-            self._fps_window.append(now)
+            self._fps_tick_count += 1
+            if self._fps_tick_at is None:
+                self._fps_tick_at = now
             self._frames_decoded += 1
             self._last_frame_at = now
             if self._first_frame_at is None:
@@ -601,6 +1007,7 @@ class LocalVideoTap:
 
 
 __all__ = [
+    "ADOS_LATENCY_SEI_UUID",
     "DEFAULT_HEIGHT",
     "DEFAULT_RTSP_URL",
     "DEFAULT_WIDTH",
@@ -608,5 +1015,6 @@ __all__ = [
     "LocalVideoTapUnavailable",
     "build_pipeline_string",
     "gst_plugin_available",
+    "parse_sei_latency_ns",
     "select_decoder",
 ]
