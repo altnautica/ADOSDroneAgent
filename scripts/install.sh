@@ -481,6 +481,7 @@ install_system_deps() {
         python3-jinja2 \
         python3-msgpack \
         python3-pyroute2 \
+        socat \
         libcap-dev \
         libsystemd-dev \
         libyaml-dev \
@@ -1959,7 +1960,7 @@ if is_installed && $DO_UPGRADE && ! $DO_FORCE; then
         ffmpeg v4l-utils avahi-daemon \
         gstreamer1.0-tools gstreamer1.0-rtsp \
         python3-twisted python3-serial python3-jinja2 \
-        python3-msgpack python3-pyroute2; do
+        python3-msgpack python3-pyroute2 socat; do
         if ! dpkg -s "$pkg" &>/dev/null; then
             info "Installing missing system dependency: ${pkg}"
             apt-get install -y -qq "$pkg" 2>/dev/null || true
