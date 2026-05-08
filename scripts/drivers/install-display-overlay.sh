@@ -412,9 +412,9 @@ case "${BOARD_ID}" in
     rock-5c-lite|rock-5c)
         case "${DISPLAY_ID}" in
             waveshare35a)
-                # Pick the activation-mechanism label up front so both
-                # the BSP-DTBO path and the vendored-fallback path tag
-                # /etc/ados/display.conf consistently.
+                # Pick the activation-mechanism label up front so the
+                # vendored-DTBO path tags /etc/ados/display.conf
+                # consistently with the rest of the installer.
                 detect_activation_method() {
                     if [ -f /boot/dtbo/managed.list ] && command -v u-boot-update >/dev/null 2>&1; then
                         echo "u-boot-update"
@@ -424,22 +424,23 @@ case "${BOARD_ID}" in
                         echo "armbianEnv"
                     fi
                 }
-                # Try BSP-shipped DTBO first.
+                # Always compile and install the repo-vendored DTS for
+                # this combo. The BSP-shipped DTBO has wrong pendown-gpio
+                # polarity for the ADS7846 controller — the kernel IRQ
+                # never fires and no touch events reach userspace. The
+                # vendored source at data/overlays/upstream/rk3588-spi4-
+                # m2-cs0-waveshare35.dts pins pendown-gpio = ACTIVE_LOW
+                # + interrupts = EDGE_FALLING which is what the chip
+                # actually does on this carrier.
+                info "Installing vendored DTS for rock-5c-lite + waveshare35a (BSP polarity fix)."
+                compile_and_install_upstream_dtbo "rk3588-spi4-m2-cs0-waveshare35"
                 if activate_overlay_rk3588 "rk3588-spi4-m2-cs0-waveshare35"; then
-                    OVERLAY_SOURCE="upstream"
+                    OVERLAY_SOURCE="upstream-vendored"
                     OVERLAY_REF="rk3588-spi4-m2-cs0-waveshare35"
                     ACTIVATED_VIA="$(detect_activation_method)"
                 else
-                    info "Falling back to vendored upstream source."
-                    compile_and_install_upstream_dtbo "rk3588-spi4-m2-cs0-waveshare35"
-                    if activate_overlay_rk3588 "rk3588-spi4-m2-cs0-waveshare35"; then
-                        OVERLAY_SOURCE="upstream-vendored"
-                        OVERLAY_REF="rk3588-spi4-m2-cs0-waveshare35"
-                        ACTIVATED_VIA="$(detect_activation_method)"
-                    else
-                        error "Could not activate overlay even after vendored install."
-                        exit 3
-                    fi
+                    error "Could not activate vendored overlay."
+                    exit 3
                 fi
                 ;;
             *)
