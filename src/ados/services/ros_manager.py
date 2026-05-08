@@ -52,6 +52,27 @@ class RosManager:
         self._state = RosState.NOT_INITIALIZED
         self._error: str | None = None
         self._container_id: str | None = None
+        # Latches True when a one-shot probe of the configured foxglove port
+        # cannot establish a TCP connection on localhost. Surfaced on the
+        # heartbeat so the GCS can show a clear error instead of waiting.
+        self._foxglove_bind_failed: bool = False
+
+    def foxglove_bind_failed(self) -> bool:
+        """True when the post-start localhost probe of foxglove failed."""
+        return self._foxglove_bind_failed
+
+    def _probe_foxglove_bind(self) -> None:
+        """One-shot localhost TCP probe; latches `_foxglove_bind_failed`."""
+        import socket
+
+        try:
+            port = int(getattr(self._config.ros, "foxglove_port", 8766))
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.settimeout(1.0)
+                err = s.connect_ex(("127.0.0.1", port))
+                self._foxglove_bind_failed = err != 0
+        except OSError:
+            self._foxglove_bind_failed = True
 
     @property
     def state(self) -> RosState:
@@ -280,6 +301,7 @@ class RosManager:
             if await self._is_healthy():
                 self._state = RosState.RUNNING
                 log.info("ROS container is healthy")
+                self._probe_foxglove_bind()
                 return True
             await asyncio.sleep(2)
 
@@ -287,6 +309,7 @@ class RosManager:
         log.warning(self._error)
         # Still consider it running, just warn
         self._state = RosState.RUNNING
+        self._probe_foxglove_bind()
         return True
 
     async def stop(self) -> bool:

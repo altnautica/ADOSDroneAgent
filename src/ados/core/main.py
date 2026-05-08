@@ -523,6 +523,17 @@ class AgentApp:
             "videoRestartAttempts": video_restart_attempts,
         }
 
+        # Foxglove bind status. Defaults to False when no ROS manager is
+        # attached; flips True only after a started ROS container fails the
+        # localhost TCP probe on the configured foxglove port.
+        rm = getattr(self, "_ros_manager", None)
+        try:
+            payload["foxgloveBindFailed"] = (
+                bool(rm.foxglove_bind_failed()) if rm is not None else False
+            )
+        except Exception:
+            payload["foxgloveBindFailed"] = False
+
         remote = self.config.remote_access.cloudflare
         if remote.setup_url:
             payload["setupUrl"] = remote.setup_url
