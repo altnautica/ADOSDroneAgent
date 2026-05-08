@@ -1949,9 +1949,17 @@ if is_installed && $DO_UPGRADE && ! $DO_FORCE; then
     local_ver=$(get_installed_version)
     info "Current version: ${local_ver}"
 
-    # Ensure system deps are present (ffmpeg, v4l-utils may be missing on older installs)
+    # Ensure system deps are present. The upgrade path skips the full
+    # install_system_deps to keep upgrades fast, so we only top up the
+    # packages that earlier installs may have missed. Includes the
+    # wfb-ng runtime Python deps (twisted et al.) so wfb-server can
+    # start the bind protocol on rigs first installed before v0.16.4.
     info "Checking system dependencies..."
-    for pkg in ffmpeg v4l-utils avahi-daemon gstreamer1.0-tools gstreamer1.0-rtsp; do
+    for pkg in \
+        ffmpeg v4l-utils avahi-daemon \
+        gstreamer1.0-tools gstreamer1.0-rtsp \
+        python3-twisted python3-serial python3-jinja2 \
+        python3-msgpack python3-pyroute2; do
         if ! dpkg -s "$pkg" &>/dev/null; then
             info "Installing missing system dependency: ${pkg}"
             apt-get install -y -qq "$pkg" 2>/dev/null || true
