@@ -473,13 +473,33 @@ case "${BOARD_ID}" in
                     error "Pi config.txt not found at /boot/firmware/config.txt or /boot/config.txt."
                     exit 3
                 fi
-                # Sanity: the dtbo must exist. Pi OS Bookworm ships it.
+                # Ensure waveshare35a.dtbo exists. Pi OS Bookworm doesn't
+                # ship this one (it's community-maintained); fetch from
+                # Waveshare's CDN if missing. Idempotent on re-runs.
                 PI_OVERLAYS_DIR="$(dirname "${PI_CONFIG}")/overlays"
                 if [ ! -f "${PI_OVERLAYS_DIR}/waveshare35a.dtbo" ]; then
-                    error "${PI_OVERLAYS_DIR}/waveshare35a.dtbo missing."
-                    error "Run: apt-get install --reinstall raspberrypi-bootloader"
-                    error "or fetch the dtbo from https://files.waveshare.com/wiki/common/Waveshare35a.zip"
-                    exit 3
+                    info "waveshare35a.dtbo missing; fetching from Waveshare."
+                    DEBIAN_FRONTEND=noninteractive apt-get install -y unzip wget >/dev/null 2>&1 || true
+                    WS_TMP="$(mktemp -d)"
+                    if ! wget -q https://files.waveshare.com/wiki/common/Waveshare35a.zip -O "${WS_TMP}/Waveshare35a.zip"; then
+                        rm -rf "${WS_TMP}"
+                        error "Failed to download Waveshare35a.zip from files.waveshare.com."
+                        exit 3
+                    fi
+                    if ! unzip -o "${WS_TMP}/Waveshare35a.zip" -d "${WS_TMP}/extracted" >/dev/null 2>&1; then
+                        rm -rf "${WS_TMP}"
+                        error "Failed to unzip Waveshare35a.zip."
+                        exit 3
+                    fi
+                    DTBO_SRC="$(find "${WS_TMP}/extracted" -name "waveshare35a.dtbo" | head -1)"
+                    if [ -z "${DTBO_SRC}" ] || [ ! -f "${DTBO_SRC}" ]; then
+                        rm -rf "${WS_TMP}"
+                        error "waveshare35a.dtbo not found inside the downloaded archive."
+                        exit 3
+                    fi
+                    install -m 0755 "${DTBO_SRC}" "${PI_OVERLAYS_DIR}/waveshare35a.dtbo"
+                    rm -rf "${WS_TMP}"
+                    info "Installed ${PI_OVERLAYS_DIR}/waveshare35a.dtbo from Waveshare upstream."
                 fi
                 info "Editing ${PI_CONFIG} for Waveshare 3.5 LCD."
                 # Idempotently ensure dtparam=spi=on. Match a commented or
