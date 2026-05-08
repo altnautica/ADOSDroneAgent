@@ -15,6 +15,7 @@ from ados.setup.models import (
     ProfileSuggestion,
     SetupActionResult,
     UiApplyRequest,
+    WfbApplyRequest,
 )
 
 
@@ -255,4 +256,130 @@ def apply_ui(
         message = f"UI updated ({', '.join(changed_fields)})."
     else:
         message = "No UI changes detected."
+    return SetupActionResult(ok=True, message=message, data=data)
+
+
+def apply_wfb(
+    runtime: Any,
+    request: WfbApplyRequest | None,
+) -> SetupActionResult:
+    """Persist a WFB radio config slice onto ``runtime.config.video.wfb``.
+
+    ``channel`` and ``tx_power_dbm`` mirror the existing dedicated
+    routes (``POST /api/wfb/channel``, ``PUT /api/wfb/tx-power``).
+    ``mcs_index`` and ``topology`` have no dedicated route; this
+    setter is the only path that updates them. Reboot-required flips
+    are surfaced through ``data["restart_required"]`` so the caller
+    can tally pending reboots.
+
+    Returns ``ok=True`` on a no-op so the batch-apply route can
+    iterate sections without special-casing absent payloads.
+    """
+    if request is None:
+        return SetupActionResult(
+            ok=True,
+            message="No WFB changes requested.",
+            data={"changed": False},
+        )
+
+    config = runtime.config
+    video = getattr(config, "video", None)
+    wfb = getattr(video, "wfb", None) if video is not None else None
+    if wfb is None:
+        return SetupActionResult(
+            ok=False,
+            message="WFB configuration is not available on this agent.",
+        )
+
+    changed_fields: list[str] = []
+    restart_required = False
+
+    if request.channel is not None:
+        new_channel = int(request.channel)
+        # Validate against the standard list to refuse a typo before it
+        # reaches the wfb manager. Imported lazily so the setup module
+        # does not pull the wfb service tree at import time.
+        try:
+            from ados.services.wfb.channel import STANDARD_CHANNELS, get_channel
+
+            if get_channel(new_channel) is None:
+                valid = [c.channel_number for c in STANDARD_CHANNELS]
+                return SetupActionResult(
+                    ok=False,
+                    message=(
+                        f"channel must be one of {valid}, got {new_channel}"
+                    ),
+                )
+        except ImportError:
+            pass
+        if int(getattr(wfb, "channel", 0)) != new_channel:
+            wfb.channel = new_channel
+            changed_fields.append("channel")
+            restart_required = True
+
+    if request.tx_power_dbm is not None:
+        requested = int(request.tx_power_dbm)
+        ceiling = int(getattr(wfb, "tx_power_max_dbm", 15))
+        if requested < 1:
+            return SetupActionResult(
+                ok=False,
+                message=f"tx_power_dbm below floor (min 1), got {requested}",
+            )
+        if requested > ceiling:
+            return SetupActionResult(
+                ok=False,
+                message=(
+                    f"tx_power_dbm above ceiling (max {ceiling}), got {requested}"
+                ),
+            )
+        if int(getattr(wfb, "tx_power_dbm", 0)) != requested:
+            wfb.tx_power_dbm = requested
+            changed_fields.append("tx_power_dbm")
+
+    if request.mcs_index is not None:
+        new_mcs = int(request.mcs_index)
+        # MCS index range is 0..7 for the modulation table the wfb
+        # transport understands. Refuse anything outside that.
+        if new_mcs < 0 or new_mcs > 7:
+            return SetupActionResult(
+                ok=False,
+                message=f"mcs_index must be 0..7, got {new_mcs}",
+            )
+        if int(getattr(wfb, "mcs_index", 0)) != new_mcs:
+            wfb.mcs_index = new_mcs
+            changed_fields.append("mcs_index")
+            restart_required = True
+
+    if request.topology is not None:
+        new_topo = str(request.topology)
+        if new_topo not in ("host_vbus", "powered_hub", "external_5v"):
+            return SetupActionResult(
+                ok=False,
+                message=(
+                    "topology must be one of host_vbus / powered_hub / "
+                    f"external_5v, got {new_topo}"
+                ),
+            )
+        if str(getattr(wfb, "topology", "")) != new_topo:
+            wfb.topology = new_topo  # type: ignore[assignment]
+            changed_fields.append("topology")
+            restart_required = True
+
+    saver = getattr(getattr(runtime, "raw_runtime", None), "save_config", None)
+    if changed_fields and callable(saver):
+        try:
+            saver()
+        except Exception:
+            pass
+
+    data: dict[str, object] = {
+        "changed": bool(changed_fields),
+        "fields": changed_fields,
+    }
+    if restart_required:
+        data["restart_required"] = True
+    if changed_fields:
+        message = f"WFB updated ({', '.join(changed_fields)})."
+    else:
+        message = "No WFB changes detected."
     return SetupActionResult(ok=True, message=message, data=data)

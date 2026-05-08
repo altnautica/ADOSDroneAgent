@@ -151,6 +151,23 @@ class NetworkApplyRequest(BaseModel):
     hotspot_enabled: bool | None = None
 
 
+class WfbApplyRequest(BaseModel):
+    """WFB section of the batch-apply payload.
+
+    All fields optional. ``channel`` and ``tx_power_dbm`` mirror the
+    existing dedicated routes; ``mcs_index`` and ``topology`` are
+    persisted directly through this section because they have no
+    other dedicated route. ``mcs_index`` and ``topology`` flips
+    require a wfb-tx restart and are surfaced as reboot-required to
+    the operator.
+    """
+
+    channel: int | None = None
+    tx_power_dbm: int | None = None
+    mcs_index: int | None = None
+    topology: Literal["host_vbus", "powered_hub", "external_5v"] | None = None
+
+
 class AdvancedApplyRequest(BaseModel):
     """Advanced section of the batch-apply payload.
 

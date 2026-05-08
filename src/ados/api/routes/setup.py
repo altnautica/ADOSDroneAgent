@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import shutil
 from contextlib import suppress
+from pathlib import Path
 from typing import Literal
 
 import httpx
@@ -33,9 +34,10 @@ from ados.setup.models import (
     SetupActionResult,
     SetupStatus,
     UiApplyRequest,
+    WfbApplyRequest,
 )
 from ados.setup.network import apply_network
-from ados.setup.profile import apply_profile, apply_ui
+from ados.setup.profile import apply_profile, apply_ui, apply_wfb
 from ados.setup.service import (
     apply_cloud_choice,
     build_setup_status,
@@ -106,6 +108,7 @@ class ApplyRequest(BaseModel):
     cloud: CloudChoiceRequest | None = None
     network: NetworkApplyRequest | None = None
     ui: UiApplyRequest | None = None
+    wfb: WfbApplyRequest | None = None
     display: DisplayInstallRequest | None = None
     advanced: AdvancedApplyRequest | None = None
 
@@ -417,6 +420,7 @@ async def batch_apply_settings(request: ApplyRequest) -> ApplyResponse:
         ("network", request.network),
         ("cloud", request.cloud),
         ("ui", request.ui),
+        ("wfb", request.wfb),
         ("display", request.display),
         ("advanced", request.advanced),
     ]
@@ -476,6 +480,8 @@ async def _apply_single_section(
         )
     if name == "ui":
         return apply_ui(runtime, payload)
+    if name == "wfb":
+        return apply_wfb(runtime, payload)
     if name == "display":
         if not payload.display_id:
             return SetupActionResult(
@@ -557,6 +563,14 @@ def _capture_section_snapshot(runtime, name: str) -> dict[str, object]:
         elif name == "ui":
             ui = getattr(config, "ui", None)
             snap["theme"] = str(getattr(ui, "theme", "") or "")
+        elif name == "wfb":
+            video = getattr(config, "video", None)
+            wfb = getattr(video, "wfb", None) if video is not None else None
+            if wfb is not None:
+                snap["channel"] = int(getattr(wfb, "channel", 0) or 0)
+                snap["tx_power_dbm"] = int(getattr(wfb, "tx_power_dbm", 0) or 0)
+                snap["mcs_index"] = int(getattr(wfb, "mcs_index", 0) or 0)
+                snap["topology"] = str(getattr(wfb, "topology", "") or "")
         elif name == "advanced":
             agent = getattr(config, "agent", None)
             snap["log_level"] = str(getattr(agent, "log_level", "") or "")
@@ -586,6 +600,8 @@ def _rollback_completed(
                 _restore_network(runtime, snap)
             elif name == "ui":
                 _restore_ui(runtime, snap)
+            elif name == "wfb":
+                _restore_wfb(runtime, snap)
             elif name == "advanced":
                 _restore_advanced(runtime, snap)
             else:
@@ -668,6 +684,33 @@ def _restore_advanced(runtime, snap: dict[str, object]) -> None:
     agent = getattr(config, "agent", None)
     if agent is not None and hasattr(agent, "log_level") and "log_level" in snap:
         agent.log_level = str(snap.get("log_level") or "")
+
+
+def _restore_wfb(runtime, snap: dict[str, object]) -> None:
+    config = runtime.config
+    video = getattr(config, "video", None)
+    wfb = getattr(video, "wfb", None) if video is not None else None
+    if wfb is None:
+        return
+    if "channel" in snap:
+        try:
+            wfb.channel = int(snap.get("channel") or 0)
+        except (TypeError, ValueError):
+            pass
+    if "tx_power_dbm" in snap:
+        try:
+            wfb.tx_power_dbm = int(snap.get("tx_power_dbm") or 0)
+        except (TypeError, ValueError):
+            pass
+    if "mcs_index" in snap:
+        try:
+            wfb.mcs_index = int(snap.get("mcs_index") or 0)
+        except (TypeError, ValueError):
+            pass
+    if "topology" in snap:
+        prior = str(snap.get("topology") or "")
+        if prior in ("host_vbus", "powered_hub", "external_5v"):
+            wfb.topology = prior  # type: ignore[assignment]
 
 
 @router.post("/finish", response_model=SetupStatus)
@@ -899,6 +942,38 @@ async def stream_cloudflare_logs(websocket: WebSocket) -> None:
         log.warning("cloudflare_log_ws_error", error=str(exc))
     finally:
         await tail.unsubscribe(queue)
+
+
+@router.post("/display/calibrate/start", response_model=SetupActionResult)
+async def start_display_calibration() -> SetupActionResult:
+    """Trigger an LCD touch-calibration cycle on next agent restart.
+
+    Writes a one-shot flag at ``/run/ados/recalibrate.flag`` that the
+    OLED service consumes during framebuffer probe. The actual wizard
+    UI runs there; the route just creates the marker so a bench
+    operator can re-run calibration without an SSH session.
+
+    The agent does not auto-restart on this call. The next time the
+    OLED service starts (operator-initiated reboot or a service
+    restart) it picks the marker up, runs the wizard, and unlinks the
+    file on success.
+    """
+    flag = Path("/run/ados/recalibrate.flag")
+    try:
+        flag.parent.mkdir(parents=True, exist_ok=True)
+        flag.write_text("1\n")
+    except OSError as exc:
+        return SetupActionResult(
+            ok=False,
+            message=f"Could not arm calibration flag: {exc}",
+        )
+    return SetupActionResult(
+        ok=True,
+        message=(
+            "Touch calibration scheduled. Restart the agent to launch the wizard."
+        ),
+        data={"flag_path": str(flag)},
+    )
 
 
 @router.post("/reset", response_model=SetupStatus)

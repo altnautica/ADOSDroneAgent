@@ -33,7 +33,11 @@ if TYPE_CHECKING:  # pragma: no cover
 
     from ados.services.ui.renderers.framebuffer import FrameBufferRenderer
     from ados.services.ui.theme import Palette
-    from ados.services.ui.touch.events import TouchGesture
+    from ados.services.ui.touch.events import (
+        TouchEventBus,
+        TouchGesture,
+        TouchMoveBus,
+    )
 
 
 @dataclass(frozen=True)
@@ -83,6 +87,13 @@ class PageContext:
     framebuffer: FrameBufferRenderer | None
     navigator: PageNavigator
     logger: structlog.BoundLogger
+    # Touch buses are surfaced here so pages that need live drag
+    # tracking (settings list, slider thumb drag, enum picker scroll,
+    # mesh peer list) can subscribe through the context without
+    # reaching into private bridge attributes. Both default to None
+    # so unit tests don't have to construct a bridge to render a page.
+    touch_move_bus: TouchMoveBus | None = None
+    touch_event_bus: TouchEventBus | None = None
 
 
 class Page(Protocol):

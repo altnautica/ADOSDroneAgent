@@ -417,16 +417,7 @@ class RadioLinkDetailPage:
         live thumb tracking, which means listening on the
         higher-frequency move bus.
         """
-        bridge = getattr(ctx.framebuffer, "_touch_bridge", None) if ctx.framebuffer else None
-        if bridge is None:
-            # The OLED service stores the bridge on itself, not on the
-            # framebuffer; reach back through the navigator's owner if
-            # one is available. The simplest portable answer is to walk
-            # the logger's bound app reference, but for testability we
-            # pull the move bus off ctx.framebuffer when present and
-            # otherwise no-op.
-            return
-        move_bus = getattr(bridge, "move_bus", None)
+        move_bus = ctx.touch_move_bus
         if move_bus is None:
             return
         try:

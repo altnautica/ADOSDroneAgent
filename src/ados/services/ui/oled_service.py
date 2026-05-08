@@ -50,6 +50,7 @@ import asyncio
 import signal
 import sys
 import time
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -572,7 +573,27 @@ class OledService:
             return
         navigator = PageNavigator()
         navigator.register(DashboardPage())
+        # Settings page lives at the same registry; the tab-bar route
+        # for "settings" resolves to it. Imported locally to avoid
+        # cycles with the page __init__ during early startup.
+        from ados.services.ui.pages.settings import SettingsPage
+
+        navigator.register(SettingsPage())
         self._page_navigator = navigator
+        # Surface the bridge's touch buses on the context so any page
+        # that needs live drag tracking (settings list, slider modal,
+        # enum picker scroll) can subscribe without reaching into
+        # private bridge attributes.
+        move_bus = (
+            getattr(self._touch_bridge, "move_bus", None)
+            if self._touch_bridge is not None
+            else None
+        )
+        gesture_bus = (
+            getattr(self._touch_bridge, "gesture_bus", None)
+            if self._touch_bridge is not None
+            else None
+        )
         self._page_context = PageContext(
             state=self._state,
             palette=current_palette(),
@@ -581,16 +602,36 @@ class OledService:
             framebuffer=self._fb_renderer,
             navigator=navigator,
             logger=log,
+            touch_move_bus=move_bus,
+            touch_event_bus=gesture_bus,
         )
-        # If a touch chip exists and no calibration file (or skip
-        # marker) is present, launch the wizard before landing on the
-        # dashboard. The wizard takes over the full panel until it
-        # completes or the operator skips.
-        if self._touch_present() and load_calib(TOUCH_CALIB_PATH) is None:
+        # The settings page can arm a one-shot recalibrate flag at
+        # ``/run/ados/recalibrate.flag``. When present, force the
+        # wizard regardless of whether a calibration file is already
+        # on disk; unlink the flag immediately so a single press only
+        # produces one wizard run.
+        recalibrate_flag = Path("/run/ados/recalibrate.flag")
+        force_recalibrate = False
+        if recalibrate_flag.exists():
+            force_recalibrate = True
+            try:
+                recalibrate_flag.unlink()
+            except OSError:
+                pass
+        # If a touch chip exists and (a) no calibration file is present,
+        # or (b) the operator just armed a recalibrate, launch the
+        # wizard before landing on the dashboard. The wizard takes over
+        # the full panel until it completes or the operator skips.
+        if self._touch_present() and (
+            force_recalibrate or load_calib(TOUCH_CALIB_PATH) is None
+        ):
             self._calibration_wizard = CalibrationWizard()
             self._calibration_wizard.start()
             self._mode = "calibrate"
-            log.info("lcd_calibration_wizard_started")
+            log.info(
+                "lcd_calibration_wizard_started",
+                forced=force_recalibrate,
+            )
         else:
             self._mode = "lcd_page"
             log.info(
@@ -600,7 +641,6 @@ class OledService:
 
     def _read_hostname(self) -> str:
         try:
-            from pathlib import Path
             return Path("/etc/hostname").read_text().strip() or "groundnode"
         except OSError:
             return "groundnode"
