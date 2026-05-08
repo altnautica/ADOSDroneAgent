@@ -476,6 +476,11 @@ install_system_deps() {
         python3-pip \
         python3-dev \
         python3-setuptools \
+        python3-twisted \
+        python3-serial \
+        python3-jinja2 \
+        python3-msgpack \
+        python3-pyroute2 \
         libcap-dev \
         libsystemd-dev \
         libyaml-dev \
