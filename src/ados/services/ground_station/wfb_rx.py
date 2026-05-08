@@ -90,9 +90,17 @@ class WfbRxManager:
         return self._monitor
 
     def detect_adapter(self) -> str | None:
-        """Find the first WFB-ng compatible adapter in monitor-capable state.
+        """Find a WFB-ng compatible adapter that can actually go monitor.
 
-        Returns interface name, or None if no compatible adapter is present.
+        Returns interface name, or None if no compatible adapter accepts
+        the monitor-mode set. Iterates through every compatible adapter
+        and tries to set monitor on each — handles the case where the
+        agent's chipset-fingerprint scan mislabels a non-RTL adapter
+        (e.g., Rock 5C internal AIC8800D80) as WFB-compatible. The
+        false-positive will fail `iw set monitor` (different driver
+        doesn't support that mode) and we'll fall through to the real
+        RTL.
+
         Thin wrapper over the shared wfb.adapter helper so callers outside
         this module (setup webapp, API, tests) have a single entry point.
         """
@@ -102,13 +110,30 @@ class WfbRxManager:
         compatible = [a for a in adapters if a.is_wfb_compatible and a.supports_monitor]
         if not compatible:
             return None
-        chosen = compatible[0]
-        log.info(
-            "ground_wfb_adapter_selected",
-            interface=chosen.interface_name,
-            chipset=chosen.chipset,
-        )
-        return chosen.interface_name
+        # Try each compatible adapter; first one that accepts monitor-mode
+        # set wins. Adapters that fail are skipped, NOT retried, so the
+        # outer manager loop's backoff timer doesn't spin on a dead chip.
+        for adapter in compatible:
+            iface = adapter.interface_name
+            log.info(
+                "ground_wfb_adapter_candidate",
+                interface=iface,
+                chipset=adapter.chipset,
+            )
+            if set_monitor_mode(iface):
+                log.info(
+                    "ground_wfb_adapter_selected",
+                    interface=iface,
+                    chipset=adapter.chipset,
+                )
+                return iface
+            log.warning(
+                "ground_wfb_adapter_monitor_rejected",
+                interface=iface,
+                chipset=adapter.chipset,
+            )
+        log.error("ground_wfb_no_usable_adapter", candidates=len(compatible))
+        return None
 
     def set_monitor_mode(self, interface: str) -> bool:
         """Set the interface to monitor mode. Thin re-export for API callers."""
@@ -338,12 +363,10 @@ class WfbRxManager:
 
             self._interface = interface
 
-            if not self.set_monitor_mode(interface):
-                log.error("ground_monitor_mode_failed", interface=interface)
-                self._state = LinkState.DISCONNECTED
-                await asyncio.sleep(backoff)
-                backoff = min(backoff * 2, 30.0)
-                continue
+            # Monitor mode was already set by detect_adapter() above as
+            # part of its candidate-iteration. Skipping the duplicate
+            # call here avoids re-running iw on an interface that's
+            # already in monitor mode.
 
             # Key existence already enforced at top of loop. If the key
             # disappeared between then and now (unpair raced with us)
