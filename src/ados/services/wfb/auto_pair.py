@@ -29,11 +29,11 @@ log = get_logger("wfb.auto_pair")
 # and udev-rename, and lets ados-cloud get its initial heartbeat in.
 START_DELAY_S = 15.0
 
-# Backoff between retry attempts. Long enough that an operator who
-# wants to interrupt has breathing room to unset auto_pair_enabled
-# from the LCD or webapp, short enough that pairing is fast once the
-# peer becomes reachable on the radio.
-RETRY_BACKOFF_S = 30.0
+# Backoff between retry attempts. Each attempt stops + restarts the
+# normal wfb unit briefly. 60s is gentle enough that we don't thrash
+# the wfb subprocess; short enough that pairing is fast once the peer
+# becomes reachable on the radio.
+RETRY_BACKOFF_S = 60.0
 
 
 class AutoPairSupervisor:

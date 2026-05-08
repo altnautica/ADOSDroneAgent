@@ -231,13 +231,30 @@ class BindOrchestrator:
         peer_device_id: str | None,
     ) -> None:
         """End-to-end orchestration. Stages mirror BindState transitions."""
-        # Pre-flight: upstream artifacts must exist.
+        # Pre-flight: every external dep the bind protocol needs must
+        # be present BEFORE we touch the radio. A missing socat / shell
+        # script / bind artifact would otherwise surface ~6 retries
+        # later as a generic 'unexpected: FileNotFoundError' from deep
+        # inside an asyncio.create_subprocess_exec call. Failing fast
+        # with a structured BindError is faster to debug.
         for path in (UPSTREAM_BIND_KEY, UPSTREAM_BIND_YAML):
             if not path.is_file():
                 raise BindError(
                     f"upstream wfb-ng artifact missing: {path}. Reinstall via "
                     "install.sh to provision /etc/bind.key and /etc/bind.yaml."
                 )
+        for script in (WFB_BIND_SERVER_SH, WFB_BIND_CLIENT_SH):
+            if not Path(script).is_file():
+                raise BindError(
+                    f"upstream wfb-ng helper missing: {script}. wfb-ng "
+                    "package must be installed via install.sh."
+                )
+        if shutil.which("socat") is None:
+            raise BindError(
+                "socat binary not found on PATH. Install via "
+                "`apt install socat` or rerun install.sh which now "
+                "includes socat in its deps."
+            )
 
         normal_unit = (
             ADOS_WFB_DRONE_UNIT if session.role == "drone" else ADOS_WFB_GS_UNIT
@@ -249,16 +266,20 @@ class BindOrchestrator:
             DRONE_BIND_IFACE if session.role == "drone" else GS_BIND_IFACE
         )
 
-        # Stage 1: Stop the normal wfb unit. Best-effort — if it was
-        # already inactive (e.g., agent just booted unpaired), no-op.
-        _systemctl("stop", normal_unit)
-
-        # Stage 2: GS-only — generate the fresh keypair BEFORE opening
-        # the tunnel so we don't burn bind-window time on it. The
-        # upstream wfb_bind_client.sh expects /etc/gs.key + /etc/drone.key
-        # to already exist.
+        # Stage 1: GS-only — generate the fresh keypair BEFORE touching
+        # the wfb units. Cheap operation; if it fails (e.g., wfb_keygen
+        # absent), the normal wfb unit stays running and the only
+        # disruption is a logged failure. Done here, BEFORE the
+        # _systemctl("stop"), so a wfb_keygen failure doesn't leave the
+        # rig with no wfb service running.
         if session.role == "gs":
             await self._generate_keypair_or_raise()
+
+        # Stage 2: Stop the normal wfb unit so it releases the radio
+        # adapter for the bind profile. After this point any failure
+        # path MUST restart the normal unit; the try/finally in
+        # start_local_bind ensures _cleanup runs.
+        _systemctl("stop", normal_unit)
 
         session.state = BindState.OPENING_TUNNEL
 
