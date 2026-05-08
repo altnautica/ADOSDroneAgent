@@ -574,7 +574,21 @@ case "${DISPLAY_ID}" in
         CONTROLLER="ILI9486"
         TOUCH_CHIP="ADS7846"
         RESOLUTION="480x320"
-        ROTATION=90
+        # On Rockchip + Allwinner the SPI LCD comes up portrait-native
+        # (320x480) and we rotate the canvas to landscape in PIL via
+        # framebuffer.present(). On Raspberry Pi the waveshare35a.dtbo
+        # rotates kernel-side so the fb is already landscape (480x320);
+        # PIL must NOT rotate again or it clips the corners (verified
+        # via /sys/class/graphics/fb0/virtual_size = 480,320 on rpi4b
+        # at v0.18.12).
+        case "${BOARD_ID}" in
+            rpi4b|rpi5|pi-zero-2w|raspberrypi)
+                ROTATION=0
+                ;;
+            *)
+                ROTATION=90
+                ;;
+        esac
         HAS_TOUCH="true"
         FB_PATH="/dev/fb1"
         FB_NAME="fb_ili9486"
