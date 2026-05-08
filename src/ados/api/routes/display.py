@@ -35,8 +35,6 @@ from __future__ import annotations
 
 import io
 import json
-import os
-import tempfile
 import threading
 import time
 from pathlib import Path
@@ -46,6 +44,7 @@ from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
+from ados.core.atomic import atomic_write_json
 from ados.core.logging import get_logger
 from ados.core.paths import (
     DISPLAY_CONF_PATH,
@@ -146,27 +145,6 @@ def _read_lcd_state() -> dict[str, Any]:
             ],
         }
     return {"active_page": "dashboard", "modal_stack": []}
-
-
-def _atomic_write_json(path: Path, blob: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(
-        prefix=path.name + ".",
-        suffix=".tmp",
-        dir=str(path.parent),
-    )
-    try:
-        with os.fdopen(fd, "w") as fh:
-            json.dump(blob, fh, separators=(",", ":"))
-            fh.flush()
-            os.fsync(fh.fileno())
-        os.replace(tmp, path)
-    except OSError:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
 
 
 def _read_framebuffer_image(conf: dict[str, str]) -> Any | None:
@@ -449,7 +427,7 @@ async def post_page(body: PageSetBody) -> dict[str, Any]:
         )
     blob = {"page": page_id, "requested_at_ms": int(time.time() * 1000)}
     try:
-        _atomic_write_json(LCD_PAGE_REQUEST_PATH, blob)
+        atomic_write_json(LCD_PAGE_REQUEST_PATH, blob)
     except OSError as exc:
         log.warning("lcd_page_request_write_failed", error=str(exc))
         raise HTTPException(
