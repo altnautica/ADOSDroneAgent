@@ -13,14 +13,13 @@ the ground-station profile, so every agent exposes this router.
 
 from __future__ import annotations
 
-import json
-import os
 from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
+from ados.core.atomic import atomic_write_json
 from ados.core.logging import get_logger
 from ados.core.paths import PERIPHERALS_DIR
 from ados.services.peripherals.registry import get_peripheral_registry
@@ -47,20 +46,6 @@ def _config_path(peripheral_id: str) -> Path:
     """
     safe = peripheral_id.replace("/", "_").replace("..", "_")
     return _CONFIG_DIR / f"{safe}.config.json"
-
-
-def _atomic_write_json(path: Path, payload: dict) -> None:
-    """Write JSON to ``path`` via a sibling temp file + rename."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    fd = os.open(str(tmp), os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o644)
-    try:
-        os.write(fd, json.dumps(payload, indent=2, sort_keys=True).encode("utf-8"))
-        os.fsync(fd)
-    finally:
-        os.close(fd)
-    os.chmod(tmp, 0o644)
-    os.rename(tmp, path)
 
 
 @router.get("")
@@ -139,7 +124,7 @@ async def put_peripheral_config(
 
     path = _config_path(peripheral_id)
     try:
-        _atomic_write_json(path, body)
+        atomic_write_json(path, body, mode=0o644, sort_keys=True)
     except OSError as exc:
         log.error(
             "peripheral_config_write_failed",
