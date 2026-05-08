@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 from pathlib import Path
@@ -13,6 +14,7 @@ from pydantic import BaseModel, Field
 
 from ados.api.deps import get_agent_app
 from ados.core.paths import CONFIG_YAML
+from ados.services.wfb.auto_pair import FAILOVER_STATE_PATH
 from ados.services.wfb.channel import STANDARD_CHANNELS, get_channel
 
 router = APIRouter()
@@ -439,3 +441,25 @@ async def put_wfb_pair_auto_pair(request: AutoPairToggleRequest) -> dict[str, An
         wfb_cfg.auto_pair_enabled = bool(result.get("auto_pair_enabled", False))
 
     return result
+
+
+@router.get("/wfb/pair/failover-status")
+async def get_failover_status() -> dict[str, str]:
+    """Return the current local-bind to cloud-relay failover state.
+
+    Reads the sidecar at ``/run/ados/wfb_failover.json`` written by the
+    auto_pair supervisor in the ados-cloud process. Default is ``local``
+    when the sidecar is missing or unreadable, which matches the
+    supervisor's startup state.
+    """
+    path = Path(str(FAILOVER_STATE_PATH))
+    if not path.exists():
+        return {"failover_state": "local"}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {"failover_state": "local"}
+    state = data.get("state", "local") if isinstance(data, dict) else "local"
+    if state not in {"local", "cloud_relay", "failed"}:
+        state = "local"
+    return {"failover_state": state}

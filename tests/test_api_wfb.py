@@ -226,3 +226,79 @@ def test_wfb_set_tx_power_apply_failure(agent_app):
     assert resp.status_code == 500
     detail = resp.json()["detail"]
     assert detail["error"] == "apply_failed"
+
+
+# ---------------------------------------------------------------------
+# Pair failover-status sidecar
+# ---------------------------------------------------------------------
+
+
+def test_failover_status_missing_sidecar_defaults_to_local(
+    client, tmp_path, monkeypatch,
+):
+    """No sidecar file => failover_state defaults to ``local``."""
+    monkeypatch.setattr(
+        "ados.api.routes.wfb.FAILOVER_STATE_PATH",
+        tmp_path / "missing.json",
+    )
+
+    resp = client.get("/api/wfb/pair/failover-status")
+    assert resp.status_code == 200
+    assert resp.json() == {"failover_state": "local"}
+
+
+def test_failover_status_local(client, tmp_path, monkeypatch):
+    """Sidecar with ``local`` state echoes through unchanged."""
+    sidecar = tmp_path / "wfb_failover.json"
+    sidecar.write_text('{"state": "local"}', encoding="utf-8")
+    monkeypatch.setattr("ados.api.routes.wfb.FAILOVER_STATE_PATH", sidecar)
+
+    resp = client.get("/api/wfb/pair/failover-status")
+    assert resp.status_code == 200
+    assert resp.json() == {"failover_state": "local"}
+
+
+def test_failover_status_cloud_relay(client, tmp_path, monkeypatch):
+    """Sidecar with ``cloud_relay`` state echoes through unchanged."""
+    sidecar = tmp_path / "wfb_failover.json"
+    sidecar.write_text('{"state": "cloud_relay"}', encoding="utf-8")
+    monkeypatch.setattr("ados.api.routes.wfb.FAILOVER_STATE_PATH", sidecar)
+
+    resp = client.get("/api/wfb/pair/failover-status")
+    assert resp.status_code == 200
+    assert resp.json() == {"failover_state": "cloud_relay"}
+
+
+def test_failover_status_failed(client, tmp_path, monkeypatch):
+    """Sidecar with ``failed`` state echoes through unchanged."""
+    sidecar = tmp_path / "wfb_failover.json"
+    sidecar.write_text('{"state": "failed"}', encoding="utf-8")
+    monkeypatch.setattr("ados.api.routes.wfb.FAILOVER_STATE_PATH", sidecar)
+
+    resp = client.get("/api/wfb/pair/failover-status")
+    assert resp.status_code == 200
+    assert resp.json() == {"failover_state": "failed"}
+
+
+def test_failover_status_unknown_value_falls_back_to_local(
+    client, tmp_path, monkeypatch,
+):
+    """An unrecognized state defends with ``local`` rather than echoing."""
+    sidecar = tmp_path / "wfb_failover.json"
+    sidecar.write_text('{"state": "weird"}', encoding="utf-8")
+    monkeypatch.setattr("ados.api.routes.wfb.FAILOVER_STATE_PATH", sidecar)
+
+    resp = client.get("/api/wfb/pair/failover-status")
+    assert resp.status_code == 200
+    assert resp.json() == {"failover_state": "local"}
+
+
+def test_failover_status_corrupt_json(client, tmp_path, monkeypatch):
+    """A non-JSON file returns ``local`` instead of bubbling up an error."""
+    sidecar = tmp_path / "wfb_failover.json"
+    sidecar.write_text("not json {{{", encoding="utf-8")
+    monkeypatch.setattr("ados.api.routes.wfb.FAILOVER_STATE_PATH", sidecar)
+
+    resp = client.get("/api/wfb/pair/failover-status")
+    assert resp.status_code == 200
+    assert resp.json() == {"failover_state": "local"}
