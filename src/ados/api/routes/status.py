@@ -231,23 +231,35 @@ async def get_full_status(request: Request):
         pass
 
     # --- Video (same logic as /api/video with mediamtx probe) ---
-    from ados.api.routes.video import _probe_mediamtx
+    from ados.api.routes.video import _empty_recording_block, _probe_mediamtx, _recording_block
 
-    video = {"state": "not_initialized", "whep_url": None}
+    video: dict = {"state": "not_initialized", "whep_url": None, **_empty_recording_block()}
     pipeline = app.video_pipeline()
     if pipeline is not None:
         vid_status = pipeline.get_status()
         if vid_status.get("mediamtx", {}).get("running"):
             host = request.headers.get("host", "localhost").split(":")[0]
             webrtc_port = vid_status["mediamtx"].get("webrtc_port", 8889)
-            video = {"state": "running", "whep_url": f"http://{host}:{webrtc_port}/main/whep"}
+            video = {
+                "state": "running",
+                "whep_url": f"http://{host}:{webrtc_port}/main/whep",
+                **_recording_block(pipeline),
+            }
         else:
-            video = {"state": vid_status.get("state", "stopped"), "whep_url": None}
+            video = {
+                "state": vid_status.get("state", "stopped"),
+                "whep_url": None,
+                **_recording_block(pipeline),
+            }
     else:
         mtx = await _probe_mediamtx()
         if mtx and mtx.get("ready"):
             host = request.headers.get("host", "localhost").split(":")[0]
-            video = {"state": "running", "whep_url": f"http://{host}:8889/main/whep"}
+            video = {
+                "state": "running",
+                "whep_url": f"http://{host}:8889/main/whep",
+                **_empty_recording_block(),
+            }
 
     # --- Telemetry snapshot ---
     telemetry = app.vehicle_state_dict()

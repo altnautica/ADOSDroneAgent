@@ -51,6 +51,11 @@ class VideoRecorder:
         self._current_path: str = ""
         self._recording = False
         self._start_time: float = 0.0
+        # Wall-clock ISO timestamp captured when start_recording succeeds.
+        # Exposed alongside the monotonic _start_time so API responses can
+        # report when the active capture began without leaking monotonic
+        # clock semantics to clients.
+        self._started_at_iso: str = ""
         self._storage_task: asyncio.Task | None = None
 
     @property
@@ -58,23 +63,55 @@ class VideoRecorder:
         return self._recording
 
     @property
+    def is_recording(self) -> bool:
+        """Alias for ``recording``. Matches the ground-station recorder API."""
+        return self._recording
+
+    @property
     def current_path(self) -> str:
         return self._current_path
+
+    @property
+    def current_filename(self) -> str | None:
+        """Just the basename of the active recording, or None when idle."""
+        if not self._current_path:
+            return None
+        return Path(self._current_path).name
+
+    @property
+    def started_at(self) -> str | None:
+        """ISO 8601 UTC start timestamp, or None when idle."""
+        return self._started_at_iso or None
 
     def _ensure_dir(self) -> None:
         """Create the recording directory if it does not exist."""
         self._dir.mkdir(parents=True, exist_ok=True)
 
-    def _generate_filename(self) -> str:
-        """Generate a timestamped filename for a new recording."""
+    def _generate_filename(self, suffix: str | None = None) -> str:
+        """Generate a timestamped filename for a new recording.
+
+        ``suffix`` is appended before the extension when supplied so a
+        camera-switch rotation does not collide with the previous file
+        when both starts land in the same wall-clock second.
+        """
         ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        if suffix:
+            safe = "".join(c for c in suffix if c.isalnum() or c in ("-", "_"))[:32]
+            if safe:
+                return f"recording_{ts}_{safe}.mp4"
         return f"recording_{ts}.mp4"
 
-    async def start_recording(self, source: str = "-") -> str:
+    async def start_recording(
+        self, source: str = "-", *, filename_suffix: str | None = None
+    ) -> str:
         """Start recording from a source into an MP4 file.
 
         Args:
             source: Input source for ffmpeg (pipe, device, or URL).
+            filename_suffix: Optional suffix appended to the generated
+                filename. Used by camera-switch rotation so the post-
+                switch file does not collide with the pre-switch one
+                when both starts land in the same wall-clock second.
 
         Returns:
             The file path of the new recording.
@@ -86,7 +123,7 @@ class VideoRecorder:
         self._ensure_dir()
         self._cleanup_old_recordings()
 
-        filename = self._generate_filename()
+        filename = self._generate_filename(filename_suffix)
         filepath = str(self._dir / filename)
 
         cmd = [
@@ -108,6 +145,7 @@ class VideoRecorder:
             self._current_path = filepath
             self._recording = True
             self._start_time = time.monotonic()
+            self._started_at_iso = datetime.now(timezone.utc).isoformat()
             self._storage_task = asyncio.create_task(self._periodic_storage_check())
             log.info("recording_started", path=filepath)
         except FileNotFoundError:
@@ -167,6 +205,7 @@ class VideoRecorder:
         self._recording = False
         self._process = None
         self._current_path = ""
+        self._started_at_iso = ""
 
         log.info("recording_stopped", path=filepath, duration_s=round(duration, 1))
         return filepath
@@ -225,5 +264,7 @@ class VideoRecorder:
         return {
             "recording": self._recording,
             "current_path": self._current_path,
+            "current_filename": self.current_filename,
+            "started_at": self.started_at,
             "recordings_dir": str(self._dir),
         }

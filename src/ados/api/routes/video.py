@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+from typing import Any, Literal
 
 import httpx
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse, Response
+from pydantic import BaseModel, Field
 
 from ados.api.deps import get_agent_app
 from ados.core.logging import get_logger
@@ -15,6 +17,24 @@ from ados.core.logging import get_logger
 log = get_logger("api.video")
 
 router = APIRouter()
+
+# Serializes /api/video/record/{start,stop} so two simultaneous toggles
+# from the LCD page and the GCS cannot interleave and leave the
+# recorder in an inconsistent state.
+_RECORD_LOCK = asyncio.Lock()
+
+
+class CameraSwitchBody(BaseModel):
+    """Body for ``POST /api/video/camera/switch``."""
+
+    role: Literal["primary", "secondary"] = Field(
+        ..., description="Camera role to bind the device to."
+    )
+    device_path: str = Field(
+        ...,
+        min_length=1,
+        description="Filesystem device path of the target camera (e.g. /dev/video0).",
+    )
 
 # mediamtx default ports — must match the values in mediamtx.py.
 _MEDIAMTX_API_PORT = 9997
@@ -51,6 +71,112 @@ def _get_video_pipeline():
     """
     app = get_agent_app()
     return app.video_pipeline()
+
+
+def _empty_recording_block() -> dict[str, Any]:
+    return {
+        "recording": False,
+        "recording_filename": None,
+        "recording_started_at": None,
+    }
+
+
+def _recording_block(pipeline: Any) -> dict[str, Any]:
+    """Pull recording state from a pipeline + its recorder.
+
+    Tolerates both the production VideoRecorder (which exposes
+    ``is_recording`` / ``current_filename`` / ``started_at``) and the
+    DemoVideoPipeline (which only exposes ``recording`` and a synthetic
+    path). Demo path returns the basename of the synthetic path so the
+    LCD page and GCS see a non-null filename when "recording" is on.
+    """
+    if pipeline is None:
+        return _empty_recording_block()
+
+    recorder = getattr(pipeline, "recorder", None)
+    if recorder is not None:
+        try:
+            is_rec = bool(getattr(recorder, "is_recording", recorder.recording))
+        except Exception:
+            is_rec = False
+        if not is_rec:
+            return _empty_recording_block()
+        filename: str | None
+        try:
+            filename = recorder.current_filename  # type: ignore[attr-defined]
+        except AttributeError:
+            current_path = getattr(recorder, "current_path", "") or ""
+            filename = Path(current_path).name if current_path else None
+        try:
+            started_at = recorder.started_at  # type: ignore[attr-defined]
+        except AttributeError:
+            started_at = None
+        return {
+            "recording": True,
+            "recording_filename": filename or None,
+            "recording_started_at": started_at,
+        }
+
+    # Demo pipeline path: only the boolean flag and the synthetic path
+    # are available.
+    is_rec = bool(getattr(pipeline, "recording", False))
+    if not is_rec:
+        return _empty_recording_block()
+    fake_path = getattr(pipeline, "_recording_path", "") or ""
+    return {
+        "recording": True,
+        "recording_filename": Path(fake_path).name if fake_path else None,
+        "recording_started_at": None,
+    }
+
+
+def _enumerate_cameras(pipeline: Any) -> dict[str, Any]:
+    """Return cameras + assignments in the API contract shape.
+
+    When the pipeline is live we read the camera_manager directly so the
+    response includes the operator's current role bindings. Otherwise we
+    fall back to a fresh HAL discovery (the same fallback used for the
+    /api/video status response) and return empty assignments.
+    """
+    if pipeline is not None:
+        cam_mgr = getattr(pipeline, "camera_manager", None)
+        if cam_mgr is not None:
+            cameras = [
+                {
+                    "device_path": c.device_path,
+                    "type": c.type.value,
+                    "label": c.name,
+                    "width": c.width,
+                    "height": c.height,
+                }
+                for c in cam_mgr.cameras
+            ]
+            assignments: dict[str, str] = {}
+            for role, cam in cam_mgr.assignments.items():
+                assignments[role.value] = cam.device_path
+            return {"cameras": cameras, "assignments": assignments}
+
+    # Pipeline not live: fall back to a one-shot HAL discovery so the
+    # operator still sees what's plugged in.
+    try:
+        from ados.hal.camera import discover_cameras
+
+        cams = discover_cameras()
+        return {
+            "cameras": [
+                {
+                    "device_path": c.device_path,
+                    "type": c.type.value,
+                    "label": c.name,
+                    "width": c.width,
+                    "height": c.height,
+                }
+                for c in cams
+            ],
+            "assignments": {},
+        }
+    except Exception:
+        return {"cameras": [], "assignments": {}}
 
 
 async def _probe_mediamtx() -> dict | None:
@@ -105,6 +231,7 @@ async def get_video_status(request: Request):
     if pipeline is None:
         cameras_payload = _discover_cameras_for_api()
         mtx = await _probe_mediamtx()
+        recording_block = _empty_recording_block()
         if mtx and mtx.get("ready"):
             host = request.headers.get("host", "localhost").split(":")[0]
             whep_url = f"http://{host}:{_MEDIAMTX_WEBRTC_PORT}/main/whep"
@@ -115,6 +242,7 @@ async def get_video_status(request: Request):
                 "mediamtx": mtx,
                 "whep_url": whep_url,
                 "dependencies": deps_dict,
+                **recording_block,
             }
         return {
             "state": "not_initialized",
@@ -123,6 +251,7 @@ async def get_video_status(request: Request):
             "mediamtx": {"running": False},
             "whep_url": None,
             "dependencies": deps_dict,
+            **recording_block,
         }
 
     status = pipeline.get_status()
@@ -136,6 +265,10 @@ async def get_video_status(request: Request):
         status["whep_url"] = None
 
     status["dependencies"] = deps_dict
+    # Surface the recording state at the top level so the LCD video page
+    # and the GCS can read it without re-implementing the recorder
+    # serializer.
+    status.update(_recording_block(pipeline))
     return status
 
 
@@ -249,41 +382,140 @@ async def trigger_snapshot():
 
 @router.post("/video/record/start")
 async def start_recording():
-    """Start MP4 recording from the primary camera."""
+    """Start MP4 recording from the primary camera.
+
+    Mutex-guarded so concurrent toggles from the LCD page and the GCS
+    cannot race each other into a half-started recorder. The response
+    surfaces the live ``recording`` flag in addition to the legacy
+    ``path`` / ``status`` keys so callers can update their UI without a
+    follow-up ``GET /api/video`` poll.
+    """
     pipeline = _get_video_pipeline()
     if pipeline is None:
-        return {"error": "video pipeline not initialized", "path": ""}
+        return {
+            "error": "video pipeline not initialized",
+            "path": "",
+            **_empty_recording_block(),
+        }
 
-    if hasattr(pipeline, "start_recording") and callable(pipeline.start_recording):
-        # Demo pipeline has sync start_recording
-        path = pipeline.start_recording()
-        return {"path": path, "status": "recording"}
+    async with _RECORD_LOCK:
+        if hasattr(pipeline, "start_recording") and callable(pipeline.start_recording):
+            # Demo pipeline has sync start_recording.
+            path = pipeline.start_recording()
+            return {
+                "path": path,
+                "status": "recording",
+                **_recording_block(pipeline),
+            }
 
-    # Real pipeline: use recorder
-    recorder = pipeline.recorder
-    if recorder.recording:
-        return {"path": recorder.current_path, "status": "already_recording"}
+        # Real pipeline: use recorder.
+        recorder = pipeline.recorder
+        if recorder.recording:
+            return {
+                "path": recorder.current_path,
+                "status": "already_recording",
+                **_recording_block(pipeline),
+            }
 
-    path = await recorder.start_recording()
-    if path:
-        return {"path": path, "status": "recording"}
-    return {"error": "failed to start recording", "path": ""}
+        path = await recorder.start_recording()
+        if path:
+            return {
+                "path": path,
+                "status": "recording",
+                **_recording_block(pipeline),
+            }
+        return {
+            "error": "failed to start recording",
+            "path": "",
+            **_empty_recording_block(),
+        }
 
 
 @router.post("/video/record/stop")
 async def stop_recording():
-    """Stop the current MP4 recording."""
+    """Stop the current MP4 recording.
+
+    Mutex-guarded; see :func:`start_recording`.
+    """
     pipeline = _get_video_pipeline()
     if pipeline is None:
-        return {"error": "video pipeline not initialized", "path": ""}
+        return {
+            "error": "video pipeline not initialized",
+            "path": "",
+            **_empty_recording_block(),
+        }
 
-    if hasattr(pipeline, "stop_recording") and callable(pipeline.stop_recording):
-        path = pipeline.stop_recording()
-        return {"path": path, "status": "stopped"}
+    async with _RECORD_LOCK:
+        if hasattr(pipeline, "stop_recording") and callable(pipeline.stop_recording):
+            path = pipeline.stop_recording()
+            return {
+                "path": path,
+                "status": "stopped",
+                **_recording_block(pipeline),
+            }
 
-    recorder = pipeline.recorder
-    if not recorder.recording:
-        return {"error": "no active recording", "path": ""}
+        recorder = pipeline.recorder
+        if not recorder.recording:
+            return {
+                "error": "no active recording",
+                "path": "",
+                **_empty_recording_block(),
+            }
 
-    path = await recorder.stop_recording()
-    return {"path": path, "status": "stopped"}
+        path = await recorder.stop_recording()
+        return {
+            "path": path,
+            "status": "stopped",
+            **_recording_block(pipeline),
+        }
+
+
+@router.get("/video/cameras")
+async def list_cameras():
+    """Enumerate cameras + their current role assignments.
+
+    Always returns 200 with at least an empty ``cameras`` array. When the
+    video pipeline is live the response reflects camera_manager state so
+    the operator's role bindings show through; otherwise we fall back
+    to a fresh HAL discovery so a not-yet-running pipeline doesn't make
+    the UI look like the SBC has no cameras attached.
+    """
+    pipeline = _get_video_pipeline()
+    return _enumerate_cameras(pipeline)
+
+
+@router.post("/video/camera/switch")
+async def switch_camera(body: CameraSwitchBody):
+    """Reassign a camera role and restart the encoder.
+
+    Validates that ``device_path`` matches an enumerated camera before
+    the role assignment is persisted. Returns 400 when the device path
+    is unknown so the LCD page and the GCS can surface a precise
+    rejection reason instead of a vague 500.
+    """
+    pipeline = _get_video_pipeline()
+    if pipeline is None:
+        raise HTTPException(
+            status_code=503, detail="video pipeline not initialized"
+        )
+
+    cam_mgr = getattr(pipeline, "camera_manager", None)
+    if cam_mgr is None:
+        raise HTTPException(
+            status_code=503, detail="camera manager unavailable"
+        )
+
+    known_paths = {c.device_path for c in cam_mgr.cameras}
+    if body.device_path not in known_paths:
+        raise HTTPException(status_code=400, detail="unknown camera")
+
+    # The pipeline owns the lock + serialization; surface its errors as
+    # 400 (lookup) or 500 (everything else).
+    try:
+        await pipeline.restart_with_camera(body.role, body.device_path)
+    except LookupError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return {"ok": True, "restarting": True}

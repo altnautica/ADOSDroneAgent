@@ -91,10 +91,24 @@ async def get_ground_station_status() -> dict[str, Any]:
     # subsystem fault never crashes the /status endpoint that drives
     # the OLED + GCS Hardware tab.
     recording_active = False
+    recording_filename: str | None = None
     try:
-        recording_active = bool(_gs._recorder().is_active())
+        recorder = _gs._recorder()
+        recording_active = bool(recorder.is_active())
+        if recording_active:
+            recording_filename = getattr(recorder, "current_filename", None)
     except Exception:
         recording_active = False
+        recording_filename = None
+
+    # Mirror the recorder state into a `video` block so clients written
+    # against the air-side surface (LCD video page, GCS Hardware tab)
+    # can read the same shape on either profile. Legacy `recording`
+    # flag stays where it is so older clients keep working.
+    video_block: dict[str, Any] = {
+        "recording": recording_active,
+        "recording_filename": recording_filename,
+    }
 
     return {
         "profile": "ground_station",
@@ -110,6 +124,7 @@ async def get_ground_station_status() -> dict[str, Any]:
         "network": _gs._network_view(app),
         "system": _gs._system_snapshot(),
         "recording": recording_active,
+        "video": video_block,
         "role": role_block,
         "mesh": mesh_block,
     }

@@ -13,7 +13,7 @@ import httpx
 
 from ados.core.logging import get_logger
 from ados.hal.camera import discover_cameras
-from ados.services.video.camera_mgr import CameraManager
+from ados.services.video.camera_mgr import CameraManager, CameraRole
 from ados.services.video.encoder import (
     EncoderConfig,
     EncoderType,
@@ -77,6 +77,11 @@ class VideoPipeline:
         self._first_packet_seen: bool = False  # set True once mediamtx reports a publisher
         # Reuse client across probes; mediamtx URL is stable.
         self._mediamtx_client: httpx.AsyncClient | None = None
+        # Serializes camera-switch operations so two concurrent
+        # restart_with_camera() calls cannot race each other and leave
+        # the encoder pointed at one device while camera_mgr says
+        # another.
+        self._switch_lock = asyncio.Lock()
 
     @property
     def state(self) -> PipelineState:
@@ -596,3 +601,196 @@ class VideoPipeline:
             "mediamtx": self._mediamtx.to_dict(),
             "cloud_push": cloud_push,
         }
+
+    async def restart_with_camera(self, role: str, device_path: str) -> None:
+        """Reassign a camera role and restart the encoder pointing at it.
+
+        Drives the operator-initiated camera switch flow:
+
+        * Validates the role against :class:`CameraRole`.
+        * Locates the matching :class:`CameraInfo` in the camera manager
+          and binds it to the requested role.
+        * If a recording is active when ``role`` is ``primary``, gracefully
+          stops the in-flight capture, restarts the encoder against the
+          new device, and resumes recording into a new file. The result
+          is two real MP4 files on disk: one ending at the switch boundary
+          and one starting fresh after the encoder restart.
+        * Tears down the current encoder + mediamtx subprocesses and
+          starts a fresh stream so the new camera becomes the publisher.
+
+        Concurrent calls are serialized through ``self._switch_lock``.
+        """
+        try:
+            role_enum = CameraRole(role)
+        except ValueError as exc:  # pragma: no cover - guarded by API
+            raise ValueError(f"unknown camera role: {role}") from exc
+
+        cameras = self._camera_mgr.cameras
+        target = next(
+            (c for c in cameras if c.device_path == device_path),
+            None,
+        )
+        if target is None:
+            raise LookupError(
+                f"device_path {device_path} not present in enumerated cameras"
+            )
+
+        async with self._switch_lock:
+            previous = self._camera_mgr.get_by_role(role_enum)
+            from_path = previous.device_path if previous is not None else None
+
+            # Capture the active recording state before we touch the
+            # encoder so we can rotate the file across the switch.
+            was_recording = self._recorder.recording
+            previous_recording_path = (
+                self._recorder.current_path if was_recording else ""
+            )
+
+            # Bind the role first so any restart that hits start_stream()
+            # picks the correct primary.
+            self._camera_mgr.assign_role(target, role_enum)
+
+            log.info(
+                "pipeline_camera_switch_begin",
+                role=role_enum.value,
+                from_device_path=from_path,
+                to_device_path=device_path,
+                recording=was_recording,
+            )
+
+            # Rotate the recording boundary if a primary-role switch
+            # interrupts an active capture. Stop the current segment so
+            # ffmpeg flushes the MP4 trailer; we restart it after the
+            # encoder is back up.
+            if was_recording and role_enum == CameraRole.PRIMARY:
+                try:
+                    await self._recorder.stop_recording()
+                except Exception as exc:  # noqa: BLE001
+                    log.warning(
+                        "pipeline_camera_switch_recorder_stop_failed",
+                        error=str(exc),
+                    )
+
+            # Tear down the encoder + mediamtx so start_stream() spawns a
+            # fresh pair pointing at the newly-assigned primary.
+            try:
+                await self.stop_stream()
+            except Exception as exc:  # noqa: BLE001
+                log.warning(
+                    "pipeline_camera_switch_stop_failed",
+                    error=str(exc),
+                )
+
+            # Reset the discover hook so the next start_stream() picks up
+            # the new role assignment without re-running auto_assign(),
+            # which would clobber the operator's choice.
+            await self._restart_after_assign()
+
+            # Resume recording on the post-switch encoder. The new file
+            # is generated from the timestamp at this point. The
+            # ``post-switch`` suffix prevents a collision with the
+            # pre-switch file when the rotation happens inside the same
+            # wall-clock second the recorder timestamps with.
+            if was_recording and role_enum == CameraRole.PRIMARY:
+                try:
+                    new_path = await self._recorder.start_recording(
+                        filename_suffix="post-switch"
+                    )
+                    log.info(
+                        "pipeline_camera_switch_recorder_resumed",
+                        previous_path=previous_recording_path,
+                        new_path=new_path,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    log.warning(
+                        "pipeline_camera_switch_recorder_resume_failed",
+                        error=str(exc),
+                    )
+
+            log.info(
+                "pipeline_camera_switched",
+                role=role_enum.value,
+                from_device_path=from_path,
+                to_device_path=device_path,
+            )
+
+    async def _restart_after_assign(self) -> bool:
+        """Restart the stream without running camera auto-assignment.
+
+        ``start_stream`` normally re-runs ``_discover_and_assign`` which
+        clobbers the role bindings we just set. This wrapper bypasses
+        that step so an operator-driven switch survives the restart.
+        """
+        # Mirror start_stream() but skip _discover_and_assign so the
+        # role bindings we just set are not overwritten.
+        if self._encoder_process is not None and self._encoder_process.returncode is None:
+            log.info("killing_stale_encoder", pid=self._encoder_process.pid)
+            self._encoder_process.kill()
+            await self._encoder_process.wait()
+            self._encoder_process = None
+
+        self._state = PipelineState.STARTING
+
+        primary = self._camera_mgr.get_primary()
+        if not primary:
+            log.error("no_primary_camera")
+            self._state = PipelineState.ERROR
+            return False
+
+        self._encoder_type = detect_encoder_for_camera(primary)
+        if self._encoder_type is None:
+            log.error("no_encoder_available")
+            self._state = PipelineState.ERROR
+            return False
+
+        enc_config = EncoderConfig(
+            type=self._encoder_type,
+            codec=self._config.camera.codec,
+            width=self._config.camera.width,
+            height=self._config.camera.height,
+            fps=self._config.camera.fps,
+            bitrate_kbps=self._config.camera.bitrate_kbps,
+        )
+
+        pipe_uri = f"rtsp://localhost:{self._mediamtx.rtsp_port}/main"
+        cmd = build_encoder_command(
+            enc_config, primary.device_path, pipe_uri, camera=primary
+        )
+        if not cmd:
+            log.error("encoder_command_empty")
+            self._state = PipelineState.ERROR
+            return False
+
+        self._mediamtx.generate_config({"main": "publisher"})
+        mtx_ok = await self._mediamtx.start()
+        if not mtx_ok:
+            log.error("mediamtx_start_failed")
+            self._state = PipelineState.ERROR
+            return False
+
+        try:
+            self._encoder_process = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            self._encoder_stderr_task = asyncio.create_task(
+                self._drain_stderr(self._encoder_process, "encoder")
+            )
+            self._state = PipelineState.RUNNING
+            self._started_at = time.monotonic()
+            self._first_packet_seen = False
+            log.info(
+                "pipeline_started",
+                encoder=self._encoder_type.value,
+                camera=primary.name,
+            )
+            return True
+        except FileNotFoundError:
+            log.error("encoder_binary_not_found", encoder=self._encoder_type.value)
+            await self._teardown_after_partial_start()
+            return False
+        except Exception as exc:
+            log.error("encoder_start_failed", error=str(exc), exc_info=True)
+            await self._teardown_after_partial_start()
+            return False
