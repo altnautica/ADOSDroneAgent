@@ -68,7 +68,7 @@ def _read_board_name() -> str:
         return "--"
 
 
-class AboutPage:
+class AboutDetailPage:
     """Read-only About modal pushed from the settings list."""
 
     id: ClassVar[str] = "details.about"

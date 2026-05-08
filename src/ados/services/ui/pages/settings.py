@@ -1029,9 +1029,9 @@ async def _factory_reset_action(
 async def _about_drilldown(
     page: SettingsPage, ctx: PageContext, row: Row,
 ) -> None:
-    from ados.services.ui.pages.details.about import AboutPage
+    from ados.services.ui.pages.details.about import AboutDetailPage
 
-    await ctx.navigator.push_modal(AboutPage(), ctx=ctx)
+    await ctx.navigator.push_modal(AboutDetailPage(), ctx=ctx)
 
 
 # ── REST helpers ───────────────────────────────────────────────

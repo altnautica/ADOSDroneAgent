@@ -13,7 +13,7 @@ hopping back to the GCS:
 * **Restart agent** — confirm dialog → POST the supervisor restart
   endpoint. The supervisor brings the agent back up after a few
   seconds; the LCD reflects that via the heartbeat banner.
-* **About** — drilldown to the existing AboutPage detail (read-only
+* **About** — drilldown to the existing AboutDetailPage detail (read-only
   build identity and license info).
 
 Layout: 4 rows of 48 px each. The page reuses :func:`draw_list_row`
@@ -203,9 +203,9 @@ async def _restart_action(
 async def _about_drilldown(
     page: MorePage, ctx: PageContext, row: _Row,
 ) -> None:
-    from ados.services.ui.pages.details.about import AboutPage
+    from ados.services.ui.pages.details.about import AboutDetailPage
 
-    await ctx.navigator.push_modal(AboutPage(), ctx=ctx)
+    await ctx.navigator.push_modal(AboutDetailPage(), ctx=ctx)
 
 
 # ── row registry ───────────────────────────────────────────────

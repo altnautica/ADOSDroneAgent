@@ -1088,7 +1088,7 @@ async def main() -> None:
     tasks.append(asyncio.create_task(command_poll_loop(), name="command-poll"))
 
     # ── WFB Auto-Pair Supervisor ──────────────────────
-    # Runs the RubyFPV-style first-boot auto-bind loop here in ados-cloud
+    # Runs the first-boot auto-bind loop here in ados-cloud
     # rather than inside ados-wfb / ados-wfb-rx because the bind
     # orchestrator stops + starts those wfb units to flip wfb-ng
     # profiles. Hosting the supervisor in the same service it's stopping

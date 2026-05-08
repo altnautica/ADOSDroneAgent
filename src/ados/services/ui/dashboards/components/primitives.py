@@ -172,8 +172,8 @@ def text_size(
     here so callers don't have to remember the API change.
     """
     try:
-        l, t, r, b = f.getbbox(text)
-        return (r - l, b - t)
+        left, top, right, bottom = f.getbbox(text)
+        return (right - left, bottom - top)
     except AttributeError:
         # Bitmap fallback fonts lack getbbox; use the deprecated path.
         return f.getsize(text)  # type: ignore[attr-defined]

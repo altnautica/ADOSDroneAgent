@@ -186,16 +186,12 @@ def draw_hardware_tile(
         state_val = (item.get("state") or "unknown").lower()
         if state_val == "ok":
             dot_color = p.STATUS_SUCCESS
-            mark = "✓"
         elif state_val in ("warning", "missing") and required:
             dot_color = p.STATUS_ERROR
-            mark = "✗"
         elif state_val in ("warning", "missing"):
             dot_color = p.STATUS_WARNING
-            mark = "○"
         else:
             dot_color = p.TEXT_TERTIARY
-            mark = "·"
 
         # Status dot left, label, fix hint right (truncated).
         draw_dot(image, bx + 6, line_y + 8, dot_color, radius=4)

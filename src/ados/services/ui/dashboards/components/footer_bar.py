@@ -79,12 +79,18 @@ def draw_footer(
     label_font = p.font("mono_regular", 11)
     value_font = p.font("mono_bold", 12)
 
-    cpu_color = p.threshold_color(cpu, success_at=70, warning_at=85, direction="lower_is_better")
+    cpu_color = p.threshold_color(
+        cpu, success_at=70, warning_at=85, direction="lower_is_better"
+    )
     ram_pct = None
     if ram_used is not None and ram_total and ram_total > 0:
         ram_pct = (ram_used / ram_total) * 100.0
-    ram_color = p.threshold_color(ram_pct, success_at=70, warning_at=85, direction="lower_is_better")
-    temp_color = p.threshold_color(temp, success_at=65, warning_at=75, direction="lower_is_better")
+    ram_color = p.threshold_color(
+        ram_pct, success_at=70, warning_at=85, direction="lower_is_better"
+    )
+    temp_color = p.threshold_color(
+        temp, success_at=65, warning_at=75, direction="lower_is_better"
+    )
 
     # Compose the row as left-anchored chunks. The version sticks
     # right; everything else flows from the left.

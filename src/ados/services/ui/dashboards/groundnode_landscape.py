@@ -94,7 +94,6 @@ def _route_tiles(state: dict[str, Any]) -> tuple:
     """
     link = state.get("link") or {}
     drone = state.get("drone") or {}
-    mesh = state.get("mesh") or {}
     role = state.get("role") or {}
     cloud = state.get("cloud") or {}
 
