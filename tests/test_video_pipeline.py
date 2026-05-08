@@ -206,3 +206,65 @@ class TestPipelinePartialStartCleanup:
         assert ok is False
         assert pipeline.state == PipelineState.ERROR
         pipeline._mediamtx.stop.assert_not_awaited()
+
+
+class TestRestartAttemptsSurface:
+    """Public restart counter + healthy-window reset behaviour."""
+
+    def test_restart_attempts_starts_at_zero(self):
+        pipeline = VideoPipeline(VideoConfig())
+        assert pipeline.restart_attempts() == 0
+
+    def test_restart_attempts_reflects_internal_counter(self):
+        pipeline = VideoPipeline(VideoConfig())
+        pipeline._restart_count = 4
+        assert pipeline.restart_attempts() == 4
+
+    def test_first_healthy_tick_seeds_timer_without_clearing(self):
+        pipeline = VideoPipeline(VideoConfig())
+        pipeline._restart_count = 3
+        cleared = pipeline._note_healthy_tick(now=100.0)
+        # First call records the stamp but does not yet clear because
+        # we have not measured a window of healthy time.
+        assert cleared is False
+        assert pipeline._last_healthy_at == 100.0
+        assert pipeline._restart_count == 3
+
+    def test_sustained_healthy_window_clears_counter(self):
+        pipeline = VideoPipeline(VideoConfig())
+        pipeline._restart_count = 5
+        pipeline._note_healthy_tick(now=100.0)
+        # 30 s in: still inside the window, counter intact.
+        assert pipeline._note_healthy_tick(now=130.0) is False
+        assert pipeline._restart_count == 5
+        # 65 s in: past the 60 s window, counter clears.
+        assert pipeline._note_healthy_tick(now=165.0) is True
+        assert pipeline._restart_count == 0
+
+    def test_no_clear_when_counter_already_zero(self):
+        pipeline = VideoPipeline(VideoConfig())
+        pipeline._note_healthy_tick(now=100.0)
+        # Past the window with a clean counter — nothing to clear.
+        assert pipeline._note_healthy_tick(now=200.0) is False
+        assert pipeline._restart_count == 0
+
+    def test_unhealthy_tick_resets_window(self):
+        pipeline = VideoPipeline(VideoConfig())
+        pipeline._restart_count = 4
+        pipeline._note_healthy_tick(now=100.0)
+        # Failure interrupts the streak.
+        pipeline._note_unhealthy_tick()
+        assert pipeline._last_healthy_at == 0.0
+        # Counter has not been touched by the unhealthy tick itself.
+        assert pipeline._restart_count == 4
+        # New healthy stamp at t=200; another window must elapse before
+        # the counter can clear (test that we did not retain the old
+        # 100.0 stamp somehow).
+        pipeline._note_healthy_tick(now=200.0)
+        assert pipeline._last_healthy_at == 200.0
+        # 30 s later, still within window — no clear.
+        assert pipeline._note_healthy_tick(now=230.0) is False
+        assert pipeline._restart_count == 4
+        # 65 s after the new stamp, clear fires.
+        assert pipeline._note_healthy_tick(now=270.0) is True
+        assert pipeline._restart_count == 0

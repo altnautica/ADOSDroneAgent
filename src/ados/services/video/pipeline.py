@@ -75,6 +75,15 @@ class VideoPipeline:
         self._base_restart_delay: float = 5.0
         self._started_at: float = 0.0  # monotonic time of last start_stream()
         self._first_packet_seen: bool = False  # set True once mediamtx reports a publisher
+        # Stamp of the most recent healthy probe. Used to clear
+        # `_restart_count` after a sustained run of healthy frames so a
+        # transient failure during the day does not leave the counter
+        # pinned and trigger the circuit breaker on the next dip.
+        self._last_healthy_at: float = 0.0
+        # Window of consecutive healthy time required to clear the
+        # restart counter. Tuned for the operator-visible UX: a clip of
+        # 60 s of clean frames is "we're back".
+        self._healthy_reset_window_secs: float = 60.0
         # Reuse client across probes; mediamtx URL is stable.
         self._mediamtx_client: httpx.AsyncClient | None = None
         # Serializes camera-switch operations so two concurrent
@@ -356,6 +365,45 @@ class VideoPipeline:
         self._state = PipelineState.STOPPED
         log.info("pipeline_stopped")
 
+    def restart_attempts(self) -> int:
+        """Public accessor for the encoder restart counter.
+
+        Surfaced on the cloud heartbeat so the GCS health view can
+        flag a flapping pipeline before the circuit breaker fires.
+        """
+        return self._restart_count
+
+    def _note_healthy_tick(self, now: float | None = None) -> bool:
+        """Stamp a healthy probe and clear the counter when stable.
+
+        Returns True if the restart counter was just cleared as a
+        result of this call. Carved out of `run()` so the reset
+        decision can be tested without driving the infinite loop.
+        """
+        if now is None:
+            now = time.monotonic()
+        if self._last_healthy_at == 0.0:
+            self._last_healthy_at = now
+            return False
+        if (
+            self._restart_count > 0
+            and now - self._last_healthy_at
+            > self._healthy_reset_window_secs
+        ):
+            log.info(
+                "pipeline_restart_counter_reset",
+                msg="healthy window reached, clearing counter",
+                window_secs=self._healthy_reset_window_secs,
+                attempts=self._restart_count,
+            )
+            self._restart_count = 0
+            return True
+        return False
+
+    def _note_unhealthy_tick(self) -> None:
+        """Reset the consecutive-healthy timer on a failed probe."""
+        self._last_healthy_at = 0.0
+
     async def _check_health(self) -> bool:
         """Check if the encoder and mediamtx are both running and healthy."""
         if self._encoder_process is None:
@@ -480,7 +528,20 @@ class VideoPipeline:
         try:
             while True:
                 if self._state == PipelineState.RUNNING:
-                    if not await self._check_health():
+                    health_ok = await self._check_health()
+                    if health_ok:
+                        # Stamp the most recent healthy tick. After a
+                        # sustained healthy window, clear any pinned
+                        # restart counter so a fresh transient failure
+                        # later in the day does not roll straight into
+                        # the circuit breaker.
+                        self._note_healthy_tick()
+                    else:
+                        # Restart the consecutive-healthy timer on any
+                        # failed probe so a flap window has to start
+                        # over before the counter clears.
+                        self._note_unhealthy_tick()
+                    if not health_ok:
                         self._restart_count += 1
                         delay = min(
                             self._base_restart_delay * (2 ** (self._restart_count - 1)),

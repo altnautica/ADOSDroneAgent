@@ -449,6 +449,16 @@ class AgentApp:
         self._cpu_history.append(cpu_percent)
         self._memory_history.append(memory_percent)
 
+        # Video pipeline restart counter, exposed for the GCS health
+        # view. Defensive against an absent or older pipeline.
+        vp = getattr(self, "_video_pipeline", None)
+        try:
+            video_restart_attempts = (
+                int(vp.restart_attempts()) if vp is not None else 0
+            )
+        except Exception:
+            video_restart_attempts = 0
+
         # Per-service data with real uptime (no fake CPU/RAM distribution)
         now_mono = time.monotonic()
         for svc_name, svc_state in all_services.items():
@@ -502,6 +512,7 @@ class AgentApp:
             "setupUrl": f"http://{local_ip}:8080",
             "apiUrl": f"http://{local_ip}:8080/api",
             "agentVersion": __version__,
+            "videoRestartAttempts": video_restart_attempts,
         }
 
         remote = self.config.remote_access.cloudflare

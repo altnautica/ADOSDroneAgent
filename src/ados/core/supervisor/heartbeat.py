@@ -248,6 +248,15 @@ class HeartbeatMixin:
         total_cpu = sum(s.cpu_percent for s in self._services.values())
         total_mem = sum(s.memory_mb for s in self._services.values())
 
+        # Video pipeline restart counter, defensively read.
+        vp = getattr(self, "_video_pipeline", None)
+        try:
+            video_restart_attempts = (
+                int(vp.restart_attempts()) if vp is not None else 0
+            )
+        except Exception:
+            video_restart_attempts = 0
+
         return {
             "version": __version__,
             "runtimeMode": "full",
@@ -271,6 +280,7 @@ class HeartbeatMixin:
             "cpuHistory": list(self._cpu_history),
             "memoryHistory": list(self._memory_history),
             "services": self.get_services_status(),
+            "videoRestartAttempts": video_restart_attempts,
             "activeSuite": self._active_suite,
             "setupState": setup_state,
             "profileSource": profile_source,
