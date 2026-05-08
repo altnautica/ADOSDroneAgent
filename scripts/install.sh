@@ -842,8 +842,30 @@ video:
     bitrate_kbps: 4000
 CFGEOF
 
-    chmod 644 "$config_file"
+    chmod 0600 "$config_file"
     info "Default config written."
+}
+
+# ─── Harden Secret File Permissions ─────────────────────────────────────────
+
+harden_secret_perms() {
+    # Idempotent: only chmod files that exist; absence is fine on first install.
+    # Tightens secrets in /etc/ados to 0600 (root-only). All ados-* services run as root.
+    for f in "${CONFIG_DIR}/pairing.json" \
+             "${CONFIG_DIR}/config.yaml" \
+             "${CONFIG_DIR}/setup-token" \
+             "${CONFIG_DIR}/env"; do
+        [ -f "$f" ] && chmod 0600 "$f" 2>/dev/null || true
+    done
+    if [ -d "${CONFIG_DIR}/plugin-keys" ]; then
+        chmod 0700 "${CONFIG_DIR}/plugin-keys" 2>/dev/null || true
+        find "${CONFIG_DIR}/plugin-keys" -maxdepth 1 -type f -name '*.pem' \
+            -exec chmod 0600 {} + 2>/dev/null || true
+    fi
+    if [ -d "${CONFIG_DIR}/wfb" ]; then
+        find "${CONFIG_DIR}/wfb" -maxdepth 1 -type f -name '*.key' \
+            -exec chmod 0600 {} + 2>/dev/null || true
+    fi
 }
 
 # ─── Install systemd Service ────────────────────────────────────────────────
@@ -1738,7 +1760,7 @@ write_pairing() {
   "code_created_at": $(date +%s)
 }
 PAIREOF
-    chmod 644 "$pairing_file"
+    chmod 0600 "$pairing_file"
 }
 
 # ─── Print Pairing Code Box ─────────────────────────────────────────────────
@@ -2232,6 +2254,10 @@ fi
 
 # Install global symlinks (ados, ados-agent → /usr/local/bin/)
 install_global_symlinks
+
+# Tighten permissions on any secret-bearing files in /etc/ados. Idempotent;
+# safe to run on every install/upgrade after all file writes have settled.
+harden_secret_perms
 
 # Print summary
 print_status
