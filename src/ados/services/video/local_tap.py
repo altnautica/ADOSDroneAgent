@@ -200,12 +200,23 @@ def select_decoder(soc: str) -> str:
 
     The returned name is the gstreamer element factory string the
     pipeline string should embed.
+
+    Pi 4B (BCM2711) is forced to ``avdec_h264`` because the upstream
+    Debian 13 trixie kernel ships a v4l2h264dec / bcm2835-codec combo
+    that returns NOT_NEGOTIATED on RTP-depayloaded H.264 streams within
+    ~200ms of state-change to PLAYING, regardless of stream-format
+    (avc vs byte-stream) or alignment caps. Software decode at 720p
+    baseline 30fps consumes ~30% of one A72 core on Pi 4B — well
+    inside the headroom — and is correct under the same stream the
+    hardware path refuses.
     """
     soc_lower = soc.lower() if isinstance(soc, str) else ""
     if soc_lower.startswith("rk35") and gst_plugin_available("mppvideodec"):
         return "mppvideodec"
     if soc_lower.startswith("rk35") and gst_plugin_available("rkvdec"):
         return "rkvdec"
+    if soc_lower.startswith("bcm271"):
+        return "avdec_h264"
     if gst_plugin_available("v4l2h264dec"):
         return "v4l2h264dec"
     return "avdec_h264"
