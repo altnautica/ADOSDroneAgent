@@ -923,12 +923,15 @@ class OledService:
         if gesture.start_y < 320 - TAB_HEIGHT:
             return
         index = max(0, min(TAB_COUNT - 1, gesture.start_x // TAB_WIDTH))
-        # The zone ids are stable; rebuild via the helper map.
+        # The zone ids are stable; rebuild via the helper map. Must
+        # match the tuple in chrome.bottom_tab_bar._TABS — the fourth
+        # tab now routes to LinkStatsPage; the old MorePage class is
+        # left in tree but unregistered.
         zone_ids = (
             "tab.dashboard",
             "tab.video",
             "tab.settings",
-            "tab.more",
+            "tab.link_stats",
         )
         zone_id = zone_ids[index]
         page_id = page_id_for_zone(zone_id)

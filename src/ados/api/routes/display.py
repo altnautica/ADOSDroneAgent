@@ -68,8 +68,12 @@ router = APIRouter(prefix="/v1/display", tags=["display"])
 
 # Page ids the navigator owns. POST /page validates against this set
 # so a typo never hangs the OLED service waiting on an unknown route.
+# `more` is kept in the set for backward compat — the More tab was
+# replaced by `link_stats` in the bottom bar but the MorePage class is
+# still importable and a stale GCS request that targets `more` should
+# still resolve rather than 400.
 _VALID_PAGE_IDS: frozenset[str] = frozenset(
-    {"dashboard", "video", "settings", "more"}
+    {"dashboard", "video", "settings", "more", "link_stats"}
 )
 
 
