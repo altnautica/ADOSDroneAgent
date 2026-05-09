@@ -49,7 +49,11 @@ SERVICE_REGISTRY: list[dict] = [
     {"name": "ados-health", "category": "core"},
     # Hardware-dependent (started on detection)
     {"name": "ados-video", "category": "hardware"},
-    {"name": "ados-wfb", "category": "hardware"},
+    # The drone-side WFB-ng TX manager. Profile-gated to drone so a
+    # ground-station rig doesn't bring up wfb_tx and fight the
+    # ground-station's wfb_rx for the same monitor-mode adapter. The
+    # GS-side counterpart is ados-wfb-rx below.
+    {"name": "ados-wfb", "category": "hardware", "profile_gate": "drone"},
     # Suite-dependent (started on suite activation)
     {"name": "ados-scripting", "category": "suite"},
     # On-demand
