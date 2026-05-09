@@ -401,7 +401,32 @@ def build_pipeline_string(
         f"latency={latency_ms} drop-on-latency=true "
         "! rtph264depay "
         "! h264parse "
+        # queue between depay and decoder hands rtspsrc its own thread so
+        # the network reader keeps pulling RTP while the decoder works.
+        # leaky=downstream + small max-size means a slow decoder drops
+        # the oldest frame instead of blocking upstream and starving
+        # rtspsrc's RTCP loop (which cascades into "not-linked" errors).
+        "! queue max-size-buffers=8 max-size-bytes=0 max-size-time=0 leaky=downstream "
         f"! {decoder} "
+        # second queue between decoder and downstream conversion gives
+        # the decoder its own thread. PIL composition + framebuffer write
+        # in the render loop runs at 20 Hz and shares the GIL with the
+        # appsink callback; without this queue, a slow render tick stalls
+        # the decoder.
+        "! queue max-size-buffers=4 max-size-bytes=0 max-size-time=0 leaky=downstream "
+        # decimate the decoded stream to 15 fps before videoconvert.
+        # The LCD render loop runs at ~20 Hz on a single Python GIL,
+        # competing with PIL composition + SPI framebuffer write that
+        # can take 30-50 ms per render tick. At 30 fps source, each
+        # appsink callback contends with the render loop and frames
+        # back-pressure into the appsink queue; the visible result is
+        # smooth video for a few seconds then a freeze when the buffer
+        # saturates. At 15 fps the callback rate matches what the
+        # render loop can consume between SPI writes. drop-only=true
+        # reuses the most-recent frame instead of duplicating, so we
+        # never invent frames on slow inputs.
+        "! videorate drop-only=true "
+        "! video/x-raw,framerate=15/1 "
         "! videoconvert "
         "! videoscale "
         f"! video/x-raw,format=RGB,width={width},height={height} "
