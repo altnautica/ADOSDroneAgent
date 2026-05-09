@@ -188,3 +188,125 @@ def test_managed_mode_success(mock_platform, mock_subprocess):
 
     assert set_managed_mode("wlan0") is True
     assert mock_subprocess.run.call_count == 3
+
+
+def test_multi_radio_does_not_tag_onboard_as_rtl(monkeypatch):
+    """Regression: a board with an onboard non-RTL adapter (wlan0,
+    e.g. AIC8800) plus an RTL USB dongle (wlxMAC, driver=8812eu) must
+    tag ONLY the RTL iface as wfb-compatible. Earlier versions
+    cross-correlated by name substring then by global lsusb sweep,
+    which marked the onboard adapter as compatible whenever any RTL
+    happened to be plugged in elsewhere."""
+    from ados.services.wfb import adapter as adapter_mod
+    from ados.hal.usb import UsbCategory
+
+    # Mock platform Linux so detection runs.
+    monkeypatch.setattr(adapter_mod.platform, "system", lambda: "Linux")
+
+    # Two netdevs visible to iw dev: wlan0 + wlxMAC.
+    iw_dev_stdout = (
+        "phy#0\n\tInterface wlan0\n\t\ttype managed\n"
+        "phy#1\n\tInterface wlxfc23cd1cf1a5\n\t\ttype managed\n"
+    )
+    # Both phys advertise monitor mode so the manager-side filter
+    # doesn't drop them on that axis.
+    iw_phy_stdout = (
+        "Wiphy phy0\n\tSupported interface modes:\n\t\t * managed\n\t\t * monitor\n"
+        "Wiphy phy1\n\tSupported interface modes:\n\t\t * managed\n\t\t * monitor\n"
+    )
+
+    def _fake_subprocess_run(cmd, **_kw):
+        result = MagicMock()
+        result.returncode = 0
+        result.stdout = ""
+        if cmd[:2] == ["iw", "dev"]:
+            result.stdout = iw_dev_stdout
+        elif cmd[:2] == ["iw", "phy"]:
+            result.stdout = iw_phy_stdout
+        elif cmd[0] == "readlink":
+            target = cmd[1]
+            if "wlan0" in target:
+                # Onboard driver (AIC8800-style) — NOT a known WFB driver.
+                result.stdout = "/sys/bus/usb/drivers/aic8800_fdrv\n"
+            else:
+                result.stdout = "/sys/bus/usb/drivers/8812eu\n"
+        return result
+
+    monkeypatch.setattr(adapter_mod.subprocess, "run", _fake_subprocess_run)
+
+    # USB inventory: an RTL dongle is plugged in. The previous bug
+    # tagged EVERY netdev as RTL-compatible because of this.
+    rtl_usb = MagicMock()
+    rtl_usb.vid = 0x0BDA
+    rtl_usb.pid = 0xA81A
+    rtl_usb.category = UsbCategory.RADIO
+    rtl_usb.name = "wlxfc23cd1cf1a5"
+    rtl_usb.description = "RTL8812AU"
+
+    monkeypatch.setattr(
+        adapter_mod, "discover_usb_devices", lambda: [rtl_usb]
+    )
+
+    # Per-iface USB ID lookup: only wlxMAC's sysfs walk hits the RTL
+    # vendor IDs. wlan0 returns (0, 0) because its sysfs walk reaches
+    # a non-USB device or has no idVendor.
+    def _fake_usb_id_for_interface(iface):
+        if iface == "wlxfc23cd1cf1a5":
+            return (0x0BDA, 0xA81A)
+        return (0, 0)
+
+    monkeypatch.setattr(
+        adapter_mod, "_get_usb_id_for_interface", _fake_usb_id_for_interface
+    )
+
+    adapters = detect_wfb_adapters()
+    by_name = {a.interface_name: a for a in adapters}
+
+    assert "wlan0" in by_name and "wlxfc23cd1cf1a5" in by_name
+    assert by_name["wlan0"].is_wfb_compatible is False, (
+        "onboard non-RTL adapter must NOT be tagged as wfb compatible "
+        "even when an RTL dongle is plugged in elsewhere"
+    )
+    assert by_name["wlxfc23cd1cf1a5"].is_wfb_compatible is True, (
+        "the RTL adapter (driver=8812eu, VID:PID=0BDA:A81A) must be "
+        "tagged as wfb compatible"
+    )
+    # Chipset label on the RTL iface should reflect the USB chipset
+    # name for diagnostics, not just the bare driver string.
+    assert "RTL" in by_name["wlxfc23cd1cf1a5"].chipset
+
+
+def test_compat_via_driver_name_when_sysfs_walk_misses(monkeypatch):
+    """Driver-name match is the authoritative signal even when the
+    sysfs USB ID walk returns (0, 0). Catches RTL adapters on hub
+    layouts where the parent USB device dir is one level further up."""
+    from ados.services.wfb import adapter as adapter_mod
+
+    monkeypatch.setattr(adapter_mod.platform, "system", lambda: "Linux")
+
+    iw_dev_stdout = "phy#0\n\tInterface wlan_rtl\n\t\ttype managed\n"
+    iw_phy_stdout = (
+        "Wiphy phy0\n\tSupported interface modes:\n\t\t * managed\n\t\t * monitor\n"
+    )
+
+    def _fake_subprocess_run(cmd, **_kw):
+        result = MagicMock()
+        result.returncode = 0
+        result.stdout = ""
+        if cmd[:2] == ["iw", "dev"]:
+            result.stdout = iw_dev_stdout
+        elif cmd[:2] == ["iw", "phy"]:
+            result.stdout = iw_phy_stdout
+        elif cmd[0] == "readlink":
+            result.stdout = "/sys/bus/usb/drivers/rtl88x2eu\n"
+        return result
+
+    monkeypatch.setattr(adapter_mod.subprocess, "run", _fake_subprocess_run)
+    monkeypatch.setattr(adapter_mod, "discover_usb_devices", lambda: [])
+    monkeypatch.setattr(
+        adapter_mod, "_get_usb_id_for_interface", lambda _iface: (0, 0)
+    )
+
+    adapters = detect_wfb_adapters()
+    assert len(adapters) == 1
+    assert adapters[0].is_wfb_compatible is True

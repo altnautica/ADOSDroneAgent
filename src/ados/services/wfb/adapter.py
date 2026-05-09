@@ -6,6 +6,7 @@ import platform
 import re
 import subprocess
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from ados.core.logging import get_logger
 from ados.hal.usb import UsbCategory, discover_usb_devices
@@ -144,6 +145,43 @@ def _get_driver_for_interface(interface: str) -> str:
     return "unknown"
 
 
+def _get_usb_id_for_interface(interface: str) -> tuple[int, int]:
+    """Read the USB VID:PID for a netdev by walking its sysfs device tree.
+
+    Returns (0, 0) when the interface is not USB-backed (built-in PCI
+    wireless, virtual, etc.) or when sysfs cannot be read. Walks up the
+    `/sys/class/net/<iface>/device` chain because the immediate `device`
+    symlink for a USB netdev points at the per-interface USB endpoint,
+    not the parent USB device that owns idVendor/idProduct.
+    """
+    _validate_interface_name(interface)
+    try:
+        device_link = Path(f"/sys/class/net/{interface}/device").resolve()
+    except OSError:
+        return (0, 0)
+    cursor: Path | None = device_link
+    # Walk up until idVendor + idProduct appear. USB netdevs need this
+    # because the immediate device dir is the usb interface (e.g. 1-1:1.0)
+    # whose parent is the usb device (e.g. 1-1) where the IDs live.
+    for _ in range(8):  # bounded so a corrupted link can't loop forever
+        if cursor is None:
+            break
+        vendor_path = cursor / "idVendor"
+        product_path = cursor / "idProduct"
+        if vendor_path.is_file() and product_path.is_file():
+            try:
+                vid = int(vendor_path.read_text().strip(), 16)
+                pid = int(product_path.read_text().strip(), 16)
+                return (vid, pid)
+            except (OSError, ValueError):
+                return (0, 0)
+        parent = cursor.parent
+        if parent == cursor:
+            break
+        cursor = parent
+    return (0, 0)
+
+
 def detect_wfb_adapters() -> list[WifiAdapterInfo]:
     """Detect WiFi adapters suitable for WFB-ng.
 
@@ -158,13 +196,11 @@ def detect_wfb_adapters() -> list[WifiAdapterInfo]:
         log.warning("wfb_unsupported_platform", platform=system)
         return []
 
-    # Get USB devices for cross-referencing
+    # USB radio inventory used downstream only to enrich chipset labels
+    # for diagnostics. The actual per-iface USB ID lookup walks sysfs
+    # off the iface itself; do not cross-correlate by name or by global
+    # presence — that produces false positives on multi-radio boards.
     usb_radios = [d for d in discover_usb_devices() if d.category == UsbCategory.RADIO]
-    usb_by_name: dict[str, tuple[int, int, str]] = {}
-    for dev in usb_radios:
-        pair = (dev.vid, dev.pid)
-        chipset = WFB_COMPATIBLE.get(pair, dev.description)
-        usb_by_name[dev.name] = (dev.vid, dev.pid, chipset)
 
     # Parse iw dev for interfaces
     try:
@@ -212,35 +248,37 @@ def detect_wfb_adapters() -> list[WifiAdapterInfo]:
         current_mode = iface.get("type", "unknown")
         driver = _get_driver_for_interface(name)
 
-        # Cross-reference with USB
-        vid = 0
-        pid = 0
+        # Per-iface USB ID lookup via sysfs walk. Lifts the VID:PID off
+        # THIS iface's own USB device tree so we don't cross-contaminate
+        # one iface's compat verdict with a different RTL dongle that
+        # happens to be plugged into the same box. The previous
+        # "any RTL in lsusb -> every iface is RTL-compat" fallback
+        # tagged onboard adapters (e.g. AIC8800) as RTL on multi-radio
+        # boards, the manager then tried monitor mode on the wrong
+        # iface and got EIO.
+        vid, pid = _get_usb_id_for_interface(name)
         chipset = driver
         is_compat = False
 
-        for usb_name, (uv, up, uc) in usb_by_name.items():
-            if usb_name.lower() in name.lower() or name.lower() in usb_name.lower():
-                vid, pid, chipset = uv, up, uc
-                is_compat = (uv, up) in WFB_COMPATIBLE
-                break
-
-        # Also check by VID:PID directly from any radio device
-        if not is_compat:
-            for dev in usb_radios:
-                if (dev.vid, dev.pid) in WFB_COMPATIBLE:
-                    vid, pid = dev.vid, dev.pid
-                    chipset = WFB_COMPATIBLE[(vid, pid)]
-                    is_compat = True
-                    break
-
-        # Driver-name fallback: when the USB ID lookup misses (e.g. the
-        # adapter has been renamed by udev to a wlxMAC name and no usb
-        # entry was correlated), accept the adapter when the kernel
-        # driver matches one of the known WFB-ng modules.
-        if not is_compat and driver and driver.lower() in WFB_COMPATIBLE_DRIVERS:
+        if (vid, pid) in WFB_COMPATIBLE:
+            chipset = WFB_COMPATIBLE[(vid, pid)]
+            is_compat = True
+        elif driver and driver.lower() in WFB_COMPATIBLE_DRIVERS:
+            # Driver-name confirmation: the kernel driver bound to this
+            # iface is one of the known WFB-ng modules. Authoritative
+            # signal that this is an RTL netdev even when sysfs walk
+            # missed the IDs (e.g., USB hub layer hides the parent).
             is_compat = True
             if not chipset or chipset == driver:
                 chipset = driver
+        # USB lookup hint: surface the original USB device's chipset
+        # label when it shares VID:PID with a known WFB chipset, so
+        # diagnostic logs read e.g. "RTL8812AU (a81a)" not "8812eu".
+        if is_compat and chipset == driver:
+            for dev in usb_radios:
+                if (dev.vid, dev.pid) == (vid, pid) and (dev.vid, dev.pid) in WFB_COMPATIBLE:
+                    chipset = WFB_COMPATIBLE[(dev.vid, dev.pid)]
+                    break
 
         adapter = WifiAdapterInfo(
             interface_name=name,
