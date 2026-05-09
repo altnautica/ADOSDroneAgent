@@ -169,14 +169,22 @@ class MediamtxGsManager:
         rtsp_url = (
             f"rtsp://127.0.0.1:{self._core._rtsp_port}/{GROUND_RTSP_PATH}"
         )
+        # Relaxed probe flags compared to the air-side wfb tee. The GS
+        # ingest reads from a UDP socket whose feed comes over the
+        # radio: at boot, before pairing, the socket is silent and
+        # `-probesize 32 -analyzeduration 0` made ffmpeg give up within
+        # milliseconds with "Could not find codec parameters" and exit.
+        # The health monitor then respawned it 5 s later in a tight
+        # loop, never letting ffmpeg sit long enough to receive its
+        # first frame. Default probesize/analyzeduration buffer up to
+        # ~5 s of input before deciding, which is exactly the window
+        # we need.
         cmd = [
             binary,
             "-fflags", "nobuffer",
             "-flags", "low_delay",
-            "-probesize", "32",
-            "-analyzeduration", "0",
             "-f", "h264",
-            "-i", f"udp://@:{self._udp_port}?fifo_size=1000000&overrun_nonfatal=1",
+            "-i", f"udp://@:{self._udp_port}?fifo_size=1000000&overrun_nonfatal=1&timeout=0",
             "-c:v", "copy",
             "-bsf:v", "h264_mp4toannexb",
             "-f", "rtsp",
@@ -205,7 +213,15 @@ class MediamtxGsManager:
             return False
 
     async def _drain_ffmpeg_stderr(self) -> None:
-        """Drain ffmpeg stderr to prevent pipe buffer deadlock."""
+        """Drain ffmpeg stderr and surface error lines to the journal.
+
+        Previously logged everything at debug, which hid the actual
+        reason ffmpeg exited (e.g., "Could not find codec parameters")
+        from the operator's journalctl view. We now look for explicit
+        error markers and bump those to warning so the next bench
+        bringup doesn't have to guess. Routine progress lines stay at
+        debug to keep the journal scanable.
+        """
         if self._ffmpeg is None or self._ffmpeg.stderr is None:
             return
         try:
@@ -214,7 +230,17 @@ class MediamtxGsManager:
                 if not line:
                     break
                 text = line.decode(errors="replace").rstrip()
-                if text:
+                if not text:
+                    continue
+                lower = text.lower()
+                if (
+                    "error" in lower
+                    or "failed" in lower
+                    or "could not" in lower
+                    or "no such" in lower
+                ):
+                    log.warning("ground_ffmpeg_stderr", line=text)
+                else:
                     log.debug("ground_ffmpeg_stderr", line=text)
         except (asyncio.CancelledError, Exception):
             pass
