@@ -259,10 +259,23 @@ class MediamtxGsManager:
             "-fflags", "nobuffer",
             "-flags", "low_delay",
             "-protocol_whitelist", "file,udp,rtp",
+            # `-probesize 5M -analyzeduration 5M` give ffmpeg up to 5
+            # seconds (or 5 MB) to discover the H.264 SPS/PPS from the
+            # incoming RTP stream. The SDP carries only the encoding
+            # name + clock rate; codec config (width/height/profile/
+            # level) arrives inline in the first IDR. Default
+            # probesize/analyzeduration timed out and ffmpeg exited
+            # with "unspecified size" before the IDR arrived.
+            "-probesize", "5M",
+            "-analyzeduration", "5M",
             "-f", "sdp",
             "-i", str(GROUND_SDP_PATH),
             "-c:v", "copy",
-            "-bsf:v", "h264_mp4toannexb",
+            # NO h264_mp4toannexb here: rtph264depay already emits
+            # Annex-B (start-code-prefixed) NAL units; the bsf was a
+            # leftover from the old `-f h264 -i udp://` path that
+            # received raw bytes. Applying it twice corrupts the
+            # bitstream's NAL boundaries.
             "-f", "rtsp",
             "-rtsp_transport", "tcp",
             rtsp_url,
