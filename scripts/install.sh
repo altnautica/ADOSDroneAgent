@@ -2126,6 +2126,19 @@ if is_installed && $DO_UPGRADE && ! $DO_FORCE; then
         git clone --depth 1 --recurse-submodules --shallow-submodules --quiet "${REPO_URL}" "${tmp_repo}/repo"
     fi
 
+    # Migrate older venvs that were created without
+    # --system-site-packages so the agent can `import gi` (PyGObject)
+    # for the LCD video page's gstreamer pipeline. python3-gi is an
+    # apt-only package; pip can't install it. Idempotent: if the flag
+    # is already true, sed leaves the file unchanged.
+    if [ -f "${VENV_DIR}/pyvenv.cfg" ]; then
+        if grep -q "^include-system-site-packages = false" "${VENV_DIR}/pyvenv.cfg"; then
+            info "Flipping venv to include-system-site-packages=true (gi/gstreamer access)"
+            sed -i 's|^include-system-site-packages = false|include-system-site-packages = true|' \
+                "${VENV_DIR}/pyvenv.cfg"
+        fi
+    fi
+
     # Upgrade pip package from cloned source (ensures version match)
     info "Upgrading pip package..."
     "${VENV_DIR}/bin/pip" install --upgrade "${tmp_repo}/repo" --quiet
@@ -2252,9 +2265,16 @@ mkdir -p "${DATA_DIR}/recordings"
 mkdir -p "${INSTALL_DIR}/models/vision"
 mkdir -p "${DATA_DIR}/state"
 
-# Create or refresh the Python venv
+# Create or refresh the Python venv with system site-packages visible.
+# python3-gi (PyGObject) is an apt-only package — it cannot be pip
+# installed because it links against system libffi/glib/gobject-
+# introspection at build time. The OLED video page's LocalVideoTap
+# does `import gi` to drive its gstreamer pipeline. Without
+# --system-site-packages the agent's venv-isolated Python cannot see
+# the system gi module and the LCD reports "Video pipeline
+# unavailable" forever.
 info "Creating Python virtual environment at ${VENV_DIR}..."
-"$PYTHON" -m venv "${VENV_DIR}"
+"$PYTHON" -m venv --system-site-packages "${VENV_DIR}"
 
 # Clone repo for pip install + data files (needed when piped via curl)
 FRESH_REPO_DIR=""
