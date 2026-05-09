@@ -55,6 +55,14 @@ _METRICS_REFRESH_SECONDS = 1.0
 # in the OLED service's _render_forever path.
 _TAP_INACTIVITY_TEARDOWN_SECONDS = 30.0
 
+# Cooldown between retries when LocalVideoTap.start() raises
+# LocalVideoTapUnavailable. The first attempt at boot can fail because
+# mediamtx-gs is still binding port 8554 or the ffmpeg sidecar hasn't
+# yet decoded a packet from the radio. Retry every 15s lets the LCD
+# pick up the live stream once everything is wired without spinning
+# up gstreamer at every render tick.
+_TAP_RETRY_COOLDOWN_SECONDS = 15.0
+
 
 def _safe_dict(value: Any) -> dict:
     return value if isinstance(value, dict) else {}
@@ -70,6 +78,12 @@ class VideoPage:
         self._compositor = VideoCompositor()
         self._tap: LocalVideoTap | None = None
         self._tap_unavailable_reason: str | None = None
+        # Monotonic timestamp of the last failed tap.start() attempt.
+        # Used to gate retries: we don't re-spin gstreamer for at least
+        # _TAP_RETRY_COOLDOWN_SECONDS after a failure, but we DO retry
+        # eventually so a bench rig that comes up before mediamtx-gs is
+        # serving recovers without an operator restart.
+        self._tap_unavailable_at: float | None = None
         self._recording: bool = False
         self._camera_count: int = 1
         self._camera_label: str = "CAM 1"
@@ -126,17 +140,31 @@ class VideoPage:
             except Exception as exc:  # noqa: BLE001
                 ctx.logger.debug("video_tap_resume_failed", error=str(exc))
             return
+        # Cached failure: skip the retry until the cooldown window
+        # elapses, then fall through and try again. Without this, a
+        # boot-time race against mediamtx-gs binding port 8554 leaves
+        # the page stuck on "Video pipeline unavailable" forever even
+        # after the live RTSP source comes up seconds later.
         if self._tap_unavailable_reason is not None:
-            return
+            now = time.monotonic()
+            if (
+                self._tap_unavailable_at is not None
+                and now - self._tap_unavailable_at < _TAP_RETRY_COOLDOWN_SECONDS
+            ):
+                return
+            self._tap_unavailable_reason = None
+            self._tap_unavailable_at = None
         tap = LocalVideoTap(logger=ctx.logger)
         try:
             await tap.start()
         except LocalVideoTapUnavailable as exc:
             self._tap_unavailable_reason = str(exc)
+            self._tap_unavailable_at = time.monotonic()
             ctx.logger.warning("video_tap_unavailable", reason=str(exc))
             return
         except Exception as exc:  # noqa: BLE001
             self._tap_unavailable_reason = str(exc)
+            self._tap_unavailable_at = time.monotonic()
             ctx.logger.warning("video_tap_start_failed", error=str(exc))
             return
         self._tap = tap

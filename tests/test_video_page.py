@@ -275,3 +275,108 @@ async def test_status_full_404_falls_back_to_ground_station_status(
     await page._refresh_metrics_once(ctx)
     assert page._recording is True
     assert any(g.endswith("/api/v1/ground-station/status") for g in client.gets)
+
+
+@pytest.mark.asyncio
+async def test_unavailable_tap_does_not_retry_within_cooldown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed tap.start() must not be retried until the cooldown
+    window elapses. Earlier code cached the failure forever — this
+    test guards against regression in the OTHER direction (retrying
+    on every render tick, which would re-spin gstreamer at ~1 Hz)."""
+    from ados.services.video import local_tap as lt
+    from ados.services.ui.pages import video as video_mod
+
+    attempts: list[int] = []
+
+    async def _fail_start(self) -> None:  # type: ignore[no-untyped-def]
+        attempts.append(1)
+        raise lt.LocalVideoTapUnavailable("stub failure")
+
+    monkeypatch.setattr(lt.LocalVideoTap, "start", _fail_start)
+    # Freeze monotonic so the cooldown gate stays closed for both calls.
+    monkeypatch.setattr(video_mod.time, "monotonic", lambda: 100.0)
+
+    page = VideoPage()
+    nav = PageNavigator()
+    ctx = _ctx(nav, _StubClient())
+
+    await page._ensure_tap(ctx)
+    await page._ensure_tap(ctx)
+
+    assert len(attempts) == 1
+    assert page._tap_unavailable_reason == "stub failure"
+    assert page._tap_unavailable_at == 100.0
+
+
+@pytest.mark.asyncio
+async def test_unavailable_tap_retries_after_cooldown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """After the cooldown window elapses, the page must clear the
+    cached failure and re-attempt tap.start() so the LCD recovers
+    once mediamtx-gs and the ffmpeg sidecar finish coming up."""
+    from ados.services.video import local_tap as lt
+    from ados.services.ui.pages import video as video_mod
+
+    attempts: list[float] = []
+
+    # First call fails, second call succeeds.
+    call_idx = {"n": 0}
+
+    async def _flaky_start(self) -> None:  # type: ignore[no-untyped-def]
+        call_idx["n"] += 1
+        attempts.append(time_ref["t"])
+        if call_idx["n"] == 1:
+            raise lt.LocalVideoTapUnavailable("first attempt fails")
+        # Second call succeeds — no exception.
+
+    time_ref = {"t": 100.0}
+    monkeypatch.setattr(lt.LocalVideoTap, "start", _flaky_start)
+    monkeypatch.setattr(video_mod.time, "monotonic", lambda: time_ref["t"])
+
+    page = VideoPage()
+    nav = PageNavigator()
+    ctx = _ctx(nav, _StubClient())
+
+    # First attempt: fails, gets cached.
+    await page._ensure_tap(ctx)
+    assert page._tap_unavailable_reason is not None
+    assert page._tap is None
+
+    # Advance just shy of the cooldown — still gated.
+    time_ref["t"] = 100.0 + video_mod._TAP_RETRY_COOLDOWN_SECONDS - 0.1
+    await page._ensure_tap(ctx)
+    assert len(attempts) == 1, "should still be in cooldown"
+
+    # Advance past the cooldown — retry fires and succeeds.
+    time_ref["t"] = 100.0 + video_mod._TAP_RETRY_COOLDOWN_SECONDS + 0.1
+    await page._ensure_tap(ctx)
+    assert len(attempts) == 2
+    assert page._tap_unavailable_reason is None
+    assert page._tap_unavailable_at is None
+    assert page._tap is not None
+
+
+@pytest.mark.asyncio
+async def test_first_attempt_records_failure_timestamp(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The cached failure must come with a monotonic timestamp so the
+    cooldown gate has something to compare against."""
+    from ados.services.video import local_tap as lt
+    from ados.services.ui.pages import video as video_mod
+
+    async def _fail_start(self) -> None:  # type: ignore[no-untyped-def]
+        raise lt.LocalVideoTapUnavailable("stub")
+
+    monkeypatch.setattr(lt.LocalVideoTap, "start", _fail_start)
+    monkeypatch.setattr(video_mod.time, "monotonic", lambda: 555.5)
+
+    page = VideoPage()
+    nav = PageNavigator()
+    await page._ensure_tap(_ctx(nav, _StubClient()))
+
+    assert page._tap_unavailable_reason == "stub"
+    assert page._tap_unavailable_at == 555.5
