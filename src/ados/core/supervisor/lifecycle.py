@@ -452,10 +452,23 @@ class Supervisor(HotplugMixin, MonitorMixin, HeartbeatMixin):
         elif not video_enabled:
             log.info("video_service_skipped", reason="video.mode is disabled in config")
 
-        # Check for WFB-ng adapter
+        # Check for WFB-ng adapter and start the right side of the radio
+        # pair for our profile. Drone runs ados-wfb (TX manager); ground
+        # station runs ados-wfb-rx (RX, single-node "direct" role) or
+        # ados-wfb-relay / ados-wfb-receiver in mesh roles. The mesh
+        # role units are managed by role_manager, so the supervisor's
+        # detection path only owns the direct-role RX unit here.
         has_wfb = self._check_wfb_adapter()
-        if has_wfb and "ados-wfb" in self._services:
-            await self.start_service("ados-wfb")
+        if has_wfb:
+            active_profile = getattr(
+                getattr(self.config, "agent", None), "profile", "auto"
+            )
+            if active_profile == "ground_station":
+                if "ados-wfb-rx" in self._services:
+                    await self.start_service("ados-wfb-rx")
+            else:
+                if "ados-wfb" in self._services:
+                    await self.start_service("ados-wfb")
 
     def _check_csi_camera(self) -> bool:
         """Check for CSI camera via rpicam-hello."""
