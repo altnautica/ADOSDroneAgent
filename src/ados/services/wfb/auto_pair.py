@@ -32,14 +32,17 @@ log = get_logger("wfb.auto_pair")
 START_DELAY_S = 15.0
 
 # Backoff between retry attempts. Each attempt stops + restarts the
-# normal wfb unit briefly. 60s is gentle enough that we don't thrash
-# the wfb subprocess; short enough that pairing is fast once the peer
-# becomes reachable on the radio.
+# normal wfb unit briefly. The bind orchestrator itself is unbounded
+# in its rendezvous wait, so we only get back here when something
+# actually broke (radio adapter died, tunnel never came up, etc.) —
+# never on a "no peer yet" timeout.
 RETRY_BACKOFF_S = 60.0
 
-# Cap on consecutive local-bind attempts before flipping the failover
-# sidecar to "cloud_relay". An operator can re-arm via the GCS or CLI
-# to start the local-bind loop again from a known state.
+# Cap on consecutive bind FAILURES (BindError raises from the
+# orchestrator) before flipping the failover sidecar to "cloud_relay".
+# Real BindErrors signal a hardware-level wedge worth surfacing to the
+# operator. The threshold no longer counts "no peer yet" timeouts since
+# those don't exist under the unbounded rendezvous design.
 MAX_LOCAL_BIND_ATTEMPTS = 10
 
 # Sidecar file shared with the ados-api process, which exposes the
@@ -52,7 +55,11 @@ FAILOVER_STATE_PATH = Path("/run/ados/wfb_failover.json")
 class AutoPairSupervisor:
     """Background task that drives the first-boot auto-bind loop."""
 
-    def __init__(self, role: str) -> None:
+    def __init__(
+        self,
+        role: str,
+        shutdown_event: asyncio.Event | None = None,
+    ) -> None:
         # role is "drone" or "gs"; comes from the agent profile fingerprint.
         # If the rig was provisioned to a non-pairing role (e.g.,
         # `relay` or `receiver` at the GS profile level) the run-loop
@@ -60,6 +67,11 @@ class AutoPairSupervisor:
         self._role = role
         self._task: asyncio.Task | None = None
         self._stop = asyncio.Event()
+        # External shutdown source (the cloud service's signal handler
+        # event). When it fires, mirror it into self._stop so the
+        # orchestrator's cancel_event hook tears down any in-flight bind.
+        self._shutdown_event = shutdown_event
+        self._mirror_task: asyncio.Task | None = None
         # Tracks whether the rig is still trying to bind locally or
         # has given up and asked the operator to fall back to the
         # cloud relay. Mirror is persisted to a sidecar file so the
@@ -97,13 +109,32 @@ class AutoPairSupervisor:
     async def stop(self) -> None:
         """Cooperative stop of the supervisor task."""
         self._stop.set()
+        if self._mirror_task is not None and not self._mirror_task.done():
+            self._mirror_task.cancel()
+            try:
+                await self._mirror_task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
+            self._mirror_task = None
         if self._task is not None:
             self._task.cancel()
             try:
                 await self._task
-            except (asyncio.CancelledError, Exception):
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
                 pass
             self._task = None
+
+    async def _mirror_external_shutdown(self) -> None:
+        """Forward the service-level shutdown event into our own stop.
+
+        The orchestrator only watches `self._stop` as its cancel source,
+        so mirroring the cloud service's signal-handler event here keeps
+        the orchestrator unaware of the external plumbing.
+        """
+        if self._shutdown_event is None:
+            return
+        await self._shutdown_event.wait()
+        self._stop.set()
 
     async def _run(self) -> None:
         if self._role not in ("drone", "gs"):
@@ -120,6 +151,15 @@ class AutoPairSupervisor:
             BindError,
             get_bind_orchestrator,
         )
+
+        # Mirror an external shutdown event into our internal stop so a
+        # single cancel signal feeds the bind orchestrator. Async-safe
+        # to start here (not in __init__) because we need a running loop.
+        if self._shutdown_event is not None:
+            self._mirror_task = asyncio.create_task(
+                self._mirror_external_shutdown(),
+                name="auto-pair-shutdown-mirror",
+            )
 
         try:
             await asyncio.wait_for(self._stop.wait(), timeout=START_DELAY_S)
@@ -197,30 +237,24 @@ class AutoPairSupervisor:
                 role=self._role,
             )
             try:
+                # Pass our internal stop event as the cancel hook so a
+                # service-shutdown signal (or explicit supervisor.stop)
+                # tears down any in-flight bind cleanly. The orchestrator
+                # itself is unbounded in its rendezvous wait.
                 result = await orch.start_local_bind(
                     role=self._role,
                     source="auto",
+                    cancel_event=self._stop,
                 )
             except BindBusyError:
+                # Another bind path raced us (REST handler, manual CLI).
+                # Defer; the busy session will succeed or fail and we
+                # pick up from there.
                 log.info("auto_pair_busy_retry")
-                if self._maybe_failover(attempt):
-                    return
                 if await self._sleep_or_stop(RETRY_BACKOFF_S):
                     return
                 continue
-            except BindError as exc:
-                log.info(
-                    "auto_pair_attempt_failed",
-                    attempt=attempt,
-                    error=str(exc),
-                    backoff_s=RETRY_BACKOFF_S,
-                )
-                if self._maybe_failover(attempt):
-                    return
-                if await self._sleep_or_stop(RETRY_BACKOFF_S):
-                    return
-                continue
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001 — final safety net
                 log.exception("auto_pair_unexpected", error=str(exc))
                 if self._maybe_failover(attempt):
                     return
@@ -228,16 +262,13 @@ class AutoPairSupervisor:
                     return
                 continue
 
-            if result.get("state") == "paired":
+            terminal = result.get("state")
+            if terminal == "paired":
                 log.info(
                     "auto_pair_paired",
                     attempts=attempt,
                     fingerprint=result.get("fingerprint"),
                 )
-                # Successful pair: keep the sidecar at "local" and
-                # let the caller exit the run loop. Idempotent re-write
-                # so a rig that flipped to cloud_relay and then bound
-                # later ends up in the consistent state.
                 self._persist_failover_state("local")
                 # apply_keypair already flipped auto_pair_enabled to
                 # false during pair persistence, so the next config
@@ -245,12 +276,22 @@ class AutoPairSupervisor:
                 # avoid the wasteful round trip.
                 return
 
-            # Bind exited a non-paired terminal state without raising.
-            # Treat as a failed attempt and retry.
+            if terminal == "aborted":
+                # Operator or service shutdown asked us to stop. Exit
+                # cleanly without bumping the failover counter.
+                log.info(
+                    "auto_pair_aborted",
+                    session_id=result.get("session_id"),
+                    reason=result.get("error"),
+                )
+                return
+
+            # terminal == "failed": a real BindError surfaced (radio
+            # adapter died, tunnel never came up, watchdog fired). Count
+            # toward the failover threshold and try again.
             log.info(
-                "auto_pair_attempt_non_paired_state",
+                "auto_pair_attempt_failed",
                 attempt=attempt,
-                terminal_state=result.get("state"),
                 error=result.get("error"),
                 backoff_s=RETRY_BACKOFF_S,
             )
@@ -291,15 +332,19 @@ class AutoPairSupervisor:
 _instance: "AutoPairSupervisor | None" = None
 
 
-def get_auto_pair_supervisor(role: str) -> "AutoPairSupervisor":
+def get_auto_pair_supervisor(
+    role: str,
+    shutdown_event: asyncio.Event | None = None,
+) -> "AutoPairSupervisor":
     """Return the process-wide AutoPairSupervisor singleton.
 
-    The role parameter is used only on first construction; subsequent
-    calls return the existing instance regardless of role argument.
+    The role and shutdown_event parameters are used only on first
+    construction; subsequent calls return the existing instance
+    regardless of the arguments passed.
     """
     global _instance
     if _instance is None:
-        _instance = AutoPairSupervisor(role=role)
+        _instance = AutoPairSupervisor(role=role, shutdown_event=shutdown_event)
     return _instance
 
 

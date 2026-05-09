@@ -81,7 +81,7 @@ def test_start_local_bind_busy_raises(
         bg = asyncio.create_task(_hold_lock())
         await held.wait()
         with pytest.raises(BindBusyError):
-            await orch.start_local_bind(role="gs", timeout_s=1.0)
+            await orch.start_local_bind(role="gs")
         finish.set()
         await bg
 
@@ -167,7 +167,6 @@ def test_start_local_bind_drone_path_calls_pair_manager(
                 orch.start_local_bind(
                     role="drone",
                     peer_device_id="gs-1",
-                    timeout_s=2.0,
                 )
             )
 
@@ -294,10 +293,160 @@ def test_start_local_bind_sweeps_stragglers_pre_flight(
     monkeypatch.setattr(orch_mod, "_wait_for_iface", _wait_for_iface_stub)
 
     orch = get_bind_orchestrator()
-    result = asyncio.run(orch.start_local_bind(role="drone", timeout_s=1.0))
+    result = asyncio.run(orch.start_local_bind(role="drone"))
 
     assert sweep_calls, "pre-flight sweep was never invoked"
     # _cleanup must also call the sweep on the failure path so
     # any subprocess that survived a cancel path is reaped.
     assert len(sweep_calls) >= 2, "cleanup-time sweep was not invoked"
     assert result["state"] == BindState.FAILED.value
+
+
+def test_cancel_event_aborts_in_flight_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When the caller fires the cancel event mid-session, the orchestrator
+    returns state=aborted within milliseconds. Regression test for the
+    operator-cancel path: the previous bounded-window design forced
+    operators to wait for the next 60s timeout to free the orchestrator.
+    """
+    bind_key = tmp_path / "bind.key"
+    bind_yaml = tmp_path / "bind.yaml"
+    bind_key.write_bytes(b"\x00")
+    bind_yaml.write_bytes(b"")
+    monkeypatch.setattr(orch_mod, "UPSTREAM_BIND_KEY", bind_key)
+    monkeypatch.setattr(orch_mod, "UPSTREAM_BIND_YAML", bind_yaml)
+    monkeypatch.setattr(
+        orch_mod, "WFB_BIND_SERVER_SH", str(tmp_path / "wfb_bind_server.sh")
+    )
+    monkeypatch.setattr(
+        orch_mod, "WFB_BIND_CLIENT_SH", str(tmp_path / "wfb_bind_client.sh")
+    )
+    Path(orch_mod.WFB_BIND_SERVER_SH).write_text("#!/bin/sh\nexit 0\n")
+    Path(orch_mod.WFB_BIND_CLIENT_SH).write_text("#!/bin/sh\nexit 0\n")
+    monkeypatch.setattr(orch_mod, "_systemctl", lambda *_a, **_kw: (True, ""))
+    monkeypatch.setattr(
+        orch_mod.shutil,
+        "which",
+        lambda name: f"/usr/bin/{name}",
+    )
+
+    async def _wait_for_iface_stub(_iface: str, _timeout_s: float = 0.0) -> bool:
+        return True
+
+    monkeypatch.setattr(orch_mod, "_wait_for_iface", _wait_for_iface_stub)
+
+    # Stub socat to never return (simulate a real "waiting for peer"
+    # session) so the cancel path is the only way out.
+    async def _hung_subprocess_exec(*_cmd, **_kw):
+        proc = AsyncMock()
+        forever = asyncio.Event()  # never set
+
+        async def _communicate():
+            await forever.wait()
+            return (b"", b"")
+
+        proc.communicate = _communicate
+        proc.returncode = None
+        proc.kill = lambda: None  # the helper checks returncode is None
+        proc.wait = AsyncMock(return_value=0)
+        proc.pid = 12345
+        return proc
+
+    async def _scenario() -> dict:
+        cancel_event = asyncio.Event()
+        with patch(
+            "asyncio.create_subprocess_exec", side_effect=_hung_subprocess_exec
+        ):
+            orch = get_bind_orchestrator()
+            bind_task = asyncio.create_task(
+                orch.start_local_bind(role="drone", cancel_event=cancel_event)
+            )
+            # Let the orchestrator reach the WAITING state.
+            await asyncio.sleep(0.05)
+            cancel_event.set()
+            return await asyncio.wait_for(bind_task, timeout=5.0)
+
+    result = asyncio.run(_scenario())
+    assert result["state"] == BindState.ABORTED.value
+    assert "cancel" in (result["error"] or "").lower()
+
+
+def test_unbounded_wait_does_not_self_exit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A session with no cancel and no peer must NOT exit on its own
+    within 5 seconds. The previous design hit a 60s wall-clock timeout;
+    the new design only exits on cancel, watchdog (30 min), or peer."""
+    bind_key = tmp_path / "bind.key"
+    bind_yaml = tmp_path / "bind.yaml"
+    bind_key.write_bytes(b"\x00")
+    bind_yaml.write_bytes(b"")
+    monkeypatch.setattr(orch_mod, "UPSTREAM_BIND_KEY", bind_key)
+    monkeypatch.setattr(orch_mod, "UPSTREAM_BIND_YAML", bind_yaml)
+    monkeypatch.setattr(
+        orch_mod, "WFB_BIND_SERVER_SH", str(tmp_path / "wfb_bind_server.sh")
+    )
+    monkeypatch.setattr(
+        orch_mod, "WFB_BIND_CLIENT_SH", str(tmp_path / "wfb_bind_client.sh")
+    )
+    Path(orch_mod.WFB_BIND_SERVER_SH).write_text("#!/bin/sh\nexit 0\n")
+    Path(orch_mod.WFB_BIND_CLIENT_SH).write_text("#!/bin/sh\nexit 0\n")
+    monkeypatch.setattr(orch_mod, "_systemctl", lambda *_a, **_kw: (True, ""))
+    monkeypatch.setattr(
+        orch_mod.shutil, "which", lambda name: f"/usr/bin/{name}"
+    )
+
+    async def _wait_for_iface_stub(_iface: str, _timeout_s: float = 0.0) -> bool:
+        return True
+
+    monkeypatch.setattr(orch_mod, "_wait_for_iface", _wait_for_iface_stub)
+
+    async def _hung_subprocess_exec(*_cmd, **_kw):
+        proc = AsyncMock()
+        forever = asyncio.Event()
+
+        async def _communicate():
+            await forever.wait()
+            return (b"", b"")
+
+        proc.communicate = _communicate
+        proc.returncode = None
+        proc.kill = lambda: None
+        proc.wait = AsyncMock(return_value=0)
+        proc.pid = 23456
+        return proc
+
+    async def _scenario() -> bool:
+        with patch(
+            "asyncio.create_subprocess_exec", side_effect=_hung_subprocess_exec
+        ):
+            orch = get_bind_orchestrator()
+            bind_task = asyncio.create_task(orch.start_local_bind(role="drone"))
+            try:
+                # If the unbounded design works, this wait_for must time out.
+                await asyncio.wait_for(asyncio.shield(bind_task), timeout=2.0)
+                bind_task.cancel()
+                return False  # bound: orchestrator self-exited
+            except asyncio.TimeoutError:
+                bind_task.cancel()
+                try:
+                    await bind_task
+                except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                    pass
+                return True  # unbounded: still waiting after 2s
+
+    assert asyncio.run(_scenario()) is True
+
+
+def test_watchdog_constant_is_long_enough_for_real_benches() -> None:
+    """The watchdog is a paranoia trip, not a normal-path bound. It
+    should be at least 5 minutes so a slow-to-boot peer never accidentally
+    triggers it."""
+    assert orch_mod.WAITING_PEER_WATCHDOG_S >= 300.0
+
+
+def test_default_timeout_constant_is_gone() -> None:
+    """The old DEFAULT_TIMEOUT_S knob was the bug; it should not be
+    referenceable anywhere in the module after the redesign."""
+    assert not hasattr(orch_mod, "DEFAULT_TIMEOUT_S")

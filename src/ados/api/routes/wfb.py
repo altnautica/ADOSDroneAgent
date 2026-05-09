@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import subprocess
@@ -16,6 +17,12 @@ from ados.api.deps import get_agent_app
 from ados.core.paths import CONFIG_YAML
 from ados.services.wfb.auto_pair import FAILOVER_STATE_PATH
 from ados.services.wfb.channel import STANDARD_CHANNELS, get_channel
+
+# HTTP-level cap on the local-bind endpoint. The orchestrator itself is
+# unbounded in its rendezvous wait; this just prevents browsers and
+# reverse proxies from cutting the request mid-flight. Operator-driven
+# cancel is also wired through POST /wfb/pair/cancel.
+_REST_LOCAL_BIND_TIMEOUT_S = 300.0  # 5 minutes
 
 router = APIRouter()
 
@@ -356,10 +363,11 @@ async def post_wfb_pair_local_bind(request: LocalBindRequest) -> dict[str, Any]:
 
     Returns a session dict (`session_id`, `state`, `started_at`,
     `finished_at`, `error`, `fingerprint`, `peer_device_id`, `source`).
-    The endpoint is synchronous: the entire bind protocol runs to
-    completion within the request, capped at 60 seconds. Long-poll
-    clients should issue this and treat the response as the terminal
-    state. Concurrent calls fail-fast with a 409.
+    The orchestrator itself waits for a peer indefinitely, so this
+    endpoint enforces an HTTP-level cap (5 minutes) before returning
+    whatever state the session is in. The bind is cancellable mid-flight
+    via POST `/wfb/pair/cancel`. Concurrent local-bind calls fail-fast
+    with a 409.
     """
     app = get_agent_app()
     role = (
@@ -370,26 +378,45 @@ async def post_wfb_pair_local_bind(request: LocalBindRequest) -> dict[str, Any]:
 
     from ados.services.wfb.bind_orchestrator import (
         BindBusyError,
-        BindError,
         get_bind_orchestrator,
     )
 
     orch = get_bind_orchestrator()
-    try:
-        return await orch.start_local_bind(
+    cancel_event = asyncio.Event()
+    bind_task = asyncio.create_task(
+        orch.start_local_bind(
             role=role,
             peer_device_id=request.peer_device_id,
             source="operator",
-        )
+            cancel_event=cancel_event,
+        ),
+        name="rest-local-bind",
+    )
+    try:
+        return await asyncio.wait_for(bind_task, timeout=_REST_LOCAL_BIND_TIMEOUT_S)
+    except asyncio.TimeoutError:
+        # Don't let an idle rendezvous tie up the HTTP connection past
+        # what proxies / browsers tolerate. Fire the cancel hook so the
+        # orchestrator drops its socat and returns a clean session
+        # snapshot, then surface whatever state we got.
+        cancel_event.set()
+        try:
+            return await bind_task
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(
+                status_code=504,
+                detail={
+                    "error": {
+                        "code": "E_BIND_TIMEOUT",
+                        "message": f"bind did not complete within "
+                        f"{_REST_LOCAL_BIND_TIMEOUT_S}s",
+                    }
+                },
+            ) from exc
     except BindBusyError as exc:
         raise HTTPException(
             status_code=409,
             detail={"error": {"code": "E_BIND_IN_PROGRESS", "message": str(exc)}},
-        ) from exc
-    except BindError as exc:
-        raise HTTPException(
-            status_code=500,
-            detail={"error": {"code": "E_BIND_FAILED", "message": str(exc)}},
         ) from exc
 
 

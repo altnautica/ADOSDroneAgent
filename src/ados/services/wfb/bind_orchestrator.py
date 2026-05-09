@@ -70,10 +70,18 @@ GS_BIND_IFACE = "gs-bind"
 DRONE_BIND_PEER_IP = "10.5.99.2"
 BIND_TCP_PORT = 5555
 
-# End-to-end timeout (15s tunnel + ~15s protocol + slack).
-DEFAULT_TIMEOUT_S = 60.0
+# Tunnel bring-up is the only real wall-clock failure mode. socat itself
+# blocks on accept() (drone server) or retries connect() (gs client) for
+# as long as we let it; the rendezvous between the two halves is unbounded
+# by design so a slow-to-boot peer never causes a "missed window" failure.
 TUNNEL_WAIT_TIMEOUT_S = 30.0
 TUNNEL_POLL_INTERVAL_S = 1.0
+
+# Belt-and-suspenders watchdog for a wedged session that neither makes
+# progress nor surfaces as an OS-level error (rc!=0). Sized big enough
+# that an operator on a flaky bench rig never sees this fire under
+# normal "still looking for peer" conditions.
+WAITING_PEER_WATCHDOG_S = 1800.0  # 30 minutes
 
 
 class BindState(StrEnum):
@@ -235,15 +243,27 @@ class BindOrchestrator:
         role: Role,
         peer_device_id: str | None = None,
         source: str = "operator",
-        timeout_s: float = DEFAULT_TIMEOUT_S,
+        cancel_event: asyncio.Event | None = None,
     ) -> dict:
         """Open a bind window and run the upstream protocol to completion.
 
-        Returns the final session dict regardless of success/failure.
+        Pairing is a rendezvous: the call blocks until either a peer is
+        found and the bind handshake succeeds, the caller fires
+        `cancel_event` (operator abort, service shutdown), the watchdog
+        fires (a wedge no one is detecting at the OS level), or the
+        protocol itself raises `BindError`. There is intentionally NO
+        time bound on "still looking for peer" — the previous bounded-
+        window design produced a phase-alignment race between the drone
+        and gs halves that broke auto-pair on lopsided availability.
         Concurrent calls fail-fast with a `409`-style ConflictError.
         """
         if self._lock.locked():
             raise BindBusyError("a bind session is already in progress")
+
+        # A never-firing default lets callers omit the parameter when
+        # they don't have an external cancel source. The watchdog still
+        # bounds a wedged session.
+        cancel_event = cancel_event if cancel_event is not None else asyncio.Event()
 
         async with self._lock:
             # Sweep stragglers from any prior aborted session before we
@@ -263,35 +283,80 @@ class BindOrchestrator:
                 role=role,
                 source=source,
             )
+            session_task = asyncio.create_task(
+                self._run_session(session, peer_device_id),
+                name=f"bind-session-{session.session_id[:8]}",
+            )
+            cancel_task = asyncio.create_task(
+                cancel_event.wait(),
+                name=f"bind-cancel-{session.session_id[:8]}",
+            )
+            watchdog_task = asyncio.create_task(
+                asyncio.sleep(WAITING_PEER_WATCHDOG_S),
+                name=f"bind-watchdog-{session.session_id[:8]}",
+            )
             try:
-                await asyncio.wait_for(
-                    self._run_session(session, peer_device_id),
-                    timeout=timeout_s,
+                done, _pending = await asyncio.wait(
+                    {session_task, cancel_task, watchdog_task},
+                    return_when=asyncio.FIRST_COMPLETED,
                 )
-            except asyncio.TimeoutError:
-                session.error = f"timeout after {timeout_s}s"
-                session.state = BindState.FAILED
-                log.warning(
-                    "bind_session_timeout",
-                    session_id=session.session_id,
-                    timeout_s=timeout_s,
-                )
-                await self._cleanup(session)
-            except BindError as exc:
-                session.error = str(exc)
-                session.state = BindState.FAILED
-                log.warning(
-                    "bind_session_failed",
-                    session_id=session.session_id,
-                    error=str(exc),
-                )
-                await self._cleanup(session)
-            except Exception as exc:  # noqa: BLE001 — final safety net
-                session.error = f"unexpected: {exc}"
-                session.state = BindState.FAILED
-                log.exception("bind_session_crashed", session_id=session.session_id)
-                await self._cleanup(session)
+                if cancel_task in done and session_task not in done:
+                    # Operator-driven abort (CLI, GCS, webapp toggle, or
+                    # service shutdown). Kill any in-flight socat via
+                    # session_task cancellation; its finally hooks then
+                    # drop the OS process.
+                    session.state = BindState.ABORTED
+                    session.error = "cancelled by caller"
+                    log.info(
+                        "bind_session_aborted",
+                        session_id=session.session_id,
+                    )
+                    await self._cleanup(session)
+                elif watchdog_task in done and session_task not in done:
+                    session.state = BindState.FAILED
+                    session.error = (
+                        f"watchdog fired after {WAITING_PEER_WATCHDOG_S}s "
+                        "with no progress"
+                    )
+                    log.warning(
+                        "bind_session_watchdog_fired",
+                        session_id=session.session_id,
+                        watchdog_s=WAITING_PEER_WATCHDOG_S,
+                    )
+                    await self._cleanup(session)
+                else:
+                    # session_task completed (exception or success).
+                    exc = session_task.exception()
+                    if isinstance(exc, BindError):
+                        session.error = str(exc)
+                        session.state = BindState.FAILED
+                        log.warning(
+                            "bind_session_failed",
+                            session_id=session.session_id,
+                            error=str(exc),
+                        )
+                        await self._cleanup(session)
+                    elif exc is not None:
+                        session.error = f"unexpected: {exc}"
+                        session.state = BindState.FAILED
+                        log.exception(
+                            "bind_session_crashed",
+                            session_id=session.session_id,
+                        )
+                        await self._cleanup(session)
+                    # else: session.state already set inside _run_session
+                    # (PAIRED on the happy path).
             finally:
+                # Always cancel the helpers that didn't complete so they
+                # don't leak past this scope. session_task's finally
+                # already kills any socat subprocess on cancel.
+                for task in (session_task, cancel_task, watchdog_task):
+                    if not task.done():
+                        task.cancel()
+                        try:
+                            await task
+                        except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                            pass
                 session.finished_at = datetime.now(UTC).isoformat(timespec="seconds")
 
         return session.to_dict()
@@ -510,15 +575,16 @@ class BindOrchestrator:
                 "must be installed."
             )
 
-        # Retry budget must outlast the drone server's hold time so the
-        # two ends overlap reliably under auto-pair, where the two
-        # sessions start on independent cadences. With DEFAULT_TIMEOUT_S
-        # at 60s and tunnel bring-up taking 1-3s, retry=55 keeps the
-        # client probing for ~55s before socat itself gives up.
+        # Unbounded rendezvous: socat retries connect() at 1s interval
+        # for as long as the orchestrator keeps it alive. The orchestrator
+        # itself ends the wait via cancel_event (operator abort or service
+        # shutdown), watchdog (wedged session paranoia), or the success
+        # path. retry=86400 (24h) is functionally infinite — a real
+        # bench session pairs in seconds when the peer is up.
         cmd = [
             "socat",
             "-d",
-            f"TCP4:{DRONE_BIND_PEER_IP}:{BIND_TCP_PORT},crlf,retry=55,interval=1",
+            f"TCP4:{DRONE_BIND_PEER_IP}:{BIND_TCP_PORT},crlf,retry=86400,interval=1",
             f"EXEC:{WFB_BIND_CLIENT_SH}",
         ]
         log.info(

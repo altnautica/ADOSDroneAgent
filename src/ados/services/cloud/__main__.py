@@ -742,7 +742,10 @@ async def main() -> None:
         from ados.services.wfb.auto_pair import get_auto_pair_supervisor
 
         ap_role = "drone" if config.agent.profile == "drone" else "gs"
-        ap_supervisor = get_auto_pair_supervisor(ap_role)
+        # Pass the service shutdown event so a SIGTERM during a long-
+        # running rendezvous tears down the in-flight bind cleanly. The
+        # orchestrator's cancel hook kills any leftover socat for us.
+        ap_supervisor = get_auto_pair_supervisor(ap_role, shutdown_event=shutdown)
         ap_supervisor.start()
         log.info("auto_pair_supervisor_spawned", role=ap_role)
     except Exception as exc:  # noqa: BLE001
