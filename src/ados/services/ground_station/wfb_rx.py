@@ -80,10 +80,19 @@ class WfbRxManager:
         self._running = False
         self._restart_count = 0
         self._max_restarts = 10
-        # RX-liveness watchdog state. Symmetric to TX watchdog on the
-        # air side. See operating rule 37.
-        self._last_rx_pkt_value: int = -1
-        self._last_rx_pkt_change_at: float = 0.0
+        # RX-liveness watchdog state. We CAN'T use the wlan iface
+        # rx_packets counter the way the TX side uses tx_bytes —
+        # rx_packets on a monitor-mode interface reflects what the
+        # kernel/driver captured from the air, NOT what wfb_rx
+        # consumed. SIGSTOP'd wfb_rx still leaves rx_packets
+        # incrementing because the kernel keeps capturing 802.11 frames
+        # regardless of the userspace consumer.
+        # Instead we track when wfb_rx last emitted a stdout stats
+        # line — _read_rx_output() updates _last_rx_stdout_at on each
+        # successful line. wfb_rx prints stats every second under
+        # nominal operation, so 30 s of silence is a strong signal.
+        # See operating rule 37.
+        self._last_rx_stdout_at: float = 0.0
         self._rx_zombie_kills: int = 0
 
     @property
@@ -309,14 +318,19 @@ class WfbRxManager:
             "auto_pair_enabled": auto_pair_enabled,
             "rx_zombie_kills": self._rx_zombie_kills,
             "rx_silent_seconds": (
-                round(time.monotonic() - self._last_rx_pkt_change_at, 1)
-                if self._last_rx_pkt_change_at > 0
+                round(time.monotonic() - self._last_rx_stdout_at, 1)
+                if self._last_rx_stdout_at > 0
                 else None
             ),
         }
 
     async def _read_rx_output(self) -> None:
-        """Feed wfb_rx stdout lines into the link quality monitor."""
+        """Feed wfb_rx stdout lines into the link quality monitor.
+
+        Also stamps `_last_rx_stdout_at` on every successful read so
+        the RX watchdog can detect a wfb_rx zombie (process alive but
+        no longer producing per-second stats lines on stdout).
+        """
         if self._rx_proc is None or self._rx_proc.stdout is None:
             return
         while self._running:
@@ -324,6 +338,7 @@ class WfbRxManager:
                 line_bytes = await self._rx_proc.stdout.readline()
                 if not line_bytes:
                     break
+                self._last_rx_stdout_at = time.monotonic()
                 line = line_bytes.decode("utf-8", errors="replace").strip()
                 if line:
                     snap = self._monitor.feed_line(line)
@@ -334,21 +349,28 @@ class WfbRxManager:
                 break
 
     async def _rx_health_watchdog(self) -> None:
-        """Catch wfb_rx zombies (process alive, radio iface rx_packets flat).
+        """Catch wfb_rx zombies (process alive but stdout silent).
 
-        Polls /sys/class/net/<iface>/statistics/rx_packets every 5 s
-        (rx_bytes is unreliable on monitor-mode interfaces with some
-        kernels — packet count is the durable signal). If unchanged
-        for 30 s while wfb_rx is alive, terminate so the standard
-        restart loop respawns it. See operating rule 37.
+        wfb_rx prints a stats line on stdout every second under nominal
+        operation. _read_rx_output() stamps `_last_rx_stdout_at` on
+        each line. If the timestamp hasn't moved for 30 s while the
+        process is alive, terminate so the standard restart loop
+        respawns it.
+
+        We deliberately do NOT poll /sys/class/net/<iface>/statistics/
+        rx_packets — that counter reflects what the kernel/driver
+        captured from the air, NOT what wfb_rx consumed. A SIGSTOP'd
+        wfb_rx still leaves rx_packets incrementing because the kernel
+        keeps capturing 802.11 frames regardless of the userspace
+        consumer. Stdout silence is the durable wfb_rx-specific signal.
+        See operating rule 37.
         """
-        if not self._interface or self._rx_proc is None:
+        if self._rx_proc is None:
             return
-        counter_path = (
-            f"/sys/class/net/{self._interface}/statistics/rx_packets"
-        )
-        self._last_rx_pkt_value = -1
-        self._last_rx_pkt_change_at = time.monotonic()
+        # Reset the stamp so we don't carry over silence accumulated
+        # while the process was being spawned. Give the process a full
+        # threshold window to start producing stats.
+        self._last_rx_stdout_at = time.monotonic()
         while (
             self._running
             and self._rx_proc is not None
@@ -358,21 +380,7 @@ class WfbRxManager:
                 await asyncio.sleep(_RX_HEALTH_POLL_INTERVAL_S)
             except asyncio.CancelledError:
                 return
-            try:
-                with open(counter_path) as f:
-                    current = int(f.read().strip())
-            except (FileNotFoundError, ValueError, OSError) as exc:
-                log.debug(
-                    "ground_rx_health_read_failed",
-                    path=counter_path,
-                    error=str(exc),
-                )
-                continue
-            if current != self._last_rx_pkt_value:
-                self._last_rx_pkt_value = current
-                self._last_rx_pkt_change_at = time.monotonic()
-                continue
-            silent_for = time.monotonic() - self._last_rx_pkt_change_at
+            silent_for = time.monotonic() - self._last_rx_stdout_at
             if silent_for >= _RX_HEALTH_SILENCE_THRESHOLD_S:
                 self._rx_zombie_kills += 1
                 log.warning(
@@ -382,7 +390,7 @@ class WfbRxManager:
                     pid=self._rx_proc.pid if self._rx_proc else None,
                     zombie_kills_total=self._rx_zombie_kills,
                     note=(
-                        "rx_packets flat while process alive; "
+                        "stdout silent while process alive; "
                         "terminating to trigger restart"
                     ),
                 )
@@ -390,8 +398,7 @@ class WfbRxManager:
                     self._rx_proc.terminate()
                 except ProcessLookupError:
                     pass
-                self._last_rx_pkt_value = -1
-                self._last_rx_pkt_change_at = time.monotonic()
+                self._last_rx_stdout_at = time.monotonic()
                 return
 
     def _update_state_from_stats(self, snap: LinkStats) -> None:
