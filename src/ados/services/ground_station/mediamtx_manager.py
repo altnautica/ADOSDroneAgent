@@ -254,11 +254,26 @@ class MediamtxGsManager:
         if not ok:
             return False
 
-        # Give mediamtx a beat to open its RTSP port before the ingest
-        # tries to publish. The core manager already sleeps 1s but an
-        # extra short wait here avoids a transient "connection refused"
-        # on slow SBCs.
-        await asyncio.sleep(0.5)
+        # Wait for mediamtx's RTSP listener to actually accept TCP before
+        # spawning the ffmpeg ingest. On slow SBCs (Pi 4B post-reboot)
+        # mediamtx takes 5-15 s to bind 8554 even after the parent
+        # process is up, and the previous fixed 0.5 s sleep was not
+        # enough — ffmpeg's first publish attempt got "Connection
+        # refused" and exited, leaving the health monitor to chase a
+        # moving target.
+        from ados.services.video.mediamtx import _wait_for_tcp_port
+
+        ready = await _wait_for_tcp_port(
+            "127.0.0.1", self._core._rtsp_port, timeout_s=30.0
+        )
+        if not ready:
+            log.error(
+                "ground_mediamtx_rtsp_not_ready",
+                port=self._core._rtsp_port,
+                timeout_s=30.0,
+            )
+            await self._core.stop()
+            return False
 
         ingest_ok = await self._start_ffmpeg_ingest()
         if not ingest_ok:
@@ -323,8 +338,11 @@ class MediamtxGsManager:
         """Reap the dead ffmpeg sidecar and spawn a fresh one.
 
         Used by the health monitor in `main()` so a sidecar that exited
-        (e.g., because UDP 5600 had no traffic at boot before pairing
-        completed) doesn't leave mediamtx without a publisher forever.
+        (e.g., because mediamtx's RTSP port was not yet listening on
+        the first attempt) doesn't leave mediamtx without a publisher
+        forever. Waits for the RTSP port to actually accept TCP again
+        before respawning so the new ffmpeg doesn't immediately hit
+        the same "Connection refused" the previous one died on.
         """
         if self._ffmpeg_stderr_task is not None:
             self._ffmpeg_stderr_task.cancel()
@@ -340,6 +358,17 @@ class MediamtxGsManager:
                     except ProcessLookupError:
                         pass
             self._ffmpeg = None
+        from ados.services.video.mediamtx import _wait_for_tcp_port
+
+        ready = await _wait_for_tcp_port(
+            "127.0.0.1", self._core._rtsp_port, timeout_s=10.0
+        )
+        if not ready:
+            log.warning(
+                "ground_mediamtx_rtsp_not_ready_on_restart",
+                port=self._core._rtsp_port,
+            )
+            return False
         return await self._start_ffmpeg_ingest()
 
 
