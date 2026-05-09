@@ -289,6 +289,33 @@ class MediamtxGsManager:
         base["whep_path"] = GROUND_WHEP_PATH
         return base
 
+    def ffmpeg_alive(self) -> bool:
+        """True when the UDP-to-RTSP ffmpeg sidecar process is running."""
+        return self._ffmpeg is not None and self._ffmpeg.returncode is None
+
+    async def restart_ffmpeg(self) -> bool:
+        """Reap the dead ffmpeg sidecar and spawn a fresh one.
+
+        Used by the health monitor in `main()` so a sidecar that exited
+        (e.g., because UDP 5600 had no traffic at boot before pairing
+        completed) doesn't leave mediamtx without a publisher forever.
+        """
+        if self._ffmpeg_stderr_task is not None:
+            self._ffmpeg_stderr_task.cancel()
+            self._ffmpeg_stderr_task = None
+        if self._ffmpeg is not None:
+            if self._ffmpeg.returncode is None:
+                try:
+                    self._ffmpeg.terminate()
+                    await asyncio.wait_for(self._ffmpeg.wait(), timeout=3.0)
+                except (TimeoutError, ProcessLookupError):
+                    try:
+                        self._ffmpeg.kill()
+                    except ProcessLookupError:
+                        pass
+            self._ffmpeg = None
+        return await self._start_ffmpeg_ingest()
+
 
 async def main() -> None:
     """Service entry point. Invoked by systemd via `python -m`."""
@@ -310,9 +337,48 @@ async def main() -> None:
 
     slog.info("ground_mediamtx_service_ready")
 
+    # Monitor the ffmpeg sidecar that ingests UDP 5600 -> RTSP push.
+    # The first attempt at boot can exit because wfb_rx hasn't received
+    # any radio frames yet (UDP 5600 silent, ffmpeg's probe gives up).
+    # Without this loop, mediamtx ends up with no publisher and the
+    # ground-station path stays empty forever even after pairing
+    # completes and the radio starts delivering.
+    async def _monitor_ffmpeg() -> None:
+        backoff = 5.0
+        max_backoff = 60.0
+        while not shutdown.is_set():
+            try:
+                await asyncio.wait_for(shutdown.wait(), timeout=5.0)
+                return
+            except asyncio.TimeoutError:
+                pass
+            if manager.ffmpeg_alive():
+                # Healthy tick; reset the backoff so the next outage
+                # restarts quickly.
+                backoff = 5.0
+                continue
+            slog.warning(
+                "ground_ffmpeg_dead_restarting", backoff_seconds=backoff
+            )
+            ok = await manager.restart_ffmpeg()
+            if ok:
+                slog.info("ground_ffmpeg_restarted")
+                backoff = 5.0
+            else:
+                # Capped exponential backoff so a persistently broken
+                # ffmpeg doesn't spin the supervisor.
+                backoff = min(backoff * 2, max_backoff)
+
+    monitor_task = asyncio.create_task(_monitor_ffmpeg(), name="ffmpeg_monitor")
+
     await shutdown.wait()
 
     slog.info("ground_mediamtx_service_stopping")
+    monitor_task.cancel()
+    try:
+        await monitor_task
+    except (asyncio.CancelledError, Exception):
+        pass
     await manager.stop()
     slog.info("ground_mediamtx_service_stopped")
 
