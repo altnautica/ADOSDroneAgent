@@ -35,14 +35,20 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 _HEALTH_CHECK_INTERVAL = 5.0
 
 # Local UDP socket the wfb-ng radio reads from on the air side. The radio
-# subprocess (`wfb_tx -u 5600 ...`) listens on this port for raw H.264
-# Annex-B frames; we run a parallel ffmpeg that pulls from local mediamtx
-# RTSP and writes to this socket so the radio actually has data to send.
-# pkt_size keeps each UDP datagram under the 802.11 MTU after wfb-ng
-# overhead so packets are not fragmented at the link layer.
+# subprocess (`wfb_tx -u 5600 ...`) listens on this port and broadcasts
+# each UDP datagram as a single 802.11 frame with FEC, per the wfb-ng
+# protocol contract: every UDP datagram going in must be a self-contained
+# unit that survives single-packet loss. We therefore wrap the encoded
+# H.264 in RTP (RFC 6184) before handing it to wfb_tx — a lost RTP packet
+# costs at most one NAL fragment, instead of corrupting the byte stream
+# until the next start code (which is what raw-H.264-over-UDP does).
+# Receiver wraps with rtph264depay; SDP at /etc/ados/wfb/video.sdp.
+# pkt_size keeps each datagram under the 802.11 MTU after wfb-ng overhead.
 _WFB_TEE_HOST = "127.0.0.1"
 _WFB_TEE_PORT = 5600
 _WFB_TEE_PKT_SIZE = 1316
+_WFB_TEE_PAYLOAD_TYPE = 96
+_WFB_TEE_SSRC = "0xCAFE"
 
 
 class PipelineState(StrEnum):
@@ -356,8 +362,8 @@ class VideoPipeline:
             return True
 
         local_rtsp = f"rtsp://localhost:{self._mediamtx.rtsp_port}/main"
-        udp_url = (
-            f"udp://{_WFB_TEE_HOST}:{_WFB_TEE_PORT}?pkt_size={_WFB_TEE_PKT_SIZE}"
+        rtp_url = (
+            f"rtp://{_WFB_TEE_HOST}:{_WFB_TEE_PORT}?pkt_size={_WFB_TEE_PKT_SIZE}"
         )
 
         try:
@@ -368,8 +374,10 @@ class VideoPipeline:
                 "-rtsp_transport", "tcp",
                 "-i", local_rtsp,
                 "-c:v", "copy",
-                "-f", "h264",
-                udp_url,
+                "-f", "rtp",
+                "-payload_type", str(_WFB_TEE_PAYLOAD_TYPE),
+                "-ssrc", _WFB_TEE_SSRC,
+                rtp_url,
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.PIPE,
             )
@@ -379,7 +387,8 @@ class VideoPipeline:
             log.info(
                 "wfb_tee_started",
                 source=local_rtsp,
-                destination=udp_url,
+                destination=rtp_url,
+                payload_type=_WFB_TEE_PAYLOAD_TYPE,
                 pid=self._wfb_tee_process.pid,
             )
             return True

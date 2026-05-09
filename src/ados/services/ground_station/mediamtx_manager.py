@@ -3,17 +3,17 @@
 The air-side mediamtx (ados.services.video.mediamtx.MediamtxManager)
 ingests a local camera encoder and publishes WHEP. On the ground side
 the ingest source is different: wfb_rx decodes the radio stream and
-pushes a raw H.264 payload to UDP 127.0.0.1:5600. Everything else
+pushes RTP-framed H.264 to UDP 127.0.0.1:5600. Everything else
 (WHEP republish, ICE config, stderr draining, process lifecycle) is
 identical, so this module reuses `MediamtxManager` and only swaps in
 a ground-profile config generator plus an ffmpeg ingest helper.
 
 Data flow:
 
-    wfb_rx  -->  udp://127.0.0.1:5600  (H.264 Annex-B, no MPEG-TS wrapper)
+    wfb_rx  -->  udp://127.0.0.1:5600  (RTP-framed H.264, payload type 96)
         |
         v
-    ffmpeg (copy, -f mpegts -> -f rtsp)  -->  rtsp://127.0.0.1:8554/main
+    ffmpeg (-i sdp:..., -c copy)  -->  rtsp://127.0.0.1:8554/main
         |
         v
     mediamtx (publisher source on /main)  -->  WHEP at :8889/ados/whep
@@ -21,9 +21,17 @@ Data flow:
         v
     Browser GCS / Android app
 
-Why the ffmpeg hop: wfb_rx emits a bare payload, not an RTSP or RTP
-stream. mediamtx cannot ingest bare UDP without a container. ffmpeg
-does the muxing with `-c copy` so there is zero transcoding cost.
+Why RTP and not raw H.264: the wfb-ng wire protocol broadcasts each UDP
+datagram as one 802.11 frame with FEC. A datagram lost beyond FEC capacity
+must not corrupt the rest of the stream. RTP carries one NAL fragment per
+packet and re-syncs at the next packet; raw H.264 over UDP loses bytes
+mid-NAL and the decoder cannot recover until the next start code. The
+upstream wfb-ng README explicitly mandates "RTP packet with video or
+audio" as the UDP payload (README §design line 6, line 138, line 150).
+
+The SDP file at /etc/ados/wfb/video.sdp tells ffmpeg the RTP stream's
+encoding (H.264 / 90kHz / packetization-mode 1) without any RTSP
+DESCRIBE round-trip, since wfb_rx is a one-way broadcast.
 """
 
 from __future__ import annotations
@@ -47,6 +55,42 @@ log = get_logger("ground_station.mediamtx")
 GROUND_INGEST_UDP_PORT = 5600
 GROUND_RTSP_PATH = "main"
 GROUND_WHEP_PATH = "ados/whep"
+GROUND_RTP_PAYLOAD_TYPE = 96
+# SDP describing the RTP stream wfb_rx pushes to UDP 5600. ffmpeg reads
+# this file via `-f sdp -i ...` so it knows the codec / clock rate /
+# packetization mode without an RTSP DESCRIBE round-trip (wfb_rx is a
+# one-way broadcaster, no RTSP server to query). We write a fresh copy
+# from generate_config() each time to track port / payload-type changes.
+# Sits next to /etc/ados/wfb/{rx,tx}.key in the same writable dir.
+GROUND_SDP_PATH = Path("/etc/ados/wfb/video.sdp")
+
+
+def _build_sdp(udp_port: int, payload_type: int) -> str:
+    """Return the SDP body that describes the wfb_rx RTP stream."""
+    return (
+        "v=0\n"
+        "o=- 0 0 IN IP4 127.0.0.1\n"
+        "s=ADOS Video\n"
+        "c=IN IP4 127.0.0.1\n"
+        "t=0 0\n"
+        f"m=video {udp_port} RTP/AVP {payload_type}\n"
+        f"a=rtpmap:{payload_type} H264/90000\n"
+        f"a=fmtp:{payload_type} packetization-mode=1\n"
+    )
+
+
+def _write_sdp(udp_port: int, payload_type: int = GROUND_RTP_PAYLOAD_TYPE) -> Path:
+    """Write the SDP to GROUND_SDP_PATH and return the path. Idempotent."""
+    GROUND_SDP_PATH.parent.mkdir(parents=True, exist_ok=True)
+    body = _build_sdp(udp_port, payload_type)
+    if GROUND_SDP_PATH.exists():
+        try:
+            if GROUND_SDP_PATH.read_text() == body:
+                return GROUND_SDP_PATH
+        except OSError:
+            pass
+    GROUND_SDP_PATH.write_text(body)
+    return GROUND_SDP_PATH
 
 
 class MediamtxGsManager:
@@ -147,6 +191,26 @@ class MediamtxGsManager:
         # Piggyback onto the core manager's config state so its start()
         # knows where to read from.
         self._core._config_path = self._config_path
+
+        # Drop the RTP-describing SDP next to /etc/ados/wfb so the
+        # ffmpeg ingest can read it via `-f sdp -i ...`. wfb_rx is a
+        # one-way broadcaster — there is no RTSP server to DESCRIBE —
+        # so the codec parameters (H264 / 90 kHz / packetization-mode 1)
+        # must come from a static descriptor.
+        try:
+            sdp_path = _write_sdp(self._udp_port, GROUND_RTP_PAYLOAD_TYPE)
+            log.info(
+                "ground_sdp_written",
+                path=str(sdp_path),
+                payload_type=GROUND_RTP_PAYLOAD_TYPE,
+            )
+        except OSError as exc:
+            log.error(
+                "ground_sdp_write_failed",
+                path=str(GROUND_SDP_PATH),
+                error=str(exc),
+            )
+
         log.info(
             "ground_mediamtx_config_generated",
             path=self._config_path,
@@ -155,36 +219,48 @@ class MediamtxGsManager:
         return self._config_path
 
     async def _start_ffmpeg_ingest(self) -> bool:
-        """Spawn ffmpeg that reads UDP 5600 and publishes to mediamtx.
+        """Spawn ffmpeg that reads RTP from UDP 5600 and publishes to mediamtx.
 
-        Uses `-c copy` (no transcode) and the H.264 mp4-to-annexb bsf
-        for consistent NAL delivery, matching the fix pattern from the
-        air-side video pipeline.
+        Reads via `-f sdp -i <path>` so ffmpeg knows the codec without
+        an RTSP DESCRIBE round-trip (wfb_rx is a one-way broadcaster,
+        no RTSP server to query). `-c copy` keeps it zero-transcode;
+        the h264_mp4toannexb bsf re-flags the bitstream as Annex-B for
+        the downstream RTSP push.
         """
         binary = shutil.which("ffmpeg")
         if not binary:
             log.error("ffmpeg_not_found", msg="ffmpeg not in PATH")
             return False
 
+        if not GROUND_SDP_PATH.exists():
+            # generate_config() should have written this; if it didn't
+            # (e.g., a config regen race), retry now so we never spawn
+            # ffmpeg without an SDP to read from.
+            try:
+                _write_sdp(self._udp_port, GROUND_RTP_PAYLOAD_TYPE)
+            except OSError as exc:
+                log.error(
+                    "ground_sdp_missing_and_unwritable",
+                    path=str(GROUND_SDP_PATH),
+                    error=str(exc),
+                )
+                return False
+
         rtsp_url = (
             f"rtsp://127.0.0.1:{self._core._rtsp_port}/{GROUND_RTSP_PATH}"
         )
-        # Relaxed probe flags compared to the air-side wfb tee. The GS
-        # ingest reads from a UDP socket whose feed comes over the
-        # radio: at boot, before pairing, the socket is silent and
-        # `-probesize 32 -analyzeduration 0` made ffmpeg give up within
-        # milliseconds with "Could not find codec parameters" and exit.
-        # The health monitor then respawned it 5 s later in a tight
-        # loop, never letting ffmpeg sit long enough to receive its
-        # first frame. Default probesize/analyzeduration buffer up to
-        # ~5 s of input before deciding, which is exactly the window
-        # we need.
+        # `-protocol_whitelist file,udp,rtp` is required because the SDP
+        # path schemes (file for the SDP itself, udp+rtp for the media)
+        # must all be explicitly allowed when reading via `sdp://`.
+        # Default probesize/analyzeduration so ffmpeg can tolerate a
+        # silent socket at boot before pairing completes.
         cmd = [
             binary,
             "-fflags", "nobuffer",
             "-flags", "low_delay",
-            "-f", "h264",
-            "-i", f"udp://@:{self._udp_port}?fifo_size=1000000&overrun_nonfatal=1&timeout=0",
+            "-protocol_whitelist", "file,udp,rtp",
+            "-f", "sdp",
+            "-i", str(GROUND_SDP_PATH),
             "-c:v", "copy",
             "-bsf:v", "h264_mp4toannexb",
             "-f", "rtsp",
