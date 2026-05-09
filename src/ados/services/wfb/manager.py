@@ -257,12 +257,18 @@ class WfbManager:
             True if the process started successfully.
         """
         _tx_key, rx_key = get_key_paths()
+        # `-l 1000` enables wfb_rx's per-second stats line emission so
+        # _read_rx_output() can feed the LinkQualityMonitor. Without
+        # it wfb_rx is silent on stdout, the API surface stays at
+        # default/zero values, and the LinkStatsPage on the LCD shows
+        # an empty radio band even when frames are flowing.
         cmd = [
             "wfb_rx",
             "-p", "0",
             "-c", "127.0.0.1",
             "-u", "5600",
             "-K", rx_key,
+            "-l", "1000",
             interface,
         ]
 

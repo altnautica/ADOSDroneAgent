@@ -180,12 +180,20 @@ class WfbRxManager:
             spawn fails.
         """
         _tx_key, rx_key = get_key_paths()
+        # `-l 1000` enables wfb_rx's stats line emission once per second.
+        # Without it the binary is silent on stdout, _read_rx_output()
+        # blocks on readline() forever, LinkQualityMonitor stays empty,
+        # and /api/wfb permanently reports state=disabled / rssi=-100 /
+        # packets_received=0 even when 802.11 frames are flowing through
+        # to UDP 5600 cleanly. The RX watchdog also relies on stdout
+        # cadence as its liveness signal — silence breaks both.
         cmd = [
             "wfb_rx",
             "-p", "0",
             "-c", "127.0.0.1",
             "-u", "5600",
             "-K", rx_key,
+            "-l", "1000",
             interface,
         ]
 
