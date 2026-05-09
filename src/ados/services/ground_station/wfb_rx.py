@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import signal
 import sys
+import time
 from enum import StrEnum
 from typing import TYPE_CHECKING
 
@@ -34,6 +35,13 @@ from ados.core.paths import WFB_KEY_DIR
 from ados.services.wfb.adapter import detect_wfb_adapters, set_monitor_mode
 from ados.services.wfb.key_mgr import get_key_paths, key_exists
 from ados.services.wfb.link_quality import LinkQualityMonitor, LinkStats
+
+# RX-liveness watchdog tunables. Symmetric to wfb/manager.py's TX
+# watchdog. We poll rx_packets (not rx_bytes) because the bytes counter
+# is unreliable on monitor-mode interfaces with some kernel versions;
+# packet count increments per radiotap-framed 802.11 frame regardless.
+_RX_HEALTH_POLL_INTERVAL_S = 5.0
+_RX_HEALTH_SILENCE_THRESHOLD_S = 30.0
 
 if TYPE_CHECKING:
     from ados.core.config import WfbConfig
@@ -72,6 +80,11 @@ class WfbRxManager:
         self._running = False
         self._restart_count = 0
         self._max_restarts = 10
+        # RX-liveness watchdog state. Symmetric to TX watchdog on the
+        # air side. See operating rule 37.
+        self._last_rx_pkt_value: int = -1
+        self._last_rx_pkt_change_at: float = 0.0
+        self._rx_zombie_kills: int = 0
 
     @property
     def state(self) -> LinkState:
@@ -294,6 +307,12 @@ class WfbRxManager:
             "paired_at": paired_at,
             "public_key_fingerprint": fingerprint,
             "auto_pair_enabled": auto_pair_enabled,
+            "rx_zombie_kills": self._rx_zombie_kills,
+            "rx_silent_seconds": (
+                round(time.monotonic() - self._last_rx_pkt_change_at, 1)
+                if self._last_rx_pkt_change_at > 0
+                else None
+            ),
         }
 
     async def _read_rx_output(self) -> None:
@@ -313,6 +332,67 @@ class WfbRxManager:
             except Exception as exc:
                 log.debug("ground_rx_read_error", error=str(exc))
                 break
+
+    async def _rx_health_watchdog(self) -> None:
+        """Catch wfb_rx zombies (process alive, radio iface rx_packets flat).
+
+        Polls /sys/class/net/<iface>/statistics/rx_packets every 5 s
+        (rx_bytes is unreliable on monitor-mode interfaces with some
+        kernels — packet count is the durable signal). If unchanged
+        for 30 s while wfb_rx is alive, terminate so the standard
+        restart loop respawns it. See operating rule 37.
+        """
+        if not self._interface or self._rx_proc is None:
+            return
+        counter_path = (
+            f"/sys/class/net/{self._interface}/statistics/rx_packets"
+        )
+        self._last_rx_pkt_value = -1
+        self._last_rx_pkt_change_at = time.monotonic()
+        while (
+            self._running
+            and self._rx_proc is not None
+            and self._rx_proc.returncode is None
+        ):
+            try:
+                await asyncio.sleep(_RX_HEALTH_POLL_INTERVAL_S)
+            except asyncio.CancelledError:
+                return
+            try:
+                with open(counter_path) as f:
+                    current = int(f.read().strip())
+            except (FileNotFoundError, ValueError, OSError) as exc:
+                log.debug(
+                    "ground_rx_health_read_failed",
+                    path=counter_path,
+                    error=str(exc),
+                )
+                continue
+            if current != self._last_rx_pkt_value:
+                self._last_rx_pkt_value = current
+                self._last_rx_pkt_change_at = time.monotonic()
+                continue
+            silent_for = time.monotonic() - self._last_rx_pkt_change_at
+            if silent_for >= _RX_HEALTH_SILENCE_THRESHOLD_S:
+                self._rx_zombie_kills += 1
+                log.warning(
+                    "ground_wfb_rx_zombie_detected",
+                    interface=self._interface,
+                    silent_seconds=round(silent_for, 1),
+                    pid=self._rx_proc.pid if self._rx_proc else None,
+                    zombie_kills_total=self._rx_zombie_kills,
+                    note=(
+                        "rx_packets flat while process alive; "
+                        "terminating to trigger restart"
+                    ),
+                )
+                try:
+                    self._rx_proc.terminate()
+                except ProcessLookupError:
+                    pass
+                self._last_rx_pkt_value = -1
+                self._last_rx_pkt_change_at = time.monotonic()
+                return
 
     def _update_state_from_stats(self, snap: LinkStats) -> None:
         if snap.loss_percent > 50.0 or snap.rssi_dbm < -85.0:
@@ -431,10 +511,15 @@ class WfbRxManager:
             backoff = 1.0
             self._state = LinkState.CONNECTED
 
+            # The RX-liveness watchdog rides alongside _rx_proc.wait() so
+            # a process that's alive but no longer producing UDP frames
+            # still terminates the wait and triggers the standard restart
+            # path. See operating rule 37 (TX-liveness contract).
             tasks: list[asyncio.Task] = []
             if self._rx_proc is not None:
                 tasks.append(asyncio.create_task(self._read_rx_output()))
                 tasks.append(asyncio.create_task(self._rx_proc.wait()))
+                tasks.append(asyncio.create_task(self._rx_health_watchdog()))
 
             try:
                 if tasks:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from enum import StrEnum
 from typing import TYPE_CHECKING
 
@@ -11,6 +12,14 @@ from ados.core.paths import WFB_KEY_DIR
 from ados.services.wfb.adapter import detect_wfb_adapters, set_monitor_mode, set_tx_power
 from ados.services.wfb.key_mgr import get_key_paths, key_exists
 from ados.services.wfb.link_quality import LinkQualityMonitor, LinkStats
+
+# TX-liveness watchdog tunables. wfb_tx can be alive (returncode is None)
+# but stop pushing 802.11 frames — observed after rapid bind/unbind
+# cycles and monitor-mode driver wedges. Polling /sys/class/net counter
+# is the only reliable way to see this from userspace; wfb_tx itself
+# does not emit a "tx_byte_count" line on its stdout.
+_TX_HEALTH_POLL_INTERVAL_S = 5.0
+_TX_HEALTH_SILENCE_THRESHOLD_S = 30.0
 
 if TYPE_CHECKING:
     from ados.core.config import WfbConfig
@@ -53,6 +62,12 @@ class WfbManager:
         self._running = False
         self._restart_count = 0
         self._max_restarts = 10
+        # TX-liveness watchdog state. Updated each time the radio iface
+        # tx_bytes counter changes; surfaced via stats() so the heartbeat
+        # carries it.
+        self._last_tx_byte_value: int = -1
+        self._last_tx_byte_change_at: float = 0.0
+        self._tx_zombie_kills: int = 0
 
     @property
     def state(self) -> LinkState:
@@ -145,6 +160,12 @@ class WfbManager:
             "paired_at": paired_at,
             "public_key_fingerprint": fingerprint,
             "auto_pair_enabled": auto_pair_enabled,
+            "tx_zombie_kills": self._tx_zombie_kills,
+            "tx_silent_seconds": (
+                round(time.monotonic() - self._last_tx_byte_change_at, 1)
+                if self._last_tx_byte_change_at > 0
+                else None
+            ),
         }
 
     def force_state(self, state: LinkState) -> None:
@@ -300,6 +321,81 @@ class WfbManager:
                 log.debug("rx_read_error", error=str(e))
                 break
 
+    async def _tx_health_watchdog(self) -> None:
+        """Catch wfb_tx zombies (process alive, radio iface tx_bytes flat).
+
+        Polls /sys/class/net/<iface>/statistics/tx_bytes every 5 s. If
+        the counter is unchanged for 30 s while wfb_tx's process is
+        still alive, terminate wfb_tx so the standard restart loop in
+        run() respawns it.
+
+        Covers the failure mode where the UDP socket on 5600 is bound
+        and the process's _wait task is happy, but the userspace driver
+        has stopped pushing 802.11 frames downstream. Process-liveness
+        is necessary but never sufficient for radio work — see operating
+        rule 37. Modeled on RubyFPV's shared-memory watchdog and
+        OpenHD's link-statistics polling.
+        """
+        if not self._interface or self._tx_proc is None:
+            return
+        counter_path = (
+            f"/sys/class/net/{self._interface}/statistics/tx_bytes"
+        )
+        # Reset window state so we don't carry over "silent for X s"
+        # across restarts of the wfb_tx process.
+        self._last_tx_byte_value = -1
+        self._last_tx_byte_change_at = time.monotonic()
+        while (
+            self._running
+            and self._tx_proc is not None
+            and self._tx_proc.returncode is None
+        ):
+            try:
+                await asyncio.sleep(_TX_HEALTH_POLL_INTERVAL_S)
+            except asyncio.CancelledError:
+                return
+            try:
+                with open(counter_path) as f:
+                    current = int(f.read().strip())
+            except (FileNotFoundError, ValueError, OSError) as exc:
+                # Iface gone (USB unplug) or counter unreadable. Don't
+                # kill wfb_tx on that — let the stdin-pipe error or the
+                # adapter detect loop in run() catch it.
+                log.debug(
+                    "wfb_tx_health_read_failed",
+                    path=counter_path,
+                    error=str(exc),
+                )
+                continue
+            if current != self._last_tx_byte_value:
+                self._last_tx_byte_value = current
+                self._last_tx_byte_change_at = time.monotonic()
+                continue
+            silent_for = time.monotonic() - self._last_tx_byte_change_at
+            if silent_for >= _TX_HEALTH_SILENCE_THRESHOLD_S:
+                self._tx_zombie_kills += 1
+                log.warning(
+                    "wfb_tx_zombie_detected",
+                    interface=self._interface,
+                    silent_seconds=round(silent_for, 1),
+                    pid=self._tx_proc.pid if self._tx_proc else None,
+                    zombie_kills_total=self._tx_zombie_kills,
+                    note=(
+                        "tx_bytes flat while process alive; "
+                        "terminating to trigger restart"
+                    ),
+                )
+                try:
+                    self._tx_proc.terminate()
+                except ProcessLookupError:
+                    pass
+                # Reset watchdog state so the next watchdog instance
+                # (started after wfb_tx respawns) doesn't immediately
+                # fire on the carried-over silence window.
+                self._last_tx_byte_value = -1
+                self._last_tx_byte_change_at = time.monotonic()
+                return
+
     def _update_state_from_stats(self, stats: LinkStats) -> None:
         """Update link state based on current statistics."""
         if stats.loss_percent > 50.0 or stats.rssi_dbm < -85.0:
@@ -442,12 +538,17 @@ class WfbManager:
             backoff = 1.0
             self._state = LinkState.CONNECTED
 
-            # Step 5: Monitor processes and read stats
+            # Step 5: Monitor processes and read stats. The TX-liveness
+            # watchdog is added alongside _tx_proc.wait() so an alive
+            # but silently-zombied wfb_tx still fires the watch loop's
+            # FIRST_COMPLETED return and triggers the restart. See
+            # operating rule 37 (TX-liveness contract).
             tasks: list[asyncio.Task] = []
             if self._rx_proc is not None:
                 tasks.append(asyncio.create_task(self._read_rx_output()))
             if self._tx_proc is not None and self._tx_proc.returncode is None:
                 tasks.append(asyncio.create_task(self._tx_proc.wait()))
+                tasks.append(asyncio.create_task(self._tx_health_watchdog()))
             if self._rx_proc is not None and self._rx_proc.returncode is None:
                 tasks.append(asyncio.create_task(self._rx_proc.wait()))
 
