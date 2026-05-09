@@ -100,6 +100,21 @@ class WfbConfig(BaseModel):
     topology: Literal["host_vbus", "powered_hub", "external_5v"] = "host_vbus"
     fec_k: int = 8
     fec_n: int = 12
+    # Frequency-band whitelist used by ``select_quietest_channel`` when
+    # ``auto_channel_enabled`` is true. U-NII-1 (5180-5240) is almost
+    # always quieter than U-NII-3 (5745-5825) in a home/office because
+    # consumer routers default to 149-161. Operators in regulatory
+    # domains that forbid U-NII-1 should set ``u-nii-3`` here. ``all``
+    # asks the scanner to consider every standard channel without a
+    # band filter.
+    band: Literal["u-nii-1", "u-nii-3", "all"] = "u-nii-1"
+    # When true, the agent scans the configured band on every fresh
+    # bind and writes the quietest channel into the persisted config
+    # before bringing wfb_tx / wfb_rx up. Disable this to pin a
+    # specific channel via the ``channel`` field above. The scan is
+    # an `iw scan` round-trip (~1-3 s), only run at bind time — never
+    # on the steady-state link health tick.
+    auto_channel_enabled: bool = True
     # When true, the agent's auto_pair supervisor opens a local bind
     # window on first boot and pairs to whichever unpaired peer responds
     # first on the radio. Flips to false the moment a pair lands so the
