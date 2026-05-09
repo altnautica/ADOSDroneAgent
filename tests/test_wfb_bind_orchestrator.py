@@ -105,9 +105,21 @@ def test_start_local_bind_drone_path_calls_pair_manager(
     monkeypatch.setattr(
         orch_mod, "WFB_BIND_SERVER_SH", str(tmp_path / "wfb_bind_server.sh")
     )
+    monkeypatch.setattr(
+        orch_mod, "WFB_BIND_CLIENT_SH", str(tmp_path / "wfb_bind_client.sh")
+    )
     Path(orch_mod.WFB_BIND_SERVER_SH).write_text("#!/bin/sh\nexit 0\n")
+    Path(orch_mod.WFB_BIND_CLIENT_SH).write_text("#!/bin/sh\nexit 0\n")
 
     monkeypatch.setattr(orch_mod, "_systemctl", lambda *_a, **_kw: (True, ""))
+    # socat + wfb_keygen aren't installed on the dev box; the orchestrator
+    # only needs them via shutil.which() preflights so a fixed return is
+    # cheaper than installing them.
+    monkeypatch.setattr(
+        orch_mod.shutil,
+        "which",
+        lambda name: f"/usr/bin/{name}",
+    )
 
     async def _wait_for_iface_stub(iface: str, timeout_s: float = 0.0) -> bool:
         return True
@@ -165,3 +177,127 @@ def test_start_local_bind_drone_path_calls_pair_manager(
     assert role == "drone"
     assert peer_id == "gs-1"
     assert len(blob) == 64
+
+
+def test_kill_stale_bind_socats_targets_listener_and_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The sweep helper must invoke pkill against both the listener
+    pattern (drone side) and the client pattern (gs side). The bind
+    port + peer IP are the discriminators that prevent us from killing
+    unrelated socat invocations on the box."""
+    calls: list[list[str]] = []
+
+    def _fake_run(cmd, **_kw):
+        calls.append(list(cmd))
+
+        class _Result:
+            returncode = 0
+            stdout = b""
+            stderr = b""
+
+        return _Result()
+
+    monkeypatch.setattr(orch_mod.subprocess, "run", _fake_run)
+    orch_mod._kill_stale_bind_socats()
+
+    assert len(calls) == 2
+    listener = next(c for c in calls if "TCP4-LISTEN:" in " ".join(c))
+    client = next(c for c in calls if "TCP4:" in " ".join(c) and "TCP4-LISTEN:" not in " ".join(c))
+    assert "pkill" in listener[0] and "-9" in listener and "-f" in listener
+    assert orch_mod.DRONE_BIND_PEER_IP in " ".join(listener)
+    assert str(orch_mod.BIND_TCP_PORT) in " ".join(listener)
+    assert orch_mod.DRONE_BIND_PEER_IP in " ".join(client)
+
+
+def test_run_socat_with_kill_on_cancel_kills_subprocess() -> None:
+    """When the outer caller is cancelled (asyncio.wait_for timeout),
+    the helper's finally block must kill the OS process so port 5555
+    stays free for the next attempt. Regression test for the leak that
+    caused every retry after the first to fail with `Address already
+    in use` on 10.5.99.2:5555."""
+    import os
+    import signal
+
+    async def _scenario() -> int:
+        # /bin/sleep is universally available; stand-in for a hung socat.
+        # We wrap the helper in a wait_for that fires before sleep
+        # completes; the helper's finally must kill the child.
+        captured_pid: dict[str, int] = {}
+
+        async def _spy_run() -> None:
+            # Inline the helper but capture the pid for post-mortem.
+            proc = await asyncio.create_subprocess_exec(
+                "/bin/sleep",
+                "30",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            captured_pid["pid"] = proc.pid
+            try:
+                await proc.communicate()
+            finally:
+                if proc.returncode is None:
+                    try:
+                        proc.kill()
+                    except ProcessLookupError:
+                        pass
+                    try:
+                        await asyncio.wait_for(proc.wait(), timeout=5.0)
+                    except (asyncio.TimeoutError, ProcessLookupError):
+                        pass
+
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(_spy_run(), timeout=0.5)
+        # Give the kernel a beat to reap.
+        await asyncio.sleep(0.1)
+        return captured_pid["pid"]
+
+    pid = asyncio.run(_scenario())
+    # Process must be gone. Sending signal 0 raises ProcessLookupError if so.
+    with pytest.raises(ProcessLookupError):
+        os.kill(pid, 0)
+
+
+def test_start_local_bind_sweeps_stragglers_pre_flight(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Pre-flight sweep must run BEFORE pre-flight artifact checks raise,
+    so a rig with stale socats from a crashed prior session recovers on
+    the next start_local_bind call."""
+    bind_key = tmp_path / "bind.key"
+    bind_yaml = tmp_path / "bind.yaml"
+    bind_key.write_bytes(b"\x00")
+    bind_yaml.write_bytes(b"")
+    monkeypatch.setattr(orch_mod, "UPSTREAM_BIND_KEY", bind_key)
+    monkeypatch.setattr(orch_mod, "UPSTREAM_BIND_YAML", bind_yaml)
+    monkeypatch.setattr(
+        orch_mod, "WFB_BIND_SERVER_SH", str(tmp_path / "wfb_bind_server.sh")
+    )
+    monkeypatch.setattr(
+        orch_mod, "WFB_BIND_CLIENT_SH", str(tmp_path / "wfb_bind_client.sh")
+    )
+    Path(orch_mod.WFB_BIND_SERVER_SH).write_text("#!/bin/sh\nexit 0\n")
+    Path(orch_mod.WFB_BIND_CLIENT_SH).write_text("#!/bin/sh\nexit 0\n")
+    monkeypatch.setattr(orch_mod, "_systemctl", lambda *_a, **_kw: (True, ""))
+
+    sweep_calls: list[int] = []
+
+    def _spy_kill_stale() -> None:
+        sweep_calls.append(1)
+
+    monkeypatch.setattr(orch_mod, "_kill_stale_bind_socats", _spy_kill_stale)
+
+    async def _wait_for_iface_stub(_iface: str, _timeout_s: float = 0.0) -> bool:
+        return False  # Force the session to fail so we don't need a real bind.
+
+    monkeypatch.setattr(orch_mod, "_wait_for_iface", _wait_for_iface_stub)
+
+    orch = get_bind_orchestrator()
+    result = asyncio.run(orch.start_local_bind(role="drone", timeout_s=1.0))
+
+    assert sweep_calls, "pre-flight sweep was never invoked"
+    # _cleanup must also call the sweep on the failure path so
+    # any subprocess that survived a cancel path is reaped.
+    assert len(sweep_calls) >= 2, "cleanup-time sweep was not invoked"
+    assert result["state"] == BindState.FAILED.value

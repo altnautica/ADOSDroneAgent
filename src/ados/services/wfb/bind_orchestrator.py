@@ -130,6 +130,73 @@ def _systemctl(action: str, unit: str, timeout_s: float = 10.0) -> tuple[bool, s
     return True, ""
 
 
+def _kill_stale_bind_socats() -> None:
+    """Kill leftover socat processes from a previously aborted bind session.
+
+    Why: Python's asyncio cancels the wrapper task on outer wait_for timeout,
+    but `asyncio.subprocess.Process` does not propagate the cancel to the
+    underlying OS process. A bind session that hits the 60s outer timeout
+    leaves the socat listener (drone) or socat client (gs) running with
+    port 5555 on 10.5.99.2 still bound. Every subsequent attempt then
+    crashes with `bind() Address already in use`. This helper sweeps
+    those stragglers before opening a new session and during cleanup.
+    """
+    patterns = (
+        f"socat.*TCP4-LISTEN:{BIND_TCP_PORT},bind={DRONE_BIND_PEER_IP}",
+        f"socat.*TCP4:{DRONE_BIND_PEER_IP}:{BIND_TCP_PORT}",
+    )
+    for pattern in patterns:
+        try:
+            subprocess.run(
+                ["pkill", "-9", "-f", pattern],
+                check=False,
+                timeout=5.0,
+                capture_output=True,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            log.debug("stale_bind_socat_kill_failed", pattern=pattern, error=str(exc))
+
+
+async def _run_socat_with_kill_on_cancel(
+    cmd: list[str],
+    *,
+    log_event: str,
+    session_id: str,
+) -> tuple[int, bytes, bytes]:
+    """Run a socat subprocess and guarantee its OS process dies on cancel.
+
+    `asyncio.create_subprocess_exec` returns a Process whose lifetime is
+    tied to its handle, not to the caller's task. If the caller is
+    cancelled mid-`communicate()` (e.g., the orchestrator's outer
+    `asyncio.wait_for` fires), the OS process keeps running and holds
+    its sockets. Wrapping the await in try/finally with proc.kill() in
+    the cancel path is what closes the gap.
+    """
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        stdout, stderr = await proc.communicate()
+        return proc.returncode or 0, stdout, stderr
+    finally:
+        if proc.returncode is None:
+            log.warning(
+                f"{log_event}_force_killed",
+                session_id=session_id,
+                pid=proc.pid,
+            )
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=5.0)
+            except (asyncio.TimeoutError, ProcessLookupError):
+                pass
+
+
 async def _wait_for_iface(iface: str, timeout_s: float = TUNNEL_WAIT_TIMEOUT_S) -> bool:
     """Poll `ip -4 addr show` until the L3 bind tunnel interface appears."""
     deadline = asyncio.get_event_loop().time() + timeout_s
@@ -179,6 +246,10 @@ class BindOrchestrator:
             raise BindBusyError("a bind session is already in progress")
 
         async with self._lock:
+            # Sweep stragglers from any prior aborted session before we
+            # touch the radio. Cheap and idempotent when nothing is stale.
+            _kill_stale_bind_socats()
+
             session = BindSession(
                 session_id=str(uuid.uuid4()),
                 role=role,
@@ -415,15 +486,14 @@ class BindOrchestrator:
         )
 
         session.state = BindState.TRANSFERRING_KEYS
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+        rc, stdout, stderr = await _run_socat_with_kill_on_cancel(
+            cmd,
+            log_event="bind_server_socat",
+            session_id=session.session_id,
         )
-        stdout, stderr = await proc.communicate()
-        if proc.returncode != 0:
+        if rc != 0:
             raise BindError(
-                f"socat server exited rc={proc.returncode}: "
+                f"socat server exited rc={rc}: "
                 f"{stderr.decode(errors='replace').strip()[:240]}"
             )
         log.info(
@@ -440,10 +510,15 @@ class BindOrchestrator:
                 "must be installed."
             )
 
+        # Retry budget must outlast the drone server's hold time so the
+        # two ends overlap reliably under auto-pair, where the two
+        # sessions start on independent cadences. With DEFAULT_TIMEOUT_S
+        # at 60s and tunnel bring-up taking 1-3s, retry=55 keeps the
+        # client probing for ~55s before socat itself gives up.
         cmd = [
             "socat",
             "-d",
-            f"TCP4:{DRONE_BIND_PEER_IP}:{BIND_TCP_PORT},crlf,retry=30,interval=1",
+            f"TCP4:{DRONE_BIND_PEER_IP}:{BIND_TCP_PORT},crlf,retry=55,interval=1",
             f"EXEC:{WFB_BIND_CLIENT_SH}",
         ]
         log.info(
@@ -453,15 +528,14 @@ class BindOrchestrator:
         )
 
         session.state = BindState.TRANSFERRING_KEYS
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+        rc, stdout, stderr = await _run_socat_with_kill_on_cancel(
+            cmd,
+            log_event="bind_client_socat",
+            session_id=session.session_id,
         )
-        stdout, stderr = await proc.communicate()
-        if proc.returncode != 0:
+        if rc != 0:
             raise BindError(
-                f"socat client exited rc={proc.returncode}: "
+                f"socat client exited rc={rc}: "
                 f"{stderr.decode(errors='replace').strip()[:240]}"
             )
         log.info(
@@ -483,6 +557,10 @@ class BindOrchestrator:
         bind_unit = (
             DRONE_BIND_UNIT if session.role == "drone" else GS_BIND_UNIT
         )
+        # Belt-and-suspenders: any socat that survived the cancel path
+        # would leak port 5555 and break the next attempt. The kill is
+        # cheap and idempotent.
+        _kill_stale_bind_socats()
         _systemctl("stop", bind_unit)
         _systemctl("start", normal_unit)
 
