@@ -2088,6 +2088,16 @@ if is_installed && $DO_UPGRADE && ! $DO_FORCE; then
     local_ver=$(get_installed_version)
     info "Current version: ${local_ver}"
 
+    # Resolve the agent profile early on the upgrade path. Without this
+    # line ADOS_PROFILE stayed empty for the rest of the block and every
+    # `${ADOS_PROFILE:-drone}` check defaulted to "drone", which meant
+    # ground-station upgrades silently skipped the GS-only steps and the
+    # cross-profile teardown ran the wrong direction. resolve_profile
+    # reads --profile flag first, then /etc/ados/profile.conf — both of
+    # which are stable across upgrades on a previously-installed rig.
+    ADOS_PROFILE="$(resolve_profile)"
+    info "Detected profile: ${ADOS_PROFILE}"
+
     # Ensure system deps are present. The upgrade path skips the full
     # install_system_deps to keep upgrades fast, so we only top up the
     # packages that earlier installs may have missed. Includes the
