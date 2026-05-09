@@ -268,3 +268,147 @@ class TestRestartAttemptsSurface:
         # 65 s after the new stamp, clear fires.
         assert pipeline._note_healthy_tick(now=270.0) is True
         assert pipeline._restart_count == 0
+
+
+class TestWfbUdpTee:
+    """The wfb tee feeds the radio's UDP listener so video crosses the
+    radio link. Without this, wfb_tx starves and zero bytes hit the GS."""
+
+    @pytest.mark.asyncio
+    async def test_start_wfb_tee_spawns_ffmpeg_with_correct_args(self, monkeypatch):
+        from ados.services.video import pipeline as pl_mod
+
+        pipeline = VideoPipeline(VideoConfig())
+        pipeline._state = PipelineState.RUNNING
+        # Mediamtx port lookup is via the real manager attribute.
+        pipeline._mediamtx = MagicMock()
+        pipeline._mediamtx.rtsp_port = 8554
+
+        captured_cmd: list[str] = []
+
+        async def _fake_exec(*cmd, **_kw):
+            captured_cmd.extend(cmd)
+            proc = MagicMock()
+            proc.returncode = None
+            proc.pid = 9999
+            proc.stderr = None
+            return proc
+
+        monkeypatch.setattr(pl_mod.asyncio, "create_subprocess_exec", _fake_exec)
+
+        ok = await pipeline.start_wfb_tee()
+        assert ok is True
+        # The tee must read from local mediamtx RTSP and write to UDP
+        # 127.0.0.1:5600 — the port wfb_tx listens on.
+        assert "rtsp://localhost:8554/main" in captured_cmd
+        joined = " ".join(captured_cmd)
+        assert "udp://127.0.0.1:5600" in joined
+        assert "pkt_size=1316" in joined
+        # No re-encode: the encoder is upstream and CPU is precious.
+        assert "-c:v" in captured_cmd
+        copy_index = captured_cmd.index("-c:v") + 1
+        assert captured_cmd[copy_index] == "copy"
+
+    @pytest.mark.asyncio
+    async def test_start_wfb_tee_skipped_when_pipeline_not_running(self, monkeypatch):
+        from ados.services.video import pipeline as pl_mod
+
+        pipeline = VideoPipeline(VideoConfig())
+        pipeline._state = PipelineState.STOPPED
+
+        called = []
+
+        async def _fake_exec(*cmd, **_kw):
+            called.append(cmd)
+            return MagicMock(returncode=None, pid=1, stderr=None)
+
+        monkeypatch.setattr(pl_mod.asyncio, "create_subprocess_exec", _fake_exec)
+        ok = await pipeline.start_wfb_tee()
+        assert ok is False
+        assert called == []
+
+    @pytest.mark.asyncio
+    async def test_start_wfb_tee_idempotent_when_already_running(self):
+        pipeline = VideoPipeline(VideoConfig())
+        pipeline._state = PipelineState.RUNNING
+        running = MagicMock()
+        running.returncode = None
+        pipeline._wfb_tee_process = running
+        ok = await pipeline.start_wfb_tee()
+        assert ok is True
+        # Did not respawn — the existing process is reused.
+        assert pipeline._wfb_tee_process is running
+
+    @pytest.mark.asyncio
+    async def test_start_wfb_tee_handles_missing_ffmpeg(self, monkeypatch):
+        from ados.services.video import pipeline as pl_mod
+
+        pipeline = VideoPipeline(VideoConfig())
+        pipeline._state = PipelineState.RUNNING
+        pipeline._mediamtx = MagicMock()
+        pipeline._mediamtx.rtsp_port = 8554
+
+        async def _missing(*_args, **_kw):
+            raise FileNotFoundError("ffmpeg")
+
+        monkeypatch.setattr(pl_mod.asyncio, "create_subprocess_exec", _missing)
+        ok = await pipeline.start_wfb_tee()
+        # Best-effort: returns False but does not raise. Pipeline keeps
+        # running because the local mediamtx and cloud push do not need
+        # the tee.
+        assert ok is False
+
+    @pytest.mark.asyncio
+    async def test_stop_wfb_tee_terminates_subprocess(self):
+        pipeline = VideoPipeline(VideoConfig())
+        proc = MagicMock()
+        proc.returncode = None
+        # First call to wait() completes normally.
+        proc.wait = AsyncMock(return_value=0)
+        proc.terminate = MagicMock()
+        proc.kill = MagicMock()
+        pipeline._wfb_tee_process = proc
+
+        await pipeline.stop_wfb_tee()
+        proc.terminate.assert_called_once()
+        proc.wait.assert_awaited()
+        assert pipeline._wfb_tee_process is None
+
+    @pytest.mark.asyncio
+    async def test_stop_wfb_tee_no_op_when_already_stopped(self):
+        pipeline = VideoPipeline(VideoConfig())
+        # No process attached: stop is a clean no-op.
+        await pipeline.stop_wfb_tee()
+        assert pipeline._wfb_tee_process is None
+
+    @pytest.mark.asyncio
+    async def test_check_wfb_tee_health_detects_exit(self):
+        pipeline = VideoPipeline(VideoConfig())
+        proc = MagicMock()
+        proc.returncode = 1  # ffmpeg crashed
+        pipeline._wfb_tee_process = proc
+
+        ok = await pipeline._check_wfb_tee_health()
+        assert ok is False
+        # Failed health drops the handle so the run loop can respawn.
+        assert pipeline._wfb_tee_process is None
+
+    @pytest.mark.asyncio
+    async def test_check_wfb_tee_health_returns_true_when_not_started(self):
+        pipeline = VideoPipeline(VideoConfig())
+        # No tee attached — that is a healthy state pre-stream-start.
+        ok = await pipeline._check_wfb_tee_health()
+        assert ok is True
+
+    def test_get_status_surfaces_wfb_tee_flag(self):
+        pipeline = VideoPipeline(VideoConfig())
+        # Stopped pipeline: tee not running.
+        status = pipeline.get_status()
+        assert status["wfb_tee"] is False
+
+        # Inject a live tee process and verify the flag flips.
+        proc = MagicMock()
+        proc.returncode = None
+        pipeline._wfb_tee_process = proc
+        status = pipeline.get_status()
+        assert status["wfb_tee"] is True

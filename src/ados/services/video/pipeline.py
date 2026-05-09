@@ -34,6 +34,16 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 
 _HEALTH_CHECK_INTERVAL = 5.0
 
+# Local UDP socket the wfb-ng radio reads from on the air side. The radio
+# subprocess (`wfb_tx -u 5600 ...`) listens on this port for raw H.264
+# Annex-B frames; we run a parallel ffmpeg that pulls from local mediamtx
+# RTSP and writes to this socket so the radio actually has data to send.
+# pkt_size keeps each UDP datagram under the 802.11 MTU after wfb-ng
+# overhead so packets are not fragmented at the link layer.
+_WFB_TEE_HOST = "127.0.0.1"
+_WFB_TEE_PORT = 5600
+_WFB_TEE_PKT_SIZE = 1316
+
 
 class PipelineState(StrEnum):
     STOPPED = "stopped"
@@ -67,6 +77,13 @@ class VideoPipeline:
         self._encoder_type: EncoderType | None = None
         self._cloud_push_process: asyncio.subprocess.Process | None = None
         self._cloud_stderr_task: asyncio.Task | None = None
+        # ffmpeg sidecar that fans out the encoded RTSP back to UDP 5600
+        # so the wfb-ng radio has H.264 to broadcast. Independent
+        # lifecycle from cloud_push: cloud_push is for remote viewing,
+        # the wfb tee is for the local radio link.
+        self._wfb_tee_process: asyncio.subprocess.Process | None = None
+        self._wfb_tee_stderr_task: asyncio.Task | None = None
+        self._wfb_tee_restart_count: int = 0
         # Encoder stderr is captured (not DEVNULL) so ffmpeg errors surface.
         self._encoder_stderr_task: asyncio.Task | None = None
         self._restart_count: int = 0
@@ -199,6 +216,10 @@ class VideoPipeline:
                 encoder=self._encoder_type.value,
                 camera=primary.name,
             )
+            # Best-effort radio fan-out. Failure here does not fail the
+            # pipeline; local mediamtx and cloud push still work, only
+            # the radio link goes dark.
+            await self.start_wfb_tee()
             return True
         except FileNotFoundError:
             log.error("encoder_binary_not_found", encoder=self._encoder_type.value)
@@ -211,6 +232,8 @@ class VideoPipeline:
 
     async def _teardown_after_partial_start(self) -> None:
         """Roll back partial start. Stops any process spawned after mediamtx.start()."""
+        # Sweep the wfb tee first; it depends on local RTSP being up.
+        await self.stop_wfb_tee()
         # Encoder may have spawned but not been assigned cleanly; sweep it.
         if self._encoder_process is not None and self._encoder_process.returncode is None:
             try:
@@ -308,9 +331,90 @@ class VideoPipeline:
             self._cloud_push_process = None
             log.info("cloud_push_stopped")
 
+    async def start_wfb_tee(self) -> bool:
+        """Fan out the encoded H.264 RTSP back to local UDP for the radio.
+
+        The wfb-ng TX subprocess listens on UDP 127.0.0.1:5600 for raw
+        Annex-B H.264 frames to encapsulate and broadcast over the
+        radio. Without something feeding that socket, the radio link is
+        a dry pipe even when the encoder is publishing fine to mediamtx.
+        This sidecar reads from the local mediamtx RTSP path with
+        `-c:v copy` (no re-encode) and writes to UDP. On rigs without a
+        wfb radio (e.g. a ground station running this service for some
+        reason) the UDP packets are silently dropped by the kernel —
+        harmless cost.
+        """
+        if self._state != PipelineState.RUNNING:
+            log.warning("wfb_tee_skipped", reason="pipeline not running")
+            return False
+
+        # Idempotent: an existing healthy tee just stays.
+        if (
+            self._wfb_tee_process is not None
+            and self._wfb_tee_process.returncode is None
+        ):
+            return True
+
+        local_rtsp = f"rtsp://localhost:{self._mediamtx.rtsp_port}/main"
+        udp_url = (
+            f"udp://{_WFB_TEE_HOST}:{_WFB_TEE_PORT}?pkt_size={_WFB_TEE_PKT_SIZE}"
+        )
+
+        try:
+            self._wfb_tee_process = await asyncio.create_subprocess_exec(
+                "ffmpeg",
+                "-fflags", "nobuffer",
+                "-flags", "low_delay",
+                "-rtsp_transport", "tcp",
+                "-i", local_rtsp,
+                "-c:v", "copy",
+                "-f", "h264",
+                udp_url,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            self._wfb_tee_stderr_task = asyncio.create_task(
+                self._drain_stderr(self._wfb_tee_process, "wfb_tee")
+            )
+            log.info(
+                "wfb_tee_started",
+                source=local_rtsp,
+                destination=udp_url,
+                pid=self._wfb_tee_process.pid,
+            )
+            return True
+        except FileNotFoundError:
+            log.error("wfb_tee_ffmpeg_not_found")
+            return False
+        except Exception as exc:  # noqa: BLE001
+            log.error("wfb_tee_start_failed", error=str(exc))
+            return False
+
+    async def stop_wfb_tee(self) -> None:
+        """Stop the wfb radio UDP tee."""
+        if self._wfb_tee_stderr_task is not None:
+            self._wfb_tee_stderr_task.cancel()
+            self._wfb_tee_stderr_task = None
+        proc = self._wfb_tee_process
+        if proc is not None and proc.returncode is None:
+            try:
+                proc.terminate()
+            except ProcessLookupError:
+                pass
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=5.0)
+            except (TimeoutError, asyncio.CancelledError):
+                try:
+                    proc.kill()
+                except ProcessLookupError:
+                    pass
+            log.info("wfb_tee_stopped")
+        self._wfb_tee_process = None
+
     async def stop_stream(self) -> None:
         """Stop the encoding pipeline and mediamtx."""
         log.info("stop_stream_begin")
+        await self.stop_wfb_tee()
         await self.stop_cloud_push()
 
         # The encoder subprocess could already be dead by the time
@@ -517,6 +621,27 @@ class VideoPipeline:
             return False
         return True
 
+    async def _check_wfb_tee_health(self) -> bool:
+        """Check if the wfb UDP tee subprocess is still running.
+
+        Returns True if healthy or if the tee was never started.
+        Returns False only when the process died unexpectedly so the
+        run loop can restart it without flapping the encoder itself.
+        """
+        if self._wfb_tee_process is None:
+            return True
+        if self._wfb_tee_process.returncode is not None:
+            log.warning(
+                "wfb_tee_process_exited",
+                returncode=self._wfb_tee_process.returncode,
+            )
+            self._wfb_tee_process = None
+            if self._wfb_tee_stderr_task is not None:
+                self._wfb_tee_stderr_task.cancel()
+                self._wfb_tee_stderr_task = None
+            return False
+        return True
+
     async def run(self) -> None:
         """Main service loop — monitors pipeline health and restarts on failure.
 
@@ -595,6 +720,34 @@ class VideoPipeline:
                             success = await self.start_cloud_push()
                             if success:
                                 self._cloud_restart_count = 0
+                    elif not await self._check_wfb_tee_health():
+                        # Encoder + cloud are fine but the radio fan-out died.
+                        # Restart only the tee so the radio recovers without
+                        # tearing down the rest of the pipeline.
+                        self._wfb_tee_restart_count += 1
+                        delay = min(
+                            self._base_restart_delay * (2 ** (self._wfb_tee_restart_count - 1)),
+                            self._max_restart_delay,
+                        )
+                        if self._wfb_tee_restart_count >= 10:
+                            log.error(
+                                "wfb_tee_circuit_breaker",
+                                msg="too many wfb tee failures, waiting 5 minutes",
+                                attempts=self._wfb_tee_restart_count,
+                            )
+                            await asyncio.sleep(self._max_restart_delay)
+                            self._wfb_tee_restart_count = 0
+                        else:
+                            log.warning(
+                                "wfb_tee_restarting",
+                                attempt=self._wfb_tee_restart_count,
+                                backoff_secs=delay,
+                            )
+                            await self.stop_wfb_tee()
+                            await asyncio.sleep(max(0, delay - _HEALTH_CHECK_INTERVAL))
+                            success = await self.start_wfb_tee()
+                            if success:
+                                self._wfb_tee_restart_count = 0
 
                 elif self._state in (PipelineState.ERROR, PipelineState.STOPPED):
                     # Retry start_stream with backoff. Covers cases where the
@@ -627,6 +780,24 @@ class VideoPipeline:
 
                 await asyncio.sleep(_HEALTH_CHECK_INTERVAL)
         finally:
+            # Kill the wfb tee first because it has a TCP connection to
+            # local mediamtx that needs to drain before mediamtx itself
+            # goes away.
+            if self._wfb_tee_process is not None and self._wfb_tee_process.returncode is None:
+                try:
+                    self._wfb_tee_process.terminate()
+                except ProcessLookupError:
+                    pass
+                try:
+                    await asyncio.wait_for(self._wfb_tee_process.wait(), timeout=5.0)
+                except (TimeoutError, asyncio.CancelledError):
+                    try:
+                        self._wfb_tee_process.kill()
+                    except ProcessLookupError:
+                        pass
+                self._wfb_tee_process = None
+                log.info("wfb_tee_process_cleaned_up")
+
             # Kill cloud push subprocess on shutdown/cancellation
             if self._cloud_push_process is not None and self._cloud_push_process.returncode is None:
                 self._cloud_push_process.terminate()
@@ -654,6 +825,10 @@ class VideoPipeline:
             self._cloud_push_process is not None
             and self._cloud_push_process.returncode is None
         )
+        wfb_tee = (
+            self._wfb_tee_process is not None
+            and self._wfb_tee_process.returncode is None
+        )
         return {
             "state": self._state.value,
             "encoder": self._encoder_type.value if self._encoder_type else None,
@@ -661,6 +836,7 @@ class VideoPipeline:
             "recorder": self._recorder.to_dict(),
             "mediamtx": self._mediamtx.to_dict(),
             "cloud_push": cloud_push,
+            "wfb_tee": wfb_tee,
         }
 
     async def restart_with_camera(self, role: str, device_path: str) -> None:
@@ -846,6 +1022,7 @@ class VideoPipeline:
                 encoder=self._encoder_type.value,
                 camera=primary.name,
             )
+            await self.start_wfb_tee()
             return True
         except FileNotFoundError:
             log.error("encoder_binary_not_found", encoder=self._encoder_type.value)
