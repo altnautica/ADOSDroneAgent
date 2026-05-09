@@ -1,6 +1,6 @@
 [Unit]
 Description=ADOS mesh pairing daemon (UDP 5801 sidecar for pairing_manager)
-After=ados-supervisor.service ados-batman.service
+After=ados-batman.service
 Wants=ados-batman.service
 PartOf=ados-supervisor.service
 # Only runs on nodes that have the mesh deps installed (every ground

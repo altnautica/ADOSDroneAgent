@@ -1,6 +1,14 @@
 [Unit]
 Description=ADOS WFB-ng RX (ground-station profile)
-After=ados-supervisor.service
+# After= the network and the mavlink unit, NOT the supervisor itself.
+# An earlier revision had After=ados-supervisor.service which deadlocked
+# the supervisor's own startup: when the supervisor's start_service
+# called systemctl start during its init phase, systemd held the start
+# request waiting for the supervisor to reach 'active' state — but the
+# supervisor needed this child to start before it could call
+# sd_notify(READY=1). PartOf= still binds the lifecycle so a supervisor
+# stop tears the rx unit down with it.
+After=network.target ados-mavlink.service
 PartOf=ados-supervisor.service
 ConditionKernelCommandLine=!no-wfb
 StartLimitInterval=60s

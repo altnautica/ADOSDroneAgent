@@ -1,6 +1,6 @@
 [Unit]
 Description=ADOS Pilot-in-Command Arbiter (ground-station profile)
-After=ados-supervisor.service ados-input.service
+After=ados-input.service
 PartOf=ados-supervisor.service
 StartLimitInterval=60s
 StartLimitBurst=5

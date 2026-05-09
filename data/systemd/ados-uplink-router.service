@@ -1,6 +1,6 @@
 [Unit]
 Description=ADOS Uplink Router (ground-station profile)
-After=ados-supervisor.service NetworkManager.service
+After=NetworkManager.service
 PartOf=ados-supervisor.service
 Requires=ados-supervisor.service
 StartLimitInterval=60s

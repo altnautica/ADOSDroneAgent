@@ -1,6 +1,6 @@
 [Unit]
 Description=ADOS Ethernet Manager (ground-station profile)
-After=ados-supervisor.service NetworkManager.service
+After=NetworkManager.service
 PartOf=ados-supervisor.service
 Requires=NetworkManager.service
 StartLimitInterval=60s

@@ -1,6 +1,6 @@
 [Unit]
 Description=ADOS batman-adv local wireless mesh (ground-station mesh role)
-After=ados-supervisor.service systemd-networkd.service
+After=systemd-networkd.service
 PartOf=ados-supervisor.service
 # Only comes up when the role sentinel is `relay` or `receiver`. role_manager
 # writes /etc/ados/mesh/role on every transition. On direct-mode nodes the

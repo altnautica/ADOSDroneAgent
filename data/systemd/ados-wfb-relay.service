@@ -1,6 +1,6 @@
 [Unit]
 Description=ADOS WFB-ng relay (mesh relay role)
-After=ados-supervisor.service ados-batman.service
+After=ados-batman.service
 Wants=ados-batman.service
 PartOf=ados-supervisor.service
 # Only runs when the role sentinel reads `relay`. role_manager owns this file.

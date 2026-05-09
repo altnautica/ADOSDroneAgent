@@ -1,6 +1,6 @@
 [Unit]
 Description=ADOS Ground Station WiFi AP
-After=ados-supervisor.service network.target
+After=network.target
 PartOf=ados-supervisor.service
 ConditionPathExists=/sys/class/net/wlan0
 StartLimitInterval=60s

@@ -1,6 +1,6 @@
 [Unit]
 Description=ADOS Cloud Relay Bridge (ground-station profile)
-After=ados-supervisor.service ados-uplink-router.service
+After=ados-uplink-router.service
 PartOf=ados-supervisor.service
 Requires=ados-uplink-router.service
 StartLimitInterval=60s

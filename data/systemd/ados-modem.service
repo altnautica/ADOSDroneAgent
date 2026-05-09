@@ -1,6 +1,6 @@
 [Unit]
 Description=ADOS Modem Manager (ground-station profile)
-After=ados-supervisor.service ModemManager.service
+After=ModemManager.service
 PartOf=ados-supervisor.service
 # Only start when a USB modem is present. SIM7600G-H enumerates as
 # /dev/ttyUSB0..3 and wwan0 on MBIM/QMI. The pattern keeps the unit
