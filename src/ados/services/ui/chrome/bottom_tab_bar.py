@@ -28,12 +28,18 @@ TAB_WIDTH = 120
 TAB_COUNT = 4
 
 # Stable id per tab. The page id is the same as the navigator route.
+# The fourth tab used to be "more" (plus glyph) which led to a
+# four-row overflow menu (Pair, Diagnostics, Restart, About). Those
+# rows now live under Settings -> Maintenance, freeing the fourth
+# tab for a live link-and-decoder diagnostics page where it earns
+# more screen-time. See LinkStatsPage and the maintenance section
+# in SettingsPage.
 _TABS: tuple[tuple[str, str, str], ...] = (
     # (zone_id, page_id, icon_name)
     ("tab.dashboard", "dashboard", "dashboard"),
     ("tab.video", "video", "video"),
     ("tab.settings", "settings", "settings"),
-    ("tab.more", "more", "plus"),
+    ("tab.link_stats", "link_stats", "link_stats"),
 )
 
 

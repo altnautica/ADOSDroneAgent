@@ -585,11 +585,17 @@ class OledService:
         # Settings page lives at the same registry; the tab-bar route
         # for "settings" resolves to it. Imported locally to avoid
         # cycles with the page __init__ during early startup.
+        from ados.services.ui.pages.link_stats import LinkStatsPage
         from ados.services.ui.pages.settings import SettingsPage
         from ados.services.ui.pages.video import VideoPage
 
         navigator.register(SettingsPage())
         navigator.register(VideoPage())
+        # Live link + decoder + system metrics page; replaces the old
+        # More overflow menu (whose four rows now live under
+        # Settings -> Maintenance). Tab bar's fourth tab routes here
+        # via id="link_stats".
+        navigator.register(LinkStatsPage())
         self._page_navigator = navigator
         # Surface the bridge's touch buses on the context so any page
         # that needs live drag tracking (settings list, slider modal,

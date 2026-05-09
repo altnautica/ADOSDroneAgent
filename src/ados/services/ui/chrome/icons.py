@@ -28,7 +28,13 @@ if TYPE_CHECKING:  # pragma: no cover
 
 _ICON_PIXELS = 24
 _ICON_PACKAGE = "ados.services.ui.chrome._icons"
-_KNOWN_ICONS: tuple[str, ...] = ("dashboard", "video", "settings", "plus")
+_KNOWN_ICONS: tuple[str, ...] = (
+    "dashboard",
+    "video",
+    "settings",
+    "plus",
+    "link_stats",
+)
 
 
 def _fallback_icon() -> Image.Image:
