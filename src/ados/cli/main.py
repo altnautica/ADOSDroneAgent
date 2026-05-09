@@ -289,6 +289,59 @@ def uninstall(purge: bool, yes: bool) -> None:
     _uninstall_linux(purge=purge, yes=yes)
 
 
+def _stop_service_with_kill_fallback(service: str) -> None:
+    """Best-effort stop with timeout + SIGKILL fallback.
+
+    Why: stubborn child processes (or a wedged supervisor with hung
+    children) can keep `systemctl stop <unit>` blocked past its
+    timeout. The previous code passed timeout=30 and let
+    `subprocess.TimeoutExpired` propagate, crashing the uninstall
+    mid-transaction so symlinks and directories never got cleaned
+    up. This helper bumps the graceful timeout to 60s, then on
+    timeout escalates to `systemctl kill -s SIGKILL` and one more
+    short stop. Any exception below this layer is logged and
+    swallowed so the uninstall always continues to the cleanup
+    phase.
+    """
+    if not shutil.which("systemctl"):
+        return
+    try:
+        subprocess.run(
+            ["systemctl", "stop", service],
+            capture_output=True,
+            timeout=60,
+        )
+        return
+    except subprocess.TimeoutExpired:
+        click.echo(
+            f"  warn: stop {service} timed out, escalating to SIGKILL", err=True
+        )
+    except OSError as exc:
+        click.echo(f"  warn: stop {service} failed: {exc}", err=True)
+        return
+
+    # Escalation: kill any remaining processes in the unit's cgroup,
+    # then a short stop to clear systemd's tracking. Both are best-
+    # effort — if even SIGKILL doesn't work, log and move on so the
+    # filesystem cleanup still runs.
+    try:
+        subprocess.run(
+            ["systemctl", "kill", "-s", "SIGKILL", service],
+            capture_output=True,
+            timeout=10,
+        )
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        click.echo(f"  warn: kill {service} failed: {exc}", err=True)
+    try:
+        subprocess.run(
+            ["systemctl", "stop", service],
+            capture_output=True,
+            timeout=10,
+        )
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        click.echo(f"  warn: post-kill stop {service} failed: {exc}", err=True)
+
+
 def _uninstall_macos(*, yes: bool) -> None:
     if not yes:
         click.confirm("Uninstall ados-drone-agent from this system?", abort=True)
@@ -372,11 +425,23 @@ def _uninstall_linux(*, purge: bool, yes: bool) -> None:
 
     for service, service_file in zip(services, service_files):
         if service_file.exists():
-            subprocess.run(["systemctl", "stop", service], capture_output=True, timeout=30)
-            subprocess.run(["systemctl", "disable", service], capture_output=True, timeout=10)
+            _stop_service_with_kill_fallback(service)
+            try:
+                subprocess.run(
+                    ["systemctl", "disable", service],
+                    capture_output=True,
+                    timeout=10,
+                )
+            except (subprocess.TimeoutExpired, OSError) as exc:
+                click.echo(f"  warn: disable {service} skipped: {exc}", err=True)
             service_file.unlink(missing_ok=True)
     if shutil.which("systemctl"):
-        subprocess.run(["systemctl", "daemon-reload"], capture_output=True, timeout=10)
+        try:
+            subprocess.run(
+                ["systemctl", "daemon-reload"], capture_output=True, timeout=10
+            )
+        except (subprocess.TimeoutExpired, OSError) as exc:
+            click.echo(f"  warn: daemon-reload skipped: {exc}", err=True)
     for path in symlinks:
         if path.exists() or path.is_symlink():
             path.unlink(missing_ok=True)

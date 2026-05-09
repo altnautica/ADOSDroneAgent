@@ -19,6 +19,24 @@ from typing import Any, Iterable
 from ados.core.logging import get_logger
 from ados.setup.models import HardwareCheckItem, HardwareCheckStatus
 
+# Kernel driver names exported under /sys/class/graphics/fbN/name when an
+# SPI LCD is bound. Used by _check_display to identify a framebuffer
+# regardless of whether it landed at /dev/fb0 or /dev/fb1 (the index
+# depends on whether the primary display driver is also active).
+_SPI_LCD_DRIVER_NAMES = frozenset(
+    {
+        "fb_ili9486",
+        "fb_ili9341",
+        "fb_ili9340",
+        "fb_st7789v",
+        "fb_st7735r",
+        "fb_hx8347d",
+        "fb_hx8353d",
+        "fb_pcd8544",
+        "fb_ssd1351",
+    }
+)
+
 log = get_logger("setup.hardware_check")
 
 
@@ -286,46 +304,61 @@ def _check_display() -> HardwareCheckItem:
         )
 
     display_id = conf.get("display_id", "?")
-    fb_path = Path(conf.get("framebuffer_path", "/dev/fb1"))
     expected_name = conf.get("framebuffer_name_expected") or "fb_ili9486"
-
-    if not fb_path.exists():
-        return HardwareCheckItem(
-            id="display",
-            label="Local display (SPI LCD)",
-            state="warning",
-            detail=(
-                f"{display_id} provisioned but {fb_path} is not bound. "
-                "Reboot to load the overlay."
-            ),
-            fix_hint="Run `sudo reboot`. The kernel binds the panel at boot.",
-        )
-
-    fb_name_path = Path("/sys/class/graphics") / fb_path.name / "name"
-    actual_name = ""
-    try:
-        actual_name = fb_name_path.read_text().strip()
-    except OSError:
-        pass
+    configured_path = conf.get("framebuffer_path", "")
 
     has_touch = (conf.get("has_touch", "false").lower() == "true")
     res = conf.get("resolution", "?")
     rotation = conf.get("rotation", "0")
     suffix = " + touch" if has_touch else ""
 
-    if expected_name and actual_name and expected_name not in actual_name:
+    # Walk all /dev/fb* and pick the framebuffer that's actually bound
+    # to a known SPI-LCD driver. Hard-coding /dev/fb1 breaks on Pi 4B
+    # without an HDMI monitor: bcm2708_fb disables itself, the SPI
+    # driver claims /dev/fb0 instead, and the probe falsely reports
+    # "fb1 not bound" even though the panel is fully functional.
+    matched_fb_path: Path | None = None
+    matched_fb_name = ""
+    for entry in sorted(Path("/dev").glob("fb*")):
+        # Skip non-fb files in /dev (e.g. fbdev*) — only /dev/fbN where
+        # N is a digit.
+        if not entry.name.startswith("fb") or not entry.name[2:].isdigit():
+            continue
+        # Build the path as a single string so a test that patches
+        # Path("...") at the module level can intercept the lookup. A
+        # chained `Path("/sys/class/graphics") / entry.name / "name"`
+        # only goes through the patched constructor once and the rest
+        # of the chain stays on the real filesystem.
+        name_path = Path(f"/sys/class/graphics/{entry.name}/name")
+        try:
+            fb_name = name_path.read_text().strip()
+        except OSError:
+            continue
+        if expected_name and expected_name in fb_name:
+            matched_fb_path = entry
+            matched_fb_name = fb_name
+            break
+        if fb_name in _SPI_LCD_DRIVER_NAMES:
+            matched_fb_path = entry
+            matched_fb_name = fb_name
+            # Don't break: prefer the configured expected_name match
+            # over a generic SPI-LCD match. Only use this as fallback.
+
+    if matched_fb_path is None:
+        # No SPI LCD framebuffer found. If display.conf has a configured
+        # path, mention it in the diagnostic so the operator can confirm
+        # the overlay is staged correctly.
+        hint_path = configured_path or "/dev/fb*"
         return HardwareCheckItem(
             id="display",
             label="Local display (SPI LCD)",
             state="warning",
             detail=(
-                f"{fb_path} bound to {actual_name}, expected {expected_name}. "
-                "Overlay may have changed."
+                f"{display_id} provisioned but no SPI LCD framebuffer is bound "
+                f"({hint_path}). Reboot to load the overlay if the install "
+                "just ran."
             ),
-            fix_hint=(
-                "Re-run `sudo install.sh --upgrade` to refresh the "
-                "device-tree overlay, then reboot."
-            ),
+            fix_hint="Run `sudo reboot`. The kernel binds the panel at boot.",
         )
 
     return HardwareCheckItem(
@@ -333,7 +366,8 @@ def _check_display() -> HardwareCheckItem:
         label="Local display (SPI LCD)",
         state="ok",
         detail=(
-            f"{display_id} on {fb_path} ({res}, rotation {rotation}{suffix})."
+            f"{display_id} on {matched_fb_path} ({matched_fb_name}, "
+            f"{res}, rotation {rotation}{suffix})."
         ),
     )
 

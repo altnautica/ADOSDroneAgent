@@ -304,6 +304,62 @@ def test_setup_state_corrupt_file_returns_defaults(monkeypatch, tmp_path) -> Non
     assert s.skipped_steps == set()
 
 
+def test_setup_state_record_ever_complete_grows_persisted_set(monkeypatch, tmp_path) -> None:
+    """The percentage stays monotonic across transient state flips by
+    promoting any currently-complete step id to a persisted set."""
+    target = _redirect_state_path(monkeypatch, tmp_path)
+    setup_state.record_ever_complete({"profile", "hardware_check"})
+    s = setup_state.read_state()
+    assert s.ever_completed_steps == {"profile", "hardware_check"}
+    assert target.exists()
+
+
+def test_setup_state_record_ever_complete_unions_with_prior(monkeypatch, tmp_path) -> None:
+    _redirect_state_path(monkeypatch, tmp_path)
+    setup_state.record_ever_complete({"profile"})
+    setup_state.record_ever_complete({"hardware_check", "pair"})
+    s = setup_state.read_state()
+    assert s.ever_completed_steps == {"profile", "hardware_check", "pair"}
+
+
+def test_setup_state_record_ever_complete_no_write_when_unchanged(
+    monkeypatch, tmp_path,
+) -> None:
+    """Hot-path reads skip the write when the persisted set already
+    contains every id passed in."""
+    target = _redirect_state_path(monkeypatch, tmp_path)
+    setup_state.record_ever_complete({"profile", "hardware_check"})
+    mtime_before = target.stat().st_mtime_ns
+    # No new ids: no write.
+    setup_state.record_ever_complete({"profile"})
+    mtime_after = target.stat().st_mtime_ns
+    assert mtime_before == mtime_after
+
+
+def test_setup_state_reset_clears_ever_completed(monkeypatch, tmp_path) -> None:
+    _redirect_state_path(monkeypatch, tmp_path)
+    setup_state.record_ever_complete({"profile", "hardware_check", "pair"})
+    setup_state.reset_state()
+    s = setup_state.read_state()
+    assert s.ever_completed_steps == set()
+
+
+def test_setup_state_legacy_file_without_ever_completed_key(
+    monkeypatch, tmp_path,
+) -> None:
+    """A state file written by an older agent that doesn't know about
+    ever_completed_steps must read back cleanly with an empty set."""
+    target = _redirect_state_path(monkeypatch, tmp_path)
+    target.write_text(
+        '{"setup_finalized": true, "skipped_steps": ["remote_access"]}',
+        encoding="utf-8",
+    )
+    s = setup_state.read_state()
+    assert s.setup_finalized is True
+    assert s.skipped_steps == {"remote_access"}
+    assert s.ever_completed_steps == set()
+
+
 # --- profile choice ----------------------------------------------------------
 
 

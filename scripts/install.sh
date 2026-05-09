@@ -981,6 +981,15 @@ ENVEOF
     # profiles.
     enable_universal_units
 
+    # Tear down units that belong to the OTHER profile. Without this,
+    # a rig that was previously installed under one profile and is
+    # being upgraded under a different profile keeps the prior
+    # profile's services running. ados-wfb (drone TX) and ados-wfb-rx
+    # (GS RX) both fight for the same RTL adapter; whichever spawns
+    # first claims monitor mode and the loser dies. Stale services
+    # also pin radio interfaces and hold ports the new profile expects.
+    disable_other_profile_units
+
     # Enable ground-station units if the profile demands them.
     if [ "${ADOS_PROFILE:-drone}" = "ground_station" ] || [ "${ADOS_PROFILE:-drone}" = "ground-station" ]; then
         enable_ground_station_units
@@ -1139,6 +1148,62 @@ PLUGTMPEOF
         chmod 0750 /run/ados/plugins
         chown ados:ados /run/ados/plugins 2>/dev/null || true
     fi
+}
+
+# Disable + stop systemd units that belong to a profile OTHER than the
+# one currently being installed. Idempotent: a unit that's already
+# disabled is a clean no-op. Safe on a fresh install where none of these
+# exist yet — every operation tolerates the not-found case.
+#
+# Units listed under each side are exclusive to that profile. Services
+# shared between profiles (api, cloud, supervisor, mavlink, video,
+# peripherals, health) are NOT touched here.
+disable_other_profile_units() {
+    local profile="${ADOS_PROFILE:-drone}"
+    local target_units=""
+    case "${profile}" in
+        ground_station|ground-station)
+            # On a GS rig, the drone TX manager + air-side wfb units
+            # must not run. The drone uses ados-wfb (TX); GS uses
+            # ados-wfb-rx (RX). Running both is the bug we are
+            # cleaning up.
+            target_units="ados-wfb.service"
+            ;;
+        *)
+            # On a drone rig, every GS-only unit gets torn down. List
+            # mirrors enable_ground_station_units's enable list so
+            # whatever the GS install enables, the drone install
+            # explicitly disables.
+            target_units="ados-wfb-rx.service \
+                ados-mediamtx-gs.service \
+                ados-usb-gadget.service \
+                ados-usb-gadget-setup.service \
+                ados-oled.service \
+                ados-buttons.service \
+                ados-hostapd.service \
+                ados-dnsmasq-gs.service \
+                ados-setup-captive.service \
+                ados-kiosk.service \
+                ados-input.service \
+                ados-pic.service \
+                ados-uplink-router.service \
+                ados-modem.service \
+                ados-wifi-client.service \
+                ados-ethernet.service \
+                ados-cloud-relay.service \
+                ados-batman.service \
+                ados-mesh-pairing.service"
+            ;;
+    esac
+    info "Tearing down units that do not belong to profile=${profile}..."
+    for unit in ${target_units}; do
+        # is-active returns nonzero for inactive/failed/missing — that's
+        # fine, we still attempt disable to clear any enable-link.
+        if systemctl list-unit-files "${unit}" 2>/dev/null | grep -q "${unit}"; then
+            systemctl stop "${unit}" 2>/dev/null || true
+            systemctl disable "${unit}" 2>/dev/null || true
+        fi
+    done
 }
 
 # Enable cross-profile systemd units. Run on every install regardless
@@ -1307,19 +1372,44 @@ PY
 # Extra apt deps needed for the ground-station profile. Idempotent.
 install_ground_station_deps() {
     info "Installing ground-station profile dependencies..."
-    apt-get install -y \
+
+    # The Chromium package is named `chromium` on Debian 13 trixie and
+    # later, `chromium-browser` on Debian 12 bookworm and the older
+    # Radxa BSPs. Pick by reading /etc/os-release so neither side logs
+    # a noisy fallback warning on the platforms it does run on.
+    local chromium_pkg="chromium-browser"
+    local os_id_like=""
+    local os_version_codename=""
+    if [ -r /etc/os-release ]; then
+        # shellcheck disable=SC1091
+        . /etc/os-release
+        os_id_like="${ID:-}${ID_LIKE:+ ${ID_LIKE}}"
+        os_version_codename="${VERSION_CODENAME:-}"
+    fi
+    case "${os_version_codename}" in
+        trixie|forky|sid)
+            chromium_pkg="chromium"
+            ;;
+    esac
+
+    if ! apt-get install -y \
         hostapd \
         dnsmasq \
         bluetooth \
         bluez \
-        chromium-browser \
-        cage || {
-        # chromium-browser has different package names on Debian Bookworm
-        # (chromium) and some Radxa BSPs. Fall back gracefully.
-        warn "Primary ground-station deps install failed; retrying with chromium fallback."
+        "${chromium_pkg}" \
+        cage; then
+        # Belt-and-suspenders: if the chosen chromium package fails for
+        # any reason, retry with the other name. Any remaining failure
+        # is silenced (||true) because the rest of the GS profile runs
+        # without chromium just fine — the kiosk service only matters
+        # when an HDMI panel is attached.
+        local fallback_pkg="chromium"
+        [ "${chromium_pkg}" = "chromium" ] && fallback_pkg="chromium-browser"
+        warn "Primary ground-station deps install failed; retrying chromium as ${fallback_pkg}."
         apt-get install -y hostapd dnsmasq bluetooth bluez cage || true
-        apt-get install -y chromium || true
-    }
+        apt-get install -y "${fallback_pkg}" || true
+    fi
 
     # Ensure dwc2 overlay + module load for USB gadget mode (Pi family).
     local cfg="/boot/firmware/config.txt"

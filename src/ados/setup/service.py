@@ -27,7 +27,7 @@ from ados.setup.models import (
     VideoAccess,
 )
 from ados.setup.profile import build_profile_suggestion
-from ados.setup.state import read_state
+from ados.setup.state import read_state, record_ever_complete
 from ados.setup.state_machine import (  # re-export for callers/tests
     _resolve_display_step,
     _setup_steps,
@@ -303,7 +303,21 @@ async def build_setup_status(runtime: Any, host_header: str | None = None) -> Se
             if step.id in persisted.skipped_steps and step.state == "needs_action":
                 step.state = "optional"
 
-    complete_steps = sum(1 for step in steps if step.state == "complete")
+    # Promote any currently-complete steps to the persisted "ever
+    # complete" set so the percentage stays monotonic across transient
+    # state flips (cloud relay reconnecting, FC heartbeat post-reboot,
+    # video pipeline retry backoff, etc.). The percentage now answers
+    # "how much of the install + configure flow is durably done" rather
+    # than "how many runtime probes are passing right this instant".
+    currently_complete = {step.id for step in steps if step.state == "complete"}
+    persisted = record_ever_complete(currently_complete)
+
+    countable = {
+        step.id
+        for step in steps
+        if step.state == "complete" or step.id in persisted.ever_completed_steps
+    }
+    complete_steps = len(countable)
     completion_percent = round((complete_steps / len(steps)) * 100)
     next_step = next((step for step in steps if step.state == "needs_action"), None)
     next_action = (

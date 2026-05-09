@@ -625,5 +625,44 @@ EOF
 chmod 0644 "${DISPLAY_CONF}"
 info "Wrote ${DISPLAY_CONF}"
 
+# Try runtime activation before falling back to the reboot message.
+# On Pi OS the `dtoverlay` tool can apply a config-tree overlay live;
+# on Rockchip + Allwinner the modprobes above are usually enough once
+# the device tree was edited at install time. Either way: poll
+# /sys/class/graphics/fb*/name for ~5s; if a framebuffer reports the
+# expected driver, the panel is bound and no reboot is needed.
+if [ -n "${FB_NAME}" ]; then
+    if command -v dtoverlay >/dev/null 2>&1 && [ -n "${DISPLAY_ID}" ]; then
+        # Best-effort: dtoverlay is Pi-only and may fail on other
+        # boards or when the overlay is already loaded. Suppress any
+        # noise; the polling step below is the verdict.
+        dtoverlay "${DISPLAY_ID}" >/dev/null 2>&1 || true
+    fi
+
+    bound_path=""
+    bound_name=""
+    poll_start_ts=$(date +%s)
+    while [ "$(date +%s)" -lt "$((poll_start_ts + 5))" ]; do
+        for fb_dev in /dev/fb0 /dev/fb1 /dev/fb2 /dev/fb3 /dev/fb4 /dev/fb5; do
+            [ -e "${fb_dev}" ] || continue
+            fb_name_file="/sys/class/graphics/$(basename "${fb_dev}")/name"
+            [ -r "${fb_name_file}" ] || continue
+            current_name=$(cat "${fb_name_file}" 2>/dev/null || true)
+            if [ -n "${current_name}" ] && \
+                printf '%s' "${current_name}" | grep -q "${FB_NAME}"; then
+                bound_path="${fb_dev}"
+                bound_name="${current_name}"
+                break 2
+            fi
+        done
+        sleep 1
+    done
+
+    if [ -n "${bound_path}" ]; then
+        info "Display overlay provisioning complete. Panel bound at ${bound_path} (${bound_name})."
+        exit 0
+    fi
+fi
+
 info "Display overlay provisioning complete. Reboot to bind the panel."
 exit 0

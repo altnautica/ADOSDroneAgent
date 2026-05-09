@@ -30,11 +30,18 @@ class SetupRunState:
 
     setup_finalized: bool = False
     skipped_steps: set[str] = field(default_factory=set)
+    # Step ids that have been observed in the "complete" state at any
+    # point in the past. Used to keep the setup percentage monotonic
+    # across transient state flips: once an operator has completed
+    # `pair` or `mavlink` the percentage no longer drops because the
+    # FC heartbeat is briefly absent post-reboot.
+    ever_completed_steps: set[str] = field(default_factory=set)
 
     def to_dict(self) -> dict:
         return {
             "setup_finalized": bool(self.setup_finalized),
             "skipped_steps": sorted(self.skipped_steps),
+            "ever_completed_steps": sorted(self.ever_completed_steps),
         }
 
 
@@ -83,10 +90,19 @@ def read_state() -> SetupRunState:
     skipped = raw.get("skipped_steps") or []
     if not isinstance(skipped, list):
         skipped = []
-    cleaned = {str(s) for s in skipped if isinstance(s, str) and str(s) in _KNOWN_STEP_IDS}
+    cleaned_skipped = {
+        str(s) for s in skipped if isinstance(s, str) and str(s) in _KNOWN_STEP_IDS
+    }
+    ever = raw.get("ever_completed_steps") or []
+    if not isinstance(ever, list):
+        ever = []
+    cleaned_ever = {
+        str(s) for s in ever if isinstance(s, str) and str(s) in _KNOWN_STEP_IDS
+    }
     return SetupRunState(
         setup_finalized=bool(raw.get("setup_finalized", False)),
-        skipped_steps=cleaned,
+        skipped_steps=cleaned_skipped,
+        ever_completed_steps=cleaned_ever,
     )
 
 
@@ -127,4 +143,28 @@ def reset_state() -> SetupRunState:
     """Forget finalization and skipped steps. Used by Re-run setup."""
     state = SetupRunState()
     _write(state)
+    return state
+
+
+def record_ever_complete(step_ids: set[str]) -> SetupRunState:
+    """Promote any newly-complete step ids to the persisted set.
+
+    Returns the post-write state. The write only happens when the set
+    actually grows so that hot-path reads don't burn IOs on every
+    setup-status request. Persistence failures (read-only filesystem,
+    missing dir on a dev box) degrade silently to in-memory-only: the
+    caller still gets the unioned set so the current request's
+    percentage calc is correct, the next request will retry the write.
+    """
+    state = read_state()
+    promoted = step_ids - state.ever_completed_steps
+    if not promoted:
+        return state
+    state.ever_completed_steps |= promoted
+    try:
+        _write(state)
+    except OSError:
+        # Persistence is best-effort. The in-memory set still flows
+        # back to the caller via the return value below.
+        pass
     return state
