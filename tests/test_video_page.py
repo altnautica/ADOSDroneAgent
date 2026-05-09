@@ -380,3 +380,89 @@ async def test_first_attempt_records_failure_timestamp(
 
     assert page._tap_unavailable_reason == "stub"
     assert page._tap_unavailable_at == 555.5
+
+
+@pytest.mark.asyncio
+async def test_render_drives_retry_when_user_sits_on_failed_page(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the operator sits on the Video tab past the cooldown after a
+    failed tap, render() must invoke _ensure_tap so the live frame can
+    appear without the operator having to navigate away and back.
+
+    Regression for the gap between v0.19.15 (cooldown logic) and
+    v0.19.19 (render-loop hook): the cooldown was correct but only
+    on_enter ever called _ensure_tap, so a tap that failed at first
+    open stayed unavailable forever even after RTSP came up.
+    """
+    from ados.services.video import local_tap as lt
+    from ados.services.ui.pages import video as video_mod
+
+    call_idx = {"n": 0}
+
+    async def _flaky_start(self) -> None:  # type: ignore[no-untyped-def]
+        call_idx["n"] += 1
+        if call_idx["n"] == 1:
+            raise lt.LocalVideoTapUnavailable("first attempt fails")
+        # Second call (from render) succeeds.
+
+    time_ref = {"t": 100.0}
+    monkeypatch.setattr(lt.LocalVideoTap, "start", _flaky_start)
+    monkeypatch.setattr(video_mod.time, "monotonic", lambda: time_ref["t"])
+
+    page = VideoPage()
+    nav = PageNavigator()
+    ctx = _ctx(nav, _StubClient())
+
+    # Simulate operator opening Video tab; first attempt fails.
+    await page.on_enter(ctx)
+    assert page._tap_unavailable_reason == "first attempt fails"
+    assert page._tap is None
+    assert call_idx["n"] == 1
+
+    # Operator sits on the page. render() ticks within the cooldown
+    # window — must NOT spin gstreamer.
+    time_ref["t"] = 100.0 + 5.0  # 5 s in
+    await page.render(ctx)
+    assert call_idx["n"] == 1, "render must respect cooldown"
+
+    # Cooldown elapses. Next render() must drive the retry which
+    # succeeds and clears the cached failure.
+    time_ref["t"] = 100.0 + video_mod._TAP_RETRY_COOLDOWN_SECONDS + 0.1
+    await page.render(ctx)
+    assert call_idx["n"] == 2
+    assert page._tap_unavailable_reason is None
+    assert page._tap is not None
+
+
+@pytest.mark.asyncio
+async def test_render_skips_retry_when_tap_already_alive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The render-side retry hook must short-circuit when the tap is
+    already alive so we don't pay attribute reads on the happy path."""
+    from ados.services.video import local_tap as lt
+    from ados.services.ui.pages import video as video_mod
+
+    start_calls = {"n": 0}
+
+    async def _ok_start(self) -> None:  # type: ignore[no-untyped-def]
+        start_calls["n"] += 1
+
+    monkeypatch.setattr(lt.LocalVideoTap, "start", _ok_start)
+    monkeypatch.setattr(video_mod.time, "monotonic", lambda: 1.0)
+
+    page = VideoPage()
+    nav = PageNavigator()
+    ctx = _ctx(nav, _StubClient())
+
+    await page.on_enter(ctx)
+    assert page._tap is not None
+    assert start_calls["n"] == 1
+
+    # Two render ticks: should not call start again because the tap
+    # is alive (the render hook only fires when _tap is None and a
+    # cached failure is present).
+    await page.render(ctx)
+    await page.render(ctx)
+    assert start_calls["n"] == 1

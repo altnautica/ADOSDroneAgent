@@ -160,13 +160,22 @@ class VideoPage:
         except LocalVideoTapUnavailable as exc:
             self._tap_unavailable_reason = str(exc)
             self._tap_unavailable_at = time.monotonic()
-            ctx.logger.warning("video_tap_unavailable", reason=str(exc))
+            ctx.logger.warning(
+                "video_tap_unavailable",
+                reason=str(exc),
+                error_type=type(exc).__name__,
+            )
             return
         except Exception as exc:  # noqa: BLE001
             self._tap_unavailable_reason = str(exc)
             self._tap_unavailable_at = time.monotonic()
-            ctx.logger.warning("video_tap_start_failed", error=str(exc))
+            ctx.logger.warning(
+                "video_tap_start_failed",
+                error=str(exc),
+                error_type=type(exc).__name__,
+            )
             return
+        ctx.logger.info("video_tap_started")
         self._tap = tap
 
     async def maybe_teardown_idle_tap(self, ctx: PageContext) -> None:
@@ -425,6 +434,16 @@ class VideoPage:
 
     async def render(self, ctx: PageContext) -> Image.Image:
         self._last_active_at = time.monotonic()
+        # If a previous tap attempt failed and the cooldown window has
+        # elapsed, re-attempt now from the render loop. Without this
+        # hook, on_enter is the only entry point for _ensure_tap, so a
+        # tap that fails at the moment the operator first opens the
+        # Video tab stays stuck on the unavailable banner forever even
+        # after the underlying RTSP source becomes ready. _ensure_tap
+        # re-checks the cooldown gate so a double-call within the
+        # window is a clean no-op.
+        if self._tap is None and self._tap_unavailable_reason is not None:
+            await self._ensure_tap(ctx)
         palette = ctx.palette
         canvas = Image.new("RGB", (PAGE_W, PAGE_H), palette.bg_primary)
 
