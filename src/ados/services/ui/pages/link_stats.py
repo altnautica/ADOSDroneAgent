@@ -37,11 +37,9 @@ This keeps the page a pure read-only watch surface.
 
 from __future__ import annotations
 
-import asyncio
 import json
 import time
 from collections import deque
-from pathlib import Path
 from typing import Any, ClassVar
 
 from PIL import Image, ImageDraw
@@ -155,13 +153,38 @@ class LinkStatsPage:
         # profiles surface this endpoint with the same shape (the GS
         # variant goes through ground_station.wfb_rx.WfbRxManager.stats()
         # but the keys match WfbManager.stats() on the air side).
+        fetched: dict[str, Any] | None = None
         if ctx.http is not None:
             try:
                 r = await ctx.http.get("/api/wfb", timeout=1.5)
-                if r.status_code == 200 and isinstance(r.json(), dict):
-                    self._wfb = r.json()
+                if r.status_code == 200:
+                    body = r.json()
+                    if isinstance(body, dict):
+                        fetched = body
             except Exception as exc:  # noqa: BLE001
-                ctx.logger.debug("link_stats_wfb_fetch_failed", error=str(exc))
+                # Warning, not debug — a silent failure here is the
+                # exact failure mode that left every metric blank on
+                # bench. Operator-visible journalctl is the only
+                # signal we have when ctx.http is misconfigured.
+                ctx.logger.warning(
+                    "link_stats_wfb_fetch_failed", error=str(exc)
+                )
+
+        if fetched:
+            self._wfb = fetched
+        elif not self._wfb:
+            # Defense-in-depth: if /api/wfb is unreachable for any
+            # reason (transient agent restart, base_url misconfig,
+            # bind window flipping the radio), fall back to the
+            # ``link`` block populated by the OLED service's 1 Hz
+            # state poll. The poll uses an absolute URL and is more
+            # resilient. _link_view emits both bitrate_kbps and
+            # bitrate_mbps + fec_failed and fec_lost so this page's
+            # render code reads populated values without per-key
+            # remap.
+            fallback = ctx.state.get("link")
+            if isinstance(fallback, dict):
+                self._wfb = dict(fallback)
 
         # mediamtx control API. Try the canonical port; some installs
         # disable the API in which case we render mediamtx state as

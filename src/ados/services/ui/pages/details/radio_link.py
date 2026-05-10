@@ -127,7 +127,9 @@ class RadioLinkDetailPage:
             if r.status_code == 200:
                 self._snapshot = r.json() if isinstance(r.json(), dict) else {}
         except Exception as exc:  # noqa: BLE001
-            ctx.logger.debug("details_radio_link_snapshot_fetch_failed", error=str(exc))
+            ctx.logger.warning(
+                "details_radio_link_snapshot_fetch_failed", error=str(exc)
+            )
         try:
             r = await client.get(
                 "/api/wfb/history",
@@ -137,7 +139,9 @@ class RadioLinkDetailPage:
             if r.status_code == 200:
                 self._history = _samples_from_history(r.json())
         except Exception as exc:  # noqa: BLE001
-            ctx.logger.debug("details_radio_link_history_fetch_failed", error=str(exc))
+            ctx.logger.warning(
+                "details_radio_link_history_fetch_failed", error=str(exc)
+            )
 
     async def render(self, ctx: PageContext) -> Image.Image:
         # Refresh on every tick; the page navigator drives at 2 Hz so

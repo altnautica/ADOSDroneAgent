@@ -22,14 +22,10 @@ from ados.api.deps import get_agent_app
 from ados.core.paths import (
     GS_UI_JSON,
     GS_UPLINK_JSON,
-    MESH_GATEWAY_JSON,
-    MESH_ID_PATH,
     MESH_STATE_JSON,
-    PROFILE_CONF,
     WFB_RECEIVER_JSON,
     WFB_RELAY_JSON,
 )
-
 
 # Persistent UI config lives in a separate JSON file because the
 # current Pydantic ADOSConfig does not model a ground_station section
@@ -473,6 +469,7 @@ def _link_view(app: Any) -> dict[str, Any]:
     """
     import json as _json
     import time as _time
+
     from ados.core.paths import WFB_STATS_JSON
 
     wfb_cfg = getattr(app.config, "wfb", None)
@@ -485,8 +482,15 @@ def _link_view(app: Any) -> dict[str, Any]:
     base: dict[str, Any] = {
         "rssi_dbm": None,
         "bitrate_mbps": None,
+        # Mirror of bitrate_mbps in kbps so consumers that key on the
+        # canonical producer field (``bitrate_kbps`` from
+        # ``LinkStats.to_dict``) read populated values without a
+        # per-page rename. See the LCD link stats page fallback path.
+        "bitrate_kbps": None,
         "fec_recovered": 0,
         "fec_lost": 0,
+        # Mirror of fec_lost under the producer key. Same rationale.
+        "fec_failed": 0,
         "channel": config_channel,
         "snr_db": None,
         "noise_dbm": None,
@@ -515,12 +519,17 @@ def _link_view(app: Any) -> dict[str, Any]:
         )
         # Live snapshot wins. Channel from the file (what the manager
         # actually applied) wins over the disk config when present.
+        fec_failed = int(payload.get("fec_failed") or 0)
         merged: dict[str, Any] = {
             **base,
             "rssi_dbm": rssi if isinstance(rssi, (int, float)) else None,
             "bitrate_mbps": bitrate_mbps,
+            "bitrate_kbps": int(bitrate_kbps)
+            if isinstance(bitrate_kbps, (int, float))
+            else None,
             "fec_recovered": int(payload.get("fec_recovered") or 0),
-            "fec_lost": int(payload.get("fec_failed") or 0),
+            "fec_lost": fec_failed,
+            "fec_failed": fec_failed,
             "channel": payload.get("channel") or config_channel,
             "snr_db": payload.get("snr_db"),
             "noise_dbm": payload.get("noise_dbm"),

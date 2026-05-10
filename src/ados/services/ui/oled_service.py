@@ -372,6 +372,8 @@ class OledService:
         api_port: int = 8080,
     ) -> None:
         self._bus = bus
+        self._api_host = api_host
+        self._api_port = api_port
         self._api_base = f"http://{api_host}:{api_port}/api/v1/ground-station"
         self._api_url = f"{self._api_base}/status"
         self._device = None
@@ -1735,7 +1737,17 @@ class OledService:
                 self._touch_bridge.mode = "lcd_page"
             else:
                 self._touch_bridge.mode = "oled_compat"
-        self._http = httpx.AsyncClient(timeout=0.9)
+        # Set base_url so pages can use relative paths like
+        # ``"/api/wfb"`` without each one having to know the agent's
+        # host/port. Without this, httpx raises UnsupportedProtocol on
+        # relative-URL requests and pages render blank metrics. The
+        # absolute-URL callers in this service (``_api_base/...`` and
+        # the mediamtx 9997 calls) are unaffected — httpx ignores
+        # ``base_url`` when the request URL is already absolute.
+        self._http = httpx.AsyncClient(
+            base_url=f"http://{self._api_host}:{self._api_port}",
+            timeout=0.9,
+        )
         # Hand the http client to the page context so pages can make
         # REST calls without each one constructing its own pool.
         if self._page_context is not None:

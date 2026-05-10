@@ -9,12 +9,10 @@ mediamtx running.
 
 from __future__ import annotations
 
-import json
 from typing import Any
 
 import pytest
 import structlog
-from PIL import Image
 
 from ados.services.ui.pages import PageContext, PageNavigator
 from ados.services.ui.pages.link_stats import LinkStatsPage
@@ -190,3 +188,108 @@ async def test_link_stats_inbound_rate_delta() -> None:
     # exact magnitude.
     assert page._mtx_inbound_kbps is not None
     assert page._mtx_inbound_kbps > 0
+
+
+# ── regression suite for the missing-base_url bug ─────────────────
+
+
+class _StrictHttpxLikeClient:
+    """A stub that mimics httpx behavior when the AsyncClient lacks a
+    ``base_url`` — relative URLs raise ``UnsupportedProtocol``. Used to
+    pin the contract that pages either use absolute URLs OR the OLED
+    service's shared client must be constructed with ``base_url=``.
+    """
+
+    def __init__(self, mtx_payload: dict | None = None) -> None:
+        self.gets: list[str] = []
+        self._mtx_payload = mtx_payload or {}
+
+    async def get(
+        self, url: str, *, timeout: float = 1.5, **_: Any
+    ) -> _Resp:
+        self.gets.append(url)
+        if not (url.startswith("http://") or url.startswith("https://")):
+            raise RuntimeError(
+                f"UnsupportedProtocol: Request URL is missing a protocol: {url!r}"
+            )
+        if url.endswith("/v3/paths/get/main"):
+            return _Resp(200, dict(self._mtx_payload))
+        return _Resp(404, {})
+
+
+@pytest.mark.asyncio
+async def test_link_stats_falls_back_to_ctx_state_link_when_fetch_fails() -> None:
+    """If /api/wfb is unreachable (the relative-URL failure mode that
+    blanked every metric on bench), the page must fall back to
+    ``ctx.state['link']`` so the operator still sees populated cells.
+
+    Regression for the bench bug where ``oled_service.AsyncClient`` was
+    constructed without a ``base_url`` and every ``ctx.http.get('/api/...')``
+    call raised an exception that was silently swallowed.
+    """
+    page = LinkStatsPage()
+    nav = PageNavigator(registry={"link_stats": page})
+    client = _StrictHttpxLikeClient(mtx_payload={"ready": True, "inboundBytes": 0})
+    ctx = PageContext(
+        state={
+            "link": {
+                # _link_view emits both bitrate_mbps + bitrate_kbps and
+                # both fec_lost + fec_failed for forward compat.
+                "rssi_dbm": -55.0,
+                "channel": 149,
+                "bitrate_mbps": 3.5,
+                "bitrate_kbps": 3500,
+                "packets_received": 1000,
+                "packets_lost": 5,
+                "loss_percent": 0.5,
+                "fec_recovered": 12,
+                "fec_lost": 5,
+                "fec_failed": 5,
+                "state": "connected",
+            }
+        },
+        palette=DARK,
+        hostname="skynode",
+        http=client,
+        framebuffer=None,
+        navigator=nav,
+        logger=structlog.get_logger("test.link_stats.fallback"),
+    )
+    await page.on_enter(ctx)
+    img = await page.render(ctx)
+    assert img.size == (480, 244)
+    # Fallback populated _wfb from ctx.state["link"].
+    assert page._wfb.get("rssi_dbm") == -55.0
+    assert page._wfb.get("bitrate_kbps") == 3500
+    assert page._wfb.get("fec_failed") == 5
+    assert page._wfb.get("channel") == 149
+
+
+@pytest.mark.asyncio
+async def test_link_stats_prefers_fresh_fetch_over_state_fallback() -> None:
+    """When /api/wfb returns a fresh dict, that wins over the state
+    fallback. State block exists but is stale-shaped (heartbeat keys
+    only); fresh fetch is producer-shape (kbps + failed).
+    """
+    page = LinkStatsPage()
+    nav = PageNavigator(registry={"link_stats": page})
+    client = _StubClient()
+    client.wfb_payload = {
+        "state": "connected",
+        "rssi_dbm": -42.0,
+        "bitrate_kbps": 5000,
+        "fec_failed": 0,
+        "channel": 149,
+    }
+    ctx = PageContext(
+        state={"link": {"rssi_dbm": -99.0, "bitrate_mbps": 0.1}},
+        palette=DARK,
+        hostname="skynode",
+        http=client,
+        framebuffer=None,
+        navigator=nav,
+        logger=structlog.get_logger("test.link_stats.fresh"),
+    )
+    await page.on_enter(ctx)
+    assert page._wfb.get("rssi_dbm") == -42.0
+    assert page._wfb.get("bitrate_kbps") == 5000
