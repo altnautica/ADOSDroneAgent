@@ -129,10 +129,15 @@ _RECONNECT_LADDER_SECONDS: tuple[float, ...] = (1.0, 2.0, 4.0, 8.0, 30.0)
 
 # Frame-arrival watchdog: number of seconds of pipeline_state="playing"
 # with no fresh appsink callback before the watchdog forces a restart.
-# 3 s is enough to absorb a long single-frame decode hiccup or a brief
-# RTSP reconnect storm without false-tripping, while still kicking
-# in well before the operator perceives a sustained freeze.
-_FRAME_SILENCE_THRESHOLD_S = 3.0
+# 10 s gives the pipeline time to absorb a brief decoder stall, queue
+# rebuild, or rtspsrc reconnect storm without tripping a false-positive
+# restart that itself feeds back into the loop. The original 3 s was
+# too aggressive — bench at v0.20.21 showed a ~5500-sample successful
+# run interrupted by a 3.3 s silence window, watchdog kicked, and the
+# subsequent restart triggered another bus_error in a cascade. The
+# operator perception of "stuck" is on a longer timescale (15 s+)
+# anyway, so 10 s catches real freezes without the false positives.
+_FRAME_SILENCE_THRESHOLD_S = 10.0
 # Watchdog poll interval. 1 Hz is fine — we're checking a flag, not
 # reading the GStreamer bus.
 _FRAME_SILENCE_POLL_S = 1.0
