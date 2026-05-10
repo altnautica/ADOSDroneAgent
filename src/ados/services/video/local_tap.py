@@ -500,12 +500,15 @@ def build_pipeline_string(
     else:
         # Phase 11 default: udpsrc directly from the LCD-side fanout
         # port. No mediamtx-gs round-trip, no rtspsrc TCP handshake,
-        # no 404 race when mediamtx-gs goes briefly not-ready. The
-        # rtpjitterbuffer with latency_ms (default ~50) absorbs
-        # transient packet jitter; do-lost=true emits GAP events on
-        # loss so downstream recovers faster. mode=0 disables the
-        # jitterbuffer's reordering / loss-detection state machine
-        # (we're on localhost, no reordering risk).
+        # no 404 race when mediamtx-gs goes briefly not-ready.
+        #
+        # Bench-tested rtpjitterbuffer settings:
+        # - drop the `mode=0 do-lost=true` knobs we initially tried;
+        #   `do-lost=true` was triggering downstream EOS events that
+        #   tore down the pipeline within seconds of pipeline start.
+        # - default mode (slave) + plain latency=50 keeps the buffer
+        #   simple and lets gst handle packet loss via leaky queues
+        #   downstream like the rest of the chain.
         try:
             udp_port = int(source_url)
         except (ValueError, TypeError):
@@ -514,7 +517,7 @@ def build_pipeline_string(
             f"udpsrc port={udp_port} "
             "caps=\"application/x-rtp,media=video,encoding-name=H264,"
             "payload=96,clock-rate=90000\" "
-            f"! rtpjitterbuffer latency={latency_ms} mode=0 do-lost=true "
+            f"! rtpjitterbuffer latency={latency_ms} "
             "! rtph264depay "
         )
     return (

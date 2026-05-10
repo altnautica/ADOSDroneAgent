@@ -135,7 +135,6 @@ def test_pipeline_string_udpsrc_default_when_source_is_port() -> None:
     assert "udpsrc port=5601" in s
     assert "encoding-name=H264" in s
     assert "rtpjitterbuffer latency=50" in s
-    assert "do-lost=true" in s
     # NO rtspsrc anywhere when source_url is a bare port.
     assert "rtspsrc" not in s
     # Same downstream stages preserved.
