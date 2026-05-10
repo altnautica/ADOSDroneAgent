@@ -83,6 +83,7 @@ def _build_status_from_stats_file(wfb_cfg: object) -> dict:
     """
     import json as _json
     import time as _time
+
     from ados.core.paths import WFB_STATS_JSON
 
     # Static config defaults (used regardless of whether the file is
@@ -150,6 +151,15 @@ def _build_status_from_stats_file(wfb_cfg: object) -> dict:
         if ch_info:
             merged["frequency_mhz"] = ch_info.frequency_mhz
             merged["bandwidth_mhz"] = ch_info.bandwidth_mhz
+        # Emit bitrate_mbps alongside the canonical bitrate_kbps so a
+        # consumer that knows only the heartbeat-style key still gets
+        # a populated value. Cheap forward-compat shim.
+        bk = merged.get("bitrate_kbps")
+        merged["bitrate_mbps"] = (
+            round(float(bk) / 1000.0, 3)
+            if isinstance(bk, (int, float)) and bk > 0
+            else 0.0
+        )
         return merged
     except (FileNotFoundError, ValueError, OSError):
         return base
@@ -258,6 +268,16 @@ async def get_wfb_status():
         pass
 
     status["adapter"] = adapter_info
+
+    # Forward-compat: emit bitrate_mbps alongside the canonical
+    # bitrate_kbps so a consumer that knows only the heartbeat-style
+    # key still gets a populated value.
+    bk = status.get("bitrate_kbps")
+    status["bitrate_mbps"] = (
+        round(float(bk) / 1000.0, 3)
+        if isinstance(bk, (int, float)) and bk > 0
+        else 0.0
+    )
     return status
 
 
@@ -460,7 +480,7 @@ async def post_wfb_pair_local_bind(request: LocalBindRequest) -> dict[str, Any]:
     )
     try:
         return await asyncio.wait_for(bind_task, timeout=_REST_LOCAL_BIND_TIMEOUT_S)
-    except asyncio.TimeoutError:
+    except TimeoutError:
         # Don't let an idle rendezvous tie up the HTTP connection past
         # what proxies / browsers tolerate. Fire the cancel hook so the
         # orchestrator drops its socat and returns a clean session

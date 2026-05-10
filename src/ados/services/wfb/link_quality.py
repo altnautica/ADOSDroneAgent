@@ -248,6 +248,9 @@ class LinkQualityMonitor:
     # bitrate = count_b_outgoing / interval directly without delta math.
     _last_rx_ant: RxAntSnapshot | None = field(default=None)
     _last_pkt: PktSnapshot | None = field(default=None)
+    # Last time we logged an unmatched line. Rate-limits the noisy debug
+    # log so a wfb-ng format drift surfaces in journalctl without spam.
+    _last_unmatched_log: float = 0.0
 
     def __post_init__(self) -> None:
         self._history = deque(maxlen=self.max_samples)
@@ -268,6 +271,18 @@ class LinkQualityMonitor:
 
         pkt = parse_pkt_line(line)
         if pkt is None:
+            # Surface format drift in journalctl. Without this, a
+            # wfb-ng release that reshapes the stdout stats lines
+            # produces zero stats with no log signal — consumers
+            # downstream (LCD, REST, heartbeat) all silently render
+            # blank values. Rate-limit to one log every 5 s so a
+            # genuine spew doesn't drown the journal.
+            stripped = line.strip()
+            if stripped:
+                now = time.monotonic()
+                if now - self._last_unmatched_log > 5.0:
+                    log.debug("wfb_rx_no_match", line=stripped[:120])
+                    self._last_unmatched_log = now
             return None
 
         self._last_pkt = pkt

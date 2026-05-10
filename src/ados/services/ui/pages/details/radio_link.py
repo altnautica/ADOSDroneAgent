@@ -151,9 +151,24 @@ class RadioLinkDetailPage:
         rssi = snap.get("rssi_dbm")
         snr = snap.get("snr_db")
         noise = snap.get("noise_dbm")
-        bitrate = snap.get("bitrate_mbps")
+        loss = snap.get("loss_percent")
+        # Bitrate canonical key is bitrate_kbps; accept legacy bitrate_mbps
+        # so a future caller that only knows the heartbeat shape still
+        # renders correctly.
+        bitrate_kbps = snap.get("bitrate_kbps")
+        if isinstance(bitrate_kbps, (int, float)) and bitrate_kbps > 0:
+            bitrate = float(bitrate_kbps) / 1000.0
+        else:
+            legacy = snap.get("bitrate_mbps")
+            bitrate = (
+                float(legacy)
+                if isinstance(legacy, (int, float)) and legacy > 0
+                else None
+            )
         fec_rec = snap.get("fec_recovered")
-        fec_lost = snap.get("fec_lost")
+        # Producer key is fec_failed; heartbeat shape uses fec_lost. Accept
+        # either so this page works against both.
+        fec_lost = snap.get("fec_failed", snap.get("fec_lost"))
         channel = snap.get("channel")
         freq = snap.get("frequency_mhz")
         bw = snap.get("bandwidth_mhz")
@@ -234,7 +249,13 @@ class RadioLinkDetailPage:
             )
 
         snr_text = f"{snr:.0f} dB" if isinstance(snr, (int, float)) else "-- dB"
-        noise_text = f"noise {int(noise)} dBm" if isinstance(noise, (int, float)) else "noise --"
+        loss_suffix = (
+            f"  loss {loss:.1f}%" if isinstance(loss, (int, float)) else ""
+        )
+        if isinstance(noise, (int, float)):
+            noise_text = f"noise {int(noise)} dBm{loss_suffix}"
+        else:
+            noise_text = f"noise --{loss_suffix}"
         _col(0, "SNR", snr_text, noise_text)
 
         bitrate_text = (
@@ -246,10 +267,16 @@ class RadioLinkDetailPage:
             fec_text = "FEC -- / --"
         _col(col_w, "Bitrate", bitrate_text, fec_text)
 
-        ch_text = f"ch {int(channel)}" if isinstance(channel, (int, float)) else "ch --"
-        if isinstance(freq, (int, float)) and isinstance(bw, (int, float)):
+        # Treat zero as no-data: the producer's pre-bind defaults are 0
+        # for channel / freq / bw, and rendering "ch 0" / "0 MHz · 0 MHz"
+        # is worse than "--" because it implies a real reading.
+        ch_valid = isinstance(channel, (int, float)) and channel > 0
+        freq_valid = isinstance(freq, (int, float)) and freq > 0
+        bw_valid = isinstance(bw, (int, float)) and bw > 0
+        ch_text = f"ch {int(channel)}" if ch_valid else "ch --"
+        if freq_valid and bw_valid:
             band_text = f"{int(freq)} MHz · {int(bw)} MHz"
-        elif isinstance(freq, (int, float)):
+        elif freq_valid:
             band_text = f"{int(freq)} MHz"
         else:
             band_text = "-- MHz"
