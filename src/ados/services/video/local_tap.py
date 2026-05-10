@@ -491,20 +491,19 @@ def build_pipeline_string(
         "! h264parse name=h264parse_tap config-interval=1 "
         # queue between depay and decoder hands rtspsrc its own thread so
         # the network reader keeps pulling RTP while the decoder works.
-        # leaky=downstream + small max-size means a slow decoder drops
-        # the oldest frame instead of blocking upstream and starving
-        # rtspsrc's RTCP loop (which cascades into "not-linked" errors).
-        # max-size-buffers=4 caps worst-case backlog at ~133 ms (30 fps).
-        # We tried 2 but combined with rtspsrc latency=5 the pipeline
-        # tripped not-linked errors; 4 is the practical floor.
-        "! queue max-size-buffers=4 max-size-bytes=0 max-size-time=0 leaky=downstream "
+        # leaky=downstream + max-size-buffers=8 means a slow decoder
+        # drops the oldest frame instead of blocking upstream and
+        # starving rtspsrc's RTCP loop (which cascades into "not-linked"
+        # errors). We tried 2-4 in Phase 9 but the pipeline tripped
+        # bus errors; 8 is the practical floor on Pi 4B.
+        "! queue max-size-buffers=8 max-size-bytes=0 max-size-time=0 leaky=downstream "
         f"! {decoder} "
         # second queue between decoder and downstream conversion gives
         # the decoder its own thread. PIL composition + framebuffer write
         # in the render loop runs at 20 Hz and shares the GIL with the
         # appsink callback; without this queue, a slow render tick stalls
         # the decoder.
-        "! queue max-size-buffers=2 max-size-bytes=0 max-size-time=0 leaky=downstream "
+        "! queue max-size-buffers=4 max-size-bytes=0 max-size-time=0 leaky=downstream "
         # decimate the decoded stream to fps_cap before videoconvert.
         # Default 15 matches what the Pi 4B's single-threaded Python GIL
         # + PIL composition + SPI framebuffer write loop can sustain
@@ -637,15 +636,17 @@ class LocalVideoTap:
 
             decoder = select_decoder(_detect_soc())
             self._decoder_type = decoder
-            # rtspsrc internal jitter buffer. The previous 100 ms (avdec)
-            # / 50 ms (hw) was the dominant single source of glass-to-
-            # decoder latency. We tried 5 ms but rtspsrc's internal
-            # loop refuses to negotiate at that tight a constraint and
-            # throws `streaming stopped, reason not-linked`. 30 ms is
-            # the practical floor that keeps rtspsrc happy while still
-            # cutting ~70 ms off the pre-fix baseline. drop-on-latency
-            # absorbs transient bursts.
-            latency_ms = 30
+            # rtspsrc internal jitter buffer. We tried 5 ms and 30 ms
+            # but rtspsrc's internal loop on Pi 4B + GStreamer 1.22
+            # refuses to negotiate at those tight constraints and
+            # throws `streaming stopped, reason not-linked` within
+            # seconds of the first frame, causing a restart loop.
+            # The known-good baseline is 50 ms (hw decoder) / 100 ms
+            # (avdec_h264). Pushing past this floor requires bypassing
+            # rtspsrc entirely (read UDP 5600 directly via udpsrc) —
+            # that's a separate refactor; deferred until v3 of the
+            # LCD path.
+            latency_ms = 50 if decoder != "avdec_h264" else 100
             pipeline_str = build_pipeline_string(
                 source_url=self._source_url,
                 decoder=decoder,
