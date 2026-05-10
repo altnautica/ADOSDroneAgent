@@ -258,10 +258,14 @@ class MediamtxGsManager:
             binary,
             "-fflags", "nobuffer",
             "-flags", "low_delay",
-            # `-max_delay 0` flushes packets to demux without holding
-            # for reorder; combined with nobuffer/low_delay it gets
-            # demux latency to well under 1 ms on localhost UDP.
-            "-max_delay", "0",
+            # NB: do NOT add `-max_delay 0` here. We tried it as a
+            # latency micro-optimization and it broke codec discovery
+            # — ffmpeg returned "Could not find codec parameters for
+            # stream 0 (Video: h264, none): unspecified size" because
+            # the flag overrode the probesize/analyzeduration window.
+            # The codec params (width/height/profile/level) only
+            # arrive inline in the first IDR, which can take a couple
+            # of seconds after wfb_rx hands over the first packets.
             "-protocol_whitelist", "file,udp,rtp",
             # `-probesize 5M -analyzeduration 5M` give ffmpeg up to 5
             # seconds (or 5 MB) to discover the H.264 SPS/PPS from the
