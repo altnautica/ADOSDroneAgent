@@ -37,6 +37,15 @@ MESH_STATE_JSON = ADOS_RUN_DIR / "mesh-state.json"
 WFB_RELAY_JSON = ADOS_RUN_DIR / "wfb-relay.json"
 WFB_RECEIVER_JSON = ADOS_RUN_DIR / "wfb-receiver.json"
 
+# Live wfb-ng radio stats snapshot (rssi, snr, packets, fec, bitrate).
+# Written ~once per second by whichever wfb manager owns the radio:
+# WfbManager on the drone profile, WfbRxManager on the GS profile.
+# Read by the API layer + the OLED dashboard tile + the LCD link
+# stats page. The cross-process file is the right shape because the
+# wfb subprocess and the api subprocess don't share memory and the
+# wfb stats need to surface to multiple consumers per box.
+WFB_STATS_JSON = ADOS_RUN_DIR / "wfb-stats.json"
+
 # Sentinel files
 UPLINK_ACTIVE_FLAG = ADOS_RUN_DIR / "uplink-active"
 AP_WAS_ENABLED_FLAG = ADOS_RUN_DIR / "ap-was-enabled"

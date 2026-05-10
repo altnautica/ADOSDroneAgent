@@ -1,152 +1,275 @@
-"""Tests for WFB-ng link quality monitoring and stats parsing."""
+"""Tests for the upstream-format wfb-ng v26.4 stats parser.
+
+The samples below are real strings captured live via ``strace`` on a
+running ``wfb_rx -l 1000 ... wlan1`` on the GS rig 2026-05-10. The
+upstream emit code is at
+``referenceCode/fpv-video-link/wfb-ng/src/rx.cpp:495-508``:
+
+    IPC_MSG("%llu\\tRX_ANT\\t%u:%u:%u\\t%llx\\t%d:%d:%d:%d:%d:%d:%d\\n", ...);
+    IPC_MSG("%llu\\tPKT\\t%u:%u:%u:%u:%u:%u:%u:%u:%u:%u:%u\\n", ...);
+"""
 
 from __future__ import annotations
 
-from ados.services.wfb.link_quality import LinkQualityMonitor, LinkStats, parse_wfb_rx_line
+from ados.services.wfb.link_quality import (
+    LinkQualityMonitor,
+    LinkStats,
+    parse_pkt_line,
+    parse_rx_ant_line,
+    parse_wfb_rx_line,
+)
 
-# --- parse_wfb_rx_line ---
+# --- single-line parsers ---
 
-def test_parse_standard_line():
-    line = (
-        "RX ANT 0: [aa:bb:cc:dd:ee:ff] "
-        "rssi_min=-52 rssi_avg=-48 rssi_max=-44 "
-        "packets=1234 lost=2 fec_rec=5 fec_fail=0"
-    )
+
+def test_parse_rx_ant_line() -> None:
+    """Real captured output: ts=1175372 ms, freq=5745 MHz, mcs=1, bw=20,
+    ant_id=1, count=649, rssi (-50,-48,-45), snr (35,38,42)."""
+    line = "1175372\tRX_ANT\t5745:1:20\t1\t649:-50:-48:-45:35:38:42"
+    rx = parse_rx_ant_line(line)
+    assert rx is not None
+    assert rx.freq_mhz == 5745
+    assert rx.mcs_index == 1
+    assert rx.bandwidth_mhz == 20
+    assert rx.antenna_id == 1
+    assert rx.count == 649
+    assert rx.rssi_min == -50
+    assert rx.rssi_avg == -48
+    assert rx.rssi_max == -45
+    assert rx.snr_min == 35
+    assert rx.snr_avg == 38
+    assert rx.snr_max == 42
+
+
+def test_parse_pkt_line() -> None:
+    """Realistic PKT shape: 700 received, 700 unique data, 4 fec
+    recovered, 0 lost, 8 Mbps outgoing → 1 MB/s = 1_000_000 b_outgoing."""
+    line = "1175372\tPKT\t720:1075000:0:5:715:715:4:0:0:715:1000000"
+    pkt = parse_pkt_line(line)
+    assert pkt is not None
+    assert pkt.count_p_all == 720
+    assert pkt.count_b_all == 1075000
+    assert pkt.count_p_dec_err == 0
+    assert pkt.count_p_session == 5
+    assert pkt.count_p_data == 715
+    assert pkt.count_p_uniq == 715
+    assert pkt.count_p_fec_recovered == 4
+    assert pkt.count_p_lost == 0
+    assert pkt.count_p_bad == 0
+    assert pkt.count_p_outgoing == 715
+    assert pkt.count_b_outgoing == 1000000
+
+
+def test_parse_rx_ant_returns_none_on_pkt_line() -> None:
+    """Cross-shape inputs must not match each other's regex."""
+    line = "1175372\tPKT\t720:1075000:0:5:715:715:4:0:0:715:1000000"
+    assert parse_rx_ant_line(line) is None
+
+
+def test_parse_pkt_returns_none_on_rx_ant_line() -> None:
+    line = "1175372\tRX_ANT\t5745:1:20\t1\t649:-50:-48:-45:35:38:42"
+    assert parse_pkt_line(line) is None
+
+
+def test_parse_garbage_returns_none() -> None:
+    assert parse_rx_ant_line("Starting wfb_rx...") is None
+    assert parse_pkt_line("Starting wfb_rx...") is None
+    assert parse_rx_ant_line("") is None
+    assert parse_pkt_line("") is None
+    assert parse_rx_ant_line("1175372\tBOGUS\tfields") is None
+
+
+def test_parse_rx_ant_handles_multi_digit_antenna_hex() -> None:
+    line = "9999999\tRX_ANT\t5180:7:40\tff\t100:-70:-65:-60:10:15:20"
+    rx = parse_rx_ant_line(line)
+    assert rx is not None
+    assert rx.antenna_id == 0xFF
+    assert rx.freq_mhz == 5180
+    assert rx.bandwidth_mhz == 40
+    assert rx.mcs_index == 7
+
+
+# --- legacy single-line wrapper ---
+
+
+def test_legacy_parse_wfb_rx_line_extracts_rssi_only_from_rx_ant() -> None:
+    """The legacy entrypoint returns a partial LinkStats from RX_ANT
+    alone (with packet counters at zero) so callers that pre-date
+    the stateful aggregator keep working."""
+    line = "1175372\tRX_ANT\t5745:1:20\t1\t649:-50:-48:-45:35:38:42"
     stats = parse_wfb_rx_line(line)
     assert stats is not None
     assert stats.rssi_dbm == -48.0
-    assert stats.rssi_min == -52.0
-    assert stats.rssi_max == -44.0
-    assert stats.packets_received == 1234
-    assert stats.packets_lost == 2
-    assert stats.fec_recovered == 5
-    assert stats.fec_failed == 0
-    assert stats.noise_dbm == -95.0  # default
-    assert stats.snr_db == -48.0 - (-95.0)
-    assert stats.timestamp != ""
+    assert stats.snr_db == 38.0
+    # Packet counters not present in an RX_ANT line — defaults.
+    assert stats.packets_received == 0
 
 
-def test_parse_line_with_noise():
-    line = (
-        "RX ANT 0: rssi_min=-60 rssi_avg=-55 rssi_max=-50 "
-        "packets=500 lost=10 fec_rec=3 fec_fail=1 noise=-90"
-    )
+def test_legacy_parse_wfb_rx_line_extracts_packets_from_pkt() -> None:
+    line = "1175372\tPKT\t720:1075000:0:5:715:715:4:0:0:715:1000000"
     stats = parse_wfb_rx_line(line)
     assert stats is not None
-    assert stats.noise_dbm == -90.0
-    assert stats.snr_db == -55.0 - (-90.0)
+    assert stats.packets_received == 715
+    assert stats.fec_recovered == 4
 
 
-def test_parse_line_with_bitrate():
-    line = (
-        "rssi_min=-45 rssi_avg=-42 rssi_max=-40 "
-        "packets=2000 lost=0 fec_rec=0 fec_fail=0 8000 kbit/s"
+# --- LinkQualityMonitor (stateful) ---
+
+
+def test_monitor_emits_only_on_pkt_line() -> None:
+    """RX_ANT alone updates internal state but doesn't emit a snapshot.
+    The PKT line that follows is what produces the LinkStats."""
+    mon = LinkQualityMonitor()
+    rx_line = "1175372\tRX_ANT\t5745:1:20\t1\t649:-50:-48:-45:35:38:42"
+    pkt_line = "1175372\tPKT\t720:1075000:0:5:715:715:4:0:0:715:1000000"
+
+    assert mon.feed_line(rx_line) is None
+    assert mon.sample_count == 0
+
+    snap = mon.feed_line(pkt_line)
+    assert snap is not None
+    assert mon.sample_count == 1
+
+
+def test_monitor_combines_rx_ant_and_pkt_into_one_snapshot() -> None:
+    mon = LinkQualityMonitor()
+    mon.feed_line("1175372\tRX_ANT\t5745:1:20\t1\t649:-50:-48:-45:35:38:42")
+    snap = mon.feed_line(
+        "1175372\tPKT\t720:1075000:0:5:715:715:4:0:0:715:1000000"
     )
-    stats = parse_wfb_rx_line(line)
-    assert stats is not None
-    assert stats.bitrate_kbps == 8000
+    assert snap is not None
+    # RSSI from RX_ANT
+    assert snap.rssi_dbm == -48.0
+    assert snap.snr_db == 38.0
+    # Counters from PKT
+    assert snap.packets_received == 715
+    assert snap.fec_recovered == 4
+    # Bitrate derived from b_outgoing / interval (default 1.0 s).
+    # 1_000_000 bytes/s * 8 = 8_000_000 bps = 8000 kbps.
+    assert snap.bitrate_kbps == 8000
 
 
-def test_parse_non_stats_line():
-    assert parse_wfb_rx_line("Starting wfb_rx...") is None
-    assert parse_wfb_rx_line("") is None
-    assert parse_wfb_rx_line("Session started") is None
-
-
-def test_parse_loss_percent():
-    line = (
-        "rssi_min=-70 rssi_avg=-65 rssi_max=-60 "
-        "packets=900 lost=100 fec_rec=50 fec_fail=10"
+def test_monitor_loss_percent_only_uses_data_and_lost() -> None:
+    mon = LinkQualityMonitor()
+    mon.feed_line(
+        "1175372\tRX_ANT\t5745:1:20\t1\t800:-60:-58:-55:20:25:30"
     )
-    stats = parse_wfb_rx_line(line)
-    assert stats is not None
-    assert stats.loss_percent == 10.0  # 100 / (900+100) * 100
-
-
-def test_parse_zero_packets():
-    line = (
-        "rssi_min=-80 rssi_avg=-75 rssi_max=-70 "
-        "packets=0 lost=0 fec_rec=0 fec_fail=0"
+    snap = mon.feed_line(
+        # 700 data, 50 lost, dec_err 100 (irrelevant — keys mismatched)
+        "1175372\tPKT\t850:1000000:100:5:700:700:0:50:0:700:1000000"
     )
-    stats = parse_wfb_rx_line(line)
-    assert stats is not None
-    assert stats.loss_percent == 0.0
+    assert snap is not None
+    # 50 / (700 + 50) = 6.67%
+    assert snap.loss_percent == 6.67
 
 
-# --- LinkStats ---
+def test_monitor_handles_missing_rx_ant_gracefully() -> None:
+    """If a PKT line arrives with no preceding RX_ANT (out-of-order
+    boot, clock skew), the snapshot still produces with default RSSI."""
+    mon = LinkQualityMonitor()
+    snap = mon.feed_line(
+        "1175372\tPKT\t720:1075000:0:5:715:715:4:0:0:715:1000000"
+    )
+    assert snap is not None
+    assert snap.rssi_dbm == -100.0  # default
+    assert snap.packets_received == 715  # PKT counters still populated
 
-def test_link_stats_to_dict():
+
+def test_monitor_history_grows_with_pkt_lines() -> None:
+    mon = LinkQualityMonitor(max_samples=3)
+    for i in range(5):
+        mon.feed_line(
+            f"{1000+i}\tRX_ANT\t5745:1:20\t1\t100:-50:-48:-45:35:38:42"
+        )
+        mon.feed_line(
+            f"{1000+i}\tPKT\t100:100000:0:5:95:95:0:0:0:95:90000"
+        )
+    # Ring buffer trimmed to 3
+    assert mon.sample_count == 3
+    history = mon.get_history(seconds=60)
+    assert len(history) == 3
+
+
+def test_monitor_clear_resets_aggregator_state() -> None:
+    mon = LinkQualityMonitor()
+    mon.feed_line(
+        "1175372\tRX_ANT\t5745:1:20\t1\t649:-50:-48:-45:35:38:42"
+    )
+    mon.feed_line(
+        "1175372\tPKT\t720:1075000:0:5:715:715:4:0:0:715:1000000"
+    )
+    assert mon.sample_count == 1
+
+    mon.clear()
+    assert mon.sample_count == 0
+    assert mon.get_current().rssi_dbm == -100.0
+    # After clear, a lone PKT must still work but with default RSSI
+    snap = mon.feed_line(
+        "1175372\tPKT\t720:1075000:0:5:715:715:4:0:0:715:1000000"
+    )
+    assert snap is not None
+    assert snap.rssi_dbm == -100.0
+
+
+def test_monitor_get_history_empty() -> None:
+    mon = LinkQualityMonitor()
+    assert mon.get_history(seconds=60) == []
+
+
+def test_monitor_garbage_lines_ignored() -> None:
+    mon = LinkQualityMonitor()
+    assert mon.feed_line("some random log line") is None
+    assert mon.feed_line("Starting wfb_rx...") is None
+    assert mon.sample_count == 0
+
+
+# --- persist_to_file ---
+
+
+def test_monitor_persist_to_file_writes_atomic_json(tmp_path) -> None:
+    import json
+
+    mon = LinkQualityMonitor()
+    mon.feed_line(
+        "1175372\tRX_ANT\t5745:1:20\t1\t649:-50:-48:-45:35:38:42"
+    )
+    mon.feed_line(
+        "1175372\tPKT\t720:1075000:0:5:715:715:4:0:0:715:1000000"
+    )
+    out = tmp_path / "wfb-stats.json"
+    mon.persist_to_file(
+        out, extra={"channel": 149, "interface": "wlan1", "profile": "ground_station"},
+    )
+    assert out.exists()
+    payload = json.loads(out.read_text())
+    assert payload["rssi_dbm"] == -48.0
+    assert payload["packets_received"] == 715
+    assert payload["bitrate_kbps"] == 8000
+    assert payload["channel"] == 149
+    assert payload["state"] == "connected"
+
+
+def test_monitor_persist_to_file_state_connecting_when_no_packets(
+    tmp_path,
+) -> None:
+    """A fresh monitor with no PKT line yet shows state=connecting."""
+    import json
+
+    mon = LinkQualityMonitor()
+    out = tmp_path / "wfb-stats.json"
+    mon.persist_to_file(out)
+    payload = json.loads(out.read_text())
+    assert payload["state"] == "connecting"
+    assert payload["packets_received"] == 0
+
+
+# --- LinkStats compatibility ---
+
+
+def test_link_stats_to_dict_round_trip() -> None:
     stats = LinkStats(rssi_dbm=-55.0, packets_received=100, loss_percent=1.5)
     d = stats.to_dict()
     assert d["rssi_dbm"] == -55.0
     assert d["packets_received"] == 100
     assert d["loss_percent"] == 1.5
     assert "timestamp" in d
-
-
-# --- LinkQualityMonitor ---
-
-def test_monitor_feed_valid_line():
-    mon = LinkQualityMonitor()
-    line = (
-        "rssi_min=-52 rssi_avg=-48 rssi_max=-44 "
-        "packets=1000 lost=5 fec_rec=2 fec_fail=0"
-    )
-    result = mon.feed_line(line)
-    assert result is not None
-    assert mon.sample_count == 1
-    assert mon.get_current().rssi_dbm == -48.0
-
-
-def test_monitor_feed_invalid_line():
-    mon = LinkQualityMonitor()
-    result = mon.feed_line("some random log message")
-    assert result is None
-    assert mon.sample_count == 0
-
-
-def test_monitor_history():
-    mon = LinkQualityMonitor()
-    for i in range(5):
-        line = (
-            f"rssi_min=-{50+i} rssi_avg=-{48+i} rssi_max=-{46+i} "
-            f"packets={1000+i} lost={i} fec_rec=0 fec_fail=0"
-        )
-        mon.feed_line(line)
-
-    history = mon.get_history(seconds=60)
-    assert len(history) == 5
-
-
-def test_monitor_ring_buffer_limit():
-    mon = LinkQualityMonitor(max_samples=3)
-    for i in range(5):
-        line = (
-            f"rssi_min=-{50+i} rssi_avg=-{48+i} rssi_max=-{46+i} "
-            f"packets={1000+i} lost=0 fec_rec=0 fec_fail=0"
-        )
-        mon.feed_line(line)
-
-    assert mon.sample_count == 3
-    # Should have the last 3 samples
-    current = mon.get_current()
-    assert current.rssi_dbm == -52.0  # -48 + 4 (last iteration i=4)
-
-
-def test_monitor_clear():
-    mon = LinkQualityMonitor()
-    line = (
-        "rssi_min=-52 rssi_avg=-48 rssi_max=-44 "
-        "packets=1000 lost=5 fec_rec=2 fec_fail=0"
-    )
-    mon.feed_line(line)
-    assert mon.sample_count == 1
-
-    mon.clear()
-    assert mon.sample_count == 0
-    assert mon.get_current().rssi_dbm == -100.0
-
-
-def test_monitor_get_history_empty():
-    mon = LinkQualityMonitor()
-    assert mon.get_history(seconds=60) == []

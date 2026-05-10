@@ -462,16 +462,83 @@ def _validate_ipv4_cidr(value: str) -> bool:
 
 
 def _link_view(app: Any) -> dict[str, Any]:
-    """Best-effort link view. Channel comes from config; the rest is stubbed."""
+    """Live radio link view sourced from /run/ados/wfb-stats.json.
+
+    The OLED dashboard radio-link tile, the OLED link-screen, and the
+    GCS Hardware tab all read this block. Static config (channel,
+    topology, tx_power_max) merges with the live snapshot the wfb
+    manager writes once per stats interval. Falls back to None /
+    zeros if the file isn't there yet (fresh boot before first PKT
+    line) or is stale (manager dead / radio interface gone).
+    """
+    import json as _json
+    import time as _time
+    from ados.core.paths import WFB_STATS_JSON
+
     wfb_cfg = getattr(app.config, "wfb", None)
-    channel = getattr(wfb_cfg, "channel", None) if wfb_cfg is not None else None
-    return {
+    config_channel = (
+        getattr(wfb_cfg, "channel", None) if wfb_cfg is not None else None
+    )
+
+    # Defaults — what the dashboard renders before the wfb manager
+    # has written its first snapshot.
+    base: dict[str, Any] = {
         "rssi_dbm": None,
         "bitrate_mbps": None,
         "fec_recovered": 0,
         "fec_lost": 0,
-        "channel": channel,
+        "channel": config_channel,
+        "snr_db": None,
+        "noise_dbm": None,
+        "packets_received": 0,
+        "packets_lost": 0,
+        "loss_percent": None,
+        "tx_power_dbm": getattr(wfb_cfg, "tx_power_dbm", None)
+        if wfb_cfg is not None
+        else None,
+        "state": "connecting",
     }
+
+    try:
+        st = WFB_STATS_JSON.stat()
+        age_s = _time.time() - st.st_mtime
+        with open(WFB_STATS_JSON) as f:
+            payload = _json.load(f)
+        if not isinstance(payload, dict):
+            return base
+        rssi = payload.get("rssi_dbm")
+        bitrate_kbps = payload.get("bitrate_kbps")
+        bitrate_mbps = (
+            round(bitrate_kbps / 1000.0, 2)
+            if isinstance(bitrate_kbps, (int, float))
+            else None
+        )
+        # Live snapshot wins. Channel from the file (what the manager
+        # actually applied) wins over the disk config when present.
+        merged: dict[str, Any] = {
+            **base,
+            "rssi_dbm": rssi if isinstance(rssi, (int, float)) else None,
+            "bitrate_mbps": bitrate_mbps,
+            "fec_recovered": int(payload.get("fec_recovered") or 0),
+            "fec_lost": int(payload.get("fec_failed") or 0),
+            "channel": payload.get("channel") or config_channel,
+            "snr_db": payload.get("snr_db"),
+            "noise_dbm": payload.get("noise_dbm"),
+            "packets_received": int(payload.get("packets_received") or 0),
+            "packets_lost": int(payload.get("packets_lost") or 0),
+            "loss_percent": payload.get("loss_percent"),
+            "tx_power_dbm": payload.get("tx_power_dbm")
+            if payload.get("tx_power_dbm") is not None
+            else base["tx_power_dbm"],
+            "state": payload.get("state") or "connecting",
+        }
+        # 10 s mtime ceiling — over that, the snapshot is suspect.
+        # Mark state="stale" so the LCD can render a yellow badge.
+        if age_s > 10.0:
+            merged["state"] = "stale"
+        return merged
+    except (FileNotFoundError, ValueError, OSError):
+        return base
 
 
 def _network_view(app: Any) -> dict[str, Any]:

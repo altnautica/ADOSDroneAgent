@@ -394,9 +394,27 @@ class LinkStatsPage:
             f"{fps:.1f} fps" if isinstance(fps, (int, float)) else "— fps"
         )
         d.text((x + 12, y + 42), fps_text, fill=fps_color, font=mono_f)
+        # Glass-to-glass latency from the SEI marker measurement that
+        # LocalVideoTap.stats() writes to /run/ados/lcd-video-tap.json.
+        # tap dict carries `latency_ms` when at least one valid sample
+        # has been observed; falls back to "— ms" until the first
+        # marker arrives. Color-coded: <80 ms green, <150 ms amber.
+        latency_ms = tap.get("latency_ms")
+        if isinstance(latency_ms, (int, float)):
+            latency_text = f"{int(round(latency_ms))} ms"
+            if latency_ms <= 80:
+                latency_color = palette.status_success
+            elif latency_ms <= 150:
+                latency_color = palette.status_warning
+            else:
+                latency_color = palette.status_error
+        else:
+            latency_text = "— ms"
+            latency_color = palette.text_secondary
+        d.text((x + 110, y + 42), latency_text, fill=latency_color, font=mono_f)
         if not active:
             d.text(
-                (x + 110, y + 46),
+                (x + 200, y + 46),
                 "(tap inactive)",
                 fill=palette.text_secondary,
                 font=med_f,

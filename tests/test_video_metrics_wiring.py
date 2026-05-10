@@ -107,11 +107,16 @@ def _install_inproc_monitor(
 ) -> LinkQualityMonitor:
     """Wire up a fake agent app whose wfb_manager().monitor returns LinkStats."""
     monitor = LinkQualityMonitor()
+    # wfb-ng v26.4 emits paired RX_ANT + PKT lines. RX_ANT carries
+    # rssi/snr; PKT carries the packet/FEC counters. The monitor emits
+    # a snapshot only when PKT is seen.
+    total = fec_recovered + fec_failed
     monitor.feed_line(
-        "RX ANT 0: addr rssi_min=-60 "
-        f"rssi_avg={int(rssi)} rssi_max=-40 "
-        f"packets={fec_recovered + fec_failed} lost={fec_failed} "
-        f"fec_rec={fec_recovered} fec_fail={fec_failed}"
+        f"1000\tRX_ANT\t5745:1:20\t1\t{total}:-60:{int(rssi)}:-40:30:35:40"
+    )
+    monitor.feed_line(
+        f"1000\tPKT\t{total}:100000:0:0:{total}:{total}:"
+        f"{fec_recovered}:{fec_failed}:0:{total}:90000"
     )
 
     class _FakeWfb:

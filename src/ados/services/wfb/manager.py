@@ -313,6 +313,8 @@ class WfbManager:
         if self._rx_proc is None or self._rx_proc.stdout is None:
             return
 
+        from ados.core.paths import WFB_STATS_JSON
+
         while self._running:
             try:
                 line_bytes = await self._rx_proc.stdout.readline()
@@ -323,6 +325,21 @@ class WfbManager:
                     stats = self._monitor.feed_line(line)
                     if stats is not None:
                         self._update_state_from_stats(stats)
+                        # Surface live stats to /run/ados/wfb-stats.json
+                        # so the API process + OLED dashboard tile +
+                        # LCD link stats page can read them. Atomic
+                        # tmpfile+rename inside persist_to_file.
+                        self._monitor.persist_to_file(
+                            WFB_STATS_JSON,
+                            extra={
+                                "interface": self._interface,
+                                "channel": self._channel,
+                                "tx_power_dbm": self._effective_tx_power_dbm,
+                                "topology": self._config.topology,
+                                "mcs_index": self._config.mcs_index,
+                                "profile": "drone",
+                            },
+                        )
             except Exception as e:
                 log.debug("rx_read_error", error=str(e))
                 break

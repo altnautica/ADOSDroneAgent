@@ -341,6 +341,8 @@ class WfbRxManager:
         """
         if self._rx_proc is None or self._rx_proc.stdout is None:
             return
+        from ados.core.paths import WFB_STATS_JSON
+
         while self._running:
             try:
                 line_bytes = await self._rx_proc.stdout.readline()
@@ -352,6 +354,28 @@ class WfbRxManager:
                     snap = self._monitor.feed_line(line)
                     if snap is not None:
                         self._update_state_from_stats(snap)
+                        # Mirror the stats to /run/ados/wfb-stats.json
+                        # so the API + OLED dashboard tile + Link
+                        # Stats LCD page see real values. The api
+                        # process can't reach this manager directly
+                        # (different systemd unit, different process).
+                        self._monitor.persist_to_file(
+                            WFB_STATS_JSON,
+                            extra={
+                                "interface": self._interface,
+                                "channel": self._channel,
+                                "tx_power_dbm": getattr(
+                                    self._config, "tx_power_dbm", None
+                                ),
+                                "topology": getattr(
+                                    self._config, "topology", None
+                                ),
+                                "mcs_index": getattr(
+                                    self._config, "mcs_index", None
+                                ),
+                                "profile": "ground_station",
+                            },
+                        )
             except Exception as exc:
                 log.debug("ground_rx_read_error", error=str(exc))
                 break

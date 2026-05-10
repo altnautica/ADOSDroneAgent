@@ -69,6 +69,92 @@ def _read_regulatory_domain() -> str:
         return "unknown"
 
 
+def _build_status_from_stats_file(wfb_cfg: object) -> dict:
+    """Compose a /api/wfb response from /run/ados/wfb-stats.json.
+
+    Used on the GS profile (and any other profile where ``app.wfb_manager()``
+    is None) because the wfb stats live in a sibling process. The file
+    is written ~once per second by whichever manager owns the radio;
+    if it's stale (mtime > 10 s) we mark state="stale" so the LCD can
+    render a degraded badge instead of presenting old data as live.
+
+    Falls back to a zero-default block if the file doesn't exist yet
+    (fresh boot, before the first PKT line has arrived).
+    """
+    import json as _json
+    import time as _time
+    from ados.core.paths import WFB_STATS_JSON
+
+    # Static config defaults (used regardless of whether the file is
+    # readable so the API response shape stays stable).
+    cfg_channel = getattr(wfb_cfg, "channel", 0) if wfb_cfg is not None else 0
+    cfg_tx_power = getattr(wfb_cfg, "tx_power_dbm", None) if wfb_cfg is not None else None
+    cfg_tx_power_max = getattr(wfb_cfg, "tx_power_max_dbm", None) if wfb_cfg is not None else None
+    cfg_topology = getattr(wfb_cfg, "topology", None) if wfb_cfg is not None else None
+    cfg_mcs = getattr(wfb_cfg, "mcs_index", None) if wfb_cfg is not None else None
+
+    base = {
+        "state": "disabled",
+        "interface": "",
+        "channel": cfg_channel,
+        "frequency_mhz": 0,
+        "bandwidth_mhz": 0,
+        "adapter": {
+            "driver": "",
+            "chipset": "",
+            "supports_monitor": False,
+        },
+        "rssi_dbm": -100.0,
+        "noise_dbm": -95.0,
+        "snr_db": 0.0,
+        "packets_received": 0,
+        "packets_lost": 0,
+        "loss_percent": 0.0,
+        "fec_recovered": 0,
+        "fec_failed": 0,
+        "bitrate_kbps": 0,
+        "restart_count": 0,
+        "samples": 0,
+        "tx_power_dbm": cfg_tx_power,
+        "tx_power_max_dbm": cfg_tx_power_max,
+        "topology": cfg_topology,
+        "mcs_index": cfg_mcs,
+        "regulatory_domain": _read_regulatory_domain(),
+    }
+
+    try:
+        st = WFB_STATS_JSON.stat()
+        age_s = _time.time() - st.st_mtime
+        with open(WFB_STATS_JSON) as f:
+            payload = _json.load(f)
+        if not isinstance(payload, dict):
+            return base
+        # Merge file payload over the defaults. The file already
+        # contains the same key names as our response shape (the
+        # writer in link_quality.persist_to_file builds it from
+        # LinkStats.to_dict + the manager's `extra` dict).
+        merged = dict(base)
+        merged.update(payload)
+        # Channel/topology/mcs from the file take precedence over the
+        # static config (the live values reflect what the manager
+        # actually applied via iw, which can differ from disk during
+        # a transition).
+        # Stale detection: anything older than 10 s is suspect.
+        if age_s > 10.0:
+            merged["state"] = "stale"
+        merged["regulatory_domain"] = base["regulatory_domain"]
+        # Re-derive frequency/bandwidth from the channel number using
+        # the channel module's lookup so consumers get a consistent
+        # shape regardless of who wrote the file.
+        ch_info = get_channel(int(merged.get("channel") or 0))
+        if ch_info:
+            merged["frequency_mhz"] = ch_info.frequency_mhz
+            merged["bandwidth_mhz"] = ch_info.bandwidth_mhz
+        return merged
+    except (FileNotFoundError, ValueError, OSError):
+        return base
+
+
 def _persist_tx_power(dbm: int) -> bool:
     """Atomically write `video.wfb.tx_power_dbm` to the on-disk config.
 
@@ -112,34 +198,14 @@ async def get_wfb_status():
     wfb_cfg = getattr(cfg.video, "wfb", None) if cfg is not None else None
 
     if wfb is None:
-        return {
-            "state": "disabled",
-            "interface": "",
-            "channel": 0,
-            "frequency_mhz": 0,
-            "bandwidth_mhz": 0,
-            "adapter": {
-                "driver": "",
-                "chipset": "",
-                "supports_monitor": False,
-            },
-            "rssi_dbm": -100.0,
-            "noise_dbm": -95.0,
-            "snr_db": 0.0,
-            "packets_received": 0,
-            "packets_lost": 0,
-            "loss_percent": 0.0,
-            "fec_recovered": 0,
-            "fec_failed": 0,
-            "bitrate_kbps": 0,
-            "restart_count": 0,
-            "samples": 0,
-            "tx_power_dbm": getattr(wfb_cfg, "tx_power_dbm", None),
-            "tx_power_max_dbm": getattr(wfb_cfg, "tx_power_max_dbm", None),
-            "topology": getattr(wfb_cfg, "topology", None),
-            "mcs_index": getattr(wfb_cfg, "mcs_index", None),
-            "regulatory_domain": _read_regulatory_domain(),
-        }
+        # GS profile path: the WfbRxManager lives in ados-wfb-rx (a
+        # different systemd unit than this api process), so we can't
+        # call its stats() directly. The manager mirrors its current
+        # snapshot to /run/ados/wfb-stats.json once per stats interval;
+        # read that file as the canonical source. Falls through to a
+        # zero-default block on a fresh boot before the file is
+        # written, or after a long wfb_rx outage where mtime > 10 s.
+        return _build_status_from_stats_file(wfb_cfg)
     status = wfb.get_status()
 
     # Enrich with channel frequency info

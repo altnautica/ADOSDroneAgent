@@ -64,13 +64,17 @@ def test_wfb_history_no_manager(client):
 def test_wfb_history_with_data(agent_app):
     """GET /api/wfb/history returns samples from monitor."""
     demo = DemoWfbManager()
-    # Feed some stats
+    # Feed some stats — wfb-ng v26.4 emits paired RX_ANT + PKT lines.
+    # The monitor only emits a snapshot when PKT is seen.
     for i in range(5):
-        line = (
-            f"rssi_min=-{50+i} rssi_avg=-{48+i} rssi_max=-{46+i} "
-            f"packets={1000+i} lost={i} fec_rec=0 fec_fail=0"
+        ts = 1000 + i
+        rssi_avg = -(48 + i)
+        demo.monitor.feed_line(
+            f"{ts}\tRX_ANT\t5745:1:20\t1\t100:-{50+i}:{rssi_avg}:-{46+i}:30:35:40"
         )
-        demo.monitor.feed_line(line)
+        demo.monitor.feed_line(
+            f"{ts}\tPKT\t{1000+i}:100000:0:0:{1000+i}:{1000+i}:0:{i}:0:{1000+i}:90000"
+        )
     agent_app.wfb_manager_handle = demo
 
     fastapi_app = create_app(agent_app)
