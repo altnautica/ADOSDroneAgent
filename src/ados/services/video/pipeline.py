@@ -61,14 +61,15 @@ _WFB_TEE_PAYLOAD_TYPE = 96
 # false-positive restart cascades during install + reload races.
 _WFB_TEE_PROGRESS_TIMEOUT_S = 15.0
 # Pattern matched in ffmpeg stderr lines to detect forward progress.
-# `-c copy` ffmpeg doesn't always print frame= (especially when
-# stream-copying); we look for any of the progress counters ffmpeg
-# emits on its 1-Hz status line: frame=, size=, time=, bitrate=.
-# Any forward-moving counter means the process is actively pushing
-# bytes to the pipe.
+# We spawn ffmpeg with `-progress pipe:2` which writes structured
+# key=value lines to stderr once per second. Recognise both the
+# structured form (out_time_ms=, total_size=, etc.) and the legacy
+# status line tokens for completeness.
 _FFMPEG_FRAME_PROGRESS_RE = re.compile(r"\bframe=\s*(\d+)\b")
 _FFMPEG_PROGRESS_TOKEN_RE = re.compile(
-    r"\b(?:frame|size|time|bitrate)=",
+    r"\b(?:frame|size|time|bitrate|out_time_ms|out_time_us|"
+    r"out_time|total_size|fps|dup_frames|drop_frames|"
+    r"speed|progress)=",
 )
 _WFB_TEE_SSRC = "0xCAFE"
 
@@ -489,6 +490,10 @@ class VideoPipeline:
                 # `-muxdelay 0 -muxpreload 0` defeat ffmpeg's default
                 # 0.7s mux delay + 0.5s preload buffer. For live RTP we
                 # want each packet on the wire as soon as encoded.
+                # `-progress pipe:2` forces structured 1-Hz progress to
+                # stderr so the watchdog can tell working-but-quiet
+                # from wedged-and-stuck (otherwise ffmpeg suppresses
+                # progress when stderr is piped).
                 cmd_out = (
                     "ffmpeg "
                     "-fflags nobuffer -flags low_delay "
@@ -496,6 +501,7 @@ class VideoPipeline:
                     "-c:v copy -muxdelay 0 -muxpreload 0 -f rtp "
                     f"-payload_type {_WFB_TEE_PAYLOAD_TYPE} "
                     f"-ssrc {_WFB_TEE_SSRC} "
+                    "-progress pipe:2 "
                     f"{rtp_url}"
                 )
                 bash_cmd = f"{cmd_in} | {cmd_inject} | {cmd_out}"
@@ -518,6 +524,13 @@ class VideoPipeline:
                     start_new_session=True,
                 )
             else:
+                # `-progress pipe:2` forces ffmpeg to write its periodic
+                # status report (frame=, size=, time=, bitrate=, ...) to
+                # stderr as plain key=value lines, ONE PER SECOND. Without
+                # this flag ffmpeg suppresses the status line entirely
+                # when stderr is captured (not a tty); our watchdog can't
+                # tell working-but-quiet from wedged-and-stuck, and
+                # fires false-positive restarts every ~15 s.
                 self._wfb_tee_process = await asyncio.create_subprocess_exec(
                     "ffmpeg",
                     "-fflags", "nobuffer",
@@ -528,6 +541,7 @@ class VideoPipeline:
                     "-f", "rtp",
                     "-payload_type", str(_WFB_TEE_PAYLOAD_TYPE),
                     "-ssrc", _WFB_TEE_SSRC,
+                    "-progress", "pipe:2",
                     rtp_url,
                     stdout=asyncio.subprocess.DEVNULL,
                     stderr=asyncio.subprocess.PIPE,
