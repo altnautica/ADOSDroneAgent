@@ -91,11 +91,16 @@ _EWMA_ALPHA = 0.2
 # converted into instantaneous fps on every sample, then EWMA-smoothed.
 _FPS_TICK_SECONDS = 1.0
 
-# Default MediaMTX path the encoder publishes to. Matches the URL the
-# cloud-relay pusher and the websocket relay both consume so the LCD
-# tap never sees a frame that hasn't already been validated by the
-# rest of the pipeline.
-DEFAULT_RTSP_URL = "rtsp://127.0.0.1:8554/main"
+# Phase 11 default video source for the LCD tap: the UDP port the
+# WfbRxManager's fan-out emits to (alongside mediamtx-gs's existing
+# UDP 5600 ingest port). udpsrc reads directly from this port, skipping
+# the mediamtx-gs RTSP server that was the source of the freeze
+# cascade (rtspsrc 404 races, caps re-negotiation failures).
+#
+# Legacy callers (tests and the older rtspsrc bench-debug path) can
+# still pass an ``rtsp://...`` URL to LocalVideoTap.__init__; the
+# pipeline string builder dispatches on the prefix.
+DEFAULT_RTSP_URL = "5601"
 
 # Target geometry for the LCD video region (480 px wide, 176 px tall —
 # leaves a 56 px metrics strip below).
@@ -475,11 +480,45 @@ def build_pipeline_string(
     ``fps_cap`` is the videorate decimation target. Default 15 matches
     the SPI-write throughput of the Pi 4B + Waveshare 3.5" combo;
     higher values are achievable on faster SBCs / hardware decoders.
+
+    ``source_url`` selects the front end:
+    - If it starts with ``rtsp://`` (legacy / tests), we use rtspsrc.
+    - Otherwise we treat it as an integer UDP port and use udpsrc with
+      RTP H.264 caps. This is the Phase 11 default — it bypasses the
+      mediamtx-gs RTSP indirection and the rtspsrc 100 ms jitter buffer
+      that was the source of the freeze cascade.
     """
+    if source_url.startswith("rtsp://"):
+        # Legacy rtspsrc front end — kept so tests that pre-date the
+        # udpsrc path continue to work, and so a bench operator can
+        # opt into the rtspsrc+mediamtx-gs path for debugging.
+        front = (
+            f"rtspsrc location={source_url} protocols=tcp "
+            f"latency={latency_ms} drop-on-latency=true "
+            "! rtph264depay "
+        )
+    else:
+        # Phase 11 default: udpsrc directly from the LCD-side fanout
+        # port. No mediamtx-gs round-trip, no rtspsrc TCP handshake,
+        # no 404 race when mediamtx-gs goes briefly not-ready. The
+        # rtpjitterbuffer with latency_ms (default ~50) absorbs
+        # transient packet jitter; do-lost=true emits GAP events on
+        # loss so downstream recovers faster. mode=0 disables the
+        # jitterbuffer's reordering / loss-detection state machine
+        # (we're on localhost, no reordering risk).
+        try:
+            udp_port = int(source_url)
+        except (ValueError, TypeError):
+            udp_port = 5601
+        front = (
+            f"udpsrc port={udp_port} "
+            "caps=\"application/x-rtp,media=video,encoding-name=H264,"
+            "payload=96,clock-rate=90000\" "
+            f"! rtpjitterbuffer latency={latency_ms} mode=0 do-lost=true "
+            "! rtph264depay "
+        )
     return (
-        f"rtspsrc location={source_url} protocols=tcp "
-        f"latency={latency_ms} drop-on-latency=true "
-        "! rtph264depay "
+        f"{front}"
         # h264parse with default settings, named so the SEI pad probe
         # can be pinned via get_by_name. We tried adding alignment=au
         # (both as a downstream capsfilter and as an element property)
@@ -492,13 +531,11 @@ def build_pipeline_string(
         # encoder side (libx264 -bsf:v h264_mp4toannexb already
         # inlines SPS/PPS at IDRs).
         "! h264parse name=h264parse_tap "
-        # queue between depay and decoder hands rtspsrc its own thread so
-        # the network reader keeps pulling RTP while the decoder works.
-        # leaky=downstream + max-size-buffers=8 means a slow decoder
-        # drops the oldest frame instead of blocking upstream and
-        # starving rtspsrc's RTCP loop (which cascades into "not-linked"
-        # errors). We tried 2-4 in Phase 9 but the pipeline tripped
-        # bus errors; 8 is the practical floor on Pi 4B.
+        # queue between depay and decoder hands the source its own
+        # thread so the network reader keeps pulling RTP while the
+        # decoder works. leaky=downstream + max-size-buffers=8 means
+        # a slow decoder drops the oldest frame instead of blocking
+        # upstream.
         "! queue max-size-buffers=8 max-size-bytes=0 max-size-time=0 leaky=downstream "
         f"! {decoder} "
         # second queue between decoder and downstream conversion gives

@@ -118,6 +118,49 @@ def test_pipeline_string_honors_fps_cap() -> None:
     assert "framerate=15/1" in s_default
 
 
+def test_pipeline_string_udpsrc_default_when_source_is_port() -> None:
+    """Phase 11: default LCD path is udpsrc directly from the fanout
+    port, NOT rtspsrc. udpsrc bypasses mediamtx-gs RTSP indirection,
+    eliminating the 404 race + caps re-negotiation cascades that were
+    the root cause of the freeze.
+    """
+    s = lt.build_pipeline_string(
+        source_url="5601",  # Phase 11 default — UDP port, not URL
+        decoder="avdec_h264",
+        width=480,
+        height=176,
+        latency_ms=50,
+    )
+    # New udpsrc front end with RTP H.264 caps + rtpjitterbuffer.
+    assert "udpsrc port=5601" in s
+    assert "encoding-name=H264" in s
+    assert "rtpjitterbuffer latency=50" in s
+    assert "do-lost=true" in s
+    # NO rtspsrc anywhere when source_url is a bare port.
+    assert "rtspsrc" not in s
+    # Same downstream stages preserved.
+    assert "rtph264depay" in s
+    assert "h264parse name=h264parse_tap" in s
+    assert "appsink name=tap" in s
+
+
+def test_pipeline_string_rtsp_legacy_path_still_works() -> None:
+    """Tests + bench debug can pass an rtsp:// URL to fall back to the
+    rtspsrc front end (the v0.20.24 path). Phase 11 keeps it for
+    backward compat."""
+    s = lt.build_pipeline_string(
+        source_url="rtsp://localhost:8554/main",
+        decoder="avdec_h264",
+        width=480,
+        height=176,
+        latency_ms=100,
+    )
+    assert "rtspsrc" in s
+    # Legacy: NO rtpjitterbuffer (rtspsrc has its own internal buffer).
+    assert "rtpjitterbuffer" not in s
+    assert "udpsrc" not in s
+
+
 def test_parse_sei_extracts_ns_with_emulation_prevention() -> None:
     """The receiver must de-escape H.264 emulation-prevention bytes.
 

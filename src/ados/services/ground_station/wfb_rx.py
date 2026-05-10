@@ -43,6 +43,19 @@ from ados.services.wfb.link_quality import LinkQualityMonitor, LinkStats
 _RX_HEALTH_POLL_INTERVAL_S = 5.0
 _RX_HEALTH_SILENCE_THRESHOLD_S = 30.0
 
+# Phase 11 video pipeline ports.
+# wfb_rx outputs FEC-decoded RTP H.264 to UDP _WFB_RX_INTERNAL_UDP_PORT
+# (5599). The video fanout reads from there and emits to:
+#   - _WFB_RX_MEDIAMTX_UDP_PORT (5600) for the mediamtx-gs ffmpeg
+#     ingest sidecar (browser WHEP path, unchanged contract)
+#   - _WFB_RX_LCD_UDP_PORT     (5601) for the LCD's udpsrc front end
+#     (Phase 11 NEW direct path, bypasses mediamtx-gs RTSP indirection)
+# Both consumers see every packet; SO_REUSEPORT would load-balance and
+# break RTP, so we use an explicit fanout instead.
+_WFB_RX_INTERNAL_UDP_PORT = 5599
+_WFB_RX_MEDIAMTX_UDP_PORT = 5600
+_WFB_RX_LCD_UDP_PORT = 5601
+
 if TYPE_CHECKING:
     from ados.core.config import WfbConfig
 
@@ -82,6 +95,10 @@ class WfbRxManager:
         _apply_link_preset(self._config, log)
         self._state = LinkState.DISCONNECTED
         self._rx_proc: asyncio.subprocess.Process | None = None
+        # Phase 11: UDP fan-out subprocess that reads wfb_rx output on
+        # the internal port and emits to mediamtx-gs ingest + LCD udpsrc.
+        # Spawned alongside wfb_rx and torn down with it.
+        self._fanout_proc: asyncio.subprocess.Process | None = None
         self._monitor = LinkQualityMonitor()
         self._interface: str = ""
         self._channel: int = config.channel
@@ -192,14 +209,19 @@ class WfbRxManager:
         # Without it the binary is silent on stdout, _read_rx_output()
         # blocks on readline() forever, LinkQualityMonitor stays empty,
         # and /api/wfb permanently reports state=disabled / rssi=-100 /
-        # packets_received=0 even when 802.11 frames are flowing through
-        # to UDP 5600 cleanly. The RX watchdog also relies on stdout
-        # cadence as its liveness signal — silence breaks both.
+        # packets_received=0 even when 802.11 frames are flowing through.
+        # `-u 5599`: internal-only port. Phase 11 changed this from the
+        # historical 5600 to free that port for the new fan-out's egress.
+        # wfb_rx → 5599 → ados-video-fanout → 5600 (mediamtx-gs ingest,
+        # unchanged) AND 5601 (LCD udpsrc, NEW direct path that bypasses
+        # the mediamtx-gs RTSP indirection). Both consumers see every
+        # packet without needing SO_REUSEPORT (which load-balances and
+        # would break RTP).
         cmd = [
             "wfb_rx",
             "-p", "0",
             "-c", "127.0.0.1",
-            "-u", "5600",
+            "-u", str(_WFB_RX_INTERNAL_UDP_PORT),
             "-K", rx_key,
             "-l", "1000",
             interface,
@@ -227,6 +249,57 @@ class WfbRxManager:
         except OSError as exc:
             log.error("ground_wfb_rx_start_failed", error=str(exc))
             return False
+
+    async def start_fanout(self) -> bool:
+        """Spawn the UDP fan-out: 5599 → 5600 (mediamtx) + 5601 (LCD).
+
+        The fan-out is a small Python subprocess (sibling to wfb_rx) that
+        reads each datagram off the wfb_rx output socket and re-emits it
+        to two downstream ports. Both consumers (mediamtx-gs ffmpeg
+        ingest on 5600, LocalVideoTap udpsrc on 5601) get every packet.
+        """
+        cmd = [
+            sys.executable,
+            "-m",
+            "ados.services.ground_station.video_fanout",
+            "--listen-host", "127.0.0.1",
+            "--listen-port", str(_WFB_RX_INTERNAL_UDP_PORT),
+            "--target", f"127.0.0.1:{_WFB_RX_MEDIAMTX_UDP_PORT}",
+            "--target", f"127.0.0.1:{_WFB_RX_LCD_UDP_PORT}",
+        ]
+        try:
+            self._fanout_proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            log.info(
+                "ground_video_fanout_started",
+                pid=self._fanout_proc.pid,
+                listen_port=_WFB_RX_INTERNAL_UDP_PORT,
+                mediamtx_port=_WFB_RX_MEDIAMTX_UDP_PORT,
+                lcd_port=_WFB_RX_LCD_UDP_PORT,
+            )
+            return True
+        except OSError as exc:
+            log.error("ground_video_fanout_start_failed", error=str(exc))
+            return False
+
+    async def stop_fanout(self) -> None:
+        """Terminate the fan-out subprocess if alive."""
+        proc = self._fanout_proc
+        if proc is not None and proc.returncode is None:
+            try:
+                proc.terminate()
+                await asyncio.wait_for(proc.wait(), timeout=2.0)
+            except TimeoutError:
+                try:
+                    proc.kill()
+                except ProcessLookupError:
+                    pass
+            except ProcessLookupError:
+                pass
+        self._fanout_proc = None
 
     async def stop_rx(self) -> None:
         """Terminate the wfb_rx subprocess if alive."""
@@ -554,6 +627,14 @@ class WfbRxManager:
                 backoff = min(backoff * 2, 5.0)
                 continue
 
+            # Phase 11: spawn the UDP fan-out as soon as wfb_rx is up.
+            # The fanout reads wfb_rx output and forwards to both
+            # mediamtx-gs and the LCD. Start failure is non-fatal — the
+            # browser WHEP path may still come up via mediamtx-gs's
+            # direct ingest if some operator override redirects, but
+            # the LCD will be silent until the fanout works.
+            await self.start_fanout()
+
             backoff = 1.0
             self._state = LinkState.CONNECTED
 
@@ -590,6 +671,10 @@ class WfbRxManager:
                 backoff=backoff,
             )
 
+            # Stop fanout BEFORE stop_rx so it doesn't try to forward
+            # while wfb_rx is being torn down. Bath both each restart
+            # cycle so a stuck fanout never out-lives its rx.
+            await self.stop_fanout()
             await self.stop_rx()
             self._running = True
 
@@ -634,6 +719,7 @@ async def main() -> None:
     slog.info("ground_wfb_rx_service_stopping")
     manager_task.cancel()
     await asyncio.gather(manager_task, return_exceptions=True)
+    await manager.stop_fanout()
     await manager.stop_rx()
     slog.info("ground_wfb_rx_service_stopped")
 
