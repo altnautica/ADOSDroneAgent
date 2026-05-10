@@ -475,20 +475,18 @@ def build_pipeline_string(
         f"rtspsrc location={source_url} protocols=tcp "
         f"latency={latency_ms} drop-on-latency=true "
         "! rtph264depay "
-        # h264parse without an explicit alignment requirement.
-        # Earlier we tried both a downstream `! video/x-h264,alignment=au`
-        # capsfilter AND an `alignment=au` element property; both broke
-        # the pipeline on Pi 4B's GStreamer (the capsfilter triggers a
-        # caps re-negotiation that avdec_h264 refuses with
-        # `streaming stopped, reason not-linked`; the property form
-        # raises `no property "alignment" in element "h264parse"` at
-        # parse_launch time). The SEI pad probe walks the buffer's
-        # byte stream looking for our UUID, so it works regardless of
-        # whether buffers are per-NAL or per-AU. config-interval=1
-        # prepends SPS/PPS to every IDR for late-joiner robustness.
-        # The named element lets get_by_name pin the SEI pad probe
-        # deterministically.
-        "! h264parse name=h264parse_tap config-interval=1 "
+        # h264parse with default settings, named so the SEI pad probe
+        # can be pinned via get_by_name. We tried adding alignment=au
+        # (both as a downstream capsfilter and as an element property)
+        # AND config-interval=1 (SPS/PPS injection); both broke the
+        # pipeline on Pi 4B's GStreamer with `streaming stopped,
+        # reason not-linked` errors that put the tap into a sustained
+        # restart loop. The SEI pad probe walks the buffer's byte
+        # stream looking for our UUID, so it works without any explicit
+        # alignment. SPS/PPS for late-joiners is taken care of by the
+        # encoder side (libx264 -bsf:v h264_mp4toannexb already
+        # inlines SPS/PPS at IDRs).
+        "! h264parse name=h264parse_tap "
         # queue between depay and decoder hands rtspsrc its own thread so
         # the network reader keeps pulling RTP while the decoder works.
         # leaky=downstream + max-size-buffers=8 means a slow decoder

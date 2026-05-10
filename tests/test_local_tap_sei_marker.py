@@ -86,14 +86,15 @@ def test_pipeline_string_pins_au_alignment() -> None:
         height=176,
         latency_ms=100,
     )
-    # h264parse without explicit alignment. Both the downstream
-    # capsfilter form (`! video/x-h264,alignment=au`) and the property
-    # form (`h264parse alignment=au`) broke the pipeline on Pi 4B's
-    # GStreamer; the SEI pad probe walks the byte stream and finds
-    # our UUID regardless of buffer alignment.
-    assert "h264parse name=h264parse_tap config-interval=1" in s
+    # h264parse with default settings, named for get_by_name lookup.
+    # Both alignment=au (capsfilter and property forms) and
+    # config-interval=1 broke the pipeline on Pi 4B's GStreamer.
+    # The SEI pad probe works via byte-stream scan regardless of
+    # buffer alignment.
+    assert "h264parse name=h264parse_tap" in s
     assert "alignment=au" not in s
     assert "video/x-h264,alignment=au" not in s
+    assert "config-interval=1" not in s
 
 
 def test_pipeline_string_honors_fps_cap() -> None:
