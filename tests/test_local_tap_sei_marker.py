@@ -86,7 +86,7 @@ def test_pipeline_string_pins_au_alignment() -> None:
         height=176,
         latency_ms=100,
     )
-    assert "h264parse config-interval=1" in s
+    assert "h264parse name=h264parse_tap config-interval=1" in s
     assert "alignment=au" in s
 
 

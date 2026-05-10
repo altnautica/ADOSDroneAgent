@@ -472,7 +472,11 @@ def build_pipeline_string(
         # the src pad sees the SEI but doesn't easily correlate it
         # with the frame. config-interval=1 prepends SPS/PPS to every
         # IDR for late-joiner robustness on the LCD reconnect path.
-        "! h264parse config-interval=1 "
+        # Naming the element ``h264parse_tap`` lets ``get_by_name``
+        # find it deterministically; the element-iterator approach
+        # silently fails on PyGObject builds where Gst.IteratorResult
+        # surfaces RESYNC mid-walk.
+        "! h264parse name=h264parse_tap config-interval=1 "
         "! video/x-h264,alignment=au "
         # queue between depay and decoder hands rtspsrc its own thread so
         # the network reader keeps pulling RTP while the decoder works.
@@ -652,7 +656,12 @@ class LocalVideoTap:
             # string; iterate the pipeline to find it. If it cannot be
             # located the rest of the tap still works — latency just
             # stays unset.
-            h264parse = self._find_h264parse(pipeline)
+            # Prefer get_by_name for the named h264parse element; the
+            # legacy iterator walk is kept as a fallback for any path
+            # that constructs a custom pipeline string without the name.
+            h264parse = pipeline.get_by_name("h264parse_tap")
+            if h264parse is None:
+                h264parse = self._find_h264parse(pipeline)
             if h264parse is None:
                 # Surface this as a warning, not a debug whisper — without
                 # the probe, latency stays blank on the LCD and there's no
