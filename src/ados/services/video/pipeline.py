@@ -383,9 +383,17 @@ class VideoPipeline:
                 # child (bash); if any stage crashes, bash returns
                 # non-zero and the existing health-check + restart
                 # loop respawns the whole tee.
+                # NB: do NOT add `-max_delay 0` to either ffmpeg here.
+                # We tried it as a latency micro-optimization and it
+                # broke codec discovery — input ffmpeg returned
+                # "Could not find codec parameters" before the first
+                # IDR arrived, the bash pipeline's exit cascaded into
+                # never-started wfb_tee, and groundnode stopped
+                # transmitting entirely. Same root cause as the
+                # mediamtx-gs ingest sidecar earlier.
                 cmd_in = (
                     "ffmpeg "
-                    "-fflags nobuffer -flags low_delay -max_delay 0 "
+                    "-fflags nobuffer -flags low_delay "
                     "-rtsp_transport tcp "
                     f"-i {local_rtsp} "
                     "-c:v copy -f h264 -"
@@ -398,7 +406,7 @@ class VideoPipeline:
                 # want each packet on the wire as soon as encoded.
                 cmd_out = (
                     "ffmpeg "
-                    "-fflags nobuffer -flags low_delay -max_delay 0 "
+                    "-fflags nobuffer -flags low_delay "
                     "-f h264 -i - "
                     "-c:v copy -muxdelay 0 -muxpreload 0 -f rtp "
                     f"-payload_type {_WFB_TEE_PAYLOAD_TYPE} "
