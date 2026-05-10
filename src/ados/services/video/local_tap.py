@@ -513,8 +513,12 @@ def build_pipeline_string(
             udp_port = int(source_url)
         except (ValueError, TypeError):
             udp_port = 5601
+        # `reuse=true` enables SO_REUSEADDR + SO_REUSEPORT so a quick
+        # restart cycle (start() retry after a transient pipeline
+        # construction failure) doesn't get "Address already in use"
+        # while the previous udpsrc's NULL-state transition propagates.
         front = (
-            f"udpsrc port={udp_port} "
+            f"udpsrc port={udp_port} reuse=true "
             "caps=\"application/x-rtp,media=video,encoding-name=H264,"
             "payload=96,clock-rate=90000\" "
             f"! rtpjitterbuffer latency={latency_ms} "
@@ -1305,6 +1309,17 @@ class LocalVideoTap:
         self._reset_stats()
         try:
             pipeline.set_state(gst.State.NULL)
+            # Block until the NULL transition actually propagates to
+            # every element. Without this, udpsrc may not have released
+            # its bound socket by the time we re-enter PLAYING, and the
+            # next bind fails with "Address already in use" even with
+            # SO_REUSEADDR (the kernel race is brief but real). 1 s is
+            # enough on Pi 4B; the timeout prevents an infinite hang
+            # if a downstream element refuses to release.
+            try:
+                pipeline.get_state(1_000_000_000)  # 1 s in ns
+            except Exception:  # noqa: BLE001
+                pass
             pipeline.set_state(gst.State.PLAYING)
             self._pipeline_state = "playing"
             self._logger.info("local_tap_auto_restart", reason=reason)
