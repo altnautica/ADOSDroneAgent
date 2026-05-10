@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import signal
 import sys
 import time
 from enum import StrEnum
@@ -362,6 +363,15 @@ class VideoPipeline:
         ):
             return True
 
+        # Sweep orphans from a previous run before spawning a fresh
+        # tee. Handles: pre-Phase-12 agent versions that didn't set
+        # start_new_session, an unclean SIGKILL of the parent that
+        # leaves bash dead but ffmpegs alive, or two-set duplication
+        # from a failed restart cycle. Without this sweep, the new
+        # ffmpeg fights an old one for the same RTP destination on
+        # UDP 5600 and the LCD video freezes.
+        await self._kill_orphan_wfb_tee_ffmpegs()
+
         local_rtsp = f"rtsp://localhost:{self._mediamtx.rtsp_port}/main"
         rtp_url = (
             f"rtp://{_WFB_TEE_HOST}:{_WFB_TEE_PORT}?pkt_size={_WFB_TEE_PKT_SIZE}"
@@ -414,12 +424,23 @@ class VideoPipeline:
                     f"{rtp_url}"
                 )
                 bash_cmd = f"{cmd_in} | {cmd_inject} | {cmd_out}"
+                # start_new_session=True so bash + ffmpeg children form
+                # a process group. Without this, terminate() sends
+                # SIGTERM only to bash; bash exits but the ffmpeg
+                # children survive as orphans. On the next restart
+                # cycle a NEW set of ffmpegs spawns alongside the
+                # orphans, two ffmpegs try to pull the same RTSP source
+                # and two send to the same UDP 5600 destination -> RTP
+                # packet duplication / out-of-order chaos -> the LCD
+                # video freezes. stop_wfb_tee() now uses killpg to
+                # terminate the entire group cleanly.
                 self._wfb_tee_process = await asyncio.create_subprocess_exec(
                     "bash",
                     "-c",
                     bash_cmd,
                     stdout=asyncio.subprocess.DEVNULL,
                     stderr=asyncio.subprocess.PIPE,
+                    start_new_session=True,
                 )
             else:
                 self._wfb_tee_process = await asyncio.create_subprocess_exec(
@@ -435,6 +456,10 @@ class VideoPipeline:
                     rtp_url,
                     stdout=asyncio.subprocess.DEVNULL,
                     stderr=asyncio.subprocess.PIPE,
+                    # Mirror the bash branch: ffmpeg is single-process
+                    # here so it's not strictly needed, but consistent
+                    # group semantics make stop_wfb_tee uniform.
+                    start_new_session=True,
                 )
             self._wfb_tee_stderr_task = asyncio.create_task(
                 self._drain_stderr(self._wfb_tee_process, "wfb_tee")
@@ -456,25 +481,88 @@ class VideoPipeline:
             return False
 
     async def stop_wfb_tee(self) -> None:
-        """Stop the wfb radio UDP tee."""
+        """Stop the wfb radio UDP tee.
+
+        Sends SIGTERM/SIGKILL to the entire process group (start_new_
+        session=True at spawn time) so the bash wrapper AND its ffmpeg
+        children all die together. Without this, killing bash alone
+        orphans the ffmpegs; the next start cycle spawns NEW ffmpegs
+        alongside the orphans, two compete for the same RTSP source +
+        UDP 5600 destination, RTP packets garble, and the LCD freezes.
+        """
         if self._wfb_tee_stderr_task is not None:
             self._wfb_tee_stderr_task.cancel()
             self._wfb_tee_stderr_task = None
         proc = self._wfb_tee_process
         if proc is not None and proc.returncode is None:
+            pgid: int | None = None
             try:
-                proc.terminate()
-            except ProcessLookupError:
+                pgid = os.getpgid(proc.pid)
+            except (ProcessLookupError, OSError):
+                pgid = None
+            # Send SIGTERM to the whole group when we can; fall back to
+            # the single-process terminate() for safety.
+            try:
+                if pgid is not None:
+                    os.killpg(pgid, signal.SIGTERM)
+                else:
+                    proc.terminate()
+            except (ProcessLookupError, OSError):
                 pass
             try:
                 await asyncio.wait_for(proc.wait(), timeout=5.0)
             except (TimeoutError, asyncio.CancelledError):
                 try:
-                    proc.kill()
-                except ProcessLookupError:
+                    if pgid is not None:
+                        os.killpg(pgid, signal.SIGKILL)
+                    else:
+                        proc.kill()
+                except (ProcessLookupError, OSError):
                     pass
-            log.info("wfb_tee_stopped")
+            log.info("wfb_tee_stopped", pgid=pgid)
+        # Belt-and-suspenders: even after our managed process is gone,
+        # there could be orphan ffmpegs left from a previous code
+        # version (pre-Phase 12) or from an unclean exit. Sweep them.
+        await self._kill_orphan_wfb_tee_ffmpegs()
         self._wfb_tee_process = None
+
+    async def _kill_orphan_wfb_tee_ffmpegs(self) -> None:
+        """Kill any stray ffmpegs that match the wfb_tee command signature.
+
+        Defence-in-depth: an orphan ffmpeg sending to UDP 5600 will
+        fight a freshly-spawned one and corrupt the RTP stream. We
+        identify orphans by their command line (sending to the wfb
+        RTP destination) and SIGKILL them.
+        """
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "pgrep", "-f", f"rtp://{_WFB_TEE_HOST}:{_WFB_TEE_PORT}",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=2.0)
+        except (FileNotFoundError, TimeoutError, asyncio.CancelledError):
+            return
+        for line in stdout.decode("utf-8", errors="replace").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                pid = int(line)
+            except ValueError:
+                continue
+            # Skip our own python process if it's matched by name.
+            if pid == os.getpid():
+                continue
+            try:
+                os.kill(pid, signal.SIGKILL)
+                log.warning(
+                    "wfb_tee_orphan_killed",
+                    pid=pid,
+                    note="stale ffmpeg from a previous wfb_tee cycle",
+                )
+            except (ProcessLookupError, OSError):
+                pass
 
     async def stop_stream(self) -> None:
         """Stop the encoding pipeline and mediamtx."""
