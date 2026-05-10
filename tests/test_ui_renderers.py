@@ -119,6 +119,59 @@ class TestFrameBufferPresent:
         data = fb.read_bytes()
         assert all(b == 0 for b in data)
 
+    def test_present_returns_immediately(self, tmp_path: Path):
+        """present() must return in <5 ms regardless of mmap.write speed.
+
+        Regression for the LCD freeze cascade: when present() ran
+        synchronously, the 10-25 ms SPI write blocked the asyncio
+        render loop, which back-pressured the GStreamer appsink and
+        triggered not-linked restart loops. The decoupled writer
+        thread fix means present() should be near-instant from the
+        caller's perspective.
+        """
+        import time as _time
+
+        fb = self._make_fb(tmp_path)
+        renderer = FrameBufferRenderer(
+            fb_path=str(fb),
+            fb_name="fb_fake",
+            actual_width=480,
+            actual_height=320,
+            bpp=16,
+        )
+        try:
+            img = Image.new("1", (LOGICAL_WIDTH, LOGICAL_HEIGHT), 0)
+            t0 = _time.monotonic()
+            renderer.present(img)
+            elapsed_ms = (_time.monotonic() - t0) * 1000.0
+        finally:
+            renderer.cleanup()
+        # Generous threshold for slow CI; the goal is just to confirm
+        # the call no longer waits on the writer thread's mmap.write.
+        assert elapsed_ms < 50.0, f"present() took {elapsed_ms:.1f} ms; expected <50"
+
+    def test_present_drops_under_pressure(self, tmp_path: Path):
+        """When present() is called faster than the writer can drain,
+        the older pending frame is dropped and the writer always sees
+        the freshest one. Latest-wins semantics."""
+        fb = self._make_fb(tmp_path)
+        renderer = FrameBufferRenderer(
+            fb_path=str(fb),
+            fb_name="fb_fake",
+            actual_width=480,
+            actual_height=320,
+            bpp=16,
+        )
+        try:
+            for _ in range(10):
+                renderer.present(Image.new("1", (LOGICAL_WIDTH, LOGICAL_HEIGHT), 0))
+        finally:
+            renderer.cleanup()
+        stats = renderer.stats()
+        # All but the last frame should have been dropped.
+        assert stats["drops"] >= 1
+        assert stats["writes"] >= 1
+
     def test_present_writes_full_frame_size(self, tmp_path: Path):
         fb = self._make_fb(tmp_path)
         renderer = FrameBufferRenderer(

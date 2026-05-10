@@ -22,6 +22,7 @@ from __future__ import annotations
 import mmap
 import os
 import struct
+import threading
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -168,7 +169,38 @@ class FrameBufferRenderer:
         self._fd: int = -1
         self._mmap: mmap.mmap | None = None
         self._frame_bytes = actual_width * actual_height * (bpp // 8)
+        # Decoupled SPI writer. present() stashes the latest image
+        # into _pending_image (latest-wins) and signals the writer
+        # thread; the actual PIL composition + RGB565 pack + mmap.write
+        # runs on the writer's daemon thread. Removes the 10-25 ms SPI
+        # blocking call from the asyncio render loop's critical path,
+        # which was the root cascade behind the LCD freeze: synchronous
+        # mmap.write blocks the loop -> appsink pulls slow -> upstream
+        # queues fill -> rtspsrc stalls -> not-linked bus error -> tap
+        # restart. Latest-wins semantics: if SPI is busy when a new
+        # frame arrives, the older pending frame is dropped.
+        self._pending_image: PILImage | None = None
+        self._pending_lock = threading.Lock()
+        self._pending_event = threading.Event()
+        self._writer_stop = threading.Event()
+        self._writer_drops: int = 0
+        self._writer_writes: int = 0
+        # Last-tick timing observability. Wall-clock duration of the
+        # most recent mmap.write() call; surfaced via stats() so an
+        # SPI-throughput regression is visible in journalctl + the
+        # GCS / LCD diagnostics page.
+        self._last_write_ms: float | None = None
+        self._writer_thread: threading.Thread | None = None
         self._open()
+        # Spawn the writer only after _open() succeeds — _open() raises
+        # on missing framebuffer and we don't want a thread holding a
+        # half-initialized renderer.
+        self._writer_thread = threading.Thread(
+            target=self._writer_loop,
+            name="ados-fb-writer",
+            daemon=True,
+        )
+        self._writer_thread.start()
 
     @classmethod
     def probe(cls) -> FrameBufferRenderer | None:
@@ -274,34 +306,40 @@ class FrameBufferRenderer:
             raise
 
     def present(self, image: PILImage) -> None:
-        """Blit the image to the framebuffer.
+        """Stash the image for the SPI writer thread; return immediately.
 
-        Two paths:
+        Used to do the PIL composition + RGB565 pack + mmap.write
+        synchronously, blocking the caller for 10-25 ms. That stalled
+        the OLED service's asyncio loop, which back-pressured the
+        GStreamer appsink, which back-pressured the queues + decoder,
+        which eventually starved rtspsrc and tripped the not-linked
+        restart cascade.
 
-        * If ``image.size == (actual_width, actual_height)`` the
-          image is already at native panel size — skip the upscale,
-          convert to RGB if needed, blit straight. This is the
-          dashboard renderer's path.
-        * Otherwise treat the input as the legacy 128x64 OLED
-          carousel canvas: convert to RGB, NEAREST-upscale by
-          ``self.upscale``, center on a black background of the
-          actual panel size, crop overflow.
-
-        After compositing, ``self.rotation`` is applied so a panel
-        mounted physically rotated still renders right-way-up. PIL's
-        ``rotate(angle)`` is counter-clockwise by convention; we want
-        the contents to compensate for a clockwise physical mount, so
-        the angle is negated. ``expand=False`` keeps the canvas
-        dimensions matched to the framebuffer geometry — at 90 / 270
-        the contents simply lose the corners of the long axis, which
-        is fine because at those rotations the panel's logical width
-        and height match the canvas anyway (the renderer is
-        constructed at ``actual_width`` / ``actual_height`` that the
-        kernel reports for the physical orientation).
+        Now: the calling thread only stashes the image into a single-
+        slot lock-protected holder and signals the writer. The writer
+        thread (``ados-fb-writer``) does the composition + pack + mmap
+        write off-thread. If a new frame arrives while the writer is
+        still busy with the previous one, latest-wins: the older
+        pending frame is dropped.
         """
         if self._mmap is None:
             return
+        with self._pending_lock:
+            if self._pending_image is not None:
+                # The previous frame never made it to SPI — overwrite
+                # so the writer always handles the freshest frame.
+                self._writer_drops += 1
+            self._pending_image = image
+        self._pending_event.set()
 
+    def _compose_and_pack(self, image: PILImage) -> bytes | None:
+        """Build the RGB565 / RGB888 / xRGB byte buffer for the panel.
+
+        Pulled out of the original ``present`` body unchanged: same
+        size-matching, same upscale path for legacy screens, same
+        rotation, same bpp pack. Returns ``None`` if the produced buffer
+        size mismatches the framebuffer geometry (caller logs + drops).
+        """
         if image.size == (self.actual_width, self.actual_height):
             # Native dashboard render. No scaling, just convert mode if
             # needed and treat the image itself as the canvas.
@@ -359,11 +397,78 @@ class FrameBufferRenderer:
                 produced=len(buf),
                 expected=self._frame_bytes,
             )
-            return
-        self._mmap.seek(0)
-        self._mmap.write(buf)
+            return None
+        return buf
+
+    def _writer_loop(self) -> None:
+        """Daemon-thread SPI writer. Pulls from _pending_image, writes."""
+        import time as _time
+
+        while True:
+            stop = self._writer_stop.is_set()
+            # Wait for a fresh frame, but wake periodically so cleanup()
+            # can break us out without relying on the event being set.
+            if not stop:
+                self._pending_event.wait(timeout=0.5)
+            self._pending_event.clear()
+            with self._pending_lock:
+                image = self._pending_image
+                self._pending_image = None
+            if image is None:
+                # No pending work. If we were asked to stop, exit now;
+                # otherwise loop back to wait for the next frame.
+                if stop:
+                    return
+                continue
+            # If stop is set but we have a pending image, drain it
+            # before exiting so a present() right before cleanup()
+            # actually lands on the framebuffer (tests rely on this).
+            try:
+                buf = self._compose_and_pack(image)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("framebuffer_compose_failed", error=str(exc))
+                continue
+            if buf is None:
+                continue
+            mmap_obj = self._mmap
+            if mmap_obj is None:
+                # Renderer torn down between stash and write.
+                return
+            t0 = _time.monotonic()
+            try:
+                mmap_obj.seek(0)
+                mmap_obj.write(buf)
+            except (OSError, ValueError) as exc:
+                # ValueError on closed mmap during cleanup; OSError on
+                # disconnected SPI bus. Either way, stop trying.
+                log.warning("framebuffer_write_failed", error=str(exc))
+                return
+            self._last_write_ms = (_time.monotonic() - t0) * 1000.0
+            self._writer_writes += 1
+
+    def stats(self) -> dict:
+        """Return SPI-writer observability snapshot."""
+        return {
+            "writes": self._writer_writes,
+            "drops": self._writer_drops,
+            "last_write_ms": (
+                round(self._last_write_ms, 2)
+                if self._last_write_ms is not None
+                else None
+            ),
+        }
 
     def cleanup(self) -> None:
+        # Stop the writer thread before closing the mmap; otherwise it
+        # could try to write into a closed mapping and crash.
+        self._writer_stop.set()
+        self._pending_event.set()
+        thread = self._writer_thread
+        if thread is not None and thread.is_alive():
+            try:
+                thread.join(timeout=1.0)
+            except Exception:  # noqa: BLE001
+                pass
         if self._mmap is not None:
             try:
                 self._mmap.close()
