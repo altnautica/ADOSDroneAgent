@@ -475,19 +475,20 @@ def build_pipeline_string(
         f"rtspsrc location={source_url} protocols=tcp "
         f"latency={latency_ms} drop-on-latency=true "
         "! rtph264depay "
-        # h264parse with alignment=au set as a property (not as a
-        # downstream capsfilter). The capsfilter form
-        # ``! video/x-h264,alignment=au`` triggers a caps re-negotiation
-        # that the avdec_h264 chain refuses on Pi 4B + GStreamer 1.22,
-        # producing a `streaming stopped, reason not-linked` bus error
-        # within a few buffers — pipeline drops to NULL, restart loop
-        # kicks in, no frames ever reach the appsink, LCD shows a
-        # frozen last-frame. Setting alignment=au as a property
-        # negotiates upstream of the queue without splitting the
-        # pipeline graph. config-interval=1 prepends SPS/PPS to every
-        # IDR for late-joiner robustness. The named element lets
-        # get_by_name pin the SEI pad probe deterministically.
-        "! h264parse name=h264parse_tap config-interval=1 alignment=au "
+        # h264parse without an explicit alignment requirement.
+        # Earlier we tried both a downstream `! video/x-h264,alignment=au`
+        # capsfilter AND an `alignment=au` element property; both broke
+        # the pipeline on Pi 4B's GStreamer (the capsfilter triggers a
+        # caps re-negotiation that avdec_h264 refuses with
+        # `streaming stopped, reason not-linked`; the property form
+        # raises `no property "alignment" in element "h264parse"` at
+        # parse_launch time). The SEI pad probe walks the buffer's
+        # byte stream looking for our UUID, so it works regardless of
+        # whether buffers are per-NAL or per-AU. config-interval=1
+        # prepends SPS/PPS to every IDR for late-joiner robustness.
+        # The named element lets get_by_name pin the SEI pad probe
+        # deterministically.
+        "! h264parse name=h264parse_tap config-interval=1 "
         # queue between depay and decoder hands rtspsrc its own thread so
         # the network reader keeps pulling RTP while the decoder works.
         # leaky=downstream + tight max-size means a slow decoder drops
