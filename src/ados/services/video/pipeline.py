@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import signal
 import sys
 import time
@@ -50,6 +51,14 @@ _WFB_TEE_HOST = "127.0.0.1"
 _WFB_TEE_PORT = 5600
 _WFB_TEE_PKT_SIZE = 1316
 _WFB_TEE_PAYLOAD_TYPE = 96
+# Output-progress watchdog: if wfb_tee's ffmpeg stderr stops
+# advancing the `frame=N` counter for this many seconds, the process
+# is considered a zombie (alive but not pushing UDP packets) and we
+# force a restart via the regular run-loop health-check path. 8 s
+# absorbs a brief IDR-wait or encoder-CPU spike without false-tripping.
+_WFB_TEE_PROGRESS_TIMEOUT_S = 8.0
+# Pattern matched in ffmpeg stderr lines to extract the frame counter.
+_FFMPEG_FRAME_PROGRESS_RE = re.compile(r"\bframe=\s*(\d+)\b")
 _WFB_TEE_SSRC = "0xCAFE"
 
 
@@ -92,6 +101,15 @@ class VideoPipeline:
         self._wfb_tee_process: asyncio.subprocess.Process | None = None
         self._wfb_tee_stderr_task: asyncio.Task | None = None
         self._wfb_tee_restart_count: int = 0
+        # Output-progress watchdog state. Each time the wfb_tee stderr
+        # emits a `frame=N` line with N greater than the previous one,
+        # we stamp _wfb_tee_last_progress_at = time.monotonic(). The
+        # health-check fails (triggering restart) if this stamp is
+        # older than _WFB_TEE_PROGRESS_TIMEOUT_S. Catches the
+        # "process alive but ffmpeg wedged" zombie mode that
+        # process-liveness-only checks miss (Rule 37 contract).
+        self._wfb_tee_last_progress_at: float = 0.0
+        self._wfb_tee_last_frame_count: int = -1
         # Encoder stderr is captured (not DEVNULL) so ffmpeg errors surface.
         self._encoder_stderr_task: asyncio.Task | None = None
         self._restart_count: int = 0
@@ -260,6 +278,48 @@ class VideoPipeline:
         except Exception as exc:
             log.warning("mediamtx_teardown_failed", error=str(exc))
         self._state = PipelineState.ERROR
+
+    async def _drain_wfb_tee_stderr(
+        self, proc: asyncio.subprocess.Process,
+    ) -> None:
+        """Drain wfb_tee stderr AND track ffmpeg's frame= progress.
+
+        Every line that matches `_FFMPEG_FRAME_PROGRESS_RE` updates
+        ``self._wfb_tee_last_progress_at`` so the health-check can
+        tell the difference between a healthy ffmpeg (frames
+        advancing) and a zombie (process alive, frames stuck). This
+        is the output-byte-counter watchdog mandated by Rule 37 —
+        process-liveness alone is never proof of work.
+        """
+        if proc.stderr is None:
+            return
+        try:
+            while True:
+                line = await proc.stderr.readline()
+                if not line:
+                    break
+                text = line.decode(errors="replace").rstrip()
+                if not text:
+                    continue
+                # ffmpeg's `frame=N` progress lines arrive at roughly
+                # the output frame rate (~30 Hz on a healthy bench).
+                # Match each one and remember the highest frame count
+                # seen so far; only stamp the timestamp when the
+                # counter actually advances, so a stuck process that
+                # keeps echoing the same `frame=` value doesn't
+                # falsely register as healthy.
+                m = _FFMPEG_FRAME_PROGRESS_RE.search(text)
+                if m is not None:
+                    try:
+                        frame = int(m.group(1))
+                    except (TypeError, ValueError):
+                        frame = -1
+                    if frame > self._wfb_tee_last_frame_count:
+                        self._wfb_tee_last_frame_count = frame
+                        self._wfb_tee_last_progress_at = time.monotonic()
+                log.warning("subprocess_stderr", label="wfb_tee", line=text)
+        except (asyncio.CancelledError, Exception):
+            pass
 
     @staticmethod
     async def _drain_stderr(proc: asyncio.subprocess.Process, label: str) -> None:
@@ -461,8 +521,13 @@ class VideoPipeline:
                     # group semantics make stop_wfb_tee uniform.
                     start_new_session=True,
                 )
+            # Reset the progress watchdog state at spawn time so a fresh
+            # tee gets the full _WFB_TEE_PROGRESS_TIMEOUT_S window
+            # before the health check trips on it.
+            self._wfb_tee_last_progress_at = time.monotonic()
+            self._wfb_tee_last_frame_count = -1
             self._wfb_tee_stderr_task = asyncio.create_task(
-                self._drain_stderr(self._wfb_tee_process, "wfb_tee")
+                self._drain_wfb_tee_stderr(self._wfb_tee_process)
             )
             log.info(
                 "wfb_tee_started",
@@ -775,11 +840,17 @@ class VideoPipeline:
         return True
 
     async def _check_wfb_tee_health(self) -> bool:
-        """Check if the wfb UDP tee subprocess is still running.
+        """Check if the wfb UDP tee subprocess is still running AND producing.
 
         Returns True if healthy or if the tee was never started.
-        Returns False only when the process died unexpectedly so the
-        run loop can restart it without flapping the encoder itself.
+        Returns False when:
+        1. The process exited (returncode set).
+        2. The process is alive but ffmpeg's frame= counter hasn't
+           advanced for _WFB_TEE_PROGRESS_TIMEOUT_S seconds (the
+           process is a zombie — alive, holding ports, but not
+           pushing UDP packets to wfb_tx). This is the "PLAYING but
+           silent" failure mode that process-liveness checks miss.
+           Per Rule 37, process-liveness is never proof of work.
         """
         if self._wfb_tee_process is None:
             return True
@@ -792,6 +863,22 @@ class VideoPipeline:
             if self._wfb_tee_stderr_task is not None:
                 self._wfb_tee_stderr_task.cancel()
                 self._wfb_tee_stderr_task = None
+            return False
+        # Output-progress watchdog: ffmpeg should be advancing its
+        # frame counter at ~30 Hz. If we haven't seen a fresh `frame=N`
+        # for the timeout window, the encoder pipeline is silently
+        # stuck. _wfb_tee_last_progress_at is stamped to monotonic()
+        # both on spawn and on each frame advance, so a freshly-spawned
+        # tee gets the full window before the check trips.
+        silent_for = time.monotonic() - self._wfb_tee_last_progress_at
+        if silent_for >= _WFB_TEE_PROGRESS_TIMEOUT_S:
+            log.warning(
+                "wfb_tee_zombie_detected",
+                silent_s=round(silent_for, 1),
+                threshold_s=_WFB_TEE_PROGRESS_TIMEOUT_S,
+                last_frame=self._wfb_tee_last_frame_count,
+                note="alive but ffmpeg frame counter flat; forcing restart",
+            )
             return False
         return True
 
@@ -876,31 +963,29 @@ class VideoPipeline:
                     elif not await self._check_wfb_tee_health():
                         # Encoder + cloud are fine but the radio fan-out died.
                         # Restart only the tee so the radio recovers without
-                        # tearing down the rest of the pipeline.
+                        # tearing down the rest of the pipeline. Per Rule 26
+                        # there is no give-up cap — video must keep retrying
+                        # forever. Snappy 5 s backoff ceiling so recovery is
+                        # fast when the upstream comes back. The previous
+                        # 10-attempt circuit breaker meant a transient
+                        # 30-second-window of failures (e.g., during install
+                        # or a config reload race) left the LCD frozen until
+                        # a manual `systemctl restart` cleared the counter.
                         self._wfb_tee_restart_count += 1
                         delay = min(
                             self._base_restart_delay * (2 ** (self._wfb_tee_restart_count - 1)),
-                            self._max_restart_delay,
+                            5.0,
                         )
-                        if self._wfb_tee_restart_count >= 10:
-                            log.error(
-                                "wfb_tee_circuit_breaker",
-                                msg="too many wfb tee failures, waiting 5 minutes",
-                                attempts=self._wfb_tee_restart_count,
-                            )
-                            await asyncio.sleep(self._max_restart_delay)
+                        log.warning(
+                            "wfb_tee_restarting",
+                            attempt=self._wfb_tee_restart_count,
+                            backoff_secs=delay,
+                        )
+                        await self.stop_wfb_tee()
+                        await asyncio.sleep(max(0, delay - _HEALTH_CHECK_INTERVAL))
+                        success = await self.start_wfb_tee()
+                        if success:
                             self._wfb_tee_restart_count = 0
-                        else:
-                            log.warning(
-                                "wfb_tee_restarting",
-                                attempt=self._wfb_tee_restart_count,
-                                backoff_secs=delay,
-                            )
-                            await self.stop_wfb_tee()
-                            await asyncio.sleep(max(0, delay - _HEALTH_CHECK_INTERVAL))
-                            success = await self.start_wfb_tee()
-                            if success:
-                                self._wfb_tee_restart_count = 0
 
                 elif self._state in (PipelineState.ERROR, PipelineState.STOPPED):
                     # Retry start_stream with backoff. Covers cases where the
