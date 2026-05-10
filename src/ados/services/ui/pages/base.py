@@ -24,7 +24,7 @@ Design notes
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, ClassVar, Protocol
+from typing import TYPE_CHECKING, Any, ClassVar, Protocol
 
 if TYPE_CHECKING:  # pragma: no cover
     import httpx
@@ -94,6 +94,12 @@ class PageContext:
     # so unit tests don't have to construct a bridge to render a page.
     touch_move_bus: TouchMoveBus | None = None
     touch_event_bus: TouchEventBus | None = None
+    # Service-level always-on video tap. The OLED service owns its
+    # lifecycle so the Video page (and any other consumer) can read
+    # the latest frame without paying the gstreamer cold-start cost
+    # on every navigation. Defaults to None for tests / non-GS
+    # profiles where the tap is not constructed.
+    video_tap: Any | None = None
 
 
 class Page(Protocol):

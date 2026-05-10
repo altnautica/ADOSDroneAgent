@@ -164,3 +164,29 @@ def test_apply_tx_power_returns_none_on_driver_reject(manager: WfbManager):
         effective = manager.apply_tx_power(5)
     assert effective is None
     assert manager.effective_tx_power_dbm is None
+
+
+def test_link_preset_conservative_leaves_explicit_values_alone():
+    """Default preset is a no-op so a rig with explicitly-tuned mcs / fec
+    keeps its values."""
+    cfg = WfbConfig(mcs_index=4, fec_k=10, fec_n=14, wfb_link_preset="conservative")
+    WfbManager(cfg)
+    assert cfg.mcs_index == 4
+    assert cfg.fec_k == 10
+    assert cfg.fec_n == 14
+
+
+def test_link_preset_balanced_overrides_to_mcs_3():
+    cfg = WfbConfig(mcs_index=1, fec_k=8, fec_n=12, wfb_link_preset="balanced")
+    WfbManager(cfg)
+    assert cfg.mcs_index == 3
+    assert cfg.fec_k == 8
+    assert cfg.fec_n == 12
+
+
+def test_link_preset_aggressive_lowers_fec_redundancy():
+    cfg = WfbConfig(mcs_index=1, fec_k=8, fec_n=12, wfb_link_preset="aggressive")
+    WfbManager(cfg)
+    assert cfg.mcs_index == 5
+    assert cfg.fec_k == 8
+    assert cfg.fec_n == 10

@@ -136,6 +136,25 @@ class WfbConfig(BaseModel):
     # agent. The receiver-side parser is always wired and waits for
     # markers — flipping the encoder flag is sufficient.
     sei_latency: bool = False
+    # Operator-facing radio link preset. The WfbManager reads this at
+    # startup and overrides mcs_index / fec_k / fec_n with the preset
+    # values. Lets a bench operator widen the link without remembering
+    # the right K/N/MCS combinations.
+    #
+    #   conservative (default): MCS=1, FEC=8/12. Low TX power, noisy
+    #     bench, 200m range. Safe under host_vbus topology.
+    #   balanced: MCS=3, FEC=8/12. Good outdoor link, 500m+, headroom
+    #     for RSSI swings. Recommended once topology is powered_hub.
+    #   aggressive: MCS=5, FEC=8/10. Excellent SNR, close-in, max
+    #     throughput. Will drop the link on a noisy channel.
+    #
+    # When the preset is left at the default "conservative", the
+    # manager respects whatever values are explicitly set on
+    # mcs_index / fec_k / fec_n above (so an existing rig with custom
+    # values is unaffected by adding the preset field).
+    wfb_link_preset: Literal[
+        "conservative", "balanced", "aggressive"
+    ] = "conservative"
 
     @model_validator(mode="before")
     @classmethod
@@ -189,6 +208,17 @@ class VideoConfig(BaseModel):
     camera: CameraConfig = CameraConfig()
     recording: RecordingConfig = RecordingConfig()
     cloud_relay_url: str = ""  # e.g. rtsp://video.altnautica.com:8554
+    # Decoded-frame cap fed into the LCD GStreamer pipeline (videorate
+    # decimation target). Higher = smoother LCD video at the cost of
+    # CPU on the SPI render loop. Default 15 matches Pi 4B + Waveshare
+    # 3.5" SPI throughput; faster SBCs / hardware decoders / lighter
+    # render paths can raise it. Bench-validate before flipping the
+    # default in repo.
+    lcd_fps_cap: int = Field(
+        default=15,
+        ge=1,
+        le=60,
+    )
 
 
 # --- Network ---

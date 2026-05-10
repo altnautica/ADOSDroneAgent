@@ -108,13 +108,39 @@ class VideoPage:
         # Bitrate sparkline ring for the detail HUD; 60 samples = 60 s.
         self._bitrate_history: deque[float] = deque(maxlen=60)
         self._last_active_at: float = time.monotonic()
+        # Snapshot of the tap chosen during the most recent
+        # ``_refresh_metrics_once``. Helpers that don't take ctx (the
+        # detail HUD, fec history, fps formatter) read from this so
+        # they hit the always-on service tap instead of the legacy
+        # per-page tap.
+        self._active_ctx_tap: Any | None = None
 
     # ── lifecycle ──────────────────────────────────────────────
+
+    def _active_tap(self, ctx: PageContext) -> Any:
+        """Return whichever tap is live: the service-level always-on tap
+        (preferred) or this page's own per-page tap (fallback for tests
+        and contexts where the OLED service didn't provide one).
+        """
+        if getattr(ctx, "video_tap", None) is not None:
+            return ctx.video_tap
+        return self._tap
+
+    def _resolved_tap(self) -> Any:
+        """Tap accessor for helpers without a ctx (detail HUD, fec history,
+        fps formatter). Reads the snapshot recorded during the last
+        ``_refresh_metrics_once`` and falls back to ``self._tap``.
+        """
+        return self._active_ctx_tap if self._active_ctx_tap is not None else self._tap
 
     async def on_enter(self, ctx: PageContext) -> None:
         ctx.logger.info("video_enter")
         self._last_active_at = time.monotonic()
-        await self._ensure_tap(ctx)
+        # Skip the per-page ensure_tap dance when the service-level tap
+        # is already running. The always-on tap is alive for the
+        # agent's lifetime; the page just reads frames from it.
+        if getattr(ctx, "video_tap", None) is None:
+            await self._ensure_tap(ctx)
         if self._metrics_task is None or self._metrics_task.done():
             self._metrics_task = asyncio.create_task(
                 self._refresh_metrics_forever(ctx),
@@ -123,9 +149,11 @@ class VideoPage:
 
     async def on_leave(self, ctx: PageContext) -> None:
         ctx.logger.info("video_leave")
-        # Pause but don't stop the tap — the operator may come right
-        # back. The render loop tears it down on inactivity.
-        if self._tap is not None:
+        # If the always-on service tap is in use, leave it running —
+        # other pages may consume it and the cold-start cost is the
+        # whole reason it's a singleton. Only pause the per-page tap,
+        # which is the legacy/test path.
+        if getattr(ctx, "video_tap", None) is None and self._tap is not None:
             try:
                 await self._tap.pause()
             except Exception as exc:  # noqa: BLE001
@@ -266,9 +294,15 @@ class VideoPage:
                     self._metrics_cache["fec_drops"] = (int(drops), int(drops))
         # Latency comes from the local tap's SEI parser; refresh the
         # cached value so a paused tab still shows the most recent
-        # number rather than a flat None.
-        if self._tap is not None:
-            stats = self._tap.stats()
+        # number rather than a flat None. Prefer the service-level
+        # always-on tap when available so the cell populates without
+        # waiting for the per-page tap to come up on first navigation.
+        active_tap = self._active_tap(ctx)
+        # Stash for the non-ctx helpers (detail HUD, fec history,
+        # fps formatter, tap-status publisher).
+        self._active_ctx_tap = active_tap
+        if active_tap is not None:
+            stats = active_tap.stats()
             latency_ms = stats.get("latency_ms")
             if isinstance(latency_ms, (int, float)):
                 self._metrics_cache["latency_ms"] = float(latency_ms)
@@ -318,34 +352,48 @@ class VideoPage:
         # so the cloud heartbeat enricher can surface decoder state to
         # the GCS without reaching into the OLED service's process.
         try:
-            self._publish_tap_status()
+            self._publish_tap_status(ctx)
         except Exception as exc:  # noqa: BLE001
             ctx.logger.debug("video_tap_status_publish_failed", error=str(exc))
 
-    def _publish_tap_status(self) -> None:
+    def _publish_tap_status(self, ctx: PageContext | None = None) -> None:
         """Atomic-write a tap-status JSON for the heartbeat enricher.
 
-        The payload is intentionally minimal: just the four fields the
-        GCS Display sub-view reads (active, decoder, fps, recording).
         Written every metrics tick (~1 Hz) so the heartbeat — which
         also runs at 5 s — never reads more than a 1 s old snapshot.
+        ``latency_ms`` and ``latency_samples`` let bench-debug tools
+        observe glass-to-glass latency without entering the LCD page.
         """
         from ados.core.paths import LCD_VIDEO_TAP_PATH
 
         active = False
         decoder: str | None = None
         fps: float = 0.0
-        if self._tap is not None:
-            stats = self._tap.stats()
+        latency_ms: float | None = None
+        latency_samples = 0
+        # Prefer the service-level always-on tap when one is bound on
+        # the context; fall back to the per-page tap for tests / older
+        # contexts that don't supply one.
+        tap = self._active_tap(ctx) if ctx is not None else self._tap
+        if tap is not None:
+            stats = tap.stats()
             pipeline_state = str(stats.get("pipeline_state") or "")
             active = pipeline_state == "playing"
             decoder = stats.get("decoder_type") or None
             fps_val = stats.get("fps")
             fps = float(fps_val) if isinstance(fps_val, (int, float)) else 0.0
+            lat_val = stats.get("latency_ms")
+            if isinstance(lat_val, (int, float)):
+                latency_ms = round(float(lat_val), 1)
+            samples_val = stats.get("latency_samples")
+            if isinstance(samples_val, int):
+                latency_samples = samples_val
         blob: dict[str, Any] = {
             "active": active,
             "decoder": decoder,
             "fps": round(fps, 2),
+            "latency_ms": latency_ms,
+            "latency_samples": latency_samples,
             "recording": bool(self._recording),
             "updated_at_ms": int(time.time() * 1000),
         }
@@ -457,13 +505,25 @@ class VideoPage:
         # after the underlying RTSP source becomes ready. _ensure_tap
         # re-checks the cooldown gate so a double-call within the
         # window is a clean no-op.
-        if self._tap is None and self._tap_unavailable_reason is not None:
+        # If the always-on service tap is available, never fall back to
+        # the per-page retry path. Otherwise honor the per-page retry
+        # cooldown for legacy/test contexts.
+        active_tap = self._active_tap(ctx)
+        if (
+            active_tap is None
+            and self._tap is None
+            and self._tap_unavailable_reason is not None
+        ):
             await self._ensure_tap(ctx)
+            active_tap = self._active_tap(ctx)
         palette = ctx.palette
         canvas = Image.new("RGB", (PAGE_W, PAGE_H), palette.bg_primary)
 
         frame: Image.Image | None = None
-        if self._tap_unavailable_reason is not None:
+        # Treat the page as unavailable only when neither the service
+        # tap nor the per-page tap exists and the per-page retry has
+        # given up. With the always-on tap, this branch never fires.
+        if active_tap is None and self._tap_unavailable_reason is not None:
             self._compositor.paint(
                 canvas,
                 0,
@@ -475,8 +535,8 @@ class VideoPage:
                 message="Video pipeline unavailable",
             )
         else:
-            if self._tap is not None:
-                frame = self._tap.latest_frame()
+            if active_tap is not None:
+                frame = active_tap.latest_frame()
                 if frame is not None:
                     self._compositor.set(frame)
             self._compositor.paint(
@@ -613,8 +673,9 @@ class VideoPage:
         frames_dropped = 0
         pipeline_latency_ms: Any = None
         decode_cpu: Any = None
-        if self._tap is not None:
-            stats = self._tap.stats()
+        tap = self._resolved_tap()
+        if tap is not None:
+            stats = tap.stats()
             decoder = stats.get("decoder_type") or "--"
             fps = float(stats.get("fps") or 0.0)
             frames_decoded = int(stats.get("frames_decoded") or 0)
@@ -767,9 +828,10 @@ class VideoPage:
         return "--"
 
     def _format_fps(self) -> str:
-        if self._tap is None:
+        tap = self._resolved_tap()
+        if tap is None:
             return "--"
-        stats = self._tap.stats()
+        stats = tap.stats()
         fps = float(stats.get("fps") or 0.0)
         if fps <= 0:
             return "--"

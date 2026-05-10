@@ -448,6 +448,7 @@ def build_pipeline_string(
     width: int,
     height: int,
     latency_ms: int,
+    fps_cap: int = 15,
 ) -> str:
     """Compose the gstreamer pipeline launch string.
 
@@ -455,12 +456,24 @@ def build_pipeline_string(
     SoC without spinning up gstreamer. Format mirrors the OEM doc set
     so a bench operator pasting the same line into ``gst-launch-1.0``
     sees the same behavior.
+
+    ``fps_cap`` is the videorate decimation target. Default 15 matches
+    the SPI-write throughput of the Pi 4B + Waveshare 3.5" combo;
+    higher values are achievable on faster SBCs / hardware decoders.
     """
     return (
         f"rtspsrc location={source_url} protocols=tcp "
         f"latency={latency_ms} drop-on-latency=true "
         "! rtph264depay "
-        "! h264parse "
+        # h264parse with alignment=au so each downstream buffer holds a
+        # complete access unit. Without this, gstreamer's default
+        # alignment is per-NAL, which means a SEI-only NAL and its
+        # target slice arrive in separate buffers — the pad probe on
+        # the src pad sees the SEI but doesn't easily correlate it
+        # with the frame. config-interval=1 prepends SPS/PPS to every
+        # IDR for late-joiner robustness on the LCD reconnect path.
+        "! h264parse config-interval=1 "
+        "! video/x-h264,alignment=au "
         # queue between depay and decoder hands rtspsrc its own thread so
         # the network reader keeps pulling RTP while the decoder works.
         # leaky=downstream + small max-size means a slow decoder drops
@@ -474,19 +487,15 @@ def build_pipeline_string(
         # appsink callback; without this queue, a slow render tick stalls
         # the decoder.
         "! queue max-size-buffers=4 max-size-bytes=0 max-size-time=0 leaky=downstream "
-        # decimate the decoded stream to 15 fps before videoconvert.
-        # The LCD render loop runs at ~20 Hz on a single Python GIL,
-        # competing with PIL composition + SPI framebuffer write that
-        # can take 30-50 ms per render tick. At 30 fps source, each
-        # appsink callback contends with the render loop and frames
-        # back-pressure into the appsink queue; the visible result is
-        # smooth video for a few seconds then a freeze when the buffer
-        # saturates. At 15 fps the callback rate matches what the
-        # render loop can consume between SPI writes. drop-only=true
-        # reuses the most-recent frame instead of duplicating, so we
-        # never invent frames on slow inputs.
+        # decimate the decoded stream to fps_cap before videoconvert.
+        # Default 15 matches what the Pi 4B's single-threaded Python GIL
+        # + PIL composition + SPI framebuffer write loop can sustain
+        # without back-pressuring the appsink queue and freezing video.
+        # Faster SBCs / hardware decoders / lighter LCD render paths
+        # can raise this via WfbConfig.lcd_fps_cap. drop-only=true reuses
+        # the most-recent frame instead of duplicating.
         "! videorate drop-only=true "
-        "! video/x-raw,framerate=15/1 "
+        f"! video/x-raw,framerate={int(fps_cap)}/1 "
         "! videoconvert "
         "! videoscale "
         f"! video/x-raw,format=RGB,width={width},height={height} "
@@ -512,11 +521,13 @@ class LocalVideoTap:
         source_url: str = DEFAULT_RTSP_URL,
         width: int = DEFAULT_WIDTH,
         height: int = DEFAULT_HEIGHT,
+        fps_cap: int = 15,
         logger: Any | None = None,
     ) -> None:
         self._source_url = source_url
         self._width = width
         self._height = height
+        self._fps_cap = max(1, int(fps_cap))
         self._logger = logger or log
 
         self._frame_holder = _FrameSlot()
@@ -543,6 +554,11 @@ class LocalVideoTap:
         self._latency_ewma: float | None = None
         self._latency_last_sample_at: float | None = None
         self._latency_samples: int = 0
+        # Counts h264 buffers that arrived without an ADOS SEI marker.
+        # Reset on each successful parse; warning logged every 100 to
+        # surface a sustained absence (encoder-side flag off, network
+        # drop, h264parse alignment misconfig) without flooding logs.
+        self._sei_miss_count: int = 0
 
         self._decoder_type: str | None = None
         self._pipeline_state: str = "idle"
@@ -605,6 +621,7 @@ class LocalVideoTap:
                 width=self._width,
                 height=self._height,
                 latency_ms=latency_ms,
+                fps_cap=self._fps_cap,
             )
             self._logger.info(
                 "local_tap_pipeline_constructed",
@@ -612,6 +629,7 @@ class LocalVideoTap:
                 source_url=self._source_url,
                 width=self._width,
                 height=self._height,
+                fps_cap=self._fps_cap,
             )
             try:
                 pipeline = Gst.parse_launch(pipeline_str)
@@ -635,9 +653,21 @@ class LocalVideoTap:
             # located the rest of the tap still works — latency just
             # stays unset.
             h264parse = self._find_h264parse(pipeline)
-            if h264parse is not None:
+            if h264parse is None:
+                # Surface this as a warning, not a debug whisper — without
+                # the probe, latency stays blank on the LCD and there's no
+                # other signal that something is wrong.
+                self._logger.warning(
+                    "local_tap_h264parse_not_found",
+                    note="latency markers will not be parsed",
+                )
+            else:
                 src_pad = h264parse.get_static_pad("src")
-                if src_pad is not None:
+                if src_pad is None:
+                    self._logger.warning(
+                        "local_tap_h264parse_no_src_pad",
+                    )
+                else:
                     try:
                         probe_mask = Gst.PadProbeType.BUFFER
                         probe_id = src_pad.add_probe(
@@ -645,8 +675,11 @@ class LocalVideoTap:
                         )
                         self._h264parse = h264parse
                         self._h264parse_probe_id = probe_id
+                        self._logger.info(
+                            "local_tap_h264_probe_installed",
+                        )
                     except Exception as exc:  # noqa: BLE001
-                        self._logger.debug(
+                        self._logger.warning(
                             "local_tap_h264_probe_install_failed",
                             error=str(exc),
                         )
@@ -744,6 +777,7 @@ class LocalVideoTap:
         self._latency_ewma = None
         self._latency_last_sample_at = None
         self._latency_samples = 0
+        self._sei_miss_count = 0
 
     async def pause(self) -> None:
         """Transition the pipeline to PAUSED without tearing down."""
@@ -899,7 +933,27 @@ class LocalVideoTap:
         finally:
             buf.unmap(mapinfo)
         if encoded_ns is None:
+            self._sei_miss_count += 1
+            # Every 100 missed buffers, surface a single warning so a
+            # sustained absence of SEI markers is visible without
+            # spamming the journal. Reset the streak counter on the
+            # log so the next 100 missed buffers produce another log
+            # only if the problem persists.
+            if self._sei_miss_count >= 100:
+                self._logger.warning(
+                    "local_tap_sei_miss_streak",
+                    misses=self._sei_miss_count,
+                    total_samples=self._latency_samples,
+                    note=(
+                        "h264 buffers arriving without ADOS SEI markers; "
+                        "check video.wfb.sei_latency on the air-side rig"
+                    ),
+                )
+                self._sei_miss_count = 0
             return 1
+        # Reset the miss streak on a successful parse so the next log
+        # window only fires after a fresh sustained gap.
+        self._sei_miss_count = 0
         self._record_latency_sample(encoded_ns)
         return 1
 

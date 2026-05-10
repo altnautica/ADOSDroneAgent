@@ -74,6 +74,43 @@ def test_uuid_is_exactly_sixteen_bytes() -> None:
     assert len(lt.ADOS_LATENCY_SEI_UUID) == 16
 
 
+def test_pipeline_string_pins_au_alignment() -> None:
+    """h264parse must emit one buffer per access unit so the pad probe
+    sees SEI + VCL together. Default per-NAL output splits the SEI
+    away from its frame, breaking latency correlation.
+    """
+    s = lt.build_pipeline_string(
+        source_url="rtsp://localhost:8554/main",
+        decoder="avdec_h264",
+        width=480,
+        height=176,
+        latency_ms=100,
+    )
+    assert "h264parse config-interval=1" in s
+    assert "alignment=au" in s
+
+
+def test_pipeline_string_honors_fps_cap() -> None:
+    s = lt.build_pipeline_string(
+        source_url="rtsp://localhost:8554/main",
+        decoder="avdec_h264",
+        width=480,
+        height=176,
+        latency_ms=100,
+        fps_cap=20,
+    )
+    assert "framerate=20/1" in s
+    # Default behavior unchanged when caller doesn't specify.
+    s_default = lt.build_pipeline_string(
+        source_url="rtsp://localhost:8554/main",
+        decoder="avdec_h264",
+        width=480,
+        height=176,
+        latency_ms=100,
+    )
+    assert "framerate=15/1" in s_default
+
+
 def test_parse_sei_extracts_ns_with_emulation_prevention() -> None:
     """The receiver must de-escape H.264 emulation-prevention bytes.
 

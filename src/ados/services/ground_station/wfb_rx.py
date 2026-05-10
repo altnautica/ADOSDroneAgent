@@ -72,6 +72,14 @@ class WfbRxManager:
 
     def __init__(self, config: WfbConfig) -> None:
         self._config = config
+        # Mirror the air-side preset application so the GS reports the
+        # same MCS / FEC values in /api/wfb. The actual radio
+        # parameters are set by wfb_tx upstream; the GS-side wfb_rx
+        # doesn't read mcs_index, but the operator-visible status
+        # block must match.
+        from ados.services.wfb.manager import _apply_link_preset
+
+        _apply_link_preset(self._config, log)
         self._state = LinkState.DISCONNECTED
         self._rx_proc: asyncio.subprocess.Process | None = None
         self._monitor = LinkQualityMonitor()

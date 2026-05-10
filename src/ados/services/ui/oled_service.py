@@ -1415,6 +1415,73 @@ class OledService:
             except TimeoutError:
                 continue
 
+    def _build_video_tap(self) -> Any:
+        """Construct the always-on LocalVideoTap, picking up the
+        operator's `video.lcd_fps_cap` config so a faster SBC can ask
+        for higher fps without code changes. Returns None if the tap
+        module fails to import (gstreamer missing in test envs).
+        """
+        try:
+            from ados.core.config import load_config
+            from ados.services.video.local_tap import LocalVideoTap
+        except Exception as exc:  # noqa: BLE001
+            log.warning("video_tap_module_unavailable", error=str(exc))
+            return None
+        fps_cap = 15
+        try:
+            cfg = load_config()
+            fps_cap = int(getattr(cfg.video, "lcd_fps_cap", 15) or 15)
+        except Exception as exc:  # noqa: BLE001
+            log.debug("video_tap_config_load_failed", error=str(exc))
+        return LocalVideoTap(fps_cap=fps_cap, logger=log)
+
+    async def _ensure_video_tap_forever(self) -> None:
+        """Keep the LCD video tap running for the agent's lifetime.
+
+        Calls ``tap.start()`` with the existing internal 15s cooldown
+        until mediamtx-gs is publishing /main. Once started, the tap's
+        own bus-error restart loop handles transient errors. This
+        coroutine sleeps once the tap reaches a stable state so the
+        agent doesn't busy-loop on a healthy rig.
+        """
+        from ados.services.video.local_tap import LocalVideoTapUnavailable
+
+        if self._page_context is None:
+            return
+        tap = self._page_context.video_tap
+        if tap is None:
+            return
+        backoff_s = 5.0
+        while not self._stop.is_set():
+            try:
+                await tap.start()
+                # tap.start() returns once the pipeline is wired and
+                # the run-loop thread is spawned. Subsequent recovery
+                # is internal. Sleep until shutdown.
+                log.info("oled_video_tap_started")
+                try:
+                    await self._stop.wait()
+                except Exception:  # noqa: BLE001
+                    pass
+                return
+            except LocalVideoTapUnavailable as exc:
+                log.warning(
+                    "oled_video_tap_start_failed",
+                    error=str(exc),
+                    retry_in_s=backoff_s,
+                )
+            except Exception as exc:  # noqa: BLE001
+                log.warning(
+                    "oled_video_tap_start_error",
+                    error=str(exc),
+                    retry_in_s=backoff_s,
+                )
+            try:
+                await asyncio.wait_for(self._stop.wait(), timeout=backoff_s)
+                return
+            except TimeoutError:
+                continue
+
     async def _consume_buttons(self) -> None:
         """Drain the button bus and update UI state."""
         async for ev in self._bus.subscribe():
@@ -1752,10 +1819,22 @@ class OledService:
         # REST calls without each one constructing its own pool.
         if self._page_context is not None:
             self._page_context.http = self._http
+        # Always-on LCD video tap. Construct the LocalVideoTap once at
+        # service init and keep it running so the Video page (and any
+        # future consumer) can read frames without paying the gst
+        # cold-start cost on every navigation. _ensure_video_tap_forever
+        # retries start() with the existing 15s cooldown until mediamtx
+        # publishes /main; once running, the tap auto-recovers from
+        # transient errors via its own bus-error restart loop.
+        self._page_context.video_tap = self._build_video_tap()
         tasks = [
             asyncio.create_task(self._render_forever(), name="oled_render"),
             asyncio.create_task(self._consume_buttons(), name="oled_buttons"),
             asyncio.create_task(self._poll_state_forever(), name="oled_poll"),
+            asyncio.create_task(
+                self._ensure_video_tap_forever(),
+                name="oled_video_tap",
+            ),
         ]
         if self._touch_bridge is not None:
             tasks.append(
@@ -1782,6 +1861,16 @@ class OledService:
             try:
                 if self._http is not None:
                     await self._http.aclose()
+            except Exception:
+                pass
+            try:
+                tap = (
+                    self._page_context.video_tap
+                    if self._page_context is not None
+                    else None
+                )
+                if tap is not None:
+                    await tap.stop()
             except Exception:
                 pass
             try:

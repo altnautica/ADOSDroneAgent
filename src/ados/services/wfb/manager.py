@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import time
 from enum import StrEnum
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from ados.core.logging import get_logger
 from ados.core.paths import WFB_KEY_DIR
@@ -39,6 +39,58 @@ class LinkState(StrEnum):
     DEGRADED = "degraded"
 
 
+# Operator-facing radio link presets. Map each preset to the trio of
+# wfb-ng tunables (MCS index, Reed-Solomon K, Reed-Solomon N). Tuned
+# for RTL8812EU radios on a 20 MHz channel; rough capacity estimates
+# in comments.
+_LINK_PRESETS: dict[str, tuple[int, int, int]] = {
+    # MCS=1 (~13 Mbps cap, 50% redundancy). Default. Robust under low
+    # SNR / host-vbus power budgets / a noisy bench.
+    "conservative": (1, 8, 12),
+    # MCS=3 (~26 Mbps cap, 50% redundancy). Headroom for outdoor links
+    # where SNR is reliably above ~10 dB.
+    "balanced": (3, 8, 12),
+    # MCS=5 (~52 Mbps cap, 25% redundancy). Excellent SNR + close-in.
+    # Will lose the link on a noisy channel; reduce to balanced if FEC
+    # losses appear.
+    "aggressive": (5, 8, 10),
+}
+
+
+def _apply_link_preset(config: WfbConfig, logger: Any) -> None:
+    """Override mcs_index / fec_k / fec_n from the wfb_link_preset field.
+
+    The preset is operator-facing on /etc/ados/config.yaml. Default
+    "conservative" leaves the existing config values alone, which lets
+    a rig with explicitly-tuned values keep them untouched. Any other
+    preset value forces the trio so the operator can widen the link
+    by changing one field instead of three.
+    """
+    preset = getattr(config, "wfb_link_preset", "conservative")
+    if preset == "conservative":
+        # Respect the explicit config; do not override.
+        return
+    spec = _LINK_PRESETS.get(preset)
+    if spec is None:
+        logger.warning(
+            "wfb_link_preset_unknown",
+            preset=preset,
+            note="falling back to current config values",
+        )
+        return
+    mcs, fec_k, fec_n = spec
+    config.mcs_index = mcs
+    config.fec_k = fec_k
+    config.fec_n = fec_n
+    logger.info(
+        "wfb_link_preset_applied",
+        preset=preset,
+        mcs_index=mcs,
+        fec_k=fec_k,
+        fec_n=fec_n,
+    )
+
+
 class WfbManager:
     """Manages wfb_tx and wfb_rx subprocesses for WFB-ng video link.
 
@@ -52,6 +104,11 @@ class WfbManager:
 
     def __init__(self, config: WfbConfig) -> None:
         self._config = config
+        # Apply the link preset to mcs_index / fec_k / fec_n. Only
+        # touches the config when the preset is not "conservative" so
+        # an existing rig with custom values keeps them. Logged so the
+        # operator can see which values are actually in flight.
+        _apply_link_preset(self._config, log)
         self._state = LinkState.DISCONNECTED
         self._tx_proc: asyncio.subprocess.Process | None = None
         self._rx_proc: asyncio.subprocess.Process | None = None
