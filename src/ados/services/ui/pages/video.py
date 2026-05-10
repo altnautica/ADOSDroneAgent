@@ -96,6 +96,11 @@ class VideoPage:
             "channel": None,
             "mcs_index": None,
             "latency_ms": None,
+            # Live TX power in dBm. The link is currently throttled below
+            # the radio's max via topology-aware budgets (host_vbus etc.),
+            # so showing the effective level here keeps the operator
+            # honest about what's actually on the air.
+            "tx_power_dbm": None,
         }
         self._metrics_task: asyncio.Task | None = None
         self._mediamtx_prev_bytes: int | None = None
@@ -232,6 +237,9 @@ class VideoPage:
         if wfb_blob is not None:
             self._metrics_cache["channel"] = wfb_blob.get("channel")
             self._metrics_cache["mcs_index"] = wfb_blob.get("mcs_index")
+            tx_power = wfb_blob.get("tx_power_dbm")
+            if isinstance(tx_power, (int, float)):
+                self._metrics_cache["tx_power_dbm"] = float(tx_power)
             rssi = wfb_blob.get("rssi_dbm")
             if isinstance(rssi, (int, float)):
                 # The REST surface emits -100.0 as a "no signal" sentinel
@@ -381,12 +389,19 @@ class VideoPage:
                 )
                 if monitor is not None:
                     snap = monitor.get_current()
+                    # Effective TX power: prefer what the manager
+                    # actually applied via iw, fall back to the
+                    # configured request value.
+                    effective_tx = getattr(wfb, "effective_tx_power_dbm", None)
+                    if effective_tx is None and wfb_cfg is not None:
+                        effective_tx = getattr(wfb_cfg, "tx_power_dbm", None)
                     return {
                         "channel": channel,
                         "mcs_index": mcs_index,
                         "rssi_dbm": float(snap.rssi_dbm),
                         "fec_recovered": int(snap.fec_recovered),
                         "fec_failed": int(snap.fec_failed),
+                        "tx_power_dbm": effective_tx,
                     }
         except (AssertionError, ImportError, AttributeError, Exception) as exc:  # noqa: BLE001
             ctx.logger.debug("video_metrics_wfb_inproc_failed", error=str(exc))
@@ -528,7 +543,11 @@ class VideoPage:
         )
         label_font = p.font("sans_bold", 9)
         value_font = p.font("mono_regular", 11)
-        col_w = PAGE_W // 3
+        # 4 columns x 2 rows = 8 cells. Wider grid than before because
+        # we surface TX power as its own widget, and split the combined
+        # RADIO cell into separate CHANNEL and MCS cells so the labels
+        # stay short and skim-readable.
+        col_w = PAGE_W // 4
         rows = [
             (
                 "LATENCY",
@@ -537,25 +556,26 @@ class VideoPage:
                 self._format_rssi(self._metrics_cache.get("rssi_dbm")),
                 "BITRATE",
                 self._format_bitrate(self._metrics_cache.get("bitrate_kbps")),
+                "TX",
+                self._format_tx_power(self._metrics_cache.get("tx_power_dbm")),
             ),
             (
                 "FEC DROPS",
                 self._format_drops(self._metrics_cache.get("fec_drops")),
                 "FPS",
                 self._format_fps(),
-                "RADIO",
-                self._format_radio(
-                    self._metrics_cache.get("channel"),
-                    self._metrics_cache.get("mcs_index"),
-                ),
+                "CHANNEL",
+                self._format_channel(self._metrics_cache.get("channel")),
+                "MCS",
+                self._format_mcs(self._metrics_cache.get("mcs_index")),
             ),
         ]
         label_color = palette.text_tertiary if dim else palette.text_secondary
         value_color = palette.text_secondary if dim else palette.text_primary
         for r_idx, row in enumerate(rows):
             ry = VIDEO_H + 6 + r_idx * 30
-            for c_idx in range(3):
-                lx = c_idx * col_w + 12
+            for c_idx in range(4):
+                lx = c_idx * col_w + 8
                 lbl = row[c_idx * 2]
                 val = row[c_idx * 2 + 1]
                 draw.text(
@@ -762,6 +782,24 @@ class VideoPage:
         if mc:
             return f"ch{ch} {mc}"
         return f"ch{ch}"
+
+    @staticmethod
+    def _format_channel(value: Any) -> str:
+        if isinstance(value, (int, float)) and value > 0:
+            return f"ch{int(value)}"
+        return "--"
+
+    @staticmethod
+    def _format_mcs(value: Any) -> str:
+        if isinstance(value, (int, float)):
+            return f"MCS{int(value)}"
+        return "--"
+
+    @staticmethod
+    def _format_tx_power(value: Any) -> str:
+        if isinstance(value, (int, float)):
+            return f"{int(value)} dBm"
+        return "--"
 
     # ── hit zones + dispatch ───────────────────────────────────
 

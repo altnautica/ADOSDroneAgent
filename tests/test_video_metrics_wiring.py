@@ -123,10 +123,16 @@ def _install_inproc_monitor(
         def __init__(self, m: LinkQualityMonitor) -> None:
             self.monitor = m
             self._channel = 149
+            # Mirror the live manager's effective TX power so the
+            # video page reads the same value the radio is actually
+            # transmitting at, not just the configured target.
+            self.effective_tx_power_dbm = 5
 
     class _FakeWfbCfg:
         channel = 149
         mcs_index = 1
+        tx_power_dbm = 5
+        tx_power_max_dbm = 15
 
     class _FakeVideoCfg:
         wfb = _FakeWfbCfg()
@@ -181,6 +187,7 @@ async def test_rssi_and_fec_drops_from_rest_fallback(
             "rssi_dbm": -58.0,
             "fec_recovered": 500,
             "fec_failed": 7,
+            "tx_power_dbm": 7,
         },
     )
     ctx = _ctx(nav, client)
@@ -190,6 +197,7 @@ async def test_rssi_and_fec_drops_from_rest_fallback(
     assert page._metrics_cache["fec_drops"] == (7, 507)
     assert page._metrics_cache["channel"] == 161
     assert page._metrics_cache["mcs_index"] == 2
+    assert page._metrics_cache["tx_power_dbm"] == 7.0
 
 
 @pytest.mark.asyncio
@@ -210,9 +218,11 @@ async def test_bitrate_kbps_from_mediamtx_delta(fresh_agent_app: None) -> None:
 
 
 @pytest.mark.asyncio
-async def test_metrics_strip_renders_all_six_cells(
+async def test_metrics_strip_renders_all_eight_cells(
     monkeypatch: pytest.MonkeyPatch, fresh_agent_app: None,
 ) -> None:
+    """The Video page metrics strip is a 4 col x 2 row grid: latency,
+    rssi, bitrate, tx | fec drops, fps, channel, mcs."""
     _install_inproc_monitor(
         monkeypatch, rssi=-50.0, fec_recovered=2048, fec_failed=4,
     )
@@ -228,10 +238,51 @@ async def test_metrics_strip_renders_all_six_cells(
     # Inspect the cache to confirm formatters would render real values.
     assert page._format_rssi(page._metrics_cache["rssi_dbm"]) == "-50 dBm"
     assert page._format_drops(page._metrics_cache["fec_drops"]) == "4 / 2052"
-    assert page._format_radio(
-        page._metrics_cache["channel"],
-        page._metrics_cache["mcs_index"],
-    ) == "ch149 MCS1"
+    assert page._format_channel(page._metrics_cache["channel"]) == "ch149"
+    assert page._format_mcs(page._metrics_cache["mcs_index"]) == "MCS1"
+    assert page._format_tx_power(page._metrics_cache["tx_power_dbm"]) == "5 dBm"
+
+
+@pytest.mark.asyncio
+async def test_tx_power_from_inproc_monitor(
+    monkeypatch: pytest.MonkeyPatch, fresh_agent_app: None,
+) -> None:
+    """The TX power widget pulls effective_tx_power_dbm from the manager
+    when the in-process path is reachable."""
+    _install_inproc_monitor(
+        monkeypatch, rssi=-55.0, fec_recovered=10, fec_failed=0,
+    )
+    page = VideoPage()
+    nav = PageNavigator()
+    client = _StubClient()
+    ctx = _ctx(nav, client)
+    await page.on_enter(ctx)
+    await page._refresh_metrics_once(ctx)
+    assert page._metrics_cache["tx_power_dbm"] == 5.0
+
+
+@pytest.mark.asyncio
+async def test_tx_power_dashed_when_unknown(
+    fresh_agent_app: None,
+) -> None:
+    """Pre-bind / pre-detect, /api/wfb has no tx_power; render --."""
+    page = VideoPage()
+    nav = PageNavigator()
+    client = _StubClient(
+        wfb_payload={
+            "channel": 0,
+            "mcs_index": 0,
+            "rssi_dbm": -100.0,
+            "fec_recovered": 0,
+            "fec_failed": 0,
+            # Note: no tx_power_dbm key.
+        },
+    )
+    ctx = _ctx(nav, client)
+    await page.on_enter(ctx)
+    await page._refresh_metrics_once(ctx)
+    assert page._metrics_cache["tx_power_dbm"] is None
+    assert page._format_tx_power(page._metrics_cache["tx_power_dbm"]) == "--"
 
 
 @pytest.mark.asyncio
