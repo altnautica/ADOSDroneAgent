@@ -344,6 +344,43 @@ def _iter_nal_units(stream: bytes) -> Any:
         i += length
 
 
+def _remove_emulation_prevention(ebsp: bytes) -> bytes:
+    """Strip the H.264 emulation-prevention escape bytes from an EBSP.
+
+    The encoder side inserts a ``0x03`` byte after any ``00 00`` pair
+    when the next byte is in {0, 1, 2, 3}, per H.264 §7.4.1.1. Without
+    removing those escapes here, a SEI payload that happened to carry
+    a ``00 00`` pattern (typical for some ``time.time_ns()`` values
+    that have two adjacent zero bytes) would be mis-parsed: the
+    declared payload-size byte counts un-escaped bytes, but the raw
+    EBSP contains one extra byte per escape, so ``data[16:24]`` would
+    read shifted ns bytes.
+
+    Inverse of ``sei_injector._emulation_prevent``. Idempotent on
+    streams that have no escape bytes (a no-op).
+    """
+    out = bytearray()
+    i = 0
+    n = len(ebsp)
+    while i < n:
+        if (
+            i + 2 < n
+            and ebsp[i] == 0
+            and ebsp[i + 1] == 0
+            and ebsp[i + 2] == 3
+        ):
+            out.append(0)
+            out.append(0)
+            i += 3
+            if i < n:
+                out.append(ebsp[i])
+                i += 1
+        else:
+            out.append(ebsp[i])
+            i += 1
+    return bytes(out)
+
+
 def parse_sei_latency_ns(stream: bytes) -> int | None:
     """Extract the air-side encoder's wall-clock-time-ns from a SEI marker.
 
@@ -358,14 +395,18 @@ def parse_sei_latency_ns(stream: bytes) -> int | None:
     Returns the encoded ns value, or ``None`` if no matching SEI is
     present in the buffer.
     """
-    for nal_type, payload in _iter_nal_units(stream):
+    for nal_type, raw_payload in _iter_nal_units(stream):
         if nal_type != 6:
             continue
-        if not payload:
+        if not raw_payload:
             continue
         # SEI message structure: <payload_type> <payload_size> <data>.
         # payload_type and payload_size are each ff-extended bytes per
         # the spec but in practice fit in one byte for our markers.
+        # The raw payload coming off the wire is EBSP — strip H.264
+        # emulation-prevention bytes before parsing so a ns value with
+        # 00 00 patterns reads correctly.
+        payload = _remove_emulation_prevention(raw_payload)
         idx = 0
         plen = len(payload)
         while idx < plen:

@@ -74,6 +74,34 @@ def test_uuid_is_exactly_sixteen_bytes() -> None:
     assert len(lt.ADOS_LATENCY_SEI_UUID) == 16
 
 
+def test_parse_sei_extracts_ns_with_emulation_prevention() -> None:
+    """The receiver must de-escape H.264 emulation-prevention bytes.
+
+    Real time.time_ns() values occasionally carry a 00 00 [0-3] byte
+    pattern in the low bits; the encoder inserts a 0x03 escape per
+    H.264 §7.4.1.1, and the receiver must remove it before reading
+    the ns. Without de-escape the parser would read shifted bytes
+    and the [0, 5000 ms] sanity bound would silently reject the
+    sample. This test pins the round-trip property — use the actual
+    encoder-side build_sei_nal to construct the wire format so any
+    encoder/decoder drift trips this test.
+    """
+    from ados.services.video.sei_injector import build_sei_nal
+
+    for ns in (
+        # ns with 00 00 02 in the middle — escape required.
+        0x1800_0002_3456_789A,
+        # ns with 00 00 01 — would otherwise be misread as a NAL
+        # start code.
+        0x1800_0001_FFFF_FFFF,
+        # ns with two consecutive escape triggers.
+        0x0000_0001_0000_0002,
+    ):
+        nal = build_sei_nal(ns)
+        recovered = lt.parse_sei_latency_ns(nal)
+        assert recovered == ns, f"failed for ns=0x{ns:016x}"
+
+
 def test_record_latency_sample_applies_ewma() -> None:
     tap = lt.LocalVideoTap()
     # First sample seeds the EWMA exactly.

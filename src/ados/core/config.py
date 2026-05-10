@@ -128,6 +128,14 @@ class WfbConfig(BaseModel):
     # the canonical surface for fresh installs is here.
     paired_with_device_id: str | None = None
     paired_at: str | None = None  # iso timestamp
+    # Inject H.264 SEI markers carrying time.time_ns() into the wfb-tee
+    # output so the ground side can compute over-the-air video
+    # latency. Adds ~30 bytes per VCL NAL (~900 B/s at 30 fps),
+    # negligible vs a 4 Mbps stream. Default off until bench-validated;
+    # flip in /etc/ados/config.yaml under video.wfb and restart the
+    # agent. The receiver-side parser is always wired and waits for
+    # markers — flipping the encoder flag is sufficient.
+    sei_latency: bool = False
 
     @model_validator(mode="before")
     @classmethod

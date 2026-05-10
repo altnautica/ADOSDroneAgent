@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import sys
 import time
 from enum import StrEnum
 from typing import TYPE_CHECKING
@@ -366,21 +367,64 @@ class VideoPipeline:
             f"rtp://{_WFB_TEE_HOST}:{_WFB_TEE_PORT}?pkt_size={_WFB_TEE_PKT_SIZE}"
         )
 
+        # When sei_latency is set on WfbConfig, wrap the tee in a bash
+        # pipeline that splices a Python NAL injector between an input
+        # ffmpeg (RTSP -> Annex-B stdout) and an output ffmpeg
+        # (stdin -> RTP UDP). The injector prepends a SEI NAL with a
+        # wall-clock time.time_ns() before every VCL slice so the
+        # ground-side LCD can render glass-to-glass air latency.
+        sei_latency_on = bool(
+            getattr(self._config.wfb, "sei_latency", False)
+        )
+
         try:
-            self._wfb_tee_process = await asyncio.create_subprocess_exec(
-                "ffmpeg",
-                "-fflags", "nobuffer",
-                "-flags", "low_delay",
-                "-rtsp_transport", "tcp",
-                "-i", local_rtsp,
-                "-c:v", "copy",
-                "-f", "rtp",
-                "-payload_type", str(_WFB_TEE_PAYLOAD_TYPE),
-                "-ssrc", _WFB_TEE_SSRC,
-                rtp_url,
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.PIPE,
-            )
+            if sei_latency_on:
+                # Three-stage bash pipeline. The parent sees a single
+                # child (bash); if any stage crashes, bash returns
+                # non-zero and the existing health-check + restart
+                # loop respawns the whole tee.
+                cmd_in = (
+                    "ffmpeg "
+                    "-fflags nobuffer -flags low_delay "
+                    "-rtsp_transport tcp "
+                    f"-i {local_rtsp} "
+                    "-c:v copy -f h264 -"
+                )
+                cmd_inject = (
+                    f"{sys.executable} -m ados.services.video.sei_injector"
+                )
+                cmd_out = (
+                    "ffmpeg "
+                    "-fflags nobuffer -flags low_delay "
+                    "-f h264 -i - "
+                    "-c:v copy -f rtp "
+                    f"-payload_type {_WFB_TEE_PAYLOAD_TYPE} "
+                    f"-ssrc {_WFB_TEE_SSRC} "
+                    f"{rtp_url}"
+                )
+                bash_cmd = f"{cmd_in} | {cmd_inject} | {cmd_out}"
+                self._wfb_tee_process = await asyncio.create_subprocess_exec(
+                    "bash",
+                    "-c",
+                    bash_cmd,
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+            else:
+                self._wfb_tee_process = await asyncio.create_subprocess_exec(
+                    "ffmpeg",
+                    "-fflags", "nobuffer",
+                    "-flags", "low_delay",
+                    "-rtsp_transport", "tcp",
+                    "-i", local_rtsp,
+                    "-c:v", "copy",
+                    "-f", "rtp",
+                    "-payload_type", str(_WFB_TEE_PAYLOAD_TYPE),
+                    "-ssrc", _WFB_TEE_SSRC,
+                    rtp_url,
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.PIPE,
+                )
             self._wfb_tee_stderr_task = asyncio.create_task(
                 self._drain_stderr(self._wfb_tee_process, "wfb_tee")
             )
@@ -390,6 +434,7 @@ class VideoPipeline:
                 destination=rtp_url,
                 payload_type=_WFB_TEE_PAYLOAD_TYPE,
                 pid=self._wfb_tee_process.pid,
+                sei_latency=sei_latency_on,
             )
             return True
         except FileNotFoundError:

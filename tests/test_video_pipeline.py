@@ -310,6 +310,44 @@ class TestWfbUdpTee:
         assert captured_cmd[copy_index] == "copy"
 
     @pytest.mark.asyncio
+    async def test_start_wfb_tee_uses_injector_when_flag_set(self, monkeypatch):
+        """With WfbConfig.sei_latency=True, the tee runs the SEI
+        injector inside a bash pipeline between two ffmpeg processes."""
+        from ados.services.video import pipeline as pl_mod
+
+        cfg = VideoConfig()
+        cfg.wfb.sei_latency = True
+        pipeline = VideoPipeline(cfg)
+        pipeline._state = PipelineState.RUNNING
+        pipeline._mediamtx = MagicMock()
+        pipeline._mediamtx.rtsp_port = 8554
+
+        captured_cmd: list[str] = []
+
+        async def _fake_exec(*cmd, **_kw):
+            captured_cmd.extend(cmd)
+            proc = MagicMock()
+            proc.returncode = None
+            proc.pid = 9999
+            proc.stderr = None
+            return proc
+
+        monkeypatch.setattr(pl_mod.asyncio, "create_subprocess_exec", _fake_exec)
+
+        ok = await pipeline.start_wfb_tee()
+        assert ok is True
+        # The bash wrapper is the spawned process; the SEI injector
+        # invocation is in the bash command string.
+        assert captured_cmd[0] == "bash"
+        assert captured_cmd[1] == "-c"
+        bash_cmd = captured_cmd[2]
+        assert "ados.services.video.sei_injector" in bash_cmd
+        assert "rtsp://localhost:8554/main" in bash_cmd
+        assert "rtp://127.0.0.1:5600" in bash_cmd
+        # Three stages joined with shell pipes.
+        assert bash_cmd.count(" | ") == 2
+
+    @pytest.mark.asyncio
     async def test_start_wfb_tee_skipped_when_pipeline_not_running(self, monkeypatch):
         from ados.services.video import pipeline as pl_mod
 
