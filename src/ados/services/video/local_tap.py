@@ -127,6 +127,16 @@ _RESTART_RETRY_INTERVAL_SECONDS = 2.0
 # doesn't compound.
 _RECONNECT_LADDER_SECONDS: tuple[float, ...] = (1.0, 2.0, 4.0, 8.0, 30.0)
 
+# Frame-arrival watchdog: number of seconds of pipeline_state="playing"
+# with no fresh appsink callback before the watchdog forces a restart.
+# 3 s is enough to absorb a long single-frame decode hiccup or a brief
+# RTSP reconnect storm without false-tripping, while still kicking
+# in well before the operator perceives a sustained freeze.
+_FRAME_SILENCE_THRESHOLD_S = 3.0
+# Watchdog poll interval. 1 Hz is fine — we're checking a flag, not
+# reading the GStreamer bus.
+_FRAME_SILENCE_POLL_S = 1.0
+
 
 class LocalVideoTapUnavailable(RuntimeError):  # noqa: N818
     """Raised by :meth:`LocalVideoTap.start` when gstreamer is missing.
@@ -465,32 +475,33 @@ def build_pipeline_string(
         f"rtspsrc location={source_url} protocols=tcp "
         f"latency={latency_ms} drop-on-latency=true "
         "! rtph264depay "
-        # h264parse with alignment=au so each downstream buffer holds a
-        # complete access unit. Without this, gstreamer's default
-        # alignment is per-NAL, which means a SEI-only NAL and its
-        # target slice arrive in separate buffers — the pad probe on
-        # the src pad sees the SEI but doesn't easily correlate it
-        # with the frame. config-interval=1 prepends SPS/PPS to every
-        # IDR for late-joiner robustness on the LCD reconnect path.
-        # Naming the element ``h264parse_tap`` lets ``get_by_name``
-        # find it deterministically; the element-iterator approach
-        # silently fails on PyGObject builds where Gst.IteratorResult
-        # surfaces RESYNC mid-walk.
-        "! h264parse name=h264parse_tap config-interval=1 "
-        "! video/x-h264,alignment=au "
+        # h264parse with alignment=au set as a property (not as a
+        # downstream capsfilter). The capsfilter form
+        # ``! video/x-h264,alignment=au`` triggers a caps re-negotiation
+        # that the avdec_h264 chain refuses on Pi 4B + GStreamer 1.22,
+        # producing a `streaming stopped, reason not-linked` bus error
+        # within a few buffers — pipeline drops to NULL, restart loop
+        # kicks in, no frames ever reach the appsink, LCD shows a
+        # frozen last-frame. Setting alignment=au as a property
+        # negotiates upstream of the queue without splitting the
+        # pipeline graph. config-interval=1 prepends SPS/PPS to every
+        # IDR for late-joiner robustness. The named element lets
+        # get_by_name pin the SEI pad probe deterministically.
+        "! h264parse name=h264parse_tap config-interval=1 alignment=au "
         # queue between depay and decoder hands rtspsrc its own thread so
         # the network reader keeps pulling RTP while the decoder works.
-        # leaky=downstream + small max-size means a slow decoder drops
+        # leaky=downstream + tight max-size means a slow decoder drops
         # the oldest frame instead of blocking upstream and starving
         # rtspsrc's RTCP loop (which cascades into "not-linked" errors).
-        "! queue max-size-buffers=8 max-size-bytes=0 max-size-time=0 leaky=downstream "
+        # max-size-buffers=2 caps worst-case backlog at ~67 ms (30 fps).
+        "! queue max-size-buffers=2 max-size-bytes=0 max-size-time=0 leaky=downstream "
         f"! {decoder} "
         # second queue between decoder and downstream conversion gives
         # the decoder its own thread. PIL composition + framebuffer write
         # in the render loop runs at 20 Hz and shares the GIL with the
         # appsink callback; without this queue, a slow render tick stalls
         # the decoder.
-        "! queue max-size-buffers=4 max-size-bytes=0 max-size-time=0 leaky=downstream "
+        "! queue max-size-buffers=1 max-size-bytes=0 max-size-time=0 leaky=downstream "
         # decimate the decoded stream to fps_cap before videoconvert.
         # Default 15 matches what the Pi 4B's single-threaded Python GIL
         # + PIL composition + SPI framebuffer write loop can sustain
@@ -563,6 +574,11 @@ class LocalVideoTap:
         # surface a sustained absence (encoder-side flag off, network
         # drop, h264parse alignment misconfig) without flooding logs.
         self._sei_miss_count: int = 0
+        # Frame-arrival watchdog state. Records the last
+        # ``_last_frame_at`` value the watchdog observed at its
+        # previous poll. If pipeline is PLAYING and this stamp hasn't
+        # advanced beyond ``_FRAME_SILENCE_THRESHOLD_S``, force restart.
+        self._watchdog_thread: threading.Thread | None = None
 
         self._decoder_type: str | None = None
         self._pipeline_state: str = "idle"
@@ -618,7 +634,14 @@ class LocalVideoTap:
 
             decoder = select_decoder(_detect_soc())
             self._decoder_type = decoder
-            latency_ms = 50 if decoder != "avdec_h264" else 100
+            # rtspsrc internal jitter buffer. The previous 100 ms (avdec)
+            # / 50 ms (hw) was the dominant single source of glass-to-
+            # decoder latency on the bench (~100 ms of the observed 146).
+            # Drop to 5 ms; drop-on-latency=true (set in the pipeline
+            # string) absorbs transient bursts by dropping a frame
+            # instead of stalling. On localhost RTSP there's
+            # essentially no jitter to absorb anyway.
+            latency_ms = 5
             pipeline_str = build_pipeline_string(
                 source_url=self._source_url,
                 decoder=decoder,
@@ -718,6 +741,20 @@ class LocalVideoTap:
                 daemon=True,
             )
             self._thread.start()
+            # Frame-arrival watchdog. The bus-error path catches a gst
+            # pipeline crash but a subtler fault is "PLAYING but no
+            # frames flowing" — the appsink never fires, the FrameSlot
+            # keeps serving the same old frame, and the LCD shows a
+            # frozen image until something else trips the bus. Per
+            # operating Rule 37, process-liveness is never proof of
+            # work; check the actual frame-arrival counter and kick a
+            # restart when it goes flat.
+            self._watchdog_thread = threading.Thread(
+                target=self._frame_silence_watchdog,
+                name="ados-local-tap-watchdog",
+                daemon=True,
+            )
+            self._watchdog_thread.start()
 
     async def stop(self) -> None:
         """Tear down the pipeline cleanly.
@@ -1154,12 +1191,65 @@ class LocalVideoTap:
             kwargs={"reason": reason},
         ).start()
 
+    def _frame_silence_watchdog(self) -> None:
+        """Force a restart when PLAYING but no frame has arrived.
+
+        Catches the failure mode where the gst pipeline reaches PLAYING,
+        rtspsrc reconnects, h264parse pushes data, but nothing ever hits
+        the appsink (caps mismatch, decoder wedge, queue cycle, etc.).
+        The bus-error path doesn't see this because no element emits an
+        ERROR — the loop simply runs idle. Without this watchdog the
+        FrameSlot keeps the last successfully composited frame and the
+        LCD looks frozen until the operator restarts the agent.
+        """
+        while not self._stop_requested.is_set():
+            try:
+                time.sleep(_FRAME_SILENCE_POLL_S)
+            except Exception:  # noqa: BLE001
+                return
+            if self._stop_requested.is_set():
+                return
+            if self._pipeline_state != "playing":
+                continue
+            last = self._last_frame_at
+            if last is None:
+                # Pipeline reached PLAYING but no frame ever arrived.
+                # The reconnect ladder will eventually catch this; the
+                # watchdog only kicks in once we've SEEN at least one
+                # frame and then go silent.
+                continue
+            silent_s = time.monotonic() - last
+            if silent_s < _FRAME_SILENCE_THRESHOLD_S:
+                continue
+            self._logger.warning(
+                "local_tap_frame_silence_kick",
+                silent_s=round(silent_s, 1),
+                threshold_s=_FRAME_SILENCE_THRESHOLD_S,
+                latency_samples=self._latency_samples,
+                note="appsink starved while PLAYING; forcing restart",
+            )
+            try:
+                self._maybe_auto_restart(reason="frame_silence")
+            except Exception as exc:  # noqa: BLE001
+                self._logger.warning(
+                    "local_tap_watchdog_restart_failed", error=str(exc)
+                )
+            # After a kick, reset the timer so we don't immediately
+            # re-trigger before the new pipeline state takes effect.
+            self._last_frame_at = time.monotonic()
+
     def _do_restart(self, *, reason: str) -> None:
         """Drop to NULL then PLAYING in place to recover from a fault."""
         gst = self._Gst
         pipeline = self._pipeline
         if gst is None or pipeline is None or self._stop_requested.is_set():
             return
+        # Zero counters across the restart so stats reflect the new run
+        # rather than accumulating across the entire restart-loop
+        # history. Without this, latency_samples / sei_miss_count
+        # / fps_ewma all carry old values into the new pipeline run
+        # and make observability misleading.
+        self._reset_stats()
         try:
             pipeline.set_state(gst.State.NULL)
             pipeline.set_state(gst.State.PLAYING)

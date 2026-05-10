@@ -385,7 +385,7 @@ class VideoPipeline:
                 # loop respawns the whole tee.
                 cmd_in = (
                     "ffmpeg "
-                    "-fflags nobuffer -flags low_delay "
+                    "-fflags nobuffer -flags low_delay -max_delay 0 "
                     "-rtsp_transport tcp "
                     f"-i {local_rtsp} "
                     "-c:v copy -f h264 -"
@@ -393,11 +393,14 @@ class VideoPipeline:
                 cmd_inject = (
                     f"{sys.executable} -m ados.services.video.sei_injector"
                 )
+                # `-muxdelay 0 -muxpreload 0` defeat ffmpeg's default
+                # 0.7s mux delay + 0.5s preload buffer. For live RTP we
+                # want each packet on the wire as soon as encoded.
                 cmd_out = (
                     "ffmpeg "
-                    "-fflags nobuffer -flags low_delay "
+                    "-fflags nobuffer -flags low_delay -max_delay 0 "
                     "-f h264 -i - "
-                    "-c:v copy -f rtp "
+                    "-c:v copy -muxdelay 0 -muxpreload 0 -f rtp "
                     f"-payload_type {_WFB_TEE_PAYLOAD_TYPE} "
                     f"-ssrc {_WFB_TEE_SSRC} "
                     f"{rtp_url}"

@@ -125,15 +125,17 @@ def inject_stream(
     reader: BinaryIO,
     writer: BinaryIO,
     *,
-    chunk_size: int = 65536,
+    chunk_size: int = 4096,
 ) -> None:
     """Stream Annex-B from reader to writer, prepending SEI before each VCL.
 
     Buffers a 4-byte tail across chunk boundaries so a start code
     spanning two reads is detected on the next iteration. Writes
     output synchronously after each chunk so latency added by the
-    injector is bounded by chunk_size / link_bitrate (~16 ms at 4
-    Mbps with a 64 KB chunk; tighter with smaller chunks).
+    injector is bounded by chunk_size / link_bitrate. At 4 Mbps a
+    4 KB chunk is ~8 ms worst-case, vs 131 ms with the previous
+    65 KB default — that 65 KB chunk was the second-largest single
+    contributor to the observed 146 ms glass-to-decoder latency.
     """
     buf = bytearray()
     while True:

@@ -86,8 +86,13 @@ def test_pipeline_string_pins_au_alignment() -> None:
         height=176,
         latency_ms=100,
     )
-    assert "h264parse name=h264parse_tap config-interval=1" in s
-    assert "alignment=au" in s
+    # alignment=au is set as an h264parse property (NOT as a separate
+    # capsfilter). The capsfilter form was a Phase 8 regression that
+    # tripped a caps re-negotiation downstream and threw the pipeline
+    # into a not-linked restart loop on Pi 4B + GStreamer 1.22.
+    assert "h264parse name=h264parse_tap config-interval=1 alignment=au" in s
+    # Sanity: NO separate downstream capsfilter pinning alignment.
+    assert "video/x-h264,alignment=au" not in s
 
 
 def test_pipeline_string_honors_fps_cap() -> None:

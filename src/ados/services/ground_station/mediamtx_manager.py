@@ -258,6 +258,10 @@ class MediamtxGsManager:
             binary,
             "-fflags", "nobuffer",
             "-flags", "low_delay",
+            # `-max_delay 0` flushes packets to demux without holding
+            # for reorder; combined with nobuffer/low_delay it gets
+            # demux latency to well under 1 ms on localhost UDP.
+            "-max_delay", "0",
             "-protocol_whitelist", "file,udp,rtp",
             # `-probesize 5M -analyzeduration 5M` give ffmpeg up to 5
             # seconds (or 5 MB) to discover the H.264 SPS/PPS from the
@@ -276,6 +280,11 @@ class MediamtxGsManager:
             # leftover from the old `-f h264 -i udp://` path that
             # received raw bytes. Applying it twice corrupts the
             # bitstream's NAL boundaries.
+            # `-muxdelay 0 -muxpreload 0` strip ffmpeg's default
+            # 0.7 s mux delay + 0.5 s preload; for live RTSP push we
+            # want every packet emitted as soon as encoded.
+            "-muxdelay", "0",
+            "-muxpreload", "0",
             "-f", "rtsp",
             "-rtsp_transport", "tcp",
             rtsp_url,
