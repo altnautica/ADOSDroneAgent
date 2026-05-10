@@ -1,7 +1,16 @@
 [Unit]
 Description=ADOS Drone Agent Supervisor
-After=network-online.target
-Wants=network-online.target
+# Deliberately NOT After=/Wants=network-online.target.
+# The radio link (WFB-ng on RTL8812EU monitor mode) and the entire
+# video pipeline (camera -> encoder -> tee -> wfb_tx | wfb_rx ->
+# ffmpeg sidecar -> mediamtx -> LCD) operate locally. They do not
+# need DHCP, DNS, or a default route. Only the cloud-relay heartbeat
+# child needs internet, and it retries indefinitely on its own.
+# Gating the supervisor on network-online previously left the LCD
+# blank for hours when the home Wi-Fi failed to associate at boot.
+# Per Rule 26: "the install must be 100% AUTOMATIC" — an operator
+# on a deserted island with both rigs powered must see video.
+After=local-fs.target
 StartLimitInterval=60s
 StartLimitBurst=5
 
