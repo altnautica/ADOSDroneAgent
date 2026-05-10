@@ -51,14 +51,25 @@ _WFB_TEE_HOST = "127.0.0.1"
 _WFB_TEE_PORT = 5600
 _WFB_TEE_PKT_SIZE = 1316
 _WFB_TEE_PAYLOAD_TYPE = 96
-# Output-progress watchdog: if wfb_tee's ffmpeg stderr stops
-# advancing the `frame=N` counter for this many seconds, the process
-# is considered a zombie (alive but not pushing UDP packets) and we
-# force a restart via the regular run-loop health-check path. 8 s
-# absorbs a brief IDR-wait or encoder-CPU spike without false-tripping.
-_WFB_TEE_PROGRESS_TIMEOUT_S = 8.0
-# Pattern matched in ffmpeg stderr lines to extract the frame counter.
+# Output-progress watchdog: if wfb_tee's ffmpeg stderr stops emitting
+# progress tokens (frame= / size= / time= / bitrate=) for this many
+# seconds, the process is considered a zombie (alive but not pushing
+# UDP packets) and we force a restart via the regular run-loop
+# health-check path. 15 s is the practical floor: ffmpeg's RTSP
+# handshake (DESCRIBE / SETUP / PLAY) + first IDR wait can take 5-10 s
+# on bench cold-start; setting the threshold below that triggers
+# false-positive restart cascades during install + reload races.
+_WFB_TEE_PROGRESS_TIMEOUT_S = 15.0
+# Pattern matched in ffmpeg stderr lines to detect forward progress.
+# `-c copy` ffmpeg doesn't always print frame= (especially when
+# stream-copying); we look for any of the progress counters ffmpeg
+# emits on its 1-Hz status line: frame=, size=, time=, bitrate=.
+# Any forward-moving counter means the process is actively pushing
+# bytes to the pipe.
 _FFMPEG_FRAME_PROGRESS_RE = re.compile(r"\bframe=\s*(\d+)\b")
+_FFMPEG_PROGRESS_TOKEN_RE = re.compile(
+    r"\b(?:frame|size|time|bitrate)=",
+)
 _WFB_TEE_SSRC = "0xCAFE"
 
 
@@ -301,22 +312,26 @@ class VideoPipeline:
                 text = line.decode(errors="replace").rstrip()
                 if not text:
                     continue
-                # ffmpeg's `frame=N` progress lines arrive at roughly
-                # the output frame rate (~30 Hz on a healthy bench).
-                # Match each one and remember the highest frame count
-                # seen so far; only stamp the timestamp when the
-                # counter actually advances, so a stuck process that
-                # keeps echoing the same `frame=` value doesn't
-                # falsely register as healthy.
-                m = _FFMPEG_FRAME_PROGRESS_RE.search(text)
-                if m is not None:
-                    try:
-                        frame = int(m.group(1))
-                    except (TypeError, ValueError):
-                        frame = -1
-                    if frame > self._wfb_tee_last_frame_count:
-                        self._wfb_tee_last_frame_count = frame
-                        self._wfb_tee_last_progress_at = time.monotonic()
+                # Stamp progress on any of ffmpeg's status counters:
+                # frame= (transcoding), size= / time= / bitrate=
+                # (any output mode including -c copy). All advance at
+                # roughly 1 Hz on a healthy bench. Stamping on the
+                # mere presence of the token (not a strict increase)
+                # is sufficient because ffmpeg's status line is
+                # carriage-returned and re-emitted every second only
+                # when it's actually processing.
+                if _FFMPEG_PROGRESS_TOKEN_RE.search(text):
+                    self._wfb_tee_last_progress_at = time.monotonic()
+                    # Also try to pull a frame number for observability;
+                    # may not advance with -c copy but harmless.
+                    m = _FFMPEG_FRAME_PROGRESS_RE.search(text)
+                    if m is not None:
+                        try:
+                            frame = int(m.group(1))
+                            if frame > self._wfb_tee_last_frame_count:
+                                self._wfb_tee_last_frame_count = frame
+                        except (TypeError, ValueError):
+                            pass
                 log.warning("subprocess_stderr", label="wfb_tee", line=text)
         except (asyncio.CancelledError, Exception):
             pass
