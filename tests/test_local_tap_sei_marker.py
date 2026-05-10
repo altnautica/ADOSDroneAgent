@@ -2,10 +2,15 @@
 
 The air-side encoder will eventually inject a SEI of type 5
 (user_data_unregistered) carrying our 16-byte UUID followed by an 8-byte
-big-endian uint64 of the encoder's monotonic-time-ns. The ground-side
-parser must extract that timestamp from a synthetic Annex-B H.264 buffer
-and yield the right delta. When the marker is absent the parser must
-return None so the metrics strip falls through to "—".
+big-endian uint64 of the encoder's wall-clock ``time.time_ns()``. The
+ground-side parser extracts that timestamp from a synthetic Annex-B
+H.264 buffer and yields the right delta against its own ``time_ns``
+clock. When the marker is absent the parser must return None so the
+metrics strip falls through to "—".
+
+Wall-clock — not monotonic — because the air-side and ground-side run
+on different hosts whose monotonic epochs are unrelated; both ends
+rely on NTP to keep wall clocks aligned within a few ms.
 """
 
 from __future__ import annotations
@@ -72,7 +77,7 @@ def test_uuid_is_exactly_sixteen_bytes() -> None:
 def test_record_latency_sample_applies_ewma() -> None:
     tap = lt.LocalVideoTap()
     # First sample seeds the EWMA exactly.
-    encoded_ns = time.monotonic_ns() - 50_000_000  # 50 ms ago
+    encoded_ns = time.time_ns() - 50_000_000  # 50 ms ago
     tap._record_latency_sample(encoded_ns)
     assert tap._latency_ewma is not None
     assert 40 <= tap._latency_ewma <= 60
@@ -81,8 +86,8 @@ def test_record_latency_sample_applies_ewma() -> None:
 
 def test_record_latency_sample_rejects_negative_drift() -> None:
     tap = lt.LocalVideoTap()
-    # Future encode timestamp (clock drift across processes).
-    encoded_ns = time.monotonic_ns() + 100_000_000
+    # Future encode timestamp (NTP drift across hosts mid-correction).
+    encoded_ns = time.time_ns() + 100_000_000
     tap._record_latency_sample(encoded_ns)
     assert tap._latency_ewma is None
     assert tap._latency_samples == 0
@@ -91,7 +96,7 @@ def test_record_latency_sample_rejects_negative_drift() -> None:
 def test_record_latency_sample_rejects_extreme_value() -> None:
     tap = lt.LocalVideoTap()
     # 10 seconds in the past — clearly bogus.
-    encoded_ns = time.monotonic_ns() - 10_000_000_000
+    encoded_ns = time.time_ns() - 10_000_000_000
     tap._record_latency_sample(encoded_ns)
     assert tap._latency_ewma is None
     assert tap._latency_samples == 0
@@ -101,18 +106,18 @@ def test_record_latency_sample_smooths_across_three_samples() -> None:
     tap = lt.LocalVideoTap()
     # Synthesize three samples at 30, 40, 50 ms by adjusting the encoded ns.
     for delay_ms in (30, 40, 50):
-        encoded_ns = time.monotonic_ns() - delay_ms * 1_000_000
+        encoded_ns = time.time_ns() - delay_ms * 1_000_000
         tap._record_latency_sample(encoded_ns)
     assert tap._latency_samples == 3
     assert tap._latency_ewma is not None
     # EWMA with alpha=0.2: starts at 30, then 0.2*40+0.8*30=32, then
-    # 0.2*50+0.8*32=35.6. Allow ±5 ms slack for monotonic_ns drift.
+    # 0.2*50+0.8*32=35.6. Allow ±5 ms slack for clock drift.
     assert 30.0 <= tap._latency_ewma <= 45.0
 
 
 def test_stats_exposes_latency_ms_when_set() -> None:
     tap = lt.LocalVideoTap()
-    encoded_ns = time.monotonic_ns() - 25_000_000
+    encoded_ns = time.time_ns() - 25_000_000
     tap._record_latency_sample(encoded_ns)
     stats = tap.stats()
     assert "latency_ms" in stats

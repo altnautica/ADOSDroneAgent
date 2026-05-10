@@ -66,16 +66,18 @@ log = get_logger("video.local_tap")
 
 # 16-byte UUID prefix the air-side encoder will embed in a SEI of type
 # 5 (user_data_unregistered) followed by an 8-byte big-endian uint64 of
-# the encoder's monotonic-time-ns. Picking a stable random UUID here
-# (rather than referencing some external value) so the air and ground
-# encoders can agree by importing this constant.
+# the encoder's wall-clock ``time.time_ns()``. Wall-clock — not
+# monotonic — because the air-side and ground-side run on different
+# hosts whose monotonic epochs are unrelated. Both ends rely on NTP /
+# chrony / systemd-timesyncd to keep wall clocks within a few ms of
+# each other, which is the standard assumption on a LAN-paired rig.
 ADOS_LATENCY_SEI_UUID = bytes.fromhex("ad05140e9c2c4f6e8a31f0e5b7d4c8a2")
 assert len(ADOS_LATENCY_SEI_UUID) == 16
 
 # Latency sanity bounds. A negative value means the air-side and
-# ground-side monotonic clocks have drifted relative to each other (the
-# clocks are different processes so they have different epochs); a
-# value above 5 s implies a stale buffer or a bogus SEI payload.
+# ground-side wall clocks have drifted relative to each other (NTP
+# correction in flight, large drift, or unsynced rigs); a value above
+# 5 s implies a stale buffer or a bogus SEI payload.
 _LATENCY_MIN_MS = 0.0
 _LATENCY_MAX_MS = 5_000.0
 
@@ -343,13 +345,15 @@ def _iter_nal_units(stream: bytes) -> Any:
 
 
 def parse_sei_latency_ns(stream: bytes) -> int | None:
-    """Extract the air-side encoder's monotonic-time-ns from a SEI marker.
+    """Extract the air-side encoder's wall-clock-time-ns from a SEI marker.
 
     Scans ``stream`` for an H.264 SEI NAL unit (NAL type 6) that
     contains a user-data-unregistered payload (payload type 5) whose
     16-byte UUID matches :data:`ADOS_LATENCY_SEI_UUID`. The next 8
     bytes are interpreted as a big-endian uint64 of the encoder's
-    ``time.monotonic_ns()`` at frame-encode time.
+    ``time.time_ns()`` at frame-encode time. Wall-clock so a comparison
+    against the receiver's ``time.time_ns()`` produces meaningful
+    glass-to-glass latency across hosts.
 
     Returns the encoded ns value, or ``None`` if no matching SEI is
     present in the buffer.
@@ -859,8 +863,17 @@ class LocalVideoTap:
         return 1
 
     def _record_latency_sample(self, encoded_ns: int) -> None:
-        """Apply sanity guard + EWMA on a fresh latency sample."""
-        now_ns = time.monotonic_ns()
+        """Apply sanity guard + EWMA on a fresh latency sample.
+
+        ``encoded_ns`` is the air-side encoder's ``time.time_ns()`` at
+        frame-encode time; we subtract from our own ``time.time_ns()``
+        at parse time. Both clocks are wall-clock (NTP-synced on the
+        LAN), so the delta is the actual elapsed wall time even though
+        the encoder ran on a different host. ``time.monotonic_ns()``
+        used to live here, but its epoch is per-process so the math
+        was nonsense across hosts.
+        """
+        now_ns = time.time_ns()
         delta_ms = (now_ns - encoded_ns) / 1_000_000.0
         if delta_ms < _LATENCY_MIN_MS or delta_ms > _LATENCY_MAX_MS:
             self._logger.debug(
