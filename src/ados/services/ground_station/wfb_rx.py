@@ -512,15 +512,14 @@ class WfbRxManager:
                 log.error("ground_wfb_rx_failed_to_start")
                 self._state = LinkState.DISCONNECTED
                 self._restart_count += 1
-                if self._restart_count >= self._max_restarts:
-                    log.error(
-                        "ground_wfb_max_restarts_reached",
-                        count=self._restart_count,
-                    )
-                    self._running = False
-                    break
+                # Retry forever, snappy ceiling. The drone may not yet
+                # have come up; the operator may have unplugged the
+                # RTL adapter to wiggle a connector. Recovery should
+                # be automatic the moment hardware comes back. The
+                # previous 10-restart cap put the rig into a permanent
+                # dead state requiring SSH to clear.
                 await asyncio.sleep(backoff)
-                backoff = min(backoff * 2, 30.0)
+                backoff = min(backoff * 2, 5.0)
                 continue
 
             backoff = 1.0
@@ -562,15 +561,10 @@ class WfbRxManager:
             await self.stop_rx()
             self._running = True
 
-            if self._restart_count >= self._max_restarts:
-                log.error(
-                    "ground_wfb_max_restarts_reached",
-                    count=self._restart_count,
-                )
-                break
-
+            # No give-up cap. Snappy 5 s ceiling on backoff so recovery
+            # is fast when upstream comes back. See operating rule 26.
             await asyncio.sleep(backoff)
-            backoff = min(backoff * 2, 30.0)
+            backoff = min(backoff * 2, 5.0)
 
         self._state = LinkState.DISCONNECTED
 

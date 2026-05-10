@@ -533,12 +533,15 @@ class WfbManager:
                 log.error("wfb_both_failed_to_start")
                 self._state = LinkState.DISCONNECTED
                 self._restart_count += 1
-                if self._restart_count >= self._max_restarts:
-                    log.error("wfb_max_restarts_reached", count=self._restart_count)
-                    self._running = False
-                    break
+                # No give-up cap. The drone may have come up before the
+                # adapter enumerated; the operator may have unplugged
+                # the dongle to wiggle a connector. The agent retries
+                # forever — recovery should be automatic the moment
+                # the hardware comes back. Fixed 5 s ceiling on the
+                # backoff so we don't sit at 30 s after a single bad
+                # window when the hardware is fine.
                 await asyncio.sleep(backoff)
-                backoff = min(backoff * 2, 30.0)
+                backoff = min(backoff * 2, 5.0)
                 continue
 
             backoff = 1.0
@@ -587,11 +590,12 @@ class WfbManager:
             await self.stop()
             self._running = True  # stop() sets _running=False, re-enable
 
-            if self._restart_count >= self._max_restarts:
-                log.error("wfb_max_restarts_reached", count=self._restart_count)
-                break
-
+            # No give-up cap on the run loop either. Fixed 5 s ceiling
+            # on the backoff (down from 30 s) so we recover snappily
+            # when the upstream comes back. Per the GS philosophy: this
+            # process exists to relay video — recovery latency dominates
+            # over CPU savings.
             await asyncio.sleep(backoff)
-            backoff = min(backoff * 2, 30.0)
+            backoff = min(backoff * 2, 5.0)
 
         self._state = LinkState.DISCONNECTED

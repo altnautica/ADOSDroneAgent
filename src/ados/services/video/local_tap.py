@@ -100,10 +100,25 @@ DEFAULT_RTSP_URL = "rtsp://127.0.0.1:8554/main"
 DEFAULT_WIDTH = 480
 DEFAULT_HEIGHT = 176
 
-# Bus auto-restart policy.
-_MAX_RESTART_ATTEMPTS = 3
-_RESTART_BACKOFF_SECONDS = 2.0
-_RESTART_FAILURE_WINDOW_SECONDS = 30.0
+# Bus auto-restart policy. Fixed 2-second retry, forever.
+#
+# The ground station's job is to show video. Recovery latency from a
+# transient upstream outage matters far more than the CPU saved by an
+# exponential backoff: each restart attempt is two gstreamer state
+# transitions (~20 ms of work) so even at 0.5 Hz the cost is well
+# under 1% of one Pi 4B core, and the user sees the picture come
+# back within ~1 second of upstream recovering.
+#
+# Why no exponential backoff: the most common bus error is a startup-
+# race 404 from rtspsrc against mediamtx-gs (publisher not yet up).
+# That clears in 5-30 s on its own. With backoff, the operator could
+# end up waiting 30 s for the next probe to land in the recovery
+# window. Fixed 2 s means median recovery ≈ 1 s.
+#
+# Why no cap: per Rule 26, any operator-visible failure that needs
+# SSH to clear is a bug. The tap retries indefinitely while the user
+# is on the video page; ``on_leave`` cancels the timer.
+_RESTART_RETRY_INTERVAL_SECONDS = 2.0
 
 # Reconnect ladder for the RTSP source itself when the pipeline starts
 # but never receives a frame. Capped at 30 s so a long encoder outage
@@ -486,7 +501,9 @@ class LocalVideoTap:
 
         self._decoder_type: str | None = None
         self._pipeline_state: str = "idle"
-        self._restart_failures: deque[float] = deque(maxlen=_MAX_RESTART_ATTEMPTS)
+        # Counter only used to walk the backoff ladder. Never used as
+        # a give-up gate — the tap retries forever.
+        self._consecutive_restart_failures: int = 0
 
         # Lazily-bound gstreamer / PyGObject objects. Held as Any so the
         # type checker doesn't need PyGObject installed in CI.
@@ -965,6 +982,10 @@ class LocalVideoTap:
                     "local_tap_first_frame",
                     decoder=self._decoder_type,
                 )
+            # Any successful frame resets the consecutive-failure counter
+            # so the next bus error logs `attempt=1` rather than carrying
+            # the prior session's count. Log line stays meaningful.
+            self._consecutive_restart_failures = 0
         finally:
             buf.unmap(mapinfo)
         return 0  # Gst.FlowReturn.OK
@@ -998,30 +1019,20 @@ class LocalVideoTap:
         return True
 
     def _maybe_auto_restart(self, *, reason: str) -> None:
-        """Try a single restart with backoff; surface failure cap to UI."""
-        now = time.monotonic()
-        # Trim failures outside the rolling window so a single 30-min
-        # outage doesn't permanently mark the tap as failed.
-        while (
-            self._restart_failures
-            and (now - self._restart_failures[0]) > _RESTART_FAILURE_WINDOW_SECONDS
-        ):
-            self._restart_failures.popleft()
-        if len(self._restart_failures) >= _MAX_RESTART_ATTEMPTS:
-            self._pipeline_state = "failed"
-            self._logger.warning(
-                "local_tap_restart_cap_hit",
-                reason=reason,
-                window_s=_RESTART_FAILURE_WINDOW_SECONDS,
-            )
-            return
-        self._restart_failures.append(now)
+        """Schedule the next restart attempt — fixed 2 s, forever."""
         gst = self._Gst
         pipeline = self._pipeline
         if gst is None or pipeline is None:
             return
+        self._consecutive_restart_failures += 1
+        self._logger.info(
+            "local_tap_restart_scheduled",
+            reason=reason,
+            delay_s=_RESTART_RETRY_INTERVAL_SECONDS,
+            attempt=self._consecutive_restart_failures,
+        )
         threading.Timer(
-            _RESTART_BACKOFF_SECONDS,
+            _RESTART_RETRY_INTERVAL_SECONDS,
             self._do_restart,
             kwargs={"reason": reason},
         ).start()
