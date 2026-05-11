@@ -72,6 +72,14 @@ LCD_PAGE_REQUEST_PATH = ADOS_RUN_DIR / "lcd-page-request.json"
 # OLED service's private state directly.
 LCD_VIDEO_TAP_PATH = ADOS_RUN_DIR / "lcd-video-tap.json"
 
+# Phase 13: in-process GStreamer air-side pipeline publishes its stats
+# snapshot to this path at 1 Hz. Consumed by the REST surface (``GET
+# /api/v1/video/air-pipeline``) and the cloud heartbeat enricher so the
+# GCS can render encoder + pipeline-flavor pills without IPC into the
+# video service. The file is absent when the legacy bash air pipeline
+# owns the stream.
+AIR_PIPELINE_STATS_PATH = ADOS_RUN_DIR / "air-pipeline.json"
+
 # ---------------------------------------------------------------------------
 # Config directory: /etc/ados/
 # Persistent operator-owned configuration. Written by the installer,

@@ -219,6 +219,27 @@ class VideoConfig(BaseModel):
         ge=1,
         le=60,
     )
+    # Opt into the in-process GStreamer air-side pipeline that replaces
+    # the legacy bash composition of camera-capture + ffmpeg-encoder +
+    # mediamtx-air + ffmpeg-tee + python-sei-injector + ffmpeg-RTP with a
+    # single PyGObject-driven pipeline writing RTP directly to UDP 5600
+    # for wfb_tx. Default off until bench-validated; flip per-rig in
+    # /etc/ados/config.yaml under ``video.use_gst_air_pipeline`` and
+    # restart the agent. When false, the legacy bash path is unchanged.
+    use_gst_air_pipeline: bool = False
+    # When the GStreamer pipeline can choose between a hardware encoder
+    # (v4l2h264enc on Pi, mpph264enc on Rockchip, omxh264enc / nvv4l2h264enc
+    # on Jetson) and the software libx264 fallback, prefer hardware. Set
+    # false to force software for A/B benchmarking or when the hardware
+    # path is known fragile on a given rig.
+    prefer_hw_encoder: bool = True
+    # UDP port the GStreamer pipeline emits a second RTP copy to when
+    # cloud relay is enabled. mediamtx-air's udpRead ingest binds the
+    # same port and republishes as RTSP/WHEP for the browser preview.
+    # Only used when ``cloud_relay_url`` is also set; otherwise the
+    # branch is muted at the pipeline's identity-element gate and no
+    # packets leave the loopback interface.
+    cloud_rtp_port: int = 8000
 
 
 # --- Network ---

@@ -10,12 +10,15 @@ import signal
 import sys
 import time
 from enum import StrEnum
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import httpx
 
 from ados.core.logging import get_logger
 from ados.hal.camera import discover_cameras
+from ados.hal.detect import detect_board
+from ados.services.video.air_pipeline import AirPipeline, AirPipelineUnavailable
 from ados.services.video.camera_mgr import CameraManager, CameraRole
 from ados.services.video.encoder import (
     EncoderConfig,
@@ -146,6 +149,20 @@ class VideoPipeline:
         # the encoder pointed at one device while camera_mgr says
         # another.
         self._switch_lock = asyncio.Lock()
+        # Phase 13 in-process GStreamer air-side pipeline. Mutually
+        # exclusive with the legacy encoder + wfb_tee subprocess tree;
+        # selected at start_stream() based on the
+        # ``use_gst_air_pipeline`` config flag. When None, the legacy
+        # bash-pipeline path is in force.
+        self._air_pipeline: AirPipeline | None = None
+        # Optional cloud-relay bridge sidecar: when the GST air pipeline
+        # is in use AND cloud_relay_url is set, this one ffmpeg subprocess
+        # reads RTP from UDP <cloud_rtp_port> and pushes RTSP to the
+        # local mediamtx-air. Lifecycle is tied to the air pipeline.
+        # Replaces the legacy 3-subprocess bash chain (ffmpeg + python +
+        # ffmpeg) with a single ffmpeg.
+        self._air_cloud_bridge_process: asyncio.subprocess.Process | None = None
+        self._air_cloud_bridge_stderr_task: asyncio.Task | None = None
 
     @property
     def state(self) -> PipelineState:
@@ -195,6 +212,23 @@ class VideoPipeline:
             log.error("no_primary_camera")
             self._state = PipelineState.ERROR
             return False
+
+        # Phase 13: in-process GStreamer air-side pipeline. Replaces the
+        # legacy ffmpeg-encoder + mediamtx-air + ffmpeg-tee + python
+        # sei_injector chain with one PyGObject-driven pipeline. Falls
+        # back to the legacy bash path if PyGObject or a compatible
+        # encoder element is missing so a misconfigured rig still has
+        # video.
+        if bool(getattr(self._config, "use_gst_air_pipeline", False)):
+            ok = await self._start_air_pipeline(primary)
+            if ok:
+                return True
+            log.warning(
+                "air_pipeline_unavailable_fallback",
+                msg="falling back to legacy bash air pipeline",
+            )
+            # Reset so the legacy path's idempotency assumptions hold.
+            self._state = PipelineState.STARTING
 
         # Detect encoder
         self._encoder_type = detect_encoder_for_camera(primary)
@@ -267,6 +301,221 @@ class VideoPipeline:
             log.error("encoder_start_failed", error=str(exc), exc_info=True)
             await self._teardown_after_partial_start()
             return False
+
+    async def _start_air_pipeline(self, primary) -> bool:
+        """Start the Phase 13 in-process GStreamer air pipeline.
+
+        Mediamtx-air is only spawned when ``cloud_relay_url`` is set —
+        on a bench / LAN rig the GStreamer pipeline writes RTP straight
+        to wfb_tx's UDP 5600 with no RTSP intermediate. When cloud
+        relay is enabled, mediamtx-air ingests via a single ffmpeg
+        sidecar that bridges UDP 8000 RTP → RTSP push, and republishes
+        as RTSP/WHEP.
+
+        Returns False (without setting state to ERROR) when PyGObject
+        or a compatible encoder is missing, so the caller can fall
+        back to the legacy bash pipeline cleanly.
+        """
+        cloud_url = getattr(self._config, "cloud_relay_url", "") or ""
+        cloud_enabled = bool(cloud_url)
+
+        # Mediamtx-air only when the cloud branch is in play. The new
+        # pipeline doesn't need a local RTSP intermediate for the wfb
+        # path; the udpsink goes straight to 127.0.0.1:5600 for wfb_tx.
+        if cloud_enabled:
+            self._mediamtx.generate_config({"main": "publisher"})
+            mtx_ok = await self._mediamtx.start()
+            if not mtx_ok:
+                log.warning(
+                    "air_pipeline_mediamtx_start_failed",
+                    msg="cloud relay branch will be inert",
+                )
+                cloud_enabled = False
+
+        board = detect_board()
+        try:
+            self._air_pipeline = AirPipeline(
+                video_config=self._config,
+                camera=primary,
+                board_soc=board.soc,
+                board_hw_codecs=board.hw_video_codecs,
+                cloud_relay_enabled=cloud_enabled,
+                sei_latency_enabled=bool(
+                    getattr(self._config.wfb, "sei_latency", False)
+                ),
+            )
+            await self._air_pipeline.start()
+        except AirPipelineUnavailable as exc:
+            log.warning(
+                "air_pipeline_unavailable",
+                error=str(exc),
+            )
+            self._air_pipeline = None
+            # Tear down mediamtx if we spawned it; the legacy path will
+            # re-spawn it shortly with its own config.
+            if cloud_enabled:
+                try:
+                    await self._mediamtx.stop()
+                except Exception as stop_exc:  # noqa: BLE001
+                    log.debug(
+                        "air_pipeline_mediamtx_stop_after_fail",
+                        error=str(stop_exc),
+                    )
+            return False
+        except Exception as exc:  # noqa: BLE001
+            log.error(
+                "air_pipeline_start_failed",
+                error=str(exc),
+                exc_info=True,
+            )
+            self._air_pipeline = None
+            if cloud_enabled:
+                try:
+                    await self._mediamtx.stop()
+                except Exception as stop_exc:  # noqa: BLE001
+                    log.debug(
+                        "air_pipeline_mediamtx_stop_after_fail",
+                        error=str(stop_exc),
+                    )
+            self._state = PipelineState.ERROR
+            return False
+
+        # Stamp encoder_type so get_status() still surfaces a useful
+        # value to the GCS even though no encoder ffmpeg subprocess
+        # exists.
+        chosen = self._air_pipeline.stats().get("encoder_name") or ""
+        try:
+            self._encoder_type = EncoderType(chosen)
+        except (ValueError, KeyError):
+            self._encoder_type = None
+
+        # Spawn the cloud-bridge ffmpeg sidecar when cloud relay is on
+        # and mediamtx-air is up. One subprocess vs the legacy 3-stage
+        # bash chain. The pipeline's tee element is already emitting
+        # RTP at UDP <cloud_rtp_port> — we just need to republish it as
+        # RTSP into mediamtx-air for browser WHEP.
+        if cloud_enabled:
+            await self._start_air_cloud_bridge()
+
+        self._state = PipelineState.RUNNING
+        self._started_at = time.monotonic()
+        self._first_packet_seen = True  # in-process pipeline; no probe race
+        log.info(
+            "air_pipeline_started",
+            camera=primary.name,
+            encoder=chosen,
+            cloud_branch=cloud_enabled,
+        )
+        return True
+
+    async def _start_air_cloud_bridge(self) -> bool:
+        """Bridge GStreamer's UDP RTP output to mediamtx-air as RTSP push.
+
+        One ffmpeg subprocess reading ``rtp://127.0.0.1:<cloud_rtp_port>``
+        and pushing ``rtsp://localhost:8554/main``. Replaces the legacy
+        3-subprocess bash chain in the cloud-on path; the bench-only
+        path skips this entirely.
+        """
+        if (
+            self._air_cloud_bridge_process is not None
+            and self._air_cloud_bridge_process.returncode is None
+        ):
+            return True
+        cloud_port = int(getattr(self._config, "cloud_rtp_port", 8000))
+        local_rtsp = f"rtsp://localhost:{self._mediamtx.rtsp_port}/main"
+        # The input ffmpeg needs an SDP to know the codec; we describe
+        # H.264/payload-96 inline via the ``-protocol_whitelist`` +
+        # ``-i`` form. Simpler than writing a real SDP file to disk.
+        sdp_inline = (
+            f"v=0\\n"
+            f"o=- 0 0 IN IP4 127.0.0.1\\n"
+            f"s=ados\\n"
+            f"c=IN IP4 127.0.0.1\\n"
+            f"t=0 0\\n"
+            f"m=video {cloud_port} RTP/AVP 96\\n"
+            f"a=rtpmap:96 H264/90000\\n"
+        )
+        try:
+            # Write SDP to /run/ados so the ffmpeg can read it; cheaper
+            # than coordinating stdin.
+            sdp_path = Path("/run/ados/air-pipeline-cloud.sdp")
+            try:
+                sdp_path.parent.mkdir(parents=True, exist_ok=True)
+            except OSError:
+                pass
+            try:
+                sdp_path.write_text(sdp_inline.replace("\\n", "\n"))
+            except OSError as exc:
+                log.warning(
+                    "air_cloud_bridge_sdp_write_failed", error=str(exc),
+                )
+                return False
+            self._air_cloud_bridge_process = await asyncio.create_subprocess_exec(
+                "ffmpeg",
+                "-protocol_whitelist", "file,udp,rtp",
+                "-fflags", "nobuffer",
+                "-flags", "low_delay",
+                "-i", str(sdp_path),
+                "-c:v", "copy",
+                "-f", "rtsp",
+                "-rtsp_transport", "tcp",
+                "-muxdelay", "0",
+                "-muxpreload", "0",
+                local_rtsp,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.PIPE,
+                start_new_session=True,
+            )
+            self._air_cloud_bridge_stderr_task = asyncio.create_task(
+                self._drain_stderr(
+                    self._air_cloud_bridge_process, "air_cloud_bridge"
+                )
+            )
+            log.info(
+                "air_cloud_bridge_started",
+                pid=self._air_cloud_bridge_process.pid,
+                cloud_rtp_port=cloud_port,
+                destination=local_rtsp,
+            )
+            return True
+        except FileNotFoundError:
+            log.error("air_cloud_bridge_ffmpeg_not_found")
+            return False
+        except Exception as exc:  # noqa: BLE001
+            log.error("air_cloud_bridge_start_failed", error=str(exc))
+            return False
+
+    async def _stop_air_cloud_bridge(self) -> None:
+        """Stop the cloud-bridge ffmpeg sidecar via process-group SIGTERM."""
+        if self._air_cloud_bridge_stderr_task is not None:
+            self._air_cloud_bridge_stderr_task.cancel()
+            self._air_cloud_bridge_stderr_task = None
+        proc = self._air_cloud_bridge_process
+        if proc is not None and proc.returncode is None:
+            pgid: int | None = None
+            try:
+                pgid = os.getpgid(proc.pid)
+            except (ProcessLookupError, OSError):
+                pgid = None
+            try:
+                if pgid is not None:
+                    os.killpg(pgid, signal.SIGTERM)
+                else:
+                    proc.terminate()
+            except (ProcessLookupError, OSError):
+                pass
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=5.0)
+            except (TimeoutError, asyncio.CancelledError):
+                try:
+                    if pgid is not None:
+                        os.killpg(pgid, signal.SIGKILL)
+                    else:
+                        proc.kill()
+                except (ProcessLookupError, OSError):
+                    pass
+            log.info("air_cloud_bridge_stopped", pgid=pgid)
+        self._air_cloud_bridge_process = None
 
     async def _teardown_after_partial_start(self) -> None:
         """Roll back partial start. Stops any process spawned after mediamtx.start()."""
@@ -661,6 +910,16 @@ class VideoPipeline:
     async def stop_stream(self) -> None:
         """Stop the encoding pipeline and mediamtx."""
         log.info("stop_stream_begin")
+        # Phase 13 in-process GStreamer pipeline. Idempotent stop;
+        # the legacy bash teardown below is a no-op when air pipeline
+        # owns the stream.
+        if self._air_pipeline is not None:
+            try:
+                await self._air_pipeline.stop()
+            except Exception as exc:  # noqa: BLE001
+                log.warning("air_pipeline_stop_failed", error=str(exc))
+            self._air_pipeline = None
+        await self._stop_air_cloud_bridge()
         await self.stop_wfb_tee()
         await self.stop_cloud_push()
 
@@ -757,6 +1016,15 @@ class VideoPipeline:
 
     async def _check_health(self) -> bool:
         """Check if the encoder and mediamtx are both running and healthy."""
+        # Phase 13: when the in-process GStreamer pipeline owns the
+        # stream there is no ffmpeg encoder + mediamtx-air to probe;
+        # health is whether the pipeline thread reports a live state.
+        # The pipeline's own bus watchdog + tx-byte watchdog handle
+        # restart internally per Rule 26 / Rule 37, so the outer
+        # restart loop only fires if the pipeline gives up entirely
+        # (which by design never happens — there is no give-up).
+        if self._air_pipeline is not None:
+            return self._air_pipeline.is_running()
         if self._encoder_process is None:
             return False
         if self._encoder_process.returncode is not None:
@@ -1096,6 +1364,9 @@ class VideoPipeline:
             self._wfb_tee_process is not None
             and self._wfb_tee_process.returncode is None
         )
+        air_pipeline_block = None
+        if self._air_pipeline is not None:
+            air_pipeline_block = self._air_pipeline.stats()
         return {
             "state": self._state.value,
             "encoder": self._encoder_type.value if self._encoder_type else None,
@@ -1104,6 +1375,7 @@ class VideoPipeline:
             "mediamtx": self._mediamtx.to_dict(),
             "cloud_push": cloud_push,
             "wfb_tee": wfb_tee,
+            "air_pipeline": air_pipeline_block,
         }
 
     async def restart_with_camera(self, role: str, device_path: str) -> None:
@@ -1240,6 +1512,20 @@ class VideoPipeline:
             log.error("no_primary_camera")
             self._state = PipelineState.ERROR
             return False
+
+        # Phase 13: honour the same flag the cold-start path honours so
+        # a mid-flight camera switch doesn't silently fall back to the
+        # legacy bash pipeline. AirPipeline rebuilds with the new
+        # camera object inside ``_start_air_pipeline``.
+        if bool(getattr(self._config, "use_gst_air_pipeline", False)):
+            ok = await self._start_air_pipeline(primary)
+            if ok:
+                return True
+            log.warning(
+                "air_pipeline_unavailable_fallback",
+                msg="falling back to legacy bash air pipeline after camera switch",
+            )
+            self._state = PipelineState.STARTING
 
         self._encoder_type = detect_encoder_for_camera(primary)
         if self._encoder_type is None:

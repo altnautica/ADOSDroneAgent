@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Any
 
 from ados.core.paths import (
+    AIR_PIPELINE_STATS_PATH,
     DISPLAY_CONF_PATH,
     LCD_VIDEO_TAP_PATH,
     TOUCH_CALIB_PATH,
@@ -405,6 +406,27 @@ def read_recent_touch() -> dict | None:
         return None
 
 
+def read_air_pipeline_state() -> dict | None:
+    """Read ``/run/ados/air-pipeline.json`` published by the AirPipeline.
+
+    Returns ``None`` when the file is absent (legacy bash air pipeline
+    in force, or the air-side service has not booted yet) so the
+    heartbeat enricher can omit the related fields entirely.
+    """
+    blob = _read_json_with_retry(AIR_PIPELINE_STATS_PATH)
+    if blob is None:
+        return None
+    # Drop snapshots older than 15 s — the air pipeline stats publisher
+    # ticks at 1 Hz so a 15 s gap means the pipeline has crashed and
+    # we should not surface stale state to the GCS.
+    updated_at = blob.get("updated_at_ms")
+    if isinstance(updated_at, (int, float)):
+        age_ms = (time.time() * 1000) - float(updated_at)
+        if age_ms > 15_000:
+            return None
+    return blob
+
+
 def read_video_recording_state() -> bool | None:
     """Ask the local agent whether the recorder is currently active.
 
@@ -495,6 +517,25 @@ def build_display_enrichment(
     recording = read_video_recording_state()
     if recording is not None:
         enrich["videoRecording"] = bool(recording)
+    # Phase 13: air-side pipeline flavor + encoder identity so the GCS
+    # can render a "GST" pill on the drone card and surface the chosen
+    # encoder (HW vs SW) on the Configure tab. Absent when the legacy
+    # bash air pipeline owns the stream.
+    air = read_air_pipeline_state()
+    if air is not None:
+        enrich["videoPipelineFlavor"] = "gst-native"
+        encoder_name = air.get("encoder_name")
+        if isinstance(encoder_name, str) and encoder_name:
+            enrich["videoEncoderName"] = encoder_name
+        hw_accel = air.get("encoder_hw_accel")
+        if isinstance(hw_accel, bool):
+            enrich["videoEncoderHwAccel"] = hw_accel
+        camera_source = air.get("camera_source")
+        if isinstance(camera_source, str) and camera_source:
+            enrich["videoCameraSource"] = camera_source
+        state = air.get("pipeline_state")
+        if isinstance(state, str) and state:
+            enrich["videoPipelineState"] = state
     return enrich
 
 

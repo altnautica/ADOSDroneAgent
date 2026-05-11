@@ -519,3 +519,37 @@ async def switch_camera(body: CameraSwitchBody):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     return {"ok": True, "restarting": True}
+
+
+# Phase 13: in-process GStreamer air pipeline stats. The pipeline runs
+# in the ``ados-video`` process and publishes its stats to a
+# ``/run/ados/air-pipeline.json`` snapshot at 1 Hz so this endpoint
+# in the API process can serve them without IPC. When the snapshot
+# file is missing the air pipeline is not in use (legacy bash path
+# active) and the endpoint returns a 204 No Content.
+
+
+@router.get("/v1/video/air-pipeline")
+async def get_air_pipeline_status():
+    """Return the air-side GStreamer pipeline's live stats snapshot.
+
+    Reads the same ``/run/ados/air-pipeline.json`` the heartbeat
+    enricher reads. Returns 204 when the air pipeline is not in use
+    (legacy bash air pipeline owns the stream).
+    """
+    from ados.core.paths import AIR_PIPELINE_STATS_PATH
+
+    if not AIR_PIPELINE_STATS_PATH.exists():
+        return Response(status_code=204)
+    try:
+        import json
+
+        blob = json.loads(AIR_PIPELINE_STATS_PATH.read_text())
+    except (OSError, ValueError) as exc:
+        log.warning("air_pipeline_status_read_failed", error=str(exc))
+        raise HTTPException(
+            status_code=503, detail="air pipeline stats unavailable"
+        ) from exc
+    if not isinstance(blob, dict):
+        return Response(status_code=204)
+    return blob
