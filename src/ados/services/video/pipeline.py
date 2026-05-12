@@ -450,17 +450,28 @@ class VideoPipeline:
                     "air_cloud_bridge_sdp_write_failed", error=str(exc),
                 )
                 return False
+            # `-probesize 1M -analyzeduration 1000000` mirror the
+            # ground sidecar (mediamtx_manager.py): the SDP we read
+            # carries only the encoding name + clock rate, codec
+            # config arrives inline in the first IDR. 1 s/1 MB is the
+            # safe floor; ffmpeg's defaults are larger and would gate
+            # cold-start to ~5 s on this path too. NB: still no
+            # `-max_delay 0` here — same codec-discovery hazard
+            # documented at lines 720-728 and in the ground sidecar.
             self._air_cloud_bridge_process = await asyncio.create_subprocess_exec(
                 "ffmpeg",
                 "-protocol_whitelist", "file,udp,rtp",
                 "-fflags", "nobuffer",
                 "-flags", "low_delay",
+                "-probesize", "1M",
+                "-analyzeduration", "1000000",
                 "-i", str(sdp_path),
                 "-c:v", "copy",
                 "-f", "rtsp",
                 "-rtsp_transport", "tcp",
                 "-muxdelay", "0",
                 "-muxpreload", "0",
+                "-flush_packets", "1",
                 local_rtsp,
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.PIPE,
@@ -780,6 +791,16 @@ class VideoPipeline:
                 # when stderr is captured (not a tty); our watchdog can't
                 # tell working-but-quiet from wedged-and-stuck, and
                 # fires false-positive restarts every ~15 s.
+                # `-muxdelay 0 -muxpreload 0 -flush_packets 1` strip the
+                # RTP muxer's default 0.7 s mux delay + 0.5 s preload +
+                # output-side packet aggregation; the bash/SEI branch
+                # above already passes these on its cmd_out ffmpeg. The
+                # plain branch had been silently inheriting ffmpeg
+                # defaults, costing ~1.2 s of constant glass-to-glass
+                # latency on every operator's pipeline. NB: do NOT add
+                # `-max_delay 0` here. The bash-branch comment above and
+                # the ground sidecar (mediamtx_manager.py) both document
+                # that it breaks codec discovery on the input ffmpeg.
                 self._wfb_tee_process = await asyncio.create_subprocess_exec(
                     "ffmpeg",
                     "-fflags", "nobuffer",
@@ -790,6 +811,9 @@ class VideoPipeline:
                     "-f", "rtp",
                     "-payload_type", str(_WFB_TEE_PAYLOAD_TYPE),
                     "-ssrc", _WFB_TEE_SSRC,
+                    "-muxdelay", "0",
+                    "-muxpreload", "0",
+                    "-flush_packets", "1",
                     "-progress", "pipe:2",
                     rtp_url,
                     stdout=asyncio.subprocess.DEVNULL,
