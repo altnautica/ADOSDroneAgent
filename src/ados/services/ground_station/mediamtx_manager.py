@@ -192,13 +192,14 @@ class MediamtxGsManager:
             # 512 still tolerates routine wifi retries while keeping
             # the failure surface visible to the ffmpeg supervisor.
             "writeQueueSize": 512,
-            # Explicit read/write timeouts so a wedged peer (browser
-            # tab paused, NAT path dropped) is reaped on a clock,
-            # not whenever mediamtx happens to notice. The defaults
-            # are 10 s/10 s; 5 s/5 s aligns with the ffmpeg frame-
-            # stall window so failures recycle in the same cadence.
-            "readTimeout": "5s",
-            "writeTimeout": "5s",
+            # NB: do NOT override readTimeout / writeTimeout below
+            # the gortsplib defaults (10 s / 10 s). A 5 s ceiling
+            # under low-RAM swap pressure caught system stutters
+            # the 10 s default absorbs, and produced a deterministic
+            # 120 s publisher eviction cycle on Pi 4B 1 GB boards.
+            # The 10 s default gives the kernel enough room to page
+            # mediamtx's working set back in without tearing the
+            # publisher session.
             "udpMaxPayloadSize": 1472,
             "webrtc": True,
             "webrtcAddress": f":{self._core._webrtc_port}",
@@ -350,6 +351,19 @@ class MediamtxGsManager:
             # found, not after the full window.
             "-probesize", "20M",
             "-analyzeduration", "20M",
+            # RTP demuxer reorder + max-delay window. ffmpeg's default
+            # `max_delay = 500_000` (500 ms) is what produces the
+            # `[sdp @ ...] max delay reached. need to consume packet`
+            # + `RTP: missed N packets` cascade on any sub-second
+            # system stutter (swap thrash, USB sysfs walk, kernel
+            # task-group rebalance). Widening to 2 s lets the demuxer
+            # absorb a brief stall and resume without dropping a
+            # whole burst of packets. `reorder_queue_size` is the
+            # max number of packets held for reorder; bumping from
+            # the libav default 500 to a matched 256 keeps the
+            # buffer bounded for a 4 Mbps live stream.
+            "-max_delay", "2000000",
+            "-reorder_queue_size", "256",
             "-f", "sdp",
             "-i", str(GROUND_SDP_PATH),
             "-c:v", "copy",
