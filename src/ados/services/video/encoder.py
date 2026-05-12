@@ -106,6 +106,74 @@ def detect_encoder_for_camera(camera: CameraInfo) -> EncoderType | None:
     return None
 
 
+def board_supports_h265_encode() -> bool:
+    """Best-effort check for H.265 hardware encode on this board.
+
+    Reads the active board profile's HAL YAML to look for
+    ``h265_enc`` in the ``hw_video_codecs`` list. Returns False
+    when the HAL surface isn't available so the encoder selection
+    falls back to H.264 silently.
+
+    Used by the future dual-codec path (full encoder branch +
+    parallel mediamtx publish + WHEP codec negotiation) to decide
+    whether to offer H.265 as an option. Today the encoder is
+    H.264-only and this helper exists as scaffolding for L7.
+    """
+    try:
+        from ados.hal import detect as hal_detect
+
+        board = hal_detect.detect_board()
+        if board is None:
+            return False
+        codecs = getattr(board, "hw_video_codecs", None) or []
+        return "h265_enc" in {str(c).lower() for c in codecs}
+    except Exception:
+        return False
+
+
+def _detect_hw_h265_encoder() -> str | None:
+    """Find the ffmpeg HEVC encoder name on this system.
+
+    Mirrors ``_detect_hw_h264_encoder`` for the H.265 path. The
+    Rockchip rkmpp gotcha applies symmetrically: on Rockchip the
+    ffmpeg ``hevc_v4l2m2m`` plugin reports as available but hangs
+    in the probe. Short-circuits to None on Rockchip so the
+    pipeline opts into GStreamer mpph265enc via the gst path
+    builder once L7 is fully wired.
+    """
+    try:
+        with open("/proc/device-tree/compatible", "rb") as _f:
+            if b"rockchip" in _f.read():
+                return None
+    except Exception:
+        pass
+    try:
+        result = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-encoders"],
+            capture_output=True, text=True, timeout=5,
+        )
+        output = result.stdout
+        hw_encoders = ["hevc_v4l2m2m", "hevc_nvenc", "hevc_vaapi"]
+        for enc in hw_encoders:
+            if enc in output:
+                return enc
+    except Exception:
+        pass
+    return None
+
+
+def _has_mpph265enc() -> bool:
+    """Check if GStreamer's mpph265enc (Rockchip HEVC VPU) is available."""
+    try:
+        result = subprocess.run(
+            ["gst-inspect-1.0", "mpph265enc"],
+            capture_output=True, timeout=5,
+        )
+        return result.returncode == 0
+    except Exception:
+        return False
+
+
 def _detect_hw_h264_encoder() -> str | None:
     """Check if ffmpeg has a hardware H.264 encoder available.
 
