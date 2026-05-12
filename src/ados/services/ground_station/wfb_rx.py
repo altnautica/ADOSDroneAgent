@@ -48,13 +48,17 @@ _RX_HEALTH_SILENCE_THRESHOLD_S = 30.0
 # (5599). The video fanout reads from there and emits to:
 #   - _WFB_RX_MEDIAMTX_UDP_PORT (5600) for the mediamtx-gs ffmpeg
 #     ingest sidecar (browser WHEP path, unchanged contract)
-#   - _WFB_RX_LCD_UDP_PORT     (5601) for the LCD's udpsrc front end
-#     (Phase 11 NEW direct path, bypasses mediamtx-gs RTSP indirection)
+#   - _WFB_RX_LCD_UDP_PORT     (5605) for the LCD's udpsrc front end
+#     (Phase 11 NEW direct path, bypasses mediamtx-gs RTSP indirection).
+#     Moved from 5601 because ffmpeg's -f sdp ingest opens RTCP on
+#     RTP+1 by default (RTP=5600, RTCP=5601) and a=rtcp in the SDP
+#     is silently ignored by the ffmpeg 5.x build we ship. Putting
+#     the LCD tap on 5605 leaves 5601 free for ffmpeg's RTCP.
 # Both consumers see every packet; SO_REUSEPORT would load-balance and
 # break RTP, so we use an explicit fanout instead.
 _WFB_RX_INTERNAL_UDP_PORT = 5599
 _WFB_RX_MEDIAMTX_UDP_PORT = 5600
-_WFB_RX_LCD_UDP_PORT = 5601
+_WFB_RX_LCD_UDP_PORT = 5605
 
 if TYPE_CHECKING:
     from ados.core.config import WfbConfig

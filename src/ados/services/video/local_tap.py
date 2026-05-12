@@ -101,7 +101,7 @@ _FPS_TICK_SECONDS = 1.0
 # Legacy callers (tests and the older rtspsrc bench-debug path) can
 # still pass an ``rtsp://...`` URL to LocalVideoTap.__init__; the
 # pipeline string builder dispatches on the prefix.
-DEFAULT_RTSP_URL = "5601"
+DEFAULT_RTSP_URL = "5605"
 
 # Target geometry for the LCD video region (480 px wide, 176 px tall —
 # leaves a 56 px metrics strip below).
@@ -513,7 +513,7 @@ def build_pipeline_string(
         try:
             udp_port = int(source_url)
         except (ValueError, TypeError):
-            udp_port = 5601
+            udp_port = 5605
         # `reuse=true` enables SO_REUSEADDR + SO_REUSEPORT so a quick
         # restart cycle (start() retry after a transient pipeline
         # construction failure) doesn't get "Address already in use"
