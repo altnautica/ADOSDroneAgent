@@ -506,14 +506,23 @@ def _build_ffmpeg_command(
         #   rather than batching writes; combined with the
         #   -muxdelay/-muxpreload work on the tee ffmpeg this is the
         #   last hop where ffmpeg can decide to wait.
-        # - intra-refresh=1 / scenecut=0: rolling intra-MB refresh
-        #   instead of large full-frame IDRs at scene cuts. The
-        #   periodic IDR (set by -g) still happens for absolute
-        #   recovery and late-joiner SPS/PPS, but mid-GOP an I-slice
-        #   walks across the frame so loss recovery is continuous
-        #   rather than gated on the next IDR.
+        # - scenecut=0: disable scene-cut detection. Without this,
+        #   libx264 inserts an extra IDR when a scene changes, which
+        #   spikes the bitrate. We do not need scene-cut adaptive
+        #   keyframes; -g 15 gives us a fixed 0.5 s IDR cadence which
+        #   is the recovery floor regardless of content.
         # - sliced-threads=0: per-slice threading adds queue latency
         #   per slice. -threads 2 already uses frame-level threading.
+        # - NB: intra-refresh=1 was tried in 0.23.x and silently broke
+        #   the wire path. libx264 replaces the keyint-driven IDR with
+        #   a rolling intra-MB pattern across N P-frames, which means
+        #   NO H.264 NAL type 5 (IDR) on the wire — only NAL type 1
+        #   with intra slices. ffmpeg and gstreamer ingest parsers
+        #   need a true IDR for codec-param bootstrap (SPS/PPS are
+        #   only emitted at IDRs); the L0 ingest sidecar throws
+        #   decode_slice_header errors forever without one. Keeping
+        #   traditional IDRs at the 500 ms cadence; intra-refresh
+        #   stays disabled.
         gop = max(config.fps // 2, 1)
         cmd.extend([
             "-pix_fmt", "yuv420p",
@@ -532,7 +541,6 @@ def _build_ffmpeg_command(
                 "sync-lookahead=0:"
                 "rc-lookahead=0:"
                 "sliced-threads=0:"
-                "intra-refresh=1:"
                 "scenecut=0"
             ),
             # Convert MP4-style NAL framing to Annex-B for downstream
