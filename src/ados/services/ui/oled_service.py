@@ -55,6 +55,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+import psutil
 from PIL import Image, ImageDraw
 
 from ados.core.config import load_config
@@ -1862,20 +1863,53 @@ class OledService:
         # retries start() with the existing 15s cooldown until mediamtx
         # publishes /main; once running, the tap auto-recovers from
         # transient errors via its own bus-error restart loop.
-        self._page_context.video_tap = self._build_video_tap()
+        #
+        # Memory-constrained gate: on a board with ≤ 1500 MB total RAM
+        # (Pi 4B 1 GB class, Pi Zero 2 W, Cubie A7Z) the always-on
+        # GStreamer pipeline competes with the WFB-ng → mediamtx →
+        # WebRTC chain for scheduler time and the system swap-thrashes
+        # under the combined load. Skip the tap entirely on those
+        # boards; the LCD still renders status pages, just not live
+        # video preview. Operators who want LCD video on a 1 GB board
+        # can plug into a 2 GB+ SBC.
+        try:
+            total_ram_mb = (
+                psutil.virtual_memory().total // (1024 * 1024)
+            )
+        except Exception:  # noqa: BLE001
+            total_ram_mb = 0
+        video_tap_enabled = total_ram_mb == 0 or total_ram_mb >= 1500
+        if video_tap_enabled:
+            self._page_context.video_tap = self._build_video_tap()
+        else:
+            self._page_context.video_tap = None
+            log.info(
+                "oled_video_tap_disabled_low_ram",
+                ram_mb=total_ram_mb,
+                msg=(
+                    "LCD video preview disabled on memory-constrained "
+                    "board; status pages still render. Frees ~130 % "
+                    "CPU on Pi 4B 1 GB."
+                ),
+            )
         tasks = [
             asyncio.create_task(self._render_forever(), name="oled_render"),
             asyncio.create_task(self._consume_buttons(), name="oled_buttons"),
             asyncio.create_task(self._poll_state_forever(), name="oled_poll"),
-            asyncio.create_task(
-                self._ensure_video_tap_forever(),
-                name="oled_video_tap",
-            ),
-            asyncio.create_task(
-                self._persist_tap_stats_forever(),
-                name="oled_tap_stats_persist",
-            ),
         ]
+        if video_tap_enabled:
+            tasks.append(
+                asyncio.create_task(
+                    self._ensure_video_tap_forever(),
+                    name="oled_video_tap",
+                ),
+            )
+            tasks.append(
+                asyncio.create_task(
+                    self._persist_tap_stats_forever(),
+                    name="oled_tap_stats_persist",
+                ),
+            )
         if self._touch_bridge is not None:
             tasks.append(
                 asyncio.create_task(self._touch_bridge.run(), name="oled_touch")
