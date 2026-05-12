@@ -66,7 +66,18 @@ GROUND_SDP_PATH = Path("/etc/ados/wfb/video.sdp")
 
 
 def _build_sdp(udp_port: int, payload_type: int) -> str:
-    """Return the SDP body that describes the wfb_rx RTP stream."""
+    """Return the SDP body that describes the wfb_rx RTP stream.
+
+    Explicit `a=rtcp` line moves the RTCP socket OFF udp_port+1.
+    The default RTP/AVP behavior is RTCP=RTP+1, which on our pipeline
+    collides with the LCD render-tap that listens on 5601 by design
+    (the video_fanout fans wfb_rx output to 5600 + 5601). Without
+    this hint, ffmpeg's auto-bind for RTCP lands on 5601, gets EADDRINUSE,
+    and the whole ingest dies in a restart loop. We move RTCP to
+    udp_port + 1000 (e.g. 6600 when RTP=5600) so the LCD tap is not
+    in the RTCP socket's path.
+    """
+    rtcp_port = udp_port + 1000
     return (
         "v=0\n"
         "o=- 0 0 IN IP4 127.0.0.1\n"
@@ -74,6 +85,7 @@ def _build_sdp(udp_port: int, payload_type: int) -> str:
         "c=IN IP4 127.0.0.1\n"
         "t=0 0\n"
         f"m=video {udp_port} RTP/AVP {payload_type}\n"
+        f"a=rtcp:{rtcp_port}\n"
         f"a=rtpmap:{payload_type} H264/90000\n"
         f"a=fmtp:{payload_type} packetization-mode=1\n"
     )
