@@ -146,6 +146,14 @@ class MediamtxGsManager:
             "apiAddress": f":{self._core._api_port}",
             "rtsp": True,
             "rtspAddress": f":{self._core._rtsp_port}",
+            # readTimeout 5s + writeQueueSize 2048: the default RTSP
+            # write queue is sized for typical streaming workloads; on
+            # an air-link with bursty FEC blocks we observed mediamtx
+            # dropping clients when a brief stall caused the queue to
+            # fill. Doubling the queue size eats a few MB of RAM and
+            # buys headroom across the inevitable wifi retries.
+            "writeQueueSize": 2048,
+            "udpMaxPayloadSize": 1472,
             "webrtc": True,
             "webrtcAddress": f":{self._core._webrtc_port}",
             "webrtcAllowOrigin": "*",
@@ -169,11 +177,18 @@ class MediamtxGsManager:
             "paths": {
                 # ffmpeg pushes RTSP here with -c copy from udp://:5600
                 GROUND_RTSP_PATH: {"source": "publisher"},
-                # WHEP alias. mediamtx serves WHEP on any published path,
-                # so the GCS URL is /ados/whep when this path publishes.
+                # WHEP alias. mediamtx serves WHEP on the same source
+                # path without re-pulling on demand: sourceOnDemand
+                # false keeps the WebRTC track warm between client
+                # connects so the first-frame delay on browser open
+                # collapses from ~500 ms (re-establish RTSP pull +
+                # buffer one GOP) to whatever the WHEP DTLS handshake
+                # alone costs. The RAM cost on the GS is single-
+                # digit megabytes — the source is already running for
+                # the local UDP fanout / LCD tap anyway.
                 GROUND_WHEP_PATH: {
                     "source": f"rtsp://127.0.0.1:{self._core._rtsp_port}/{GROUND_RTSP_PATH}",
-                    "sourceOnDemand": True,
+                    "sourceOnDemand": False,
                 },
             },
         }

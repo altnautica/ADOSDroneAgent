@@ -291,6 +291,7 @@ do_uninstall() {
         rm -f "/etc/systemd/system/ados-agent.service"
     fi
     rm -f /etc/tmpfiles.d/ados.conf
+    rm -f /etc/sysctl.d/99-ados-video.conf
     rm -rf /run/ados
     rm -f /etc/update-motd.d/30-ados
     systemctl daemon-reload
@@ -950,6 +951,11 @@ TMPEOF
     # service starts.
     install_plugin_tmpfiles
 
+    # Kernel UDP buffer ceiling for the video pipeline. Idempotent
+    # drop-in at /etc/sysctl.d/99-ados-video.conf; applies on the
+    # spot so the upgrade path doesn't need a reboot.
+    install_video_sysctl
+
     # Write environment file
     local device_id=""
     if [ -f "${DEVICE_ID_FILE}" ]; then
@@ -1112,6 +1118,41 @@ install_plugin_slice() {
 
 # Drop the plugin tmpfiles.d snippet into /etc/tmpfiles.d and
 # materialize the runtime directory. Idempotent: safe to re-run.
+# Drop a sysctl tuning file that bumps the kernel UDP socket buffer
+# ceiling so the wfb_rx + fanout + mediamtx ingest chain can absorb
+# bursty 802.11 frame deliveries without dropping. The video_fanout
+# socket already requests 4 MiB SO_RCVBUF/SO_SNDBUF; on a stock
+# Debian/Ubuntu kernel net.core.rmem_max is 208 KiB so the request
+# is silently clamped. Bumping the ceiling to 16 MiB lets the
+# requested allocation actually land.
+#
+# This is a well-trodden tuning for any high-throughput UDP receiver
+# and matches the values mediamtx, gstreamer, and ffmpeg recommend in
+# their own production-tuning docs. Idempotent: writes a drop-in,
+# applies once via sysctl --system fallback. Removed cleanly by the
+# uninstall path below.
+install_video_sysctl() {
+    info "Installing video sysctl tuning..."
+    cat > /etc/sysctl.d/99-ados-video.conf <<'SYSCTLEOF'
+# ADOS video pipeline UDP buffer ceiling. Allows the wfb_rx +
+# video_fanout + mediamtx UDP sockets to actually allocate the
+# 4 MiB SO_RCVBUF / SO_SNDBUF they request at bind time. Without
+# this, the kernel silently clamps to net.core.rmem_max ~208 KiB
+# and bursty FEC frame deliveries drop packets at the kernel.
+net.core.rmem_max = 16777216
+net.core.wmem_max = 16777216
+net.core.rmem_default = 4194304
+net.core.wmem_default = 4194304
+SYSCTLEOF
+    chmod 0644 /etc/sysctl.d/99-ados-video.conf
+    # Apply now so the running agent picks up the new ceiling on
+    # the next socket bind. Suppressed if the host lacks sysctl
+    # (e.g. inside a stripped container build path).
+    if command -v sysctl >/dev/null 2>&1; then
+        sysctl -p /etc/sysctl.d/99-ados-video.conf >/dev/null 2>&1 || true
+    fi
+}
+
 # Sources the snippet from the repo first; falls back to a literal
 # write so older trees and minimal install paths still get the
 # directory provisioned.
