@@ -160,6 +160,11 @@ class ApiRuntimeFacade:
     def wfb_manager(self) -> Any:
         return self._runtime_attr("wfb_manager_handle", "_wfb_manager")
 
+    def bitrate_controller(self) -> Any:
+        return self._runtime_attr(
+            "bitrate_controller_handle", "_bitrate_controller"
+        )
+
     def scripting_handles(self) -> ScriptingHandles:
         return ScriptingHandles(
             runner=self._runtime_attr("script_runner", "_script_runner"),

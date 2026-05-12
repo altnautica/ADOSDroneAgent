@@ -576,7 +576,10 @@ def _bitrate_controller_snapshot(app: Any) -> dict[str, Any] | None:
     not visible from here; returns None and the caller falls back
     to the WFB-config defaults.
     """
-    ctrl = getattr(app, "_bitrate_controller", None)
+    getter = getattr(app, "bitrate_controller", None)
+    if not callable(getter):
+        return None
+    ctrl = getter()
     if ctrl is None:
         return None
     snap_fn = getattr(ctrl, "snapshot", None)
@@ -652,7 +655,8 @@ async def set_video_config(body: VideoConfigBody) -> dict[str, Any]:
     app = get_agent_app()
     wfb_mgr = app.wfb_manager() if hasattr(app, "wfb_manager") else None
     pipeline = app.video_pipeline() if hasattr(app, "video_pipeline") else None
-    ctrl = getattr(app, "_bitrate_controller", None)
+    ctrl_getter = getattr(app, "bitrate_controller", None)
+    ctrl = ctrl_getter() if callable(ctrl_getter) else None
 
     warnings: list[str] = []
 
