@@ -185,6 +185,13 @@ class FrameBufferRenderer:
         self._writer_stop = threading.Event()
         self._writer_drops: int = 0
         self._writer_writes: int = 0
+        self._writer_skipped_duplicates: int = 0
+        # Cached hash of the most recently packed-and-written image.
+        # Subsequent frames whose raw bytes hash to the same value skip
+        # the RGB565 pack + mmap.write entirely — a status carousel
+        # spends most of its time showing the same pixels and packing
+        # 480x320 in pure-Python costs ~100 ms per call on a Pi 4B.
+        self._last_written_hash: int | None = None
         # Last-tick timing observability. Wall-clock duration of the
         # most recent mmap.write() call; surfaced via stats() so an
         # SPI-throughput regression is visible in journalctl + the
@@ -423,6 +430,21 @@ class FrameBufferRenderer:
             # If stop is set but we have a pending image, drain it
             # before exiting so a present() right before cleanup()
             # actually lands on the framebuffer (tests rely on this).
+            # Fast-skip when the input bytes are identical to the last
+            # successfully written frame. The hash is over the raw input
+            # image bytes, not the packed buffer, so we avoid the
+            # expensive pure-Python RGB565 pack entirely on duplicates.
+            try:
+                input_hash = hash(image.tobytes())
+            except Exception:  # noqa: BLE001
+                input_hash = None
+            if (
+                input_hash is not None
+                and self._last_written_hash is not None
+                and input_hash == self._last_written_hash
+            ):
+                self._writer_skipped_duplicates += 1
+                continue
             try:
                 buf = self._compose_and_pack(image)
             except Exception as exc:  # noqa: BLE001
@@ -445,12 +467,15 @@ class FrameBufferRenderer:
                 return
             self._last_write_ms = (_time.monotonic() - t0) * 1000.0
             self._writer_writes += 1
+            if input_hash is not None:
+                self._last_written_hash = input_hash
 
     def stats(self) -> dict:
         """Return SPI-writer observability snapshot."""
         return {
             "writes": self._writer_writes,
             "drops": self._writer_drops,
+            "skipped_duplicates": self._writer_skipped_duplicates,
             "last_write_ms": (
                 round(self._last_write_ms, 2)
                 if self._last_write_ms is not None
