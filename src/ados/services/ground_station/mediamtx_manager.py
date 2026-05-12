@@ -37,14 +37,34 @@ DESCRIBE round-trip, since wfb_rx is a one-way broadcast.
 from __future__ import annotations
 
 import asyncio
+import re
 import shutil
 import signal
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 import structlog
 import yaml
+
+# Match the `frame=NNNN` token in ffmpeg's stderr progress lines.
+# ffmpeg emits progress as a single carriage-return-terminated record:
+# `frame= 1234 fps= 30 q=-1.0 size=N/A time=... bitrate=N/A speed=1x`
+# Multiple progress records can land in one readline() buffer when
+# stderr is drained slowly, so the search is non-anchored and we take
+# the *last* match in the line to track the freshest frame count.
+_FFMPEG_FRAME_RE = re.compile(rb"frame=\s*(\d+)")
+
+# Window over which a static `frame=` counter means the publisher has
+# gone silent. The downstream symptom is mediamtx's RTSP write socket
+# eventually breaking the pipe; we want to recycle ffmpeg *before* that
+# back-pressure causes a multi-second outage in the browser viewer.
+FFMPEG_FRAME_STALL_SECONDS = 8.0
+
+# How often the monitor in main() polls liveness. Tight enough to react
+# inside FFMPEG_FRAME_STALL_SECONDS, loose enough to stay cheap.
+FFMPEG_MONITOR_TICK_SECONDS = 2.0
 
 from ados.core.config import load_config
 from ados.core.logging import configure_logging, get_logger
@@ -125,6 +145,15 @@ class MediamtxGsManager:
         self._ffmpeg_stderr_task: asyncio.Task | None = None
         self._config_path: str = ""
         self._running = False
+        # TX-liveness tracking. ffmpeg emits `frame=NNNN ...` progress
+        # lines on stderr. The stderr drain parses out N and updates
+        # these two fields; the supervisor in main() compares the wall
+        # time since the last advance against a stall threshold so a
+        # publisher whose downstream RTSP write has wedged (mediamtx
+        # back-pressure / broken pipe build-up) is reaped before the
+        # broken-pipe restart cascade kicks in.
+        self._ffmpeg_frame_count: int = 0
+        self._ffmpeg_last_frame_at: float = 0.0
 
     @property
     def running(self) -> bool:
@@ -154,13 +183,22 @@ class MediamtxGsManager:
             "apiAddress": f":{self._core._api_port}",
             "rtsp": True,
             "rtspAddress": f":{self._core._rtsp_port}",
-            # readTimeout 5s + writeQueueSize 2048: the default RTSP
-            # write queue is sized for typical streaming workloads; on
-            # an air-link with bursty FEC blocks we observed mediamtx
-            # dropping clients when a brief stall caused the queue to
-            # fill. Doubling the queue size eats a few MB of RAM and
-            # buys headroom across the inevitable wifi retries.
-            "writeQueueSize": 2048,
+            # Bound write queue so a stalled reader surfaces back-
+            # pressure to the publisher within a couple of seconds
+            # instead of letting it deepen for tens of seconds. The
+            # earlier value (2048) let the queue absorb ~1 s of
+            # 4 Mbps H.264 silently; the publisher then hit a sudden
+            # broken-pipe instead of a graceful slow-and-recover.
+            # 512 still tolerates routine wifi retries while keeping
+            # the failure surface visible to the ffmpeg supervisor.
+            "writeQueueSize": 512,
+            # Explicit read/write timeouts so a wedged peer (browser
+            # tab paused, NAT path dropped) is reaped on a clock,
+            # not whenever mediamtx happens to notice. The defaults
+            # are 10 s/10 s; 5 s/5 s aligns with the ffmpeg frame-
+            # stall window so failures recycle in the same cadence.
+            "readTimeout": "5s",
+            "writeTimeout": "5s",
             "udpMaxPayloadSize": 1472,
             "webrtc": True,
             "webrtcAddress": f":{self._core._webrtc_port}",
@@ -185,18 +223,20 @@ class MediamtxGsManager:
             "paths": {
                 # ffmpeg pushes RTSP here with -c copy from udp://:5600
                 GROUND_RTSP_PATH: {"source": "publisher"},
-                # WHEP alias. mediamtx serves WHEP on the same source
-                # path without re-pulling on demand: sourceOnDemand
-                # false keeps the WebRTC track warm between client
-                # connects so the first-frame delay on browser open
-                # collapses from ~500 ms (re-establish RTSP pull +
-                # buffer one GOP) to whatever the WHEP DTLS handshake
-                # alone costs. The RAM cost on the GS is single-
-                # digit megabytes — the source is already running for
-                # the local UDP fanout / LCD tap anyway.
+                # WHEP alias. sourceOnDemand True keeps the secondary
+                # internal reader idle until a WHEP client actually
+                # connects to /ados/whep. The earlier `False` setting
+                # ran a permanent self-pull of /main into /ados/whep
+                # even when no one was using the WHEP path (browsers
+                # hit /main directly via webrtc:8889 endpoint), which
+                # doubled mediamtx's internal goroutine count and
+                # held a second RTSP reader open against the publisher
+                # all the time. The cold-start delay on WHEP first
+                # connect is ~1 GOP (~500 ms at fps/2 keyint); a fair
+                # trade for half the routine load.
                 GROUND_WHEP_PATH: {
                     "source": f"rtsp://127.0.0.1:{self._core._rtsp_port}/{GROUND_RTSP_PATH}",
-                    "sourceOnDemand": False,
+                    "sourceOnDemand": True,
                 },
             },
         }
@@ -301,10 +341,15 @@ class MediamtxGsManager:
             # landing in ffmpeg's parser are mid-GOP P-frames with
             # no SPS/PPS, and ffmpeg threw `decode_slice_header
             # error` + `unspecified size` before an IDR arrived.
-            # 5M/5s is the proven conservative value; the cold-start
-            # cost is real but a working stream beats a broken one.
-            "-probesize", "5M",
-            "-analyzeduration", "5M",
+            # 20M/20s is the safety margin: cold restarts under load
+            # (Pi 4B class, swap pressure, GOP > 1 s) sometimes wait
+            # past 5 s for the first IDR and the older 5M/5s caused
+            # an `unspecified size` death loop with mandatory 5 s
+            # backoff between each retry. 20 s is invisible on a
+            # healthy boot because probe exits as soon as an IDR is
+            # found, not after the full window.
+            "-probesize", "20M",
+            "-analyzeduration", "20M",
             "-f", "sdp",
             "-i", str(GROUND_SDP_PATH),
             "-c:v", "copy",
@@ -331,6 +376,11 @@ class MediamtxGsManager:
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.PIPE,
             )
+            # Reset liveness counters so the new ffmpeg gets a fresh
+            # stall window starting from the spawn moment, not from
+            # whatever the previous process left behind.
+            self._ffmpeg_frame_count = 0
+            self._ffmpeg_last_frame_at = time.monotonic()
             self._ffmpeg_stderr_task = asyncio.create_task(
                 self._drain_ffmpeg_stderr()
             )
@@ -348,21 +398,52 @@ class MediamtxGsManager:
     async def _drain_ffmpeg_stderr(self) -> None:
         """Drain ffmpeg stderr and surface error lines to the journal.
 
-        Previously logged everything at debug, which hid the actual
-        reason ffmpeg exited (e.g., "Could not find codec parameters")
-        from the operator's journalctl view. We now look for explicit
-        error markers and bump those to warning so the next bench
-        bringup doesn't have to guess. Routine progress lines stay at
-        debug to keep the journal scanable.
+        Also parses the `frame=NNNN` progress token from each line and
+        updates the TX-liveness counters so the monitor in main() can
+        catch a wedged publisher before mediamtx's RTSP write-side
+        breaks the pipe (the speed-decay -> broken-pipe pattern).
         """
         if self._ffmpeg is None or self._ffmpeg.stderr is None:
             return
         try:
             while True:
-                line = await self._ffmpeg.stderr.readline()
-                if not line:
+                # readuntil() on `\r` keeps each carriage-return-
+                # terminated progress record as its own line. ffmpeg
+                # uses `\r` for in-place progress; readline() (which
+                # stops at `\n`) would batch many records into one
+                # giant string and we'd only see the freshest one
+                # whenever the journal eventually flushed.
+                try:
+                    chunk = await self._ffmpeg.stderr.readuntil(b"\r")
+                except asyncio.IncompleteReadError as exc:
+                    chunk = exc.partial
+                    if not chunk:
+                        break
+                except asyncio.LimitOverrunError:
+                    # readuntil's default StreamReader buffer is 64 KB;
+                    # an absurdly long progress line shouldn't happen
+                    # in practice, but fall back to a bounded read so
+                    # we never deadlock the drain.
+                    chunk = await self._ffmpeg.stderr.read(4096)
+                    if not chunk:
+                        break
+                if not chunk:
                     break
-                text = line.decode(errors="replace").rstrip()
+                # Parse frame counter — keep the last match per chunk,
+                # which is the freshest record when multiple landed in
+                # one read. Update before logging so a stalled ffmpeg
+                # whose progress lines have stopped streaming doesn't
+                # also cost us a missed liveness signal.
+                matches = _FFMPEG_FRAME_RE.findall(chunk)
+                if matches:
+                    try:
+                        latest = int(matches[-1])
+                    except ValueError:
+                        latest = self._ffmpeg_frame_count
+                    if latest > self._ffmpeg_frame_count:
+                        self._ffmpeg_frame_count = latest
+                        self._ffmpeg_last_frame_at = time.monotonic()
+                text = chunk.decode(errors="replace").rstrip()
                 if not text:
                     continue
                 lower = text.lower()
@@ -377,6 +458,32 @@ class MediamtxGsManager:
                     log.debug("ground_ffmpeg_stderr", line=text)
         except (asyncio.CancelledError, Exception):
             pass
+
+    def ffmpeg_frame_stalled(self, window_s: float = FFMPEG_FRAME_STALL_SECONDS) -> bool:
+        """True when ffmpeg's frame counter has not advanced for window_s.
+
+        Caller (the monitor loop) treats a True return as authorization
+        to terminate the ffmpeg subprocess and restart it. The check is
+        skipped while no process is alive — the dead-process path is
+        handled by the existing `ffmpeg_alive()` branch.
+        """
+        if not self.ffmpeg_alive():
+            return False
+        # Cold start: counters were just reset in _start_ffmpeg_ingest.
+        # Give the encoder probe window plus a safety margin before we
+        # consider a zero-frame state a stall. The `-analyzeduration`
+        # ffmpeg flag is set to 20 s above; FFMPEG_FRAME_STALL_SECONDS
+        # is 8 s. Allow up to (probe + stall) before the very first
+        # frame is required.
+        first_frame_grace = 28.0
+        if self._ffmpeg_frame_count == 0:
+            since_start = time.monotonic() - self._ffmpeg_last_frame_at
+            return since_start >= first_frame_grace
+        return (time.monotonic() - self._ffmpeg_last_frame_at) >= window_s
+
+    def ffmpeg_frame_count(self) -> int:
+        """Latest `frame=` value observed in ffmpeg's stderr."""
+        return self._ffmpeg_frame_count
 
     async def start(self) -> bool:
         """Start mediamtx and the ffmpeg ingest."""
@@ -536,26 +643,48 @@ async def main() -> None:
         max_backoff = 60.0
         while not shutdown.is_set():
             try:
-                await asyncio.wait_for(shutdown.wait(), timeout=5.0)
+                await asyncio.wait_for(
+                    shutdown.wait(), timeout=FFMPEG_MONITOR_TICK_SECONDS
+                )
                 return
             except asyncio.TimeoutError:
                 pass
-            if manager.ffmpeg_alive():
-                # Healthy tick; reset the backoff so the next outage
-                # restarts quickly.
-                backoff = 5.0
+            if not manager.ffmpeg_alive():
+                slog.warning(
+                    "ground_ffmpeg_dead_restarting", backoff_seconds=backoff
+                )
+                ok = await manager.restart_ffmpeg()
+                if ok:
+                    slog.info("ground_ffmpeg_restarted")
+                    backoff = 5.0
+                else:
+                    # Capped exponential backoff so a persistently broken
+                    # ffmpeg doesn't spin the supervisor.
+                    backoff = min(backoff * 2, max_backoff)
                 continue
-            slog.warning(
-                "ground_ffmpeg_dead_restarting", backoff_seconds=backoff
-            )
-            ok = await manager.restart_ffmpeg()
-            if ok:
-                slog.info("ground_ffmpeg_restarted")
-                backoff = 5.0
-            else:
-                # Capped exponential backoff so a persistently broken
-                # ffmpeg doesn't spin the supervisor.
-                backoff = min(backoff * 2, max_backoff)
+            # ffmpeg is alive but may have a stuck downstream write.
+            # Catch the back-pressure stall before mediamtx's RTSP
+            # write-side breaks the pipe; a clean recycle here costs
+            # ~1 s of viewer freeze vs the ~15-20 s freeze the broken-
+            # pipe -> 5 s backoff -> codec re-probe path produces.
+            if manager.ffmpeg_frame_stalled():
+                slog.warning(
+                    "ground_ffmpeg_frame_stalled",
+                    last_frame=manager.ffmpeg_frame_count(),
+                    stall_window_s=FFMPEG_FRAME_STALL_SECONDS,
+                )
+                ok = await manager.restart_ffmpeg()
+                if ok:
+                    slog.info(
+                        "ground_ffmpeg_restarted_after_stall",
+                    )
+                    backoff = 5.0
+                else:
+                    backoff = min(backoff * 2, max_backoff)
+                continue
+            # Healthy tick; reset the backoff so the next outage
+            # restarts quickly.
+            backoff = 5.0
 
     monitor_task = asyncio.create_task(_monitor_ffmpeg(), name="ffmpeg_monitor")
 
