@@ -43,7 +43,7 @@ _TABS: tuple[tuple[str, str, str], ...] = (
     ("tab.video", "video", "video"),
     ("tab.settings", "settings", "settings"),
     ("tab.link_stats", "link_stats", "link_stats"),
-    ("tab.channel_hops", "channel_hops", "link_stats"),
+    ("tab.channel_hops", "channel_hops", "hops"),
 )
 
 

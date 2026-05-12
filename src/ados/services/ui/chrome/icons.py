@@ -34,6 +34,7 @@ _KNOWN_ICONS: tuple[str, ...] = (
     "settings",
     "plus",
     "link_stats",
+    "hops",
 )
 
 

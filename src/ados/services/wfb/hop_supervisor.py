@@ -47,6 +47,8 @@ import hashlib
 import hmac
 import json
 import socket
+
+from ados.core.paths import HOP_SUPERVISOR_JSON
 import struct
 import time
 from dataclasses import dataclass
@@ -93,16 +95,46 @@ _HOP_MAGIC = b"AD05HOP1"
 _HOP_BROADCAST_ROUNDS = int(HOP_COUNTDOWN_MS / HOP_BROADCAST_INTERVAL_MS)
 
 
+# Wire format versions for HopAnnounce.
+# v1: trigger byte is 0/reserved. Old supervisor + old listener combo.
+# v2: trigger byte carries the supervisor's classification (0 =
+#     periodic, 1 = reactive). Lets the GS-side listener record the
+#     drone's reason for hopping in its own history ring without
+#     guessing.
+_HOP_ANNOUNCE_VERSION_CURRENT = 2
+
+# Trigger byte values. Match the string labels the supervisor and the
+# listener record in their snapshot dicts.
+_TRIGGER_PERIODIC = 0
+_TRIGGER_REACTIVE = 1
+
+_TRIGGER_BYTE_TO_LABEL: dict[int, str] = {
+    _TRIGGER_PERIODIC: "periodic",
+    _TRIGGER_REACTIVE: "reactive",
+}
+
+_TRIGGER_LABEL_TO_BYTE: dict[str, int] = {
+    v: k for k, v in _TRIGGER_BYTE_TO_LABEL.items()
+}
+
+
 @dataclass(frozen=True)
 class HopAnnounce:
     """Wire shape of a single hop-announce packet.
 
     Encoded as: _HOP_MAGIC (8B) + version (1B) + epoch_ms (8B BE) +
-    target_channel (1B) + reserved (1B) + hmac_sha256 (32B) =
+    target_channel (1B) + trigger (1B) + hmac_sha256 (32B) =
     51 bytes total.
 
+    The trigger byte was reserved through v1 and is now (v2) the
+    supervisor's classification (0 = periodic, 1 = reactive). Old
+    listeners that never validated the byte continue to apply hops;
+    they just can't surface the trigger label downstream. Old
+    supervisors that always sent reserved=0 are indistinguishable
+    from v2 periodic announces, which is the safe interpretation.
+
     The HMAC is computed over the magic + version + epoch_ms +
-    target_channel + reserved using the shared pair key as the
+    target_channel + trigger using the shared pair key as the
     secret. Authenticates the announce so a third party watching
     the control band can't inject a hop that knocks our pair off
     the air.
@@ -111,6 +143,7 @@ class HopAnnounce:
     version: int
     epoch_ms: int
     target_channel: int
+    trigger: int = _TRIGGER_PERIODIC
 
     def encode(self, pair_key: bytes) -> bytes:
         body = (
@@ -118,7 +151,7 @@ class HopAnnounce:
             + bytes([self.version])
             + struct.pack(">Q", self.epoch_ms)
             + bytes([self.target_channel])
-            + b"\x00"
+            + bytes([self.trigger & 0xFF])
         )
         tag = hmac.new(pair_key, body, hashlib.sha256).digest()
         return body + tag
@@ -136,9 +169,17 @@ class HopAnnounce:
         version = body[8]
         epoch_ms = struct.unpack(">Q", body[9:17])[0]
         target_channel = body[17]
+        trigger = body[18]
         return cls(
-            version=version, epoch_ms=epoch_ms, target_channel=target_channel
+            version=version,
+            epoch_ms=epoch_ms,
+            target_channel=target_channel,
+            trigger=trigger,
         )
+
+    @property
+    def trigger_label(self) -> str:
+        return _TRIGGER_BYTE_TO_LABEL.get(self.trigger, "periodic")
 
 
 def _resolve_pair_key() -> bytes:
@@ -322,9 +363,6 @@ class HopSupervisor:
         critical-path.
         """
         try:
-            from ados.core.paths import HOP_SUPERVISOR_JSON
-            import json
-
             path = HOP_SUPERVISOR_JSON
             payload = self.snapshot()
             payload["wall_time_unix"] = time.time()
@@ -395,31 +433,50 @@ class HopSupervisor:
             )
             return
 
-        ok = await self._execute_hop(target.channel_number)
+        trigger_label = "reactive" if reactive else "periodic"
+        from_channel = self._wfb._channel
+        ok = await self._execute_hop(
+            target.channel_number, trigger_label=trigger_label,
+        )
         self._history.append(
             {
                 "at": time.time(),
-                "from": self._wfb._channel,
+                "from": from_channel,
                 "to": target.channel_number,
-                "trigger": "reactive" if reactive else "periodic",
+                "trigger": trigger_label,
                 "ok": ok,
             }
         )
         if ok:
             self._last_hop_at = now
 
-    async def _execute_hop(self, target_channel: int) -> bool:
+    async def _execute_hop(
+        self,
+        target_channel: int,
+        *,
+        trigger_label: str = "periodic",
+    ) -> bool:
         """Announce + flip. Returns True if the drone actually
         moved to ``target_channel``.
 
         Self-gating: the drone only flips after receiving at least
         one peer ACK on the control port. If no ACK arrives during
         the countdown, the drone stays on the current channel.
+
+        ``trigger_label`` is encoded into the wire packet's trigger
+        byte (v2 wire format) so the GS-side listener can surface
+        the reason in its own history ring without guessing.
         """
         pair_key = _resolve_pair_key()
         epoch_ms = int(time.time() * 1000) + HOP_COUNTDOWN_MS
+        trigger_byte = _TRIGGER_LABEL_TO_BYTE.get(
+            trigger_label, _TRIGGER_PERIODIC
+        )
         announce = HopAnnounce(
-            version=1, epoch_ms=epoch_ms, target_channel=target_channel
+            version=_HOP_ANNOUNCE_VERSION_CURRENT,
+            epoch_ms=epoch_ms,
+            target_channel=target_channel,
+            trigger=trigger_byte,
         )
 
         ack_received = await self._broadcast_and_await_ack(
@@ -522,6 +579,180 @@ class HopSupervisor:
         return ack_event.is_set()
 
 
+_CHANNEL_NUMBERS = {ch.channel_number for ch in STANDARD_CHANNELS}
+
+
+class HopListener:
+    """GS-side counterpart of HopSupervisor.
+
+    Listens on the control port for valid HopAnnounce packets, ACKs
+    by echoing the same announce back, and schedules a local
+    ``iw set channel`` for the announced epoch. Maintains a 32-entry
+    history ring of the hops it applied so the GS LCD's
+    ChannelHopsPage has data to render — without this the only
+    rig with an LCD (the GS) would see an empty page forever
+    because the drone-side HopSupervisor writes the state file
+    on the wrong machine.
+
+    snapshot() returns the SAME shape as HopSupervisor.snapshot()
+    so the LCD widget, the API route, and any other consumer reads
+    the same JSON keys regardless of which side wrote the file.
+    """
+
+    def __init__(
+        self,
+        *,
+        wfb_manager: Any,
+        band: str = "u-nii-1",
+        control_port: int = HOP_CONTROL_PORT,
+    ) -> None:
+        self._wfb = wfb_manager
+        self._band = band
+        self._control_port = control_port
+        self._history: list[dict[str, Any]] = []
+        self._last_hop_at: float = 0.0
+
+    def snapshot(self) -> dict[str, Any]:
+        """Return the same shape as HopSupervisor.snapshot()."""
+        return {
+            "enabled": True,
+            "band": self._band,
+            "hop_period_seconds": None,
+            "loss_threshold_percent": None,
+            "rssi_threshold_dbm": None,
+            "last_hop_at": self._last_hop_at,
+            "history": list(self._history[-32:]),
+            "source": "listener",
+        }
+
+    def _persist_snapshot(self) -> None:
+        """Write the snapshot to /run/ados/hop-supervisor.json.
+
+        Atomic tmpfile + rename. Best-effort: I/O errors logged at
+        debug and discarded. Single source of truth file path —
+        the drone supervisor and the GS listener both write here;
+        a given rig only has one or the other running so there's
+        no contention.
+        """
+        try:
+            path = HOP_SUPERVISOR_JSON
+            payload = self.snapshot()
+            payload["wall_time_unix"] = time.time()
+            tmp = path.with_suffix(".tmp")
+            tmp.parent.mkdir(parents=True, exist_ok=True)
+            tmp.write_text(json.dumps(payload))
+            tmp.replace(path)
+        except OSError as exc:
+            log.debug("hop_listener_persist_failed", error=str(exc))
+
+    async def run(self, stop_event: asyncio.Event) -> None:
+        """Long-running coroutine. Drives the listener until stop."""
+        log.info(
+            "hop_listener_started",
+            band=self._band,
+            port=self._control_port,
+        )
+
+        pair_key = _resolve_pair_key()
+        loop = asyncio.get_running_loop()
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.bind(("0.0.0.0", self._control_port))
+            sock.setblocking(False)
+        except OSError as exc:
+            log.warning("hop_listener_socket_failed", error=str(exc))
+            sock.close()
+            return
+
+        # Persist the initial empty snapshot so the LCD page reads
+        # a valid (but empty) state file even before the first hop
+        # — otherwise the page shows "no hops yet" via the missing-
+        # file fallback, which is fine, but the file's absence
+        # also confuses /api/video/config consumers.
+        self._persist_snapshot()
+        next_persist = time.monotonic() + 5.0
+
+        pending_epoch: int | None = None
+        pending_channel: int | None = None
+        pending_trigger: str = "periodic"
+        try:
+            while not stop_event.is_set():
+                try:
+                    data, peer = await asyncio.wait_for(
+                        loop.sock_recvfrom(sock, 256), timeout=1.0
+                    )
+                except (asyncio.TimeoutError, OSError):
+                    # Periodic wake to fire the scheduled hop if
+                    # its epoch has arrived, and to push a fresh
+                    # snapshot to disk every ~5 s.
+                    if (
+                        pending_epoch is not None
+                        and time.time() * 1000 >= pending_epoch
+                        and pending_channel is not None
+                    ):
+                        prev_channel = getattr(
+                            self._wfb, "_channel", None
+                        )
+                        ok = await _apply_hop(
+                            self._wfb, pending_channel,
+                        )
+                        # Always record — failures are also worth
+                        # surfacing on the chart (red marker).
+                        self._history.append(
+                            {
+                                "at": time.time(),
+                                "from": (
+                                    int(prev_channel)
+                                    if isinstance(prev_channel, int)
+                                    else 0
+                                ),
+                                "to": int(pending_channel),
+                                "trigger": pending_trigger,
+                                "ok": bool(ok),
+                            }
+                        )
+                        if ok:
+                            self._last_hop_at = time.time()
+                        # Truncate to the 32-entry cap; deque would
+                        # do this for free but we keep the simple
+                        # list to make the persist code uniform.
+                        if len(self._history) > 32:
+                            self._history = self._history[-32:]
+                        self._persist_snapshot()
+                        pending_epoch = None
+                        pending_channel = None
+                        pending_trigger = "periodic"
+                    now = time.monotonic()
+                    if now >= next_persist:
+                        self._persist_snapshot()
+                        next_persist = now + 5.0
+                    continue
+
+                announce = HopAnnounce.decode(data, pair_key)
+                if announce is None:
+                    continue
+                if announce.target_channel not in _CHANNEL_NUMBERS:
+                    continue
+                # ACK by echoing the same packet back to the sender.
+                try:
+                    sock.sendto(data, peer)
+                except OSError:
+                    pass
+                pending_epoch = announce.epoch_ms
+                pending_channel = announce.target_channel
+                pending_trigger = announce.trigger_label
+                log.info(
+                    "hop_listener_scheduled",
+                    target=announce.target_channel,
+                    trigger=pending_trigger,
+                    in_ms=announce.epoch_ms - int(time.time() * 1000),
+                )
+        finally:
+            sock.close()
+            log.info("hop_listener_stopped")
+
+
 async def run_hop_listener(
     *,
     wfb_manager: Any,
@@ -529,84 +760,29 @@ async def run_hop_listener(
     control_port: int = HOP_CONTROL_PORT,
     stop_event: asyncio.Event,
 ) -> None:
-    """Ground-side counterpart of HopSupervisor.
+    """Function-style wrapper around HopListener.run().
 
-    Listens on the control port for valid HopAnnounce packets,
-    ACKs by echoing the same announce back, and schedules a
-    local ``iw set channel`` for the announced epoch. The ACK +
-    flip pattern means a half-upgraded pair (drone on new code,
-    GS on old) will see the drone not flipping (no ACK arrived),
-    so the older GS does not silently lose its peer.
-
-    Wired as a long-running asyncio task by the wfb manager
-    main loop.
+    Kept for backward compat with the existing call site in
+    ground_station/wfb_rx.run(); new callers can instantiate
+    HopListener directly to access the snapshot() surface.
     """
-    log.info("hop_listener_started", band=band, port=control_port)
-
-    pair_key = _resolve_pair_key()
-    loop = asyncio.get_running_loop()
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    try:
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        sock.bind(("0.0.0.0", control_port))
-        sock.setblocking(False)
-    except OSError as exc:
-        log.warning("hop_listener_socket_failed", error=str(exc))
-        sock.close()
-        return
-
-    pending_epoch: int | None = None
-    pending_channel: int | None = None
-    try:
-        while not stop_event.is_set():
-            try:
-                data, peer = await asyncio.wait_for(
-                    loop.sock_recvfrom(sock, 256), timeout=1.0
-                )
-            except (asyncio.TimeoutError, OSError):
-                # Periodic wake to fire the scheduled hop if its
-                # epoch has arrived.
-                if (
-                    pending_epoch is not None
-                    and time.time() * 1000 >= pending_epoch
-                    and pending_channel is not None
-                ):
-                    await _apply_hop(wfb_manager, pending_channel)
-                    pending_epoch = None
-                    pending_channel = None
-                continue
-
-            announce = HopAnnounce.decode(data, pair_key)
-            if announce is None:
-                continue
-            if announce.target_channel not in _CHANNEL_NUMBERS:
-                continue
-            # ACK by echoing the same packet back to the sender.
-            try:
-                sock.sendto(data, peer)
-            except OSError:
-                pass
-            pending_epoch = announce.epoch_ms
-            pending_channel = announce.target_channel
-            log.info(
-                "hop_listener_scheduled",
-                target=announce.target_channel,
-                in_ms=announce.epoch_ms - int(time.time() * 1000),
-            )
-    finally:
-        sock.close()
-        log.info("hop_listener_stopped")
+    listener = HopListener(
+        wfb_manager=wfb_manager, band=band, control_port=control_port,
+    )
+    await listener.run(stop_event)
 
 
-_CHANNEL_NUMBERS = {ch.channel_number for ch in STANDARD_CHANNELS}
+async def _apply_hop(wfb_manager: Any, target_channel: int) -> bool:
+    """GS-side actuation: stop wfb_rx, retune the radio, start wfb_rx.
 
-
-async def _apply_hop(wfb_manager: Any, target_channel: int) -> None:
-    """GS-side actuation: stop wfb_rx, retune the radio, start wfb_rx."""
+    Returns True on a successful start_rx (the listener records this
+    in its history). False when the interface is missing or the
+    channel is unknown — both surface as red markers on the chart.
+    """
     interface = getattr(wfb_manager, "_interface", None)
     if not interface:
         log.warning("hop_listener_no_interface")
-        return
+        return False
     log.info("hop_listener_applying", target=target_channel)
     await wfb_manager.stop()
     await asyncio.create_subprocess_exec(
@@ -622,5 +798,6 @@ async def _apply_hop(wfb_manager: Any, target_channel: int) -> None:
     ch = get_channel(target_channel)
     if ch is None:
         log.warning("hop_listener_unknown_channel", target=target_channel)
-        return
-    await wfb_manager.start_rx(interface, target_channel)
+        return False
+    ok = await wfb_manager.start_rx(interface, target_channel)
+    return bool(ok)
