@@ -7,6 +7,8 @@ import platform
 from collections.abc import Callable
 from typing import Any
 
+import psutil
+
 from ados.core.logging import get_logger
 from ados.hal.usb import UsbDevice, discover_usb_devices
 
@@ -15,8 +17,16 @@ log = get_logger("hal.hotplug")
 # Callback type: (event: str, device: UsbDevice) -> None
 HotplugCallback = Callable[[str, UsbDevice], Any]
 
-# Poll interval: Linux checks faster because sysfs is cheap.
+# Poll interval: Linux checks faster because sysfs is cheap on healthy
+# memory. On low-RAM SBCs (Pi 4B 1 GB and similar) the system spends
+# most of its time in swap; each scan that walks /sys/bus/usb/devices
+# pages cold inodes back in and contributes to scheduler stalls that
+# break the WFB-ng → mediamtx → WebRTC pipeline. Stretch the interval
+# under that condition. Operators plugging in a camera still see
+# detection within a few seconds.
 _LINUX_POLL_INTERVAL = 2.0
+_LINUX_POLL_INTERVAL_LOW_RAM = 10.0
+_LOW_RAM_THRESHOLD_MB = 1500
 _MACOS_POLL_INTERVAL = 5.0
 
 
@@ -45,7 +55,16 @@ class HotplugMonitor:
         self._known: dict[str, UsbDevice] = {}
         self._running = False
         if self._system == "Linux":
-            self._interval = _LINUX_POLL_INTERVAL
+            try:
+                total_ram_mb = (
+                    psutil.virtual_memory().total // (1024 * 1024)
+                )
+            except Exception:  # noqa: BLE001
+                total_ram_mb = 0
+            if 0 < total_ram_mb < _LOW_RAM_THRESHOLD_MB:
+                self._interval = _LINUX_POLL_INTERVAL_LOW_RAM
+            else:
+                self._interval = _LINUX_POLL_INTERVAL
         else:
             self._interval = _MACOS_POLL_INTERVAL
 
