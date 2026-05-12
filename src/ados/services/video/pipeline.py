@@ -931,6 +931,50 @@ class VideoPipeline:
             except (ProcessLookupError, OSError):
                 pass
 
+    async def set_video_bitrate(self, kbps: int) -> bool:
+        """Apply a new encoder bitrate via stop+start.
+
+        libx264 / mpph264enc / rpicam-vid don't expose a hot
+        bitrate-reload knob across the stack, so the only correct
+        application is to tear the pipeline down and bring it
+        back up with the updated bitrate in self._config. Total
+        blackout is ~1-2 s, absorbed by the GCS WHEP playout
+        buffer and the LCD's last-frame-hold. Refuses values
+        outside a sensible 0.5-12 Mbps band so a buggy controller
+        cannot drive the link to silence or overrun the FEC
+        budget on the radio side.
+
+        Returns True on a clean restart. False when the new
+        bitrate failed validation or the restart did not come
+        back healthy; in the failure case the next supervisor
+        tick will retry on its own.
+        """
+        if not 500 <= kbps <= 12000:
+            log.warning("set_video_bitrate_out_of_range", kbps=kbps)
+            return False
+        if self._state != PipelineState.RUNNING:
+            # Pipeline isn't up. Persist the new value so the
+            # next start_stream picks it up; no restart required.
+            self._config.camera.bitrate_kbps = kbps
+            log.info("set_video_bitrate_pending_start", kbps=kbps)
+            return True
+        old = self._config.camera.bitrate_kbps
+        log.info("set_video_bitrate_applying", old=old, new=kbps)
+        self._config.camera.bitrate_kbps = kbps
+        try:
+            await self.stop_stream()
+        except Exception as exc:  # noqa: BLE001
+            log.warning("set_video_bitrate_stop_failed", error=str(exc))
+        ok = await self.start_stream()
+        if not ok:
+            log.warning("set_video_bitrate_restart_failed", kbps=kbps)
+            # Roll the config back so the next supervisor restart
+            # picks up a value that was already proven to start.
+            self._config.camera.bitrate_kbps = old
+            return False
+        log.info("set_video_bitrate_applied", kbps=kbps)
+        return True
+
     async def stop_stream(self) -> None:
         """Stop the encoding pipeline and mediamtx."""
         log.info("stop_stream_begin")

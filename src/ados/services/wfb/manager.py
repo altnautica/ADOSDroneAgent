@@ -365,6 +365,107 @@ class WfbManager:
         self._state = LinkState.DISCONNECTED
         log.info("wfb_stopped")
 
+    async def set_fec(self, fec_k: int, fec_n: int) -> bool:
+        """Apply a new Reed-Solomon (K, N) ratio to the live wfb_tx.
+
+        wfb_tx does not expose a runtime knob so the only correct
+        application is stop + start. Cost is ~500 ms of radio
+        blackout, absorbed by the GCS WHEP jitter buffer and the
+        LCD's last-frame-hold. Returns False on validation or
+        spawn failure; the live link is left on whatever was
+        running before so a bad call does not knock the rig off
+        the air.
+
+        Wired from the BitrateController on tier-change decisions.
+        Also surfaced via the REST /api/video/config write so an
+        operator can pin a manual ratio.
+        """
+        if fec_k <= 0 or fec_n <= fec_k:
+            log.warning("set_fec_invalid", k=fec_k, n=fec_n)
+            return False
+        if not self._interface:
+            log.warning("set_fec_no_interface")
+            return False
+        if self._tx_proc is None or self._tx_proc.returncode is not None:
+            # No live tx to restart; just persist the new values so
+            # the next start_tx picks them up.
+            self._config.fec_k = fec_k
+            self._config.fec_n = fec_n
+            return True
+
+        old_k, old_n = self._config.fec_k, self._config.fec_n
+        log.info("set_fec_applying", old_k=old_k, old_n=old_n, k=fec_k, n=fec_n)
+
+        # Terminate the existing wfb_tx cleanly.
+        try:
+            self._tx_proc.terminate()
+            await asyncio.wait_for(self._tx_proc.wait(), timeout=2.0)
+        except TimeoutError:
+            try:
+                self._tx_proc.kill()
+            except ProcessLookupError:
+                pass
+        except ProcessLookupError:
+            pass
+        self._tx_proc = None
+
+        # Mutate config and respawn. start_tx reads from
+        # self._config, so the update is reflected on respawn.
+        self._config.fec_k = fec_k
+        self._config.fec_n = fec_n
+        ok = await self.start_tx(self._interface, self._channel or 0)
+        if not ok:
+            # Roll the config back so the in-memory state matches
+            # the active wfb_tx (still nothing here, but next
+            # respawn attempt should not silently keep the
+            # rejected values).
+            self._config.fec_k = old_k
+            self._config.fec_n = old_n
+            log.warning("set_fec_respawn_failed", k=fec_k, n=fec_n)
+            return False
+        log.info("set_fec_applied", k=fec_k, n=fec_n)
+        return True
+
+    async def set_mcs(self, mcs: int) -> bool:
+        """Apply a new MCS index to the live wfb_tx.
+
+        Same restart-on-change pattern as set_fec. The supported
+        MCS range on RTL8812EU is 0..7 for VHT80; we accept 0..7
+        and let the underlying wfb_tx reject anything wider.
+        """
+        if not 0 <= mcs <= 7:
+            log.warning("set_mcs_out_of_range", mcs=mcs)
+            return False
+        if not self._interface:
+            log.warning("set_mcs_no_interface")
+            return False
+        if self._tx_proc is None or self._tx_proc.returncode is not None:
+            self._config.mcs_index = mcs
+            return True
+
+        old_mcs = self._config.mcs_index
+        log.info("set_mcs_applying", old=old_mcs, new=mcs)
+        try:
+            self._tx_proc.terminate()
+            await asyncio.wait_for(self._tx_proc.wait(), timeout=2.0)
+        except TimeoutError:
+            try:
+                self._tx_proc.kill()
+            except ProcessLookupError:
+                pass
+        except ProcessLookupError:
+            pass
+        self._tx_proc = None
+
+        self._config.mcs_index = mcs
+        ok = await self.start_tx(self._interface, self._channel or 0)
+        if not ok:
+            self._config.mcs_index = old_mcs
+            log.warning("set_mcs_respawn_failed", mcs=mcs)
+            return False
+        log.info("set_mcs_applied", mcs=mcs)
+        return True
+
     async def _read_rx_output(self) -> None:
         """Read wfb_rx stdout and feed lines to the link quality monitor."""
         if self._rx_proc is None or self._rx_proc.stdout is None:

@@ -203,6 +203,35 @@ class AgentApp:
             self._wfb_manager = WfbManager(self.config.video.wfb)
             self._start_service("wfb-link", self._wfb_manager.run())
 
+            # Closed-loop video bitrate + FEC controller. Reads link
+            # quality off the wfb manager's LinkQualityMonitor and
+            # drives the four-tier ladder via wfb.set_fec +
+            # video_pipeline.set_video_bitrate. Disabled by default
+            # (WfbConfig.adaptive_bitrate_enabled = False); the
+            # controller still runs so its diagnostics surface is
+            # populated for /api/video/config consumers.
+            try:
+                from ados.services.video.bitrate_controller import (
+                    BitrateController,
+                )
+                pipeline = self._video_pipeline
+                wfb = self._wfb_manager
+                self._bitrate_controller = BitrateController(
+                    link_quality_monitor=wfb.monitor,
+                    set_fec=wfb.set_fec,
+                    set_bitrate=pipeline.set_video_bitrate,
+                    enabled=self.config.video.wfb.adaptive_bitrate_enabled,
+                )
+                self._start_service(
+                    "bitrate-controller",
+                    self._bitrate_controller.run(),
+                )
+            except AttributeError as exc:
+                # WfbManager.monitor or .set_fec missing on a demo
+                # build path. The controller is opt-in so we just
+                # log and skip; the rest of the agent comes up clean.
+                log.warning("bitrate_controller_wire_skipped", error=str(exc))
+
         # Start Scripting Engine
         if self.demo:
             from ados.services.scripting.demo import DemoScriptingEngine
