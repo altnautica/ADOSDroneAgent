@@ -149,22 +149,27 @@ def _resolve_pair_key() -> bytes:
     other use of the wfb keys so a future rotation of one doesn't
     leak the other.
     """
+    # wfb-ng session keys are symmetric per pair: the drone writes the
+    # shared bytes to /etc/ados/wfb/tx.key and the GS writes the same
+    # bytes to /etc/ados/wfb/rx.key during bind. They're the same 64
+    # bytes — wfb_tx and wfb_rx need a shared AEAD secret to encrypt
+    # and decrypt each other's frames. So whichever file the local
+    # rig holds gives the same derived hop secret on both sides.
     candidates = (
-        ("/etc/ados/wfb/tx.key", "/etc/ados/wfb/rx.key"),
-        ("/etc/ados/tx.key", "/etc/ados/rx.key"),
+        "/etc/ados/wfb/tx.key",
+        "/etc/ados/wfb/rx.key",
+        "/etc/ados/tx.key",
+        "/etc/ados/rx.key",
     )
-    for tx_path, rx_path in candidates:
+    for path in candidates:
         try:
-            with open(tx_path, "rb") as f:
-                tx = f.read()
-            with open(rx_path, "rb") as f:
-                rx = f.read()
+            with open(path, "rb") as f:
+                key_bytes = f.read()
         except (OSError, FileNotFoundError):
             continue
         h = hashlib.sha256()
         h.update(b"ados/wfb/hop/v1\n")
-        h.update(tx)
-        h.update(rx)
+        h.update(key_bytes)
         return h.digest()
     # No keys on disk yet (cold start before bind). Use a constant
     # so a stray hop announce can still be parsed; the supervisor
