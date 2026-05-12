@@ -159,8 +159,13 @@ CONTRAST_DIM = 40
 WIDTH = 128
 HEIGHT = 64
 
-# Polling cadence for agent state.
-POLL_PERIOD_SECONDS = 1.0
+# Polling cadence for agent state. Status pages refresh slowly enough
+# that a few seconds of staleness is invisible; sub-second polling burns
+# CPU on a Pi-class SBC and crowds out the video pipeline's writer
+# thread when the same node also serves the WFB-ng → mediamtx → WebRTC
+# chain. 5 s gives the operator a fresh-enough status view at ~5x lower
+# CPU cost. Pairing overlay still polls at PAIRING_POLL_SECONDS.
+POLL_PERIOD_SECONDS = 5.0
 
 # Screen registry keyed by screen id so the active list can be rebuilt
 # from `ground_station.ui.screens` config. REST schema uses the keys
@@ -1775,9 +1780,14 @@ class OledService:
             else:
                 self._render_to_framebuffer()
 
-            # Refresh cadence: pages declare a preferred Hz; carousel
-            # stays at the historical 5 Hz.
-            tick_period = 0.2
+            # Refresh cadence: pages declare a preferred Hz; status
+            # carousel and overlays render at 1 Hz so a typical status
+            # screen (clock, RSSI, role badge) doesn't repaint at 5 fps
+            # when nothing has actually changed. The framebuffer renderer
+            # also fast-skips identical frames so a higher rate would
+            # mostly cost hash + tobytes overhead, but 1 Hz also drops
+            # the wakeups themselves.
+            tick_period = 1.0
             if self._mode == "lcd_page" and self._page_navigator is not None:
                 page = self._page_navigator.current_page()
                 hz = float(getattr(page, "refresh_hz", 5.0) or 5.0)
