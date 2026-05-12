@@ -232,6 +232,47 @@ class AgentApp:
                 # log and skip; the rest of the agent comes up clean.
                 log.warning("bitrate_controller_wire_skipped", error=str(exc))
 
+            # Coordinated frequency-hopping supervisor (drone side).
+            # The GS-side listener spawns inside the wfb_rx service
+            # when the ground-station profile is active. Both are
+            # gated on auto_hop_enabled so a fixed-frequency
+            # deployment opts out by flipping a single flag.
+            agent_profile = getattr(
+                getattr(self.config, "agent", None), "profile", "auto"
+            )
+            wfb_cfg = self.config.video.wfb
+            if (
+                agent_profile != "ground_station"
+                and getattr(wfb_cfg, "auto_hop_enabled", True)
+            ):
+                try:
+                    from ados.services.wfb.hop_supervisor import (
+                        HopSupervisor,
+                    )
+                    self._hop_supervisor = HopSupervisor(
+                        wfb_manager=self._wfb_manager,
+                        link_quality_monitor=self._wfb_manager.monitor,
+                        band=getattr(wfb_cfg, "band", "u-nii-1"),
+                        hop_period_seconds=int(
+                            getattr(wfb_cfg, "hop_period_seconds", 60)
+                        ),
+                        loss_threshold_percent=float(
+                            getattr(wfb_cfg, "hop_loss_threshold_percent", 10.0)
+                        ),
+                        rssi_threshold_dbm=float(
+                            getattr(wfb_cfg, "hop_rssi_threshold_dbm", -75.0)
+                        ),
+                        enabled=True,
+                    )
+                    self._start_service(
+                        "hop-supervisor",
+                        self._hop_supervisor.run(),
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    log.warning(
+                        "hop_supervisor_wire_skipped", error=str(exc)
+                    )
+
         # Start Scripting Engine
         if self.demo:
             from ados.services.scripting.demo import DemoScriptingEngine

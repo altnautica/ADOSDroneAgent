@@ -528,6 +528,33 @@ class WfbRxManager:
         backoff = 1.0
         unpaired_logged = False
 
+        # Spawn the hop-announce listener as a sibling task. It
+        # listens on the control port for valid HopAnnounce
+        # packets, ACKs them, and schedules a local channel flip
+        # synchronized with the drone's flip epoch. Self-gating:
+        # a drone running older code that doesn't broadcast
+        # HopAnnounce simply produces no packets here, the
+        # listener idles, and the GS stays on the current
+        # channel. Disabled when WfbConfig.auto_hop_enabled is
+        # false (operator opt-out for fixed-frequency ops).
+        if getattr(self._config, "auto_hop_enabled", True):
+            try:
+                from ados.services.wfb.hop_supervisor import (
+                    run_hop_listener,
+                )
+                self._hop_listener_stop = asyncio.Event()
+                self._hop_listener_task = asyncio.create_task(
+                    run_hop_listener(
+                        wfb_manager=self,
+                        band=getattr(self._config, "band", "u-nii-1"),
+                        stop_event=self._hop_listener_stop,
+                    )
+                )
+            except Exception as exc:  # noqa: BLE001
+                log.warning(
+                    "ground_hop_listener_start_failed", error=str(exc)
+                )
+
         while self._running:
             # Block when no GS-side key (rx.key) is on disk. Pairing
             # (local bind, cloud relay, or operator) lands it at

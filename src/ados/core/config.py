@@ -164,6 +164,29 @@ class WfbConfig(BaseModel):
     # paces itself so the link can settle before the next decision.
     # Default off until field-validated; flip via REST or GCS.
     adaptive_bitrate_enabled: bool = False
+    # Periodic + reactive coordinated frequency hopping. Operator
+    # picks a band (the existing `band` field above) and the agent
+    # autonomously moves the WFB-ng link to the quietest channel
+    # inside that band on a periodic timer or when the link
+    # degrades. Drone-side broadcasts an authenticated
+    # HopAnnounce on the reserved control port; GS-side listens
+    # and flips synchronously. Self-gating: the drone only flips
+    # after it sees a peer ACK, so a half-upgraded pair does not
+    # silently lose its link. Default on — the operator does not
+    # need to think about channel selection. Disable to pin the
+    # link to a fixed channel.
+    auto_hop_enabled: bool = True
+    # Period in seconds between routine "is there a quieter
+    # channel?" rescans. Tuned for the bench: 60 s feels invisible
+    # to the operator (one ~300 ms freeze per minute of flight)
+    # without sitting on a degraded channel for too long.
+    hop_period_seconds: int = 60
+    # Reactive hop thresholds. The supervisor triggers an
+    # off-schedule migration when the live link quality sample
+    # crosses either threshold AND the link has been stable on
+    # the current channel for at least 30 s.
+    hop_loss_threshold_percent: float = 10.0
+    hop_rssi_threshold_dbm: float = -75.0
 
     @model_validator(mode="before")
     @classmethod
