@@ -290,23 +290,21 @@ class MediamtxGsManager:
             # arrive inline in the first IDR, which can take a couple
             # of seconds after wfb_rx hands over the first packets.
             "-protocol_whitelist", "file,udp,rtp",
-            # `-probesize 1M -analyzeduration 1000000` give ffmpeg up
-            # to 1 second (or 1 MB) to discover the H.264 SPS/PPS from
+            # `-probesize 5M -analyzeduration 5M` give ffmpeg up to
+            # 5 seconds (or 5 MB) to discover the H.264 SPS/PPS from
             # the incoming RTP stream. The SDP carries only the
             # encoding name + clock rate; codec config (width/height/
-            # profile/level) arrives inline in the first IDR. The
-            # default probesize/analyzeduration is too aggressive and
-            # ffmpeg exited with "unspecified size" before the IDR
-            # arrived. The earlier 5M/5s value was conservative — it
-            # bought cold-start headroom but cost up to 5 s of
-            # first-frame wait. With the drone encoder at keyint=15
-            # @ 30 fps (IDR every 500 ms per encoder.py:411), an IDR
-            # is on the wire within 500-1000 ms of wfb_rx handing over
-            # the first packets. 1 s is the safe floor; reducing
-            # further re-triggers the documented codec-discovery
-            # failure mode.
-            "-probesize", "1M",
-            "-analyzeduration", "1000000",
+            # profile/level) arrives inline in the first IDR.
+            # NB: bench validation surfaced a race when this was
+            # tightened to 1M/1s — even with the drone encoder at
+            # keyint=15 (IDR every 500 ms), the first RTP packets
+            # landing in ffmpeg's parser are mid-GOP P-frames with
+            # no SPS/PPS, and ffmpeg threw `decode_slice_header
+            # error` + `unspecified size` before an IDR arrived.
+            # 5M/5s is the proven conservative value; the cold-start
+            # cost is real but a working stream beats a broken one.
+            "-probesize", "5M",
+            "-analyzeduration", "5M",
             "-f", "sdp",
             "-i", str(GROUND_SDP_PATH),
             "-c:v", "copy",

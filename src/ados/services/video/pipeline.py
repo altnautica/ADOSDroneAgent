@@ -450,21 +450,24 @@ class VideoPipeline:
                     "air_cloud_bridge_sdp_write_failed", error=str(exc),
                 )
                 return False
-            # `-probesize 1M -analyzeduration 1000000` mirror the
-            # ground sidecar (mediamtx_manager.py): the SDP we read
-            # carries only the encoding name + clock rate, codec
-            # config arrives inline in the first IDR. 1 s/1 MB is the
-            # safe floor; ffmpeg's defaults are larger and would gate
-            # cold-start to ~5 s on this path too. NB: still no
-            # `-max_delay 0` here — same codec-discovery hazard
-            # documented at lines 720-728 and in the ground sidecar.
+            # `-probesize 5M -analyzeduration 5M` mirror the ground
+            # sidecar (mediamtx_manager.py): the SDP we read carries
+            # only the encoding name + clock rate, codec config
+            # arrives inline in the first IDR. Bench validation
+            # showed 1M/1s is too tight — mid-GOP P-frame packets
+            # arrive first and ffmpeg throws decode_slice_header /
+            # unspecified-size before an IDR lands. 5M/5s is the
+            # proven conservative value. NB: still no `-max_delay
+            # 0` here — same codec-discovery hazard documented at
+            # the bash branch comment above and in the ground
+            # sidecar.
             self._air_cloud_bridge_process = await asyncio.create_subprocess_exec(
                 "ffmpeg",
                 "-protocol_whitelist", "file,udp,rtp",
                 "-fflags", "nobuffer",
                 "-flags", "low_delay",
-                "-probesize", "1M",
-                "-analyzeduration", "1000000",
+                "-probesize", "5M",
+                "-analyzeduration", "5M",
                 "-i", str(sdp_path),
                 "-c:v", "copy",
                 "-f", "rtsp",
