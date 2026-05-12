@@ -288,6 +288,7 @@ class HopSupervisor:
 
     async def _loop(self) -> None:
         next_periodic = time.monotonic() + self._hop_period_s
+        next_persist = 0.0
         while not self._stop_event.is_set():
             try:
                 await self._tick(next_periodic)
@@ -295,6 +296,15 @@ class HopSupervisor:
                 raise
             except Exception as exc:  # noqa: BLE001
                 log.error("hop_supervisor_tick_failed", error=str(exc))
+            # Persist snapshot to /run/ados/hop-supervisor.json so the
+            # API process (separate from ados-wfb in multi-process
+            # systemd) can read it without a cross-process accessor.
+            # 5 s cadence — the GCS chart polls at 1 Hz but doesn't
+            # need sub-second freshness for hop history.
+            now = time.monotonic()
+            if now >= next_persist:
+                self._persist_snapshot()
+                next_persist = now + 5.0
             try:
                 await asyncio.wait_for(self._stop_event.wait(), timeout=1.0)
             except asyncio.TimeoutError:
@@ -302,6 +312,28 @@ class HopSupervisor:
             now = time.monotonic()
             if now >= next_periodic:
                 next_periodic = now + self._hop_period_s
+
+    def _persist_snapshot(self) -> None:
+        """Write the current snapshot to /run/ados/hop-supervisor.json.
+
+        Atomic tmpfile+rename so a concurrent reader on the API side
+        never sees a truncated file. Best-effort: any I/O error is
+        logged at debug and the loop continues — the metric is not
+        critical-path.
+        """
+        try:
+            from pathlib import Path
+            import json
+
+            path = Path("/run/ados/hop-supervisor.json")
+            payload = self.snapshot()
+            payload["wall_time_unix"] = time.time()
+            tmp = path.with_suffix(".tmp")
+            tmp.parent.mkdir(parents=True, exist_ok=True)
+            tmp.write_text(json.dumps(payload))
+            tmp.replace(path)
+        except OSError as exc:
+            log.debug("hop_supervisor_persist_failed", error=str(exc))
 
     async def _tick(self, next_periodic_at: float) -> None:
         if not self._enabled:

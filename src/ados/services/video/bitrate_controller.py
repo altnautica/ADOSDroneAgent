@@ -258,6 +258,7 @@ class BitrateController:
         self._stop_event.set()
 
     async def _loop(self) -> None:
+        next_persist = 0.0
         while not self._stop_event.is_set():
             try:
                 await self._tick()
@@ -271,12 +272,44 @@ class BitrateController:
                     error=str(exc),
                     tier=self.current_tier.name,
                 )
+            # Persist snapshot to /run/ados/bitrate-controller.json
+            # so the API process (separate from ados-wfb in
+            # multi-process systemd) can read it without a cross-
+            # process accessor. 5 s cadence matches the hop
+            # supervisor; both feed the same GCS panel.
+            import time as _time
+
+            now = _time.monotonic()
+            if now >= next_persist:
+                self._persist_snapshot()
+                next_persist = now + 5.0
             try:
                 await asyncio.wait_for(
                     self._stop_event.wait(), timeout=self._tick_interval_s
                 )
             except asyncio.TimeoutError:
                 pass
+
+    def _persist_snapshot(self) -> None:
+        """Write the current snapshot to /run/ados/bitrate-controller.json.
+
+        Atomic tmpfile+rename. Best-effort: I/O failures swallowed
+        at debug.
+        """
+        try:
+            from pathlib import Path
+            import json
+            import time as _time
+
+            path = Path("/run/ados/bitrate-controller.json")
+            payload = self.snapshot()
+            payload["wall_time_unix"] = _time.time()
+            tmp = path.with_suffix(".tmp")
+            tmp.parent.mkdir(parents=True, exist_ok=True)
+            tmp.write_text(json.dumps(payload))
+            tmp.replace(path)
+        except OSError as exc:
+            log.debug("bitrate_controller_persist_failed", error=str(exc))
 
     async def _tick(self) -> None:
         if not self._enabled or not self._auto:

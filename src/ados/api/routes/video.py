@@ -565,30 +565,68 @@ class VideoConfigBody(BaseModel):
     )
 
 
-def _bitrate_controller_snapshot(app: Any) -> dict[str, Any] | None:
-    """Best-effort lookup of the BitrateController snapshot.
+def _read_state_file(path: str) -> dict[str, Any] | None:
+    """Read a JSON snapshot file written by a wfb-side controller.
 
-    The controller is a member of the agent app instance set up by
-    AgentMain. When the API is running in the same process as the
-    video supervisor (single-process mode and bench dev) the
-    reference is live and snapshot() returns the current ladder
-    state. When the API is in its own process the controller is
-    not visible from here; returns None and the caller falls back
-    to the WFB-config defaults.
+    The BitrateController and HopSupervisor run inside ados-wfb
+    (separate process from ados-api in production multi-process
+    systemd). They persist their snapshots to /run/ados/*.json
+    every ~5 s; this reader pulls whichever file is asked for.
+    Returns None on any read or parse failure so the caller can
+    fall back to defaults.
+    """
+    try:
+        from pathlib import Path
+        import json
+
+        p = Path(path)
+        if not p.is_file():
+            return None
+        blob = json.loads(p.read_text())
+        return blob if isinstance(blob, dict) else None
+    except (OSError, ValueError):
+        return None
+
+
+def _bitrate_controller_snapshot(app: Any) -> dict[str, Any] | None:
+    """Read the BitrateController snapshot.
+
+    First tries the in-process accessor (single-process mode,
+    bench dev). Falls back to the state file the controller
+    persists at /run/ados/bitrate-controller.json (production
+    multi-process). Returns None when neither path yields data.
     """
     getter = getattr(app, "bitrate_controller", None)
-    if not callable(getter):
-        return None
-    ctrl = getter()
-    if ctrl is None:
-        return None
-    snap_fn = getattr(ctrl, "snapshot", None)
-    if not callable(snap_fn):
-        return None
-    try:
-        return snap_fn()
-    except Exception:  # noqa: BLE001
-        return None
+    if callable(getter):
+        ctrl = getter()
+        if ctrl is not None:
+            snap_fn = getattr(ctrl, "snapshot", None)
+            if callable(snap_fn):
+                try:
+                    return snap_fn()
+                except Exception:  # noqa: BLE001
+                    pass
+    return _read_state_file("/run/ados/bitrate-controller.json")
+
+
+def _hop_supervisor_snapshot(app: Any) -> dict[str, Any] | None:
+    """Read the HopSupervisor snapshot.
+
+    Same dual-path pattern as the bitrate controller: prefer
+    the in-process accessor, fall back to the state file at
+    /run/ados/hop-supervisor.json.
+    """
+    getter = getattr(app, "hop_supervisor", None)
+    if callable(getter):
+        sup = getter()
+        if sup is not None:
+            snap_fn = getattr(sup, "snapshot", None)
+            if callable(snap_fn):
+                try:
+                    return snap_fn()
+                except Exception:  # noqa: BLE001
+                    pass
+    return _read_state_file("/run/ados/hop-supervisor.json")
 
 
 @router.get("/video/config")
@@ -635,10 +673,34 @@ async def get_video_config() -> dict[str, Any]:
     snap = _bitrate_controller_snapshot(app)
     if snap is not None:
         adaptive.update(snap)
+
+    # Hop supervisor snapshot: drone-side periodic + reactive
+    # frequency hopper. Drives the GCS ChannelHistoryChart.
+    # Falls back to a minimal stub on incapable rigs (e.g. GS
+    # profile, which spawns the listener only, no supervisor)
+    # so the GCS chart can render an "armed but quiet" state.
+    hop_snap = _hop_supervisor_snapshot(app)
+    if hop_snap is None:
+        hopping = {
+            "enabled": (
+                getattr(wfb_cfg, "auto_hop_enabled", False)
+                if wfb_cfg else False
+            ),
+            "band": getattr(wfb_cfg, "band", None) if wfb_cfg else None,
+            "hop_period_seconds": (
+                getattr(wfb_cfg, "hop_period_seconds", None)
+                if wfb_cfg else None
+            ),
+            "history": [],
+            "last_hop_at": 0.0,
+        }
+    else:
+        hopping = hop_snap
     return {
         "radio": radio,
         "encoder": encoder,
         "adaptive": adaptive,
+        "hopping": hopping,
     }
 
 
