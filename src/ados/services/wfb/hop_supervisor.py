@@ -773,18 +773,49 @@ async def run_hop_listener(
 
 
 async def _apply_hop(wfb_manager: Any, target_channel: int) -> bool:
-    """GS-side actuation: stop wfb_rx, retune the radio, start wfb_rx.
+    """GS-side actuation: hot-restart wfb_rx on the new channel.
 
-    Returns True on a successful start_rx (the listener records this
-    in its history). False when the interface is missing or the
-    channel is unknown — both surface as red markers on the chart.
+    Does NOT call ``wfb_manager.stop()`` / ``stop_rx()`` — those set
+    ``_running = False`` which causes the outer ``wfb_rx.run()`` loop
+    to exit and the whole service to shut down. Each hop would
+    otherwise trigger a full service restart, losing the listener's
+    history ring and forcing systemd to bring everything back up.
+    Instead: kill the rx subprocess directly, set the new channel
+    on the radio with ``iw``, and call ``start_rx`` to spawn a fresh
+    wfb_rx tied to the same long-running manager.
+
+    Returns True on a successful start_rx. False when the interface
+    is missing or the channel is unknown — both surface as red
+    markers on the chart.
     """
     interface = getattr(wfb_manager, "_interface", None)
     if not interface:
         log.warning("hop_listener_no_interface")
         return False
     log.info("hop_listener_applying", target=target_channel)
-    await wfb_manager.stop()
+
+    # Kill the rx subprocess in-place. _running stays True so the
+    # outer manager loop doesn't tear the service down — this is
+    # the critical difference vs calling stop() / stop_rx().
+    proc = getattr(wfb_manager, "_rx_proc", None)
+    if proc is not None and getattr(proc, "returncode", 0) is None:
+        try:
+            proc.terminate()
+            await asyncio.wait_for(proc.wait(), timeout=3.0)
+        except asyncio.TimeoutError:
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
+        except ProcessLookupError:
+            pass
+    # Clear the handle so start_rx doesn't see a stale process.
+    try:
+        wfb_manager._rx_proc = None
+    except AttributeError:
+        pass
+
+    # Retune the radio. iw on monitor mode is the supported path.
     await asyncio.create_subprocess_exec(
         "iw",
         interface,
@@ -794,7 +825,11 @@ async def _apply_hop(wfb_manager: Any, target_channel: int) -> bool:
         stdout=asyncio.subprocess.DEVNULL,
         stderr=asyncio.subprocess.DEVNULL,
     )
-    wfb_manager._channel = target_channel
+    try:
+        wfb_manager._channel = target_channel
+    except AttributeError:
+        pass
+
     ch = get_channel(target_channel)
     if ch is None:
         log.warning("hop_listener_unknown_channel", target=target_channel)
