@@ -312,21 +312,38 @@ class HopSupervisor:
         now = time.monotonic()
         # Reactive trigger: most recent sample crosses either threshold
         # AND it's been at least reactive_cooldown_s since the last hop.
+        #
+        # CRITICAL: only fire when we have ACTUAL link-quality samples.
+        # LinkQualityMonitor's default LinkStats has rssi_dbm=-100 and
+        # loss_percent=0 — which trips the reactive threshold on every
+        # tick before any real wfb_rx output has been parsed. On a
+        # drone-only rig that doesn't run wfb_rx (no rx.key), the
+        # monitor never updates and the supervisor would otherwise
+        # hop every 30 s (cooldown) forever on stale defaults. Gate
+        # on `timestamp` being non-empty AND `packets_received` having
+        # crossed at least once — both are 0/empty in the default
+        # LinkStats.
         reactive = False
         latest = getattr(self._lqm, "_latest", None) or getattr(
             self._lqm, "latest", None
         )
         if latest is not None:
+            timestamp = getattr(latest, "timestamp", "")
+            packets_received = int(getattr(latest, "packets_received", 0))
+            has_real_data = bool(timestamp) and packets_received > 0
             loss = float(getattr(latest, "loss_percent", 0.0))
             rssi = float(getattr(latest, "rssi_dbm", -100.0))
             if (
-                loss > self._loss_threshold or rssi < self._rssi_threshold
-            ) and (now - self._last_hop_at) > self._reactive_cooldown_s:
+                has_real_data
+                and (loss > self._loss_threshold or rssi < self._rssi_threshold)
+                and (now - self._last_hop_at) > self._reactive_cooldown_s
+            ):
                 reactive = True
                 log.info(
                     "hop_supervisor_reactive_trigger",
                     loss=loss,
                     rssi=rssi,
+                    packets=packets_received,
                 )
 
         periodic = now >= next_periodic_at
