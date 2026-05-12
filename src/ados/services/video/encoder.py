@@ -272,6 +272,13 @@ def _build_rpicam_command(
             "transfer_characteristics=1:"
             "matrix_coefficients=1:"
             "video_full_range_flag=0",
+            # Strip the RTSP muxer's default mux delay + preload +
+            # output-side packet aggregation; mirrors the tee and
+            # ground sidecar work so this path doesn't quietly
+            # reintroduce ~1.2 s of latency on CSI-camera rigs.
+            "-muxdelay", "0",
+            "-muxpreload", "0",
+            "-flush_packets", "1",
             "-f", "rtsp",
             "-rtsp_transport", "tcp",
             output,
@@ -408,6 +415,37 @@ def _build_ffmpeg_command(
         # Late joiners also see a keyframe within ~0.5s of subscribing.
         # Trade-off: ~15% higher bitrate from more frequent IDR frames,
         # acceptable on LAN and 4G.
+        #
+        # Low-latency hardening on top of -tune zerolatency:
+        # - -rc-lookahead 0 / sync-lookahead=0 / no-mbtree=1: libx264's
+        #   default rate control buffers ~40 future frames (~1.3 s at
+        #   30 fps) so the encoder can amortize bitrate across a
+        #   moving average. None of that helps a live FPV stream where
+        #   every frame must hit the wire immediately. Disabling
+        #   the three lookahead layers shaves 30-50 ms of constant
+        #   encoder latency.
+        # - -bf 0: no B-frames. -tune zerolatency implies this but
+        #   passing it explicitly survives future libx264 default
+        #   shifts.
+        # - -refs 1: single reference frame on the wire; decoder
+        #   side never has to buffer a reorder window.
+        # - -threads 2: cap encoder threads. With libx264 each thread
+        #   adds roughly one frame of pipeline latency; 2 threads is
+        #   the sweet spot on quad-core SBCs (1 thread saturates the
+        #   core, 4 threads = ~4 frames of latency for negligible
+        #   throughput gain at 720p30).
+        # - -flush_packets 1: muxer flushes after every encoded NAL
+        #   rather than batching writes; combined with the
+        #   -muxdelay/-muxpreload work on the tee ffmpeg this is the
+        #   last hop where ffmpeg can decide to wait.
+        # - intra-refresh=1 / scenecut=0: rolling intra-MB refresh
+        #   instead of large full-frame IDRs at scene cuts. The
+        #   periodic IDR (set by -g) still happens for absolute
+        #   recovery and late-joiner SPS/PPS, but mid-GOP an I-slice
+        #   walks across the frame so loss recovery is continuous
+        #   rather than gated on the next IDR.
+        # - sliced-threads=0: per-slice threading adds queue latency
+        #   per slice. -threads 2 already uses frame-level threading.
         gop = max(config.fps // 2, 1)
         cmd.extend([
             "-pix_fmt", "yuv420p",
@@ -416,6 +454,19 @@ def _build_ffmpeg_command(
             "-preset", "ultrafast",
             "-tune", "zerolatency",
             "-g", str(gop),
+            "-bf", "0",
+            "-refs", "1",
+            "-threads", "2",
+            "-flush_packets", "1",
+            "-x264-params",
+            (
+                "no-mbtree=1:"
+                "sync-lookahead=0:"
+                "rc-lookahead=0:"
+                "sliced-threads=0:"
+                "intra-refresh=1:"
+                "scenecut=0"
+            ),
             # Convert MP4-style NAL framing to Annex-B for downstream
             # RTSP/WebRTC compatibility. libx264 produces AVCC
             # length-prefixed NALs by default; mediamtx (and browser
@@ -426,9 +477,18 @@ def _build_ffmpeg_command(
             "-bsf:v", "h264_mp4toannexb",
         ])
     elif ffmpeg_codec == "h264_v4l2m2m":
-        # Pi V4L2 M2M needs yuv420p input — force pixel format conversion
+        # Pi V4L2 M2M needs yuv420p input — force pixel format conversion.
+        # -bf 0 mirrors the libx264 branch; -flush_packets 1 likewise.
+        # The HW encoder does NOT expose an intra-refresh control in a
+        # portable way across Pi 4B / Pi 5 / Rockchip kernels, so the
+        # rolling-refresh trick stays on the software libx264 path.
         gop_hw = max(config.fps // 2, 1)
-        cmd.extend(["-pix_fmt", "yuv420p", "-g", str(gop_hw)])
+        cmd.extend([
+            "-pix_fmt", "yuv420p",
+            "-g", str(gop_hw),
+            "-bf", "0",
+            "-flush_packets", "1",
+        ])
 
     # Specify output format for network destinations
     if output.startswith("rtsp://"):
@@ -476,15 +536,29 @@ def _build_gstreamer_command(
     if _is_rockchip() and _has_mpph264enc():
         # mpph264enc: hardware VPU encoder. bps = bits per second.
         # header-mode=1 inserts SPS/PPS before every IDR for WebRTC
-        # late-joiner compatibility.
+        # late-joiner compatibility. rc-mode=1 selects VBR with
+        # bounded bps-max/bps-min so the encoder cannot starve the
+        # wfb_tx FEC pipeline with a runaway bitrate spike on a
+        # scene change. qp-min=5/qp-max=51 mirrors the OpenHD bench
+        # values for live FPV.
         encoder = (
             f"mpph264enc bps={config.bitrate_kbps * 1000} "
+            f"bps-max={int(config.bitrate_kbps * 1.5) * 1000} "
+            f"bps-min={int(config.bitrate_kbps * 0.5) * 1000} "
+            f"qp-min=5 qp-max=51 rc-mode=1 "
             f"gop={gop} header-mode=1"
         )
     else:
+        # x264enc software fallback. threads=2 + sliced-threads=false
+        # bound the encoder pipeline depth to ~2 frames of latency.
+        # tune=zerolatency disables B-frames + lookahead but the
+        # property doesn't expose intra-refresh; on this path we
+        # accept the keyframe periodic cost.
         encoder = (
             f"x264enc bitrate={config.bitrate_kbps} "
-            f"speed-preset=ultrafast tune=zerolatency key-int-max={gop}"
+            "speed-preset=ultrafast tune=zerolatency "
+            "threads=2 sliced-threads=false "
+            f"key-int-max={gop}"
         )
 
     if output.startswith("rtsp://"):
