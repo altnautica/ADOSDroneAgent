@@ -924,6 +924,7 @@ class OledService:
             HEIGHT as TAB_HEIGHT,
         )
         from ados.services.ui.chrome.bottom_tab_bar import (
+            _TABS,
             TAB_COUNT,
             TAB_WIDTH,
             page_id_for_zone,
@@ -931,17 +932,12 @@ class OledService:
         if gesture.start_y < 320 - TAB_HEIGHT:
             return
         index = max(0, min(TAB_COUNT - 1, gesture.start_x // TAB_WIDTH))
-        # The zone ids are stable; rebuild via the helper map. Must
-        # match the tuple in chrome.bottom_tab_bar._TABS — the fourth
-        # tab now routes to LinkStatsPage; the old MorePage class is
-        # left in tree but unregistered.
-        zone_ids = (
-            "tab.dashboard",
-            "tab.video",
-            "tab.settings",
-            "tab.link_stats",
-        )
-        zone_id = zone_ids[index]
+        # Read zone ids straight from the _TABS source-of-truth so the
+        # dispatch stays correct when tabs are added or removed.
+        # Previously this was a hardcoded 4-tuple which silently
+        # IndexError'd on the 5th tap when TAB_COUNT grew to 5 (the
+        # ChannelHopsPage entry).
+        zone_id = _TABS[index][0]
         page_id = page_id_for_zone(zone_id)
         if page_id is None:
             return
