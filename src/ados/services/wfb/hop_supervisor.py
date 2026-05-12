@@ -322,10 +322,10 @@ class HopSupervisor:
         critical-path.
         """
         try:
-            from pathlib import Path
+            from ados.core.paths import HOP_SUPERVISOR_JSON
             import json
 
-            path = Path("/run/ados/hop-supervisor.json")
+            path = HOP_SUPERVISOR_JSON
             payload = self.snapshot()
             payload["wall_time_unix"] = time.time()
             tmp = path.with_suffix(".tmp")

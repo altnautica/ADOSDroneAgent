@@ -750,18 +750,31 @@ class VideoPipeline:
                 cmd_inject = (
                     f"{sys.executable} -m ados.services.video.sei_injector"
                 )
-                # `-muxdelay 0 -muxpreload 0` defeat ffmpeg's default
-                # 0.7s mux delay + 0.5s preload buffer. For live RTP we
-                # want each packet on the wire as soon as encoded.
-                # `-progress pipe:2` forces structured 1-Hz progress to
-                # stderr so the watchdog can tell working-but-quiet
-                # from wedged-and-stuck (otherwise ffmpeg suppresses
-                # progress when stderr is piped).
+                # `-muxdelay 0 -muxpreload 0 -flush_packets 1` strip
+                # ffmpeg's default 0.7 s mux delay + 0.5 s preload +
+                # output-side packet aggregation. The flush_packets
+                # is critical when the SEI injector is in the bash
+                # pipe in front of this ffmpeg: the injector emits
+                # one extra NAL per video frame, an irregular
+                # cadence that triggers the RTP muxer to batch
+                # output. Without -flush_packets 1, cmd_out's stdin
+                # buffer fills, the injector blocks on write, it
+                # can't drain its own stdin, cmd_in's stdout buffer
+                # fills, and the bash pipe collapses with
+                # "Conversion failed!" within seconds. The plain
+                # (non-SEI) ffmpeg branch below has carried this
+                # flag since 0.21.2; bringing this branch into parity.
+                # `-progress pipe:2` forces structured 1-Hz progress
+                # to stderr so the watchdog can tell working-but-
+                # quiet from wedged-and-stuck (otherwise ffmpeg
+                # suppresses progress when stderr is piped).
                 cmd_out = (
                     "ffmpeg "
                     "-fflags nobuffer -flags low_delay "
                     "-f h264 -i - "
-                    "-c:v copy -muxdelay 0 -muxpreload 0 -f rtp "
+                    "-c:v copy "
+                    "-muxdelay 0 -muxpreload 0 -flush_packets 1 "
+                    "-f rtp "
                     f"-payload_type {_WFB_TEE_PAYLOAD_TYPE} "
                     f"-ssrc {_WFB_TEE_SSRC} "
                     "-progress pipe:2 "

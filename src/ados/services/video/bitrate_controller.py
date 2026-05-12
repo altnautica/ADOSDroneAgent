@@ -297,11 +297,11 @@ class BitrateController:
         at debug.
         """
         try:
-            from pathlib import Path
+            from ados.core.paths import BITRATE_CONTROLLER_JSON
             import json
             import time as _time
 
-            path = Path("/run/ados/bitrate-controller.json")
+            path = BITRATE_CONTROLLER_JSON
             payload = self.snapshot()
             payload["wall_time_unix"] = _time.time()
             tmp = path.with_suffix(".tmp")

@@ -46,6 +46,14 @@ WFB_RECEIVER_JSON = ADOS_RUN_DIR / "wfb-receiver.json"
 # wfb stats need to surface to multiple consumers per box.
 WFB_STATS_JSON = ADOS_RUN_DIR / "wfb-stats.json"
 
+# Hop supervisor + bitrate controller snapshots. Both live inside the
+# ados-wfb service in production multi-process; consumers (api,
+# oled, lcd channel-hops page) read these files because the
+# accessors are cross-process-blind. Written by their owners every
+# ~5 s (atomic tmpfile+rename).
+HOP_SUPERVISOR_JSON = ADOS_RUN_DIR / "hop-supervisor.json"
+BITRATE_CONTROLLER_JSON = ADOS_RUN_DIR / "bitrate-controller.json"
+
 # Sentinel files
 UPLINK_ACTIVE_FLAG = ADOS_RUN_DIR / "uplink-active"
 AP_WAS_ENABLED_FLAG = ADOS_RUN_DIR / "ap-was-enabled"

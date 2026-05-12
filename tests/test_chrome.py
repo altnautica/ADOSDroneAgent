@@ -63,7 +63,7 @@ class TestTopStatusBar:
 
 
 class TestBottomTabBar:
-    def test_returns_four_zones_with_correct_geometry(self):
+    def test_returns_five_zones_with_correct_geometry(self):
         canvas = _new_canvas()
         zones = bottom_tab_bar.draw(
             canvas,
@@ -73,21 +73,23 @@ class TestBottomTabBar:
             palette=DARK,
             active="dashboard",
         )
-        assert len(zones) == 4
-        # Tabs span the full width, 120 px each.
+        assert len(zones) == 5
+        # Tabs span the full width, 96 px each (480 / 5).
         assert zones[0].x == 0
-        assert zones[0].w == 120
+        assert zones[0].w == 96
         assert zones[0].y == 276
         assert zones[0].h == 44
-        assert zones[1].x == 120
-        assert zones[2].x == 240
-        assert zones[3].x == 360
-        # All four ids match the spec.
+        assert zones[1].x == 96
+        assert zones[2].x == 192
+        assert zones[3].x == 288
+        assert zones[4].x == 384
+        # All five ids match the spec.
         assert [z.id for z in zones] == [
             "tab.dashboard",
             "tab.video",
             "tab.settings",
-            "tab.more",
+            "tab.link_stats",
+            "tab.channel_hops",
         ]
 
     def test_active_tab_gets_accent_line(self):
@@ -128,7 +130,8 @@ class TestBottomTabBar:
         assert bottom_tab_bar.page_id_for_zone("tab.dashboard") == "dashboard"
         assert bottom_tab_bar.page_id_for_zone("tab.video") == "video"
         assert bottom_tab_bar.page_id_for_zone("tab.settings") == "settings"
-        assert bottom_tab_bar.page_id_for_zone("tab.more") == "more"
+        assert bottom_tab_bar.page_id_for_zone("tab.link_stats") == "link_stats"
+        assert bottom_tab_bar.page_id_for_zone("tab.channel_hops") == "channel_hops"
         assert bottom_tab_bar.page_id_for_zone("nonsense") is None
 
 

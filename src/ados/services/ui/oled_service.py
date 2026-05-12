@@ -587,6 +587,7 @@ class OledService:
         # Settings page lives at the same registry; the tab-bar route
         # for "settings" resolves to it. Imported locally to avoid
         # cycles with the page __init__ during early startup.
+        from ados.services.ui.pages.channel_hops import ChannelHopsPage
         from ados.services.ui.pages.link_stats import LinkStatsPage
         from ados.services.ui.pages.settings import SettingsPage
         from ados.services.ui.pages.video import VideoPage
@@ -598,6 +599,11 @@ class OledService:
         # Settings -> Maintenance). Tab bar's fourth tab routes here
         # via id="link_stats".
         navigator.register(LinkStatsPage())
+        # Channel-hopping history (drone profile only renders real data;
+        # GS profile sees the empty-state placeholder since the
+        # supervisor lives only on the drone side). Tab bar's fifth
+        # tab routes here via id="channel_hops".
+        navigator.register(ChannelHopsPage())
         self._page_navigator = navigator
         # Surface the bridge's touch buses on the context so any page
         # that needs live drag tracking (settings list, slider modal,

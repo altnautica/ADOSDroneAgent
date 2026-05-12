@@ -1,6 +1,6 @@
 """Bottom tab bar — 44 px persistent navigation strip.
 
-Four tabs each 120 px wide laid out left-to-right: Dashboard, Video,
+Five tabs each 96 px wide laid out left-to-right: Dashboard, Video,
 Settings, More (the plus glyph). Each tab has:
 
 * A tinted 24 px icon (``text_tertiary`` for inactive, ``text_primary``
@@ -24,22 +24,26 @@ from ados.services.ui.pages.base import HitZone
 from ados.services.ui.theme import Palette
 
 HEIGHT = 44
-TAB_WIDTH = 120
-TAB_COUNT = 4
+TAB_COUNT = 5
+TAB_WIDTH = 480 // TAB_COUNT  # 96 px each at 480 px page width
 
 # Stable id per tab. The page id is the same as the navigator route.
 # The fourth tab used to be "more" (plus glyph) which led to a
 # four-row overflow menu (Pair, Diagnostics, Restart, About). Those
 # rows now live under Settings -> Maintenance, freeing the fourth
 # tab for a live link-and-decoder diagnostics page where it earns
-# more screen-time. See LinkStatsPage and the maintenance section
-# in SettingsPage.
+# more screen-time. The fifth tab surfaces the HopSupervisor's
+# channel-hopping history (drone profile populates with real data;
+# GS profile renders the empty-state placeholder until a separate
+# follow-on adds GS-side hop tracking). See LinkStatsPage,
+# ChannelHopsPage, and the maintenance section in SettingsPage.
 _TABS: tuple[tuple[str, str, str], ...] = (
     # (zone_id, page_id, icon_name)
     ("tab.dashboard", "dashboard", "dashboard"),
     ("tab.video", "video", "video"),
     ("tab.settings", "settings", "settings"),
     ("tab.link_stats", "link_stats", "link_stats"),
+    ("tab.channel_hops", "channel_hops", "link_stats"),
 )
 
 

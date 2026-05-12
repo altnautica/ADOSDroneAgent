@@ -606,7 +606,9 @@ def _bitrate_controller_snapshot(app: Any) -> dict[str, Any] | None:
                     return snap_fn()
                 except Exception:  # noqa: BLE001
                     pass
-    return _read_state_file("/run/ados/bitrate-controller.json")
+    from ados.core.paths import BITRATE_CONTROLLER_JSON
+
+    return _read_state_file(str(BITRATE_CONTROLLER_JSON))
 
 
 def _hop_supervisor_snapshot(app: Any) -> dict[str, Any] | None:
@@ -626,7 +628,9 @@ def _hop_supervisor_snapshot(app: Any) -> dict[str, Any] | None:
                     return snap_fn()
                 except Exception:  # noqa: BLE001
                     pass
-    return _read_state_file("/run/ados/hop-supervisor.json")
+    from ados.core.paths import HOP_SUPERVISOR_JSON
+
+    return _read_state_file(str(HOP_SUPERVISOR_JSON))
 
 
 @router.get("/video/config")
