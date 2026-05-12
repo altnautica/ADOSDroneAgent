@@ -529,6 +529,221 @@ async def switch_camera(body: CameraSwitchBody):
 # active) and the endpoint returns a 204 No Content.
 
 
+class VideoConfigBody(BaseModel):
+    """Body for ``POST /api/video/config``.
+
+    Every field is optional; a request with no fields is a no-op
+    that returns the current snapshot. Fields are validated
+    individually and applied independently so a partial-update
+    request leaves the rest of the config untouched.
+    """
+
+    bitrate_kbps: int | None = Field(
+        default=None, ge=500, le=12000,
+        description="Encoder bitrate in kbps. Restarts the encoder.",
+    )
+    fec_k: int | None = Field(
+        default=None, ge=1, le=64,
+        description="Reed-Solomon K (data fragments per FEC block).",
+    )
+    fec_n: int | None = Field(
+        default=None, ge=2, le=128,
+        description="Reed-Solomon N (total fragments per FEC block).",
+    )
+    mcs: int | None = Field(
+        default=None, ge=0, le=7,
+        description="802.11 MCS index passed to wfb_tx -M.",
+    )
+    auto: bool | None = Field(
+        default=None,
+        description="Toggle closed-loop adaptive control.",
+    )
+    tier_idx: int | None = Field(
+        default=None, ge=0, le=8,
+        description="Pin a specific tier on the bitrate/FEC ladder. "
+                    "Implicitly sets auto=False.",
+    )
+
+
+def _bitrate_controller_snapshot(app: Any) -> dict[str, Any] | None:
+    """Best-effort lookup of the BitrateController snapshot.
+
+    The controller is a member of the agent app instance set up by
+    AgentMain. When the API is running in the same process as the
+    video supervisor (single-process mode and bench dev) the
+    reference is live and snapshot() returns the current ladder
+    state. When the API is in its own process the controller is
+    not visible from here; returns None and the caller falls back
+    to the WFB-config defaults.
+    """
+    ctrl = getattr(app, "_bitrate_controller", None)
+    if ctrl is None:
+        return None
+    snap_fn = getattr(ctrl, "snapshot", None)
+    if not callable(snap_fn):
+        return None
+    try:
+        return snap_fn()
+    except Exception:  # noqa: BLE001
+        return None
+
+
+@router.get("/video/config")
+async def get_video_config() -> dict[str, Any]:
+    """Live snapshot of the adaptive bitrate + FEC + radio config.
+
+    Combines the static wfb config (channel, mcs, fec_k/fec_n
+    persisted to /etc/ados/config.yaml) with the dynamic ladder
+    state from the BitrateController. Shape is stable enough that
+    the GCS Video Link panel can render its sparklines without a
+    schema migration when an additional metric is added.
+    """
+    app = get_agent_app()
+    cfg = app.config
+    wfb_cfg = getattr(cfg.video, "wfb", None) if cfg is not None else None
+    camera_cfg = getattr(cfg.video, "camera", None) if cfg is not None else None
+
+    radio = {
+        "channel": getattr(wfb_cfg, "channel", None) if wfb_cfg else None,
+        "band": getattr(wfb_cfg, "band", None) if wfb_cfg else None,
+        "mcs_index": getattr(wfb_cfg, "mcs_index", None) if wfb_cfg else None,
+        "fec_k": getattr(wfb_cfg, "fec_k", None) if wfb_cfg else None,
+        "fec_n": getattr(wfb_cfg, "fec_n", None) if wfb_cfg else None,
+        "tx_power_dbm": (
+            getattr(wfb_cfg, "tx_power_dbm", None) if wfb_cfg else None
+        ),
+        "preset": getattr(wfb_cfg, "wfb_link_preset", None) if wfb_cfg else None,
+    }
+    encoder = {
+        "bitrate_kbps": (
+            getattr(camera_cfg, "bitrate_kbps", None) if camera_cfg else None
+        ),
+        "width": getattr(camera_cfg, "width", None) if camera_cfg else None,
+        "height": getattr(camera_cfg, "height", None) if camera_cfg else None,
+        "fps": getattr(camera_cfg, "fps", None) if camera_cfg else None,
+        "codec": getattr(camera_cfg, "codec", None) if camera_cfg else None,
+    }
+    adaptive = {
+        "available": (
+            getattr(wfb_cfg, "adaptive_bitrate_enabled", False)
+            if wfb_cfg else False
+        ),
+    }
+    snap = _bitrate_controller_snapshot(app)
+    if snap is not None:
+        adaptive.update(snap)
+    return {
+        "radio": radio,
+        "encoder": encoder,
+        "adaptive": adaptive,
+    }
+
+
+@router.post("/video/config")
+async def set_video_config(body: VideoConfigBody) -> dict[str, Any]:
+    """Apply zero or more video / radio tuning knobs.
+
+    Each field is optional and applied independently. Returns the
+    same shape as GET /video/config so the GCS can refresh its
+    local state from a single response. Fields that the agent
+    couldn't apply (e.g. wfb_manager is None in this process)
+    surface in ``warnings`` so a partial success is visible.
+    """
+    app = get_agent_app()
+    wfb_mgr = app.wfb_manager() if hasattr(app, "wfb_manager") else None
+    pipeline = app.video_pipeline() if hasattr(app, "video_pipeline") else None
+    ctrl = getattr(app, "_bitrate_controller", None)
+
+    warnings: list[str] = []
+
+    # Bitrate: pipeline-side restart. Skip if pipeline not in process.
+    if body.bitrate_kbps is not None:
+        if pipeline is not None and hasattr(pipeline, "set_video_bitrate"):
+            ok = await pipeline.set_video_bitrate(body.bitrate_kbps)
+            if not ok:
+                warnings.append("set_video_bitrate_failed")
+        else:
+            warnings.append("video_pipeline_not_in_process")
+
+    # FEC: stop-then-start wfb_tx. Skip if wfb not in process.
+    if body.fec_k is not None or body.fec_n is not None:
+        if wfb_mgr is not None and hasattr(wfb_mgr, "set_fec"):
+            cfg = app.config.video.wfb
+            new_k = body.fec_k if body.fec_k is not None else cfg.fec_k
+            new_n = body.fec_n if body.fec_n is not None else cfg.fec_n
+            ok = await wfb_mgr.set_fec(new_k, new_n)
+            if not ok:
+                warnings.append("set_fec_failed")
+        else:
+            warnings.append("wfb_manager_not_in_process")
+
+    # MCS
+    if body.mcs is not None:
+        if wfb_mgr is not None and hasattr(wfb_mgr, "set_mcs"):
+            ok = await wfb_mgr.set_mcs(body.mcs)
+            if not ok:
+                warnings.append("set_mcs_failed")
+        else:
+            warnings.append("wfb_manager_not_in_process")
+
+    # Controller toggles
+    if ctrl is not None:
+        if body.auto is not None:
+            try:
+                ctrl.set_auto(body.auto)
+            except Exception as exc:  # noqa: BLE001
+                warnings.append(f"set_auto_failed:{exc}")
+        if body.tier_idx is not None:
+            try:
+                ok = await ctrl.set_manual_tier(body.tier_idx)
+                if not ok:
+                    warnings.append("set_manual_tier_failed")
+            except Exception as exc:  # noqa: BLE001
+                warnings.append(f"set_manual_tier_failed:{exc}")
+    elif body.auto is not None or body.tier_idx is not None:
+        warnings.append("bitrate_controller_not_in_process")
+
+    response = await get_video_config()
+    response["warnings"] = warnings
+    return response
+
+
+@router.get("/video/latency")
+async def get_video_latency() -> dict[str, Any]:
+    """Return the most recent SEI-probe glass-to-glass latency.
+
+    Reads from the state file written by the LCD-side local tap
+    when the SEI latency feature is enabled
+    (WfbConfig.sei_latency = true). Returns latency_ms=None when
+    the probe is disabled or no SEI samples have arrived yet.
+    """
+    try:
+        from ados.core.paths import LCD_LATENCY_STATS_PATH
+
+        path = LCD_LATENCY_STATS_PATH
+    except (ImportError, AttributeError):
+        path = Path("/run/ados/lcd-latency.json")
+
+    if not Path(str(path)).is_file():
+        return {"latency_ms": None, "source": "unavailable"}
+    try:
+        import json
+
+        blob = json.loads(Path(str(path)).read_text())
+    except (OSError, ValueError) as exc:
+        log.warning("video_latency_read_failed", error=str(exc))
+        return {"latency_ms": None, "source": "read_failed"}
+    if not isinstance(blob, dict):
+        return {"latency_ms": None, "source": "unexpected_shape"}
+    return {
+        "latency_ms": blob.get("latency_ms"),
+        "ewma_ms": blob.get("latency_ewma_ms") or blob.get("ewma_ms"),
+        "pipeline_latency_ms": blob.get("pipeline_latency_ms"),
+        "samples": blob.get("samples"),
+        "source": blob.get("source", "sei"),
+    }
+
+
 @router.get("/v1/video/air-pipeline")
 async def get_air_pipeline_status():
     """Return the air-side GStreamer pipeline's live stats snapshot.

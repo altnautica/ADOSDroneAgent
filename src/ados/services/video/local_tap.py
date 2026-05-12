@@ -56,6 +56,7 @@ import subprocess
 import threading
 import time
 from collections import deque
+from pathlib import Path
 from typing import Any
 
 from PIL import Image
@@ -929,6 +930,29 @@ class LocalVideoTap:
             "pipeline_latency_ms": self._query_pipeline_latency_ms(),
             "decode_cpu_percent": self._read_decode_cpu_percent(),
         }
+
+    def persist_stats_to_file(
+        self,
+        path: str | Path = "/run/ados/lcd-latency.json",
+    ) -> None:
+        """Write the current stats snapshot to a JSON state file.
+
+        Bridges the LocalVideoTap (running in the OLED/UI service
+        process) to the API service which serves /api/video/latency.
+        Atomic tmpfile+rename so a concurrent reader never sees a
+        truncated file. Best-effort: any I/O error is swallowed
+        with a debug log; the metric is not critical-path.
+        """
+        try:
+            snapshot = self.stats()
+            snapshot["wall_time_unix"] = time.time()
+            tmp = Path(str(path)).with_suffix(".tmp")
+            import json as _json
+            tmp.parent.mkdir(parents=True, exist_ok=True)
+            tmp.write_text(_json.dumps(snapshot))
+            tmp.replace(Path(str(path)))
+        except OSError as exc:
+            self._logger.debug("local_tap_persist_failed", error=str(exc))
 
     # ── internals ──────────────────────────────────────────────
 

@@ -1435,6 +1435,30 @@ class OledService:
             log.debug("video_tap_config_load_failed", error=str(exc))
         return LocalVideoTap(fps_cap=fps_cap, logger=log)
 
+    async def _persist_tap_stats_forever(self) -> None:
+        """Persist LocalVideoTap stats to /run/ados/lcd-latency.json.
+
+        The API service is a separate process and cannot read the
+        tap's in-memory state directly. Drop a JSON snapshot every
+        second so /api/video/latency has something to serve. Best
+        effort: I/O failures are logged at debug and the loop
+        continues.
+        """
+        if self._page_context is None:
+            return
+        tap = self._page_context.video_tap
+        if tap is None:
+            return
+        while not self._stop.is_set():
+            try:
+                tap.persist_stats_to_file()
+            except Exception as exc:  # noqa: BLE001
+                log.debug("oled_tap_stats_persist_failed", error=str(exc))
+            try:
+                await asyncio.wait_for(self._stop.wait(), timeout=1.0)
+            except asyncio.TimeoutError:
+                pass
+
     async def _ensure_video_tap_forever(self) -> None:
         """Keep the LCD video tap running for the agent's lifetime.
 
@@ -1834,6 +1858,10 @@ class OledService:
             asyncio.create_task(
                 self._ensure_video_tap_forever(),
                 name="oled_video_tap",
+            ),
+            asyncio.create_task(
+                self._persist_tap_stats_forever(),
+                name="oled_tap_stats_persist",
             ),
         ]
         if self._touch_bridge is not None:
