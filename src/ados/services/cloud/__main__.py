@@ -246,10 +246,15 @@ async def main() -> None:
                     except Exception:
                         pass
 
+                    from ados.core.profile import current_profile_and_role
+                    _profile, _role = current_profile_and_role(config)
+
                     payload = {
                         "deviceId": config.agent.device_id,
                         "version": __version__,
                         "runtimeMode": "full",
+                        "profile": _profile,
+                        "role": _role,
                         "uptimeSeconds": round(uptime),
                         "boardName": board.name if board else "unknown",
                         "boardTier": board.tier if board else 0,

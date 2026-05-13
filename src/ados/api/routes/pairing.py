@@ -8,6 +8,7 @@ from pydantic import BaseModel
 from ados import __version__
 from ados.api.deps import get_agent_app
 from ados.core.pairing import claim_with_external_code
+from ados.core.profile import current_profile_and_role
 
 router = APIRouter(tags=["pairing"])
 
@@ -33,16 +34,25 @@ class PairingInfo(BaseModel):
     owner_id: str | None = None
     paired_at: float | None = None
     mdns_host: str
+    profile: str
+    role: str | None = None
 
 
 @router.get("/pairing/info", response_model=PairingInfo)
 async def get_pairing_info():
-    """Get pairing info. No auth required."""
+    """Get pairing info. No auth required.
+
+    Doubles as the Mission Control "probe" endpoint when a user pastes
+    a hostname into Add-a-Node — the response carries the node identity
+    (device_id, name, board, version), pairing state, and the new
+    ``profile`` + ``role`` discriminators that drive GCS panel selection.
+    """
     app = get_agent_app()
     pm = app.pairing_manager
     info = pm.get_info()
     discovery = app.discovery_service
     short_id = app.config.agent.device_id[:6].lower()
+    profile, role = current_profile_and_role(app.config)
 
     return PairingInfo(
         device_id=app.config.agent.device_id,
@@ -54,6 +64,8 @@ async def get_pairing_info():
         owner_id=info.get("owner_id"),
         paired_at=info.get("paired_at"),
         mdns_host=discovery.mdns_hostname if discovery else f"ados-{short_id}.local",
+        profile=profile,
+        role=role,
     )
 
 
@@ -78,10 +90,16 @@ async def claim_pairing(request: ClaimRequest):
     api_key = pm.claim(request.user_id)
     discovery = app.discovery_service
     short_id = app.config.agent.device_id[:6].lower()
+    profile, role = current_profile_and_role(app.config)
 
     # Update mDNS TXT records
     if discovery:
-        await discovery.update_txt(paired=True, owner=request.user_id)
+        await discovery.update_txt(
+            paired=True,
+            owner=request.user_id,
+            profile=profile,
+            role=role,
+        )
 
     return ClaimResponse(
         api_key=api_key,
@@ -138,10 +156,16 @@ async def unpair():
 
     pm.unpair()
     discovery = app.discovery_service
+    profile, role = current_profile_and_role(app.config)
 
     # Update mDNS with new code
     new_code = pm.get_or_create_code()
     if discovery:
-        await discovery.update_txt(paired=False, code=new_code)
+        await discovery.update_txt(
+            paired=False,
+            code=new_code,
+            profile=profile,
+            role=role,
+        )
 
     return {"status": "unpaired", "new_code": new_code}

@@ -270,7 +270,14 @@ async def claim_with_external_code(app: object, code: str) -> dict:
 
     if discovery is not None:
         try:
-            await discovery.update_txt(paired=True, owner=owner_id)
+            from ados.core.profile import current_profile_and_role
+            profile, role = current_profile_and_role(config)
+            await discovery.update_txt(
+                paired=True,
+                owner=owner_id,
+                profile=profile,
+                role=role,
+            )
         except Exception:
             log.debug("mdns_txt_update_failed_after_external_claim")
 

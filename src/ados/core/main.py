@@ -323,6 +323,7 @@ class AgentApp:
 
         # mDNS discovery registration
         if self.config.discovery.mdns_enabled:
+            from ados.core.profile import current_profile_and_role
             from ados.services.discovery import DiscoveryService
             api_port = self.config.scripting.rest_api.port
             self.discovery_service = DiscoveryService(
@@ -333,10 +334,13 @@ class AgentApp:
                 board=self.board_name,
             )
             pm = self.pairing_manager
+            profile, role = current_profile_and_role(self.config)
             await self.discovery_service.register(
                 paired=pm.is_paired,
                 code=pm.get_or_create_code() if not pm.is_paired else None,
                 owner=pm.owner_id,
+                profile=profile,
+                role=role,
             )
 
         if self._single_process_cloud_enabled():

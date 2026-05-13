@@ -51,6 +51,8 @@ class DiscoveryService:
         paired: bool = False,
         code: str | None = None,
         owner: str | None = None,
+        profile: str | None = None,
+        role: str | None = None,
     ) -> dict:
         records = {
             "device_id": self._device_id,
@@ -63,6 +65,10 @@ class DiscoveryService:
             records["code"] = code
         if owner and paired:
             records["owner"] = owner
+        if profile:
+            records["profile"] = profile
+        if role:
+            records["role"] = role
         return records
 
     async def register(
@@ -70,6 +76,8 @@ class DiscoveryService:
         paired: bool = False,
         code: str | None = None,
         owner: str | None = None,
+        profile: str | None = None,
+        role: str | None = None,
     ) -> None:
         """Register mDNS service on the local network."""
         try:
@@ -77,7 +85,7 @@ class DiscoveryService:
             from zeroconf.asyncio import AsyncServiceInfo, AsyncZeroconf
 
             local_ip = self._get_local_ip()
-            txt_records = self._build_txt_records(paired, code, owner)
+            txt_records = self._build_txt_records(paired, code, owner, profile, role)
             service_name = f"ADOS-{self._short_id}.{SERVICE_TYPE}"
 
             self._info = AsyncServiceInfo(
@@ -109,6 +117,8 @@ class DiscoveryService:
         paired: bool = False,
         code: str | None = None,
         owner: str | None = None,
+        profile: str | None = None,
+        role: str | None = None,
     ) -> None:
         """Update TXT records (e.g., after pairing state changes)."""
         if not self._zeroconf or not self._info:
@@ -116,7 +126,7 @@ class DiscoveryService:
         try:
             from zeroconf.asyncio import AsyncServiceInfo
 
-            txt_records = self._build_txt_records(paired, code, owner)
+            txt_records = self._build_txt_records(paired, code, owner, profile, role)
             local_ip = self._get_local_ip()
             service_name = self._info.name
 

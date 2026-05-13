@@ -31,6 +31,7 @@ async def main() -> None:
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, shutdown.set)
 
+    from ados.core.profile import current_profile_and_role
     from ados.services.discovery import DiscoveryService
 
     pairing = PairingManager(state_path=config.pairing.state_path)
@@ -44,25 +45,33 @@ async def main() -> None:
     )
 
     # Register mDNS service
+    profile, role = current_profile_and_role(config)
     await discovery.register(
         paired=pairing.is_paired,
         code=pairing.get_info().get("pairing_code"),
         owner=pairing.get_info().get("owner_id"),
+        profile=profile,
+        role=role,
     )
 
     log.info("discovery_service_ready", hostname=discovery.mdns_hostname)
 
-    # Keep running until shutdown, periodically updating TXT records
+    # Keep running until shutdown, periodically updating TXT records.
+    # Role can transition at runtime on a ground-station node (direct ↔
+    # relay ↔ receiver), so re-read on each refresh.
     while not shutdown.is_set():
         try:
             await asyncio.wait_for(shutdown.wait(), timeout=30.0)
         except TimeoutError:
-            # Refresh TXT records (pairing state may have changed)
+            # Refresh TXT records (pairing state and role may have changed)
             info = pairing.get_info()
+            profile, role = current_profile_and_role(config)
             await discovery.update_txt(
                 paired=pairing.is_paired,
                 code=info.get("pairing_code"),
                 owner=info.get("owner_id"),
+                profile=profile,
+                role=role,
             )
 
     log.info("discovery_service_stopping")
