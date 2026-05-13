@@ -149,7 +149,26 @@ class ApiRuntimeFacade:
         state = self.vehicle_state()
         if state:
             return state.to_dict()
-        return {}
+        # In the multi-process supervisor (production), the API service
+        # has no in-process VehicleState. The mavlink service publishes
+        # the live snapshot to `/run/ados/state.sock` at ~10 Hz and the
+        # standalone runtime subscribes via the StateIPC client. Without
+        # this fallback the REST `/api/telemetry` surface returns an
+        # empty dict even while MAVLink frames are decoding correctly.
+        ipc_state = self.state_ipc_state()
+        if not ipc_state:
+            return {}
+        # The IPC payload also carries fc_connected / fc_port / fc_baud
+        # / service_uptime alongside the vehicle keys. Strip those so
+        # /api/telemetry surfaces only the vehicle state fields the GCS
+        # expects (heartbeat, attitude, gps, battery, etc.).
+        _ipc_only_keys = {
+            "fc_connected",
+            "fc_port",
+            "fc_baud",
+            "service_uptime",
+        }
+        return {k: v for k, v in ipc_state.items() if k not in _ipc_only_keys}
 
     def param_cache(self) -> Any:
         return self._runtime_attr("param_cache_handle", "_param_cache")

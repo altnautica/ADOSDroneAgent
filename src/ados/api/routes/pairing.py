@@ -7,10 +7,12 @@ from pydantic import BaseModel
 
 from ados import __version__
 from ados.api.deps import get_agent_app
+from ados.core.logging import get_logger
 from ados.core.pairing import claim_with_external_code
 from ados.core.profile import current_profile_and_role
 
 router = APIRouter(tags=["pairing"])
+log = get_logger("pairing_api")
 
 
 class ClaimRequest(BaseModel):
@@ -44,29 +46,60 @@ async def get_pairing_info():
 
     Doubles as the Mission Control "probe" endpoint when a user pastes
     a hostname into Add-a-Node — the response carries the node identity
-    (device_id, name, board, version), pairing state, and the new
+    (device_id, name, board, version), pairing state, and the
     ``profile`` + ``role`` discriminators that drive GCS panel selection.
-    """
-    app = get_agent_app()
-    pm = app.pairing_manager
-    info = pm.get_info()
-    discovery = app.discovery_service
-    short_id = app.config.agent.device_id[:6].lower()
-    profile, role = current_profile_and_role(app.config)
 
-    return PairingInfo(
-        device_id=app.config.agent.device_id,
-        name=app.config.agent.name,
-        version=__version__,
-        board=app.board_name,
-        paired=info["paired"],
-        pairing_code=info.get("pairing_code"),
-        owner_id=info.get("owner_id"),
-        paired_at=info.get("paired_at"),
-        mdns_host=discovery.mdns_hostname if discovery else f"ados-{short_id}.local",
-        profile=profile,
-        role=role,
-    )
+    Every field read is guarded: a partially-configured agent (fresh
+    flash, profile not yet picked, board detect not yet run) used to
+    surface as a 500 here, which broke the GCS pairing-probe flow.
+    Defaults stand in for missing identity fields so the response is
+    always a 200 with a usable shape.
+    """
+    try:
+        app = get_agent_app()
+        pm = app.pairing_manager
+        info = pm.get_info() if pm is not None else {"paired": False}
+
+        device_id = str(getattr(app.config.agent, "device_id", "") or "")
+        name = str(getattr(app.config.agent, "name", "") or "ADOS Agent")
+        board = str(app.board_name or "unknown")
+        short_id = device_id[:6].lower() or "unknown"
+
+        try:
+            profile, role = current_profile_and_role(app.config)
+        except Exception as exc:
+            log.warning("pairing_info_profile_lookup_failed", error=str(exc))
+            profile, role = "drone", None
+
+        discovery = app.discovery_service
+        mdns_host = f"ados-{short_id}.local"
+        if discovery is not None:
+            try:
+                mdns_host = str(discovery.mdns_hostname) or mdns_host
+            except Exception as exc:
+                log.warning("pairing_info_mdns_lookup_failed", error=str(exc))
+
+        return PairingInfo(
+            device_id=device_id,
+            name=name,
+            version=__version__,
+            board=board,
+            paired=bool(info.get("paired", False)),
+            pairing_code=info.get("pairing_code"),
+            owner_id=info.get("owner_id"),
+            paired_at=info.get("paired_at"),
+            mdns_host=mdns_host,
+            profile=profile,
+            role=role,
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        log.exception("pairing_info_unhandled", error=str(exc))
+        raise HTTPException(
+            status_code=500,
+            detail=f"Internal error building pairing info: {type(exc).__name__}",
+        ) from exc
 
 
 @router.get("/pairing/code")

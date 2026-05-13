@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import subprocess
 import time
 
 from fastapi import APIRouter, Request
@@ -109,6 +110,70 @@ def _build_services_list_sync(app) -> list[dict]:
             svc_entry["uptimeSeconds"] = round(svc_uptime)
             services.append(svc_entry)
 
+    if not services:
+        services = _systemd_services_fallback()
+
+    return services
+
+
+def _systemd_services_fallback() -> list[dict]:
+    """Enumerate ados-* systemd units when the in-process tracker is empty.
+
+    The standalone API service runs in its own process under the
+    multi-process supervisor. The in-process ServiceTracker only sees
+    services managed inside the same Python process, so on that path
+    the tracker is empty and the consolidated status reports
+    ``services: []`` even when every ``ados-*.service`` is active.
+
+    This fallback shells ``systemctl list-units 'ados-*.service'`` once
+    per cache window so the GCS sees the real fleet of running units.
+    """
+    import shutil
+
+    if not shutil.which("systemctl"):
+        return []
+
+    try:
+        result = subprocess.run(
+            [
+                "systemctl",
+                "list-units",
+                "--type=service",
+                "--all",
+                "--no-pager",
+                "--no-legend",
+                "ados-*.service",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+
+    if result.returncode != 0:
+        return []
+
+    services: list[dict] = []
+    for line in result.stdout.splitlines():
+        parts = line.split(None, 4)
+        if len(parts) < 4:
+            continue
+        unit = parts[0].lstrip("●*").strip()
+        sub = parts[3].strip()
+        if not unit.endswith(".service"):
+            continue
+        name = unit[: -len(".service")]
+        state = "running" if sub == "running" else sub or "unknown"
+        services.append(
+            {
+                "name": name,
+                "state": state,
+                "status": state,
+                "task_done": state != "running",
+                "uptimeSeconds": 0,
+            }
+        )
     return services
 
 

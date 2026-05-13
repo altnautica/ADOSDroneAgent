@@ -52,6 +52,10 @@ class MavlinkAccess(BaseModel):
     baud: int | None = None
     websocket_url: str | None = None
     public_websocket_url: str | None = None
+    # Direct MAVLink TCP listener. Standard mavlink-router style endpoint.
+    # The GCS can dial this without the WebSocket adapter when a desktop
+    # GCS (Mission Planner, QGroundControl) is on the same LAN.
+    tcp_url: str | None = None
 
 
 class NetworkStatus(BaseModel):
@@ -287,3 +291,17 @@ class SetupStatus(BaseModel):
     profile_suggestion: ProfileSuggestion = Field(default_factory=ProfileSuggestion)
     hardware_check: HardwareCheckStatus | None = None
     skipped_steps: list[str] = Field(default_factory=list)
+    # Pairing surface. ``pairing_code`` is the current 6-character code
+    # the operator types into Mission Control to claim this device.
+    # ``paired`` flips true once Mission Control completes the handshake.
+    # Both fields live at the top level so the CLI and webapp can show
+    # them without walking the steps array.
+    pairing_code: str | None = None
+    paired: bool = False
+    # LAN-routable host the CLI and external clients should use to
+    # reach this agent. Prefers the system hostname (``groundnode.local``)
+    # over the device-id mDNS form (``ados-<id>.local``) when set, with
+    # the first non-loopback IP as fallback. Empty when no LAN identity
+    # could be derived. The agent's own webapp still self-references via
+    # ``localhost``; this field is for clients elsewhere on the LAN.
+    lan_host: str = ""

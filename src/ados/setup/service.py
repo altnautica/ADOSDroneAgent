@@ -89,6 +89,43 @@ def _first_mavlink_ws_port(config: Any) -> int:
     return 8765
 
 
+def _first_mavlink_tcp_port(config: Any) -> int | None:
+    """Return the first enabled MAVLink TCP server port, or None.
+
+    Mirrors `_first_mavlink_ws_port` but for the desktop-GCS-friendly
+    TCP listener. Returns None when no TCP endpoint is configured so
+    callers can decide whether to advertise the URL at all.
+    """
+    for endpoint in getattr(config.mavlink, "endpoints", []):
+        etype = str(getattr(endpoint, "type", "") or "")
+        if etype in ("tcp", "tcp_server") and getattr(endpoint, "enabled", False):
+            return int(getattr(endpoint, "port", 5760))
+    return None
+
+
+def _best_lan_host(hostname: str, local_ips: list[str]) -> str:
+    """Pick the most operator-friendly LAN-routable host string.
+
+    Preference order:
+    1. ``<hostname>.local`` when the system hostname looks routable.
+       ``groundnode`` becomes ``groundnode.local`` — the form a bench
+       operator already typed at the SSH prompt.
+    2. ``<hostname>`` itself when it already carries a dot (admin set a
+       full DNS name).
+    3. First non-loopback IPv4 from the discovered set.
+    4. Empty string when nothing is reachable from the LAN.
+    """
+    name = (hostname or "").strip().rstrip(".")
+    if name and name not in ("", "localhost") and not name.startswith("127."):
+        if "." in name:
+            return name
+        return f"{name}.local"
+    for ip in local_ips:
+        if ip and not ip.startswith("127."):
+            return ip
+    return ""
+
+
 def _services(runtime: Any) -> list[ServiceState]:
     tracker = runtime.service_tracker
     data = tracker.to_dict() if tracker else {}
@@ -232,9 +269,24 @@ async def build_setup_status(runtime: Any, host_header: str | None = None) -> Se
 
     fc = runtime.fc_status()
     mavlink_ws_port = _first_mavlink_ws_port(config)
-    mavlink_url = f"ws://{host_name}:{mavlink_ws_port}/"
+    mavlink_tcp_port = _first_mavlink_tcp_port(config)
 
-    video = await _video_access(runtime, host_name)
+    # Pick a LAN-routable host for any URL a client elsewhere on the LAN
+    # will dial. The agent's own webapp keeps using whatever the caller
+    # sent in the Host header (typically localhost) so self-references
+    # stay correct, but mavlink_tcp_url, mavlink_ws_url, and the LAN
+    # video viewer all use the operator-friendly form here.
+    lan_host = _best_lan_host(_hostname(), local_ips)
+    if not lan_host:
+        # Falls back to mDNS or host_name so URLs are never blank when
+        # the agent has at least one identity to advertise.
+        lan_host = mdns_host or host_name
+    mavlink_url = f"ws://{lan_host}:{mavlink_ws_port}/"
+    mavlink_tcp_url = (
+        f"tcp://{lan_host}:{mavlink_tcp_port}" if mavlink_tcp_port else None
+    )
+
+    video = await _video_access(runtime, lan_host)
     remote = _remote_status(config)
     network = NetworkStatus(
         hostname=_hostname(),
@@ -252,6 +304,7 @@ async def build_setup_status(runtime: Any, host_header: str | None = None) -> Se
         baud=int(fc.baud or 0) if fc.baud is not None else None,
         websocket_url=mavlink_url,
         public_websocket_url=config.remote_access.cloudflare.mavlink_ws_url or None,
+        tcp_url=mavlink_tcp_url,
     )
     if video.public_whep_url is None and config.remote_access.cloudflare.video_whep_url:
         video.public_whep_url = config.remote_access.cloudflare.video_whep_url
@@ -341,6 +394,21 @@ async def build_setup_status(runtime: Any, host_header: str | None = None) -> Se
         "user" if explicit_profile else profile_suggestion.source
     )
 
+    # Pairing surface — read once, expose at the top level so the CLI
+    # and webapp can render the code without walking the steps array.
+    pairing_code: str | None = None
+    paired_now = False
+    pm = getattr(runtime.raw_runtime, "pairing_manager", None) or getattr(
+        runtime, "pairing_manager", None
+    )
+    if pm is not None:
+        try:
+            paired_now = bool(getattr(pm, "is_paired", False))
+            if not paired_now:
+                pairing_code = pm.get_or_create_code()
+        except Exception:
+            pairing_code = None
+
     return SetupStatus(
         version=__version__,
         device_id=config.agent.device_id,
@@ -365,6 +433,9 @@ async def build_setup_status(runtime: Any, host_header: str | None = None) -> Se
         profile_suggestion=profile_suggestion,
         hardware_check=hardware_check,
         skipped_steps=sorted(persisted.skipped_steps),
+        pairing_code=pairing_code,
+        paired=paired_now,
+        lan_host=lan_host,
     )
 
 

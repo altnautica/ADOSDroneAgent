@@ -76,27 +76,92 @@ def _state_label(value: str) -> str:
     return value.replace("_", " ")
 
 
+def _viewer_url_from_whep(whep_url: str | None) -> str | None:
+    """Derive the browser-clickable MediaMTX viewer URL from a WHEP URL.
+
+    MediaMTX serves the JS player at ``http://host:port/<path>/`` and
+    accepts the WebRTC SDP at ``http://host:port/<path>/whep``. The
+    CLI prints both: ``whep`` for the GCS, viewer for an operator who
+    wants to eyeball the stream in a browser.
+    """
+    if not whep_url:
+        return None
+    base = whep_url.rstrip("/")
+    if base.endswith("/whep"):
+        base = base[: -len("/whep")]
+    return base + "/"
+
+
 def _plain_status(data: dict[str, Any]) -> None:
     click.echo(f"ADOS Drone Agent {data.get('version', '?')}")
     click.echo(f"Device:  {data.get('device_name', '?')} ({data.get('device_id', '?')})")
     click.echo(f"Profile: {data.get('profile', '?')}")
     click.echo(f"Setup:   {data.get('completion_percent', 0)}%")
+
+    paired = bool(data.get("paired", False))
+    code = data.get("pairing_code")
+    if paired:
+        click.echo("Pair:    paired")
+    elif code:
+        click.echo(f"Pair:    code {code}  (enter this in Mission Control)")
+    else:
+        click.echo("Pair:    not paired")
     click.echo("")
 
-    urls = data.get("access_urls", [])
-    for item in urls:
-        if item.get("primary"):
-            click.echo(f"Open setup: {item.get('url')}")
-            break
+    # Open-setup URL. Prefer a LAN-routable form so the line is paste-
+    # ready from a separate workstation.
+    network = data.get("network", {})
+    lan_host = data.get("lan_host") or network.get("mdns_host") or network.get(
+        "hostname", ""
+    )
+    api_port = int(network.get("api_port", 8080) or 8080)
+    if lan_host:
+        click.echo(f"Open setup: http://{lan_host}:{api_port}/setup.html")
     else:
-        click.echo("Open setup: http://ados.local:8080")
+        urls = data.get("access_urls", [])
+        primary = next((u.get("url") for u in urls if u.get("primary")), None)
+        click.echo(f"Open setup: {primary or 'http://localhost:8080/setup.html'}")
+
+    mavlink = data.get("mavlink", {})
+    fc_connected = bool(mavlink.get("connected"))
+    click.echo(
+        "MAVLink FC: "
+        + ("connected" if fc_connected else "not connected")
+        + (f"  ({mavlink.get('port')})" if mavlink.get("port") else "")
+    )
+    if mavlink.get("tcp_url"):
+        click.echo(f"MAVLink TCP: {mavlink.get('tcp_url')}")
+    if mavlink.get("websocket_url"):
+        click.echo(f"MAVLink WS:  {mavlink.get('websocket_url')}")
 
     video = data.get("video", {})
-    mavlink = data.get("mavlink", {})
-    remote = data.get("remote_access", {})
-    click.echo(f"MAVLink: {bool(mavlink.get('connected'))} {mavlink.get('port') or ''}")
-    click.echo(f"Video:   {video.get('state', 'unknown')} {video.get('whep_url') or ''}")
-    click.echo(f"Remote:  {remote.get('status', 'disabled')}")
+    whep_url = video.get("whep_url")
+    viewer_url = _viewer_url_from_whep(whep_url)
+    state = video.get("state", "unknown")
+    if viewer_url:
+        click.echo(f"Video:      {state}  viewer {viewer_url}  whep {whep_url}")
+    elif whep_url:
+        click.echo(f"Video:      {state}  whep {whep_url}")
+    else:
+        click.echo(f"Video:      {state}")
+
+    cloud_choice = data.get("cloud_choice", {}) or {}
+    cloud_paired = bool(cloud_choice.get("paired"))
+    backend_url = str(cloud_choice.get("backend_url", "") or "")
+    cloud_mode = str(cloud_choice.get("mode", "") or "")
+    if cloud_paired and backend_url:
+        click.echo(f"Cloud relay: paired ({backend_url})")
+    elif backend_url and cloud_mode != "local":
+        click.echo(f"Cloud relay: configured ({backend_url}, awaiting pair)")
+    elif cloud_mode == "local":
+        click.echo("Cloud relay: disabled (local mode)")
+    else:
+        click.echo("Cloud relay: not configured")
+
+    remote = data.get("remote_access", {}) or {}
+    cloudflare_status = remote.get("status", "disabled")
+    click.echo(f"Cloudflare: {cloudflare_status}")
+
     click.echo("")
     click.echo(f"Next: {data.get('next_action', 'Open setup in a browser')}")
 
@@ -123,6 +188,12 @@ def _render_dashboard(data: dict[str, Any]) -> Any:
     title.append("ADOS Drone Agent", style="bold cyan")
     title.append(f"  v{data.get('version', '?')}  ")
     title.append(f"{data.get('device_name', '?')} / {profile}", style="white")
+    paired = bool(data.get("paired", False))
+    code = data.get("pairing_code")
+    if paired:
+        title.append("  paired", style="bold green")
+    elif code:
+        title.append(f"  code {code}", style="bold yellow")
     title.append(f"  refreshed {datetime.now().strftime('%H:%M:%S')}", style="dim")
     layout["header"].update(Panel(title, border_style="cyan"))
 
@@ -138,7 +209,7 @@ def _render_dashboard(data: dict[str, Any]) -> Any:
 
     status_table = Table.grid(padding=(0, 1))
     status_table.add_column(style="bold")
-    status_table.add_column()
+    status_table.add_column(overflow="fold")
     for step in data.get("steps", []):
         state = _state_label(str(step.get("state", "")))
         status_table.add_row(str(step.get("label", "")), state)
@@ -146,10 +217,39 @@ def _render_dashboard(data: dict[str, Any]) -> Any:
     mavlink = data.get("mavlink", {})
     network = data.get("network", {})
     remote = data.get("remote_access", {})
-    status_table.add_row("MAVLink", "connected" if mavlink.get("connected") else "not connected")
-    status_table.add_row("Video", str(video.get("state", "unknown")))
+    cloud_choice = data.get("cloud_choice", {}) or {}
+
+    status_table.add_row(
+        "MAVLink FC",
+        "connected" if mavlink.get("connected") else "not connected",
+    )
+    if mavlink.get("tcp_url"):
+        status_table.add_row("MAVLink TCP", str(mavlink.get("tcp_url")))
+    if mavlink.get("websocket_url"):
+        status_table.add_row("MAVLink WS", str(mavlink.get("websocket_url")))
+
+    viewer_url = _viewer_url_from_whep(video.get("whep_url"))
+    if viewer_url:
+        status_table.add_row(
+            "Video viewer", f"{video.get('state', '?')}  {viewer_url}"
+        )
+    else:
+        status_table.add_row("Video", str(video.get("state", "unknown")))
+
     status_table.add_row("Hotspot", str(network.get("hotspot_ssid", "")))
-    status_table.add_row("Remote", str(remote.get("status", "disabled")))
+
+    cloud_paired = bool(cloud_choice.get("paired"))
+    backend_url = str(cloud_choice.get("backend_url", "") or "")
+    cloud_mode = str(cloud_choice.get("mode", "") or "")
+    if cloud_paired and backend_url:
+        status_table.add_row("Cloud relay", f"paired ({backend_url})")
+    elif backend_url and cloud_mode != "local":
+        status_table.add_row("Cloud relay", f"configured ({backend_url})")
+    elif cloud_mode == "local":
+        status_table.add_row("Cloud relay", "disabled (local mode)")
+    else:
+        status_table.add_row("Cloud relay", "not configured")
+    status_table.add_row("Cloudflare", str(remote.get("status", "disabled")))
     layout["status"].update(Panel(status_table, title="Status", border_style="blue"))
 
     telemetry = data.get("telemetry") or {}

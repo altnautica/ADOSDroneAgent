@@ -446,6 +446,28 @@ class AgentApp:
                     log.debug("pairing_beacon_failed")
             await asyncio.sleep(interval)
 
+    def _first_mavlink_tcp_port_for_heartbeat(self) -> int | None:
+        """Return the first enabled MAVLink TCP listener port, or None.
+
+        Mirrors `ados.setup.service._first_mavlink_tcp_port` but lives
+        on the agent itself so the heartbeat builder doesn't need to
+        import the setup module. Returns None when no TCP endpoint is
+        configured so the heartbeat consumer can hide the field.
+        """
+        for endpoint in getattr(self.config.mavlink, "endpoints", []):
+            etype = str(getattr(endpoint, "type", "") or "")
+            if etype in ("tcp", "tcp_server") and getattr(endpoint, "enabled", False):
+                return int(getattr(endpoint, "port", 5760))
+        return None
+
+    def _first_mavlink_ws_port_for_heartbeat(self) -> int | None:
+        """Return the first enabled MAVLink WebSocket port, or None."""
+        for endpoint in getattr(self.config.mavlink, "endpoints", []):
+            etype = str(getattr(endpoint, "type", "") or "")
+            if etype == "websocket" and getattr(endpoint, "enabled", False):
+                return int(getattr(endpoint, "port", 8765))
+        return None
+
     def _build_heartbeat_payload(self) -> dict:
         """Build the cloud heartbeat payload dict.
 
@@ -559,6 +581,64 @@ class AgentApp:
                 "uptimeSeconds": round(svc_uptime),
             })
 
+        # LAN-routable URL block. The GCS surfaces these as "manual
+        # connection" fallbacks when the cloud-relay flow is degraded
+        # or the operator wants a direct LAN connection from a desktop
+        # GCS. Built from local_ip so they survive a hostname rename
+        # and from the live config so any MAVLink endpoint flip
+        # propagates on the next tick.
+        mav_tcp_port = self._first_mavlink_tcp_port_for_heartbeat()
+        mav_ws_port = self._first_mavlink_ws_port_for_heartbeat()
+        video_whep_port: int | None = None
+        vp = getattr(self, "_video_pipeline", None)
+        if vp is not None:
+            try:
+                vp_status = vp.get_status()
+                video_whep_port = int(
+                    vp_status.get("mediamtx", {}).get("webrtc_port", 8889)
+                )
+            except Exception:
+                video_whep_port = None
+        manual_connection_urls: dict[str, str | None] = {
+            "mavlinkTcp": (
+                f"tcp://{local_ip}:{mav_tcp_port}" if mav_tcp_port and local_ip else None
+            ),
+            "mavlinkWs": (
+                f"ws://{local_ip}:{mav_ws_port}/" if mav_ws_port and local_ip else None
+            ),
+            "videoViewer": (
+                f"http://{local_ip}:{video_whep_port}/main/"
+                if video_whep_port and local_ip
+                else None
+            ),
+            "videoWhep": (
+                f"http://{local_ip}:{video_whep_port}/main/whep"
+                if video_whep_port and local_ip
+                else None
+            ),
+        }
+
+        # Cloud relay = MQTT-to-Convex pair. Cloudflare = inbound tunnel.
+        # These are distinct concepts. The GCS used to conflate them
+        # under a single "Remote" label; surface them separately here
+        # so the heartbeat consumer can render an accurate state.
+        cloud_relay_url: str | None = None
+        if self.pairing_manager.is_paired:
+            server = getattr(self.config, "server", None)
+            mode = getattr(server, "mode", "") if server else ""
+            if mode == "self_hosted":
+                sh = getattr(server, "self_hosted", None)
+                cloud_relay_url = str(getattr(sh, "url", "") or "") or None
+            elif mode == "cloud":
+                cloud = getattr(server, "cloud", None)
+                cloud_relay_url = str(getattr(cloud, "url", "") or "") or None
+        cloudflare_url: str | None = None
+        cf_remote = self.config.remote_access.cloudflare
+        if getattr(cf_remote, "enabled", False):
+            cloudflare_url = (
+                str(getattr(cf_remote, "setup_url", "") or "") or None
+            )
+
         payload: dict = {
             "deviceId": self.config.agent.device_id,
             "version": __version__,
@@ -595,6 +675,9 @@ class AgentApp:
             "apiUrl": f"http://{local_ip}:8080/api",
             "agentVersion": __version__,
             "videoRestartAttempts": video_restart_attempts,
+            "manualConnectionUrls": manual_connection_urls,
+            "cloudRelayUrl": cloud_relay_url,
+            "cloudflareUrl": cloudflare_url,
         }
 
         # Foxglove bind status. Defaults to False when no ROS manager is

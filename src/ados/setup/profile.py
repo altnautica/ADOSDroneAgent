@@ -9,6 +9,7 @@ having to call the probes itself.
 
 from __future__ import annotations
 
+import socket
 from typing import Any
 
 from ados.setup.models import (
@@ -17,6 +18,27 @@ from ados.setup.models import (
     UiApplyRequest,
     WfbApplyRequest,
 )
+
+
+def _hostname_suggested_profile() -> str | None:
+    """Heuristic mapping from system hostname to expected profile.
+
+    Returns one of ``"drone"`` or ``"ground_station"`` when the hostname
+    matches a well-known prefix the bench uses, or ``None`` when the
+    hostname carries no signal. The check is intentionally narrow so
+    operators with custom hostnames see no advisory.
+    """
+    try:
+        name = (socket.gethostname() or "").strip().lower()
+    except OSError:
+        return None
+    if not name:
+        return None
+    if name.startswith(("groundnode", "groundstation", "gcs", "gs-")):
+        return "ground_station"
+    if name.startswith(("skynode", "drone", "rig-", "uav")):
+        return "drone"
+    return None
 
 
 def build_profile_suggestion(config: Any) -> ProfileSuggestion:
@@ -176,6 +198,29 @@ def apply_profile(
     }
     if changed and previous_profile not in ("", "auto"):
         data["restart_required"] = True
+
+    # Advisory: hostname carries a strong signal about expected
+    # profile (e.g., `groundnode` should be a ground station). When
+    # the chosen profile contradicts the hostname-derived expectation
+    # the wizard still applies the choice — operators do reconfigure
+    # — but surfaces an inline nudge so the swap is intentional. No
+    # advisory when the hostname carries no signal.
+    suggested = _hostname_suggested_profile()
+    if suggested is not None and suggested != profile:
+        try:
+            hostname = socket.gethostname()
+        except OSError:
+            hostname = ""
+        data["advisory"] = {
+            "code": "profile_hostname_mismatch",
+            "hostname": hostname,
+            "hostname_suggests": suggested,
+            "chosen": profile,
+            "message": (
+                f"Hostname '{hostname}' suggests profile '{suggested}', "
+                f"but you picked '{profile}'. Confirm this is intentional."
+            ),
+        }
 
     if profile == "drone":
         message = "Profile set to drone."
