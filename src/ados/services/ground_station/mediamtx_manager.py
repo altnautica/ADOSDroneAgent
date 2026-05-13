@@ -369,15 +369,20 @@ class MediamtxGsManager:
             "apiAddress": f":{self._core._api_port}",
             "rtsp": True,
             "rtspAddress": f":{self._core._rtsp_port}",
-            # Bound write queue so a stalled reader surfaces back-
-            # pressure to the publisher within a couple of seconds
-            # instead of letting it deepen for tens of seconds. The
-            # earlier value (2048) let the queue absorb ~1 s of
-            # 4 Mbps H.264 silently; the publisher then hit a sudden
-            # broken-pipe instead of a graceful slow-and-recover.
-            # 512 still tolerates routine wifi retries while keeping
-            # the failure surface visible to the ffmpeg supervisor.
-            "writeQueueSize": 512,
+            # Per-reader write queue depth, measured in RTP packets
+            # (not bytes). When a reader's queue overflows, mediamtx
+            # logs "reader is too slow, discarding N frames" and the
+            # reader's stream becomes corrupted — the canonical
+            # browser-WebRTC "freeze on last frame, refresh restores"
+            # symptom. Headroom math: at ~30 fps and worst-case
+            # 50 RTP packets per frame for 1280x720 H.264 = 1500
+            # packets/sec; 4096 holds ~2.7 s of buffer. Survives a
+            # routine Chrome GC pause, a paint frame, a tab focus
+            # change, and a brief Pi 4B swap-in stall — all the
+            # things the earlier 512-packet ceiling caught and
+            # turned into reader eviction. Memory cost: ~5 MB per
+            # active reader. Acceptable.
+            "writeQueueSize": 4096,
             # NB: do NOT override readTimeout / writeTimeout below
             # the gortsplib defaults (10 s / 10 s). A 5 s ceiling
             # under low-RAM swap pressure caught system stutters
@@ -406,7 +411,25 @@ class MediamtxGsManager:
                 {"url": "stun:stun.cloudflare.com:3478"},
                 {"url": "stun:global.stun.twilio.com:3478"},
             ],
-            "hls": False,
+            # LL-HLS as a parallel transport. mediamtx serves the same
+            # /main path simultaneously over WebRTC and HLS. WebRTC's
+            # failure mode under load is "freeze on last frame and
+            # require renegotiation"; HLS's failure mode is "drift
+            # latency by a second, keep playing." Browsers that hit
+            # a WebRTC freeze can fall back to the HLS endpoint at
+            # http://<host>:8888/<path>/index.m3u8 and keep watching.
+            # Works with the existing -c copy publish path — mediamtx
+            # remuxes H.264 NAL units into fragmented MP4 without
+            # re-encoding. Target latency on LAN: ~600 ms. Memory
+            # cost: ~10-15 MB extra for the segmenter.
+            "hls": True,
+            "hlsAddress": ":8888",
+            "hlsAllowOrigin": "*",
+            "hlsAlwaysRemux": True,
+            "hlsVariant": "lowLatency",
+            "hlsSegmentCount": 7,
+            "hlsSegmentDuration": "200ms",
+            "hlsPartDuration": "100ms",
             "paths": {
                 # ffmpeg pushes RTSP here with -c copy from udp://:5600
                 GROUND_RTSP_PATH: {"source": "publisher"},
