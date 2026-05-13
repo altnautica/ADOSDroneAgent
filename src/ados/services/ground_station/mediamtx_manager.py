@@ -611,20 +611,30 @@ class MediamtxGsManager:
             return False
 
     async def _bake_sprop_into_sdp(self, rtsp_url: str) -> None:
-        """One-shot SDP bake task. Probes the live stream after
-        ffmpeg + mediamtx settle, extracts SPS + PPS, and updates
-        /etc/ados/wfb/video.sdp in place. No-op when the SDP already
-        carries a matching sprop string. Logs the outcome either way so
-        an empty result is visible in the journal."""
+        """One-shot SDP bake task.
+
+        Cheap path first: if the SDP already carries a sprop-parameter-
+        sets value, return immediately without spawning the probe. The
+        bake fires once after a clean install (when the SDP has no
+        sprop) and never again. Every other ffmpeg restart short-
+        circuits here.
+
+        Slow path: probe the live stream after ffmpeg + mediamtx
+        settle, extract SPS + PPS, and update /etc/ados/wfb/video.sdp
+        in place.
+
+        Why the cheap path matters: the probe spawns a second ffmpeg
+        that connects to the local mediamtx as a reader. On a memory-
+        constrained SBC under swap pressure, serving the publisher
+        and the probe-reader concurrently stalls the publisher's RTSP
+        read goroutine, which trips the frame-counter watchdog, which
+        recycles ffmpeg, which re-enters this method — a feedback
+        loop that observed publisher uptime drop from ~15 min to
+        ~3 min on the Pi 4B 1 GB bench rig.
+        """
         try:
             await asyncio.sleep(SPROP_PROBE_DELAY_SECONDS)
-            sprop = await _probe_sprop_parameter_sets(rtsp_url)
-            if not sprop:
-                log.warning("ground_sprop_bake_no_sprop_extracted")
-                return
-            # Compare against what's already in the SDP. If matching,
-            # nothing to do — we don't want to rewrite the same file on
-            # every ffmpeg restart and trip atime-watching dependents.
+            # Cheap path: SDP already baked.
             try:
                 existing_sdp = GROUND_SDP_PATH.read_text()
             except OSError:
@@ -632,11 +642,16 @@ class MediamtxGsManager:
             existing_match = re.search(
                 r"sprop-parameter-sets=([^\s;]+)", existing_sdp
             )
-            if (
-                existing_match is not None
-                and existing_match.group(1) == sprop
-            ):
-                log.info("ground_sprop_bake_unchanged")
+            if existing_match is not None and existing_match.group(1):
+                log.debug(
+                    "ground_sprop_bake_skipped_already_present",
+                    sprop=existing_match.group(1),
+                )
+                return
+            # Slow path: probe the live stream.
+            sprop = await _probe_sprop_parameter_sets(rtsp_url)
+            if not sprop:
+                log.warning("ground_sprop_bake_no_sprop_extracted")
                 return
             try:
                 _write_sdp(
