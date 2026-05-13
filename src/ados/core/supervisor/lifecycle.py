@@ -458,7 +458,12 @@ class Supervisor(HotplugMixin, MonitorMixin, HeartbeatMixin):
         # ados-wfb-relay / ados-wfb-receiver in mesh roles. The mesh
         # role units are managed by role_manager, so the supervisor's
         # detection path only owns the direct-role RX unit here.
-        has_wfb = self._check_wfb_adapter()
+        # The check wraps `lsusb` / `system_profiler`, both of which
+        # block for multiple seconds. Run it in a worker thread so the
+        # event loop can keep firing the watchdog and complete the
+        # READY=1 notify; otherwise systemd's WatchdogSec=30 fires
+        # before sd_notify can run and reports the unit as failed.
+        has_wfb = await asyncio.to_thread(self._check_wfb_adapter)
         if has_wfb:
             active_profile = getattr(
                 getattr(self.config, "agent", None), "profile", "auto"
