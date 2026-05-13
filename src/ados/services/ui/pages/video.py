@@ -136,6 +136,20 @@ class VideoPage:
     async def on_enter(self, ctx: PageContext) -> None:
         ctx.logger.info("video_enter")
         self._last_active_at = time.monotonic()
+        # Memory-constrained gate. When the service host explicitly
+        # turned off the live-video pipeline (small-SBC class), we MUST
+        # NOT construct a per-page LocalVideoTap fallback — the whole
+        # point of the gate is to keep the gstreamer pipeline out of
+        # this process so it doesn't compete with mediamtx for CPU.
+        # Render falls back to the "unavailable" placeholder via the
+        # _tap_unavailable_reason path that already exists.
+        if not getattr(ctx, "video_tap_enabled", True):
+            self._tap_unavailable_reason = (
+                "Live video preview is disabled on this hardware."
+            )
+            self._tap_unavailable_at = time.monotonic()
+            ctx.logger.info("video_enter_skipped_low_ram")
+            return
         # Skip the per-page ensure_tap dance when the service-level tap
         # is already running. The always-on tap is alive for the
         # agent's lifetime; the page just reads frames from it.

@@ -1879,6 +1879,11 @@ class OledService:
         except Exception:  # noqa: BLE001
             total_ram_mb = 0
         video_tap_enabled = total_ram_mb == 0 or total_ram_mb >= 1500
+        # Propagate the gate to the PageContext so the Video page can
+        # honor it. Without this, video.py's per-page _ensure_tap
+        # fallback path constructs its own LocalVideoTap on every
+        # navigation, defeating the run()-level gate.
+        self._page_context.video_tap_enabled = video_tap_enabled
         if video_tap_enabled:
             self._page_context.video_tap = self._build_video_tap()
         else:

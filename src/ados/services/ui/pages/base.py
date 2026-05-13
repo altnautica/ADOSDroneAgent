@@ -100,6 +100,14 @@ class PageContext:
     # on every navigation. Defaults to None for tests / non-GS
     # profiles where the tap is not constructed.
     video_tap: Any | None = None
+    # Hard gate for the live video pipeline. When False, the Video
+    # page renders an "unavailable on this hardware" placeholder and
+    # MUST NOT construct its own per-page LocalVideoTap fallback. The
+    # OLED service flips this False on memory-constrained boards
+    # (Pi 4B 1 GB class) where the gstreamer pipeline competes with
+    # mediamtx for scheduler time and breaks the remote WebRTC feed.
+    # Defaults True so non-GS / test contexts keep the legacy behavior.
+    video_tap_enabled: bool = True
 
 
 class Page(Protocol):
