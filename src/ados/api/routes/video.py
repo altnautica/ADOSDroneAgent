@@ -212,6 +212,57 @@ async def _probe_mediamtx() -> dict | None:
         return None
 
 
+async def _probe_mediamtx_via_whep() -> dict | None:
+    """Liveness probe via the public WHEP endpoint.
+
+    The ground-station MediaMTX (started by `ados-mediamtx-gs`) puts
+    auth on the management API at :9997, so `_probe_mediamtx()` fails
+    with 401 even while the WHEP surface on :8889 is serving frames.
+    Probe the WHEP path instead. A GET on the POST-only WHEP endpoint
+    returns 405 when bound — that's the canonical "endpoint exists
+    and MediaMTX is up" signal, no credentials needed.
+
+    Returns the same dict shape as `_probe_mediamtx()` so callers can
+    chain. `ready` is set to True optimistically because the LCD-side
+    fanout doesn't expose a separate readiness signal at this layer.
+    """
+    try:
+        async with httpx.AsyncClient(timeout=2.0) as client:
+            resp = await client.get(
+                f"http://127.0.0.1:{_MEDIAMTX_WEBRTC_PORT}/main/whep"
+            )
+            if resp.status_code in (200, 204, 405):
+                return {
+                    "running": True,
+                    "stream_name": "main",
+                    "ready": True,
+                    "tracks": [],
+                    "readers": 0,
+                    "webrtc_port": _MEDIAMTX_WEBRTC_PORT,
+                }
+    except Exception:
+        return None
+    return None
+
+
+def mediamtx_whep_alive_sync() -> bool:
+    """Synchronous version of the WHEP liveness probe.
+
+    Same signal as `_probe_mediamtx_via_whep` but callable from the
+    heartbeat builder, which runs sync inside an otherwise-async loop.
+    Uses a 1s timeout so a stalled MediaMTX cannot delay heartbeat
+    delivery beyond one tick.
+    """
+    try:
+        with httpx.Client(timeout=1.0) as client:
+            resp = client.get(
+                f"http://127.0.0.1:{_MEDIAMTX_WEBRTC_PORT}/main/whep"
+            )
+            return resp.status_code in (200, 204, 405)
+    except Exception:
+        return False
+
+
 @router.get("/video")
 async def get_video_status(request: Request):
     """Video pipeline status: cameras, streams, recording, mediamtx, WHEP URL."""
@@ -231,6 +282,12 @@ async def get_video_status(request: Request):
     if pipeline is None:
         cameras_payload = _discover_cameras_for_api()
         mtx = await _probe_mediamtx()
+        if mtx is None or not mtx.get("ready"):
+            # Ground-station-profile MediaMTX puts auth on the management
+            # API; the WHEP probe doesn't depend on it. Fall through so
+            # the REST surface reports running when the WHEP endpoint is
+            # actually serving frames.
+            mtx = await _probe_mediamtx_via_whep() or mtx
         recording_block = _empty_recording_block()
         if mtx and mtx.get("ready"):
             host = request.headers.get("host", "localhost").split(":")[0]

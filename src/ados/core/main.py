@@ -608,6 +608,23 @@ class AgentApp:
                 )
             except Exception:
                 video_whep_port = None
+        if video_whep_port is None:
+            # Ground-station profile runs `ados-mediamtx-gs` independently
+            # of `self._video_pipeline` (which is the drone-side pipeline
+            # and stays None on a ground-station node). Probe the public
+            # WHEP endpoint directly so the heartbeat carries the LAN
+            # video URL whenever MediaMTX is serving frames, regardless
+            # of which service spawned it.
+            try:
+                from ados.api.routes.video import (
+                    _MEDIAMTX_WEBRTC_PORT,
+                    mediamtx_whep_alive_sync,
+                )
+
+                if mediamtx_whep_alive_sync():
+                    video_whep_port = _MEDIAMTX_WEBRTC_PORT
+            except Exception:
+                video_whep_port = None
         manual_connection_urls: dict[str, str | None] = {
             "mavlinkTcp": (
                 f"tcp://{local_ip}:{mav_tcp_port}" if mav_tcp_port and local_ip else None

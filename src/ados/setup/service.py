@@ -480,9 +480,17 @@ async def _video_access(runtime: Any, host_name: str) -> VideoAccess:
         )
 
     try:
-        from ados.api.routes.video import _probe_mediamtx
+        from ados.api.routes.video import (
+            _probe_mediamtx,
+            _probe_mediamtx_via_whep,
+        )
 
         mtx = await _probe_mediamtx()
+        if mtx is None or not mtx.get("ready"):
+            # Ground-station-profile MediaMTX gates its management API
+            # behind auth, so the JSON probe fails. The WHEP probe is
+            # auth-blind and confirms the surface is serving frames.
+            mtx = await _probe_mediamtx_via_whep() or mtx
         if mtx and mtx.get("ready"):
             webrtc_port = int(mtx.get("webrtc_port", 8889))
             hls_port = int(mtx.get("hls_port", 8888))
