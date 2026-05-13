@@ -205,8 +205,16 @@ def apply_profile(
     # the wizard still applies the choice — operators do reconfigure
     # — but surfaces an inline nudge so the swap is intentional. No
     # advisory when the hostname carries no signal.
+    #
+    # Fire only on the FIRST explicit choice (previous_profile is
+    # empty or "auto"). Once the operator has set the profile to a
+    # concrete value, subsequent re-applies are deliberate and the
+    # advisory becomes noise — re-running install.sh --upgrade
+    # would otherwise re-show the nudge every time on bench rigs
+    # whose hostname/profile pairing is intentional.
+    is_first_explicit_choice = previous_profile in ("", "auto")
     suggested = _hostname_suggested_profile()
-    if suggested is not None and suggested != profile:
+    if is_first_explicit_choice and suggested is not None and suggested != profile:
         try:
             hostname = socket.gethostname()
         except OSError:

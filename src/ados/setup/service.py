@@ -49,6 +49,15 @@ _HOTSPOT_URL = f"http://{_HOTSPOT_IP}"
 _USB_URL_TEMPLATE = "http://{ip}:{port}"
 _TOKEN_RE = re.compile(r"(?:--token|service\s+install)\s+['\"]?([^'\"\s]+)")
 
+# Default port for the always-on MAVLink TCP proxy. The proxy is started
+# unconditionally by `ados.core.main.AgentApp` with this hardcoded port
+# (search `TcpProxy(self._fc_connection, port=5760)`) and is NOT
+# registered in `config.mavlink.endpoints`. The helpers below fall back
+# to this constant when the endpoints walk finds no TCP entry so the
+# CLI and heartbeat surfaces always advertise the live listener.
+# Keep this value locked with the TcpProxy instantiation.
+DEFAULT_MAVLINK_TCP_PORT = 5760
+
 
 def _hostname() -> str:
     try:
@@ -90,17 +99,26 @@ def _first_mavlink_ws_port(config: Any) -> int:
 
 
 def _first_mavlink_tcp_port(config: Any) -> int | None:
-    """Return the first enabled MAVLink TCP server port, or None.
+    """Return the MAVLink TCP server port the agent serves on.
 
     Mirrors `_first_mavlink_ws_port` but for the desktop-GCS-friendly
-    TCP listener. Returns None when no TCP endpoint is configured so
-    callers can decide whether to advertise the URL at all.
+    TCP listener. Walks `config.mavlink.endpoints` first so an operator
+    who explicitly disabled the listener (or moved it to a non-default
+    port) wins. Falls back to `DEFAULT_MAVLINK_TCP_PORT` since the
+    in-process TCP proxy is started unconditionally with that port.
     """
+    found_disabled = False
     for endpoint in getattr(config.mavlink, "endpoints", []):
         etype = str(getattr(endpoint, "type", "") or "")
-        if etype in ("tcp", "tcp_server") and getattr(endpoint, "enabled", False):
-            return int(getattr(endpoint, "port", 5760))
-    return None
+        if etype in ("tcp", "tcp_server"):
+            if getattr(endpoint, "enabled", False):
+                return int(getattr(endpoint, "port", DEFAULT_MAVLINK_TCP_PORT))
+            found_disabled = True
+    if found_disabled:
+        # Operator explicitly disabled the TCP listener via config —
+        # don't advertise it.
+        return None
+    return DEFAULT_MAVLINK_TCP_PORT
 
 
 def _best_lan_host(hostname: str, local_ips: list[str]) -> str:

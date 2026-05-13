@@ -447,18 +447,27 @@ class AgentApp:
             await asyncio.sleep(interval)
 
     def _first_mavlink_tcp_port_for_heartbeat(self) -> int | None:
-        """Return the first enabled MAVLink TCP listener port, or None.
+        """Return the MAVLink TCP listener port the agent serves on.
 
-        Mirrors `ados.setup.service._first_mavlink_tcp_port` but lives
-        on the agent itself so the heartbeat builder doesn't need to
-        import the setup module. Returns None when no TCP endpoint is
-        configured so the heartbeat consumer can hide the field.
+        Mirrors `ados.setup.service._first_mavlink_tcp_port`. Walks
+        `config.mavlink.endpoints` first so an explicit override wins,
+        then falls back to `DEFAULT_MAVLINK_TCP_PORT` (the hardcoded
+        port the in-process `TcpProxy` is instantiated with elsewhere
+        in this module). Returns None only when the operator explicitly
+        disabled the TCP entry in config.
         """
+        from ados.setup.service import DEFAULT_MAVLINK_TCP_PORT
+
+        found_disabled = False
         for endpoint in getattr(self.config.mavlink, "endpoints", []):
             etype = str(getattr(endpoint, "type", "") or "")
-            if etype in ("tcp", "tcp_server") and getattr(endpoint, "enabled", False):
-                return int(getattr(endpoint, "port", 5760))
-        return None
+            if etype in ("tcp", "tcp_server"):
+                if getattr(endpoint, "enabled", False):
+                    return int(getattr(endpoint, "port", DEFAULT_MAVLINK_TCP_PORT))
+                found_disabled = True
+        if found_disabled:
+            return None
+        return DEFAULT_MAVLINK_TCP_PORT
 
     def _first_mavlink_ws_port_for_heartbeat(self) -> int | None:
         """Return the first enabled MAVLink WebSocket port, or None."""
