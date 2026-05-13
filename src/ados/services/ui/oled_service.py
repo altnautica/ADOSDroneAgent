@@ -168,6 +168,19 @@ HEIGHT = 64
 # CPU cost. Pairing overlay still polls at PAIRING_POLL_SECONDS.
 POLL_PERIOD_SECONDS = 5.0
 
+# Idle floor for the LCD render loop. When the operator hasn't touched
+# a button or the touchscreen for IDLE_LCD_FLOOR_SECONDS, the render
+# tick stretches to at least 1 / IDLE_LCD_FLOOR_HZ regardless of what
+# the active page's declared refresh_hz says. The dashboard's natural
+# 5 Hz cadence is a waste of a full core on a benchtop SBC where the
+# LCD is paint-the-same-clock-second over and over. Operator interaction
+# (button press, touch gesture) resets _last_button_ts and the loop
+# returns to the page's declared rate within one tick. Set the floor
+# below the AUTO_CYCLE_SECONDS so the status carousel still advances
+# while idle.
+IDLE_LCD_FLOOR_SECONDS = 30.0
+IDLE_LCD_FLOOR_HZ = 0.5
+
 # Screen registry keyed by screen id so the active list can be rebuilt
 # from `ground_station.ui.screens` config. REST schema uses the keys
 # `home`, `link`, `drone`, `network`, `system`, `qr`. We map older ids
@@ -1794,6 +1807,21 @@ class OledService:
                 hz = float(getattr(page, "refresh_hz", 5.0) or 5.0)
                 if hz > 0:
                     tick_period = max(0.02, 1.0 / hz)
+                # Idle floor: stretch the tick when the operator has
+                # not pressed a button or touched the screen for a while.
+                # Building a 480x320 PIL image in Python at the page's
+                # declared 5 Hz costs nearly a full core on a Pi 4B; on
+                # a benchtop unit nobody is looking at the LCD and this
+                # CPU is wasted scheduler time that would otherwise go
+                # to mediamtx serving the remote WebRTC viewer. The
+                # floor only applies in lcd_page mode (status mode is
+                # already low-frequency, overlays handle their own
+                # cadence). Any button or touch event resets the
+                # underlying timestamp via _consume_buttons /
+                # _consume_touch_gestures, so the loop returns to the
+                # page's full rate on the next tick.
+                if idle >= IDLE_LCD_FLOOR_SECONDS and IDLE_LCD_FLOOR_HZ > 0:
+                    tick_period = max(tick_period, 1.0 / IDLE_LCD_FLOOR_HZ)
             try:
                 await asyncio.wait_for(self._stop.wait(), timeout=tick_period)
             except TimeoutError:

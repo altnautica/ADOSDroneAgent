@@ -37,7 +37,12 @@ class DashboardPage:
     """Live 4-tile dashboard registered as ``dashboard``."""
 
     id: ClassVar[str] = "dashboard"
-    refresh_hz: ClassVar[float] = 5.0
+    # 2 Hz is enough for a dashboard whose fastest-changing content is
+    # the clock second and the RSSI / battery values. The earlier 5 Hz
+    # cost ~75 % CPU on a Pi 4B 1 GB just for the Python-side PIL build
+    # loop, and dropped the WFB-ng → mediamtx → WebRTC pipeline's
+    # scheduler share enough to back-pressure the publisher.
+    refresh_hz: ClassVar[float] = 2.0
 
     # Hit zones in page-local coordinates. The values match the tile
     # rectangles laid out by ``render_landscape_inset`` so a tap on a

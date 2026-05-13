@@ -56,7 +56,7 @@ class MorePage:
     """The "+" tab content — drilldown menu for secondary actions."""
 
     id: ClassVar[str] = "more"
-    refresh_hz: ClassVar[float] = 5.0
+    refresh_hz: ClassVar[float] = 2.0
 
     def __init__(self) -> None:
         self._rows: tuple[_Row, ...] = _ROW_DEFS

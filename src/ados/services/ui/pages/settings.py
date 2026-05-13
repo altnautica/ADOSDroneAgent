@@ -85,7 +85,7 @@ class SettingsPage:
     """
 
     id: ClassVar[str] = "settings"
-    refresh_hz: ClassVar[float] = 5.0
+    refresh_hz: ClassVar[float] = 2.0
 
     def __init__(self) -> None:
         self._y_offset: int = 0
