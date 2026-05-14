@@ -484,6 +484,12 @@ class PairingConfig(BaseModel):
     heartbeat_interval: int = 60  # seconds
     single_process_cloud_enabled: bool = False
     code_ttl: int = 900  # 15 minutes
+    # Cloud pair beacon is opt-in. When False (default) the agent
+    # only accepts local LAN pair via /api/pairing/claim. Operators
+    # who want cross-network discovery flip this to True via the
+    # setup webapp or config.yaml. Heartbeats after pair still flow
+    # whenever convex_url is set and the agent is paired.
+    beacon_enabled: bool = False
 
 
 # --- Discovery ---

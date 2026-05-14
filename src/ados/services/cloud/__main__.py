@@ -130,6 +130,15 @@ async def main() -> None:
         import httpx
 
         interval = getattr(config.pairing, "beacon_interval", 30)
+        # Cloud pair beacon is opt-in. When disabled the agent stays
+        # LAN-only and waits for a direct POST /api/pairing/claim.
+        beacon_enabled = getattr(config.pairing, "beacon_enabled", False)
+        if not beacon_enabled:
+            log.info(
+                "pairing_beacon_disabled",
+                reason="config.pairing.beacon_enabled is False",
+            )
+            return
         while not shutdown.is_set():
             if not pairing.is_paired and convex_url:
                 try:
