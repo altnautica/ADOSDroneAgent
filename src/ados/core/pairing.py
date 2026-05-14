@@ -21,11 +21,20 @@ PAIRING_STATE_PATH = str(PAIRING_JSON)
 
 
 class PairingManager:
-    """Manages pairing state, code generation, and API key validation."""
+    """Manages pairing state, code generation, and API key validation.
+
+    The agent runs three processes that each instantiate this class
+    (ados-api, ados-cloud, ados-supervisor). Without cross-process
+    coordination they would each carry their own in-memory snapshot
+    of ``pairing.json`` and diverge from disk as soon as one of them
+    rotated the pair code. The mtime-tracked reload below keeps all
+    three convergent within one public-read cycle.
+    """
 
     def __init__(self, state_path: str = PAIRING_STATE_PATH):
         self._state_path = Path(state_path)
         self._state: dict = {}
+        self._last_loaded_mtime: float = 0.0
         self._load_state()
 
     def _load_state(self) -> None:
@@ -38,9 +47,35 @@ class PairingManager:
                 self._state = {}
         else:
             self._state = {}
+        try:
+            self._last_loaded_mtime = self._state_path.stat().st_mtime
+        except OSError:
+            self._last_loaded_mtime = 0.0
+
+    def _maybe_reload(self) -> None:
+        """Reload state when the on-disk pairing.json is newer than the
+        copy we have in memory.
+
+        Cheap: one stat() call per public read. The file is ~200 bytes,
+        the reload itself only fires on mtime change. Without this the
+        reading process serves stale state forever — the symptom that
+        bit us when ados-cloud rotated the code and ados-api kept
+        advertising the old one through /api/pairing/code, /api/pairing/info,
+        and `ados status`.
+        """
+        try:
+            mtime = self._state_path.stat().st_mtime
+        except OSError:
+            return
+        if mtime > self._last_loaded_mtime:
+            self._load_state()
 
     def _save_state(self) -> None:
         atomic_write_json(self._state_path, self._state, indent=2)
+        try:
+            self._last_loaded_mtime = self._state_path.stat().st_mtime
+        except OSError:
+            pass
         log.debug("pairing_state_saved")
 
     @staticmethod
@@ -55,18 +90,29 @@ class PairingManager:
 
     @property
     def is_paired(self) -> bool:
+        self._maybe_reload()
         return self._state.get("paired", False)
 
     @property
     def api_key(self) -> str | None:
-        return self._state.get("api_key") if self.is_paired else None
+        self._maybe_reload()
+        return self._state.get("api_key") if self._state.get("paired", False) else None
 
     @property
     def owner_id(self) -> str | None:
-        return self._state.get("owner_id") if self.is_paired else None
+        self._maybe_reload()
+        return self._state.get("owner_id") if self._state.get("paired", False) else None
 
     def get_or_create_code(self) -> str:
-        """Get current pairing code, or generate a new one if expired."""
+        """Get current pairing code, or generate a new one if expired.
+
+        Reloads disk state first so a sibling process that just wrote a
+        fresh code (atomic write + mtime bump) is observed and returned
+        verbatim. Without the reload this would generate a NEW code and
+        clobber the sibling's write — exactly the race that gave the
+        bench two competing codes per drone.
+        """
+        self._maybe_reload()
         code = self._state.get("pairing_code")
         created_at = self._state.get("code_created_at", 0)
         if code and (time.time() - created_at) < CODE_TTL:
@@ -95,6 +141,7 @@ class PairingManager:
         pairing beacon so the GCS can render a countdown clock and
         stop showing a stale code.
         """
+        self._maybe_reload()
         created_at = self._state.get("code_created_at")
         if not created_at:
             return None
@@ -124,13 +171,15 @@ class PairingManager:
 
     def validate_key(self, key: str) -> bool:
         """Check if a given API key matches the stored one."""
-        if not self.is_paired:
+        self._maybe_reload()
+        if not self._state.get("paired", False):
             return True  # When unpaired, all access is open
         return key == self._state.get("api_key")
 
     def get_info(self) -> dict:
         """Get pairing info for the /pairing/info endpoint."""
-        if self.is_paired:
+        self._maybe_reload()
+        if self._state.get("paired", False):
             return {
                 "paired": True,
                 "owner_id": self._state.get("owner_id"),
