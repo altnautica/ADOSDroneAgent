@@ -81,3 +81,47 @@ def test_security_defaults():
     assert len(cfg.security.api.cors_origins) >= 1
     assert "*" not in cfg.security.api.cors_origins
     assert "http://localhost:4000" in cfg.security.api.cors_origins
+
+
+def test_cors_origins_additive_merge():
+    """Custom cors_origins config keeps the default Mission Control origins.
+
+    A deployment yaml that sets `cors_origins:` to a custom list
+    must not accidentally drop the dev / local Mission Control
+    origin. The effective allowlist is always defaults+configured+extras.
+    """
+    from ados.core.config import ApiSecurityConfig
+
+    cfg = ApiSecurityConfig(cors_origins=["https://team.example.com"])
+    effective = cfg.effective_cors_origins
+    assert "http://localhost:4000" in effective
+    assert "https://team.example.com" in effective
+    # No duplicates.
+    assert len(effective) == len(set(effective))
+
+
+def test_cors_origins_extra_merges():
+    """`cors_origins_extra` augments on top of defaults."""
+    from ados.core.config import ApiSecurityConfig
+
+    cfg = ApiSecurityConfig(cors_origins_extra=["https://team.example.com"])
+    effective = cfg.effective_cors_origins
+    assert "http://localhost:4000" in effective
+    assert "https://team.example.com" in effective
+
+
+def test_cors_origins_env_override_replaces(monkeypatch):
+    """`ADOS_CORS_ORIGINS_OVERRIDE` env var fully replaces the allowlist."""
+    from ados.core.config import ApiSecurityConfig
+
+    monkeypatch.setenv(
+        "ADOS_CORS_ORIGINS_OVERRIDE",
+        "https://only-this.example.com, https://and-this.example.com ",
+    )
+    cfg = ApiSecurityConfig()
+    effective = cfg.effective_cors_origins
+    assert effective == [
+        "https://only-this.example.com",
+        "https://and-this.example.com",
+    ]
+    assert "http://localhost:4000" not in effective

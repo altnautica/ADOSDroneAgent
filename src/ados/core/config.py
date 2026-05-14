@@ -377,17 +377,54 @@ class WireguardConfig(BaseModel):
     config_path: str = "/etc/wireguard/ados.conf"
 
 
+DEFAULT_CORS_ORIGINS: list[str] = [
+    "http://localhost:4000",
+    "http://127.0.0.1:4000",
+    "http://localhost:4001",
+    "http://127.0.0.1:4001",
+]
+
+
 class ApiSecurityConfig(BaseModel):
     api_key: str = ""
     cors_enabled: bool = True
-    cors_origins: list[str] = Field(
-        default_factory=lambda: [
-            "http://localhost:4000",
-            "http://127.0.0.1:4000",
-            "http://localhost:4001",
-            "http://127.0.0.1:4001",
-        ]
-    )
+    # Default origins ALWAYS apply unless an explicit override env var
+    # is set. Ops files (/etc/ados/security.yaml) only need to populate
+    # `cors_origins_extra` to allow additional origins; the defaults
+    # are preserved automatically. This avoids the common
+    # foot-gun where a deployment override drops localhost:4000 and
+    # the local-dev Mission Control can no longer reach the agent.
+    cors_origins: list[str] = Field(default_factory=lambda: list(DEFAULT_CORS_ORIGINS))
+    # Additional origins added on top of the defaults. Empty by
+    # default. The effective allowlist is `defaults | extras`.
+    cors_origins_extra: list[str] = Field(default_factory=list)
+
+    @property
+    def effective_cors_origins(self) -> list[str]:
+        """Return the deduped union of defaults + configured + extras.
+
+        Defaults are ALWAYS merged in so a deployment yaml that sets
+        `cors_origins:` to a custom list does not accidentally drop
+        the local-dev Mission Control origins. To truly replace the
+        allowlist (rare), set the `ADOS_CORS_ORIGINS_OVERRIDE` env
+        var to a comma-separated list — that fully replaces.
+        """
+        import os
+
+        override = os.environ.get("ADOS_CORS_ORIGINS_OVERRIDE", "").strip()
+        if override:
+            return [o.strip() for o in override.split(",") if o.strip()]
+        seen: set[str] = set()
+        merged: list[str] = []
+        for origin in (
+            *DEFAULT_CORS_ORIGINS,
+            *self.cors_origins,
+            *self.cors_origins_extra,
+        ):
+            if origin and origin not in seen:
+                seen.add(origin)
+                merged.append(origin)
+        return merged
 
 
 class SecurityConfig(BaseModel):
