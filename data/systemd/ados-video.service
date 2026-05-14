@@ -17,7 +17,7 @@ EnvironmentFile=-/etc/ados/env
 SupplementaryGroups=video
 NoNewPrivileges=yes
 ProtectSystem=strict
-ReadWritePaths=/var/ados /run/ados /dev /tmp
+ReadWritePaths=/var/ados /run/ados /dev /tmp /etc/ados
 
 MemoryMax=512M
 # CPUQuota removed: 50% was throttling 43% of scheduling periods

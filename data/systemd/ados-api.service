@@ -15,7 +15,7 @@ EnvironmentFile=-/etc/ados/env
 
 NoNewPrivileges=yes
 ProtectSystem=strict
-ReadWritePaths=/var/ados /run/ados
+ReadWritePaths=/var/ados /run/ados /etc/ados
 
 MemoryMax=64M
 CPUQuota=20%

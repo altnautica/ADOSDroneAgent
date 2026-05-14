@@ -17,7 +17,7 @@ EnvironmentFile=-/etc/ados/env
 SupplementaryGroups=dialout
 NoNewPrivileges=yes
 ProtectSystem=strict
-ReadWritePaths=/var/ados /run/ados /dev
+ReadWritePaths=/var/ados /run/ados /dev /etc/ados
 
 # Resource limits
 MemoryMax=50M
