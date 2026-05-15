@@ -818,7 +818,7 @@ security:
 scripting:
   rest_api:
     enabled: true
-    host: "0.0.0.0"
+    host: "::"
     port: 8080
 
 pairing:
@@ -2199,6 +2199,19 @@ if is_installed && $DO_UPGRADE && ! $DO_FORCE; then
         SYSTEMD_SRC_DIR="${tmp_repo}/repo/data/systemd"
     fi
     install_systemd_service
+
+    # One-time config migration: legacy installs wrote the IPv4-only
+    # bind `host: "0.0.0.0"` for the REST API. Browsers that resolve
+    # the agent's mDNS hostname to the IPv6 link-local address see
+    # "Connection refused" and surface a "Failed to fetch" error.
+    # Rewrite to the dual-stack `host: "::"` so the same socket
+    # accepts both IPv4 and IPv6 connections. Idempotent — sed only
+    # touches lines that still carry the legacy literal.
+    local cfg_file="${CONFIG_DIR}/config.yaml"
+    if [ -f "$cfg_file" ] && grep -q '^[[:space:]]*host:[[:space:]]*"0\.0\.0\.0"' "$cfg_file"; then
+        info "Migrating REST API bind from 0.0.0.0 to dual-stack '::' (config.yaml)"
+        sed -i 's|^\([[:space:]]*\)host:[[:space:]]*"0\.0\.0\.0"|\1host: "::"|' "$cfg_file"
+    fi
 
     # LCD overlay installer needs the cloned scripts + DTS sources,
     # so it runs before the temp-repo cleanup. Skipped on drone profile

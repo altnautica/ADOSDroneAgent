@@ -56,7 +56,12 @@ suites:
 scripting:
   rest_api:
     enabled: true
-    host: "0.0.0.0"
+    # IPv6 dual-stack: accepts both IPv6 and IPv4-mapped connections
+    # on Linux. Browsers that resolve the agent's mDNS hostname to
+    # the IPv6 link-local address would otherwise see "Connection
+    # refused" before falling back to the IPv4 address, surfacing
+    # as "Failed to fetch" in the GCS.
+    host: "::"
     port: 8080
 
 ota:

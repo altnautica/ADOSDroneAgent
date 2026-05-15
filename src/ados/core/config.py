@@ -50,7 +50,13 @@ class AgentConfig(BaseModel):
 
 class EndpointConfig(BaseModel):
     type: str = "websocket"
-    host: str = "0.0.0.0"
+    # Default to IPv6 dual-stack so browsers that resolve the agent's
+    # mDNS hostname to the IPv6 link-local address still connect.
+    # On Linux a `[::]` socket accepts both IPv6 and IPv4-mapped
+    # connections; binding 0.0.0.0 only accepts IPv4 and the browser
+    # gets "connection refused" on its IPv6 attempt before falling
+    # back, which surfaces as "Failed to fetch".
+    host: str = "::"
     port: int = 8765
     enabled: bool = True
 
@@ -464,7 +470,8 @@ class ScriptsConfig(BaseModel):
 
 class RestApiConfig(BaseModel):
     enabled: bool = True
-    host: str = "0.0.0.0"
+    # Default to IPv6 dual-stack — see EndpointConfig.host comment.
+    host: str = "::"
     port: int = 8080
 
 
