@@ -289,7 +289,11 @@ async def get_full_status(request: Request):
         resources = {
             "cpu_percent": cpu_percent,
             "memory_percent": mem.percent,
+            "memory_used_mb": round(mem.used / (1024 * 1024)),
+            "memory_total_mb": round(mem.total / (1024 * 1024)),
             "disk_percent": disk.percent,
+            "disk_used_gb": round(disk.used / (1024 * 1024 * 1024), 1),
+            "disk_total_gb": round(disk.total / (1024 * 1024 * 1024), 1),
             "temperature": next(iter(temps.values()), None),
         }
     except ImportError:

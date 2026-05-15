@@ -40,6 +40,11 @@ class WifiApManager:
         self._shutdown = shutdown_event or asyncio.Event()
         self._hostapd_proc: asyncio.subprocess.Process | None = None
         self._dnsmasq_proc: asyncio.subprocess.Process | None = None
+        # Tracked by `_configure_interface` so `_stop` can release the
+        # AP-side IP when the captive portal exits. Without this the
+        # `192.168.4.1/24` address lingers on wlan0 after stop, which
+        # avahi continues to publish via mDNS and confuses LAN clients.
+        self._iface: str | None = None
 
     async def run(self) -> None:
         if sys.platform != "linux":
@@ -97,6 +102,7 @@ class WifiApManager:
 
     async def _configure_interface(self, iface: str) -> None:
         """Set IP on wireless interface."""
+        self._iface = iface
         cmds = [
             ["ip", "addr", "flush", "dev", iface],
             ["ip", "addr", "add", f"{self.ap_ip}/24", "dev", iface],
@@ -162,6 +168,21 @@ class WifiApManager:
                 except asyncio.TimeoutError:
                     proc.kill()
                 log.info("daemon_stopped", daemon=name)
+        # Release the AP IP so it does not linger on the interface
+        # after the captive portal exits. Idempotent — `ip addr del`
+        # exits non-zero if the address is already absent and we
+        # ignore the return code.
+        if self._iface:
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    "ip", "addr", "del", f"{self.ap_ip}/24", "dev", self._iface,
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.DEVNULL,
+                )
+                await asyncio.wait_for(proc.wait(), timeout=2)
+            except (FileNotFoundError, asyncio.TimeoutError):
+                pass
+            log.info("ap_ip_released", ip=self.ap_ip, iface=self._iface)
         # Cleanup temp files
         for f in (HOSTAPD_CONF, DNSMASQ_CONF):
             Path(f).unlink(missing_ok=True)
