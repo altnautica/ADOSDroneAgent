@@ -84,7 +84,14 @@ async def main() -> None:
     from ados.services.mqtt.gateway import MqttGateway
 
     pairing = PairingManager(state_path=config.pairing.state_path)
-    convex_url = config.pairing.convex_url
+    # Operators with ``server.mode = "local"`` have asked the agent to
+    # stay off the cloud relay entirely. The pairing beacon, heartbeat
+    # POST, and command-polling loops all gate on a non-empty effective
+    # URL — clearing it once here keeps the rest of the file readable.
+    cloud_enabled = config.server.mode != "local"
+    convex_url = config.pairing.convex_url if cloud_enabled else ""
+    if not cloud_enabled:
+        log.info("cloud_relay_disabled", reason="server.mode=local")
     board = detect_board()
     start_time = time.monotonic()
 
@@ -372,7 +379,7 @@ async def main() -> None:
                         fetch_wfb_status_via_http,
                     )
                     payload["radio"] = build_radio_block(
-                        fetch_wfb_status_via_http()
+                        fetch_wfb_status_via_http(api_key=pairing.api_key)
                     )
 
                     # Pair-flag transition detection. When the radio
@@ -431,6 +438,7 @@ async def main() -> None:
                             has_attached_display=_attached_display is not None,
                             local_ip=payload.get("lastIp", _get_local_ip()),
                             api_port=config.scripting.rest_api.port,
+                            api_key=pairing.api_key,
                         )
                         payload.update(enrich)
                     except Exception as exc:

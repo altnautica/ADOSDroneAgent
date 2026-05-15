@@ -29,6 +29,11 @@ class MqttGateway:
 
     def _get_broker_config(self) -> tuple[str, int]:
         """Get broker host and port based on server mode."""
+        if self.config.server.mode == "local":
+            # Local-only operators don't want a cloud MQTT round-trip.
+            # `run()` short-circuits on an empty broker, so the gateway
+            # stays quiet without disabling the rest of the agent.
+            return ("", 0)
         if self.config.server.mode == "self_hosted":
             return (
                 self.config.server.self_hosted.mqtt_broker,
