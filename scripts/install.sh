@@ -1427,6 +1427,24 @@ cfg_path.write_text(yaml.safe_dump(cfg, sort_keys=False, default_flow_style=Fals
 PY
 }
 
+# Stop, disable, and mask the Debian-default dnsmasq.service and
+# hostapd.service units. Both get enabled the moment the apt packages
+# land, and both bind ports the ADOS ground-station profile owns:
+# standalone dnsmasq grabs 0.0.0.0:53 and 0.0.0.0:67, which blocks
+# ados-dnsmasq-gs (wlan0:53 + wlan0:67) and ados-setup-captive
+# (0.0.0.0:53). Standalone hostapd would equally fight ados-hostapd
+# for wlan0 once it's configured. Mask both so they cannot be revived
+# by a future apt-reinstall or by an operator reflex `systemctl start
+# dnsmasq`. Called from both the fresh-install ground-station deps
+# step AND the upgrade path so previously-installed rigs get the fix
+# on the next `install.sh --upgrade`. Idempotent — every call is a
+# no-op when already in the right state.
+mask_conflicting_standalone_services() {
+    systemctl stop    dnsmasq.service hostapd.service 2>/dev/null || true
+    systemctl disable dnsmasq.service hostapd.service 2>/dev/null || true
+    systemctl mask    dnsmasq.service hostapd.service 2>/dev/null || true
+}
+
 # Extra apt deps needed for the ground-station profile. Idempotent.
 install_ground_station_deps() {
     info "Installing ground-station profile dependencies..."
@@ -1469,18 +1487,7 @@ install_ground_station_deps() {
         apt-get install -y "${fallback_pkg}" || true
     fi
 
-    # Debian enables dnsmasq.service and hostapd.service the moment the
-    # packages land. Both bind ports the ADOS ground-station profile
-    # owns: standalone dnsmasq grabs 0.0.0.0:53 and 0.0.0.0:67, which
-    # blocks ados-dnsmasq-gs (wlan0:53 + wlan0:67) and ados-setup-captive
-    # (0.0.0.0:53). Standalone hostapd would equally fight ados-hostapd
-    # for wlan0 once it's configured. Mask both so they cannot be revived
-    # by a future apt-reinstall or by an operator's reflex `systemctl
-    # start dnsmasq`. Stop first so this is effective immediately on a
-    # fresh apt install.
-    systemctl stop dnsmasq.service hostapd.service 2>/dev/null || true
-    systemctl disable dnsmasq.service hostapd.service 2>/dev/null || true
-    systemctl mask dnsmasq.service hostapd.service 2>/dev/null || true
+    mask_conflicting_standalone_services
 
     # Ensure dwc2 overlay + module load for USB gadget mode (Pi family).
     local cfg="/boot/firmware/config.txt"
@@ -2168,6 +2175,15 @@ if is_installed && $DO_UPGRADE && ! $DO_FORCE; then
     # which are stable across upgrades on a previously-installed rig.
     ADOS_PROFILE="$(resolve_profile)"
     info "Detected profile: ${ADOS_PROFILE}"
+
+    # Rigs first installed before this revision still have the Debian
+    # dnsmasq.service and hostapd.service enabled; mask them on every
+    # ground-station upgrade so the standalone units cannot keep racing
+    # the ADOS-owned ports. No-op on drone profile and no-op on rigs
+    # where the units are already masked.
+    if [ "${ADOS_PROFILE}" = "ground_station" ] || [ "${ADOS_PROFILE}" = "ground-station" ]; then
+        mask_conflicting_standalone_services
+    fi
 
     # Ensure system deps are present. The upgrade path skips the full
     # install_system_deps to keep upgrades fast, so we only top up the
