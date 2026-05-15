@@ -138,11 +138,12 @@ class WfbConfig(BaseModel):
     # Inject H.264 SEI markers carrying time.time_ns() into the wfb-tee
     # output so the ground side can compute over-the-air video
     # latency. Adds ~30 bytes per VCL NAL (~900 B/s at 30 fps),
-    # negligible vs a 4 Mbps stream. Default off until bench-validated;
-    # flip in /etc/ados/config.yaml under video.wfb and restart the
-    # agent. The receiver-side parser is always wired and waits for
-    # markers — flipping the encoder flag is sufficient.
-    sei_latency: bool = False
+    # negligible vs a 4 Mbps stream. On by default so the LCD shows
+    # camera→display latency out of the box and the GCS popover can
+    # compute true end-to-end via the browser-side SEI parser.
+    # To disable, set sei_latency: false in /etc/ados/config.yaml
+    # under video.wfb and restart the agent.
+    sei_latency: bool = True
     # Operator-facing radio link preset. The WfbManager reads this at
     # startup and overrides mcs_index / fec_k / fec_n with the preset
     # values. Lets a bench operator widen the link without remembering
