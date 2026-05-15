@@ -11,7 +11,7 @@ import sys
 import time
 from enum import StrEnum
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import Any, TYPE_CHECKING
 
 import httpx
 
@@ -125,6 +125,11 @@ class VideoPipeline:
         # process-liveness-only checks miss (Rule 37 contract).
         self._wfb_tee_last_progress_at: float = 0.0
         self._wfb_tee_last_frame_count: int = -1
+        # Headless SEI tap. Reads the local mediamtx RTSP feed and
+        # writes /run/ados/lcd-latency.json so the /api/video/latency
+        # route returns numbers on a drone with no LCD attached.
+        # Lazily constructed in start_stream when wfb.sei_latency is on.
+        self._sei_tap: Any | None = None
         # Encoder stderr is captured (not DEVNULL) so ffmpeg errors surface.
         self._encoder_stderr_task: asyncio.Task | None = None
         self._restart_count: int = 0
@@ -256,6 +261,21 @@ class VideoPipeline:
             self._state = PipelineState.ERROR
             return False
 
+        # When SEI latency injection is enabled, route the encoder
+        # output through the Python NAL injector BEFORE it hits
+        # mediamtx. This way every downstream consumer (browser WHEP,
+        # over-the-air wfb_tx, drone-side LCD tap) gets the same
+        # wall-clock timestamp on the same frame — which is what makes
+        # browser-side true camera->monitor glass-to-glass measurable.
+        # The wfb_tee bash pipeline below stops re-injecting (the
+        # stream from mediamtx already carries SEI) so the marker
+        # isn't doubled.
+        if bool(getattr(self._config.wfb, "sei_latency", False)):
+            from ados.services.video.encoder import wrap_with_sei_inject
+
+            cmd = wrap_with_sei_inject(cmd, pipe_uri)
+            log.info("sei_inject_upstream_of_mediamtx", encoder=self._encoder_type.value)
+
         # Configure and start mediamtx
         self._mediamtx.generate_config({"main": "publisher"})
         mtx_ok = await self._mediamtx.start()
@@ -292,6 +312,19 @@ class VideoPipeline:
             # pipeline; local mediamtx and cloud push still work, only
             # the radio link goes dark.
             await self.start_wfb_tee()
+            # Headless SEI tap on the local mediamtx RTSP feed. Only
+            # spawn when wfb.sei_latency is enabled (the markers are
+            # what we read). Decoupled from the OLED service so it
+            # works on drones without an LCD attached.
+            if bool(getattr(self._config.wfb, "sei_latency", False)):
+                try:
+                    from ados.services.video.sei_tap import HeadlessSeiTap
+
+                    self._sei_tap = HeadlessSeiTap(rtsp_url=pipe_uri)
+                    await self._sei_tap.start()
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("headless_sei_tap_spawn_failed", error=str(exc))
+                    self._sei_tap = None
             return True
         except FileNotFoundError:
             log.error("encoder_binary_not_found", encoder=self._encoder_type.value)
@@ -535,6 +568,12 @@ class VideoPipeline:
         """Roll back partial start. Stops any process spawned after mediamtx.start()."""
         # Sweep the wfb tee first; it depends on local RTSP being up.
         await self.stop_wfb_tee()
+        if self._sei_tap is not None:
+            try:
+                await self._sei_tap.stop()
+            except Exception:  # noqa: BLE001
+                pass
+            self._sei_tap = None
         # Encoder may have spawned but not been assigned cleanly; sweep it.
         if self._encoder_process is not None and self._encoder_process.returncode is None:
             try:
@@ -716,129 +755,51 @@ class VideoPipeline:
             f"rtp://{_WFB_TEE_HOST}:{_WFB_TEE_PORT}?pkt_size={_WFB_TEE_PKT_SIZE}"
         )
 
-        # When sei_latency is set on WfbConfig, wrap the tee in a bash
-        # pipeline that splices a Python NAL injector between an input
-        # ffmpeg (RTSP -> Annex-B stdout) and an output ffmpeg
-        # (stdin -> RTP UDP). The injector prepends a SEI NAL with a
-        # wall-clock time.time_ns() before every VCL slice so the
-        # ground-side LCD can render glass-to-glass air latency.
+        # SEI latency injection now lives upstream of mediamtx (see the
+        # wrap_with_sei_inject call in start_stream). The stream we
+        # pull out of local_rtsp here already carries one SEI NAL per
+        # VCL slice when wfb.sei_latency is set, so wfb_tee just does
+        # a plain RTSP -> RTP copy with no extra processing. Tracking
+        # sei_latency_on only for logging.
         sei_latency_on = bool(
             getattr(self._config.wfb, "sei_latency", False)
         )
 
         try:
-            if sei_latency_on:
-                # Three-stage bash pipeline. The parent sees a single
-                # child (bash); if any stage crashes, bash returns
-                # non-zero and the existing health-check + restart
-                # loop respawns the whole tee.
-                # NB: do NOT add `-max_delay 0` to either ffmpeg here.
-                # We tried it as a latency micro-optimization and it
-                # broke codec discovery — input ffmpeg returned
-                # "Could not find codec parameters" before the first
-                # IDR arrived, the bash pipeline's exit cascaded into
-                # never-started wfb_tee, and groundnode stopped
-                # transmitting entirely. Same root cause as the
-                # mediamtx-gs ingest sidecar earlier.
-                cmd_in = (
-                    "ffmpeg "
-                    "-fflags nobuffer -flags low_delay "
-                    "-rtsp_transport tcp "
-                    f"-i {local_rtsp} "
-                    "-c:v copy -f h264 -"
-                )
-                cmd_inject = (
-                    f"{sys.executable} -m ados.services.video.sei_injector"
-                )
-                # `-muxdelay 0 -muxpreload 0 -flush_packets 1` strip
-                # ffmpeg's default 0.7 s mux delay + 0.5 s preload +
-                # output-side packet aggregation. The flush_packets
-                # is critical when the SEI injector is in the bash
-                # pipe in front of this ffmpeg: the injector emits
-                # one extra NAL per video frame, an irregular
-                # cadence that triggers the RTP muxer to batch
-                # output. Without -flush_packets 1, cmd_out's stdin
-                # buffer fills, the injector blocks on write, it
-                # can't drain its own stdin, cmd_in's stdout buffer
-                # fills, and the bash pipe collapses with
-                # "Conversion failed!" within seconds. The plain
-                # (non-SEI) ffmpeg branch below has carried this
-                # flag since 0.21.2; bringing this branch into parity.
-                # `-progress pipe:2` forces structured 1-Hz progress
-                # to stderr so the watchdog can tell working-but-
-                # quiet from wedged-and-stuck (otherwise ffmpeg
-                # suppresses progress when stderr is piped).
-                cmd_out = (
-                    "ffmpeg "
-                    "-fflags nobuffer -flags low_delay "
-                    "-f h264 -i - "
-                    "-c:v copy "
-                    "-muxdelay 0 -muxpreload 0 -flush_packets 1 "
-                    "-f rtp "
-                    f"-payload_type {_WFB_TEE_PAYLOAD_TYPE} "
-                    f"-ssrc {_WFB_TEE_SSRC} "
-                    "-progress pipe:2 "
-                    f"{rtp_url}"
-                )
-                bash_cmd = f"{cmd_in} | {cmd_inject} | {cmd_out}"
-                # start_new_session=True so bash + ffmpeg children form
-                # a process group. Without this, terminate() sends
-                # SIGTERM only to bash; bash exits but the ffmpeg
-                # children survive as orphans. On the next restart
-                # cycle a NEW set of ffmpegs spawns alongside the
-                # orphans, two ffmpegs try to pull the same RTSP source
-                # and two send to the same UDP 5600 destination -> RTP
-                # packet duplication / out-of-order chaos -> the LCD
-                # video freezes. stop_wfb_tee() now uses killpg to
-                # terminate the entire group cleanly.
-                self._wfb_tee_process = await asyncio.create_subprocess_exec(
-                    "bash",
-                    "-c",
-                    bash_cmd,
-                    stdout=asyncio.subprocess.DEVNULL,
-                    stderr=asyncio.subprocess.PIPE,
-                    start_new_session=True,
-                )
-            else:
-                # `-progress pipe:2` forces ffmpeg to write its periodic
-                # status report (frame=, size=, time=, bitrate=, ...) to
-                # stderr as plain key=value lines, ONE PER SECOND. Without
-                # this flag ffmpeg suppresses the status line entirely
-                # when stderr is captured (not a tty); our watchdog can't
-                # tell working-but-quiet from wedged-and-stuck, and
-                # fires false-positive restarts every ~15 s.
-                # `-muxdelay 0 -muxpreload 0 -flush_packets 1` strip the
-                # RTP muxer's default 0.7 s mux delay + 0.5 s preload +
-                # output-side packet aggregation; the bash/SEI branch
-                # above already passes these on its cmd_out ffmpeg. The
-                # plain branch had been silently inheriting ffmpeg
-                # defaults, costing ~1.2 s of constant glass-to-glass
-                # latency on every operator's pipeline. NB: do NOT add
-                # `-max_delay 0` here. The bash-branch comment above and
-                # the ground sidecar (mediamtx_manager.py) both document
-                # that it breaks codec discovery on the input ffmpeg.
-                self._wfb_tee_process = await asyncio.create_subprocess_exec(
-                    "ffmpeg",
-                    "-fflags", "nobuffer",
-                    "-flags", "low_delay",
-                    "-rtsp_transport", "tcp",
-                    "-i", local_rtsp,
-                    "-c:v", "copy",
-                    "-f", "rtp",
-                    "-payload_type", str(_WFB_TEE_PAYLOAD_TYPE),
-                    "-ssrc", _WFB_TEE_SSRC,
-                    "-muxdelay", "0",
-                    "-muxpreload", "0",
-                    "-flush_packets", "1",
-                    "-progress", "pipe:2",
-                    rtp_url,
-                    stdout=asyncio.subprocess.DEVNULL,
-                    stderr=asyncio.subprocess.PIPE,
-                    # Mirror the bash branch: ffmpeg is single-process
-                    # here so it's not strictly needed, but consistent
-                    # group semantics make stop_wfb_tee uniform.
-                    start_new_session=True,
-                )
+            # `-progress pipe:2` forces ffmpeg to write its periodic
+            # status report (frame=, size=, time=, bitrate=, ...) to
+            # stderr as plain key=value lines, ONE PER SECOND. Without
+            # this flag ffmpeg suppresses the status line entirely
+            # when stderr is captured (not a tty); our watchdog can't
+            # tell working-but-quiet from wedged-and-stuck, and
+            # fires false-positive restarts every ~15 s.
+            # `-muxdelay 0 -muxpreload 0 -flush_packets 1` strip the
+            # RTP muxer's default 0.7 s mux delay + 0.5 s preload +
+            # output-side packet aggregation. NB: do NOT add
+            # `-max_delay 0` here — it breaks codec discovery on the
+            # input ffmpeg (same root cause as the mediamtx-gs
+            # ingest sidecar earlier).
+            self._wfb_tee_process = await asyncio.create_subprocess_exec(
+                "ffmpeg",
+                "-fflags", "nobuffer",
+                "-flags", "low_delay",
+                "-rtsp_transport", "tcp",
+                "-i", local_rtsp,
+                "-c:v", "copy",
+                "-f", "rtp",
+                "-payload_type", str(_WFB_TEE_PAYLOAD_TYPE),
+                "-ssrc", _WFB_TEE_SSRC,
+                "-muxdelay", "0",
+                "-muxpreload", "0",
+                "-flush_packets", "1",
+                "-progress", "pipe:2",
+                rtp_url,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.PIPE,
+                # start_new_session keeps the group-kill path uniform
+                # with stop_wfb_tee's killpg-or-terminate dance.
+                start_new_session=True,
+            )
             # Reset the progress watchdog state at spawn time so a fresh
             # tee gets the full _WFB_TEE_PROGRESS_TIMEOUT_S window
             # before the health check trips on it.
@@ -1006,6 +967,13 @@ class VideoPipeline:
         await self._stop_air_cloud_bridge()
         await self.stop_wfb_tee()
         await self.stop_cloud_push()
+        # Headless SEI sample reader; idempotent stop().
+        if self._sei_tap is not None:
+            try:
+                await self._sei_tap.stop()
+            except Exception as exc:  # noqa: BLE001
+                log.warning("headless_sei_tap_stop_failed", error=str(exc))
+            self._sei_tap = None
 
         # The encoder subprocess could already be dead by the time
         # stop_stream() runs (e.g. ffmpeg crashed 5s after start due to

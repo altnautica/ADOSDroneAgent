@@ -368,6 +368,136 @@ def _shell_quote(arg: str) -> str:
     return arg
 
 
+def wrap_with_sei_inject(cmd: list[str], output_uri: str) -> list[str]:
+    """Splice the SEI injector into the encoder->publish pipeline.
+
+    The injector writes a wall-clock SEI NAL in front of every VCL slice
+    so any downstream consumer (browser WHEP via mediamtx, over-the-air
+    wfb_tx, drone-side LCD tap) sees the same timestamp on the same
+    frame. Before this wrapper, the only injection point lived inside
+    the wfb_tee bash pipeline, which meant only the radio link
+    carried SEI. Browser-side glass-to-glass measurement was
+    structurally impossible.
+
+    The output URI is needed because the wrapper has to split the
+    encoder command into two halves: encode-to-stdout, and
+    publish-stdin-to-mediamtx. The publish half re-mounts the output
+    URI in a thin ``-c copy`` ffmpeg.
+
+    Three encoder cases:
+    - ``["bash", "-c", "<rpicam ... | ffmpeg ... output>"]`` — already a
+      bash pipeline; splice ``| python sei_injector |`` before the
+      final ffmpeg stage.
+    - ``["ffmpeg", ...]`` ending with ``-f rtsp <output>`` — wrap in a
+      bash pipeline with two ffmpeg processes and the injector in the
+      middle.
+    - Anything else (GStreamer ``gst-launch-1.0`` cmds) — returned
+      unchanged with a warn log; SEI inject for the GStreamer pipeline
+      would require an in-process pad probe rather than a subprocess
+      pipe and is out of scope for this wrapper.
+    """
+    import sys
+
+    inject_cmd = f"{_shell_quote(sys.executable)} -m ados.services.video.sei_injector"
+
+    # Case 1: rpicam path is already a bash pipeline.
+    if len(cmd) >= 3 and cmd[0] == "bash" and cmd[1] == "-c":
+        bash_body = cmd[2]
+        # The pipeline ends with `... | ffmpeg ... <output>`. Splice
+        # the injector before that final ffmpeg stage. rsplit on "|"
+        # with maxsplit=1 splits off only the last stage.
+        stages = bash_body.rsplit("|", 1)
+        if len(stages) != 2:
+            log.warning(
+                "sei_wrap_bash_no_pipe",
+                msg="bash command has no pipe stage to splice; leaving unchanged",
+            )
+            return cmd
+        head = stages[0].rstrip()
+        tail = stages[1].lstrip()
+        return ["bash", "-c", f"{head} | {inject_cmd} | {tail}"]
+
+    # Case 2: raw ffmpeg cmd publishing to RTSP. Split into two stages.
+    if cmd and cmd[0] == "ffmpeg":
+        encoded = list(cmd)
+        # Strip the output URI (must be the last token).
+        if encoded and encoded[-1] == output_uri:
+            encoded.pop()
+        # Strip the muxer format specifier (`-f rtsp`, `-f mpegts`, ...).
+        for i in range(len(encoded) - 1, 0, -1):
+            if encoded[i] == "-f" and i + 1 < len(encoded):
+                encoded.pop(i + 1)
+                encoded.pop(i)
+                break
+        # Strip RTSP transport hint if present.
+        for i in range(len(encoded) - 1, 0, -1):
+            if encoded[i] == "-rtsp_transport" and i + 1 < len(encoded):
+                encoded.pop(i + 1)
+                encoded.pop(i)
+                break
+        # Strip max_delay if present (was paired with rtsp output).
+        for i in range(len(encoded) - 1, 0, -1):
+            if encoded[i] == "-max_delay" and i + 1 < len(encoded):
+                encoded.pop(i + 1)
+                encoded.pop(i)
+                break
+        # Encode-only ffmpeg now emits raw Annex-B H.264 on stdout.
+        encoded.extend(["-f", "h264", "-"])
+        # Publish-only ffmpeg pulls Annex-B from stdin and pushes to
+        # the original RTSP output. -c copy keeps it lossless.
+        publish: list[str]
+        if output_uri.startswith("rtsp://"):
+            publish = [
+                "ffmpeg",
+                "-loglevel", "error",
+                "-fflags", "nobuffer",
+                "-flags", "low_delay",
+                "-f", "h264",
+                "-i", "-",
+                "-c", "copy",
+                "-muxdelay", "0",
+                "-muxpreload", "0",
+                "-flush_packets", "1",
+                "-rtsp_transport", "tcp",
+                "-f", "rtsp",
+                output_uri,
+            ]
+        elif output_uri.startswith("udp://") or output_uri.startswith("tcp://"):
+            publish = [
+                "ffmpeg",
+                "-loglevel", "error",
+                "-fflags", "nobuffer",
+                "-flags", "low_delay",
+                "-f", "h264",
+                "-i", "-",
+                "-c", "copy",
+                "-muxdelay", "0",
+                "-muxpreload", "0",
+                "-flush_packets", "1",
+                "-f", "mpegts",
+                output_uri,
+            ]
+        else:
+            log.warning(
+                "sei_wrap_ffmpeg_unknown_output",
+                output=output_uri,
+                msg="cannot rebuild publisher for this URI; leaving cmd unchanged",
+            )
+            return cmd
+        encode_str = " ".join(_shell_quote(a) for a in encoded)
+        publish_str = " ".join(_shell_quote(a) for a in publish)
+        return ["bash", "-c", f"{encode_str} | {inject_cmd} | {publish_str}"]
+
+    # Case 3: gstreamer or unknown. Skip with a warn so the wfb-tee
+    # injector keeps being the only SEI source (legacy behaviour).
+    log.warning(
+        "sei_wrap_unsupported_encoder",
+        cmd_head=cmd[0] if cmd else "(empty)",
+        msg="encoder kind not supported by SEI wrap; browser glass-to-glass disabled",
+    )
+    return cmd
+
+
 def _select_input_format(camera: CameraInfo | None) -> str | None:
     """Choose the best V4L2 input format based on camera capabilities.
 
