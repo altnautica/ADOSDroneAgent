@@ -532,12 +532,14 @@ class PairingConfig(BaseModel):
     heartbeat_interval: int = 60  # seconds
     single_process_cloud_enabled: bool = False
     code_ttl: int = 900  # 15 minutes
-    # Cloud pair beacon is opt-in. When False (default) the agent
-    # only accepts local LAN pair via /api/pairing/claim. Operators
-    # who want cross-network discovery flip this to True via the
-    # setup webapp or config.yaml. Heartbeats after pair still flow
-    # whenever convex_url is set and the agent is paired.
-    beacon_enabled: bool = False
+    # Cloud pair beacon publishes the unpaired agent's short-lived
+    # pair code to ``convex_url`` so a GCS reached from any network
+    # (e.g. command.altnautica.com) can claim by code. Loop runs only
+    # while unpaired and gates on a non-empty ``convex_url`` — air-gap
+    # operators get a clean opt-out by setting ``server.mode = "local"``
+    # which clears the URL and stops every cloud-touching task at the
+    # same gate.
+    beacon_enabled: bool = True
 
 
 # --- Discovery ---
