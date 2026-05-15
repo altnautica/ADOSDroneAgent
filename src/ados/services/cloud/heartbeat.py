@@ -377,20 +377,25 @@ def read_lcd_video_tap() -> dict | None:
     return blob
 
 
-def read_recent_touch() -> dict | None:
+def read_recent_touch(*, api_key: str | None = None) -> dict | None:
     """Return the most recent touch event published by the OLED service.
 
     The OLED service holds the ring buffer in process memory, so the
     cloud subprocess cannot read it directly. We hit the local API
     surface (port 8080) the same way the radio block fetcher does,
     with a tight 0.2 s budget.
+
+    When the agent is paired the API requires X-ADOS-Key; callers must
+    pass the agent's ``pairing.api_key`` or get a 401.
     """
     try:
         import httpx
 
+        headers = {"X-ADOS-Key": api_key} if api_key else None
         with httpx.Client(timeout=0.2) as client:
             resp = client.get(
-                "http://127.0.0.1:8080/api/v1/display/touches"
+                "http://127.0.0.1:8080/api/v1/display/touches",
+                headers=headers,
             )
             if resp.status_code != 200:
                 return None
@@ -427,7 +432,7 @@ def read_air_pipeline_state() -> dict | None:
     return blob
 
 
-def read_video_recording_state() -> bool | None:
+def read_video_recording_state(*, api_key: str | None = None) -> bool | None:
     """Ask the local agent whether the recorder is currently active.
 
     Mirrors the precedent set by the radio block fetcher: the cloud
@@ -435,12 +440,19 @@ def read_video_recording_state() -> bool | None:
     agent's REST surface on localhost. ``None`` means we couldn't
     tell (API unreachable, response malformed) — the heartbeat
     enricher then omits the field entirely.
+
+    When the agent is paired the API requires X-ADOS-Key; callers must
+    pass the agent's ``pairing.api_key`` or get a 401.
     """
     try:
         import httpx
 
+        headers = {"X-ADOS-Key": api_key} if api_key else None
         with httpx.Client(timeout=0.2) as client:
-            resp = client.get("http://127.0.0.1:8080/api/video")
+            resp = client.get(
+                "http://127.0.0.1:8080/api/video",
+                headers=headers,
+            )
             if resp.status_code != 200:
                 return None
             data = resp.json()
@@ -459,6 +471,7 @@ def build_display_enrichment(
     has_attached_display: bool,
     local_ip: str,
     api_port: int,
+    api_key: str | None = None,
 ) -> dict:
     """Return the optional display + UI fields the heartbeat will fold in.
 
@@ -491,7 +504,7 @@ def build_display_enrichment(
             f"http://{local_ip}:{api_port}/api/v1/display/snapshot"
         )
         enrich["lcdSnapshotUrl"] = snapshot_url
-        last_touch = read_recent_touch()
+        last_touch = read_recent_touch(api_key=api_key)
         if last_touch is not None:
             t_ms = last_touch.get("t")
             if isinstance(t_ms, (int, float)):
@@ -514,7 +527,7 @@ def build_display_enrichment(
         fps = tap.get("fps")
         if isinstance(fps, (int, float)):
             enrich["videoLocalDecoderFps"] = float(fps)
-    recording = read_video_recording_state()
+    recording = read_video_recording_state(api_key=api_key)
     if recording is not None:
         enrich["videoRecording"] = bool(recording)
     # Phase 13: air-side pipeline flavor + encoder identity so the GCS

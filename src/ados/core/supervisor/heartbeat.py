@@ -119,18 +119,31 @@ def build_radio_block(wfb_status: dict[str, Any] | None) -> dict[str, Any]:
     }
 
 
-def fetch_wfb_status_via_http(host: str = "127.0.0.1", port: int = 8080) -> dict[str, Any] | None:
+def fetch_wfb_status_via_http(
+    host: str = "127.0.0.1",
+    port: int = 8080,
+    *,
+    api_key: str | None = None,
+) -> dict[str, Any] | None:
     """HTTP fallback when no in-process WfbManager is available.
 
     Used by subprocess-mode heartbeat senders that can't import the
     running manager directly. Best-effort: any failure returns None and
     the caller emits an `absent` radio block.
+
+    When the agent is paired the auth middleware rejects unauthenticated
+    callers with 401. Callers in subprocess context should pass the
+    agent's ``pairing.api_key`` so the probe can complete.
     """
     try:
         import httpx
 
+        headers = {"X-ADOS-Key": api_key} if api_key else None
         with httpx.Client(timeout=0.2) as client:
-            resp = client.get(f"http://{host}:{port}/api/wfb")
+            resp = client.get(
+                f"http://{host}:{port}/api/wfb",
+                headers=headers,
+            )
             if resp.status_code != 200:
                 return None
             data = resp.json()
