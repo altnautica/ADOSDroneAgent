@@ -5,11 +5,80 @@ from __future__ import annotations
 import asyncio
 import shutil
 import subprocess
+import time
+from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, BackgroundTasks
 
 router = APIRouter()
+
+
+def _is_ntp_synced() -> bool:
+    """Best-effort check that the system clock is being disciplined.
+
+    Looks for the synchronisation flag exposed by chrony (preferred)
+    and falls back to ``timedatectl show`` when chronyc is absent. On
+    a fresh Buildroot rootfs neither tool is guaranteed to be present,
+    so the function fails closed and returns False.
+    """
+    chronyc = shutil.which("chronyc")
+    if chronyc is not None:
+        try:
+            result = subprocess.run(
+                [chronyc, "-c", "tracking"],
+                capture_output=True,
+                text=True,
+                timeout=1.0,
+                check=False,
+            )
+            # `tracking` emits a comma-separated row; the second-to-last
+            # field is the leap status. Any successful read with a
+            # non-empty stride implies chrony has a reference.
+            if result.returncode == 0 and result.stdout.strip():
+                return True
+        except (subprocess.SubprocessError, OSError):
+            pass
+
+    timedatectl = shutil.which("timedatectl")
+    if timedatectl is not None:
+        try:
+            result = subprocess.run(
+                [timedatectl, "show", "-p", "NTPSynchronized", "--value"],
+                capture_output=True,
+                text=True,
+                timeout=1.0,
+                check=False,
+            )
+            return result.stdout.strip().lower() == "yes"
+        except (subprocess.SubprocessError, OSError):
+            pass
+
+    # systemd-timesyncd writes /run/systemd/timesync/synchronized once
+    # it acquires a reference. Read-only filesystem check, no subprocess.
+    try:
+        return Path("/run/systemd/timesync/synchronized").is_file()
+    except OSError:
+        return False
+
+
+@router.get("/time")
+async def get_time() -> dict[str, Any]:
+    """Return monotonic + wall-clock timestamps for client clock-offset estimation.
+
+    The GCS browser uses Cristian's algorithm against this endpoint to
+    estimate the drone↔browser clock offset, which lets it map the
+    drone-side SEI timestamps embedded in the H.264 stream into the
+    browser's own monotonic clock for true glass-to-glass latency.
+
+    Cost: one ``time.time_ns()`` + one ``time.monotonic_ns()`` plus a
+    bounded chrony / timedatectl probe. Safe at 30 s polling.
+    """
+    return {
+        "time_ns": time.time_ns(),
+        "monotonic_ns": time.monotonic_ns(),
+        "ntp_synced": _is_ntp_synced(),
+    }
 
 
 @router.get("/system")
