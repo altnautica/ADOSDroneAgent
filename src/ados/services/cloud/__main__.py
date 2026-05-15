@@ -450,6 +450,15 @@ async def main() -> None:
                             error=str(exc),
                         )
 
+                    # Convex's v.optional(T) accepts "field absent OR T",
+                    # not explicit null. Strip any top-level None-valued
+                    # fields so a drone-profile heartbeat (role=None) or
+                    # any other future optional field doesn't 500 the
+                    # mutation on validation. Nested objects pass through
+                    # — their internal validators handle their own
+                    # null-vs-absent semantics.
+                    payload = {k: v for k, v in payload.items() if v is not None}
+
                     async with httpx.AsyncClient(timeout=10.0) as client:
                         resp = await client.post(
                             f"{convex_url}/agent/status",
