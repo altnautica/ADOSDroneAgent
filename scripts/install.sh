@@ -1795,6 +1795,14 @@ enable_ground_station_units() {
         ados-cloud-relay.service; do
         if [ -f "/etc/systemd/system/${unit}" ]; then
             systemctl enable "${unit}" 2>/dev/null || true
+            # Also kick the unit. enable_ground_station_units is called
+            # from both the fresh-install path AND the --upgrade path,
+            # and in the upgrade case the supervisor restart upstream
+            # stopped these via PartOf= without anything subsequently
+            # starting them. Start with --no-block so any unit whose
+            # ExecStartPre takes a moment does not serialise the rest.
+            # Idempotent: already-running units are a no-op for start.
+            systemctl start --no-block "${unit}" 2>/dev/null || true
         else
             warn "Unit ${unit} not deployed; skipping enable."
         fi
@@ -2245,6 +2253,18 @@ if is_installed && $DO_UPGRADE && ! $DO_FORCE; then
         SYSTEMD_SRC_DIR="${tmp_repo}/repo/data/systemd"
     fi
     install_systemd_service
+
+    # install_systemd_service restarts ados-supervisor, and the
+    # ground-station child units (hostapd, dnsmasq-gs, wfb-rx, etc.)
+    # carry PartOf=ados-supervisor.service so they stop on that
+    # restart. Nothing in the rest of the upgrade block starts them
+    # again — the fresh-install path reaches enable_ground_station_units
+    # via the main install body, but --upgrade never did. Mirror the
+    # call here so the AP comes back without an operator running
+    # systemctl by hand.
+    if [ "${ADOS_PROFILE}" = "ground_station" ] || [ "${ADOS_PROFILE}" = "ground-station" ]; then
+        enable_ground_station_units
+    fi
 
     # Config migration: a brief 0.26.7/0.26.8 release rewrote the REST
     # API host to "::" expecting kernel-default dual-stack. uvicorn on
