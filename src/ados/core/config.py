@@ -50,13 +50,14 @@ class AgentConfig(BaseModel):
 
 class EndpointConfig(BaseModel):
     type: str = "websocket"
-    # Default to IPv6 dual-stack so browsers that resolve the agent's
-    # mDNS hostname to the IPv6 link-local address still connect.
-    # On Linux a `[::]` socket accepts both IPv6 and IPv4-mapped
-    # connections; binding 0.0.0.0 only accepts IPv4 and the browser
-    # gets "connection refused" on its IPv6 attempt before falling
-    # back, which surfaces as "Failed to fetch".
-    host: str = "::"
+    # IPv4 wildcard. The agent's network entry points (REST + MAVLink WS)
+    # bind explicit dual-stack sockets at startup via a helper that
+    # creates one AF_INET listener AND one AF_INET6 listener, so the
+    # `host` here is interpreted as the IPv4 bind address. The IPv6
+    # leg is added implicitly by the dual-bind helper. Binding to "::"
+    # alone is unreliable across kernels (uvicorn's IPv6-only fallback
+    # left IPv4 unreachable on the bench Pi).
+    host: str = "0.0.0.0"
     port: int = 8765
     enabled: bool = True
 
@@ -470,8 +471,10 @@ class ScriptsConfig(BaseModel):
 
 class RestApiConfig(BaseModel):
     enabled: bool = True
-    # Default to IPv6 dual-stack — see EndpointConfig.host comment.
-    host: str = "::"
+    # IPv4 wildcard. See EndpointConfig.host comment — the actual
+    # listener binds dual-stack via a separate helper that creates
+    # both AF_INET and AF_INET6 sockets at startup.
+    host: str = "0.0.0.0"
     port: int = 8080
 
 

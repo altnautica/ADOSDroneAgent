@@ -205,12 +205,12 @@ async def create_api_task(agent: Any) -> None:
     app = create_app(api_runtime)
     api_config = api_runtime.config.scripting.rest_api
 
+    from ados.api.dual_bind import make_dual_stack_sockets
+    sockets = make_dual_stack_sockets(api_config.host, api_config.port)
     config = uvicorn.Config(
         app,
-        host=api_config.host,
-        port=api_config.port,
         log_level="warning",
         access_log=False,
     )
     server = uvicorn.Server(config)
-    await server.serve()
+    await server.serve(sockets=sockets)

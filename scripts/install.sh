@@ -818,7 +818,7 @@ security:
 scripting:
   rest_api:
     enabled: true
-    host: "::"
+    host: "0.0.0.0"
     port: 8080
 
 pairing:
@@ -2200,17 +2200,31 @@ if is_installed && $DO_UPGRADE && ! $DO_FORCE; then
     fi
     install_systemd_service
 
-    # One-time config migration: legacy installs wrote the IPv4-only
-    # bind `host: "0.0.0.0"` for the REST API. Browsers that resolve
-    # the agent's mDNS hostname to the IPv6 link-local address see
-    # "Connection refused" and surface a "Failed to fetch" error.
-    # Rewrite to the dual-stack `host: "::"` so the same socket
-    # accepts both IPv4 and IPv6 connections. Idempotent — sed only
-    # touches lines that still carry the legacy literal.
+    # Config migration: a brief 0.26.7/0.26.8 release rewrote the REST
+    # API host to "::" expecting kernel-default dual-stack. uvicorn on
+    # some Pi kernels treated [::] as IPv6-only and IPv4 connections
+    # were refused. Now the agent binds explicit dual-stack sockets
+    # at startup, so the config host should be the IPv4 wildcard
+    # again. Flip "::" back to "0.0.0.0" idempotently.
     cfg_file="${CONFIG_DIR}/config.yaml"
-    if [ -f "$cfg_file" ] && grep -q '^[[:space:]]*host:[[:space:]]*"0\.0\.0\.0"' "$cfg_file"; then
-        info "Migrating REST API bind from 0.0.0.0 to dual-stack '::' (config.yaml)"
-        sed -i 's|^\([[:space:]]*\)host:[[:space:]]*"0\.0\.0\.0"|\1host: "::"|' "$cfg_file"
+    if [ -f "$cfg_file" ] && grep -q '^[[:space:]]*host:[[:space:]]*"::"' "$cfg_file"; then
+        info "Reverting REST API bind from '::' to '0.0.0.0' (config.yaml; agent now dual-binds at startup)"
+        sed -i 's|^\([[:space:]]*\)host:[[:space:]]*"::"|\1host: "0.0.0.0"|' "$cfg_file"
+    fi
+
+    # Orphan AP IP cleanup: a previously-active setup-webapp captive
+    # portal can leave 192.168.4.1/24 on wlan0 even after the AP is
+    # torn down. Avahi then publishes that address via mDNS and the
+    # browser may try it as a candidate for the agent hostname,
+    # producing a connection timeout. Drop the address when no AP
+    # service is currently active.
+    if ip -4 addr show wlan0 2>/dev/null | grep -q "inet 192\.168\.4\.1/"; then
+        if ! systemctl is-active --quiet hostapd 2>/dev/null \
+            && ! systemctl is-active --quiet ados-setup-ap 2>/dev/null \
+            && ! systemctl is-active --quiet ados-captive-portal 2>/dev/null; then
+            info "Removing orphan AP address 192.168.4.1/24 from wlan0"
+            ip addr del 192.168.4.1/24 dev wlan0 2>/dev/null || true
+        fi
     fi
 
     # LCD overlay installer needs the cloned scripts + DTS sources,

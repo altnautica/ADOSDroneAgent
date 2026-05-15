@@ -45,17 +45,21 @@ async def main() -> None:
     app = create_app(api_runtime)
 
     api_config = config.scripting.rest_api
+    # Bind explicit AF_INET + AF_INET6 sockets so both IPv4 and IPv6
+    # clients reach the agent regardless of which family the browser's
+    # mDNS resolver returns first. uvicorn alone with `host="::"` did
+    # not produce a working IPv4 listener on some Pi kernels.
+    from ados.api.dual_bind import make_dual_stack_sockets
+    sockets = make_dual_stack_sockets(api_config.host, api_config.port)
     uvi_config = uvicorn.Config(
         app,
-        host=api_config.host,
-        port=api_config.port,
         log_level="warning",
         access_log=False,
     )
     server = uvicorn.Server(uvi_config)
 
     tasks = [
-        asyncio.create_task(server.serve(), name="uvicorn"),
+        asyncio.create_task(server.serve(sockets=sockets), name="uvicorn"),
     ]
 
     if state_client.connected:
