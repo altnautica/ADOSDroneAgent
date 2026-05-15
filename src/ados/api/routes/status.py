@@ -369,6 +369,14 @@ async def get_full_status(request: Request):
     except Exception:
         pass
 
+    # Resolved profile + role using the same helper that drives the
+    # cloud heartbeat in services/cloud/__main__.py. Hyphen-form
+    # (`"ground-station"`) so the GCS receives the canonical wire shape
+    # from both the cloud relay and the direct LAN poll, instead of
+    # having to infer profile from `fc_connected`.
+    from ados.core.profile import current_profile_and_role
+    resolved_profile, resolved_role = current_profile_and_role(app.config)
+
     payload = {
         "version": __version__,
         "uptime_seconds": uptime,
@@ -383,6 +391,8 @@ async def get_full_status(request: Request):
         "telemetry": telemetry,
         "capabilities": capabilities,
         "mesh": mesh_block,
+        "profile": resolved_profile,
+        "role": resolved_role,
     }
 
     etag = _compute_etag(payload)
