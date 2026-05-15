@@ -241,6 +241,35 @@ def _run_http_server(stop_evt: threading.Event) -> None:
         pass
 
 
+def _ground_station_dnsmasq_is_owner() -> bool:
+    """Return True when ados-dnsmasq-gs is the intended DNS+DHCP owner.
+
+    On ground-station profile nodes the dnsmasq-gs unit owns wlan0:53,
+    which covers every IP on wlan0 (AP gateway plus any client lease
+    NetworkManager still holds). A captive_dns bound to 0.0.0.0:53
+    wins the race at boot and then dnsmasq-gs can never come up,
+    because Linux refuses to bind wlan0:53 once 0.0.0.0:53 is taken.
+    Captive's job is only to redirect probes when no real DNS is
+    around, so when the GS DNS is configured + enabled we get out of
+    the way without binding.
+    """
+    if not Path("/etc/ados/dnsmasq-gs.conf").exists():
+        return False
+    import subprocess  # noqa: PLC0415 — tiny import, only on GS rigs
+
+    try:
+        rc = subprocess.run(
+            ["/bin/systemctl", "is-enabled", "--quiet", "ados-dnsmasq-gs.service"],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=2,
+        ).returncode
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return rc == 0
+
+
 async def _amain() -> int:
     configure_logging()
     logging.getLogger("asyncio").setLevel(logging.WARNING)
@@ -250,6 +279,13 @@ async def _amain() -> int:
             "captive_dns_inactive",
             reason="setup already complete, exiting cleanly",
             sentinel=str(SETUP_COMPLETE_SENTINEL),
+        )
+        return 0
+
+    if _ground_station_dnsmasq_is_owner():
+        log.info(
+            "captive_dns_yielding",
+            reason="ados-dnsmasq-gs is the intended DNS owner on this node",
         )
         return 0
 
