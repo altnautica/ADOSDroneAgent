@@ -16,7 +16,15 @@ log = get_logger("pairing")
 # Safe charset: no ambiguous chars (0/O/1/I/L)
 SAFE_CHARSET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
 CODE_LENGTH = 6
-CODE_TTL = 900  # 15 minutes
+# An unpaired agent regenerates its pair code every CODE_TTL seconds
+# (the beacon loop calls get_or_create_code on each iteration and the
+# stale-timestamp branch fires once the window passes). Keep this
+# generous: the operator reads the code off `ados status`, the install
+# banner, or the LCD, and we cannot assume they will walk over to
+# Mission Control inside the next 15 minutes. 24 hours is long enough
+# for a bench session that spans a workday, short enough that an
+# abandoned-unpaired agent eventually rolls.
+CODE_TTL = 24 * 60 * 60
 PAIRING_STATE_PATH = str(PAIRING_JSON)
 
 
