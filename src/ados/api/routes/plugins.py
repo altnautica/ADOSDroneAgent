@@ -32,10 +32,26 @@ from __future__ import annotations
 import tempfile
 from pathlib import Path
 
-from fastapi import APIRouter, File, HTTPException, UploadFile
+from fastapi import (
+    APIRouter,
+    File,
+    UploadFile,
+    WebSocket,
+    WebSocketDisconnect,
+)
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
+from ados.api.deps import get_agent_app
+from ados.api.routes._plugins_helpers import (
+    TOKEN_TTL_SECONDS_DEFAULT,
+    authenticate_job_websocket,
+    compute_granted_caps_for_token,
+    job_ticket_store,
+    mint_agent_capability_token,
+    run_job_progress_stream,
+    write_sidecar,
+)
 from ados.core.logging import get_logger
 from ados.plugins.archive import open_archive
 from ados.plugins.errors import (
@@ -209,13 +225,25 @@ async def parse_plugin_archive(file: UploadFile = File(...)):
 
 
 @router.post("/plugins/install")
-async def install_plugin(file: UploadFile = File(...)):
+async def install_plugin(
+    file: UploadFile = File(...),
+    job_id: str | None = None,
+    requested_permissions: str | None = None,
+):
     """Multipart upload of a ``.adosplug`` archive.
 
     The archive is read into a temp file (to keep the supervisor's
     on-disk pathing intact), parsed, signature-verified, and the
     manifest summary is returned. Permission grants come on a
     subsequent ``/grant`` call from the install dialog.
+
+    Optional ``job_id`` lets the LAN-direct path write the same
+    ``/run/ados/plugin_install_<jobId>.json`` sidecar the cloud-relay
+    receiver writes, so the WebSocket progress route serves both
+    transports the same way. Optional comma-separated
+    ``requested_permissions`` triggers immediate grants on the freshly
+    installed plugin — used by the install dialog so the operator does
+    not have to click through a separate grant flow.
     """
     if not file.filename or not file.filename.endswith(".adosplug"):
         return _err(2, "usage_error", "expected a .adosplug file", 400)
@@ -223,12 +251,16 @@ async def install_plugin(file: UploadFile = File(...)):
     if not raw:
         return _err(2, "usage_error", "empty upload", 400)
     sup = _get_supervisor()
+    if job_id:
+        write_sidecar(job_id, {"stage": "verifying"})
     with tempfile.NamedTemporaryFile(
         suffix=".adosplug", delete=False
     ) as tmp:
         tmp.write(raw)
         tmp_path = Path(tmp.name)
     try:
+        if job_id:
+            write_sidecar(job_id, {"stage": "installing"})
         result = sup.install_archive(tmp_path)
     except SignatureError as exc:
         kind_to_code = {
@@ -257,6 +289,27 @@ async def install_plugin(file: UploadFile = File(...)):
             tmp_path.unlink(missing_ok=True)
         except OSError as exc:
             log.warning("plugin_install_temp_cleanup", error=str(exc))
+
+    granted_ids: list[str] = []
+    if requested_permissions:
+        wanted = [p.strip() for p in requested_permissions.split(",") if p.strip()]
+        for perm in wanted:
+            try:
+                sup.grant_permission(result.plugin_id, perm)
+                granted_ids.append(perm)
+            except SupervisorError as exc:
+                log.warning(
+                    "plugin_install_grant_skip",
+                    permission=perm,
+                    error=str(exc),
+                )
+
+    if job_id:
+        write_sidecar(
+            job_id,
+            {"stage": "completed", "pluginId": result.plugin_id},
+        )
+
     return {
         "ok": True,
         "plugin_id": result.plugin_id,
@@ -264,6 +317,8 @@ async def install_plugin(file: UploadFile = File(...)):
         "signer_id": result.signer_id,
         "risk": result.risk,
         "permissions_requested": result.permissions_requested,
+        "granted": granted_ids,
+        "job_id": job_id,
     }
 
 
@@ -347,4 +402,126 @@ async def revoke_plugin_permission(plugin_id: str, permission_id: str):
         "plugin_id": plugin_id,
         "granted": granted,
         "requires_restart": False,
+    }
+
+
+# ---------------------------------------------------------------------
+# One-shot WebSocket ticket mint
+# ---------------------------------------------------------------------
+
+
+@router.post("/plugins/jobs/{job_id}/ticket")
+async def mint_install_job_ticket(job_id: str) -> dict:
+    """Issue a one-shot ticket the GCS uses to open the progress WS.
+
+    Browsers cannot set ``X-ADOS-Key`` on a WebSocket handshake, so
+    the previous design fell back to ``?api_key=<pairing_key>`` in
+    the URL — which leaks into DevTools, HAR exports, and any
+    reverse-proxy access log. This route lets the GCS exchange its
+    pairing key (enforced on the REST middleware) for a short-lived
+    random ticket and hand the ticket to ``new WebSocket(url,
+    ["ados-job-ticket", ticket])``. The agent validates and consumes
+    the ticket on the WebSocket handshake.
+
+    Ticket lifetime: 30 s. One-shot: the second connect with the
+    same ticket fails.
+    """
+    if not job_id:
+        return _err(2, "usage_error", "job_id required", 400)
+    ticket, expires_at = await job_ticket_store.issue(job_id)
+    return {"ok": True, "ticket": ticket, "expiresAt": expires_at}
+
+
+# ---------------------------------------------------------------------
+# WebSocket: in-flight install job progress
+# ---------------------------------------------------------------------
+
+
+@router.websocket("/plugins/jobs/{job_id}")
+async def stream_install_job(websocket: WebSocket, job_id: str) -> None:
+    """Stream install-job progress from the in-flight sidecar JSON.
+
+    Both transports write the same sidecar so this route is
+    transport-agnostic. Closes on terminal stage or idle timeout.
+
+    The Starlette HTTP middleware does not process WebSocket
+    handshakes, so the paired-key check runs inline before
+    ``accept()``. Native clients can pass ``X-ADOS-Key``; browsers
+    pass a one-shot ticket via the ``ados-job-ticket`` subprotocol.
+    The previous ``?api_key=`` query-string fallback is gone — the
+    URL must not carry the pairing key.
+    """
+    accept_subprotocol = await authenticate_job_websocket(
+        websocket, job_id=job_id
+    )
+    if accept_subprotocol is None:
+        return
+    if accept_subprotocol:
+        await websocket.accept(subprotocol=accept_subprotocol)
+    else:
+        await websocket.accept()
+    try:
+        await run_job_progress_stream(websocket, job_id)
+    except WebSocketDisconnect:
+        return
+    except Exception as exc:  # pragma: no cover — defensive
+        log.warning("plugin_job_ws_error", job_id=job_id, error=str(exc))
+
+
+# ---------------------------------------------------------------------
+# Capability-token mint (agent issuer)
+# ---------------------------------------------------------------------
+
+
+class CapabilityTokenRequest(BaseModel):
+    plugin_id: str
+    operator_id: str | None = None
+    ttl_seconds: int | None = None
+
+
+@router.post("/plugins/capability-token")
+async def mint_capability_token(body: CapabilityTokenRequest):
+    """Mint an ``iss: agent:<device_id>`` capability token.
+
+    The token rides postMessage RPCs from the plugin iframe to the GCS
+    bridge, which verifies the same HMAC the agent signs with (HKDF
+    from the pairing key + spec'd salt).
+    """
+    app = get_agent_app()
+    pairing_key = getattr(app.pairing_manager, "api_key", None)
+    if not pairing_key:
+        return _err(
+            11,
+            "not_paired",
+            "agent must be paired to mint capability tokens",
+            409,
+        )
+
+    sup = _get_supervisor()
+    install = sup.find_install(body.plugin_id)
+    if install is None:
+        return _err(14, "not_found", f"plugin {body.plugin_id} not installed", 404)
+
+    granted, audit = compute_granted_caps_for_token(
+        plugin_id=body.plugin_id,
+        in_memory_permissions=install.permissions,
+    )
+
+    operator_id = (
+        body.operator_id or (audit or {}).get("operator_id") or "unknown"
+    )
+    token, claims = mint_agent_capability_token(
+        plugin_id=body.plugin_id,
+        agent_id=app.config.agent.device_id,
+        operator_id=str(operator_id),
+        granted_capabilities=granted,
+        pairing_key=pairing_key,
+        ttl_seconds=body.ttl_seconds or TOKEN_TTL_SECONDS_DEFAULT,
+    )
+    return {
+        "ok": True,
+        "token": token,
+        "expiresAt": claims.expires_at_ms,
+        "issuer": claims.issuer,
+        "grantedCapabilities": list(claims.granted_capabilities),
     }
