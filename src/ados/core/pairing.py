@@ -126,6 +126,35 @@ class PairingManager:
         log.info("pairing_code_generated", code=code)
         return code
 
+    def get_or_create_api_key(self) -> str:
+        """Return a stable API key for the current pending pair attempt.
+
+        The pair beacon calls this once per iteration. Without caching
+        the agent posts a different key every 30 s; the cloud relay
+        freezes whichever key happens to be in flight at claim time,
+        and the agent's later transition to paired uses the very latest
+        key — so cmd_drones.apiKey and pairing.json.api_key drift apart
+        and every heartbeat after the claim 401s permanently.
+
+        Mirrors ``get_or_create_code()``: persists the key on disk so a
+        restart or sibling process picks up the same value, then clears
+        it once ``claim()`` or ``unpair()`` runs.
+        """
+        self._maybe_reload()
+        if self._state.get("paired"):
+            # Already paired — return the active key. Callers should
+            # really be reading the api_key property here, but this
+            # fallback keeps the loop tidy.
+            return self._state.get("api_key", "")
+        cached = self._state.get("pending_api_key")
+        if cached:
+            return cached
+        key = self.generate_api_key()
+        self._state["pending_api_key"] = key
+        self._save_state()
+        log.info("pairing_api_key_generated")
+        return key
+
     def set_code(self, code: str) -> None:
         """Set a pre-generated pairing code (from install --pair flag)."""
         self._state["pairing_code"] = code.upper()
@@ -148,16 +177,26 @@ class PairingManager:
         return int(created_at) + CODE_TTL
 
     def claim(self, user_id: str, api_key: str | None = None) -> str:
-        """Claim this agent for a user. Returns API key."""
+        """Claim this agent for a user. Returns API key.
+
+        Prefers the cached ``pending_api_key`` over generating a fresh
+        one so the key the agent advertised through the beacon stays
+        the same key the cloud-relay handler validates against.
+        """
         if self.is_paired:
             raise ValueError("Already paired. Unpair first.")
-        key = api_key or self.generate_api_key()
+        key = (
+            api_key
+            or self._state.get("pending_api_key")
+            or self.generate_api_key()
+        )
         self._state["paired"] = True
         self._state["api_key"] = key
         self._state["owner_id"] = user_id
         self._state["paired_at"] = time.time()
         self._state.pop("pairing_code", None)
         self._state.pop("code_created_at", None)
+        self._state.pop("pending_api_key", None)
         self._save_state()
         log.info("pairing_claimed", user_id=user_id)
         return key
@@ -165,6 +204,9 @@ class PairingManager:
     def unpair(self) -> None:
         """Clear pairing state, generate new code."""
         old_owner = self._state.get("owner_id")
+        # _save_state() writes whatever's in _state, so a true reset
+        # means setting the dict to empty before saving. The cached
+        # pending_api_key, code, paired flag, and owner all drop here.
         self._state = {}
         self._save_state()
         log.info("pairing_unpaired", previous_owner=old_owner)

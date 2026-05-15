@@ -150,7 +150,10 @@ async def main() -> None:
             if not pairing.is_paired and convex_url:
                 try:
                     code = pairing.get_or_create_code()
-                    api_key = pairing.generate_api_key()
+                    # Stable across beacon iterations so the apiKey on
+                    # cmd_pairingRequests stays consistent and survives
+                    # the claim → pairing.json transition without drift.
+                    api_key = pairing.get_or_create_api_key()
                     local_ip = _get_local_ip()
 
                     beacon_body = {
