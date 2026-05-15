@@ -29,7 +29,7 @@ from pathlib import Path
 from typing import Any
 
 from ados.core.logging import get_logger
-from ados.services.video.local_tap import parse_sei_latency_ns
+from ados.services.video.sei_parser import parse_sei_latency_ns
 
 log = get_logger("video.sei_tap")
 
