@@ -2207,7 +2207,7 @@ if is_installed && $DO_UPGRADE && ! $DO_FORCE; then
     # Rewrite to the dual-stack `host: "::"` so the same socket
     # accepts both IPv4 and IPv6 connections. Idempotent — sed only
     # touches lines that still carry the legacy literal.
-    local cfg_file="${CONFIG_DIR}/config.yaml"
+    cfg_file="${CONFIG_DIR}/config.yaml"
     if [ -f "$cfg_file" ] && grep -q '^[[:space:]]*host:[[:space:]]*"0\.0\.0\.0"' "$cfg_file"; then
         info "Migrating REST API bind from 0.0.0.0 to dual-stack '::' (config.yaml)"
         sed -i 's|^\([[:space:]]*\)host:[[:space:]]*"0\.0\.0\.0"|\1host: "::"|' "$cfg_file"
