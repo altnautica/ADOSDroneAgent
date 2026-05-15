@@ -75,6 +75,21 @@ def build_profile_suggestion(config: Any) -> ProfileSuggestion:
     if source not in ("detected", "tiebreaker", "override", "default"):
         source = "detected"
 
+    # Auto-persist the detected profile to /etc/ados/profile.conf when
+    # the operator hasn't picked an explicit value yet AND detection
+    # had a clear winner (source != "default" — that path means tied
+    # scores and would lock in a coin-flip). Without this the agent
+    # silently reports "drone" forever even when probes are unanimous;
+    # `core.profile.current_profile_and_role` reads profile.conf as a
+    # fallback so persisting here makes the whole chain self-healing.
+    if not confirmed and source != "default":
+        try:
+            from ados.bootstrap.profile_detect import write_profile_conf
+
+            write_profile_conf({"profile": detected, "source": source})
+        except Exception:
+            pass
+
     ground_role = str(getattr(config.ground_station, "role", "direct") or "direct")
     if ground_role not in ("direct", "relay", "receiver"):
         ground_role = "direct"

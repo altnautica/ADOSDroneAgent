@@ -20,6 +20,80 @@ from ados.core.ipc import StateIPCClient
 from ados.core.logging import configure_logging
 
 
+_PROFILE_SEED_DELAY_S = 5.0
+_PROFILE_SEED_RETRY_GAP_S = 30.0
+_PROFILE_SEED_MAX_RETRIES = 4
+
+
+async def _seed_profile_conf_if_unset(config, log) -> None:
+    """Auto-detect the agent profile and persist to profile.conf at boot.
+
+    No-op when ``agent.profile`` is already an explicit value or when
+    profile.conf is already populated. Runs the detection in a worker
+    thread so probes never stall the event loop.
+
+    Some probes (i2c, gpio) flake at the moment systemd brings the API
+    service up — a transient i2c byte-read on an empty bus can land at
+    0x3C and falsely score the node as a ground-station. To defend
+    against that, the seed retries after gaps when the probes tie
+    (source == "default"). The first attempt waits ~5 s for services
+    to settle; subsequent attempts run every 30 s for up to 4 tries
+    total. A clean non-tied result on any pass persists and ends the
+    loop. If every attempt ties, the seed gives up — the operator can
+    pick explicitly via ``ados profile set`` or the setup wizard.
+    """
+    try:
+        explicit = str(getattr(getattr(config, "agent", None), "profile", "") or "")
+        if explicit in ("drone", "ground_station"):
+            return
+
+        from ados.core.paths import PROFILE_CONF
+        from ados.core.profile import _read_profile_conf_value
+
+        if _read_profile_conf_value() is not None:
+            return
+
+        from ados.bootstrap.profile_detect import detect_profile, write_profile_conf
+
+        await asyncio.sleep(_PROFILE_SEED_DELAY_S)
+
+        for attempt in range(1, _PROFILE_SEED_MAX_RETRIES + 1):
+            # The operator may have set an explicit value (via the
+            # wizard or `ados profile set`) between attempts; bail
+            # cleanly if the file showed up while we were waiting.
+            if _read_profile_conf_value() is not None:
+                return
+
+            result = await asyncio.to_thread(detect_profile, None)
+            source = str(result.get("source") or "")
+            if source != "default":
+                ok = await asyncio.to_thread(write_profile_conf, result)
+                if ok:
+                    log.info(
+                        "profile_conf_seeded",
+                        profile=result.get("profile"),
+                        source=source,
+                        attempt=attempt,
+                        path=str(PROFILE_CONF),
+                    )
+                return
+            log.info(
+                "profile_seed_tied_retrying",
+                attempt=attempt,
+                ground_score=result.get("ground_score"),
+                air_score=result.get("air_score"),
+            )
+            if attempt < _PROFILE_SEED_MAX_RETRIES:
+                await asyncio.sleep(_PROFILE_SEED_RETRY_GAP_S)
+
+        log.info("profile_seed_gave_up_after_ties", attempts=_PROFILE_SEED_MAX_RETRIES)
+    except Exception as exc:  # noqa: BLE001 - boot must never crash on seed
+        try:
+            log.warning("profile_seed_failed", error=str(exc))
+        except Exception:
+            pass
+
+
 async def main() -> None:
     config = load_config()
     configure_logging(config.logging.level)
@@ -43,6 +117,17 @@ async def main() -> None:
 
     api_runtime = StandaloneApiRuntime(config, state_client, log)
     app = create_app(api_runtime)
+
+    # Boot-time profile auto-detect + persist. The full chain depends
+    # on /etc/ados/profile.conf to bridge the operator-friendly
+    # `agent.profile: auto` default with the wire-contract value the
+    # heartbeat reports. Without a one-shot detection here, profile.conf
+    # only gets written when a setup-webapp client polls /api/setup/status.
+    # Fire-and-forget so a slow probe never blocks API startup.
+    asyncio.create_task(
+        _seed_profile_conf_if_unset(config, log),
+        name="profile-seed",
+    )
 
     api_config = config.scripting.rest_api
     # Bind explicit AF_INET + AF_INET6 sockets so both IPv4 and IPv6

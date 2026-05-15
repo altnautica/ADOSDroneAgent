@@ -411,6 +411,27 @@ def probe_mesh_capable() -> bool:
 # ---- Decision -------------------------------------------------------------
 
 
+def _hostname_suggested_profile() -> str | None:
+    """Best-effort hostname → profile heuristic for the tiebreaker.
+
+    Returns ``"drone"`` / ``"ground_station"`` when the system hostname
+    matches a well-known prefix, ``None`` otherwise. Mirrors (but is
+    independent of) the same helper in ``ados.setup.profile`` — kept
+    private here so the bootstrap module never imports the setup tree.
+    """
+    try:
+        name = (socket.gethostname() or "").strip().lower()
+    except OSError:
+        return None
+    if not name:
+        return None
+    if name.startswith(("groundnode", "groundstation", "gcs", "gs-")):
+        return "ground_station"
+    if name.startswith(("skynode", "drone", "rig-", "uav")):
+        return "drone"
+    return None
+
+
 def detect_profile(config_override: str | None = None) -> dict[str, Any]:
     """Run all probes and decide the profile.
 
@@ -464,13 +485,34 @@ def detect_profile(config_override: str | None = None) -> dict[str, Any]:
     ground_score = sum(g for g, _a, _d in probes.values())
     air_score = sum(a for _g, a, _d in probes.values())
 
+    # Hostname is operator-controlled: when an operator names a box
+    # `groundnode` they explicitly told us its role. Apply a strong
+    # weight so a bench rig that has hybrid hardware (e.g. a ground
+    # station with an FC plugged in for testing) still detects to
+    # the operator-stated role. Hardware probes are noisy enough on
+    # both rigs we ship to that this single signal needs to outweigh
+    # them. An operator who wants the opposite still has
+    # `agent.profile` in /etc/ados/config.yaml or `ados profile set`.
+    hostname_pick = _hostname_suggested_profile()
+    HOSTNAME_WEIGHT = 7
+    hostname_source = ""
+    if hostname_pick == "ground_station":
+        ground_score += HOSTNAME_WEIGHT
+        hostname_source = "hostname"
+    elif hostname_pick == "drone":
+        air_score += HOSTNAME_WEIGHT
+        hostname_source = "hostname"
+
     if air_score > ground_score:
         profile = "drone"
-        source = "detected"
+        source = hostname_source or "detected"
     elif ground_score > air_score:
         profile = "ground_station"
-        source = "detected"
+        source = hostname_source or "detected"
     else:
+        # Tied even after hostname weighting (hostname carried no
+        # signal). Fall back to the last-known persisted profile, then
+        # the safe default.
         prior = _read_last_known_profile()
         if prior in ("drone", "ground_station"):
             profile = prior
