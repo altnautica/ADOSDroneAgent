@@ -10,6 +10,13 @@ StartLimitBurst=5
 [Service]
 Type=simple
 User=root
+# Defence in depth against the Debian-default standalone dnsmasq.service.
+# install.sh masks it on a fresh ground-station install, but a future
+# apt reinstall or a manual `systemctl unmask` can revive it and then
+# the standalone binds 0.0.0.0:53 before we get a chance to take wlan0:53.
+# Stop+disable here so the start sequence always wins.
+ExecStartPre=-/bin/systemctl stop dnsmasq.service
+ExecStartPre=-/bin/systemctl disable dnsmasq.service
 ExecStart=/usr/sbin/dnsmasq --keep-in-foreground --conf-file=/etc/ados/dnsmasq-gs.conf
 Restart=on-failure
 RestartSec=5

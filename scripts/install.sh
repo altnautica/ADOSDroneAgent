@@ -2,10 +2,13 @@
 # =============================================================================
 # ADOS Drone Agent — Installation Script
 # Supports: Raspberry Pi OS (Bookworm), Ubuntu 22.04+, Armbian, macOS (dev)
-# Usage: sudo ./install.sh [CODE]        (install + pair)
-#        sudo ./install.sh --upgrade     (upgrade only)
-#        sudo ./install.sh --force       (full reinstall)
-#        sudo ./install.sh --uninstall   (remove)
+# Usage: sudo ./install.sh [CODE]                       (install + pair)
+#        sudo ./install.sh --upgrade                    (upgrade only)
+#        sudo ./install.sh --force                      (full reinstall)
+#        sudo ./install.sh --uninstall                  (remove)
+#        sudo ./install.sh --profile <drone|ground-station|lite-rs|auto>
+#        sudo ./install.sh --display  <auto|waveshare35a|none|...>
+#        sudo ./install.sh --branch   <name>            (track a feature branch)
 # Idempotent: re-runs skip completed steps. --pair is a fast path (<5s).
 # =============================================================================
 set -euo pipefail
@@ -379,6 +382,20 @@ while [ $# -gt 0 ]; do
             # the script. Skip the value too so we don't loop forever.
             shift
             shift 2>/dev/null || true
+            ;;
+        --display)
+            # Operator pins a specific LCD overlay ID (e.g. waveshare35a)
+            # for the in-script display provisioner. Equivalent to
+            # exporting ADOS_DISPLAY before invoking the script. "auto"
+            # (default) lets install_display_driver pick from the board
+            # YAML displays.supported list. "none" disables the panel.
+            shift
+            export ADOS_DISPLAY="${1:-auto}"
+            if [ -z "${ADOS_DISPLAY}" ]; then
+                error "--display requires a value (e.g. waveshare35a, auto, none)"
+                exit 1
+            fi
+            shift
             ;;
         --dry-run)
             # Same — consumed up top.
@@ -1451,6 +1468,19 @@ install_ground_station_deps() {
         apt-get install -y hostapd dnsmasq bluetooth bluez cage || true
         apt-get install -y "${fallback_pkg}" || true
     fi
+
+    # Debian enables dnsmasq.service and hostapd.service the moment the
+    # packages land. Both bind ports the ADOS ground-station profile
+    # owns: standalone dnsmasq grabs 0.0.0.0:53 and 0.0.0.0:67, which
+    # blocks ados-dnsmasq-gs (wlan0:53 + wlan0:67) and ados-setup-captive
+    # (0.0.0.0:53). Standalone hostapd would equally fight ados-hostapd
+    # for wlan0 once it's configured. Mask both so they cannot be revived
+    # by a future apt-reinstall or by an operator's reflex `systemctl
+    # start dnsmasq`. Stop first so this is effective immediately on a
+    # fresh apt install.
+    systemctl stop dnsmasq.service hostapd.service 2>/dev/null || true
+    systemctl disable dnsmasq.service hostapd.service 2>/dev/null || true
+    systemctl mask dnsmasq.service hostapd.service 2>/dev/null || true
 
     # Ensure dwc2 overlay + module load for USB gadget mode (Pi family).
     local cfg="/boot/firmware/config.txt"

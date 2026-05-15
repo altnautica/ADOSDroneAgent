@@ -220,7 +220,16 @@ def _run_http_server(stop_evt: threading.Event) -> None:
     try:
         httpd = ThreadingHTTPServer(("0.0.0.0", HTTP_PORT), _ProbeHandler)
     except OSError as exc:
-        log.error("captive_http_bind_failed", port=HTTP_PORT, error=str(exc))
+        # Another HTTP listener already owns port 80 (e.g. the agent's
+        # setup REST itself, an operator nginx, or a stale process).
+        # The captive portal is only useful while no other HTTP is
+        # answering. Log and move on rather than crashloop.
+        log.info(
+            "captive_http_skipped",
+            port=HTTP_PORT,
+            reason="port already bound by another listener",
+            error=str(exc),
+        )
         return
     log.info("captive_http_bound", port=HTTP_PORT)
     httpd.timeout = 0.5
@@ -264,8 +273,23 @@ async def _amain() -> int:
             reuse_port=False,
         )
     except OSError as exc:
-        log.error("captive_dns_bind_failed", port=DNS_PORT, error=str(exc))
-        return 2
+        # Port 53 already owned by another DNS server. Most common cause
+        # on a ground station is the masked-but-revived Debian dnsmasq,
+        # the agent's own ados-dnsmasq-gs (when the GS AP is up), or
+        # systemd-resolved. In every one of those cases the captive
+        # portal would be useless: a phone joining the AP is already
+        # going to receive useful DNS from whoever owns the port. Exit
+        # 0 so systemd records a clean stop and does not crashloop.
+        # Other OSErrors (permission denied, address family issues)
+        # also exit 0 here because the captive portal is a first-boot
+        # convenience, not a load-bearing component.
+        log.info(
+            "captive_dns_skipped",
+            port=DNS_PORT,
+            reason="port 53 already bound or unavailable",
+            error=str(exc),
+        )
+        return 0
 
     http_stop = threading.Event()
     http_thread = threading.Thread(
