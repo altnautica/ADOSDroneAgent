@@ -1,5 +1,11 @@
 """Pair-state manager for the WFB radio link.
 
+Disambiguation: this module is the WFB radio-link pair manager (drone
+↔ ground-station key state). It is NOT the mesh tap-to-pair manager
+for joining relays into a deployment — that lives in
+``pairing_manager`` (note the ``-ing`` suffix). Different concern,
+different transport, similar filename.
+
 This module owns the persisted "are these two rigs paired" state on
 either side of the link. The actual key bytes come from `wfb_keygen`
 via `ados.services.wfb.key_mgr` (during a local bind window or a

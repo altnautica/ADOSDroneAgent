@@ -1,5 +1,11 @@
 """Field-only tap-to-pair for mesh relays.
 
+Disambiguation: this module is the mesh-fabric tap-to-pair manager
+(relay ↔ receiver invite bundle exchange over UDP/bat0). It is NOT
+the WFB radio-link pair manager — that lives in ``pair_manager`` (no
+``-ing`` suffix). Different concern, different transport, similar
+filename.
+
 When a receiver operator opens the Accept window from the OLED, this
 module listens on UDP/`bat0` for join requests, runs a Curve25519 ECDH
 key exchange with each requesting relay, encrypts an invite bundle
