@@ -76,6 +76,37 @@ from ados.services.ui.touch.session import get_session_registry
 from ados.services.ui.touch.transform import load as load_calib
 from ados.services.ui.touch_input import TouchInputBridge
 
+from .constants import (
+    AUTO_CYCLE_SECONDS,
+    B1,
+    B2,
+    B3,
+    B4,
+    CONTRAST_ACTIVE,
+    CONTRAST_DIM,
+    HEIGHT,
+    IDLE_DIM_SECONDS,
+    IDLE_LCD_FLOOR_HZ,
+    IDLE_LCD_FLOOR_SECONDS,
+    INVERT_PERIOD_SECONDS,
+    PAIRING_POLL_SECONDS,
+    POLL_PERIOD_SECONDS,
+    WIDTH,
+)
+from .menu_tree import (
+    MENU_TREE,
+    _filter_visible,
+    _normalize_radio_fields,
+    _now,
+)
+from .screen_registry import (
+    DEFAULT_SCREEN_ENABLED,
+    DEFAULT_SCREEN_ORDER,
+    OVERLAY_SCREENS,
+    SCREEN_RENDERERS,
+    screen_menu,
+)
+
 # Native-resolution dashboard renderer. Imported defensively so the
 # OLED service still starts (and falls back to the legacy 4x upscale
 # carousel) when the dashboards module fails to import for any
@@ -86,299 +117,11 @@ try:
     )
 except Exception:  # noqa: BLE001
     render_groundnode_dashboard = None  # type: ignore[assignment]
-from ados.services.ui.screens import (
-    drone as screen_drone,
-)
-from ados.services.ui.screens import (
-    gcs as screen_gcs,
-)
-from ados.services.ui.screens import (
-    link as screen_link,
-)
-from ados.services.ui.screens import (
-    menu as screen_menu,
-)
-from ados.services.ui.screens import (
-    net as screen_net,
-)
-from ados.services.ui.screens import (
-    system as screen_system,
-)
-from ados.services.ui.screens.mesh import (
-    accept_window as screen_mesh_accept_window,
-)
-from ados.services.ui.screens.mesh import (
-    error_states as screen_mesh_error_states,
-)
-from ados.services.ui.screens.mesh import (
-    hub_unreachable as screen_mesh_hub_unreachable,
-)
-from ados.services.ui.screens.mesh import (
-    join_request_inflight as screen_mesh_join_request_inflight,
-)
-from ados.services.ui.screens.mesh import (
-    join_scan as screen_mesh_join_scan,
-)
-from ados.services.ui.screens.mesh import (
-    joined_status as screen_mesh_joined_status,
-)
-from ados.services.ui.screens.mesh import (
-    leave_confirm as screen_mesh_leave_confirm,
-)
-from ados.services.ui.screens.mesh import (
-    mesh_unavailable as screen_mesh_unavailable,
-)
-from ados.services.ui.screens.mesh import (
-    neighbors as screen_mesh_neighbors,
-)
-from ados.services.ui.screens.mesh import (
-    role_picker as screen_mesh_role_picker,
-)
-from ados.services.ui.screens.mesh import (
-    unset_boot as screen_mesh_unset_boot,
-)
 
-# The `unset_boot` module is additionally reached via OVERLAY_SCREENS
-# below; keeping the direct import for the first-boot render path lets
-# the render loop skip a dict lookup on every tick.
+# Re-export for the first-boot render path.
+from .screen_registry import unset_boot_screen as screen_mesh_unset_boot  # noqa: E402
 
 log = get_logger("ui.oled_service")
-
-# Button BCM pins, matching `button_service.py`.
-B1, B2, B3, B4 = 5, 6, 13, 19
-
-# Auto-cycle period and idle behavior (seconds).
-AUTO_CYCLE_SECONDS = 5.0
-IDLE_DIM_SECONDS = 60.0
-INVERT_PERIOD_SECONDS = 600.0
-
-# Brightness as luma.oled contrast values.
-CONTRAST_ACTIVE = 80
-CONTRAST_DIM = 40
-
-# Display geometry.
-WIDTH = 128
-HEIGHT = 64
-
-# Polling cadence for agent state. Status pages refresh slowly enough
-# that a few seconds of staleness is invisible; sub-second polling burns
-# CPU on a Pi-class SBC and crowds out the video pipeline's writer
-# thread when the same node also serves the WFB-ng → mediamtx → WebRTC
-# chain. 5 s gives the operator a fresh-enough status view at ~5x lower
-# CPU cost. Pairing overlay still polls at PAIRING_POLL_SECONDS.
-POLL_PERIOD_SECONDS = 5.0
-
-# Idle floor for the LCD render loop. When the operator hasn't touched
-# a button or the touchscreen for IDLE_LCD_FLOOR_SECONDS, the render
-# tick stretches to at least 1 / IDLE_LCD_FLOOR_HZ regardless of what
-# the active page's declared refresh_hz says. The dashboard's natural
-# 5 Hz cadence is a waste of a full core on a benchtop SBC where the
-# LCD is paint-the-same-clock-second over and over. Operator interaction
-# (button press, touch gesture) resets _last_button_ts and the loop
-# returns to the page's declared rate within one tick. Set the floor
-# below the AUTO_CYCLE_SECONDS so the status carousel still advances
-# while idle.
-IDLE_LCD_FLOOR_SECONDS = 30.0
-IDLE_LCD_FLOOR_HZ = 0.5
-
-# Screen registry keyed by screen id so the active list can be rebuilt
-# from `ground_station.ui.screens` config. REST schema uses the keys
-# `home`, `link`, `drone`, `network`, `system`, `qr`. We map older ids
-# onto the current REST schema (`net` -> `network`, no separate `home`
-# or `qr` renderer yet) so an unknown screen id is silently skipped
-# instead of crashing.
-SCREEN_RENDERERS: dict[str, Any] = {
-    "link": screen_link,
-    "drone": screen_drone,
-    "gcs": screen_gcs,
-    "net": screen_net,
-    "network": screen_net,
-    "system": screen_system,
-}
-
-DEFAULT_SCREEN_ORDER: list[str] = ["link", "drone", "gcs", "net", "system"]
-DEFAULT_SCREEN_ENABLED: list[str] = ["link", "drone", "gcs", "net", "system"]
-
-# Overlay screen registry. Each module exports render() plus optional
-# BUTTON_ACTIONS, initial_state(service), on_enter(service), and
-# on_exit(service). The service dispatches button presses to
-# BUTTON_ACTIONS while the overlay is active. B4 in an overlay always
-# exits unless the module maps B4 to a different action.
-OVERLAY_SCREENS: dict[str, Any] = {
-    "unset_boot": screen_mesh_unset_boot,
-    "role_picker": screen_mesh_role_picker,
-    "accept_window": screen_mesh_accept_window,
-    "join_scan": screen_mesh_join_scan,
-    "join_request_inflight": screen_mesh_join_request_inflight,
-    "joined_status": screen_mesh_joined_status,
-    "hub_unreachable": screen_mesh_hub_unreachable,
-    "mesh_unavailable": screen_mesh_unavailable,
-    "neighbors": screen_mesh_neighbors,
-    "leave_confirm": screen_mesh_leave_confirm,
-    "error_states": screen_mesh_error_states,
-}
-
-# Secondary poll cadence for pending-relay list while the Accept-window
-# overlay is live. Faster than the main status poll so the operator sees
-# incoming requests with minimal latency.
-PAIRING_POLL_SECONDS = 0.5
-
-# Menu tree from the physical UI spec.
-# Each node is {label, children, optional: visibility, screen}. Leaves
-# with a `screen` key open the named overlay. Leaves without one are
-# logged as `menu_action_stub`. `visibility` is an optional callable
-# `state -> bool`; when present, the node is hidden if the callable
-# returns False. The filter runs against the live agent state snapshot.
-MENU_TREE: list[dict[str, Any]] = [
-    {"label": "Pair with drone", "children": []},
-    {
-        "label": "Network",
-        "children": [
-            {"label": "WiFi AP on/off", "children": []},
-            {"label": "WiFi client scan", "children": []},
-            {"label": "4G modem status", "children": []},
-            {"label": "Uplink priority", "children": []},
-        ],
-    },
-    {
-        "label": "Mesh",
-        # Mesh menu is always visible so operators on drone-profile or
-        # direct-role nodes can see that the feature exists. When the
-        # node is not mesh_capable, the submenu collapses to a single
-        # hint item explaining how to enable it. This avoids a silent
-        # "nothing happens when I open Mesh" failure mode.
-        "children": [
-            {
-                "label": "Mesh unavailable",
-                "children": [],
-                "screen": "mesh_unavailable",
-                "visibility": lambda st: not bool(
-                    (st.get("role") or {}).get("mesh_capable")
-                ),
-            },
-            {
-                "label": "Set role",
-                "children": [],
-                "screen": "role_picker",
-                "visibility": lambda st: bool(
-                    (st.get("role") or {}).get("mesh_capable")
-                ),
-            },
-            {
-                "label": "Accept relay",
-                "children": [],
-                "screen": "accept_window",
-                "visibility": lambda st: (
-                    bool((st.get("role") or {}).get("mesh_capable"))
-                    and (st.get("role") or {}).get("current") == "receiver"
-                ),
-            },
-            {
-                "label": "Join mesh",
-                "children": [],
-                "screen": "join_scan",
-                "visibility": lambda st: (
-                    bool((st.get("role") or {}).get("mesh_capable"))
-                    and (st.get("role") or {}).get("current") == "relay"
-                    and not (st.get("mesh") or {}).get("up")
-                ),
-            },
-            {
-                "label": "Neighbors",
-                "children": [],
-                "screen": "neighbors",
-                "visibility": lambda st: (
-                    bool((st.get("role") or {}).get("mesh_capable"))
-                    and (st.get("role") or {}).get("current") in ("relay", "receiver")
-                ),
-            },
-            {
-                "label": "Leave mesh",
-                "children": [],
-                "screen": "leave_confirm",
-                "visibility": lambda st: (
-                    bool((st.get("role") or {}).get("mesh_capable"))
-                    and (st.get("mesh") or {}).get("up", False)
-                ),
-            },
-        ],
-    },
-    {
-        "label": "Radio",
-        "children": [
-            {"label": "Channel", "children": []},
-            {"label": "TX power (n/a)", "children": []},
-            {"label": "Bitrate profile", "children": []},
-        ],
-    },
-    {
-        "label": "Display",
-        "children": [
-            {"label": "HDMI resolution", "children": []},
-            {"label": "OLED brightness", "children": []},
-        ],
-    },
-    {
-        "label": "System",
-        "children": [
-            {"label": "Version", "children": []},
-            {"label": "Reboot", "children": []},
-            {"label": "Factory reset", "children": []},
-        ],
-    },
-    {"label": "Back to status", "children": []},
-]
-
-
-def _filter_visible(items: list[dict[str, Any]], state: dict) -> list[dict[str, Any]]:
-    """Drop items whose `visibility` callable returns False.
-
-    Nodes without a visibility callable are always visible. Errors in
-    the callable are treated as "hide" so a broken predicate does not
-    crash the menu.
-    """
-    out: list[dict[str, Any]] = []
-    for node in items:
-        vis = node.get("visibility")
-        if vis is None:
-            out.append(node)
-            continue
-        try:
-            if vis(state):
-                out.append(node)
-        except Exception:
-            pass
-    return out
-
-
-def _now() -> float:
-    return time.monotonic()
-
-
-def _normalize_radio_fields(data: dict[str, Any]) -> dict[str, Any]:
-    """Backfill ``link.tx_power_dbm`` and ``radio.topology`` defaults.
-
-    The dashboard tile + OLED link screen both reach into
-    ``state["link"]["tx_power_dbm"]`` and
-    ``state["radio"]["topology"]``. Older agent builds (or any build
-    that hasn't taken the WFB-status REST exposure yet) won't carry
-    these keys; left missing, the renderers paint ``--`` placeholders.
-    Filling defensively here means downstream code can rely on a
-    stable shape regardless of which side ships first.
-
-    Mutates and returns the same dict for caller convenience. The
-    transformation is shallow and additive — we never overwrite a
-    value the agent already supplied.
-    """
-    link = data.get("link")
-    if isinstance(link, dict):
-        link.setdefault("tx_power_dbm", None)
-    radio = data.get("radio")
-    if not isinstance(radio, dict):
-        radio = {}
-        data["radio"] = radio
-    radio.setdefault("topology", "host_vbus")
-    return data
 
 
 class OledService:

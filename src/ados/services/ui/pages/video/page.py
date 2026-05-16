@@ -40,7 +40,19 @@ from ados.services.video.local_tap import (
     LocalVideoTapUnavailable,
 )
 
-from .base import HitZone, PageContext
+from ..base import HitZone, PageContext
+from .metrics import (
+    format_bitrate,
+    format_channel,
+    format_drops,
+    format_latency,
+    format_mcs,
+    format_radio,
+    format_rssi,
+    format_tx_power,
+    safe_dict,
+    write_tap_status,
+)
 
 PAGE_W = 480
 PAGE_H = 244
@@ -62,10 +74,6 @@ _TAP_INACTIVITY_TEARDOWN_SECONDS = 30.0
 # pick up the live stream once everything is wired without spinning
 # up gstreamer at every render tick.
 _TAP_RETRY_COOLDOWN_SECONDS = 15.0
-
-
-def _safe_dict(value: Any) -> dict:
-    return value if isinstance(value, dict) else {}
 
 
 class VideoPage:
@@ -335,7 +343,7 @@ class VideoPage:
                 status_code = getattr(r, "status_code", None)
             if status_code == 200:
                 blob = r.json() if callable(getattr(r, "json", None)) else {}
-                video_block = _safe_dict(blob.get("video"))
+                video_block = safe_dict(blob.get("video"))
                 if "recording" in video_block:
                     self._recording = bool(video_block.get("recording"))
         except Exception as exc:  # noqa: BLE001
@@ -411,7 +419,7 @@ class VideoPage:
             "recording": bool(self._recording),
             "updated_at_ms": int(time.time() * 1000),
         }
-        _write_tap_status(LCD_VIDEO_TAP_PATH, blob)
+        write_tap_status(LCD_VIDEO_TAP_PATH, blob)
 
     async def _load_wfb_blob(
         self,
@@ -804,42 +812,25 @@ class VideoPage:
         except Exception:  # noqa: BLE001
             return []
 
+    # Format helpers retained as static-method delegates so any caller
+    # that reaches into ``VideoPage._format_*`` keeps working. Real
+    # implementations live in ``metrics.py``.
+
     @staticmethod
     def _format_latency(value: Any) -> str:
-        if isinstance(value, (int, float)):
-            return f"{int(value)} ms"
-        return "--"
+        return format_latency(value)
 
     @staticmethod
     def _format_rssi(value: Any) -> str:
-        if isinstance(value, (int, float)):
-            return f"{int(value)} dBm"
-        return "--"
+        return format_rssi(value)
 
     @staticmethod
     def _format_bitrate(value: Any) -> str:
-        if isinstance(value, (int, float)):
-            kbps = float(value)
-            if kbps >= 1000:
-                return f"{kbps / 1000:.1f} Mbps"
-            return f"{kbps:.0f} kbps"
-        return "--"
+        return format_bitrate(value)
 
     @staticmethod
     def _format_drops(value: Any) -> str:
-        # Tuple form: (lost, total) renders as "lost / total" so the
-        # operator sees both the loss count and the denominator. Bare
-        # int form falls through to the legacy "lost" display so older
-        # cached values do not crash the renderer.
-        if isinstance(value, tuple) and len(value) == 2:
-            lost, total = value
-            try:
-                return f"{int(lost)} / {int(total)}"
-            except (TypeError, ValueError):
-                return "--"
-        if isinstance(value, (int, float)):
-            return str(int(value))
-        return "--"
+        return format_drops(value)
 
     def _format_fps(self) -> str:
         tap = self._resolved_tap()
@@ -853,29 +844,19 @@ class VideoPage:
 
     @staticmethod
     def _format_radio(channel: Any, mcs: Any) -> str:
-        ch = str(int(channel)) if isinstance(channel, (int, float)) else "--"
-        mc = f"MCS{int(mcs)}" if isinstance(mcs, (int, float)) else ""
-        if mc:
-            return f"ch{ch} {mc}"
-        return f"ch{ch}"
+        return format_radio(channel, mcs)
 
     @staticmethod
     def _format_channel(value: Any) -> str:
-        if isinstance(value, (int, float)) and value > 0:
-            return f"ch{int(value)}"
-        return "--"
+        return format_channel(value)
 
     @staticmethod
     def _format_mcs(value: Any) -> str:
-        if isinstance(value, (int, float)):
-            return f"MCS{int(value)}"
-        return "--"
+        return format_mcs(value)
 
     @staticmethod
     def _format_tx_power(value: Any) -> str:
-        if isinstance(value, (int, float)):
-            return f"{int(value)} dBm"
-        return "--"
+        return format_tx_power(value)
 
     # ── hit zones + dispatch ───────────────────────────────────
 
@@ -995,35 +976,3 @@ class VideoPage:
             ),
             ctx=ctx,
         )
-
-
-def _write_tap_status(path: Any, blob: dict) -> None:
-    """Atomic-write a JSON blob to ``path``.
-
-    Helper for ``VideoPage._publish_tap_status``. Kept module-level so
-    the import graph stays acyclic (the page should not depend on the
-    cloud heartbeat module to write a sidecar file).
-    """
-    import json
-    import os
-    import tempfile
-    from pathlib import Path as _Path
-
-    target = _Path(str(path))
-    try:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(
-            prefix=target.name + ".",
-            suffix=".tmp",
-            dir=str(target.parent),
-        )
-        with os.fdopen(fd, "w") as fh:
-            json.dump(blob, fh, separators=(",", ":"))
-            fh.flush()
-            os.fsync(fh.fileno())
-        os.replace(tmp, target)
-    except OSError:
-        try:
-            os.unlink(tmp)  # type: ignore[name-defined]
-        except (OSError, NameError):
-            pass

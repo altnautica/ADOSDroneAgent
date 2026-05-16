@@ -1,11 +1,31 @@
-"""Video pipeline service — orchestrates camera, encoder, streaming, and recording."""
+"""Video pipeline orchestrator.
+
+Owns the long-lived :class:`VideoPipeline` instance the supervisor runs
+on the air side. Every coroutine here is a distinct lifecycle stage:
+start / health check / restart / stop / camera switch / cloud relay
+push / wfb tee. The class has no internal seam where the GStreamer
+pipeline can be split cleanly without sequencing risk, so the helpers
+that ARE pure (constants, regexes) live in sibling modules and the
+main class stays in one place.
+
+Patching contract
+-----------------
+
+The tests patch a handful of names on the package barrel
+(``ados.services.video.pipeline``) — :data:`log`, ``discover_cameras``,
+``detect_encoder_for_camera``, ``build_encoder_command``. To honour
+those patches, this module routes every call to those four names
+through the live package object via ``_pkg`` (resolved lazily inside
+each method that uses them). Other names (mediamtx, recorder, etc.)
+are imported normally because no test patches them at the package
+path.
+"""
 
 from __future__ import annotations
 
 import asyncio
 import logging
 import os
-import re
 import signal
 import sys
 import time
@@ -15,66 +35,45 @@ from typing import Any, TYPE_CHECKING
 
 import httpx
 
-from ados.core.logging import get_logger
-from ados.hal.camera import discover_cameras
 from ados.hal.detect import detect_board
 from ados.services.video.air_pipeline import AirPipeline, AirPipelineUnavailable
 from ados.services.video.camera_mgr import CameraManager, CameraRole
 from ados.services.video.encoder import (
     EncoderConfig,
     EncoderType,
-    build_encoder_command,
-    detect_encoder_for_camera,
 )
 from ados.services.video.mediamtx import MediamtxManager
 from ados.services.video.recorder import VideoRecorder
 
+from .constants import (
+    _FFMPEG_FRAME_PROGRESS_RE,
+    _FFMPEG_PROGRESS_TOKEN_RE,
+    _HEALTH_CHECK_INTERVAL,
+    _WFB_TEE_HOST,
+    _WFB_TEE_PAYLOAD_TYPE,
+    _WFB_TEE_PKT_SIZE,
+    _WFB_TEE_PORT,
+    _WFB_TEE_PROGRESS_TIMEOUT_S,
+    _WFB_TEE_SSRC,
+)
+
 if TYPE_CHECKING:
     from ados.core.config import VideoConfig
-
-log = get_logger("video.pipeline")
 
 # Suppress httpx's per-request INFO log ("HTTP Request: GET ...") which
 # spams journalctl every 5 seconds with no diagnostic value.
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
-_HEALTH_CHECK_INTERVAL = 5.0
 
-# Local UDP socket the wfb-ng radio reads from on the air side. The radio
-# subprocess (`wfb_tx -u 5600 ...`) listens on this port and broadcasts
-# each UDP datagram as a single 802.11 frame with FEC, per the wfb-ng
-# protocol contract: every UDP datagram going in must be a self-contained
-# unit that survives single-packet loss. We therefore wrap the encoded
-# H.264 in RTP (RFC 6184) before handing it to wfb_tx — a lost RTP packet
-# costs at most one NAL fragment, instead of corrupting the byte stream
-# until the next start code (which is what raw-H.264-over-UDP does).
-# Receiver wraps with rtph264depay; SDP at /etc/ados/wfb/video.sdp.
-# pkt_size keeps each datagram under the 802.11 MTU after wfb-ng overhead.
-_WFB_TEE_HOST = "127.0.0.1"
-_WFB_TEE_PORT = 5600
-_WFB_TEE_PKT_SIZE = 1316
-_WFB_TEE_PAYLOAD_TYPE = 96
-# Output-progress watchdog: if wfb_tee's ffmpeg stderr stops emitting
-# progress tokens (frame= / size= / time= / bitrate=) for this many
-# seconds, the process is considered a zombie (alive but not pushing
-# UDP packets) and we force a restart via the regular run-loop
-# health-check path. 15 s is the practical floor: ffmpeg's RTSP
-# handshake (DESCRIBE / SETUP / PLAY) + first IDR wait can take 5-10 s
-# on bench cold-start; setting the threshold below that triggers
-# false-positive restart cascades during install + reload races.
-_WFB_TEE_PROGRESS_TIMEOUT_S = 15.0
-# Pattern matched in ffmpeg stderr lines to detect forward progress.
-# We spawn ffmpeg with `-progress pipe:2` which writes structured
-# key=value lines to stderr once per second. Recognise both the
-# structured form (out_time_ms=, total_size=, etc.) and the legacy
-# status line tokens for completeness.
-_FFMPEG_FRAME_PROGRESS_RE = re.compile(r"\bframe=\s*(\d+)\b")
-_FFMPEG_PROGRESS_TOKEN_RE = re.compile(
-    r"\b(?:frame|size|time|bitrate|out_time_ms|out_time_us|"
-    r"out_time|total_size|fps|dup_frames|drop_frames|"
-    r"speed|progress)=",
-)
-_WFB_TEE_SSRC = "0xCAFE"
+def _pkg():
+    """Return the package module so patched attributes resolve at call time.
+
+    Tests do ``patch("ados.services.video.pipeline.discover_cameras",
+    ...)`` which sets the attribute on the package's namespace. Reading
+    those names through ``_pkg().<name>`` lets the patch take effect
+    without any extra plumbing in the test layer.
+    """
+    return sys.modules["ados.services.video.pipeline"]
 
 
 class PipelineState(StrEnum):
@@ -187,7 +186,7 @@ class VideoPipeline:
 
     def _discover_and_assign(self) -> None:
         """Run camera discovery and auto-assign roles."""
-        cameras = discover_cameras()
+        cameras = _pkg().discover_cameras()
         self._camera_mgr.set_cameras(cameras)
         self._camera_mgr.auto_assign()
 
@@ -196,6 +195,7 @@ class VideoPipeline:
 
         Returns True if the stream started successfully.
         """
+        log = _pkg().log
         if self._state == PipelineState.RUNNING:
             log.warning("pipeline_already_running")
             return True
@@ -236,7 +236,7 @@ class VideoPipeline:
             self._state = PipelineState.STARTING
 
         # Detect encoder
-        self._encoder_type = detect_encoder_for_camera(primary)
+        self._encoder_type = _pkg().detect_encoder_for_camera(primary)
         if self._encoder_type is None:
             log.error("no_encoder_available")
             self._state = PipelineState.ERROR
@@ -254,7 +254,7 @@ class VideoPipeline:
 
         # Start mediamtx for stream output
         pipe_uri = f"rtsp://localhost:{self._mediamtx.rtsp_port}/main"
-        cmd = build_encoder_command(enc_config, primary.device_path, pipe_uri, camera=primary)
+        cmd = _pkg().build_encoder_command(enc_config, primary.device_path, pipe_uri, camera=primary)
 
         if not cmd:
             log.error("encoder_command_empty")
@@ -349,6 +349,7 @@ class VideoPipeline:
         or a compatible encoder is missing, so the caller can fall
         back to the legacy bash pipeline cleanly.
         """
+        log = _pkg().log
         cloud_url = getattr(self._config, "cloud_relay_url", "") or ""
         cloud_enabled = bool(cloud_url)
 
@@ -449,6 +450,7 @@ class VideoPipeline:
         3-subprocess bash chain in the cloud-on path; the bench-only
         path skips this entirely.
         """
+        log = _pkg().log
         if (
             self._air_cloud_bridge_process is not None
             and self._air_cloud_bridge_process.returncode is None
@@ -534,6 +536,7 @@ class VideoPipeline:
 
     async def _stop_air_cloud_bridge(self) -> None:
         """Stop the cloud-bridge ffmpeg sidecar via process-group SIGTERM."""
+        log = _pkg().log
         if self._air_cloud_bridge_stderr_task is not None:
             self._air_cloud_bridge_stderr_task.cancel()
             self._air_cloud_bridge_stderr_task = None
@@ -566,6 +569,7 @@ class VideoPipeline:
 
     async def _teardown_after_partial_start(self) -> None:
         """Roll back partial start. Stops any process spawned after mediamtx.start()."""
+        log = _pkg().log
         # Sweep the wfb tee first; it depends on local RTSP being up.
         await self.stop_wfb_tee()
         if self._sei_tap is not None:
@@ -605,6 +609,7 @@ class VideoPipeline:
         is the output-byte-counter watchdog mandated by Rule 37 —
         process-liveness alone is never proof of work.
         """
+        log = _pkg().log
         if proc.stderr is None:
             return
         try:
@@ -647,6 +652,7 @@ class VideoPipeline:
         at the default info log level. Previously logged at debug, which
         hid every ffmpeg crash reason from the operator.
         """
+        log = _pkg().log
         if proc.stderr is None:
             return
         try:
@@ -667,6 +673,7 @@ class VideoPipeline:
         and pushes to the cloud relay RTSP endpoint. Uses TCP transport
         and timeouts to detect network failures.
         """
+        log = _pkg().log
         cloud_url = self._config.cloud_relay_url
         if not cloud_url:
             log.info("cloud_push_disabled", reason="no cloud_relay_url configured")
@@ -704,6 +711,7 @@ class VideoPipeline:
 
     async def stop_cloud_push(self) -> None:
         """Stop the cloud RTSP push."""
+        log = _pkg().log
         if self._cloud_stderr_task is not None:
             self._cloud_stderr_task.cancel()
             self._cloud_stderr_task = None
@@ -730,6 +738,7 @@ class VideoPipeline:
         reason) the UDP packets are silently dropped by the kernel —
         harmless cost.
         """
+        log = _pkg().log
         if self._state != PipelineState.RUNNING:
             log.warning("wfb_tee_skipped", reason="pipeline not running")
             return False
@@ -834,6 +843,7 @@ class VideoPipeline:
         alongside the orphans, two compete for the same RTSP source +
         UDP 5600 destination, RTP packets garble, and the LCD freezes.
         """
+        log = _pkg().log
         if self._wfb_tee_stderr_task is not None:
             self._wfb_tee_stderr_task.cancel()
             self._wfb_tee_stderr_task = None
@@ -878,6 +888,7 @@ class VideoPipeline:
         identify orphans by their command line (sending to the wfb
         RTP destination) and SIGKILL them.
         """
+        log = _pkg().log
         try:
             proc = await asyncio.create_subprocess_exec(
                 "pgrep", "-f", f"rtp://{_WFB_TEE_HOST}:{_WFB_TEE_PORT}",
@@ -926,6 +937,7 @@ class VideoPipeline:
         back healthy; in the failure case the next supervisor
         tick will retry on its own.
         """
+        log = _pkg().log
         if not 500 <= kbps <= 12000:
             log.warning("set_video_bitrate_out_of_range", kbps=kbps)
             return False
@@ -954,6 +966,7 @@ class VideoPipeline:
 
     async def stop_stream(self) -> None:
         """Stop the encoding pipeline and mediamtx."""
+        log = _pkg().log
         log.info("stop_stream_begin")
         # Phase 13 in-process GStreamer pipeline. Idempotent stop;
         # the legacy bash teardown below is a no-op when air pipeline
@@ -1042,6 +1055,7 @@ class VideoPipeline:
         result of this call. Carved out of `run()` so the reset
         decision can be tested without driving the infinite loop.
         """
+        log = _pkg().log
         if now is None:
             now = time.monotonic()
         if self._last_healthy_at == 0.0:
@@ -1068,6 +1082,7 @@ class VideoPipeline:
 
     async def _check_health(self) -> bool:
         """Check if the encoder and mediamtx are both running and healthy."""
+        log = _pkg().log
         # Phase 13: when the in-process GStreamer pipeline owns the
         # stream there is no ffmpeg encoder + mediamtx-air to probe;
         # health is whether the pipeline thread reports a live state.
@@ -1140,6 +1155,7 @@ class VideoPipeline:
 
     async def _close_mediamtx_client(self) -> None:
         """Tear down the shared httpx client on pipeline shutdown."""
+        log = _pkg().log
         if self._mediamtx_client is not None:
             try:
                 await self._mediamtx_client.aclose()
@@ -1174,6 +1190,7 @@ class VideoPipeline:
         Returns True if healthy or if cloud push is not configured.
         Returns False only when the process has died unexpectedly.
         """
+        log = _pkg().log
         if self._cloud_push_process is None:
             return True  # Not configured, nothing to check
         if self._cloud_push_process.returncode is not None:
@@ -1201,6 +1218,7 @@ class VideoPipeline:
            silent" failure mode that process-liveness checks miss.
            Per Rule 37, process-liveness is never proof of work.
         """
+        log = _pkg().log
         if self._wfb_tee_process is None:
             return True
         if self._wfb_tee_process.returncode is not None:
@@ -1237,6 +1255,7 @@ class VideoPipeline:
         On cancellation, ensures the encoder subprocess is terminated and not
         orphaned (A-07).
         """
+        log = _pkg().log
         log.info("video_pipeline_service_start")
 
         try:
@@ -1448,6 +1467,7 @@ class VideoPipeline:
 
         Concurrent calls are serialized through ``self._switch_lock``.
         """
+        log = _pkg().log
         try:
             role_enum = CameraRole(role)
         except ValueError as exc:  # pragma: no cover - guarded by API
@@ -1549,6 +1569,7 @@ class VideoPipeline:
         clobbers the role bindings we just set. This wrapper bypasses
         that step so an operator-driven switch survives the restart.
         """
+        log = _pkg().log
         # Mirror start_stream() but skip _discover_and_assign so the
         # role bindings we just set are not overwritten.
         if self._encoder_process is not None and self._encoder_process.returncode is None:
@@ -1579,7 +1600,7 @@ class VideoPipeline:
             )
             self._state = PipelineState.STARTING
 
-        self._encoder_type = detect_encoder_for_camera(primary)
+        self._encoder_type = _pkg().detect_encoder_for_camera(primary)
         if self._encoder_type is None:
             log.error("no_encoder_available")
             self._state = PipelineState.ERROR
@@ -1595,7 +1616,7 @@ class VideoPipeline:
         )
 
         pipe_uri = f"rtsp://localhost:{self._mediamtx.rtsp_port}/main"
-        cmd = build_encoder_command(
+        cmd = _pkg().build_encoder_command(
             enc_config, primary.device_path, pipe_uri, camera=primary
         )
         if not cmd:

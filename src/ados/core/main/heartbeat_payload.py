@@ -1,0 +1,305 @@
+"""Cloud-heartbeat payload composer.
+
+Extracted from the AgentApp so the dict-shape construction is testable
+in isolation and the rest of the supervisor stays focused on lifecycle
+concerns. Pulled out as a free function taking the AgentApp because
+most of the input data lives on the app instance.
+"""
+
+from __future__ import annotations
+
+import time
+from typing import TYPE_CHECKING
+
+from ados import __version__
+from ados.core.service_tracker import ServiceState
+
+from ._helpers import _get_local_ip
+
+if TYPE_CHECKING:
+    from .app import AgentApp
+
+
+def build_heartbeat_payload(app: "AgentApp") -> dict:  # noqa: C901
+    """Build the cloud heartbeat payload dict.
+
+    Extracted from ``AgentApp._cloud_heartbeat_loop`` for direct
+    testability. Reads only from the running app instance.
+    """
+    local_ip = _get_local_ip()
+    mdns_host = ""
+    if app.discovery_service:
+        mdns_host = app.discovery_service.mdns_hostname
+
+    fc_connected = False
+    fc_port = ""
+    fc_baud = 0
+    if app._fc_connection:
+        fc_connected = getattr(app._fc_connection, "connected", False)
+        fc_port = getattr(app.config.mavlink, "port", "")
+        fc_baud = getattr(app.config.mavlink, "baud", 0)
+
+    # Board info from detection
+    board = getattr(app, "_board", None)
+    board_tier = board.tier if board else 0
+    board_soc = board.soc if board else ""
+    board_arch = board.arch if board else ""
+
+    # Health info from monitor
+    health = app.health
+    cpu_percent = getattr(health, "cpu_percent", 0.0)
+    memory_percent = getattr(health, "memory_percent", 0.0)
+    disk_percent = getattr(health, "disk_percent", 0.0)
+    temperature = getattr(health, "temperature", None)
+
+    # Service states with accurate operational status
+    service_list: list[dict] = []
+    all_services = app.services.get_all()
+
+    # Infer true state from runtime conditions
+    def _svc_state(name: str, state: ServiceState) -> str:
+        s = state.value
+        if s != "running":
+            return s
+        if name == "fc-connection":
+            fc = getattr(app, "_fc_connection", None)
+            if fc and not getattr(fc, "connected", False):
+                return "degraded"
+        elif name == "video-pipeline":
+            if getattr(app.config.video, "mode", "disabled") == "disabled":
+                return "stopped"
+        elif name == "wfb-link":
+            wfb = getattr(app, "_wfb_manager", None)
+            if wfb and not getattr(wfb, "has_adapter", False):
+                return "degraded"
+        elif name == "pairing-beacon":
+            if app.pairing_manager.is_paired:
+                return "stopped"
+        return s
+
+    # Get process-level metrics (single process, all services share)
+    proc_cpu = 0.0
+    proc_rss_mb = 0.0
+    mem_used_mb = 0
+    mem_total_mb = 0
+    disk_used_gb = 0.0
+    disk_total_gb = 0.0
+    cpu_cores = 0
+    try:
+        import os as _os
+
+        import psutil as _psutil
+        _proc = _psutil.Process(_os.getpid())
+        proc_cpu = _proc.cpu_percent(interval=0)
+        proc_rss_mb = _proc.memory_info().rss / (1024 * 1024)
+        _vm = _psutil.virtual_memory()
+        mem_used_mb = round(_vm.used / (1024 * 1024))
+        mem_total_mb = round(_vm.total / (1024 * 1024))
+        _disk = _psutil.disk_usage("/")
+        disk_used_gb = round(_disk.used / (1024**3), 1)
+        disk_total_gb = round(_disk.total / (1024**3), 1)
+        cpu_cores = _psutil.cpu_count() or 0
+    except Exception:
+        pass
+
+    # Track CPU/memory history for sparkline charts (5s interval, 5 min window)
+    app._cpu_history.append(cpu_percent)
+    app._memory_history.append(memory_percent)
+
+    # Video pipeline restart counter, exposed for the GCS health
+    # view. Defensive against an absent or older pipeline.
+    vp = getattr(app, "_video_pipeline", None)
+    try:
+        video_restart_attempts = (
+            int(vp.restart_attempts()) if vp is not None else 0
+        )
+    except Exception:
+        video_restart_attempts = 0
+
+    # Per-service data with real uptime (no fake CPU/RAM distribution)
+    now_mono = time.monotonic()
+    for svc_name, svc_state in all_services.items():
+        real_state = _svc_state(svc_name, svc_state)
+        # Compute per-service uptime from transition history
+        svc_uptime = 0.0
+        transitions = app.services.get_transitions(svc_name)
+        if transitions:
+            for ts, st in reversed(transitions):
+                if st == ServiceState.RUNNING:
+                    svc_uptime = now_mono - ts
+                    break
+        service_list.append({
+            "name": svc_name,
+            "status": real_state,
+            "uptimeSeconds": round(svc_uptime),
+        })
+
+    # LAN-routable URL block. The GCS surfaces these as "manual
+    # connection" fallbacks when the cloud-relay flow is degraded
+    # or the operator wants a direct LAN connection from a desktop
+    # GCS. Built from local_ip so they survive a hostname rename
+    # and from the live config so any MAVLink endpoint flip
+    # propagates on the next tick.
+    mav_tcp_port = app._first_mavlink_tcp_port_for_heartbeat()
+    mav_ws_port = app._first_mavlink_ws_port_for_heartbeat()
+    video_whep_port: int | None = None
+    vp = getattr(app, "_video_pipeline", None)
+    if vp is not None:
+        try:
+            vp_status = vp.get_status()
+            video_whep_port = int(
+                vp_status.get("mediamtx", {}).get("webrtc_port", 8889)
+            )
+        except Exception:
+            video_whep_port = None
+    if video_whep_port is None:
+        # Ground-station profile runs `ados-mediamtx-gs` independently
+        # of `app._video_pipeline` (which is the drone-side pipeline
+        # and stays None on a ground-station node). Probe the public
+        # WHEP endpoint directly so the heartbeat carries the LAN
+        # video URL whenever MediaMTX is serving frames, regardless
+        # of which service spawned it.
+        try:
+            from ados.api.routes.video import (
+                _MEDIAMTX_WEBRTC_PORT,
+                mediamtx_whep_alive_sync,
+            )
+
+            if mediamtx_whep_alive_sync():
+                video_whep_port = _MEDIAMTX_WEBRTC_PORT
+        except Exception:
+            video_whep_port = None
+    manual_connection_urls: dict[str, str | None] = {
+        "mavlinkTcp": (
+            f"tcp://{local_ip}:{mav_tcp_port}" if mav_tcp_port and local_ip else None
+        ),
+        "mavlinkWs": (
+            f"ws://{local_ip}:{mav_ws_port}/" if mav_ws_port and local_ip else None
+        ),
+        "videoViewer": (
+            f"http://{local_ip}:{video_whep_port}/main/"
+            if video_whep_port and local_ip
+            else None
+        ),
+        "videoWhep": (
+            f"http://{local_ip}:{video_whep_port}/main/whep"
+            if video_whep_port and local_ip
+            else None
+        ),
+    }
+
+    # Cloud relay = MQTT-to-Convex pair. Cloudflare = inbound tunnel.
+    # These are distinct concepts. The GCS used to conflate them
+    # under a single "Remote" label; surface them separately here
+    # so the heartbeat consumer can render an accurate state.
+    cloud_relay_url: str | None = None
+    if app.pairing_manager.is_paired:
+        server = getattr(app.config, "server", None)
+        mode = getattr(server, "mode", "") if server else ""
+        if mode == "self_hosted":
+            sh = getattr(server, "self_hosted", None)
+            cloud_relay_url = str(getattr(sh, "url", "") or "") or None
+        elif mode == "cloud":
+            cloud = getattr(server, "cloud", None)
+            cloud_relay_url = str(getattr(cloud, "url", "") or "") or None
+    cloudflare_url: str | None = None
+    cf_remote = app.config.remote_access.cloudflare
+    if getattr(cf_remote, "enabled", False):
+        cloudflare_url = (
+            str(getattr(cf_remote, "setup_url", "") or "") or None
+        )
+
+    payload: dict = {
+        "deviceId": app.config.agent.device_id,
+        "version": __version__,
+        "runtimeMode": "full",
+        "uptimeSeconds": app.uptime_seconds,
+        "boardName": app.board_name,
+        "boardTier": board_tier,
+        "boardSoc": board_soc,
+        "boardArch": board_arch,
+        "cpuPercent": cpu_percent,
+        "memoryPercent": memory_percent,
+        "diskPercent": disk_percent,
+        "temperature": temperature,
+        # Absolute resource values
+        "memoryUsedMb": mem_used_mb,
+        "memoryTotalMb": mem_total_mb,
+        "diskUsedGb": disk_used_gb,
+        "diskTotalGb": disk_total_gb,
+        "cpuCores": cpu_cores,
+        "boardRamMb": mem_total_mb,
+        # Process-level totals (single-process architecture)
+        "processCpuPercent": round(proc_cpu, 1),
+        "processMemoryMb": round(proc_rss_mb, 1),
+        # History arrays for sparkline charts
+        "cpuHistory": list(app._cpu_history),
+        "memoryHistory": list(app._memory_history),
+        "fcConnected": fc_connected,
+        "fcPort": fc_port,
+        "fcBaud": fc_baud,
+        "services": service_list,
+        "lastIp": local_ip,
+        "mdnsHost": mdns_host,
+        "setupUrl": f"http://{local_ip}:8080",
+        "apiUrl": f"http://{local_ip}:8080/api",
+        "agentVersion": __version__,
+        "videoRestartAttempts": video_restart_attempts,
+        "manualConnectionUrls": manual_connection_urls,
+        "cloudRelayUrl": cloud_relay_url,
+        "cloudflareUrl": cloudflare_url,
+    }
+
+    # Foxglove bind status. Defaults to False when no ROS manager is
+    # attached; flips True only after a started ROS container fails the
+    # localhost TCP probe on the configured foxglove port.
+    rm = getattr(app, "_ros_manager", None)
+    try:
+        payload["foxgloveBindFailed"] = (
+            bool(rm.foxglove_bind_failed()) if rm is not None else False
+        )
+    except Exception:
+        payload["foxgloveBindFailed"] = False
+
+    remote = app.config.remote_access.cloudflare
+    if remote.setup_url:
+        payload["setupUrl"] = remote.setup_url
+    if remote.api_url:
+        payload["apiUrl"] = remote.api_url
+    if remote.video_whep_url:
+        payload["videoWhepUrl"] = remote.video_whep_url
+    if remote.mavlink_ws_url:
+        payload["mavlinkWsUrl"] = remote.mavlink_ws_url
+    # Surface the prior URL on the tick the value changes so the GCS can
+    # drain stale connections without waiting for a new dial. Only the
+    # config-driven URL is tracked here; live rotation observation is
+    # future work.
+    current_mavlink_ws_url = payload.get("mavlinkWsUrl")
+    if current_mavlink_ws_url is not None:
+        if (
+            app._last_mavlink_ws_url is not None
+            and app._last_mavlink_ws_url != current_mavlink_ws_url
+        ):
+            payload["mavlinkWsUrlPrev"] = app._last_mavlink_ws_url
+        app._last_mavlink_ws_url = current_mavlink_ws_url
+    payload["missionControlUrl"] = app.config.server.cloud.url
+    payload["remoteAccess"] = {
+        "provider": app.config.remote_access.provider,
+        "publicUrls": app.config.remote_access.public_urls,
+    }
+
+    # Forward-compatible radio link block — sourced from
+    # the in-process WfbManager directly when present.
+    from ados.core.supervisor.heartbeat import build_radio_block
+    wfb = getattr(app, "_wfb_manager", None)
+    wfb_status: dict | None = None
+    if wfb is not None:
+        try:
+            wfb_status = wfb.get_status()
+        except Exception:
+            wfb_status = None
+    payload["radio"] = build_radio_block(wfb_status)
+    return payload
+
+
+__all__ = ["build_heartbeat_payload"]
