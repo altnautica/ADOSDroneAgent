@@ -886,6 +886,26 @@ harden_secret_perms() {
     fi
 }
 
+# ─── Provision First-Party Plugin Trust Keys ────────────────────────────────
+
+provision_plugin_keys() {
+    # Drop the first-party publisher public keys at /etc/ados/plugin-keys/
+    # so the agent can verify signed .adosplug archives against the
+    # FIRST_PARTY_SIGNERS allowlist. Keys ship inside the package at
+    # scripts/plugin-keys/. Idempotent: overwrites are fine since the key
+    # bytes are stable across reinstalls.
+    local src_dir="${PKG_DIR:-/opt/ados}/scripts/plugin-keys"
+    local dst_dir="${CONFIG_DIR}/plugin-keys"
+    if [ ! -d "${src_dir}" ]; then
+        return 0
+    fi
+    install -d -m 0700 "${dst_dir}"
+    for pem in "${src_dir}"/*.pem; do
+        [ -f "${pem}" ] || continue
+        install -m 0600 "${pem}" "${dst_dir}/$(basename "${pem}")"
+    done
+}
+
 # ─── Install systemd Service ────────────────────────────────────────────────
 
 install_systemd_service() {
@@ -2508,6 +2528,10 @@ fi
 
 # Install global symlinks (ados, ados-agent → /usr/local/bin/)
 install_global_symlinks
+
+# Drop first-party plugin trust keys before the perms pass so they
+# get the same 0600 chmod treatment.
+provision_plugin_keys
 
 # Tighten permissions on any secret-bearing files in /etc/ados. Idempotent;
 # safe to run on every install/upgrade after all file writes have settled.
