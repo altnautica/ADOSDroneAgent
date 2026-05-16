@@ -384,6 +384,151 @@ def logs(plugin_id: str, lines: int, follow: bool, as_json: bool) -> None:
         click.echo(line.rstrip())
 
 
+@plugin_group.command(
+    "pin",
+    help="Pin a plugin to its current version; auto-update will skip it.",
+)
+@click.argument("plugin_id")
+@click.argument("version")
+@click.option("--json", "as_json", is_flag=True)
+def pin(plugin_id: str, version: str, as_json: bool) -> None:
+    from ados.plugins.state import save_state, state_lock
+
+    sup = _make_supervisor()
+    install = sup.find_install(plugin_id)
+    if install is None:
+        _emit_err(as_json, EXIT_NOT_FOUND, f"plugin {plugin_id} not installed")
+        sys.exit(EXIT_NOT_FOUND)
+    with state_lock():
+        install.pinned_version = version
+        save_state(sup.installs())
+    _emit_ok(as_json, {"plugin_id": plugin_id, "pinned_version": version})
+    if not as_json:
+        click.echo(f"{plugin_id}: pinned to {version}.")
+
+
+@plugin_group.command(
+    "unpin",
+    help="Clear the pinned version on a plugin so auto-update can run.",
+)
+@click.argument("plugin_id")
+@click.option("--json", "as_json", is_flag=True)
+def unpin(plugin_id: str, as_json: bool) -> None:
+    from ados.plugins.state import save_state, state_lock
+
+    sup = _make_supervisor()
+    install = sup.find_install(plugin_id)
+    if install is None:
+        _emit_err(as_json, EXIT_NOT_FOUND, f"plugin {plugin_id} not installed")
+        sys.exit(EXIT_NOT_FOUND)
+    with state_lock():
+        install.pinned_version = None
+        save_state(sup.installs())
+    _emit_ok(as_json, {"plugin_id": plugin_id, "pinned_version": None})
+    if not as_json:
+        click.echo(f"{plugin_id}: unpinned.")
+
+
+@plugin_group.command(
+    "auto-update",
+    help="Toggle auto-update on or off for a plugin.",
+)
+@click.argument("plugin_id")
+@click.argument("state", type=click.Choice(["on", "off"]))
+@click.option("--json", "as_json", is_flag=True)
+def auto_update(plugin_id: str, state: str, as_json: bool) -> None:
+    from ados.plugins.state import save_state, state_lock
+
+    sup = _make_supervisor()
+    install = sup.find_install(plugin_id)
+    if install is None:
+        _emit_err(as_json, EXIT_NOT_FOUND, f"plugin {plugin_id} not installed")
+        sys.exit(EXIT_NOT_FOUND)
+    new_value = state == "on"
+    with state_lock():
+        install.auto_update = new_value
+        save_state(sup.installs())
+    _emit_ok(as_json, {"plugin_id": plugin_id, "auto_update": new_value})
+    if not as_json:
+        click.echo(f"{plugin_id}: auto-update {state}.")
+
+
+@plugin_group.command(
+    "check-updates",
+    help="Run the auto-update poll once and print outcomes per plugin.",
+)
+@click.option("--json", "as_json", is_flag=True)
+def check_updates(as_json: bool) -> None:
+    """Synchronous wrapper around the auto-update poll for operator use.
+
+    Useful when the operator wants to verify the registry round trip
+    without waiting for the daily cadence. Honours pin / auto-update
+    flags on each install. Requires the agent to be paired (cloud
+    credentials live in the pairing state).
+    """
+    import asyncio
+
+    from ados.core.config import load_config
+    from ados.core.pairing import PairingManager
+    from ados.hal.detect import detect_board
+    from ados.plugins.auto_update import check_one_plugin
+
+    config = load_config()
+    pairing = PairingManager(state_path=config.pairing.state_path)
+    convex_url = config.pairing.convex_url
+    if not (pairing.is_paired and convex_url):
+        _emit_err(
+            as_json,
+            EXIT_GENERIC,
+            "agent is not paired to the cloud relay",
+            hint="Pair with 'ados pair' before running check-updates.",
+        )
+        sys.exit(EXIT_GENERIC)
+
+    board = detect_board()
+    current_board_id = board.name if board else None
+    sup = _make_supervisor()
+    installs = [
+        i for i in sup.installs() if i.status in ("enabled", "running")
+    ]
+    if not installs:
+        if as_json:
+            _emit_ok(as_json, [])
+        else:
+            click.echo("No enabled plugins to check.")
+        return
+
+    async def _run() -> list[dict]:
+        import httpx
+
+        from ados.plugins.auto_update import REGISTRY_TIMEOUT_SECONDS
+
+        rows: list[dict] = []
+        async with httpx.AsyncClient(timeout=REGISTRY_TIMEOUT_SECONDS) as http:
+            for install in installs:
+                outcome = await check_one_plugin(
+                    install=install,
+                    supervisor=sup,
+                    http_client=http,
+                    convex_url=convex_url,
+                    api_key=pairing.api_key,
+                    device_id=config.agent.device_id,
+                    current_board_id=current_board_id,
+                )
+                rows.append(
+                    {"plugin_id": install.plugin_id, "outcome": outcome.value}
+                )
+        return rows
+
+    results = asyncio.run(_run())
+    if as_json:
+        _emit_ok(as_json, results)
+        return
+    click.echo(f"{'PLUGIN':40} OUTCOME")
+    for row in results:
+        click.echo(f"{row['plugin_id']:40} {row['outcome']}")
+
+
 @plugin_group.command("info", help="Print manifest summary and runtime state.")
 @click.argument("plugin_id")
 @click.option("--json", "as_json", is_flag=True)

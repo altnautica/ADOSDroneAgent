@@ -224,6 +224,24 @@ async def heartbeat_loop(ctx: CloudContext) -> None:  # noqa: C901
                 if payload["temperature"] is None:
                     del payload["temperature"]
 
+                # Plugin auto-update freshness for the GCS drone-detail
+                # panel. Maximum of every install's last-check timestamp;
+                # absent when nothing has been polled yet. Best-effort —
+                # heartbeat must not fail on auxiliary data.
+                try:
+                    from ados.plugins.auto_update import (
+                        latest_check_timestamp_ms as _latest_plugin_check,
+                    )
+
+                    _last_plugin_check = _latest_plugin_check()
+                    if _last_plugin_check is not None:
+                        payload["lastPluginUpdateCheckAt"] = _last_plugin_check
+                except Exception as exc:
+                    log.debug(
+                        "heartbeat_plugin_update_check_failed",
+                        error=str(exc),
+                    )
+
                 # Optional peripherals block. Currently carries the
                 # attached SPI LCD (if /etc/ados/display.conf is
                 # present). Mission Control's infer-capabilities

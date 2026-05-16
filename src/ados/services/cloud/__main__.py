@@ -194,6 +194,22 @@ async def main() -> None:
     # enabling P2P direct WebRTC across WAN.
     tasks.append(asyncio.create_task(webrtc_signaling_task(ctx), name="webrtc-signaling"))
 
+    # ── Plugin Auto-Update Daily Poll (when paired) ─────────────
+    # Iterates installed and enabled plugins, queries the registry
+    # for newer releases, silently installs patch and minor bumps
+    # whose permission surface is unchanged, and emits MQTT
+    # notify-only events for major bumps or permission deltas.
+    try:
+        from ados.plugins.auto_update import run_daily_loop as plugin_auto_update_loop
+
+        tasks.append(
+            asyncio.create_task(
+                plugin_auto_update_loop(ctx), name="plugin-auto-update"
+            )
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.warning("plugin_auto_update_spawn_failed", error=str(exc))
+
     log.info("cloud_service_ready", paired=pairing.is_paired)
     await shutdown.wait()
 
