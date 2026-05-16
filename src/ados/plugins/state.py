@@ -23,10 +23,27 @@ State file at ``/var/ados/state/plugin-state.json``. JSON shape:
           "permissions": {
             "hardware.spi": {"granted": true, "granted_at": 1735000000},
             "vehicle.command": {"granted": false, "granted_at": null}
+          },
+          "auto_update": true,
+          "pinned_version": null,
+          "last_update_check_at": 1735086400000,
+          "last_update_attempt": {
+            "version": "1.1.0",
+            "outcome": "success",
+            "error": null
           }
         }
       ]
     }
+
+The four auto-update fields default safely so older state files load
+clean. ``auto_update=true`` means the daily registry poll may swap
+this plugin to a newer compatible release without operator approval
+when the jump is patch/minor AND permissions are unchanged AND the
+board is still supported. ``pinned_version`` overrides that — when
+set, the auto-update loop never touches the plugin. The two
+``last_update_*`` fields record the most recent poll outcome so the
+GCS can surface it on the drone-detail panel.
 """
 
 from __future__ import annotations
@@ -77,6 +94,12 @@ class PluginInstall:
     enabled_at: int | None = None
     failure_reason: str | None = None
     permissions: dict[str, PermissionGrant] = field(default_factory=dict)
+    # Auto-update fields. Backward-compatible defaults so older state
+    # files load without migration. See module docstring for shape.
+    auto_update: bool = True
+    pinned_version: str | None = None
+    last_update_check_at: int | None = None
+    last_update_attempt: dict | None = None
 
 
 @contextlib.contextmanager
@@ -148,6 +171,12 @@ def load_state(path: Path | None = None) -> list[PluginInstall]:
                 pid: PermissionGrant(**(pgrant if isinstance(pgrant, dict) else {}))
                 for pid, pgrant in (entry.get("permissions") or {}).items()
             }
+            last_attempt_raw = entry.get("last_update_attempt")
+            last_attempt = (
+                dict(last_attempt_raw)
+                if isinstance(last_attempt_raw, dict)
+                else None
+            )
             out.append(
                 PluginInstall(
                     plugin_id=entry["plugin_id"],
@@ -161,6 +190,10 @@ def load_state(path: Path | None = None) -> list[PluginInstall]:
                     enabled_at=entry.get("enabled_at"),
                     failure_reason=entry.get("failure_reason"),
                     permissions=perms,
+                    auto_update=bool(entry.get("auto_update", True)),
+                    pinned_version=entry.get("pinned_version"),
+                    last_update_check_at=entry.get("last_update_check_at"),
+                    last_update_attempt=last_attempt,
                 )
             )
         except (KeyError, TypeError) as exc:
