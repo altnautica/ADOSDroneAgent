@@ -12,7 +12,6 @@ from __future__ import annotations
 import time
 from typing import Any
 
-
 # Menu tree from the physical UI spec.
 # Each node is {label, children, optional: visibility, screen}. Leaves
 # with a `screen` key open the named overlay. Leaves without one are

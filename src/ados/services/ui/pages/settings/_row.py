@@ -31,7 +31,7 @@ class Row:
     label: str
     variant: str
     handler: Callable[
-        ["SettingsPage", PageContext, "Row"], Awaitable[Any]
+        [SettingsPage, PageContext, Row], Awaitable[Any]
     ]
 
 

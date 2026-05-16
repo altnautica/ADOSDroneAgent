@@ -24,7 +24,7 @@ if TYPE_CHECKING:
 
 
 async def _channel_enum(
-    page: "SettingsPage", ctx: PageContext, row: Row,
+    page: SettingsPage, ctx: PageContext, row: Row,
 ) -> None:
     options = [
         ("36", "36 (5180 MHz)"),
@@ -65,7 +65,7 @@ async def _channel_enum(
 
 
 async def _tx_power_slider(
-    page: "SettingsPage", ctx: PageContext, row: Row,
+    page: SettingsPage, ctx: PageContext, row: Row,
 ) -> None:
     current = page._wfb.get("tx_power_dbm") if isinstance(page._wfb, dict) else None
     cur_int = int(current) if isinstance(current, (int, float)) else 5
@@ -98,7 +98,7 @@ async def _tx_power_slider(
 
 
 async def _mcs_enum(
-    page: "SettingsPage", ctx: PageContext, row: Row,
+    page: SettingsPage, ctx: PageContext, row: Row,
 ) -> None:
     options = [(str(i), f"MCS {i}") for i in range(8)]
     current = page._wfb.get("mcs_index") if isinstance(page._wfb, dict) else None
@@ -121,7 +121,7 @@ async def _mcs_enum(
 
 
 async def _topology_enum(
-    page: "SettingsPage", ctx: PageContext, row: Row,
+    page: SettingsPage, ctx: PageContext, row: Row,
 ) -> None:
     options = [
         ("host_vbus", "Host VBUS (USB-A)"),
@@ -147,7 +147,7 @@ async def _topology_enum(
 
 
 async def _auto_pair_toggle(
-    page: "SettingsPage", ctx: PageContext, row: Row,
+    page: SettingsPage, ctx: PageContext, row: Row,
 ) -> None:
     current = bool(page._value_for(row.id, ctx))
     new_value = not current
@@ -165,7 +165,7 @@ async def _auto_pair_toggle(
 
 
 async def _role_enum(
-    page: "SettingsPage", ctx: PageContext, row: Row,
+    page: SettingsPage, ctx: PageContext, row: Row,
 ) -> None:
     options = [
         ("direct", "Direct (single node)"),

@@ -19,13 +19,13 @@ from __future__ import annotations
 import time  # noqa: F401
 
 from .page import (
+    _METRICS_REFRESH_SECONDS,
+    _TAP_INACTIVITY_TEARDOWN_SECONDS,
+    _TAP_RETRY_COOLDOWN_SECONDS,
     METRICS_H,
     PAGE_H,
     PAGE_W,
     VIDEO_H,
-    _METRICS_REFRESH_SECONDS,
-    _TAP_INACTIVITY_TEARDOWN_SECONDS,
-    _TAP_RETRY_COOLDOWN_SECONDS,
     VideoPage,
 )
 
@@ -35,4 +35,7 @@ __all__ = [
     "PAGE_W",
     "VIDEO_H",
     "VideoPage",
+    "_METRICS_REFRESH_SECONDS",
+    "_TAP_INACTIVITY_TEARDOWN_SECONDS",
+    "_TAP_RETRY_COOLDOWN_SECONDS",
 ]

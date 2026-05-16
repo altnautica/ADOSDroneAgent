@@ -10,7 +10,6 @@ from __future__ import annotations
 
 from typing import Any
 
-
 # 16-byte UUID prefix the air-side encoder will embed in a SEI of type
 # 5 (user_data_unregistered) followed by an 8-byte big-endian uint64 of
 # the encoder's wall-clock ``time.time_ns()``. Wall-clock — not

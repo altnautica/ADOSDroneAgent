@@ -61,7 +61,6 @@ from ados.services.ui.screens.mesh import (
     unset_boot as screen_mesh_unset_boot,
 )
 
-
 # Screen registry keyed by screen id so the active list can be rebuilt
 # from `ground_station.ui.screens` config. REST schema uses the keys
 # `home`, `link`, `drone`, `network`, `system`, `qr`. We map older ids

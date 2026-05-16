@@ -8,7 +8,6 @@ constants.
 
 from __future__ import annotations
 
-
 # Button BCM pins, matching `button_service.py`.
 B1, B2, B3, B4 = 5, 6, 13, 19
 

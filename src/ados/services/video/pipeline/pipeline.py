@@ -31,7 +31,7 @@ import sys
 import time
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import httpx
 
@@ -254,7 +254,9 @@ class VideoPipeline:
 
         # Start mediamtx for stream output
         pipe_uri = f"rtsp://localhost:{self._mediamtx.rtsp_port}/main"
-        cmd = _pkg().build_encoder_command(enc_config, primary.device_path, pipe_uri, camera=primary)
+        cmd = _pkg().build_encoder_command(
+            enc_config, primary.device_path, pipe_uri, camera=primary,
+        )
 
         if not cmd:
             log.error("encoder_command_empty")
@@ -280,7 +282,10 @@ class VideoPipeline:
         self._mediamtx.generate_config({"main": "publisher"})
         mtx_ok = await self._mediamtx.start()
         if not mtx_ok:
-            log.error("mediamtx_start_failed", msg="cannot stream without mediamtx — install mediamtx")
+            log.error(
+                "mediamtx_start_failed",
+                msg="cannot stream without mediamtx — install mediamtx",
+            )
             self._state = PipelineState.ERROR
             return False
 

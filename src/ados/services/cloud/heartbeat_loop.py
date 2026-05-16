@@ -25,9 +25,17 @@ from ados.core.paths import HEALTH_JSON
 from ._context import CloudContext
 from .heartbeat import (
     build_display_enrichment as _build_display_enrichment,
+)
+from .heartbeat import (
     collect_attached_display as _collect_attached_display,
+)
+from .heartbeat import (
     get_local_ip as _get_local_ip,
+)
+from .heartbeat import (
     get_services_status as _get_services_status,
+)
+from .heartbeat import (
     read_lcd_state_blob as _read_lcd_state_blob,
 )
 
@@ -52,7 +60,7 @@ async def heartbeat_loop(ctx: CloudContext) -> None:  # noqa: C901
     # every heartbeat. Refresh every 6th iteration (~30s).
     _cached_services: list[dict] = []
     _svc_refresh_counter = 0
-    _SVC_REFRESH_INTERVAL = 6  # refresh every 6 heartbeats
+    _svc_refresh_interval = 6  # refresh every 6 heartbeats
 
     # Track the previous radio.paired flag so we can emit one
     # extra heartbeat 1s after the value changes. Without the
@@ -87,7 +95,7 @@ async def heartbeat_loop(ctx: CloudContext) -> None:  # noqa: C901
                 # 10+ subprocess calls). Skip on most heartbeats to keep
                 # CPU free for the video encoder.
                 _svc_refresh_counter += 1
-                if _svc_refresh_counter >= _SVC_REFRESH_INTERVAL or not _cached_services:
+                if _svc_refresh_counter >= _svc_refresh_interval or not _cached_services:
                     _cached_services = await asyncio.to_thread(_get_services_status)
                     _svc_refresh_counter = 0
 

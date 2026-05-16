@@ -24,7 +24,7 @@ if TYPE_CHECKING:
 
 
 async def _theme_enum(
-    page: "SettingsPage", ctx: PageContext, row: Row,
+    page: SettingsPage, ctx: PageContext, row: Row,
 ) -> None:
     options = [("dark", "Dark"), ("light", "Light")]
     current = page._value_for(row.id, ctx) or "dark"
@@ -45,7 +45,7 @@ async def _theme_enum(
 
 
 async def _log_level_enum(
-    page: "SettingsPage", ctx: PageContext, row: Row,
+    page: SettingsPage, ctx: PageContext, row: Row,
 ) -> None:
     options = [
         ("debug", "Debug"),
@@ -72,13 +72,13 @@ async def _log_level_enum(
 
 
 async def _reboot_action(
-    page: "SettingsPage", ctx: PageContext, row: Row,
+    page: SettingsPage, ctx: PageContext, row: Row,
 ) -> None:
     await page._show_reboot_dialog(ctx)
 
 
 async def _factory_reset_action(
-    page: "SettingsPage", ctx: PageContext, row: Row,
+    page: SettingsPage, ctx: PageContext, row: Row,
 ) -> None:
     async def _on_confirm() -> None:
         client = ctx.http
@@ -107,7 +107,7 @@ async def _factory_reset_action(
 
 
 async def _about_drilldown(
-    page: "SettingsPage", ctx: PageContext, row: Row,
+    page: SettingsPage, ctx: PageContext, row: Row,
 ) -> None:
     from ados.services.ui.pages.details.about import AboutDetailPage
 

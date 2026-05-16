@@ -24,7 +24,7 @@ if TYPE_CHECKING:
 log = get_logger("main")
 
 
-async def cloud_beacon_loop(app: "AgentApp") -> None:
+async def cloud_beacon_loop(app: AgentApp) -> None:
     """When unpaired, periodically POST pairing code to Convex for cloud discovery."""
     import httpx
 
@@ -65,7 +65,7 @@ async def cloud_beacon_loop(app: "AgentApp") -> None:
         await asyncio.sleep(interval)
 
 
-async def cloud_heartbeat_loop(app: "AgentApp") -> None:
+async def cloud_heartbeat_loop(app: AgentApp) -> None:
     """When paired, periodically POST full status to Convex."""
     import httpx
 
@@ -87,7 +87,7 @@ async def cloud_heartbeat_loop(app: "AgentApp") -> None:
         await asyncio.sleep(5)
 
 
-async def cloud_command_poll_loop(app: "AgentApp") -> None:  # noqa: C901
+async def cloud_command_poll_loop(app: AgentApp) -> None:  # noqa: C901
     """When paired, poll Convex for pending commands and execute them."""
     import httpx
 

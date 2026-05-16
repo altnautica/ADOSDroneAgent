@@ -19,7 +19,7 @@ if TYPE_CHECKING:
 
 def install_termination_handlers(
     loop: asyncio.AbstractEventLoop,
-    app: "AgentApp",
+    app: AgentApp,
 ) -> None:
     """Wire SIGTERM and SIGINT to ``app.request_shutdown()``.
 

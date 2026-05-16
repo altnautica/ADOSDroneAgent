@@ -1,5 +1,10 @@
 # Companion Computer Chip Comparison
 
+> **Internal hardware reference.** Bench-rig sourcing notes and pricing in
+> this document reflect the maintainers' local supply chain (₹ INR, named
+> vendor) and are indicative, not a global recommendation. The chips
+> themselves are evaluated on technical merit only.
+
 > All chips evaluated for ADOS ADOS Drone Agent. Updated 2026-03-21.
 
 ## Summary Table

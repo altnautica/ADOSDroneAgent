@@ -25,8 +25,8 @@ import time  # noqa: F401
 from .frame_slot import _FrameSlot
 from .pipeline_string import (
     _INSPECTOR,
-    _PluginInspector,
     _detect_soc,
+    _PluginInspector,
     build_pipeline_string,
     gst_plugin_available,
     select_decoder,
@@ -53,8 +53,15 @@ __all__ = [
     "DEFAULT_WIDTH",
     "LocalVideoTap",
     "LocalVideoTapUnavailable",
+    "_FrameSlot",
+    "_INSPECTOR",
+    "_PluginInspector",
+    "_detect_soc",
+    "_iter_nal_units",
+    "_remove_emulation_prevention",
     "build_pipeline_string",
     "gst_plugin_available",
+    "log",
     "parse_sei_latency_ns",
     "select_decoder",
 ]

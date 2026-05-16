@@ -50,7 +50,6 @@ import asyncio
 import json
 import signal
 import sys
-import time
 from pathlib import Path
 from typing import Any
 
@@ -683,13 +682,13 @@ class OledService:
         # We recompute rather than caching them so a different chrome
         # height in the future does not get a stale dispatch.
         from ados.services.ui.chrome.bottom_tab_bar import (
-            HEIGHT as TAB_HEIGHT,
-        )
-        from ados.services.ui.chrome.bottom_tab_bar import (
             _TABS,
             TAB_COUNT,
             TAB_WIDTH,
             page_id_for_zone,
+        )
+        from ados.services.ui.chrome.bottom_tab_bar import (
+            HEIGHT as TAB_HEIGHT,
         )
         if gesture.start_y < 320 - TAB_HEIGHT:
             return
@@ -1220,7 +1219,7 @@ class OledService:
                 log.debug("oled_tap_stats_persist_failed", error=str(exc))
             try:
                 await asyncio.wait_for(self._stop.wait(), timeout=1.0)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 pass
 
     async def _ensure_video_tap_forever(self) -> None:

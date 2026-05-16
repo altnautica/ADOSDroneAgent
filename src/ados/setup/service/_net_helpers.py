@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import socket
-from pathlib import Path
 from typing import Any
 
 from ._constants import (

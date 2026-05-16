@@ -23,7 +23,7 @@ if TYPE_CHECKING:
 
 
 async def _cloud_mode_enum(
-    page: "SettingsPage", ctx: PageContext, row: Row,
+    page: SettingsPage, ctx: PageContext, row: Row,
 ) -> None:
     options = [
         ("cloud", "Altnautica cloud"),
@@ -57,7 +57,7 @@ async def _cloud_mode_enum(
 
 
 async def _display_drilldown(
-    page: "SettingsPage", ctx: PageContext, row: Row,
+    page: SettingsPage, ctx: PageContext, row: Row,
 ) -> None:
     options: list[tuple[str, str]] = []
     client = ctx.http
@@ -113,7 +113,7 @@ async def _display_drilldown(
 
 
 async def _calibrate_action(
-    page: "SettingsPage", ctx: PageContext, row: Row,
+    page: SettingsPage, ctx: PageContext, row: Row,
 ) -> None:
     async def _on_confirm() -> None:
         client = ctx.http
@@ -142,7 +142,7 @@ async def _calibrate_action(
 
 
 async def _rotation_enum(
-    page: "SettingsPage", ctx: PageContext, row: Row,
+    page: SettingsPage, ctx: PageContext, row: Row,
 ) -> None:
     from ados.services.ui.display_conf import (
         ALLOWED_ROTATIONS,

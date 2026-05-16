@@ -25,9 +25,9 @@ if TYPE_CHECKING:
 
 
 async def monitor_ffmpeg(
-    manager: "MediamtxGsManager",
+    manager: MediamtxGsManager,
     shutdown: asyncio.Event,
-    slog: "structlog.BoundLogger",
+    slog: structlog.BoundLogger,
 ) -> None:
     """Supervise the ffmpeg ingest until ``shutdown`` is set.
 
@@ -45,7 +45,7 @@ async def monitor_ffmpeg(
                 shutdown.wait(), timeout=FFMPEG_MONITOR_TICK_SECONDS
             )
             return
-        except asyncio.TimeoutError:
+        except TimeoutError:
             pass
         if not manager.ffmpeg_alive():
             slog.warning(

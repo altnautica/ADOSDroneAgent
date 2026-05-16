@@ -229,7 +229,7 @@ async def _probe_sprop_parameter_sets(rtsp_url: str) -> str | None:
             proc.communicate(),
             timeout=SPROP_PROBE_DURATION_SECONDS + 5.0,
         )
-    except asyncio.TimeoutError:
+    except TimeoutError:
         try:
             proc.kill()
             await proc.wait()

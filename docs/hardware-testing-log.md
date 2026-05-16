@@ -1,5 +1,9 @@
 # Hardware Testing Log
 
+> **Internal bench-rig log.** Vendor names and ₹ INR pricing reflect the
+> maintainers' local supply chain; this file is not a sourcing guide for
+> non-bench operators. Test methodology and pass criteria are generic.
+
 > Record all test results here. One row per test. Never delete rows. Updated 2026-03-21.
 
 ## Test Categories

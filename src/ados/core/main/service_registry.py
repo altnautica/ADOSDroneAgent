@@ -24,7 +24,7 @@ if TYPE_CHECKING:
 log = get_logger("main")
 
 
-async def register_services(app: "AgentApp") -> None:  # noqa: C901
+async def register_services(app: AgentApp) -> None:  # noqa: C901
     """Spawn every long-running agent service and wire its task into the supervisor."""
     log.info(
         "agent_starting",

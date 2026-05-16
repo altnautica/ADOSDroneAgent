@@ -23,7 +23,7 @@ if TYPE_CHECKING:
 
 
 async def _wifi_hotspot_drilldown(
-    page: "SettingsPage", ctx: PageContext, row: Row,
+    page: SettingsPage, ctx: PageContext, row: Row,
 ) -> None:
     initial = page._value_for(row.id, ctx) or ""
 
@@ -44,7 +44,7 @@ async def _wifi_hotspot_drilldown(
 
 
 async def _hotspot_toggle(
-    page: "SettingsPage", ctx: PageContext, row: Row,
+    page: SettingsPage, ctx: PageContext, row: Row,
 ) -> None:
     current = bool(page._value_for(row.id, ctx))
     new_value = not current
@@ -71,7 +71,7 @@ async def _hotspot_toggle(
 
 
 async def _wifi_client_drilldown(
-    page: "SettingsPage", ctx: PageContext, row: Row,
+    page: SettingsPage, ctx: PageContext, row: Row,
 ) -> None:
     current = page._value_for(row.id, ctx) or ""
 

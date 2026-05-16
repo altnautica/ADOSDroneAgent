@@ -20,7 +20,7 @@ if TYPE_CHECKING:
     from .app import AgentApp
 
 
-def build_heartbeat_payload(app: "AgentApp") -> dict:  # noqa: C901
+def build_heartbeat_payload(app: AgentApp) -> dict:  # noqa: C901
     """Build the cloud heartbeat payload dict.
 
     Extracted from ``AgentApp._cloud_heartbeat_loop`` for direct

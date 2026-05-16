@@ -61,11 +61,23 @@ async def command_poll_loop(ctx: CloudContext) -> None:
                                     headers={"X-ADOS-Key": pairing.api_key},
                                 )
                                 if ack_resp.status_code == 200:
-                                    log.info("cloud_command_acked", command=cmd_name, status=status)
+                                    log.info(
+                                        "cloud_command_acked",
+                                        command=cmd_name,
+                                        status=status,
+                                    )
                                 else:
-                                    log.warning("cloud_command_ack_failed", command=cmd_name, http_status=ack_resp.status_code)
+                                    log.warning(
+                                        "cloud_command_ack_failed",
+                                        command=cmd_name,
+                                        http_status=ack_resp.status_code,
+                                    )
                             except Exception as ack_err:
-                                log.warning("cloud_command_ack_error", command=cmd_name, error=str(ack_err))
+                                log.warning(
+                                    "cloud_command_ack_error",
+                                    command=cmd_name,
+                                    error=str(ack_err),
+                                )
             except Exception:
                 log.debug("cloud_command_poll_failed")
         await asyncio.sleep(5)
