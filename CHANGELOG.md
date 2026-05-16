@@ -4,6 +4,88 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.28.10] - 2026-05-16
+
+### Added
+
+- **Plugin SDK fill: real `PluginContext`.** The Python `ADOSPlugin`
+  base class and `PluginContext` now ship as real implementations
+  rather than spec stubs. Plugins receive a context object that
+  exposes `ctx.events.publish / subscribe`, `ctx.mavlink.send` and
+  `ctx.mavlink.subscribe`, `ctx.peripheral_manager.register_camera /
+  register_depth_sensor`, `ctx.config.get / set / on_change`,
+  `ctx.agent_id`, and `ctx.process.spawn`. Each context method
+  enforces the plugin's declared capability grants at call time.
+- **`subprocess_spawn` allowlist.** Manifest schema v2 adds an
+  explicit allowlist of vendor binaries a plugin may exec. The
+  supervisor enforces the allowlist at spawn time via a new
+  `process_sandbox.py` that inherits the plugin's cgroup limits, pipes
+  stdio, and rejects any path not in the manifest. This is the
+  sandbox guarantee for plugins that ship pre-compiled binaries.
+- **`vendor_attribution` manifest field.** Required when
+  `contains_vendor_binary: true`. Carries `upstream_repo`,
+  `commit_sha`, `license`, and `source_offer_url` so the install
+  dialog can surface GPL §6 source-offer compliance details to the
+  operator before installation.
+- **Three new agent capabilities.** `mavlink.component.vio` (HIGH
+  risk) registers MAVLink component ids 197 and 198 on the vehicle
+  bus. `estimator.pose.inject` (CRITICAL risk) authorizes submission
+  of `ODOMETRY`, `VISION_POSITION_ESTIMATE`, `VISION_POSITION_DELTA`,
+  and `VICON_POSITION_ESTIMATE` to the FC's state estimator. Both are
+  catalogued in `ados.plugins.capabilities` and gated by the IPC
+  dispatcher.
+- **`OPTICAL_FLOW_RAD` MAVLink encoder.** Plugins with the
+  `mavlink.component.vio` capability can now emit `OPTICAL_FLOW_RAD`
+  (msg id 106) through `ctx.mavlink.send`. The encoder lives at
+  `src/ados/protocol/mavlink/encoders/optical_flow.py` and registers
+  CRC_EXTRA for clean parser round-trips.
+- **`SET_GPS_GLOBAL_ORIGIN` and `MAV_CMD_SET_EKF_SOURCE_SET`
+  encoders.** Both are required for GPS-denied flight setup. The
+  agent's pre-arm helper dispatches `SET_GPS_GLOBAL_ORIGIN` when the
+  EKF reports "waiting for home" and a plugin has registered itself
+  with the vision component id.
+- **HAL board YAMLs gain navigation fields.** Every board profile under
+  `src/ados/hal/boards/*.yaml` adds `navigation: { optical_flow,
+  vio }` where each value is `none`, `cpu_only`, or `npu_accelerated`.
+  Plugin installers refuse to install on boards whose declared
+  navigation tier doesn't cover the plugin's needs. The vision-nav
+  plugin requires `optical_flow >= cpu_only` and `vio >=
+  npu_accelerated`.
+- **Setup webapp `/setup/navigation/*` routes.** Three new routes on
+  the universal setup webapp under `web/setup/views/navigation/`
+  preview the camera enumeration result, the rangefinder bus
+  availability, and the FC firmware detected. These are read-only
+  diagnostics; per-drone vision-nav config still happens through
+  Mission Control's plugin configuration drawer.
+- **`RemoteInstallReceiver` and LAN-direct install.** The agent
+  accepts plugin install commands through two transports: the
+  existing `cmd_droneCommands` cloud-relay queue (for the HTTPS GCS
+  case) and a new `/api/v1/plugins/install` LAN-direct endpoint (for
+  the local-network HTTP GCS case). Both transports converge on the
+  same supervisor pipeline; both honor the same signature and trust
+  list. The LAN-direct path is gated by the WS auth ticket flow.
+
+### Changed
+
+- **MAVLink router registers `MAV_COMP_ID_VISUAL_INERTIAL_ODOMETRY`
+  (197) and the optical-flow companion convention (198).** Plugins
+  with `mavlink.component.vio` claim one of those component ids on
+  install and emit traffic under that component on the vehicle bus.
+
+### Security
+
+- **WS auth ticket on the plugin LAN-direct install endpoint.** The
+  endpoint previously accepted unauthenticated install commands when
+  the GCS was on the same LAN. It now requires a short-lived ticket
+  minted by the GCS through the existing pairing handshake, scoped to
+  the install operation, and bound to the requesting origin. Tickets
+  expire after 60 seconds.
+- **Signed-URL allowlist on the plugin downloader.** The agent's
+  `.adosplug` downloader now allowlists Convex storage origins and
+  the configured registry origin. Downloading from arbitrary URLs
+  requires an operator override flag on the `ados plugin install`
+  CLI, which the GCS never invokes.
+
 ## [0.13.3] - 2026-05-07
 
 ### Added
