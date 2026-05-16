@@ -147,14 +147,19 @@ class _StubResp:
 
 
 def _stub_client(payload: dict, *, status_code: int = 200) -> MagicMock:
-    """An AsyncClient double whose ``post`` returns a stub envelope."""
+    """An AsyncClient double whose ``get`` returns the registry payload.
+
+    The agent now calls ``GET {convex_url}/v1/plugins/<plugin_id>``
+    which is the public REST surface in ``pluginRegistryHttp.ts``;
+    the response body is the raw ``{plugin, versions}`` shape
+    (no Convex envelope).
+    """
     client = MagicMock()
-    envelope = {"status": "success", "value": payload}
 
-    async def _post(url, json=None, headers=None):
-        return _StubResp(status_code, envelope)
+    async def _get(url, headers=None):
+        return _StubResp(status_code, payload)
 
-    client.post = AsyncMock(side_effect=_post)
+    client.get = AsyncMock(side_effect=_get)
     return client
 
 
@@ -206,7 +211,7 @@ async def test_skipped_when_pinned(isolated_state):
 
     assert outcome is AutoUpdateOutcome.SKIPPED
     # Pinned plugins never hit the registry.
-    client.post.assert_not_called()
+    client.get.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -370,9 +375,11 @@ async def test_silent_install_happy_path(isolated_state):
         )
 
     assert outcome is AutoUpdateOutcome.SILENT_INSTALL
-    # Sequence: disable → remove → install_archive → grant → enable.
+    # Sequence: disable → install_archive (overwrite) → grant → enable.
+    # No standalone ``remove`` step — install_archive overwrites in
+    # place so a failed install leaves the old version intact.
     sup.disable.assert_called_once_with("com.example.plug")
-    sup.remove.assert_called_once_with("com.example.plug", keep_data=False)
+    sup.remove.assert_not_called()
     sup.install_archive.assert_called_once()
     sup.grant_permission.assert_called_once_with(
         "com.example.plug", "event.publish"
@@ -462,10 +469,10 @@ async def test_registry_query_failure_records_attempt(isolated_state):
     # Network error talking to the registry.
     client = MagicMock()
 
-    async def _post(url, json=None, headers=None):
+    async def _get(url, headers=None):
         raise httpx.ConnectError("dns fail")
 
-    client.post = AsyncMock(side_effect=_post)
+    client.get = AsyncMock(side_effect=_get)
 
     outcome = await check_one_plugin(
         install=install,
@@ -655,3 +662,97 @@ def test_latest_check_timestamp_ms_returns_none_when_empty(isolated_state):
     install = _make_install()
     save_state([install])
     assert latest_check_timestamp_ms() is None
+
+
+# ---------------------------------------------------------------------
+# Set-equality on removed/swapped permission deltas (full set check)
+# ---------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_permission_removed_triggers_notify(isolated_state):
+    """{a,b} → {a} drops b — must notify (set-equality, not just adds)."""
+    install = _make_install(
+        permissions={
+            "event.publish": PermissionGrant(True, 1),
+            "vehicle.status.read": PermissionGrant(True, 1),
+        }
+    )
+    save_state([install])
+    sup = _make_supervisor(install)
+    client = _stub_client(
+        _registry_payload(permissions=["event.publish"])
+    )
+    with patch.object(au, "_publish_update_notice") as pub:
+        outcome = await check_one_plugin(
+            install=install,
+            supervisor=sup,
+            http_client=client,
+            convex_url="https://example.convex.cloud",
+            api_key="key",
+            device_id="dev-1",
+            current_board_id="rpi4b",
+        )
+    assert outcome is AutoUpdateOutcome.NOTIFY
+    notice = pub.call_args[0][1]
+    assert notice["reason"] == "permission_delta"
+    assert notice["new_permissions"] == []
+    assert notice["removed_permissions"] == ["vehicle.status.read"]
+    # The install must NOT have been overwritten.
+    sup.install_archive.assert_not_called()
+    sup.disable.assert_not_called()
+
+
+# ---------------------------------------------------------------------
+# Failure rollback: a failed install_archive leaves the OLD version alive
+# ---------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_silent_install_archive_failure_rolls_back_to_enabled(isolated_state):
+    """install_archive raises mid-flight → old version stays installed + enabled.
+
+    With the disable → install_archive (overwrite) → enable sequence,
+    a failed install_archive leaves the old plugin's files and state
+    record intact. The rollback path re-enables the original so the
+    operator does not have to start it by hand.
+    """
+    install = _make_install(
+        permissions={
+            "event.publish": PermissionGrant(granted=True, granted_at=1)
+        }
+    )
+    save_state([install])
+    sup = _make_supervisor(install)
+    sup.install_archive.side_effect = SupervisorError("install_archive blew up")
+    client = _stub_client(_registry_payload(latest_version="1.1.0"))
+
+    async def _fake_stream(http, url):
+        return 200, b"archive-bytes"
+
+    with patch.object(au, "stream_download", side_effect=_fake_stream), patch.object(
+        au, "validate_download_url"
+    ), patch.object(au, "verify_sha256"):
+        outcome = await check_one_plugin(
+            install=install,
+            supervisor=sup,
+            http_client=client,
+            convex_url="https://example.convex.cloud",
+            api_key="key",
+            device_id="dev-1",
+            current_board_id="rpi4b",
+        )
+
+    assert outcome is AutoUpdateOutcome.FAILED
+    # The old plugin was disabled for the swap window but must be
+    # re-enabled on the rollback path so the operator does not lose it.
+    sup.disable.assert_called_once_with("com.example.plug")
+    sup.install_archive.assert_called_once()
+    sup.enable.assert_called_once_with("com.example.plug")
+    # remove() must never run — the old files have to stay on disk so
+    # install_archive's overwrite-or-fail contract is what protects us.
+    sup.remove.assert_not_called()
+    # The attempt was recorded with the install error.
+    assert install.last_update_attempt is not None
+    assert install.last_update_attempt["outcome"] == "failed"
+    assert "install_archive blew up" in install.last_update_attempt["error"]

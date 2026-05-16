@@ -71,11 +71,14 @@ class MqttGateway:
         if transport == "websockets":
             client.ws_set_options(path="/mqtt")
 
-        # Username/password auth — in cloud mode, auto-use deviceId + apiKey
+        # Username/password auth — in cloud mode, auto-use deviceId + apiKey.
+        # Username is the bare device_id (no prefix) so the broker ACL pattern
+        # `pattern readwrite ados/%u/#` substitutes to the agent's actual topic
+        # subtree `ados/<device_id>/...`.
         mqtt_user = self.config.server.mqtt_username
         mqtt_pass = self.config.server.mqtt_password
         if self.config.server.mode == "cloud" and self._api_key:
-            mqtt_user = mqtt_user or f"ados-{self._device_id}"
+            mqtt_user = mqtt_user or self._device_id
             mqtt_pass = mqtt_pass or self._api_key
         if mqtt_user:
             client.username_pw_set(mqtt_user, mqtt_pass)

@@ -26,12 +26,13 @@ The agent never re-verifies signatures itself: the supervisor's
 verify fails. This module catches the four documented exception
 types from ``ados.plugins.errors`` and records them on the install.
 
-Convex query transport: ``POST {convex_url}/api/query`` with the
-standard JSON body
-``{"path": "pluginRegistry:getPlugin", "args": {"pluginId": "..."},
-"format": "json"}``. Authenticated via ``X-ADOS-Key`` header. The
-registry stores the manifest YAML on each version row; permissions
-and supported-boards lists are extracted from that blob.
+Registry transport: ``GET {convex_url}/v1/plugins/<plugin_id>`` —
+the public REST surface that mirrors the ``pluginRegistry.getPlugin``
+query. The handler at the convex-site domain returns the raw
+``{plugin, versions}`` JSON shape (or HTTP 404 when the row is
+missing). Authenticated via ``X-ADOS-Key`` header. The registry
+stores the manifest YAML on each version row; permissions and
+supported-boards lists are extracted from that blob.
 
 The download path reuses ``remote_install_download``: same hostname
 allowlist, same streaming size cap, same SHA-256 verify hook.
@@ -149,32 +150,33 @@ async def _registry_get_plugin(
     api_key: str | None,
     plugin_id: str,
 ) -> dict | None:
-    """Call ``pluginRegistry.getPlugin`` and return its raw payload.
+    """Fetch a plugin row from the public registry REST surface.
 
-    Convex public queries are reachable over HTTP at
-    ``POST /api/query`` with a ``{path, args, format}`` body. The
-    response envelope is ``{"status": "success", "value": <result>}``
-    on a successful query. Returns ``None`` when the registry has no
-    row for that plugin id (Convex returns ``"value": null``).
+    Calls ``GET {convex_url}/v1/plugins/<plugin_id>``. The endpoint is
+    served by ``pluginRegistryHttp.ts`` on the convex-site domain and
+    returns the raw ``{plugin, versions}`` JSON shape on success. A
+    404 means no published row exists for that id; treated as ``None``
+    so the daily loop can move on. Any other non-200 status raises so
+    the caller can record the failure on the install record.
     """
-    url = f"{convex_url.rstrip('/')}/api/query"
+    url = f"{convex_url.rstrip('/')}/v1/plugins/{plugin_id}"
     headers = {"X-ADOS-Key": api_key} if api_key else {}
-    body = {
-        "path": "pluginRegistry:getPlugin",
-        "args": {"pluginId": plugin_id},
-        "format": "json",
-    }
-    resp = await client.post(url, json=body, headers=headers)
+    resp = await client.get(url, headers=headers)
+    if resp.status_code == 404:
+        return None
     if resp.status_code != 200:
         raise RuntimeError(
             f"registry getPlugin HTTP {resp.status_code}: {resp.text[:200]}"
         )
-    envelope = resp.json()
-    if envelope.get("status") != "success":
+    payload = resp.json()
+    # The REST endpoint mirrors the query's return shape directly. An
+    # error response body carries an ``error`` key with a status-coded
+    # message; bail to the failure path so the loop records it.
+    if isinstance(payload, dict) and "error" in payload and "plugin" not in payload:
         raise RuntimeError(
-            f"registry getPlugin error: {envelope.get('errorMessage', 'unknown')}"
+            f"registry getPlugin error: {payload.get('error', 'unknown')}"
         )
-    return envelope.get("value")
+    return payload
 
 
 def _pick_latest_version_row(payload: dict) -> dict | None:
@@ -378,19 +380,24 @@ async def check_one_plugin(
         )
         return AutoUpdateOutcome.NOTIFY
 
-    # Gate 7: permission delta. Set-equality on declared id sets.
-    # New permissions in the remote manifest that the operator never
-    # approved on this device require a fresh approval dialog.
+    # Gate 7: permission delta. Full set-equality on declared id sets.
+    # Any difference — added, removed, or swapped — triggers a notify
+    # so the operator re-confirms the posture before the new version
+    # takes effect. A pure-removal update could otherwise quietly drop
+    # a capability the operator was relying on, and a swap update
+    # could quietly grant something the operator never approved.
     current_declared = set(install.permissions.keys())
     remote_declared = remote_manifest.declared_permissions()
-    new_permissions = sorted(remote_declared - current_declared)
-    if new_permissions:
+    if remote_declared != current_declared:
+        new_permissions = sorted(remote_declared - current_declared)
+        removed_permissions = sorted(current_declared - remote_declared)
         notice = {
             "plugin_id": plugin_id,
             "current_version": install.version,
             "latest_version": latest_version,
             "reason": "permission_delta",
             "new_permissions": new_permissions,
+            "removed_permissions": removed_permissions,
             "timestamp_ms": _now_ms(),
         }
         _publish_update_notice(device_id, notice)
@@ -401,6 +408,7 @@ async def check_one_plugin(
             "auto_update_notify_permission_delta",
             plugin_id=plugin_id,
             new_permissions=new_permissions,
+            removed_permissions=removed_permissions,
         )
         return AutoUpdateOutcome.NOTIFY
 
@@ -422,16 +430,24 @@ async def _silent_install(
     version_row: dict,
     latest_version: str,
 ) -> AutoUpdateOutcome:
-    """Download, replace, and re-enable a plugin atomically.
+    """Download, swap, and re-enable a plugin with rollback on failure.
 
-    Sequence: ``disable`` → ``remove(keep_data=False)`` →
-    ``install_archive`` → ``enable`` → re-grant every previously
-    granted permission. If install_archive raises before any state
-    mutation, re-enable the original plugin so the operator does not
-    find their plugin stuck in disabled state. The supervisor's
-    install path is atomic — it raises before mutating state when
-    signature / manifest / compatibility checks fail, so there is
-    nothing for us to roll back beyond restoring the enabled flag.
+    Sequence: ``disable`` → ``install_archive`` (overwrites the on-disk
+    plugin and replaces the state record in one step) → re-grant every
+    previously granted permission → ``enable``. When ``install_archive``
+    raises, the prior on-disk files and the prior state record are
+    still intact, so the rollback path simply re-enables the original
+    plugin. The operator never finds their plugin gone — at worst it
+    sits in the disabled state for the brief swap window, and on the
+    failure path it is restored to the original enabled state.
+
+    The supervisor's ``install_archive`` is documented as
+    overwrite-safe: it ``shutil.rmtree`` the target install dir,
+    unpacks the new archive, rewrites the systemd unit (when the
+    plugin is a subprocess plugin), and replaces the state record via
+    ``upsert_install``. All of these mutations happen only after the
+    signature / manifest / compatibility gates pass, so a rejected
+    archive leaves the old plugin's files and state intact.
     """
     plugin_id = install.plugin_id
     download_url = str(version_row.get("download_url") or "")
@@ -507,26 +523,12 @@ async def _silent_install(
             )
             return AutoUpdateOutcome.FAILED
 
-        try:
-            await asyncio.to_thread(
-                supervisor.remove, plugin_id, keep_data=False
-            )
-        except SupervisorError as exc:
-            log.warning(
-                "auto_update_remove_failed",
-                plugin_id=plugin_id,
-                error=str(exc),
-            )
-            _record_attempt(
-                install,
-                supervisor,
-                version=latest_version,
-                outcome="failed",
-                error=f"remove: {exc}",
-            )
-            return AutoUpdateOutcome.FAILED
-
-        # ---- Step 3: install the new archive ---------------------------
+        # ---- Step 3: install over the existing plugin ------------------
+        # ``install_archive`` overwrites the on-disk files and the
+        # state record in one step. If it raises (signature / manifest
+        # / compatibility / archive error) it does so BEFORE any
+        # mutation, so the old plugin is still installed — we just
+        # re-enable it to restore the prior running state.
         try:
             await asyncio.to_thread(supervisor.install_archive, tmp_path)
         except (
@@ -540,6 +542,20 @@ async def _silent_install(
                 plugin_id=plugin_id,
                 error=str(exc),
             )
+            # Restore the original plugin to the enabled state so the
+            # operator does not have to do it by hand. A failure to
+            # re-enable is logged but does not change the overall
+            # outcome — the old version is still present on disk and
+            # in the state file.
+            if disabled_for_swap:
+                try:
+                    await asyncio.to_thread(supervisor.enable, plugin_id)
+                except SupervisorError as restore_exc:
+                    log.warning(
+                        "auto_update_rollback_enable_failed",
+                        plugin_id=plugin_id,
+                        error=str(restore_exc),
+                    )
             _record_attempt(
                 install,
                 supervisor,
@@ -550,6 +566,9 @@ async def _silent_install(
             return AutoUpdateOutcome.FAILED
 
         # ---- Step 4: re-grant prior permissions ------------------------
+        # install_archive resets the install record's permissions map
+        # to empty. Restore every grant the operator approved on the
+        # prior version so the plugin starts with the same posture.
         for perm_id in granted_perm_ids:
             try:
                 await asyncio.to_thread(

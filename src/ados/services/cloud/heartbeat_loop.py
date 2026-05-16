@@ -235,7 +235,7 @@ async def heartbeat_loop(ctx: CloudContext) -> None:  # noqa: C901
 
                     _last_plugin_check = _latest_plugin_check()
                     if _last_plugin_check is not None:
-                        payload["lastPluginUpdateCheckAt"] = _last_plugin_check
+                        payload["last_plugin_update_check_at"] = _last_plugin_check
                 except Exception as exc:
                     log.debug(
                         "heartbeat_plugin_update_check_failed",
