@@ -928,8 +928,25 @@ def _journal_tail_for(unit: str) -> _JournalTail:
 
 @router.websocket("/cloudflare/logs")
 async def stream_cloudflare_logs(websocket: WebSocket) -> None:
-    """Stream cloudflared journal lines to the wizard's log console."""
-    await websocket.accept()
+    """Stream cloudflared journal lines to the wizard's log console.
+
+    The HTTP middleware does not process WebSocket handshakes, so the
+    paired-key check runs inline here. Native clients pass
+    ``X-ADOS-Key`` on the handshake; browsers mint a one-shot ticket
+    via ``POST /api/_ws/ticket`` with ``scope=setup.cloudflare_logs``
+    and present it through the ``ados-ws-ticket`` subprotocol.
+    """
+    from ados.api.middleware.ws_auth import authenticate_websocket as _ws_auth
+
+    accept_subprotocol = await _ws_auth(
+        websocket, scope="setup.cloudflare_logs"
+    )
+    if accept_subprotocol is None:
+        return
+    if accept_subprotocol:
+        await websocket.accept(subprotocol=accept_subprotocol)
+    else:
+        await websocket.accept()
     app = get_agent_app()
     cf = getattr(app.config.remote_access, "cloudflare", None)
     unit = (getattr(cf, "service_name", "") or "cloudflared").strip() or "cloudflared"

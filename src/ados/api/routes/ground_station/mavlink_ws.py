@@ -55,14 +55,30 @@ async def ws_mavlink_bridge(websocket: WebSocket) -> None:
 
     Either task ending (peer disconnect, IPC error) cancels the other
     and tears the connection down.
+
+    Native clients pass ``X-ADOS-Key`` on the handshake; browsers
+    exchange the pairing key for a one-shot ticket via
+    ``POST /api/_ws/ticket`` with ``scope=gs.mavlink_ws`` and present
+    it through the ``ados-ws-ticket`` subprotocol. The previous
+    ``?api_key=`` query-string fallback is gone — the URL must not
+    carry the pairing key.
     """
+    from ados.api.middleware.ws_auth import authenticate_websocket as _ws_auth
+
+    accept_subprotocol = await _ws_auth(websocket, scope="gs.mavlink_ws")
+    if accept_subprotocol is None:
+        return
+
     app = get_agent_app()
     profile = getattr(app.config.agent, "profile", "auto")
     if profile != "ground_station":
         await websocket.close(code=1008, reason="E_PROFILE_MISMATCH")
         return
 
-    await websocket.accept()
+    if accept_subprotocol:
+        await websocket.accept(subprotocol=accept_subprotocol)
+    else:
+        await websocket.accept()
 
     ipc = MavlinkIPCClient(sock_path=MAVLINK_SOCK)
     try:

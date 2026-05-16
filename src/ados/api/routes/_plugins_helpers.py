@@ -24,12 +24,10 @@ LAN pairing event.
 
 from __future__ import annotations
 
-import asyncio
 import base64
 import hmac
 import json
 import os
-import secrets
 import tempfile
 import time
 from dataclasses import dataclass
@@ -45,17 +43,17 @@ log = get_logger("api.plugins.helpers")
 
 
 # ---------------------------------------------------------------------
-# WebSocket auth helper
+# WebSocket auth helpers
 # ---------------------------------------------------------------------
 #
-# ``ApiKeyAuthMiddleware`` extends Starlette's ``BaseHTTPMiddleware``,
-# which by design only processes HTTP requests. WebSocket handshakes
-# bypass it entirely, so any ``@router.websocket`` route must enforce
-# the same paired-key contract itself. This helper centralises the
-# check so the rest of the API can reuse it without duplicating the
-# pairing-manager wiring.
+# The plugin install-job WebSocket has its own ticket flow that binds
+# each ticket to a specific ``job_id`` and uses the historical
+# ``ados-job-ticket`` subprotocol marker. The underlying ticket store
+# and the credential-check logic live in
+# :mod:`ados.api.middleware.ws_auth` so other routes can reuse the
+# same code paths.
 #
-# Two accepted credentials per the install-job WebSocket contract:
+# Two accepted credentials per the WebSocket auth contract:
 #
 #   * ``X-ADOS-Key`` header — native clients (``ados`` CLI, agent
 #     integration tests) that can set arbitrary headers on the
@@ -72,56 +70,47 @@ log = get_logger("api.plugins.helpers")
 #     exports, or reverse-proxy access logs.
 
 
-# The ticket protocol marker the GCS sends as the FIRST entry in the
-# WebSocket subprotocols list. The agent echoes this exact value back
-# in ``websocket.accept(subprotocol=...)`` per RFC 6455. The SECOND
-# entry is the actual ticket hex string.
-WS_JOB_TICKET_PROTOCOL = "ados-job-ticket"
+from ados.api.middleware.ws_auth import (
+    WS_JOB_TICKET_PROTOCOL,
+    WS_TICKET_PROTOCOL as _WS_TICKET_PROTOCOL,
+    authenticate_websocket as _authenticate_websocket_unified,
+    ws_ticket_store,
+)
+
+# Re-export so the test suite and any external callers can pick the
+# marker up from the historical location.
+__all_ws = ["WS_JOB_TICKET_PROTOCOL", "_WS_TICKET_PROTOCOL"]
 
 
-@dataclass
-class _JobTicket:
-    job_id: str
-    issued_at_ms: int
-    expires_at_ms: int
+def _job_ticket_scope(job_id: str) -> str:
+    """Map an install-job id onto the unified ticket store's scope key."""
+    return f"plugin-job:{job_id}"
 
 
-class _JobTicketStore:
-    """In-memory store of one-shot WebSocket auth tickets.
+class _JobTicketStoreShim:
+    """Thin shim around the unified ticket store.
 
-    Each ticket is a 32-byte (64 hex char) random string bound to a
-    single ``job_id`` and expires 30 s after issue. ``consume`` is
-    one-shot — the second call for the same ticket returns ``None``
-    even if the TTL is still active, so a leaked ticket cannot be
-    replayed. Pruned opportunistically on every issue to keep the
-    dict bounded without a background task.
+    Existing tests reach into ``job_ticket_store`` to issue or reset
+    tickets without going through the route layer. Preserve that
+    surface while the underlying storage moves to the unified store.
     """
 
-    DEFAULT_TTL_SECONDS = 30
-    HEX_LEN = 64  # 32 bytes of randomness
-
-    def __init__(self) -> None:
-        self._tickets: dict[str, _JobTicket] = {}
-        self._lock = asyncio.Lock()
+    @property
+    def HEX_LEN(self) -> int:  # noqa: N802 — back-compat constant name
+        return ws_ticket_store.HEX_LEN
 
     async def issue(
         self,
         job_id: str,
         *,
-        ttl_seconds: int = DEFAULT_TTL_SECONDS,
+        ttl_seconds: int = 30,
         now_ms: int | None = None,
     ) -> tuple[str, int]:
-        ticket = secrets.token_hex(32)
-        issued = int(now_ms if now_ms is not None else time.time() * 1000)
-        expires = issued + ttl_seconds * 1000
-        async with self._lock:
-            self._prune_locked(now_ms=issued)
-            self._tickets[ticket] = _JobTicket(
-                job_id=job_id,
-                issued_at_ms=issued,
-                expires_at_ms=expires,
-            )
-        return ticket, expires
+        return await ws_ticket_store.issue(
+            _job_ticket_scope(job_id),
+            ttl_seconds=ttl_seconds,
+            now_ms=now_ms,
+        )
 
     async def consume(
         self,
@@ -130,48 +119,19 @@ class _JobTicketStore:
         job_id: str,
         now_ms: int | None = None,
     ) -> bool:
-        if not ticket or len(ticket) != self.HEX_LEN:
-            return False
-        now = int(now_ms if now_ms is not None else time.time() * 1000)
-        async with self._lock:
-            entry = self._tickets.pop(ticket, None)
-            if entry is None:
-                return False
-            if entry.expires_at_ms <= now:
-                return False
-            return entry.job_id == job_id
-
-    def _prune_locked(self, *, now_ms: int) -> None:
-        # Caller holds ``self._lock``. O(n) sweep is fine; the dict
-        # never grows beyond a handful of in-flight installs.
-        stale = [t for t, e in self._tickets.items() if e.expires_at_ms <= now_ms]
-        for t in stale:
-            self._tickets.pop(t, None)
+        return await ws_ticket_store.consume(
+            ticket,
+            scope=_job_ticket_scope(job_id),
+            now_ms=now_ms,
+        )
 
     def _reset_for_tests(self) -> None:
-        self._tickets.clear()
+        ws_ticket_store._reset_for_tests()
 
 
-# Module-level singleton. The agent has one ticket store across all
-# install jobs; ticket-to-job binding is enforced inside ``consume``.
-job_ticket_store = _JobTicketStore()
-
-
-def _extract_subprotocols(websocket: Any) -> list[str]:
-    """Read the offered WebSocket subprotocols.
-
-    Starlette parses these into ``scope['subprotocols']``; fall back
-    to splitting the raw header when ``scope`` is absent (TestClient
-    paths in older Starlette versions).
-    """
-    scope = getattr(websocket, "scope", None) or {}
-    offered = scope.get("subprotocols")
-    if isinstance(offered, list) and offered:
-        return [str(p) for p in offered]
-    raw = websocket.headers.get("sec-websocket-protocol")
-    if not raw:
-        return []
-    return [p.strip() for p in raw.split(",") if p.strip()]
+# Module-level singleton kept for back-compat with tests and any
+# external caller that imported the symbol directly.
+job_ticket_store = _JobTicketStoreShim()
 
 
 async def authenticate_job_websocket(
@@ -185,58 +145,22 @@ async def authenticate_job_websocket(
     ``websocket.accept(subprotocol=...)`` when the ticket path is
     taken (so the browser handshake completes per RFC 6455), or an
     empty string when the header path is taken (no subprotocol to
-    echo), or ``None`` on rejection. The helper closes the socket
-    with code ``4401`` before returning ``None`` so the route only
-    has to bail out on a falsy result.
+    echo), or ``None`` on rejection.
     """
-    # Import lazily to avoid a circular import at module load time
-    # (deps -> server -> routes -> _plugins_helpers).
-    from ados.api.deps import get_agent_app
-
-    app = get_agent_app()
-    pm = getattr(app, "pairing_manager", None)
-
-    # Open posture on an unpaired agent. Matches HTTP middleware.
-    if pm is None or not getattr(pm, "is_paired", False):
-        return ""
-
-    configured_key: str | None = None
-    try:
-        configured_key = app.config.security.api.api_key
-    except AttributeError:
-        configured_key = None
-
-    api_key = websocket.headers.get("X-ADOS-Key")
-    if api_key:
-        if configured_key and api_key == configured_key:
-            return ""
-        if pm.validate_key(api_key):
-            return ""
-        # Bad header: still try the ticket path before rejecting, in
-        # case a buggy intermediary stuck a junk value on the wire.
-
-    # Ticket path. Browsers cannot set custom headers on the
-    # WebSocket handshake; the GCS hands the ticket through the
-    # subprotocols list instead. Expect at least the marker and one
-    # ticket value; ignore any additional entries.
-    offered = _extract_subprotocols(websocket)
-    if len(offered) >= 2 and offered[0] == WS_JOB_TICKET_PROTOCOL:
-        ticket_value = offered[1]
-        if await job_ticket_store.consume(ticket_value, job_id=job_id):
-            return WS_JOB_TICKET_PROTOCOL
-
-    await websocket.close(code=4401, reason="auth required")
-    return None
+    return await _authenticate_websocket_unified(
+        websocket,
+        scope=_job_ticket_scope(job_id),
+        allow_legacy_job_protocol=True,
+    )
 
 
 async def authenticate_websocket(websocket: Any) -> bool:
-    """Back-compat wrapper for callers that have no job-id binding.
+    """Back-compat header-only wrapper for routes without a ticket flow.
 
-    Validates the pairing key the same way the install-job ticket
-    flow does but without consuming a ticket: header-only. Closes
-    with ``4401`` on failure. Kept for routes that haven't moved to
-    the ticket flow yet; new routes should call
-    :func:`authenticate_job_websocket` instead.
+    New routes should call
+    :func:`ados.api.middleware.ws_auth.authenticate_websocket` with an
+    explicit ``scope``. Returns ``True`` on success, ``False`` on
+    failure (in which case the socket has been closed with ``4401``).
     """
     from ados.api.deps import get_agent_app
 

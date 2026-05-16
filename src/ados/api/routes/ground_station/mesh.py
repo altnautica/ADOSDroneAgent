@@ -294,14 +294,28 @@ async def ws_uplink_events(websocket: WebSocket) -> None:
     Mirrors the `/pic/events` pattern: profile-gate before accept so
     wrong-profile callers close with 1008; subscribe to the async
     iterator `UplinkEventBus.subscribe()`; JSON-serialize each event.
+
+    Native clients pass ``X-ADOS-Key`` on the handshake; browsers
+    exchange the pairing key for a one-shot ticket via
+    ``POST /api/_ws/ticket`` with ``scope=gs.uplink_events`` and
+    present it through the ``ados-ws-ticket`` subprotocol.
     """
+    from ados.api.middleware.ws_auth import authenticate_websocket as _ws_auth
+
+    accept_subprotocol = await _ws_auth(websocket, scope="gs.uplink_events")
+    if accept_subprotocol is None:
+        return
+
     app = get_agent_app()
     profile = getattr(app.config.agent, "profile", "auto")
     if profile != "ground_station":
         await websocket.close(code=1008, reason="E_PROFILE_MISMATCH")
         return
 
-    await websocket.accept()
+    if accept_subprotocol:
+        await websocket.accept(subprotocol=accept_subprotocol)
+    else:
+        await websocket.accept()
 
     try:
         from ados.services.ground_station.uplink_router import get_uplink_router
@@ -350,14 +364,35 @@ async def ws_mesh_events(websocket: WebSocket) -> None:
     Gated like all other ground-station endpoints: closes on drone
     profile. Fans `MeshEvent` and `PairingEvent` into the same socket
     so GCS only needs one subscription for the Hardware tab.
+
+    Native clients pass ``X-ADOS-Key`` on the handshake; browsers
+    exchange the pairing key for a one-shot ticket via
+    ``POST /api/_ws/ticket`` with ``scope=gs.mesh_events`` and present
+    it through the ``ados-ws-ticket`` subprotocol.
     """
-    await websocket.accept()
+    from ados.api.middleware.ws_auth import authenticate_websocket as _ws_auth
+
+    accept_subprotocol = await _ws_auth(websocket, scope="gs.mesh_events")
+    if accept_subprotocol is None:
+        return
+
     app = get_agent_app()
     profile = getattr(app.config.agent, "profile", "auto")
     if profile != "ground_station":
+        # Profile-mismatch path: accept briefly so the JSON error reaches
+        # the client, then close. Matches the prior behaviour.
+        if accept_subprotocol:
+            await websocket.accept(subprotocol=accept_subprotocol)
+        else:
+            await websocket.accept()
         await websocket.send_json({"event": "error", "code": "E_PROFILE_MISMATCH"})
         await websocket.close()
         return
+
+    if accept_subprotocol:
+        await websocket.accept(subprotocol=accept_subprotocol)
+    else:
+        await websocket.accept()
 
     from ados.services.ground_station.events import (
         get_mesh_event_bus,
