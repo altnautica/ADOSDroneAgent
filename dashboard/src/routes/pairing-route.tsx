@@ -11,6 +11,7 @@ import {
   usePairingInfo,
   useUnpair,
 } from "@/hooks/use-pairing";
+import { useStatus } from "@/hooks/use-status";
 
 function MaskedCode({ code }: { code: string }) {
   return (
@@ -69,13 +70,16 @@ function AcceptCodeForm() {
 export function PairingRoute() {
   const info = usePairingInfo();
   const unpair = useUnpair();
+  const status = useStatus();
+  const profile = status.data?.profile;
+  const subject = profile === "ground_station" ? "ground station" : "drone";
 
   return (
     <div className="space-y-6 max-w-3xl">
       <header>
         <h1 className="text-xl font-semibold tracking-tight">Pairing</h1>
         <p className="text-sm text-muted-foreground">
-          Link this drone to one or more Mission Control instances. Codes
+          Link this {subject} to one or more Mission Control instances. Codes
           rotate automatically; new codes are generated on agent restart and
           when a pairing succeeds.
         </p>

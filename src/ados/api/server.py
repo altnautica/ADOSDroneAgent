@@ -195,6 +195,12 @@ def create_app(agent: Any) -> FastAPI:
                 # so the user sees missing files instead of a silent index.
                 if path.startswith("assets/") or "." in path.rsplit("/", 1)[-1]:
                     raise
+                # Don't fall back for /api/*: an unknown API path means the
+                # caller hit a typo'd endpoint or a wrong HTTP method, and
+                # returning the SPA HTML there silently masks the real 404 /
+                # 405. Plugin and external integrations need crisp errors.
+                if path.startswith("api/") or path == "api":
+                    raise
                 return FileResponse(self.index_path)
 
     app.mount(

@@ -51,7 +51,7 @@ function droneItems(): NavItem[] {
   // than hiding the link and leaving operators wondering where to go.
   return [
     { to: "/telemetry", label: "Telemetry", icon: Radio, enabled: true },
-    { to: "/video", label: "Video", icon: Video, enabled: false },
+    { to: "/video", label: "Video", icon: Video, enabled: true },
     { to: "/ros", label: "ROS", icon: Bot, enabled: true },
   ];
 }
@@ -59,7 +59,7 @@ function droneItems(): NavItem[] {
 function groundItems(role: GroundRole): NavItem[] {
   const items: NavItem[] = [
     { to: "/receive", label: "Receive", icon: Antenna, enabled: true },
-    { to: "/io", label: "Display & Joystick", icon: Gamepad2, enabled: false },
+    { to: "/io", label: "Display & Joystick", icon: Gamepad2, enabled: true },
   ];
   if (role === "relay" || role === "receiver") {
     items.push({ to: "/mesh", label: "Mesh", icon: Network, enabled: true });
