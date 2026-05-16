@@ -85,9 +85,31 @@ export interface NavigationAssignCameraPayload {
   role: "nav" | "secondary" | "thermal" | "inspection" | "primary";
 }
 
-export function postNavigationAssignCamera(payload: NavigationAssignCameraPayload) {
-  return apiFetch<SetupActionResult>("/api/v1/setup/navigation/assign-camera", {
-    method: "POST",
-    body: payload,
-  });
+export interface RoleConflictDetail {
+  error: "role_conflict";
+  device_path: string;
+  current_role: string;
+  current_plugin: string;
+  requested_role: string;
+  message: string;
+}
+
+export function isRoleConflictDetail(value: unknown): value is RoleConflictDetail {
+  if (!value || typeof value !== "object") return false;
+  const v = value as { error?: unknown };
+  return v.error === "role_conflict";
+}
+
+export function postNavigationAssignCamera(
+  payload: NavigationAssignCameraPayload,
+  opts: { force?: boolean } = {},
+) {
+  const qs = opts.force ? "?force=true" : "";
+  return apiFetch<SetupActionResult>(
+    `/api/v1/setup/navigation/assign-camera${qs}`,
+    {
+      method: "POST",
+      body: payload,
+    },
+  );
 }

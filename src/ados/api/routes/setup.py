@@ -9,13 +9,14 @@ from pathlib import Path
 from typing import Literal
 
 import httpx
-from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, File, Form, HTTPException, Query, Request, UploadFile, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field
 
 from ados.api.deps import get_agent_app
 from ados.core.logging import get_logger
 from ados.core.paths import DISPLAY_CONF_PATH
 from ados.hal.detect import _load_board_profiles, detect_board
+from ados.services.video.camera_mgr import RoleConflict
 from ados.setup import display_install, hardware_state
 from ados.setup import navigation_helpers as nav_helpers
 from ados.setup import state as setup_state
@@ -1109,12 +1110,29 @@ async def list_navigation_cameras() -> NavigationCamerasResponse:
 @router.post("/navigation/assign-camera", response_model=SetupActionResult)
 async def assign_navigation_camera(
     request: NavigationAssignCameraRequest,
+    force: bool = Query(
+        default=False,
+        description=(
+            "When true, drop any existing plugin claim on the target "
+            "camera and reassign. Operator-confirmed override path "
+            "the GCS uses after a 409 prompt."
+        ),
+    ),
 ) -> SetupActionResult:
     """Bind a discovered camera to a role.
 
-    The exclusive roles (``thermal``, ``inspection``) return a 409 when
-    they are already held by a different camera so a misclick does not
-    silently steal the role from another active pipeline.
+    Two 409 paths exist:
+
+    * Plugin claim conflict: the target camera is exclusively claimed
+      by a plugin (typically vision-nav) and the operator is trying
+      to repurpose it via the wizard. The response body carries
+      ``error: "role_conflict"`` with the current holder so the GCS
+      can render a confirm dialog. Pass ``?force=true`` to override.
+    * Role-already-bound conflict (``thermal``, ``inspection``): the
+      requested role is already pointed at a different device. The
+      operator must unassign the role first; ``force=true`` does NOT
+      override this path because it is not a plugin claim, it is the
+      operator's own previous wizard choice.
     """
     mgr = _resolve_camera_mgr()
     if mgr is None:
@@ -1163,15 +1181,66 @@ async def assign_navigation_camera(
             ),
         )
 
-    try:
-        mgr.assign_role(target, role)
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    # NAV is the only role where the wizard installs an exclusive claim
+    # on behalf of the navigation plugin so the plugin can survive a
+    # restart without losing the camera reservation. Other roles stay
+    # non-exclusive (the wizard can repoint them freely).
+    new_claim_plugin_id: str | None = (
+        nav_helpers.DEFAULT_NAV_PLUGIN_ID if request.role == "nav" else None
+    )
+
+    if force:
+        # Operator-confirmed override path: drop whatever claim is on
+        # the device and reassign atomically under the manager's lock.
+        dropped = mgr.reassign_role_exclusive(target, role, new_claim_plugin_id)
+        log.warning(
+            "nav_assign_camera_forced",
+            device_path=request.device_path,
+            requested_role=request.role,
+            dropped_holder=dropped,
+            new_holder=new_claim_plugin_id,
+        )
+    else:
+        try:
+            if new_claim_plugin_id is not None:
+                mgr.assign_role_exclusive(target, role, new_claim_plugin_id)
+            else:
+                mgr.assign_role(target, role)
+        except RoleConflict as conflict:
+            log.warning(
+                "nav_assign_camera_role_conflict",
+                device_path=request.device_path,
+                requested_role=request.role,
+                current_holder=conflict.current_holder,
+            )
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": "role_conflict",
+                    "device_path": request.device_path,
+                    "current_role": role.value,
+                    "current_plugin": conflict.current_holder,
+                    "requested_role": request.role,
+                    "message": (
+                        f"Camera {request.device_path} is currently claimed "
+                        f"by {conflict.current_holder!r}. Retry with "
+                        "force=true to reassign."
+                    ),
+                },
+            ) from conflict
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     return SetupActionResult(
         ok=True,
         message=f"Camera {request.device_path} assigned to role {request.role}.",
-        data={"device_path": request.device_path, "role": request.role},
+        data={
+            "device_path": request.device_path,
+            "role": request.role,
+            "forced": force,
+        },
     )
 
 

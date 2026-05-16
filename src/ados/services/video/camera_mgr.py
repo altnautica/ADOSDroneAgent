@@ -149,6 +149,50 @@ class CameraManager:
             plugin_id=plugin_id,
         )
 
+    def reassign_role_exclusive(
+        self,
+        camera: CameraInfo,
+        role: CameraRole,
+        plugin_id: str | None = None,
+    ) -> str | None:
+        """Force a role reassignment, dropping any existing exclusive claim.
+
+        This is the explicit-override path. The operator has been
+        warned (via 409 + confirm dialog on the GCS) that the camera is
+        currently claimed by another plugin and has chosen to proceed.
+
+        Behavior under the lock (single atomic operation so a concurrent
+        ``assign_role_exclusive`` from the dropped plugin cannot wedge
+        the state):
+
+        * Drop any existing claim on ``camera.device_path``.
+        * If ``plugin_id`` is a non-empty string, install a new claim
+          mapping the device to ``plugin_id``.
+        * If ``plugin_id`` is ``None`` or empty, leave the camera
+          unclaimed (the setup wizard's NAV bind path uses this when
+          the role is not held by a plugin).
+        * Set the role assignment to ``camera``.
+
+        Returns the dropped plugin id (or ``None`` if no claim existed)
+        so the caller can log + surface it in the response.
+        """
+        normalized_id = plugin_id.strip() if isinstance(plugin_id, str) else None
+        new_holder = normalized_id or None
+        with self._state_lock:
+            dropped = self._claims.pop(camera.device_path, None)
+            if new_holder:
+                self._claims[camera.device_path] = new_holder
+            self._assignments[role] = camera
+        log.warning(
+            "camera_role_force_reassigned",
+            role=role.value,
+            camera=camera.name,
+            device_path=camera.device_path,
+            dropped_holder=dropped,
+            new_holder=new_holder,
+        )
+        return dropped
+
     def release_claim(self, device_path: str, plugin_id: str) -> bool:
         """Release a plugin's exclusive claim on a camera.
 

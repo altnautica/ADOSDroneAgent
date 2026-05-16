@@ -175,6 +175,87 @@ def test_assign_camera_exclusive_role_conflict_returns_409(client, agent_app, ca
     assert resp.status_code == 409
 
 
+def test_assign_nav_installs_exclusive_claim(client, agent_app) -> None:
+    """A clean NAV bind installs an exclusive claim for the nav plugin
+    so the plugin can reattach after a restart without losing the
+    camera reservation."""
+    resp = client.post(
+        "/api/v1/setup/navigation/assign-camera",
+        json={"device_path": "/dev/video0", "role": "nav"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is True
+    assert body["data"]["forced"] is False
+    mgr = agent_app.video_pipeline_handle._camera_mgr
+    from ados.setup import navigation_helpers as nh
+
+    assert mgr.claimed_by("/dev/video0") == nh.DEFAULT_NAV_PLUGIN_ID
+
+
+def test_assign_nav_plugin_claim_returns_structured_409(client, agent_app) -> None:
+    """When a third-party plugin already claims the camera, the route
+    returns a 409 with a structured body so the GCS can prompt the
+    operator with the current holder."""
+    mgr = agent_app.video_pipeline_handle._camera_mgr
+    # Some other plugin already owns /dev/video0.
+    cam = next(c for c in mgr.cameras if c.device_path == "/dev/video0")
+    mgr.assign_role_exclusive(cam, CameraRole.NAV, plugin_id="com.other.tracker")
+
+    resp = client.post(
+        "/api/v1/setup/navigation/assign-camera",
+        json={"device_path": "/dev/video0", "role": "nav"},
+    )
+    assert resp.status_code == 409
+    body = resp.json()
+    # FastAPI wraps non-string detail under the "detail" key.
+    detail = body["detail"]
+    assert detail["error"] == "role_conflict"
+    assert detail["device_path"] == "/dev/video0"
+    assert detail["current_plugin"] == "com.other.tracker"
+    assert detail["requested_role"] == "nav"
+    assert "message" in detail
+
+
+def test_assign_nav_force_true_overrides_plugin_claim(client, agent_app) -> None:
+    """``force=true`` drops the existing claim and installs the wizard's
+    claim on behalf of the navigation plugin."""
+    mgr = agent_app.video_pipeline_handle._camera_mgr
+    cam = next(c for c in mgr.cameras if c.device_path == "/dev/video0")
+    mgr.assign_role_exclusive(cam, CameraRole.NAV, plugin_id="com.other.tracker")
+
+    resp = client.post(
+        "/api/v1/setup/navigation/assign-camera?force=true",
+        json={"device_path": "/dev/video0", "role": "nav"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["data"]["forced"] is True
+
+    from ados.setup import navigation_helpers as nh
+
+    assert mgr.claimed_by("/dev/video0") == nh.DEFAULT_NAV_PLUGIN_ID
+
+
+def test_assign_secondary_role_with_force_drops_claim_without_replacing(
+    client, agent_app
+) -> None:
+    """Forcing a non-NAV role drops the existing plugin claim but does
+    not install a new wizard claim (only NAV is held exclusively by
+    the wizard)."""
+    mgr = agent_app.video_pipeline_handle._camera_mgr
+    cam = next(c for c in mgr.cameras if c.device_path == "/dev/video0")
+    mgr.assign_role_exclusive(cam, CameraRole.NAV, plugin_id="com.other.tracker")
+
+    resp = client.post(
+        "/api/v1/setup/navigation/assign-camera?force=true",
+        json={"device_path": "/dev/video0", "role": "secondary"},
+    )
+    assert resp.status_code == 200
+    assert mgr.claimed_by("/dev/video0") is None
+    assert mgr.get_by_role(CameraRole.SECONDARY).device_path == "/dev/video0"
+
+
 # ---------------------------------------------------------------------------
 # POST /navigation/calibration
 # ---------------------------------------------------------------------------

@@ -148,3 +148,78 @@ def test_assign_role_exclusive_rejects_empty_plugin_id() -> None:
     mgr.set_cameras([cam])
     with pytest.raises(ValueError):
         mgr.assign_role_exclusive(cam, CameraRole.NAV, plugin_id="")
+
+
+# ---------------------------------------------------------------------------
+# reassign_role_exclusive — operator-confirmed override path
+# ---------------------------------------------------------------------------
+
+
+def test_reassign_role_exclusive_drops_existing_holder() -> None:
+    """Force-reassign drops the prior plugin's claim and installs a new one.
+
+    Returned value is the dropped plugin id so the caller can audit-log
+    + surface it on the response. After the call the device is owned by
+    the new plugin and the role points at the new camera atomically.
+    """
+    mgr = CameraManager()
+    cam = _cam()
+    mgr.set_cameras([cam])
+    mgr.assign_role_exclusive(cam, CameraRole.NAV, plugin_id="com.example.vision-nav")
+
+    dropped = mgr.reassign_role_exclusive(
+        cam, CameraRole.NAV, plugin_id="com.altnautica.vision-nav"
+    )
+
+    assert dropped == "com.example.vision-nav"
+    assert mgr.claimed_by(cam.device_path) == "com.altnautica.vision-nav"
+    assert mgr.get_by_role(CameraRole.NAV) is cam
+
+
+def test_reassign_role_exclusive_clears_claim_when_plugin_id_none() -> None:
+    """``plugin_id=None`` drops the existing claim and leaves the device unclaimed.
+
+    Used by the wizard for non-NAV roles where the operator wants to
+    repurpose a plugin-claimed camera back to a shared role (PRIMARY,
+    SECONDARY) without installing a new exclusive reservation.
+    """
+    mgr = CameraManager()
+    cam = _cam()
+    mgr.set_cameras([cam])
+    mgr.assign_role_exclusive(cam, CameraRole.NAV, plugin_id="com.example.vision-nav")
+
+    dropped = mgr.reassign_role_exclusive(
+        cam, CameraRole.PRIMARY, plugin_id=None
+    )
+
+    assert dropped == "com.example.vision-nav"
+    assert mgr.claimed_by(cam.device_path) is None
+    assert mgr.get_by_role(CameraRole.PRIMARY) is cam
+
+
+def test_reassign_role_exclusive_when_no_prior_claim() -> None:
+    """When the device has no existing claim, reassign behaves like a
+    plain exclusive assign and returns ``None`` for the dropped holder."""
+    mgr = CameraManager()
+    cam = _cam()
+    mgr.set_cameras([cam])
+
+    dropped = mgr.reassign_role_exclusive(
+        cam, CameraRole.NAV, plugin_id="com.altnautica.vision-nav"
+    )
+
+    assert dropped is None
+    assert mgr.claimed_by(cam.device_path) == "com.altnautica.vision-nav"
+    assert mgr.get_by_role(CameraRole.NAV) is cam
+
+
+def test_reassign_role_exclusive_empty_plugin_id_clears_claim() -> None:
+    """Empty / whitespace plugin_id is treated as ``None`` (no new claim)."""
+    mgr = CameraManager()
+    cam = _cam()
+    mgr.set_cameras([cam])
+    mgr.assign_role_exclusive(cam, CameraRole.NAV, plugin_id="com.example.vision-nav")
+
+    dropped = mgr.reassign_role_exclusive(cam, CameraRole.SECONDARY, plugin_id="   ")
+    assert dropped == "com.example.vision-nav"
+    assert mgr.claimed_by(cam.device_path) is None

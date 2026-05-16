@@ -4,16 +4,27 @@ import { Link, useNavigate } from "react-router-dom";
 
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { WizardShell, type WizardStep } from "@/components/wizard/wizard-shell";
 import { useStatus } from "@/hooks/use-status";
+import { ApiError } from "@/lib/api";
 import {
   finishSetup,
   installCloudflared,
+  isRoleConflictDetail,
   postCloudChoice,
   postNavigationAssignCamera,
   postNavigationConfig,
   postProfile,
   skipStep,
+  type RoleConflictDetail,
 } from "@/lib/setup-actions";
 import type { GroundRole, Profile } from "@/lib/types";
 
@@ -158,6 +169,16 @@ export function SetupRoute() {
   );
   const onNavChange = useCallback((next: NavigationState) => setNavState(next), []);
 
+  // When the agent returns a 409 role_conflict, we stash the parsed
+  // detail here so the dialog can render. ``onConfirm`` is the deferred
+  // continuation that re-runs the failing POST with ``force=true`` and
+  // resumes the navigation step.
+  const [pendingConflict, setPendingConflict] = useState<{
+    detail: RoleConflictDetail;
+    onConfirm: () => Promise<void>;
+  } | null>(null);
+  const [conflictPending, setConflictPending] = useState(false);
+
   function deriveNavMode(s: NavigationState): "off" | "optical-flow" | "vio" | "both" {
     if (s.enableOpticalFlow && s.enableVio) return "both";
     if (s.enableVio) return "vio";
@@ -165,19 +186,8 @@ export function SetupRoute() {
     return "off";
   }
 
-  async function applyNavigationStep() {
+  async function postNavigationConfigForState(): Promise<void> {
     const mode = deriveNavMode(navState);
-    if (mode === "off" && !navState.enableRangefinder) {
-      // Pure skip path. Mark the wizard step deferred and move on.
-      await skipStep("navigation").catch(() => undefined);
-      return;
-    }
-    if (mode !== "off" && navState.cameraDevice) {
-      await postNavigationAssignCamera({
-        device_path: navState.cameraDevice,
-        role: "nav",
-      });
-    }
     await postNavigationConfig({
       mode,
       rangefinder: navState.enableRangefinder
@@ -192,6 +202,68 @@ export function SetupRoute() {
           }
         : undefined,
     });
+  }
+
+  async function applyNavigationStep() {
+    const mode = deriveNavMode(navState);
+    if (mode === "off" && !navState.enableRangefinder) {
+      // Pure skip path. Mark the wizard step deferred and move on.
+      await skipStep("navigation").catch(() => undefined);
+      return;
+    }
+    if (mode !== "off" && navState.cameraDevice) {
+      try {
+        await postNavigationAssignCamera({
+          device_path: navState.cameraDevice,
+          role: "nav",
+        });
+      } catch (err) {
+        if (err instanceof ApiError && err.status === 409) {
+          const body = (err.body ?? null) as { detail?: unknown } | null;
+          const detail = body && typeof body === "object" ? body.detail : null;
+          if (isRoleConflictDetail(detail)) {
+            // Pause the wizard. The dialog's confirm handler retries
+            // the assign with force=true, then continues with the
+            // navigation/config POST + step advance.
+            const device = navState.cameraDevice;
+            setPendingConflict({
+              detail,
+              onConfirm: async () => {
+                await postNavigationAssignCamera(
+                  { device_path: device, role: "nav" },
+                  { force: true },
+                );
+                await postNavigationConfigForState();
+                await qc.invalidateQueries({ queryKey: ["setup-status"] });
+                setStepId("cloud-pair");
+              },
+            });
+            return;
+          }
+        }
+        throw err;
+      }
+    }
+    await postNavigationConfigForState();
+  }
+
+  async function onConfirmReassign(): Promise<void> {
+    const pending = pendingConflict;
+    if (!pending) return;
+    setErrorMsg(null);
+    setConflictPending(true);
+    try {
+      await pending.onConfirm();
+      setPendingConflict(null);
+    } catch (err) {
+      setErrorMsg(humanizeApiError(err));
+    } finally {
+      setConflictPending(false);
+    }
+  }
+
+  function onCancelReassign(): void {
+    setPendingConflict(null);
   }
 
   const goNext = async () => {
@@ -229,8 +301,7 @@ export function SetupRoute() {
         navigate("/home", { replace: true });
       }
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      setErrorMsg(msg);
+      setErrorMsg(humanizeApiError(err));
     }
   };
 
@@ -254,35 +325,108 @@ export function SetupRoute() {
   if (!step) return null;
 
   return (
-    <WizardShell
-      steps={STEPS}
-      currentStepId={stepId}
-      onChangeStep={setStepId}
-      onBack={idx > 0 ? goBack : undefined}
-      backDisabled={idx === 0 || nextLoading}
-      onNext={goNext}
-      nextDisabled={nextDisabled || nextLoading}
-      nextLoading={nextLoading}
-      nextLabel={nextLabel}
-      rightAction={
-        <Button asChild variant="ghost" size="sm">
-          <Link to="/">Skip to Home</Link>
-        </Button>
-      }
-    >
-      {stepId === "profile" && <ProfileStep onChange={onProfileChange} />}
-      {stepId === "connectivity" && <ConnectivityStep />}
-      {stepId === "navigation" && <NavigationStep onChange={onNavChange} />}
-      {stepId === "cloud-pair" && <CloudPairStep onChange={onCloudChange} />}
-      {stepId === "finish" && <FinishStep onChange={onFinishChange} />}
+    <>
+      <WizardShell
+        steps={STEPS}
+        currentStepId={stepId}
+        onChangeStep={setStepId}
+        onBack={idx > 0 ? goBack : undefined}
+        backDisabled={idx === 0 || nextLoading}
+        onNext={goNext}
+        nextDisabled={nextDisabled || nextLoading}
+        nextLoading={nextLoading}
+        nextLabel={nextLabel}
+        rightAction={
+          <Button asChild variant="ghost" size="sm">
+            <Link to="/">Skip to Home</Link>
+          </Button>
+        }
+      >
+        {stepId === "profile" && <ProfileStep onChange={onProfileChange} />}
+        {stepId === "connectivity" && <ConnectivityStep />}
+        {stepId === "navigation" && <NavigationStep onChange={onNavChange} />}
+        {stepId === "cloud-pair" && <CloudPairStep onChange={onCloudChange} />}
+        {stepId === "finish" && <FinishStep onChange={onFinishChange} />}
 
-      {errorMsg && (
-        <Card>
-          <CardContent className="pt-4">
-            <p className="text-sm text-destructive">{errorMsg}</p>
-          </CardContent>
-        </Card>
-      )}
-    </WizardShell>
+        {errorMsg && (
+          <Card>
+            <CardContent className="pt-4">
+              <p className="text-sm text-destructive">{errorMsg}</p>
+            </CardContent>
+          </Card>
+        )}
+      </WizardShell>
+
+      <Dialog
+        open={pendingConflict !== null}
+        onOpenChange={(open) => {
+          if (!open && !conflictPending) onCancelReassign();
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Camera already in use</DialogTitle>
+            <DialogDescription>
+              {pendingConflict ? (
+                <>
+                  Camera{" "}
+                  <span className="font-mono">
+                    {pendingConflict.detail.device_path}
+                  </span>{" "}
+                  is currently reserved for{" "}
+                  <span className="font-mono">
+                    {pendingConflict.detail.current_plugin}
+                  </span>{" "}
+                  (role{" "}
+                  <span className="font-mono">
+                    {pendingConflict.detail.current_role}
+                  </span>
+                  ). Reassign it to vision navigation? The other plugin will lose its
+                  reservation and may stop working until you reconfigure it.
+                </>
+              ) : null}
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              variant="ghost"
+              onClick={onCancelReassign}
+              disabled={conflictPending}
+            >
+              Keep current assignment
+            </Button>
+            <Button
+              onClick={() => {
+                void onConfirmReassign();
+              }}
+              disabled={conflictPending}
+            >
+              {conflictPending ? "Reassigning..." : "Reassign to navigation"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </>
   );
+}
+
+/**
+ * Convert an unknown error from a setup-route POST into a single line
+ * of operator-readable copy. Strips raw JSON, prefers the agent's
+ * ``detail.message`` when present, falls back to the HTTP status +
+ * statusText for anything we cannot parse.
+ */
+function humanizeApiError(err: unknown): string {
+  if (err instanceof ApiError) {
+    const body = (err.body ?? null) as { detail?: unknown } | null;
+    const detail = body && typeof body === "object" ? body.detail : null;
+    if (detail && typeof detail === "object") {
+      const maybeMsg = (detail as { message?: unknown }).message;
+      if (typeof maybeMsg === "string" && maybeMsg.trim()) return maybeMsg;
+    }
+    if (typeof detail === "string" && detail.trim()) return detail;
+    return `Request failed (${err.status}).`;
+  }
+  if (err instanceof Error) return err.message;
+  return String(err);
 }
