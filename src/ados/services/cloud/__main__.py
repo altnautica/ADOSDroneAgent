@@ -705,6 +705,40 @@ async def main() -> None:
                 except Exception as exc:  # noqa: BLE001
                     return "failed", {"success": False, "message": str(exc)}, None
 
+            elif command == "plugin.install":
+                # Cloud-relay install fallback. The local-first path is
+                # the multipart upload to /api/plugins/install which the
+                # GCS uses whenever it has a direct LAN line. This
+                # branch fires only when the GCS could not reach us.
+                from ados.api.routes.plugins import _get_supervisor
+                from ados.plugins.remote_install import RemoteInstallReceiver
+
+                return await RemoteInstallReceiver.handle_install(
+                    cmd,
+                    supervisor=_get_supervisor(),
+                    device_id=config.agent.device_id,
+                    api_key=pairing.api_key,
+                    convex_url=convex_url,
+                )
+
+            elif command in (
+                "plugin.uninstall",
+                "plugin.enable",
+                "plugin.disable",
+                "plugin.configure",
+            ):
+                # Non-install lifecycle commands route through the same
+                # receiver so idempotency + ack shape stay consistent
+                # with the install path.
+                from ados.api.routes.plugins import _get_supervisor
+                from ados.plugins.remote_install import RemoteInstallReceiver
+
+                return await RemoteInstallReceiver.dispatch(
+                    cmd,
+                    supervisor=_get_supervisor(),
+                    device_id=config.agent.device_id,
+                )
+
             else:
                 return "failed", {"success": False, "message": f"Unknown command: {command}"}, None
 

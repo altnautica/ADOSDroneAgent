@@ -32,6 +32,12 @@ SAME_ORIGIN_SETUP_PATHS = {
     "/api/v1/setup/cloud-choice",
     "/api/v1/setup/finish",
     "/api/v1/setup/reset",
+    "/api/v1/setup/navigation/capabilities",
+    "/api/v1/setup/navigation/cameras",
+    "/api/v1/setup/navigation/assign-camera",
+    "/api/v1/setup/navigation/calibration",
+    "/api/v1/setup/navigation/config",
+    "/api/v1/setup/navigation/preflight",
 }
 
 # Path prefixes that follow the same same-origin trust model. Used for

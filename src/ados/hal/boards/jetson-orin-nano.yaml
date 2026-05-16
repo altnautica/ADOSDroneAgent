@@ -23,6 +23,27 @@ hw_video_codecs:
   - h265_dec
   - av1_dec
 
+# Orin Nano devkit exposes 2 MIPI CSI lanes plus 4 USB ports. Spare CSI
+# lane carries the downward navigation camera.
+video:
+  csi_ports: 2
+  max_encode_resolution: "3840x2160"
+  max_encode_fps: 60
+  encoder_api: v4l2
+  nav_cameras:
+    csi_count: 2
+    usb_uvc_count: 4
+    recommended_role: nav-csi
+
+# Orin GPU + NVDLA carries VIO with headroom. The 4 GB SKU is tight but
+# usable; the 8 GB SKU is comfortable. Rangefinder lands on a free UART
+# or the I2C bus.
+navigation:
+  vio_capable: true
+  rangefinder_ports:
+    - {type: uart, path: /dev/ttyTHS1, baud_max: 115200}
+    - {type: i2c, path: /dev/i2c-1, speed_hz: 400000}
+
 # ROS 2: 4-8 GB RAM. Orin GPU with NVDLA accelerator. Docker fits.
 # Minimal profile conservative default; 8 GB variant could run VIO.
 ros:

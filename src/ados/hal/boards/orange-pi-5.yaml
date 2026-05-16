@@ -23,6 +23,28 @@ hw_video_codecs:
   - av1_dec
   - vp9_dec
 
+# Orange Pi 5 exposes 2 MIPI CSI ports plus multiple USB hosts. Downward
+# navigation camera lands on the spare CSI lane.
+video:
+  csi_ports: 2
+  max_encode_resolution: "7680x4320"
+  max_encode_fps: 30
+  encoder_api: rkmpp
+  nav_cameras:
+    csi_count: 2
+    usb_uvc_count: 4
+    recommended_role: nav-csi
+
+# 6 TOPS NPU + Cortex-A76 quad carry VIO on the 8 GB+ SKUs. The 4 GB SKU
+# is tight; runtime check should confirm RAM headroom before enabling
+# the VIO front-end.
+navigation:
+  vio_capable: true
+  rangefinder_ports:
+    - {type: uart, path: /dev/ttyS1, baud_max: 115200}
+    - {type: i2c, path: /dev/i2c-0, speed_hz: 400000}
+    - {type: i2c, path: /dev/i2c-1, speed_hz: 400000}
+
 # ROS 2: RK3588S with 4-16 GB variants. Docker fits. Minimal profile conservative
 # default for 4 GB; 8+ GB boards could run VIO but RAM is not guaranteed at HAL level.
 ros:

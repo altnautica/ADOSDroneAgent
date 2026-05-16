@@ -20,6 +20,28 @@ hw_video_codecs:
   - h264_dec
   - h265_dec
 
+# Pi 4B exposes one MIPI CSI on the standard board and four USB host
+# ports. Downward navigation camera typically lands on a USB UVC port
+# because the single CSI is consumed by the primary forward camera.
+video:
+  csi_ports: 1
+  max_encode_resolution: "1920x1080"
+  max_encode_fps: 30
+  encoder_api: v4l2
+  nav_cameras:
+    csi_count: 1
+    usb_uvc_count: 4
+    recommended_role: nav-usb
+
+# 4-8 GB SKUs and Cortex-A72 quad can carry a CPU-bound VIO at modest
+# frame rates. No dedicated NPU, so optical flow is the more efficient
+# default. Rangefinder lands on the primary UART or the I2C bus.
+navigation:
+  vio_capable: false
+  rangefinder_ports:
+    - {type: uart, path: /dev/ttyAMA0, baud_max: 115200}
+    - {type: i2c, path: /dev/i2c-1, speed_hz: 400000}
+
 # ground-station bench build uses OLED on I2C1 and four menu buttons.
 buses:
   i2c:

@@ -66,6 +66,13 @@ video:
   max_encode_fps: 30
   encoder_api: rkmedia
   encoder_api_lite: rkmpi  # Rust lite agent reads this; routes to the rkmpi-wrapper subprocess
+  # Single CSI lane is consumed by the primary camera. The single USB
+  # host port is typically claimed by the WFB-ng dongle, leaving no slot
+  # for a dedicated UVC nav camera.
+  nav_cameras:
+    csi_count: 1
+    usb_uvc_count: 0
+    recommended_role: nav-shared-primary
 
 power:
   typical_watts: 1.0
@@ -75,6 +82,14 @@ power:
 # ROS 2: 256 MB RAM, armv7l. Cannot run Docker or Jazzy.
 ros:
   supported: false
+
+# Optical flow only. 256 MB RAM and the single Cortex-A7 cannot host
+# VIO. Rangefinder lands on the primary UART or the I2C bus.
+navigation:
+  vio_capable: false
+  rangefinder_ports:
+    - {type: uart, path: /dev/ttyS0, baud_max: 115200}
+    - {type: i2c, path: /dev/i2c-0, speed_hz: 400000}
 
 profiles:
   tier: budget

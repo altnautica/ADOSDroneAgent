@@ -163,6 +163,26 @@ def _setup_steps(
         )
     )
 
+    # Optional GPS-denied navigation step. Drone profile only: ground
+    # stations have no nav pipeline to configure. Default state is
+    # ``optional`` so the operator can advance the wizard without
+    # engaging the plugin; flips to ``complete`` once the operator
+    # finalizes a config via POST /v1/setup/navigation/config.
+    if is_drone:
+        steps.append(
+            SetupStep(
+                id="navigation",
+                label="GPS-denied navigation",
+                state="optional",
+                detail=(
+                    "Optional. Configure optical flow, VIO, or a rangefinder "
+                    "for flight without GPS."
+                ),
+                action_label="Configure navigation",
+                href="/setup.html?step=navigation",
+            )
+        )
+
     steps.append(
         SetupStep(
             id="cloud_choice",

@@ -105,6 +105,12 @@ video:
   max_encode_resolution: "1920x1080"
   max_encode_fps: 60
   encoder_api: vendor
+  # Single CSI consumed by the primary camera. Single USB host can carry
+  # a UVC nav camera if the WFB-ng dongle is on the OTG port.
+  nav_cameras:
+    csi_count: 1
+    usb_uvc_count: 1
+    recommended_role: nav-usb
 
 power:
   typical_watts: 2.0
@@ -114,6 +120,16 @@ power:
 
 ros:
   supported: false
+
+# Cortex-A76 pair + 2 TOPS NPU can host VIO on the 4 GB+ SKUs. The 1 GB
+# SKU is too tight; the runtime should gate the VIO front-end on real
+# RAM. Rangefinder lands on the FC UART link (shared with the FC) or
+# the broken-out I2C bus.
+navigation:
+  vio_capable: true
+  rangefinder_ports:
+    - {type: uart, path: /dev/ttyS3, baud_max: 115200}
+    - {type: i2c, path: /dev/i2c-11, speed_hz: 400000}
 
 displays:
   supported:

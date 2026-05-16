@@ -21,3 +21,24 @@ hw_video_codecs:
   - h264_dec
   - h265_enc
   - h265_dec
+
+# CM3 typically breaks out a single MIPI CSI lane on the carrier. The
+# downward navigation camera lands on a free USB UVC port.
+video:
+  csi_ports: 1
+  max_encode_resolution: "1920x1080"
+  max_encode_fps: 60
+  encoder_api: rkmedia
+  nav_cameras:
+    csi_count: 1
+    usb_uvc_count: 2
+    recommended_role: nav-usb
+
+# 2 GB RAM and 0.8 TOPS NPU keep VIO out of reach. Optical flow runs
+# fine. Rangefinder choices: primary UART or either I2C bus.
+navigation:
+  vio_capable: false
+  rangefinder_ports:
+    - {type: uart, path: /dev/ttyS2, baud_max: 115200}
+    - {type: i2c, path: /dev/i2c-0, speed_hz: 400000}
+    - {type: i2c, path: /dev/i2c-1, speed_hz: 400000}

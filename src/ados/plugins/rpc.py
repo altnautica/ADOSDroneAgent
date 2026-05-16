@@ -12,17 +12,23 @@ supervisor's IPC server verifies the token before routing the request.
 Tokens are short-lived (default 10 min) and rotate on every plugin
 restart and on every permission change. The runner does not see the
 HMAC secret; it just echoes the token back to the supervisor.
+
+The supervisor also accepts a second token shape — JSON claims signed
+with one of three issuer secrets — coming through the GCS bridge for
+postMessage RPCs. See :class:`MultiIssuerVerifier`.
 """
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import hmac
+import json
 import os
 import secrets
 import time
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any, Callable, Literal
 
 import msgpack
 
@@ -252,3 +258,145 @@ class TokenIssuer:
             ]
         ).encode("utf-8")
         return hmac.new(self._secret, payload, hashlib.sha256).hexdigest()
+
+
+# ---------------------------------------------------------------------------
+# Multi-issuer JSON-claim token verifier
+# ---------------------------------------------------------------------------
+
+
+class TokenInvalid(TokenError):
+    """Raised when a JSON-claim token fails issuer / signature / claim checks."""
+
+
+@dataclass(frozen=True)
+class VerifiedClaims:
+    plugin_id: str
+    agent_id: str
+    operator_id: str
+    expires_at_ms: int
+    granted_capabilities: tuple[str, ...]
+    issuer: str
+
+
+def _b64_decode_padless(s: str) -> bytes:
+    pad = (-len(s)) % 4
+    return base64.urlsafe_b64decode(s + ("=" * pad))
+
+
+def _split_claim_token(token: str) -> tuple[dict[str, Any], bytes, bytes]:
+    if not token or "." not in token:
+        raise TokenInvalid("malformed token: missing separator")
+    blob_b64, sig_b64 = token.rsplit(".", 1)
+    blob = _b64_decode_padless(blob_b64)
+    sig = _b64_decode_padless(sig_b64)
+    try:
+        claims = json.loads(blob.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise TokenInvalid(f"malformed claims: {exc}") from exc
+    if not isinstance(claims, dict):
+        raise TokenInvalid("claims must be a JSON object")
+    return claims, blob, sig
+
+
+class MultiIssuerVerifier:
+    """Verifies JSON-claim tokens for three issuer variants.
+
+    * ``iss = "cloud:<userId>"`` — signature verified with the
+      operator's HMAC secret, fetched via the supplied Convex callable
+      and cached for five minutes.
+    * ``iss = "agent:<deviceId>"`` — signature verified with the
+      agent's own HKDF-derived per-pairing secret. Caller supplies the
+      derivation as ``agent_secret_provider``.
+    * ``iss = "local"`` — dev-mode CLI token; signature is still
+      verified against a local dev secret but the ``agentId`` claim is
+      not enforced.
+
+    All variants require ``expires_at_ms`` in the future and
+    ``agent_id`` matching ``self.device_id`` (except ``iss=local``).
+    """
+
+    OPERATOR_SECRET_TTL_SECONDS = 300
+
+    def __init__(
+        self,
+        *,
+        device_id: str,
+        agent_secret_provider: Callable[[], bytes] | None = None,
+        operator_secret_fetcher: Callable[[str], bytes | None] | None = None,
+        local_dev_secret: bytes | None = None,
+        now_ms: Callable[[], int] | None = None,
+    ) -> None:
+        self.device_id = device_id
+        self._agent_secret_provider = agent_secret_provider
+        self._operator_secret_fetcher = operator_secret_fetcher
+        self._local_dev_secret = local_dev_secret
+        self._now_ms = now_ms or (lambda: int(time.time() * 1000))
+        self._op_cache: dict[str, tuple[bytes, int]] = {}
+
+    def verify(self, token: str) -> VerifiedClaims:
+        claims, blob, sig = _split_claim_token(token)
+        iss = str(claims.get("iss", ""))
+        plugin_id = str(claims.get("pluginId", ""))
+        agent_id = str(claims.get("agentId", ""))
+        operator_id = str(claims.get("operatorId", ""))
+        expires_at = int(claims.get("expiresAt", 0))
+        caps = tuple(claims.get("grantedCapabilities") or [])
+
+        if iss.startswith("cloud:"):
+            user_id = iss.split(":", 1)[1]
+            secret = self._operator_secret(user_id)
+            self._require_match(secret, blob, sig, "cloud")
+            self._require_device_match(agent_id)
+        elif iss.startswith("agent:"):
+            if self._agent_secret_provider is None:
+                raise TokenInvalid("agent issuer not configured")
+            secret = self._agent_secret_provider()
+            self._require_match(secret, blob, sig, "agent")
+            self._require_device_match(agent_id)
+        elif iss == "local":
+            if self._local_dev_secret is None:
+                raise TokenInvalid("local issuer not enabled")
+            self._require_match(self._local_dev_secret, blob, sig, "local")
+            # Local dev tokens deliberately skip the agent_id check.
+        else:
+            raise TokenInvalid(f"unknown issuer: {iss}")
+
+        if expires_at <= self._now_ms():
+            raise TokenInvalid("token expired")
+
+        return VerifiedClaims(
+            plugin_id=plugin_id,
+            agent_id=agent_id,
+            operator_id=operator_id,
+            expires_at_ms=expires_at,
+            granted_capabilities=caps,
+            issuer=iss,
+        )
+
+    def _operator_secret(self, user_id: str) -> bytes:
+        if not user_id:
+            raise TokenInvalid("cloud issuer missing userId")
+        now = self._now_ms()
+        cached = self._op_cache.get(user_id)
+        if cached is not None and cached[1] > now:
+            return cached[0]
+        if self._operator_secret_fetcher is None:
+            raise TokenInvalid("cloud issuer not configured")
+        secret = self._operator_secret_fetcher(user_id)
+        if not secret:
+            raise TokenInvalid(f"no operator secret for {user_id}")
+        self._op_cache[user_id] = (secret, now + self.OPERATOR_SECRET_TTL_SECONDS * 1000)
+        return secret
+
+    @staticmethod
+    def _require_match(secret: bytes, blob: bytes, sig: bytes, kind: str) -> None:
+        expected = hmac.new(secret, blob, hashlib.sha256).digest()
+        if not hmac.compare_digest(expected, sig):
+            raise TokenInvalid(f"{kind} signature mismatch")
+
+    def _require_device_match(self, agent_id: str) -> None:
+        if agent_id != self.device_id:
+            raise TokenInvalid(
+                f"agentId claim {agent_id!r} does not match device {self.device_id!r}"
+            )

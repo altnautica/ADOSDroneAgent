@@ -1,0 +1,316 @@
+"""Tests for the /api/v1/setup/navigation/* wizard endpoints.
+
+Five routes shipped:
+
+* ``GET  /navigation/capabilities`` board nav summary
+* ``GET  /navigation/cameras``      discovery + role hint
+* ``POST /navigation/assign-camera`` bind device to role
+* ``POST /navigation/calibration``  multipart Kalibr upload
+* ``POST /navigation/config``       persist mode + rangefinder
+* ``GET  /navigation/preflight``    five-second capture sample
+
+The tests stub the camera manager + plugin destination directory so the
+suite runs on macOS dev hosts without root or /etc/ados write access.
+"""
+
+from __future__ import annotations
+
+import io
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+import pytest
+from fastapi.testclient import TestClient
+
+from ados.api.server import create_app
+from ados.hal.camera import CameraInfo, CameraType, HardwareRole
+from ados.services.video.camera_mgr import CameraManager, CameraRole
+from ados.setup import navigation_helpers as nav_helpers
+from tests.api_runtime_utils import build_api_runtime
+
+# Inline Kalibr YAML samples — enough fields to satisfy the validator.
+_CAMCHAIN_OK = b"""cam0:
+  camera_model: pinhole
+  intrinsics: [320.0, 320.0, 320.0, 240.0]
+  resolution: [640, 480]
+"""
+
+_IMU_OK = b"""imu0:
+  accelerometer_noise_density: 0.01
+  accelerometer_random_walk: 0.0002
+  gyroscope_noise_density: 0.005
+  gyroscope_random_walk: 4.0e-06
+  update_rate: 200.0
+"""
+
+
+def _make_camera(device: str = "/dev/video0", kind: CameraType = CameraType.CSI) -> CameraInfo:
+    return CameraInfo(
+        name=f"test-{device}",
+        type=kind,
+        device_path=device,
+        width=1280,
+        height=720,
+        capabilities=["h264"],
+        hardware_role=HardwareRole.CAMERA,
+    )
+
+
+def _wire_camera_mgr(*cameras: CameraInfo) -> MagicMock:
+    """Return a pipeline stub whose `_camera_mgr` is a real CameraManager."""
+    mgr = CameraManager()
+    mgr.set_cameras(list(cameras))
+    pipeline = MagicMock()
+    pipeline._camera_mgr = mgr
+    pipeline.camera_mgr = mgr  # tolerated alias
+    return pipeline
+
+
+@pytest.fixture
+def cameras() -> list[CameraInfo]:
+    return [_make_camera("/dev/video0", CameraType.CSI), _make_camera("/dev/video1", CameraType.USB)]
+
+
+@pytest.fixture
+def agent_app(cameras: list[CameraInfo]):
+    return build_api_runtime(video_pipeline=_wire_camera_mgr(*cameras))
+
+
+@pytest.fixture
+def client(agent_app):
+    return TestClient(create_app(agent_app))
+
+
+@pytest.fixture
+def plugin_etc(monkeypatch, tmp_path: Path) -> Path:
+    """Redirect /etc/ados/plugins/<id>/ writes into tmp_path."""
+    fake_etc = tmp_path / "etc" / "ados"
+    fake_etc.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(nav_helpers, "ADOS_ETC_DIR", fake_etc)
+    return fake_etc
+
+
+# ---------------------------------------------------------------------------
+# GET /navigation/capabilities
+# ---------------------------------------------------------------------------
+
+
+def test_capabilities_returns_expected_shape(client) -> None:
+    with patch.object(nav_helpers, "discover_cameras", return_value=[_make_camera()]):
+        resp = client.get("/api/v1/setup/navigation/capabilities")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert set(body.keys()) >= {
+        "vio_capable",
+        "csi_count",
+        "usb_uvc_count",
+        "rangefinder_ports",
+    }
+    assert isinstance(body["rangefinder_ports"], list)
+
+
+# ---------------------------------------------------------------------------
+# GET /navigation/cameras
+# ---------------------------------------------------------------------------
+
+
+def test_cameras_lists_discovered(client, cameras) -> None:
+    with patch.object(nav_helpers, "discover_cameras", return_value=cameras):
+        resp = client.get("/api/v1/setup/navigation/cameras")
+    assert resp.status_code == 200
+    body = resp.json()
+    devices = {c["device"] for c in body["cameras"]}
+    assert devices == {"/dev/video0", "/dev/video1"}
+    # First CSI is recommended as the nav camera.
+    csi = next(c for c in body["cameras"] if c["device"] == "/dev/video0")
+    assert csi["recommended_role"] == "nav"
+
+
+# ---------------------------------------------------------------------------
+# POST /navigation/assign-camera
+# ---------------------------------------------------------------------------
+
+
+def test_assign_camera_binds_role(client, agent_app) -> None:
+    resp = client.post(
+        "/api/v1/setup/navigation/assign-camera",
+        json={"device_path": "/dev/video0", "role": "nav"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is True
+    mgr = agent_app.video_pipeline_handle._camera_mgr
+    # The "nav" role resolves to NAV if available, otherwise SECONDARY.
+    role = nav_helpers.safe_camera_role("nav")
+    assert mgr.get_by_role(role).device_path == "/dev/video0"
+
+
+def test_assign_camera_unknown_device_returns_404(client) -> None:
+    resp = client.post(
+        "/api/v1/setup/navigation/assign-camera",
+        json={"device_path": "/dev/never", "role": "nav"},
+    )
+    assert resp.status_code == 404
+
+
+def test_assign_camera_no_pipeline_returns_503() -> None:
+    runtime = build_api_runtime(video_pipeline=None)
+    c = TestClient(create_app(runtime))
+    resp = c.post(
+        "/api/v1/setup/navigation/assign-camera",
+        json={"device_path": "/dev/video0", "role": "nav"},
+    )
+    assert resp.status_code == 503
+
+
+def test_assign_camera_exclusive_role_conflict_returns_409(client, agent_app, cameras) -> None:
+    mgr = agent_app.video_pipeline_handle._camera_mgr
+    # Pre-bind thermal to camera 1 so a request to bind camera 0 to
+    # thermal must surface the exclusive-role guard.
+    mgr.assign_role(cameras[1], CameraRole.THERMAL)
+    resp = client.post(
+        "/api/v1/setup/navigation/assign-camera",
+        json={"device_path": "/dev/video0", "role": "thermal"},
+    )
+    assert resp.status_code == 409
+
+
+# ---------------------------------------------------------------------------
+# POST /navigation/calibration
+# ---------------------------------------------------------------------------
+
+
+def test_calibration_persists_pair(client, plugin_etc: Path) -> None:
+    files = {
+        "camchain": ("camchain-imucam.yaml", io.BytesIO(_CAMCHAIN_OK), "text/yaml"),
+        "imu": ("imu.yaml", io.BytesIO(_IMU_OK), "text/yaml"),
+    }
+    resp = client.post(
+        "/api/v1/setup/navigation/calibration",
+        files=files,
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is True
+    cam_path = Path(body["data"]["camchain_path"])
+    imu_path = Path(body["data"]["imu_path"])
+    assert cam_path.is_file()
+    assert imu_path.is_file()
+    assert cam_path.read_bytes() == _CAMCHAIN_OK
+    assert imu_path.read_bytes() == _IMU_OK
+
+
+def test_calibration_missing_required_key_rejects(client, plugin_etc: Path) -> None:
+    bad_camchain = b"cam99:\n  intrinsics: [1, 2]\n"
+    files = {
+        "camchain": ("camchain-imucam.yaml", io.BytesIO(bad_camchain), "text/yaml"),
+        "imu": ("imu.yaml", io.BytesIO(_IMU_OK), "text/yaml"),
+    }
+    resp = client.post(
+        "/api/v1/setup/navigation/calibration",
+        files=files,
+    )
+    assert resp.status_code == 400
+    # Partial-drop guard: neither file should land on disk.
+    cal_dir = nav_helpers.calibration_dir(nav_helpers.DEFAULT_NAV_PLUGIN_ID)
+    assert not (cal_dir / "imu.yaml").exists()
+
+
+def test_calibration_uses_custom_plugin_id(client, plugin_etc: Path) -> None:
+    files = {
+        "camchain": ("camchain-imucam.yaml", io.BytesIO(_CAMCHAIN_OK), "text/yaml"),
+        "imu": ("imu.yaml", io.BytesIO(_IMU_OK), "text/yaml"),
+    }
+    resp = client.post(
+        "/api/v1/setup/navigation/calibration",
+        data={"plugin_id": "com.example.alt-nav"},
+        files=files,
+    )
+    assert resp.status_code == 200
+    target = nav_helpers.calibration_dir("com.example.alt-nav")
+    assert (target / "camchain-imucam.yaml").is_file()
+
+
+# ---------------------------------------------------------------------------
+# POST /navigation/config
+# ---------------------------------------------------------------------------
+
+
+def test_config_writes_plugin_yaml(client, plugin_etc: Path) -> None:
+    payload = {
+        "mode": "optical-flow",
+        "rangefinder": {
+            "topology": "companion",
+            "driver": "tfluna_uart",
+            "device": {"path": "/dev/ttyS3", "baud": 115200},
+        },
+    }
+    resp = client.post("/api/v1/setup/navigation/config", json=payload)
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is True
+    cfg_path = Path(body["data"]["config_path"])
+    assert cfg_path.is_file()
+    text = cfg_path.read_text()
+    assert "mode: optical-flow" in text
+    assert "tfluna_uart" in text
+
+
+def test_config_unknown_rangefinder_driver_rejects(client, plugin_etc: Path) -> None:
+    payload = {
+        "mode": "vio",
+        "rangefinder": {
+            "topology": "companion",
+            "driver": "definitely_not_a_driver",
+            "device": {"path": "/dev/ttyS3"},
+        },
+    }
+    resp = client.post("/api/v1/setup/navigation/config", json=payload)
+    assert resp.status_code == 400
+
+
+def test_config_mode_off_marks_step_skipped(client, plugin_etc: Path, monkeypatch) -> None:
+    captured: list[str] = []
+
+    def fake_mark_skipped(step_id: str):
+        captured.append(step_id)
+
+    monkeypatch.setattr(
+        "ados.api.routes.setup.setup_state.mark_skipped",
+        fake_mark_skipped,
+    )
+    resp = client.post("/api/v1/setup/navigation/config", json={"mode": "off"})
+    assert resp.status_code == 200
+    assert captured == ["navigation"]
+
+
+# ---------------------------------------------------------------------------
+# GET /navigation/preflight
+# ---------------------------------------------------------------------------
+
+
+def test_preflight_returns_no_camera_when_pipeline_empty() -> None:
+    runtime = build_api_runtime(video_pipeline=None)
+    c = TestClient(create_app(runtime))
+    resp = c.get("/api/v1/setup/navigation/preflight")
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "no_camera"
+
+
+def test_preflight_returns_sample_when_camera_assigned(client, agent_app, cameras) -> None:
+    mgr = agent_app.video_pipeline_handle._camera_mgr
+    nav_role = nav_helpers.safe_camera_role("nav")
+    mgr.assign_role(cameras[0], nav_role)
+
+    fake = nav_helpers.PreflightSample(
+        frames_captured=150,
+        avg_quality=1.0,
+        mean_distance_m=None,
+        status="good",
+    )
+    with patch.object(nav_helpers, "run_preflight_sample", return_value=fake):
+        resp = client.get("/api/v1/setup/navigation/preflight")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "good"
+    assert body["frames_captured"] == 150

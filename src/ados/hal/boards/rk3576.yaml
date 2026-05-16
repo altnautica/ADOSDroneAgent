@@ -131,6 +131,13 @@ video:
   encoder_codec: "h265"
   isp: "Rockchip ISP (rkisp)"
   notes: "Triple CSI on SoC (CSI0, CSI1, CSI3), drone board uses 2"
+  # Dual CSI on the reference board (third CSI available on SoC if a
+  # custom carrier exposes it). Downward nav camera lands on the spare
+  # CSI port, leaving USB free for sensors and the WFB-ng dongle.
+  nav_cameras:
+    csi_count: 2
+    usb_uvc_count: 2
+    recommended_role: nav-csi
 
 power:
   typical_watts: 5.0
@@ -151,6 +158,16 @@ thermal:
 ros:
   supported: true
   max_profile: vio
+
+# Full VIO target. 6 TOPS NPU + LPDDR5 carry OpenVINS comfortably. The
+# reference carrier exposes UART4 (FC), UART5 (GPS / expansion), and
+# I2C4 on the sensor expansion header.
+navigation:
+  vio_capable: true
+  rangefinder_ports:
+    - {type: uart, path: /dev/ttyS5, baud_max: 115200}
+    - {type: i2c, path: /dev/i2c-4, speed_hz: 400000}
+    - {type: i2c, path: /dev/i2c-2, speed_hz: 400000}
 
 profiles:
   tier: recommended

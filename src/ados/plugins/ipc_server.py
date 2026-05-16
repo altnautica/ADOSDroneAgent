@@ -6,17 +6,28 @@ issues request envelopes (event publish/subscribe, MAVLink read/write,
 HAL access, etc). Each request is validated against the token's
 declared capability set before routing to the host service.
 
-Currently routes only the event surface (``event.publish``,
-``event.subscribe``). MAVLink, HAL, and telemetry extension routing
-get wired as additional handlers once the supervisor exposes stable
-hooks into those services.
+Surface covered today:
+
+* Event bus publish / subscribe (capability-gated)
+* MAVLink send / subscribe / component-id reservation
+* Telemetry channel extension
+* Driver registration (camera / lidar / gimbal / gps / esc /
+  payload-actuator) plus camera-path claim
+* Config kv with per-drone and global scope
+* Sandboxed vendor binary spawn (allowlist enforced via the manifest)
+
+The dispatch loop holds a verified :class:`CapabilityToken` per
+session and gates each method on a required capability declared in
+the dispatch table. Handler bodies live in
+:mod:`ados.plugins.ipc.handlers` so this file stays focused on
+transport, handshake, and routing.
 """
 
 from __future__ import annotations
 
 import asyncio
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Awaitable, Callable
 
@@ -29,6 +40,9 @@ from ados.plugins.events import (
     is_subscribe_allowed,
     now_ms,
 )
+from ados.plugins.errors import CapabilityDenied as _CapabilityDenied
+from ados.plugins.ipc.host_services import HostServices, default_host_services
+from ados.plugins.process_sandbox import AllowlistViolation as _AllowlistViolation
 from ados.plugins.rpc import (
     CapabilityToken,
     Envelope,
@@ -50,6 +64,8 @@ class PluginSession:
     token: CapabilityToken
     writer: asyncio.StreamWriter
     subscriptions: set[str]
+    mavlink_subscriptions: set[str] = field(default_factory=set)
+    pump_tasks: list[asyncio.Task] = field(default_factory=list)
 
 
 class PluginIpcServer:
@@ -66,12 +82,23 @@ class PluginIpcServer:
         bus: EventBus,
         token_issuer: TokenIssuer,
         socket_dir: Path = SOCKET_DIR,
+        host: HostServices | None = None,
     ) -> None:
         self._bus = bus
         self._token_issuer = token_issuer
         self._socket_dir = socket_dir
+        self._host = host if host is not None else default_host_services()
         self._servers: dict[str, asyncio.AbstractServer] = {}
         self._sessions: dict[str, PluginSession] = {}
+
+    @property
+    def host(self) -> HostServices:
+        """Bundle of host-side service facades the handlers route through."""
+        return self._host
+
+    @property
+    def bus(self) -> EventBus:
+        return self._bus
 
     async def start_for_plugin(self, plugin_id: str) -> Path:
         """Start a UDS server for one plugin. Returns the socket path."""
@@ -136,12 +163,14 @@ class PluginIpcServer:
                 error_type=type(exc).__name__,
             )
         finally:
+            session = self._sessions.pop(plugin_id, None)
+            if session is not None:
+                self._release_session_resources(session)
             writer.close()
             try:
                 await writer.wait_closed()
             except Exception:  # noqa: BLE001
                 pass
-            self._sessions.pop(plugin_id, None)
 
     async def _handshake(
         self,
@@ -174,6 +203,8 @@ class PluginIpcServer:
             token=token,
             writer=writer,
             subscriptions=set(),
+            mavlink_subscriptions=set(),
+            pump_tasks=[],
         )
 
     async def _dispatch_loop(
@@ -217,6 +248,23 @@ class PluginIpcServer:
             except _RpcError as exc:
                 await self._send_error(
                     session.writer, str(exc), req_id=env.request_id
+                )
+            except _CapabilityDenied as exc:
+                # Handler-level inline gate (mavlink.register_component,
+                # peripheral.register_driver, pose-inject classification,
+                # vio-component classification). Surface as the same
+                # capability_denied envelope the dispatch-level gate
+                # uses, so the client maps both consistently.
+                await self._send_error(
+                    session.writer,
+                    f"capability_denied: {exc.capability}",
+                    req_id=env.request_id,
+                )
+            except _AllowlistViolation as exc:
+                await self._send_error(
+                    session.writer,
+                    f"allowlist_violation: {exc.basename}",
+                    req_id=env.request_id,
                 )
 
     # ---- handlers ----------------------------------------------------
@@ -298,22 +346,17 @@ class PluginIpcServer:
     ) -> dict:
         return {"pong": True, "plugin_id": session.plugin_id}
 
-    # ---- gated stubs -------------------------------------------------
-    # The next batch of capability-gated surfaces. Each method gate is
-    # declared in _METHOD_HANDLERS; the dispatcher rejects ungranted
-    # callers with capability_denied before reaching the handler. The
-    # bodies return not_implemented until the corresponding host
-    # service exposes a stable hook.
+    # ---- gated stubs (await full host service wiring) ----------------
+    # Some surfaces still defer to the underlying host service. Each
+    # method gate is declared in _METHOD_HANDLERS; the dispatcher
+    # rejects ungranted callers with capability_denied before the
+    # handler runs. The bodies below return not_implemented until the
+    # corresponding host service exposes a stable hook.
 
     async def _handle_telemetry_subscribe(
         self, session: PluginSession, env: Envelope
     ) -> dict:
         return {"error": "not_implemented", "method": "telemetry.subscribe"}
-
-    async def _handle_telemetry_extend(
-        self, session: PluginSession, env: Envelope
-    ) -> dict:
-        return {"error": "not_implemented", "method": "telemetry.extend"}
 
     async def _handle_mission_read(
         self, session: PluginSession, env: Envelope
@@ -335,15 +378,49 @@ class PluginIpcServer:
     ) -> dict:
         return {"error": "not_implemented", "method": "recording.stop"}
 
-    async def _handle_mavlink_subscribe(
-        self, session: PluginSession, env: Envelope
-    ) -> dict:
-        return {"error": "not_implemented", "method": "mavlink.subscribe"}
+    # ---- session resource cleanup -----------------------------------
 
-    async def _handle_mavlink_send(
-        self, session: PluginSession, env: Envelope
-    ) -> dict:
-        return {"error": "not_implemented", "method": "mavlink.send"}
+    def _release_session_resources(self, session: PluginSession) -> None:
+        """Drop all per-session host resources when the plugin disconnects.
+
+        Each handler family stores per-plugin state on a host-services
+        facade (component reservations, driver registrations, camera
+        claims, telemetry channels, in-memory config). We release them
+        symmetrically so a crashed-and-restarted plugin does not leak
+        stale registrations into the host's view of the world.
+        """
+        plugin_id = session.plugin_id
+        # Cancel any MAVLink subscription pumps the dispatcher spawned.
+        for task in session.pump_tasks:
+            task.cancel()
+        session.pump_tasks.clear()
+        try:
+            self._host.components.release_plugin(plugin_id)
+            self._host.drivers.release_plugin(plugin_id)
+            self._host.cameras.release_plugin(plugin_id)
+            self._host.telemetry.clear_plugin(plugin_id)
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "plugin_ipc_release_resources_failed",
+                plugin_id=plugin_id,
+                error=str(exc),
+            )
+
+    # ---- MAVLink subscription pump ----------------------------------
+
+    def spawn_mavlink_pump(
+        self, session: PluginSession, msg_name: str
+    ) -> None:
+        """Subscribe the plugin to MAVLink frames matching ``msg_name``.
+
+        Delegates to :mod:`ados.plugins.ipc.mavlink_pump` so this module
+        does not carry the pump body. The pump consumes the raw byte
+        queue exposed by the host's MAVLink connection and forwards
+        each frame to the plugin as an event-style envelope.
+        """
+        from ados.plugins.ipc import mavlink_pump as _pump
+
+        _pump.spawn_pump(self, session, msg_name)
 
     # ---- helpers -----------------------------------------------------
 
@@ -390,39 +467,14 @@ class _RpcError(Exception):
 _HandlerFn = Callable[
     [PluginIpcServer, PluginSession, Envelope], Awaitable[dict]
 ]
-
-# Method dispatch table. Each entry is (handler, required_capability).
-# A required_capability of None means the method is either ungated or
-# gated inline by the handler itself (event.publish and event.subscribe
-# do their own per-topic checks via is_publish_allowed / is_subscribe_allowed).
-# Methods with a non-None requirement are rejected with capability_denied
-# before reaching the handler when the calling token does not carry the cap.
 _HandlerSpec = tuple[_HandlerFn, str | None]
-_METHOD_HANDLERS: dict[str, _HandlerSpec] = {
-    "event.publish": (PluginIpcServer._handle_event_publish, None),
-    "event.subscribe": (PluginIpcServer._handle_event_subscribe, None),
-    "ping": (PluginIpcServer._handle_ping, None),
-    "telemetry.subscribe": (
-        PluginIpcServer._handle_telemetry_subscribe,
-        "telemetry.read",
-    ),
-    "telemetry.extend": (
-        PluginIpcServer._handle_telemetry_extend,
-        "telemetry.extend",
-    ),
-    "mission.read": (PluginIpcServer._handle_mission_read, "mission.read"),
-    "mission.write": (PluginIpcServer._handle_mission_write, "mission.write"),
-    "recording.start": (
-        PluginIpcServer._handle_recording_start,
-        "recording.write",
-    ),
-    "recording.stop": (
-        PluginIpcServer._handle_recording_stop,
-        "recording.write",
-    ),
-    "mavlink.subscribe": (
-        PluginIpcServer._handle_mavlink_subscribe,
-        "mavlink.read",
-    ),
-    "mavlink.send": (PluginIpcServer._handle_mavlink_send, "mavlink.write"),
-}
+
+
+# The dispatch table mapping method-name -> (handler, required-cap)
+# lives in :mod:`ados.plugins.ipc.dispatch` so this module stays focused
+# on the transport surface. The import is deferred to module bottom to
+# avoid the cycle with :mod:`ados.plugins.ipc.handlers` (which lazy-imports
+# _RpcError from this module).
+from ados.plugins.ipc.dispatch import build_dispatch_table  # noqa: E402
+
+_METHOD_HANDLERS: dict[str, _HandlerSpec] = build_dispatch_table(PluginIpcServer)

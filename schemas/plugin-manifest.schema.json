@@ -41,12 +41,77 @@
           "default": false,
           "title": "Contains Vendor Binary",
           "type": "boolean"
+        },
+        "vendor_attribution": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/VendorAttribution"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "subprocess_spawn": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Subprocess Spawn"
+        },
+        "per_drone_config": {
+          "default": false,
+          "title": "Per Drone Config",
+          "type": "boolean"
         }
       },
       "required": [
         "entrypoint"
       ],
       "title": "AgentBlock",
+      "type": "object"
+    },
+    "VendorAttribution": {
+      "additionalProperties": false,
+      "description": "Source-offer record for plugins that ship a vendor binary.",
+      "properties": {
+        "upstream_repo": {
+          "minLength": 1,
+          "title": "Upstream Repo",
+          "type": "string"
+        },
+        "commit_sha": {
+          "minLength": 1,
+          "title": "Commit Sha",
+          "type": "string"
+        },
+        "license": {
+          "minLength": 1,
+          "title": "License",
+          "type": "string"
+        },
+        "source_offer_url": {
+          "minLength": 1,
+          "title": "Source Offer Url",
+          "type": "string"
+        }
+      },
+      "required": [
+        "upstream_repo",
+        "commit_sha",
+        "license",
+        "source_offer_url"
+      ],
+      "title": "VendorAttribution",
       "type": "object"
     },
     "AgentContributes": {
@@ -212,7 +277,8 @@
             "gimbal",
             "payload",
             "peripheral",
-            "generic"
+            "generic",
+            "vio"
           ],
           "title": "Component Kind",
           "type": "string"
@@ -336,7 +402,8 @@
   "properties": {
     "schema_version": {
       "default": 1,
-      "maximum": 1,
+      "description": "Manifest schema version. 1 is the original baseline. 2 unlocks the additional agent fields vendor_attribution, subprocess_spawn, and per_drone_config.",
+      "maximum": 2,
       "minimum": 1,
       "title": "Schema Version",
       "type": "integer"

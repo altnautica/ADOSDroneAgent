@@ -21,6 +21,27 @@ hw_video_codecs:
   - h265_enc
   - h265_dec
 
+# Jetson Nano devkit breaks out 2 MIPI CSI lanes plus 4 USB ports. Spare
+# CSI lane available for the downward navigation camera.
+video:
+  csi_ports: 2
+  max_encode_resolution: "3840x2160"
+  max_encode_fps: 30
+  encoder_api: v4l2
+  nav_cameras:
+    csi_count: 2
+    usb_uvc_count: 4
+    recommended_role: nav-csi
+
+# 4 GB RAM and Tegra X1 GPU can host a lightweight VIO front-end. No
+# dedicated NPU, so VIO runs on CPU/GPU. Rangefinder lands on the
+# primary UART or the I2C bus.
+navigation:
+  vio_capable: true
+  rangefinder_ports:
+    - {type: uart, path: /dev/ttyTHS1, baud_max: 115200}
+    - {type: i2c, path: /dev/i2c-1, speed_hz: 400000}
+
 # ROS 2: 4 GB RAM. Docker fits but Tegra X1 GPU (no dedicated NPU) limits vision.
 # MAVLink bridge + foxglove_bridge only. No VIO.
 ros:

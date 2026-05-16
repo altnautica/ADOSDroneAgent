@@ -86,6 +86,12 @@ video:
   max_encode_resolution: "1920x1080"
   max_encode_fps: 60
   encoder_api: rkmedia
+  # Single CSI lane is consumed by the primary camera. Downward nav
+  # camera lands on a free USB UVC port.
+  nav_cameras:
+    csi_count: 1
+    usb_uvc_count: 2
+    recommended_role: nav-usb
 
 power:
   typical_watts: 2.5
@@ -95,6 +101,14 @@ power:
 # ROS 2: 2 GB RAM too tight for Jazzy Docker image (~800 MB).
 ros:
   supported: false
+
+# 2 GB RAM and 0.8 TOPS NPU rule out full VIO. Optical flow only.
+navigation:
+  vio_capable: false
+  rangefinder_ports:
+    - {type: uart, path: /dev/ttyS1, baud_max: 115200}
+    - {type: i2c, path: /dev/i2c-0, speed_hz: 400000}
+    - {type: i2c, path: /dev/i2c-1, speed_hz: 400000}
 
 profiles:
   tier: recommended

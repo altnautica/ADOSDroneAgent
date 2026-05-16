@@ -2,17 +2,23 @@
 
 The :class:`PluginContext` exposed to plugin code wraps a
 :class:`PluginIpcClient` so plugin authors call simple methods
-(``ctx.events.publish(...)``, ``ctx.events.subscribe(...)``) and the
+(``ctx.events.publish(...)``, ``ctx.mavlink.send(...)``,
+``ctx.peripheral_manager.register_camera_driver(...)`` ) and the
 client serializes them as RPC envelopes to the supervisor's UDS.
 
-Current public surface:
+Public surface today:
 
-* ``ctx.events.publish(topic, payload)`` — capability-gated.
-* ``ctx.events.subscribe(topic_pattern, callback)`` — async iterator.
-* ``ctx.ping()`` — health probe.
-
-MAVLink, HAL, telemetry-extension wrappers land as additional methods
-on the supervisor's IPC server.
+* ``ctx.events.publish / subscribe`` — event bus.
+* ``ctx.mavlink.send / subscribe / register_component`` — MAVLink
+  read and write through the host's router.
+* ``ctx.peripheral_manager.register_*_driver`` and ``camera.claim`` —
+  driver registration plus exclusive camera holds.
+* ``ctx.telemetry.extend`` — extend the heartbeat schema.
+* ``ctx.config.get / set`` — per-drone or global kv.
+* ``ctx.process.spawn`` — sandboxed vendor-binary spawn with
+  allowlist enforcement on the supervisor side.
+* ``ctx.lifecycle.on_pause / on_resume`` — GCS-side mount events.
+* ``ctx.ping_supervisor()`` — health probe.
 """
 
 from __future__ import annotations
@@ -31,6 +37,31 @@ from ados.plugins.rpc import (
     read_frame,
 )
 
+
+# ---------------------------------------------------------------------
+# Typed exceptions surfaced to plugin code
+# ---------------------------------------------------------------------
+
+
+class InvalidComponent(PluginError):
+    """Raised when a plugin sends to a component_id it has not reserved."""
+
+
+class AllowlistViolation(PluginError):
+    """Raised when ``ctx.process.spawn`` rejects a basename that is not on
+    the manifest's ``agent.subprocess_spawn`` allowlist."""
+
+    def __init__(self, basename: str) -> None:
+        super().__init__(
+            f"binary basename {basename!r} not on subprocess_spawn allowlist"
+        )
+        self.basename = basename
+
+
+class HostUnavailable(PluginError):
+    """Raised when the host service the call routes through has not
+    been wired yet (e.g., the FC connection has not initialized)."""
+
 log = get_logger("plugins.ipc_client")
 
 DEFAULT_REQUEST_TIMEOUT_S = 5.0
@@ -47,6 +78,9 @@ class PluginIpcClient:
         self._writer: asyncio.StreamWriter | None = None
         self._pending: dict[str, asyncio.Future[Envelope]] = {}
         self._event_callbacks: dict[
+            str, list[Callable[[dict], Awaitable[None] | None]]
+        ] = {}
+        self._mavlink_callbacks: dict[
             str, list[Callable[[dict], Awaitable[None] | None]]
         ] = {}
         self._reader_task: asyncio.Task | None = None
@@ -94,6 +128,134 @@ class PluginIpcClient:
             args={"topic": topic_pattern},
         )
 
+    # ---- MAVLink ------------------------------------------------------
+
+    async def mavlink_send(
+        self, msg_bytes: bytes, component_id: int | None = None
+    ) -> dict:
+        args: dict[str, Any] = {"msg_bytes": bytes(msg_bytes)}
+        if component_id is not None:
+            args["component_id"] = int(component_id)
+        return (
+            await self._send_request(
+                "mavlink.send", capability="mavlink.write", args=args
+            )
+        ).args
+
+    async def mavlink_register_component(self, comp_id: int, kind: str) -> dict:
+        return (
+            await self._send_request(
+                "mavlink.register_component",
+                capability=f"mavlink.component.{kind}",
+                args={"component_id": int(comp_id), "kind": kind},
+            )
+        ).args
+
+    async def mavlink_subscribe(
+        self,
+        msg_name: str,
+        callback: Callable[[dict], Awaitable[None] | None],
+    ) -> None:
+        # MAVLink deliveries arrive as ``event``-type envelopes routed
+        # through the same reader loop as event bus deliveries; the
+        # dispatcher routes them by topic.
+        self._mavlink_callbacks.setdefault(msg_name, []).append(callback)
+        await self._send_request(
+            "mavlink.subscribe",
+            capability="mavlink.read",
+            args={"msg_name": msg_name},
+        )
+
+    # ---- Telemetry ----------------------------------------------------
+
+    async def telemetry_extend(self, channel: str, payload: dict) -> dict:
+        return (
+            await self._send_request(
+                "telemetry.extend",
+                capability="telemetry.extend",
+                args={"channel": channel, "payload": payload},
+            )
+        ).args
+
+    # ---- Peripheral manager ------------------------------------------
+
+    async def peripheral_register_driver(self, kind: str, driver_ref: str) -> dict:
+        return (
+            await self._send_request(
+                "peripheral.register_driver",
+                capability=f"sensor.{kind}.register",
+                args={"kind": kind, "driver_ref": driver_ref},
+            )
+        ).args
+
+    async def peripheral_unregister_driver(self, handle_id: str) -> dict:
+        return (
+            await self._send_request(
+                "peripheral.unregister_driver",
+                capability="",
+                args={"handle_id": handle_id},
+            )
+        ).args
+
+    async def camera_claim(self, device_path: str, exclusive: bool = True) -> dict:
+        return (
+            await self._send_request(
+                "camera.claim",
+                capability="sensor.camera.register",
+                args={"device_path": device_path, "exclusive": exclusive},
+            )
+        ).args
+
+    # ---- Config kv ----------------------------------------------------
+
+    async def config_get(self, key: str, default: Any = None) -> Any:
+        resp = await self._send_request(
+            "config.get",
+            capability="",
+            args={"key": key, "default": default},
+        )
+        return resp.args.get("value")
+
+    async def config_set(
+        self, key: str, value: Any, scope: str = "drone"
+    ) -> dict:
+        return (
+            await self._send_request(
+                "config.set",
+                capability="",
+                args={"key": key, "value": value, "scope": scope},
+            )
+        ).args
+
+    # ---- Process spawn (sandboxed) -----------------------------------
+
+    async def process_spawn(
+        self,
+        basename: str,
+        args: list[str] | None = None,
+        env: dict[str, str] | None = None,
+    ) -> dict:
+        """Authorize a vendor-binary spawn through the supervisor.
+
+        The supervisor enforces the manifest allowlist and audit-logs
+        the attempt. On success it returns the resolved install dir
+        plus the original args/env; the actual exec happens in the
+        plugin runner process via
+        :func:`ados.plugins.process_sandbox.spawn` so the child
+        inherits the runner's cgroup slice.
+        """
+        return (
+            await self._send_request(
+                "process.spawn",
+                capability="process.spawn",
+                args={
+                    "basename": basename,
+                    "args": list(args or []),
+                    "env": dict(env or {}),
+                },
+            )
+        ).args
+
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
@@ -139,6 +301,9 @@ class PluginIpcClient:
                 # capability the method declares.
                 cap = response.error.split(":", 1)[1].strip()
                 raise CapabilityDenied(self._plugin_id, cap)
+            if response.error.startswith("allowlist_violation:"):
+                basename = response.error.split(":", 1)[1].strip()
+                raise AllowlistViolation(basename)
             raise PluginError(f"rpc error: {response.error}")
         return response
 
@@ -158,7 +323,10 @@ class PluginIpcClient:
                 if env is None:
                     return
                 if env.type == "event":
-                    await self._dispatch_event(env)
+                    if env.method == "mavlink.deliver":
+                        await self._dispatch_mavlink(env)
+                    else:
+                        await self._dispatch_event(env)
                 else:
                     fut = self._pending.get(env.request_id)
                     if fut is not None and not fut.done():
@@ -192,6 +360,31 @@ class PluginIpcClient:
                             error=str(exc),
                         )
 
+    async def _dispatch_mavlink(self, env: Envelope) -> None:
+        msg_name: Any = env.args.get("msg_name")
+        if not isinstance(msg_name, str):
+            return
+        frame: Any = env.args.get("frame")
+        payload = {
+            "msg_name": msg_name,
+            "frame": frame if isinstance(frame, (bytes, bytearray)) else bytes(frame or b""),
+            "timestamp_ms": env.args.get("timestamp_ms"),
+        }
+        for pattern, callbacks in list(self._mavlink_callbacks.items()):
+            if pattern == msg_name or _matches(pattern, msg_name):
+                for cb in callbacks:
+                    try:
+                        result = cb(payload)
+                        if asyncio.iscoroutine(result):
+                            await result
+                    except Exception as exc:  # noqa: BLE001
+                        log.error(
+                            "plugin_mavlink_callback_error",
+                            plugin_id=self._plugin_id,
+                            msg_name=msg_name,
+                            error=str(exc),
+                        )
+
 
 def _matches(pattern: str, topic: str) -> bool:
     import fnmatch as _fnm
@@ -200,50 +393,78 @@ def _matches(pattern: str, topic: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# PluginContext: the public API plugin code sees
+# PluginContext: re-export the public surface from the context module.
+# The facade classes live in :mod:`ados.plugins.ipc.context` so this module
+# stays focused on the wire-level IPC client. Existing imports of
+# :class:`PluginContext` from :mod:`ados.plugins.ipc_client` still work.
 # ---------------------------------------------------------------------------
 
 
-class _EventsClient:
-    def __init__(self, ipc: PluginIpcClient) -> None:
-        self._ipc = ipc
-
-    async def publish(self, topic: str, payload: dict | None = None) -> int:
-        return await self._ipc.event_publish(topic, payload or {})
-
-    async def subscribe(
-        self,
-        topic_pattern: str,
-        callback: Callable[[dict], Awaitable[None] | None],
-    ) -> None:
-        await self._ipc.event_subscribe(topic_pattern, callback)
+from ados.plugins.ipc.context import (  # noqa: E402, F401
+    PluginContext,
+    _ConfigClient,
+    _EventsClient,
+    _LifecycleClient,
+    _MAVLinkClient,
+    _PeripheralManagerClient,
+    _ProcessClient,
+    _TelemetryClient,
+)
 
 
-class PluginContext:
-    """The object handed to every lifecycle hook on the plugin class.
+class _NullIpcClient:
+    """No-op stand-in for :class:`PluginIpcClient`.
 
-    Currently exposes ``events`` + ``log`` + identity. ``mavlink``,
-    ``hal``, ``telemetry``, ``recording``, ``peripherals``,
-    ``network`` are added as additional sub-clients when the
-    supervisor wires the corresponding host handlers. Plugin code
-    should program against the typed interface on this class, not
-    the underlying IPC client.
+    Used by :class:`_BarePluginContext` when no real IPC bridge has
+    been wired yet (early supervisor boot, certain test paths). Every
+    method raises :class:`HostUnavailable`. The shape mirrors the
+    real client so attribute lookup succeeds; calls fail loudly.
+    """
+
+    def __init__(self, plugin_id: str) -> None:
+        self._plugin_id = plugin_id
+
+    def _unavail(self, _name: str) -> Any:
+        raise HostUnavailable(
+            f"plugin {self._plugin_id}: IPC bridge not connected"
+        )
+
+    async def ping(self) -> dict: return self._unavail("ping")
+    async def event_publish(self, *_a, **_k) -> int: return self._unavail("event_publish")
+    async def event_subscribe(self, *_a, **_k) -> None: return self._unavail("event_subscribe")
+    async def mavlink_send(self, *_a, **_k) -> dict: return self._unavail("mavlink_send")
+    async def mavlink_subscribe(self, *_a, **_k) -> None: return self._unavail("mavlink_subscribe")
+    async def mavlink_register_component(self, *_a, **_k) -> dict: return self._unavail("mavlink_register_component")
+    async def telemetry_extend(self, *_a, **_k) -> dict: return self._unavail("telemetry_extend")
+    async def peripheral_register_driver(self, *_a, **_k) -> dict: return self._unavail("peripheral_register_driver")
+    async def peripheral_unregister_driver(self, *_a, **_k) -> dict: return self._unavail("peripheral_unregister_driver")
+    async def camera_claim(self, *_a, **_k) -> dict: return self._unavail("camera_claim")
+    async def config_get(self, *_a, **_k) -> Any: return self._unavail("config_get")
+    async def config_set(self, *_a, **_k) -> dict: return self._unavail("config_set")
+    async def process_spawn(self, *_a, **_k) -> dict: return self._unavail("process_spawn")
+
+
+class _BarePluginContext(PluginContext):
+    """Deprecated alias retained for v1.0 lifecycle-hook tests.
+
+    Subclasses :class:`PluginContext` so any call site that type-checks
+    against the bare shape still works. New code should construct
+    :class:`PluginContext` directly.
     """
 
     def __init__(
         self,
         *,
         plugin_id: str,
-        plugin_version: str,
-        config: dict,
-        ipc: PluginIpcClient,
+        version: str,
+        ipc: PluginIpcClient | None = None,
     ) -> None:
-        self.plugin_id = plugin_id
-        self.plugin_version = plugin_version
-        self.config = config
-        self.events = _EventsClient(ipc)
-        self.log = get_logger(f"plugin.{plugin_id}")
-        self._ipc = ipc
-
-    async def ping_supervisor(self) -> dict:
-        return await self._ipc.ping()
+        if ipc is None:
+            ipc = _NullIpcClient(plugin_id)  # type: ignore[assignment]
+        super().__init__(
+            plugin_id=plugin_id,
+            plugin_version=version,
+            config={},
+            ipc=ipc,  # type: ignore[arg-type]
+            agent_id="",
+        )

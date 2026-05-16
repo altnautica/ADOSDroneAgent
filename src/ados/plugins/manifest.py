@@ -77,9 +77,25 @@ class ResourceLimits(_StrictModel):
 class MavlinkComponent(_StrictModel):
     component_id: int = Field(..., ge=0, le=255)
     component_kind: Literal[
-        "camera", "gimbal", "payload", "peripheral", "generic"
+        "camera", "gimbal", "payload", "peripheral", "generic", "vio"
     ]
     sub_id: int | None = Field(None, ge=0, le=255)
+
+
+class VendorAttribution(_StrictModel):
+    """Source-offer record for plugins that ship a vendor binary.
+
+    Required when ``agent.contains_vendor_binary`` is true so the
+    install dialog can surface the upstream repo, commit, license, and
+    a reachable source-offer URL. Satisfies GPL-3.0 section 6 for
+    plugins that distribute pre-compiled binaries built from
+    GPL-compatible upstreams.
+    """
+
+    upstream_repo: str = Field(..., min_length=1)
+    commit_sha: str = Field(..., min_length=1)
+    license: str = Field(..., min_length=1)
+    source_offer_url: str = Field(..., min_length=1)
 
 
 class VisionContribution(_StrictModel):
@@ -134,6 +150,26 @@ class AgentBlock(_StrictModel):
     Consumed by the SDK test harness so plugin tests can replay scenarios
     by name. Paths are validated for traversal at install time."""
 
+    vendor_attribution: VendorAttribution | None = None
+    """Source-offer record for vendor-binary plugins. Required when
+    ``contains_vendor_binary`` is true; absent for pure-Python
+    plugins. Schema v2."""
+
+    subprocess_spawn: list[str] | None = None
+    """Allowlist of binary basenames the plugin may exec via
+    ``ctx.process.spawn``. Paths resolve relative to the plugin's
+    ``data_dir``. Implies the ``process.spawn`` capability must be
+    declared in ``permissions``. Empty or absent means the plugin
+    cannot spawn any subprocess. Schema v2."""
+
+    per_drone_config: bool = False
+    """When true, the supervisor runs one process instance per
+    connected drone with a distinct ``ctx.agent_id`` and a per-drone
+    config dict at
+    ``/var/lib/ados/plugins/<plugin_id>/config/<agent_id>.yaml``.
+    Default false preserves single-config behavior from the v1
+    schema. Schema v2."""
+
     @field_validator("entrypoint")
     @classmethod
     def _validate_entrypoint(cls, v: str) -> str:
@@ -174,6 +210,52 @@ class AgentBlock(_StrictModel):
                     "plugin_manifest_unknown_agent_capability",
                     capability=perm.id,
                 )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_vendor_attribution_pairing(self) -> "AgentBlock":
+        """``contains_vendor_binary`` and ``vendor_attribution`` must
+        agree. A vendor-binary plugin without a source-offer record
+        would ship a GPL-incompatible install dialog; a source-offer
+        record without a declared vendor binary is a manifest typo
+        that the operator would not see in the install dialog risk
+        summary."""
+        has_attribution = self.vendor_attribution is not None
+        if self.contains_vendor_binary and not has_attribution:
+            raise ManifestError(
+                "agent.contains_vendor_binary is true but "
+                "agent.vendor_attribution is missing; the four "
+                "source-offer fields are required for vendor-binary "
+                "plugins"
+            )
+        if has_attribution and not self.contains_vendor_binary:
+            raise ManifestError(
+                "agent.vendor_attribution is set but "
+                "agent.contains_vendor_binary is false; set the flag "
+                "or remove the attribution block"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_subprocess_spawn_capability(self) -> "AgentBlock":
+        """If ``subprocess_spawn`` lists any binary, the plugin must
+        declare the ``process.spawn`` capability so the operator sees
+        the Critical-tier risk badge at install time. The supervisor
+        also enforces the allowlist at spawn time, but the manifest
+        validator surfaces the missing declaration up-front with an
+        actionable error."""
+        spawns = self.subprocess_spawn or []
+        if not spawns:
+            return self
+        declared = {p.id for p in self.permissions}
+        if "process.spawn" not in declared:
+            raise ManifestError(
+                "agent.subprocess_spawn lists "
+                f"{len(spawns)} binary path(s) but the "
+                "process.spawn capability is not declared in "
+                "agent.permissions; add it so the operator can "
+                "review the spawn allowlist at install time"
+            )
         return self
 
 
@@ -222,7 +304,12 @@ class Compatibility(_StrictModel):
 class PluginManifest(_StrictModel):
     """Top-level plugin manifest. Loaded from ``manifest.yaml``."""
 
-    schema_version: int = Field(1, ge=1, le=1)
+    schema_version: int = Field(1, ge=1, le=2)
+    """Manifest schema version. ``1`` is the original baseline. ``2``
+    unlocks the additional ``agent`` fields ``vendor_attribution``,
+    ``subprocess_spawn``, and ``per_drone_config``. Both versions
+    parse identical-shape v1 manifests; the version field is
+    informational so older tooling can route on schema generation."""
     id: str
     version: str
     name: str

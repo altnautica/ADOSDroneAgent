@@ -59,6 +59,12 @@ video:
   max_encode_resolution: "1920x1080"
   max_encode_fps: 30
   encoder_api: rkmedia
+  # 64 MB RAM cannot host a nav pipeline alongside MAVLink relay. The
+  # single CSI is reserved for the primary camera if used at all.
+  nav_cameras:
+    csi_count: 1
+    usb_uvc_count: 0
+    recommended_role: none
 
 power:
   typical_watts: 0.8
@@ -68,6 +74,13 @@ power:
 # ROS 2: 64 MB RAM, armv7l. Cannot run Docker or Jazzy.
 ros:
   supported: false
+
+# Telemetry-only profile. No navigation pipeline of any kind fits in
+# 64 MB RAM. Rangefinder port left empty because the FC, not the
+# companion, is the only place a rangefinder can land on this tier.
+navigation:
+  vio_capable: false
+  rangefinder_ports: []
 
 profiles:
   tier: minimal

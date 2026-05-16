@@ -10,13 +10,20 @@ import {
   finishSetup,
   installCloudflared,
   postCloudChoice,
+  postNavigationAssignCamera,
+  postNavigationConfig,
   postProfile,
+  skipStep,
 } from "@/lib/setup-actions";
 import type { GroundRole, Profile } from "@/lib/types";
 
 import { CloudPairStep } from "./setup/cloud-pair-step";
 import { ConnectivityStep } from "./setup/connectivity-step";
 import { FinishStep } from "./setup/finish-step";
+import {
+  NavigationStep,
+  type NavigationState,
+} from "./setup/navigation-step";
 import { ProfileStep } from "./setup/profile-step";
 
 const STEPS: ReadonlyArray<WizardStep> = [
@@ -31,6 +38,12 @@ const STEPS: ReadonlyArray<WizardStep> = [
     label: "Connectivity",
     description:
       "Sanity-check that MAVLink, video, and the network uplink are healthy before continuing.",
+  },
+  {
+    id: "navigation",
+    label: "Navigation",
+    description:
+      "Optional. Configure optical flow, VIO, or a rangefinder for GPS-denied flight.",
   },
   {
     id: "cloud-pair",
@@ -85,6 +98,17 @@ export function SetupRoute() {
   const [finishState, setFinishState] = useState<FinishState>({
     enableCloudflared: false,
   });
+  const [navState, setNavState] = useState<NavigationState>({
+    enableOpticalFlow: false,
+    enableVio: false,
+    enableRangefinder: false,
+    cameraDevice: "",
+    rangefinder: {
+      topology: "companion",
+      driver: "tfluna_uart",
+      devicePath: "",
+    },
+  });
 
   // Auto-redirect home if setup is already finalized.
   useEffect(() => {
@@ -132,6 +156,43 @@ export function SetupRoute() {
     (next: ProfileState) => setProfileState(next),
     [],
   );
+  const onNavChange = useCallback((next: NavigationState) => setNavState(next), []);
+
+  function deriveNavMode(s: NavigationState): "off" | "optical-flow" | "vio" | "both" {
+    if (s.enableOpticalFlow && s.enableVio) return "both";
+    if (s.enableVio) return "vio";
+    if (s.enableOpticalFlow) return "optical-flow";
+    return "off";
+  }
+
+  async function applyNavigationStep() {
+    const mode = deriveNavMode(navState);
+    if (mode === "off" && !navState.enableRangefinder) {
+      // Pure skip path. Mark the wizard step deferred and move on.
+      await skipStep("navigation").catch(() => undefined);
+      return;
+    }
+    if (mode !== "off" && navState.cameraDevice) {
+      await postNavigationAssignCamera({
+        device_path: navState.cameraDevice,
+        role: "nav",
+      });
+    }
+    await postNavigationConfig({
+      mode,
+      rangefinder: navState.enableRangefinder
+        ? {
+            topology: navState.rangefinder.topology,
+            driver: navState.rangefinder.driver,
+            device: {
+              path: navState.rangefinder.devicePath,
+              baud: navState.rangefinder.baud,
+              address: navState.rangefinder.address,
+            },
+          }
+        : undefined,
+    });
+  }
 
   const goNext = async () => {
     setErrorMsg(null);
@@ -140,6 +201,10 @@ export function SetupRoute() {
         await profileMut.mutateAsync();
         setStepId("connectivity");
       } else if (stepId === "connectivity") {
+        setStepId("navigation");
+      } else if (stepId === "navigation") {
+        await applyNavigationStep();
+        await qc.invalidateQueries({ queryKey: ["setup-status"] });
         setStepId("cloud-pair");
       } else if (stepId === "cloud-pair") {
         await cloudMut.mutateAsync();
@@ -207,6 +272,7 @@ export function SetupRoute() {
     >
       {stepId === "profile" && <ProfileStep onChange={onProfileChange} />}
       {stepId === "connectivity" && <ConnectivityStep />}
+      {stepId === "navigation" && <NavigationStep onChange={onNavChange} />}
       {stepId === "cloud-pair" && <CloudPairStep onChange={onCloudChange} />}
       {stepId === "finish" && <FinishStep onChange={onFinishChange} />}
 

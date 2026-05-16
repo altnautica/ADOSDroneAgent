@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from enum import StrEnum
 
 from ados.core.logging import get_logger
@@ -15,6 +16,35 @@ class CameraRole(StrEnum):
     SECONDARY = "secondary"
     THERMAL = "thermal"
     INSPECTION = "inspection"
+    NAV = "nav"
+    """Vision-navigation role. Cameras in this role feed an
+    optical-flow or VIO pipeline (typically a downward-facing global
+    shutter sensor) and are exclusively claimed by a single plugin so
+    the setup wizard cannot reassign them mid-flight."""
+
+
+class RoleConflict(Exception):
+    """Raised when an exclusive role claim collides with an existing
+    claim held by a different plugin. Carries the device path, the
+    role, the current holder, and the requesting plugin so the GCS
+    can render an actionable error."""
+
+    def __init__(
+        self,
+        device_path: str,
+        role: "CameraRole",
+        current_holder: str,
+        requested_by: str,
+    ) -> None:
+        super().__init__(
+            f"camera {device_path} role {role.value} exclusively "
+            f"claimed by {current_holder!r}; "
+            f"{requested_by!r} cannot reassign"
+        )
+        self.device_path = device_path
+        self.role = role
+        self.current_holder = current_holder
+        self.requested_by = requested_by
 
 
 class CameraManager:
@@ -22,11 +52,23 @@ class CameraManager:
 
     Cameras are discovered by the HAL layer and then assigned roles here.  The
     pipeline uses the role assignment to decide which camera feeds which stream.
+
+    Two assignment paths exist. ``assign_role`` is the non-exclusive
+    path used by the setup wizard and the auto-assign heuristic; it
+    overwrites whatever was previously assigned to the role. Plugins
+    that need a stable camera reservation across wizard runs call
+    ``assign_role_exclusive`` instead, which records the claiming
+    plugin id and refuses to reassign while the claim is held. The
+    setup wizard checks ``claimed_by`` on each camera before
+    offering it to the operator.
     """
 
     def __init__(self) -> None:
         self._assignments: dict[CameraRole, CameraInfo] = {}
         self._cameras: list[CameraInfo] = []
+        self._claims: dict[str, str] = {}
+        """device_path -> plugin_id for exclusive claims."""
+        self._state_lock = threading.Lock()
 
     @property
     def cameras(self) -> list[CameraInfo]:
@@ -45,9 +87,21 @@ class CameraManager:
         """Assign a role to a camera.
 
         If the role was previously assigned to another camera, it is replaced.
+        Non-exclusive: this path is used by the setup wizard and the auto-assign
+        heuristic. Plugins that need an exclusive reservation must call
+        ``assign_role_exclusive`` instead.
         """
-        prev = self._assignments.get(role)
-        self._assignments[role] = camera
+        with self._state_lock:
+            holder = self._claims.get(camera.device_path)
+            if holder is not None:
+                raise RoleConflict(
+                    device_path=camera.device_path,
+                    role=role,
+                    current_holder=holder,
+                    requested_by="<setup-wizard>",
+                )
+            prev = self._assignments.get(role)
+            self._assignments[role] = camera
         if prev and prev.device_path != camera.device_path:
             log.info(
                 "camera_role_reassigned",
@@ -57,6 +111,70 @@ class CameraManager:
             )
         else:
             log.info("camera_role_assigned", role=role.value, camera=camera.name)
+
+    def assign_role_exclusive(
+        self,
+        camera: CameraInfo,
+        role: CameraRole,
+        plugin_id: str,
+    ) -> None:
+        """Exclusively claim a camera for a role on behalf of a plugin.
+
+        The setup wizard cannot reassign or unassign the role until the
+        plugin releases its claim via ``release_claim``. A subsequent
+        call from the same ``plugin_id`` is idempotent (updates the
+        role mapping but leaves the claim in place). A call from a
+        different ``plugin_id`` raises :class:`RoleConflict`.
+
+        Used by vision-navigation plugins (and similar) that need a
+        stable camera reservation across wizard runs.
+        """
+        if not plugin_id:
+            raise ValueError("plugin_id must be a non-empty string")
+        with self._state_lock:
+            holder = self._claims.get(camera.device_path)
+            if holder is not None and holder != plugin_id:
+                raise RoleConflict(
+                    device_path=camera.device_path,
+                    role=role,
+                    current_holder=holder,
+                    requested_by=plugin_id,
+                )
+            self._claims[camera.device_path] = plugin_id
+            self._assignments[role] = camera
+        log.info(
+            "camera_role_assigned_exclusive",
+            role=role.value,
+            camera=camera.name,
+            plugin_id=plugin_id,
+        )
+
+    def release_claim(self, device_path: str, plugin_id: str) -> bool:
+        """Release a plugin's exclusive claim on a camera.
+
+        Returns True if a claim was released, False if there was none
+        or the claim belonged to a different plugin (silent no-op for
+        idempotency on plugin teardown). Roles assigned to the
+        released camera stay in place; the wizard may overwrite them
+        on the next assign.
+        """
+        with self._state_lock:
+            holder = self._claims.get(device_path)
+            if holder is None or holder != plugin_id:
+                return False
+            del self._claims[device_path]
+        log.info(
+            "camera_claim_released",
+            device_path=device_path,
+            plugin_id=plugin_id,
+        )
+        return True
+
+    def claimed_by(self, device_path: str) -> str | None:
+        """Return the plugin id that exclusively claims this camera,
+        or None if the camera is shared."""
+        with self._state_lock:
+            return self._claims.get(device_path)
 
     def unassign_role(self, role: CameraRole) -> None:
         """Remove a role assignment."""
@@ -103,10 +221,26 @@ class CameraManager:
         )
 
     def to_dict(self) -> dict:
-        """Serialize state for API responses."""
+        """Serialize state for API responses.
+
+        Each camera entry is enriched with a ``claimed_by`` field so
+        the GCS can render an "in use by <plugin>" badge and disable
+        wizard reassignment for exclusively-claimed cameras.
+        """
+        with self._state_lock:
+            claims_snapshot = dict(self._claims)
+            assignments_snapshot = dict(self._assignments)
+            cameras_snapshot = list(self._cameras)
+
+        def _cam_with_claim(cam: CameraInfo) -> dict:
+            d = cam.to_dict()
+            d["claimed_by"] = claims_snapshot.get(cam.device_path)
+            return d
+
         return {
-            "cameras": [c.to_dict() for c in self._cameras],
+            "cameras": [_cam_with_claim(c) for c in cameras_snapshot],
             "assignments": {
-                role.value: cam.to_dict() for role, cam in self._assignments.items()
+                role.value: _cam_with_claim(cam)
+                for role, cam in assignments_snapshot.items()
             },
         }

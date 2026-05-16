@@ -67,6 +67,7 @@ _KNOWN_STEP_IDS: frozenset[str] = frozenset(
         "welcome",
         "profile",
         "hardware_check",
+        "navigation",
         "cloud_choice",
         "pair",
         "mavlink",

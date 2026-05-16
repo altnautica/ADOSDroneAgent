@@ -78,6 +78,12 @@ video:
   max_encode_fps: 30
   encoder_api: rkmedia
   isp: true
+  # Dual CSI: spare lane for the downward navigation camera. USB host
+  # ports remain free for sensors.
+  nav_cameras:
+    csi_count: 2
+    usb_uvc_count: 2
+    recommended_role: nav-csi
 
 power:
   typical_watts: 2.0
@@ -87,6 +93,16 @@ power:
 # ROS 2: 1 GB RAM, armv7l. Too tight for Jazzy Docker image.
 ros:
   supported: false
+
+# Quad-A7 + 2 TOPS NPU + 1 GB RAM can host a lightweight VIO front-end
+# alongside optical flow. Two UART and two I2C buses give flexible
+# rangefinder placement.
+navigation:
+  vio_capable: true
+  rangefinder_ports:
+    - {type: uart, path: /dev/ttyS1, baud_max: 115200}
+    - {type: i2c, path: /dev/i2c-0, speed_hz: 400000}
+    - {type: i2c, path: /dev/i2c-1, speed_hz: 400000}
 
 profiles:
   tier: recommended

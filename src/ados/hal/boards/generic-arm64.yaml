@@ -12,6 +12,26 @@ uart_paths:
   - /dev/ttyS0
 hw_video_codecs: []
 
+# Unknown hardware. Assume no CSI broken out and route any navigation
+# camera over USB UVC. Runtime probing should override this if the real
+# board exposes CSI.
+video:
+  csi_ports: 0
+  encoder_api: "unknown"
+  nav_cameras:
+    csi_count: 0
+    usb_uvc_count: 1
+    recommended_role: nav-usb
+
+# Conservative default: no VIO until the runtime confirms RAM, NPU, and
+# CPU class. Rangefinder lands on the FC link UART or one of the common
+# I2C buses; both paths are best-effort because the board is unknown.
+navigation:
+  vio_capable: false
+  rangefinder_ports:
+    - {type: uart, path: /dev/ttyUSB0, baud_max: 115200}
+    - {type: i2c, path: /dev/i2c-1, speed_hz: 400000}
+
 # ROS 2: unknown hardware. Cannot guarantee Docker or sufficient RAM.
 ros:
   supported: false

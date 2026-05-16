@@ -123,6 +123,12 @@ video:
   max_encode_resolution: "3840x2160"
   max_encode_fps: 60
   encoder_api: rkmpp     # Mali-G610 absent, so video uses VPU + DRM, NOT GLES
+  # Single CSI consumed by the primary forward camera. Downward nav
+  # camera (optical-flow or VIO mono) lands on one of the four USB ports.
+  nav_cameras:
+    csi_count: 1
+    usb_uvc_count: 4
+    recommended_role: nav-usb
 
 power:
   typical_watts: 4.0
@@ -133,6 +139,16 @@ power:
 ros:
   supported: true
   max_profile: vio          # 16 GB RAM, 6 TOPS NPU. VIO fits comfortably.
+
+# Full VIO target. NPU intact at 6 TOPS, 16 GB RAM, Cortex-A76 pair drives
+# the front-end at 30 fps comfortably. Rangefinder choices: a free UART
+# header or either I2C bus.
+navigation:
+  vio_capable: true
+  rangefinder_ports:
+    - {type: uart, path: /dev/ttyS1, baud_max: 115200}
+    - {type: i2c, path: /dev/i2c-0, speed_hz: 400000}
+    - {type: i2c, path: /dev/i2c-1, speed_hz: 400000}
 
 # 40-pin header signal positions are Pi-pinout-compatible at the SPI4-M2
 # pad mux (GPIO1_A0..A4 → physical pins 21/19/23/24/26), so a Waveshare

@@ -85,7 +85,9 @@ def _install_with_perms(plugin_id: str, **grants: bool) -> PluginInstall:
 
 
 def test_catalog_size_matches_spec() -> None:
-    assert len(AGENT_CAPABILITIES) == 29
+    # 29 v1.0 entries + 3 v1.1 additions: mavlink.component.vio,
+    # estimator.pose.inject, process.spawn. See 04-permission-model.md.
+    assert len(AGENT_CAPABILITIES) == 32
 
 
 def test_only_event_caps_are_enforced_today() -> None:

@@ -36,6 +36,16 @@ storage:
   nand: true
   nand_mb: 256
 
+# No HW video encoder. RK3506 cannot drive a video pipeline of any kind,
+# so it does not host navigation cameras either.
+video:
+  csi_ports: 0
+  encoder_api: "none"
+  nav_cameras:
+    csi_count: 0
+    usb_uvc_count: 0
+    recommended_role: none
+
 buses:
   uart:
     - id: uart0
@@ -67,6 +77,15 @@ power:
 # ROS 2: 256 MB RAM, armv7l. Cannot run Docker or Jazzy.
 ros:
   supported: false
+
+# Telemetry-only board. No HW encoder rules out optical-flow capture and
+# VIO. Rangefinder, if present, lands on the primary UART or the single
+# I2C bus, though the FC is the more typical host on this tier.
+navigation:
+  vio_capable: false
+  rangefinder_ports:
+    - {type: uart, path: /dev/ttyS0, baud_max: 115200}
+    - {type: i2c, path: /dev/i2c-0, speed_hz: 400000}
 
 profiles:
   tier: telemetry_only

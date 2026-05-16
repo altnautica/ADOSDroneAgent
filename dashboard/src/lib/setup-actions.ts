@@ -62,3 +62,32 @@ export function installCloudflared(payload: { token?: string; quick?: boolean })
 export function rebootAgent() {
   return apiFetch("/api/v1/setup/reboot", { method: "POST" });
 }
+
+export interface NavigationConfigPayload {
+  mode: "off" | "optical-flow" | "vio" | "both";
+  rangefinder?: {
+    topology: "companion" | "fc";
+    driver: "tfluna_uart" | "garmin_lidarlite_i2c" | "vl53l1x_i2c";
+    device: { path: string; baud?: number; address?: string };
+  };
+  plugin_id?: string;
+}
+
+export function postNavigationConfig(payload: NavigationConfigPayload) {
+  return apiFetch<SetupActionResult>("/api/v1/setup/navigation/config", {
+    method: "POST",
+    body: payload,
+  });
+}
+
+export interface NavigationAssignCameraPayload {
+  device_path: string;
+  role: "nav" | "secondary" | "thermal" | "inspection" | "primary";
+}
+
+export function postNavigationAssignCamera(payload: NavigationAssignCameraPayload) {
+  return apiFetch<SetupActionResult>("/api/v1/setup/navigation/assign-camera", {
+    method: "POST",
+    body: payload,
+  });
+}

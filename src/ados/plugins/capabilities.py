@@ -61,6 +61,12 @@ AGENT_CAPABILITIES: frozenset[str] = frozenset(
         "filesystem.host",
         # recording
         "recording.write",
+        # v1.1 additions: high-risk MAVLink component, estimator
+        # injection, and explicit subprocess-spawn for vendor binaries.
+        # Risk and full semantics live in the permission model spec.
+        "mavlink.component.vio",
+        "estimator.pose.inject",
+        "process.spawn",
     }
 )
 """Canonical agent permissions. Source: plugin permission model spec."""

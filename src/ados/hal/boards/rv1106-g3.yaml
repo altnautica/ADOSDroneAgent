@@ -63,6 +63,12 @@ video:
   max_encode_fps: 30
   encoder_api: rkmedia
   encoder_api_lite: rkmpi  # Rust lite agent reads this; routes to the rkmpi-wrapper subprocess
+  # Single CSI consumed by the primary camera. Pico Zero form factor has
+  # no broken-out I2C and no spare USB for a dedicated UVC nav camera.
+  nav_cameras:
+    csi_count: 1
+    usb_uvc_count: 0
+    recommended_role: nav-shared-primary
 
 power:
   typical_watts: 0.9
@@ -72,6 +78,14 @@ power:
 # ROS 2: 256 MB RAM, armv7l. Cannot run Docker or Jazzy.
 ros:
   supported: false
+
+# Optical flow only. 256 MB RAM and a single Cortex-A7 cannot host VIO.
+# I2C is not broken out on the Pico Zero header, so the rangefinder rides
+# on the primary UART that the FC link uses.
+navigation:
+  vio_capable: false
+  rangefinder_ports:
+    - {type: uart, path: /dev/ttyS0, baud_max: 115200}
 
 profiles:
   tier: budget

@@ -20,6 +20,26 @@ hw_video_codecs:
   - h264_dec
   - h265_dec
 
+# CM4 carrier boards typically break out 0-2 MIPI CSI ports depending on
+# the IO board. The default profile assumes a carrier with no CSI broken
+# out; downward-facing optical-flow cameras land on USB UVC instead.
+video:
+  csi_ports: 0
+  max_encode_resolution: "1920x1080"
+  max_encode_fps: 30
+  encoder_api: v4l2
+  nav_cameras:
+    csi_count: 0
+    usb_uvc_count: 2
+    recommended_role: nav-usb
+
+# Optical flow only. No NPU, RAM-constrained carriers cannot host VIO.
+navigation:
+  vio_capable: false
+  rangefinder_ports:
+    - {type: uart, path: /dev/ttyAMA0, baud_max: 115200}
+    - {type: i2c, path: /dev/i2c-1, speed_hz: 400000}
+
 # ROS 2: CM4 ships in 1-8 GB variants but most drone builds use 1-2 GB.
 # No NPU. Docker overhead too high on typical configs.
 ros:

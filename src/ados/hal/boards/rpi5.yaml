@@ -20,6 +20,27 @@ hw_video_codecs:
   - h265_enc
   - h265_dec
 
+# Pi 5 exposes 2x MIPI CSI on the board itself. Downward navigation
+# camera lands on the spare CSI port; USB stays free for the WFB-ng
+# dongle and accessory sensors.
+video:
+  csi_ports: 2
+  max_encode_resolution: "1920x1080"
+  max_encode_fps: 60
+  encoder_api: v4l2
+  nav_cameras:
+    csi_count: 2
+    usb_uvc_count: 4
+    recommended_role: nav-csi
+
+# VIO runs on the Cortex-A76 quad at the 8 GB SKU. Rangefinder lands on
+# the primary UART or the I2C bus.
+navigation:
+  vio_capable: true
+  rangefinder_ports:
+    - {type: uart, path: /dev/ttyAMA0, baud_max: 115200}
+    - {type: i2c, path: /dev/i2c-1, speed_hz: 400000}
+
 # ROS 2: BCM2712 with 8 GB variant available. No dedicated NPU but VIO runs on CPU.
 ros:
   supported: true

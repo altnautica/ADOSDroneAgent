@@ -90,6 +90,12 @@ video:
   max_encode_resolution: "7680x4320"
   max_encode_fps: 30
   encoder_api: rkmedia
+  # Dual MIPI CSI: spare lane after the primary forward camera lands the
+  # downward navigation camera. USB host ports remain free for sensors.
+  nav_cameras:
+    csi_count: 2
+    usb_uvc_count: 2
+    recommended_role: nav-csi
 
 power:
   typical_watts: 4.0
@@ -100,6 +106,16 @@ power:
 ros:
   supported: true
   max_profile: vio
+
+# Full VIO target. 6 TOPS NPU + Cortex-A76 quad easily drives 30 fps
+# OpenVINS. Two UART and two I2C buses give the rangefinder plenty of
+# placement options.
+navigation:
+  vio_capable: true
+  rangefinder_ports:
+    - {type: uart, path: /dev/ttyS1, baud_max: 115200}
+    - {type: i2c, path: /dev/i2c-0, speed_hz: 400000}
+    - {type: i2c, path: /dev/i2c-1, speed_hz: 400000}
 
 profiles:
   tier: pro

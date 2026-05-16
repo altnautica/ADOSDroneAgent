@@ -80,6 +80,13 @@ video:
   encoder_api_lite: "libcamera"
   vendor_lib_loader: "none"
   isp: "VideoCore IV ISP"
+  # Single CSI port is typically consumed by the primary forward camera.
+  # A downward optical-flow camera can either share the primary CSI via
+  # libcamera or land on the single USB OTG port via a UVC adapter.
+  nav_cameras:
+    csi_count: 1
+    usb_uvc_count: 1
+    recommended_role: nav-shared-primary
 
 power:
   typical_watts: 1.2
@@ -99,6 +106,15 @@ wifi_chip_driver: "brcmfmac"
 
 ros:
   supported: false
+
+# Optical flow only. 512 MB RAM and the single Cortex-A53 cluster cannot
+# carry VIO at usable frame rates. Rangefinder lands on UART0 (shared
+# with the FC link, time-sliced) or the single I2C bus.
+navigation:
+  vio_capable: false
+  rangefinder_ports:
+    - {type: uart, path: /dev/ttyAMA0, baud_max: 115200}
+    - {type: i2c, path: /dev/i2c-1, speed_hz: 400000}
 
 profiles:
   tier: lite
