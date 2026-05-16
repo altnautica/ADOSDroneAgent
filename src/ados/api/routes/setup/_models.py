@@ -132,6 +132,16 @@ class NavigationConfigRequest(BaseModel):
     mode: Literal["off", "optical-flow", "vio", "both"]
     rangefinder: NavigationRangefinderConfig | None = None
     plugin_id: str | None = None
+    # VIO direction. Only applies when mode is 'vio' or 'both'.
+    # 'forward' fits indoor / corridor flight; 'downward' fits
+    # over-ground flight (agriculture, survey, SAR, pipeline patrol);
+    # 'auto' defers to the bound HAL camera role.
+    vio_camera_orientation: Literal["forward", "downward", "auto"] | None = None
+    # Flight controller firmware. Optical flow is supported on
+    # ArduPilot, PX4, and iNav (7.0+). VIO is supported on ArduPilot
+    # and PX4; the wizard rejects vio + inav. Betaflight is rejected
+    # outright because the firmware has no position estimator.
+    firmware: Literal["ardupilot", "px4", "inav"] | None = None
 
 
 class NavigationPreflightResponse(BaseModel):

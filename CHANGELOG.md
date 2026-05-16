@@ -4,6 +4,40 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.28.12] - 2026-05-16
+
+### Added
+
+- **Navigation wizard: VIO camera orientation field.**
+  `POST /setup/navigation/config` accepts a new optional
+  `vio_camera_orientation` field (`forward`, `downward`, `auto`).
+  Operators flying over ground (agriculture, survey, SAR, pipeline
+  patrol) pick `downward`; operators flying indoor / corridor /
+  inspection pick `forward`. The wizard rejects `forward` or
+  `downward` on optical-flow modes (which are always downward) and
+  rejects `downward` when no downward camera is discovered.
+- **Navigation wizard: firmware field.** `POST /setup/navigation/config`
+  accepts `firmware: "ardupilot" | "px4" | "inav"`. Betaflight is
+  intentionally absent and gets rejected by Pydantic with a 422.
+  iNav + VIO modes get rejected at validation time because iNav's
+  external position-injection EKF integration is not VIO-grade.
+- **Wizard-to-plugin translation step.** `translate_wizard_to_plugin_config()`
+  converts the wizard's simplified 4-mode + orientation + firmware
+  vocabulary into the plugin's 6-mode + camera-orientation schema
+  when persisting `config.yaml` under `/etc/ados/plugins/<id>/`.
+  Operators never see the plugin's native mode names; the wizard
+  speaks `optical-flow` / `vio` / `both` and the plugin reads
+  `optical_flow` / `vio_vins_fusion` / `hybrid_of_plus_vio`.
+- **HAL board profile: `cameras:` block.** Additive optional metadata
+  on every board profile YAML. Each entry carries `name`, `bus`,
+  `orientation`, and `notes`. The vision-nav wizard reads this to
+  default the camera-orientation picker. Rock 5C Lite profile populated
+  with `front=forward` and `down=downward` entries for the dev rig.
+- 10 new tests on `tests/api/test_setup_navigation.py` covering the
+  new orientation + firmware fields, the wizard-to-plugin translation,
+  iNav-VIO rejection, and Betaflight schema rejection. Total nav
+  route test count goes from 17 to 27.
+
 ## [0.28.10] - 2026-05-16
 
 ### Added

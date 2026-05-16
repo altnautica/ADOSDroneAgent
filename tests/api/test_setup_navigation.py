@@ -333,13 +333,156 @@ def test_config_writes_plugin_yaml(client, plugin_etc: Path) -> None:
     cfg_path = Path(body["data"]["config_path"])
     assert cfg_path.is_file()
     text = cfg_path.read_text()
-    assert "mode: optical-flow" in text
+    # The wizard speaks "optical-flow" but the plugin's persisted YAML
+    # uses the plugin's native "optical_flow" mode key after the
+    # wizard-to-plugin translation step.
+    assert "mode: optical_flow" in text
     assert "tfluna_uart" in text
+    # Optical-flow always forces downward orientation in the translation.
+    assert "orientation: downward" in text
+
+
+def test_config_vio_with_downward_orientation_writes_plugin_vio(
+    client, plugin_etc: Path
+) -> None:
+    """VIO + downward camera (the over-ground default) translates into
+    the plugin's vio_vins_fusion mode with camera.orientation=downward.
+    This is the agriculture / survey / SAR / pipeline-patrol path."""
+    payload = {
+        "mode": "vio",
+        "vio_camera_orientation": "downward",
+        "firmware": "ardupilot",
+    }
+    resp = client.post("/api/v1/setup/navigation/config", json=payload)
+    assert resp.status_code == 200
+    cfg_path = Path(resp.json()["data"]["config_path"])
+    text = cfg_path.read_text()
+    assert "mode: vio_vins_fusion" in text
+    assert "orientation: downward" in text
+    assert "type: ardupilot" in text
+
+
+def test_config_vio_with_forward_orientation_writes_plugin_vio(
+    client, plugin_etc: Path
+) -> None:
+    """VIO + forward camera (the indoor / corridor default) translates
+    into the plugin's vio_vins_fusion mode with camera.orientation=forward."""
+    payload = {
+        "mode": "vio",
+        "vio_camera_orientation": "forward",
+        "firmware": "px4",
+    }
+    resp = client.post("/api/v1/setup/navigation/config", json=payload)
+    assert resp.status_code == 200
+    cfg_path = Path(resp.json()["data"]["config_path"])
+    text = cfg_path.read_text()
+    assert "mode: vio_vins_fusion" in text
+    assert "orientation: forward" in text
+    assert "type: px4" in text
+
+
+def test_config_both_mode_writes_hybrid(client, plugin_etc: Path) -> None:
+    """The wizard's 'both' translates to the plugin's hybrid_of_plus_vio."""
+    payload = {
+        "mode": "both",
+        "vio_camera_orientation": "forward",
+        "firmware": "ardupilot",
+    }
+    resp = client.post("/api/v1/setup/navigation/config", json=payload)
+    assert resp.status_code == 200
+    cfg_path = Path(resp.json()["data"]["config_path"])
+    text = cfg_path.read_text()
+    assert "mode: hybrid_of_plus_vio" in text
+
+
+def test_config_inav_with_optical_flow_accepted(
+    client, plugin_etc: Path
+) -> None:
+    """iNav + optical flow is supported. Plugin emits OPTICAL_FLOW_RAD
+    which iNav 7.0+ consumes when opflow_hardware=MAVLINK."""
+    payload = {
+        "mode": "optical-flow",
+        "firmware": "inav",
+        "rangefinder": {
+            "topology": "companion",
+            "driver": "tfluna_uart",
+            "device": {"path": "/dev/ttyS3"},
+        },
+    }
+    resp = client.post("/api/v1/setup/navigation/config", json=payload)
+    assert resp.status_code == 200
+    cfg_path = Path(resp.json()["data"]["config_path"])
+    text = cfg_path.read_text()
+    assert "type: inav" in text
+    assert "mode: optical_flow" in text
+
+
+def test_config_inav_with_vio_rejected(client, plugin_etc: Path) -> None:
+    """iNav + VIO is rejected. iNav's external position injection EKF
+    integration is not VIO-grade in 7.x."""
+    payload = {"mode": "vio", "firmware": "inav"}
+    resp = client.post("/api/v1/setup/navigation/config", json=payload)
+    assert resp.status_code == 400
+    detail = resp.json()["detail"]
+    assert "iNav" in detail or "inav" in detail.lower()
+
+
+def test_config_inav_with_both_rejected(client, plugin_etc: Path) -> None:
+    """Hybrid mode requires VIO; iNav cannot run VIO so 'both' is
+    also rejected."""
+    payload = {"mode": "both", "firmware": "inav"}
+    resp = client.post("/api/v1/setup/navigation/config", json=payload)
+    assert resp.status_code == 400
+
+
+def test_config_betaflight_rejected_by_pydantic(
+    client, plugin_etc: Path
+) -> None:
+    """Betaflight is intentionally absent from the firmware literal so
+    pydantic rejects the payload before it ever reaches the validator.
+    The 422 (vs the 400 the validator would return) is the expected
+    FastAPI behavior for schema violations."""
+    payload = {"mode": "optical-flow", "firmware": "betaflight"}
+    resp = client.post("/api/v1/setup/navigation/config", json=payload)
+    assert resp.status_code == 422
+
+
+def test_config_orientation_on_optical_flow_rejected(
+    client, plugin_etc: Path
+) -> None:
+    """vio_camera_orientation only applies to vio/both. Setting forward
+    or downward on optical-flow is an operator error and surfaces a 400."""
+    payload = {
+        "mode": "optical-flow",
+        "vio_camera_orientation": "forward",
+    }
+    resp = client.post("/api/v1/setup/navigation/config", json=payload)
+    assert resp.status_code == 400
+
+
+def test_config_orientation_auto_passes_on_optical_flow(
+    client, plugin_etc: Path
+) -> None:
+    """vio_camera_orientation='auto' is a no-op on optical-flow and
+    must not be rejected. It only carries meaning under VIO modes."""
+    payload = {
+        "mode": "optical-flow",
+        "vio_camera_orientation": "auto",
+        "rangefinder": {
+            "topology": "companion",
+            "driver": "tfluna_uart",
+            "device": {"path": "/dev/ttyS3"},
+        },
+    }
+    resp = client.post("/api/v1/setup/navigation/config", json=payload)
+    assert resp.status_code == 200
 
 
 def test_config_unknown_rangefinder_driver_rejects(client, plugin_etc: Path) -> None:
     payload = {
         "mode": "vio",
+        "vio_camera_orientation": "downward",
+        "firmware": "ardupilot",
         "rangefinder": {
             "topology": "companion",
             "driver": "definitely_not_a_driver",

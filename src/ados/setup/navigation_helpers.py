@@ -58,6 +58,30 @@ NAV_MODES: frozenset[str] = frozenset(
 )
 
 
+# Camera orientations the operator can pin under VIO mode. The wizard
+# speaks this simplified four-value vocabulary so an operator does not
+# have to learn the plugin's full six-mode + camera-orientation matrix;
+# the agent translates it into the plugin's config schema when it
+# writes the YAML.
+#
+# ``forward``  -- indoor / corridor / inspection
+# ``downward`` -- agriculture / survey / SAR / pipeline patrol (default
+#                  for the over-ground suites)
+# ``auto``     -- defer to the bound HAL camera role
+VIO_CAMERA_ORIENTATIONS: frozenset[str] = frozenset(
+    {"forward", "downward", "auto"}
+)
+
+
+# Firmware types the wizard surfaces. Mirrors the plugin's
+# ``FirmwareConfig.type`` literal. Betaflight is intentionally absent
+# because the firmware has no position estimator; the wizard refuses
+# to enable navigation on Betaflight hosts with a clear error.
+NAV_FIRMWARE_TYPES: frozenset[str] = frozenset(
+    {"ardupilot", "px4", "inav"}
+)
+
+
 # Default plugin id the wizard targets when the caller does not pass one.
 # Plugin ids are namespaced by reverse-DNS; the navigation plugin lives
 # under the company namespace so a future contributed alternative does
@@ -392,6 +416,44 @@ def validate_nav_config(payload: dict[str, Any]) -> None:
         raise ValueError(
             f"mode must be one of {sorted(NAV_MODES)}; got {mode!r}"
         )
+
+    # Firmware gate: Betaflight has no position estimator, so even a
+    # well-formed nav config cannot run there. iNav has optical flow
+    # but no VIO; the validator rejects vio + inav up front.
+    firmware = str(payload.get("firmware", "ardupilot")).strip()
+    if firmware and firmware not in NAV_FIRMWARE_TYPES:
+        # Betaflight or any other unsupported firmware.
+        raise ValueError(
+            f"firmware {firmware!r} is not supported for vision "
+            "navigation. Betaflight has no position estimator; "
+            "cross-flash iNav or ArduPilot Copter to enable flow / VIO."
+        )
+    if firmware == "inav" and mode in {"vio", "both"}:
+        raise ValueError(
+            "VIO is not supported on iNav in this release. Use "
+            "mode='optical-flow' with a downward camera + rangefinder, "
+            "or cross-flash ArduPilot Copter or PX4 for VIO."
+        )
+
+    # Camera orientation gate. Only meaningful when mode is vio or
+    # both; optical-flow is always downward regardless of what the
+    # wizard sends. The wizard refuses ``downward`` when the discovered
+    # cameras include no downward-mounted device.
+    orientation = payload.get("vio_camera_orientation")
+    if orientation is not None:
+        orientation_s = str(orientation).strip()
+        if orientation_s not in VIO_CAMERA_ORIENTATIONS:
+            raise ValueError(
+                "vio_camera_orientation must be one of "
+                f"{sorted(VIO_CAMERA_ORIENTATIONS)}; got {orientation_s!r}"
+            )
+        if mode not in {"vio", "both"} and orientation_s != "auto":
+            raise ValueError(
+                "vio_camera_orientation only applies to mode='vio' "
+                "or mode='both'; got mode="
+                f"{mode!r} with orientation={orientation_s!r}"
+            )
+
     rf = payload.get("rangefinder")
     if rf is None:
         return  # rangefinder is optional except in obstacle-avoidance modes
@@ -411,6 +473,77 @@ def validate_nav_config(payload: dict[str, Any]) -> None:
     device = rf.get("device")
     if not isinstance(device, dict) or not str(device.get("path", "")).strip():
         raise ValueError("rangefinder.device.path is required")
+
+
+def translate_wizard_to_plugin_config(
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    """Translate the wizard's simplified 4-mode + orientation payload
+    into the plugin's 6-mode + camera-orientation config shape.
+
+    The wizard vocabulary is intentionally smaller than the plugin's
+    so the operator does not have to think in estimator-engine terms.
+    This translation runs at write time, before
+    :func:`write_plugin_config` serializes the YAML the plugin
+    supervisor will load on next start.
+
+    Mapping:
+
+    * ``off`` -> plugin ``mode='off'``.
+    * ``optical-flow`` -> plugin ``mode='optical_flow'`` (downward
+      camera, rangefinder required). When no rangefinder is wired the
+      plugin auto-flips to ``optical_flow_degraded`` at start-up.
+    * ``vio`` -> plugin ``mode='vio_vins_fusion'`` (the default VIO
+      engine). The wizard's ``vio_camera_orientation`` becomes the
+      plugin's ``camera.orientation``.
+    * ``both`` -> plugin ``mode='hybrid_of_plus_vio'``. The primary
+      camera carries the downward OF stream; the secondary carries the
+      forward VIO stream. The wizard's orientation field is informational
+      for the operator's confirmation step and does not change the
+      plugin's hybrid camera assignments.
+    """
+
+    mode = str(payload.get("mode", "off")).strip()
+    orientation = str(payload.get("vio_camera_orientation", "auto")).strip()
+    firmware = str(payload.get("firmware", "ardupilot")).strip() or "ardupilot"
+
+    if mode == "off":
+        plugin_mode = "off"
+    elif mode == "optical-flow":
+        plugin_mode = "optical_flow"
+    elif mode == "vio":
+        plugin_mode = "vio_vins_fusion"
+    elif mode == "both":
+        plugin_mode = "hybrid_of_plus_vio"
+    else:
+        # validate_nav_config already gates the literal; fall through
+        # defensively in case a caller bypasses validation.
+        plugin_mode = "off"
+
+    # Camera orientation only carried for VIO modes. Optical flow is
+    # always downward; hybrid uses both cameras with explicit slots.
+    if plugin_mode in {"vio_vins_fusion", "vio_openvins"}:
+        camera_orientation = orientation
+    elif plugin_mode == "optical_flow":
+        camera_orientation = "downward"
+    else:
+        camera_orientation = "auto"
+
+    plugin_payload: dict[str, Any] = {
+        "mode": plugin_mode,
+        "camera": {"orientation": camera_orientation},
+        "firmware": {"type": firmware},
+    }
+    rf = payload.get("rangefinder")
+    if isinstance(rf, dict):
+        plugin_payload["rangefinder"] = {
+            "topology": rf.get("topology", "fc"),
+            "driver": rf.get("driver", "fc_relay"),
+        }
+        device = rf.get("device")
+        if isinstance(device, dict) and device.get("path"):
+            plugin_payload["rangefinder"]["device"] = device["path"]
+    return plugin_payload
 
 
 # ---------------------------------------------------------------------

@@ -287,8 +287,14 @@ async def configure_navigation(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    # Translate wizard vocabulary (4 modes + orientation + firmware)
+    # into the plugin's 6-mode + camera-orientation schema before
+    # persisting. The plugin supervisor consumes the translated file
+    # on next start; the operator never sees the plugin's native
+    # vocabulary.
+    plugin_payload = nav_helpers.translate_wizard_to_plugin_config(payload)
     try:
-        cfg_path = nav_helpers.write_plugin_config(pid, payload)
+        cfg_path = nav_helpers.write_plugin_config(pid, plugin_payload)
     except OSError as exc:
         raise HTTPException(
             status_code=500,

@@ -125,10 +125,26 @@ video:
   encoder_api: rkmpp     # Mali-G610 absent, so video uses VPU + DRM, NOT GLES
   # Single CSI consumed by the primary forward camera. Downward nav
   # camera (optical-flow or VIO mono) lands on one of the four USB ports.
+  #
+  # The optional ``cameras`` block below maps each physical port to a
+  # mount orientation. The vision-nav wizard reads this to default the
+  # camera-orientation picker; without it the wizard falls back to
+  # ``auto`` and asks the operator to confirm. ``forward`` suits
+  # indoor / corridor / inspection flight; ``downward`` suits
+  # over-ground flight (agriculture, survey, SAR, pipeline patrol).
   nav_cameras:
     csi_count: 1
     usb_uvc_count: 4
     recommended_role: nav-usb
+  cameras:
+    - name: front
+      bus: csi
+      orientation: forward
+      notes: "Primary forward FPV / Vision Engine camera. MIPI CSI is the cleanest path on the dev rig once a supported sensor lands; current dev-rig builds use USB UVC instead."
+    - name: down
+      bus: usb
+      orientation: downward
+      notes: "AprilTag landing and survey capture today; the optical-flow estimator and downward VIO both bind here when the operator picks them in the wizard."
 
 power:
   typical_watts: 4.0
