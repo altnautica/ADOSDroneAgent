@@ -67,6 +67,65 @@ _MAVLINK_SERIAL_PATHS = [
     "/dev/ttyAMA0",
 ]
 
+# Known FC USB vendor IDs. Match grants a strong "this is a drone"
+# signal. A bare USB-serial adapter without an FC behind it would not
+# match any of these, so the score boost is safe to add on top of the
+# port-exists baseline.
+#
+# - 0x1209: pid.codes umbrella vendor used by SpeedyBee, ArduPilot
+#   configurable bootloaders, and a long tail of community FC vendors.
+# - 0x0483: STMicroelectronics — generic STM32 virtual com port, used
+#   by raw STM32 dev boards. Less specific than 1209 so we still match
+#   it but rely on the port-exists baseline already covering it.
+# - 0x1d50: OpenMoko — OpenPilot, LibrePilot Revolution boards.
+# - 0x26ac: 3D Robotics — original Pixhawk hardware.
+# - 0x2dae: Hex / ProfiCNC — Cube series autopilots.
+# - 0x3162: Holybro — current Pixhawk variants and Durandal.
+# - 0x35a4: mRobotics — mRo Pixracer / Control Zero.
+_FC_USB_VENDOR_IDS: set[int] = {
+    0x1209,
+    0x0483,
+    0x1D50,
+    0x26AC,
+    0x2DAE,
+    0x3162,
+    0x35A4,
+}
+
+
+def _read_usb_vendor_for_tty(tty_path: str) -> int | None:
+    """Read the USB vendor ID of the device backing ``tty_path``.
+
+    Resolves ``/sys/class/tty/<name>/device`` (the USB interface
+    symlink), walks up one level to the USB device, and reads
+    ``idVendor`` as hex. Returns ``None`` for non-USB ttys (e.g.
+    ``/dev/ttyAMA0`` which is a UART on the SoC, not a USB device).
+    Failures are swallowed so the caller can fall back to the
+    port-exists baseline.
+    """
+    name = Path(tty_path).name
+    link = Path(f"/sys/class/tty/{name}/device")
+    if not link.exists():
+        return None
+    try:
+        iface_real = link.resolve(strict=True)
+    except (OSError, RuntimeError):
+        return None
+    # USB tty: .../<bus>-<port>/<bus>-<port>:<config>.<iface>
+    # parent of the interface is the USB device which carries idVendor.
+    usb_device = iface_real.parent
+    id_file = usb_device / "idVendor"
+    if not id_file.is_file():
+        return None
+    try:
+        raw = id_file.read_text().strip()
+    except OSError:
+        return None
+    try:
+        return int(raw, 16)
+    except ValueError:
+        return None
+
 
 # ---- Signal probes ---------------------------------------------------------
 
@@ -178,13 +237,24 @@ def probe_rtl8812() -> tuple[int, int, bool]:
 def probe_mavlink_serial() -> tuple[int, int, bool]:
     """Look for a plausible FC serial device.
 
-    We do not read a heartbeat here. A present device earns +3 air points.
-    Heartbeat confirmation is a separate probe done after the mavlink
-    service is up (placeholder below).
+    A present device earns +3 air points (baseline). When the backing
+    USB device's vendor ID matches a known autopilot vendor
+    (pid.codes, ST, OpenMoko, 3DR, Hex, Holybro, mRo) we add +3 more
+    so a real FC outweighs the hostname tiebreaker even on hybrid
+    bench rigs where the box also has a WFB-ng dongle plugged in.
+
+    Heartbeat confirmation lives in ``probe_fc_heartbeat`` and runs
+    against ``/run/ados/state.sock`` once the mavlink service is up.
+    Install-time detection runs before that socket exists, so the
+    VID match is what closes the install-time gap.
     """
     for path in _MAVLINK_SERIAL_PATHS:
-        if Path(path).exists():
-            return 0, 3, True
+        if not Path(path).exists():
+            continue
+        vid = _read_usb_vendor_for_tty(path)
+        if vid is not None and vid in _FC_USB_VENDOR_IDS:
+            return 0, 6, True
+        return 0, 3, True
     return 0, 0, False
 
 
@@ -485,16 +555,15 @@ def detect_profile(config_override: str | None = None) -> dict[str, Any]:
     ground_score = sum(g for g, _a, _d in probes.values())
     air_score = sum(a for _g, a, _d in probes.values())
 
-    # Hostname is operator-controlled: when an operator names a box
-    # `groundnode` they explicitly told us its role. Apply a strong
-    # weight so a bench rig that has hybrid hardware (e.g. a ground
-    # station with an FC plugged in for testing) still detects to
-    # the operator-stated role. Hardware probes are noisy enough on
-    # both rigs we ship to that this single signal needs to outweigh
-    # them. An operator who wants the opposite still has
-    # `agent.profile` in /etc/ados/config.yaml or `ados profile set`.
+    # Hostname is operator-controlled but easy to leave stale: a box
+    # named `groundnode` six months ago might be wired up as a drone
+    # today. Treat it as a soft tiebreaker rather than a hardware
+    # override, so a real FC with a matched USB vendor (6 air points)
+    # still wins over an inherited "groundnode" hostname. Operators
+    # who want hard pinning use `agent.profile` in /etc/ados/config.yaml
+    # or `ados profile set`.
     hostname_pick = _hostname_suggested_profile()
-    HOSTNAME_WEIGHT = 7
+    HOSTNAME_WEIGHT = 2
     hostname_source = ""
     if hostname_pick == "ground_station":
         ground_score += HOSTNAME_WEIGHT

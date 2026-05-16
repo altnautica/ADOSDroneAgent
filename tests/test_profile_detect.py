@@ -261,3 +261,144 @@ def test_probe_uplink_kinds_dark(tmp_path, monkeypatch) -> None:
     _route_sysnet(monkeypatch, tmp_path)
     assert profile_detect.probe_uplink_kinds() == []
     assert profile_detect.probe_uplink_type() == (0, 0, False)
+
+
+# ---- probe_mavlink_serial: USB VID matching --------------------------------
+
+
+class _FakeSerialPath:
+    """Path stub for probe_mavlink_serial: only the configured tty
+    reports as existing. Everything else returns False. We keep the
+    rest of the Path API intact by inheriting from real Path."""
+
+    def __init__(self, present_path: str):
+        self._present = present_path
+
+    def __call__(self, p):
+        # Mirror Path's constructor signature: return an object whose
+        # .exists() check uses the configured presence list, while
+        # leaving other attributes (.name, etc.) intact.
+        wrapped = Path(p)
+
+        class _PathWithPresence:
+            def __init__(_self, base, present):
+                _self._base = base
+                _self._present = present
+
+            def exists(_self):
+                return str(_self._base) == _self._present
+
+            @property
+            def name(_self):
+                return _self._base.name
+
+            def __getattr__(_self, item):
+                return getattr(_self._base, item)
+
+        return _PathWithPresence(wrapped, self._present)
+
+
+def test_mavlink_serial_baseline_when_port_exists_but_vid_unknown(monkeypatch) -> None:
+    """Generic USB-serial adapter at /dev/ttyACM0 with no known FC
+    vendor still scores +3 air (the port-exists baseline)."""
+    monkeypatch.setattr(
+        profile_detect, "Path", _FakeSerialPath("/dev/ttyACM0")
+    )
+    monkeypatch.setattr(
+        profile_detect, "_read_usb_vendor_for_tty", lambda _p: 0x1234
+    )
+    assert profile_detect.probe_mavlink_serial() == (0, 3, True)
+
+
+def test_mavlink_serial_boosts_when_vid_matches_known_fc(monkeypatch) -> None:
+    """SpeedyBee F4 v4 (pid.codes 0x1209) on /dev/ttyACM0 awards the
+    +6 air-points score so a real FC outweighs hostname tiebreakers."""
+    monkeypatch.setattr(
+        profile_detect, "Path", _FakeSerialPath("/dev/ttyACM0")
+    )
+    monkeypatch.setattr(
+        profile_detect, "_read_usb_vendor_for_tty", lambda _p: 0x1209
+    )
+    assert profile_detect.probe_mavlink_serial() == (0, 6, True)
+
+
+def test_mavlink_serial_zero_when_no_ports(monkeypatch) -> None:
+    """No tty present anywhere → zero contribution."""
+    monkeypatch.setattr(
+        profile_detect, "Path", _FakeSerialPath("/dev/nonexistent-zz")
+    )
+    assert profile_detect.probe_mavlink_serial() == (0, 0, False)
+
+
+def test_mavlink_serial_uart_with_no_usb_metadata(monkeypatch) -> None:
+    """SoC UART (e.g. /dev/ttyAMA0) has no /sys/class/tty/<n>/device
+    USB ancestor. The helper returns None and the probe falls back to
+    the +3 baseline rather than swallowing the signal entirely."""
+    monkeypatch.setattr(
+        profile_detect, "Path", _FakeSerialPath("/dev/ttyAMA0")
+    )
+    monkeypatch.setattr(
+        profile_detect, "_read_usb_vendor_for_tty", lambda _p: None
+    )
+    assert profile_detect.probe_mavlink_serial() == (0, 3, True)
+
+
+# ---- Hostname is a soft tiebreaker, not a hardware override ---------------
+
+
+def test_fc_with_matched_vid_outweighs_groundnode_hostname(monkeypatch) -> None:
+    """The motivating fix: a Rock 5C named ``groundnode`` with an FC
+    plugged in (pid.codes VID) and a WFB-ng dongle should auto-detect
+    as ``drone`` because hardware reality (FC + matched VID) carries
+    more weight than the stale hostname."""
+    _stub_probes(
+        monkeypatch,
+        probe_mavlink_serial=(0, 6, True),  # FC with matched USB VID
+        probe_rtl8812=(1, 1, True),  # WFB-ng dongle present
+        probe_uplink_type=(1, 0, True),  # wlan up
+    )
+    monkeypatch.setattr(
+        profile_detect, "_hostname_suggested_profile", lambda: "ground_station"
+    )
+    result = profile_detect.detect_profile(config_override=None)
+    assert result["profile"] == "drone"
+    # ground = rtl(1) + uplink(1) + hostname(2) = 4
+    # air    = mavlink(6) + rtl(1) = 7
+    assert result["ground_score"] == 4
+    assert result["air_score"] == 7
+
+
+def test_hostname_still_resolves_genuine_ground_station(monkeypatch) -> None:
+    """Regression: a ground-station rig with no FC, OLED + buttons +
+    WFB dongle + hostname ``groundnode`` still resolves to
+    ``ground_station`` — hostname weight stays meaningful when the
+    hardware signal is itself low."""
+    _stub_probes(
+        monkeypatch,
+        probe_i2c_oled=(3, 0, True),
+        probe_gpio_buttons=(2, 0, True),
+        probe_rtl8812=(1, 1, True),
+        probe_uplink_type=(1, 0, True),
+    )
+    monkeypatch.setattr(
+        profile_detect, "_hostname_suggested_profile", lambda: "ground_station"
+    )
+    result = profile_detect.detect_profile(config_override=None)
+    assert result["profile"] == "ground_station"
+    # ground = oled(3) + buttons(2) + rtl(1) + uplink(1) + hostname(2) = 9
+    # air    = rtl(1)
+    assert result["ground_score"] == 9
+    assert result["air_score"] == 1
+
+
+def test_hostname_tiebreak_when_hardware_is_silent(monkeypatch) -> None:
+    """No hardware probes fire; hostname ``groundnode`` still pushes
+    the result toward ground_station via the +2 weight."""
+    _stub_probes(monkeypatch)  # everything zero
+    monkeypatch.setattr(
+        profile_detect, "_hostname_suggested_profile", lambda: "ground_station"
+    )
+    result = profile_detect.detect_profile(config_override=None)
+    assert result["profile"] == "ground_station"
+    assert result["ground_score"] == 2
+    assert result["air_score"] == 0
