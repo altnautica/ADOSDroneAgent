@@ -85,8 +85,13 @@ export function ProfileGate({ allow, roles, children }: ProfileGateProps) {
     return <LoadingPlaceholder />;
   }
 
+  // Pre-finalize (profile=auto) and unknown profiles are transitional:
+  // the operator is still walking the setup wizard or running on a fresh
+  // image. Don't gate during this phase — let them explore every screen
+  // so the wizard can show them what's available. Gating only kicks in
+  // once a concrete profile is committed.
   if (profile === "auto" || profile === "unknown") {
-    return <LoadingPlaceholder />;
+    return <>{children}</>;
   }
 
   if (!allow.includes(profile as AllowedProfile)) {
