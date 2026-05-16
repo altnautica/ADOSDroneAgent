@@ -4,7 +4,13 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { BrowserRouter } from "react-router-dom";
 
 import { App } from "./App";
+import { consumeUrlKey } from "./lib/api-key";
 import "./styles/globals.css";
+
+// Capture a one-shot ?ados_key=… URL parameter into localStorage before
+// any React render. Used by tunnel links so the dashboard can authenticate
+// across a cross-origin boundary.
+consumeUrlKey();
 
 const queryClient = new QueryClient({
   defaultOptions: {

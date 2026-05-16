@@ -3,6 +3,8 @@
 // and against the real agent at runtime. JSON in, JSON out, throws on
 // non-2xx with a useful message.
 
+import { getApiKey } from "./api-key";
+
 export class ApiError extends Error {
   status: number;
   body: unknown;
@@ -24,9 +26,18 @@ export async function apiFetch<T = unknown>(
   path: string,
   opts: FetchOptions = {},
 ): Promise<T> {
+  const headers: Record<string, string> = { Accept: "application/json" };
+
+  // Same-origin browser requests are accepted by the agent without an
+  // explicit key. The stored key is consulted only when the dashboard
+  // runs behind a tunnel / reverse proxy where the Origin no longer
+  // matches the agent's listener.
+  const storedKey = getApiKey();
+  if (storedKey) headers["X-ADOS-Key"] = storedKey;
+
   const init: RequestInit = {
     method: opts.method ?? "GET",
-    headers: { Accept: "application/json" },
+    headers,
     signal: opts.signal,
   };
 

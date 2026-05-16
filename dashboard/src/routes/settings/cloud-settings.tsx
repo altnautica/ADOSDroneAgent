@@ -9,6 +9,7 @@ import { Label } from "@/components/ui/label";
 import { RadioCardGroup } from "@/components/ui/radio-card-group";
 import { useDirtyGuard } from "@/hooks/use-dirty-guard";
 import { useStatus } from "@/hooks/use-status";
+import { setApiKey as persistApiKey } from "@/lib/api-key";
 import { toast, toastFromError } from "@/lib/toast";
 import { cloudSectionSchema, postApply } from "@/lib/apply-actions";
 
@@ -113,6 +114,12 @@ export function CloudSettings() {
       });
       const section = res.sections.cloud;
       if (res.overall && section?.ok) {
+        // Mirror the key into browser storage so cross-origin / tunnel
+        // sessions can authenticate the dashboard's own /api calls.
+        // Same-origin LAN access stays untouched by this.
+        if (mode === "self_hosted" && apiKey.trim()) {
+          persistApiKey(apiKey.trim());
+        }
         toast.ok(section.message || "Cloud posture saved.");
         setApiKey("");
       } else {
