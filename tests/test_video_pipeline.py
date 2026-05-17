@@ -450,3 +450,231 @@ class TestWfbUdpTee:
         pipeline._wfb_tee_process = proc
         status = pipeline.get_status()
         assert status["wfb_tee"] is True
+
+
+class TestEncoderOrphanKill:
+    """Sweep stray ffmpegs from a previous pipeline cycle before
+    spawning a fresh encoder + bridge, so the new processes do not
+    fight an orphan for the V4L2 device or the mediamtx publisher slot.
+
+    The encoder is also spawned with start_new_session=True so future
+    teardowns can clean up the whole process group via os.killpg().
+    """
+
+    @pytest.mark.asyncio
+    async def test_kill_orphan_encoder_ffmpegs_matches_device_path(
+        self, monkeypatch,
+    ):
+        from ados.services.video import pipeline as pl_mod
+
+        pipeline = VideoPipeline(VideoConfig())
+
+        captured_pgrep_cmd: list = []
+
+        async def _fake_exec(*cmd, **_kw):
+            captured_pgrep_cmd.append(cmd)
+            proc = MagicMock()
+            # Two PIDs in pgrep output. communicate() returns (stdout, stderr).
+            proc.communicate = AsyncMock(return_value=(b"12345\n12346\n", b""))
+            return proc
+
+        monkeypatch.setattr(pl_mod.asyncio, "create_subprocess_exec", _fake_exec)
+
+        killed: list[tuple[int, int]] = []
+
+        def _fake_kill(pid, sig):
+            killed.append((pid, sig))
+
+        # The orphan-kill methods live in pipeline.pipeline (the submodule),
+        # which has `import os` at the top. Patch the os module so any call
+        # to os.kill from that module is captured.
+        monkeypatch.setattr("os.kill", _fake_kill)
+
+        logged: list[dict] = []
+
+        def _fake_warning(event, **kw):
+            logged.append({"event": event, **kw})
+
+        log_stub = MagicMock()
+        log_stub.warning = _fake_warning
+        monkeypatch.setattr(pl_mod, "log", log_stub, raising=False)
+
+        await pipeline._kill_orphan_encoder_ffmpegs("/dev/video0")
+
+        # pgrep cmd was issued and matches the device path.
+        assert len(captured_pgrep_cmd) == 1
+        assert captured_pgrep_cmd[0][0] == "pgrep"
+        assert "-i /dev/video0" in captured_pgrep_cmd[0]
+
+        # Both PIDs from the pgrep output were SIGKILL'd.
+        import signal as _signal
+
+        assert (12345, _signal.SIGKILL) in killed
+        assert (12346, _signal.SIGKILL) in killed
+        # Never signal our own process.
+        assert all(pid != os.getpid() for pid, _ in killed)
+
+        # Structured log emitted with device + count.
+        kills_logged = [e for e in logged if e["event"] == "encoder_orphans_killed"]
+        assert len(kills_logged) == 1
+        assert kills_logged[0]["device"] == "/dev/video0"
+        assert kills_logged[0]["count"] == 2
+
+    @pytest.mark.asyncio
+    async def test_kill_orphan_bridge_ffmpegs_matches_rtsp_url(
+        self, monkeypatch,
+    ):
+        from ados.services.video import pipeline as pl_mod
+
+        pipeline = VideoPipeline(VideoConfig())
+
+        captured_pgrep_cmd: list = []
+
+        async def _fake_exec(*cmd, **_kw):
+            captured_pgrep_cmd.append(cmd)
+            proc = MagicMock()
+            proc.communicate = AsyncMock(return_value=(b"22345\n22346\n", b""))
+            return proc
+
+        monkeypatch.setattr(pl_mod.asyncio, "create_subprocess_exec", _fake_exec)
+
+        killed: list[tuple[int, int]] = []
+
+        def _fake_kill(pid, sig):
+            killed.append((pid, sig))
+
+        monkeypatch.setattr("os.kill", _fake_kill)
+
+        logged: list[dict] = []
+
+        def _fake_warning(event, **kw):
+            logged.append({"event": event, **kw})
+
+        log_stub = MagicMock()
+        log_stub.warning = _fake_warning
+        monkeypatch.setattr(pl_mod, "log", log_stub, raising=False)
+
+        await pipeline._kill_orphan_bridge_ffmpegs(
+            "rtsp://localhost:8554/main",
+        )
+
+        # pgrep cmd was issued and matches the RTSP URL.
+        assert len(captured_pgrep_cmd) == 1
+        assert captured_pgrep_cmd[0][0] == "pgrep"
+        assert "rtsp://localhost:8554/main" in captured_pgrep_cmd[0]
+
+        import signal as _signal
+
+        assert (22345, _signal.SIGKILL) in killed
+        assert (22346, _signal.SIGKILL) in killed
+        assert all(pid != os.getpid() for pid, _ in killed)
+
+        kills_logged = [e for e in logged if e["event"] == "bridge_orphans_killed"]
+        assert len(kills_logged) == 1
+        assert kills_logged[0]["destination"] == "rtsp://localhost:8554/main"
+        assert kills_logged[0]["count"] == 2
+
+    @pytest.mark.asyncio
+    async def test_start_stream_kills_orphans_before_encoder_spawn(
+        self, monkeypatch,
+    ):
+        from ados.services.video.encoder import EncoderType
+
+        pipeline = _pipeline_with_mediamtx_mocks()
+        monkeypatch.setattr(
+            "ados.services.video.pipeline.detect_encoder_for_camera",
+            lambda cam: EncoderType.FFMPEG,
+        )
+        monkeypatch.setattr(
+            "ados.services.video.pipeline.build_encoder_command",
+            lambda *a, **k: ["ffmpeg", "-i", "/dev/video0", "rtsp://x"],
+        )
+
+        # Track call order across the orphan-kill methods and the
+        # encoder subprocess spawn.
+        call_log: list[str] = []
+
+        async def _fake_encoder_kill(device_path):
+            call_log.append(f"kill_encoder:{device_path}")
+
+        async def _fake_bridge_kill(rtsp_url):
+            call_log.append(f"kill_bridge:{rtsp_url}")
+
+        pipeline._kill_orphan_encoder_ffmpegs = AsyncMock(
+            side_effect=_fake_encoder_kill
+        )
+        pipeline._kill_orphan_bridge_ffmpegs = AsyncMock(
+            side_effect=_fake_bridge_kill
+        )
+        # Don't actually fire the radio fan-out during this test.
+        pipeline.start_wfb_tee = AsyncMock(return_value=True)
+
+        async def _fake_spawn(*cmd, **_kw):
+            call_log.append("encoder_spawn")
+            proc = MagicMock()
+            proc.returncode = None
+            proc.pid = 9999
+            proc.stderr = None
+            return proc
+
+        import asyncio as _asyncio
+        monkeypatch.setattr(_asyncio, "create_subprocess_exec", _fake_spawn)
+
+        ok = await pipeline.start_stream()
+        assert ok is True
+
+        # Both orphan sweeps must happen before the encoder spawns.
+        encoder_kill_idx = next(
+            i for i, e in enumerate(call_log) if e.startswith("kill_encoder:")
+        )
+        bridge_kill_idx = next(
+            i for i, e in enumerate(call_log) if e.startswith("kill_bridge:")
+        )
+        spawn_idx = call_log.index("encoder_spawn")
+        assert encoder_kill_idx < spawn_idx
+        assert bridge_kill_idx < spawn_idx
+        # Device path + RTSP URL propagated through.
+        assert "kill_encoder:/dev/video0" in call_log
+        assert "kill_bridge:rtsp://localhost:8554/main" in call_log
+
+    @pytest.mark.asyncio
+    async def test_encoder_spawn_uses_start_new_session(self, monkeypatch):
+        from ados.services.video.encoder import EncoderType
+
+        pipeline = _pipeline_with_mediamtx_mocks()
+        monkeypatch.setattr(
+            "ados.services.video.pipeline.detect_encoder_for_camera",
+            lambda cam: EncoderType.FFMPEG,
+        )
+        monkeypatch.setattr(
+            "ados.services.video.pipeline.build_encoder_command",
+            lambda *a, **k: ["ffmpeg", "-i", "/dev/video0", "rtsp://x"],
+        )
+        # Bypass the orphan sweeps so the spawn we inspect is the
+        # encoder, not the pgrep child process.
+        pipeline._kill_orphan_encoder_ffmpegs = AsyncMock()
+        pipeline._kill_orphan_bridge_ffmpegs = AsyncMock()
+        pipeline.start_wfb_tee = AsyncMock(return_value=True)
+
+        captured_kwargs: list[dict] = []
+
+        async def _fake_spawn(*cmd, **kwargs):
+            captured_kwargs.append(kwargs)
+            proc = MagicMock()
+            proc.returncode = None
+            proc.pid = 9999
+            proc.stderr = None
+            return proc
+
+        import asyncio as _asyncio
+        monkeypatch.setattr(_asyncio, "create_subprocess_exec", _fake_spawn)
+
+        ok = await pipeline.start_stream()
+        assert ok is True
+
+        # Exactly one spawn (the encoder) was issued.
+        assert len(captured_kwargs) == 1
+        # The encoder must be put in a new session so the supervisor
+        # can clean up the whole process group with os.killpg() on a
+        # graceful teardown.
+        assert captured_kwargs[0].get("start_new_session") is True

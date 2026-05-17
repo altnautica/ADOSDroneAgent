@@ -188,6 +188,91 @@ class VideoPipeline(_DiscoveryMixin, _HealthMixin, _WfbTeeMixin):
     def mediamtx(self) -> MediamtxManager:
         return self._mediamtx
 
+    async def _kill_orphan_encoder_ffmpegs(self, device_path: str) -> None:
+        """Kill stray ffmpeg processes holding the V4L2 device.
+
+        Sweeps before encoder spawn so a new pipeline cycle reclaims
+        /dev/video* from any process inherited by init after a prior
+        parent died. Without this sweep, the freshly-spawned encoder
+        opens the V4L2 node and immediately bounces with EBUSY because
+        an orphan from a prior cycle is still holding the device.
+        """
+        log = _pkg().log
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "pgrep", "-f", f"-i {device_path}",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=2.0)
+        except (FileNotFoundError, TimeoutError, asyncio.CancelledError):
+            return
+        killed = 0
+        for line in stdout.decode("utf-8", errors="replace").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                pid = int(line)
+            except ValueError:
+                continue
+            # Skip our own python process if it's matched by name.
+            if pid == os.getpid():
+                continue
+            try:
+                os.kill(pid, signal.SIGKILL)
+                killed += 1
+            except (ProcessLookupError, OSError):
+                pass
+        if killed > 0:
+            log.warning(
+                "encoder_orphans_killed",
+                device=device_path,
+                count=killed,
+            )
+
+    async def _kill_orphan_bridge_ffmpegs(self, rtsp_url: str) -> None:
+        """Kill stray ffmpeg processes pushing to our local mediamtx.
+
+        Mirrors the encoder orphan sweep; the bridge ffmpeg is the
+        process that publishes the encoded H.264 stream into mediamtx
+        via RTSP. A stale one will hold the publisher slot and the new
+        bridge will fail to register the path.
+        """
+        log = _pkg().log
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "pgrep", "-f", rtsp_url,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=2.0)
+        except (FileNotFoundError, TimeoutError, asyncio.CancelledError):
+            return
+        killed = 0
+        for line in stdout.decode("utf-8", errors="replace").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                pid = int(line)
+            except ValueError:
+                continue
+            # Skip our own python process if it's matched by name.
+            if pid == os.getpid():
+                continue
+            try:
+                os.kill(pid, signal.SIGKILL)
+                killed += 1
+            except (ProcessLookupError, OSError):
+                pass
+        if killed > 0:
+            log.warning(
+                "bridge_orphans_killed",
+                destination=rtsp_url,
+                count=killed,
+            )
+
     async def start_stream(self) -> bool:
         """Start the encoding and streaming pipeline.
 
@@ -215,6 +300,16 @@ class VideoPipeline(_DiscoveryMixin, _HealthMixin, _WfbTeeMixin):
             log.error("no_primary_camera")
             self._state = PipelineState.ERROR
             return False
+
+        # Sweep orphan ffmpegs that may be holding the camera or
+        # the mediamtx publisher slot before we spawn fresh ones.
+        # Without these sweeps an orphan encoder holds /dev/video*
+        # with EBUSY (the new encoder bounces immediately) or an
+        # orphan bridge holds the mediamtx publisher slot (the new
+        # bridge fails to register the path).
+        await self._kill_orphan_encoder_ffmpegs(primary.device_path)
+        pipe_uri = f"rtsp://localhost:{self._mediamtx.rtsp_port}/main"
+        await self._kill_orphan_bridge_ffmpegs(pipe_uri)
 
         # In-process GStreamer air-side pipeline. Replaces the legacy
         # ffmpeg-encoder + mediamtx-air + ffmpeg-tee + python
@@ -250,8 +345,10 @@ class VideoPipeline(_DiscoveryMixin, _HealthMixin, _WfbTeeMixin):
             bitrate_kbps=self._config.camera.bitrate_kbps,
         )
 
-        # Start mediamtx for stream output
-        pipe_uri = f"rtsp://localhost:{self._mediamtx.rtsp_port}/main"
+        # Start mediamtx for stream output. ``pipe_uri`` was built above
+        # for the bridge-orphan sweep; reuse the same value here so the
+        # URL the encoder publishes to matches the URL the sweep matched
+        # on, and we don't compute it twice.
         cmd = _pkg().build_encoder_command(
             enc_config, primary.device_path, pipe_uri, camera=primary,
         )
@@ -299,6 +396,11 @@ class VideoPipeline(_DiscoveryMixin, _HealthMixin, _WfbTeeMixin):
                 *cmd,
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.PIPE,
+                # New session puts every encoder child in its own
+                # process group so a graceful teardown can clean them
+                # up via os.killpg(); future encoder generations stop
+                # accumulating as orphans when the parent goes away.
+                start_new_session=True,
             )
             self._encoder_stderr_task = asyncio.create_task(
                 self._drain_stderr(self._encoder_process, "encoder")
