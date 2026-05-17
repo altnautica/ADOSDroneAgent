@@ -7,7 +7,12 @@ from unittest.mock import patch
 
 import pytest
 
-from ados.hal.hotplug import HotplugMonitor, _device_key
+from ados.hal.hotplug import (
+    _LINUX_POLL_INTERVAL,
+    _LINUX_POLL_INTERVAL_LOW_RAM,
+    HotplugMonitor,
+    _device_key,
+)
 from ados.hal.usb import UsbCategory, UsbDevice
 
 
@@ -95,6 +100,44 @@ class TestHotplugMonitor:
         monitor._running = True
         monitor.stop()
         assert monitor.running is False
+
+    def test_linux_poll_interval_constant_is_one_second(self):
+        """Lock in the 1 Hz Linux poll cadence.
+
+        Regression guard: the supervisor's boot gate is derived from this
+        constant (1.5x), so bumping it back to 2 s silently widens the
+        gate and slows USB hot-plug detection across the fleet.
+        """
+        assert _LINUX_POLL_INTERVAL == 1.0
+        assert _LINUX_POLL_INTERVAL_LOW_RAM == 10.0
+
+    def test_poll_interval_normal_linux(self):
+        """On a normal Linux board (>= 1.5 GB RAM) poll_interval is 1 s."""
+        from types import SimpleNamespace
+
+        with (
+            patch("ados.hal.hotplug.platform.system", return_value="Linux"),
+            patch(
+                "ados.hal.hotplug.psutil.virtual_memory",
+                return_value=SimpleNamespace(total=4 * 1024 * 1024 * 1024),
+            ),
+        ):
+            monitor = HotplugMonitor()
+        assert monitor.poll_interval == 1.0
+
+    def test_poll_interval_low_ram_linux(self):
+        """On a low-RAM Linux board (< 1.5 GB) poll_interval stays at 10 s."""
+        from types import SimpleNamespace
+
+        with (
+            patch("ados.hal.hotplug.platform.system", return_value="Linux"),
+            patch(
+                "ados.hal.hotplug.psutil.virtual_memory",
+                return_value=SimpleNamespace(total=1024 * 1024 * 1024),
+            ),
+        ):
+            monitor = HotplugMonitor()
+        assert monitor.poll_interval == 10.0
 
     @pytest.mark.asyncio
     async def test_run_can_be_stopped(self):

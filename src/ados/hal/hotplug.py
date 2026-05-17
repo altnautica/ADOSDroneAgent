@@ -17,14 +17,17 @@ log = get_logger("hal.hotplug")
 # Callback type: (event: str, device: UsbDevice) -> None
 HotplugCallback = Callable[[str, UsbDevice], Any]
 
-# Poll interval: Linux checks faster because sysfs is cheap on healthy
-# memory. On low-RAM SBCs (Pi 4B 1 GB and similar) the system spends
-# most of its time in swap; each scan that walks /sys/bus/usb/devices
-# pages cold inodes back in and contributes to scheduler stalls that
-# break the WFB-ng → mediamtx → WebRTC pipeline. Stretch the interval
-# under that condition. Operators plugging in a camera still see
-# detection within a few seconds.
-_LINUX_POLL_INTERVAL = 2.0
+# Poll interval: normal Linux boards poll at 1 Hz because the sysfs
+# scan over /sys/bus/usb/devices is cheap when inodes are warm in
+# page cache. Faster detection means USB camera hot-plug, FC reboot
+# re-enumeration, and radio dongle insertion all surface to the
+# supervisor within a second. On low-RAM SBCs (Pi 4B 1 GB and similar)
+# the system spends most of its time in swap; each scan pages cold
+# inodes back in and contributes to scheduler stalls that break the
+# WFB-ng → mediamtx → WebRTC pipeline. Stretch the interval to 10s
+# under that condition. Operators plugging in a camera on a low-RAM
+# board still see detection within a few seconds.
+_LINUX_POLL_INTERVAL = 1.0
 _LINUX_POLL_INTERVAL_LOW_RAM = 10.0
 _LOW_RAM_THRESHOLD_MB = 1500
 _MACOS_POLL_INTERVAL = 5.0
@@ -46,7 +49,8 @@ def _device_key(dev: UsbDevice) -> str:
 class HotplugMonitor:
     """Watches for USB device add/remove events by periodic polling.
 
-    Linux: polls every 2 seconds.
+    Linux: polls every 1 second on normal boards, 10 seconds on low-RAM
+    SBCs (under 1.5 GB total RAM) to avoid swap-induced scheduler stalls.
     macOS: polls every 5 seconds (system_profiler is slower).
     """
 
