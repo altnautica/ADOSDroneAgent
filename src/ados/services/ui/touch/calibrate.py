@@ -1,9 +1,10 @@
-"""5-point touchscreen calibration wizard.
+"""9-point touchscreen calibration wizard.
 
-The wizard takes the full 480x320 panel — no chrome, no tab bar — and
-prompts the operator to tap five known target positions in sequence.
-After the fifth tap, the wizard fits an affine matrix to the five
-sample/target pairs and persists the result to ``/etc/ados/touch.calib``.
+The wizard takes the full 480x320 panel (no chrome, no tab bar) and
+prompts the operator to tap a 3x3 grid of known target positions in
+sequence. After the final tap, the wizard fits an affine matrix to all
+nine sample/target pairs and persists the result to
+``/etc/ados/touch.calib``.
 
 If the RMS residual exceeds the rejection threshold (the operator
 mistapped a target by a wide margin) the wizard returns a failure
@@ -14,12 +15,15 @@ The wizard state machine is::
     start() -> step 0
     submit_sample(0, x_raw, y_raw) -> step 1
     ...
-    submit_sample(4, x_raw, y_raw) -> step 5 (complete)
+    submit_sample(STEP_COUNT - 1, x_raw, y_raw) -> step STEP_COUNT
     complete() -> Affine | None
 
-Targets are positioned to give the least-squares fit good corner
-coverage plus a center reference: corners at (40, 40), (440, 40),
-(40, 280), (440, 280) and the panel center at (240, 160).
+Targets are positioned on a 3x3 grid for even panel coverage: four
+corners at (40, 40), (440, 40), (40, 280), (440, 280); four edge
+midpoints at (240, 40), (40, 160), (440, 160), (240, 280); and the
+panel center at (240, 160). The 18 equations in 6 unknowns produced
+by the 9-point fit suppress per-tap noise vs the older 5-point
+pattern.
 """
 
 from __future__ import annotations
@@ -49,18 +53,26 @@ CANVAS_H = 320
 
 # RMS rejection threshold in LCD pixels. A clean tap with a stylus
 # produces RMS residuals well under 5 px; a loose finger tap is in the
-# 5..15 range; an obvious mistap (operator hit the wrong corner)
-# pushes the residual past 50.
-REJECT_RMS_PX = 50.0
+# 5..15 range; an obvious mistap (operator hit the wrong corner) pushes
+# the residual past 35. The 9-point over-determined fit (18 equations,
+# 6 unknowns) suppresses per-tap noise ~1.5x vs the older 5-point
+# pattern, so the threshold is tightened from 50 px to 35 px.
+REJECT_RMS_PX = 35.0
 
 # Target order matches the mockup at mockups/lcd-ui/pages/07-touch-
-# calibrate.html. Coordinates are in LCD pixel space.
+# calibrate.html. Coordinates are in LCD pixel space. The 9-point grid
+# (3x3) gives an over-determined fit with 18 equations in 6 unknowns,
+# which suppresses per-tap noise vs the older 5-point pattern.
 TARGETS: tuple[tuple[int, int], ...] = (
-    (40, 40),
-    (440, 40),
-    (240, 160),
-    (40, 280),
-    (440, 280),
+    (40, 40),       # top-left
+    (240, 40),      # top-center
+    (440, 40),      # top-right
+    (40, 160),      # left-center
+    (240, 160),     # center
+    (440, 160),     # right-center
+    (40, 280),      # bottom-left
+    (240, 280),     # bottom-center
+    (440, 280),     # bottom-right
 )
 
 STEP_COUNT = len(TARGETS)
@@ -77,7 +89,7 @@ class CalibrationResult:
 
 
 class CalibrationWizard:
-    """5-point calibration state machine + renderer."""
+    """9-point calibration state machine + renderer."""
 
     def __init__(
         self,
@@ -112,7 +124,7 @@ class CalibrationWizard:
 
     @property
     def is_done(self) -> bool:
-        """True once all five samples are in. Caller should call complete()."""
+        """True once all samples are in. Caller should call complete()."""
         return self._step >= STEP_COUNT
 
     @property
@@ -203,10 +215,10 @@ class CalibrationWizard:
     def render(self, palette: Palette) -> Image.Image:
         """Paint the full-canvas wizard frame.
 
-        Renders all five target rings (done targets in success color,
-        the active target in accent color, pending targets dimmed),
-        the centered legend with step counter + instruction, and a
-        small skip hint anchored at the bottom edge.
+        Renders all target rings (done targets in success color, the
+        active target in accent color, pending targets dimmed), the
+        centered legend with step counter + instruction, and a small
+        skip hint anchored at the bottom edge.
         """
         img = Image.new("RGB", (CANVAS_W, CANVAS_H), palette.bg_primary)
         draw = ImageDraw.Draw(img)
@@ -230,7 +242,7 @@ class CalibrationWizard:
         title_text = "Tap each target with the stylus"
         body_text = (
             "Hold the stylus steady. We save the calibration "
-            "after the fifth target is tapped."
+            f"after all {STEP_COUNT} targets are tapped."
         )
 
         legend_y = 200

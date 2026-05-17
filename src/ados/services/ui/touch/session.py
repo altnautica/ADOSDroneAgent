@@ -1,6 +1,6 @@
 """Process-wide calibration session, shared by REST and the on-LCD wizard.
 
-The 5-point calibration flow has two co-equal entry points:
+The 9-point calibration flow has two co-equal entry points:
 
 * The on-LCD wizard rendered by ``CalibrationWizard`` and driven by the
   OLED service when the operator taps the panel.
@@ -40,16 +40,25 @@ from .transform import save_skip_marker as save_skip_calib
 # and the on-LCD wizard never drift on the geometry. (The wizard module
 # imports nothing from here to keep the import graph acyclic; an update
 # to one constant must be mirrored to the other in lock step.)
+# 3x3 grid: 9 targets give an over-determined fit (18 equations in 6
+# unknowns), reducing the per-tap noise floor ~1.5x vs a 5-point fit.
 TARGETS: tuple[tuple[int, int], ...] = (
-    (40, 40),
-    (440, 40),
-    (240, 160),
-    (40, 280),
-    (440, 280),
+    (40, 40),       # top-left
+    (240, 40),      # top-center
+    (440, 40),      # top-right
+    (40, 160),      # left-center
+    (240, 160),     # center
+    (440, 160),     # right-center
+    (40, 280),      # bottom-left
+    (240, 280),     # bottom-center
+    (440, 280),     # bottom-right
 )
 
 STEP_COUNT = len(TARGETS)
-REJECT_RMS_PX = 50.0
+# 9-point over-determined fit (18 equations, 6 unknowns) reduces the
+# per-tap noise floor ~1.5x vs the older 5-point pattern, so the RMS
+# rejection threshold is tightened from 50 px to 35 px.
+REJECT_RMS_PX = 35.0
 
 
 @dataclass
@@ -57,8 +66,8 @@ class CalibrationSession:
     """Mutable state shared by the on-LCD wizard and the REST routes.
 
     ``current_step`` is the next sample index the wizard expects. ``0``
-    means "tap target #1", ``5`` means "all five samples in, ready to
-    save". ``in_progress`` is True between ``start()`` and a terminal
+    means "tap target #1", ``STEP_COUNT`` means "all samples in, ready
+    to save". ``in_progress`` is True between ``start()`` and a terminal
     ``save()`` / ``skip()`` call. ``samples`` carries the raw ADC
     coordinates supplied so far.
     """
