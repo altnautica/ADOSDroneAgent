@@ -199,6 +199,20 @@ async def test_ethernet_adapter_no_link():
     assert await adapter.is_up() is False
 
 
+def test_ethernet_manager_get_iface_returns_resolved_interface():
+    """Real EthernetManager must expose get_iface() so the router's logical
+    "eth0" priority key resolves to the physical interface (e.g. end1 on
+    Rock 5C). Adapter then re-exports via _interface getattr.
+    """
+    from ados.services.ground_station.ethernet_manager import EthernetManager
+
+    mgr = EthernetManager(interface="end1")
+    assert mgr.get_iface() == "end1"
+
+    adapter = _EthernetAdapter(mgr)
+    assert adapter.get_iface() == "end1"
+
+
 # ---------------------------------------------------------------------------
 # _UsageState (de)serialization
 # ---------------------------------------------------------------------------

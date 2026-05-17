@@ -32,6 +32,11 @@ from ados.core.subprocess import run_cmd
 
 log = get_logger("ground_station.ethernet")
 
+# Default Ethernet interface name. Kept as a module constant for back-compat
+# with any caller that imported these names directly. The active interface is
+# now resolved per-instance via _detect_ethernet_iface() (see __init__) so
+# Rockchip BSPs that expose `end1`, predictable-name systems with `enp*`, or
+# USB-Ethernet adapters with `enx*` all work without bench-side intervention.
 _ETH_IFACE = "eth0"
 _CARRIER_PATH = Path(f"/sys/class/net/{_ETH_IFACE}/carrier")
 _SPEED_PATH = Path(f"/sys/class/net/{_ETH_IFACE}/speed")
@@ -117,20 +122,20 @@ async def _run(cmd: list[str], timeout: float = 10.0) -> tuple[int, str, str]:
     return result.returncode, result.stdout, result.stderr
 
 
-def _read_carrier() -> bool:
-    if not _CARRIER_PATH.exists():
+def _read_carrier(path: Path = _CARRIER_PATH) -> bool:
+    if not path.exists():
         return False
     try:
-        return _CARRIER_PATH.read_text(encoding="utf-8").strip() == "1"
+        return path.read_text(encoding="utf-8").strip() == "1"
     except OSError:
         return False
 
 
-def _read_speed() -> int | None:
-    if not _SPEED_PATH.exists():
+def _read_speed(path: Path = _SPEED_PATH) -> int | None:
+    if not path.exists():
         return None
     try:
-        val = _SPEED_PATH.read_text(encoding="utf-8").strip()
+        val = path.read_text(encoding="utf-8").strip()
         return int(val) if val and val != "-1" else None
     except (OSError, ValueError):
         return None
@@ -140,10 +145,29 @@ def _read_speed() -> int | None:
 
 
 class EthernetManager:
-    """eth0 link manager."""
+    """Ethernet link manager.
 
-    def __init__(self, interface: str = _ETH_IFACE) -> None:
+    The active interface name is auto-detected at construction time from
+    /sys/class/net via :func:`_detect_ethernet_iface`, with a fallback to
+    "eth0" when nothing matches. Callers that need to pin a specific name
+    (tests, bench rigs with multiple NICs) can pass ``interface=`` and the
+    detection step is skipped.
+    """
+
+    def __init__(self, interface: str | None = None) -> None:
+        if interface is None:
+            try:
+                # Local import to avoid a bootstrap → ground_station cycle at
+                # module import time. The bootstrap package is leaf and does
+                # not import ethernet_manager itself.
+                from ados.bootstrap.profile_detect import _detect_ethernet_iface
+
+                interface = _detect_ethernet_iface() or _ETH_IFACE
+            except Exception:
+                interface = _ETH_IFACE
         self._interface = interface
+        self._carrier_path = Path(f"/sys/class/net/{self._interface}/carrier")
+        self._speed_path = Path(f"/sys/class/net/{self._interface}/speed")
         self._bus = EthernetEventBus()
         self._poll_task: asyncio.Task | None = None
         self._last_link: bool | None = None
@@ -152,12 +176,15 @@ class EthernetManager:
     def bus(self) -> EthernetEventBus:
         return self._bus
 
+    def get_iface(self) -> str:
+        return self._interface
+
     # -------------------- public API --------------------
 
     async def status(self) -> dict:
         """Return link + IP + gateway + DHCP lease info."""
-        link = _read_carrier()
-        speed = _read_speed() if link else None
+        link = _read_carrier(self._carrier_path)
+        speed = _read_speed(self._speed_path) if link else None
 
         ip_addr = None
         gateway = None
@@ -442,7 +469,7 @@ class EthernetManager:
     async def _poll_loop(self, interval_s: float = 5.0) -> None:
         while True:
             try:
-                link = _read_carrier()
+                link = _read_carrier(self._carrier_path)
                 if self._last_link is None:
                     self._last_link = link
                 elif link != self._last_link:

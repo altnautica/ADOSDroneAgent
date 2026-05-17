@@ -460,3 +460,109 @@ def test_hostname_tiebreak_when_hardware_is_silent(monkeypatch) -> None:
     assert result["profile"] == "ground_station"
     assert result["ground_score"] == 2
     assert result["air_score"] == 0
+
+
+# ---- _detect_ethernet_iface: predictable network name handling -------------
+
+
+def _make_iface(sysnet: Path, name: str, *, operstate: str | None = None) -> None:
+    """Create a fake /sys/class/net/<name> directory under sysnet.
+
+    If ``operstate`` is provided, write it to the ``operstate`` file.
+    """
+    iface_dir = sysnet / name
+    iface_dir.mkdir(parents=True, exist_ok=True)
+    if operstate is not None:
+        (iface_dir / "operstate").write_text(operstate + "\n")
+
+
+def test_detect_eth_only_eth0_up(tmp_path, monkeypatch) -> None:
+    """Pi-class BSP: only eth0 exists and is up → returns eth0."""
+    _make_iface(tmp_path, "eth0", operstate="up")
+    _route_sysnet(monkeypatch, tmp_path)
+    assert profile_detect._detect_ethernet_iface() == "eth0"
+
+
+def test_detect_eth_only_end1_up(tmp_path, monkeypatch) -> None:
+    """Rock 5C BSP: only end1 exists and is up → returns end1."""
+    _make_iface(tmp_path, "end1", operstate="up")
+    _route_sysnet(monkeypatch, tmp_path)
+    assert profile_detect._detect_ethernet_iface() == "end1"
+
+
+def test_detect_eth_eth0_and_end1_both_up_prefers_eth0(tmp_path, monkeypatch) -> None:
+    """Both eth0 and end1 are up → eth* wins by pattern priority."""
+    _make_iface(tmp_path, "eth0", operstate="up")
+    _make_iface(tmp_path, "end1", operstate="up")
+    _route_sysnet(monkeypatch, tmp_path)
+    assert profile_detect._detect_ethernet_iface() == "eth0"
+
+
+def test_detect_eth_only_enp5s0_up(tmp_path, monkeypatch) -> None:
+    """systemd predictable naming: enp5s0 alone → returns enp5s0."""
+    _make_iface(tmp_path, "enp5s0", operstate="up")
+    _route_sysnet(monkeypatch, tmp_path)
+    assert profile_detect._detect_ethernet_iface() == "enp5s0"
+
+
+def test_detect_eth_end1_down_only_falls_back(tmp_path, monkeypatch) -> None:
+    """end1 exists but is down, nothing else → returns end1 from the
+    second-pass existence fallback."""
+    _make_iface(tmp_path, "end1", operstate="down")
+    _route_sysnet(monkeypatch, tmp_path)
+    assert profile_detect._detect_ethernet_iface() == "end1"
+
+
+def test_detect_eth_nothing_returns_none(tmp_path, monkeypatch) -> None:
+    """No matching interface anywhere → returns None."""
+    # tmp_path is empty; only "lo" or unrelated NICs would exist in reality
+    # but for this test the empty dir is the cleanest signal.
+    _route_sysnet(monkeypatch, tmp_path)
+    assert profile_detect._detect_ethernet_iface() is None
+
+
+def test_detect_eth_up_beats_fallback_across_patterns(tmp_path, monkeypatch) -> None:
+    """end1 exists but is down; enp5s0 is up → returns enp5s0.
+
+    The first pass should walk all patterns looking for an "up" interface
+    before falling back to existence. This guards against the bug where
+    the function would return the first existing iface from the eth*/end*
+    pattern before looking at enp*/enx* for an "up" one.
+    """
+    _make_iface(tmp_path, "end1", operstate="down")
+    _make_iface(tmp_path, "enp5s0", operstate="up")
+    _route_sysnet(monkeypatch, tmp_path)
+    assert profile_detect._detect_ethernet_iface() == "enp5s0"
+
+
+def test_detect_eth_multiple_eth_both_up_alphabetical(tmp_path, monkeypatch) -> None:
+    """Multiple eth* both up → returns eth0 (alphabetical sort)."""
+    _make_iface(tmp_path, "eth0", operstate="up")
+    _make_iface(tmp_path, "eth1", operstate="up")
+    _route_sysnet(monkeypatch, tmp_path)
+    assert profile_detect._detect_ethernet_iface() == "eth0"
+
+
+# ---- probe_uplink_type / probe_uplink_kinds: predictable-name awareness ----
+
+
+def test_probe_uplink_kinds_end1_only(tmp_path, monkeypatch) -> None:
+    """Rock 5C BSP: end1 has carrier=1 → uplink_kinds reports ethernet."""
+    sysnet = tmp_path
+    (sysnet / "end1").mkdir()
+    (sysnet / "end1" / "carrier").write_text("1\n")
+    (sysnet / "end1" / "operstate").write_text("up\n")
+    _route_sysnet(monkeypatch, sysnet)
+    assert profile_detect.probe_uplink_kinds() == ["ethernet"]
+    assert profile_detect.probe_uplink_type() == (1, 0, True)
+
+
+def test_probe_uplink_type_no_ethernet_iface_at_all(tmp_path, monkeypatch) -> None:
+    """No eth*/end*/enp*/enx* iface → ethernet contributes nothing.
+
+    A wlan0 that is up still gets the (1, 0, True) score so this test
+    deliberately leaves wlan absent too. Result is the dark (0, 0, False).
+    """
+    _route_sysnet(monkeypatch, tmp_path)
+    assert profile_detect.probe_uplink_type() == (0, 0, False)
+    assert profile_detect.probe_uplink_kinds() == []

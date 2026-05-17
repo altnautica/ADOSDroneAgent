@@ -58,9 +58,25 @@ class UplinkRouter:
         priority: Optional[list[str]] = None,
         priority_config_path: Path = GS_UPLINK_JSON,
     ) -> None:
+        # Resolve the physical ethernet iface lazily, inside __init__ rather
+        # than at module import, because early boot can race with udev: the
+        # NIC may not yet have its predictable name when this module is
+        # imported. Falls back to "eth0" when nothing is present so the
+        # stub-manager path still works on a board with no NIC plugged in.
+        try:
+            from ados.bootstrap.profile_detect import _detect_ethernet_iface
+
+            self._eth_iface = _detect_ethernet_iface() or "eth0"
+        except Exception:
+            self._eth_iface = "eth0"
+
         self._modem = modem_manager
         self._wifi = wifi_client_manager or _StubManager("wlan0_client")
-        self._eth = ethernet_manager or _StubManager("eth0")
+        # The stub still uses the resolved physical iface so that any code
+        # that calls get_iface() (route table, health probe bind) reads the
+        # right /sys/class/net/<iface>/* paths even before a real manager
+        # is wired in.
+        self._eth = ethernet_manager or _StubManager(self._eth_iface)
         self._usb_check = usb_tether_check
 
         self._priority_config_path = priority_config_path
