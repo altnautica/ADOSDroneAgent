@@ -43,12 +43,18 @@ from ados.core.paths import PROFILE_CONF
 # RTL8812 family USB IDs used on WFB-ng primary adapters.
 # (vendor 0x0bda Realtek, known product IDs for the RTL8812 series).
 # 0xB812 is the RTL8822E-class silicon used by the LB-LINK BL-M8812EU2
-# module and similar vendor rebrands of the RTL8812EU.
+# module and similar vendor rebrands of the RTL8812EU. 0xA81A is the
+# product ID some vendors expose on RTL8811AU / RTL8814AU rebrands
+# that ship with the same monitor-mode driver pack; observed live on
+# the Realtek "802.11ac NIC" silicon shipped with several ground
+# station radio kits and confirmed compatible with the same DKMS
+# driver tree.
 _RTL8812_IDS: set[tuple[int, int]] = {
     (0x0BDA, 0x8812),
     (0x0BDA, 0x881A),
     (0x0BDA, 0x881B),
     (0x0BDA, 0x881C),
+    (0x0BDA, 0xA81A),
     (0x0BDA, 0xB812),
 }
 

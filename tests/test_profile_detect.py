@@ -343,6 +343,64 @@ def test_mavlink_serial_uart_with_no_usb_metadata(monkeypatch) -> None:
     assert profile_detect.probe_mavlink_serial() == (0, 3, True)
 
 
+# ---- probe_rtl8812: USB vendor IDs of the RTL8812 family ------------------
+
+
+def _stub_lsusb(monkeypatch, stdout: str, returncode: int = 0) -> None:
+    """Replace subprocess.run with a stub that returns the given lsusb
+    output. probe_rtl8812 only ever calls run() with argv[0]=='lsusb'
+    so the stub is narrow on purpose."""
+    class _Result:
+        def __init__(self, rc, out):
+            self.returncode = rc
+            self.stdout = out
+
+    def _fake_run(argv, *_args, **_kwargs):
+        return _Result(returncode, stdout)
+
+    monkeypatch.setattr(profile_detect.subprocess, "run", _fake_run)
+
+
+def test_rtl8812_matches_canonical_pid(monkeypatch) -> None:
+    """RTL8812EU canonical PID 0x8812 still scores."""
+    _stub_lsusb(
+        monkeypatch,
+        "Bus 001 Device 002: ID 0bda:8812 Realtek Semiconductor Corp.\n",
+    )
+    assert profile_detect.probe_rtl8812() == (1, 1, True)
+
+
+def test_rtl8812_matches_pid_a81a(monkeypatch) -> None:
+    """Bench dev rig: groundnode's Realtek '802.11ac NIC' exposes
+    ``0bda:a81a``. Same monitor-mode driver works; probe should score
+    the adapter so the install-time profile decision isn't reduced to
+    a hostname tiebreak."""
+    _stub_lsusb(
+        monkeypatch,
+        "Bus 006 Device 004: ID 0bda:a81a Realtek Semiconductor Corp. 802.11ac NIC\n",
+    )
+    assert profile_detect.probe_rtl8812() == (1, 1, True)
+
+
+def test_rtl8812_zero_when_no_realtek_adapter(monkeypatch) -> None:
+    """No Realtek adapter present → zero contribution."""
+    _stub_lsusb(
+        monkeypatch,
+        "Bus 001 Device 001: ID 1d6b:0002 Linux Foundation 2.0 root hub\n",
+    )
+    assert profile_detect.probe_rtl8812() == (0, 0, False)
+
+
+def test_rtl8812_ignores_unrelated_realtek_pid(monkeypatch) -> None:
+    """A Realtek NIC with a non-RTL8812 PID (e.g. an Ethernet adapter)
+    should not match. Picks 0x8153 (RTL8153 USB Ethernet)."""
+    _stub_lsusb(
+        monkeypatch,
+        "Bus 001 Device 003: ID 0bda:8153 Realtek Semiconductor Corp. RTL8153\n",
+    )
+    assert profile_detect.probe_rtl8812() == (0, 0, False)
+
+
 # ---- Hostname is a soft tiebreaker, not a hardware override ---------------
 
 

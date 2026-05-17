@@ -1383,21 +1383,41 @@ EOF
         warn "Ignoring unrecognized profile.conf contents."
     fi
 
-    # Priority 3 — auto-detect via the agent's profile_detect.
-    if "${VENV_DIR}/bin/python" -c "import ados.bootstrap.profile_detect" 2>/dev/null; then
-        local detected
+    # Priority 3 — auto-detect via the agent's profile_detect. Stderr is
+    # captured to a tmp file (not /dev/null) so an import error or an
+    # exception in detect_profile() lands in the install log instead of
+    # silently letting us fall through to the drone default. The earlier
+    # silent-fallthrough is what put a freshly-purged ground-station box
+    # on the wrong profile branch during install, which then skipped the
+    # LCD overlay step before the post-install runtime probe corrected
+    # the profile (LCD never got provisioned that cycle).
+    local detect_stderr; detect_stderr="$(mktemp)"
+    local detect_rc=0
+    local detected=""
+    if "${VENV_DIR}/bin/python" -c "import ados.bootstrap.profile_detect" 2>"${detect_stderr}"; then
         detected="$("${VENV_DIR}/bin/python" -c \
             'from ados.bootstrap.profile_detect import detect_profile; print(detect_profile()["profile"])' \
-            2>/dev/null | tr -d '[:space:]' || true)"
-        if [[ "${detected}" =~ ${valid_re} ]]; then
-            mkdir -p "${CONFIG_DIR}"
-            cat > "${profile_file}" <<EOF
+            2>"${detect_stderr}")" || detect_rc=$?
+        detected="$(echo "${detected}" | tr -d '[:space:]')"
+    else
+        detect_rc=$?
+    fi
+    if [ "${detect_rc}" -ne 0 ] || [ -z "${detected}" ]; then
+        local stderr_head
+        stderr_head="$(head -c 400 "${detect_stderr}" 2>/dev/null | tr '\n' ' ')"
+        warn "Profile auto-detect failed (rc=${detect_rc}); falling back to drone. stderr: ${stderr_head:-<empty>}"
+    elif [[ "${detected}" =~ ${valid_re} ]]; then
+        rm -f "${detect_stderr}"
+        mkdir -p "${CONFIG_DIR}"
+        cat > "${profile_file}" <<EOF
 profile: ${detected//-/_}
 EOF
-            echo "${detected//-/_}"
-            return 0
-        fi
+        echo "${detected//-/_}"
+        return 0
+    else
+        warn "Profile auto-detect returned an unrecognised value '${detected}'; falling back to drone."
     fi
+    rm -f "${detect_stderr}"
 
     # Priority 4 — fallback.
     echo "drone"
@@ -2314,11 +2334,11 @@ if is_installed && $DO_UPGRADE && ! $DO_FORCE; then
     fi
 
     # LCD overlay installer needs the cloned scripts + DTS sources,
-    # so it runs before the temp-repo cleanup. Skipped on drone profile
-    # by the function's profile gate.
-    if [ "${ADOS_PROFILE:-}" = "ground_station" ] || [ "${ADOS_PROFILE:-}" = "ground-station" ]; then
-        FRESH_REPO_DIR="${tmp_repo}" install_display_driver
-    fi
+    # so it runs before the temp-repo cleanup. Runs on every profile;
+    # the function short-circuits on boards whose HAL has no
+    # displays.supported entry, so calling it on a drone rig with no
+    # LCD is a fast no-op.
+    FRESH_REPO_DIR="${tmp_repo}" install_display_driver
 
     # Persist driver scripts + overlay sources to /opt/ados/source/ so the
     # wizard's display step (and any future CLI re-runs) can find them
@@ -2486,16 +2506,18 @@ if [ "${ADOS_PROFILE}" = "ground_station" ] || [ "${ADOS_PROFILE}" = "ground-sta
     # the second-USB-WiFi fingerprint in profile_detect sets
     # `mesh_capable: true` when a carrier adapter is present.
     install_mesh_deps
-
-    # SPI LCD on the 40-pin header (e.g. Waveshare 3.5" RPi LCD on
-    # Cubie A7Z or Rock 5C). The driver script auto-detects the board
-    # and the supported display, compiles or activates the right
-    # device-tree overlay, writes /etc/ados/display.conf, and queues
-    # the kernel modules needed at next boot. Skipped on boards with
-    # no displays.supported entry. Failure is non-fatal so the agent
-    # itself still boots when the LCD-overlay step fails.
-    install_display_driver
 fi
+
+# SPI LCD on the 40-pin header (e.g. Waveshare 3.5" RPi LCD on Cubie
+# A7Z or Rock 5C). The driver script auto-detects the board and the
+# supported display, compiles or activates the right device-tree
+# overlay, writes /etc/ados/display.conf, and queues the kernel
+# modules needed at next boot. Runs unconditionally so a drone-profile
+# rig with a status LCD is provisioned the same way; the function
+# itself short-circuits on boards whose HAL profile carries no
+# displays.supported entry. Failure is non-fatal so the agent still
+# boots when the LCD-overlay step fails.
+install_display_driver
 
 # Generate device identity (idempotent)
 generate_device_id
