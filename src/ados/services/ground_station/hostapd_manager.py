@@ -459,6 +459,29 @@ async def main() -> None:
     device_id = config.agent.device_id
     hotspot = config.network.hotspot
 
+    # Opt-in gate. The hotspot is off by default; operators who want
+    # it enable it via the Setup webapp Network step or by writing
+    # network.hotspot.enabled=true into /etc/ados/config.yaml. Without
+    # this gate the systemd unit would attempt to bind hostapd to
+    # wlan0 even when the operator left the field on the default
+    # false, which on a box that's already a WiFi client gives the
+    # interface two IPs (DHCP + 192.168.4.1) and tends to break the
+    # home-WiFi association.
+    #
+    # Idle-sleep (not exit) so systemd keeps the unit in `active` state
+    # and the supervisor's monitor loop doesn't see a Type=simple
+    # process exit as `service_died` and start retrying. The operator
+    # restarts the unit after toggling hotspot.enabled=true via the
+    # Setup webapp; on the next start the idle branch is skipped.
+    if not hotspot.enabled:
+        slog.info(
+            "hotspot_disabled_by_config",
+            note="operator opt-in not set; idling. Toggle via Setup webapp to activate.",
+        )
+        # Park forever; systemd considers the service active.
+        while True:
+            await asyncio.sleep(3600)
+
     # If the user set a literal SSID in config (no template), honor it.
     ssid_override: str | None = None
     if hotspot.ssid and "{device_id}" not in hotspot.ssid and hotspot.ssid.strip():

@@ -87,7 +87,11 @@ SERVICE_REGISTRY: list[dict] = [
     # ground-station profile, independent of hardware detection.
     {"name": "ados-uplink-router", "category": "hardware", "profile_gate": "ground_station"},
     {"name": "ados-modem", "category": "hardware", "profile_gate": "ground_station"},
-    {"name": "ados-wifi-client", "category": "hardware", "profile_gate": "ground_station"},
+    # WiFi client is profile-agnostic on purpose: drone-profile rigs
+    # also need the option to join a home / bench WiFi instead of
+    # running off Ethernet. The manager itself reads no profile state,
+    # so removing the gate is a pure widening of accepted callers.
+    {"name": "ados-wifi-client", "category": "hardware", "profile_gate": None},
     {"name": "ados-ethernet", "category": "hardware", "profile_gate": "ground_station"},
     {"name": "ados-cloud-relay", "category": "core", "profile_gate": "ground_station"},
     # Distributed receive role-gated services. ados-batman brings up

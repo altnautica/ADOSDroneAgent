@@ -83,18 +83,30 @@ class Supervisor(HotplugMixin, MonitorMixin, HeartbeatMixin):
             return False
 
         # gate by agent profile. Services tagged for one profile do not
-        # start on another.
-        active_profile = getattr(
-            getattr(self.config, "agent", None), "profile", "auto"
-        )
-        if spec.profile_gate and active_profile != spec.profile_gate:
-            log.info(
-                "service_profile_gated",
-                service=name,
-                required=spec.profile_gate,
-                active=active_profile,
-            )
-            return False
+        # start on another. The resolver in ados.core.profile picks up
+        # /etc/ados/profile.conf when config.agent.profile is "auto" or
+        # unset, which is the common case for a fresh-install where the
+        # runtime probe wrote the resolved profile to disk but never
+        # mutated config.yaml. Earlier this read config.agent.profile
+        # directly and treated the literal string "auto" as a profile
+        # name, gating every profile-keyed service into a permanent
+        # "active=auto required=drone" log line + a dead drone link.
+        if spec.profile_gate:
+            from ados.core.profile import current_profile_and_role
+            wire_profile, _role = current_profile_and_role(self.config)
+            # Registry gates are written in the underscore form
+            # ("ground_station") for legacy reasons; the resolver
+            # returns the hyphenated wire form. Normalise once here so
+            # the rest of the supervisor never has to think about it.
+            active_profile = wire_profile.replace("-", "_")
+            if active_profile != spec.profile_gate:
+                log.info(
+                    "service_profile_gated",
+                    service=name,
+                    required=spec.profile_gate,
+                    active=active_profile,
+                )
+                return False
 
         # gate by ground-station role. role_gate is a pipe-separated list
         # of allowed roles. The active role comes from the on-disk sentinel
