@@ -3,20 +3,28 @@ Description=ADOS detach framebuffer console from the LCD framebuffer
 # Without this, fbcon claims the SPI LCD framebuffer at boot and the
 # Linux terminal renders on top of whatever the ADOS UI service is
 # trying to paint, so the operator sees a console instead of the
-# dashboard. We unbind vtcon1 (the framebuffer console attachment)
-# only when an LCD has been provisioned by install-display-overlay.sh
-# AND when something is actually bound today.
+# dashboard. The unit unbinds vtcon1 (the framebuffer console
+# attachment) only when an LCD has been provisioned by
+# install-display-overlay.sh.
 ConditionPathExists=/etc/ados/display.conf
-ConditionPathExists=/sys/class/vtconsole/vtcon1/bind
+After=systemd-modules-load.service systemd-udev-settle.service
+Wants=systemd-udev-settle.service
 Before=ados-oled.service ados-supervisor.service
-DefaultDependencies=no
-After=local-fs.target
 
 [Service]
 Type=oneshot
-# Skip when the operator skipped LCD setup (display_id=none) so a
-# user that explicitly opted out keeps their console.
-ExecStart=/bin/sh -c 'id="$(awk -F= "/^display_id=/{print \\$2}" /etc/ados/display.conf 2>/dev/null)"; if [ -n "$id" ] && [ "$id" != "none" ]; then echo 0 > /sys/class/vtconsole/vtcon1/bind; fi'
+# vtcon1 only registers once fbcon attaches to a real framebuffer,
+# which in turn waits for fb_ili9486 to bind to the SPI device.
+# That happens late in kernel boot. An earlier
+# ConditionPathExists=/sys/class/vtconsole/vtcon1/bind here caused
+# systemd to evaluate at unit-firing time, find the path missing,
+# and SKIP the unit -- by the time fbcon attached, we had already
+# given up and the terminal claimed the panel. Polling inside
+# ExecStart waits for the file to appear (up to 10s, well past the
+# observed worst-case late-bind window on Rock 5C Lite) before
+# unbinding. Also skips cleanly when the operator opted out via
+# display_id=none so a non-LCD user keeps their console.
+ExecStart=/bin/sh -c 'id="$(awk -F= "/^display_id=/{print \\$2}" /etc/ados/display.conf 2>/dev/null)"; if [ -z "$id" ] || [ "$id" = "none" ]; then exit 0; fi; for _ in $(seq 1 50); do [ -e /sys/class/vtconsole/vtcon1/bind ] && break; sleep 0.2; done; if [ -e /sys/class/vtconsole/vtcon1/bind ]; then echo 0 > /sys/class/vtconsole/vtcon1/bind; fi'
 RemainAfterExit=yes
 StandardOutput=journal
 StandardError=journal
