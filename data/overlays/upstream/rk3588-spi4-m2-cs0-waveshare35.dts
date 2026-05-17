@@ -6,24 +6,29 @@
  * / Rock 5C / Rock 5D), this lets a Pi-style 3.5" LCD HAT plug in
  * directly. Touch is enabled.
  *
- * Polarity note (Rockchip convention): even though the XPT2046/ADS7846
- * PENIRQ line is electrically open-drain pull-low, every working Rockchip
- * Linux config (Radxa Rock 3B docs and the rk3568 spi3 waveshare35
- * overlay both ship pendown-gpio = GPIO_ACTIVE_HIGH paired with
- * IRQ_TYPE_EDGE_FALLING) treats the gpio flag as ACTIVE_HIGH on this
- * platform. The IRQ trigger stays EDGE_FALLING because the IRQ
- * controller still sees the physical hi -> lo transition produced by
- * pen contact; only the pendown-gpio flag gets the platform-convention
- * value. Older versions of this overlay shipped ACTIVE_LOW, which never
- * fired (verified on Rock 5C Lite via /proc/interrupts ads7846 = 0
- * across all CPUs).
+ * Polarity note: the XPT2046/ADS7846 PENIRQ output is open-drain
+ * active-low with a ~50 kohm internal chip-side pull-up. Combined with
+ * the Rockchip-side pcfg_pull_up from the pinctrl group below, the
+ * line idles HIGH at VCC and only drops to LOW during finger contact.
+ * pendown-gpio is GPIO_ACTIVE_LOW so gpiolib reads "pen down" when
+ * the electrical level is LOW. Every working Pi-canonical Waveshare
+ * overlay (swkim01/waveshare-dtoverlays, goodtft/LCD-show,
+ * marcin-chwedczuk/waveshare-35A-raspberry-pi-64-driver) ships
+ * ACTIVE_LOW, as do Rock 5B reports on the Radxa forum.
  *
- * Pinmux note: the PENIRQ pin needs both the GPIO function AND a
- * pull-up bias to register clean falling edges. Without the explicit
- * pinctrl-0 block below, /sys/kernel/debug/pinctrl reports
- * "pin 139 (gpio4-11): (MUX UNCLAIMED)" and the line floats. Touch
- * stays dead with ads7846 IRQ count = 0 across boots until the pin
- * is muxed back to GPIO with pcfg_pull_up.
+ * An earlier ACTIVE_HIGH revision of this overlay (lifted from a
+ * Radxa Rock 3B template that was itself copied from a vendor
+ * reference using a different touch chip) caused the driver's
+ * ads7846_get_pendown_state() to read "pen permanently down" at idle
+ * and "pen up" on press, so the driver never armed the falling-edge
+ * IRQ. /proc/interrupts ads7846 stayed at 0 across all CPUs and
+ * across reboots, verified on Rock 5C Lite. Do not flip back to
+ * ACTIVE_HIGH without an end-to-end IRQ-counter increment proof.
+ *
+ * Pinmux note: the PENIRQ pin also needs an explicit pinctrl group
+ * that puts gpio4 PB3 into RK_FUNC_GPIO with pcfg_pull_up. Without
+ * it, /sys/kernel/debug/pinctrl reports "(MUX UNCLAIMED)" and the
+ * line bias is undefined.
  */
 
 #define DISPLAY_SPI spi4
@@ -66,6 +71,6 @@
     pinctrl-0 = <&ads7846_irq>;
     interrupt-parent = <&gpio4>;
     interrupts = <RK_PB3 IRQ_TYPE_EDGE_FALLING>;
-    pendown-gpio = <&gpio4 RK_PB3 GPIO_ACTIVE_HIGH>;
+    pendown-gpio = <&gpio4 RK_PB3 GPIO_ACTIVE_LOW>;
     touchscreen-max-pressure = <255>;
 };
