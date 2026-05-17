@@ -1747,6 +1747,7 @@ persist_repo_artifacts() {
     local persist_root="/opt/ados/source"
     info "Persisting driver scripts and overlays to ${persist_root}/"
     install -d -m 0755 "${persist_root}/scripts/drivers"
+    install -d -m 0755 "${persist_root}/scripts/lib"
     install -d -m 0755 "${persist_root}/data/overlays/upstream"
 
     # Driver shell scripts (install-display-overlay.sh, install-rtl8812eu.sh, ...)
@@ -1754,6 +1755,16 @@ persist_repo_artifacts() {
         find "${src_root}/scripts/drivers" -maxdepth 1 -type f -name '*.sh' -print0 \
             | while IFS= read -r -d '' f; do
                 install -m 0755 "$f" "${persist_root}/scripts/drivers/"
+            done
+    fi
+
+    # Shared shell helpers sourced by driver scripts at runtime
+    # (display-conf-helpers.sh today; more to come). Persisted as 0644
+    # because they're library files that get sourced, not executed.
+    if [ -d "${src_root}/scripts/lib" ]; then
+        find "${src_root}/scripts/lib" -maxdepth 1 -type f -name '*.sh' -print0 \
+            | while IFS= read -r -d '' f; do
+                install -m 0644 "$f" "${persist_root}/scripts/lib/"
             done
     fi
 

@@ -583,10 +583,10 @@ case "${DISPLAY_ID}" in
         # at v0.18.12).
         case "${BOARD_ID}" in
             rpi4b|rpi5|pi-zero-2w|raspberrypi)
-                ROTATION=0
+                DEFAULT_ROTATION=0
                 ;;
             *)
-                ROTATION=90
+                DEFAULT_ROTATION=90
                 ;;
         esac
         HAS_TOUCH="true"
@@ -597,18 +597,59 @@ case "${DISPLAY_ID}" in
         CONTROLLER="unknown"
         TOUCH_CHIP=""
         RESOLUTION=""
-        ROTATION=0
+        DEFAULT_ROTATION=0
         HAS_TOUCH="false"
         FB_PATH="/dev/fb1"
         FB_NAME=""
         ;;
 esac
 
+# Preserve an operator-set rotation from a prior run. The Python
+# helper ados.services.ui.display_conf.write_rotation() and the LCD
+# Settings page both mutate this key without touching the rest of
+# the file. Earlier revisions of this installer unconditionally
+# wrote DEFAULT_ROTATION on every --upgrade, which silently reset
+# the operator's choice. The preserve logic lives in a sourceable
+# helper so tests/test_display_conf_idempotency.py exercises the
+# same code path.
+HELPERS_LIB=""
+if [ -n "${FRESH_REPO_DIR:-}" ] && [ -f "${FRESH_REPO_DIR}/repo/scripts/lib/display-conf-helpers.sh" ]; then
+    HELPERS_LIB="${FRESH_REPO_DIR}/repo/scripts/lib/display-conf-helpers.sh"
+elif [ -f "$(dirname "$0" 2>/dev/null)/../lib/display-conf-helpers.sh" ] 2>/dev/null; then
+    HELPERS_LIB="$(cd "$(dirname "$0")/../lib" && pwd)/display-conf-helpers.sh"
+elif [ -f /opt/ados/source/scripts/lib/display-conf-helpers.sh ]; then
+    HELPERS_LIB="/opt/ados/source/scripts/lib/display-conf-helpers.sh"
+fi
+if [ -n "${HELPERS_LIB}" ]; then
+    # shellcheck source=/dev/null
+    . "${HELPERS_LIB}"
+    PRIOR_ROTATION_HINT=""
+    if [ -f "${DISPLAY_CONF}" ]; then
+        PRIOR_ROTATION_HINT="$(awk -F= '/^rotation=/{print $2; exit}' "${DISPLAY_CONF}" 2>/dev/null | tr -d '[:space:]')"
+    fi
+    ROTATION="$(display_conf_preserve_rotation "${DISPLAY_CONF}" "${DEFAULT_ROTATION}")"
+    if [ -n "${PRIOR_ROTATION_HINT}" ] && [ "${ROTATION}" = "${PRIOR_ROTATION_HINT}" ] && [ "${ROTATION}" != "${DEFAULT_ROTATION}" ]; then
+        info "Preserved operator-set rotation=${ROTATION} from existing ${DISPLAY_CONF}."
+    fi
+else
+    warn "display-conf-helpers.sh not found; falling back to board default rotation."
+    ROTATION="${DEFAULT_ROTATION}"
+fi
+
+# Note: /etc/ados/touch.calib is owned by the calibration wizard
+# (src/ados/services/ui/touch/transform.py) and survives every
+# installer run because we never touch that path. Keep it that way.
 cat > "${DISPLAY_CONF}" <<EOF
 # Written by scripts/drivers/install-display-overlay.sh. The on-board
 # UI service (ados-oled.service) and the cloud heartbeat assembler
 # read this file at runtime to decide whether to attach a framebuffer
 # renderer and what to advertise to Mission Control.
+#
+# The rotation key is operator-mutable via the Python helper
+# ados.services.ui.display_conf.write_rotation() and via the LCD
+# Settings page. The installer preserves an operator-set value on
+# --upgrade and only falls back to the board default on a fresh
+# install where the file did not exist.
 display_id=${DISPLAY_ID}
 board=${BOARD_ID}
 controller=${CONTROLLER}
