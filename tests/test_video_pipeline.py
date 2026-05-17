@@ -501,15 +501,21 @@ class TestEncoderOrphanKill:
 
         await pipeline._kill_orphan_encoder_ffmpegs("/dev/video0")
 
-        # pgrep cmd was issued, used `--` to force literal pattern (a
-        # leading `-` in the pattern would otherwise be parsed as a
-        # flag), and matched the device path.
-        assert len(captured_pgrep_cmd) == 1
+        # Two pgrep calls fire per orphan-kill: first for the ffmpeg
+        # ``-i /dev/videoN`` pattern, second for the rpicam-vid Pi-CSI
+        # path. Both use ``--`` so a leading ``-`` in the pattern is
+        # treated literally instead of as a flag.
+        assert len(captured_pgrep_cmd) == 2
         assert captured_pgrep_cmd[0][0] == "pgrep"
         assert "--" in captured_pgrep_cmd[0]
         assert "-i /dev/video0" in captured_pgrep_cmd[0]
+        assert captured_pgrep_cmd[1][0] == "pgrep"
+        assert "--" in captured_pgrep_cmd[1]
+        assert "rpicam-vid" in captured_pgrep_cmd[1]
 
-        # Both PIDs from the pgrep output were SIGKILL'd.
+        # Both PIDs from each pgrep output were SIGKILL'd (4 total —
+        # the fake stdout returns the same two PIDs on every call;
+        # SIGKILL on a missing PID is silently swallowed).
         import signal as _signal
 
         assert (12345, _signal.SIGKILL) in killed
@@ -517,11 +523,14 @@ class TestEncoderOrphanKill:
         # Never signal our own process.
         assert all(pid != os.getpid() for pid, _ in killed)
 
-        # Structured log emitted with device + count.
+        # Structured log emitted with device + count covering both
+        # patterns (4 total kills from two pgreps each returning two
+        # PIDs).
         kills_logged = [e for e in logged if e["event"] == "encoder_orphans_killed"]
         assert len(kills_logged) == 1
         assert kills_logged[0]["device"] == "/dev/video0"
-        assert kills_logged[0]["count"] == 2
+        # Two pgreps each returned (12345, 12346) → 4 kills total.
+        assert kills_logged[0]["count"] == 4
 
     @pytest.mark.asyncio
     async def test_kill_orphan_bridge_ffmpegs_matches_rtsp_url(
@@ -682,4 +691,123 @@ class TestEncoderOrphanKill:
         # The encoder must be put in a new session so the supervisor
         # can clean up the whole process group with os.killpg() on a
         # graceful teardown.
+        assert captured_kwargs[0].get("start_new_session") is True
+
+    @pytest.mark.asyncio
+    async def test_kill_orphan_encoder_rpicam_matches_pattern(
+        self, monkeypatch,
+    ):
+        """The encoder sweep also covers rpicam-vid orphans for the Pi
+        CSI camera path. rpicam doesn't open ``/dev/video*`` directly
+        so the ``-i /dev/videoN`` pattern misses it; the second pgrep
+        sweep with the bare ``rpicam-vid`` pattern catches it.
+        """
+        from ados.services.video import pipeline as pl_mod
+
+        pipeline = VideoPipeline(VideoConfig())
+
+        captured_patterns: list = []
+
+        # Two pgrep calls happen inside one orphan-kill: first for
+        # ``-i {device_path}`` (returns empty), second for
+        # ``rpicam-vid`` (returns two PIDs). Use a side-effect list to
+        # serve both.
+        call_count = {"n": 0}
+
+        async def _fake_exec(*cmd, **_kw):
+            captured_patterns.append(cmd[-1])
+            call_count["n"] += 1
+            proc = MagicMock()
+            if call_count["n"] == 1:
+                # First call: ffmpeg encoder pattern, no matches.
+                proc.communicate = AsyncMock(return_value=(b"", b""))
+            else:
+                # Second call: rpicam pattern, two orphan PIDs.
+                proc.communicate = AsyncMock(
+                    return_value=(b"42000\n42001\n", b""),
+                )
+            return proc
+
+        monkeypatch.setattr(pl_mod.asyncio, "create_subprocess_exec", _fake_exec)
+
+        killed: list[tuple[int, int]] = []
+
+        def _fake_kill(pid, sig):
+            killed.append((pid, sig))
+
+        monkeypatch.setattr("os.kill", _fake_kill)
+
+        logged: list[dict] = []
+
+        def _fake_warning(event, **kw):
+            logged.append({"event": event, **kw})
+
+        log_stub = MagicMock()
+        log_stub.warning = _fake_warning
+        monkeypatch.setattr(pl_mod, "log", log_stub, raising=False)
+
+        await pipeline._kill_orphan_encoder_ffmpegs("/dev/video0")
+
+        # Two pgrep calls fired: one per pattern, in this order.
+        assert call_count["n"] == 2
+        assert captured_patterns[0] == "-i /dev/video0"
+        assert captured_patterns[1] == "rpicam-vid"
+
+        # Two rpicam orphans got SIGKILL'd.
+        import signal as _signal
+        assert (42000, _signal.SIGKILL) in killed
+        assert (42001, _signal.SIGKILL) in killed
+
+        # Combined count surfaced in the structured log.
+        kills_logged = [e for e in logged if e["event"] == "encoder_orphans_killed"]
+        assert len(kills_logged) == 1
+        assert kills_logged[0]["count"] == 2
+
+    @pytest.mark.asyncio
+    async def test_start_cloud_push_carries_start_new_session_true(
+        self, monkeypatch,
+    ):
+        """``cloud_push`` ffmpeg must spawn with
+        ``start_new_session=True`` so its lifecycle isn't tied to the
+        parent agent process group. Without it, an unclean parent death
+        leaves the cloud_push ffmpeg holding a TCP connection to the
+        remote RTSP server forever.
+        """
+        from ados.services.video import pipeline as pl_mod
+
+        pipeline = _pipeline_with_mediamtx_mocks()
+        pipeline._state = pl_mod.PipelineState.RUNNING
+        # Configure a cloud relay URL so start_cloud_push() doesn't
+        # short-circuit on the "not configured" path.
+        pipeline._config = type(
+            "Cfg",
+            (),
+            {
+                "cloud_relay_url": "rtsp://relay.example.com:8554",
+                "wfb": type("W", (), {"sei_latency": False})(),
+            },
+        )()
+
+        captured_kwargs: list[dict] = []
+
+        async def _fake_spawn(*cmd, **kwargs):
+            captured_kwargs.append(kwargs)
+            proc = MagicMock()
+            proc.returncode = None
+            proc.pid = 9999
+            proc.stderr = None
+            return proc
+
+        # _drain_stderr starts a background task; stub it so the test
+        # doesn't leak coroutines.
+        pipeline._drain_stderr = AsyncMock()
+
+        import asyncio as _asyncio
+        monkeypatch.setattr(_asyncio, "create_subprocess_exec", _fake_spawn)
+
+        await pipeline.start_cloud_push()
+
+        # Exactly one cloud_push spawn was issued.
+        assert len(captured_kwargs) == 1
+        # session isolation is on so process-group cleanup is possible.
         assert captured_kwargs[0].get("start_new_session") is True

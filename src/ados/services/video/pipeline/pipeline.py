@@ -188,31 +188,25 @@ class VideoPipeline(_DiscoveryMixin, _HealthMixin, _WfbTeeMixin):
     def mediamtx(self) -> MediamtxManager:
         return self._mediamtx
 
-    async def _kill_orphan_encoder_ffmpegs(self, device_path: str) -> None:
-        """Kill stray ffmpeg processes holding the V4L2 device.
+    async def _pgrep_and_sigkill(self, pattern: str) -> int:
+        """Run ``pgrep -f -- <pattern>``, SIGKILL every matched PID
+        except our own, and return how many were killed.
 
-        Sweeps before encoder spawn so a new pipeline cycle reclaims
-        /dev/video* from any process inherited by init after a prior
-        parent died. Without this sweep, the freshly-spawned encoder
-        opens the V4L2 node and immediately bounces with EBUSY because
-        an orphan from a prior cycle is still holding the device.
+        ``--`` forces pgrep to treat the next token as the search
+        pattern even when it starts with ``-``. Without it, a pattern
+        like ``-i /dev/video0`` makes pgrep parse the leading dash as
+        a flag and exit with ``invalid option -- ' '``, producing
+        zero matches and a silent false negative.
         """
-        log = _pkg().log
         try:
-            # ``--`` forces pgrep to treat the next token as the search
-            # pattern, not an option. Without it, a pattern starting
-            # with ``-`` (e.g. ``-i /dev/video0``) makes pgrep parse
-            # the leading dash as a flag and exit with
-            # ``invalid option -- ' '``, producing zero matches and a
-            # silent false negative.
             proc = await asyncio.create_subprocess_exec(
-                "pgrep", "-f", "--", f"-i {device_path}",
+                "pgrep", "-f", "--", pattern,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.DEVNULL,
             )
             stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=2.0)
         except (FileNotFoundError, TimeoutError, asyncio.CancelledError):
-            return
+            return 0
         killed = 0
         for line in stdout.decode("utf-8", errors="replace").splitlines():
             line = line.strip()
@@ -230,6 +224,26 @@ class VideoPipeline(_DiscoveryMixin, _HealthMixin, _WfbTeeMixin):
                 killed += 1
             except (ProcessLookupError, OSError):
                 pass
+        return killed
+
+    async def _kill_orphan_encoder_ffmpegs(self, device_path: str) -> None:
+        """Kill stray encoder processes holding the camera.
+
+        Two patterns are swept in sequence:
+
+        * ffmpeg encoders holding ``/dev/videoN`` (USB UVC, V4L2).
+        * ``rpicam-vid`` (Pi CSI cameras). rpicam doesn't open
+          ``/dev/video*`` directly so the V4L2 pattern misses it. The
+          tool is purpose-built so a bare-name match is safe.
+
+        Without this sweep, a freshly-spawned encoder opens the camera
+        node and immediately bounces with EBUSY because an orphan from
+        a prior cycle is still holding the hardware.
+        """
+        log = _pkg().log
+        killed = 0
+        killed += await self._pgrep_and_sigkill(f"-i {device_path}")
+        killed += await self._pgrep_and_sigkill("rpicam-vid")
         if killed > 0:
             log.warning(
                 "encoder_orphans_killed",
@@ -246,35 +260,7 @@ class VideoPipeline(_DiscoveryMixin, _HealthMixin, _WfbTeeMixin):
         bridge will fail to register the path.
         """
         log = _pkg().log
-        try:
-            # Defensive ``--``: today the URL starts with ``rtsp://`` so
-            # pgrep parses it as a pattern, but a future URL with a
-            # leading dash would silently break the sweep otherwise.
-            proc = await asyncio.create_subprocess_exec(
-                "pgrep", "-f", "--", rtsp_url,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.DEVNULL,
-            )
-            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=2.0)
-        except (FileNotFoundError, TimeoutError, asyncio.CancelledError):
-            return
-        killed = 0
-        for line in stdout.decode("utf-8", errors="replace").splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                pid = int(line)
-            except ValueError:
-                continue
-            # Skip our own python process if it's matched by name.
-            if pid == os.getpid():
-                continue
-            try:
-                os.kill(pid, signal.SIGKILL)
-                killed += 1
-            except (ProcessLookupError, OSError):
-                pass
+        killed = await self._pgrep_and_sigkill(rtsp_url)
         if killed > 0:
             log.warning(
                 "bridge_orphans_killed",
@@ -754,6 +740,11 @@ class VideoPipeline(_DiscoveryMixin, _HealthMixin, _WfbTeeMixin):
         push_url = f"{cloud_url}/main"
 
         try:
+            # ``start_new_session=True`` puts the cloud-push ffmpeg in
+            # its own process group so the supervisor (or a teardown
+            # path) can clean it up cleanly without orphaning it on
+            # parent death. Mirrors the encoder + air_cloud_bridge
+            # spawns above.
             self._cloud_push_process = await asyncio.create_subprocess_exec(
                 "ffmpeg",
                 "-rtsp_transport", "tcp",
@@ -765,6 +756,7 @@ class VideoPipeline(_DiscoveryMixin, _HealthMixin, _WfbTeeMixin):
                 push_url,
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.PIPE,
+                start_new_session=True,
             )
             # Drain stderr in background to prevent pipe buffer deadlock
             self._cloud_stderr_task = asyncio.create_task(
