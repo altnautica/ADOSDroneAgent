@@ -374,6 +374,21 @@ class HopSupervisor:
             log.debug("hop_supervisor_persist_failed", error=str(exc))
 
     async def _tick(self, next_periodic_at: float) -> None:
+        # Defensive: never trigger a channel change while a local bind
+        # session is in flight. The bind orchestrator stops the normal
+        # wfb unit so wfb-ng's bind profile can own the radio adapter
+        # exclusively; a racing iw-channel + wfb_tx restart from this
+        # supervisor would fight the bind tunnel and corrupt the socat
+        # key exchange. Lazy import keeps this module independent of
+        # the bind orchestrator at import time.
+        try:
+            from ados.services.wfb.bind_orchestrator import is_bind_active
+            if is_bind_active():
+                log.debug("hop_skipped_during_bind")
+                return
+        except Exception:
+            pass
+
         if not self._enabled:
             return
         if not getattr(self._wfb, "_interface", None):

@@ -29,6 +29,33 @@ class MonitorMixin:
                         self._check_circuit_breaker(spec)
                         # Auto-restart if circuit not open
                         if spec.state != "circuit_open":
+                            # Skip auto-restart of the wfb units while a
+                            # local bind session is in flight. The bind
+                            # orchestrator stops the normal wfb unit so
+                            # wfb-ng's bind profile can own the radio
+                            # adapter exclusively for the handshake. A
+                            # racing restart here re-acquires the
+                            # adapter, fights monitor mode with the
+                            # bind tunnel, and corrupts the socat key
+                            # exchange. Lazy import avoids a module-
+                            # load cycle and a hard dep at supervisor
+                            # boot.
+                            if name in ("ados-wfb", "ados-wfb-rx"):
+                                try:
+                                    from ados.services.wfb.bind_orchestrator import (
+                                        is_bind_active,
+                                    )
+                                    if is_bind_active():
+                                        log.info(
+                                            "service_restart_skipped_during_bind",
+                                            service=name,
+                                        )
+                                        continue
+                                except Exception:
+                                    # Broken import (test env, missing
+                                    # module) must not gate normal
+                                    # restart behavior. Fall through.
+                                    pass
                             log.info("service_auto_restart", service=name)
                             await self.start_service(name)
 

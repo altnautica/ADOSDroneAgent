@@ -760,3 +760,36 @@ def _reset_for_tests() -> None:
     """Drop the cached singleton. Test-only helper."""
     global _instance
     _instance = None
+
+
+# Terminal states. A session in any of these is finished; the radio is
+# back under normal-unit control (or never left it) and unrelated
+# supervisors are free to act on the wfb adapter again.
+_TERMINAL_BIND_STATES: frozenset[BindState] = frozenset(
+    {
+        BindState.IDLE,
+        BindState.PAIRED,
+        BindState.FAILED,
+        BindState.ABORTED,
+    }
+)
+
+
+def is_bind_active() -> bool:
+    """Return True if a bind session is currently in flight.
+
+    Terminal states (IDLE, PAIRED, FAILED, ABORTED) return False.
+    Non-terminal states (OPENING_TUNNEL, WAITING_PEER, TRANSFERRING_KEYS,
+    APPLYING_KEYS, RESTARTING_SERVICES) return True.
+
+    Used by the agent supervisor to skip auto-restart of ados-wfb /
+    ados-wfb-rx during bind so wfb-ng owns the radio adapter
+    exclusively for the handshake. Also consulted by the hop
+    supervisor to skip channel changes while a bind is in flight.
+    """
+    if _instance is None:
+        return False
+    session = _instance.session
+    if session is None:
+        return False
+    return session.state not in _TERMINAL_BIND_STATES
