@@ -1,3 +1,3 @@
 """ADOS Drone Agent — Software-defined drone network agent."""
 
-__version__ = "0.29.0"
+__version__ = "0.30.0"

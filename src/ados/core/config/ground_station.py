@@ -58,6 +58,31 @@ class WfbReceiverConfig(BaseModel):
     accept_local_nic: bool = True
 
 
+DisplayType = Literal["auto", "hdmi", "lcd", "none"]
+
+
+class DisplayConfig(BaseModel):
+    """Effective local-display primary path for the ground-station profile.
+
+    ``type`` is the operator-set selection. ``auto`` lets the agent pick
+    the strongest local renderer at runtime (HDMI > SPI LCD > none).
+    Explicit values short-circuit detection: ``hdmi`` keeps the OLED /
+    SPI LCD services from grabbing the panel on boards where the
+    operator wants the Chromium kiosk to own the screen, ``lcd`` keeps
+    the kiosk off boards that boot with both an HDMI sink and an SPI
+    LCD wired, ``none`` disables all local-display services entirely
+    (headless deployment).
+
+    ``detected_type`` is runtime-only — it is populated by the heartbeat
+    enrichment helper after probing what the OS actually exposes and is
+    surfaced to Mission Control as a read-only field. Operators should
+    not write to it via the config API.
+    """
+
+    type: DisplayType = "auto"
+    detected_type: DisplayType | None = None
+
+
 class MeshConfig(BaseModel):
     """batman-adv local mesh transport settings.
 
@@ -100,3 +125,10 @@ class GroundStationConfig(BaseModel):
     wfb_relay: WfbRelayConfig = WfbRelayConfig()
     wfb_receiver: WfbReceiverConfig = WfbReceiverConfig()
     mesh: MeshConfig = MeshConfig()
+    # Operator-set primary local-display path. The OLED service gates
+    # its early startup on this value so a board with HDMI + SPI LCD
+    # wired together can be steered to one renderer without ripping
+    # cables. The heartbeat enrichment helper resolves the effective
+    # type (probing HDMI / framebuffer when set to "auto") and ships it
+    # to Mission Control under ``displayType``.
+    display: DisplayConfig = Field(default_factory=DisplayConfig)

@@ -27,6 +27,9 @@ from .heartbeat import (
     build_display_enrichment as _build_display_enrichment,
 )
 from .heartbeat import (
+    build_display_type_enrichment as _build_display_type_enrichment,
+)
+from .heartbeat import (
     collect_attached_display as _collect_attached_display,
 )
 from .heartbeat import (
@@ -326,6 +329,20 @@ async def heartbeat_loop(ctx: CloudContext) -> None:  # noqa: C901
                 except Exception as exc:
                     log.debug(
                         "heartbeat_display_enrichment_failed",
+                        error=str(exc),
+                    )
+
+                # Effective local-display primary path. Folded in next
+                # to the LCD-rooted fields above so the GCS can show a
+                # single "displayType" pill (HDMI / LCD / none) without
+                # having to re-derive it from the other enrichment
+                # fields. Failure-tolerant for the same reason as the
+                # block above.
+                try:
+                    payload.update(_build_display_type_enrichment(config))
+                except Exception as exc:
+                    log.debug(
+                        "heartbeat_display_type_enrichment_failed",
                         error=str(exc),
                     )
 

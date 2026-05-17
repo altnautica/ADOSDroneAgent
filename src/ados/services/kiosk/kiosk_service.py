@@ -74,6 +74,18 @@ def _hdmi_present() -> bool:
     return _DRM_CARD_PATH.exists()
 
 
+def hdmi_present() -> bool:
+    """Public alias for ``_hdmi_present``.
+
+    The heartbeat enrichment helper imports this to resolve the
+    effective display type on boards where ``ground_station.display.type``
+    is left at ``auto``. Keeping a public wrapper instead of removing
+    the leading-underscore name preserves the in-module call sites that
+    use the private form.
+    """
+    return _hdmi_present()
+
+
 def _get_kiosk_config(config: Any) -> tuple[str | None, bool | None]:
     """Return (target_url, minimal_layer) from config, if present.
 

@@ -1741,6 +1741,22 @@ class OledService:
 async def _amain() -> int:
     cfg = load_config()
     configure_logging(cfg.logging.level)
+
+    # Honour the operator-set local-display primary path. On boards
+    # that boot with both HDMI and the SPI LCD wired (or that ship
+    # headless), letting the OLED / framebuffer renderers grab the
+    # panel anyway fights the kiosk service for the display. Gate
+    # early so the systemd unit exits cleanly and stays inactive.
+    display_type = getattr(
+        getattr(cfg.ground_station, "display", None), "type", "auto"
+    )
+    if display_type in ("hdmi", "none"):
+        log.info(
+            "oled_skipped_due_to_display_config",
+            display_type=display_type,
+        )
+        return 0
+
     api_cfg = cfg.scripting.rest_api
     bus = ButtonEventBus()
     service = OledService(

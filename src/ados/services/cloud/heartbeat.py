@@ -552,6 +552,49 @@ def build_display_enrichment(
     return enrich
 
 
+def build_display_type_enrichment(config: Any) -> dict:
+    """Resolve the effective local-display primary path for the heartbeat.
+
+    Returns ``{"displayType": "hdmi" | "lcd" | "none"}`` so the GCS can
+    surface which renderer actually owns the panel on each ground
+    station. When ``ground_station.display.type`` is anything other
+    than ``"auto"`` the operator's selection is forwarded verbatim.
+    Under ``"auto"`` the helper probes ``/dev/dri/card0`` for HDMI and
+    ``/etc/ados/display.conf`` for a provisioned SPI LCD, picking
+    HDMI if both are present and ``"none"`` if neither is.
+
+    Returns an empty dict only if the helper cannot determine anything
+    at all (defensive — keeps the heartbeat from carrying a misleading
+    field). The caller does ``payload.update(...)``.
+    """
+    try:
+        configured = getattr(
+            getattr(config, "ground_station", None), "display", None
+        )
+        configured_type = getattr(configured, "type", "auto")
+    except Exception:
+        configured_type = "auto"
+
+    if configured_type in ("hdmi", "lcd", "none"):
+        return {"displayType": configured_type}
+
+    # "auto": probe both renderers and prefer HDMI when both are wired.
+    try:
+        from ados.services.kiosk.kiosk_service import hdmi_present
+        hdmi = bool(hdmi_present())
+    except Exception:
+        hdmi = False
+
+    if hdmi:
+        return {"displayType": "hdmi"}
+
+    lcd = collect_attached_display() is not None
+    if lcd:
+        return {"displayType": "lcd"}
+
+    return {"displayType": "none"}
+
+
 def get_local_ip() -> str:
     """Detect local IP via UDP socket probe."""
     try:
