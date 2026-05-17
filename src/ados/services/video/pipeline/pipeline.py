@@ -199,8 +199,14 @@ class VideoPipeline(_DiscoveryMixin, _HealthMixin, _WfbTeeMixin):
         """
         log = _pkg().log
         try:
+            # ``--`` forces pgrep to treat the next token as the search
+            # pattern, not an option. Without it, a pattern starting
+            # with ``-`` (e.g. ``-i /dev/video0``) makes pgrep parse
+            # the leading dash as a flag and exit with
+            # ``invalid option -- ' '``, producing zero matches and a
+            # silent false negative.
             proc = await asyncio.create_subprocess_exec(
-                "pgrep", "-f", f"-i {device_path}",
+                "pgrep", "-f", "--", f"-i {device_path}",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.DEVNULL,
             )
@@ -241,8 +247,11 @@ class VideoPipeline(_DiscoveryMixin, _HealthMixin, _WfbTeeMixin):
         """
         log = _pkg().log
         try:
+            # Defensive ``--``: today the URL starts with ``rtsp://`` so
+            # pgrep parses it as a pattern, but a future URL with a
+            # leading dash would silently break the sweep otherwise.
             proc = await asyncio.create_subprocess_exec(
-                "pgrep", "-f", rtsp_url,
+                "pgrep", "-f", "--", rtsp_url,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.DEVNULL,
             )

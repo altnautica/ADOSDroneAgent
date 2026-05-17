@@ -501,9 +501,12 @@ class TestEncoderOrphanKill:
 
         await pipeline._kill_orphan_encoder_ffmpegs("/dev/video0")
 
-        # pgrep cmd was issued and matches the device path.
+        # pgrep cmd was issued, used `--` to force literal pattern (a
+        # leading `-` in the pattern would otherwise be parsed as a
+        # flag), and matched the device path.
         assert len(captured_pgrep_cmd) == 1
         assert captured_pgrep_cmd[0][0] == "pgrep"
+        assert "--" in captured_pgrep_cmd[0]
         assert "-i /dev/video0" in captured_pgrep_cmd[0]
 
         # Both PIDs from the pgrep output were SIGKILL'd.
@@ -558,9 +561,11 @@ class TestEncoderOrphanKill:
             "rtsp://localhost:8554/main",
         )
 
-        # pgrep cmd was issued and matches the RTSP URL.
+        # pgrep cmd was issued, used `--` to force literal pattern, and
+        # matched the RTSP URL.
         assert len(captured_pgrep_cmd) == 1
         assert captured_pgrep_cmd[0][0] == "pgrep"
+        assert "--" in captured_pgrep_cmd[0]
         assert "rtsp://localhost:8554/main" in captured_pgrep_cmd[0]
 
         import signal as _signal
