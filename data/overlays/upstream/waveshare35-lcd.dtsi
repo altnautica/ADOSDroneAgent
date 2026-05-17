@@ -1,10 +1,49 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 /*
- * Shared DTSI fragment binding the ILI9486 + ADS7846 child nodes onto a
- * caller-selected SPI bus. Including DTSes set ``DISPLAY_SPI`` to the
- * SPI controller they want to host the panel and then add
- * board-specific pinctrl / cs-gpios / reset-gpios / dc-gpios in a
- * follow-up override.
+ * Shared device-tree fragment for the Waveshare 3.5" RPi LCD (A)
+ * (ILI9486 SPI display + ADS7846 / XPT2046 resistive touch).
+ *
+ * Including DTSes set ``DISPLAY_SPI`` to the SPI controller they want
+ * to host the panel and then add board-specific overrides in a
+ * follow-up block.
+ *
+ * ----------------------------------------------------------------------
+ * PER-BOARD OVERLAY CONTRACT
+ *
+ *   Properties below are CHIP-LEVEL invariants. Per-board overlays
+ *   MUST NOT redeclare them; the lint script at
+ *   scripts/test/lint_overlay_invariants.sh fails CI when they do.
+ *
+ *     - ti,x-plate-ohms          : touch panel resistance, datasheet
+ *     - ti,pressure-max          : full-scale pressure reading
+ *     - ti,swap-xy               : axis swap; same on every board
+ *     - ti,invert-y              : Y-axis polarity for the resistive
+ *                                  layer in this panel build; same on
+ *                                  every board
+ *     - touchscreen-max-pressure : modern binding name for the same
+ *                                  full-scale value (kernel >= 5.0)
+ *     - compatible / reg         : chip identity and SPI CS slot;
+ *                                  every board wires touch at CS1 so
+ *                                  this is invariant
+ *     - spi-max-frequency        : 2 MHz per ADS7846 datasheet upper
+ *                                  bound; per-board may lower it but
+ *                                  not raise
+ *
+ *   Per-board overlays SHOULD override:
+ *
+ *     - interrupt-parent + interrupts + pendown-gpio (cell content is
+ *       SoC-specific: phandle and GPIO bank+pin only make sense for
+ *       one platform). PENDOWN POLARITY IS ALWAYS GPIO_ACTIVE_LOW; the
+ *       open-drain PENIRQ line idles HIGH via the internal pull-up and
+ *       drops LOW on contact. The lint refuses ACTIVE_HIGH; see the
+ *       polarity story in data/overlays/README.md.
+ *     - pinctrl-names + pinctrl-0 (the IRQ pin needs a per-SoC
+ *       pinctrl group that sets GPIO mux + pull-up bias)
+ *     - vcc-supply (the regulator phandle name varies by SoC)
+ *     - reset-gpios + dc-gpios on &ili9486 (per-board GPIO refs)
+ *     - cs-gpios + num-cs + pinctrl-0 on &DISPLAY_SPI (per-SoC SPI
+ *       controller pinctrl and CS routing)
+ * ----------------------------------------------------------------------
  */
 
 #ifndef __WAVESHARE35_LCD_DTSI__
@@ -43,13 +82,12 @@
         compatible = "ti,ads7846";
         status = "okay";
         reg = <1>;
-        id = <1>;
         spi-max-frequency = <2000000>;
         ti,x-plate-ohms = /bits/ 16 <60>;
         ti,pressure-max = /bits/ 16 <255>;
         ti,swap-xy = <0>;
         ti,invert-y = <1>;
-        vcc-supply = <&vcc5v0_sys>;
+        touchscreen-max-pressure = <255>;
     };
 };
 

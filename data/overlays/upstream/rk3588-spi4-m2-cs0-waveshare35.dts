@@ -66,11 +66,10 @@
 };
 
 &ads7846 {
-    status = "okay";
     pinctrl-names = "default";
     pinctrl-0 = <&ads7846_irq>;
     interrupt-parent = <&gpio4>;
     interrupts = <RK_PB3 IRQ_TYPE_EDGE_FALLING>;
     pendown-gpio = <&gpio4 RK_PB3 GPIO_ACTIVE_LOW>;
-    touchscreen-max-pressure = <255>;
+    vcc-supply = <&vcc5v0_sys>;
 };
