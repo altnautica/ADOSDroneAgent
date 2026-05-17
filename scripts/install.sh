@@ -74,6 +74,46 @@ if [ -n "${ADOS_SCRIPT_DIR}" ] && [ -f "${ADOS_SCRIPT_DIR}/install.d/lib.sh" ]; 
     unset module module_path
 fi
 
+# ─── curl-pipe bootstrap ────────────────────────────────────────────────────
+#
+# When the operator runs `curl -sSL .../install.sh | sudo bash -s -- ...`,
+# BASH_SOURCE[0] is not a real file so ADOS_SCRIPT_DIR is empty and the
+# install.d/*.sh modules were never sourced above. Without those modules,
+# detect_profile, error, do_uninstall, install_system_deps, ... are all
+# undefined and the next command would die with "command not found".
+#
+# Bootstrap by git-cloning the repo to a temp dir and re-execing this
+# script from there. The re-execed script sees ADOS_SCRIPT_DIR as a real
+# path, sources install.d/*.sh, and proceeds normally. Must run BEFORE
+# the lite-rs pre-dispatch (which calls detect_profile from 00-detect.sh).
+if [ -z "${ADOS_SCRIPT_DIR}" ]; then
+    if ! command -v git >/dev/null 2>&1; then
+        echo "ERROR: git is required to bootstrap installer from curl-pipe" >&2
+        echo "       sudo apt-get install -y git" >&2
+        exit 1
+    fi
+    _BOOT_BRANCH="main"
+    # Peek at --branch for the clone so a feature-branch install bootstraps
+    # the right tree; the full arg parser below re-reads it.
+    _peek_args=("$@")
+    for ((_i=0; _i<${#_peek_args[@]}; _i++)); do
+        if [ "${_peek_args[$_i]}" = "--branch" ] && [ $((_i+1)) -lt ${#_peek_args[@]} ]; then
+            _BOOT_BRANCH="${_peek_args[$((_i+1))]}"
+            break
+        fi
+    done
+    _BOOT_DIR="$(mktemp -d)"
+    _BOOT_REPO="https://github.com/altnautica/ADOSDroneAgent.git"
+    echo "Bootstrapping installer from ${_BOOT_REPO} (branch ${_BOOT_BRANCH})..."
+    if ! git clone --depth 1 --quiet --branch "${_BOOT_BRANCH}" \
+                   "${_BOOT_REPO}" "${_BOOT_DIR}/repo" 2>&1; then
+        echo "ERROR: failed to clone ${_BOOT_REPO} for bootstrap" >&2
+        rm -rf "${_BOOT_DIR}"
+        exit 1
+    fi
+    exec bash "${_BOOT_DIR}/repo/scripts/install.sh" "$@"
+fi
+
 # ─── Lite-rs Profile Pre-dispatch ───────────────────────────────────────────
 #
 # Profile dispatch with board fingerprint auto-detection.

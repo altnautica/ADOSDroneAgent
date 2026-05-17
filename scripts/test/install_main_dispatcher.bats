@@ -263,3 +263,33 @@ probe_args() {
     first_source="$(echo "$output" | head -1)"
     [[ "$first_source" == *"lib.sh"* ]]
 }
+
+# -----------------------------------------------------------------------------
+# curl-pipe bootstrap (regression: install.d/* modules must reach the rig)
+# -----------------------------------------------------------------------------
+
+@test "dispatcher self-bootstraps when curl-piped (ADOS_SCRIPT_DIR empty)" {
+    # The dispatcher contains a bootstrap block: when BASH_SOURCE[0] is
+    # not a real file (curl-pipe-to-bash), the install.d/*.sh modules
+    # were never sourced. The bootstrap must git-clone the repo and
+    # exec install.sh from there BEFORE the lite dispatch tries to call
+    # detect_profile (which lives in 00-detect.sh).
+    run grep -nE "curl-pipe bootstrap" "${DISPATCHER}"
+    [ "$status" -eq 0 ]
+    [ -n "$output" ]
+    # And the bootstrap must come before the lite dispatch block.
+    bootstrap_line="$(grep -nE 'curl-pipe bootstrap' "${DISPATCHER}" | head -1 | cut -d: -f1)"
+    lite_line="$(grep -nE 'Lite-rs Profile Pre-dispatch' "${DISPATCHER}" | head -1 | cut -d: -f1)"
+    [ -n "$bootstrap_line" ]
+    [ -n "$lite_line" ]
+    [ "$bootstrap_line" -lt "$lite_line" ]
+}
+
+@test "bootstrap re-execs into the cloned repo's install.sh" {
+    # The bootstrap should end with exec'ing the cloned install.sh,
+    # passing through the original args so --pair / --upgrade / --branch
+    # behave the same as a non-piped invocation.
+    run bash -c "awk '/curl-pipe bootstrap/,/^fi$/' '${DISPATCHER}' | grep -cE 'exec.*install\\.sh.*\\\"\\\$@\\\"'"
+    [ "$status" -eq 0 ]
+    [ "$output" = "1" ]
+}
