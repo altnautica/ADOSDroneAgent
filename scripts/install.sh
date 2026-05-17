@@ -1288,7 +1288,10 @@ disable_other_profile_units() {
 # of the detected profile.
 enable_universal_units() {
     info "Enabling cross-profile systemd units..."
-    for unit in ados-peripherals.service; do
+    # ados-fbcon-detach is profile-agnostic. The unit's own
+    # ConditionPathExists gates ensure it no-ops on boards that don't
+    # have a provisioned SPI LCD, so enabling it everywhere is safe.
+    for unit in ados-peripherals.service ados-fbcon-detach.service; do
         if [ -f "/etc/systemd/system/${unit}" ]; then
             systemctl enable "${unit}" 2>/dev/null || true
         else

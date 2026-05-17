@@ -1,0 +1,26 @@
+[Unit]
+Description=ADOS detach framebuffer console from the LCD framebuffer
+# Without this, fbcon claims the SPI LCD framebuffer at boot and the
+# Linux terminal renders on top of whatever the ADOS UI service is
+# trying to paint, so the operator sees a console instead of the
+# dashboard. We unbind vtcon1 (the framebuffer console attachment)
+# only when an LCD has been provisioned by install-display-overlay.sh
+# AND when something is actually bound today.
+ConditionPathExists=/etc/ados/display.conf
+ConditionPathExists=/sys/class/vtconsole/vtcon1/bind
+Before=ados-oled.service ados-supervisor.service
+DefaultDependencies=no
+After=local-fs.target
+
+[Service]
+Type=oneshot
+# Skip when the operator skipped LCD setup (display_id=none) so a
+# user that explicitly opted out keeps their console.
+ExecStart=/bin/sh -c 'id="$(awk -F= "/^display_id=/{print \\$2}" /etc/ados/display.conf 2>/dev/null)"; if [ -n "$id" ] && [ "$id" != "none" ]; then echo 0 > /sys/class/vtconsole/vtcon1/bind; fi'
+RemainAfterExit=yes
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ados-fbcon-detach
+
+[Install]
+WantedBy=multi-user.target
