@@ -73,6 +73,49 @@ setup() {
     [[ "$output" == *"OK"* ]]
 }
 
+@test "13-main.sh sources cleanly after other modules" {
+    run bash -c "
+        set -e
+        source '${INSTALL_D}/lib.sh'
+        for m in 00-detect 01-state 02-deps 03-kernel 04-dkms 05-mesh \
+                 06-radio 07-systemd 08-plugin 09-config 10-network \
+                 11-artifacts 12-output 13-main; do
+            source '${INSTALL_D}/'\$m.sh
+        done
+        echo OK
+    "
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"OK"* ]]
+}
+
+@test "main_install_flow is defined after sourcing 13-main.sh" {
+    run bash -c "
+        source '${INSTALL_D}/lib.sh'
+        source '${INSTALL_D}/13-main.sh'
+        declare -F main_install_flow >/dev/null && echo OK
+    "
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"OK"* ]]
+}
+
+@test "dispatcher sources 13-main in the module loop" {
+    # The `for module in ...; do` block spans multiple lines via `\`
+    # continuation, so grep line-by-line cannot see both anchors at once.
+    # Use awk to flatten the dispatcher into a logical-line stream and
+    # then look for the module loop with 13-main present.
+    run awk '/for module in/,/; do$/ {printf "%s ", $0} /; do$/ {print ""}' "${DISPATCHER}"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"for module in"* ]]
+    [[ "$output" == *"13-main"* ]]
+    [[ "$output" == *"; do"* ]]
+
+    # Sanity: the dispatcher also calls main_install_flow once after the
+    # export line, otherwise the install never runs.
+    run grep -E '^main_install_flow[[:space:]]*$' "${DISPATCHER}"
+    [ "$status" -eq 0 ]
+    [ -n "$output" ]
+}
+
 @test "all 37 spec-mapped functions resolve after sourcing modules" {
     run bash -c "
         set -e
@@ -248,7 +291,14 @@ probe_args() {
     # install_plugin_tmpfiles / persist_repo_artifacts via subshells
     # spawned out of the dispatcher main flow. Must be exported for
     # the subshells to see it. SYSTEMD_SRC_DIR same story.
-    run grep -E '^export[[:space:]]+(FRESH_REPO_DIR|SYSTEMD_SRC_DIR)' "${DISPATCHER}"
+    #
+    # FRESH_REPO_DIR is exported up front in install.sh alongside the
+    # other shared globals. SYSTEMD_SRC_DIR is set + exported inside
+    # the main install flow (13-main.sh) because the path is only
+    # known once the fresh-clone branch picks a temp directory.
+    # Search both files so we catch the post-split layout.
+    run grep -rE '^[[:space:]]*export[[:space:]]+.*(FRESH_REPO_DIR|SYSTEMD_SRC_DIR)' \
+        "${DISPATCHER}" "${INSTALL_D}/13-main.sh"
     [ "$status" -eq 0 ]
     [[ "$output" == *"FRESH_REPO_DIR"* ]]
     [[ "$output" == *"SYSTEMD_SRC_DIR"* ]]
