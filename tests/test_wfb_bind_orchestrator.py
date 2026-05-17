@@ -450,3 +450,329 @@ def test_default_timeout_constant_is_gone() -> None:
     """The old DEFAULT_TIMEOUT_S knob was the bug; it should not be
     referenceable anywhere in the module after the redesign."""
     assert not hasattr(orch_mod, "DEFAULT_TIMEOUT_S")
+
+
+def test_bind_error_backward_compat() -> None:
+    """`raise BindError("msg")` still works without the new phase arg.
+    Existing callers that do not pass `phase=` must continue to compile
+    and produce a BindError with `phase is None`."""
+    err = BindError("legacy call shape")
+    assert str(err) == "legacy call shape"
+    assert err.phase is None
+
+    err_with_phase = BindError("new call shape", phase="transferring_keys")
+    assert str(err_with_phase) == "new call shape"
+    assert err_with_phase.phase == "transferring_keys"
+
+
+def test_session_exposes_phase_and_entered_at(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Drive a partial bind to the WAITING_PEER state, then inspect the
+    session snapshot: `phase` must match `state`, `phase_entered_at`
+    must be set to a recent monotonic timestamp, and `phase_age_s`
+    must be a small non-negative float."""
+    import time as _time
+
+    bind_key = tmp_path / "bind.key"
+    bind_yaml = tmp_path / "bind.yaml"
+    bind_key.write_bytes(b"\x00")
+    bind_yaml.write_bytes(b"")
+    monkeypatch.setattr(orch_mod, "UPSTREAM_BIND_KEY", bind_key)
+    monkeypatch.setattr(orch_mod, "UPSTREAM_BIND_YAML", bind_yaml)
+    monkeypatch.setattr(
+        orch_mod, "WFB_BIND_SERVER_SH", str(tmp_path / "wfb_bind_server.sh")
+    )
+    monkeypatch.setattr(
+        orch_mod, "WFB_BIND_CLIENT_SH", str(tmp_path / "wfb_bind_client.sh")
+    )
+    Path(orch_mod.WFB_BIND_SERVER_SH).write_text("#!/bin/sh\nexit 0\n")
+    Path(orch_mod.WFB_BIND_CLIENT_SH).write_text("#!/bin/sh\nexit 0\n")
+    monkeypatch.setattr(orch_mod, "_systemctl", lambda *_a, **_kw: (True, ""))
+    monkeypatch.setattr(
+        orch_mod.shutil, "which", lambda name: f"/usr/bin/{name}"
+    )
+
+    async def _wait_for_iface_stub(_iface: str, _timeout_s: float = 0.0) -> bool:
+        return True
+
+    monkeypatch.setattr(orch_mod, "_wait_for_iface", _wait_for_iface_stub)
+
+    # Hang socat so the orchestrator reaches TRANSFERRING_KEYS and stays
+    # there; we then snapshot before the cancel.
+    async def _hung_subprocess_exec(*_cmd, **_kw):
+        proc = AsyncMock()
+        forever = asyncio.Event()
+
+        async def _communicate():
+            await forever.wait()
+            return (b"", b"")
+
+        proc.communicate = _communicate
+        proc.returncode = None
+        proc.kill = lambda: None
+        proc.wait = AsyncMock(return_value=0)
+        proc.pid = 34567
+        return proc
+
+    async def _scenario() -> dict:
+        cancel_event = asyncio.Event()
+        with patch(
+            "asyncio.create_subprocess_exec", side_effect=_hung_subprocess_exec
+        ):
+            orch = get_bind_orchestrator()
+            bind_task = asyncio.create_task(
+                orch.start_local_bind(role="drone", cancel_event=cancel_event)
+            )
+            # Let the orchestrator reach TRANSFERRING_KEYS.
+            await asyncio.sleep(0.05)
+            snap_mid = await orch.status()
+            assert snap_mid is not None
+            # Tear down so the test doesn't leak the bind_task.
+            cancel_event.set()
+            try:
+                await asyncio.wait_for(bind_task, timeout=5.0)
+            except Exception:  # noqa: BLE001
+                pass
+            return snap_mid
+
+    before = _time.monotonic()
+    snap = asyncio.run(_scenario())
+    after = _time.monotonic()
+
+    assert snap["phase"] == snap["state"]
+    # The session must have advanced past IDLE.
+    assert snap["state"] != orch_mod.BindState.IDLE.value
+    assert snap["phase_entered_at"] is not None
+    # Phase entered at must be a monotonic-clock value taken between the
+    # before-call and after-call samples.
+    assert before <= snap["phase_entered_at"] <= after
+    assert snap["phase_age_s"] is not None
+    assert snap["phase_age_s"] >= 0.0
+    # Phase age cannot exceed the wall-clock the scenario consumed.
+    assert snap["phase_age_s"] <= (after - before) + 0.1
+
+
+def test_key_transfer_timeout_raises_bind_error_with_phase(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If the socat key-transfer step hangs past KEY_TRANSFER_TIMEOUT_S,
+    the orchestrator must surface a BindError whose `phase` attribute
+    names the phase the timeout fired in (TRANSFERRING_KEYS). The
+    session's terminal `state` is FAILED; the error message references
+    the transfer-timeout budget."""
+    bind_key = tmp_path / "bind.key"
+    bind_yaml = tmp_path / "bind.yaml"
+    bind_key.write_bytes(b"\x00")
+    bind_yaml.write_bytes(b"")
+    monkeypatch.setattr(orch_mod, "UPSTREAM_BIND_KEY", bind_key)
+    monkeypatch.setattr(orch_mod, "UPSTREAM_BIND_YAML", bind_yaml)
+    monkeypatch.setattr(
+        orch_mod, "WFB_BIND_SERVER_SH", str(tmp_path / "wfb_bind_server.sh")
+    )
+    monkeypatch.setattr(
+        orch_mod, "WFB_BIND_CLIENT_SH", str(tmp_path / "wfb_bind_client.sh")
+    )
+    Path(orch_mod.WFB_BIND_SERVER_SH).write_text("#!/bin/sh\nexit 0\n")
+    Path(orch_mod.WFB_BIND_CLIENT_SH).write_text("#!/bin/sh\nexit 0\n")
+    monkeypatch.setattr(orch_mod, "_systemctl", lambda *_a, **_kw: (True, ""))
+    monkeypatch.setattr(
+        orch_mod.shutil, "which", lambda name: f"/usr/bin/{name}"
+    )
+
+    # Shrink the budget so the test is fast.
+    monkeypatch.setattr(orch_mod, "KEY_TRANSFER_TIMEOUT_S", 0.2)
+
+    async def _wait_for_iface_stub(_iface: str, _timeout_s: float = 0.0) -> bool:
+        return True
+
+    monkeypatch.setattr(orch_mod, "_wait_for_iface", _wait_for_iface_stub)
+
+    # Hang socat so the inner asyncio.timeout fires.
+    async def _hung_subprocess_exec(*_cmd, **_kw):
+        proc = AsyncMock()
+        forever = asyncio.Event()
+
+        async def _communicate():
+            await forever.wait()
+            return (b"", b"")
+
+        proc.communicate = _communicate
+        proc.returncode = None
+        proc.kill = lambda: None
+        proc.wait = AsyncMock(return_value=0)
+        proc.pid = 45678
+        return proc
+
+    async def _scenario() -> dict:
+        with patch(
+            "asyncio.create_subprocess_exec", side_effect=_hung_subprocess_exec
+        ):
+            orch = get_bind_orchestrator()
+            return await orch.start_local_bind(role="drone")
+
+    result = asyncio.run(_scenario())
+
+    assert result["state"] == orch_mod.BindState.FAILED.value
+    err_msg = result["error"] or ""
+    assert "timed out" in err_msg.lower()
+    assert "transferring_keys" in err_msg
+
+
+def test_restart_timeout_raises_bind_error_with_phase(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If PairManager.apply_keypair hangs past RESTART_TIMEOUT_S, the
+    orchestrator must raise a BindError tagged `phase=restarting_services`
+    and the session's terminal state must be FAILED."""
+    bind_key = tmp_path / "bind.key"
+    bind_yaml = tmp_path / "bind.yaml"
+    bind_key.write_bytes(b"\x00")
+    bind_yaml.write_bytes(b"")
+    monkeypatch.setattr(orch_mod, "UPSTREAM_BIND_KEY", bind_key)
+    monkeypatch.setattr(orch_mod, "UPSTREAM_BIND_YAML", bind_yaml)
+
+    drone_key_path = tmp_path / "drone.key"
+    monkeypatch.setattr(orch_mod, "UPSTREAM_DRONE_KEY", drone_key_path)
+    monkeypatch.setattr(
+        orch_mod, "WFB_BIND_SERVER_SH", str(tmp_path / "wfb_bind_server.sh")
+    )
+    monkeypatch.setattr(
+        orch_mod, "WFB_BIND_CLIENT_SH", str(tmp_path / "wfb_bind_client.sh")
+    )
+    Path(orch_mod.WFB_BIND_SERVER_SH).write_text("#!/bin/sh\nexit 0\n")
+    Path(orch_mod.WFB_BIND_CLIENT_SH).write_text("#!/bin/sh\nexit 0\n")
+    monkeypatch.setattr(orch_mod, "_systemctl", lambda *_a, **_kw: (True, ""))
+    monkeypatch.setattr(
+        orch_mod.shutil, "which", lambda name: f"/usr/bin/{name}"
+    )
+
+    # Shrink the restart budget so the test is fast; leave the key
+    # transfer budget at default so it does NOT fire first.
+    monkeypatch.setattr(orch_mod, "RESTART_TIMEOUT_S", 0.2)
+
+    async def _wait_for_iface_stub(_iface: str, _timeout_s: float = 0.0) -> bool:
+        return True
+
+    monkeypatch.setattr(orch_mod, "_wait_for_iface", _wait_for_iface_stub)
+
+    # socat exits cleanly and writes the drone.key so the orchestrator
+    # advances to APPLYING_KEYS and reads the blob. The hang has to be
+    # in apply_keypair.
+    async def _fake_subprocess_exec(*_cmd, **_kw):
+        proc = AsyncMock()
+        drone_key_path.write_bytes(b"\x42" * 32 + b"\x99" * 32)
+
+        async def _communicate():
+            return (b"", b"")
+
+        proc.communicate = _communicate
+        proc.returncode = 0
+        return proc
+
+    async def _hung_apply(_blob, _role, _peer_id):
+        forever = asyncio.Event()
+        await forever.wait()
+
+    async def _scenario() -> dict:
+        with patch(
+            "asyncio.create_subprocess_exec", side_effect=_fake_subprocess_exec
+        ):
+            from ados.services.ground_station import pair_manager as pm_mod
+
+            pm_mod._reset_for_tests()
+            with patch.object(
+                pm_mod.PairManager,
+                "apply_keypair",
+                side_effect=_hung_apply,
+            ):
+                orch = get_bind_orchestrator()
+                return await orch.start_local_bind(role="drone")
+
+    result = asyncio.run(_scenario())
+
+    assert result["state"] == orch_mod.BindState.FAILED.value
+    err_msg = result["error"] or ""
+    assert "restart" in err_msg.lower()
+    assert "timed out" in err_msg.lower()
+
+
+def test_status_snapshot_includes_phase_fields_when_paired(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """After a successful bind the snapshot still carries phase metadata.
+    GET /wfb/pair/local-bind callers should always see the three new
+    keys (`phase`, `phase_entered_at`, `phase_age_s`) regardless of
+    terminal state."""
+    bind_key = tmp_path / "bind.key"
+    bind_yaml = tmp_path / "bind.yaml"
+    bind_key.write_bytes(b"\x00")
+    bind_yaml.write_bytes(b"")
+    monkeypatch.setattr(orch_mod, "UPSTREAM_BIND_KEY", bind_key)
+    monkeypatch.setattr(orch_mod, "UPSTREAM_BIND_YAML", bind_yaml)
+
+    drone_key_path = tmp_path / "drone.key"
+    monkeypatch.setattr(orch_mod, "UPSTREAM_DRONE_KEY", drone_key_path)
+    monkeypatch.setattr(
+        orch_mod, "WFB_BIND_SERVER_SH", str(tmp_path / "wfb_bind_server.sh")
+    )
+    monkeypatch.setattr(
+        orch_mod, "WFB_BIND_CLIENT_SH", str(tmp_path / "wfb_bind_client.sh")
+    )
+    Path(orch_mod.WFB_BIND_SERVER_SH).write_text("#!/bin/sh\nexit 0\n")
+    Path(orch_mod.WFB_BIND_CLIENT_SH).write_text("#!/bin/sh\nexit 0\n")
+    monkeypatch.setattr(orch_mod, "_systemctl", lambda *_a, **_kw: (True, ""))
+    monkeypatch.setattr(
+        orch_mod.shutil, "which", lambda name: f"/usr/bin/{name}"
+    )
+
+    async def _wait_for_iface_stub(_iface: str, _timeout_s: float = 0.0) -> bool:
+        return True
+
+    monkeypatch.setattr(orch_mod, "_wait_for_iface", _wait_for_iface_stub)
+
+    async def _fake_subprocess_exec(*_cmd, **_kw):
+        proc = AsyncMock()
+        drone_key_path.write_bytes(b"\x42" * 32 + b"\x99" * 32)
+
+        async def _communicate():
+            return (b"", b"")
+
+        proc.communicate = _communicate
+        proc.returncode = 0
+        return proc
+
+    async def fake_apply(_blob, role, peer_id):
+        return {
+            "paired": True,
+            "fingerprint": "deadbeefcafefeed",
+            "role": role,
+            "paired_with_device_id": peer_id,
+            "paired_at": "2026-01-01T00:00:00+00:00",
+        }
+
+    with patch(
+        "asyncio.create_subprocess_exec", side_effect=_fake_subprocess_exec
+    ):
+        from ados.services.ground_station import pair_manager as pm_mod
+
+        pm_mod._reset_for_tests()
+        with patch.object(
+            pm_mod.PairManager,
+            "apply_keypair",
+            side_effect=fake_apply,
+        ):
+            orch = get_bind_orchestrator()
+            result = asyncio.run(orch.start_local_bind(role="drone"))
+
+    assert result["state"] == orch_mod.BindState.PAIRED.value
+    # Phase keys must always be present in the snapshot, even on the
+    # success path. Otherwise the GCS LCD has nothing to render when
+    # poll cadence catches a freshly-terminal state.
+    assert "phase" in result
+    assert "phase_entered_at" in result
+    assert "phase_age_s" in result
+    assert result["phase"] == orch_mod.BindState.PAIRED.value
+    assert result["phase_entered_at"] is not None
+    assert result["phase_age_s"] is not None
+    assert result["phase_age_s"] >= 0.0

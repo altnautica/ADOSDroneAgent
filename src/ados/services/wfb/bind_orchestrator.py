@@ -31,6 +31,7 @@ from __future__ import annotations
 import asyncio
 import shutil
 import subprocess
+import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -83,6 +84,24 @@ TUNNEL_POLL_INTERVAL_S = 1.0
 # normal "still looking for peer" conditions.
 WAITING_PEER_WATCHDOG_S = 1800.0  # 30 minutes
 
+# Per-phase sub-timeouts. The global watchdog above catches wedged-but-
+# alive sessions; these catch a specific phase that hangs while every
+# other liveness signal still looks fine. Sized as wall-clock budgets
+# that real bench sessions never approach.
+#
+# Key transfer (TRANSFERRING_KEYS + APPLYING_KEYS combined): the upstream
+# wfb_bind_{server,client}.sh wrappers stream a ~4 KB tar.gz over the
+# L3 tunnel. Even on a lossy link, anything past 5 minutes means the
+# socat handshake has stalled and won't recover on its own.
+KEY_TRANSFER_TIMEOUT_S = 300.0
+
+# Service restart (RESTARTING_SERVICES): PairManager.apply_keypair()
+# writes the new key file and `systemctl restart`s the normal wfb
+# unit. The restart itself is bounded by systemd's own timeouts, but
+# a stuck dependency or wedged drop-in can outlast them. 60s is an
+# order of magnitude above the steady-state restart cost.
+RESTART_TIMEOUT_S = 60.0
+
 
 class BindState(StrEnum):
     IDLE = "idle"
@@ -107,12 +126,37 @@ class BindSession:
     fingerprint: str | None = None
     peer_device_id: str | None = None
     source: str = "operator"  # "operator" | "auto"
+    # Monotonic timestamp marking the most recent state transition. Used
+    # to compute `phase_age_s` for the REST surface so the LCD/GCS can
+    # render "stuck in TRANSFERRING_KEYS for 47s" without dragging system
+    # wall-clock into the math.
+    phase_entered_at: float | None = None
+
+    @property
+    def phase(self) -> str:
+        """String alias of the current state. Pairs with `phase_entered_at`
+        so consumers reading from JSON get a phase tag + age clock without
+        having to know the BindState enum."""
+        return self.state.value
+
+    def transition(self, new_state: BindState) -> None:
+        """Move to a new state and stamp the phase clock. Centralises the
+        pairing of `state` mutations with `phase_entered_at` so a future
+        contributor can't update one without the other."""
+        self.state = new_state
+        self.phase_entered_at = time.monotonic()
 
     def to_dict(self) -> dict:
+        phase_age_s: float | None = None
+        if self.phase_entered_at is not None:
+            phase_age_s = max(0.0, time.monotonic() - self.phase_entered_at)
         return {
             "session_id": self.session_id,
             "role": self.role,
             "state": self.state.value,
+            "phase": self.phase,
+            "phase_entered_at": self.phase_entered_at,
+            "phase_age_s": phase_age_s,
             "started_at": self.started_at,
             "finished_at": self.finished_at,
             "error": self.error,
@@ -305,7 +349,7 @@ class BindOrchestrator:
                     # service shutdown). Kill any in-flight socat via
                     # session_task cancellation; its finally hooks then
                     # drop the OS process.
-                    session.state = BindState.ABORTED
+                    session.transition(BindState.ABORTED)
                     session.error = "cancelled by caller"
                     log.info(
                         "bind_session_aborted",
@@ -313,7 +357,7 @@ class BindOrchestrator:
                     )
                     await self._cleanup(session)
                 elif watchdog_task in done and session_task not in done:
-                    session.state = BindState.FAILED
+                    session.transition(BindState.FAILED)
                     session.error = (
                         f"watchdog fired after {WAITING_PEER_WATCHDOG_S}s "
                         "with no progress"
@@ -329,16 +373,24 @@ class BindOrchestrator:
                     exc = session_task.exception()
                     if isinstance(exc, BindError):
                         session.error = str(exc)
-                        session.state = BindState.FAILED
+                        # Preserve the phase the error surfaced in (set by
+                        # the raiser via BindError(phase=...)) when present;
+                        # otherwise fall through to the last state the
+                        # session reached. This keeps the LCD/GCS able to
+                        # render "key transfer timed out" with the right
+                        # phase badge.
+                        failure_phase = getattr(exc, "phase", None)
+                        session.transition(BindState.FAILED)
                         log.warning(
                             "bind_session_failed",
                             session_id=session.session_id,
                             error=str(exc),
+                            phase=failure_phase,
                         )
                         await self._cleanup(session)
                     elif exc is not None:
                         session.error = f"unexpected: {exc}"
-                        session.state = BindState.FAILED
+                        session.transition(BindState.FAILED)
                         log.exception(
                             "bind_session_crashed",
                             session_id=session.session_id,
@@ -417,58 +469,96 @@ class BindOrchestrator:
         # start_local_bind ensures _cleanup runs.
         _systemctl("stop", normal_unit)
 
-        session.state = BindState.OPENING_TUNNEL
+        session.transition(BindState.OPENING_TUNNEL)
 
         # Stage 3: Start the bind profile. Brings up the L3 tunnel.
         ok, err = _systemctl("start", bind_unit)
         if not ok:
-            raise BindError(f"failed to start {bind_unit}: {err}")
+            raise BindError(
+                f"failed to start {bind_unit}: {err}",
+                phase=BindState.OPENING_TUNNEL.value,
+            )
 
         try:
             tunnel_up = await _wait_for_iface(bind_iface, TUNNEL_WAIT_TIMEOUT_S)
             if not tunnel_up:
                 raise BindError(
                     f"bind tunnel interface {bind_iface} did not come up "
-                    f"within {TUNNEL_WAIT_TIMEOUT_S}s"
+                    f"within {TUNNEL_WAIT_TIMEOUT_S}s",
+                    phase=BindState.OPENING_TUNNEL.value,
                 )
 
-            session.state = BindState.WAITING_PEER
+            session.transition(BindState.WAITING_PEER)
 
-            # Stage 4: Run the upstream wire protocol.
-            if session.role == "drone":
-                await self._run_drone_server(session)
-            else:
-                await self._run_gs_client(session)
+            # Stage 4: Run the upstream wire protocol. The drone/gs
+            # helpers move the state to TRANSFERRING_KEYS the moment
+            # they hand off to socat. We wrap both the socat exchange
+            # AND the immediately-following APPLYING_KEYS work in a
+            # single `asyncio.wait_for` budget so a stuck socat or a
+            # stuck post-handshake key read never wedges the rig past
+            # KEY_TRANSFER_TIMEOUT_S.
+            try:
+                async with asyncio.timeout(KEY_TRANSFER_TIMEOUT_S):
+                    if session.role == "drone":
+                        await self._run_drone_server(session)
+                    else:
+                        await self._run_gs_client(session)
 
-            session.state = BindState.APPLYING_KEYS
+                    session.transition(BindState.APPLYING_KEYS)
 
-            # Stage 5: Copy the resulting upstream key file into the
-            # agent's canonical slot via PairManager. PairManager also
-            # persists pair state and restarts the normal wfb unit, so
-            # we don't need to do it ourselves below.
-            from ados.services.ground_station.pair_manager import (
-                get_pair_manager,
-            )
-            from ados.services.wfb.key_mgr import read_public_fingerprint
-
-            pm = get_pair_manager()
-            if session.role == "drone":
-                if not UPSTREAM_DRONE_KEY.is_file():
-                    raise BindError(
-                        f"bind protocol completed but {UPSTREAM_DRONE_KEY} not "
-                        "present. Upstream server may have failed silently."
+                    # Stage 5: Copy the resulting upstream key file into the
+                    # agent's canonical slot via PairManager. PairManager also
+                    # persists pair state and restarts the normal wfb unit, so
+                    # we don't need to do it ourselves below.
+                    from ados.services.ground_station.pair_manager import (
+                        get_pair_manager,
                     )
-                blob = UPSTREAM_DRONE_KEY.read_bytes()
-            else:
-                if not UPSTREAM_GS_KEY.is_file():
-                    raise BindError(
-                        f"bind protocol completed but {UPSTREAM_GS_KEY} not "
-                        "present. wfb_keygen output may have been overwritten."
+                    from ados.services.wfb.key_mgr import (
+                        read_public_fingerprint,
                     )
-                blob = UPSTREAM_GS_KEY.read_bytes()
 
-            session.state = BindState.RESTARTING_SERVICES
-            await pm.apply_keypair(blob, session.role, peer_device_id)
+                    pm = get_pair_manager()
+                    if session.role == "drone":
+                        if not UPSTREAM_DRONE_KEY.is_file():
+                            raise BindError(
+                                f"bind protocol completed but "
+                                f"{UPSTREAM_DRONE_KEY} not present. "
+                                "Upstream server may have failed silently.",
+                                phase=BindState.APPLYING_KEYS.value,
+                            )
+                        blob = UPSTREAM_DRONE_KEY.read_bytes()
+                    else:
+                        if not UPSTREAM_GS_KEY.is_file():
+                            raise BindError(
+                                f"bind protocol completed but "
+                                f"{UPSTREAM_GS_KEY} not present. "
+                                "wfb_keygen output may have been "
+                                "overwritten.",
+                                phase=BindState.APPLYING_KEYS.value,
+                            )
+                        blob = UPSTREAM_GS_KEY.read_bytes()
+            except TimeoutError as exc:
+                # The combined transfer + apply budget tripped. Tag the
+                # error with whichever phase we were in when the budget
+                # ran out so the GCS renders the right badge.
+                raise BindError(
+                    f"key transfer timed out after "
+                    f"{KEY_TRANSFER_TIMEOUT_S}s in {session.state.value}",
+                    phase=session.state.value,
+                ) from exc
+
+            # Stage 6: Restart the agent-managed wfb unit so it picks
+            # up the new key. Wrapped in its own wait_for so a stuck
+            # systemd restart can't wedge the rig past RESTART_TIMEOUT_S.
+            session.transition(BindState.RESTARTING_SERVICES)
+            try:
+                async with asyncio.timeout(RESTART_TIMEOUT_S):
+                    await pm.apply_keypair(blob, session.role, peer_device_id)
+            except TimeoutError as exc:
+                raise BindError(
+                    f"service restart timed out after {RESTART_TIMEOUT_S}s",
+                    phase=BindState.RESTARTING_SERVICES.value,
+                ) from exc
 
             try:
                 target = pm.tx_key_path if session.role == "drone" else pm.rx_key_path
@@ -480,7 +570,7 @@ class BindOrchestrator:
                     error=str(exc),
                 )
 
-            session.state = BindState.PAIRED
+            session.transition(BindState.PAIRED)
             log.info(
                 "bind_session_paired",
                 session_id=session.session_id,
@@ -550,7 +640,7 @@ class BindOrchestrator:
             cmd=" ".join(cmd),
         )
 
-        session.state = BindState.TRANSFERRING_KEYS
+        session.transition(BindState.TRANSFERRING_KEYS)
         rc, stdout, stderr = await _run_socat_with_kill_on_cancel(
             cmd,
             log_event="bind_server_socat",
@@ -559,7 +649,8 @@ class BindOrchestrator:
         if rc != 0:
             raise BindError(
                 f"socat server exited rc={rc}: "
-                f"{stderr.decode(errors='replace').strip()[:240]}"
+                f"{stderr.decode(errors='replace').strip()[:240]}",
+                phase=BindState.TRANSFERRING_KEYS.value,
             )
         log.info(
             "bind_server_complete",
@@ -593,7 +684,7 @@ class BindOrchestrator:
             cmd=" ".join(cmd),
         )
 
-        session.state = BindState.TRANSFERRING_KEYS
+        session.transition(BindState.TRANSFERRING_KEYS)
         rc, stdout, stderr = await _run_socat_with_kill_on_cancel(
             cmd,
             log_event="bind_client_socat",
@@ -602,7 +693,8 @@ class BindOrchestrator:
         if rc != 0:
             raise BindError(
                 f"socat client exited rc={rc}: "
-                f"{stderr.decode(errors='replace').strip()[:240]}"
+                f"{stderr.decode(errors='replace').strip()[:240]}",
+                phase=BindState.TRANSFERRING_KEYS.value,
             )
         log.info(
             "bind_client_complete",
@@ -632,7 +724,18 @@ class BindOrchestrator:
 
 
 class BindError(RuntimeError):
-    """Raised when a bind session fails for a recoverable reason."""
+    """Raised when a bind session fails for a recoverable reason.
+
+    The optional `phase` attribute names the BindState the orchestrator
+    was in when the failure surfaced. REST/LCD consumers use it to
+    render "key transfer timed out" with the right phase badge instead
+    of a generic "bind failed". Default `None` keeps the old
+    `raise BindError("msg")` call sites working.
+    """
+
+    def __init__(self, message: str, phase: str | None = None) -> None:
+        super().__init__(message)
+        self.phase = phase
 
 
 class BindBusyError(BindError):
