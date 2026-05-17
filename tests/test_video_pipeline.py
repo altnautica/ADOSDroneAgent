@@ -176,11 +176,21 @@ class TestPipelinePartialStartCleanup:
             lambda *a, **k: ["ffmpeg", "-i", "x", "y"],
         )
 
-        async def boom(*args, **kwargs):
+        # start_stream() first calls _kill_orphan_encoder_ffmpegs and
+        # _kill_orphan_bridge_ffmpegs, each of which spawns ``pgrep``
+        # subprocesses via create_subprocess_exec. The OSError must fire
+        # only on the encoder ffmpeg spawn, not on the pgrep sweeps.
+        # Discriminate by argv[0]: pgrep returns an empty-stdout mock,
+        # ffmpeg raises OSError.
+        async def _fake_exec(*args, **kwargs):
+            if args and args[0] == "pgrep":
+                proc = MagicMock()
+                proc.communicate = AsyncMock(return_value=(b"", b""))
+                return proc
             raise OSError("permission denied")
 
         import asyncio as _asyncio
-        monkeypatch.setattr(_asyncio, "create_subprocess_exec", boom)
+        monkeypatch.setattr(_asyncio, "create_subprocess_exec", _fake_exec)
 
         ok = await pipeline.start_stream()
         assert ok is False
@@ -284,35 +294,58 @@ class TestWfbUdpTee:
         pipeline._mediamtx = MagicMock()
         pipeline._mediamtx.rtsp_port = 8554
 
+        # start_wfb_tee() first calls _kill_orphan_wfb_tee_ffmpegs(),
+        # which spawns ``pgrep`` to find stale tee processes. Capture
+        # only the ffmpeg/bash spawn (the real wfb_tee) for argv
+        # assertions; pgrep gets an empty-stdout proc so the orphan
+        # sweep finishes silently.
         captured_cmd: list[str] = []
 
         async def _fake_exec(*cmd, **_kw):
-            captured_cmd.extend(cmd)
             proc = MagicMock()
             proc.returncode = None
             proc.pid = 9999
             proc.stderr = None
+            if cmd and cmd[0] == "pgrep":
+                proc.communicate = AsyncMock(return_value=(b"", b""))
+                return proc
+            captured_cmd.extend(cmd)
             return proc
 
         monkeypatch.setattr(pl_mod.asyncio, "create_subprocess_exec", _fake_exec)
 
         ok = await pipeline.start_wfb_tee()
         assert ok is True
-        # The tee must read from local mediamtx RTSP and write to UDP
-        # 127.0.0.1:5600 — the port wfb_tx listens on.
+        # The tee reads the local mediamtx RTSP path and forwards as
+        # RTP to 127.0.0.1:5600 (the wfb_tx UDP socket). The earlier
+        # raw-UDP form was replaced by RTP framing so the receiver can
+        # demux + reorder; the wire transport underneath is still UDP.
         assert "rtsp://localhost:8554/main" in captured_cmd
         joined = " ".join(captured_cmd)
-        assert "udp://127.0.0.1:5600" in joined
+        assert "rtp://127.0.0.1:5600" in joined
         assert "pkt_size=1316" in joined
         # No re-encode: the encoder is upstream and CPU is precious.
         assert "-c:v" in captured_cmd
         copy_index = captured_cmd.index("-c:v") + 1
         assert captured_cmd[copy_index] == "copy"
+        # RTP-specific framing flags must be in the argv.
+        assert "-f" in captured_cmd
+        assert "rtp" in captured_cmd
+        assert "-payload_type" in captured_cmd
 
     @pytest.mark.asyncio
-    async def test_start_wfb_tee_uses_injector_when_flag_set(self, monkeypatch):
-        """With WfbConfig.sei_latency=True, the tee runs the SEI
-        injector inside a bash pipeline between two ffmpeg processes."""
+    async def test_start_wfb_tee_shape_unchanged_by_sei_latency_flag(
+        self, monkeypatch,
+    ):
+        """The wfb_tee no longer changes shape based on
+        ``wfb.sei_latency``: SEI injection now lives upstream of
+        mediamtx (see ``wrap_with_sei_inject`` at start_stream), so the
+        stream the tee pulls already carries one SEI NAL per VCL slice
+        when the flag is set. The tee itself is always a plain
+        RTSP -> RTP copy regardless. Previously this test expected a
+        bash-wrapped three-stage pipeline; that wrapper was retired
+        when the injection moved upstream.
+        """
         from ados.services.video import pipeline as pl_mod
 
         cfg = VideoConfig()
@@ -325,27 +358,30 @@ class TestWfbUdpTee:
         captured_cmd: list[str] = []
 
         async def _fake_exec(*cmd, **_kw):
-            captured_cmd.extend(cmd)
             proc = MagicMock()
             proc.returncode = None
             proc.pid = 9999
             proc.stderr = None
+            if cmd and cmd[0] == "pgrep":
+                proc.communicate = AsyncMock(return_value=(b"", b""))
+                return proc
+            captured_cmd.extend(cmd)
             return proc
 
         monkeypatch.setattr(pl_mod.asyncio, "create_subprocess_exec", _fake_exec)
 
         ok = await pipeline.start_wfb_tee()
         assert ok is True
-        # The bash wrapper is the spawned process; the SEI injector
-        # invocation is in the bash command string.
-        assert captured_cmd[0] == "bash"
-        assert captured_cmd[1] == "-c"
-        bash_cmd = captured_cmd[2]
-        assert "ados.services.video.sei_injector" in bash_cmd
-        assert "rtsp://localhost:8554/main" in bash_cmd
-        assert "rtp://127.0.0.1:5600" in bash_cmd
-        # Three stages joined with shell pipes.
-        assert bash_cmd.count(" | ") == 2
+        # Plain ffmpeg — no bash wrapper even when sei_latency=True.
+        assert captured_cmd[0] == "ffmpeg"
+        assert "bash" not in captured_cmd
+        assert "ados.services.video.sei_injector" not in " ".join(captured_cmd)
+        # Same RTSP -> RTP copy as the sei_latency=False case.
+        assert "rtsp://localhost:8554/main" in captured_cmd
+        joined = " ".join(captured_cmd)
+        assert "rtp://127.0.0.1:5600" in joined
+        copy_index = captured_cmd.index("-c:v") + 1
+        assert captured_cmd[copy_index] == "copy"
 
     @pytest.mark.asyncio
     async def test_start_wfb_tee_skipped_when_pipeline_not_running(self, monkeypatch):
@@ -397,18 +433,48 @@ class TestWfbUdpTee:
         assert ok is False
 
     @pytest.mark.asyncio
-    async def test_stop_wfb_tee_terminates_subprocess(self):
+    async def test_stop_wfb_tee_terminates_subprocess(self, monkeypatch):
+        """stop_wfb_tee() prefers process-group SIGTERM via os.killpg()
+        because the tee subprocess is a bash wrapper with ffmpeg
+        children (start_new_session=True at spawn). It only falls back
+        to proc.terminate() when os.getpgid() can't resolve the group.
+        Verify the SIGTERM-to-group path fires when pgid is available.
+        """
+        from ados.services.video.pipeline import wfb_tee as wfb_tee_mod
+
         pipeline = VideoPipeline(VideoConfig())
         proc = MagicMock()
         proc.returncode = None
-        # First call to wait() completes normally.
+        proc.pid = 9999
+        # wait() resolves normally inside the 5s wait_for budget.
         proc.wait = AsyncMock(return_value=0)
         proc.terminate = MagicMock()
         proc.kill = MagicMock()
         pipeline._wfb_tee_process = proc
 
+        # Resolve a fake pgid so the killpg branch fires.
+        monkeypatch.setattr(wfb_tee_mod.os, "getpgid", lambda pid: 12345)
+        killpg_calls: list[tuple[int, int]] = []
+        monkeypatch.setattr(
+            wfb_tee_mod.os, "killpg",
+            lambda pgid, sig: killpg_calls.append((pgid, sig)),
+        )
+        # Stub the orphan-sweep pgrep so it returns no orphans.
+        async def _no_orphans(*_args, **_kw):
+            stub = MagicMock()
+            stub.communicate = AsyncMock(return_value=(b"", b""))
+            return stub
+        monkeypatch.setattr(
+            wfb_tee_mod.asyncio, "create_subprocess_exec", _no_orphans,
+        )
+
         await pipeline.stop_wfb_tee()
-        proc.terminate.assert_called_once()
+
+        # SIGTERM landed on the resolved process group, not on the
+        # bare proc handle (which would orphan the bash children).
+        import signal as _signal
+        assert (12345, _signal.SIGTERM) in killpg_calls
+        proc.terminate.assert_not_called()
         proc.wait.assert_awaited()
         assert pipeline._wfb_tee_process is None
 
