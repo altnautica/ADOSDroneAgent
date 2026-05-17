@@ -242,7 +242,7 @@ generate_device_id() {
     # (systemd / Buildroot both populate it on first boot); fall back
     # to uuidgen, then to a hostname + epoch hash.
     if [ -r /etc/machine-id ]; then
-        printf 'ados-%s' "$(cat /etc/machine-id | tr -d '\n')"
+        printf 'ados-%s' "$(tr -d '\n' < /etc/machine-id)"
         return
     fi
     if command -v uuidgen >/dev/null 2>&1; then
