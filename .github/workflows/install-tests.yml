@@ -1,0 +1,69 @@
+name: install-tests
+
+on:
+  pull_request:
+    paths:
+      - 'scripts/install.sh'
+      - 'scripts/install-lite.sh'
+      - 'scripts/drivers/**'
+      - 'scripts/lib/**'
+      - 'scripts/test/**'
+      - 'data/overlays/**'
+      - 'data/systemd/**'
+      - '.github/workflows/install-tests.yml'
+      - 'agents/lite-rs/buildroot/configs/**'
+  push:
+    branches: [main]
+    paths:
+      - 'scripts/install.sh'
+      - 'scripts/install-lite.sh'
+      - 'scripts/drivers/**'
+      - 'scripts/lib/**'
+      - 'scripts/test/**'
+      - 'data/overlays/**'
+      - 'data/systemd/**'
+      - '.github/workflows/install-tests.yml'
+      - 'agents/lite-rs/buildroot/configs/**'
+
+jobs:
+  shell-tests:
+    name: shell + DTS lint harness
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            bats minisign shellcheck \
+            device-tree-compiler \
+            linux-headers-generic cpp
+
+      - name: shellcheck library + driver + test scripts
+        run: |
+          shellcheck scripts/install.sh
+          shellcheck scripts/install-lite.sh
+          shellcheck scripts/lib/detect-target.sh
+          shellcheck scripts/drivers/install-display-overlay.sh
+          shellcheck scripts/drivers/install-rtl8812eu.sh
+          shellcheck scripts/test/run_dispatcher_tests.sh
+          shellcheck scripts/test/defconfig_reproducibility.sh
+          shellcheck scripts/test/minisign_verify_smoke.sh
+          shellcheck scripts/test/lint_overlay_invariants.sh
+          shellcheck scripts/test/compile_overlays.sh
+
+      - name: dispatcher bats suite
+        run: bash scripts/test/run_dispatcher_tests.sh
+
+      - name: defconfig reproducibility
+        run: bash scripts/test/defconfig_reproducibility.sh
+
+      - name: minisign verify smoke
+        run: bash scripts/test/minisign_verify_smoke.sh
+
+      - name: per-board overlay invariant lint
+        run: bash scripts/test/lint_overlay_invariants.sh
+
+      - name: compile every device-tree overlay
+        run: bash scripts/test/compile_overlays.sh
