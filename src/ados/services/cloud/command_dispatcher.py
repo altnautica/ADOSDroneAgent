@@ -16,9 +16,21 @@ from __future__ import annotations
 import asyncio
 
 from ados.core.paths import SCRIPTS_DIR, SUITES_DIR
+from ados.core.profile import current_profile_and_role
 
 from ._context import CloudContext
 from .heartbeat import get_services_status as _get_services_status
+
+
+def _resolved_wire_profile(config) -> str:
+    """Return the resolved wire-form profile (drone | ground-station | lite-rs).
+
+    Consults /etc/ados/profile.conf when config.agent.profile is "auto"
+    so a fresh drone install with the default config is not silently
+    misclassified as a ground station for cloud-relay command routing.
+    """
+    profile, _role = current_profile_and_role(config)
+    return profile
 
 
 def _get_recent_logs(limit: int = 200) -> list[dict]:
@@ -145,7 +157,7 @@ async def execute_command(  # noqa: C901
             # error instead of silently corrupting state.
             import base64
 
-            if config.agent.profile == "drone":
+            if _resolved_wire_profile(config) == "drone":
                 return "failed", {
                     "success": False,
                     "message": "wfb_pair_init_remote runs on the GS rig only",
@@ -190,7 +202,7 @@ async def execute_command(  # noqa: C901
             # persist it via PairManager. GS-only rigs reject.
             import base64
 
-            if config.agent.profile != "drone":
+            if _resolved_wire_profile(config) != "drone":
                 return "failed", {
                     "success": False,
                     "message": "wfb_pair_apply_remote runs on the drone rig only",
@@ -236,7 +248,7 @@ async def execute_command(  # noqa: C901
                     get_pair_manager,
                 )
 
-                role = "drone" if config.agent.profile == "drone" else "gs"
+                role = "drone" if _resolved_wire_profile(config) == "drone" else "gs"
                 result = await get_pair_manager().unpair(role)
                 return "completed", {"success": True, "message": "ok"}, result
             except Exception as exc:  # noqa: BLE001

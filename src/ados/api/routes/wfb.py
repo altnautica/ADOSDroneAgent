@@ -403,13 +403,38 @@ async def set_wfb_tx_power(request: TxPowerRequest):
 
 
 def _agent_role_from_profile(profile: str) -> str:
-    """Map the agent profile string to the bind-protocol role.
+    """Map a resolved profile string to the bind-protocol role.
 
-    Drone profile = `drone` (runs wfb_bind_server). Anything else
-    (ground_station, auto-resolved-as-gs at boot) is treated as `gs`
-    (runs wfb_bind_client).
+    The input must already be a resolved profile in either the wire
+    form (``"drone"`` / ``"ground-station"``) or the underscore form
+    (``"drone"`` / ``"ground_station"``). The raw ``config.agent.profile``
+    value can be ``"auto"`` on a fresh install where the operator left
+    the field at its default; do NOT pass that through here directly —
+    use ``_current_role()`` instead, which routes through
+    ``current_profile_and_role()`` so ``/etc/ados/profile.conf`` gets
+    consulted when the config field is unresolved.
     """
     return "drone" if profile == "drone" else "gs"
+
+
+def _current_role(app) -> str:
+    """Resolve the agent's current bind-protocol role.
+
+    Routes through ``ados.core.profile.current_profile_and_role`` so
+    the on-disk ``/etc/ados/profile.conf`` is consulted whenever
+    ``config.agent.profile`` is ``"auto"`` or empty. Without this hop
+    a freshly-installed drone (where the default config carries
+    ``profile: "auto"``) would be misclassified as a ground station,
+    the auto-pair supervisor would run the GS bind-client flow, and
+    the rendezvous would never converge.
+    """
+    from ados.core.profile import current_profile_and_role
+
+    profile, _role = current_profile_and_role(app.config)
+    # current_profile_and_role returns the hyphenated wire form
+    # ("drone" / "ground-station"); _agent_role_from_profile only
+    # checks ``== "drone"`` so the hyphen form maps correctly.
+    return _agent_role_from_profile(profile)
 
 
 class LocalBindRequest(BaseModel):
@@ -435,7 +460,7 @@ class AutoPairToggleRequest(BaseModel):
 async def get_wfb_pair_status() -> dict[str, Any]:
     """Pair-state snapshot (paired, peer device-id, fingerprint, auto-pair)."""
     app = get_agent_app()
-    role = _agent_role_from_profile(app.config.agent.profile)
+    role = _current_role(app)
 
     from ados.services.ground_station.pair_manager import get_pair_manager
 
@@ -459,7 +484,7 @@ async def post_wfb_pair_local_bind(request: LocalBindRequest) -> dict[str, Any]:
     role = (
         request.role
         if request.role in ("drone", "gs")
-        else _agent_role_from_profile(app.config.agent.profile)
+        else _current_role(app)
     )
 
     from ados.services.wfb.bind_orchestrator import (
@@ -524,7 +549,7 @@ async def post_wfb_pair_unpair() -> dict[str, Any]:
     again.
     """
     app = get_agent_app()
-    role = _agent_role_from_profile(app.config.agent.profile)
+    role = _current_role(app)
 
     from ados.services.ground_station.pair_manager import get_pair_manager
 
@@ -540,7 +565,7 @@ async def put_wfb_pair_auto_pair(request: AutoPairToggleRequest) -> dict[str, An
     operator must `unpair` first.
     """
     app = get_agent_app()
-    role = _agent_role_from_profile(app.config.agent.profile)
+    role = _current_role(app)
 
     from ados.services.ground_station.pair_manager import get_pair_manager
 

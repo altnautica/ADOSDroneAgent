@@ -174,9 +174,16 @@ async def main() -> None:
     # it can systemctl-stop the wfb units without dying.
 
     try:
+        from ados.core.profile import current_profile_and_role
         from ados.services.wfb.auto_pair import get_auto_pair_supervisor
 
-        ap_role = "drone" if config.agent.profile == "drone" else "gs"
+        # Route through current_profile_and_role so /etc/ados/profile.conf
+        # is consulted whenever config.agent.profile is "auto" — without
+        # this hop a fresh-install drone (where the default config carries
+        # profile: "auto") supervises the GS bind-client flow and the
+        # rendezvous never converges.
+        ap_profile, _ap_subrole = current_profile_and_role(config)
+        ap_role = "drone" if ap_profile == "drone" else "gs"
         # Pass the service shutdown event so a SIGTERM during a long-
         # running rendezvous tears down the in-flight bind cleanly. The
         # orchestrator's cancel hook kills any leftover socat for us.

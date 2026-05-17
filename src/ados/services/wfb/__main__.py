@@ -76,8 +76,15 @@ async def main() -> None:
     # The GS-side counterpart spawns inside ground_station/wfb_rx.run().
     # Gated on auto_hop_enabled so a fixed-frequency deployment opts
     # out by flipping a single flag.
+    #
+    # Route the profile through current_profile_and_role so a fresh
+    # install with profile: "auto" on a ground station does not slip
+    # past the drone-only gate (raw `!= "ground_station"` would mis-fire
+    # the supervisor on the GS rig whose config field is still "auto").
+    from ados.core.profile import current_profile_and_role as _resolve_profile
+    _wire_profile, _ = _resolve_profile(config)
     if (
-        config.agent.profile != "ground_station"
+        _wire_profile != "ground-station"
         and getattr(config.video.wfb, "auto_hop_enabled", True)
     ):
         try:
