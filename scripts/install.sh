@@ -1698,6 +1698,17 @@ install_ground_station_driver() {
         script_path="${FRESH_REPO_DIR}/repo/scripts/drivers/install-rtl8812eu.sh"
     elif [ -x "$(dirname "$0" 2>/dev/null)/drivers/install-rtl8812eu.sh" ] 2>/dev/null; then
         script_path="$(cd "$(dirname "$0")/drivers" && pwd)/install-rtl8812eu.sh"
+    elif [ -x /opt/ados/source/scripts/drivers/install-rtl8812eu.sh ]; then
+        # Persisted path written by persist_repo_artifacts on the
+        # previous install. Lets `install.sh --upgrade` find the
+        # driver script cleanly when invoked outside a fresh git
+        # clone and when FRESH_REPO_DIR is not set in the calling
+        # block (the upgrade path's RTL8812EU catch-up call at
+        # install.sh:2411 does not export FRESH_REPO_DIR, so without
+        # this fallback every --upgrade silently logged "RTL8812EU
+        # installer not found; skipping driver build" and the
+        # adapter never got its DKMS module).
+        script_path="/opt/ados/source/scripts/drivers/install-rtl8812eu.sh"
     fi
     if [ -z "${script_path}" ] || [ ! -x "${script_path}" ]; then
         warn "RTL8812EU installer not found; skipping driver build."
