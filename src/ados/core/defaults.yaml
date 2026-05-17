@@ -19,7 +19,12 @@ video:
 
 network:
   hotspot:
-    enabled: true
+    # Off by default; operators opt in via the Setup webapp's
+    # Network step (or by setting this field to true in
+    # /etc/ados/config.yaml). The Pydantic schema default in
+    # src/ados/core/config/network.py also reads false; keep both
+    # in sync.
+    enabled: false
     password: "altnautica"
 
 server:
