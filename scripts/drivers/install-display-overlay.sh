@@ -128,7 +128,7 @@ fi
 # ----------------------------------------------------------------------------
 detect_board() {
     if [ -f /etc/ados/board_override ]; then
-        cat /etc/ados/board_override | tr -d '\0' | head -n1
+        tr -d '\0' < /etc/ados/board_override | head -n1
         return
     fi
     if [ -f /proc/device-tree/model ]; then
