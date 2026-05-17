@@ -17,6 +17,13 @@
  * value. Older versions of this overlay shipped ACTIVE_LOW, which never
  * fired (verified on Rock 5C Lite via /proc/interrupts ads7846 = 0
  * across all CPUs).
+ *
+ * Pinmux note: the PENIRQ pin needs both the GPIO function AND a
+ * pull-up bias to register clean falling edges. Without the explicit
+ * pinctrl-0 block below, /sys/kernel/debug/pinctrl reports
+ * "pin 139 (gpio4-11): (MUX UNCLAIMED)" and the line floats. Touch
+ * stays dead with ads7846 IRQ count = 0 across boots until the pin
+ * is muxed back to GPIO with pcfg_pull_up.
  */
 
 #define DISPLAY_SPI spi4
@@ -45,8 +52,18 @@
     dc-gpios = <&gpio1 RK_PB0 GPIO_ACTIVE_HIGH>;
 };
 
+&pinctrl {
+    ados-waveshare35 {
+        ads7846_irq: ads7846-irq {
+            rockchip,pins = <4 RK_PB3 RK_FUNC_GPIO &pcfg_pull_up>;
+        };
+    };
+};
+
 &ads7846 {
     status = "okay";
+    pinctrl-names = "default";
+    pinctrl-0 = <&ads7846_irq>;
     interrupt-parent = <&gpio4>;
     interrupts = <RK_PB3 IRQ_TYPE_EDGE_FALLING>;
     pendown-gpio = <&gpio4 RK_PB3 GPIO_ACTIVE_HIGH>;
