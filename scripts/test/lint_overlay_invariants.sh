@@ -90,7 +90,7 @@ check_per_board_overlay() {
     count=0
     for field in "${BANNED_CHIP_FIELDS[@]}"; do
         if grep -qE "(^|[[:space:]])${field}[[:space:]]*=" "${stripped}"; then
-            echo "lint_overlay_invariants: per-board overlay redeclares chip-level field '${field}': ${dts#${REPO_ROOT}/}" >&2
+            echo "lint_overlay_invariants: per-board overlay redeclares chip-level field '${field}': ${dts#"${REPO_ROOT}"/}" >&2
             echo "  -> Remove from the per-board overlay. ${field} lives in data/overlays/upstream/${SHARED_DTSI_NAME}." >&2
             count=$((count + 1))
         fi
@@ -110,7 +110,7 @@ shared_stripped="$(mktemp)"
 strip_comments_and_strings "${SHARED_DTSI}" > "${shared_stripped}"
 for field in "${BANNED_SOC_FIELDS_IN_SHARED[@]}"; do
     if grep -qE "(^|[[:space:]])${field}[[:space:]]*=" "${shared_stripped}"; then
-        echo "lint_overlay_invariants: shared dtsi declares SoC-specific field '${field}' (must live in per-board overlay): ${SHARED_DTSI#${REPO_ROOT}/}" >&2
+        echo "lint_overlay_invariants: shared dtsi declares SoC-specific field '${field}' (must live in per-board overlay): ${SHARED_DTSI#"${REPO_ROOT}"/}" >&2
         violations=$((violations + 1))
     fi
 done
@@ -126,7 +126,7 @@ while IFS= read -r -d '' dts; do
         per_board_count="$(check_per_board_overlay "${dts}")"
         violations=$((violations + per_board_count))
     else
-        echo "lint_overlay_invariants: WARN: ${dts#${REPO_ROOT}/} does not #include the shared dtsi; skipping chip-field check." >&2
+        echo "lint_overlay_invariants: WARN: ${dts#"${REPO_ROOT}"/} does not #include the shared dtsi; skipping chip-field check." >&2
     fi
 done < <(find "${OVERLAY_ROOT}" -type f -name '*.dts' -print0)
 

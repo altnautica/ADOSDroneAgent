@@ -223,8 +223,6 @@ CONFIG_DIR="/etc/ados"
 DATA_DIR="/var/ados"
 VENV_DIR="${INSTALL_DIR}/venv"
 SERVICE_NAME="ados-supervisor"
-SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
-LEGACY_SERVICE="ados-agent"
 SYSTEMD_SRC_DIR=""  # Set at runtime to data/systemd/ relative to repo
 DEVICE_ID_FILE="${CONFIG_DIR}/device-id"
 CONVEX_URL="https://convex-site.altnautica.com"
@@ -433,6 +431,7 @@ detect_os() {
     fi
 
     if [ -f /etc/os-release ]; then
+        # shellcheck disable=SC1091
         . /etc/os-release
         case "${ID:-}" in
             raspbian)   os_name="raspbian" ;;
@@ -873,7 +872,7 @@ harden_secret_perms() {
              "${CONFIG_DIR}/config.yaml" \
              "${CONFIG_DIR}/setup-token" \
              "${CONFIG_DIR}/env"; do
-        [ -f "$f" ] && chmod 0600 "$f" 2>/dev/null || true
+        if [ -f "$f" ]; then chmod 0600 "$f" 2>/dev/null || true; fi
     done
     if [ -d "${CONFIG_DIR}/plugin-keys" ]; then
         chmod 0700 "${CONFIG_DIR}/plugin-keys" 2>/dev/null || true
@@ -1513,12 +1512,10 @@ install_ground_station_deps() {
     # Radxa BSPs. Pick by reading /etc/os-release so neither side logs
     # a noisy fallback warning on the platforms it does run on.
     local chromium_pkg="chromium-browser"
-    local os_id_like=""
     local os_version_codename=""
     if [ -r /etc/os-release ]; then
         # shellcheck disable=SC1091
         . /etc/os-release
-        os_id_like="${ID:-}${ID_LIKE:+ ${ID_LIKE}}"
         os_version_codename="${VERSION_CODENAME:-}"
     fi
     case "${os_version_codename}" in
@@ -2181,6 +2178,7 @@ fi
 
 # Print detected OS
 if [ -f /etc/os-release ]; then
+    # shellcheck disable=SC1091
     . /etc/os-release
     info "OS: ${PRETTY_NAME:-${OS_TYPE}}"
 fi

@@ -75,7 +75,7 @@ fi
 fail_count=0
 while IFS= read -r -d '' dts; do
     name="$(basename "${dts}" .dts)"
-    rel="${dts#${REPO_ROOT}/}"
+    rel="${dts#"${REPO_ROOT}"/}"
     pre="${OUT_DIR}/${name}.cpp.dts"
     dtbo="${OUT_DIR}/${name}.dtbo"
     if ! cpp -E -x assembler-with-cpp -undef -nostdinc \
