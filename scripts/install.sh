@@ -1394,10 +1394,26 @@ EOF
     local detect_stderr; detect_stderr="$(mktemp)"
     local detect_rc=0
     local detected=""
+    # detect_profile() emits a structlog "profile_detect_result" line
+    # via log.info(...) before our print() runs. Default structlog
+    # writes to stdout, which would concat the log line with the
+    # profile value if we grabbed the whole capture. The python
+    # snippet below silences structlog explicitly AND we still take
+    # the last line as a defence-in-depth measure for future log
+    # additions inside the detect path.
+    local py_snippet='
+import logging, sys
+logging.disable(logging.CRITICAL)
+try:
+    import structlog
+    structlog.configure(wrapper_class=structlog.make_filtering_bound_logger(logging.CRITICAL + 10))
+except Exception:
+    pass
+from ados.bootstrap.profile_detect import detect_profile
+sys.stdout.write(detect_profile()["profile"])
+'
     if "${VENV_DIR}/bin/python" -c "import ados.bootstrap.profile_detect" 2>"${detect_stderr}"; then
-        detected="$("${VENV_DIR}/bin/python" -c \
-            'from ados.bootstrap.profile_detect import detect_profile; print(detect_profile()["profile"])' \
-            2>"${detect_stderr}")" || detect_rc=$?
+        detected="$("${VENV_DIR}/bin/python" -c "${py_snippet}" 2>"${detect_stderr}" | tail -n 1)" || detect_rc=$?
         detected="$(echo "${detected}" | tr -d '[:space:]')"
     else
         detect_rc=$?
