@@ -1793,7 +1793,33 @@ persist_repo_artifacts() {
             done
     fi
 
-    info "Driver scripts + overlay sources persisted (drivers + overlays + upstream)."
+    # Vendored RTL8812EU kernel source (a git submodule under
+    # vendor/rtl8812eu). install-rtl8812eu.sh resolves the source via
+    # SCRIPT_DIR/../../vendor/rtl8812eu, so when it runs from the
+    # persisted path /opt/ados/source/scripts/drivers/ it expects the
+    # tree at /opt/ados/source/vendor/rtl8812eu. Without this copy
+    # every `install.sh --upgrade` re-run silently logged
+    # "Vendor source not found at /opt/ados/source/vendor/rtl8812eu"
+    # and the DKMS module never rebuilt, leaving the WFB-ng radio
+    # adapter dead at the kernel layer.
+    if [ -d "${src_root}/vendor/rtl8812eu" ]; then
+        install -d -m 0755 "${persist_root}/vendor"
+        rm -rf "${persist_root}/vendor/rtl8812eu"
+        cp -a "${src_root}/vendor/rtl8812eu" "${persist_root}/vendor/"
+    fi
+
+    # Driver-patch tree (mesh-enable patch + future build-time
+    # adjustments) the rtl8812eu installer reads via REPO_ROOT/data/
+    # driver-patches/.
+    if [ -d "${src_root}/data/driver-patches" ]; then
+        install -d -m 0755 "${persist_root}/data/driver-patches"
+        find "${src_root}/data/driver-patches" -maxdepth 1 -type f -print0 \
+            | while IFS= read -r -d '' f; do
+                install -m 0644 "$f" "${persist_root}/data/driver-patches/"
+            done
+    fi
+
+    info "Driver scripts + overlay sources persisted (drivers + lib + overlays + upstream + vendor/rtl8812eu + driver-patches)."
 }
 
 install_display_driver() {
