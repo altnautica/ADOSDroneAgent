@@ -190,4 +190,20 @@ provision_wfb_bind_artifacts() {
     if [ -f /etc/systemd/system/wifibroadcast@.service ] || [ -f /usr/lib/systemd/system/wifibroadcast@.service ]; then
         systemctl daemon-reload >/dev/null 2>&1 || true
     fi
+
+    # Patch the bind server's show_version handler so wfb-server's stdin
+    # is /dev/null instead of inheriting the long-lived socat TCP socket.
+    # Without the redirect, wfb-server prints its version line but the
+    # Twisted reactor keeps watching stdin (which never closes while
+    # socat holds the connection) and the subprocess never exits. The
+    # bash $(...) substitution then blocks forever, the client's read
+    # times out, and the entire 300 s key-transfer window burns with
+    # zero bytes transferred. Idempotent — second run of sed is a no-op
+    # because the redirect is already in place.
+    if [ -f /usr/bin/wfb_bind_server.sh ] \
+        && grep -q 'wfb-server --version | head' /usr/bin/wfb_bind_server.sh; then
+        info "Patching wfb_bind_server.sh show_version to close wfb-server stdin"
+        sed -i 's|wfb-server --version | head|wfb-server --version </dev/null | head|' \
+            /usr/bin/wfb_bind_server.sh
+    fi
 }
