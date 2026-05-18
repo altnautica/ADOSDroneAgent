@@ -776,3 +776,95 @@ def test_status_snapshot_includes_phase_fields_when_paired(
     assert result["phase_entered_at"] is not None
     assert result["phase_age_s"] is not None
     assert result["phase_age_s"] >= 0.0
+
+
+# ─── Peer-presence diagnostics during WAITING_PEER ──────────────────────────
+
+
+def test_read_rx_packets_counter_returns_none_when_iface_missing() -> None:
+    """Unknown iface returns None, never raises. Caller treats this as
+    'no signal yet' rather than crashing the polling loop."""
+    assert orch_mod._read_rx_packets_counter("definitely_not_a_real_iface_xx") is None
+
+
+@pytest.mark.asyncio
+async def test_poll_peer_presence_stamps_last_frame_at_s_on_counter_increment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Future-proof replacement for stderr regex sniffing: when the
+    kernel rx_packets counter advances between polls, the poller
+    stamps session.last_frame_at_s. A kernel-counter increment is
+    unambiguous proof the peer transmitted a packet that passed wfb_rx
+    FEC + decryption and landed on the bind TUN device."""
+    counter_values = iter([100, 100, 101, 105, 105])
+
+    def _fake_counter(_iface: str) -> int | None:
+        return next(counter_values, None)
+
+    monkeypatch.setattr(orch_mod, "_read_rx_packets_counter", _fake_counter)
+
+    session = orch_mod.BindSession(session_id="t1", role="drone")
+    session.transition(orch_mod.BindState.WAITING_PEER)
+    orch = orch_mod.BindOrchestrator()
+
+    task = asyncio.create_task(
+        orch._poll_peer_presence_forever(
+            session, "fake-bind", poll_interval_s=0.01
+        )
+    )
+    await asyncio.sleep(0.06)
+    # Move session terminal so the loop self-exits.
+    session.transition(orch_mod.BindState.PAIRED)
+    await asyncio.wait_for(task, timeout=0.5)
+
+    assert session.last_frame_at_s is not None
+    assert session.last_frame_at_s > 0
+
+
+@pytest.mark.asyncio
+async def test_poll_peer_presence_graceful_when_iface_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the kernel counter is unreadable (iface vanished mid-bind),
+    the poller keeps running and leaves session.last_frame_at_s at its
+    last value. The GCS sees no false-positive 'peer detected' chip."""
+    monkeypatch.setattr(
+        orch_mod, "_read_rx_packets_counter", lambda _iface: None
+    )
+
+    session = orch_mod.BindSession(session_id="t2", role="gs")
+    session.transition(orch_mod.BindState.WAITING_PEER)
+    orch = orch_mod.BindOrchestrator()
+
+    task = asyncio.create_task(
+        orch._poll_peer_presence_forever(
+            session, "vanished-iface", poll_interval_s=0.01
+        )
+    )
+    await asyncio.sleep(0.05)
+    session.transition(orch_mod.BindState.FAILED)
+    await asyncio.wait_for(task, timeout=0.5)
+
+    # Never stamped — caller infers 'no peer heard yet'.
+    assert session.last_frame_at_s is None
+
+
+@pytest.mark.asyncio
+async def test_poll_peer_presence_exits_on_terminal_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The poll loop self-exits once session.state leaves the
+    non-terminal set. Verifies we don't have to rely on task.cancel()
+    alone — the loop is correct even if cancellation is forgotten."""
+    monkeypatch.setattr(
+        orch_mod, "_read_rx_packets_counter", lambda _iface: 1
+    )
+    session = orch_mod.BindSession(session_id="t3", role="drone")
+    session.transition(orch_mod.BindState.PAIRED)  # terminal from the start
+    orch = orch_mod.BindOrchestrator()
+
+    # If the loop didn't check terminal state, this would hang.
+    await asyncio.wait_for(
+        orch._poll_peer_presence_forever(session, "iface", poll_interval_s=0.01),
+        timeout=0.5,
+    )

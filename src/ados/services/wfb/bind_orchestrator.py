@@ -131,6 +131,16 @@ class BindSession:
     # render "stuck in TRANSFERRING_KEYS for 47s" without dragging system
     # wall-clock into the math.
     phase_entered_at: float | None = None
+    # Peer-presence diagnostics surfaced during the WAITING_PEER window.
+    # `last_frame_at_s` is a monotonic timestamp set every time the
+    # stderr stream from the bind socat subprocess yields a line that
+    # indicates a wfb-ng RX frame from the other half of the radio pair.
+    # `last_rssi_dbm` is the most recent RSSI value parsed out of the
+    # AntStatsAndSelector log line. Both stay None until the first hit
+    # so the GCS can distinguish "still listening" from "heard something
+    # N seconds ago at -55 dBm".
+    last_frame_at_s: float | None = None
+    last_rssi_dbm: int | None = None
 
     @property
     def phase(self) -> str:
@@ -150,6 +160,9 @@ class BindSession:
         phase_age_s: float | None = None
         if self.phase_entered_at is not None:
             phase_age_s = max(0.0, time.monotonic() - self.phase_entered_at)
+        last_frame_age_s: float | None = None
+        if self.last_frame_at_s is not None:
+            last_frame_age_s = max(0.0, time.monotonic() - self.last_frame_at_s)
         return {
             "session_id": self.session_id,
             "role": self.role,
@@ -163,7 +176,39 @@ class BindSession:
             "fingerprint": self.fingerprint,
             "peer_device_id": self.peer_device_id,
             "source": self.source,
+            "last_frame_at_s": self.last_frame_at_s,
+            "last_rssi_dbm": self.last_rssi_dbm,
+            "last_frame_age_s": last_frame_age_s,
         }
+
+
+def _read_rx_packets_counter(iface: str) -> int | None:
+    """Read /sys/class/net/<iface>/statistics/rx_packets as an int.
+
+    Returns the kernel-maintained counter of received packets for the
+    given interface, or None if the file is missing (interface not
+    present yet, was torn down, or wfb-ng failed to spin up the bind
+    tunnel TUN device).
+
+    Picked over wfb-ng stderr regex sniffing because:
+    * The counter is a kernel-provided integer, immune to log-format
+      churn across wfb-ng releases.
+    * A monotonic increment proves the peer transmitted a packet that
+      passed FEC + decryption inside wfb_rx and was handed to the TUN
+      device. False positives are impossible.
+    * Per Rule 37 (TX-liveness contract): we already trust
+      /sys/class/net counters for byte-flow watchdogs elsewhere in
+      the agent.
+
+    Returns None on FileNotFoundError, PermissionError, ValueError, or
+    OSError so the caller can treat "no signal" and "iface missing"
+    uniformly without try/except boilerplate at every call site.
+    """
+    try:
+        return int(Path(f"/sys/class/net/{iface}/statistics/rx_packets")
+                   .read_text().strip())
+    except (FileNotFoundError, PermissionError, ValueError, OSError):
+        return None
 
 
 def _systemctl(action: str, unit: str, timeout_s: float = 10.0) -> tuple[bool, str]:
@@ -490,6 +535,18 @@ class BindOrchestrator:
 
             session.transition(BindState.WAITING_PEER)
 
+            # Spawn a background poller that watches the bind TUN
+            # device's kernel RX counter. The poller stamps
+            # session.last_frame_at_s every time the counter advances
+            # so the GCS PairingCard can render "last frame Ns ago"
+            # alongside the phase chip. Self-exits when the session
+            # state leaves the non-terminal set; we also explicitly
+            # cancel in the finally to free the task slot promptly.
+            peer_poll_task = asyncio.create_task(
+                self._poll_peer_presence_forever(session, bind_iface),
+                name=f"bind_peer_poll_{session.session_id[:8]}",
+            )
+
             # Stage 4: Run the upstream wire protocol. The drone/gs
             # helpers move the state to TRANSFERRING_KEYS the moment
             # they hand off to socat. We wrap both the socat exchange
@@ -578,6 +635,16 @@ class BindOrchestrator:
                 fingerprint=session.fingerprint,
             )
         finally:
+            # Cancel the peer-presence poller before tearing down the
+            # bind profile so it doesn't try to read /sys for an iface
+            # that's about to vanish. The task self-exits on its own
+            # state check too, but explicit cancel is faster and frees
+            # the task slot immediately.
+            peer_poll_task.cancel()
+            try:
+                await peer_poll_task
+            except (asyncio.CancelledError, Exception):
+                pass
             # Always tear down the bind profile so we don't leave the
             # rig stuck on the unencrypted bind tunnel after a failure.
             _systemctl("stop", bind_unit)
@@ -701,6 +768,70 @@ class BindOrchestrator:
             session_id=session.session_id,
             stdout=stdout.decode(errors="replace").strip()[:240],
         )
+
+    async def _poll_peer_presence_forever(
+        self,
+        session: BindSession,
+        bind_iface: str,
+        poll_interval_s: float = 1.0,
+    ) -> None:
+        """Watch the bind TUN device's RX counter so the GCS can render
+        "last frame Ns ago" while the bind is still in WAITING_PEER.
+
+        The bind TUN device (``drone-bind`` on the air rig, ``gs-bind``
+        on the ground rig) is created by upstream wfb-ng's
+        ``TUNTAPTransport`` when the bind profile starts. wfb_rx
+        decodes 802.11 frames it sees on the radio interface, decrypts
+        them, and pushes the payload into the TUN device. The kernel
+        increments ``/sys/class/net/<iface>/statistics/rx_packets`` on
+        every push. When that integer changes between two polls, we
+        know the peer transmitted something we successfully decoded.
+
+        Runs as a fire-and-forget asyncio task spawned at WAITING_PEER
+        entry. Self-cancels when ``session.state`` leaves the
+        non-terminal set. Tolerates the counter file vanishing
+        mid-poll (iface torn down): the session field stays at its
+        last value and the GCS renders the stale age, which is the
+        right UX (the operator should see the last reading, not have
+        the chip blink to "no signal" mid-bind).
+        """
+        last_value: int | None = None
+        non_terminal = {
+            BindState.OPENING_TUNNEL,
+            BindState.WAITING_PEER,
+            BindState.TRANSFERRING_KEYS,
+            BindState.APPLYING_KEYS,
+            BindState.RESTARTING_SERVICES,
+        }
+        try:
+            while session.state in non_terminal:
+                try:
+                    current = _read_rx_packets_counter(bind_iface)
+                    if (
+                        current is not None
+                        and last_value is not None
+                        and current != last_value
+                    ):
+                        session.last_frame_at_s = time.monotonic()
+                    if current is not None:
+                        last_value = current
+                except Exception as exc:
+                    # The helper already swallows the expected
+                    # filesystem errors. This belt-and-suspenders
+                    # catch is here so a freak failure mode (e.g.
+                    # event-loop teardown race) doesn't take the
+                    # diagnostic stream down silently for the rest
+                    # of the bind window. We log and keep polling.
+                    log.warning(
+                        "peer_poll_iter_failed",
+                        session_id=session.session_id,
+                        error=str(exc),
+                    )
+                await asyncio.sleep(poll_interval_s)
+        except asyncio.CancelledError:
+            # Normal shutdown path when the orchestrator cancels us at
+            # session end. Don't re-raise — let the task exit clean.
+            return
 
     async def _cleanup(self, session: BindSession) -> None:
         """Restart the normal wfb unit after a failed bind session.
