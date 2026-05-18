@@ -42,6 +42,13 @@
           "title": "Contains Vendor Binary",
           "type": "boolean"
         },
+        "test_fixtures": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "title": "Test Fixtures",
+          "type": "object"
+        },
         "vendor_attribution": {
           "anyOf": [
             {
@@ -72,46 +79,24 @@
           "default": false,
           "title": "Per Drone Config",
           "type": "boolean"
+        },
+        "target_profiles": {
+          "items": {
+            "enum": [
+              "drone",
+              "ground-station",
+              "lite"
+            ],
+            "type": "string"
+          },
+          "title": "Target Profiles",
+          "type": "array"
         }
       },
       "required": [
         "entrypoint"
       ],
       "title": "AgentBlock",
-      "type": "object"
-    },
-    "VendorAttribution": {
-      "additionalProperties": false,
-      "description": "Source-offer record for plugins that ship a vendor binary.",
-      "properties": {
-        "upstream_repo": {
-          "minLength": 1,
-          "title": "Upstream Repo",
-          "type": "string"
-        },
-        "commit_sha": {
-          "minLength": 1,
-          "title": "Commit Sha",
-          "type": "string"
-        },
-        "license": {
-          "minLength": 1,
-          "title": "License",
-          "type": "string"
-        },
-        "source_offer_url": {
-          "minLength": 1,
-          "title": "Source Offer Url",
-          "type": "string"
-        }
-      },
-      "required": [
-        "upstream_repo",
-        "commit_sha",
-        "license",
-        "source_offer_url"
-      ],
-      "title": "VendorAttribution",
       "type": "object"
     },
     "AgentContributes": {
@@ -365,6 +350,40 @@
       "title": "ResourceLimits",
       "type": "object"
     },
+    "VendorAttribution": {
+      "additionalProperties": false,
+      "description": "Source-offer record for plugins that ship a vendor binary.\n\nRequired when ``agent.contains_vendor_binary`` is true so the\ninstall dialog can surface the upstream repo, commit, license, and\na reachable source-offer URL. Satisfies GPL-3.0 section 6 for\nplugins that distribute pre-compiled binaries built from\nGPL-compatible upstreams.",
+      "properties": {
+        "upstream_repo": {
+          "minLength": 1,
+          "title": "Upstream Repo",
+          "type": "string"
+        },
+        "commit_sha": {
+          "minLength": 1,
+          "title": "Commit Sha",
+          "type": "string"
+        },
+        "license": {
+          "minLength": 1,
+          "title": "License",
+          "type": "string"
+        },
+        "source_offer_url": {
+          "minLength": 1,
+          "title": "Source Offer Url",
+          "type": "string"
+        }
+      },
+      "required": [
+        "upstream_repo",
+        "commit_sha",
+        "license",
+        "source_offer_url"
+      ],
+      "title": "VendorAttribution",
+      "type": "object"
+    },
     "VisionContribution": {
       "additionalProperties": false,
       "properties": {
@@ -402,7 +421,6 @@
   "properties": {
     "schema_version": {
       "default": 1,
-      "description": "Manifest schema version. 1 is the original baseline. 2 unlocks the additional agent fields vendor_attribution, subprocess_spawn, and per_drone_config.",
       "maximum": 2,
       "minimum": 1,
       "title": "Schema Version",

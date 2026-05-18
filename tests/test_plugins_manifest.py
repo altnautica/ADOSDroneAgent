@@ -150,3 +150,52 @@ def test_schema_dict_is_emittable() -> None:
     schema = schema_dict()
     assert schema["type"] == "object"
     assert "properties" in schema
+
+
+# ── target_profiles ──────────────────────────────────────────
+
+
+def test_target_profiles_defaults_to_drone_when_absent() -> None:
+    raw = _good_manifest_dict()
+    raw["agent"].pop("target_profiles", None)
+    m = PluginManifest.from_yaml_text(_yaml(raw))
+    assert m.agent is not None
+    assert m.agent.target_profiles == ["drone"]
+
+
+def test_target_profiles_accepts_ground_station() -> None:
+    raw = _good_manifest_dict()
+    raw["agent"]["target_profiles"] = ["ground-station"]
+    m = PluginManifest.from_yaml_text(_yaml(raw))
+    assert m.agent is not None
+    assert m.agent.target_profiles == ["ground-station"]
+
+
+def test_target_profiles_accepts_multi_target() -> None:
+    raw = _good_manifest_dict()
+    raw["agent"]["target_profiles"] = ["drone", "ground-station"]
+    m = PluginManifest.from_yaml_text(_yaml(raw))
+    assert m.agent is not None
+    assert m.agent.target_profiles == ["drone", "ground-station"]
+
+
+def test_target_profiles_dedupes_repeated_entries() -> None:
+    raw = _good_manifest_dict()
+    raw["agent"]["target_profiles"] = ["drone", "drone", "ground-station"]
+    m = PluginManifest.from_yaml_text(_yaml(raw))
+    assert m.agent is not None
+    assert m.agent.target_profiles == ["drone", "ground-station"]
+
+
+def test_target_profiles_rejects_empty_list() -> None:
+    raw = _good_manifest_dict()
+    raw["agent"]["target_profiles"] = []
+    with pytest.raises(ManifestError):
+        PluginManifest.from_yaml_text(_yaml(raw))
+
+
+def test_target_profiles_rejects_unknown_profile() -> None:
+    raw = _good_manifest_dict()
+    raw["agent"]["target_profiles"] = ["spacecraft"]
+    with pytest.raises(ManifestError):
+        PluginManifest.from_yaml_text(_yaml(raw))
