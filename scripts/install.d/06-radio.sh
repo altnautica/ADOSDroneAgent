@@ -27,8 +27,11 @@ install_wfb_ng_from_vendor() {
         vendor_dir="$(cd "$(dirname "$0")/../vendor/wfb-ng" && pwd)"
     fi
 
+    # .git is a directory in a regular clone and a gitlink file in a
+    # submodule clone; -e covers both so the commit probe lands in both
+    # layouts.
     local _vendor_commit=""
-    if [ -n "${vendor_dir}" ] && [ -d "${vendor_dir}/.git" ]; then
+    if [ -n "${vendor_dir}" ] && [ -e "${vendor_dir}/.git" ]; then
         _vendor_commit="$(git -C "${vendor_dir}" rev-parse HEAD 2>/dev/null || true)"
     fi
     local _installed_commit=""
