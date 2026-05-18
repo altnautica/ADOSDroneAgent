@@ -270,13 +270,18 @@ class PairManager:
         fingerprint = read_public_fingerprint(target)
         paired_at = _iso_now()
 
-        # auto_pair flips off at the moment a pair lands. The supervisor
-        # observes the persisted value and exits its retry loop.
+        # auto_pair flips off only when we know who we paired with.
+        # A "half pair" where peer_device_id is None means the local
+        # protocol completed (keys are on disk) but the cross-side
+        # device_id was never exchanged — disarming here would leave the
+        # rig stuck with a half-state that no auto-retry can climb out of.
+        # Passing None to _persist_pair_state leaves the existing flag
+        # untouched so auto_pair stays armed and retries on next cycle.
         _persist_pair_state(
             role=role,
             peer_device_id=peer_device_id,
             paired_at=paired_at,
-            auto_pair_enabled=False,
+            auto_pair_enabled=False if peer_device_id else None,
         )
 
         # Drop the setup-complete sentinel so captive_dns.py stops
@@ -357,6 +362,73 @@ class PairManager:
 
         return {
             "paired": False,
+            "role": role,
+        }
+
+    async def recover_half_pair_state(self, role: Role) -> dict[str, Any]:
+        """Detect and recover from a stuck half-pair.
+
+        A half-pair is when the local bind protocol wrote a key file
+        and stamped `paired_at` but never learned the peer's device id.
+        From the rig's own perspective it looks paired; from the peer's
+        perspective the bind aborted before its half landed. auto_pair
+        is disarmed on both sides and nothing climbs out without
+        operator intervention.
+
+        Recovery: if a key file is present but `paired_with_device_id`
+        is None / "unknown", treat the rig as never having paired.
+        Delete the orphan key file, clear the stale `paired_at`, and
+        leave `auto_pair_enabled` armed so the supervisor picks up the
+        next bind cycle on its own.
+
+        Returns a dict with `recovered: bool` and the cleared fields.
+        Safe to call on a healthy rig (where it returns recovered=False
+        without touching anything).
+        """
+        target = self._key_path_for_role(role)
+        if not (target.is_file() and target.stat().st_size == WFB_KEY_FILE_BYTES):
+            return {"recovered": False, "reason": "no_key_file"}
+
+        cfg = _load_config_dict()
+        wfb_section = (
+            cfg.get("video", {}).get("wfb", {})
+            if isinstance(cfg.get("video"), dict) else {}
+        )
+        peer = wfb_section.get("paired_with_device_id")
+        # "unknown" comes from older builds that wrote the literal
+        # placeholder when peer_device_id was missing at apply time.
+        # Treat both shapes as the same half-pair condition.
+        if isinstance(peer, str) and peer and peer != "unknown":
+            return {"recovered": False, "reason": "real_peer_known"}
+
+        try:
+            target.unlink()
+        except OSError as exc:
+            log.warning(
+                "half_pair_key_delete_failed",
+                path=str(target),
+                error=str(exc),
+            )
+            return {"recovered": False, "reason": "unlink_failed"}
+
+        _persist_pair_state(
+            role=role,
+            peer_device_id=None,
+            paired_at=None,
+            auto_pair_enabled=True,
+        )
+
+        log.warning(
+            "half_pair_recovered",
+            role=role,
+            cleared_key=str(target),
+            note="local key existed but peer_device_id was unknown; "
+                 "cleared so auto_pair can rebind cleanly",
+        )
+
+        return {
+            "recovered": True,
+            "cleared_key": str(target),
             "role": role,
         }
 

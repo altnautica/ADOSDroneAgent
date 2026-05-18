@@ -437,39 +437,38 @@ class OledService(
         # publishes /main; once running, the tap auto-recovers from
         # transient errors via its own bus-error restart loop.
         #
-        # Memory-constrained gate: on a board with ≤ 1500 MB total RAM
-        # (Pi 4B 1 GB class, Pi Zero 2 W, Cubie A7Z) the always-on
-        # GStreamer pipeline competes with the WFB-ng → mediamtx →
-        # WebRTC chain for scheduler time and the system swap-thrashes
-        # under the combined load. Skip the tap entirely on those
-        # boards; the LCD still renders status pages, just not live
-        # video preview. Operators who want LCD video on a 1 GB board
-        # can plug into a 2 GB+ SBC.
+        # The LCD video tap runs on every ground station regardless of
+        # RAM. On low-RAM boards (≤ 1500 MB: Pi 4B 1 GB, Pi Zero 2 W,
+        # Cubie A7Z) the always-on GStreamer pipeline competes with
+        # mediamtx + WebRTC for scheduler time and adds ~130 % CPU; the
+        # operator gets a one-time warning so the slowdown is not a
+        # mystery. The previous behavior of skipping the tap entirely on
+        # low-RAM boards was reverted at user direction — the operator
+        # paying for the LCD wants to see the video on it.
         try:
             total_ram_mb = (
                 psutil.virtual_memory().total // (1024 * 1024)
             )
         except Exception:  # noqa: BLE001
             total_ram_mb = 0
-        video_tap_enabled = total_ram_mb == 0 or total_ram_mb >= 1500
+        video_tap_enabled = True
+        if total_ram_mb and total_ram_mb < 1500:
+            log.warning(
+                "oled_video_tap_low_ram_cpu_warning",
+                ram_mb=total_ram_mb,
+                msg=(
+                    "LCD video tap is running on a memory-constrained "
+                    "board. Expect ~130 % CPU and possible status-page "
+                    "render hitches. Run on a 2 GB+ SBC for smoother "
+                    "operation."
+                ),
+            )
         # Propagate the gate to the PageContext so the Video page can
         # honor it. Without this, video.py's per-page _ensure_tap
         # fallback path constructs its own LocalVideoTap on every
         # navigation, defeating the run()-level gate.
         self._page_context.video_tap_enabled = video_tap_enabled
-        if video_tap_enabled:
-            self._page_context.video_tap = self._build_video_tap()
-        else:
-            self._page_context.video_tap = None
-            log.info(
-                "oled_video_tap_disabled_low_ram",
-                ram_mb=total_ram_mb,
-                msg=(
-                    "LCD video preview disabled on memory-constrained "
-                    "board; status pages still render. Frees ~130 % "
-                    "CPU on Pi 4B 1 GB."
-                ),
-            )
+        self._page_context.video_tap = self._build_video_tap()
         tasks = [
             asyncio.create_task(self._render_forever(), name="oled_render"),
             asyncio.create_task(self._consume_buttons(), name="oled_buttons"),

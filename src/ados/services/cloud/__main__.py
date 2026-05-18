@@ -175,6 +175,7 @@ async def main() -> None:
 
     try:
         from ados.core.profile import current_profile_and_role
+        from ados.services.ground_station.pair_manager import get_pair_manager
         from ados.services.wfb.auto_pair import get_auto_pair_supervisor
 
         # Route through current_profile_and_role so /etc/ados/profile.conf
@@ -184,6 +185,21 @@ async def main() -> None:
         # rendezvous never converges.
         ap_profile, _ap_subrole = current_profile_and_role(config)
         ap_role = "drone" if ap_profile == "drone" else "gs"
+
+        # Self-heal a stuck half-pair before the supervisor reads pair
+        # state. If a previous bind cycle wrote our half of the key but
+        # the peer never confirmed its device_id, the rig looks paired
+        # to itself, auto_pair stays disarmed, and the peer keeps
+        # retrying into a silent listener. Clean the orphan key and
+        # re-arm so the very next bind cycle can complete cleanly.
+        try:
+            pm = get_pair_manager()
+            recovery = await pm.recover_half_pair_state(ap_role)
+            if recovery.get("recovered"):
+                log.info("auto_pair_half_pair_cleared", **recovery)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("auto_pair_half_pair_check_failed", error=str(exc))
+
         # Pass the service shutdown event so a SIGTERM during a long-
         # running rendezvous tears down the in-flight bind cleanly. The
         # orchestrator's cancel hook kills any leftover socat for us.

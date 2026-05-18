@@ -74,6 +74,20 @@ if [ -n "${ADOS_SCRIPT_DIR}" ] && [ -f "${ADOS_SCRIPT_DIR}/install.d/lib.sh" ]; 
     unset module module_path
 fi
 
+# ─── Bootstrap dir cleanup trap ─────────────────────────────────────────────
+#
+# When install.sh was reached via the curl-pipe bootstrap below, the outer
+# bootstrap exec()ed us with ADOS_BOOTSTRAP_DIR pointing at the mktemp dir
+# that holds the cloned repo. exec() does NOT fire the outer script's
+# traps, so the cleanup has to live here in the new process image. Without
+# this, every curl-pipe install leaves a ~66 MB tree in /tmp; on the Pi 4B
+# (453 MB tmpfs) a handful of installs fills the disk and DKMS extraction
+# silently fails partway through.
+if [ -n "${ADOS_BOOTSTRAP_DIR:-}" ] && [ -d "${ADOS_BOOTSTRAP_DIR}" ]; then
+    # shellcheck disable=SC2064
+    trap "rm -rf \"${ADOS_BOOTSTRAP_DIR}\" 2>/dev/null || true" EXIT
+fi
+
 # ─── curl-pipe bootstrap ────────────────────────────────────────────────────
 #
 # When the operator runs `curl -sSL .../install.sh | sudo bash -s -- ...`,
@@ -102,7 +116,20 @@ if [ -z "${ADOS_SCRIPT_DIR}" ]; then
             break
         fi
     done
+    # Sweep stale bootstrap dirs from prior install runs before mktemp.
+    # Each run leaves a ~66 MB tree of cloned source + vendored
+    # submodules behind. On the Pi 4B (453 MB tmpfs) seven runs fill
+    # /tmp completely and the next install fails partway through DKMS
+    # with "unable to write file". Match only our own pattern (the
+    # marker file we drop on every fresh bootstrap) so we never delete
+    # an unrelated user's mktemp dir.
+    for _stale in /tmp/tmp.*; do
+        if [ -f "${_stale}/.ados_bootstrap" ]; then
+            rm -rf "${_stale}" 2>/dev/null || true
+        fi
+    done
     _BOOT_DIR="$(mktemp -d)"
+    : > "${_BOOT_DIR}/.ados_bootstrap"
     _BOOT_REPO="https://github.com/altnautica/ADOSDroneAgent.git"
     echo "Bootstrapping installer from ${_BOOT_REPO} (branch ${_BOOT_BRANCH})..."
     if ! git clone --depth 1 --recurse-submodules --shallow-submodules \
@@ -112,6 +139,11 @@ if [ -z "${ADOS_SCRIPT_DIR}" ]; then
         rm -rf "${_BOOT_DIR}"
         exit 1
     fi
+    # Hand the bootstrap path to the exec'd installer via env. The
+    # inner script registers a trap that cleans this dir on exit
+    # (success or failure). exec does not fire this script's traps so
+    # the cleanup must live in the new process image.
+    export ADOS_BOOTSTRAP_DIR="${_BOOT_DIR}"
     exec bash "${_BOOT_DIR}/repo/scripts/install.sh" "$@"
 fi
 

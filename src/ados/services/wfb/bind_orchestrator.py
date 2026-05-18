@@ -91,9 +91,14 @@ WAITING_PEER_WATCHDOG_S = 1800.0  # 30 minutes
 #
 # Key transfer (TRANSFERRING_KEYS + APPLYING_KEYS combined): the upstream
 # wfb_bind_{server,client}.sh wrappers stream a ~4 KB tar.gz over the
-# L3 tunnel. Even on a lossy link, anything past 5 minutes means the
-# socat handshake has stalled and won't recover on its own.
-KEY_TRANSFER_TIMEOUT_S = 300.0
+# L3 tunnel. Post-cgroup-fix (ados-cloud MemoryMax=256M) the real
+# transfer takes ~10s end-to-end. The wall-clock budget here is sized
+# so the drone's listener overlaps several ground bind retries (60 s
+# backoff) — without that overlap the drone's listener kept timing out
+# at the exact moment a ground retry was mid-handshake. 1500 s gives
+# the rendezvous a comfortable window without risking a wedged session
+# beyond what the global watchdog catches.
+KEY_TRANSFER_TIMEOUT_S = 1500.0
 
 # Service restart (RESTARTING_SERVICES): PairManager.apply_keypair()
 # writes the new key file and `systemctl restart`s the normal wfb
