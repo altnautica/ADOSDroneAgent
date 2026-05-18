@@ -32,6 +32,7 @@ from __future__ import annotations
 import tempfile
 from pathlib import Path
 
+import httpx
 from fastapi import (
     APIRouter,
     File,
@@ -54,11 +55,23 @@ from ados.api.routes._plugins_helpers import (
 )
 from ados.core.logging import get_logger
 from ados.plugins.archive import open_archive
+from ados.plugins.capabilities import get_capability_meta, is_known_capability
 from ados.plugins.errors import (
     ArchiveError,
     ManifestError,
     SignatureError,
     SupervisorError,
+)
+from ados.plugins.install_from_url_impl import (
+    DEFAULT_ALLOWED_HOSTS,
+    DOWNLOAD_CONNECT_TIMEOUT,
+    DOWNLOAD_TOTAL_TIMEOUT,
+    ArchiveDownloadError,
+    ArchiveTooLargeError,
+    Sha256MismatchError,
+    UrlValidationError,
+    stream_archive_to_path,
+    validate_install_url,
 )
 from ados.plugins.supervisor import PluginSupervisor
 
@@ -97,6 +110,49 @@ def _err(code: int, kind: str, detail: str, status: int = 400) -> JSONResponse:
         {"ok": False, "code": code, "kind": kind, "detail": detail},
         status_code=status,
     )
+
+
+# ---------------------------------------------------------------------
+# Capability catalog enrichment
+# ---------------------------------------------------------------------
+
+
+def _enrich_permissions(
+    permission_ids: list[str],
+    *,
+    required_ids: set[str] | None = None,
+) -> list[dict]:
+    """Build the install-dialog permission entries from raw ids.
+
+    For each id, look up the catalog entry and inline ``label``,
+    ``description``, ``category``, ``risk``, and ``risk_reason`` on
+    the response object. ``required_ids`` controls the ``required``
+    flag; when ``None`` every entry defaults to ``True`` because
+    today's manifest schema does not distinguish required from
+    optional declarations.
+
+    Unknown capability ids are not enriched here; callers must run
+    :func:`_unknown_capabilities` first and surface a 400 if any are
+    found.
+    """
+    required = required_ids if required_ids is not None else set(permission_ids)
+    out: list[dict] = []
+    for pid in permission_ids:
+        meta = get_capability_meta(pid)
+        entry: dict = {"id": pid, "required": pid in required}
+        if meta is not None:
+            entry["label"] = meta["label"]
+            entry["description"] = meta["description"]
+            entry["category"] = meta["category"]
+            entry["risk"] = meta["risk"]
+            entry["risk_reason"] = meta["risk_reason"]
+        out.append(entry)
+    return out
+
+
+def _unknown_capabilities(permission_ids: list[str]) -> list[str]:
+    """Return any ids that are not declared in the catalog."""
+    return [pid for pid in permission_ids if not is_known_capability(pid)]
 
 
 # ---------------------------------------------------------------------
@@ -143,6 +199,7 @@ async def get_plugin(plugin_id: str):
         manifest = sup._manifest_for(plugin_id)
     except SupervisorError as exc:
         return _err(20, "host_io_error", str(exc), 500)
+    permission_ids = sorted(manifest.declared_permissions())
     return {
         "install": _install_to_dict(install),
         "manifest": {
@@ -155,10 +212,7 @@ async def get_plugin(plugin_id: str):
                 ["agent"] if manifest.agent is not None else []
             )
             + (["gcs"] if manifest.gcs is not None else []),
-            "permissions": [
-                {"id": pid, "required": True}
-                for pid in sorted(manifest.declared_permissions())
-            ],
+            "permissions": _enrich_permissions(permission_ids),
         },
     }
 
@@ -171,10 +225,21 @@ async def get_plugin(plugin_id: str):
 def _archive_to_summary(raw: bytes) -> dict:
     """Open + signature-verify the archive in memory and return a
     manifest summary suitable for the install dialog. Does NOT touch
-    disk and does NOT mutate supervisor state."""
+    disk and does NOT mutate supervisor state.
+
+    Raises :class:`ManifestError` if any declared permission id is
+    not present in the capability catalog so the operator never sees
+    a permission row with no label.
+    """
     from ados.plugins.archive import parse_archive_bytes
     contents = parse_archive_bytes(raw)
     manifest = contents.manifest
+    permission_ids = sorted(manifest.declared_permissions())
+    unknown = _unknown_capabilities(permission_ids)
+    if unknown:
+        raise ManifestError(
+            "Unknown capability: " + ", ".join(unknown)
+        )
     return {
         "ok": True,
         "plugin_id": manifest.id,
@@ -190,10 +255,7 @@ def _archive_to_summary(raw: bytes) -> dict:
             ["agent"] if manifest.agent is not None else []
         )
         + (["gcs"] if manifest.gcs is not None else []),
-        "permissions": [
-            {"id": pid, "required": True}
-            for pid in sorted(manifest.declared_permissions())
-        ],
+        "permissions": _enrich_permissions(permission_ids),
     }
 
 
@@ -253,6 +315,29 @@ async def install_plugin(
     sup = _get_supervisor()
     if job_id:
         write_sidecar(job_id, {"stage": "verifying"})
+    # Pre-flight catalog check: refuse archives whose manifest
+    # declares a capability id we cannot label in the install dialog.
+    # This runs before the supervisor commits so a rejected install
+    # leaves no on-disk residue.
+    try:
+        from ados.plugins.archive import parse_archive_bytes
+        preview = parse_archive_bytes(raw)
+        unknown = _unknown_capabilities(
+            sorted(preview.manifest.declared_permissions())
+        )
+        if unknown:
+            return _err(
+                12,
+                "manifest_invalid",
+                "Unknown capability: " + ", ".join(unknown),
+                400,
+            )
+    except SignatureError as exc:
+        return _err(10, f"signature_{exc.kind}", str(exc), 400)
+    except ManifestError as exc:
+        return _err(12, "manifest_invalid", str(exc), 400)
+    except ArchiveError as exc:
+        return _err(12, "archive_invalid", str(exc), 400)
     with tempfile.NamedTemporaryFile(
         suffix=".adosplug", delete=False
     ) as tmp:
@@ -319,6 +404,188 @@ async def install_plugin(
         "permissions_requested": result.permissions_requested,
         "granted": granted_ids,
         "job_id": job_id,
+    }
+
+
+# ---------------------------------------------------------------------
+# Install from URL
+# ---------------------------------------------------------------------
+
+
+class InstallFromUrlRequest(BaseModel):
+    """Body of ``POST /api/plugins/install_from_url``.
+
+    The GCS sends the canonical published archive URL (typically a
+    GitHub release asset for the extensions repo) along with a SHA-256
+    pin that the registry seeder publishes. The optional
+    ``requested_permissions`` list mirrors the multipart endpoint and
+    triggers immediate grants on the freshly installed plugin so the
+    install dialog does not have to make a separate ``/grant`` call.
+    """
+
+    url: str
+    expected_sha256: str | None = None
+    requested_permissions: list[str] | None = None
+    job_id: str | None = None
+
+
+@router.post("/plugins/install_from_url")
+async def install_plugin_from_url(body: InstallFromUrlRequest):
+    """Download a ``.adosplug`` archive from an allowlisted URL and install it.
+
+    Companion to the multipart ``/install`` endpoint. Used by the GCS
+    Plugins page when the plugin is a registry entry whose canonical
+    binary is already hosted at a public URL — no intermediate storage
+    hop is needed. The download is streamed with a hard size cap and
+    a SHA-256 pin (if the caller supplied one); everything past the
+    bytes-on-disk handoff reuses the same supervisor flow as the
+    multipart endpoint.
+    """
+    url = (body.url or "").strip()
+    if not url:
+        return _err(2, "usage_error", "url required", 400)
+
+    try:
+        validate_install_url(url)
+    except UrlValidationError as exc:
+        return _err(2, "url_invalid", str(exc), 400)
+
+    expected_sha = (body.expected_sha256 or "").strip()
+    requested = list(body.requested_permissions or [])
+    job_id = body.job_id
+
+    sup = _get_supervisor()
+    if job_id:
+        write_sidecar(job_id, {"stage": "downloading"})
+
+    timeout = httpx.Timeout(
+        DOWNLOAD_TOTAL_TIMEOUT,
+        connect=DOWNLOAD_CONNECT_TIMEOUT,
+    )
+    # Per-request fresh tempdir so a botched download cannot leave
+    # debris in the supervisor's working area.
+    with tempfile.TemporaryDirectory(prefix="ados-plug-url-") as tmp_dir:
+        archive_path = Path(tmp_dir) / "archive.adosplug"
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                outcome = await stream_archive_to_path(
+                    client=client,
+                    url=url,
+                    dest=archive_path,
+                    expected_sha256=expected_sha,
+                )
+        except ArchiveTooLargeError as exc:
+            if job_id:
+                write_sidecar(job_id, {"stage": "failed", "detail": str(exc)})
+            return _err(13, "archive_too_large", str(exc), 413)
+        except Sha256MismatchError as exc:
+            if job_id:
+                write_sidecar(job_id, {"stage": "failed", "detail": str(exc)})
+            return _err(12, "sha256_mismatch", str(exc), 400)
+        except ArchiveDownloadError as exc:
+            if job_id:
+                write_sidecar(job_id, {"stage": "failed", "detail": str(exc)})
+            return _err(20, "download_failed", str(exc), 502)
+        except httpx.HTTPError as exc:
+            if job_id:
+                write_sidecar(job_id, {"stage": "failed", "detail": str(exc)})
+            return _err(20, "download_failed", str(exc), 502)
+
+        if job_id:
+            write_sidecar(job_id, {"stage": "verifying"})
+
+        # Reuse the same unknown-capability preflight the multipart
+        # path runs so the on-disk install attempt is skipped when the
+        # manifest declares a capability the host does not recognise.
+        try:
+            from ados.plugins.archive import parse_archive_bytes
+            raw = archive_path.read_bytes()
+            preview = parse_archive_bytes(raw)
+            unknown = _unknown_capabilities(
+                sorted(preview.manifest.declared_permissions())
+            )
+            if unknown:
+                if job_id:
+                    write_sidecar(
+                        job_id,
+                        {
+                            "stage": "failed",
+                            "detail": "unknown capability",
+                        },
+                    )
+                return _err(
+                    12,
+                    "manifest_invalid",
+                    "Unknown capability: " + ", ".join(unknown),
+                    400,
+                )
+        except SignatureError as exc:
+            return _err(10, f"signature_{exc.kind}", str(exc), 400)
+        except ManifestError as exc:
+            return _err(12, "manifest_invalid", str(exc), 400)
+        except ArchiveError as exc:
+            return _err(12, "archive_invalid", str(exc), 400)
+
+        if job_id:
+            write_sidecar(job_id, {"stage": "installing"})
+        try:
+            result = sup.install_archive(archive_path)
+        except SignatureError as exc:
+            return _err(
+                10,
+                f"signature_{exc.kind}",
+                str(exc),
+                400,
+            )
+        except ManifestError as exc:
+            return _err(12, "manifest_invalid", str(exc), 400)
+        except ArchiveError as exc:
+            return _err(12, "archive_invalid", str(exc), 400)
+        except SupervisorError as exc:
+            msg = str(exc)
+            if "ADOS version" in msg:
+                return _err(17, "ados_version_skew", msg, 409)
+            return _err(20, "host_io_error", msg, 500)
+
+    granted_ids: list[str] = []
+    for perm in requested:
+        perm = (perm or "").strip()
+        if not perm:
+            continue
+        try:
+            sup.grant_permission(result.plugin_id, perm)
+            granted_ids.append(perm)
+        except SupervisorError as exc:
+            log.warning(
+                "plugin_install_from_url_grant_skip",
+                permission=perm,
+                error=str(exc),
+            )
+
+    if job_id:
+        write_sidecar(
+            job_id,
+            {"stage": "completed", "pluginId": result.plugin_id},
+        )
+
+    log.info(
+        "plugin_install_from_url_ok",
+        plugin_id=result.plugin_id,
+        version=result.version,
+        sha256=outcome.sha256_hex,
+        bytes=outcome.byte_count,
+    )
+
+    return {
+        "ok": True,
+        "plugin_id": result.plugin_id,
+        "version": result.version,
+        "signer_id": result.signer_id,
+        "risk": result.risk,
+        "permissions_requested": result.permissions_requested,
+        "granted": granted_ids,
+        "job_id": job_id,
+        "sha256": outcome.sha256_hex,
     }
 
 

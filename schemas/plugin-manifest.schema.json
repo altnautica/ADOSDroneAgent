@@ -414,6 +414,170 @@
       },
       "title": "VisionContribution",
       "type": "object"
+    },
+    "HardwareRequirements": {
+      "additionalProperties": false,
+      "description": "Optional hardware-side requirements surfaced in the install dialog. All fields are free-form copy the dialog renders; the agent does not enforce these at install time.",
+      "properties": {
+        "cameras": {
+          "anyOf": [
+            { "type": "string" },
+            { "type": "null" }
+          ],
+          "default": null,
+          "title": "Cameras"
+        },
+        "fc_firmware": {
+          "anyOf": [
+            { "type": "string" },
+            { "type": "null" }
+          ],
+          "default": null,
+          "title": "Fc Firmware"
+        },
+        "boards": {
+          "items": { "type": "string" },
+          "title": "Boards",
+          "type": "array"
+        },
+        "optional": {
+          "items": { "type": "string" },
+          "title": "Optional",
+          "type": "array"
+        }
+      },
+      "title": "HardwareRequirements",
+      "type": "object"
+    },
+    "ResourceImpact": {
+      "additionalProperties": false,
+      "description": "Estimated runtime resource impact. The supervisor still enforces the hard limits declared under agent.resources; these numbers are forecast copy for the install-dialog summary.",
+      "properties": {
+        "cpu_percent_peak": {
+          "anyOf": [
+            {
+              "maximum": 1000,
+              "minimum": 0,
+              "type": "number"
+            },
+            { "type": "null" }
+          ],
+          "default": null,
+          "title": "Cpu Percent Peak"
+        },
+        "ram_mb": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "number"
+            },
+            { "type": "null" }
+          ],
+          "default": null,
+          "title": "Ram Mb"
+        },
+        "pids": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            { "type": "null" }
+          ],
+          "default": null,
+          "title": "Pids"
+        },
+        "startup_time_seconds": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "number"
+            },
+            { "type": "null" }
+          ],
+          "default": null,
+          "title": "Startup Time Seconds"
+        }
+      },
+      "title": "ResourceImpact",
+      "type": "object"
+    },
+    "FcParameter": {
+      "additionalProperties": false,
+      "description": "A single firmware parameter the plugin expects the operator to set before the feature behaves correctly.",
+      "properties": {
+        "param": {
+          "minLength": 1,
+          "title": "Param",
+          "type": "string"
+        },
+        "note": {
+          "anyOf": [
+            { "type": "string" },
+            { "type": "null" }
+          ],
+          "default": null,
+          "title": "Note"
+        },
+        "value": {
+          "anyOf": [
+            { "type": "string" },
+            { "type": "number" },
+            { "type": "integer" },
+            { "type": "null" }
+          ],
+          "default": null,
+          "title": "Value"
+        }
+      },
+      "required": ["param"],
+      "title": "FcParameter",
+      "type": "object"
+    },
+    "RequiredFcParameters": {
+      "additionalProperties": false,
+      "description": "Per-firmware bucket of required parameter hints. Each bucket is optional so a plugin can ship guidance for only the firmware it actually targets.",
+      "properties": {
+        "ardupilot": {
+          "items": { "$ref": "#/$defs/FcParameter" },
+          "title": "Ardupilot",
+          "type": "array"
+        },
+        "px4": {
+          "items": { "$ref": "#/$defs/FcParameter" },
+          "title": "Px4",
+          "type": "array"
+        },
+        "inav": {
+          "items": { "$ref": "#/$defs/FcParameter" },
+          "title": "Inav",
+          "type": "array"
+        }
+      },
+      "title": "RequiredFcParameters",
+      "type": "object"
+    },
+    "Screenshot": {
+      "additionalProperties": false,
+      "description": "One screenshot entry rendered by the install dialog.",
+      "properties": {
+        "url": {
+          "minLength": 1,
+          "title": "Url",
+          "type": "string"
+        },
+        "caption": {
+          "anyOf": [
+            { "type": "string" },
+            { "type": "null" }
+          ],
+          "default": null,
+          "title": "Caption"
+        }
+      },
+      "required": ["url"],
+      "title": "Screenshot",
+      "type": "object"
     }
   },
   "additionalProperties": false,
@@ -500,6 +664,62 @@
         }
       ],
       "default": null
+    },
+    "description_long": {
+      "anyOf": [
+        { "type": "string" },
+        { "type": "null" }
+      ],
+      "default": null,
+      "title": "Description Long"
+    },
+    "features": {
+      "items": { "type": "string" },
+      "title": "Features",
+      "type": "array"
+    },
+    "hardware_requirements": {
+      "anyOf": [
+        { "$ref": "#/$defs/HardwareRequirements" },
+        { "type": "null" }
+      ],
+      "default": null
+    },
+    "resource_impact": {
+      "anyOf": [
+        { "$ref": "#/$defs/ResourceImpact" },
+        { "type": "null" }
+      ],
+      "default": null
+    },
+    "required_fc_parameters": {
+      "anyOf": [
+        { "$ref": "#/$defs/RequiredFcParameters" },
+        { "type": "null" }
+      ],
+      "default": null
+    },
+    "telemetry_fields": {
+      "items": { "type": "string" },
+      "title": "Telemetry Fields",
+      "type": "array"
+    },
+    "documentation_url": {
+      "anyOf": [
+        {
+          "format": "uri",
+          "pattern": "^https://",
+          "type": "string"
+        },
+        { "type": "null" }
+      ],
+      "default": null,
+      "title": "Documentation Url"
+    },
+    "screenshots": {
+      "items": { "$ref": "#/$defs/Screenshot" },
+      "title": "Screenshots",
+      "type": "array"
     },
     "extra": {
       "additionalProperties": true,

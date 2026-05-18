@@ -332,6 +332,60 @@ class Compatibility(_StrictModel):
     supported_boards: list[str] = Field(default_factory=list)
 
 
+class HardwareRequirements(_StrictModel):
+    """Optional hardware-side requirements surfaced in the install dialog.
+
+    All fields are free-form so the dialog can render whatever the
+    manifest author wants the operator to see. The agent does not enforce
+    any of these at install time; they are informational copy."""
+
+    cameras: str | None = None
+    fc_firmware: str | None = None
+    boards: list[str] = Field(default_factory=list)
+    optional: list[str] = Field(default_factory=list)
+
+
+class ResourceImpact(_StrictModel):
+    """Estimated runtime resource impact. The supervisor still enforces
+    the hard limits declared under ``agent.resources``; these numbers are
+    forecast copy for the install-dialog summary."""
+
+    # CPU peak is allowed up to 1000 so multi-core peak figures
+    # (e.g. 4 cores * 100% = 400) parse without truncation.
+    cpu_percent_peak: float | None = Field(None, ge=0, le=1000)
+    ram_mb: float | None = Field(None, gt=0)
+    pids: int | None = Field(None, gt=0)
+    startup_time_seconds: float | None = Field(None, gt=0)
+
+
+class FcParameter(_StrictModel):
+    """A single firmware parameter the plugin expects the operator to
+    set before the feature behaves correctly. ``value`` is optional
+    because some parameters take a bitmask the operator computes from
+    multiple flags; in that case ``note`` carries the guidance."""
+
+    param: str = Field(..., min_length=1)
+    note: str | None = None
+    value: str | float | int | None = None
+
+
+class RequiredFcParameters(_StrictModel):
+    """Per-firmware bucket of required parameter hints. Each bucket is
+    optional so a plugin can ship guidance for only the firmware it
+    actually targets."""
+
+    ardupilot: list[FcParameter] = Field(default_factory=list)
+    px4: list[FcParameter] = Field(default_factory=list)
+    inav: list[FcParameter] = Field(default_factory=list)
+
+
+class Screenshot(_StrictModel):
+    """One screenshot entry rendered by the install dialog."""
+
+    url: str = Field(..., min_length=1)
+    caption: str | None = None
+
+
 class PluginManifest(_StrictModel):
     """Top-level plugin manifest. Loaded from ``manifest.yaml``."""
 
@@ -354,6 +408,20 @@ class PluginManifest(_StrictModel):
     agent: AgentBlock | None = None
     gcs: GcsBlock | None = None
 
+    # --- Optional install-dialog content fields ---
+    # These are informational copy the GCS install modal renders to give
+    # the operator a richer pre-install summary. The agent does not
+    # enforce or interpret any of them; they are forward-compatible and
+    # may be absent on older manifests.
+    description_long: str | None = None
+    features: list[str] = Field(default_factory=list)
+    hardware_requirements: HardwareRequirements | None = None
+    resource_impact: ResourceImpact | None = None
+    required_fc_parameters: RequiredFcParameters | None = None
+    telemetry_fields: list[str] = Field(default_factory=list)
+    documentation_url: str | None = None
+    screenshots: list[Screenshot] = Field(default_factory=list)
+
     extra: dict[str, Any] = Field(default_factory=dict)
 
     @field_validator("id")
@@ -370,6 +438,17 @@ class PluginManifest(_StrictModel):
     def _validate_version(cls, v: str) -> str:
         if not SEMVER_PATTERN.match(v):
             raise ManifestError(f"plugin version {v!r} is not valid semver")
+        return v
+
+    @field_validator("documentation_url")
+    @classmethod
+    def _validate_documentation_url(cls, v: str | None) -> str | None:
+        if v is None:
+            return v
+        if not v.startswith("https://"):
+            raise ManifestError(
+                f"documentation_url must use https://, got {v!r}"
+            )
         return v
 
     @model_validator(mode="after")
