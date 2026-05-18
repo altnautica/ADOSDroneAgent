@@ -105,7 +105,8 @@ if [ -z "${ADOS_SCRIPT_DIR}" ]; then
     _BOOT_DIR="$(mktemp -d)"
     _BOOT_REPO="https://github.com/altnautica/ADOSDroneAgent.git"
     echo "Bootstrapping installer from ${_BOOT_REPO} (branch ${_BOOT_BRANCH})..."
-    if ! git clone --depth 1 --quiet --branch "${_BOOT_BRANCH}" \
+    if ! git clone --depth 1 --recurse-submodules --shallow-submodules \
+                   --quiet --branch "${_BOOT_BRANCH}" \
                    "${_BOOT_REPO}" "${_BOOT_DIR}/repo" 2>&1; then
         echo "ERROR: failed to clone ${_BOOT_REPO} for bootstrap" >&2
         rm -rf "${_BOOT_DIR}"
