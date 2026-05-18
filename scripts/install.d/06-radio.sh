@@ -16,6 +16,26 @@
 # so the binaries are reachable from the systemd unit's default PATH
 # without any extra Environment= directive.
 install_wfb_ng_from_vendor() {
+    # Resolve vendor_dir up front so we can compare the vendored source
+    # commit against whatever is currently installed. Version drift
+    # between two rigs in a pair causes silent bind-tunnel failures
+    # (FEC sessions converge but the L3 TCP handshake never lands).
+    local vendor_dir=""
+    if [ -n "${FRESH_REPO_DIR:-}" ] && [ -d "${FRESH_REPO_DIR}/repo/vendor/wfb-ng" ]; then
+        vendor_dir="${FRESH_REPO_DIR}/repo/vendor/wfb-ng"
+    elif [ -d "$(dirname "$0" 2>/dev/null)/../vendor/wfb-ng" ] 2>/dev/null; then
+        vendor_dir="$(cd "$(dirname "$0")/../vendor/wfb-ng" && pwd)"
+    fi
+
+    local _vendor_commit=""
+    if [ -n "${vendor_dir}" ] && [ -d "${vendor_dir}/.git" ]; then
+        _vendor_commit="$(git -C "${vendor_dir}" rev-parse HEAD 2>/dev/null || true)"
+    fi
+    local _installed_commit=""
+    if [ -r /etc/ados/wfb-ng.version ]; then
+        _installed_commit="$(head -c 80 /etc/ados/wfb-ng.version 2>/dev/null | tr -d '[:space:]')"
+    fi
+
     # The bind protocol needs wfb-server (the Python orchestrator from
     # setup.py) AND the wifibroadcast@.service template, not just the
     # `make all_bin` C binaries. Earlier installs that built only
@@ -23,23 +43,30 @@ install_wfb_ng_from_vendor() {
     # legacy `command -v wfb_tx` gate but lack everything the local
     # bind window needs. Treat that case as a partial install and
     # force a rebuild so setup.py runs end-to-end.
+    #
+    # Additionally, skip the rebuild ONLY when the recorded installed
+    # commit matches the vendored source commit. When the vendored
+    # commit cannot be determined (no .git, persisted source tree without
+    # history) keep the original behavior and trust the existing install.
     if command -v wfb_tx >/dev/null 2>&1 \
         && command -v wfb-server >/dev/null 2>&1 \
         && { [ -f /usr/lib/systemd/system/wifibroadcast@.service ] \
-             || [ -f /etc/systemd/system/wifibroadcast@.service ]; }; then
-        info "wfb-ng already installed: $(command -v wfb_tx)"
-        provision_wfb_bind_artifacts ""
+             || [ -f /etc/systemd/system/wifibroadcast@.service ]; } \
+        && { [ -z "${_vendor_commit}" ] || [ "${_installed_commit}" = "${_vendor_commit}" ]; }; then
+        if [ -n "${_vendor_commit}" ]; then
+            info "wfb-ng already at vendored commit ${_vendor_commit:0:8}: $(command -v wfb_tx)"
+        else
+            info "wfb-ng already installed: $(command -v wfb_tx)"
+        fi
+        provision_wfb_bind_artifacts "${vendor_dir}"
         return 0
     fi
     if command -v wfb_tx >/dev/null 2>&1; then
-        info "wfb-ng partial install detected (missing wfb-server or unit template); rebuilding"
-    fi
-
-    local vendor_dir=""
-    if [ -n "${FRESH_REPO_DIR:-}" ] && [ -d "${FRESH_REPO_DIR}/repo/vendor/wfb-ng" ]; then
-        vendor_dir="${FRESH_REPO_DIR}/repo/vendor/wfb-ng"
-    elif [ -d "$(dirname "$0" 2>/dev/null)/../vendor/wfb-ng" ] 2>/dev/null; then
-        vendor_dir="$(cd "$(dirname "$0")/../vendor/wfb-ng" && pwd)"
+        if [ -n "${_vendor_commit}" ] && [ "${_installed_commit}" != "${_vendor_commit}" ]; then
+            info "wfb-ng commit drift detected (installed=${_installed_commit:0:8} vendor=${_vendor_commit:0:8}); rebuilding"
+        else
+            info "wfb-ng partial install detected (missing wfb-server or unit template); rebuilding"
+        fi
     fi
 
     if [ -z "${vendor_dir}" ] || [ ! -f "${vendor_dir}/Makefile" ]; then
@@ -96,6 +123,14 @@ install_wfb_ng_from_vendor() {
 
     if command -v wfb_tx >/dev/null 2>&1; then
         info "wfb-ng installed: $(command -v wfb_tx)"
+        # Persist the vendored commit so the next install/upgrade can
+        # detect drift and rebuild. Both rigs in a pair must run the
+        # same wfb-ng commit; mismatched builds silently break the bind
+        # tunnel (FEC frames decode but L3 TCP never completes).
+        if [ -n "${_vendor_commit}" ]; then
+            mkdir -p /etc/ados
+            printf '%s\n' "${_vendor_commit}" > /etc/ados/wfb-ng.version
+        fi
     else
         warn "wfb-ng install ran but wfb_tx not on PATH; check setup.py data_files paths."
     fi
