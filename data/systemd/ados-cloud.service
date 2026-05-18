@@ -33,8 +33,18 @@ ReadWritePaths=/var/ados /run/ados /etc/ados /etc
 CapabilityBoundingSet=CAP_SYS_ADMIN CAP_NET_ADMIN
 AmbientCapabilities=CAP_SYS_ADMIN CAP_NET_ADMIN
 
-MemoryMax=40M
-CPUQuota=10%
+# Memory cap sized for the bind orchestrator's worst case: the cloud
+# service itself (~30M Python + Twisted + plugins) plus the bind window's
+# transient children (wfb-server Python ~30M, socat + wfb_tx + wfb_rx
+# ~10M each). Anything under ~100M caused the bind to silently OOM-thrash
+# inside the cgroup — wfb-server stuck in mem_cgroup swap reclaim, never
+# responding to the VERSION/BIND handshake. 256M leaves comfortable
+# headroom and matches the sibling video / mediamtx-gs / ROS scale.
+MemoryMax=256M
+# CPU cap removed — the bind protocol is bursty (a few seconds of work
+# every 60 s when unpaired, near-zero post-pair), so capping was
+# producing throttling exactly when the bind needed CPU to drive the
+# Twisted reactor + base64 + tar + sha1sum + key write through socat.
 
 StandardOutput=journal
 StandardError=journal
