@@ -203,7 +203,13 @@ provision_wfb_bind_artifacts() {
     if [ -f /usr/bin/wfb_bind_server.sh ] \
         && grep -q 'wfb-server --version | head' /usr/bin/wfb_bind_server.sh; then
         info "Patching wfb_bind_server.sh show_version to close wfb-server stdin"
-        sed -i 's|wfb-server --version | head|wfb-server --version </dev/null | head|' \
+        # Use @ as sed delimiter because the pattern and replacement both
+        # contain | (the shell pipe) — would collide with the default
+        # / delimiter and the older | delimiter spelling. The pattern
+        # matches the bare "--version |" pipe; the replacement inserts
+        # "</dev/null" between --version and the pipe so wfb-server
+        # sees EOF on stdin immediately.
+        sed -i 's@wfb-server --version | head@wfb-server --version </dev/null | head@' \
             /usr/bin/wfb_bind_server.sh
     fi
 }
