@@ -20,7 +20,6 @@ class ApiRuntime(Protocol):
     board_name: str
     demo: bool
     ota_updater: Any
-    feature_manager: Any
     model_manager: Any
 
     @property
@@ -89,10 +88,6 @@ class ApiRuntimeFacade:
     @property
     def ota_updater(self) -> Any:
         return getattr(self._runtime, "ota_updater", None)
-
-    @property
-    def feature_manager(self) -> Any:
-        return getattr(self._runtime, "feature_manager", None)
 
     @property
     def model_manager(self) -> Any:
@@ -221,21 +216,19 @@ class StandaloneApiRuntime:
         self.board_name = "unknown"
         self.health = HealthMonitor()
         self.demo = False
-        self.feature_manager = None
         self.model_manager = None
-        self._initialize_feature_models(log)
+        self._initialize_model_manager(log)
 
     @property
     def uptime_seconds(self) -> float:
         return 0.0
 
-    def _initialize_feature_models(self, log: Any) -> None:
+    def _initialize_model_manager(self, log: Any) -> None:
         try:
             from pathlib import Path
 
             import yaml
 
-            from ados.core.features import FeatureManager
             from ados.hal.detect import detect_board
             from ados.services.vision.model_manager import ModelManager
 
@@ -253,12 +246,11 @@ class StandaloneApiRuntime:
                 if data.get("name") == board_info.name:
                     board_profile_dict = data
                     break
-            self.feature_manager = FeatureManager(board_profile_dict, self.config)
             npu_tops = board_profile_dict.get("compute", {}).get("npu_tops", 0)
             self.model_manager = ModelManager(self.config.vision, npu_tops=npu_tops)
-            log.info("feature_manager_initialized", board=board_info.name, npu_tops=npu_tops)
+            log.info("model_manager_initialized", board=board_info.name, npu_tops=npu_tops)
         except Exception as e:
-            log.warning("feature_manager_init_failed", error=str(e))
+            log.warning("model_manager_init_failed", error=str(e))
 
 
 def ensure_api_runtime(runtime: ApiRuntime | ApiRuntimeFacade | Any) -> ApiRuntimeFacade:

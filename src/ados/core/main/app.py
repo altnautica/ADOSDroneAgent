@@ -69,8 +69,7 @@ class AgentApp:
         self._demo_scripting: Any = None
         # Public attribute: accessed by OTA API routes via get_agent_app().ota_updater
         self.ota_updater: Any = None
-        # Public attributes: accessed by features/vision API routes
-        self.feature_manager: Any = None
+        # Vision model registry + cache, populated by service_registry.
         self.model_manager: Any = None
 
         # Pairing and discovery (public — accessed by API routes)

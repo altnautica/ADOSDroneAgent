@@ -19,7 +19,6 @@ from ados.api.routes import (
     dashboard,
     diagnostics,
     display,
-    features,
     fleet,
     ground_station,
     logs,
@@ -35,10 +34,10 @@ from ados.api.routes import (
     setup,
     signing,
     status,
-    suites,
     system,
     version,
     video,
+    vision_models,
     wfb,
     whep,
     ws_tickets,
@@ -115,9 +114,8 @@ def create_app(agent: Any) -> FastAPI:
     # Peripheral Manager plugin registry. Lives alongside the legacy
     # /api/peripherals hardware scan route.
     app.include_router(peripherals_v1.router, prefix="/api")
-    app.include_router(suites.router, prefix="/api")
     app.include_router(fleet.router, prefix="/api")
-    app.include_router(features.router, prefix="/api")
+    app.include_router(vision_models.router, prefix="/api")
     app.include_router(ground_station.router, prefix="/api")
     # ROS 2 environment management (opt-in).
     app.include_router(ros.router, prefix="/api")

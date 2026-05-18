@@ -48,7 +48,6 @@ class ApiRuntimeTestDouble:
         self.discovery_service = None
         self.board_name = "test"
         self.demo = False
-        self.feature_manager = None
         self.model_manager = None
         self.pairing_manager = MagicMock()
         self.pairing_manager.is_paired = False

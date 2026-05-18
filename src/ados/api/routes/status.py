@@ -333,14 +333,12 @@ async def get_full_status(request: Request):
     # --- Telemetry snapshot ---
     telemetry = app.vehicle_state_dict()
 
-    # --- Capabilities (from FeatureManager if available) ---
-    capabilities = {}
-    fm = app.feature_manager
-    if fm is not None:
-        try:
-            capabilities = fm.get_capabilities()
-        except Exception:
-            pass
+    # Capabilities block. Per-agent feature catalogs were retired with
+    # the legacy Features tab; capability data now comes from the heartbeat
+    # peripherals + HAL profile + plugin manifests, which the GCS reads
+    # directly. The field stays in the payload as an empty dict for
+    # forward-compat with older Mission Control builds that still read it.
+    capabilities: dict = {}
 
     # --- Mesh snapshot. Only populated on ground-station profile with
     # a non-direct role. Direct nodes and drone-profile nodes get an

@@ -44,11 +44,11 @@ async def register_services(app: AgentApp) -> None:  # noqa: C901
     if app.config.agent.tier == "auto":
         app.config.agent.tier = f"tier{board.tier}"
 
-    # Initialize feature manager and model manager
-    from ados.core.features import FeatureManager
+    # Initialize model manager (vision model registry + cache)
     from ados.services.vision.model_manager import ModelManager
 
-    # Load raw board profile YAML for capabilities (includes compute, video, etc.)
+    # Load raw board profile YAML so the model manager can pick variants
+    # sized for the detected NPU.
     board_profile_dict: dict = {}
     try:
         import yaml as _yaml
@@ -71,7 +71,6 @@ async def register_services(app: AgentApp) -> None:  # noqa: C901
     except Exception:
         pass
 
-    app.feature_manager = FeatureManager(board_profile_dict, app.config)
     npu_tops = board_profile_dict.get("compute", {}).get("npu_tops", 0)
     app.model_manager = ModelManager(app.config.vision, npu_tops=npu_tops)
 
