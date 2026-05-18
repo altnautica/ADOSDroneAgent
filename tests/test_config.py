@@ -125,3 +125,76 @@ def test_cors_origins_env_override_replaces(monkeypatch):
         "https://and-this.example.com",
     ]
     assert "http://localhost:4000" not in effective
+
+
+# ─── Per-board VideoConfig.use_gst_air_pipeline default ───────────────────────
+
+
+def test_use_gst_air_pipeline_defaults_true_on_rockchip(monkeypatch):
+    """On Rockchip boards the in-process GStreamer pipeline is preferred
+    so encoding can offload to ``mpph264enc`` on the VPU. The
+    AirPipeline's own encoder chooser falls back to ``x264enc`` if
+    ``mpph264enc`` is missing at runtime, so this default is safe even
+    on a Rockchip rig without the rockchip-mpp gstreamer plugin
+    installed."""
+    from ados.core.config.video import VideoConfig
+
+    class _FakeBoard:
+        soc = "RK3582"
+
+    monkeypatch.setattr(
+        "ados.hal.detect.detect_board", lambda *a, **kw: _FakeBoard()
+    )
+    cfg = VideoConfig()
+    assert cfg.use_gst_air_pipeline is True
+
+
+def test_use_gst_air_pipeline_defaults_false_on_pi(monkeypatch):
+    """On non-Rockchip boards (Pi 4B BCM2711, Cubie A7Z Allwinner, etc.)
+    the per-board default is False so we stay on the bench-validated
+    legacy bash pipeline. Operators can still opt in via config.yaml."""
+    from ados.core.config.video import VideoConfig
+
+    class _FakeBoard:
+        soc = "BCM2711"
+
+    monkeypatch.setattr(
+        "ados.hal.detect.detect_board", lambda *a, **kw: _FakeBoard()
+    )
+    cfg = VideoConfig()
+    assert cfg.use_gst_air_pipeline is False
+
+
+def test_use_gst_air_pipeline_respects_explicit_config(monkeypatch):
+    """An explicit ``use_gst_air_pipeline: false`` in config.yaml wins
+    over the per-board True default. The operator override path must
+    never be silently flipped by a future board-detection refactor."""
+    from ados.core.config.video import VideoConfig
+
+    class _FakeBoard:
+        soc = "RK3588"  # Would otherwise default to True
+
+    monkeypatch.setattr(
+        "ados.hal.detect.detect_board", lambda *a, **kw: _FakeBoard()
+    )
+    cfg = VideoConfig(use_gst_air_pipeline=False)
+    assert cfg.use_gst_air_pipeline is False
+
+
+def test_use_gst_air_pipeline_falls_back_to_false_on_detect_failure(
+    monkeypatch,
+):
+    """Board fingerprint probe failures (HAL not importable in a unit
+    test fixture, /proc unreadable in a container) must never crash
+    config loading. The default factory swallows the exception and
+    returns the conservative False."""
+    from ados.core.config.video import VideoConfig
+
+    def _boom(*a, **kw):
+        raise RuntimeError("simulated /proc parse failure")
+
+    monkeypatch.setattr(
+        "ados.hal.detect.detect_board", _boom
+    )
+    cfg = VideoConfig()
+    assert cfg.use_gst_air_pipeline is False

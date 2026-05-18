@@ -684,7 +684,28 @@ class AirPipeline:
             self._tx_last_bytes_seen = None
 
     def _stats_publisher(self) -> None:
-        """Write the stats snapshot to _STATS_FILE at 1 Hz."""
+        """Write the stats snapshot to _STATS_FILE at 1 Hz.
+
+        Also feeds the cumulative ``bus_errors`` counter into the
+        auto-fallback watcher. When the watcher concludes the
+        GStreamer pipeline is misbehaving (>20 bus errors in 60s —
+        vendor MPP plugin regression, kernel/driver mismatch, etc.),
+        it writes a runtime override at
+        ``/run/ados/video-encoder-override.yaml`` that flips
+        ``use_gst_air_pipeline`` to False for the next start_stream
+        cycle. We don't restart the service from here — the next
+        health-check restart in the outer pipeline picks up the
+        override.
+
+        ``bus_errors`` is monotonically increasing on the same
+        ``AirPipelineStats`` instance across in-process restarts
+        (``_do_restart`` resets state on the same pipeline without
+        zeroing stats); a process restart re-zeroes the counter AND
+        the watcher's "already triggered" flag so the new session
+        re-evaluates from scratch.
+        """
+        from .auto_fallback import AirPipelineHealthWatcher
+
         run_dir = _STATS_FILE.parent
         try:
             run_dir.mkdir(parents=True, exist_ok=True)
@@ -693,6 +714,7 @@ class AirPipeline:
             # dev host without /run/ados the publisher silently
             # disables itself.
             return
+        health_watcher = AirPipelineHealthWatcher()
         while not self._stop_requested.is_set():
             try:
                 time.sleep(_STATS_PUBLISH_INTERVAL_S)
@@ -706,6 +728,12 @@ class AirPipeline:
                 tmp = _STATS_FILE.with_suffix(".tmp")
                 tmp.write_text(json.dumps(snapshot))
                 tmp.replace(_STATS_FILE)
+                # Feed bus_errors AFTER the publish so the file always
+                # reflects what we observed even if the watcher trips.
+                # Watcher is idempotent — once the override file is
+                # written we don't repeat writes inside this process.
+                health_watcher.observe(int(snapshot.get("bus_errors", 0)))
+                health_watcher.maybe_trigger_fallback()
             except Exception as exc:  # noqa: BLE001
                 self._logger.debug(
                     "air_pipeline_stats_publish_failed", error=str(exc)

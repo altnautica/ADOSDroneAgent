@@ -11,6 +11,60 @@ from ados.core.paths import RECORDINGS_DIR
 from .wfb import WfbConfig
 
 
+def _default_use_gst_air_pipeline() -> bool:
+    """Resolve the per-board default for ``use_gst_air_pipeline``.
+
+    Resolution order:
+
+    1. Runtime self-heal override at ``/run/ados/video-encoder-override.yaml``.
+       Written by the AirPipeline health watcher when it detects an
+       unhealthy bus_errors rate. Wins over the board default so a
+       crash-looping hardware encoder auto-disables itself without
+       operator intervention.
+    2. Per-board fingerprint. Returns True on Rockchip boards (RK3566
+       / RK3582 / RK3588 / …) where the in-process GStreamer pipeline
+       can plug into the vendor ``mpph264enc`` element and offload
+       H.264 encoding to the VPU, cutting CPU from ~48 % (libx264) to
+       <10 % at 720p30 4 Mbps.
+    3. False everywhere else so other boards stay on the
+       bench-validated legacy bash pipeline path.
+
+    An explicit ``video.use_gst_air_pipeline: true|false`` in
+    ``/etc/ados/config.yaml`` bypasses this factory entirely and
+    always wins. Operator intent is sacred — the runtime override
+    can only adjust the per-board default, never an explicit value.
+
+    All probes are wrapped in broad try/except so config loading never
+    blocks on /proc parsing failures, a missing override file, or
+    an unavailable HAL.
+    """
+    # Layer 1: runtime self-heal override (set by the air pipeline
+    # bus_errors watchdog when it detects a crash-looping HW encoder).
+    try:
+        from ados.services.video.air_pipeline.auto_fallback import (
+            is_auto_fallback_active,
+        )
+
+        if is_auto_fallback_active():
+            return False
+    except Exception:
+        pass
+
+    # Layer 2: per-board fingerprint.
+    try:
+        from ados.hal.detect import detect_board
+
+        board = detect_board()
+        soc = (getattr(board, "soc", None) or "").lower()
+        # Rockchip SoCs identify as rk3566, rk3568, rk3582, rk3588, etc.
+        return soc.startswith("rk")
+    except Exception:
+        # Any failure (HAL not importable in a unit-test fixture, /proc
+        # unreadable in a container) falls back to legacy bash, never
+        # crashes config load.
+        return False
+
+
 class CameraConfig(BaseModel):
     source: str = "csi"
     codec: str = "h264"
@@ -57,10 +111,20 @@ class VideoConfig(BaseModel):
     # the legacy bash composition of camera-capture + ffmpeg-encoder +
     # mediamtx-air + ffmpeg-tee + python-sei-injector + ffmpeg-RTP with a
     # single PyGObject-driven pipeline writing RTP directly to UDP 5600
-    # for wfb_tx. Default off until bench-validated; flip per-rig in
-    # /etc/ados/config.yaml under ``video.use_gst_air_pipeline`` and
-    # restart the agent. When false, the legacy bash path is unchanged.
-    use_gst_air_pipeline: bool = False
+    # for wfb_tx. Default is **per-board**: True on Rockchip SoCs where
+    # ``mpph264enc`` offloads H.264 to the VPU, False everywhere else so
+    # we stay on the bench-validated bash pipeline. AirPipeline's own
+    # ``choose_encoder()`` then transparently falls back to ``x264enc``
+    # (software) if ``mpph264enc`` isn't available at runtime. Explicit
+    # ``video.use_gst_air_pipeline: true|false`` in
+    # ``/etc/ados/config.yaml`` always overrides the per-board default.
+    # The auto-fallback watcher in ``air_pipeline/auto_fallback.py``
+    # can also flip this to False at runtime if it detects a misbehaving
+    # hardware encoder (the override lives on /run tmpfs so a reboot
+    # gives the rig back its per-board default).
+    use_gst_air_pipeline: bool = Field(
+        default_factory=_default_use_gst_air_pipeline,
+    )
     # When the GStreamer pipeline can choose between a hardware encoder
     # (v4l2h264enc on Pi, mpph264enc on Rockchip, omxh264enc / nvv4l2h264enc
     # on Jetson) and the software libx264 fallback, prefer hardware. Set
