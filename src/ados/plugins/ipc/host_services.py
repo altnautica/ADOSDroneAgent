@@ -207,17 +207,44 @@ class CameraClaim:
     exclusive: bool
 
 
+@dataclass
+class CameraFrame:
+    """Latest captured frame for a claimed camera path.
+
+    The capture source is owned by the video pipeline (libcamera or
+    V4L2 — selected by board profile). This dataclass is the in-memory
+    handoff shape between the capture loop and the IPC handler. ``data``
+    is the raw image bytes in ``format``; the handler returns it verbatim
+    to the plugin over msgpack.
+
+    Real-world capture wiring lives outside of the plugin host. For now
+    only the test harness populates this struct; on a production drone
+    the video pipeline pushes a frame here on each new buffer it
+    decodes, and the IPC ``camera.get_frame`` handler returns the
+    cached value.
+    """
+
+    frame_id: int
+    width: int
+    height: int
+    format: str
+    data: bytes
+    ts_ns: int
+
+
 class CameraClaimTracker:
     """Records per-plugin exclusive holds on a /dev/videoN device.
 
     Domain F owns the camera_mgr extension that decides what the claim
-    means at the encoder level. This tracker only records who holds
-    which path so a second plugin requesting exclusive on the same
-    path is refused.
+    means at the encoder level. This tracker records who holds which
+    path so a second plugin requesting exclusive on the same path is
+    refused. It also acts as the cache point for the latest frame a
+    plugin can poll via ``camera.get_frame``.
     """
 
     def __init__(self) -> None:
         self._claims: dict[str, CameraClaim] = {}
+        self._frames: dict[str, CameraFrame] = {}
 
     def claim(self, plugin_id: str, device_path: str, exclusive: bool) -> CameraClaim:
         prior = self._claims.get(device_path)
@@ -229,10 +256,47 @@ class CameraClaimTracker:
         self._claims[device_path] = claim
         return claim
 
+    def release(self, plugin_id: str, device_path: str) -> None:
+        """Release a single path held by this plugin.
+
+        No-op when the plugin does not hold the path; raises only when
+        another plugin holds the path. Drops the cached frame so a
+        stale buffer from a previous owner can't leak to the next
+        claimant.
+        """
+        prior = self._claims.get(device_path)
+        if prior is None:
+            return
+        if prior.plugin_id != plugin_id:
+            raise PermissionError(
+                f"camera {device_path} is held by {prior.plugin_id}, not {plugin_id}"
+            )
+        self._claims.pop(device_path, None)
+        self._frames.pop(device_path, None)
+
     def release_plugin(self, plugin_id: str) -> None:
         for path, c in list(self._claims.items()):
             if c.plugin_id == plugin_id:
                 self._claims.pop(path, None)
+                self._frames.pop(path, None)
+
+    def holder(self, device_path: str) -> str | None:
+        """Return the plugin_id currently holding ``device_path``."""
+        claim = self._claims.get(device_path)
+        return claim.plugin_id if claim else None
+
+    def publish_frame(self, device_path: str, frame: CameraFrame) -> None:
+        """Stash the latest frame the capture loop produced for ``device_path``.
+
+        The video pipeline calls this once per decoded buffer. Only
+        called when a plugin holds the path — capture should not
+        produce frames for an unclaimed device.
+        """
+        self._frames[device_path] = frame
+
+    def latest_frame(self, device_path: str) -> CameraFrame | None:
+        """Return the cached latest frame, or None if none has been published."""
+        return self._frames.get(device_path)
 
 
 # ---------------------------------------------------------------------
@@ -369,6 +433,7 @@ __all__ = [
     "DriverRegistry",
     "CameraClaim",
     "CameraClaimTracker",
+    "CameraFrame",
     "ConfigStore",
     "MAVLinkSubscriptionPump",
     "HostServices",

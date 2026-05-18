@@ -285,6 +285,84 @@ async def handle_camera_claim(
     }
 
 
+async def handle_camera_release(
+    server: "PluginIpcServer", session: "PluginSession", env: Envelope
+) -> dict[str, Any]:
+    device_path = env.args.get("device_path")
+    if not isinstance(device_path, str) or not device_path:
+        raise _rpc_error("device_path must be a non-empty string")
+    try:
+        server.host.cameras.release(session.plugin_id, device_path)
+    except PermissionError as exc:
+        raise _rpc_error(str(exc))
+    return {"released": True, "device_path": device_path}
+
+
+# Supported frame formats. The plugin requests one of these in
+# get_frame; the supervisor refuses anything else so a future format
+# bump is a versioned addition rather than an opaque pass-through.
+_SUPPORTED_CAMERA_FORMATS: set[str] = {"nv12", "rgb888", "yuv420p"}
+
+
+async def handle_camera_get_frame(
+    server: "PluginIpcServer", session: "PluginSession", env: Envelope
+) -> dict[str, Any]:
+    device_path = env.args.get("device_path")
+    fmt = env.args.get("format", "nv12")
+    timeout_ms_raw = env.args.get("timeout_ms", 1000)
+    if not isinstance(device_path, str) or not device_path:
+        raise _rpc_error("device_path must be a non-empty string")
+    if not isinstance(fmt, str) or fmt not in _SUPPORTED_CAMERA_FORMATS:
+        raise _rpc_error(
+            f"format {fmt!r} not supported; pick one of "
+            f"{sorted(_SUPPORTED_CAMERA_FORMATS)}"
+        )
+    try:
+        timeout_ms = int(timeout_ms_raw)
+    except (TypeError, ValueError):
+        raise _rpc_error("timeout_ms must be an integer") from None
+    if timeout_ms < 0:
+        raise _rpc_error("timeout_ms must be >= 0")
+
+    holder = server.host.cameras.holder(device_path)
+    if holder is None:
+        raise _rpc_error(
+            f"camera {device_path} is not claimed; call camera.claim first"
+        )
+    if holder != session.plugin_id:
+        raise _rpc_error(
+            f"camera {device_path} is held by another plugin ({holder})"
+        )
+
+    frame = server.host.cameras.latest_frame(device_path)
+    if frame is None:
+        raise _rpc_error(
+            f"no frame available for {device_path}; capture pipeline has not "
+            "produced a buffer yet"
+        )
+    if frame.format != fmt:
+        raise _rpc_error(
+            f"frame format mismatch: pipeline produced {frame.format!r}, "
+            f"plugin requested {fmt!r}"
+        )
+    # `stale` reflects whether the supervisor would have liked to wait
+    # for a new frame but is returning the cached one. The capture
+    # pipeline owns the "is this fresh" computation; today we hand back
+    # whatever is cached so plugins can implement their own age check
+    # against `ts_ns`. timeout_ms is accepted for forward-compat with
+    # the eventual blocking-wait variant.
+    _ = timeout_ms
+    return {
+        "frame_id": frame.frame_id,
+        "width": frame.width,
+        "height": frame.height,
+        "format": frame.format,
+        "data": frame.data,
+        "ts_ns": frame.ts_ns,
+        "stale": False,
+    }
+
+
 # ---------------------------------------------------------------------
 # Config kv handler
 # ---------------------------------------------------------------------
@@ -431,6 +509,8 @@ __all__ = [
     "handle_peripheral_register_driver",
     "handle_peripheral_unregister_driver",
     "handle_camera_claim",
+    "handle_camera_release",
+    "handle_camera_get_frame",
     "handle_config_get",
     "handle_config_set",
     "handle_process_spawn",

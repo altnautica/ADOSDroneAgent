@@ -206,6 +206,34 @@ class PluginIpcClient:
             )
         ).args
 
+    async def camera_release(self, device_path: str) -> dict:
+        return (
+            await self._send_request(
+                "camera.release",
+                capability="sensor.camera.register",
+                args={"device_path": device_path},
+            )
+        ).args
+
+    async def camera_get_frame(
+        self,
+        device_path: str,
+        *,
+        format: str = "nv12",
+        timeout_ms: int = 1000,
+    ) -> dict:
+        return (
+            await self._send_request(
+                "camera.get_frame",
+                capability="sensor.camera.register",
+                args={
+                    "device_path": device_path,
+                    "format": format,
+                    "timeout_ms": int(timeout_ms),
+                },
+            )
+        ).args
+
     # ---- Config kv ----------------------------------------------------
 
     async def config_get(self, key: str, default: Any = None) -> Any:
@@ -439,6 +467,8 @@ class _NullIpcClient:
     async def peripheral_register_driver(self, *_a, **_k) -> dict: return self._unavail("peripheral_register_driver")
     async def peripheral_unregister_driver(self, *_a, **_k) -> dict: return self._unavail("peripheral_unregister_driver")
     async def camera_claim(self, *_a, **_k) -> dict: return self._unavail("camera_claim")
+    async def camera_release(self, *_a, **_k) -> dict: return self._unavail("camera_release")
+    async def camera_get_frame(self, *_a, **_k) -> dict: return self._unavail("camera_get_frame")
     async def config_get(self, *_a, **_k) -> Any: return self._unavail("config_get")
     async def config_set(self, *_a, **_k) -> dict: return self._unavail("config_set")
     async def process_spawn(self, *_a, **_k) -> dict: return self._unavail("process_spawn")

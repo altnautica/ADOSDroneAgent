@@ -92,6 +92,14 @@ def build_dispatch_table(server_cls) -> dict[str, tuple]:
             _adapt(_handlers.handle_camera_claim),
             "sensor.camera.register",
         ),
+        "camera.release": (
+            _adapt(_handlers.handle_camera_release),
+            "sensor.camera.register",
+        ),
+        "camera.get_frame": (
+            _adapt(_handlers.handle_camera_get_frame),
+            "sensor.camera.register",
+        ),
         # ---- config kv (per-drone / global) ----
         "config.get": (_adapt(_handlers.handle_config_get), None),
         "config.set": (_adapt(_handlers.handle_config_set), None),
