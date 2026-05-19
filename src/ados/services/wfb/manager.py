@@ -800,6 +800,20 @@ class WfbManager:
                             channel=beacon.channel,
                             rssi_dbm=beacon.rssi_dbm,
                         )
+                        # Back-fill the persisted pair state with the
+                        # peer device-id learned over the radio. The
+                        # bind tunnel does not always carry this, so
+                        # the presence beacon is the canonical source.
+                        try:
+                            from ados.services.ground_station.pair_manager import (
+                                update_peer_device_id,
+                            )
+                            update_peer_device_id("drone", beacon.device_id)
+                        except (ImportError, OSError) as exc:
+                            log.debug(
+                                "pair_state_peer_back_fill_failed",
+                                error=str(exc),
+                            )
                     self._persist_peer_presence()
                     continue
 
