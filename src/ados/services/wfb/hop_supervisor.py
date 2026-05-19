@@ -290,6 +290,87 @@ class HopSupervisor:
         self._last_hop_at: float = 0.0
         self._reactive_cooldown_s = 30.0
         self._history: list[dict[str, Any]] = []
+        # HopAnnounce delivery: the limited broadcast (255.255.255.255)
+        # over the default route does not bridge wired-to-wireless on
+        # most consumer APs, so we fan out to additional destinations.
+        # `_subnet_broadcast` is the /24 subnet broadcast of whichever
+        # interface owns the default route (covers APs that bridge
+        # subnet broadcast but not the limited one). `_peer_ip_cache`
+        # holds the resolved mDNS hostname of the paired peer for
+        # unicast delivery (always works regardless of AP isolation).
+        self._subnet_broadcast: str | None = self._compute_subnet_broadcast()
+        self._peer_ip_cache: str | None = None
+        self._peer_ip_cached_at: float = 0.0
+        self._peer_ip_cache_ttl_s: float = 300.0
+
+    def _compute_subnet_broadcast(self) -> str | None:
+        """Return the /24 subnet broadcast for the default-route interface.
+
+        Used as a secondary destination for HopAnnounce. Some consumer
+        APs bridge subnet broadcasts (192.168.x.255) but block the
+        limited broadcast (255.255.255.255), and vice versa. Sending
+        both maximises the chance the listener on a wireless GS gets
+        a packet from a wired drone (or wired-from-wireless).
+
+        Hardcoded /24 because the rigs deploy onto standard consumer
+        LANs. Returns None if the local IP can't be determined.
+        """
+        try:
+            import ipaddress as _ipaddress
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            try:
+                s.connect(("8.8.8.8", 80))
+                local_ip = s.getsockname()[0]
+            finally:
+                s.close()
+            net = _ipaddress.ip_network(f"{local_ip}/24", strict=False)
+            return str(net.broadcast_address)
+        except (OSError, ValueError):
+            return None
+
+    def _resolve_peer_ip(self) -> str | None:
+        """Resolve the paired peer's mDNS hostname to a unicast IP.
+
+        Cached for `_peer_ip_cache_ttl_s` (5 minutes) so a hop attempt
+        every 60s incurs at most one resolution per cache window.
+        Returns None if the peer device-id is unknown (pair never
+        completed) or resolution fails.
+
+        The mDNS hostname follows the convention in core/pairing.py:303
+        `ados-<first-6-chars-of-device-id>.local` and is served by
+        avahi-daemon + nss-mdns on every installed rig.
+        """
+        peer_id: str | None = None
+        try:
+            peer_id = getattr(
+                self._wfb._config, "paired_with_device_id", None
+            )
+        except AttributeError:
+            return None
+        if not peer_id:
+            return None
+
+        now = time.monotonic()
+        if (
+            self._peer_ip_cache is not None
+            and (now - self._peer_ip_cached_at) < self._peer_ip_cache_ttl_s
+        ):
+            return self._peer_ip_cache
+
+        short_id = peer_id[:6].lower()
+        mdns_name = f"ados-{short_id}.local"
+        try:
+            ip = socket.gethostbyname(mdns_name)
+            self._peer_ip_cache = ip
+            self._peer_ip_cached_at = now
+            return ip
+        except OSError as exc:
+            log.debug(
+                "hop_supervisor_peer_resolve_failed",
+                peer=mdns_name,
+                error=str(exc),
+            )
+            return None
 
     def snapshot(self) -> dict[str, Any]:
         return {
@@ -611,14 +692,39 @@ class HopSupervisor:
 
         reader_task = asyncio.create_task(_reader())
         payload = announce.encode(pair_key)
+        # Fan out the announce to limited broadcast, the local /24
+        # subnet broadcast, and the paired peer's unicast IP (resolved
+        # via mDNS). Three independent paths means a GS on the
+        # wireless side of a broadcast-isolating AP still receives the
+        # announce. The HopAnnounce body doesn't cover the destination
+        # address, so duplicate delivery is HMAC-safe — the listener
+        # tracks already-applied epochs and ACKs once.
+        destinations: list[tuple[str, int]] = [
+            ("255.255.255.255", self._control_port),
+        ]
+        if self._subnet_broadcast:
+            destinations.append((self._subnet_broadcast, self._control_port))
+        peer_ip = self._resolve_peer_ip()
+        if peer_ip:
+            destinations.append((peer_ip, self._control_port))
+        log.info(
+            "hop_supervisor_broadcast_start",
+            target=announce.target_channel,
+            destinations=[d[0] for d in destinations],
+        )
         try:
             for _ in range(_HOP_BROADCAST_ROUNDS):
                 if ack_event.is_set():
                     break
-                try:
-                    sock.sendto(payload, ("255.255.255.255", self._control_port))
-                except OSError as exc:
-                    log.debug("hop_supervisor_send_failed", error=str(exc))
+                for dest in destinations:
+                    try:
+                        sock.sendto(payload, dest)
+                    except OSError as exc:
+                        log.debug(
+                            "hop_supervisor_send_failed",
+                            dest=dest[0],
+                            error=str(exc),
+                        )
                 await asyncio.sleep(HOP_BROADCAST_INTERVAL_MS / 1000.0)
         finally:
             reader_task.cancel()
