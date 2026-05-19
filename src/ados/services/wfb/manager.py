@@ -21,9 +21,9 @@ from ados.services.wfb.link_quality import LinkQualityMonitor, LinkStats
 # does not emit a "tx_byte_count" line on its stdout.
 _TX_HEALTH_POLL_INTERVAL_S = 5.0
 _TX_HEALTH_SILENCE_THRESHOLD_S = 30.0
-# wfb_tx binds UDP 5600 for the air-side ingress feed. Hex 1788 is the
-# port number as it appears in /proc/net/udp's local_address column.
-_WFB_TX_INGRESS_PORT_HEX = "1788"
+# wfb_tx binds UDP 5600 for the air-side ingress feed. /proc/net/udp's
+# local_address column suffixes the port as 4-char uppercase hex.
+_WFB_TX_INGRESS_PORT_HEX = "15E0"
 # Suppress duplicate "upstream silent" warnings to once every 5 minutes
 # so a bench drone with no encoder running does not flood the journal.
 _UPSTREAM_SILENT_LOG_INTERVAL_S = 300.0
@@ -778,32 +778,46 @@ class WfbManager:
                     self._last_upstream_change_at = now
                     upstream_feeding = True
 
-            if not upstream_feeding and upstream is not None:
-                # Upstream silent. wfb_tx is doing nothing because there
-                # is nothing to send. Killing it changes nothing; log
-                # at WARN every 5 min and keep polling.
+            if not upstream_feeding:
+                # Upstream silent OR unknown (couldn't read /proc/net/udp).
+                # Either way wfb_tx is doing nothing because there is
+                # nothing to send; killing it changes nothing and would
+                # cascade through stop() to the control plane, breaking
+                # FHSS coordination. Log at WARN every 5 min and keep
+                # polling.
                 if (
                     now - self._last_upstream_silent_log_at
                     >= _UPSTREAM_SILENT_LOG_INTERVAL_S
                 ):
-                    log.warning(
-                        "wfb_tx_upstream_silent",
-                        interface=self._interface,
-                        silent_seconds=round(silent_for, 1),
-                        rx_queue=upstream[0],
-                        drops=upstream[1],
-                        note=(
-                            "tx_bytes flat but UDP 5600 ingress idle; "
-                            "no encoder feeding wfb_tx, skipping kill"
-                        ),
-                    )
+                    if upstream is not None:
+                        log.warning(
+                            "wfb_tx_upstream_silent",
+                            interface=self._interface,
+                            silent_seconds=round(silent_for, 1),
+                            rx_queue=upstream[0],
+                            drops=upstream[1],
+                            note=(
+                                "tx_bytes flat but UDP 5600 ingress idle; "
+                                "no encoder feeding wfb_tx, skipping kill"
+                            ),
+                        )
+                    else:
+                        log.warning(
+                            "wfb_tx_upstream_unknown",
+                            interface=self._interface,
+                            silent_seconds=round(silent_for, 1),
+                            note=(
+                                "tx_bytes flat and /proc/net/udp row for "
+                                "UDP 5600 not found; assuming silent, "
+                                "skipping kill"
+                            ),
+                        )
                     self._last_upstream_silent_log_at = now
                 continue
 
-            # Either the ingress is feeding (drops advancing or rx_queue
-            # non-zero) or we could not read /proc/net/udp at all — in
-            # both cases the safest call is the existing kill-and-respawn
-            # behavior so a real driver wedge does not stay stuck.
+            # Ingress IS feeding (drops advancing or rx_queue non-zero)
+            # while tx_bytes stays flat. wfb_tx is wedged — kill and let
+            # the main run loop respawn it.
             self._tx_zombie_kills += 1
             log.warning(
                 "wfb_tx_zombie_detected",
