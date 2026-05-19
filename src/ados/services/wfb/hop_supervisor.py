@@ -389,12 +389,26 @@ class HopSupervisor:
         except Exception:
             pass
 
+        now = time.monotonic()
+        # Periodic boundary check is moved up so the silent early-return
+        # gates below can log diagnostically once per period instead of
+        # every tick (which would spam the journal at 1 Hz).
+        periodic = now >= next_periodic_at
+
         if not self._enabled:
+            if periodic:
+                log.info("hop_supervisor_skip_disabled")
             return
-        if not getattr(self._wfb, "_interface", None):
+        interface = getattr(self._wfb, "_interface", None)
+        if not interface:
+            if periodic:
+                log.info(
+                    "hop_supervisor_skip_no_interface",
+                    interface=repr(interface),
+                    manager_class=type(self._wfb).__name__,
+                )
             return
 
-        now = time.monotonic()
         # Reactive trigger: most recent sample crosses either threshold
         # AND it's been at least reactive_cooldown_s since the last hop.
         #
@@ -431,9 +445,18 @@ class HopSupervisor:
                     packets=packets_received,
                 )
 
-        periodic = now >= next_periodic_at
         if not (periodic or reactive):
             return
+
+        # Confirmation: we got past every gate and are about to attempt
+        # a hop. Promoted from no-log so the journal records every
+        # periodic-fire decision.
+        log.info(
+            "hop_supervisor_attempt",
+            trigger="periodic" if periodic else "reactive",
+            current_channel=self._wfb._channel,
+            band=self._band,
+        )
 
         target = _pick_target_channel(
             interface=self._wfb._interface,
@@ -441,7 +464,7 @@ class HopSupervisor:
             current_channel=self._wfb._channel,
         )
         if target is None:
-            log.debug(
+            log.info(
                 "hop_supervisor_no_candidate",
                 band=self._band,
                 current=self._wfb._channel,
