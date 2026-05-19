@@ -308,6 +308,12 @@ main_install_flow() {
         # wfb-ng install moved earlier in the upgrade flow so it can reach
         # the temp-repo's vendor/wfb-ng/ tree before cleanup.
 
+        # Drop first-party plugin trust keys at /etc/ados/plugin-keys/ so
+        # the agent can verify signed .adosplug archives. Idempotent
+        # against the persisted /opt/ados/source/scripts/plugin-keys
+        # path populated by the persist step above.
+        provision_plugin_keys
+
         echo ""
         info "Upgrade complete."
         print_pairing_code
