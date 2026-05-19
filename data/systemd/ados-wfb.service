@@ -19,8 +19,15 @@ NoNewPrivileges=no
 ProtectSystem=strict
 ReadWritePaths=/var/ados /run/ados /dev /etc/ados
 
-MemoryMax=30M
-CPUQuota=15%
+# The original 30M cap was sized for the bare manager + wfb_tx subprocess.
+# Adding the hop supervisor (band scanner, control-port broadcaster) plus
+# the bitrate controller pushes steady-state memory past 29M, which puts
+# the cgroup into hard reclaim and stalls the asyncio loop — the periodic
+# hop timer effectively stops firing because allocations queue. 96M gives
+# the supervisor's iw-scan output (~one channel-survey buffer) plus the
+# control-port broadcaster headroom without inviting unbounded growth.
+MemoryMax=96M
+CPUQuota=25%
 
 StandardOutput=journal
 StandardError=journal
