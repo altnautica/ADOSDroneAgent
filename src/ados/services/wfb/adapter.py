@@ -22,6 +22,10 @@ WFB_COMPATIBLE: dict[tuple[int, int], str] = {
     (0x0BDA, 0x881A): "RTL8812AU (alt)",
     (0x0BDA, 0x881B): "RTL8812AU (alt)",
     (0x0BDA, 0x881C): "RTL8812AU (alt)",
+    # Ambiguous PID: shipped on both RTL8812AU rebadges and RTL8812EU /
+    # RTL8822EU dongles. Default label is the AU variant; the detection
+    # path below promotes it to "RTL8812EU (a81a)" when the bound kernel
+    # driver is rtl88x2eu, which is the authoritative disambiguator.
     (0x0BDA, 0xA81A): "RTL8812AU (a81a)",
     (0x0BDA, 0xB812): "RTL8812EU",
     (0x2357, 0x0120): "RTL8812AU (TP-Link)",
@@ -262,6 +266,16 @@ def detect_wfb_adapters() -> list[WifiAdapterInfo]:
 
         if (vid, pid) in WFB_COMPATIBLE:
             chipset = WFB_COMPATIBLE[(vid, pid)]
+            # Disambiguate the (0BDA:A81A) PID: same USB ID ships on
+            # both RTL8812AU rebadges and RTL8812EU / RTL8822EU dongles.
+            # The bound kernel driver is the authoritative signal — if
+            # rtl88x2eu claimed the device, this is the EU silicon.
+            if (
+                (vid, pid) == (0x0BDA, 0xA81A)
+                and driver
+                and driver.lower() == "rtl88x2eu"
+            ):
+                chipset = "RTL8812EU (a81a)"
             is_compat = True
         elif driver and driver.lower() in WFB_COMPATIBLE_DRIVERS:
             # Driver-name confirmation: the kernel driver bound to this

@@ -103,6 +103,17 @@ class WfbRxManager:
         # the internal port and emits to mediamtx-gs ingest + LCD udpsrc.
         # Spawned alongside wfb_rx and torn down with it.
         self._fanout_proc: asyncio.subprocess.Process | None = None
+        # WFB control-plane subprocesses (radio_id 1) that carry FHSS
+        # hop coordination over the radio link itself. wfb_rx_control
+        # decodes HopAnnounce frames from the drone and emits them on
+        # UDP 5803 where HopListener already binds. wfb_tx_control
+        # ingests HopAck frames on UDP 5810 from the listener and
+        # transmits them back over the radio to the drone supervisor.
+        # ADOS is local-first / field-deployed; the inter-rig link
+        # must work without depending on a consumer AP bridging L2
+        # broadcasts wired<->wireless.
+        self._rx_control_proc: asyncio.subprocess.Process | None = None
+        self._tx_control_proc: asyncio.subprocess.Process | None = None
         self._monitor = LinkQualityMonitor()
         self._interface: str = ""
         self._channel: int = config.channel
@@ -289,6 +300,89 @@ class WfbRxManager:
             log.error("ground_video_fanout_start_failed", error=str(exc))
             return False
 
+    async def start_rx_control(self, interface: str, channel: int) -> bool:
+        """Spawn wfb_rx_control on radio_id 1 — decodes HopAnnounce.
+
+        The drone's HopSupervisor pushes HopAnnounce frames into its
+        wfb_tx_control on radio_id 1; this subprocess decodes them on
+        the GS side and emits to UDP 5803 where HopListener already
+        binds (see hop_supervisor.HopListener). Same rx.key as the
+        data plane: wfb-ng key files carry both halves of the crypto_
+        box keypair so a single file authenticates incoming frames
+        in both directions.
+        """
+        _tx_key, rx_key = get_key_paths()
+        cmd = [
+            "wfb_rx",
+            "-p", "1",
+            "-c", "127.0.0.1",
+            "-u", "5803",
+            "-K", rx_key,
+            "-l", "1000",
+            interface,
+        ]
+        try:
+            self._rx_control_proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            log.info(
+                "ground_wfb_rx_control_started",
+                pid=self._rx_control_proc.pid,
+                interface=interface,
+                channel=channel,
+            )
+            return True
+        except FileNotFoundError:
+            log.error("ground_wfb_rx_control_not_found")
+            return False
+        except OSError as exc:
+            log.error("ground_wfb_rx_control_start_failed", error=str(exc))
+            return False
+
+    async def start_tx_control(self, interface: str, channel: int) -> bool:
+        """Spawn wfb_tx_control on radio_id 1 — sends HopAck back to drone.
+
+        The GS HopListener writes the HopAck UDP packet to 127.0.0.1:5810;
+        wfb_tx_control reads from that port and transmits the frame back
+        over the radio so the drone's HopSupervisor (listening on UDP
+        5810 served by its own wfb_rx_control) sees the ACK. Same rx.key
+        as wfb_rx_control. Lighter FEC than video because control
+        frames are tiny.
+        """
+        _tx_key, rx_key = get_key_paths()
+        cmd = [
+            "wfb_tx",
+            "-p", "1",
+            "-u", "5810",
+            "-K", rx_key,
+            "-k", "1",
+            "-n", "2",
+            "-B", "20",
+            "-M", str(self._config.mcs_index),
+            interface,
+        ]
+        try:
+            self._tx_control_proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            log.info(
+                "ground_wfb_tx_control_started",
+                pid=self._tx_control_proc.pid,
+                interface=interface,
+                channel=channel,
+            )
+            return True
+        except FileNotFoundError:
+            log.error("ground_wfb_tx_control_not_found")
+            return False
+        except OSError as exc:
+            log.error("ground_wfb_tx_control_start_failed", error=str(exc))
+            return False
+
     async def stop_fanout(self) -> None:
         """Terminate the fan-out subprocess if alive."""
         proc = self._fanout_proc
@@ -306,14 +400,20 @@ class WfbRxManager:
         self._fanout_proc = None
 
     async def stop_rx(self) -> None:
-        """Terminate the wfb_rx subprocess if alive."""
+        """Terminate the wfb_rx + control-plane subprocesses if alive."""
         self._running = False
-        proc = self._rx_proc
-        if proc is not None and proc.returncode is None:
+        for name, attr in (
+            ("ground_wfb_rx", "_rx_proc"),
+            ("ground_wfb_rx_control", "_rx_control_proc"),
+            ("ground_wfb_tx_control", "_tx_control_proc"),
+        ):
+            proc = getattr(self, attr)
+            if proc is None or proc.returncode is not None:
+                continue
             try:
                 proc.terminate()
                 await asyncio.wait_for(proc.wait(), timeout=5.0)
-                log.info("ground_wfb_rx_stopped", pid=proc.pid)
+                log.info(f"{name}_stopped", pid=proc.pid)
             except TimeoutError:
                 try:
                     proc.kill()
@@ -323,10 +423,10 @@ class WfbRxManager:
                     await asyncio.wait_for(proc.wait(), timeout=1.0)
                 except asyncio.TimeoutError:
                     pass
-                log.warning("ground_wfb_rx_killed", pid=proc.pid)
+                log.warning(f"{name}_killed", pid=proc.pid)
             except ProcessLookupError:
-                log.debug("ground_wfb_rx_already_exited")
-        self._rx_proc = None
+                log.debug(f"{name}_already_exited")
+            setattr(self, attr, None)
         self._state = LinkState.DISCONNECTED
 
     def stats(self) -> dict:
@@ -665,6 +765,15 @@ class WfbRxManager:
             # direct ingest if some operator override redirects, but
             # the LCD will be silent until the fanout works.
             await self.start_fanout()
+
+            # WFB control-plane subprocesses on radio_id 1 — receive
+            # HopAnnounce from the drone and send HopAck back, so FHSS
+            # hop coordination travels over the radio link rather than
+            # the LAN. Failures are non-fatal — the data plane stays
+            # up and the legacy LAN-broadcast HopListener path still
+            # works as a fallback while v0.36.25 is in flight.
+            await self.start_rx_control(interface, self._channel)
+            await self.start_tx_control(interface, self._channel)
 
             backoff = 1.0
             self._state = LinkState.CONNECTED

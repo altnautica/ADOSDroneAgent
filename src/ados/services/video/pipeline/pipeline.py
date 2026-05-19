@@ -138,6 +138,17 @@ class VideoPipeline(_DiscoveryMixin, _HealthMixin, _WfbTeeMixin):
         self._restart_count: int = 0
         self._cloud_restart_count: int = 0
         self._max_restart_delay: float = 300.0  # 5 minutes
+        # Tighter cap for "no_primary_camera" failures. Camera-not-present
+        # is almost always a transient USB-hotplug condition (cable jiggle,
+        # bus reset, mid-flight reseat) that resolves within seconds; a
+        # 5-minute backoff makes the LCD look frozen when an operator is
+        # actively plugging cameras in. Poll at human-attention cadence
+        # for this case and keep the 5-minute cap for real driver wedges.
+        self._max_restart_delay_no_camera: float = 30.0
+        # Tag the most recent start_stream failure so the retry loop in
+        # run() can pick the right backoff cap. None when the last start
+        # succeeded or the cause is unknown.
+        self._last_start_error: str | None = None
         self._base_restart_delay: float = 5.0
         self._started_at: float = 0.0  # monotonic time of last start_stream()
         self._first_packet_seen: bool = False  # set True once mediamtx reports a publisher
@@ -293,6 +304,7 @@ class VideoPipeline(_DiscoveryMixin, _HealthMixin, _WfbTeeMixin):
         primary = self._camera_mgr.get_primary()
         if not primary:
             log.error("no_primary_camera")
+            self._last_start_error = "no_primary_camera"
             self._state = PipelineState.ERROR
             return False
 
@@ -403,6 +415,7 @@ class VideoPipeline(_DiscoveryMixin, _HealthMixin, _WfbTeeMixin):
             self._state = PipelineState.RUNNING
             self._started_at = time.monotonic()
             self._first_packet_seen = False
+            self._last_start_error = None
             log.info(
                 "pipeline_started",
                 encoder=self._encoder_type.value,
@@ -534,6 +547,7 @@ class VideoPipeline(_DiscoveryMixin, _HealthMixin, _WfbTeeMixin):
         self._state = PipelineState.RUNNING
         self._started_at = time.monotonic()
         self._first_packet_seen = True  # in-process pipeline; no probe race
+        self._last_start_error = None
         log.info(
             "air_pipeline_started",
             camera=primary.name,
@@ -1141,23 +1155,35 @@ class VideoPipeline(_DiscoveryMixin, _HealthMixin, _WfbTeeMixin):
                     # initial start failed (no camera at boot, missing binary)
                     # and the resource appears later (USB hotplug, apt install).
                     self._restart_count += 1
+                    # Pick the backoff cap by error class. A transient
+                    # "no_primary_camera" (USB hotplug, cable jiggle, bus
+                    # reset) resolves in seconds; polling at 30 s lets the
+                    # pipeline catch the re-enumeration at human-attention
+                    # cadence. A real driver wedge keeps the 5-minute cap.
+                    if self._last_start_error == "no_primary_camera":
+                        cap = self._max_restart_delay_no_camera
+                    else:
+                        cap = self._max_restart_delay
                     delay = min(
                         self._base_restart_delay * (2 ** (self._restart_count - 1)),
-                        self._max_restart_delay,
+                        cap,
                     )
                     if self._restart_count >= 10:
                         log.warning(
                             "pipeline_retry_backoff",
-                            msg="10 consecutive failures, backing off 5 minutes",
+                            msg="10 consecutive failures, backing off",
                             attempts=self._restart_count,
+                            backoff_secs=cap,
+                            last_error=self._last_start_error,
                         )
-                        await asyncio.sleep(self._max_restart_delay)
+                        await asyncio.sleep(cap)
                         self._restart_count = 0
                         continue
                     log.info(
                         "pipeline_retry_from_error",
                         attempt=self._restart_count,
                         backoff_secs=delay,
+                        last_error=self._last_start_error,
                     )
                     await asyncio.sleep(max(0, delay - _HEALTH_CHECK_INTERVAL))
                     success = await self.start_stream()
@@ -1364,6 +1390,7 @@ class VideoPipeline(_DiscoveryMixin, _HealthMixin, _WfbTeeMixin):
         primary = self._camera_mgr.get_primary()
         if not primary:
             log.error("no_primary_camera")
+            self._last_start_error = "no_primary_camera"
             self._state = PipelineState.ERROR
             return False
 
@@ -1424,6 +1451,7 @@ class VideoPipeline(_DiscoveryMixin, _HealthMixin, _WfbTeeMixin):
             self._state = PipelineState.RUNNING
             self._started_at = time.monotonic()
             self._first_packet_seen = False
+            self._last_start_error = None
             log.info(
                 "pipeline_started",
                 encoder=self._encoder_type.value,

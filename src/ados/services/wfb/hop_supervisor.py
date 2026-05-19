@@ -638,9 +638,20 @@ class HopSupervisor:
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.DEVNULL,
         )
-        # Persist + bring wfb back up on the new channel.
+        # Persist + bring wfb back up on the new channel. Restart the
+        # control-plane subprocesses alongside the data plane so the
+        # next periodic HopAnnounce after this hop can travel over the
+        # WFB radio. If a control-plane spawn fails the data plane
+        # stays up (FHSS just falls back to the LAN-broadcast path on
+        # the next attempt).
         self._wfb._channel = target_channel
         ok = await self._wfb.start_tx(self._wfb._interface, target_channel)
+        start_tx_control = getattr(self._wfb, "start_tx_control", None)
+        start_rx_control = getattr(self._wfb, "start_rx_control", None)
+        if start_tx_control is not None:
+            await start_tx_control(self._wfb._interface, target_channel)
+        if start_rx_control is not None:
+            await start_rx_control(self._wfb._interface, target_channel)
         log.info(
             "hop_supervisor_completed",
             target=target_channel,
@@ -653,53 +664,88 @@ class HopSupervisor:
         announce: HopAnnounce,
         pair_key: bytes,
     ) -> bool:
-        """Repeatedly broadcast the announce on the control port.
+        """Repeatedly broadcast the announce and wait for HopAck.
 
-        Listens on the same port for a HopAck (any HopAnnounce we
-        receive back from the peer with our same target counts).
-        Returns True as soon as one is received; False if the
-        countdown elapses with no ACK.
+        ADOS is local-first / field-deployed; the inter-rig link is the
+        WFB radio itself. The primary HopAnnounce path goes over the
+        WFB control plane (radio_id 1) — drone sends to 127.0.0.1:5803
+        which is wfb_tx_control's UDP ingress, the GS-side wfb_rx_control
+        decodes and emits on UDP 5803 where HopListener already binds.
+        HopAck travels the same way in reverse: GS HopListener writes
+        to 127.0.0.1:5810 (wfb_tx_control ingress), the drone-side
+        wfb_rx_control decodes and emits on UDP 5810 here.
+
+        The legacy LAN broadcast paths (255.255.255.255, the /24 subnet
+        broadcast, and the mDNS-resolved peer unicast) are retained as
+        belt-and-suspenders for one release; v0.36.26 removes them.
         """
         loop = asyncio.get_running_loop()
         ack_event = asyncio.Event()
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+        # LAN socket — kept for the legacy broadcast/unicast fallback
+        # path. Bound to the original control port so historic ACKs
+        # echoed back over the LAN still arrive.
+        sock_lan = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         try:
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            sock.bind(("0.0.0.0", self._control_port))
-            sock.setblocking(False)
+            sock_lan.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+            sock_lan.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock_lan.bind(("0.0.0.0", self._control_port))
+            sock_lan.setblocking(False)
         except OSError as exc:
             log.warning("hop_supervisor_socket_failed", error=str(exc))
-            sock.close()
+            sock_lan.close()
             return False
 
-        async def _reader() -> None:
+        # WFB ACK socket — bound to the dedicated radio-link control
+        # plane return port (5810). wfb_rx_control on the drone emits
+        # decoded HopAck frames here. Bind failures are non-fatal —
+        # the legacy LAN ACK still feeds sock_lan.
+        sock_wfb: socket.socket | None = None
+        try:
+            sock_wfb = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sock_wfb.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock_wfb.bind(("0.0.0.0", 5810))
+            sock_wfb.setblocking(False)
+        except OSError as exc:
+            log.warning("hop_supervisor_wfb_socket_failed", error=str(exc))
+            if sock_wfb is not None:
+                sock_wfb.close()
+            sock_wfb = None
+
+        async def _reader(sock_ref: socket.socket, source: str) -> None:
             while not ack_event.is_set():
                 try:
-                    data = await loop.sock_recv(sock, 256)
+                    data = await loop.sock_recv(sock_ref, 256)
                 except (OSError, asyncio.CancelledError):
                     return
                 decoded = HopAnnounce.decode(data, pair_key)
                 if decoded is None:
                     continue
                 if decoded.target_channel == announce.target_channel:
-                    log.debug(
+                    log.info(
                         "hop_supervisor_ack_received",
                         target=decoded.target_channel,
+                        source=source,
                     )
                     ack_event.set()
                     return
 
-        reader_task = asyncio.create_task(_reader())
+        reader_tasks: list[asyncio.Task] = [
+            asyncio.create_task(_reader(sock_lan, "lan")),
+        ]
+        if sock_wfb is not None:
+            reader_tasks.append(
+                asyncio.create_task(_reader(sock_wfb, "wfb"))
+            )
         payload = announce.encode(pair_key)
-        # Fan out the announce to limited broadcast, the local /24
-        # subnet broadcast, and the paired peer's unicast IP (resolved
-        # via mDNS). Three independent paths means a GS on the
-        # wireless side of a broadcast-isolating AP still receives the
-        # announce. The HopAnnounce body doesn't cover the destination
-        # address, so duplicate delivery is HMAC-safe — the listener
-        # tracks already-applied epochs and ACKs once.
+
+        # WFB control-plane destination is the primary path. Legacy
+        # LAN destinations (limited broadcast, /24 subnet broadcast,
+        # mDNS-resolved peer unicast) stay in for one release as
+        # belt-and-suspenders; v0.36.26 removes them once the WFB
+        # path is field-proven.
         destinations: list[tuple[str, int]] = [
+            ("127.0.0.1", 5803),
             ("255.255.255.255", self._control_port),
         ]
         if self._subnet_broadcast:
@@ -718,7 +764,7 @@ class HopSupervisor:
                     break
                 for dest in destinations:
                     try:
-                        sock.sendto(payload, dest)
+                        sock_lan.sendto(payload, dest)
                     except OSError as exc:
                         log.debug(
                             "hop_supervisor_send_failed",
@@ -727,12 +773,16 @@ class HopSupervisor:
                         )
                 await asyncio.sleep(HOP_BROADCAST_INTERVAL_MS / 1000.0)
         finally:
-            reader_task.cancel()
-            try:
-                await reader_task
-            except (asyncio.CancelledError, Exception):
-                pass
-            sock.close()
+            for t in reader_tasks:
+                t.cancel()
+            for t in reader_tasks:
+                try:
+                    await t
+                except (asyncio.CancelledError, Exception):
+                    pass
+            sock_lan.close()
+            if sock_wfb is not None:
+                sock_wfb.close()
         return ack_event.is_set()
 
 
@@ -891,7 +941,20 @@ class HopListener:
                     continue
                 if announce.target_channel not in _CHANNEL_NUMBERS:
                     continue
-                # ACK by echoing the same packet back to the sender.
+                # ACK by echoing the same packet back. Two paths:
+                # (1) loopback to 127.0.0.1:5810 — feeds the local
+                #     wfb_tx_control subprocess (radio_id 1), which
+                #     transmits the ACK over the WFB radio to the
+                #     drone's wfb_rx_control. This is the primary
+                #     field-deployable path.
+                # (2) reply to the original sender — kept for the
+                #     legacy LAN echo so the drone's existing 5803
+                #     ACK listener still works while v0.36.25 is in
+                #     flight. v0.36.26 removes it.
+                try:
+                    sock.sendto(data, ("127.0.0.1", 5810))
+                except OSError:
+                    pass
                 try:
                     sock.sendto(data, peer)
                 except OSError:
@@ -953,9 +1016,14 @@ async def _apply_hop(wfb_manager: Any, target_channel: int) -> bool:
 
     # Kill the rx subprocess in-place. _running stays True so the
     # outer manager loop doesn't tear the service down — this is
-    # the critical difference vs calling stop() / stop_rx().
-    proc = getattr(wfb_manager, "_rx_proc", None)
-    if proc is not None and getattr(proc, "returncode", 0) is None:
+    # the critical difference vs calling stop() / stop_rx(). Also
+    # tear down the control-plane subprocesses (radio_id 1) so they
+    # re-acquire monitor frames on the new channel; they have to
+    # restart in lock-step with the data plane.
+    for attr in ("_rx_proc", "_rx_control_proc", "_tx_control_proc"):
+        proc = getattr(wfb_manager, attr, None)
+        if proc is None or getattr(proc, "returncode", 0) is not None:
+            continue
         try:
             proc.terminate()
             await asyncio.wait_for(proc.wait(), timeout=3.0)
@@ -966,11 +1034,10 @@ async def _apply_hop(wfb_manager: Any, target_channel: int) -> bool:
                 pass
         except ProcessLookupError:
             pass
-    # Clear the handle so start_rx doesn't see a stale process.
-    try:
-        wfb_manager._rx_proc = None
-    except AttributeError:
-        pass
+        try:
+            setattr(wfb_manager, attr, None)
+        except AttributeError:
+            pass
 
     # Retune the radio. iw on monitor mode is the supported path.
     await asyncio.create_subprocess_exec(
@@ -992,4 +1059,14 @@ async def _apply_hop(wfb_manager: Any, target_channel: int) -> bool:
         log.warning("hop_listener_unknown_channel", target=target_channel)
         return False
     ok = await wfb_manager.start_rx(interface, target_channel)
+    # Restart the GS-side control-plane subprocesses (radio_id 1) so
+    # the next HopAnnounce / HopAck pair after this hop travels over
+    # the radio link rather than the LAN. Failures are non-fatal —
+    # the data plane (video receive) stays up.
+    start_rx_control = getattr(wfb_manager, "start_rx_control", None)
+    start_tx_control = getattr(wfb_manager, "start_tx_control", None)
+    if start_rx_control is not None:
+        await start_rx_control(interface, target_channel)
+    if start_tx_control is not None:
+        await start_tx_control(interface, target_channel)
     return bool(ok)

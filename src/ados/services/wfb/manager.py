@@ -20,6 +20,12 @@ from ados.services.wfb.link_quality import LinkQualityMonitor, LinkStats
 # does not emit a "tx_byte_count" line on its stdout.
 _TX_HEALTH_POLL_INTERVAL_S = 5.0
 _TX_HEALTH_SILENCE_THRESHOLD_S = 30.0
+# wfb_tx binds UDP 5600 for the air-side ingress feed. Hex 1788 is the
+# port number as it appears in /proc/net/udp's local_address column.
+_WFB_TX_INGRESS_PORT_HEX = "1788"
+# Suppress duplicate "upstream silent" warnings to once every 5 minutes
+# so a bench drone with no encoder running does not flood the journal.
+_UPSTREAM_SILENT_LOG_INTERVAL_S = 300.0
 
 if TYPE_CHECKING:
     from ados.core.config import WfbConfig
@@ -112,6 +118,14 @@ class WfbManager:
         self._state = LinkState.DISCONNECTED
         self._tx_proc: asyncio.subprocess.Process | None = None
         self._rx_proc: asyncio.subprocess.Process | None = None
+        # Control-plane subprocesses on wfb-ng radio_id 1, used by the
+        # FHSS hop coordinator so HopAnnounce/HopAck flow over the WFB
+        # radio link itself rather than over the LAN. ADOS is a local-
+        # first field-deployed agent; consumer APs frequently do not
+        # bridge L2 broadcasts wired<->wireless, so any inter-rig packet
+        # whose loss breaks the radio must travel via the radio.
+        self._tx_control_proc: asyncio.subprocess.Process | None = None
+        self._rx_control_proc: asyncio.subprocess.Process | None = None
         self._monitor = LinkQualityMonitor()
         self._interface: str = ""
         self._channel: int = config.channel
@@ -125,6 +139,20 @@ class WfbManager:
         self._last_tx_byte_value: int = -1
         self._last_tx_byte_change_at: float = 0.0
         self._tx_zombie_kills: int = 0
+        # Upstream-feed tracker. Distinguishes "wfb_tx is wedged" (kill)
+        # from "no video is arriving at wfb_tx's UDP 5600 socket" (don't
+        # kill — wfb_tx is correctly idle when there is nothing to send).
+        # Reads drops + rx_queue from /proc/net/udp for the bound port.
+        # _last_upstream_byte_value tracks the drops counter (the only
+        # monotone receive-side signal /proc/net/udp exposes); a non-zero
+        # rx_queue at sample time is the secondary "is feeding right now"
+        # hint.
+        self._last_upstream_byte_value: int = -1
+        self._last_upstream_change_at: float = 0.0
+        # Throttle the "upstream silent" log to once every 5 minutes so a
+        # drone parked on the bench with no encoder doesn't flood the
+        # journal.
+        self._last_upstream_silent_log_at: float = 0.0
 
     @property
     def state(self) -> LinkState:
@@ -344,24 +372,126 @@ class WfbManager:
             log.error("wfb_rx_start_failed", error=str(e))
             return False
 
+    async def start_tx_control(self, interface: str, channel: int) -> bool:
+        """Launch wfb_tx_control subprocess for the control-plane stream.
+
+        The control plane (radio_id 1) carries HopAnnounce frames from
+        the FHSS coordinator to the ground station. Tiny payload
+        (51 bytes), lighter FEC than video (k=1, n=2), so a hop can
+        be coordinated in a few hundred ms with low overhead. Reuses
+        the same tx.key — wfb-ng key files contain both halves of the
+        crypto_box keypair so the same file authenticates both
+        directions on this and the bind streams.
+
+        Sibling subprocess to start_tx; lifecycle is managed by the
+        same supervisor and torn down by stop() alongside the data
+        plane.
+        """
+        tx_key, _rx_key = get_key_paths()
+        cmd = [
+            "wfb_tx",
+            "-p", "1",
+            "-u", "5803",
+            "-K", tx_key,
+            "-k", "1",
+            "-n", "2",
+            "-B", "20",
+            "-M", str(self._config.mcs_index),
+            interface,
+        ]
+        try:
+            self._tx_control_proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            log.info(
+                "wfb_tx_control_started",
+                pid=self._tx_control_proc.pid,
+                channel=channel,
+            )
+            return True
+        except FileNotFoundError:
+            log.error("wfb_tx_control_not_found")
+            return False
+        except OSError as e:
+            log.error("wfb_tx_control_start_failed", error=str(e))
+            return False
+
+    async def start_rx_control(self, interface: str, channel: int) -> bool:
+        """Launch wfb_rx_control subprocess to receive HopAck frames.
+
+        The control plane is bidirectional: drone -> GS carries
+        HopAnnounce on this radio_id 1 stream, GS -> drone carries
+        HopAck on the same stream id but the reverse direction.
+        The receive end of HopAck lands on UDP 5810 where the
+        HopSupervisor listens.
+        """
+        tx_key, _rx_key = get_key_paths()
+        cmd = [
+            "wfb_rx",
+            "-p", "1",
+            "-c", "127.0.0.1",
+            "-u", "5810",
+            "-K", tx_key,
+            "-l", "1000",
+            interface,
+        ]
+        try:
+            self._rx_control_proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            log.info(
+                "wfb_rx_control_started",
+                pid=self._rx_control_proc.pid,
+                channel=channel,
+            )
+            return True
+        except FileNotFoundError:
+            log.error("wfb_rx_control_not_found")
+            return False
+        except OSError as e:
+            log.error("wfb_rx_control_start_failed", error=str(e))
+            return False
+
     async def stop(self) -> None:
-        """Terminate wfb_tx and wfb_rx subprocesses."""
+        """Terminate wfb_tx, wfb_rx, and the control-plane subprocesses."""
         self._running = False
 
-        for name, proc in [("wfb_tx", self._tx_proc), ("wfb_rx", self._rx_proc)]:
+        procs_to_stop = [
+            ("wfb_tx", self._tx_proc),
+            ("wfb_rx", self._rx_proc),
+            ("wfb_tx_control", self._tx_control_proc),
+            ("wfb_rx_control", self._rx_control_proc),
+        ]
+        for name, proc in procs_to_stop:
             if proc is not None and proc.returncode is None:
                 try:
                     proc.terminate()
                     await asyncio.wait_for(proc.wait(), timeout=5.0)
                     log.info("wfb_process_stopped", name=name, pid=proc.pid)
                 except TimeoutError:
-                    proc.kill()
+                    try:
+                        proc.kill()
+                    except ProcessLookupError:
+                        pass
+                    # Reap the killed process so it doesn't sit as a
+                    # zombie until the next event-loop iteration. Mirrors
+                    # the GS-side stop_rx() pattern.
+                    try:
+                        await asyncio.wait_for(proc.wait(), timeout=1.0)
+                    except asyncio.TimeoutError:
+                        pass
                     log.warning("wfb_process_killed", name=name, pid=proc.pid)
                 except ProcessLookupError:
                     log.debug("wfb_process_already_exited", name=name)
 
         self._tx_proc = None
         self._rx_proc = None
+        self._tx_control_proc = None
+        self._rx_control_proc = None
         self._state = LinkState.DISCONNECTED
         log.info("wfb_stopped")
 
@@ -502,20 +632,70 @@ class WfbManager:
                 log.debug("rx_read_error", error=str(e))
                 break
 
+    def _read_wfb_tx_upstream_state(self) -> tuple[int, int] | None:
+        """Read (rx_queue, drops) from /proc/net/udp for wfb_tx's ingress.
+
+        Returns ``None`` when the socket row cannot be located (wfb_tx
+        not yet bound, /proc not present, file unreadable) so the caller
+        treats it as "unknown" rather than as a definitive feed signal.
+
+        `/proc/net/udp` columns: ``sl local_address rem_address st
+        tx_queue:rx_queue tr:tm->when retrnsmt uid timeout inode ref
+        pointer drops``. The bound port matches the suffix of
+        ``local_address`` so this works whether wfb_tx bound to
+        ``0.0.0.0:5600`` or ``127.0.0.1:5600``. Userspace cumulative
+        receive-byte counters aren't exposed in /proc/net/udp; ``drops``
+        is the only monotone receive-side signal here and
+        ``rx_queue`` is the current depth (zero when wfb_tx has drained
+        everything or when nothing arrived).
+        """
+        try:
+            with open("/proc/net/udp") as f:
+                lines = f.readlines()
+        except OSError:
+            return None
+        for raw in lines[1:]:  # skip the header
+            cols = raw.split()
+            if len(cols) < 13:
+                continue
+            local_addr = cols[1]
+            if not local_addr.endswith(":" + _WFB_TX_INGRESS_PORT_HEX):
+                continue
+            queues = cols[4].split(":")
+            if len(queues) != 2:
+                continue
+            try:
+                rx_queue = int(queues[1], 16)
+                drops = int(cols[12])
+            except ValueError:
+                return None
+            return (rx_queue, drops)
+        return None
+
     async def _tx_health_watchdog(self) -> None:
         """Catch wfb_tx zombies (process alive, radio iface tx_bytes flat).
 
         Polls /sys/class/net/<iface>/statistics/tx_bytes every 5 s. If
         the counter is unchanged for 30 s while wfb_tx's process is
-        still alive, terminate wfb_tx so the standard restart loop in
-        run() respawns it.
+        still alive AND its UDP 5600 ingress socket is being fed,
+        terminate wfb_tx so the standard restart loop in run() respawns
+        it.
 
-        Covers the failure mode where the UDP socket on 5600 is bound
-        and the process's _wait task is happy, but the userspace driver
-        has stopped pushing 802.11 frames downstream. Process-liveness
-        is necessary but never sufficient for radio work — see operating
-        rule 37. Modeled on RubyFPV's shared-memory watchdog and
-        OpenHD's link-statistics polling.
+        When tx_bytes is flat but the ingress is also silent (no encoder
+        pushing video), do NOT terminate wfb_tx — it is correctly idle
+        because there is nothing to send. Log the upstream-silent
+        condition once every 5 minutes and back off.
+
+        Covers two distinct failure modes:
+
+        * Driver wedged: bytes arrive on UDP 5600, wfb_tx consumes them,
+          but the 802.11 frames never leave the radio. Kill + respawn.
+        * Encoder absent: nothing is arriving on UDP 5600. tx_bytes will
+          be flat as a consequence; restarting wfb_tx changes nothing.
+
+        Process-liveness is necessary but never sufficient for radio
+        work — see operating rule 37. Modeled on RubyFPV's shared-memory
+        watchdog and OpenHD's link-statistics polling.
         """
         if not self._interface or self._tx_proc is None:
             return
@@ -526,6 +706,8 @@ class WfbManager:
         # across restarts of the wfb_tx process.
         self._last_tx_byte_value = -1
         self._last_tx_byte_change_at = time.monotonic()
+        self._last_upstream_byte_value = -1
+        self._last_upstream_change_at = time.monotonic()
         while (
             self._running
             and self._tx_proc is not None
@@ -553,29 +735,82 @@ class WfbManager:
                 self._last_tx_byte_change_at = time.monotonic()
                 continue
             silent_for = time.monotonic() - self._last_tx_byte_change_at
-            if silent_for >= _TX_HEALTH_SILENCE_THRESHOLD_S:
-                self._tx_zombie_kills += 1
-                log.warning(
-                    "wfb_tx_zombie_detected",
-                    interface=self._interface,
-                    silent_seconds=round(silent_for, 1),
-                    pid=self._tx_proc.pid if self._tx_proc else None,
-                    zombie_kills_total=self._tx_zombie_kills,
-                    note=(
-                        "tx_bytes flat while process alive; "
-                        "terminating to trigger restart"
-                    ),
-                )
-                try:
-                    self._tx_proc.terminate()
-                except ProcessLookupError:
-                    pass
-                # Reset watchdog state so the next watchdog instance
-                # (started after wfb_tx respawns) doesn't immediately
-                # fire on the carried-over silence window.
-                self._last_tx_byte_value = -1
-                self._last_tx_byte_change_at = time.monotonic()
-                return
+            if silent_for < _TX_HEALTH_SILENCE_THRESHOLD_S:
+                continue
+
+            # tx_bytes has been flat for the silence window. Look at the
+            # ingress socket on UDP 5600 to decide whether wfb_tx is
+            # wedged (data arriving but not transmitted) or just idle
+            # (no encoder feeding it).
+            upstream = self._read_wfb_tx_upstream_state()
+            now = time.monotonic()
+            upstream_feeding = False
+            if upstream is not None:
+                rx_queue, drops = upstream
+                if self._last_upstream_byte_value == -1:
+                    self._last_upstream_byte_value = drops
+                    self._last_upstream_change_at = now
+                if drops != self._last_upstream_byte_value:
+                    self._last_upstream_byte_value = drops
+                    self._last_upstream_change_at = now
+                    upstream_feeding = True
+                elif rx_queue > 0:
+                    # Current queue depth proves data IS arriving at
+                    # this sample, even if no overflow drop happened.
+                    self._last_upstream_change_at = now
+                    upstream_feeding = True
+
+            if not upstream_feeding and upstream is not None:
+                # Upstream silent. wfb_tx is doing nothing because there
+                # is nothing to send. Killing it changes nothing; log
+                # at WARN every 5 min and keep polling.
+                if (
+                    now - self._last_upstream_silent_log_at
+                    >= _UPSTREAM_SILENT_LOG_INTERVAL_S
+                ):
+                    log.warning(
+                        "wfb_tx_upstream_silent",
+                        interface=self._interface,
+                        silent_seconds=round(silent_for, 1),
+                        rx_queue=upstream[0],
+                        drops=upstream[1],
+                        note=(
+                            "tx_bytes flat but UDP 5600 ingress idle; "
+                            "no encoder feeding wfb_tx, skipping kill"
+                        ),
+                    )
+                    self._last_upstream_silent_log_at = now
+                continue
+
+            # Either the ingress is feeding (drops advancing or rx_queue
+            # non-zero) or we could not read /proc/net/udp at all — in
+            # both cases the safest call is the existing kill-and-respawn
+            # behavior so a real driver wedge does not stay stuck.
+            self._tx_zombie_kills += 1
+            log.warning(
+                "wfb_tx_zombie_detected",
+                interface=self._interface,
+                silent_seconds=round(silent_for, 1),
+                pid=self._tx_proc.pid if self._tx_proc else None,
+                zombie_kills_total=self._tx_zombie_kills,
+                upstream_known=upstream is not None,
+                note=(
+                    "tx_bytes flat while process alive and ingress "
+                    "feeding; terminating to trigger restart"
+                ),
+            )
+            try:
+                self._tx_proc.terminate()
+            except ProcessLookupError:
+                pass
+            # Reset watchdog state so the next watchdog instance
+            # (started after wfb_tx respawns) doesn't immediately
+            # fire on the carried-over silence window.
+            self._last_tx_byte_value = -1
+            self._last_tx_byte_change_at = time.monotonic()
+            self._last_upstream_byte_value = -1
+            self._last_upstream_change_at = time.monotonic()
+            return
 
     def _update_state_from_stats(self, stats: LinkStats) -> None:
         """Update link state based on current statistics."""
@@ -703,6 +938,18 @@ class WfbManager:
                     "wfb_rx_skipped_no_rx_key",
                     note="drone-only rig; uplink RX disabled",
                 )
+
+            # Step 5: control-plane stream (radio_id 1) carrying the
+            # FHSS hop coordination frames. ADOS is local-first / field-
+            # deployed; the inter-rig link is the WFB radio itself, so
+            # HopAnnounce/HopAck must travel here rather than over the
+            # operator's LAN where consumer APs frequently drop L2
+            # broadcasts wired<->wireless. Failures are non-fatal — the
+            # data plane stays up; only FHSS coordination degrades to
+            # the legacy LAN-broadcast fallback.
+            if tx_ok:
+                await self.start_tx_control(interface, self._channel)
+                await self.start_rx_control(interface, self._channel)
 
             if not tx_ok and not rx_ok:
                 log.error("wfb_both_failed_to_start")
