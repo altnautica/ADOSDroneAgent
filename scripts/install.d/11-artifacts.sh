@@ -37,7 +37,19 @@ persist_repo_artifacts() {
     info "Persisting driver scripts and overlays to ${persist_root}/"
     install -d -m 0755 "${persist_root}/scripts/drivers"
     install -d -m 0755 "${persist_root}/scripts/lib"
+    install -d -m 0755 "${persist_root}/scripts/plugin-keys"
     install -d -m 0755 "${persist_root}/data/overlays/upstream"
+
+    # First-party plugin signing public keys. These ride along with the
+    # repo and get re-deployed on every upgrade so provision_plugin_keys
+    # can populate /etc/ados/plugin-keys/ even when install.sh runs via
+    # curl-pipe with no checked-out tree.
+    if [ -d "${src_root}/scripts/plugin-keys" ]; then
+        find "${src_root}/scripts/plugin-keys" -maxdepth 1 -type f -name '*.pem' -print0 \
+            | while IFS= read -r -d '' f; do
+                install -m 0644 "$f" "${persist_root}/scripts/plugin-keys/"
+            done
+    fi
 
     # Driver shell scripts (install-display-overlay.sh, install-rtl8812eu.sh, ...)
     if [ -d "${src_root}/scripts/drivers" ]; then

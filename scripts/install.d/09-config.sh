@@ -175,17 +175,27 @@ provision_plugin_keys() {
     # Drop the first-party publisher public keys at /etc/ados/plugin-keys/
     # so the agent can verify signed .adosplug archives against the
     # FIRST_PARTY_SIGNERS allowlist. Keys ship inside the package at
-    # scripts/plugin-keys/. Idempotent: overwrites are fine since the key
-    # bytes are stable across reinstalls.
-    local src_dir="${PKG_DIR:-/opt/ados}/scripts/plugin-keys"
+    # scripts/plugin-keys/ and get persisted by 11-artifacts.sh to
+    # /opt/ados/source/scripts/plugin-keys/ for the curl-pipe path.
+    # Idempotent: overwrites are fine since the key bytes are stable
+    # across reinstalls.
     local dst_dir="${CONFIG_DIR}/plugin-keys"
-    if [ ! -d "${src_dir}" ]; then
-        return 0
-    fi
     install -d -m 0700 "${dst_dir}"
-    for pem in "${src_dir}"/*.pem; do
-        [ -f "${pem}" ] || continue
-        install -m 0600 "${pem}" "${dst_dir}/$(basename "${pem}")"
+
+    local copied=0
+    for src_dir in \
+        "${PKG_DIR:-/opt/ados}/scripts/plugin-keys" \
+        "/opt/ados/source/scripts/plugin-keys" \
+    ; do
+        [ -d "${src_dir}" ] || continue
+        for pem in "${src_dir}"/*.pem; do
+            [ -f "${pem}" ] || continue
+            install -m 0600 "${pem}" "${dst_dir}/$(basename "${pem}")"
+            copied=1
+        done
+        if [ "${copied}" -eq 1 ]; then
+            return 0
+        fi
     done
 }
 
