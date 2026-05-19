@@ -62,6 +62,12 @@ class PageNavigator:
             # Persisted id no longer registered (renamed page). Leave
             # the default in place but log so a regression is visible.
             log.warning("page_navigator_persisted_id_unknown", page_id=prev)
+        # Persist the resolved initial state so /run/ados/lcd-state.json
+        # exists on first boot. Without this, the file is only written
+        # when go() runs after operator navigation, and the cloud
+        # heartbeat consumer reads an empty state until the operator
+        # touches the LCD.
+        self._persist_active_id(self.active_page_id)
 
     # ── registration ────────────────────────────────────────────
 
