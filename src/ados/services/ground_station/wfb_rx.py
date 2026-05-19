@@ -322,10 +322,13 @@ class WfbRxManager:
             interface,
         ]
         try:
+            # DEVNULL stdout/stderr — nobody reads the wfb_rx PKT/LINK
+            # stats lines on this control-plane process and the PIPE
+            # buffer would fill and block the subprocess.
             self._rx_control_proc = await asyncio.create_subprocess_exec(
                 *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
             )
             log.info(
                 "ground_wfb_rx_control_started",
@@ -364,10 +367,12 @@ class WfbRxManager:
             interface,
         ]
         try:
+            # DEVNULL stdout/stderr — same PIPE-fill avoidance as
+            # wfb_rx_control above.
             self._tx_control_proc = await asyncio.create_subprocess_exec(
                 *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
             )
             log.info(
                 "ground_wfb_tx_control_started",
