@@ -331,8 +331,19 @@ class HopSupervisor:
         next_periodic = time.monotonic() + self._hop_period_s
         next_persist = 0.0
         while not self._stop_event.is_set():
+            # Compute periodic_due and advance the threshold BEFORE
+            # calling _tick. The prior structure deferred the advance
+            # to the bottom of the loop, after the post-sleep `now` had
+            # already crossed `next_periodic` — by the time _tick ran on
+            # the next iteration the threshold was already pushed 60s
+            # into the future, so `now >= next_periodic_at` inside _tick
+            # was never True and the periodic hop never fired.
+            now = time.monotonic()
+            periodic_due = now >= next_periodic
+            if periodic_due:
+                next_periodic = now + self._hop_period_s
             try:
-                await self._tick(next_periodic)
+                await self._tick(periodic_due=periodic_due)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001
@@ -350,9 +361,6 @@ class HopSupervisor:
                 await asyncio.wait_for(self._stop_event.wait(), timeout=1.0)
             except asyncio.TimeoutError:
                 pass
-            now = time.monotonic()
-            if now >= next_periodic:
-                next_periodic = now + self._hop_period_s
 
     def _persist_snapshot(self) -> None:
         """Write the current snapshot to /run/ados/hop-supervisor.json.
@@ -373,7 +381,7 @@ class HopSupervisor:
         except OSError as exc:
             log.debug("hop_supervisor_persist_failed", error=str(exc))
 
-    async def _tick(self, next_periodic_at: float) -> None:
+    async def _tick(self, periodic_due: bool) -> None:
         # Defensive: never trigger a channel change while a local bind
         # session is in flight. The bind orchestrator stops the normal
         # wfb unit so wfb-ng's bind profile can own the radio adapter
@@ -382,29 +390,9 @@ class HopSupervisor:
         # key exchange. Lazy import keeps this module independent of
         # the bind orchestrator at import time.
         now = time.monotonic()
-        # Periodic boundary check is moved up so the silent early-return
-        # gates below can log diagnostically once per period instead of
-        # every tick (which would spam the journal at 1 Hz).
-        periodic = now >= next_periodic_at
-
-        # Tick counter so we can distinguish "_tick never called" from
-        # "_tick called but periodic never True". Logs at 1 Hz on
-        # multiples of 30 (every ~30s) plus on periodic boundary, with
-        # the time delta to the next periodic so we can see if it's
-        # ever advancing toward zero.
-        if not hasattr(self, "_tick_count"):
-            self._tick_count = 0
-        self._tick_count += 1
-        if periodic or self._tick_count % 30 == 1:
-            log.info(
-                "hop_supervisor_tick_entered",
-                tick_n=self._tick_count,
-                periodic=periodic,
-                seconds_until_periodic=round(next_periodic_at - now, 2),
-                interface=repr(getattr(self._wfb, "_interface", None)),
-                channel=getattr(self._wfb, "_channel", None),
-                enabled=self._enabled,
-            )
+        # `periodic_due` is computed and pre-advanced by _loop; reuse
+        # the name `periodic` to keep the rest of this function readable.
+        periodic = periodic_due
 
         try:
             from ados.services.wfb.bind_orchestrator import is_bind_active
