@@ -588,10 +588,15 @@ class WfbRxManager:
     async def _presence_emit_loop(self) -> None:
         """Periodically emit a PresenceBeacon on the WFB control plane.
 
-        Mirror of `WfbManager._presence_emit_loop`. Writes a 68-byte
-        signed beacon to 127.0.0.1:5803 every 10 s; wfb_tx_control on
-        radio_id 1 transmits it to the paired drone so the drone's
-        HopListener can populate its peer cache.
+        Mirror of `WfbManager._presence_emit_loop` with one critical
+        asymmetry: on the GS, wfb_tx_control binds UDP 5810 (its
+        outbound ingress), while UDP 5803 is wfb_rx_control's output
+        AND HopListener's bound port. Sending the beacon to 5803 here
+        would loop straight back into HopListener via the kernel
+        loopback and self-pair the GS with its own device-id. Send to
+        5810 so wfb_tx_control on radio_id 1 transmits the frame over
+        RF; the drone's wfb_rx_control decodes and emits on 5810 on
+        the drone side for the future drone-side listener to consume.
         """
         try:
             import socket as _socket
@@ -633,7 +638,7 @@ class WfbRxManager:
                         epoch_ms=int(time.time() * 1000),
                     )
                     payload = beacon.encode(pair_key)
-                    sock.sendto(payload, ("127.0.0.1", 5803))
+                    sock.sendto(payload, ("127.0.0.1", 5810))
                 except OSError as exc:
                     log.debug("presence_emit_send_failed", error=str(exc))
                 except Exception as exc:

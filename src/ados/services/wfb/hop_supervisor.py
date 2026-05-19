@@ -876,6 +876,17 @@ class HopListener:
 
     def _handle_presence(self, beacon: "PresenceBeacon") -> None:
         """Update the in-memory peer cache and back-fill pair state."""
+        # Reject self-beacons. Loopback delivery can race against the
+        # wfb_tx_control bind when the emit loop misroutes; rather than
+        # rely on perfect port topology elsewhere, drop any beacon
+        # that claims our own device-id outright.
+        try:
+            from ados.core.identity import get_or_create_device_id
+            own_device_id = get_or_create_device_id()
+        except Exception:
+            own_device_id = None
+        if own_device_id and beacon.device_id == own_device_id[:16]:
+            return
         previous_device_id = self._peer_device_id
         self._peer_device_id = beacon.device_id
         self._peer_role = beacon.role_label
