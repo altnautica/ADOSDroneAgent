@@ -185,22 +185,27 @@ class HopAnnounce:
 def _resolve_pair_key() -> bytes:
     """Derive the symmetric pair key used to authenticate HopAnnounce.
 
-    Reads the canonical wfb keypair under /etc/ados/wfb/ and hashes
-    both halves with a fixed domain separator. Independent of any
-    other use of the wfb keys so a future rotation of one doesn't
-    leak the other.
+    wfb-ng's bind protocol produces a libsodium crypto_box keypair
+    (`/etc/drone.key` + `/etc/gs.key`, 64 bytes each, NOT byte-identical).
+    The wfb_bind_server.sh script on the receiving rig writes the
+    drone-side file to `/etc/drone.key`, so AFTER a successful bind both
+    rigs have a `/etc/drone.key` with the SAME bytes — that file is the
+    only shared-content key file on disk and is the right source for a
+    symmetric HMAC derivation.
+
+    Previous versions hashed `/etc/ados/wfb/tx.key` on the drone and
+    `/etc/ados/wfb/rx.key` on the GS. Those are the two DIFFERENT halves
+    of the crypto_box pair (drone gets `drone.key` renamed, GS gets
+    `gs.key` renamed), so the derived HMAC key diverged across the rigs
+    and every HopAnnounce was silently dropped at the listener.
     """
-    # wfb-ng session keys are symmetric per pair: the drone writes the
-    # shared bytes to /etc/ados/wfb/tx.key and the GS writes the same
-    # bytes to /etc/ados/wfb/rx.key during bind. They're the same 64
-    # bytes — wfb_tx and wfb_rx need a shared AEAD secret to encrypt
-    # and decrypt each other's frames. So whichever file the local
-    # rig holds gives the same derived hop secret on both sides.
     candidates = (
-        "/etc/ados/wfb/tx.key",
-        "/etc/ados/wfb/rx.key",
-        "/etc/ados/tx.key",
-        "/etc/ados/rx.key",
+        # Canonical: the file wfb-ng's bind protocol delivers byte-for-
+        # byte to both rigs.
+        "/etc/drone.key",
+        # Forward-compatibility: if a future migration relocates the
+        # file inside the agent's namespace.
+        "/etc/ados/wfb/drone.key",
     )
     for path in candidates:
         try:
@@ -208,15 +213,17 @@ def _resolve_pair_key() -> bytes:
                 key_bytes = f.read()
         except (OSError, FileNotFoundError):
             continue
+        if len(key_bytes) != 64:
+            continue
         h = hashlib.sha256()
-        h.update(b"ados/wfb/hop/v1\n")
+        h.update(b"ados/wfb/hop/v2\n")
         h.update(key_bytes)
         return h.digest()
     # No keys on disk yet (cold start before bind). Use a constant
     # so a stray hop announce can still be parsed; the supervisor
     # gates on a successful pair before doing anything anyway.
     log.warning("hop_supervisor_pair_key_unavailable")
-    return hashlib.sha256(b"ados/wfb/hop/v1/cold-start").digest()
+    return hashlib.sha256(b"ados/wfb/hop/v2/cold-start").digest()
 
 
 def _pick_target_channel(
@@ -894,6 +901,8 @@ class HopListener:
         pending_epoch: int | None = None
         pending_channel: int | None = None
         pending_trigger: str = "periodic"
+        decode_failed_count: int = 0
+        last_decode_failed_log: float = 0.0
         try:
             while not stop_event.is_set():
                 try:
@@ -949,6 +958,20 @@ class HopListener:
 
                 announce = HopAnnounce.decode(data, pair_key)
                 if announce is None:
+                    decode_failed_count += 1
+                    now_mono = time.monotonic()
+                    if now_mono - last_decode_failed_log >= 30.0:
+                        log.warning(
+                            "hop_listener_decode_failed",
+                            count=decode_failed_count,
+                            note=(
+                                "received UDP frame on the hop control port "
+                                "but HopAnnounce.decode rejected it (length, "
+                                "magic, or HMAC mismatch); rate-limited 30s"
+                            ),
+                        )
+                        last_decode_failed_log = now_mono
+                        decode_failed_count = 0
                     continue
                 if announce.target_channel not in _CHANNEL_NUMBERS:
                     continue
