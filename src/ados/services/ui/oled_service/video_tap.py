@@ -95,6 +95,15 @@ class _VideoTapMixin:
                 tap.persist_stats_to_file()
             except Exception as exc:  # noqa: BLE001
                 log.debug("oled_tap_stats_persist_failed", error=str(exc))
+            # Also publish the tap-status snapshot the heartbeat enricher
+            # reads so the cloud surface has video state even when the
+            # operator hasn't navigated to the video LCD page yet. The
+            # video page's own metrics tick still overwrites this file
+            # with page-level state (recording flag) when it's active.
+            try:
+                tap.persist_tap_status_to_file()
+            except Exception as exc:  # noqa: BLE001
+                log.debug("oled_tap_status_persist_failed", error=str(exc))
             try:
                 await asyncio.wait_for(self._stop.wait(), timeout=1.0)
             except TimeoutError:

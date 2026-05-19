@@ -500,6 +500,49 @@ class LocalVideoTap:
         except OSError as exc:
             self._logger.debug("local_tap_persist_failed", error=str(exc))
 
+    def persist_tap_status_to_file(
+        self,
+        path: str | Path = "/run/ados/lcd-video-tap.json",
+    ) -> None:
+        """Write the tap-status snapshot the cloud heartbeat enricher consumes.
+
+        Mirrors the shape produced by the video page's metrics tick so
+        the heartbeat sees a non-stale file even when the operator
+        never navigates to the video LCD page. ``recording`` defaults
+        to False because the always-on tap doesn't carry per-page
+        state; when the operator activates the video page, the page's
+        own tick still overwrites this file with the real value.
+        """
+        try:
+            stats = self.stats()
+            pipeline_state = str(stats.get("pipeline_state") or "")
+            active = pipeline_state == "playing"
+            decoder = stats.get("decoder_type") or None
+            fps_val = stats.get("fps")
+            fps = float(fps_val) if isinstance(fps_val, (int, float)) else 0.0
+            lat_val = stats.get("latency_ms")
+            latency_ms: float | None = None
+            if isinstance(lat_val, (int, float)):
+                latency_ms = round(float(lat_val), 1)
+            samples_val = stats.get("latency_samples")
+            latency_samples = int(samples_val) if isinstance(samples_val, int) else 0
+            blob = {
+                "active": active,
+                "decoder": decoder,
+                "fps": round(fps, 2),
+                "latency_ms": latency_ms,
+                "latency_samples": latency_samples,
+                "recording": False,
+                "updated_at_ms": int(time.time() * 1000),
+            }
+            tmp = Path(str(path)).with_suffix(".tmp")
+            import json as _json
+            tmp.parent.mkdir(parents=True, exist_ok=True)
+            tmp.write_text(_json.dumps(blob))
+            tmp.replace(Path(str(path)))
+        except OSError as exc:
+            self._logger.debug("local_tap_status_persist_failed", error=str(exc))
+
     # ── internals ──────────────────────────────────────────────
 
     def _compute_fps(self) -> float:
