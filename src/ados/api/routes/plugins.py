@@ -462,9 +462,18 @@ async def install_plugin_from_url(body: InstallFromUrlRequest):
         DOWNLOAD_TOTAL_TIMEOUT,
         connect=DOWNLOAD_CONNECT_TIMEOUT,
     )
-    # Per-request fresh tempdir so a botched download cannot leave
-    # debris in the supervisor's working area.
-    with tempfile.TemporaryDirectory(prefix="ados-plug-url-") as tmp_dir:
+    # Per-request fresh tempdir. On a deployed agent the systemd unit
+    # ships with ProtectSystem=strict and the only writable paths are
+    # /var/ados, /run/ados, /etc/ados — /tmp and /var/tmp are sealed.
+    # Root the tempdir under /run/ados/ so the streamed archive lands on
+    # a path the sandbox allows. In dev or unit tests /run/ados/ may not
+    # exist; fall back to the system tempdir there.
+    tempdir_kwargs: dict[str, str] = {"prefix": "ados-plug-url-"}
+    plugin_tmp_root = Path("/run/ados/plugin-downloads")
+    if plugin_tmp_root.parent.exists():
+        plugin_tmp_root.mkdir(parents=True, exist_ok=True)
+        tempdir_kwargs["dir"] = str(plugin_tmp_root)
+    with tempfile.TemporaryDirectory(**tempdir_kwargs) as tmp_dir:
         archive_path = Path(tmp_dir) / "archive.adosplug"
         try:
             async with httpx.AsyncClient(timeout=timeout) as client:
