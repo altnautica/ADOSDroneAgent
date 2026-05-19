@@ -161,6 +161,9 @@ def _iface_ip(iface: str) -> str | None:
 
 
 def _same_subnet(a: str, b: str, mask_prefix: int = 24) -> bool:
+    # Scoped to the batman-adv mesh fabric (bat0 receiver discovery).
+    # Unrelated to drone-to-GS radio coordination, which runs on the
+    # WFB control plane (radio_id 1) with no LAN dependency.
     try:
         import ipaddress
         net = ipaddress.ip_network(f"{b}/{mask_prefix}", strict=False)
