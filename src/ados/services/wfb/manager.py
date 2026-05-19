@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import time
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any
@@ -399,17 +400,20 @@ class WfbManager:
             "-M", str(self._config.mcs_index),
             interface,
         ]
+        # stdout=DEVNULL avoids PKT-stats buffer fill. stderr -> log
+        # file (truncated on each restart) so wfb-ng diagnostics survive
+        # without risking the PIPE deadlock. fd is duped by the kernel
+        # for the child; we close our copy after spawn.
+        stderr_fd = os.open(
+            "/run/ados/wfb-drone-tx-control.log",
+            os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
+            0o644,
+        )
         try:
-            # Redirect stdout/stderr to /dev/null. wfb_tx writes a PKT
-            # stats line every second; if PIPE'd, nothing reads it and
-            # the 64K buffer eventually fills and the process blocks on
-            # write. The data-plane wfb_tx gets away with PIPE because
-            # the manager's _tx_health_watchdog reads its output, but
-            # the control plane has no reader and would deadlock.
             self._tx_control_proc = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL,
+                stderr=stderr_fd,
             )
             log.info(
                 "wfb_tx_control_started",
@@ -423,6 +427,8 @@ class WfbManager:
         except OSError as e:
             log.error("wfb_tx_control_start_failed", error=str(e))
             return False
+        finally:
+            os.close(stderr_fd)
 
     async def start_rx_control(self, interface: str, channel: int) -> bool:
         """Launch wfb_rx_control subprocess to receive HopAck frames.
@@ -443,13 +449,17 @@ class WfbManager:
             "-l", "1000",
             interface,
         ]
+        # stdout=DEVNULL; stderr -> log file for wfb-ng diagnostics.
+        stderr_fd = os.open(
+            "/run/ados/wfb-drone-rx-control.log",
+            os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
+            0o644,
+        )
         try:
-            # Same DEVNULL reasoning as wfb_tx_control above — no
-            # reader for PIPE'd output, the buffer would fill.
             self._rx_control_proc = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL,
+                stderr=stderr_fd,
             )
             log.info(
                 "wfb_rx_control_started",

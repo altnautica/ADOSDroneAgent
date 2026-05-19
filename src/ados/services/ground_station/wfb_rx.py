@@ -21,6 +21,7 @@ policy handles the retry loop, same pattern as the air service.
 from __future__ import annotations
 
 import asyncio
+import os
 import signal
 import sys
 import time
@@ -321,14 +322,20 @@ class WfbRxManager:
             "-l", "1000",
             interface,
         ]
+        # stdout=DEVNULL avoids PKT-stats buffer fill. stderr -> log
+        # file (truncated on each restart) so wfb-ng diagnostics survive
+        # without risking the PIPE deadlock. fd is duped by the kernel
+        # for the child; we close our copy after spawn.
+        stderr_fd = os.open(
+            "/run/ados/wfb-gs-rx-control.log",
+            os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
+            0o644,
+        )
         try:
-            # DEVNULL stdout/stderr — nobody reads the wfb_rx PKT/LINK
-            # stats lines on this control-plane process and the PIPE
-            # buffer would fill and block the subprocess.
             self._rx_control_proc = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL,
+                stderr=stderr_fd,
             )
             log.info(
                 "ground_wfb_rx_control_started",
@@ -343,6 +350,8 @@ class WfbRxManager:
         except OSError as exc:
             log.error("ground_wfb_rx_control_start_failed", error=str(exc))
             return False
+        finally:
+            os.close(stderr_fd)
 
     async def start_tx_control(self, interface: str, channel: int) -> bool:
         """Spawn wfb_tx_control on radio_id 1 — sends HopAck back to drone.
@@ -366,13 +375,17 @@ class WfbRxManager:
             "-M", str(self._config.mcs_index),
             interface,
         ]
+        # stdout=DEVNULL; stderr -> log file for wfb-ng diagnostics.
+        stderr_fd = os.open(
+            "/run/ados/wfb-gs-tx-control.log",
+            os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
+            0o644,
+        )
         try:
-            # DEVNULL stdout/stderr — same PIPE-fill avoidance as
-            # wfb_rx_control above.
             self._tx_control_proc = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL,
+                stderr=stderr_fd,
             )
             log.info(
                 "ground_wfb_tx_control_started",
@@ -387,6 +400,8 @@ class WfbRxManager:
         except OSError as exc:
             log.error("ground_wfb_tx_control_start_failed", error=str(exc))
             return False
+        finally:
+            os.close(stderr_fd)
 
     async def stop_fanout(self) -> None:
         """Terminate the fan-out subprocess if alive."""
