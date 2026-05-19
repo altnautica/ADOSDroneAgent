@@ -15,10 +15,14 @@ EnvironmentFile=-/etc/ados/env
 
 NoNewPrivileges=yes
 ProtectSystem=strict
-ReadWritePaths=/var/ados /run/ados /etc/ados
+# /etc/systemd/system is writable for plugin unit drops; the supervisor
+# writes ados-plugin-<id>.service files there during install and removes
+# them during uninstall. /var/lib/ados is writable for plugin state and
+# the plugin-data unpack target.
+ReadWritePaths=/var/ados /run/ados /etc/ados /etc/systemd/system /var/lib/ados
 
-MemoryMax=64M
-CPUQuota=20%
+MemoryMax=128M
+CPUQuota=25%
 
 StandardOutput=journal
 StandardError=journal
