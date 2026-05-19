@@ -52,6 +52,7 @@ WFB_STATS_JSON = ADOS_RUN_DIR / "wfb-stats.json"
 # accessors are cross-process-blind. Written by their owners every
 # ~5 s (atomic tmpfile+rename).
 HOP_SUPERVISOR_JSON = ADOS_RUN_DIR / "hop-supervisor.json"
+PEER_PRESENCE_JSON = ADOS_RUN_DIR / "peer-presence.json"
 BITRATE_CONTROLLER_JSON = ADOS_RUN_DIR / "bitrate-controller.json"
 
 # Sentinel files

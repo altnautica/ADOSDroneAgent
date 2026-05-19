@@ -182,6 +182,100 @@ class HopAnnounce:
         return _TRIGGER_BYTE_TO_LABEL.get(self.trigger, "periodic")
 
 
+# PresenceBeacon — periodic "I am here, I am peer X" frame on the same
+# WFB control plane (radio_id 1, UDP 5803 loopback ingress) as the
+# HopAnnounce. Disambiguated from HopAnnounce by the magic prefix
+# (PresenceBeacon = b"AD05PRES", HopAnnounce = b"AD05HOP1"). Replaces
+# the mDNS-based inter-rig discovery dependency.
+_PRESENCE_MAGIC = b"AD05PRES"
+_PRESENCE_VERSION_CURRENT = 1
+_PRESENCE_ROLE_DRONE = 0x01
+_PRESENCE_ROLE_GS = 0x02
+_PRESENCE_DEVICE_ID_BYTES = 16
+_PRESENCE_BEACON_TOTAL_BYTES = 68
+
+
+@dataclass(frozen=True)
+class PresenceBeacon:
+    """Wire shape of a presence beacon.
+
+    Layout (68 bytes total):
+      offset 0..8    magic (b"AD05PRES")
+      offset 8       version (1B, currently 0x01)
+      offset 9..25   device_id (16B, hex device-id ASCII zero-padded)
+      offset 25      role (1B, 0x01 drone / 0x02 gs)
+      offset 26      channel (1B, current radio channel)
+      offset 27      rssi (signed int8, 0 if unknown)
+      offset 28..36  epoch_ms (uint64 BE, monotonic per rig)
+      offset 36..68  hmac_sha256 (32B) over the preceding 36 bytes
+
+    HMAC keyed by the same `/etc/drone.key`-derived secret as
+    HopAnnounce — `_resolve_pair_key()`. A third party watching the
+    control band cannot forge a beacon without that key.
+    """
+
+    version: int
+    device_id: str
+    role: int
+    channel: int
+    rssi_dbm: int
+    epoch_ms: int
+
+    def encode(self, pair_key: bytes) -> bytes:
+        device_id_bytes = self.device_id.encode("ascii", errors="ignore")[
+            :_PRESENCE_DEVICE_ID_BYTES
+        ].ljust(_PRESENCE_DEVICE_ID_BYTES, b"\x00")
+        rssi_byte = max(-128, min(127, int(self.rssi_dbm))) & 0xFF
+        body = (
+            _PRESENCE_MAGIC
+            + bytes([self.version])
+            + device_id_bytes
+            + bytes([self.role & 0xFF])
+            + bytes([self.channel & 0xFF])
+            + bytes([rssi_byte])
+            + struct.pack(">Q", self.epoch_ms)
+        )
+        tag = hmac.new(pair_key, body, hashlib.sha256).digest()
+        return body + tag
+
+    @classmethod
+    def decode(cls, raw: bytes, pair_key: bytes) -> "PresenceBeacon | None":
+        if len(raw) != _PRESENCE_BEACON_TOTAL_BYTES:
+            return None
+        if not raw.startswith(_PRESENCE_MAGIC):
+            return None
+        body, tag = raw[:-32], raw[-32:]
+        expected = hmac.new(pair_key, body, hashlib.sha256).digest()
+        if not hmac.compare_digest(expected, tag):
+            return None
+        version = body[8]
+        device_id_bytes = body[9:25].rstrip(b"\x00")
+        try:
+            device_id = device_id_bytes.decode("ascii")
+        except UnicodeDecodeError:
+            return None
+        role = body[25]
+        channel = body[26]
+        rssi_raw = body[27]
+        rssi_dbm = rssi_raw - 256 if rssi_raw >= 128 else rssi_raw
+        epoch_ms = struct.unpack(">Q", body[28:36])[0]
+        return cls(
+            version=version,
+            device_id=device_id,
+            role=role,
+            channel=channel,
+            rssi_dbm=rssi_dbm,
+            epoch_ms=epoch_ms,
+        )
+
+    @property
+    def role_label(self) -> str:
+        return {
+            _PRESENCE_ROLE_DRONE: "drone",
+            _PRESENCE_ROLE_GS: "gs",
+        }.get(self.role, "unknown")
+
+
 def _resolve_pair_key() -> bytes:
     """Derive the symmetric pair key used to authenticate HopAnnounce.
 
@@ -728,6 +822,25 @@ class HopListener:
         self._control_port = control_port
         self._history: list[dict[str, Any]] = []
         self._last_hop_at: float = 0.0
+        # Presence cache, populated by inbound PresenceBeacons. The
+        # heartbeat consumer reads this without taking a lock; reads are
+        # whole-dict copies under GIL so partial torn reads are not a
+        # concern at the field granularity here.
+        self._peer_device_id: str | None = None
+        self._peer_role: str | None = None
+        self._peer_channel: int | None = None
+        self._peer_rssi_dbm: int | None = None
+        self._peer_last_seen_unix: float | None = None
+
+    def get_peer_presence(self) -> dict[str, Any]:
+        """Snapshot the current peer presence state (heartbeat consumer)."""
+        return {
+            "peer_device_id": self._peer_device_id,
+            "peer_role": self._peer_role,
+            "peer_channel": self._peer_channel,
+            "peer_rssi_dbm": self._peer_rssi_dbm,
+            "peer_last_seen_unix": self._peer_last_seen_unix,
+        }
 
     def snapshot(self) -> dict[str, Any]:
         """Return the same shape as HopSupervisor.snapshot()."""
@@ -741,6 +854,69 @@ class HopListener:
             "history": list(self._history[-32:]),
             "source": "listener",
         }
+
+    def _persist_peer_presence(self) -> None:
+        """Write the peer presence snapshot to /run/ados/peer-presence.json.
+
+        The heartbeat builder in the main agent process reads this file
+        cross-process to enrich the cloud-relay heartbeat with the peer
+        device-id / role / channel / RSSI / freshness, since the
+        HopListener lives in ados-wfb-rx and the heartbeat lives in
+        ados-api.
+        """
+        from ados.core.paths import PEER_PRESENCE_JSON
+        payload = self.get_peer_presence()
+        try:
+            tmp = PEER_PRESENCE_JSON.with_suffix(".tmp")
+            tmp.parent.mkdir(parents=True, exist_ok=True)
+            tmp.write_text(json.dumps(payload))
+            tmp.replace(PEER_PRESENCE_JSON)
+        except OSError as exc:
+            log.debug("peer_presence_persist_failed", error=str(exc))
+
+    def _handle_presence(self, beacon: "PresenceBeacon") -> None:
+        """Update the in-memory peer cache and back-fill pair state."""
+        previous_device_id = self._peer_device_id
+        self._peer_device_id = beacon.device_id
+        self._peer_role = beacon.role_label
+        self._peer_channel = int(beacon.channel)
+        self._peer_rssi_dbm = int(beacon.rssi_dbm)
+        self._peer_last_seen_unix = time.time()
+        self._persist_peer_presence()
+        if previous_device_id != beacon.device_id:
+            log.info(
+                "hop_listener_peer_seen",
+                peer_device_id=beacon.device_id,
+                peer_role=beacon.role_label,
+                channel=beacon.channel,
+                rssi_dbm=beacon.rssi_dbm,
+            )
+            # Back-fill paired_with_device_id when the bind tunnel did
+            # not carry it. Determine the local role from the wfb
+            # manager: drone-side has no rx.key consumer, GS-side has
+            # the rx_key path present.
+            try:
+                from ados.services.ground_station.pair_manager import (
+                    update_peer_device_id,
+                )
+            except ImportError:
+                return
+            local_role: str = getattr(self._wfb, "_role", None) or (
+                "gs" if getattr(self._wfb, "_is_ground_station", False)
+                else "drone"
+            )
+            try:
+                updated = update_peer_device_id(local_role, beacon.device_id)
+                if updated:
+                    log.info(
+                        "pair_state_peer_back_filled",
+                        peer_device_id=beacon.device_id,
+                        local_role=local_role,
+                    )
+            except OSError as exc:
+                log.debug(
+                    "pair_state_peer_back_fill_failed", error=str(exc)
+                )
 
     def _persist_snapshot(self) -> None:
         """Write the snapshot to /run/ados/hop-supervisor.json.
@@ -848,6 +1024,18 @@ class HopListener:
                         next_persist = now + 5.0
                     continue
 
+                # Dispatch by magic prefix — the same UDP 5803 socket
+                # carries both HopAnnounce (51 B, magic AD05HOP1) and
+                # PresenceBeacon (68 B, magic AD05PRES). wfb_rx_control
+                # delivers either format here; we route based on the
+                # first eight bytes.
+                if data.startswith(_PRESENCE_MAGIC):
+                    beacon = PresenceBeacon.decode(data, pair_key)
+                    if beacon is None:
+                        continue
+                    self._handle_presence(beacon)
+                    continue
+
                 announce = HopAnnounce.decode(data, pair_key)
                 if announce is None:
                     decode_failed_count += 1
@@ -858,8 +1046,9 @@ class HopListener:
                             count=decode_failed_count,
                             note=(
                                 "received UDP frame on the hop control port "
-                                "but HopAnnounce.decode rejected it (length, "
-                                "magic, or HMAC mismatch); rate-limited 30s"
+                                "but neither HopAnnounce nor PresenceBeacon "
+                                "decode accepted it (length, magic, or HMAC "
+                                "mismatch); rate-limited 30s"
                             ),
                         )
                         last_decode_failed_log = now_mono

@@ -132,6 +132,27 @@ def _get_video_wfb_section(data: dict[str, Any]) -> dict[str, Any]:
     return _get_section(video, "wfb")
 
 
+def update_peer_device_id(role: Role, peer_device_id: str) -> bool:
+    """Set peer_device_id on the persisted pair state without disturbing
+    other fields (paired_at, auto_pair_enabled, key path references).
+
+    Used by the presence-beacon path to back-fill the peer identifier
+    after a pair where the bind tunnel did not carry it. Idempotent:
+    returns False if the value is already correct, True if the config
+    was rewritten so callers can decide whether to log.
+    """
+    data = _load_config_dict()
+    wfb = _get_video_wfb_section(data)
+    if wfb.get("paired_with_device_id") == peer_device_id:
+        return False
+    wfb["paired_with_device_id"] = peer_device_id
+    if role == "gs":
+        gs = _get_section(data, "ground_station")
+        gs["paired_drone_id"] = peer_device_id
+    _save_config_dict(data)
+    return True
+
+
 def _persist_pair_state(
     *,
     role: Role,

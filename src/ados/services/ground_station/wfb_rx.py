@@ -585,6 +585,69 @@ class WfbRxManager:
                 log.debug("ground_rx_read_error", error=str(exc))
                 break
 
+    async def _presence_emit_loop(self) -> None:
+        """Periodically emit a PresenceBeacon on the WFB control plane.
+
+        Mirror of `WfbManager._presence_emit_loop`. Writes a 68-byte
+        signed beacon to 127.0.0.1:5803 every 10 s; wfb_tx_control on
+        radio_id 1 transmits it to the paired drone so the drone's
+        HopListener can populate its peer cache.
+        """
+        try:
+            import socket as _socket
+            from ados.core.identity import get_or_create_device_id
+            from ados.services.wfb.hop_supervisor import (
+                PresenceBeacon,
+                _PRESENCE_ROLE_GS,
+                _PRESENCE_VERSION_CURRENT,
+                _resolve_pair_key,
+            )
+        except ImportError as exc:
+            log.warning("presence_emit_disabled", error=str(exc))
+            return
+
+        device_id = get_or_create_device_id()
+        sock = _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM)
+        try:
+            sock.bind(("0.0.0.0", 0))
+            sock.setblocking(False)
+        except OSError as exc:
+            log.warning("presence_emit_socket_failed", error=str(exc))
+            sock.close()
+            return
+        log.info(
+            "ground_presence_emit_started",
+            device_id=device_id,
+            cadence_s=10,
+        )
+        try:
+            while self._running:
+                try:
+                    pair_key = _resolve_pair_key()
+                    beacon = PresenceBeacon(
+                        version=_PRESENCE_VERSION_CURRENT,
+                        device_id=device_id,
+                        role=_PRESENCE_ROLE_GS,
+                        channel=int(self._channel or 0),
+                        rssi_dbm=0,
+                        epoch_ms=int(time.time() * 1000),
+                    )
+                    payload = beacon.encode(pair_key)
+                    sock.sendto(payload, ("127.0.0.1", 5803))
+                except OSError as exc:
+                    log.debug("presence_emit_send_failed", error=str(exc))
+                except Exception as exc:
+                    log.warning("presence_emit_unexpected", error=str(exc))
+                try:
+                    await asyncio.sleep(10.0)
+                except asyncio.CancelledError:
+                    return
+        finally:
+            try:
+                sock.close()
+            except OSError:
+                pass
+
     async def _rx_health_watchdog(self) -> None:
         """Catch wfb_rx zombies (process alive but stdout silent).
 
@@ -807,6 +870,7 @@ class WfbRxManager:
                 tasks.append(asyncio.create_task(self._read_rx_output()))
                 tasks.append(asyncio.create_task(self._rx_proc.wait()))
                 tasks.append(asyncio.create_task(self._rx_health_watchdog()))
+                tasks.append(asyncio.create_task(self._presence_emit_loop()))
 
             try:
                 if tasks:

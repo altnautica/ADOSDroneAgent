@@ -299,6 +299,31 @@ def build_heartbeat_payload(app: AgentApp) -> dict:  # noqa: C901
         except Exception:
             wfb_status = None
     payload["radio"] = build_radio_block(wfb_status)
+
+    # Inter-rig peer presence — sourced cross-process from
+    # /run/ados/peer-presence.json, written by the HopListener every
+    # time a WFB-radio PresenceBeacon decodes successfully. Fields
+    # stay None until the radio link delivers a beacon and freshness
+    # is within the staleness window.
+    import json as _json
+    from ados.core.paths import PEER_PRESENCE_JSON
+    _PEER_STALE_AFTER_S = 60.0
+    try:
+        peer = _json.loads(PEER_PRESENCE_JSON.read_text())
+    except (OSError, ValueError):
+        peer = None
+    if isinstance(peer, dict):
+        last_seen = peer.get("peer_last_seen_unix")
+        fresh = (
+            isinstance(last_seen, (int, float))
+            and (time.time() - float(last_seen)) <= _PEER_STALE_AFTER_S
+        )
+        if fresh:
+            payload["peerDeviceId"] = peer.get("peer_device_id")
+            payload["peerRole"] = peer.get("peer_role")
+            payload["peerChannel"] = peer.get("peer_channel")
+            payload["peerRssiDbm"] = peer.get("peer_rssi_dbm")
+            payload["peerSeenAtUnix"] = last_seen
     return payload
 
 
