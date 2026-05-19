@@ -702,8 +702,8 @@ class HopSupervisor:
         air. The WFB radio is the only inter-rig transport that is
         guaranteed to be present in field conditions.
         """
-        loop = asyncio.get_running_loop()
         ack_event = asyncio.Event()
+        target_channel = announce.target_channel
 
         # Send socket bound to an ephemeral source port (0). The
         # destination loopback port 5803 is wfb_tx_control's UDP
@@ -718,48 +718,20 @@ class HopSupervisor:
             sock_send.close()
             return False
 
-        # ACK socket bound to the dedicated control-plane return port.
-        # wfb_rx_control decodes HopAck frames off the radio and emits
-        # them on 127.0.0.1:5810; reading 0.0.0.0:5810 picks those up
-        # without depending on a specific source address.
-        sock_ack: socket.socket | None = None
-        try:
-            sock_ack = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            sock_ack.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            sock_ack.bind(("0.0.0.0", 5810))
-            sock_ack.setblocking(False)
-        except OSError as exc:
-            log.warning("hop_supervisor_ack_socket_failed", error=str(exc))
-            if sock_ack is not None:
-                sock_ack.close()
-            sock_ack = None
+        # Register the ACK event with the WfbManager's control-plane
+        # listener. The listener is the single long-running consumer of
+        # UDP 5810 (where wfb_rx_control delivers every -p 1 frame the
+        # radio decodes) and routes incoming HopAcks to whichever
+        # channel-keyed event is currently registered.
+        ack_events = getattr(self._wfb, "_ack_events", None)
+        if ack_events is not None:
+            ack_events[target_channel] = ack_event
 
-        async def _reader(sock_ref: socket.socket) -> None:
-            while not ack_event.is_set():
-                try:
-                    data = await loop.sock_recv(sock_ref, 256)
-                except (OSError, asyncio.CancelledError):
-                    return
-                decoded = HopAnnounce.decode(data, pair_key)
-                if decoded is None:
-                    continue
-                if decoded.target_channel == announce.target_channel:
-                    log.info(
-                        "hop_supervisor_ack_received",
-                        target=decoded.target_channel,
-                    )
-                    ack_event.set()
-                    return
-
-        reader_tasks: list[asyncio.Task] = []
-        if sock_ack is not None:
-            reader_tasks.append(asyncio.create_task(_reader(sock_ack)))
         payload = announce.encode(pair_key)
-
         destinations: list[tuple[str, int]] = [("127.0.0.1", 5803)]
         log.info(
             "hop_supervisor_broadcast_start",
-            target=announce.target_channel,
+            target=target_channel,
             destinations=[d[0] for d in destinations],
         )
         try:
@@ -777,17 +749,16 @@ class HopSupervisor:
                         )
                 await asyncio.sleep(HOP_BROADCAST_INTERVAL_MS / 1000.0)
         finally:
-            for t in reader_tasks:
-                t.cancel()
-            for t in reader_tasks:
-                try:
-                    await t
-                except (asyncio.CancelledError, Exception):
-                    pass
             sock_send.close()
-            if sock_ack is not None:
-                sock_ack.close()
-        return ack_event.is_set()
+            if ack_events is not None:
+                ack_events.pop(target_channel, None)
+        if ack_event.is_set():
+            log.info(
+                "hop_supervisor_ack_received",
+                target=target_channel,
+            )
+            return True
+        return False
 
 
 _CHANNEL_NUMBERS = {ch.channel_number for ch in STANDARD_CHANNELS}

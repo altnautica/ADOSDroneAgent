@@ -154,6 +154,21 @@ class WfbManager:
         # drone parked on the bench with no encoder doesn't flood the
         # journal.
         self._last_upstream_silent_log_at: float = 0.0
+        # Control-plane (-p 1) reception state. wfb_rx_control delivers
+        # both the GS's HopAck echoes and its PresenceBeacons here.
+        # `_ack_events` maps target_channel -> asyncio.Event the
+        # HopSupervisor registered before sending its announce. The
+        # listener fires the matching event when a HopAck for that
+        # target arrives. `_peer_*` mirrors the GS-side HopListener
+        # peer cache so the drone's heartbeat can surface the GS's
+        # device-id after the radio link delivers one beacon.
+        self._ack_events: dict[int, asyncio.Event] = {}
+        self._peer_device_id: str | None = None
+        self._peer_role: str | None = None
+        self._peer_channel: int | None = None
+        self._peer_rssi_dbm: int | None = None
+        self._peer_last_seen_unix: float | None = None
+        self._control_plane_listener_running: bool = False
 
     @property
     def state(self) -> LinkState:
@@ -690,6 +705,117 @@ class WfbManager:
             return (rx_queue, drops)
         return None
 
+    def _persist_peer_presence(self) -> None:
+        """Mirror HopListener._persist_peer_presence on the drone side."""
+        try:
+            import json as _json
+            from ados.core.paths import PEER_PRESENCE_JSON
+            payload = {
+                "peer_device_id": self._peer_device_id,
+                "peer_role": self._peer_role,
+                "peer_channel": self._peer_channel,
+                "peer_rssi_dbm": self._peer_rssi_dbm,
+                "peer_last_seen_unix": self._peer_last_seen_unix,
+            }
+            tmp = PEER_PRESENCE_JSON.with_suffix(".tmp")
+            tmp.parent.mkdir(parents=True, exist_ok=True)
+            tmp.write_text(_json.dumps(payload))
+            tmp.replace(PEER_PRESENCE_JSON)
+        except OSError as exc:
+            log.debug("peer_presence_persist_failed", error=str(exc))
+
+    async def _control_plane_listener(self) -> None:
+        """Long-running drone-side listener on the control-plane return port.
+
+        wfb_rx_control writes every decoded -p 1 frame to UDP 5810 on
+        the drone — both the GS's HopAck echoes (in response to a
+        local HopAnnounce) and the GS's PresenceBeacons (every 10 s).
+        This task binds 0.0.0.0:5810 and dispatches by magic prefix:
+
+        * HopAnnounce echo → set the matching event in `_ack_events`
+          so the supervisor's pending hop-attempt unblocks.
+        * PresenceBeacon → update the peer cache + persist
+          /run/ados/peer-presence.json so the heartbeat builder can
+          surface the GS device-id, role, channel, RSSI, and
+          freshness to Mission Control.
+        """
+        try:
+            import socket as _socket
+            from ados.core.identity import get_or_create_device_id
+            from ados.services.wfb.hop_supervisor import (
+                HopAnnounce,
+                PresenceBeacon,
+                _PRESENCE_MAGIC,
+                _resolve_pair_key,
+            )
+        except ImportError as exc:
+            log.warning("control_plane_listener_disabled", error=str(exc))
+            return
+
+        sock = _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM)
+        try:
+            sock.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
+            sock.bind(("0.0.0.0", 5810))
+            sock.setblocking(False)
+        except OSError as exc:
+            log.warning("control_plane_listener_bind_failed", error=str(exc))
+            sock.close()
+            return
+
+        own_device_id = ""
+        try:
+            own_device_id = get_or_create_device_id()
+        except Exception:
+            own_device_id = ""
+
+        self._control_plane_listener_running = True
+        log.info("control_plane_listener_started", port=5810)
+        loop = asyncio.get_running_loop()
+        try:
+            while self._running:
+                try:
+                    data = await asyncio.wait_for(
+                        loop.sock_recv(sock, 256), timeout=1.0
+                    )
+                except (asyncio.TimeoutError, OSError):
+                    continue
+                pair_key = _resolve_pair_key()
+                if data.startswith(_PRESENCE_MAGIC):
+                    beacon = PresenceBeacon.decode(data, pair_key)
+                    if beacon is None:
+                        continue
+                    if own_device_id and beacon.device_id == own_device_id[:16]:
+                        continue
+                    previous = self._peer_device_id
+                    self._peer_device_id = beacon.device_id
+                    self._peer_role = beacon.role_label
+                    self._peer_channel = int(beacon.channel)
+                    self._peer_rssi_dbm = int(beacon.rssi_dbm)
+                    self._peer_last_seen_unix = time.time()
+                    if previous != beacon.device_id:
+                        log.info(
+                            "control_plane_peer_seen",
+                            peer_device_id=beacon.device_id,
+                            peer_role=beacon.role_label,
+                            channel=beacon.channel,
+                            rssi_dbm=beacon.rssi_dbm,
+                        )
+                    self._persist_peer_presence()
+                    continue
+
+                announce = HopAnnounce.decode(data, pair_key)
+                if announce is None:
+                    continue
+                event = self._ack_events.get(announce.target_channel)
+                if event is not None and not event.is_set():
+                    event.set()
+        finally:
+            self._control_plane_listener_running = False
+            try:
+                sock.close()
+            except OSError:
+                pass
+
     async def _presence_emit_loop(self) -> None:
         """Periodically emit a PresenceBeacon on the WFB control plane.
 
@@ -1074,6 +1200,7 @@ class WfbManager:
                 tasks.append(asyncio.create_task(self._tx_proc.wait()))
                 tasks.append(asyncio.create_task(self._tx_health_watchdog()))
                 tasks.append(asyncio.create_task(self._presence_emit_loop()))
+                tasks.append(asyncio.create_task(self._control_plane_listener()))
             if self._rx_proc is not None and self._rx_proc.returncode is None:
                 tasks.append(asyncio.create_task(self._rx_proc.wait()))
 
