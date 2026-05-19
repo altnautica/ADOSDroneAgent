@@ -108,9 +108,10 @@ async def get_pairing_info():
         except Exception as exc:
             log.debug("pairing_info_config_read_failed", error=str(exc))
         try:
-            from ados.services.wfb.key_mgr import get_key_paths, key_exists
-            tx_path, rx_path = get_key_paths()
-            radio_paired = bool(key_exists(tx_path) or key_exists(rx_path))
+            from ados.services.wfb.key_mgr import key_exists
+            # key_exists takes (key_dir, role) — passing role=None
+            # accepts either tx.key or rx.key as a paired signal.
+            radio_paired = bool(key_exists())
         except Exception as exc:
             log.debug("pairing_info_key_check_failed", error=str(exc))
 
