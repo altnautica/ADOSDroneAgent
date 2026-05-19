@@ -235,7 +235,8 @@ def _archive_to_summary(raw: bytes) -> dict:
     contents = parse_archive_bytes(raw)
     manifest = contents.manifest
     permission_ids = sorted(manifest.declared_permissions())
-    unknown = _unknown_capabilities(permission_ids)
+    agent_permission_ids = sorted(manifest.declared_agent_permissions())
+    unknown = _unknown_capabilities(agent_permission_ids)
     if unknown:
         raise ManifestError(
             "Unknown capability: " + ", ".join(unknown)
@@ -323,7 +324,7 @@ async def install_plugin(
         from ados.plugins.archive import parse_archive_bytes
         preview = parse_archive_bytes(raw)
         unknown = _unknown_capabilities(
-            sorted(preview.manifest.declared_permissions())
+            sorted(preview.manifest.declared_agent_permissions())
         )
         if unknown:
             return _err(
@@ -511,7 +512,7 @@ async def install_plugin_from_url(body: InstallFromUrlRequest):
             raw = archive_path.read_bytes()
             preview = parse_archive_bytes(raw)
             unknown = _unknown_capabilities(
-                sorted(preview.manifest.declared_permissions())
+                sorted(preview.manifest.declared_agent_permissions())
             )
             if unknown:
                 if job_id:

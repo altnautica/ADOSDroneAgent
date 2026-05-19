@@ -501,13 +501,31 @@ class PluginManifest(_StrictModel):
         return cls.from_yaml_text(text)
 
     def declared_permissions(self) -> set[str]:
-        """Flat set of declared permission ids across both halves."""
+        """Flat set of declared permission ids across both halves.
+
+        Useful for the install dialog's permission preview where both
+        agent and GCS capabilities render side by side. For the agent's
+        own validation gate use :meth:`declared_agent_permissions`
+        instead so GCS-only ids never trigger the agent's capability
+        allowlist.
+        """
         ids: set[str] = set()
         if self.agent is not None:
             ids.update(p.id for p in self.agent.permissions)
         if self.gcs is not None:
             ids.update(p.id for p in self.gcs.permissions)
         return ids
+
+    def declared_agent_permissions(self) -> set[str]:
+        """Set of permission ids the plugin requests from the agent.
+
+        The agent enforces this list against its own capability catalog.
+        GCS-only ids live under ``self.gcs.permissions`` and are policed
+        by the browser-side runtime, not the agent.
+        """
+        if self.agent is None:
+            return set()
+        return {p.id for p in self.agent.permissions}
 
 
 def schema_dict() -> dict[str, Any]:
