@@ -93,20 +93,26 @@ async def get_pairing_info():
             except Exception as exc:
                 log.warning("pairing_info_mdns_lookup_failed", error=str(exc))
 
+        # Radio-pair state is owned by ados-wfb (drone) / ados-wfb-rx
+        # (GS), separate processes from ados-api. Read directly from
+        # config + the on-disk key file rather than via a manager
+        # attribute that lives in a different process.
         radio_paired = False
         radio_peer_device_id: str | None = None
-        wfb_manager = getattr(app, "_wfb_manager", None)
-        if wfb_manager is None:
-            wfb_manager = getattr(app, "_ground_wfb_manager", None)
-        if wfb_manager is not None:
-            try:
-                wfb_status = wfb_manager.get_status()
-                radio_paired = bool(wfb_status.get("paired", False))
-                peer_raw = wfb_status.get("paired_with_device_id")
+        try:
+            wfb_cfg = getattr(app.config.video, "wfb", None)
+            if wfb_cfg is not None:
+                peer_raw = getattr(wfb_cfg, "paired_with_device_id", None)
                 if isinstance(peer_raw, str) and peer_raw:
                     radio_peer_device_id = peer_raw
-            except Exception as exc:
-                log.debug("pairing_info_radio_lookup_failed", error=str(exc))
+        except Exception as exc:
+            log.debug("pairing_info_config_read_failed", error=str(exc))
+        try:
+            from ados.services.wfb.key_mgr import get_key_paths, key_exists
+            tx_path, rx_path = get_key_paths()
+            radio_paired = bool(key_exists(tx_path) or key_exists(rx_path))
+        except Exception as exc:
+            log.debug("pairing_info_key_check_failed", error=str(exc))
 
         return PairingInfo(
             device_id=device_id,
