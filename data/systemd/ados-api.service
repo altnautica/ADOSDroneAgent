@@ -22,8 +22,12 @@ ProtectSystem=strict
 # Also covers plugin unit drops at /etc/systemd/system (supervisor writes
 # ados-plugin-<id>.service files during install and removes them during
 # uninstall) and runtime config at /etc/ados. /var/lib/ados holds plugin
-# state and the plugin-data unpack target.
-ReadWritePaths=/var/ados /run/ados /etc /var/lib/ados
+# state and the plugin-data unpack target. /tmp is writable so the
+# upstream wfb_bind_client.sh + wfb_bind_server.sh scripts (invoked via
+# socat under this service's sandbox) can `mktemp -d` their staging dir
+# for the keypair tarball — without it the GS side fails the bind with
+# 'Read-only file system' before the BIND command even reaches the drone.
+ReadWritePaths=/var/ados /run/ados /etc /tmp /var/lib/ados
 
 MemoryMax=128M
 CPUQuota=25%
