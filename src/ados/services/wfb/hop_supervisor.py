@@ -682,14 +682,20 @@ class HopSupervisor:
         loop = asyncio.get_running_loop()
         ack_event = asyncio.Event()
 
-        # LAN socket — kept for the legacy broadcast/unicast fallback
-        # path. Bound to the original control port so historic ACKs
-        # echoed back over the LAN still arrive.
+        # Send socket — used for the legacy LAN broadcast fallback AND
+        # for the loopback push into wfb_tx_control. Bound to an
+        # ephemeral source port (port 0) rather than 5803 because the
+        # WFB control-plane wfb_tx_control subprocess also binds 5803
+        # on loopback for its UDP ingress; if this socket bound 5803
+        # too, the kernel would deliver our `sendto("127.0.0.1", 5803)`
+        # to whichever socket happens to be first in its lookup, and
+        # we would lose the announce to a socket that never reads it.
+        # SO_BROADCAST stays on so the LAN belt-and-suspenders sendto
+        # to 255.255.255.255 still goes out.
         sock_lan = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         try:
             sock_lan.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-            sock_lan.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            sock_lan.bind(("0.0.0.0", self._control_port))
+            sock_lan.bind(("0.0.0.0", 0))
             sock_lan.setblocking(False)
         except OSError as exc:
             log.warning("hop_supervisor_socket_failed", error=str(exc))
