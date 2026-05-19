@@ -381,19 +381,25 @@ class HopSupervisor:
         # supervisor would fight the bind tunnel and corrupt the socat
         # key exchange. Lazy import keeps this module independent of
         # the bind orchestrator at import time.
-        try:
-            from ados.services.wfb.bind_orchestrator import is_bind_active
-            if is_bind_active():
-                log.debug("hop_skipped_during_bind")
-                return
-        except Exception:
-            pass
-
         now = time.monotonic()
         # Periodic boundary check is moved up so the silent early-return
         # gates below can log diagnostically once per period instead of
         # every tick (which would spam the journal at 1 Hz).
         periodic = now >= next_periodic_at
+
+        try:
+            from ados.services.wfb.bind_orchestrator import is_bind_active
+            if is_bind_active():
+                if periodic:
+                    log.info("hop_supervisor_skip_during_bind")
+                return
+        except Exception as _exc:
+            if periodic:
+                log.info(
+                    "hop_supervisor_skip_bind_check_exception",
+                    error=str(_exc),
+                )
+            pass
 
         if not self._enabled:
             if periodic:
