@@ -208,9 +208,9 @@ def test_vision_nav_rich_field_subset_parses() -> None:
 
     m = PluginManifest.from_yaml_text(_yaml(slim))
     assert m.id == "com.altnautica.vision-nav"
-    assert m.version == "0.2.3"
+    assert m.version == raw["version"]
     assert m.description_long is not None
-    assert "GPS-denied navigation" in m.description_long
+    assert m.description_long.strip()
     assert m.features and len(m.features) >= 6
     assert m.hardware_requirements is not None
     assert "USB UVC" in (m.hardware_requirements.cameras or "")

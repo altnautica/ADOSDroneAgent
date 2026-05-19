@@ -374,6 +374,10 @@ class ResourceImpact(_StrictModel):
     ram_mb: float | None = Field(None, gt=0)
     pids: int | None = Field(None, gt=0)
     startup_time_seconds: float | None = Field(None, gt=0)
+    # Steady-state output rate for plugins that push a periodic stream
+    # (pose, video frames, sensor samples). Renders in place of CPU peak
+    # on the install-dialog resource-impact card when present.
+    output_rate_hz: float | None = Field(None, gt=0, le=10000)
 
 
 class FcParameter(_StrictModel):

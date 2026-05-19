@@ -474,6 +474,18 @@
           ],
           "default": null,
           "title": "Startup Time Seconds"
+        },
+        "output_rate_hz": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "maximum": 10000,
+              "type": "number"
+            },
+            { "type": "null" }
+          ],
+          "default": null,
+          "title": "Output Rate Hz"
         }
       },
       "title": "ResourceImpact",
