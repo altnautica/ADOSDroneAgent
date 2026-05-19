@@ -387,6 +387,17 @@ class HopSupervisor:
         # every tick (which would spam the journal at 1 Hz).
         periodic = now >= next_periodic_at
 
+        # Unconditional sentinel — fires on every periodic boundary so we
+        # can confirm _tick is being called from _loop at all. Remove once
+        # the supervisor is observably firing in production.
+        if periodic:
+            log.info(
+                "hop_supervisor_tick_entered",
+                interface=repr(getattr(self._wfb, "_interface", None)),
+                channel=getattr(self._wfb, "_channel", None),
+                enabled=self._enabled,
+            )
+
         try:
             from ados.services.wfb.bind_orchestrator import is_bind_active
             if is_bind_active():
