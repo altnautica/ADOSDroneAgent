@@ -387,12 +387,20 @@ class HopSupervisor:
         # every tick (which would spam the journal at 1 Hz).
         periodic = now >= next_periodic_at
 
-        # Unconditional sentinel — fires on every periodic boundary so we
-        # can confirm _tick is being called from _loop at all. Remove once
-        # the supervisor is observably firing in production.
-        if periodic:
+        # Tick counter so we can distinguish "_tick never called" from
+        # "_tick called but periodic never True". Logs at 1 Hz on
+        # multiples of 30 (every ~30s) plus on periodic boundary, with
+        # the time delta to the next periodic so we can see if it's
+        # ever advancing toward zero.
+        if not hasattr(self, "_tick_count"):
+            self._tick_count = 0
+        self._tick_count += 1
+        if periodic or self._tick_count % 30 == 1:
             log.info(
                 "hop_supervisor_tick_entered",
+                tick_n=self._tick_count,
+                periodic=periodic,
+                seconds_until_periodic=round(next_periodic_at - now, 2),
                 interface=repr(getattr(self._wfb, "_interface", None)),
                 channel=getattr(self._wfb, "_channel", None),
                 enabled=self._enabled,
