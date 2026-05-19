@@ -730,9 +730,14 @@ class HopSupervisor:
                     ack_event.set()
                     return
 
-        reader_tasks: list[asyncio.Task] = [
-            asyncio.create_task(_reader(sock_lan, "lan")),
-        ]
+        # Only read ACKs from the WFB control-plane socket. The LAN
+        # socket is SEND-ONLY — reading from it produces false-positive
+        # ACKs because Linux loops outgoing broadcasts back to any
+        # socket bound to 0.0.0.0 on the same port. Without the
+        # WFB radio control plane an ACK is genuinely unreachable
+        # over a broadcast-isolating AP, so an apparent LAN ACK on
+        # sock_lan is the drone hearing itself, not the GS responding.
+        reader_tasks: list[asyncio.Task] = []
         if sock_wfb is not None:
             reader_tasks.append(
                 asyncio.create_task(_reader(sock_wfb, "wfb"))
