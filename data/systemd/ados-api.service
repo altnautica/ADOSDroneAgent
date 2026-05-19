@@ -15,11 +15,15 @@ EnvironmentFile=-/etc/ados/env
 
 NoNewPrivileges=yes
 ProtectSystem=strict
-# /etc/systemd/system is writable for plugin unit drops; the supervisor
-# writes ados-plugin-<id>.service files there during install and removes
-# them during uninstall. /var/lib/ados is writable for plugin state and
-# the plugin-data unpack target.
-ReadWritePaths=/var/ados /run/ados /etc/ados /etc/systemd/system /var/lib/ados
+# /etc is writable to support runtime re-pair via the upstream wfb-ng
+# bind protocol: wfb_keygen writes /etc/gs.key and /etc/drone.key on the
+# GS, and wfb_bind_server.sh copies /etc/drone.key, /etc/wifibroadcast.cfg,
+# and /etc/bind.yaml into place on the drone during the bind handshake.
+# Also covers plugin unit drops at /etc/systemd/system (supervisor writes
+# ados-plugin-<id>.service files during install and removes them during
+# uninstall) and runtime config at /etc/ados. /var/lib/ados holds plugin
+# state and the plugin-data unpack target.
+ReadWritePaths=/var/ados /run/ados /etc /var/lib/ados
 
 MemoryMax=128M
 CPUQuota=25%
