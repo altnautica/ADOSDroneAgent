@@ -31,7 +31,21 @@ class PairingInfo(BaseModel):
     name: str
     version: str
     board: str
+    # `paired` is cloud-pair status: the agent has been claimed by a
+    # Mission Control account via the Convex API-key flow. Distinct
+    # from `radio_paired` below — the two are completely independent
+    # and the operator can be in any of the four combinations.
     paired: bool
+    # `radio_paired` is radio-pair status: the wfb-ng key handshake
+    # with the peer drone or GS has completed, the key files are on
+    # disk, and the WFB radio link is authenticated. Surfaces here
+    # alongside `paired` so Mission Control can render both states
+    # with unambiguous labels.
+    radio_paired: bool = False
+    # Truncated device-id of the radio-paired peer (16 ASCII chars).
+    # Populated from the persisted pair state once the bind tunnel
+    # writes it OR a WFB-radio PresenceBeacon back-fills it.
+    radio_peer_device_id: str | None = None
     pairing_code: str | None = None
     owner_id: str | None = None
     paired_at: float | None = None
@@ -79,12 +93,29 @@ async def get_pairing_info():
             except Exception as exc:
                 log.warning("pairing_info_mdns_lookup_failed", error=str(exc))
 
+        radio_paired = False
+        radio_peer_device_id: str | None = None
+        wfb_manager = getattr(app, "_wfb_manager", None)
+        if wfb_manager is None:
+            wfb_manager = getattr(app, "_ground_wfb_manager", None)
+        if wfb_manager is not None:
+            try:
+                wfb_status = wfb_manager.get_status()
+                radio_paired = bool(wfb_status.get("paired", False))
+                peer_raw = wfb_status.get("paired_with_device_id")
+                if isinstance(peer_raw, str) and peer_raw:
+                    radio_peer_device_id = peer_raw
+            except Exception as exc:
+                log.debug("pairing_info_radio_lookup_failed", error=str(exc))
+
         return PairingInfo(
             device_id=device_id,
             name=name,
             version=__version__,
             board=board,
             paired=bool(info.get("paired", False)),
+            radio_paired=radio_paired,
+            radio_peer_device_id=radio_peer_device_id,
             pairing_code=info.get("pairing_code"),
             owner_id=info.get("owner_id"),
             paired_at=info.get("paired_at"),
