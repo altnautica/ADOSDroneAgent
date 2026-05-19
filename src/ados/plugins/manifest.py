@@ -82,20 +82,37 @@ class MavlinkComponent(_StrictModel):
     sub_id: int | None = Field(None, ge=0, le=255)
 
 
-class VendorAttribution(_StrictModel):
+class VendorAttribution(BaseModel):
     """Source-offer record for plugins that ship a vendor binary.
 
-    Required when ``agent.contains_vendor_binary`` is true so the
-    install dialog can surface the upstream repo, commit, license, and
-    a reachable source-offer URL. Satisfies GPL-3.0 section 6 for
-    plugins that distribute pre-compiled binaries built from
-    GPL-compatible upstreams.
+    Required when ``agent.contains_vendor_binary`` is true so the install
+    dialog can surface the upstream repo, version, license, and a
+    reachable source URL. Satisfies GPL-3.0 section 6 for plugins that
+    distribute pre-compiled binaries built from GPL-compatible
+    upstreams.
+
+    Accepts two equivalent field name sets so existing first-party
+    plugins do not have to migrate their manifest copy:
+
+    * ``name`` / ``source_url`` / ``upstream_version`` (informational)
+    * ``upstream_repo`` / ``source_offer_url`` / ``commit_sha`` (legalistic)
+
+    Only ``license`` is strictly required; the other fields are
+    optional and at least one of ``source_url`` or ``source_offer_url``
+    plus one of ``upstream_version`` or ``commit_sha`` should be set
+    for the GCS install dialog to render meaningful disclosure.
     """
 
-    upstream_repo: str = Field(..., min_length=1)
-    commit_sha: str = Field(..., min_length=1)
+    model_config = ConfigDict(extra="allow", str_strip_whitespace=True)
+
+    name: str | None = None
     license: str = Field(..., min_length=1)
-    source_offer_url: str = Field(..., min_length=1)
+    source_url: str | None = None
+    source_offer_url: str | None = None
+    upstream_repo: str | None = None
+    upstream_version: str | None = None
+    commit_sha: str | None = None
+    notice: str | None = None
 
 
 class VisionContribution(_StrictModel):
@@ -150,10 +167,11 @@ class AgentBlock(_StrictModel):
     Consumed by the SDK test harness so plugin tests can replay scenarios
     by name. Paths are validated for traversal at install time."""
 
-    vendor_attribution: VendorAttribution | None = None
-    """Source-offer record for vendor-binary plugins. Required when
-    ``contains_vendor_binary`` is true; absent for pure-Python
-    plugins. Schema v2."""
+    vendor_attribution: list[VendorAttribution] = Field(default_factory=list)
+    """Source-offer records for vendor-binary plugins. Required (non-empty)
+    when ``contains_vendor_binary`` is true; empty list for pure-Python
+    plugins. Multiple entries permitted when a plugin bundles binaries
+    from more than one upstream. Schema v2."""
 
     subprocess_spawn: list[str] | None = None
     """Allowlist of binary basenames the plugin may exec via
@@ -251,12 +269,12 @@ class AgentBlock(_StrictModel):
         record without a declared vendor binary is a manifest typo
         that the operator would not see in the install dialog risk
         summary."""
-        has_attribution = self.vendor_attribution is not None
+        has_attribution = bool(self.vendor_attribution)
         if self.contains_vendor_binary and not has_attribution:
             raise ManifestError(
                 "agent.contains_vendor_binary is true but "
-                "agent.vendor_attribution is missing; the four "
-                "source-offer fields are required for vendor-binary "
+                "agent.vendor_attribution is empty; at least one "
+                "source-offer record is required for vendor-binary "
                 "plugins"
             )
         if has_attribution and not self.contains_vendor_binary:

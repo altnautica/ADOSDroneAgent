@@ -50,15 +50,9 @@
           "type": "object"
         },
         "vendor_attribution": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/VendorAttribution"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
+          "type": "array",
+          "items": { "$ref": "#/$defs/VendorAttribution" },
+          "default": []
         },
         "subprocess_spawn": {
           "anyOf": [
@@ -351,36 +345,19 @@
       "type": "object"
     },
     "VendorAttribution": {
-      "additionalProperties": false,
-      "description": "Source-offer record for plugins that ship a vendor binary.\n\nRequired when ``agent.contains_vendor_binary`` is true so the\ninstall dialog can surface the upstream repo, commit, license, and\na reachable source-offer URL. Satisfies GPL-3.0 section 6 for\nplugins that distribute pre-compiled binaries built from\nGPL-compatible upstreams.",
+      "additionalProperties": true,
+      "description": "Source-offer record for plugins that ship a vendor binary. Required when agent.contains_vendor_binary is true so the install dialog can surface upstream repo, version, license, and a reachable source URL. Satisfies GPL-3.0 section 6 for plugins that distribute pre-compiled binaries built from GPL-compatible upstreams.",
       "properties": {
-        "upstream_repo": {
-          "minLength": 1,
-          "title": "Upstream Repo",
-          "type": "string"
-        },
-        "commit_sha": {
-          "minLength": 1,
-          "title": "Commit Sha",
-          "type": "string"
-        },
-        "license": {
-          "minLength": 1,
-          "title": "License",
-          "type": "string"
-        },
-        "source_offer_url": {
-          "minLength": 1,
-          "title": "Source Offer Url",
-          "type": "string"
-        }
+        "name": { "title": "Name", "type": "string" },
+        "license": { "minLength": 1, "title": "License", "type": "string" },
+        "source_url": { "title": "Source Url", "type": "string" },
+        "source_offer_url": { "title": "Source Offer Url", "type": "string" },
+        "upstream_repo": { "title": "Upstream Repo", "type": "string" },
+        "upstream_version": { "title": "Upstream Version", "type": "string" },
+        "commit_sha": { "title": "Commit Sha", "type": "string" },
+        "notice": { "title": "Notice", "type": "string" }
       },
-      "required": [
-        "upstream_repo",
-        "commit_sha",
-        "license",
-        "source_offer_url"
-      ],
+      "required": ["license"],
       "title": "VendorAttribution",
       "type": "object"
     },
