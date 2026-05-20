@@ -189,19 +189,49 @@ async def restart_service(name: str):
     if svc_name not in allowed:
         return {"status": "error", "message": f"Unknown service: {name}"}
 
-    def _main_pid(unit: str) -> int:
+    # Preserve the GCS-side contract. The legacy `ados-wfb.service`
+    # is the drone-side WFB-TX manager; on a ground-station profile
+    # the real RX work happens in `ados-wfb-rx.service` and ados-wfb
+    # itself is a no-op systemd unit (since v0.36.41). GCS calls hit
+    # `ados-wfb` regardless of profile, so map drone-only unit names
+    # onto their ground-profile equivalents before touching systemd.
+    aliased_from: str | None = None
+    if svc_name == "ados-wfb":
+        from ados.api.deps import get_agent_app
+
+        try:
+            app = get_agent_app()
+            profile = getattr(app.config.agent, "profile", "auto")
+        except Exception:  # noqa: BLE001
+            profile = "auto"
+        if profile in ("ground_station", "ground-station"):
+            aliased_from = svc_name
+            svc_name = "ados-wfb-rx"
+
+    def _show(unit: str, prop: str) -> str:
         try:
             r = subprocess.run(
-                ["systemctl", "show", unit, "-p", "MainPID", "--value"],
+                ["systemctl", "show", unit, "-p", prop, "--value"],
                 capture_output=True,
                 text=True,
                 timeout=5,
             )
-            return int((r.stdout or "0").strip() or "0")
-        except (subprocess.SubprocessError, ValueError):
+            return (r.stdout or "").strip()
+        except subprocess.SubprocessError:
+            return ""
+
+    def _main_pid(unit: str) -> int:
+        try:
+            return int(_show(unit, "MainPID") or "0")
+        except ValueError:
             return 0
 
+    def _active_enter_ts(unit: str) -> str:
+        return _show(unit, "ActiveEnterTimestamp")
+
+    unit_type = _show(svc_name, "Type") or "simple"
     pid_before = _main_pid(svc_name)
+    ts_before = _active_enter_ts(svc_name)
 
     try:
         result = subprocess.run(
@@ -214,29 +244,58 @@ async def restart_service(name: str):
             msg = result.stderr.strip() or f"Failed to restart {svc_name}"
             return {"status": "error", "message": msg}
 
-        # Give systemd a moment to spawn the new MainPID and confirm
-        # the restart actually executed. A no-change PID after
-        # returncode=0 means PolKit/permissions silently swallowed the
-        # call — surface that as an error so the caller doesn't act on
-        # a phantom restart.
+        # Confirm the restart actually executed. systemctl returning 0
+        # is necessary but not sufficient — PolKit on Bookworm can
+        # silently no-op a restart, and oneshot/forking units don't
+        # surface a stable MainPID change. Use the strongest signal
+        # available per unit type.
         import time
-        for _ in range(20):  # up to ~2 s
-            time.sleep(0.1)
+
+        # Window is ~5 s because slow Pi 4B under load and Pi Zero 2 W
+        # take longer than the original 2 s to spawn a fresh MainPID.
+        ITER = 50
+        SLEEP_S = 0.1
+
+        for _ in range(ITER):
+            time.sleep(SLEEP_S)
+            ts_after = _active_enter_ts(svc_name)
             pid_after = _main_pid(svc_name)
-            if pid_after != 0 and pid_after != pid_before:
-                return {
-                    "status": "ok",
-                    "message": f"Restarted {svc_name}",
-                    "pid_before": pid_before,
-                    "pid_after": pid_after,
-                }
+
+            # Simple / notify / dbus units: stable MainPID, easy check.
+            if unit_type in ("simple", "notify", "dbus", "exec"):
+                if pid_after != 0 and pid_after != pid_before:
+                    return {
+                        "status": "ok",
+                        "message": f"Restarted {svc_name}",
+                        "unit": svc_name,
+                        "aliased_from": aliased_from,
+                        "pid_before": pid_before,
+                        "pid_after": pid_after,
+                    }
+            # Forking / oneshot / idle units: MainPID may transient or
+            # zero. Compare ActiveEnterTimestamp instead.
+            else:
+                if ts_after and ts_after != ts_before:
+                    return {
+                        "status": "ok",
+                        "message": f"Restarted {svc_name}",
+                        "unit": svc_name,
+                        "aliased_from": aliased_from,
+                        "active_enter_before": ts_before,
+                        "active_enter_after": ts_after,
+                    }
+
         return {
             "status": "error",
             "message": (
-                f"systemctl returned 0 but {svc_name} MainPID did not "
-                f"change ({pid_before}). Likely a polkit/permission "
-                f"issue — agent may need to run privileged."
+                f"systemctl returned 0 but {svc_name} did not show a "
+                f"restart signal within {ITER * SLEEP_S:.0f}s "
+                f"(type={unit_type}, pid_before={pid_before}). "
+                f"Likely a polkit/permission issue, or the unit takes "
+                f"longer than the polling window to spawn."
             ),
+            "unit": svc_name,
+            "aliased_from": aliased_from,
         }
     except subprocess.TimeoutExpired:
         return {"status": "error", "message": f"Restart timed out for {svc_name}"}

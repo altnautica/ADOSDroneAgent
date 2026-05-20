@@ -93,6 +93,25 @@ class ApiRuntimeFacade:
     def model_manager(self) -> Any:
         return getattr(self._runtime, "model_manager", None)
 
+    def save_config(self) -> bool:
+        """Persist the underlying runtime's config to disk.
+
+        Delegates to `runtime.save_config()` when available. The legacy
+        `_gs._save_config(app)` helper does `getattr(app, "save_config", None)`
+        with the facade as `app`; surfacing the method on the facade keeps
+        every historical callsite working.
+
+        Returns False (no-op) if the runtime doesn't expose `save_config`,
+        so the caller can flag `persisted: false` to the operator.
+        """
+        saver = getattr(self._runtime, "save_config", None)
+        if callable(saver):
+            try:
+                return bool(saver())
+            except Exception:
+                return False
+        return False
+
     def health_dict(self) -> dict:
         return self._runtime.health.last.to_dict()
 
@@ -222,6 +241,29 @@ class StandaloneApiRuntime:
     @property
     def uptime_seconds(self) -> float:
         return 0.0
+
+    def save_config(self) -> bool:
+        """Persist `self.config` to `/etc/ados/config.yaml`.
+
+        Multiple route handlers (`_gs._save_config(app)` in the
+        ground-station tree, six callers under `setup/`) used to rely
+        on `getattr(runtime, "save_config", None)`. The method was
+        never actually defined on the runtime, so every persist call
+        was a silent no-op and config changes were lost on the next
+        service restart. The bench session of 2026-05-20 surfaced this
+        when `/api/config` PUTs reported `status: ok` while the YAML
+        file on disk stayed empty.
+
+        Returns True on success, False on any persistence failure.
+        Persistence failures are already logged inside
+        `_save_config_dict()`; this wrapper just bubbles the result up
+        so callers can flag a `persisted: false` to the operator.
+        """
+        from ados.services.ground_station.pair_manager import (
+            _save_config_dict,
+        )
+
+        return _save_config_dict(self.config.model_dump())
 
     def _initialize_model_manager(self, log: Any) -> None:
         try:

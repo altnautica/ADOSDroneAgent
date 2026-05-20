@@ -69,8 +69,18 @@ def show(as_json: bool) -> None:
     default=None,
     help="Mesh role for ground_station; ignored for drone. Defaults to direct.",
 )
+@click.option(
+    "--no-restart",
+    is_flag=True,
+    default=False,
+    help=(
+        "Skip the automatic systemctl restart of profile-sensitive units. "
+        "Operator is responsible for restarting the agent before the new "
+        "profile takes effect."
+    ),
+)
 @click.option("--json", "as_json", is_flag=True, help="Machine-readable output.")
-def set_profile(value: str, role: str | None, as_json: bool) -> None:
+def set_profile(value: str, role: str | None, no_restart: bool, as_json: bool) -> None:
     target = "ground_station" if value in ("ground_station", "ground-station") else "drone"
     role_to_persist = (role or "direct") if target == "ground_station" else None
 
@@ -88,12 +98,50 @@ def set_profile(value: str, role: str | None, as_json: bool) -> None:
         click.echo(f"error: {msg}", err=True)
         raise SystemExit(1)
 
+    # Restart profile-sensitive units so the new gate (in wfb/__main__.py
+    # and friends) is picked up without a manual second step. Without
+    # this, a `profile set ground_station` leaves ados-wfb running the
+    # drone-side WfbManager from the prior profile, racing wfb-stats.json
+    # with the about-to-start ados-wfb-rx unit on next reload.
+    restart_attempts: list[dict] = []
+    if not no_restart:
+        import subprocess
+
+        # Order: stop wfb first to release the radio, then restart the
+        # profile-specific RX unit on ground. supervisor wraps everything
+        # else so the bulk of the agent restarts cleanly.
+        candidates = ["ados-wfb", "ados-wfb-rx", "ados-supervisor"]
+        for unit in candidates:
+            try:
+                r = subprocess.run(
+                    ["systemctl", "restart", unit],
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+                restart_attempts.append({
+                    "unit": unit,
+                    "returncode": r.returncode,
+                    "stderr": (r.stderr or "").strip()[:200],
+                })
+            except subprocess.SubprocessError as exc:
+                restart_attempts.append({
+                    "unit": unit,
+                    "returncode": -1,
+                    "stderr": str(exc)[:200],
+                })
+
     payload = {
         "ok": True,
         "profile": target,
         "role": role_to_persist,
-        "restart_required": True,
-        "restart_hint": "sudo systemctl restart ados-supervisor",
+        "restart_required": no_restart,
+        "restarted_units": restart_attempts,
+        "restart_hint": (
+            "sudo systemctl restart ados-supervisor"
+            if no_restart
+            else None
+        ),
     }
     if as_json:
         click.echo(json.dumps(payload))
@@ -104,7 +152,18 @@ def set_profile(value: str, role: str | None, as_json: bool) -> None:
         else target
     )
     click.echo(f"Profile set to {label}.")
-    click.echo("Restart the agent to apply: sudo systemctl restart ados-supervisor")
+    if no_restart:
+        click.echo("Restart the agent to apply: sudo systemctl restart ados-supervisor")
+    else:
+        successes = [r["unit"] for r in restart_attempts if r["returncode"] == 0]
+        failures = [r for r in restart_attempts if r["returncode"] != 0]
+        if successes:
+            click.echo(f"Restarted: {', '.join(successes)}")
+        for f in failures:
+            click.echo(
+                f"warn: failed to restart {f['unit']}: {f['stderr']}",
+                err=True,
+            )
 
 
 # ---------------------------------------------------------------------------

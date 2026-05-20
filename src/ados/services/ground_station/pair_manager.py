@@ -89,6 +89,9 @@ def _atomic_write(path: Path, data: bytes, mode: int = 0o600) -> None:
     os.rename(tmp_path, path)
 
 
+_CONFIG_LOCK_PATH = Path("/run/ados/config.yaml.lock")
+
+
 def _load_config_dict() -> dict[str, Any]:
     """Load `/etc/ados/config.yaml` as a raw dict, tolerating absence."""
     if not _CONFIG_PATH.is_file():
@@ -108,14 +111,73 @@ def _save_config_dict(data: dict[str, Any]) -> bool:
 
     mode 0o600 because this file carries secrets (mqtt_password,
     api_key, hmac_secret, pair fingerprints).
+
+    Serialized via a `/run/ados/config.yaml.lock` flock so concurrent
+    PUTs from two GCS tabs or a GCS+CLI race do not silently lose the
+    first write. The flock window covers only the YAML serialize +
+    atomic-write (the caller has already loaded + mutated their own
+    copy); a true compare-and-swap that re-reads under the lock is
+    out of scope here because every callsite already round-trips
+    `_load_config_dict()` immediately before this call.
+
+    Requires euid 0 because the file is created mode 0o600 owned by
+    root. A non-root caller will get EPERM from `open()`; we surface
+    that as a clear log line rather than a silent False.
     """
-    try:
-        body = yaml.safe_dump(data, sort_keys=False, default_flow_style=False)
-        _atomic_write(_CONFIG_PATH, body.encode("utf-8"), mode=0o600)
-        return True
-    except (OSError, yaml.YAMLError) as exc:
-        log.error("config_write_failed", path=str(_CONFIG_PATH), error=str(exc))
+    import fcntl
+
+    if os.geteuid() != 0:
+        log.error(
+            "config_write_requires_root",
+            path=str(_CONFIG_PATH),
+            euid=os.geteuid(),
+        )
         return False
+
+    try:
+        _CONFIG_LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
+        lock_fd = os.open(
+            str(_CONFIG_LOCK_PATH),
+            os.O_CREAT | os.O_WRONLY,
+            0o600,
+        )
+    except OSError as exc:
+        log.error(
+            "config_lock_open_failed",
+            path=str(_CONFIG_LOCK_PATH),
+            error=str(exc),
+        )
+        # Fall through to the write anyway. Losing the lock is worse
+        # than racing because the file system primitives are still
+        # atomic at the rename level.
+        lock_fd = -1
+
+    try:
+        if lock_fd >= 0:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        try:
+            body = yaml.safe_dump(
+                data, sort_keys=False, default_flow_style=False,
+            )
+            _atomic_write(_CONFIG_PATH, body.encode("utf-8"), mode=0o600)
+            return True
+        except (OSError, yaml.YAMLError) as exc:
+            log.error(
+                "config_write_failed",
+                path=str(_CONFIG_PATH),
+                error=str(exc),
+            )
+            return False
+    finally:
+        if lock_fd >= 0:
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
+            try:
+                os.close(lock_fd)
+            except OSError:
+                pass
 
 
 def _get_section(data: dict[str, Any], key: str) -> dict[str, Any]:

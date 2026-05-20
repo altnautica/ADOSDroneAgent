@@ -31,7 +31,11 @@ async def get_ground_station_wfb() -> dict[str, Any]:
 
 @router.put("/wfb")
 async def put_ground_station_wfb(update: WfbUpdate) -> dict[str, Any]:
-    """Update channel, bitrate profile, or FEC and persist."""
+    """Update channel, bitrate profile, or FEC and persist.
+
+    Returns the radio view plus a `persisted` flag so the operator
+    sees clearly when an in-memory mutation did not survive to disk.
+    """
     app = _gs._require_ground_profile()
 
     # WfbConfig lives at app.config.video.wfb, not app.config.wfb. The
@@ -52,38 +56,30 @@ async def put_ground_station_wfb(update: WfbUpdate) -> dict[str, Any]:
     if update.fec is not None and hasattr(wfb_cfg, "fec"):
         setattr(wfb_cfg, "fec", update.fec)
 
-    # Persist to /etc/ados/config.yaml directly. The legacy
-    # `_gs._save_config(app)` looked for a save_config method on the
-    # runtime that does not exist, so writes were silently dropped.
+    # Persist via the runtime's save_config helper. Previously this
+    # branch inlined the load-modify-save dance against the raw YAML
+    # dict; that's now centralized on the runtime so flock + euid
+    # checks apply uniformly across every PUT surface.
+    persisted = False
+    persist_error: str | None = None
     try:
-        from ados.services.ground_station.pair_manager import (
-            _load_config_dict,
-            _save_config_dict,
+        persisted = bool(app.save_config())
+    except Exception as exc:  # noqa: BLE001
+        persist_error = str(exc)
+        from structlog import get_logger
+        get_logger().warning(
+            "wfb_config_persist_failed",
+            channel=update.channel,
+            bitrate_profile=update.bitrate_profile,
+            fec=update.fec,
+            error=persist_error,
         )
 
-        data = _load_config_dict()
-        video_dict = data.get("video")
-        if not isinstance(video_dict, dict):
-            video_dict = {}
-            data["video"] = video_dict
-        wfb_dict = video_dict.get("wfb")
-        if not isinstance(wfb_dict, dict):
-            wfb_dict = {}
-            video_dict["wfb"] = wfb_dict
-        if update.channel is not None:
-            wfb_dict["channel"] = update.channel
-        if update.bitrate_profile is not None:
-            wfb_dict["bitrate_profile"] = update.bitrate_profile
-        if update.fec is not None:
-            wfb_dict["fec"] = update.fec
-        _save_config_dict(data)
-    except Exception:
-        # Persistence is best-effort; the in-memory mutation above is
-        # what the rest of this request sees. A persistence failure
-        # leaves an info-level breadcrumb but doesn't fail the request.
-        pass
-
-    return _gs._read_wfb_view(app)
+    view = dict(_gs._read_wfb_view(app))
+    view["persisted"] = persisted
+    if persist_error is not None:
+        view["persist_error"] = persist_error
+    return view
 
 
 @router.post("/wfb/pair")

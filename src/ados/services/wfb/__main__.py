@@ -36,8 +36,26 @@ async def main() -> None:
     # by the drone-side manager's "blocked_unpaired" idle state — the
     # LCD ends up reading channel 40 / 0 packets even when wfb_rx is
     # actually decoding at full rate.
+    #
+    # Wrapped in try/except because _resolve_profile reads
+    # /etc/ados/profile.conf and /proc/device-tree/model — a transient
+    # read failure (eMMC contention during boot, race with profile_detect
+    # writing the file) would crash this service. systemd Restart=always
+    # then turns a one-shot read error into a boot-time fail-loop.
+    # Default to "drone" because the WfbManager is the pre-fix behavior;
+    # on a misidentified ground node it just means the legacy race
+    # writer comes back, which is bad but not boot-fatal.
     from ados.core.profile import current_profile_and_role as _resolve_profile
-    _wire_profile, _ = _resolve_profile(config)
+
+    try:
+        _wire_profile, _ = _resolve_profile(config)
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "wfb_service_profile_resolve_failed",
+            error=str(exc),
+            default="drone",
+        )
+        _wire_profile = "drone"
     is_ground = _wire_profile == "ground-station"
 
     from ados.services.wfb.manager import WfbManager
