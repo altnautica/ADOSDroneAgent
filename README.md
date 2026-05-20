@@ -36,16 +36,11 @@ ADOS Drone Agent is the onboard intelligence layer for software-defined drones. 
       <sub>Fleet network enrollment, MQTT gateway status, and mesh radio peers</sub>
     </td>
     <td width="50%">
-      <img src="docs/screenshots/suites.png" alt="Application suites: Sentry, Survey, Inspection, Agriculture, Cargo, SAR" height="220" width="100%"><br>
-      <sub>Application suites: Sentry, Survey, Inspection, Agriculture, Cargo, and SAR</sub>
+      <img src="docs/screenshots/peripherals.png" alt="Connected peripherals with live sensor readings" height="220" width="100%"><br>
+      <sub>Connected peripherals with live sensor readings; drivers extend through the plugin system</sub>
     </td>
   </tr>
 </table>
-
-<p align="center">
-  <img src="docs/screenshots/peripherals.png" alt="Connected peripherals with live sensor readings" width="60%"><br>
-  <sub>Connected peripherals with live sensor readings</sub>
-</p>
 
 ---
 
@@ -126,7 +121,7 @@ remote access, services, and telemetry at a glance.
 |------|----------|-----|-------------|
 | Tier 1 (Basic) | RPi Zero 2W | 128MB+ | MAVLink proxy, MQTT gateway |
 | Tier 2 (Smart) | RPi 4 / CM4 | 512MB+ | + Python scripting, sensor monitoring |
-| Tier 3 (Autonomous) | CM5 / Jetson Nano | 2GB+ | + Suite runtime, vision, SLAM |
+| Tier 3 (Autonomous) | CM5 / Jetson Nano | 2GB+ | + Plugin sandbox, vision, SLAM |
 | Tier 4 (Swarm) | CM5 + radios | 2.5GB+ | + Mesh networking, formation flight |
 
 Any Linux ARM64 or x86_64 board with a serial port should work. The tier system scales features to available resources automatically.
@@ -174,7 +169,7 @@ FastAPI server at `:8080`. Full OpenAPI docs at `/docs`. Domain route modules co
 | `/api/services` | GET | Running services and status |
 | `/api/video` | GET / POST | Video pipeline status and control |
 | `/api/scripts` | GET / POST | List and execute automation scripts |
-| `/api/suites` | GET | Suite activation and status |
+| `/api/plugins` | GET / POST / DELETE | Plugin install, list, enable, disable, remove, info |
 | `/api/fleet/*` | GET | Fleet enrollment and peer status |
 | `/api/peripherals` | GET | Connected sensors and hardware |
 | `/api/pairing/*` | GET / POST | GCS pairing management |
