@@ -127,7 +127,12 @@ def _network_view(app: Any) -> dict[str, Any]:
 
 
 def _read_wfb_view(app: Any) -> dict[str, Any]:
-    wfb_cfg = getattr(app.config, "wfb", None)
+    # WfbConfig lives at app.config.video.wfb, not app.config.wfb. The
+    # earlier lookup at the root always returned None and the GET view
+    # silently returned defaults (channel=0, profile=default, fec=8/12)
+    # regardless of what the operator actually configured.
+    video_cfg = getattr(app.config, "video", None)
+    wfb_cfg = getattr(video_cfg, "wfb", None) if video_cfg is not None else None
     return {
         "channel": getattr(wfb_cfg, "channel", 0) if wfb_cfg is not None else 0,
         "bitrate_profile": getattr(wfb_cfg, "bitrate_profile", "default")
