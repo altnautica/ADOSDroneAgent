@@ -144,18 +144,64 @@ async def list_services():
 
 @router.post("/services/{name}/restart")
 async def restart_service(name: str):
-    """Restart a named systemd service."""
+    """Restart a named systemd service.
+
+    Confirms the restart actually happened by sampling the unit's
+    MainPID before and after. PolKit on Debian Bookworm can let
+    `systemctl restart` return 0 without actually restarting the unit
+    when the caller lacks the right capability — earlier this returned
+    `status: ok` to the GCS even when the unit never restarted, so
+    operators thought their config change had taken effect when it
+    had not.
+    """
     import subprocess
 
-    # Validate service name (prevent injection)
+    # Validate service name (prevent injection). Includes ground-station
+    # profile units so the GS rig's Mission Control Hardware tab can
+    # actually restart the receive-side WFB stack.
     allowed = {
-        "ados-mavlink", "ados-api", "ados-cloud", "ados-health",
-        "ados-video", "ados-wfb", "ados-scripting", "ados-ota",
+        "ados-api",
+        "ados-buttons",
+        "ados-cloud",
+        "ados-cloud-relay",
         "ados-discovery",
+        "ados-ethernet",
+        "ados-health",
+        "ados-hostapd",
+        "ados-input",
+        "ados-mavlink",
+        "ados-mediamtx-gs",
+        "ados-mesh-pairing",
+        "ados-oled",
+        "ados-ota",
+        "ados-peripherals",
+        "ados-pic",
+        "ados-scripting",
+        "ados-uplink-router",
+        "ados-video",
+        "ados-wfb",
+        "ados-wfb-rx",
+        "ados-wfb-relay",
+        "ados-wfb-receiver",
+        "ados-wifi-client",
     }
     svc_name = name if name.startswith("ados-") else f"ados-{name}"
     if svc_name not in allowed:
         return {"status": "error", "message": f"Unknown service: {name}"}
+
+    def _main_pid(unit: str) -> int:
+        try:
+            r = subprocess.run(
+                ["systemctl", "show", unit, "-p", "MainPID", "--value"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            return int((r.stdout or "0").strip() or "0")
+        except (subprocess.SubprocessError, ValueError):
+            return 0
+
+    pid_before = _main_pid(svc_name)
 
     try:
         result = subprocess.run(
@@ -164,10 +210,34 @@ async def restart_service(name: str):
             text=True,
             timeout=30,
         )
-        if result.returncode == 0:
-            return {"status": "ok", "message": f"Restarted {svc_name}"}
-        msg = result.stderr.strip() or f"Failed to restart {svc_name}"
-        return {"status": "error", "message": msg}
+        if result.returncode != 0:
+            msg = result.stderr.strip() or f"Failed to restart {svc_name}"
+            return {"status": "error", "message": msg}
+
+        # Give systemd a moment to spawn the new MainPID and confirm
+        # the restart actually executed. A no-change PID after
+        # returncode=0 means PolKit/permissions silently swallowed the
+        # call — surface that as an error so the caller doesn't act on
+        # a phantom restart.
+        import time
+        for _ in range(20):  # up to ~2 s
+            time.sleep(0.1)
+            pid_after = _main_pid(svc_name)
+            if pid_after != 0 and pid_after != pid_before:
+                return {
+                    "status": "ok",
+                    "message": f"Restarted {svc_name}",
+                    "pid_before": pid_before,
+                    "pid_after": pid_after,
+                }
+        return {
+            "status": "error",
+            "message": (
+                f"systemctl returned 0 but {svc_name} MainPID did not "
+                f"change ({pid_before}). Likely a polkit/permission "
+                f"issue — agent may need to run privileged."
+            ),
+        }
     except subprocess.TimeoutExpired:
         return {"status": "error", "message": f"Restart timed out for {svc_name}"}
     except Exception as exc:

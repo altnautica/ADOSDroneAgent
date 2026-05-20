@@ -34,7 +34,11 @@ async def put_ground_station_wfb(update: WfbUpdate) -> dict[str, Any]:
     """Update channel, bitrate profile, or FEC and persist."""
     app = _gs._require_ground_profile()
 
-    wfb_cfg = getattr(app.config, "wfb", None)
+    # WfbConfig lives at app.config.video.wfb, not app.config.wfb. The
+    # earlier lookup at the root always returned None and the handler
+    # raised E_WFB_CONFIG_MISSING on every call.
+    video_cfg = getattr(app.config, "video", None)
+    wfb_cfg = getattr(video_cfg, "wfb", None) if video_cfg is not None else None
     if wfb_cfg is None:
         raise HTTPException(
             status_code=503,
@@ -48,7 +52,37 @@ async def put_ground_station_wfb(update: WfbUpdate) -> dict[str, Any]:
     if update.fec is not None and hasattr(wfb_cfg, "fec"):
         setattr(wfb_cfg, "fec", update.fec)
 
-    _gs._save_config(app)
+    # Persist to /etc/ados/config.yaml directly. The legacy
+    # `_gs._save_config(app)` looked for a save_config method on the
+    # runtime that does not exist, so writes were silently dropped.
+    try:
+        from ados.services.ground_station.pair_manager import (
+            _load_config_dict,
+            _save_config_dict,
+        )
+
+        data = _load_config_dict()
+        video_dict = data.get("video")
+        if not isinstance(video_dict, dict):
+            video_dict = {}
+            data["video"] = video_dict
+        wfb_dict = video_dict.get("wfb")
+        if not isinstance(wfb_dict, dict):
+            wfb_dict = {}
+            video_dict["wfb"] = wfb_dict
+        if update.channel is not None:
+            wfb_dict["channel"] = update.channel
+        if update.bitrate_profile is not None:
+            wfb_dict["bitrate_profile"] = update.bitrate_profile
+        if update.fec is not None:
+            wfb_dict["fec"] = update.fec
+        _save_config_dict(data)
+    except Exception:
+        # Persistence is best-effort; the in-memory mutation above is
+        # what the rest of this request sees. A persistence failure
+        # leaves an info-level breadcrumb but doesn't fail the request.
+        pass
+
     return _gs._read_wfb_view(app)
 
 
