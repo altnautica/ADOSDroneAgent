@@ -53,6 +53,7 @@ WFB_STATS_JSON = ADOS_RUN_DIR / "wfb-stats.json"
 # ~5 s (atomic tmpfile+rename).
 HOP_SUPERVISOR_JSON = ADOS_RUN_DIR / "hop-supervisor.json"
 PEER_PRESENCE_JSON = ADOS_RUN_DIR / "peer-presence.json"
+CAMERA_STATE_JSON = ADOS_RUN_DIR / "camera-state.json"
 BITRATE_CONTROLLER_JSON = ADOS_RUN_DIR / "bitrate-controller.json"
 
 # Sentinel files

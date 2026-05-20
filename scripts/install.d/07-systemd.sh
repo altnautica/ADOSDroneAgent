@@ -241,6 +241,29 @@ enable_universal_units() {
     else
         warn "Hardware-cache udev rules source not found; skipping."
     fi
+
+    # UVC autosuspend disable rule. The kernel default usbcore.autosuspend
+    # is 2 seconds — cheap USB cameras commonly mishandle resume and end
+    # up wedged on the bus until a physical replug. Pin power/control=on
+    # for any USB device whose bDeviceClass is 0e (video) and for the
+    # parent of any /dev/video* node from a composite camera.
+    local uvc_udev_src=""
+    if [ -n "${FRESH_REPO_DIR:-}" ] && [ -f "${FRESH_REPO_DIR}/repo/data/udev/50-ados-uvc-no-autosuspend.rules" ]; then
+        uvc_udev_src="${FRESH_REPO_DIR}/repo/data/udev/50-ados-uvc-no-autosuspend.rules"
+    elif [ -f "$(dirname "$0" 2>/dev/null)/../data/udev/50-ados-uvc-no-autosuspend.rules" ] 2>/dev/null; then
+        uvc_udev_src="$(cd "$(dirname "$0")/../data/udev" && pwd)/50-ados-uvc-no-autosuspend.rules"
+    fi
+    if [ -n "${uvc_udev_src}" ] && [ -f "${uvc_udev_src}" ]; then
+        install -m 0644 "${uvc_udev_src}" "/etc/udev/rules.d/50-ados-uvc-no-autosuspend.rules"
+        udevadm control --reload 2>/dev/null || true
+        # Re-fire the rule on already-bound USB devices so a camera that
+        # was plugged in BEFORE this install gets autosuspend disabled
+        # without requiring a physical replug.
+        udevadm trigger --subsystem-match=usb --action=change 2>/dev/null || true
+        info "UVC autosuspend-disable udev rule installed."
+    else
+        warn "UVC autosuspend udev rule source not found; skipping."
+    fi
 }
 
 # Stop, disable, and mask the Debian-default dnsmasq.service and

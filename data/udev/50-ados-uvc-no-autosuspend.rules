@@ -1,0 +1,32 @@
+# 50-ados-uvc-no-autosuspend.rules
+#
+# Disable USB autosuspend on UVC / USB-video devices. Cheap UVC
+# cameras (HZ, generic OEM modules) commonly mishandle USB resume
+# at the kernel default of 2 s, causing the device to wedge on the
+# bus and eventually get timed out and removed. Pinning power
+# management to "on" keeps the camera continuously powered and
+# eliminates the resume-failure path.
+#
+# The rule fires on both "add" (fresh hotplug) and "change"
+# (post-install `udevadm trigger --action=change` that catches
+# already-bound devices on an upgrade).
+
+# Single-function UVC cameras advertise class 0e at the device
+# descriptor level. Covers the HZ 0ede:8093 reference camera and
+# the bulk of cheap webcams.
+ACTION=="add|change", SUBSYSTEM=="usb", ATTR{bDeviceClass}=="0e", \
+    ATTR{power/control}="on"
+
+# Composite cameras advertise class 0xEF (miscellaneous) at the
+# device level and only put 0e on the streaming interface. Walk up
+# from the video4linux node to its USB grandparent (device above
+# the interface) and disable autosuspend there.
+ACTION=="add", SUBSYSTEM=="video4linux", KERNEL=="video[0-9]*", \
+    RUN+="/bin/sh -c 'parent=$(readlink -f /sys%p/device/../..); [ -w \"$parent/power/control\" ] && echo on > \"$parent/power/control\"'"
+
+# Wake the running ados-video pipeline immediately on camera plug so
+# the operator does not wait up to 30 s for the no_primary_camera
+# backoff loop to retry. The pipeline traps SIGUSR1 and short-circuits
+# its sleep, re-discovering the camera within ~1 s.
+ACTION=="add", SUBSYSTEM=="video4linux", KERNEL=="video[0-9]*", \
+    RUN+="/bin/systemctl kill --signal=SIGUSR1 ados-video.service"

@@ -324,6 +324,29 @@ def build_heartbeat_payload(app: AgentApp) -> dict:  # noqa: C901
             payload["peerChannel"] = peer.get("peer_channel")
             payload["peerRssiDbm"] = peer.get("peer_rssi_dbm")
             payload["peerSeenAtUnix"] = last_seen
+
+    # Camera state — sourced cross-process from
+    # /run/ados/camera-state.json, written by the ados-video pipeline
+    # on every discover_and_assign() pass. Surfaces "missing" on the
+    # GCS drone card so operators can spot a missing or wedged camera
+    # without SSH'ing in. Stale snapshots (> 5 min since last write)
+    # are treated as unknown rather than authoritative.
+    from ados.core.paths import CAMERA_STATE_JSON
+    _CAMERA_STALE_AFTER_S = 300.0
+    try:
+        camera = _json.loads(CAMERA_STATE_JSON.read_text())
+    except (OSError, ValueError):
+        camera = None
+    if isinstance(camera, dict):
+        updated_at = camera.get("updated_at_unix")
+        cam_fresh = (
+            isinstance(updated_at, (int, float))
+            and (time.time() - float(updated_at)) <= _CAMERA_STALE_AFTER_S
+        )
+        if cam_fresh:
+            state = camera.get("state")
+            if isinstance(state, str) and state in ("ready", "missing", "error"):
+                payload["cameraState"] = state
     return payload
 
 

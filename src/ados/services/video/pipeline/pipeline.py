@@ -149,6 +149,14 @@ class VideoPipeline(_DiscoveryMixin, _HealthMixin, _WfbTeeMixin):
         # run() can pick the right backoff cap. None when the last start
         # succeeded or the cause is unknown.
         self._last_start_error: str | None = None
+        # Signal-fired event that short-circuits the no_primary_camera
+        # backoff sleep. The udev rule at
+        # /etc/udev/rules.d/50-ados-uvc-no-autosuspend.rules sends
+        # SIGUSR1 to ados-video on every fresh /dev/video* node; the
+        # run() loop installs a signal handler that calls
+        # _camera_plugged_event.set(), waking the retry from up to
+        # 30 s of sleep down to ~1 s.
+        self._camera_plugged_event: asyncio.Event = asyncio.Event()
         self._base_restart_delay: float = 5.0
         self._started_at: float = 0.0  # monotonic time of last start_stream()
         self._first_packet_seen: bool = False  # set True once mediamtx reports a publisher
@@ -300,6 +308,7 @@ class VideoPipeline(_DiscoveryMixin, _HealthMixin, _WfbTeeMixin):
 
         # Discover cameras
         self._discover_and_assign()
+        self._persist_camera_state()
 
         primary = self._camera_mgr.get_primary()
         if not primary:
@@ -1044,6 +1053,68 @@ class VideoPipeline(_DiscoveryMixin, _HealthMixin, _WfbTeeMixin):
             return False
         return True
 
+    def _persist_camera_state(self) -> None:
+        """Write a cross-process snapshot of camera discovery state.
+
+        The heartbeat builder in ados-supervisor / ados-api reads
+        ``/run/ados/camera-state.json`` to surface a 'Camera Missing'
+        pill on the GCS drone card without needing direct access to
+        the ados-video process. Best-effort; OSErrors are logged at
+        debug and discarded.
+        """
+        try:
+            import json as _json
+            from ados.core.paths import CAMERA_STATE_JSON
+            primary = self._camera_mgr.get_primary()
+            cameras = self._camera_mgr.to_dict()
+            if isinstance(cameras, dict):
+                total = len(cameras.get("cameras", []) or [])
+            else:
+                total = 0
+            if primary is not None:
+                state = "ready"
+                primary_path = getattr(primary, "device_path", None)
+                primary_name = getattr(primary, "name", None) or getattr(
+                    primary, "display_name", None
+                )
+            else:
+                state = "missing"
+                primary_path = None
+                primary_name = None
+            payload = {
+                "state": state,
+                "primary_path": primary_path,
+                "primary_name": primary_name,
+                "total_cameras": total,
+                "updated_at_unix": time.time(),
+            }
+            tmp = CAMERA_STATE_JSON.with_suffix(".tmp")
+            tmp.parent.mkdir(parents=True, exist_ok=True)
+            tmp.write_text(_json.dumps(payload))
+            tmp.replace(CAMERA_STATE_JSON)
+        except (OSError, Exception) as exc:
+            _pkg().log.debug("camera_state_persist_failed", error=str(exc))
+
+    async def _sleep_or_wake_on_camera(self, timeout: float) -> None:
+        """Sleep up to ``timeout`` seconds, or wake early if a fresh
+        /dev/video* node fires the udev SIGUSR1 to ados-video.
+
+        For non-camera errors (where the camera-plugged event is
+        irrelevant) the behaviour collapses to a plain asyncio.sleep,
+        because the event is never set by anything else.
+        """
+        if timeout <= 0:
+            return
+        try:
+            await asyncio.wait_for(
+                self._camera_plugged_event.wait(), timeout=timeout
+            )
+            # Drain the event so the next backoff cycle requires a
+            # fresh hotplug to short-circuit.
+            self._camera_plugged_event.clear()
+        except asyncio.TimeoutError:
+            pass
+
     async def run(self) -> None:
         """Main service loop — monitors pipeline health and restarts on failure.
 
@@ -1052,6 +1123,18 @@ class VideoPipeline(_DiscoveryMixin, _HealthMixin, _WfbTeeMixin):
         """
         log = _pkg().log
         log.info("video_pipeline_service_start")
+
+        # Wire SIGUSR1 to the camera-plugged event so the udev rule at
+        # /etc/udev/rules.d/50-ados-uvc-no-autosuspend.rules can wake
+        # the no_primary_camera backoff sleep immediately on hotplug.
+        # Best-effort — non-Linux loops and re-entries fall back to
+        # the legacy timeout-only behaviour.
+        try:
+            asyncio.get_running_loop().add_signal_handler(
+                signal.SIGUSR1, self._camera_plugged_event.set
+            )
+        except (RuntimeError, NotImplementedError, ValueError):
+            pass
 
         try:
             while True:
@@ -1064,6 +1147,11 @@ class VideoPipeline(_DiscoveryMixin, _HealthMixin, _WfbTeeMixin):
                         # later in the day does not roll straight into
                         # the circuit breaker.
                         self._note_healthy_tick()
+                        # Refresh /run/ados/camera-state.json so the
+                        # heartbeat builder doesn't treat a long-lived
+                        # healthy stream as a stale snapshot and drop
+                        # the GCS Camera Missing pill incorrectly.
+                        self._persist_camera_state()
                     else:
                         # Restart the consecutive-healthy timer on any
                         # failed probe so a flap window has to start
@@ -1176,7 +1264,7 @@ class VideoPipeline(_DiscoveryMixin, _HealthMixin, _WfbTeeMixin):
                             backoff_secs=cap,
                             last_error=self._last_start_error,
                         )
-                        await asyncio.sleep(cap)
+                        await self._sleep_or_wake_on_camera(cap)
                         self._restart_count = 0
                         continue
                     log.info(
@@ -1185,7 +1273,9 @@ class VideoPipeline(_DiscoveryMixin, _HealthMixin, _WfbTeeMixin):
                         backoff_secs=delay,
                         last_error=self._last_start_error,
                     )
-                    await asyncio.sleep(max(0, delay - _HEALTH_CHECK_INTERVAL))
+                    await self._sleep_or_wake_on_camera(
+                        max(0, delay - _HEALTH_CHECK_INTERVAL)
+                    )
                     success = await self.start_stream()
                     if success:
                         self._restart_count = 0
