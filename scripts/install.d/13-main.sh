@@ -255,7 +255,22 @@ main_install_flow() {
         # the function short-circuits on boards whose HAL has no
         # displays.supported entry, so calling it on a drone rig with no
         # LCD is a fast no-op.
-        FRESH_REPO_DIR="${tmp_repo}" install_display_driver
+        #
+        # Fail-fast on overlay install failure during the upgrade flow.
+        # The installer regenerates /boot/extlinux/extlinux.conf on
+        # Radxa boards via u-boot-update — if that step fails we bail
+        # the entire upgrade rather than continue with a potentially
+        # broken bootloader and let the operator power-cycle into a
+        # brick. The installer itself snapshots extlinux.conf and
+        # restores on failure, so by the time control returns here the
+        # box should still be bootable; this guard is the second line
+        # of defense.
+        if ! FRESH_REPO_DIR="${tmp_repo}" install_display_driver; then
+            error "install_display_driver failed during upgrade. Aborting before any more boot-critical changes."
+            error "Inspect /boot/extlinux/extlinux.conf and /boot/dtbo/managed.list before power-cycling."
+            rm -rf "${tmp_repo}"
+            exit 1
+        fi
 
         # Persist driver scripts + overlay sources to /opt/ados/source/ so the
         # wizard's display step (and any future CLI re-runs) can find them
