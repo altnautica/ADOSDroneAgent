@@ -12,6 +12,10 @@
 # =============================================================================
 
 main_install_flow() {
+    # Mandatory entry log. If the install log is empty after a run, that
+    # is itself a signal that the dispatcher never reached this function
+    # (sourcing failed, sudo bailed, redirect target wasn't writable).
+    info "ADOS Drone Agent install.sh starting"
     echo ""
     echo -e "${BOLD}=== ADOS Drone Agent Installer ===${NC}"
     echo ""
@@ -87,6 +91,30 @@ main_install_flow() {
         *)
             warn "Unexpected architecture '${ARCH}'. Proceeding." ;;
     esac
+
+    # ─── Stale-state auto-purge ──────────────────────────────────────────────────
+    #
+    # Residue from an incomplete prior uninstall (unit files surviving past
+    # venv removal, orphan dropin dirs) used to silently block a fresh
+    # install because some downstream step would trip on the leftovers
+    # without writing anything observable to the log. detect_stale_state
+    # returns 0 when there is residue AND no working venv; do_uninstall
+    # uses the same glob pattern used at the bottom of this script's
+    # uninstall flow, so the auto-purge cannot drift from the explicit
+    # one. Running uninstall when the system was already clean is a no-op.
+    if detect_stale_state; then
+        warn "Detected residue from an incomplete prior install or uninstall."
+        warn "Auto-purging stale systemd units, dropins, and state before fresh install."
+        do_uninstall || true
+        # do_uninstall exits with status 0 on success; if it called exit
+        # the script ends here and the operator re-runs. The `|| true`
+        # keeps us moving if it returns instead of exiting (defensive).
+    fi
+
+    # Bootstrap the long-lived state dirs once, BEFORE any unit deployment
+    # so ReadWritePaths=/var/lib/ados in ados-api.service can never see a
+    # missing target. setup_state_dirs is idempotent.
+    setup_state_dirs
 
     # ─── Fast Path: Pair-only (already installed, --pair/positional code) ────────
 

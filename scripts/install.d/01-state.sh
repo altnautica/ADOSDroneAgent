@@ -15,6 +15,54 @@ is_installed() {
     [ -x "${VENV_DIR}/bin/ados" ] && [ -d "${VENV_DIR}/lib" ]
 }
 
+# ─── State directory bootstrap ───────────────────────────────────────────────
+#
+# Creates the long-lived state + log + runtime dirs that systemd units
+# reference via ReadWritePaths and that the agent writes into. Called
+# from main_install_flow before any unit is deployed.
+#
+# /var/lib/ados — agent state (pairing token, device-id, AP passphrase)
+# /var/log/ados — supervisor + plugin logs
+# /run/ados     — IPC sockets (also created by tmpfiles.d on boot)
+#
+# Idempotent. `install -d` is a no-op if the dir already exists with the
+# right mode/owner; the chown/chmod are explicit so they self-heal a
+# previously-misconfigured deployment.
+setup_state_dirs() {
+    install -d -m 0755 -o root -g root /var/lib/ados
+    install -d -m 0755 -o root -g root /var/log/ados
+    install -d -m 0755 -o root -g root /run/ados
+}
+
+# ─── Stale-state detection ───────────────────────────────────────────────────
+#
+# Returns 0 when the system has residue from an incomplete prior uninstall:
+# unit files, dropin dirs, or top-level agent dirs that survived while the
+# venv binary is gone. Caller (main_install_flow) auto-purges via
+# do_uninstall and continues, so a partial-prior-state never silently
+# blocks a fresh install.
+detect_stale_state() {
+    # Already a clean install — not stale, fast-path will handle it.
+    if is_installed; then
+        return 1
+    fi
+    # Service or slice unit files surviving past venv removal.
+    if compgen -G "/etc/systemd/system/ados-*.service" >/dev/null; then
+        return 0
+    fi
+    if compgen -G "/etc/systemd/system/ados-*.slice" >/dev/null; then
+        return 0
+    fi
+    if [ -d /etc/systemd/system/ados-supervisor.service.wants ]; then
+        return 0
+    fi
+    # Top-level dirs without a usable venv inside.
+    if [ -d /opt/ados ] || [ -d /etc/ados ] || [ -d /var/lib/ados ]; then
+        return 0
+    fi
+    return 1
+}
+
 get_installed_version() {
     # Read the version straight from the package's __init__.py rather
     # than going through the CLI, which has no version subcommand.
@@ -48,18 +96,43 @@ do_uninstall() {
         systemctl disable "${svc_name}" 2>/dev/null || true
         rm -f "$svc_file"
     done
+    # Slice + target + timer units (plugin slice is the main one today).
+    for unit_glob in "/etc/systemd/system/ados-*.slice" \
+                     "/etc/systemd/system/ados-*.target" \
+                     "/etc/systemd/system/ados-*.timer"; do
+        for unit_file in $unit_glob; do
+            [ -f "$unit_file" ] || continue
+            systemctl stop "$(basename "$unit_file")" 2>/dev/null || true
+            rm -f "$unit_file"
+        done
+    done
+    # Dropin .wants directories (supervisor builds these to pull in
+    # profile-specific children) and orphan multi-user.target.wants symlinks.
+    rm -rf /etc/systemd/system/ados-*.service.wants
+    rm -f /etc/systemd/system/multi-user.target.wants/ados-*
     # Also remove legacy single-service unit
     if [ -f "/etc/systemd/system/ados-agent.service" ]; then
         systemctl stop "ados-agent" 2>/dev/null || true
         systemctl disable "ados-agent" 2>/dev/null || true
         rm -f "/etc/systemd/system/ados-agent.service"
     fi
+    # Tmpfiles, sysctl, modules-load, udev, avahi, motd dropins.
     rm -f /etc/tmpfiles.d/ados.conf
+    rm -f /etc/tmpfiles.d/ados-plugins.conf
     rm -f /etc/sysctl.d/99-ados-video.conf
-    rm -rf /run/ados
+    rm -f /etc/modules-load.d/ados-display.conf
+    rm -f /etc/udev/rules.d/50-ados-uvc-no-autosuspend.rules
+    rm -f /etc/udev/rules.d/99-ados-hardware.rules
+    rm -f /etc/udev/rules.d/99-ados-input.rules
+    rm -f /etc/udev/rules.d/99-ados-modem.rules
+    rm -f /etc/avahi/services/ados-gs-ap.service
     rm -f /etc/update-motd.d/30-ados
-    systemctl daemon-reload
-    info "All ADOS services removed."
+    rm -rf /run/ados
+    rm -rf /var/log/ados
+    systemctl daemon-reload 2>/dev/null || true
+    systemctl reset-failed 2>/dev/null || true
+    udevadm control --reload-rules 2>/dev/null || true
+    info "All ADOS services and dropins removed."
 
     # Remove install directory (venv + cloned code)
     if [ -d "${INSTALL_DIR}" ]; then
