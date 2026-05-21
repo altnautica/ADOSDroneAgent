@@ -71,27 +71,21 @@ get_installed_version() {
 
 # ─── Uninstall ───────────────────────────────────────────────────────────────
 
-do_uninstall() {
-    echo ""
-    echo -e "${BOLD}=== ADOS Drone Agent — Uninstall ===${NC}"
-    echo ""
-
-    # Must be root on Linux
-    if [ "$(uname -s)" != "Darwin" ] && [ "$(id -u)" -ne 0 ]; then
-        error "Run as root: sudo ./install.sh --uninstall"
-        exit 1
-    fi
-
+# ─── Cleanup primitive ───────────────────────────────────────────────────────
+#
+# Removes every artifact this install lays down outside of /opt/ados.
+# Used by both do_uninstall (which prints a header and exits 0 when done)
+# and by the stale-state auto-purge path in main_install_flow (which must
+# return to its caller so the fresh install can proceed). Does not exit.
+purge_ados_artifacts() {
     # Remove global symlinks
     rm -f /usr/local/bin/ados /usr/local/bin/ados-agent /usr/local/bin/ados-supervisor
-    info "Global symlinks removed."
 
     # Stop and disable all ADOS systemd services
     for svc_file in /etc/systemd/system/ados-*.service; do
         [ -f "$svc_file" ] || continue
         local svc_name
         svc_name=$(basename "$svc_file" .service)
-        info "Stopping and disabling ${svc_name}..."
         systemctl stop "${svc_name}" 2>/dev/null || true
         systemctl disable "${svc_name}" 2>/dev/null || true
         rm -f "$svc_file"
@@ -132,19 +126,30 @@ do_uninstall() {
     systemctl daemon-reload 2>/dev/null || true
     systemctl reset-failed 2>/dev/null || true
     udevadm control --reload-rules 2>/dev/null || true
-    info "All ADOS services and dropins removed."
 
-    # Remove install directory (venv + cloned code)
+    # Remove install + data directories. INSTALL_DIR holds the venv + cloned
+    # code; DATA_DIR is the legacy data path.
     if [ -d "${INSTALL_DIR}" ]; then
-        info "Removing ${INSTALL_DIR}..."
         rm -rf "${INSTALL_DIR}"
     fi
-
-    # Remove data directory
     if [ -d "${DATA_DIR}" ]; then
-        info "Removing ${DATA_DIR}..."
         rm -rf "${DATA_DIR}"
     fi
+}
+
+do_uninstall() {
+    echo ""
+    echo -e "${BOLD}=== ADOS Drone Agent — Uninstall ===${NC}"
+    echo ""
+
+    # Must be root on Linux
+    if [ "$(uname -s)" != "Darwin" ] && [ "$(id -u)" -ne 0 ]; then
+        error "Run as root: sudo ./install.sh --uninstall"
+        exit 1
+    fi
+
+    purge_ados_artifacts
+    info "All ADOS services, dropins, and state removed."
 
     # Config is kept by default — user may want to preserve it
     if [ -d "${CONFIG_DIR}" ]; then

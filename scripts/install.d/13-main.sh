@@ -97,18 +97,15 @@ main_install_flow() {
     # Residue from an incomplete prior uninstall (unit files surviving past
     # venv removal, orphan dropin dirs) used to silently block a fresh
     # install because some downstream step would trip on the leftovers
-    # without writing anything observable to the log. detect_stale_state
-    # returns 0 when there is residue AND no working venv; do_uninstall
-    # uses the same glob pattern used at the bottom of this script's
-    # uninstall flow, so the auto-purge cannot drift from the explicit
-    # one. Running uninstall when the system was already clean is a no-op.
+    # without writing anything observable to the log. purge_ados_artifacts
+    # runs the same cleanup do_uninstall uses but does not call exit, so
+    # the install continues after the sweep. Running it on a clean system
+    # is a no-op.
     if detect_stale_state; then
         warn "Detected residue from an incomplete prior install or uninstall."
         warn "Auto-purging stale systemd units, dropins, and state before fresh install."
-        do_uninstall || true
-        # do_uninstall exits with status 0 on success; if it called exit
-        # the script ends here and the operator re-runs. The `|| true`
-        # keeps us moving if it returns instead of exiting (defensive).
+        purge_ados_artifacts
+        info "Auto-purge complete. Continuing with fresh install."
     fi
 
     # Bootstrap the long-lived state dirs once, BEFORE any unit deployment
