@@ -60,6 +60,10 @@ CAPABILITIES: list[str] = [
     "signing.mavlink",
     # WebRTC SDP signaling broker rejection surfaced via cloud status.
     "webrtc.signaling.last_error",
+    # /api/can/passthrough route presence. Today the route returns
+    # 501; the flag lets the GCS detect whether the surface exists at
+    # all so it can fall back to MAVLink CAN_FORWARD without probing.
+    "can.passthrough",
 ]
 
 

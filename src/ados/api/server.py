@@ -14,6 +14,7 @@ from ados import __version__
 from ados.api.deps import set_agent_app
 from ados.api.middleware.auth import ApiKeyAuthMiddleware
 from ados.api.routes import (
+    can,
     commands,
     config,
     dashboard,
@@ -117,6 +118,11 @@ def create_app(agent: Any) -> FastAPI:
     app.include_router(fleet.router, prefix="/api")
     app.include_router(vision_models.router, prefix="/api")
     app.include_router(ground_station.router, prefix="/api")
+    # CAN passthrough surface reserved for a future agent-side bridge.
+    # Today the route is a 501 stub; the MAVLink relay covers the
+    # common case via CAN_FRAME / CANFD_FRAME / CAN_FILTER_MODIFY
+    # passthrough plus the CAN_FORWARD command.
+    app.include_router(can.router, prefix="/api")
     # ROS 2 environment management (opt-in).
     app.include_router(ros.router, prefix="/api")
     # MAVLink v2 message signing: capability + one-shot FC enrollment.

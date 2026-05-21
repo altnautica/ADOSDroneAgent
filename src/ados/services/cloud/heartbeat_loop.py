@@ -24,6 +24,9 @@ from ados.core.paths import HEALTH_JSON
 
 from ._context import CloudContext
 from .heartbeat import (
+    build_can_buses_enrichment as _build_can_buses_enrichment,
+)
+from .heartbeat import (
     build_display_enrichment as _build_display_enrichment,
 )
 from .heartbeat import (
@@ -329,6 +332,22 @@ async def heartbeat_loop(ctx: CloudContext) -> None:  # noqa: C901
                 except Exception as exc:
                     log.debug(
                         "heartbeat_display_enrichment_failed",
+                        error=str(exc),
+                    )
+
+                # FC CAN bus configuration. Reads the persisted
+                # parameter cache and emits a ``canBuses`` array so
+                # the GCS can surface the per-port driver / bitrate /
+                # protocol on the drone card. The helper omits the
+                # field entirely when no CAN params are loaded yet,
+                # which is the warmup window between FC connect and
+                # the parameter download finishing. Failure-tolerant:
+                # the heartbeat must not break on cache-read errors.
+                try:
+                    payload.update(_build_can_buses_enrichment())
+                except Exception as exc:
+                    log.debug(
+                        "heartbeat_can_buses_enrichment_failed",
                         error=str(exc),
                     )
 

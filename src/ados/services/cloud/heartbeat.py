@@ -552,6 +552,76 @@ def build_display_enrichment(
     return enrich
 
 
+def build_can_buses_enrichment(
+    param_cache_path: Path | str | None = None,
+) -> dict:
+    """Return a ``{"canBuses": [...]}`` fragment from the on-disk param cache.
+
+    Reads the persisted parameter cache (default
+    ``/var/lib/ados/params.json``) and surfaces the FC's per-port CAN
+    configuration so Mission Control can render the active CAN buses
+    on the drone card. Each bus entry carries:
+
+    * ``port`` — 1 or 2, matching the FC parameter port suffix.
+    * ``driver`` — ``CAN_Pn_DRIVER`` (0 = disabled, 1 = first driver, ...).
+    * ``bitrate`` — ``CAN_Pn_BITRATE`` in bits per second.
+    * ``protocol`` — ``CAN_Dn_PROTOCOL`` selected on the matching
+      driver slot (1 = DroneCAN, other vendor protocols per FC docs).
+
+    A port is included only if at least one of its four parameters is
+    present in the cache. The block is omitted from the heartbeat
+    entirely when no CAN params are cached yet, so older Mission
+    Control builds that don't read this field see no change.
+
+    Heartbeat-correctness contract: this helper does file I/O but
+    never blocks on a parameter load. If the cache file is missing,
+    empty, or malformed the helper returns ``{}`` and the heartbeat
+    builder folds nothing in.
+    """
+    if param_cache_path is None:
+        from ados.services.mavlink.param_cache import DEFAULT_CACHE_PATH
+        param_cache_path = DEFAULT_CACHE_PATH
+    path = Path(param_cache_path)
+    if not path.is_file():
+        return {}
+    try:
+        import json as _json
+        raw = _json.loads(path.read_text())
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+
+    def _read_value(name: str) -> float | None:
+        entry = raw.get(name)
+        if isinstance(entry, dict) and "value" in entry:
+            try:
+                return float(entry["value"])
+            except (TypeError, ValueError):
+                return None
+        return None
+
+    buses: list[dict[str, int]] = []
+    for port in (1, 2):
+        driver = _read_value(f"CAN_P{port}_DRIVER")
+        bitrate = _read_value(f"CAN_P{port}_BITRATE")
+        protocol = _read_value(f"CAN_D{port}_PROTOCOL")
+        # Skip ports where no CAN param has been observed yet. This
+        # keeps the block empty during the param-load warmup window
+        # rather than reporting a bogus all-zero bus.
+        if driver is None and bitrate is None and protocol is None:
+            continue
+        buses.append({
+            "port": port,
+            "driver": int(driver) if driver is not None else 0,
+            "bitrate": int(bitrate) if bitrate is not None else 0,
+            "protocol": int(protocol) if protocol is not None else 0,
+        })
+    if not buses:
+        return {}
+    return {"canBuses": buses}
+
+
 def build_display_type_enrichment(config: Any) -> dict:
     """Resolve the effective local-display primary path for the heartbeat.
 

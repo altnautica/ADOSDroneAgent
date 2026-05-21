@@ -112,6 +112,7 @@ AGENT_CAPABILITIES_FROZEN: tuple[str, ...] = (
     "ros.environment",
     "signing.mavlink",
     "webrtc.signaling.last_error",
+    "can.passthrough",
 )
 
 
