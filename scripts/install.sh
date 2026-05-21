@@ -102,9 +102,20 @@ fi
 # the lite-rs pre-dispatch (which calls detect_profile from 00-detect.sh).
 if [ -z "${ADOS_SCRIPT_DIR}" ]; then
     if ! command -v git >/dev/null 2>&1; then
-        echo "ERROR: git is required to bootstrap installer from curl-pipe" >&2
-        echo "       sudo apt-get install -y git" >&2
-        exit 1
+        # Fresh Radxa BSP images (rsdk-b2 and friends) ship without git, so
+        # the canonical curl-pipe one-liner dies at the first command unless
+        # the script self-installs git. apt-get install on a system that
+        # already has git is a no-op (<1s), so this is safe to always try.
+        if command -v apt-get >/dev/null 2>&1; then
+            echo "[bootstrap] git not found, installing via apt-get..."
+            DEBIAN_FRONTEND=noninteractive apt-get update -qq || true
+            DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends git || true
+        fi
+        if ! command -v git >/dev/null 2>&1; then
+            echo "ERROR: git is required to bootstrap installer from curl-pipe" >&2
+            echo "       sudo apt-get install -y git" >&2
+            exit 1
+        fi
     fi
     _BOOT_BRANCH="main"
     # Peek at --branch for the clone so a feature-branch install bootstraps
