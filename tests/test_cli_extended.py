@@ -139,7 +139,7 @@ def test_status_plain_uses_lan_host_when_available() -> None:
     with patch("ados.cli.main._setup_status", return_value=payload):
         result = runner.invoke(cli, ["status"])
     assert result.exit_code == 0
-    assert "Open setup: http://ados-abc123.local:8080/setup.html" in result.output
+    assert "Open setup: http://ados-abc123.local:8080/setup" in result.output
 
 
 def test_status_plain_falls_back_to_primary_access_url() -> None:

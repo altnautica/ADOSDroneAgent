@@ -131,7 +131,7 @@ def _setup_steps(
                 else "Confirm or change the profile for this device"
             ),
             action_label="Choose profile",
-            href="/setup.html?step=profile",
+            href="/setup?step=profile",
         )
     )
 
@@ -159,7 +159,7 @@ def _setup_steps(
             state=hw_state,  # type: ignore[arg-type]
             detail=hw_detail,
             action_label="Open hardware check",
-            href="/setup.html?step=hardware_check",
+            href="/setup?step=hardware_check",
         )
     )
 
@@ -179,7 +179,7 @@ def _setup_steps(
                     "for flight without GPS."
                 ),
                 action_label="Configure navigation",
-                href="/setup.html?step=navigation",
+                href="/setup?step=navigation",
             )
         )
 
@@ -201,7 +201,7 @@ def _setup_steps(
                 else "Choose a cloud posture for this device"
             ),
             action_label="Choose cloud posture",
-            href="/setup.html?step=cloud_choice",
+            href="/setup?step=cloud_choice",
         )
     )
 
@@ -221,7 +221,7 @@ def _setup_steps(
                     else "Show this device's code or accept one from Mission Control."
                 ),
                 action_label="Pair this device",
-                href="/setup.html?step=pair",
+                href="/setup?step=pair",
             )
         )
 
@@ -292,7 +292,7 @@ def _setup_steps(
                 state=display_state,  # type: ignore[arg-type]
                 detail=display_detail,
                 action_label="Configure display",
-                href="/setup.html?step=display",
+                href="/setup?step=display",
             )
         )
 

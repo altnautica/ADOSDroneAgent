@@ -96,7 +96,7 @@ def _setup_path(base: str) -> str:
     finalized the wizard would get the dashboard instead of the setup
     page they asked for.
     """
-    return base.rstrip("/") + "/setup.html"
+    return base.rstrip("/") + "/setup"
 
 
 def _usb_setup_url(*, port: int) -> str | None:

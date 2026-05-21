@@ -116,11 +116,11 @@ def _plain_status(data: dict[str, Any]) -> None:
     )
     api_port = int(network.get("api_port", 8080) or 8080)
     if lan_host:
-        click.echo(f"Open setup: http://{lan_host}:{api_port}/setup.html")
+        click.echo(f"Open setup: http://{lan_host}:{api_port}/setup")
     else:
         urls = data.get("access_urls", [])
         primary = next((u.get("url") for u in urls if u.get("primary")), None)
-        click.echo(f"Open setup: {primary or 'http://localhost:8080/setup.html'}")
+        click.echo(f"Open setup: {primary or 'http://localhost:8080/setup'}")
 
     mavlink = data.get("mavlink", {})
     fc_connected = bool(mavlink.get("connected"))
