@@ -351,9 +351,11 @@ enable_ground_station_units() {
         fi
     done
 
-    # Ensure state + config dirs exist for AP passphrase, setup sentinel, etc.
-    mkdir -p /etc/ados /var/lib/ados
-    chmod 0755 /etc/ados /var/lib/ados
+    # Ensure /etc/ados exists for AP passphrase, setup sentinel, etc.
+    # /var/lib/ados, /var/log/ados, /run/ados are created upstream by
+    # setup_state_dirs in 13-main.sh before any unit is deployed.
+    mkdir -p /etc/ados
+    chmod 0755 /etc/ados
 
     # Button service uses libgpiod via /dev/gpiochip0 which requires gpio group.
     # Idempotent: usermod -aG is a no-op if the user is already a member.
