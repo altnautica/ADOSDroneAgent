@@ -477,18 +477,54 @@ def _uninstall_linux(*, purge: bool, yes: bool) -> None:
     install_dir = Path("/opt/ados")
     config_dir = Path("/etc/ados")
     data_dir = Path("/var/ados")
+    state_dir = Path("/var/lib/ados")
+    log_dir = Path("/var/log/ados")
     motd_file = Path("/etc/update-motd.d/30-ados")
-    services = ["ados-supervisor", "ados-agent", "cloudflared"]
-    service_files = [Path(f"/etc/systemd/system/{name}.service") for name in services]
+    systemd_dir = Path("/etc/systemd/system")
+
+    # Discover all ados-* systemd unit files at runtime rather than
+    # hardcoding a list. The shell-side do_uninstall in install.d/01-state.sh
+    # uses the same glob pattern; keep this Python path in lockstep so the
+    # two uninstall surfaces never drift.
+    unit_globs = ("ados-*.service", "ados-*.slice", "ados-*.target", "ados-*.timer")
+    unit_files: list[Path] = []
+    for pattern in unit_globs:
+        unit_files.extend(sorted(systemd_dir.glob(pattern)))
+    # Dropin .wants directories built by the supervisor + any orphan
+    # multi-user.target.wants symlinks pointing into ados-*.
+    wants_dirs = sorted(systemd_dir.glob("ados-*.service.wants"))
+    target_wants_links = sorted((systemd_dir / "multi-user.target.wants").glob("ados-*"))
+
+    # Tmpfiles, sysctl, modules-load, udev, and avahi dropins that the
+    # install lays down outside /opt/ados. Without removing these, the
+    # next fresh install can pick up a stale ados-display modules-load
+    # line and load a wrong driver, or systemd-tmpfiles can recreate
+    # /run/ados sockets that the new layout did not expect.
+    dropin_files = [
+        Path("/etc/tmpfiles.d/ados.conf"),
+        Path("/etc/tmpfiles.d/ados-plugins.conf"),
+        Path("/etc/sysctl.d/99-ados-video.conf"),
+        Path("/etc/modules-load.d/ados-display.conf"),
+        Path("/etc/udev/rules.d/50-ados-uvc-no-autosuspend.rules"),
+        Path("/etc/udev/rules.d/99-ados-hardware.rules"),
+        Path("/etc/udev/rules.d/99-ados-input.rules"),
+        Path("/etc/udev/rules.d/99-ados-modem.rules"),
+        Path("/etc/avahi/services/ados-gs-ap.service"),
+    ]
+
     symlinks = [
         Path("/usr/local/bin/ados"),
         Path("/usr/local/bin/ados-agent"),
         Path("/usr/local/bin/ados-supervisor"),
     ]
+
     base_items = [
-        *(f"systemd service: {path.name}" for path in service_files if path.exists()),
+        *(f"systemd unit: {path.name}" for path in unit_files),
+        *(f"dropin dir: {path}" for path in wants_dirs),
+        *(f"target link: {path}" for path in target_wants_links),
+        *(f"system dropin: {path}" for path in dropin_files if path.exists()),
         *(f"symlink: {path}" for path in symlinks if path.exists() or path.is_symlink()),
-        *(f"dir: {path}" for path in (install_dir, data_dir) if path.exists()),
+        *(f"dir: {path}" for path in (install_dir, data_dir, state_dir, log_dir) if path.exists()),
         *([f"login banner: {motd_file}"] if motd_file.exists() else []),
     ]
     if not base_items and not config_dir.exists():
@@ -523,31 +559,74 @@ def _uninstall_linux(*, purge: bool, yes: bool) -> None:
     if not yes:
         click.confirm("Proceed with uninstall?", abort=True)
 
-    for service, service_file in zip(services, service_files):
-        if service_file.exists():
-            _stop_service_with_kill_fallback(service)
+    # Stop + disable + remove each unit. systemctl disable on a unit
+    # that was never enabled is harmless.
+    for unit_file in unit_files:
+        unit_name = unit_file.name
+        if unit_name.endswith(".service"):
+            _stop_service_with_kill_fallback(unit_name[: -len(".service")])
             try:
                 subprocess.run(
-                    ["systemctl", "disable", service],
+                    ["systemctl", "disable", unit_name],
                     capture_output=True,
                     timeout=10,
                 )
             except (subprocess.TimeoutExpired, OSError) as exc:
-                click.echo(f"  warn: disable {service} skipped: {exc}", err=True)
-            service_file.unlink(missing_ok=True)
+                click.echo(f"  warn: disable {unit_name} skipped: {exc}", err=True)
+        else:
+            # .slice, .target, .timer — stop best-effort.
+            try:
+                subprocess.run(
+                    ["systemctl", "stop", unit_name],
+                    capture_output=True,
+                    timeout=10,
+                )
+            except (subprocess.TimeoutExpired, OSError) as exc:
+                click.echo(f"  warn: stop {unit_name} skipped: {exc}", err=True)
+        unit_file.unlink(missing_ok=True)
+
+    for wants_dir in wants_dirs:
+        shutil.rmtree(wants_dir, ignore_errors=True)
+    for link in target_wants_links:
+        try:
+            link.unlink(missing_ok=True)
+        except OSError as exc:
+            click.echo(f"  warn: removing {link} failed: {exc}", err=True)
+    for dropin in dropin_files:
+        if dropin.exists() or dropin.is_symlink():
+            dropin.unlink(missing_ok=True)
+
     if shutil.which("systemctl"):
+        for cmd in (["daemon-reload"], ["reset-failed"]):
+            try:
+                subprocess.run(
+                    ["systemctl", *cmd], capture_output=True, timeout=10
+                )
+            except (subprocess.TimeoutExpired, OSError) as exc:
+                click.echo(f"  warn: systemctl {' '.join(cmd)} skipped: {exc}", err=True)
+    if shutil.which("udevadm"):
         try:
             subprocess.run(
-                ["systemctl", "daemon-reload"], capture_output=True, timeout=10
+                ["udevadm", "control", "--reload-rules"],
+                capture_output=True,
+                timeout=10,
             )
         except (subprocess.TimeoutExpired, OSError) as exc:
-            click.echo(f"  warn: daemon-reload skipped: {exc}", err=True)
+            click.echo(f"  warn: udevadm reload skipped: {exc}", err=True)
+
     for path in symlinks:
         if path.exists() or path.is_symlink():
             path.unlink(missing_ok=True)
-    for path in (install_dir, data_dir):
+    # Always wipe install + data + state + log dirs. /var/lib/ados and
+    # /var/log/ados are created by setup_state_dirs at every install, so
+    # removing them here is symmetric. Config is gated by --purge below.
+    for path in (install_dir, data_dir, state_dir, log_dir):
         if path.exists():
             shutil.rmtree(path, ignore_errors=True)
+    # /run/ados is tmpfs; best-effort.
+    run_dir = Path("/run/ados")
+    if run_dir.exists():
+        shutil.rmtree(run_dir, ignore_errors=True)
     if motd_file.exists():
         motd_file.unlink(missing_ok=True)
     if purge and config_dir.exists():
