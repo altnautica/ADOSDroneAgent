@@ -8,14 +8,29 @@ import { useResource } from "@/hooks/use-resource";
 interface PeripheralEntry {
   id: string;
   name?: string;
+  display_name?: string;
   state?: string;
   status?: string;
+  connected?: boolean;
+  last_seen?: number | null;
+  transport?: string;
+  capabilities?: string[];
+  actions?: { id: string; display_name: string }[];
+  extra?: Record<string, unknown>;
   manifest?: {
     name?: string;
     vendor?: string;
     description?: string;
     kind?: string;
   };
+}
+
+function relativeTime(unix: number): string {
+  const delta = Math.max(0, Date.now() / 1000 - unix);
+  if (delta < 60) return `${Math.floor(delta)}s ago`;
+  if (delta < 3600) return `${Math.floor(delta / 60)}m ago`;
+  if (delta < 86400) return `${Math.floor(delta / 3600)}h ago`;
+  return `${Math.floor(delta / 86400)}d ago`;
 }
 
 interface PeripheralsResponse {
@@ -66,20 +81,58 @@ export function PeripheralsRoute() {
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
         {items.map((p) => {
-          const state = p.state ?? p.status ?? "unknown";
+          // Prefer the new top-level `connected` boolean shipped by
+          // the registry; fall back to the legacy state/status fields
+          // for older agents.
+          const isConnected =
+            typeof p.connected === "boolean"
+              ? p.connected
+              : p.state === "connected" ||
+                p.state === "ready" ||
+                p.state === "active";
+          const stateLabel = isConnected
+            ? "connected"
+            : (p.state ?? p.status ?? (p.connected === false ? "disconnected" : "unknown"));
           const tone =
-            state === "connected" || state === "ready" || state === "active"
+            isConnected
               ? "ok"
-              : state === "error" || state === "failed"
+              : stateLabel === "error" || stateLabel === "failed"
                 ? "err"
-                : state === "missing" || state === "disconnected"
+                : stateLabel === "missing" || stateLabel === "disconnected"
                   ? "warn"
                   : "idle";
+          const description =
+            p.manifest?.description ??
+            (typeof p.extra?.description === "string"
+              ? (p.extra.description as string)
+              : undefined);
+          const detailBits = [
+            p.transport,
+            p.manifest?.kind,
+            p.manifest?.vendor,
+            typeof p.extra?.category === "string"
+              ? (p.extra.category as string)
+              : undefined,
+          ].filter(Boolean);
           return (
             <Card key={p.id}>
               <CardContent className="pt-4 pb-4 space-y-1.5">
                 <div className="flex items-center gap-2">
-                  <span className="font-mono text-sm truncate">{p.id}</span>
+                  <span
+                    className={`h-2 w-2 rounded-full shrink-0 ${
+                      tone === "ok"
+                        ? "bg-ok"
+                        : tone === "warn"
+                          ? "bg-warn"
+                          : tone === "err"
+                            ? "bg-destructive"
+                            : "bg-muted-foreground/40"
+                    }`}
+                    aria-hidden
+                  />
+                  <span className="text-sm truncate">
+                    {p.display_name ?? p.name ?? p.id}
+                  </span>
                   <span
                     className={`ml-auto text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded border ${
                       tone === "ok"
@@ -91,20 +144,26 @@ export function PeripheralsRoute() {
                             : "border-muted-foreground/40 text-muted-foreground"
                     }`}
                   >
-                    {state}
+                    {stateLabel}
                   </span>
                 </div>
-                {(p.manifest?.kind || p.manifest?.vendor) && (
+                <div className="text-[11px] text-muted-foreground font-mono">
+                  {p.id}
+                </div>
+                {detailBits.length > 0 && (
                   <div className="text-xs text-muted-foreground font-mono">
-                    {[p.manifest?.kind, p.manifest?.vendor]
-                      .filter(Boolean)
-                      .join(" · ")}
+                    {detailBits.join(" · ")}
                   </div>
                 )}
-                {p.manifest?.description && (
+                {description && (
                   <p className="text-xs text-muted-foreground">
-                    {p.manifest.description}
+                    {description}
                   </p>
+                )}
+                {!isConnected && typeof p.last_seen === "number" && (
+                  <div className="text-[10px] text-muted-foreground">
+                    last seen {relativeTime(p.last_seen)}
+                  </div>
                 )}
               </CardContent>
             </Card>

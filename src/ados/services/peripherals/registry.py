@@ -4,8 +4,10 @@ Keeps the merged set of manifests in memory, exposes lookup and
 listing helpers, and provides a ``reload()`` hook driven by SIGHUP.
 Connection detection is best-effort: ``regex``-style matches walk
 ``/dev/*`` for a path match; ``vid``/``pid`` matches walk the live
-sysfs USB tree. Probes are short and cached lightly by the caller
-through normal API polling.
+sysfs USB tree. Results are cached for ``_PROBE_CACHE_TTL_S`` seconds
+so list() / heartbeat tick consumers don't re-walk the filesystem on
+every call, and a ``last_seen`` timestamp survives the cache so the
+dashboard can keep showing "last seen 30 s ago" after a device drops.
 """
 
 from __future__ import annotations
@@ -13,6 +15,7 @@ from __future__ import annotations
 import glob as _glob
 import re
 import threading
+import time
 from pathlib import Path
 
 from ados.core.logging import get_logger
@@ -25,6 +28,15 @@ log = get_logger("peripherals.registry")
 # Where USB devices advertise vid/pid in sysfs. One file per device,
 # four-digit lowercase hex without prefix.
 _USB_DEVICES_ROOT = Path("/sys/bus/usb/devices")
+
+# Per-manifest probe result cache. Keyed by manifest id; value is a
+# tuple of (connected, last_probe_monotonic, last_seen_unix). The TTL
+# bounds filesystem walks under load (typical /api/v1/peripherals + the
+# heartbeat tick at 5s would otherwise scan /dev and /sys twice per
+# tick). ``last_seen_unix`` survives the cache so the dashboard can
+# render a meaningful "last seen N seconds ago" line even while the
+# device is currently disconnected.
+_PROBE_CACHE_TTL_S = 5.0
 
 
 class PeripheralRegistry:
@@ -42,18 +54,23 @@ class PeripheralRegistry:
         self._lock = threading.Lock()
         self._by_id: dict[str, PeripheralManifest] = {}
         self._order: list[str] = []
+        # id → (connected, last_probe_monotonic, last_seen_unix or None)
+        self._probe_cache: dict[str, tuple[bool, float, float | None]] = {}
         self.reload()
 
     def reload(self) -> int:
         """Re-read manifests from entry points and the filesystem.
 
         Returns the number of manifests registered after the reload.
-        Safe to call concurrently with list()/get().
+        Safe to call concurrently with list()/get(). Drops the probe
+        cache so a manifest change doesn't surface stale connection
+        results.
         """
         manifests = load_all(self._glob_path)
         with self._lock:
             self._by_id = {m.id: m for m in manifests}
             self._order = [m.id for m in manifests]
+            self._probe_cache.clear()
         log.info("peripheral_registry_reloaded", count=len(manifests))
         return len(manifests)
 
@@ -111,14 +128,61 @@ class PeripheralRegistry:
 
         return False
 
+    def _cached_state(self, manifest: PeripheralManifest) -> tuple[bool, float | None]:
+        """Return ``(connected, last_seen_unix)`` with a 5 s TTL probe cache.
+
+        The cache survives a connected→disconnected transition: the
+        last_seen timestamp stays populated even while the device is
+        currently absent so the dashboard can render a meaningful
+        "last seen N seconds ago" line.
+        """
+        now_mono = time.monotonic()
+        with self._lock:
+            cached = self._probe_cache.get(manifest.id)
+        if cached is not None:
+            connected, last_probe, last_seen = cached
+            if (now_mono - last_probe) < _PROBE_CACHE_TTL_S:
+                return (connected, last_seen)
+        connected = self._detect_connection(manifest)
+        last_seen = time.time() if connected else (
+            cached[2] if cached is not None else None
+        )
+        with self._lock:
+            self._probe_cache[manifest.id] = (connected, now_mono, last_seen)
+        return (connected, last_seen)
+
     def _envelope(self, manifest: PeripheralManifest) -> dict:
         """Return the public-facing manifest dict plus live status."""
         data = manifest.model_dump()
         status_endpoint = data.get("status_endpoint")
         if not status_endpoint:
             data["status_endpoint"] = f"/api/v1/peripherals/{manifest.id}"
-        data["connected"] = self._detect_connection(manifest)
+        connected, last_seen = self._cached_state(manifest)
+        data["connected"] = connected
+        data["last_seen"] = last_seen
         return data
+
+    def states(self) -> list[dict]:
+        """Compact connection-status array for the cloud heartbeat.
+
+        Mirrors ``list()`` but trims the manifest body to just the
+        ``id`` + ``connected`` + ``last_seen`` fields the GCS drone
+        card cares about. Cheaper than serializing the full manifest
+        list across the heartbeat at 5 s cadence.
+        """
+        with self._lock:
+            ordered = [self._by_id[pid] for pid in self._order if pid in self._by_id]
+        out: list[dict] = []
+        for manifest in ordered:
+            connected, last_seen = self._cached_state(manifest)
+            out.append(
+                {
+                    "id": manifest.id,
+                    "connected": connected,
+                    "last_seen": last_seen,
+                }
+            )
+        return out
 
     def list(self) -> list[dict]:
         """Return every registered manifest with live connection status."""

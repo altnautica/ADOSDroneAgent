@@ -373,6 +373,17 @@ def build_heartbeat_payload(app: AgentApp) -> dict:  # noqa: C901
         ]
     except Exception:
         pass
+
+    # Peripheral connection states. Drives the per-peripheral
+    # connected/disconnected dot + "last seen Ns ago" line on the GCS
+    # drone card. Cached at the registry level (5 s TTL) so this is a
+    # cheap dict copy on the heartbeat hot path.
+    try:
+        from ados.services.peripherals.registry import get_peripheral_registry
+
+        payload["peripheralStates"] = get_peripheral_registry().states()
+    except Exception:
+        pass
     return payload
 
 
