@@ -32,12 +32,16 @@ _main_loop: asyncio.AbstractEventLoop | None = None
 _SUBSCRIBER_QUEUE_DEPTH = 256
 _SSE_MAX_CLIENTS = int(os.environ.get("ADOS_SSE_MAX_CLIENTS", "16"))
 _SSE_KEEPALIVE_S = 15.0
-_subscribers: list[asyncio.Queue[dict | None]] = []
+_subscribers: list[asyncio.Queue[object]] = []
 _subscribers_lock = asyncio.Lock()
 _fanout_task: asyncio.Task | None = None
 # Sentinel pushed onto a subscriber's queue when the subscriber must
-# disconnect (slow-client drop). Distinct from ordinary dict entries.
-_DROP_SENTINEL: dict | None = None
+# disconnect (slow-client drop). Distinct identity, never collides with
+# ordinary dict entries.
+_DROP_SENTINEL: object = object()
+# Sentinel for periodic keep-alive ticks so an idle stream emits a
+# comment frame to defeat proxy idle timeouts.
+_KEEPALIVE_SENTINEL: object = object()
 
 
 def bind_loop(loop: asyncio.AbstractEventLoop) -> None:
@@ -92,62 +96,83 @@ def install_log_buffer() -> None:
 async def _fanout_loop() -> None:
     """Single producer task: drain new entries, push to each subscriber.
 
-    Runs while at least one subscriber is registered. Reads
-    ``_log_buffer`` on each wake, emits every entry past the
-    last-seen sequence number to every subscriber queue. A subscriber
-    whose queue is full gets a ``_DROP_SENTINEL`` so its generator can
-    close cleanly; the subscriber is unregistered on close. Filtering
-    by ``level`` / ``service`` happens subscriber-side (per generator)
-    so the producer stays cheap and shared across all clients.
+    Spawned once per process on the first SSE open and runs forever.
+    Keeping the task alive even when no subscribers are registered
+    avoids a lifecycle race: an alternative design that exited on
+    empty-subscribers can drop wake-ups during the window between
+    "subscriber appends queue" and "subscriber calls
+    ``_ensure_fanout_running``" where the old task is still
+    transitioning to done. The cost of an idle ``await`` on
+    ``_log_event`` is negligible compared to that correctness hole.
+
+    On wake: drain every entry past the last-seen sequence number and
+    push to every subscriber queue with ``put_nowait``. A subscriber
+    whose queue is full gets a single ``_DROP_SENTINEL`` (its
+    generator closes cleanly and unregisters itself). Filtering by
+    ``level`` / ``service`` happens subscriber-side so the producer
+    stays cheap and shared across all clients.
     """
     last_seen_seq = 0
+    dropped_in_pass: set[int] = set()
     while True:
         try:
             await asyncio.wait_for(_log_event.wait(), timeout=_SSE_KEEPALIVE_S)
+            had_event = True
         except asyncio.TimeoutError:
-            # Periodic keep-alive: poke each subscriber with a sentinel
-            # so their generator wakes and emits a heartbeat comment.
-            async with _subscribers_lock:
-                queues = list(_subscribers)
-            for q in queues:
-                try:
-                    q.put_nowait({"__keepalive__": True})
-                except asyncio.QueueFull:
-                    pass
-            continue
-        _log_event.clear()
-        tail = list(_log_buffer)
+            had_event = False
+        if had_event:
+            _log_event.clear()
+
         async with _subscribers_lock:
             queues = list(_subscribers)
         if not queues:
-            # No subscribers; bail. The wake-up still happened so the
-            # next event will trip _log_event.set() and we loop again
-            # — but exiting here means the producer task only runs
-            # when there's work to do.
-            if tail:
-                last_seen_seq = tail[-1]["seq"]
-            return
+            # No subscribers — nothing to do this tick. Stay parked on
+            # the next ``_log_event.wait()`` / keepalive cycle.
+            if had_event:
+                tail = list(_log_buffer)
+                if tail:
+                    last_seen_seq = tail[-1]["seq"]
+            continue
+
+        if not had_event:
+            # Keepalive tick. Push the keepalive sentinel to every
+            # subscriber so idle streams emit a comment frame.
+            for q in queues:
+                try:
+                    q.put_nowait(_KEEPALIVE_SENTINEL)
+                except asyncio.QueueFull:
+                    pass
+            continue
+
+        tail = list(_log_buffer)
         new_entries = [e for e in tail if e["seq"] > last_seen_seq]
         if tail:
             last_seen_seq = tail[-1]["seq"]
+        dropped_in_pass.clear()
         for entry in new_entries:
-            for q in queues:
+            for idx, q in enumerate(queues):
+                if idx in dropped_in_pass:
+                    continue
                 try:
                     q.put_nowait(entry)
                 except asyncio.QueueFull:
-                    # Slow client. Push a drop sentinel and let the
-                    # subscriber's generator close itself out so the
-                    # producer never blocks.
+                    # Slow client. Push the drop sentinel ONCE; the
+                    # subscriber's generator closes itself and the
+                    # ``finally`` block unregisters it from
+                    # ``_subscribers`` so the next pass skips it
+                    # entirely. Mark it dropped here so the rest of
+                    # this pass also skips it.
                     try:
                         q.put_nowait(_DROP_SENTINEL)
                     except asyncio.QueueFull:
                         pass
+                    dropped_in_pass.add(idx)
 
 
 async def _ensure_fanout_running() -> None:
-    """Spawn the fanout task on demand. Idempotent."""
+    """Spawn the fanout task once per process. Idempotent."""
     global _fanout_task
-    if _fanout_task is None or _fanout_task.done():
+    if _fanout_task is None:
         _fanout_task = asyncio.create_task(_fanout_loop())
 
 
@@ -245,10 +270,10 @@ async def stream_logs(
                     # so the client reconnects via EventSource auto-retry.
                     yield ": dropped slow client\n\n"
                     return
-                if entry.get("__keepalive__"):
+                if entry is _KEEPALIVE_SENTINEL:
                     yield ": keep-alive\n\n"
                     continue
-                if _filter(entry):
+                if isinstance(entry, dict) and _filter(entry):
                     yield f"data: {json.dumps(entry)}\n\n"
         except asyncio.CancelledError:
             return
