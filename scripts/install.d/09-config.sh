@@ -205,13 +205,19 @@ seed_default_peripherals() {
     # Drop the BOM peripheral manifests at /etc/ados/peripherals/ so the
     # webapp Peripherals page renders the FC, GPS, RTL8812EU adapter,
     # OLED, SPI LCD, and USB camera entries on a fresh board even
-    # before any plugin lights them up. Idempotent: skips files that
-    # are already present so operator-edited manifests survive
-    # reinstalls.
+    # before any plugin lights them up.
+    #
+    # Idempotency rule: we overwrite a target file only when it is
+    # clearly one of OUR shipped seeds (first line declares
+    # ``id: ados.``). Operator-added manifests (any id outside the
+    # ``ados.`` prefix, or any file the operator dropped manually)
+    # are preserved. This lets us push schema corrections to the
+    # default manifests without trampling operator state.
     local dst_dir="${CONFIG_DIR}/peripherals"
     install -d -m 0755 "${dst_dir}"
 
     local copied=0
+    local refreshed=0
     for src_dir in \
         "${PKG_DIR:-/opt/ados}/scripts/peripherals-seed" \
         "/opt/ados/source/scripts/peripherals-seed" \
@@ -223,10 +229,15 @@ seed_default_peripherals() {
             if [ ! -f "${target}" ]; then
                 install -m 0644 "${manifest}" "${target}"
                 copied=$((copied + 1))
+            elif grep -q "^id:[[:space:]]*ados\." "${target}" 2>/dev/null; then
+                if ! cmp -s "${manifest}" "${target}"; then
+                    install -m 0644 "${manifest}" "${target}"
+                    refreshed=$((refreshed + 1))
+                fi
             fi
         done
-        if [ "${copied}" -gt 0 ]; then
-            info "Seeded ${copied} default peripheral manifest(s)"
+        if [ "${copied}" -gt 0 ] || [ "${refreshed}" -gt 0 ]; then
+            info "Peripheral manifests: seeded ${copied}, refreshed ${refreshed}"
             return 0
         fi
     done
