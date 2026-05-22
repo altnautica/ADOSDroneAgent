@@ -17,6 +17,7 @@ export interface SetupStatus {
   ground_role?: GroundRole;
   setup_complete: boolean;
   setup_finalized: boolean;
+  setup_skipped?: boolean;
   setup_state?: string;
   profile_source?: string;
   profile_suggestion?: ProfileSuggestion;
