@@ -351,6 +351,24 @@ def build_heartbeat_payload(app: AgentApp) -> dict:  # noqa: C901
             state = camera.get("state")
             if isinstance(state, str) and state in ("ready", "missing", "error"):
                 payload["cameraState"] = state
+
+    # Plugin inventory — webapp-side installs are not visible to the GCS
+    # otherwise. Best-effort: a missing or partially-initialised
+    # supervisor leaves the field absent rather than failing the tick.
+    try:
+        from ados.api.routes.plugins import _get_supervisor
+
+        installs = _get_supervisor().installs()
+        payload["pluginInventory"] = [
+            {
+                "plugin_id": inst.plugin_id,
+                "version": getattr(inst, "version", None),
+                "status": getattr(inst, "status", None),
+            }
+            for inst in installs
+        ]
+    except Exception:
+        pass
     return payload
 
 

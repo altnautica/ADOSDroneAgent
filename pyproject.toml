@@ -117,6 +117,7 @@ include = ["ados*"]
 "ados.hal" = ["boards/*.yaml"]
 "ados.core" = ["defaults.yaml"]
 "ados.dashboard" = ["static/**/*"]
+"ados.data" = ["*.json"]
 "ados.services.ui.chrome._icons" = ["*.png"]
 
 

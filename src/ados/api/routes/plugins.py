@@ -181,6 +181,37 @@ def _install_to_dict(install) -> dict:
     }
 
 
+@router.get("/v1/plugins/catalog")
+async def get_plugin_catalog() -> dict:
+    """Return the bundled first-party plugin catalog.
+
+    The webapp's Plugins page reads this to render a marketplace grid
+    alongside the file-upload installer. The catalog ships with the
+    agent so a fully local-only install still has a browse surface;
+    the operator clicks Install and the dashboard hands the
+    download_url to ``POST /api/plugins/install_from_url``.
+
+    No I/O outside reading the bundled JSON. Future iterations may
+    proxy a remote registry behind a feature flag.
+    """
+    import json
+    from importlib.resources import files
+
+    try:
+        raw = (files("ados.data") / "plugin-catalog.json").read_text(
+            encoding="utf-8"
+        )
+        data = json.loads(raw)
+    except (FileNotFoundError, OSError, ValueError) as exc:
+        return {
+            "schema_version": 1,
+            "source": "first-party-bundled",
+            "plugins": [],
+            "error": str(exc),
+        }
+    return data
+
+
 @router.get("/plugins")
 async def list_plugins() -> dict:
     sup = _get_supervisor()

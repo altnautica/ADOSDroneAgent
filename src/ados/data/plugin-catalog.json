@@ -1,0 +1,62 @@
+{
+  "schema_version": 1,
+  "source": "first-party-bundled",
+  "plugins": [
+    {
+      "id": "com.altnautica.battery-health-panel",
+      "name": "ADOS Battery Health Panel",
+      "version": "1.0.0",
+      "description": "Cell-level battery diagnostics, predictive time-to-min, and anomaly alerts.",
+      "author": "Altnautica",
+      "homepage": "https://github.com/altnautica/ADOSExtensions/tree/main/extensions/battery-health-panel",
+      "license": "GPL-3.0-or-later",
+      "risk": "low",
+      "category": "telemetry",
+      "halves": ["gcs"],
+      "download_url": "https://github.com/altnautica/ADOSExtensions/releases/download/battery-health-panel-v1.0.0/battery-health-panel-1.0.0.adosplug",
+      "archive_sha256": null
+    },
+    {
+      "id": "com.altnautica.thermal-camera-flir-lepton-usb",
+      "name": "ADOS Thermal Camera FLIR Lepton (USB)",
+      "version": "1.0.0",
+      "description": "PureThermal 2 + FLIR Lepton 3.5 driver. Live thermal overlay, palette switching, telemetry.",
+      "author": "Altnautica",
+      "homepage": "https://github.com/altnautica/ADOSExtensions/tree/main/extensions/thermal-camera-flir-lepton-usb",
+      "license": "GPL-3.0-or-later",
+      "risk": "medium",
+      "category": "camera",
+      "halves": ["agent", "gcs"],
+      "download_url": "https://github.com/altnautica/ADOSExtensions/releases/download/thermal-camera-flir-lepton-usb-v1.0.0/thermal-camera-flir-lepton-usb-1.0.0.adosplug",
+      "archive_sha256": null
+    },
+    {
+      "id": "com.altnautica.mavlink-gimbal-v2",
+      "name": "ADOS MAVLink Gimbal v2 Controller",
+      "version": "1.0.0",
+      "description": "MAVLink Gimbal v2 control. Optional SimpleBGC, Storm32 NT, and Gremsy driver paths.",
+      "author": "Altnautica",
+      "homepage": "https://github.com/altnautica/ADOSExtensions/tree/main/extensions/mavlink-gimbal-v2",
+      "license": "GPL-3.0-or-later",
+      "risk": "medium",
+      "category": "gimbal",
+      "halves": ["agent", "gcs"],
+      "download_url": "https://github.com/altnautica/ADOSExtensions/releases/download/mavlink-gimbal-v2-v1.0.0/mavlink-gimbal-v2-1.0.0.adosplug",
+      "archive_sha256": null
+    },
+    {
+      "id": "com.altnautica.vision-nav",
+      "name": "ADOS Vision Navigation",
+      "version": "0.1.0",
+      "description": "Optical flow Phase 1 with optional monocular VIO Phase 2 (vendor binary). GPS-denied navigation.",
+      "author": "Altnautica",
+      "homepage": "https://github.com/altnautica/ADOSExtensions/tree/main/extensions/vision-nav",
+      "license": "GPL-3.0-or-later",
+      "risk": "high",
+      "category": "navigation",
+      "halves": ["agent", "gcs"],
+      "download_url": "https://github.com/altnautica/ADOSExtensions/releases/download/vision-nav-v0.1.0/vision-nav-0.1.0.adosplug",
+      "archive_sha256": null
+    }
+  ]
+}

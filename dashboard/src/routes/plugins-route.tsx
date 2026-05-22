@@ -9,6 +9,7 @@ import {
 
 import { PageShell } from "@/components/page-shell";
 import { PluginInstallDialog } from "@/components/plugins/install-dialog";
+import { RegistryGrid } from "@/components/plugins/registry-grid";
 import { ConfirmDialog } from "@/components/settings/confirm-dialog";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -38,6 +39,7 @@ export function PluginsRoute() {
   const list = useResource<PluginsListResponse>("plugins", "/api/plugins", 8000);
 
   const installs = list.data?.installs ?? [];
+  const installedIds = new Set(installs.map((i) => i.plugin_id));
 
   const [confirm, setConfirm] = useState<{
     plugin: InstallEntry;
@@ -166,10 +168,10 @@ export function PluginsRoute() {
             <div>
               <div className="text-sm font-medium">No plugins installed.</div>
               <div className="text-xs text-muted-foreground mt-1">
-                Drop a signed{" "}
+                Pick one from the catalog below, drop a signed{" "}
                 <span className="font-mono">.adosplug</span> file anywhere on
                 this window, or click <span className="font-medium">Install</span>{" "}
-                to pick one.
+                to upload one.
               </div>
             </div>
           </CardContent>
@@ -240,6 +242,11 @@ export function PluginsRoute() {
           );
         })}
       </div>
+
+      <RegistryGrid
+        installedIds={installedIds}
+        onInstalled={() => list.refetch()}
+      />
 
       <ConfirmDialog
         open={!!confirm}
