@@ -2,13 +2,18 @@
 
 Keeps the merged set of manifests in memory, exposes lookup and
 listing helpers, and provides a ``reload()`` hook driven by SIGHUP.
-Live transport detection is intentionally conservative until per-transport
-probing is available: every peripheral reports ``connected: False``.
+Connection detection is best-effort: ``regex``-style matches walk
+``/dev/*`` for a path match; ``vid``/``pid`` matches walk the live
+sysfs USB tree. Probes are short and cached lightly by the caller
+through normal API polling.
 """
 
 from __future__ import annotations
 
+import glob as _glob
+import re
 import threading
+from pathlib import Path
 
 from ados.core.logging import get_logger
 from ados.core.paths import PERIPHERALS_GLOB
@@ -16,6 +21,10 @@ from ados.services.peripherals.loader import load_all
 from ados.services.peripherals.manifest import PeripheralManifest
 
 log = get_logger("peripherals.registry")
+
+# Where USB devices advertise vid/pid in sysfs. One file per device,
+# four-digit lowercase hex without prefix.
+_USB_DEVICES_ROOT = Path("/sys/bus/usb/devices")
 
 
 class PeripheralRegistry:
@@ -51,12 +60,55 @@ class PeripheralRegistry:
     def _detect_connection(self, manifest: PeripheralManifest) -> bool:
         """Return whether the manifest matches a currently detected device.
 
-        The signature stays stable so callers can rely on it: returns
-        True if the manifest currently matches a live device on its
-        declared transport, False otherwise. For now this always returns
-        False so the API does not claim devices before a transport probe
-        validates them.
+        Three match modes, evaluated in order:
+        - regex: walks ``/dev`` for any path matching the manifest's
+          regex via ``re.fullmatch``. Anchors in the manifest become
+          functionally redundant since fullmatch is implicitly
+          anchored, but they're harmless and improve readability.
+        - vid: walks ``/sys/bus/usb/devices/*/idVendor`` for any
+          device whose vid matches.
+        - pid: same, against ``idProduct``. Combined with vid when both
+          are declared.
+        All probes are best-effort and silent on error: an inaccessible
+        sysfs path on a non-Linux dev host returns False rather than
+        raising.
         """
+        match = manifest.match
+        if match.regex:
+            try:
+                pattern = re.compile(match.regex)
+            except re.error:
+                log.warning(
+                    "peripheral_regex_invalid",
+                    peripheral_id=manifest.id,
+                    regex=match.regex,
+                )
+                return False
+            for candidate in _glob.iglob("/dev/**/*", recursive=True):
+                if pattern.fullmatch(candidate):
+                    return True
+            return False
+
+        if match.vid or match.pid:
+            want_vid = (match.vid or "").lower().removeprefix("0x")
+            want_pid = (match.pid or "").lower().removeprefix("0x")
+            if not _USB_DEVICES_ROOT.is_dir():
+                return False
+            for dev in _USB_DEVICES_ROOT.iterdir():
+                try:
+                    if want_vid:
+                        vid = (dev / "idVendor").read_text().strip().lower()
+                        if vid != want_vid:
+                            continue
+                    if want_pid:
+                        pid = (dev / "idProduct").read_text().strip().lower()
+                        if pid != want_pid:
+                            continue
+                    return True
+                except OSError:
+                    continue
+            return False
+
         return False
 
     def _envelope(self, manifest: PeripheralManifest) -> dict:
