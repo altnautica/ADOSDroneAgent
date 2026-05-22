@@ -2,7 +2,7 @@ id: ados.usb-camera-uvc
 display_name: "USB UVC camera"
 transport: usb
 match:
-  regex: "/dev/video[0-9]+"
+  regex: "^/dev/video[0-9]+$"
 capabilities:
   - camera
   - uvc

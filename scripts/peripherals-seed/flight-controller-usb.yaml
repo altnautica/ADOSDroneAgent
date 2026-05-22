@@ -2,7 +2,7 @@ id: ados.flight-controller-usb
 display_name: "Flight controller (MAVLink over USB)"
 transport: serial
 match:
-  regex: "/dev/serial/by-id/usb-(ArduPilot|Holybro|SpeedyBee|Pixhawk|iNav).*"
+  regex: "^/dev/serial/by-id/usb-(ArduPilot|Holybro|SpeedyBee|Pixhawk|iNav).*$"
 capabilities:
   - mavlink
   - fc

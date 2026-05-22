@@ -2,7 +2,7 @@ id: ados.spi-lcd-rpi-a
 display_name: "Waveshare 3.5\" RPi LCD (A)"
 transport: serial
 match:
-  regex: "/dev/fb[0-9]+"
+  regex: "^/dev/fb[0-9]+$"
 capabilities:
   - display
   - touch

@@ -2,7 +2,7 @@ id: ados.oled-i2c
 display_name: "OLED status display (I2C)"
 transport: serial
 match:
-  regex: "/dev/i2c-(0|1)"
+  regex: "^/dev/i2c-(0|1)$"
 capabilities:
   - display
   - ssd1306
