@@ -130,6 +130,13 @@ class FCConnection:
         self._streams_requested_at: float = 0.0
         self._last_msg_at: float = 0.0
         self._stream_interval: float = _STREAM_REREQUEST_DEFAULT_INTERVAL
+        # Param-sweep priming state. ``_param_sweep_at`` is the monotonic
+        # timestamp of the last PARAM_REQUEST_LIST we sent — used to
+        # rate-limit reconnect storms (60 s minimum gap). ``_param_priming``
+        # is true between the request and the moment the cache catches up
+        # to the FC's advertised total (PARAM_VALUE.param_count).
+        self._param_sweep_at: float = 0.0
+        self._param_priming: bool = False
 
     @property
     def connected(self) -> bool:
@@ -229,6 +236,11 @@ class FCConnection:
                 # Request data streams
                 self._request_streams()
 
+                # Prime the parameter cache with one PARAM_REQUEST_LIST
+                # so the Telemetry page shows the full FC param list
+                # without waiting for opportunistic PARAM_VALUE traffic.
+                self._request_all_params()
+
                 return True
             else:
                 log.warning("heartbeat_timeout", port=self._port)
@@ -243,6 +255,45 @@ class FCConnection:
         if self._conn:
             request_data_streams(self._conn)
             self._streams_requested_at = time.monotonic()
+
+    def _request_all_params(self) -> None:
+        """Fire PARAM_REQUEST_LIST so the FC streams the full param set.
+
+        Rate-limited to one sweep per 60 s so reconnect churn or restart
+        loops never flood the FC. The FC responds with one PARAM_VALUE
+        per parameter; the read loop pushes each one into the cache via
+        :meth:`VehicleState.update_from_message`. Operators see the
+        progress on /api/params (``priming`` + ``progress``).
+        """
+        if self._conn is None:
+            return
+        now = time.monotonic()
+        if self._param_sweep_at and (now - self._param_sweep_at) < 60.0:
+            return
+        try:
+            self._conn.mav.param_request_list_send(
+                self._conn.target_system or 1,
+                self._conn.target_component or 1,
+            )
+            self._param_sweep_at = now
+            self._param_priming = True
+            log.info(
+                "param_request_list_sent",
+                target_system=self._conn.target_system,
+                target_component=self._conn.target_component,
+            )
+        except Exception as exc:  # noqa: BLE001 (pymavlink can raise broad)
+            log.warning("param_request_list_failed", error=str(exc))
+
+    @property
+    def param_priming(self) -> bool:
+        """True while a PARAM_REQUEST_LIST sweep is still in flight."""
+        return self._param_priming
+
+    def note_param_progress(self, cached: int, expected: int) -> None:
+        """Clear the priming flag once the cache catches up to the FC."""
+        if expected > 0 and cached >= expected:
+            self._param_priming = False
 
     def _adapt_stream_interval(self, now: float) -> None:
         """Adjust the re-request cadence based on observed message flow.
@@ -283,6 +334,7 @@ class FCConnection:
             except Exception as e:
                 log.error("read_loop_error", error=str(e))
                 self._connected = False
+                self._param_priming = False
                 self._cleanup_connection()
                 await asyncio.sleep(1)
 

@@ -32,28 +32,56 @@ class ParamSetResponse(BaseModel):
 
 @router.get("/params")
 async def get_all_params():
-    """All cached FC parameters, served from ParamCache when available."""
+    """All cached FC parameters, served from ParamCache when available.
+
+    The response carries a ``priming`` flag and a ``progress`` block so
+    the Telemetry page can render an in-flight progress bar between the
+    PARAM_REQUEST_LIST sweep firing and the cache catching up to the
+    FC's advertised total.
+    """
     app = get_agent_app()
     param_cache = app.param_cache()
     vehicle_state = app.vehicle_state()
+    fc = app.fc_connection()
 
-    # Prefer ParamCache (persistent) if available
+    expected = vehicle_state.param_count if vehicle_state else 0
     if param_cache is not None:
         all_params = param_cache.get_all()
+        cached = len(all_params)
+        if fc is not None:
+            try:
+                fc.note_param_progress(cached, expected)
+            except AttributeError:
+                pass
         return {
             "params": all_params,
-            "count": vehicle_state.param_count if vehicle_state else len(all_params),
-            "cached": len(all_params),
+            "count": expected or cached,
+            "cached": cached,
+            "priming": bool(getattr(fc, "param_priming", False)),
+            "progress": {"got": cached, "expected": expected},
         }
 
-    # Fall back to VehicleState in-memory params
     if vehicle_state:
+        cached = len(vehicle_state.params)
+        if fc is not None:
+            try:
+                fc.note_param_progress(cached, vehicle_state.param_count)
+            except AttributeError:
+                pass
         return {
             "params": vehicle_state.params,
             "count": vehicle_state.param_count,
-            "cached": len(vehicle_state.params),
+            "cached": cached,
+            "priming": bool(getattr(fc, "param_priming", False)),
+            "progress": {"got": cached, "expected": vehicle_state.param_count},
         }
-    return {"params": {}, "count": 0, "cached": 0}
+    return {
+        "params": {},
+        "count": 0,
+        "cached": 0,
+        "priming": False,
+        "progress": {"got": 0, "expected": 0},
+    }
 
 
 @router.get("/params/{name}")

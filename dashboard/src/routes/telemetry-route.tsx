@@ -28,6 +28,8 @@ interface ParamsResponse {
   params: Record<string, number>;
   count: number;
   cached: number;
+  priming?: boolean;
+  progress?: { got: number; expected: number };
 }
 
 interface ParamSetResponse {
@@ -264,14 +266,56 @@ function ParametersTab() {
 
         {params.isError && (
           <Card>
-            <CardContent className="pt-5 pb-5 text-sm text-destructive">
-              Failed to load parameters. The FC may not be connected, or the
-              agent has not yet observed any PARAM_VALUE messages.
+            <CardContent className="pt-5 pb-5 flex items-center justify-between gap-3">
+              <p className="text-sm text-destructive">
+                Couldn't reach the parameter service.
+              </p>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => params.refetch?.()}
+              >
+                Retry
+              </Button>
             </CardContent>
           </Card>
         )}
 
-        {!params.isLoading && rows.length === 0 && (
+        {params.data?.priming && rows.length === 0 && (
+          <Card>
+            <CardContent className="pt-5 pb-5 flex items-start gap-3">
+              <Radio className="h-5 w-5 text-accent-primary mt-0.5 animate-pulse" />
+              <div className="flex-1 space-y-2">
+                <div className="text-sm font-medium">
+                  Priming parameter cache from FC…
+                </div>
+                <div className="text-xs text-muted-foreground">
+                  {params.data.progress?.got ?? 0} of{" "}
+                  {params.data.progress?.expected ?? "?"} parameters received.
+                </div>
+                {params.data.progress?.expected ? (
+                  <div className="h-1 w-full overflow-hidden rounded bg-muted">
+                    <div
+                      className="h-full bg-accent-primary transition-[width]"
+                      style={{
+                        width: `${Math.min(
+                          100,
+                          Math.round(
+                            ((params.data.progress.got ?? 0) /
+                              params.data.progress.expected) *
+                              100,
+                          ),
+                        )}%`,
+                      }}
+                    />
+                  </div>
+                ) : null}
+              </div>
+            </CardContent>
+          </Card>
+        )}
+
+        {!params.isLoading && !params.data?.priming && rows.length === 0 && (
           <Card>
             <CardContent className="pt-5 pb-5 flex items-start gap-3">
               <Radio className="h-5 w-5 text-muted-foreground mt-0.5" />
@@ -280,9 +324,9 @@ function ParametersTab() {
                   No parameters cached yet.
                 </div>
                 <div className="text-xs text-muted-foreground">
-                  The agent observes PARAM_VALUE messages from the FC and
-                  populates the cache as they arrive. Connect a flight
-                  controller and the table fills in.
+                  Connect a flight controller and the agent fires
+                  PARAM_REQUEST_LIST on connect so the table fills in
+                  automatically.
                 </div>
               </div>
             </CardContent>
