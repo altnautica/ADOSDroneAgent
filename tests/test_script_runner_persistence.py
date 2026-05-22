@@ -13,14 +13,18 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from ados.services.scripting import script_runner as runner_mod
+from ados.services.scripting import script_library as library_mod
 from ados.services.scripting.script_runner import ScriptRunner
 
 
 @pytest.fixture
 def runner(tmp_path: Path, monkeypatch) -> ScriptRunner:
+    # The runner delegates library reads/writes to script_library;
+    # patch the canonical SCRIPTS_DIR symbol on that module so any
+    # call site (runner OR direct library function) sees the temp
+    # directory.
     scripts_dir = tmp_path / "scripts"
-    monkeypatch.setattr(runner_mod, "SCRIPTS_DIR", scripts_dir)
+    monkeypatch.setattr(library_mod, "SCRIPTS_DIR", scripts_dir)
 
     config = MagicMock()
     config.max_concurrent = 4
@@ -106,9 +110,9 @@ def test_save_rejects_when_library_full(
 ) -> None:
     """The hard ceiling on library size kicks in only for net-new
     saves; in-place updates of an existing record continue to work."""
-    from ados.services.scripting import script_runner as runner_mod
+    from ados.services.scripting import script_library as library_mod
 
-    monkeypatch.setattr(runner_mod, "_MAX_SAVED_SCRIPTS", 3)
+    monkeypatch.setattr(library_mod, "MAX_SAVED_SCRIPTS", 3)
 
     runner.save_script("a", "print(1)")
     runner.save_script("b", "print(2)")

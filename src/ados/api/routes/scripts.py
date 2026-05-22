@@ -9,6 +9,7 @@ from pydantic import BaseModel
 
 from ados.api.deps import get_agent_app
 from ados.core.logging import get_logger
+from ados.services.scripting import script_library
 
 log = get_logger("api.scripts")
 
@@ -43,12 +44,16 @@ async def list_scripts():
     executor = handles.executor
     demo = handles.demo
 
-    scripts: list[dict] = []
+    # Saved scripts live on disk under SCRIPTS_DIR and are readable
+    # from every process — the API process serves the route here,
+    # the supervisor process owns the runner. Pull the library
+    # straight from the filesystem module rather than reaching for
+    # the runner so the route works in either process layout.
+    scripts: list[dict] = [asdict(s) for s in script_library.list_saved_scripts()]
     executions: list[dict] = []
     command_log: list[dict] = []
 
     if runner is not None:
-        scripts = [asdict(s) for s in runner.list_saved_scripts()]
         for info in runner.list_scripts():
             executions.append({
                 "script_id": info.script_id,
@@ -89,13 +94,15 @@ class SaveScriptRequest(BaseModel):
 
 @router.post("/scripts")
 async def save_script(req: SaveScriptRequest):
-    """Persist a script to disk and return its server-assigned id."""
-    app = get_agent_app()
-    runner = app.scripting_handles().runner
-    if runner is None:
-        raise HTTPException(status_code=503, detail="Script runner not available")
+    """Persist a script to disk and return its server-assigned id.
+
+    The library is a disk-backed shared resource, so the API process
+    handles the write directly. The supervisor process (which owns
+    the runner) reads the same files when an operator launches a
+    script.
+    """
     try:
-        saved = runner.save_script(req.name, req.content, req.suite)
+        saved = script_library.save_script(req.name, req.content, req.suite)
     except RuntimeError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     return asdict(saved)
@@ -104,11 +111,7 @@ async def save_script(req: SaveScriptRequest):
 @router.delete("/scripts/{script_id}")
 async def delete_script(script_id: str):
     """Remove a saved script by id. 404 when the id is unknown."""
-    app = get_agent_app()
-    runner = app.scripting_handles().runner
-    if runner is None:
-        raise HTTPException(status_code=503, detail="Script runner not available")
-    removed = runner.delete_script(script_id)
+    removed = script_library.delete_script(script_id)
     if not removed:
         raise HTTPException(status_code=404, detail="Saved script not found")
     return {"status": "ok", "script_id": script_id}

@@ -3,12 +3,10 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import os
-import re
 import tempfile
 import uuid
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import StrEnum
 from pathlib import Path
@@ -16,35 +14,14 @@ from typing import TYPE_CHECKING
 
 from ados.core.logging import get_logger
 from ados.core.paths import SCRIPTS_DIR
+from ados.services.scripting import script_library
+from ados.services.scripting.script_library import SavedScript  # re-export
 
 if TYPE_CHECKING:
     from ados.core.config import ScriptsConfig
     from ados.services.scripting.executor import CommandExecutor
 
 log = get_logger("scripting.script_runner")
-
-# Reverse-DNS-style script id. Generated server-side as a 12-char hex
-# so we never trust client-supplied ids on the filesystem.
-_SAVED_ID_RE = re.compile(r"^[a-f0-9]{12}$")
-
-# Hard caps on the persistent library. A paired operator who buggies
-# out (or a malicious caller who slipped through the auth gate) cannot
-# fill /var/ados/scripts/ until the partition wedges agent operation.
-_MAX_SAVED_SCRIPTS = 256
-_MAX_SCRIPT_CONTENT_BYTES = 256 * 1024  # 256 KiB
-
-
-@dataclass
-class SavedScript:
-    """Persisted script source as the dashboard / GCS see it. Mirrors
-    Mission Control's ``ScriptInfo`` TypeScript interface verbatim so
-    the API response is consumable without an adapter layer."""
-
-    id: str
-    name: str
-    content: str
-    suite: str | None = None
-    lastModified: str = ""
 
 
 class ScriptState(StrEnum):
@@ -149,135 +126,45 @@ class ScriptRunner:
         """Return info for a single script, or None."""
         return self._scripts.get(script_id)
 
-    # ---- Persistent script library ------------------------------------
+    # ---- Persistent script library (delegates to script_library) -----
     # The runner above tracks running and finished executions in
-    # memory. The library below persists script source on disk under
-    # SCRIPTS_DIR so the GCS Scripts tab can save / list / re-run them
-    # across agent restarts. Each saved script is a {id}.json manifest
-    # carrying the source plus metadata; the runner materialises a
-    # temp .py file at run-time so subprocess can exec it.
+    # memory. Library persistence (save / list / delete / read) lives
+    # in ``script_library`` because the REST API process needs the
+    # same disk-backed library, and that process does not own an
+    # instantiated runner. The wrappers below keep existing in-tree
+    # callers working without forcing them to refactor.
 
     @staticmethod
-    def _saved_path(script_id: str) -> Path:
-        return SCRIPTS_DIR / f"{script_id}.json"
+    def list_saved_scripts() -> list[SavedScript]:
+        return script_library.list_saved_scripts()
 
-    @classmethod
-    def _read_saved(cls, script_id: str) -> SavedScript | None:
-        if not _SAVED_ID_RE.fullmatch(script_id):
-            return None
-        path = cls._saved_path(script_id)
-        if not path.is_file():
-            return None
-        try:
-            raw = path.read_text(encoding="utf-8")
-            data = json.loads(raw)
-            return SavedScript(
-                id=str(data.get("id", script_id)),
-                name=str(data.get("name", "")),
-                content=str(data.get("content", "")),
-                suite=data.get("suite"),
-                lastModified=str(data.get("lastModified", "")),
-            )
-        except (OSError, json.JSONDecodeError) as exc:
-            log.warning("saved_script_unreadable", script_id=script_id, error=str(exc))
-            return None
+    @staticmethod
+    def get_saved_script(script_id: str) -> SavedScript | None:
+        return script_library.get_saved_script(script_id)
 
-    def list_saved_scripts(self) -> list[SavedScript]:
-        """Return every persisted script as a SavedScript record."""
-        out: list[SavedScript] = []
-        try:
-            SCRIPTS_DIR.mkdir(parents=True, exist_ok=True)
-            for path in sorted(SCRIPTS_DIR.glob("*.json")):
-                script_id = path.stem
-                saved = self._read_saved(script_id)
-                if saved is not None:
-                    out.append(saved)
-        except OSError as exc:
-            log.warning("scripts_dir_unreadable", error=str(exc))
-        return out
-
-    def get_saved_script(self, script_id: str) -> SavedScript | None:
-        return self._read_saved(script_id)
-
+    @staticmethod
     def save_script(
-        self,
         name: str,
         content: str,
         suite: str | None = None,
     ) -> SavedScript:
-        """Create or update a saved script. The id is server-assigned
-        on first save; subsequent saves with the same name replace the
-        existing record in place to keep the (name -> id) mapping
-        stable for the dashboard."""
-        name = name.strip()
-        if not name:
-            raise RuntimeError("script name required")
-        # Bound the wire payload so a buggy caller (or one that
-        # slipped through the auth gate) cannot push arbitrary-size
-        # blobs and wedge the disk. Sized in bytes against the
-        # UTF-8 encoding rather than character count.
-        content_bytes = content.encode("utf-8")
-        if len(content_bytes) > _MAX_SCRIPT_CONTENT_BYTES:
-            raise RuntimeError(
-                f"script content exceeds {_MAX_SCRIPT_CONTENT_BYTES} bytes",
-            )
-        SCRIPTS_DIR.mkdir(parents=True, exist_ok=True)
-        # Reuse the existing id when the operator saves under the
-        # same name; treat name as the natural key for the dashboard
-        # while keeping the on-disk file keyed by stable id.
-        existing = next(
-            (s for s in self.list_saved_scripts() if s.name == name),
-            None,
-        )
-        # Hard ceiling on library size. We only enforce on net-new
-        # saves so an in-place update of an existing record always
-        # succeeds; the library can never grow past the cap.
-        if existing is None and len(self.list_saved_scripts()) >= _MAX_SAVED_SCRIPTS:
-            raise RuntimeError(
-                f"script library full (max {_MAX_SAVED_SCRIPTS} scripts)",
-            )
-        script_id = existing.id if existing else uuid.uuid4().hex[:12]
-        record = SavedScript(
-            id=script_id,
-            name=name,
-            content=content,
-            suite=suite,
-            lastModified=datetime.now(timezone.utc).isoformat(),
-        )
-        path = self._saved_path(script_id)
-        # Atomic write: tmp + rename keeps a half-written file from
-        # ever being read by the list call mid-update.
-        tmp = path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(asdict(record), indent=2), encoding="utf-8")
-        os.replace(tmp, path)
-        try:
-            os.chmod(path, 0o600)
-        except OSError:
-            pass
-        log.info("script_saved", script_id=script_id, name=name)
-        return record
+        return script_library.save_script(name, content, suite)
 
-    def delete_script(self, script_id: str) -> bool:
-        """Remove a saved script. Returns False when the id is malformed
-        or the record was already gone — never raises."""
-        if not _SAVED_ID_RE.fullmatch(script_id):
-            return False
-        path = self._saved_path(script_id)
-        try:
-            path.unlink()
-        except FileNotFoundError:
-            return False
-        except OSError as exc:
-            log.warning("script_delete_failed", script_id=script_id, error=str(exc))
-            return False
-        log.info("script_deleted", script_id=script_id)
-        return True
+    @staticmethod
+    def delete_script(script_id: str) -> bool:
+        return script_library.delete_script(script_id)
+
+    # Older call sites in the test suite still use ``_saved_path`` to
+    # probe filesystem invariants; expose it as a thin alias.
+    @staticmethod
+    def _saved_path(script_id: str) -> Path:
+        return script_library._saved_path(script_id)
 
     def start_saved_script(self, script_id: str) -> str:
         """Resolve a saved script id to its content, write a temp .py
         file, and queue it through ``start_script``. Returns the
         execution id (distinct from the saved id)."""
-        saved = self.get_saved_script(script_id)
+        saved = script_library.get_saved_script(script_id)
         if saved is None:
             raise RuntimeError(f"saved script not found: {script_id}")
         # Materialise to a temp file the subprocess can exec. Cleanup

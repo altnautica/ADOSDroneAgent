@@ -45,6 +45,7 @@ SAME_ORIGIN_SETUP_PATHS = {
 # routes with a path parameter where exact-match would not work.
 SAME_ORIGIN_SETUP_PREFIXES = (
     "/api/v1/setup/step/",
+    "/api/v1/setup/nudges",
 )
 
 # Hostnames the agent itself binds. A request whose Origin header matches

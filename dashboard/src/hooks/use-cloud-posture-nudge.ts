@@ -36,13 +36,13 @@ export function useCloudPostureNudge(currentMode: string | undefined) {
     let cancelled = false;
     (async () => {
       try {
-        const res = await apiFetch<NudgeResponse>("/api/setup/nudges");
+        const res = await apiFetch<NudgeResponse>("/api/v1/setup/nudges");
         if (cancelled) return;
         if (res.acked?.includes(NUDGE_ID)) return;
 
         const ack = async () => {
           try {
-            await apiFetch(`/api/setup/nudges/${NUDGE_ID}/ack`, {
+            await apiFetch(`/api/v1/setup/nudges/${NUDGE_ID}/ack`, {
               method: "POST",
             });
           } catch {
