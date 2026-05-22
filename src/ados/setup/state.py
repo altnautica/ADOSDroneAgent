@@ -41,6 +41,13 @@ class SetupRunState:
     # `pair` or `mavlink` the percentage no longer drops because the
     # FC heartbeat is briefly absent post-reboot.
     ever_completed_steps: set[str] = field(default_factory=set)
+    # Sticky acknowledgement bits keyed by short id. The dashboard
+    # surfaces a one-shot prompt the first time an operator lands on
+    # Home with a posture or feature that warrants it (e.g. cloud
+    # posture default flipped to local-only on new installs); once
+    # the operator dismisses or acts on the prompt the id lands here
+    # and the prompt suppresses on every subsequent load.
+    acked_nudges: set[str] = field(default_factory=set)
 
     def to_dict(self) -> dict:
         return {
@@ -48,6 +55,7 @@ class SetupRunState:
             "setup_skipped": bool(self.setup_skipped),
             "skipped_steps": sorted(self.skipped_steps),
             "ever_completed_steps": sorted(self.ever_completed_steps),
+            "acked_nudges": sorted(self.acked_nudges),
         }
 
 
@@ -106,12 +114,31 @@ def read_state() -> SetupRunState:
     cleaned_ever = {
         str(s) for s in ever if isinstance(s, str) and str(s) in _KNOWN_STEP_IDS
     }
+    nudges = raw.get("acked_nudges") or []
+    if not isinstance(nudges, list):
+        nudges = []
+    cleaned_nudges = {str(s) for s in nudges if isinstance(s, str)}
     return SetupRunState(
         setup_finalized=bool(raw.get("setup_finalized", False)),
         setup_skipped=bool(raw.get("setup_skipped", False)),
         skipped_steps=cleaned_skipped,
         ever_completed_steps=cleaned_ever,
+        acked_nudges=cleaned_nudges,
     )
+
+
+def ack_nudge(nudge_id: str) -> SetupRunState:
+    """Mark ``nudge_id`` as acknowledged so the dashboard suppresses
+    it on every future load. Persisting is best-effort: a read-only
+    filesystem returns the in-memory state without raising so the
+    caller can still flip its UI."""
+    state = read_state()
+    state.acked_nudges.add(nudge_id)
+    try:
+        _write(state)
+    except OSError:
+        pass
+    return state
 
 
 def _write(state: SetupRunState) -> None:

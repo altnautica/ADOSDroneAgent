@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import asdict
+
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
@@ -27,7 +29,14 @@ class TextCommandRequest(BaseModel):
 
 @router.get("/scripts")
 async def list_scripts():
-    """List all scripts and recent command log."""
+    """List saved scripts, recent executions, and the command log.
+
+    The ``scripts`` field carries the persistent library — the rows
+    the Mission Control Scripts tab and the agent webapp render and
+    edit. ``executions`` carries the per-run history (state, pid,
+    output tail) so an operator can still inspect what fired off
+    most recently. ``command_log`` is the text-command audit trail.
+    """
     app = get_agent_app()
     handles = app.scripting_handles()
     runner = handles.runner
@@ -35,11 +44,13 @@ async def list_scripts():
     demo = handles.demo
 
     scripts: list[dict] = []
+    executions: list[dict] = []
     command_log: list[dict] = []
 
     if runner is not None:
+        scripts = [asdict(s) for s in runner.list_saved_scripts()]
         for info in runner.list_scripts():
-            scripts.append({
+            executions.append({
                 "script_id": info.script_id,
                 "filename": info.filename,
                 "state": info.state.value,
@@ -63,35 +74,57 @@ async def list_scripts():
     elif demo is not None:
         command_log = demo.command_log[-50:]
 
-    return {"scripts": scripts, "command_log": command_log}
+    return {
+        "scripts": scripts,
+        "executions": executions,
+        "command_log": command_log,
+    }
 
 
 class SaveScriptRequest(BaseModel):
     name: str
     content: str
+    suite: str | None = None
 
 
 @router.post("/scripts")
 async def save_script(req: SaveScriptRequest):
-    """Save a new script (stub)."""
-    return {"status": "not_implemented", "message": f"Script save not yet available: {req.name}"}
-
-
-@router.delete("/scripts/{script_id}")
-async def delete_script(script_id: str):
-    """Delete a script by ID (stub)."""
-    return {"status": "not_implemented", "message": f"Script delete not yet available: {script_id}"}
-
-
-@router.post("/scripts/{script_id}/run")
-async def run_script_by_id(script_id: str):
-    """Run a script by ID."""
+    """Persist a script to disk and return its server-assigned id."""
     app = get_agent_app()
     runner = app.scripting_handles().runner
     if runner is None:
         raise HTTPException(status_code=503, detail="Script runner not available")
     try:
-        sid = runner.start_script(script_id)
+        saved = runner.save_script(req.name, req.content, req.suite)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return asdict(saved)
+
+
+@router.delete("/scripts/{script_id}")
+async def delete_script(script_id: str):
+    """Remove a saved script by id. 404 when the id is unknown."""
+    app = get_agent_app()
+    runner = app.scripting_handles().runner
+    if runner is None:
+        raise HTTPException(status_code=503, detail="Script runner not available")
+    removed = runner.delete_script(script_id)
+    if not removed:
+        raise HTTPException(status_code=404, detail="Saved script not found")
+    return {"status": "ok", "script_id": script_id}
+
+
+@router.post("/scripts/{script_id}/run")
+async def run_script_by_id(script_id: str):
+    """Run a saved script by its server-assigned id. The runner
+    materialises the persisted source to a temp file and queues it
+    through the regular execution path."""
+    app = get_agent_app()
+    runner = app.scripting_handles().runner
+    if runner is None:
+        raise HTTPException(status_code=503, detail="Script runner not available")
+    try:
+        sid = runner.start_saved_script(script_id)
     except RuntimeError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     return {"status": "ok", "script_id": sid}

@@ -9,7 +9,7 @@ from ados.setup import state as setup_state
 from ados.setup.models import SetupStatus
 from ados.setup.service import build_setup_status
 
-from ._common import VALID_STEP_IDS
+from ._common import VALID_NUDGE_IDS, VALID_STEP_IDS
 
 router = APIRouter()
 
@@ -79,3 +79,22 @@ async def reset_setup(request: Request) -> SetupStatus:
         get_agent_app(),
         host_header=request.headers.get("host"),
     )
+
+
+@router.get("/nudges")
+async def get_nudges() -> dict:
+    """Return the set of one-shot prompt ids the operator has already
+    acknowledged. The dashboard checks this on load to decide whether
+    to surface each prompt; suppressing on the agent side means the
+    flag follows the agent through reflashes that wipe the browser."""
+    state = setup_state.read_state()
+    return {"acked": sorted(state.acked_nudges)}
+
+
+@router.post("/nudges/{nudge_id}/ack")
+async def ack_nudge(nudge_id: str) -> dict:
+    """Mark a one-shot prompt as acknowledged so it never re-renders."""
+    if nudge_id not in VALID_NUDGE_IDS:
+        raise HTTPException(status_code=404, detail=f"Unknown nudge id: {nudge_id}")
+    state = setup_state.ack_nudge(nudge_id)
+    return {"status": "ok", "acked": sorted(state.acked_nudges)}

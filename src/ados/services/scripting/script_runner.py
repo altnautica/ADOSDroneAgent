@@ -3,20 +3,42 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
+import re
+import tempfile
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from enum import StrEnum
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from ados.core.logging import get_logger
+from ados.core.paths import SCRIPTS_DIR
 
 if TYPE_CHECKING:
     from ados.core.config import ScriptsConfig
     from ados.services.scripting.executor import CommandExecutor
 
 log = get_logger("scripting.script_runner")
+
+# Reverse-DNS-style script id. Generated server-side as a 12-char hex
+# so we never trust client-supplied ids on the filesystem.
+_SAVED_ID_RE = re.compile(r"^[a-f0-9]{12}$")
+
+
+@dataclass
+class SavedScript:
+    """Persisted script source as the dashboard / GCS see it. Mirrors
+    Mission Control's ``ScriptInfo`` TypeScript interface verbatim so
+    the API response is consumable without an adapter layer."""
+
+    id: str
+    name: str
+    content: str
+    suite: str | None = None
+    lastModified: str = ""
 
 
 class ScriptState(StrEnum):
@@ -120,6 +142,140 @@ class ScriptRunner:
     def get_script(self, script_id: str) -> ScriptInfo | None:
         """Return info for a single script, or None."""
         return self._scripts.get(script_id)
+
+    # ---- Persistent script library ------------------------------------
+    # The runner above tracks running and finished executions in
+    # memory. The library below persists script source on disk under
+    # SCRIPTS_DIR so the GCS Scripts tab can save / list / re-run them
+    # across agent restarts. Each saved script is a {id}.json manifest
+    # carrying the source plus metadata; the runner materialises a
+    # temp .py file at run-time so subprocess can exec it.
+
+    @staticmethod
+    def _saved_path(script_id: str) -> Path:
+        return SCRIPTS_DIR / f"{script_id}.json"
+
+    @classmethod
+    def _read_saved(cls, script_id: str) -> SavedScript | None:
+        if not _SAVED_ID_RE.fullmatch(script_id):
+            return None
+        path = cls._saved_path(script_id)
+        if not path.is_file():
+            return None
+        try:
+            raw = path.read_text(encoding="utf-8")
+            data = json.loads(raw)
+            return SavedScript(
+                id=str(data.get("id", script_id)),
+                name=str(data.get("name", "")),
+                content=str(data.get("content", "")),
+                suite=data.get("suite"),
+                lastModified=str(data.get("lastModified", "")),
+            )
+        except (OSError, json.JSONDecodeError) as exc:
+            log.warning("saved_script_unreadable", script_id=script_id, error=str(exc))
+            return None
+
+    def list_saved_scripts(self) -> list[SavedScript]:
+        """Return every persisted script as a SavedScript record."""
+        out: list[SavedScript] = []
+        try:
+            SCRIPTS_DIR.mkdir(parents=True, exist_ok=True)
+            for path in sorted(SCRIPTS_DIR.glob("*.json")):
+                script_id = path.stem
+                saved = self._read_saved(script_id)
+                if saved is not None:
+                    out.append(saved)
+        except OSError as exc:
+            log.warning("scripts_dir_unreadable", error=str(exc))
+        return out
+
+    def get_saved_script(self, script_id: str) -> SavedScript | None:
+        return self._read_saved(script_id)
+
+    def save_script(
+        self,
+        name: str,
+        content: str,
+        suite: str | None = None,
+    ) -> SavedScript:
+        """Create or update a saved script. The id is server-assigned
+        on first save; subsequent saves with the same name replace the
+        existing record in place to keep the (name -> id) mapping
+        stable for the dashboard."""
+        name = name.strip()
+        if not name:
+            raise RuntimeError("script name required")
+        SCRIPTS_DIR.mkdir(parents=True, exist_ok=True)
+        # Reuse the existing id when the operator saves under the
+        # same name; treat name as the natural key for the dashboard
+        # while keeping the on-disk file keyed by stable id.
+        existing = next(
+            (s for s in self.list_saved_scripts() if s.name == name),
+            None,
+        )
+        script_id = existing.id if existing else uuid.uuid4().hex[:12]
+        record = SavedScript(
+            id=script_id,
+            name=name,
+            content=content,
+            suite=suite,
+            lastModified=datetime.now(timezone.utc).isoformat(),
+        )
+        path = self._saved_path(script_id)
+        # Atomic write: tmp + rename keeps a half-written file from
+        # ever being read by the list call mid-update.
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(asdict(record), indent=2), encoding="utf-8")
+        os.replace(tmp, path)
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
+        log.info("script_saved", script_id=script_id, name=name)
+        return record
+
+    def delete_script(self, script_id: str) -> bool:
+        """Remove a saved script. Returns False when the id is malformed
+        or the record was already gone — never raises."""
+        if not _SAVED_ID_RE.fullmatch(script_id):
+            return False
+        path = self._saved_path(script_id)
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            return False
+        except OSError as exc:
+            log.warning("script_delete_failed", script_id=script_id, error=str(exc))
+            return False
+        log.info("script_deleted", script_id=script_id)
+        return True
+
+    def start_saved_script(self, script_id: str) -> str:
+        """Resolve a saved script id to its content, write a temp .py
+        file, and queue it through ``start_script``. Returns the
+        execution id (distinct from the saved id)."""
+        saved = self.get_saved_script(script_id)
+        if saved is None:
+            raise RuntimeError(f"saved script not found: {script_id}")
+        # Materialise to a temp file the subprocess can exec. Cleanup
+        # belongs to the subprocess lifecycle; the runner does not
+        # delete the file because the script may still be running
+        # when the route returns.
+        SCRIPTS_DIR.mkdir(parents=True, exist_ok=True)
+        runs_dir = SCRIPTS_DIR / "runs"
+        runs_dir.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            dir=runs_dir,
+            prefix=f"{saved.id}-",
+            suffix=".py",
+            delete=False,
+            encoding="utf-8",
+        ) as fh:
+            fh.write(saved.content)
+            tmp_path = fh.name
+        return self.start_script(tmp_path)
 
     async def _run_script(self, script_id: str, path: str) -> None:
         """Launch the script subprocess and track its output."""

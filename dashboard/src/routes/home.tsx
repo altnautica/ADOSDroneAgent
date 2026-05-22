@@ -13,6 +13,7 @@ import { StatusTiles } from "@/components/panels/status-tiles";
 import { VideoPanel } from "@/components/panels/video-panel";
 import { WfbRxPanel } from "@/components/panels/wfb-rx-panel";
 import { Button } from "@/components/ui/button";
+import { useCloudPostureNudge } from "@/hooks/use-cloud-posture-nudge";
 import { useHeartbeat } from "@/hooks/use-heartbeat";
 import { useStatus } from "@/hooks/use-status";
 
@@ -21,6 +22,9 @@ export function HomeRoute() {
   const heartbeat = useHeartbeat();
   const profile = status.data?.profile ?? "auto";
   const role = status.data?.ground_role ?? "direct";
+  // One-shot prompt for agents still on the legacy `cloud` posture.
+  // The hook self-gates and runs at most once per agent.
+  useCloudPostureNudge(status.data?.cloud_choice?.mode);
 
   // Coherent agent-offline state: when the heartbeat has errored AND
   // we have no cached data, render a single page-level message instead

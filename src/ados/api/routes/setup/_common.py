@@ -28,6 +28,18 @@ VALID_STEP_IDS: frozenset[str] = frozenset(
 )
 
 
+# Operator-facing one-shot prompts. The dashboard surfaces each id at
+# most once per agent; the ack route lands the id in the persisted
+# acked_nudges set so the next page load suppresses it. Keep the list
+# small and well-known so a tampered request cannot stash arbitrary
+# keys.
+VALID_NUDGE_IDS: frozenset[str] = frozenset(
+    {
+        "cloud_posture_default_changed",
+    }
+)
+
+
 def now_iso() -> str:
     """Tz-aware ISO timestamp without microseconds, matching wizard JSON shape."""
     return (
