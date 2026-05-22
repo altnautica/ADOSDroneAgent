@@ -181,11 +181,6 @@ def build_heartbeat_payload(app: AgentApp) -> dict:  # noqa: C901
             if video_whep_port and local_ip
             else None
         ),
-        "videoWhep": (
-            f"http://{local_ip}:{video_whep_port}/main/whep"
-            if video_whep_port and local_ip
-            else None
-        ),
     }
 
     # Cloud relay = MQTT-to-Convex pair. Cloudflare = inbound tunnel.
@@ -267,6 +262,10 @@ def build_heartbeat_payload(app: AgentApp) -> dict:  # noqa: C901
     if remote.api_url:
         payload["apiUrl"] = remote.api_url
     if remote.video_whep_url:
+        # Operator-configured Cloudflare tunnel WHEP URL. Distinct from
+        # the auto-derived LAN path that was retired with the
+        # manualConnectionUrls.videoWhep field — operators that point
+        # this at a working WHEP endpoint still get a usable URL.
         payload["videoWhepUrl"] = remote.video_whep_url
     if remote.mavlink_ws_url:
         payload["mavlinkWsUrl"] = remote.mavlink_ws_url
