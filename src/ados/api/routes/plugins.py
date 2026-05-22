@@ -453,12 +453,17 @@ class InstallFromUrlRequest(BaseModel):
     ``requested_permissions`` list mirrors the multipart endpoint and
     triggers immediate grants on the freshly installed plugin so the
     install dialog does not have to make a separate ``/grant`` call.
+
+    ``from_catalog`` flips when the install was triggered by the
+    first-party catalog browser on the agent webapp. Catalog entries
+    must pin a SHA — the route rejects them when the pin is absent.
     """
 
     url: str
     expected_sha256: str | None = None
     requested_permissions: list[str] | None = None
     job_id: str | None = None
+    from_catalog: bool = False
 
 
 @router.post("/plugins/install_from_url")
@@ -469,9 +474,11 @@ async def install_plugin_from_url(body: InstallFromUrlRequest):
     Plugins page when the plugin is a registry entry whose canonical
     binary is already hosted at a public URL — no intermediate storage
     hop is needed. The download is streamed with a hard size cap and
-    a SHA-256 pin (if the caller supplied one); everything past the
-    bytes-on-disk handoff reuses the same supervisor flow as the
-    multipart endpoint.
+    a SHA-256 pin (required when ``from_catalog=true`` so first-party
+    catalog installs never skip integrity verification, optional
+    otherwise so operator-supplied URLs without a pin still work);
+    everything past the bytes-on-disk handoff reuses the same
+    supervisor flow as the multipart endpoint.
     """
     url = (body.url or "").strip()
     if not url:
@@ -483,6 +490,13 @@ async def install_plugin_from_url(body: InstallFromUrlRequest):
         return _err(2, "url_invalid", str(exc), 400)
 
     expected_sha = (body.expected_sha256 or "").strip()
+    if body.from_catalog and not expected_sha:
+        return _err(
+            2,
+            "sha256_required",
+            "catalog installs must pin archive_sha256",
+            400,
+        )
     requested = list(body.requested_permissions or [])
     job_id = body.job_id
 

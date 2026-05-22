@@ -73,7 +73,10 @@ export function RegistryGrid({ installedIds, onInstalled }: Props) {
   async function handleInstall(entry: CatalogEntry) {
     setPending(true);
     try {
-      const body: Record<string, unknown> = { url: entry.download_url };
+      const body: Record<string, unknown> = {
+        url: entry.download_url,
+        from_catalog: true,
+      };
       if (entry.archive_sha256) body.expected_sha256 = entry.archive_sha256;
       await apiFetch("/api/plugins/install_from_url", {
         method: "POST",

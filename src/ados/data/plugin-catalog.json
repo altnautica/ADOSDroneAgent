@@ -13,11 +13,11 @@
       "risk": "low",
       "category": "telemetry",
       "halves": ["gcs"],
-      "download_url": "https://github.com/altnautica/ADOSExtensions/releases/download/battery-health-panel-v1.0.0/battery-health-panel-1.0.0.adosplug",
-      "archive_sha256": null
+      "download_url": "https://github.com/altnautica/ADOSExtensions/releases/download/battery-health-panel-v1.0.0/com.altnautica.battery-health-panel-1.0.0.signed.adosplug",
+      "archive_sha256": "be1b9a981367778545aa6c0415a53073aa13b00d9331d92af956385caedb9d16"
     },
     {
-      "id": "com.altnautica.thermal-camera-flir-lepton-usb",
+      "id": "com.altnautica.thermal-flir-lepton-usb",
       "name": "ADOS Thermal Camera FLIR Lepton (USB)",
       "version": "1.0.0",
       "description": "PureThermal 2 + FLIR Lepton 3.5 driver. Live thermal overlay, palette switching, telemetry.",
@@ -27,8 +27,8 @@
       "risk": "medium",
       "category": "camera",
       "halves": ["agent", "gcs"],
-      "download_url": "https://github.com/altnautica/ADOSExtensions/releases/download/thermal-camera-flir-lepton-usb-v1.0.0/thermal-camera-flir-lepton-usb-1.0.0.adosplug",
-      "archive_sha256": null
+      "download_url": "https://github.com/altnautica/ADOSExtensions/releases/download/thermal-camera-flir-lepton-usb-v1.0.0/com.altnautica.thermal-flir-lepton-usb-1.0.0.signed.adosplug",
+      "archive_sha256": "ccbf50f7efec4f6d1ccd4cf99a2f034427592e3ef61da8deaea515f34688be9e"
     },
     {
       "id": "com.altnautica.mavlink-gimbal-v2",
@@ -41,13 +41,13 @@
       "risk": "medium",
       "category": "gimbal",
       "halves": ["agent", "gcs"],
-      "download_url": "https://github.com/altnautica/ADOSExtensions/releases/download/mavlink-gimbal-v2-v1.0.0/mavlink-gimbal-v2-1.0.0.adosplug",
-      "archive_sha256": null
+      "download_url": "https://github.com/altnautica/ADOSExtensions/releases/download/mavlink-gimbal-v2-v1.0.0/com.altnautica.mavlink-gimbal-v2-1.0.0.signed.adosplug",
+      "archive_sha256": "5befde4dbef3f4f0bf69f5f06bfacbd77b441dcdb112bb11add279cc450e6da0"
     },
     {
       "id": "com.altnautica.vision-nav",
       "name": "ADOS Vision Navigation",
-      "version": "0.1.0",
+      "version": "0.2.7",
       "description": "Optical flow with optional monocular VIO via vendor binary. GPS-denied navigation.",
       "author": "Altnautica",
       "homepage": "https://github.com/altnautica/ADOSExtensions/tree/main/extensions/vision-nav",
@@ -55,8 +55,8 @@
       "risk": "high",
       "category": "navigation",
       "halves": ["agent", "gcs"],
-      "download_url": "https://github.com/altnautica/ADOSExtensions/releases/download/vision-nav-v0.1.0/vision-nav-0.1.0.adosplug",
-      "archive_sha256": null
+      "download_url": "https://github.com/altnautica/ADOSExtensions/releases/download/extensions/vision-nav-v0.2.7/com.altnautica.vision-nav-0.2.7.signed.adosplug",
+      "archive_sha256": "54b11e19ac0cefb8fd410057d1f09f2ef52a7502db8c496fa3ddcce4e00f4def"
     }
   ]
 }

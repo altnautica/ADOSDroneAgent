@@ -229,6 +229,61 @@ def test_install_from_url_no_sha_pin_still_installs(
     assert body["plugin_id"] == "com.example.nopin"
 
 
+def test_install_from_url_catalog_requires_sha(client, supervisor):
+    """Catalog-sourced installs MUST pin a SHA — the route rejects the
+    call before any download attempt when ``from_catalog=true`` and
+    ``expected_sha256`` is missing or blank.
+    """
+    url = "https://objects.githubusercontent.com/example/com.example.catalog.adosplug"
+    resp = client.post(
+        "/api/plugins/install_from_url",
+        json={"url": url, "from_catalog": True},
+    )
+    assert resp.status_code == 400
+    body = resp.json()
+    assert body["ok"] is False
+    assert body["kind"] == "sha256_required"
+
+
+def test_install_from_url_catalog_blank_sha_rejected(client, supervisor):
+    """Whitespace-only SHA strings are stripped before the catalog gate."""
+    url = "https://objects.githubusercontent.com/example/com.example.catalog.adosplug"
+    resp = client.post(
+        "/api/plugins/install_from_url",
+        json={"url": url, "from_catalog": True, "expected_sha256": "   "},
+    )
+    assert resp.status_code == 400
+    assert resp.json()["kind"] == "sha256_required"
+
+
+def test_install_from_url_catalog_with_sha_passes_gate(
+    client, supervisor, tmp_path: Path
+):
+    """A catalog install that ships a pinned SHA clears the gate and
+    proceeds to download + verify + install like any other call.
+    """
+    archive_path = _build_archive(tmp_path, plugin_id="com.example.catalog2")
+    raw = archive_path.read_bytes()
+    sha = hashlib.sha256(raw).hexdigest()
+    url = "https://objects.githubusercontent.com/example/com.example.catalog2.adosplug"
+
+    with _patch_stream(status_code=200, body=raw), patch(
+        "ados.plugins.supervisor.subprocess.run"
+    ) as run_mock:
+        run_mock.return_value = MagicMock(returncode=0, stderr="")
+        resp = client.post(
+            "/api/plugins/install_from_url",
+            json={
+                "url": url,
+                "expected_sha256": sha,
+                "from_catalog": True,
+            },
+        )
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["plugin_id"] == "com.example.catalog2"
+
+
 # ---------------------------------------------------------------------
 # URL validation
 # ---------------------------------------------------------------------
