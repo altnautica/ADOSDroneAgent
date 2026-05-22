@@ -1,14 +1,16 @@
-schema_version: 1
 id: ados.spi-lcd-rpi-a
-name: "Waveshare 3.5\" RPi LCD (A)"
-description: "ILI9486 SPI LCD with ADS7846 touch controller. Surfaces the local agent dashboard."
-category: "display"
-bus: "spi"
+display_name: "Waveshare 3.5\" RPi LCD (A)"
+transport: serial
 match:
-  - dtoverlay: "ads7846"
-state:
-  source: "agent.lcd_service"
+  regex: "/dev/fb[0-9]+"
+capabilities:
+  - display
+  - touch
+  - ili9486
 actions:
   - id: rotate
-    label: "Rotate display"
-    description: "Cycle the display rotation 0 → 90 → 180 → 270."
+    display_name: "Rotate display"
+    requires_confirm: false
+extra:
+  description: "ILI9486 SPI LCD with ADS7846 touch. Surfaces the local agent dashboard."
+  category: display

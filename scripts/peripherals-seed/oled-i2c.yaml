@@ -1,12 +1,14 @@
-schema_version: 1
 id: ados.oled-i2c
-name: "OLED status display (I2C)"
-description: "0.96\" / 1.3\" SSD1306 OLED bound to the agent's status renderer."
-category: "display"
-bus: "i2c"
+display_name: "OLED status display (I2C)"
+transport: serial
 match:
-  - i2c_addr: "0x3c"
-  - i2c_addr: "0x3d"
-state:
-  source: "agent.oled_service"
-actions: []
+  regex: "/dev/i2c-(0|1)"
+capabilities:
+  - display
+  - ssd1306
+extra:
+  description: "0.96\" / 1.3\" SSD1306 OLED bound to the agent's status renderer."
+  category: display
+  i2c_addr_candidates:
+    - "0x3c"
+    - "0x3d"

@@ -1,15 +1,11 @@
-schema_version: 1
 id: ados.flight-controller-usb
-name: "Flight controller (MAVLink over USB)"
-description: "Auto-detected MAVLink flight controller on /dev/serial/by-id/*. ArduPilot, iNav, Betaflight, PX4."
-category: "fc"
-bus: "usb"
+display_name: "Flight controller (MAVLink over USB)"
+transport: serial
 match:
-  - device_path: "/dev/serial/by-id/usb-*ArduPilot*"
-  - device_path: "/dev/serial/by-id/usb-*Holybro*"
-  - device_path: "/dev/serial/by-id/usb-*SpeedyBee*"
-  - device_path: "/dev/serial/by-id/usb-*Pixhawk*"
-  - device_path: "/dev/serial/by-id/usb-*iNav*"
-state:
-  source: "agent.fc_connection"
-actions: []
+  regex: "/dev/serial/by-id/usb-(ArduPilot|Holybro|SpeedyBee|Pixhawk|iNav).*"
+capabilities:
+  - mavlink
+  - fc
+extra:
+  description: "Auto-detected MAVLink flight controller. ArduPilot, iNav, Betaflight, PX4."
+  category: fc

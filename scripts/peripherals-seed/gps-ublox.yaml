@@ -1,12 +1,11 @@
-schema_version: 1
 id: ados.gps-ublox
-name: "u-blox GPS receiver"
-description: "u-blox 8/9/10 series GNSS via UART or USB. Surfaces fix type and satellite count from MAVLink GPS_RAW_INT."
-category: "gps"
-bus: "uart"
+display_name: "u-blox GPS receiver"
+transport: usb
 match:
-  - device_path: "/dev/serial/by-id/usb-u-blox*"
-  - device_path: "/dev/serial/by-id/usb-1546_*"
-state:
-  source: "agent.vehicle_state.gps"
-actions: []
+  vid: "0x1546"
+capabilities:
+  - gps
+  - gnss
+extra:
+  description: "u-blox 8/9/10 series GNSS via USB or UART."
+  category: gps
