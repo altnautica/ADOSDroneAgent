@@ -534,9 +534,24 @@ async def install_plugin_from_url(body: InstallFromUrlRequest):
                 write_sidecar(job_id, {"stage": "failed", "detail": str(exc)})
             return _err(13, "archive_too_large", str(exc), 413)
         except Sha256MismatchError as exc:
+            # Log the computed digest at DEBUG (operator can pull it
+            # from the journal with full agent log access) but DO NOT
+            # echo it back on the wire. A pinned mismatch tells the
+            # caller their pin is wrong; the actual hash of whatever
+            # the URL served is an oracle they should not get from
+            # the API surface.
+            log.debug("plugin sha256 mismatch", detail=str(exc))
             if job_id:
-                write_sidecar(job_id, {"stage": "failed", "detail": str(exc)})
-            return _err(12, "sha256_mismatch", str(exc), 400)
+                write_sidecar(
+                    job_id,
+                    {"stage": "failed", "detail": "archive sha256 did not match pin"},
+                )
+            return _err(
+                12,
+                "sha256_mismatch",
+                "archive sha256 did not match pin",
+                400,
+            )
         except ArchiveDownloadError as exc:
             if job_id:
                 write_sidecar(job_id, {"stage": "failed", "detail": str(exc)})

@@ -256,6 +256,24 @@ def test_install_from_url_catalog_blank_sha_rejected(client, supervisor):
     assert resp.json()["kind"] == "sha256_required"
 
 
+def test_install_from_url_catalog_json_null_sha_rejected(client, supervisor):
+    """Explicit JSON null for ``expected_sha256`` also triggers the
+    catalog gate. Pydantic coerces ``null`` to ``None`` and the
+    handler treats None and missing identically — both must fail.
+    """
+    url = "https://objects.githubusercontent.com/example/com.example.catalog.adosplug"
+    resp = client.post(
+        "/api/plugins/install_from_url",
+        json={
+            "url": url,
+            "from_catalog": True,
+            "expected_sha256": None,
+        },
+    )
+    assert resp.status_code == 400
+    assert resp.json()["kind"] == "sha256_required"
+
+
 def test_install_from_url_catalog_with_sha_passes_gate(
     client, supervisor, tmp_path: Path
 ):
@@ -358,7 +376,12 @@ def test_install_from_url_sha_mismatch_returns_400(
     body = resp.json()
     assert body["ok"] is False
     assert body["kind"] == "sha256_mismatch"
-    assert "expected" in body["detail"]
+    # The response intentionally does NOT echo the computed digest of
+    # the served bytes — that would be a fingerprinting oracle. A
+    # static "pin did not match" suffices.
+    assert "pin" in body["detail"].lower()
+    real_sha = hashlib.sha256(raw).hexdigest()
+    assert real_sha not in body["detail"]
 
 
 def test_install_from_url_download_failure_returns_502(client, supervisor):
