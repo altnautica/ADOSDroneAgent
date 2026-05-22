@@ -82,8 +82,20 @@ export function LogsRoute() {
     const url = `/api/logs/stream${params.toString() ? `?${params}` : ""}`;
     const source = new EventSource(url, { withCredentials: false });
 
+    // Browser behavior on HTTP errors (notably 503 with Retry-After)
+    // varies: Chrome closes promptly, Firefox stays in CONNECTING and
+    // retries silently. The dashboard treats EITHER as a fallback
+    // trigger after a short grace window so the user sees polled
+    // entries while the SSE retry loop churns in the background.
+    let errorGraceTimer: ReturnType<typeof setTimeout> | null = null;
+
     source.onopen = () => {
-      if (!cancelled) setPollFallback(false);
+      if (cancelled) return;
+      setPollFallback(false);
+      if (errorGraceTimer !== null) {
+        clearTimeout(errorGraceTimer);
+        errorGraceTimer = null;
+      }
     };
 
     source.onmessage = (ev: MessageEvent<string>) => {
@@ -111,19 +123,30 @@ export function LogsRoute() {
 
     source.onerror = () => {
       if (cancelled) return;
-      // EventSource will auto-reconnect on transient errors. We flip
-      // to polling only after EventSource gives up (readyState
-      // CLOSED) so the page still shows entries via /api/logs.
       if (source.readyState === EventSource.CLOSED) {
+        // EventSource gave up. Switch to polling immediately.
         setPollFallback(true);
+        return;
+      }
+      // CONNECTING — could be a transient blip or a silent retry
+      // loop against a 503. Arm a one-shot fallback timer so the
+      // dashboard does not stay blank for more than a few seconds.
+      if (errorGraceTimer === null) {
+        errorGraceTimer = setTimeout(() => {
+          if (!cancelled) setPollFallback(true);
+        }, 3000);
       }
     };
 
     return () => {
       cancelled = true;
+      if (errorGraceTimer !== null) {
+        clearTimeout(errorGraceTimer);
+        errorGraceTimer = null;
+      }
       source.close();
     };
-  }, [level, service, paused]);
+  }, [level, service, paused, pollFallback]);
 
   // Reset live tail when filters change so the operator sees a clean
   // restart of the stream rather than a mix of pre- and post-filter
@@ -133,17 +156,16 @@ export function LogsRoute() {
     seenSeq.current = 0;
   }, [level, service]);
 
-  // Tab-hidden = close SSE indirectly by pausing; resume on visible.
-  // EventSource itself stays open while hidden, but the dashboard's
-  // useResource polling is throttled by react-query already; this
-  // hook keeps the SSE reconnect counter from churning.
+  // Tab returns to visible → if we're on the polling fallback, try
+  // SSE again. Toggling pollFallback to false re-runs the open
+  // useEffect (it's in the deps) which opens a fresh EventSource.
+  // Browsers suspend EventSource activity while hidden so we never
+  // pause the open stream explicitly; resume is the only signal we
+  // act on.
   useEffect(() => {
     function onVisibility() {
-      // Only auto-resume; never auto-pause (operator pauses
-      // explicitly). The browser already suspends EventSource
-      // activity when hidden.
       if (!document.hidden) {
-        setPollFallback((f) => f);
+        setPollFallback((current) => (current ? false : current));
       }
     }
     document.addEventListener("visibilitychange", onVisibility);
