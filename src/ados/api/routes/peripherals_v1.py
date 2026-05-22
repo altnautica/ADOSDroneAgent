@@ -186,7 +186,11 @@ def _dispatch_restart_radio() -> dict:
             detail={"code": "E_PROBE_FAILED", "message": str(exc)},
         ) from exc
     state = (active.stdout or "").strip()
-    if state in ("not-found", "inactive", "failed", "unknown", ""):
+    # Whitelist only the stable "active" state. activating /
+    # deactivating / reloading all indicate the supervisor is mid-
+    # transition; restarting on top of a deactivate path races the
+    # operator's intent. The 409 envelope tells the caller why.
+    if state != "active":
         raise HTTPException(
             status_code=409,
             detail={
@@ -194,8 +198,8 @@ def _dispatch_restart_radio() -> dict:
                 "unit": "ados-wfb",
                 "state": state or "unknown",
                 "message": (
-                    "The wfb radio service is not running on this node. "
-                    "Restart cannot proceed."
+                    "The wfb radio service is not in the stable active "
+                    "state. Restart cannot proceed."
                 ),
             },
         )

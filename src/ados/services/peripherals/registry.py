@@ -101,9 +101,16 @@ class PeripheralRegistry:
                     regex=match.regex,
                 )
                 return False
-            for candidate in _glob.iglob("/dev/**/*", recursive=True):
-                if pattern.fullmatch(candidate):
-                    return True
+            # Walk /dev only at depth 1 — every manifest pattern shipped
+            # today (^/dev/video\d+$, ^/dev/fb\d+$, ^/dev/i2c-(0|1)$,
+            # ^/dev/serial/by-id/usb-...$) matches paths in /dev itself
+            # or in one immediate subdir. Skipping the recursive walk
+            # avoids a symlink-loop hang vector (Python stdlib glob does
+            # not detect cycles) and bounds the probe runtime.
+            for root in ("/dev/*", "/dev/serial/by-id/*"):
+                for candidate in _glob.iglob(root):
+                    if pattern.fullmatch(candidate):
+                        return True
             return False
 
         if match.vid or match.pid:
@@ -167,8 +174,15 @@ class PeripheralRegistry:
 
         Mirrors ``list()`` but trims the manifest body to just the
         ``id`` + ``connected`` + ``last_seen`` fields the GCS drone
-        card cares about. Cheaper than serializing the full manifest
-        list across the heartbeat at 5 s cadence.
+        card cares about. Saves bytes per heartbeat at 5 s cadence
+        compared to serializing the full manifest list.
+
+        Note: the heartbeat runs in the ``ados-cloud`` process while
+        ``/api/v1/peripherals`` runs in ``ados-api``. Each process
+        owns its own registry singleton (and therefore its own 5 s
+        probe cache), so the dashboard's local state may diverge
+        from the cloud heartbeat's view by up to 5 s. Acceptable
+        skew given the cache is the cost-bounding mechanism.
         """
         with self._lock:
             ordered = [self._by_id[pid] for pid in self._order if pid in self._by_id]
