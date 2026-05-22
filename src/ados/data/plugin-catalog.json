@@ -48,7 +48,7 @@
       "id": "com.altnautica.vision-nav",
       "name": "ADOS Vision Navigation",
       "version": "0.1.0",
-      "description": "Optical flow Phase 1 with optional monocular VIO Phase 2 (vendor binary). GPS-denied navigation.",
+      "description": "Optical flow with optional monocular VIO via vendor binary. GPS-denied navigation.",
       "author": "Altnautica",
       "homepage": "https://github.com/altnautica/ADOSExtensions/tree/main/extensions/vision-nav",
       "license": "GPL-3.0-or-later",
