@@ -92,3 +92,30 @@ def test_saved_file_is_restricted_to_owner(runner: ScriptRunner) -> None:
     # can contain operator-authored scripts that may carry sensitive
     # snippets; group + other have no business reading it.
     assert mode == 0o600
+
+
+def test_save_rejects_oversized_content(runner: ScriptRunner) -> None:
+    """A 256 KiB ceiling caps the per-script wire payload."""
+    payload = "x" * (256 * 1024 + 1)
+    with pytest.raises(RuntimeError, match="exceeds"):
+        runner.save_script("Big", payload)
+
+
+def test_save_rejects_when_library_full(
+    runner: ScriptRunner, monkeypatch
+) -> None:
+    """The hard ceiling on library size kicks in only for net-new
+    saves; in-place updates of an existing record continue to work."""
+    from ados.services.scripting import script_runner as runner_mod
+
+    monkeypatch.setattr(runner_mod, "_MAX_SAVED_SCRIPTS", 3)
+
+    runner.save_script("a", "print(1)")
+    runner.save_script("b", "print(2)")
+    runner.save_script("c", "print(3)")
+    # Net-new save past the cap is rejected.
+    with pytest.raises(RuntimeError, match="library full"):
+        runner.save_script("d", "print(4)")
+    # In-place update of an existing record at the cap still works.
+    updated = runner.save_script("a", "print('a2')")
+    assert updated.content == "print('a2')"

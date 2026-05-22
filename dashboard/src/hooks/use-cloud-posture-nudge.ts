@@ -27,6 +27,11 @@ export function useCloudPostureNudge(currentMode: string | undefined) {
   useEffect(() => {
     if (firedRef.current) return;
     if (currentMode !== "cloud") return;
+    // Latch synchronously so React StrictMode's dev double-invoke
+    // does not race two in-flight fetches to the same one-shot
+    // toast. The ack still runs once per onClick / onDismiss /
+    // onAutoClose because the server-side flag is idempotent.
+    firedRef.current = true;
 
     let cancelled = false;
     (async () => {
@@ -34,7 +39,6 @@ export function useCloudPostureNudge(currentMode: string | undefined) {
         const res = await apiFetch<NudgeResponse>("/api/setup/nudges");
         if (cancelled) return;
         if (res.acked?.includes(NUDGE_ID)) return;
-        firedRef.current = true;
 
         const ack = async () => {
           try {

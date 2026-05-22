@@ -27,6 +27,12 @@ log = get_logger("scripting.script_runner")
 # so we never trust client-supplied ids on the filesystem.
 _SAVED_ID_RE = re.compile(r"^[a-f0-9]{12}$")
 
+# Hard caps on the persistent library. A paired operator who buggies
+# out (or a malicious caller who slipped through the auth gate) cannot
+# fill /var/ados/scripts/ until the partition wedges agent operation.
+_MAX_SAVED_SCRIPTS = 256
+_MAX_SCRIPT_CONTENT_BYTES = 256 * 1024  # 256 KiB
+
 
 @dataclass
 class SavedScript:
@@ -206,6 +212,15 @@ class ScriptRunner:
         name = name.strip()
         if not name:
             raise RuntimeError("script name required")
+        # Bound the wire payload so a buggy caller (or one that
+        # slipped through the auth gate) cannot push arbitrary-size
+        # blobs and wedge the disk. Sized in bytes against the
+        # UTF-8 encoding rather than character count.
+        content_bytes = content.encode("utf-8")
+        if len(content_bytes) > _MAX_SCRIPT_CONTENT_BYTES:
+            raise RuntimeError(
+                f"script content exceeds {_MAX_SCRIPT_CONTENT_BYTES} bytes",
+            )
         SCRIPTS_DIR.mkdir(parents=True, exist_ok=True)
         # Reuse the existing id when the operator saves under the
         # same name; treat name as the natural key for the dashboard
@@ -214,6 +229,13 @@ class ScriptRunner:
             (s for s in self.list_saved_scripts() if s.name == name),
             None,
         )
+        # Hard ceiling on library size. We only enforce on net-new
+        # saves so an in-place update of an existing record always
+        # succeeds; the library can never grow past the cap.
+        if existing is None and len(self.list_saved_scripts()) >= _MAX_SAVED_SCRIPTS:
+            raise RuntimeError(
+                f"script library full (max {_MAX_SAVED_SCRIPTS} scripts)",
+            )
         script_id = existing.id if existing else uuid.uuid4().hex[:12]
         record = SavedScript(
             id=script_id,
@@ -283,6 +305,18 @@ class ScriptRunner:
         info.state = ScriptState.RUNNING
         info.started_at = datetime.now(timezone.utc).isoformat()
 
+        # Materialised runs land under SCRIPTS_DIR/runs/ and are
+        # transient — clean them up once the subprocess has exited so
+        # a 5-minute-loop script does not leak hundreds of files into
+        # /var/ados/scripts/runs/ across a long uptime.
+        runs_root = SCRIPTS_DIR / "runs"
+        cleanup_path: str | None = None
+        try:
+            if Path(path).resolve().is_relative_to(runs_root.resolve()):
+                cleanup_path = path
+        except (OSError, ValueError):
+            cleanup_path = None
+
         env = os.environ.copy()
         env["ADOS_SDK_PORT"] = str(self._sdk_port)
         env["ADOS_SCRIPT_ID"] = script_id
@@ -334,3 +368,14 @@ class ScriptRunner:
             log.error("script_launch_error", script_id=script_id, error=str(exc))
         finally:
             self._processes.pop(script_id, None)
+            if cleanup_path is not None:
+                try:
+                    os.unlink(cleanup_path)
+                except FileNotFoundError:
+                    pass
+                except OSError as exc:
+                    log.warning(
+                        "script_run_cleanup_failed",
+                        path=cleanup_path,
+                        error=str(exc),
+                    )
