@@ -38,6 +38,7 @@ persist_repo_artifacts() {
     install -d -m 0755 "${persist_root}/scripts/drivers"
     install -d -m 0755 "${persist_root}/scripts/lib"
     install -d -m 0755 "${persist_root}/scripts/plugin-keys"
+    install -d -m 0755 "${persist_root}/scripts/peripherals-seed"
     install -d -m 0755 "${persist_root}/data/overlays/upstream"
 
     # First-party plugin signing public keys. These ride along with the
@@ -48,6 +49,17 @@ persist_repo_artifacts() {
         find "${src_root}/scripts/plugin-keys" -maxdepth 1 -type f -name '*.pem' -print0 \
             | while IFS= read -r -d '' f; do
                 install -m 0644 "$f" "${persist_root}/scripts/plugin-keys/"
+            done
+    fi
+
+    # First-party peripheral manifests for the BOM fleet (FC, GPS,
+    # RTL8812EU adapter, OLED, SPI LCD, USB camera). seed_default_peripherals
+    # reads from this persisted path so /etc/ados/peripherals/*.yaml is
+    # populated even when install.sh runs via curl-pipe.
+    if [ -d "${src_root}/scripts/peripherals-seed" ]; then
+        find "${src_root}/scripts/peripherals-seed" -maxdepth 1 -type f -name '*.yaml' -print0 \
+            | while IFS= read -r -d '' f; do
+                install -m 0644 "$f" "${persist_root}/scripts/peripherals-seed/"
             done
     fi
 

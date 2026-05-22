@@ -1,0 +1,19 @@
+schema_version: 1
+id: ados.rtl8812eu-radio
+name: "RTL8812EU radio adapter"
+description: "USB Realtek 8812EU 802.11ac adapter used for the WFB-ng air or ground radio link."
+category: "radio"
+bus: "usb"
+match:
+  - usb_vid: "0bda"
+    usb_pid: "8812"
+  - usb_vid: "0bda"
+    usb_pid: "881a"
+  - usb_vid: "0bda"
+    usb_pid: "881c"
+state:
+  source: "agent.wfb_manager"
+actions:
+  - id: restart_radio
+    label: "Restart radio"
+    description: "Stop and start the wfb-tx/rx pipeline."

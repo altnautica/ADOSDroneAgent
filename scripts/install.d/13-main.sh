@@ -353,6 +353,7 @@ main_install_flow() {
         # against the persisted /opt/ados/source/scripts/plugin-keys
         # path populated by the persist step above.
         provision_plugin_keys
+        seed_default_peripherals
 
         echo ""
         info "Upgrade complete."
@@ -519,6 +520,7 @@ main_install_flow() {
     # Drop first-party plugin trust keys before the perms pass so they
     # get the same 0600 chmod treatment.
     provision_plugin_keys
+    seed_default_peripherals
 
     # Tighten permissions on any secret-bearing files in /etc/ados. Idempotent;
     # safe to run on every install/upgrade after all file writes have settled.

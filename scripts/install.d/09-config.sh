@@ -199,6 +199,39 @@ provision_plugin_keys() {
     done
 }
 
+# ─── Seed Default Peripheral Manifests ──────────────────────────────────────
+
+seed_default_peripherals() {
+    # Drop the BOM peripheral manifests at /etc/ados/peripherals/ so the
+    # webapp Peripherals page renders the FC, GPS, RTL8812EU adapter,
+    # OLED, SPI LCD, and USB camera entries on a fresh board even
+    # before any plugin lights them up. Idempotent: skips files that
+    # are already present so operator-edited manifests survive
+    # reinstalls.
+    local dst_dir="${CONFIG_DIR}/peripherals"
+    install -d -m 0755 "${dst_dir}"
+
+    local copied=0
+    for src_dir in \
+        "${PKG_DIR:-/opt/ados}/scripts/peripherals-seed" \
+        "/opt/ados/source/scripts/peripherals-seed" \
+    ; do
+        [ -d "${src_dir}" ] || continue
+        for manifest in "${src_dir}"/*.yaml; do
+            [ -f "${manifest}" ] || continue
+            local target="${dst_dir}/$(basename "${manifest}")"
+            if [ ! -f "${target}" ]; then
+                install -m 0644 "${manifest}" "${target}"
+                copied=$((copied + 1))
+            fi
+        done
+        if [ "${copied}" -gt 0 ]; then
+            info "Seeded ${copied} default peripheral manifest(s)"
+            return 0
+        fi
+    done
+}
+
 # ─── Write Pairing State ────────────────────────────────────────────────────
 
 write_pairing() {

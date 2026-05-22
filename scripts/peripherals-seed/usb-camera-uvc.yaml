@@ -1,0 +1,12 @@
+schema_version: 1
+id: ados.usb-camera-uvc
+name: "USB UVC camera"
+description: "Generic UVC-class USB camera. Discovered via /dev/video* and surfaced through the video pipeline."
+category: "camera"
+bus: "usb"
+match:
+  - device_path: "/dev/video0"
+  - device_path: "/dev/video1"
+state:
+  source: "agent.video_pipeline"
+actions: []
