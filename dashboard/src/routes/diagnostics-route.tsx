@@ -207,9 +207,25 @@ export function DiagnosticsRoute() {
             <p className="text-xs text-muted-foreground">loading…</p>
           )}
 
-          {!services.isLoading && items.length === 0 && (
+          {services.isError && (
+            <div className="flex items-center justify-between gap-3 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+              <span>
+                Couldn't reach the service inventory. Check{" "}
+                <span className="font-mono">journalctl -u ados-supervisor</span>.
+              </span>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => services.refetch()}
+              >
+                Retry
+              </Button>
+            </div>
+          )}
+
+          {!services.isLoading && !services.isError && items.length === 0 && (
             <p className="text-xs text-muted-foreground">
-              service inventory unavailable. check{" "}
+              No agent services are running. Try Reboot board or check{" "}
               <span className="font-mono">journalctl -u ados-supervisor</span>.
             </p>
           )}

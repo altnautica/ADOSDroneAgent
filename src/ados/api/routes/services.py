@@ -3,13 +3,71 @@
 from __future__ import annotations
 
 import os
+import subprocess
 import time
 
 from fastapi import APIRouter
 
 from ados.api.deps import get_agent_app
+from ados.core.logging import get_logger
+
+log = get_logger("api.services")
 
 router = APIRouter()
+
+# Wildcard unit patterns we ask systemd about when the in-process
+# tracker is empty. Covers every drone + ground-station + agent unit
+# that ships on a stock install. Adding a new ados-* unit requires
+# nothing here — the wildcard picks it up automatically.
+_SYSTEMD_FALLBACK_PATTERNS = ("ados-*.service",)
+
+
+def _systemd_inventory() -> list[dict]:
+    """Read the live unit list from systemd for every ados-* unit.
+
+    Returns a list of dicts the dashboard already knows how to render:
+    ``{name, state, active, sub_state, pid}``. Empty list when systemctl
+    is missing or returns no matches.
+    """
+    try:
+        result = subprocess.run(
+            [
+                "systemctl",
+                "list-units",
+                "--type=service",
+                "--all",
+                "--no-legend",
+                "--plain",
+                *_SYSTEMD_FALLBACK_PATTERNS,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (subprocess.SubprocessError, FileNotFoundError) as exc:
+        log.warning("systemd_inventory_failed", error=str(exc))
+        return []
+
+    entries: list[dict] = []
+    for line in (result.stdout or "").splitlines():
+        parts = line.strip().split(None, 4)
+        if len(parts) < 4:
+            continue
+        unit, load_state, active_state, sub_state = parts[:4]
+        if not unit.endswith(".service"):
+            continue
+        name = unit[: -len(".service")]
+        entries.append(
+            {
+                "name": name,
+                "active": active_state == "active",
+                "state": active_state,
+                "sub_state": sub_state,
+                "pid": None,
+                "load_state": load_state,
+            }
+        )
+    return entries
 
 # Cache process metrics (psutil is expensive to call per-request)
 _proc_cache: dict = {"cpu": 0.0, "rss_mb": 0.0, "pid": 0, "ts": 0.0}
@@ -69,7 +127,16 @@ def _infer_service_state(app, name: str, tracker_state: str, task_done: bool) ->
 
 @router.get("/services")
 async def list_services():
-    """List all running services with state machine info and process metrics."""
+    """List all running services with state machine info and process metrics.
+
+    The API runs in its own process under the multi-process supervisor,
+    so the asyncio task list and ServiceTracker on this process only
+    report API-process work. When the tracker has no actionable entries
+    (empty or all stopped) the route falls back to systemd's view of
+    every ``ados-*`` unit so Diagnostics shows the real fleet of agent
+    services without the supervisor injecting per-unit state into the
+    API process.
+    """
     app = get_agent_app()
 
     # Get state machine data from ServiceTracker
@@ -131,6 +198,19 @@ async def list_services():
                     svc_uptime = now_mono - ts
                     break
         svc["uptimeSeconds"] = round(svc_uptime)
+
+    # systemd fallback. Triggers when the in-process tracker has no
+    # useful entries (empty OR all-stopped) so the dashboard shows the
+    # real service fleet instead of "service inventory unavailable".
+    has_actionable = any(
+        svc.get("state") not in (None, "", "stopped", "unknown")
+        for svc in services
+    )
+    if not has_actionable:
+        fallback = _systemd_inventory()
+        if fallback:
+            services = fallback
+            running_count = sum(1 for s in services if s.get("active"))
 
     return {
         "services": services,
