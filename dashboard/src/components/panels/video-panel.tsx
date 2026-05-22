@@ -9,10 +9,12 @@ import { fmtBitrate, fmtNum } from "@/lib/format";
 import { startHls, type HlsSession } from "@/lib/hls";
 import { startWhep, type WhepSession } from "@/lib/whep";
 
-// State machine: try WHEP first; on failure (3s timeout or error), try
-// HLS; if HLS also fails, fall back to a still snapshot. Final-error
+// State machine: try WHEP first; on failure (~1.2 s timeout or error),
+// try HLS; if HLS also fails, fall back to a still snapshot. Final-error
 // only when nothing works AND the pipeline says it's running — when
 // the pipeline is idle the panel shows the friendly empty state instead.
+// The aggressive timeout cuts the blank-screen window on networks that
+// drop UDP (the WHEP handshake's primary failure mode).
 type PlayerState =
   | "idle"
   | "whep-connecting"
@@ -23,7 +25,7 @@ type PlayerState =
   | "snapshot"
   | "final-error";
 
-const WHEP_TIMEOUT_MS = 5000;
+const WHEP_TIMEOUT_MS = 1200;
 
 export function VideoPanel() {
   const status = useStatus();

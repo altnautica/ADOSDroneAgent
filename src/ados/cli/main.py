@@ -139,9 +139,7 @@ def _plain_status(data: dict[str, Any]) -> None:
     viewer_url = _viewer_url_from_whep(whep_url)
     state = video.get("state", "unknown")
     if viewer_url:
-        click.echo(f"Video:      {state}  viewer {viewer_url}  whep {whep_url}")
-    elif whep_url:
-        click.echo(f"Video:      {state}  whep {whep_url}")
+        click.echo(f"Video:      {state}  viewer {viewer_url}")
     else:
         click.echo(f"Video:      {state}")
 

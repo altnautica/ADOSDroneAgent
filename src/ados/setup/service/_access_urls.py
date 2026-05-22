@@ -87,6 +87,25 @@ def _mission_control_url(*, host_name: str, config: Any) -> str:
     return ""
 
 
+def _viewer_url_from_whep(whep_url: str | None) -> str:
+    """Return the browser-clickable MediaMTX viewer URL.
+
+    The WHEP signalling path (``/main/whep``) is for the WebRTC
+    handshake — browsers cannot navigate to it directly. The viewer
+    HTML page lives at ``/main/`` on the same host/port, so the
+    operator-facing link points there instead. Returns "" when no
+    WHEP URL is known.
+    """
+    if not whep_url:
+        return ""
+    base = whep_url
+    if base.endswith("/whep"):
+        base = base[: -len("/whep")]
+    if not base.endswith("/"):
+        base = base + "/"
+    return base
+
+
 def _setup_path(base: str) -> str:
     """Append the wizard path to a host:port base URL.
 
@@ -168,21 +187,27 @@ def _access_urls(
                 source="local",
             )
         )
-    if video.whep_url:
+    # Operator-facing link is the MediaMTX HLS viewer page at /main/.
+    # The WHEP endpoint stays exposed internally for the dashboard's
+    # WebRTC fast path, but advertising it as a clickable URL was a
+    # dead end — browsers do not render the raw WHEP signalling URL.
+    viewer_url = _viewer_url_from_whep(video.whep_url)
+    if viewer_url:
         urls.append(
             SetupAccessUrl(
                 kind="video",
-                label="Local WHEP video",
-                url=video.whep_url,
+                label="Local video viewer",
+                url=viewer_url,
                 source="local",
             )
         )
-    if video.public_whep_url:
+    public_viewer_url = _viewer_url_from_whep(video.public_whep_url)
+    if public_viewer_url:
         urls.append(
             SetupAccessUrl(
                 kind="video",
-                label="Tunnel WHEP video",
-                url=video.public_whep_url,
+                label="Tunnel video viewer",
+                url=public_viewer_url,
                 source="cloud",
             )
         )
