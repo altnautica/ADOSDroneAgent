@@ -22,12 +22,17 @@ router = APIRouter()
 _SYSTEMD_FALLBACK_PATTERNS = ("ados-*.service",)
 
 
-def _systemd_inventory() -> list[dict]:
+def _systemd_inventory() -> tuple[list[dict], bool]:
     """Read the live unit list from systemd for every ados-* unit.
 
-    Returns a list of dicts the dashboard already knows how to render:
-    ``{name, state, active, sub_state, pid}``. Empty list when systemctl
-    is missing or returns no matches.
+    Returns ``(entries, available)``. ``entries`` is a list of dicts the
+    dashboard already knows how to render: ``{name, state, active,
+    sub_state, pid}``. ``available`` is False when systemctl itself
+    could not be reached (binary missing, subprocess error, timeout) —
+    distinct from "systemd answered but no ados-* units exist". The
+    dashboard uses ``available`` to render a different empty state for
+    each case so operators can tell "no services running" from "could
+    not query systemd."
 
     We force ``SYSTEMD_COLORS=0`` + ``--no-pager`` because the default
     failed-unit output starts each line with a status glyph (``● foo``,
@@ -54,7 +59,7 @@ def _systemd_inventory() -> list[dict]:
         )
     except (subprocess.SubprocessError, FileNotFoundError) as exc:
         log.warning("systemd_inventory_failed", error=str(exc))
-        return []
+        return ([], False)
 
     entries: list[dict] = []
     for line in (result.stdout or "").splitlines():
@@ -84,7 +89,7 @@ def _systemd_inventory() -> list[dict]:
                 "load_state": load_state,
             }
         )
-    return entries
+    return (entries, True)
 
 # Cache process metrics (psutil is expensive to call per-request)
 _proc_cache: dict = {"cpu": 0.0, "rss_mb": 0.0, "pid": 0, "ts": 0.0}
@@ -223,14 +228,16 @@ async def list_services():
         svc.get("state") not in (None, "", "stopped", "unknown")
         for svc in services
     )
+    systemd_available = True
     if not has_actionable:
-        fallback = _systemd_inventory()
+        fallback, systemd_available = _systemd_inventory()
         if fallback:
             services = fallback
             running_count = sum(1 for s in services if s.get("active"))
 
     return {
         "services": services,
+        "systemd_available": systemd_available,
         "process": {
             "pid": pid,
             "cpu_percent": round(total_cpu, 1),

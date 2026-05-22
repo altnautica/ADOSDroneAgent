@@ -40,6 +40,7 @@ interface ServiceEntry {
 
 interface ServicesResponse {
   services: ServiceEntry[];
+  systemd_available?: boolean;
 }
 
 export function DiagnosticsRoute() {
@@ -53,6 +54,9 @@ export function DiagnosticsRoute() {
   const items: ServiceEntry[] = Array.isArray(services.data)
     ? services.data
     : (services.data?.services ?? []);
+  const systemdAvailable: boolean = Array.isArray(services.data)
+    ? true
+    : (services.data?.systemd_available ?? true);
 
   const [busy, setBusy] = useState<string | null>(null);
   const [confirm, setConfirm] = useState<
@@ -223,12 +227,27 @@ export function DiagnosticsRoute() {
             </div>
           )}
 
-          {!services.isLoading && !services.isError && items.length === 0 && (
-            <p className="text-xs text-muted-foreground">
-              No agent services are running. Try Reboot board or check{" "}
-              <span className="font-mono">journalctl -u ados-supervisor</span>.
-            </p>
-          )}
+          {!services.isLoading &&
+            !services.isError &&
+            items.length === 0 &&
+            !systemdAvailable && (
+              <p className="text-xs text-muted-foreground">
+                Couldn't query systemd from the agent (systemctl missing or
+                blocked). Inventory is unavailable; running services may
+                still be alive. Check{" "}
+                <span className="font-mono">journalctl -u ados-supervisor</span>.
+              </p>
+            )}
+
+          {!services.isLoading &&
+            !services.isError &&
+            items.length === 0 &&
+            systemdAvailable && (
+              <p className="text-xs text-muted-foreground">
+                No agent services are running. Try Reboot board or check{" "}
+                <span className="font-mono">journalctl -u ados-supervisor</span>.
+              </p>
+            )}
 
           {items.length > 0 && (
             <ul className="space-y-1">
