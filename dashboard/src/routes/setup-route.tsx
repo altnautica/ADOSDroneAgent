@@ -343,8 +343,16 @@ export function SetupRoute() {
             size="sm"
             onClick={() => {
               // Persist the skip so the next reload also routes to Home.
-              // Best-effort: if the POST fails (offline agent) we still
-              // navigate so the operator is not trapped in the wizard.
+              // Best-effort: the POST flips the on-disk flag. We also
+              // mirror the choice to sessionStorage so a transient API
+              // failure (5xx, network hiccup) does not trap the
+              // operator in the wizard on the very next reload —
+              // IndexRedirect treats either signal as "dismissed".
+              try {
+                window.sessionStorage.setItem("ados:setup_skipped", "1");
+              } catch {
+                // sessionStorage disabled (private mode); fall through.
+              }
               skipSetup()
                 .catch(() => undefined)
                 .finally(() => navigate("/"));
