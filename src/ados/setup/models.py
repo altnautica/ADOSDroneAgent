@@ -86,9 +86,9 @@ class CloudChoiceStatus(BaseModel):
     plus a small set of operator-facing diagnostics.
     """
 
-    mode: Literal["cloud", "self_hosted", "local"] = "cloud"
+    mode: Literal["cloud", "self_hosted", "local"] = "local"
     paired: bool = False
-    pair_code_required: bool = True
+    pair_code_required: bool = False
     backend_url: str = ""  # display-only, never the API key
     backend_reachable: bool = False
     last_checked: str | None = None  # ISO 8601 IST

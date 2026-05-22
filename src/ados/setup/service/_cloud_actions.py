@@ -35,9 +35,9 @@ def extract_cloudflare_token(value: str) -> str:
 def _cloud_choice_status(config: Any) -> CloudChoiceStatus:
     """Read the current cloud posture out of config for display."""
     server = getattr(config, "server", None)
-    mode = getattr(server, "mode", "cloud") if server else "cloud"
+    mode = getattr(server, "mode", "local") if server else "local"
     if mode not in ("cloud", "self_hosted", "local"):
-        mode = "cloud"
+        mode = "local"
     if mode == "local":
         return CloudChoiceStatus(
             mode="local",

@@ -27,9 +27,15 @@ const MODE_OPTIONS: ReadonlyArray<{
   description: string;
 }> = [
   {
+    value: "local",
+    label: "Local only",
+    description:
+      "Default for new installs. No cloud. Pair on the LAN with Mission Control directly.",
+  },
+  {
     value: "cloud",
     label: "Altnautica cloud",
-    description: "Hosted MQTT relay + Convex backend. Easiest path; works out of the box.",
+    description: "Hosted MQTT relay + Convex backend. Opt in when you want fleet-wide cloud relay.",
   },
   {
     value: "self_hosted",
@@ -37,18 +43,13 @@ const MODE_OPTIONS: ReadonlyArray<{
     description:
       "Point the agent at your own Convex deployment + MQTT broker. Best for fleet operators.",
   },
-  {
-    value: "local",
-    label: "Local only",
-    description: "No cloud. Pair on the LAN with Mission Control directly. Lowest dependency.",
-  },
 ];
 
 export function CloudPairStep({ onChange }: Props) {
   const status = useStatus();
   const pairing = usePairingInfo();
 
-  const initial = (status.data?.cloud_choice?.mode as CloudMode) ?? "cloud";
+  const initial = (status.data?.cloud_choice?.mode as CloudMode) ?? "local";
   const [mode, setMode] = useState<CloudMode>(initial);
   const [backendUrl, setBackendUrl] = useState(
     status.data?.cloud_choice?.backend_url ?? "",

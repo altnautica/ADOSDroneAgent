@@ -283,6 +283,10 @@ def build_heartbeat_payload(app: AgentApp) -> dict:  # noqa: C901
             payload["mavlinkWsUrlPrev"] = app._last_mavlink_ws_url
         app._last_mavlink_ws_url = current_mavlink_ws_url
     payload["missionControlUrl"] = app.config.server.cloud.url
+    # Cloud posture chosen by the operator (or the install-time default).
+    # Mission Control reads this to distinguish "intentionally local" from
+    # "offline" when a paired drone stops emitting heartbeats.
+    payload["cloudPosture"] = str(getattr(app.config.server, "mode", "local") or "local")
     payload["remoteAccess"] = {
         "provider": app.config.remote_access.provider,
         "publicUrls": app.config.remote_access.public_urls,

@@ -104,7 +104,7 @@ logging:
   flight_log_dir: "/var/ados/logs/flights"
 
 server:
-  mode: "cloud"
+  mode: "local"
   telemetry_rate: 2
   heartbeat_interval: 5
   mqtt_transport: "websockets"

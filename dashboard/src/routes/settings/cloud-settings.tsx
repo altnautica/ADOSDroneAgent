@@ -17,6 +17,12 @@ type CloudMode = "cloud" | "self_hosted" | "local";
 
 const MODE_OPTIONS = [
   {
+    value: "local" as const,
+    label: "Local only",
+    description:
+      "Default for new installs. No cloud uplink. LAN access via /api and direct dashboard only.",
+  },
+  {
     value: "cloud" as const,
     label: "Altnautica relay",
     description:
@@ -28,18 +34,12 @@ const MODE_OPTIONS = [
     description:
       "Point at your own Convex backend and MQTT broker.",
   },
-  {
-    value: "local" as const,
-    label: "Local only",
-    description:
-      "No cloud uplink. LAN access via /api and direct dashboard only.",
-  },
 ];
 
 export function CloudSettings() {
   const status = useStatus();
 
-  const initialMode = (status.data?.cloud_choice?.mode as CloudMode) ?? "cloud";
+  const initialMode = (status.data?.cloud_choice?.mode as CloudMode) ?? "local";
   const initialUrl = status.data?.cloud_choice?.backend_url ?? "";
   const initialBroker = status.data?.cloud_choice?.mqtt_broker ?? "";
   const initialPort = status.data?.cloud_choice?.mqtt_port ?? 8883;
@@ -56,7 +56,7 @@ export function CloudSettings() {
 
   useEffect(() => {
     if (status.data) {
-      setMode((status.data.cloud_choice?.mode as CloudMode) ?? "cloud");
+      setMode((status.data.cloud_choice?.mode as CloudMode) ?? "local");
       setUrl(status.data.cloud_choice?.backend_url ?? "");
       setBroker(status.data.cloud_choice?.mqtt_broker ?? "");
       setPort(String(status.data.cloud_choice?.mqtt_port ?? 8883));
