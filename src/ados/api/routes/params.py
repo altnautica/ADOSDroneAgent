@@ -30,6 +30,35 @@ class ParamSetResponse(BaseModel):
     message: str = ""
 
 
+def _resolve_priming_flags(app) -> dict:
+    """Resolve param-sweep flags, preferring the state-IPC snapshot.
+
+    Under the multi-process supervisor the FC connection lives in the
+    mavlink-service process. ``app.fc_connection()`` returns ``None``
+    on the API process, so ``getattr(fc, "param_priming", False)``
+    silently coerces to False and the timeout never surfaces. The
+    mavlink-service publishes the flags through ``/run/ados/state.sock``;
+    we read them here first and only fall back to a local FCConnection
+    handle for single-process / test runs.
+    """
+    try:
+        ipc = app.state_ipc_state() or {}
+    except Exception:
+        ipc = {}
+    if "param_priming" in ipc:
+        return {
+            "priming": bool(ipc.get("param_priming", False)),
+            "priming_timeout": bool(ipc.get("param_sweep_timed_out", False)),
+            "priming_send_failed": bool(ipc.get("param_sweep_send_failed", False)),
+        }
+    fc = app.fc_connection()
+    return {
+        "priming": bool(getattr(fc, "param_priming", False)),
+        "priming_timeout": bool(getattr(fc, "param_sweep_timed_out", False)),
+        "priming_send_failed": bool(getattr(fc, "param_sweep_send_failed", False)),
+    }
+
+
 @router.get("/params")
 async def get_all_params():
     """All cached FC parameters, served from ParamCache when available.
@@ -47,6 +76,7 @@ async def get_all_params():
     param_cache = app.param_cache()
     vehicle_state = app.vehicle_state()
     fc = app.fc_connection()
+    flags = _resolve_priming_flags(app)
 
     expected = vehicle_state.param_count if vehicle_state else 0
     if param_cache is not None:
@@ -61,9 +91,7 @@ async def get_all_params():
             "params": all_params,
             "count": expected or cached,
             "cached": cached,
-            "priming": bool(getattr(fc, "param_priming", False)),
-            "priming_timeout": bool(getattr(fc, "param_sweep_timed_out", False)),
-            "priming_send_failed": bool(getattr(fc, "param_sweep_send_failed", False)),
+            **flags,
             "progress": {"got": cached, "expected": expected},
         }
 
@@ -78,19 +106,25 @@ async def get_all_params():
             "params": vehicle_state.params,
             "count": vehicle_state.param_count,
             "cached": cached,
-            "priming": bool(getattr(fc, "param_priming", False)),
-            "priming_timeout": bool(getattr(fc, "param_sweep_timed_out", False)),
-            "priming_send_failed": bool(getattr(fc, "param_sweep_send_failed", False)),
+            **flags,
             "progress": {"got": cached, "expected": vehicle_state.param_count},
         }
+
+    # No in-process vehicle state, no param cache — fall back entirely
+    # to the IPC snapshot for cached/expected counts too. This is the
+    # production path on the multi-process supervisor.
+    try:
+        ipc = app.state_ipc_state() or {}
+    except Exception:
+        ipc = {}
+    cached = int(ipc.get("param_cached_count", 0) or 0)
+    expected = int(ipc.get("param_expected_count", 0) or 0)
     return {
         "params": {},
-        "count": 0,
-        "cached": 0,
-        "priming": False,
-        "priming_timeout": False,
-        "priming_send_failed": False,
-        "progress": {"got": 0, "expected": 0},
+        "count": expected or cached,
+        "cached": cached,
+        **flags,
+        "progress": {"got": cached, "expected": expected},
     }
 
 

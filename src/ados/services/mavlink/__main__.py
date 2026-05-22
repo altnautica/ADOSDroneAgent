@@ -82,6 +82,35 @@ async def main() -> None:
             payload["fc_port"] = fc.port
             payload["fc_baud"] = fc.baud
             payload["service_uptime"] = _time.monotonic() - _service_start
+            # Param-sweep state. The API process lives on its own
+            # systemd unit and cannot reach this FCConnection directly,
+            # so we ferry the priming flags through the same state IPC
+            # the rest of the FC snapshot rides on. Tick the deadline
+            # check here so the timeout fires regardless of whether
+            # /api/params is being polled.
+            cached_count = 0
+            pc = getattr(vehicle_state, "param_cache", None)
+            if pc is not None:
+                try:
+                    cached_count = pc.count
+                except Exception:
+                    cached_count = 0
+            else:
+                cached_count = len(getattr(vehicle_state, "params", {}) or {})
+            expected_count = int(getattr(vehicle_state, "param_count", 0) or 0)
+            try:
+                fc.note_param_progress(cached_count, expected_count)
+            except AttributeError:
+                pass
+            payload["param_priming"] = bool(getattr(fc, "param_priming", False))
+            payload["param_sweep_timed_out"] = bool(
+                getattr(fc, "param_sweep_timed_out", False)
+            )
+            payload["param_sweep_send_failed"] = bool(
+                getattr(fc, "param_sweep_send_failed", False)
+            )
+            payload["param_cached_count"] = cached_count
+            payload["param_expected_count"] = expected_count
             state_ipc.publish(payload)
             await asyncio.sleep(0.1)  # 10Hz
 
