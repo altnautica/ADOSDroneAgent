@@ -259,16 +259,17 @@ class FCConnection:
     def _request_all_params(self) -> None:
         """Fire PARAM_REQUEST_LIST so the FC streams the full param set.
 
-        Rate-limited to one sweep per 60 s so reconnect churn or restart
-        loops never flood the FC. The FC responds with one PARAM_VALUE
-        per parameter; the read loop pushes each one into the cache via
-        :meth:`VehicleState.update_from_message`. Operators see the
-        progress on /api/params (``priming`` + ``progress``).
+        Called on every successful connect — including the first connect
+        after a reconnect storm. The FC takes care of de-duplication;
+        the sweep is small (a few hundred bytes) and is much cheaper
+        than the operator watching an empty Telemetry page. We only
+        rate-limit re-sweeps on the SAME connection (10 s) to handle
+        the rare case where this is called twice without a reconnect.
         """
         if self._conn is None:
             return
         now = time.monotonic()
-        if self._param_sweep_at and (now - self._param_sweep_at) < 60.0:
+        if self._param_sweep_at and (now - self._param_sweep_at) < 10.0:
             return
         try:
             self._conn.mav.param_request_list_send(

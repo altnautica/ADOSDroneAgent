@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 from collections import deque
+from itertools import count
 
 from fastapi import APIRouter, Query
 from fastapi.responses import StreamingResponse
@@ -18,6 +19,33 @@ router = APIRouter()
 _LOG_BUFFER_CAP = 5000
 _log_buffer: deque[dict] = deque(maxlen=_LOG_BUFFER_CAP)
 _log_event = asyncio.Event()
+_log_seq = count(1)
+_main_loop: asyncio.AbstractEventLoop | None = None
+
+
+def bind_loop(loop: asyncio.AbstractEventLoop) -> None:
+    """Capture the main event loop so logging-thread wakeups are safe.
+
+    ``logging.Handler.emit`` runs under the logging lock and can be
+    called from any thread. ``asyncio.Event.set()`` is not thread-safe,
+    so the handler routes the wake-up through
+    ``loop.call_soon_threadsafe`` against the loop captured here.
+    """
+    global _main_loop
+    _main_loop = loop
+
+
+def _wake_subscribers() -> None:
+    loop = _main_loop
+    if loop is None:
+        # No loop bound yet (test harness, early boot). The next subscriber
+        # tick picks up via the 15 s keep-alive fallback.
+        return
+    try:
+        loop.call_soon_threadsafe(_log_event.set)
+    except RuntimeError:
+        # Loop closed during shutdown — best-effort silent drop.
+        pass
 
 
 class BufferHandler(logging.Handler):
@@ -25,18 +53,16 @@ class BufferHandler(logging.Handler):
 
     def emit(self, record: logging.LogRecord) -> None:
         _log_buffer.append({
+            "seq": next(_log_seq),
             "timestamp": self.format(record) if not record.created else record.created,
             "level": record.levelname,
             "logger": record.name,
             "message": record.getMessage(),
         })
-        # Wake up any SSE subscribers. Best-effort: the handler runs
-        # under the logging lock and ``set()`` is safe from any thread
-        # because the underlying event loop is asyncio's default.
-        try:
-            _log_event.set()
-        except Exception:
-            pass
+        # Wake any SSE subscribers from whichever thread emitted this
+        # record. Routed through call_soon_threadsafe because the
+        # handler is reachable from non-asyncio worker threads.
+        _wake_subscribers()
 
 
 def install_log_buffer() -> None:
@@ -90,9 +116,16 @@ async def stream_logs(
     EventSource API; backpressure is best-effort (slow consumers miss
     entries silently rather than blocking the logger).
     """
+    # Bind the loop lazily on the first stream open so worker-thread
+    # log writes can wake subscribers thread-safely.
+    if _main_loop is None:
+        bind_loop(asyncio.get_running_loop())
 
     async def gen():
-        # Initial snapshot of the most-recent 100 entries.
+        # Initial snapshot of the most-recent 100 entries. Track the
+        # last-seen sequence number so we resume cleanly across buffer
+        # wraps; id()-based dedup was unsafe because CPython recycles
+        # ids of freed deque entries.
         snapshot = list(_log_buffer)[-100:]
         for e in snapshot:
             if level and e["level"] != level.upper():
@@ -101,7 +134,7 @@ async def stream_logs(
                 continue
             yield f"data: {json.dumps(e)}\n\n"
 
-        last_seen = id(snapshot[-1]) if snapshot else 0
+        last_seen_seq = snapshot[-1]["seq"] if snapshot else 0
         try:
             while True:
                 try:
@@ -114,12 +147,13 @@ async def stream_logs(
                     continue
                 _log_event.clear()
                 tail = list(_log_buffer)
-                # Emit only entries after the last one we forwarded.
-                emit = False
+                # Emit every entry whose monotonic sequence number is
+                # past the last one we forwarded. Even when the deque
+                # wraps and last_seen_seq is no longer in the buffer
+                # this still picks up correctly because we compare
+                # numerically rather than by reference.
                 for e in tail:
-                    if not emit:
-                        if id(e) == last_seen:
-                            emit = True
+                    if e["seq"] <= last_seen_seq:
                         continue
                     if level and e["level"] != level.upper():
                         continue
@@ -127,7 +161,7 @@ async def stream_logs(
                         continue
                     yield f"data: {json.dumps(e)}\n\n"
                 if tail:
-                    last_seen = id(tail[-1])
+                    last_seen_seq = tail[-1]["seq"]
         except asyncio.CancelledError:
             # Client disconnected. Let the generator unwind cleanly.
             return

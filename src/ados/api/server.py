@@ -87,6 +87,20 @@ def create_app(agent: Any) -> FastAPI:
     from ados.security.rate_limit import RateLimitMiddleware
     app.add_middleware(RateLimitMiddleware, rate=10.0, burst=20)
 
+    # Install the in-memory log buffer + bind the running event loop so
+    # the /api/logs and /api/logs/stream surfaces actually have content
+    # to serve. Without this the buffer handler is dead code and every
+    # log endpoint returns empty.
+    from ados.api.routes.logs import bind_loop, install_log_buffer
+
+    install_log_buffer()
+
+    @app.on_event("startup")
+    async def _bind_log_loop() -> None:
+        import asyncio as _asyncio
+
+        bind_loop(_asyncio.get_running_loop())
+
     # Health check. Moved off `/` so the ground-station static mount
     # can own the root path (`/` -> `static-ground/index.html`).
     @app.get("/healthz")

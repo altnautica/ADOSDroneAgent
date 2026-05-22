@@ -355,10 +355,15 @@ def build_heartbeat_payload(app: AgentApp) -> dict:  # noqa: C901
     # Plugin inventory — webapp-side installs are not visible to the GCS
     # otherwise. Best-effort: a missing or partially-initialised
     # supervisor leaves the field absent rather than failing the tick.
+    # The supervisor singleton is per-process; the heartbeat runs in
+    # the agent main process while plugin installs happen in the API
+    # process, so we re-load state from disk on every tick to keep the
+    # inventory fresh (the on-disk plugin-state.json file is the single
+    # source of truth, ~10s of plugins max — load cost is negligible).
     try:
-        from ados.api.routes.plugins import _get_supervisor
+        from ados.plugins.state import load_state as _load_plugin_state
 
-        installs = _get_supervisor().installs()
+        installs = _load_plugin_state()
         payload["pluginInventory"] = [
             {
                 "plugin_id": inst.plugin_id,

@@ -28,6 +28,12 @@ def _systemd_inventory() -> list[dict]:
     Returns a list of dicts the dashboard already knows how to render:
     ``{name, state, active, sub_state, pid}``. Empty list when systemctl
     is missing or returns no matches.
+
+    We force ``SYSTEMD_COLORS=0`` + ``--no-pager`` because the default
+    failed-unit output starts each line with a status glyph (``● foo``,
+    ``× bar``); a naive ``split()`` parser drops those lines because the
+    first token is the glyph instead of the unit name — and failed units
+    are exactly the rows the dashboard most needs to surface.
     """
     try:
         result = subprocess.run(
@@ -37,12 +43,14 @@ def _systemd_inventory() -> list[dict]:
                 "--type=service",
                 "--all",
                 "--no-legend",
+                "--no-pager",
                 "--plain",
                 *_SYSTEMD_FALLBACK_PATTERNS,
             ],
             capture_output=True,
             text=True,
             timeout=5,
+            env={"SYSTEMD_COLORS": "0", "SYSTEMD_PAGER": "", "LANG": "C"},
         )
     except (subprocess.SubprocessError, FileNotFoundError) as exc:
         log.warning("systemd_inventory_failed", error=str(exc))
@@ -50,7 +58,16 @@ def _systemd_inventory() -> list[dict]:
 
     entries: list[dict] = []
     for line in (result.stdout or "").splitlines():
-        parts = line.strip().split(None, 4)
+        stripped = line.strip()
+        if not stripped:
+            continue
+        # Strip any leading status glyph (``●``, ``×``, ``*``) systemd
+        # prepends to non-running units even with --no-legend.
+        if not stripped[0].isalnum() and not stripped[0].isascii():
+            stripped = stripped.split(None, 1)[-1] if " " in stripped else ""
+        elif stripped[0] in "*●×":
+            stripped = stripped.split(None, 1)[-1] if " " in stripped else ""
+        parts = stripped.split(None, 4)
         if len(parts) < 4:
             continue
         unit, load_state, active_state, sub_state = parts[:4]
