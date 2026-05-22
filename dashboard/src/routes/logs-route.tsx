@@ -20,6 +20,8 @@ interface LogsResponse {
   total: number;
   limit: number;
   offset: number;
+  buffer_size?: number;
+  buffer_cap?: number;
 }
 
 const LEVELS = ["", "DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] as const;
@@ -100,16 +102,23 @@ export function LogsRoute() {
           <div className="space-y-1.5">
             <Label className="text-xs">Logger contains</Label>
             <Input
-              placeholder="ados.services.video"
+              placeholder="filter by logger name (optional)"
               value={service}
               onChange={(e) => setService(e.target.value)}
             />
           </div>
 
-          <div className="text-xs text-muted-foreground font-mono pb-2">
-            {logs.data?.total != null
-              ? `${entries.length} of ${logs.data.total}`
-              : "—"}
+          <div className="text-xs text-muted-foreground font-mono pb-2 space-y-0.5 text-right">
+            <div>
+              {logs.data?.total != null
+                ? `${entries.length} of ${logs.data.total}`
+                : "—"}
+            </div>
+            {logs.data?.buffer_size != null && (
+              <div className="text-[10px] opacity-70">
+                buffer {logs.data.buffer_size}/{logs.data.buffer_cap ?? "?"}
+              </div>
+            )}
           </div>
         </CardContent>
       </Card>
@@ -117,11 +126,24 @@ export function LogsRoute() {
       <Card>
         <CardContent className="p-0">
           {entries.length === 0 ? (
-            <div className="px-4 py-8 flex items-center gap-2 text-sm text-muted-foreground">
-              <ScrollText className="h-4 w-4" />
-              {logs.isLoading
-                ? "loading…"
-                : "no log entries match. drop the filter or wait for activity."}
+            <div className="px-4 py-8 flex items-start gap-3 text-sm text-muted-foreground">
+              <ScrollText className="h-4 w-4 mt-0.5" />
+              <div className="space-y-1">
+                <div>
+                  {logs.isLoading
+                    ? "loading…"
+                    : service || level
+                      ? "no log entries match the filter."
+                      : "no log entries buffered yet."}
+                </div>
+                {!logs.isLoading && (
+                  <div className="text-xs opacity-70">
+                    The agent buffers up to {logs.data?.buffer_cap ?? 5000}{" "}
+                    entries since process start. Drop filters or restart a
+                    service to see fresh activity.
+                  </div>
+                )}
+              </div>
             </div>
           ) : (
             <ul className="font-mono text-xs divide-y divide-border/50 max-h-[70vh] overflow-y-auto">

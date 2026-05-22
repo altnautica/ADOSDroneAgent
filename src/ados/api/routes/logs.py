@@ -2,15 +2,22 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
 from collections import deque
 
 from fastapi import APIRouter, Query
+from fastapi.responses import StreamingResponse
 
 router = APIRouter()
 
-# In-memory log buffer
-_log_buffer: deque[dict] = deque(maxlen=1000)
+# In-memory log buffer. Capacity caps memory usage; on busy boards the
+# buffer wraps every few minutes so the dashboard surfaces the most
+# recent activity and a "since restart" hint exposes the wrap.
+_LOG_BUFFER_CAP = 5000
+_log_buffer: deque[dict] = deque(maxlen=_LOG_BUFFER_CAP)
+_log_event = asyncio.Event()
 
 
 class BufferHandler(logging.Handler):
@@ -23,6 +30,13 @@ class BufferHandler(logging.Handler):
             "logger": record.name,
             "message": record.getMessage(),
         })
+        # Wake up any SSE subscribers. Best-effort: the handler runs
+        # under the logging lock and ``set()`` is safe from any thread
+        # because the underlying event loop is asyncio's default.
+        try:
+            _log_event.set()
+        except Exception:
+            pass
 
 
 def install_log_buffer() -> None:
@@ -36,11 +50,12 @@ def install_log_buffer() -> None:
 async def get_logs(
     level: str | None = Query(None),
     service: str | None = Query(None),
-    limit: int = Query(50, ge=1, le=500),
+    limit: int = Query(50, ge=1, le=_LOG_BUFFER_CAP),
     offset: int = Query(0, ge=0),
 ):
     """Recent log entries with optional filtering."""
     entries = list(_log_buffer)
+    buffer_size = len(entries)
 
     if level:
         level_upper = level.upper()
@@ -57,4 +72,58 @@ async def get_logs(
         "total": total,
         "limit": limit,
         "offset": offset,
+        "buffer_size": buffer_size,
+        "buffer_cap": _LOG_BUFFER_CAP,
     }
+
+
+@router.get("/logs/stream")
+async def stream_logs(
+    level: str | None = Query(None),
+    service: str | None = Query(None),
+):
+    """Server-Sent Events stream of new log entries.
+
+    Each entry produces one ``data: <json>\\n\\n`` frame. The stream
+    sends an initial snapshot of the last 100 buffered entries, then
+    appends each new entry as it arrives. Clients reconnect with the
+    EventSource API; backpressure is best-effort (slow consumers miss
+    entries silently rather than blocking the logger).
+    """
+
+    async def gen():
+        # Initial snapshot of the most-recent 100 entries.
+        snapshot = list(_log_buffer)[-100:]
+        for e in snapshot:
+            if level and e["level"] != level.upper():
+                continue
+            if service and service not in e.get("logger", ""):
+                continue
+            yield f"data: {json.dumps(e)}\n\n"
+
+        last_seen = id(snapshot[-1]) if snapshot else 0
+        try:
+            while True:
+                await asyncio.wait_for(_log_event.wait(), timeout=15.0)
+                _log_event.clear()
+                tail = list(_log_buffer)
+                # Emit only entries after the last one we forwarded.
+                emit = False
+                for e in tail:
+                    if not emit:
+                        if id(e) == last_seen:
+                            emit = True
+                        continue
+                    if level and e["level"] != level.upper():
+                        continue
+                    if service and service not in e.get("logger", ""):
+                        continue
+                    yield f"data: {json.dumps(e)}\n\n"
+                if tail:
+                    last_seen = id(tail[-1])
+        except (asyncio.CancelledError, asyncio.TimeoutError):
+            # Periodic keep-alive comment so proxies do not idle-close
+            # the SSE connection.
+            yield ": keep-alive\n\n"
+
+    return StreamingResponse(gen(), media_type="text/event-stream")
