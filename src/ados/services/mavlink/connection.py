@@ -31,6 +31,13 @@ _STREAM_STALL_THRESHOLD = 5.0
 # accepted the new stream config.
 _STREAM_HEALTHY_THRESHOLD = 2.0
 
+# Window after a PARAM_REQUEST_LIST during which we expect at least one
+# PARAM_VALUE to land. If the cache stays empty past this point the
+# dashboard exits the priming spinner and shows the operator a
+# "couldn't reach the FC" CTA. Sized for the slowest plausible FC
+# response (busy UART, low-baud serial, congested USB hub).
+_PARAM_SWEEP_DEADLINE_S = 30.0
+
 SERIAL_PATTERNS = [
     "/dev/ttyACM*",
     "/dev/ttyAMA*",
@@ -132,11 +139,18 @@ class FCConnection:
         self._stream_interval: float = _STREAM_REREQUEST_DEFAULT_INTERVAL
         # Param-sweep priming state. ``_param_sweep_at`` is the monotonic
         # timestamp of the last PARAM_REQUEST_LIST we sent — used to
-        # rate-limit reconnect storms (60 s minimum gap). ``_param_priming``
+        # rate-limit reconnect storms (10 s minimum gap). ``_param_priming``
         # is true between the request and the moment the cache catches up
-        # to the FC's advertised total (PARAM_VALUE.param_count).
+        # to the FC's advertised total (PARAM_VALUE.param_count) — or until
+        # ``_PARAM_SWEEP_DEADLINE_S`` elapses without progress, at which
+        # point ``_param_sweep_timed_out`` flips and the dashboard renders
+        # an actionable "Couldn't reach the FC" CTA instead of an eternal
+        # spinner. Also clears on send failure so the API never lies about
+        # a sweep that never made it onto the wire.
         self._param_sweep_at: float = 0.0
         self._param_priming: bool = False
+        self._param_sweep_timed_out: bool = False
+        self._param_sweep_send_failed: bool = False
 
     @property
     def connected(self) -> bool:
@@ -278,12 +292,16 @@ class FCConnection:
             )
             self._param_sweep_at = now
             self._param_priming = True
+            self._param_sweep_timed_out = False
+            self._param_sweep_send_failed = False
             log.info(
                 "param_request_list_sent",
                 target_system=self._conn.target_system,
                 target_component=self._conn.target_component,
             )
         except Exception as exc:  # noqa: BLE001 (pymavlink can raise broad)
+            self._param_priming = False
+            self._param_sweep_send_failed = True
             log.warning("param_request_list_failed", error=str(exc))
 
     @property
@@ -291,10 +309,49 @@ class FCConnection:
         """True while a PARAM_REQUEST_LIST sweep is still in flight."""
         return self._param_priming
 
+    @property
+    def param_sweep_timed_out(self) -> bool:
+        """True when the most recent sweep elapsed past the deadline without progress.
+
+        The dashboard reads this through ``/api/params`` to swap the
+        "priming" spinner for an actionable "couldn't reach the FC"
+        empty state. Cleared on the next successful sweep send.
+        """
+        return self._param_sweep_timed_out
+
+    @property
+    def param_sweep_send_failed(self) -> bool:
+        """True when the most recent PARAM_REQUEST_LIST send raised on the FC link.
+
+        Distinct from ``param_sweep_timed_out``: the deadline path means
+        the request landed on the wire and the FC stayed silent; the
+        send-failed path means we never got bytes out at all.
+        """
+        return self._param_sweep_send_failed
+
     def note_param_progress(self, cached: int, expected: int) -> None:
-        """Clear the priming flag once the cache catches up to the FC."""
+        """Clear the priming flag once the cache catches up to the FC.
+
+        Also enforces a 30 s deadline from ``_param_sweep_at``: if the
+        FC has not produced any progress (cached stays at zero) within
+        the window, we flip ``_param_sweep_timed_out`` and clear
+        ``_param_priming`` so the dashboard can stop spinning.
+        """
         if expected > 0 and cached >= expected:
             self._param_priming = False
+            self._param_sweep_timed_out = False
+            return
+        if self._param_priming and self._param_sweep_at:
+            elapsed = time.monotonic() - self._param_sweep_at
+            if elapsed >= _PARAM_SWEEP_DEADLINE_S and cached == 0:
+                self._param_priming = False
+                self._param_sweep_timed_out = True
+                log.warning(
+                    "param_sweep_timed_out",
+                    elapsed_s=round(elapsed, 1),
+                    cached=cached,
+                    expected=expected,
+                )
 
     def _adapt_stream_interval(self, now: float) -> None:
         """Adjust the re-request cadence based on observed message flow.

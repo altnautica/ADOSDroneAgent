@@ -37,7 +37,11 @@ async def get_all_params():
     The response carries a ``priming`` flag and a ``progress`` block so
     the Telemetry page can render an in-flight progress bar between the
     PARAM_REQUEST_LIST sweep firing and the cache catching up to the
-    FC's advertised total.
+    FC's advertised total. ``priming_timeout`` flips true when the FC
+    stayed silent past the sweep deadline; ``priming_send_failed`` flips
+    true when the PARAM_REQUEST_LIST send itself raised at the link
+    layer. The dashboard reads these to swap the spinner for an
+    actionable empty state instead of looping forever.
     """
     app = get_agent_app()
     param_cache = app.param_cache()
@@ -58,6 +62,8 @@ async def get_all_params():
             "count": expected or cached,
             "cached": cached,
             "priming": bool(getattr(fc, "param_priming", False)),
+            "priming_timeout": bool(getattr(fc, "param_sweep_timed_out", False)),
+            "priming_send_failed": bool(getattr(fc, "param_sweep_send_failed", False)),
             "progress": {"got": cached, "expected": expected},
         }
 
@@ -73,6 +79,8 @@ async def get_all_params():
             "count": vehicle_state.param_count,
             "cached": cached,
             "priming": bool(getattr(fc, "param_priming", False)),
+            "priming_timeout": bool(getattr(fc, "param_sweep_timed_out", False)),
+            "priming_send_failed": bool(getattr(fc, "param_sweep_send_failed", False)),
             "progress": {"got": cached, "expected": vehicle_state.param_count},
         }
     return {
@@ -80,6 +88,8 @@ async def get_all_params():
         "count": 0,
         "cached": 0,
         "priming": False,
+        "priming_timeout": False,
+        "priming_send_failed": False,
         "progress": {"got": 0, "expected": 0},
     }
 

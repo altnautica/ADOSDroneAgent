@@ -29,6 +29,8 @@ interface ParamsResponse {
   count: number;
   cached: number;
   priming?: boolean;
+  priming_timeout?: boolean;
+  priming_send_failed?: boolean;
   progress?: { got: number; expected: number };
 }
 
@@ -315,23 +317,48 @@ function ParametersTab() {
           </Card>
         )}
 
-        {!params.isLoading && !params.data?.priming && rows.length === 0 && (
-          <Card>
-            <CardContent className="pt-5 pb-5 flex items-start gap-3">
-              <Radio className="h-5 w-5 text-muted-foreground mt-0.5" />
-              <div className="space-y-1">
-                <div className="text-sm font-medium">
-                  No parameters cached yet.
+        {!params.isLoading &&
+          !params.data?.priming &&
+          rows.length === 0 &&
+          (params.data?.priming_timeout || params.data?.priming_send_failed) && (
+            <Card>
+              <CardContent className="pt-5 pb-5 flex items-start gap-3">
+                <Radio className="h-5 w-5 text-warn mt-0.5" />
+                <div className="space-y-1">
+                  <div className="text-sm font-medium">
+                    Couldn't reach the flight controller.
+                  </div>
+                  <div className="text-xs text-muted-foreground">
+                    {params.data?.priming_send_failed
+                      ? "The agent could not send PARAM_REQUEST_LIST over the MAVLink link. Check the FC serial cable, baud rate, and that the FC is powered."
+                      : "The agent sent PARAM_REQUEST_LIST but the flight controller did not respond within 30 seconds. Check the cable, baud rate, and that the FC firmware is alive."}
+                  </div>
                 </div>
-                <div className="text-xs text-muted-foreground">
-                  Connect a flight controller and the agent fires
-                  PARAM_REQUEST_LIST on connect so the table fills in
-                  automatically.
+              </CardContent>
+            </Card>
+          )}
+
+        {!params.isLoading &&
+          !params.data?.priming &&
+          !params.data?.priming_timeout &&
+          !params.data?.priming_send_failed &&
+          rows.length === 0 && (
+            <Card>
+              <CardContent className="pt-5 pb-5 flex items-start gap-3">
+                <Radio className="h-5 w-5 text-muted-foreground mt-0.5" />
+                <div className="space-y-1">
+                  <div className="text-sm font-medium">
+                    No parameters cached yet.
+                  </div>
+                  <div className="text-xs text-muted-foreground">
+                    Connect a flight controller and the agent fires
+                    PARAM_REQUEST_LIST on connect so the table fills in
+                    automatically.
+                  </div>
                 </div>
-              </div>
-            </CardContent>
-          </Card>
-        )}
+              </CardContent>
+            </Card>
+          )}
 
         {visibleRows.length > 0 && (
           <Card className="p-0">
