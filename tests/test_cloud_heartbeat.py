@@ -44,7 +44,7 @@ def test_get_services_status_handles_missing_systemd(monkeypatch) -> None:
         assert "status" in entry
         assert entry["status"] in ("running", "failed", "stopped")
         assert "category" in entry
-        assert entry["category"] in ("core", "hardware", "suite", "ondemand")
+        assert entry["category"] in ("core", "hardware", "ondemand")
         # PID field is omitted when there is no real PID.
         assert "pid" not in entry or entry["pid"] > 0
 

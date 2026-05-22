@@ -15,7 +15,7 @@ per-domain files alongside this barrel:
   friends
 * ``security.py`` — :class:`SecurityConfig` and friends, plus
   :data:`DEFAULT_CORS_ORIGINS`
-* ``scripting.py`` — :class:`ScriptingConfig` and friends
+* ``scripting.py`` — :class:`ScriptingConfig` and friends (suite framework retired)
 * ``system.py`` — :class:`OtaConfig`, :class:`VisionConfig`,
   :class:`LoggingConfig`, :class:`PairingConfig`, :class:`DiscoveryConfig`,
   :class:`RosConfig`, :class:`SwarmConfig`, :class:`LoraConfig`,
@@ -66,7 +66,6 @@ from .scripting import (
     RestApiConfig,
     ScriptingConfig,
     ScriptsConfig,
-    SuiteConfig,
     TextCommandsConfig,
 )
 from .security import (
@@ -127,7 +126,6 @@ __all__ = [
     "RestApiConfig",
     "ScriptingConfig",
     "ScriptsConfig",
-    "SuiteConfig",
     "TextCommandsConfig",
     # system
     "DiscoveryConfig",

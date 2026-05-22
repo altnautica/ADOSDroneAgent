@@ -20,7 +20,7 @@ class ServiceSpec:
     """Defines a managed service."""
 
     name: str
-    category: str  # "core", "hardware", "suite", "ondemand"
+    category: str  # "core", "hardware", "ondemand"
     enabled: bool = True
     # profile_gate scopes the service to one agent profile.
     # None = runs on any profile. "drone" or "ground_station" gate it.
@@ -54,8 +54,8 @@ SERVICE_REGISTRY: list[dict] = [
     # ground-station's wfb_rx for the same monitor-mode adapter. The
     # GS-side counterpart is ados-wfb-rx below.
     {"name": "ados-wfb", "category": "hardware", "profile_gate": "drone"},
-    # Suite-dependent (started on suite activation)
-    {"name": "ados-scripting", "category": "suite"},
+    # Scripting tier — on-demand by default. Used to be suite-gated.
+    {"name": "ados-scripting", "category": "ondemand"},
     # On-demand
     {"name": "ados-ota", "category": "ondemand"},
     {"name": "ados-discovery", "category": "ondemand"},
@@ -81,7 +81,7 @@ SERVICE_REGISTRY: list[dict] = [
     {"name": "ados-input", "category": "hardware", "profile_gate": "ground_station"},
     {"name": "ados-pic", "category": "hardware", "profile_gate": "ground_station"},
     # Uplink matrix and cloud relay. No `network` or `cloud` category exists
-    # in the supervisor taxonomy (categories are core/hardware/suite/ondemand).
+    # in the supervisor taxonomy (categories are core/hardware/ondemand).
     # Uplink managers are hardware-like because they bind to real interfaces.
     # The cloud relay is treated as core because it always runs on the
     # ground-station profile, independent of hardware detection.
@@ -102,5 +102,5 @@ SERVICE_REGISTRY: list[dict] = [
     {"name": "ados-wfb-relay", "category": "hardware", "profile_gate": "ground_station", "role_gate": "relay"},
     {"name": "ados-wfb-receiver", "category": "hardware", "profile_gate": "ground_station", "role_gate": "receiver"},
     # ROS 2 environment (opt-in, Docker-managed).
-    {"name": "ados-ros", "category": "suite"},
+    {"name": "ados-ros", "category": "ondemand"},
 ]

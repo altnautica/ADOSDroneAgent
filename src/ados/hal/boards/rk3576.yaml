@@ -182,7 +182,6 @@ profiles:
     - config_webapp
     - npu_vision
     - scripting
-    - suite_runtime
     - ota_updater
     - sensor_manager
     - modem_manager

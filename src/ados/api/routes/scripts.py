@@ -69,7 +69,6 @@ async def list_scripts():
 class SaveScriptRequest(BaseModel):
     name: str
     content: str
-    suite: str | None = None
 
 
 @router.post("/scripts")

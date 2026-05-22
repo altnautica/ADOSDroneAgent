@@ -121,7 +121,7 @@ ENVEOF
     systemctl enable ados-supervisor 2>/dev/null
     systemctl restart ados-supervisor
     info "Supervisor service enabled and started."
-    info "Child services will be started by the supervisor based on hardware detection and suite config."
+    info "Child services will be started by the supervisor based on hardware detection."
 
     # Enable the cross-profile Peripheral Manager unit and create the
     # manifest drop-in directory. Runs on both drone and ground-station

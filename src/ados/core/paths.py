@@ -136,9 +136,6 @@ GS_INPUT_JSON = ADOS_ETC_DIR / "ground-station-input.json"
 GS_MODEM_JSON = ADOS_ETC_DIR / "ground-station-modem.json"
 GS_WIFI_CLIENT_JSON = ADOS_ETC_DIR / "ground-station-wifi-client.json"
 
-# Suites
-SUITES_DIR = ADOS_ETC_DIR / "suites"
-
 # Peripherals
 PERIPHERALS_DIR = ADOS_ETC_DIR / "peripherals"
 PERIPHERALS_GLOB = "/etc/ados/peripherals/*.yaml"
@@ -192,11 +189,10 @@ OTA_STATE_PATH = ADOS_VAR_DIR / "ota-state.json"
 SLOT_A_PATH = ADOS_VAR_DIR / "slot-a"
 SLOT_B_PATH = ADOS_VAR_DIR / "slot-b"
 
-# Suite activation state
+# Persistent state files (setup wizard, hardware snapshot, etc.)
 STATE_DIR = ADOS_VAR_DIR / "state"
 SETUP_STATE_DIR = ADOS_VAR_DIR / "setup"
 SETUP_STATE_PATH = SETUP_STATE_DIR / "state.json"
-ACTIVE_SUITE_PATH = STATE_DIR / "active_suite"
 
 # Hardware-check snapshot. Written at first-boot, on operator
 # Rescan, and on a successful TTL-bounded refresh inside the

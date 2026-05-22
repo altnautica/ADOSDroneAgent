@@ -54,10 +54,6 @@ security:
     cors_enabled: true
   setup_token_required: false
 
-suites:
-  manifest_dir: "/etc/ados/suites"
-  active: ""
-
 scripting:
   rest_api:
     enabled: true

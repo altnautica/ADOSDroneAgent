@@ -103,9 +103,9 @@ async def test_wait_for_stop_called_per_tier(monkeypatch):
 
     await sup.stop()
 
-    # Tier 0 (frontend), tier 1 (suite), tier 2 (hardware), tier 3 (ondemand), tier 4 (core)
-    # = 5 wait calls regardless of whether each tier had services to stop.
-    assert len(wait_calls) == 5, f"expected 5 tier waits, got {len(wait_calls)}"
+    # Tier 0 (frontend), tier 1 (hardware), tier 2 (ondemand), tier 3 (core)
+    # = 4 wait calls regardless of whether each tier had services to stop.
+    assert len(wait_calls) == 4, f"expected 4 tier waits, got {len(wait_calls)}"
     # First wait must include ados-api
     assert wait_calls[0] == ["ados-api"]
 

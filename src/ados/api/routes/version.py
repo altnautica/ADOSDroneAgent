@@ -46,8 +46,6 @@ CAPABILITIES: list[str] = [
     "pairing.mnemonic",
     # /api/peripherals/* legacy hardware scan + /v1 plugin registry.
     "peripherals.registry",
-    # /api/suites/* mission suite activation.
-    "suites.activation",
     # /api/fleet/* fleet roster surface.
     "fleet.roster",
     # /api/features/* HAL feature catalog.

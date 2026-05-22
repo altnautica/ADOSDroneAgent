@@ -1,16 +1,10 @@
-"""Suites + scripting + REST API extensibility configuration."""
+"""Scripting + REST API extensibility configuration."""
 
 from __future__ import annotations
 
 from pydantic import BaseModel
 
-from ados.core.paths import SCRIPTS_DIR, SUITES_DIR
-
-
-class SuiteConfig(BaseModel):
-    manifest_dir: str = str(SUITES_DIR)
-    active: str = ""
-    ros2_workspace: str = "/opt/ados/ros2_ws"
+from ados.core.paths import SCRIPTS_DIR
 
 
 class TextCommandsConfig(BaseModel):

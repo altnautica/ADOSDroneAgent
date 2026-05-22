@@ -304,7 +304,6 @@ class HeartbeatMixin:
             "services": self.get_services_status(),
             "videoRestartAttempts": video_restart_attempts,
             "foxgloveBindFailed": foxglove_bind_failed,
-            "activeSuite": self._active_suite,
             "setupState": setup_state,
             "profileSource": profile_source,
             # Forward-compatible radio link block; older GCS ignore it.

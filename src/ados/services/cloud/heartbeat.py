@@ -143,7 +143,7 @@ def get_services_status() -> list[dict]:
         "ados-supervisor": "core", "ados-mavlink": "core",
         "ados-api": "core", "ados-cloud": "core", "ados-health": "core",
         "ados-video": "hardware", "ados-wfb": "hardware",
-        "ados-scripting": "suite", "ados-ota": "ondemand",
+        "ados-scripting": "ondemand", "ados-ota": "ondemand",
         "ados-discovery": "ondemand",
     }
     services = []

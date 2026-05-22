@@ -103,7 +103,6 @@ def test_supervisor_heartbeat_payload_includes_radio_block():
     # Empty service registry is fine; the mixin still needs the deques.
     sup._cpu_history = deque(maxlen=10)
     sup._memory_history = deque(maxlen=10)
-    sup._active_suite = None
 
     # No in-process WfbManager and the localhost fallback fails (no
     # agent running in the test process), so the block is `absent`.
@@ -143,7 +142,6 @@ def test_supervisor_heartbeat_payload_uses_attached_manager():
     sup = Supervisor(ADOSConfig())
     sup._cpu_history = deque(maxlen=10)
     sup._memory_history = deque(maxlen=10)
-    sup._active_suite = None
     sup._wfb_manager = FakeManager()
 
     payload = sup.get_heartbeat_payload()

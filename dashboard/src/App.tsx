@@ -28,7 +28,6 @@ import { CloudSettings } from "@/routes/settings/cloud-settings";
 import { DisplaySettings } from "@/routes/settings/display-settings";
 import { NetworkSettings } from "@/routes/settings/network-settings";
 import { ProfileSettings } from "@/routes/settings/profile-settings";
-import { SuitesRoute } from "@/routes/suites-route";
 import { VideoRoute } from "@/routes/video-route";
 
 // Code-split heavy routes. The wizard (4 steps + form state) is only
@@ -103,7 +102,6 @@ export function App() {
                 />
                 <Route path="/plugins" element={<PluginsRoute />} />
                 <Route path="/peripherals" element={<PeripheralsRoute />} />
-                <Route path="/suites" element={<SuitesRoute />} />
                 <Route path="/ota" element={<OtaRoute />} />
                 <Route path="/logs" element={<LogsRoute />} />
                 <Route

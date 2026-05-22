@@ -1,4 +1,4 @@
-"""Supervisor lifecycle: service start/stop, suite activation, monitor loop.
+"""Supervisor lifecycle: service start/stop, monitor loop.
 
 The Supervisor class is composed with HotplugMixin so the USB add/remove
 routing lives in its own file.
@@ -12,12 +12,10 @@ import signal
 import subprocess
 import time
 from collections import deque
-from pathlib import Path
 
 import structlog
 
 from ados.core.asyncio_util import log_task_exceptions
-from ados.core.paths import SUITES_DIR
 from ados.hal.hotplug import HotplugMonitor
 from ados.hal.usb import UsbDevice  # noqa: F401  (used via HotplugMixin)
 
@@ -42,7 +40,6 @@ class Supervisor(HotplugMixin, MonitorMixin, HeartbeatMixin):
         self._shutdown = asyncio.Event()
         self._start_time = time.monotonic()
         self._services: dict[str, ServiceSpec] = {}
-        self._active_suite: str | None = None
         self._cpu_history: deque[float] = deque(maxlen=3600)
         self._memory_history: deque[float] = deque(maxlen=3600)
 
@@ -313,7 +310,7 @@ class Supervisor(HotplugMixin, MonitorMixin, HeartbeatMixin):
             )
 
     async def start(self) -> None:
-        """Full supervisor startup: core → hardware → suite → monitor."""
+        """Full supervisor startup: core → hardware → monitor."""
         log.info("supervisor_starting")
 
         # 0. On ground-station profile, apply the configured mesh role so
@@ -323,7 +320,7 @@ class Supervisor(HotplugMixin, MonitorMixin, HeartbeatMixin):
         self._apply_ground_station_role()
 
         # 1. Start core services. Core tier services are independent of
-        #    each other (hardware and suite tiers depend on core, not the
+        #    each other (hardware and ondemand tiers depend on core, not the
         #    reverse), so we start them concurrently. Errors in one start
         #    do not block the others; per-service failure handling lives
         #    inside start_service.
@@ -348,12 +345,7 @@ class Supervisor(HotplugMixin, MonitorMixin, HeartbeatMixin):
         # 2. Detect hardware and start hardware services
         await self._detect_and_start_hardware()
 
-        # 3. Load active suite if configured
-        suite = getattr(self.config, "active_suite", None)
-        if suite:
-            await self.activate_suite(suite)
-
-        # 4. Notify systemd we're ready
+        # 3. Notify systemd we're ready
         try:
             import socket
 
@@ -377,7 +369,7 @@ class Supervisor(HotplugMixin, MonitorMixin, HeartbeatMixin):
             debounce_secs=self._hotplug_debounce_secs,
         )
 
-        # 5. Enter monitor loop
+        # 4. Enter monitor loop
         await self._monitor_loop()
 
     async def stop(self) -> None:
@@ -391,10 +383,9 @@ class Supervisor(HotplugMixin, MonitorMixin, HeartbeatMixin):
         Sequence:
           1. Stop the HTTP frontend (ados-api) first so no new requests
              land on services that are about to die. Drain in-flight.
-          2. Stop suite services (top of the dependency tree).
-          3. Stop hardware services.
-          4. Stop on-demand services.
-          5. Stop the rest of the core services (mavlink, cloud, health).
+          2. Stop hardware services.
+          3. Stop on-demand services.
+          4. Stop the rest of the core services (mavlink, cloud, health).
 
         Between each tier we poll `systemctl is-active` for up to 5s to
         confirm the previous tier is actually down before tearing the
@@ -435,8 +426,8 @@ class Supervisor(HotplugMixin, MonitorMixin, HeartbeatMixin):
             frontend_units.append("ados-api")
         await self._wait_for_stop(frontend_units)
 
-        # Tier 1-4: top-down dependency order. ados-api already stopped.
-        for category in ("suite", "hardware", "ondemand", "core"):
+        # Tier 1-3: top-down dependency order. ados-api already stopped.
+        for category in ("hardware", "ondemand", "core"):
             tier_units: list[str] = []
             for name, spec in self._services.items():
                 if name == "ados-api":
@@ -510,57 +501,6 @@ class Supervisor(HotplugMixin, MonitorMixin, HeartbeatMixin):
             return any((d.vid, d.pid) in wfb_ids for d in devices)
         except Exception:
             return False
-
-    # ── Suite Lifecycle ────────────────────────────────────────
-
-    async def activate_suite(self, suite_id: str) -> bool:
-        """Activate a suite: parse manifest, validate sensors, start services."""
-        log.info("suite_activating", suite=suite_id)
-
-        # Load manifest
-        manifest_path = SUITES_DIR / f"{suite_id}.yaml"
-        if not manifest_path.exists():
-            # Check built-in suites
-            manifest_path = Path(f"/opt/ados/suites/{suite_id}.yaml")
-        if not manifest_path.exists():
-            log.error("suite_not_found", suite=suite_id)
-            return False
-
-        try:
-            import yaml
-
-            with open(manifest_path) as f:
-                manifest = yaml.safe_load(f)
-        except Exception as exc:
-            log.error("suite_manifest_error", suite=suite_id, error=str(exc))
-            return False
-
-        # Determine required services from manifest
-        required = manifest.get("required_services", [])
-        for svc_name in required:
-            full_name = f"ados-{svc_name}" if not svc_name.startswith("ados-") else svc_name
-            if full_name in self._services:
-                self._services[full_name].category = "suite"
-                await self.start_service(full_name)
-
-        self._active_suite = suite_id
-        log.info("suite_activated", suite=suite_id, services=required)
-        return True
-
-    async def deactivate_suite(self) -> bool:
-        """Stop all suite-dependent services."""
-        if not self._active_suite:
-            return True
-
-        log.info("suite_deactivating", suite=self._active_suite)
-        for name, spec in self._services.items():
-            if spec.category == "suite" and spec.state == "running":
-                await self.stop_service(name)
-
-        old_suite = self._active_suite
-        self._active_suite = None
-        log.info("suite_deactivated", suite=old_suite)
-        return True
 
     # Monitor loop, metrics, and watchdog live in MonitorMixin.
     # Status reporting + heartbeat payload live in HeartbeatMixin.

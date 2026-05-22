@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import asyncio
 
-from ados.core.paths import SCRIPTS_DIR, SUITES_DIR
+from ados.core.paths import SCRIPTS_DIR
 from ados.core.profile import current_profile_and_role
 
 from ._context import CloudContext
@@ -78,23 +78,6 @@ def _list_scripts() -> list[dict]:
     return scripts
 
 
-def _list_suites() -> list[dict]:
-    """List suite manifests in /etc/ados/suites/."""
-    suites_dir = SUITES_DIR
-    if not suites_dir.exists():
-        return []
-    suites = []
-    for f in suites_dir.glob("*.yaml"):
-        suites.append({
-            "id": f.stem,
-            "name": f.stem.replace("-", " ").title(),
-            "path": str(f),
-            "installed": True,
-            "active": False,
-        })
-    return suites
-
-
 async def execute_command(  # noqa: C901
     ctx: CloudContext, cmd: dict,
 ) -> tuple[str, dict | None, dict | None]:
@@ -129,10 +112,6 @@ async def execute_command(  # noqa: C901
 
         elif command == "get_scripts":
             data = _list_scripts()
-            return "completed", {"success": True, "message": "ok"}, data
-
-        elif command == "get_suites":
-            data = _list_suites()
             return "completed", {"success": True, "message": "ok"}, data
 
         elif command == "get_peers":
@@ -299,5 +278,4 @@ __all__ = [
     "execute_command",
     "_get_recent_logs",
     "_list_scripts",
-    "_list_suites",
 ]
