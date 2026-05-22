@@ -75,7 +75,12 @@ async def pairing_beacon_loop(ctx: CloudContext) -> None:
                             owner_id = result.get("userId", "cloud")
                             pairing.claim(owner_id, api_key)
                             log.info("pairing_claimed_via_beacon", owner=owner_id)
-                log.debug("pairing_beacon_sent", code=code)
+                # Code value intentionally omitted — log entries flow
+                # into the SSE log stream which is reachable from any
+                # browser on the same origin pre-pair. Logging the
+                # active code there would broadcast it to anyone who
+                # opens the dashboard during a pairing window.
+                log.debug("pairing_beacon_sent")
             except Exception:
                 log.debug("pairing_beacon_failed")
         await asyncio.sleep(interval)
