@@ -46,6 +46,10 @@ export function finishSetup() {
   return apiFetch("/api/v1/setup/finish", { method: "POST" });
 }
 
+export function skipSetup() {
+  return apiFetch("/api/v1/setup/skip", { method: "POST" });
+}
+
 export function skipStep(stepId: string) {
   return apiFetch(`/api/v1/setup/step/${encodeURIComponent(stepId)}/skip`, {
     method: "POST",

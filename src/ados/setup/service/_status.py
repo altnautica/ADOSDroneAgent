@@ -201,6 +201,7 @@ async def build_setup_status(  # noqa: C901
         ground_role=ground_role,
         setup_complete=setup_complete,
         setup_finalized=persisted.setup_finalized,
+        setup_skipped=persisted.setup_skipped,
         setup_state=setup_state,  # type: ignore[arg-type]
         profile_source=profile_source,  # type: ignore[arg-type]
         completion_percent=completion_percent,

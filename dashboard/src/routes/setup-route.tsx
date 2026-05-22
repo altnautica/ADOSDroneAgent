@@ -23,6 +23,7 @@ import {
   postNavigationAssignCamera,
   postNavigationConfig,
   postProfile,
+  skipSetup,
   skipStep,
   type RoleConflictDetail,
 } from "@/lib/setup-actions";
@@ -337,8 +338,19 @@ export function SetupRoute() {
         nextLoading={nextLoading}
         nextLabel={nextLabel}
         rightAction={
-          <Button asChild variant="ghost" size="sm">
-            <Link to="/">Skip to Home</Link>
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => {
+              // Persist the skip so the next reload also routes to Home.
+              // Best-effort: if the POST fails (offline agent) we still
+              // navigate so the operator is not trapped in the wizard.
+              skipSetup()
+                .catch(() => undefined)
+                .finally(() => navigate("/"));
+            }}
+          >
+            Skip to Home
           </Button>
         }
       >

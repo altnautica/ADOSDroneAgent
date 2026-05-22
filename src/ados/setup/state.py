@@ -29,6 +29,11 @@ class SetupRunState:
     """In-memory view of the on-disk setup state."""
 
     setup_finalized: bool = False
+    # Operator clicked "Skip to Home" — the wizard is dismissed without
+    # being finalized. Distinct from ``setup_finalized`` so we can show
+    # a resume banner on Home and still let the wizard reach Finish
+    # later. The webapp routes to Home when EITHER flag is true.
+    setup_skipped: bool = False
     skipped_steps: set[str] = field(default_factory=set)
     # Step ids that have been observed in the "complete" state at any
     # point in the past. Used to keep the setup percentage monotonic
@@ -40,6 +45,7 @@ class SetupRunState:
     def to_dict(self) -> dict:
         return {
             "setup_finalized": bool(self.setup_finalized),
+            "setup_skipped": bool(self.setup_skipped),
             "skipped_steps": sorted(self.skipped_steps),
             "ever_completed_steps": sorted(self.ever_completed_steps),
         }
@@ -102,6 +108,7 @@ def read_state() -> SetupRunState:
     }
     return SetupRunState(
         setup_finalized=bool(raw.get("setup_finalized", False)),
+        setup_skipped=bool(raw.get("setup_skipped", False)),
         skipped_steps=cleaned_skipped,
         ever_completed_steps=cleaned_ever,
     )
@@ -117,9 +124,27 @@ def _write(state: SetupRunState) -> None:
 
 
 def mark_finalized() -> SetupRunState:
-    """Record that the operator clicked Finish in the wizard."""
+    """Record that the operator clicked Finish in the wizard.
+
+    Finalizing also clears any "Skip to Home" dismissal so the resume
+    banner disappears.
+    """
     state = read_state()
     state.setup_finalized = True
+    state.setup_skipped = False
+    _write(state)
+    return state
+
+
+def mark_setup_skipped() -> SetupRunState:
+    """Record that the operator dismissed the wizard via Skip to Home.
+
+    Distinct from ``mark_finalized``: the wizard is not finished, but
+    Home is reachable. The dashboard renders a resume banner so the
+    operator can pick the wizard back up at any time.
+    """
+    state = read_state()
+    state.setup_skipped = True
     _write(state)
     return state
 

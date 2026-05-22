@@ -37,6 +37,22 @@ async def finalize_setup(request: Request) -> SetupStatus:
     )
 
 
+@router.post("/skip", response_model=SetupStatus)
+async def skip_setup(request: Request) -> SetupStatus:
+    """Mark the entire setup wizard dismissed via Skip to Home.
+
+    Sets ``setup_skipped=true`` so the webapp's index redirect routes
+    to Home immediately on the next page load. Distinct from finish:
+    the operator has not actually completed the wizard, so a resume
+    banner is shown on Home until they either finalize or reset.
+    """
+    setup_state.mark_setup_skipped()
+    return await build_setup_status(
+        get_agent_app(),
+        host_header=request.headers.get("host"),
+    )
+
+
 @router.post("/step/{step_id}/skip", response_model=SetupStatus)
 async def skip_setup_step(step_id: str, request: Request) -> SetupStatus:
     """Mark a step as deferred ("Skip for now")."""

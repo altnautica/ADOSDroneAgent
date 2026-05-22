@@ -275,6 +275,11 @@ class SetupStatus(BaseModel):
     ground_role: str = ""
     setup_complete: bool
     setup_finalized: bool = False
+    # Operator chose "Skip to Home" without finishing the wizard. The
+    # webapp treats this and ``setup_finalized`` as equivalent gates
+    # for routing to Home; the resume banner uses the pair to decide
+    # whether to surface a "Resume setup" prompt.
+    setup_skipped: bool = False
     setup_state: Literal["auto", "needs_review", "configured"] = "auto"
     profile_source: Literal["detected", "tiebreaker", "override", "default", "user"] = "detected"
     completion_percent: int

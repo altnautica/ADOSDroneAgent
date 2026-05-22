@@ -1,4 +1,5 @@
-import { CloudOff, RefreshCw } from "lucide-react";
+import { ChevronRight, CloudOff, RefreshCw } from "lucide-react";
+import { Link } from "react-router-dom";
 
 import { CloudPanel } from "@/components/panels/cloud-panel";
 import { FcPanel } from "@/components/panels/fc-panel";
@@ -33,11 +34,39 @@ export function HomeRoute() {
     }} />;
   }
 
-  if (profile === "ground_station") {
-    return <GroundHome role={role} />;
-  }
+  // Resume banner when the operator dismissed the wizard via Skip to
+  // Home without finalizing. Sits above the home grid so the entry
+  // point back into setup is always one click away.
+  const showResume =
+    status.data?.setup_skipped === true && status.data?.setup_finalized !== true;
 
-  return <DroneHome />;
+  const body = profile === "ground_station" ? <GroundHome role={role} /> : <DroneHome />;
+  if (!showResume) return body;
+  return (
+    <div className="space-y-4">
+      <ResumeSetupBanner />
+      {body}
+    </div>
+  );
+}
+
+function ResumeSetupBanner() {
+  return (
+    <div className="flex items-center justify-between rounded-md border border-amber-500/40 bg-amber-500/5 px-4 py-2.5">
+      <div className="text-sm">
+        <span className="font-medium text-amber-200">Setup is incomplete.</span>{" "}
+        <span className="text-muted-foreground">
+          Some onboarding steps were skipped. Resume any time.
+        </span>
+      </div>
+      <Button asChild variant="outline" size="sm">
+        <Link to="/setup" className="gap-1">
+          Resume setup
+          <ChevronRight className="h-3.5 w-3.5" />
+        </Link>
+      </Button>
+    </div>
+  );
 }
 
 function OfflineHome({ onRetry }: { onRetry: () => void }) {
