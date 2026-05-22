@@ -35,26 +35,33 @@ interface Props {
   onInstalled?: () => void;
 }
 
+// Risk levels map to the same visual semantics as the Mission Control
+// RiskBadge (low=green, medium=blue, high=amber, critical=red), each
+// rendered as a border / soft fill / text triple so both surfaces tell
+// the operator the same story. The agent uses its own Tailwind token
+// names (ok / info / warn / destructive) but the colour intent is
+// identical to Mission Control's status-success / accent-primary /
+// status-warning / status-error.
 const RISK_TONE: Record<
   NonNullable<CatalogEntry["risk"]>,
   { label: string; classes: string }
 > = {
   low: {
     label: "Low risk",
-    classes: "border-ok/40 text-ok",
+    classes: "border-ok/40 bg-ok/10 text-ok",
   },
   medium: {
     label: "Medium risk",
-    classes: "border-warn/40 text-warn",
+    classes: "border-info/40 bg-info/10 text-info",
   },
   high: {
     label: "High risk",
-    classes: "border-destructive/40 text-destructive",
+    classes: "border-warn/40 bg-warn/10 text-warn",
   },
   critical: {
-    label: "Critical",
+    label: "Critical risk",
     classes:
-      "border-destructive bg-destructive/10 text-destructive font-semibold",
+      "border-destructive/40 bg-destructive/10 text-destructive font-semibold",
   },
 };
 
