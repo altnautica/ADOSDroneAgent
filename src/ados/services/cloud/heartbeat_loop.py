@@ -184,10 +184,13 @@ async def heartbeat_loop(ctx: CloudContext) -> None:  # noqa: C901
                 payload["videoWhepPort"] = (
                     8889 if _video_svc and _video_svc["status"] == "running" else 0
                 )
-                if payload["videoWhepPort"]:
-                    payload["videoWhepUrl"] = (
-                        f"http://{payload['lastIp']}:{payload['videoWhepPort']}/main/whep"
-                    )
+                # The LAN-derived /main/whep URL was retired alongside
+                # the operator-facing access panel earlier this cycle —
+                # MediaMTX does not reliably serve WHEP at that path.
+                # The top-level videoWhepUrl is set below from
+                # remote.video_whep_url (operator-configured Cloudflare
+                # tunnel URL) only, so operators that point it at a
+                # working WHEP endpoint still get a usable URL.
 
                 # MAVLink WebSocket proxy port for GCS direct connection
                 _mavlink_svc = next(
