@@ -31,6 +31,7 @@ SAME_ORIGIN_SETUP_PATHS = {
     "/api/v1/setup/remote-access/cloudflare",
     "/api/v1/setup/cloud-choice",
     "/api/v1/setup/finish",
+    "/api/v1/setup/skip",
     "/api/v1/setup/reset",
     "/api/v1/setup/navigation/capabilities",
     "/api/v1/setup/navigation/cameras",

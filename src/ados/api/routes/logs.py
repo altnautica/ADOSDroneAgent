@@ -104,7 +104,14 @@ async def stream_logs(
         last_seen = id(snapshot[-1]) if snapshot else 0
         try:
             while True:
-                await asyncio.wait_for(_log_event.wait(), timeout=15.0)
+                try:
+                    await asyncio.wait_for(_log_event.wait(), timeout=15.0)
+                except asyncio.TimeoutError:
+                    # No new entries within the window — flush a
+                    # keep-alive comment to keep proxies from idle-closing
+                    # the connection, then loop back into wait.
+                    yield ": keep-alive\n\n"
+                    continue
                 _log_event.clear()
                 tail = list(_log_buffer)
                 # Emit only entries after the last one we forwarded.
@@ -121,9 +128,8 @@ async def stream_logs(
                     yield f"data: {json.dumps(e)}\n\n"
                 if tail:
                     last_seen = id(tail[-1])
-        except (asyncio.CancelledError, asyncio.TimeoutError):
-            # Periodic keep-alive comment so proxies do not idle-close
-            # the SSE connection.
-            yield ": keep-alive\n\n"
+        except asyncio.CancelledError:
+            # Client disconnected. Let the generator unwind cleanly.
+            return
 
     return StreamingResponse(gen(), media_type="text/event-stream")
