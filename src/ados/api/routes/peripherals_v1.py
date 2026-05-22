@@ -152,16 +152,107 @@ async def put_peripheral_config(
     }
 
 
+def _dispatch_restart_radio() -> dict:
+    """Restart the WFB radio service via systemctl.
+
+    Pre-flight ``systemctl is-active ados-wfb`` so a profile that
+    doesn't run the unit (drone-only without an RTL8812EU adapter)
+    surfaces a clean 409 instead of pretending to succeed. The
+    ``ados-wfb`` unit is on the same allowlist used by the dedicated
+    service-restart route in ``services.py``.
+    """
+    import shutil
+    import subprocess
+    from datetime import datetime, timezone
+
+    if shutil.which("systemctl") is None:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "E_SYSTEMCTL_MISSING",
+                "message": "systemctl unavailable on this host",
+            },
+        )
+    try:
+        active = subprocess.run(
+            ["systemctl", "is-active", "ados-wfb"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (subprocess.SubprocessError, FileNotFoundError) as exc:
+        raise HTTPException(
+            status_code=500,
+            detail={"code": "E_PROBE_FAILED", "message": str(exc)},
+        ) from exc
+    state = (active.stdout or "").strip()
+    if state in ("not-found", "inactive", "failed", "unknown", ""):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "E_UNIT_NOT_RUNNING",
+                "unit": "ados-wfb",
+                "state": state or "unknown",
+                "message": (
+                    "The wfb radio service is not running on this node. "
+                    "Restart cannot proceed."
+                ),
+            },
+        )
+    try:
+        result = subprocess.run(
+            ["systemctl", "restart", "ados-wfb"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise HTTPException(
+            status_code=504,
+            detail={
+                "code": "E_RESTART_TIMEOUT",
+                "message": "systemctl restart ados-wfb timed out",
+            },
+        ) from exc
+    if result.returncode != 0:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "code": "E_RESTART_FAILED",
+                "message": (result.stderr or "").strip()
+                or f"systemctl exited {result.returncode}",
+            },
+        )
+    return {
+        "ok": True,
+        "dispatched_at": datetime.now(timezone.utc).isoformat(),
+        "message": "ados-wfb restarted",
+    }
+
+
+# Map of (peripheral_id, action_id) -> dispatcher. Returning a dict is
+# the wire shape the dashboard renders. Raise HTTPException for clean
+# 4xx / 5xx responses. Anything not in the map falls through to the
+# generic "action declared but not wired yet" stub so the dashboard can
+# still surface the button without lying about completion.
+_ACTION_DISPATCHERS = {
+    ("ados.rtl8812eu-radio", "restart_radio"): _dispatch_restart_radio,
+}
+
+
 @router.post("/{peripheral_id}/action")
 async def invoke_peripheral_action(
     peripheral_id: str,
     request: PeripheralActionRequest,
 ) -> dict:
-    """Queue an action against the peripheral.
+    """Invoke an action against the peripheral.
 
-    Wave 3 validates that the action is declared on the manifest and
-    returns a stubbed ``{queued: True}`` response. Real plugin
-    dispatch lands with Track B.
+    Validates the action is declared on the manifest, then looks up a
+    real dispatcher in the ``_ACTION_DISPATCHERS`` table. Wired
+    actions execute and return ``{ok: true, dispatched_at, message?}``;
+    declared-but-not-yet-wired actions return a clear
+    ``{queued: false, reason}`` envelope so the dashboard surfaces a
+    "not yet implemented" message rather than pretending success.
     """
     registry = get_peripheral_registry()
     manifest = registry.get_manifest(peripheral_id)
@@ -186,13 +277,33 @@ async def invoke_peripheral_action(
             },
         )
 
+    dispatcher = _ACTION_DISPATCHERS.get((peripheral_id, request.action_id))
+    if dispatcher is None:
+        log.info(
+            "peripheral_action_not_wired",
+            peripheral_id=peripheral_id,
+            action_id=request.action_id,
+        )
+        return {
+            "ok": False,
+            "peripheral_id": peripheral_id,
+            "action_id": request.action_id,
+            "reason": "action_declared_but_not_yet_wired",
+            "message": (
+                "The agent recognises this action but no dispatcher is "
+                "wired yet. The manifest entry is the contract; "
+                "implementation lands separately."
+            ),
+        }
+
+    result = dispatcher()
     log.info(
-        "peripheral_action_queued",
+        "peripheral_action_dispatched",
         peripheral_id=peripheral_id,
         action_id=request.action_id,
     )
     return {
-        "queued": True,
         "peripheral_id": peripheral_id,
         "action_id": request.action_id,
+        **result,
     }
