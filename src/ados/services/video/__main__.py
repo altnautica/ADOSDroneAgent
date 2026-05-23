@@ -24,6 +24,23 @@ async def main() -> None:
     log = structlog.get_logger()
     log.info("video_service_starting")
 
+    # The ground-station profile receives video over the WFB-rx pipe
+    # into ados-mediamtx-gs; there is no local camera to discover.
+    # Without this gate the service spends forever in a
+    # discover_cameras() -> no_primary_camera -> backoff loop and
+    # floods the journal every 5-30 s.
+    profile = str(getattr(config.agent, "profile", "") or "").lower()
+    if profile == "ground_station":
+        log.info(
+            "video_service_profile_skipped",
+            msg=(
+                "ground_station profile uses ados-mediamtx-gs for the "
+                "WFB-rx ingest; local camera pipeline is not needed"
+            ),
+            profile=profile,
+        )
+        return
+
     if config.video.mode == "disabled":
         log.info("video_service_disabled", msg="video.mode is 'disabled' in config, exiting")
         return
