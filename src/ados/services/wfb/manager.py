@@ -143,11 +143,16 @@ class WfbManager:
         # Upstream-feed tracker. Distinguishes "wfb_tx is wedged" (kill)
         # from "no video is arriving at wfb_tx's UDP 5600 socket" (don't
         # kill — wfb_tx is correctly idle when there is nothing to send).
-        # Reads drops + rx_queue from /proc/net/udp for the bound port.
-        # _last_upstream_byte_value tracks the drops counter (the only
-        # monotone receive-side signal /proc/net/udp exposes); a non-zero
-        # rx_queue at sample time is the secondary "is feeding right now"
-        # hint.
+        # Primary signal: /proc/<wfb_tx_pid>/io rchar — the cumulative
+        # byte count the process has read() from any fd. It advances on
+        # every recv() regardless of whether the socket backs up, which
+        # is the gap that /proc/net/udp drops + rx_queue could not
+        # cover (both stay at 0 when the consumer drains as fast as
+        # data arrives, the steady-state for a 4 Mbps video pipe).
+        # Fallback signal: drops + rx_queue from /proc/net/udp, kept
+        # for kernels where /proc/<pid>/io is gated behind
+        # kernel.yama.ptrace_scope.
+        self._last_upstream_rchar: int = -1
         self._last_upstream_byte_value: int = -1
         self._last_upstream_change_at: float = 0.0
         # Throttle the "upstream silent" log to once every 5 minutes so a
@@ -665,22 +670,54 @@ class WfbManager:
                 log.debug("rx_read_error", error=str(e))
                 break
 
-    def _read_wfb_tx_upstream_state(self) -> tuple[int, int] | None:
-        """Read (rx_queue, drops) from /proc/net/udp for wfb_tx's ingress.
+    def _read_wfb_tx_consumed_bytes(self) -> int | None:
+        """Cumulative read() bytes for the wfb_tx process.
 
-        Returns ``None`` when the socket row cannot be located (wfb_tx
-        not yet bound, /proc not present, file unreadable) so the caller
-        treats it as "unknown" rather than as a definitive feed signal.
+        Returns the ``rchar`` value from ``/proc/<wfb_tx_pid>/io`` —
+        a monotone counter advanced on every ``recv()`` regardless of
+        whether the underlying UDP socket is backing up. Pairs with
+        the ``tx_bytes`` interface counter to disambiguate:
+
+        * ``rchar`` advancing + ``tx_bytes`` flat → wfb_tx is reading
+          UDP packets but the radio isn't transmitting them. Zombie.
+        * ``rchar`` flat + ``tx_bytes`` flat → wfb_tx isn't reading
+          anything. Encoder genuinely idle; don't restart.
+        * both advancing → healthy.
+
+        Returns ``None`` when the process is gone, the file is
+        unreadable, or the kernel gates ``/proc/<pid>/io`` (e.g.,
+        ``kernel.yama.ptrace_scope`` tightened beyond what
+        ``CAP_DAC_OVERRIDE`` covers). Caller falls back to
+        :meth:`_read_wfb_tx_udp_state` in that case.
+        """
+        if self._tx_proc is None or self._tx_proc.pid is None:
+            return None
+        try:
+            with open(f"/proc/{self._tx_proc.pid}/io") as f:
+                for line in f:
+                    if line.startswith("rchar:"):
+                        return int(line.split(":", 1)[1].strip())
+        except (FileNotFoundError, PermissionError, OSError, ValueError):
+            return None
+        return None
+
+    def _read_wfb_tx_udp_state(self) -> tuple[int, int] | None:
+        """Fallback: read (rx_queue, drops) from /proc/net/udp.
+
+        Used only when :meth:`_read_wfb_tx_consumed_bytes` returns
+        ``None``. Cannot distinguish "drained instantly" from "no
+        packets arrived" (both keep ``rx_queue`` at 0 and never
+        advance ``drops``), so it has a known false-negative on the
+        steady-state video case — that gap is exactly why the primary
+        signal moved to /proc/<pid>/io. Kept here so a hardened
+        kernel that blocks the per-process io file still has some
+        signal.
 
         `/proc/net/udp` columns: ``sl local_address rem_address st
         tx_queue:rx_queue tr:tm->when retrnsmt uid timeout inode ref
         pointer drops``. The bound port matches the suffix of
         ``local_address`` so this works whether wfb_tx bound to
-        ``0.0.0.0:5600`` or ``127.0.0.1:5600``. Userspace cumulative
-        receive-byte counters aren't exposed in /proc/net/udp; ``drops``
-        is the only monotone receive-side signal here and
-        ``rx_queue`` is the current depth (zero when wfb_tx has drained
-        everything or when nothing arrived).
+        ``0.0.0.0:5600`` or ``127.0.0.1:5600``.
         """
         try:
             with open("/proc/net/udp") as f:
@@ -981,6 +1018,7 @@ class WfbManager:
         # across restarts of the wfb_tx process.
         self._last_tx_byte_value = -1
         self._last_tx_byte_change_at = time.monotonic()
+        self._last_upstream_rchar = -1
         self._last_upstream_byte_value = -1
         self._last_upstream_change_at = time.monotonic()
         while (
@@ -1013,49 +1051,83 @@ class WfbManager:
             if silent_for < _TX_HEALTH_SILENCE_THRESHOLD_S:
                 continue
 
-            # tx_bytes has been flat for the silence window. Look at the
-            # ingress socket on UDP 5600 to decide whether wfb_tx is
-            # wedged (data arriving but not transmitted) or just idle
-            # (no encoder feeding it).
-            upstream = self._read_wfb_tx_upstream_state()
+            # tx_bytes has been flat for the silence window. Decide
+            # whether wfb_tx is genuinely wedged (consuming UDP but
+            # not transmitting) or just idle (no encoder feeding it).
+            #
+            # Primary signal: /proc/<wfb_tx_pid>/io rchar — the
+            # cumulative recv() byte count. Advances on every read
+            # regardless of socket back-pressure, so it correctly
+            # surfaces the steady-state "drained instantly" case the
+            # old /proc/net/udp drops + rx_queue check missed.
+            # Fallback (when /proc/<pid>/io is unreadable): the old
+            # UDP state check, with its known false-negative on
+            # steady-state video.
             now = time.monotonic()
             upstream_feeding = False
-            if upstream is not None:
-                rx_queue, drops = upstream
-                if self._last_upstream_byte_value == -1:
-                    self._last_upstream_byte_value = drops
+            rchar = self._read_wfb_tx_consumed_bytes()
+            upstream_udp: tuple[int, int] | None = None
+            if rchar is not None:
+                if self._last_upstream_rchar == -1:
+                    self._last_upstream_rchar = rchar
                     self._last_upstream_change_at = now
-                if drops != self._last_upstream_byte_value:
-                    self._last_upstream_byte_value = drops
-                    self._last_upstream_change_at = now
-                    upstream_feeding = True
-                elif rx_queue > 0:
-                    # Current queue depth proves data IS arriving at
-                    # this sample, even if no overflow drop happened.
+                elif rchar > self._last_upstream_rchar:
+                    self._last_upstream_rchar = rchar
                     self._last_upstream_change_at = now
                     upstream_feeding = True
+            else:
+                # Hardened kernel — fall back to the UDP queue reader.
+                upstream_udp = self._read_wfb_tx_udp_state()
+                if upstream_udp is not None:
+                    rx_queue, drops = upstream_udp
+                    if self._last_upstream_byte_value == -1:
+                        self._last_upstream_byte_value = drops
+                        self._last_upstream_change_at = now
+                    if drops != self._last_upstream_byte_value:
+                        self._last_upstream_byte_value = drops
+                        self._last_upstream_change_at = now
+                        upstream_feeding = True
+                    elif rx_queue > 0:
+                        self._last_upstream_change_at = now
+                        upstream_feeding = True
 
             if not upstream_feeding:
-                # Upstream silent OR unknown (couldn't read /proc/net/udp).
-                # Either way wfb_tx is doing nothing because there is
-                # nothing to send; killing it changes nothing and would
-                # cascade through stop() to the control plane, breaking
-                # FHSS coordination. Log at WARN every 5 min and keep
+                # Upstream silent OR unknown. Either way wfb_tx is
+                # doing nothing because there is nothing to send;
+                # killing it changes nothing and would cascade through
+                # stop() to the control plane, breaking FHSS
+                # coordination. Log at WARN every 5 min and keep
                 # polling.
                 if (
                     now - self._last_upstream_silent_log_at
                     >= _UPSTREAM_SILENT_LOG_INTERVAL_S
                 ):
-                    if upstream is not None:
+                    if rchar is not None:
                         log.warning(
                             "wfb_tx_upstream_silent",
                             interface=self._interface,
                             silent_seconds=round(silent_for, 1),
-                            rx_queue=upstream[0],
-                            drops=upstream[1],
+                            rchar=rchar,
+                            signal="rchar",
                             note=(
-                                "tx_bytes flat but UDP 5600 ingress idle; "
-                                "no encoder feeding wfb_tx, skipping kill"
+                                "tx_bytes flat and wfb_tx rchar not "
+                                "advancing; no encoder feeding wfb_tx, "
+                                "skipping kill"
+                            ),
+                        )
+                    elif upstream_udp is not None:
+                        log.warning(
+                            "wfb_tx_upstream_silent",
+                            interface=self._interface,
+                            silent_seconds=round(silent_for, 1),
+                            rx_queue=upstream_udp[0],
+                            drops=upstream_udp[1],
+                            signal="udp_state_fallback",
+                            note=(
+                                "tx_bytes flat, /proc/<pid>/io unreadable, "
+                                "UDP fallback shows no drops + empty queue; "
+                                "skipping kill (false-negative risk on "
+                                "steady-state video)"
                             ),
                         )
                     else:
@@ -1064,25 +1136,25 @@ class WfbManager:
                             interface=self._interface,
                             silent_seconds=round(silent_for, 1),
                             note=(
-                                "tx_bytes flat and /proc/net/udp row for "
-                                "UDP 5600 not found; assuming silent, "
-                                "skipping kill"
+                                "tx_bytes flat and neither /proc/<pid>/io "
+                                "nor /proc/net/udp readable; skipping kill"
                             ),
                         )
                     self._last_upstream_silent_log_at = now
                 continue
 
-            # Ingress IS feeding (drops advancing or rx_queue non-zero)
-            # while tx_bytes stays flat. wfb_tx is wedged — kill and let
-            # the main run loop respawn it.
+            # Ingress IS feeding (rchar advancing, or drops/rx_queue
+            # on the fallback path) while tx_bytes stays flat. wfb_tx
+            # is wedged — kill and let the main run loop respawn it.
             self._tx_zombie_kills += 1
+            signal_kind = "rchar" if rchar is not None else "udp_state_fallback"
             log.warning(
                 "wfb_tx_zombie_detected",
                 interface=self._interface,
                 silent_seconds=round(silent_for, 1),
                 pid=self._tx_proc.pid if self._tx_proc else None,
                 zombie_kills_total=self._tx_zombie_kills,
-                upstream_known=upstream is not None,
+                signal=signal_kind,
                 note=(
                     "tx_bytes flat while process alive and ingress "
                     "feeding; terminating to trigger restart"
@@ -1097,6 +1169,7 @@ class WfbManager:
             # fire on the carried-over silence window.
             self._last_tx_byte_value = -1
             self._last_tx_byte_change_at = time.monotonic()
+            self._last_upstream_rchar = -1
             self._last_upstream_byte_value = -1
             self._last_upstream_change_at = time.monotonic()
             return
