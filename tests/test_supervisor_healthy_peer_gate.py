@@ -97,10 +97,16 @@ async def test_reactive_trigger_scans_despite_fresh_peer() -> None:
 
 
 @pytest.mark.asyncio
-async def test_cold_start_periodic_scans_without_gate() -> None:
-    """Periodic tick with _last_hop_at == 0.0 always scans (cold start)."""
+async def test_no_peer_ever_seen_scans() -> None:
+    """Periodic tick scans when no peer has ever been observed.
+
+    Cold-start signal is "PresenceBeacon never decoded" — gating on
+    the older _last_hop_at would keep scanning forever on a rig
+    where every hop aborts on no_peer_ack (the failure path the
+    gate is supposed to protect).
+    """
     sup = _make_supervisor(
-        peer_last_seen_unix=time.time() - 5.0,
+        peer_last_seen_unix=None,
         last_hop_at=0.0,
     )
 

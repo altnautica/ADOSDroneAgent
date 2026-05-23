@@ -569,11 +569,12 @@ class HopSupervisor:
         # plane has decoded a PresenceBeacon in the last minute the
         # link is fine and the rescan is pure waste, so return early.
         # Reactive scans (loss / RSSI thresholds tripped) always run
-        # because that's the only way to find a better channel. The
-        # cold-start case (no hop yet executed) also still runs so the
-        # drone can settle on a quiet channel before the ground rig
-        # boots.
-        if periodic and not reactive and self._last_hop_at > 0.0:
+        # because that's the only way to find a better channel. Cold
+        # start (no peer ever seen, including hops aborted on
+        # no_peer_ack) still scans so the drone can discover the
+        # ground rig — gate engages once any PresenceBeacon has
+        # decoded successfully.
+        if periodic and not reactive:
             peer_last_seen = getattr(self._wfb, "_peer_last_seen_unix", None)
             if (
                 isinstance(peer_last_seen, (int, float))
