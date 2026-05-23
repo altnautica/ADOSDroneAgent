@@ -11,6 +11,7 @@ so a persistently broken sidecar doesn't spin the supervisor.
 from __future__ import annotations
 
 import asyncio
+import json
 from typing import TYPE_CHECKING
 
 from .ffmpeg_monitor import (
@@ -22,6 +23,32 @@ if TYPE_CHECKING:
     import structlog
 
     from .manager import MediamtxGsManager
+
+
+def _wfb_packets_received() -> int | None:
+    """Read packets_received from the shared /run/ados/wfb-stats.json.
+
+    The ground-side wfb_rx manager writes this file ~1 Hz. Returns the
+    cumulative packets_received counter when readable, or ``None`` when
+    the file is missing / malformed. Used by the ffmpeg watchdog to
+    gate restarts so we don't loop ffmpeg every 5 s on a cold boot
+    where the drone hasn't paired yet (ffmpeg's SDP probe gives up
+    after 20 s with no packets and the supervisor immediately respawns
+    it into the same empty-input death).
+    """
+    from ados.core.paths import WFB_STATS_JSON
+
+    try:
+        with open(WFB_STATS_JSON) as f:
+            payload = json.load(f)
+    except (FileNotFoundError, OSError, ValueError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    value = payload.get("packets_received")
+    if isinstance(value, int) and value >= 0:
+        return value
+    return None
 
 
 async def monitor_ffmpeg(
@@ -48,6 +75,23 @@ async def monitor_ffmpeg(
         except TimeoutError:
             pass
         if not manager.ffmpeg_alive():
+            # Cold-boot gate: ffmpeg's SDP probe exits with "Output
+            # file does not contain any stream" the moment its probe
+            # window ends with zero inbound packets. If wfb_rx hasn't
+            # received any radio frames yet there's nothing to demux,
+            # so respawning ffmpeg just lights up the same 20 s
+            # probe-and-die cycle. Hold off until packets are
+            # actually flowing.
+            received = _wfb_packets_received()
+            if received is not None and received == 0:
+                slog.info(
+                    "ground_ffmpeg_waiting_for_radio_packets",
+                    msg=(
+                        "wfb_rx packets_received=0; holding ffmpeg "
+                        "until the link delivers its first frame"
+                    ),
+                )
+                continue
             slog.warning(
                 "ground_ffmpeg_dead_restarting", backoff_seconds=backoff
             )
