@@ -16,21 +16,22 @@ function sessionSkipFlag(): boolean {
   }
 }
 
-// Setup is non-blocking. On a fresh boot the wizard is offered but the
-// operator can click Skip to Home at any point and reach the dashboard
-// immediately. Either setup_finalized OR setup_skipped (server- or
-// session-side) routes to Home. While the first poll is in flight we
-// render nothing (avoids a flash of either Home or the wizard before
-// the data lands).
+// Setup is opt-in. The dashboard Home renders at `/` whenever the
+// agent reports the rig is operational (`setup_complete`) OR the
+// operator finalized / skipped the wizard previously. The Setup
+// button in the header is the only forced surface; the wizard never
+// hijacks the root URL. While the first poll is in flight we render
+// nothing to avoid flashing either Home or the wizard.
 export function IndexRedirect() {
   const status = useStatus();
 
   if (status.isLoading) {
     return null;
   }
+  const complete = status.data?.setup_complete === true;
   const finalized = status.data?.setup_finalized === true;
   const skipped = status.data?.setup_skipped === true || sessionSkipFlag();
-  if (!finalized && !skipped) {
+  if (!complete && !finalized && !skipped) {
     return <Navigate to="/setup" replace />;
   }
   return <HomeRoute />;

@@ -1,4 +1,4 @@
-import { Settings as SettingsIcon, Menu, Copy, Check } from "lucide-react";
+import { Settings as SettingsIcon, Menu, Copy, Check, Wand2 } from "lucide-react";
 import { useState } from "react";
 import { Link } from "react-router-dom";
 
@@ -68,6 +68,7 @@ export function Header() {
   const version = heartbeat.data?.version ?? status.data?.version ?? "";
   const uptime = fmtUptime(heartbeat.data?.uptime_seconds);
   const online = !heartbeat.isError && heartbeat.data != null;
+  const setupComplete = status.data?.setup_complete === true;
 
   return (
     <header className="border-b border-border bg-background/80 backdrop-blur sticky top-0 z-30">
@@ -120,6 +121,24 @@ export function Header() {
         </div>
 
         <div className="ml-auto lg:ml-0 flex items-center gap-1">
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button asChild variant="ghost" size="icon" className="relative">
+                <Link to="/setup" aria-label="setup wizard">
+                  <Wand2 />
+                  {!setupComplete && (
+                    <span
+                      className="absolute top-1.5 right-1.5 h-1.5 w-1.5 rounded-full bg-warn"
+                      aria-hidden
+                    />
+                  )}
+                </Link>
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent side="bottom">
+              {setupComplete ? "setup wizard" : "setup wizard — gaps remain"}
+            </TooltipContent>
+          </Tooltip>
           <Tooltip>
             <TooltipTrigger asChild>
               <Button asChild variant="ghost" size="icon">
