@@ -55,21 +55,23 @@ export function CloudPanel() {
           </span>
         </div>
 
-        <div className="border-t border-border/50 pt-3 mt-2 space-y-2">
-          <div className="flex items-center gap-2 text-xs text-muted-foreground">
-            <KeyRound className="h-3 w-3" />
-            Pairing
-          </div>
-          {finalized && !code ? (
-            <Badge variant="ok">paired</Badge>
-          ) : code ? (
-            <div className="font-mono text-2xl tracking-[0.3em] py-1">
-              {code}
+        {choice?.mode !== "local" && (
+          <div className="border-t border-border/50 pt-3 mt-2 space-y-2">
+            <div className="flex items-center gap-2 text-xs text-muted-foreground">
+              <KeyRound className="h-3 w-3" />
+              Pairing
             </div>
-          ) : (
-            <p className="text-xs text-muted-foreground">awaiting code…</p>
-          )}
-        </div>
+            {finalized && !code ? (
+              <Badge variant="ok">paired</Badge>
+            ) : code ? (
+              <div className="font-mono text-2xl tracking-[0.3em] py-1">
+                {code}
+              </div>
+            ) : (
+              <p className="text-xs text-muted-foreground">awaiting code…</p>
+            )}
+          </div>
+        )}
       </CardContent>
     </Card>
   );

@@ -227,6 +227,52 @@ def mediamtx_whep_alive_sync() -> bool:
         return False
 
 
+def mediamtx_track_info_sync() -> dict | None:
+    """Best-effort sync read of the live MediaMTX track for path ``main``.
+
+    Returns a small dict with ``codec``, ``width``, ``height`` and
+    ``bytes_received`` pulled out of ``/v3/paths/list`` when the
+    management API is reachable and at least one track is active.
+    Falls back to ``None`` quickly (1s timeout) so the dashboard
+    snapshot poll never stalls.
+    """
+    try:
+        with httpx.Client(timeout=1.0) as client:
+            resp = client.get(
+                f"http://127.0.0.1:{_MEDIAMTX_API_PORT}/v3/paths/list"
+            )
+            if resp.status_code != 200:
+                return None
+            data = resp.json()
+    except Exception:
+        return None
+    items = data.get("items", []) if isinstance(data, dict) else []
+    if not items:
+        return None
+    path = next(
+        (p for p in items if isinstance(p, dict) and p.get("name") == "main"),
+        items[0] if isinstance(items[0], dict) else None,
+    )
+    if not isinstance(path, dict):
+        return None
+    tracks = path.get("tracks") or []
+    if not isinstance(tracks, list):
+        return None
+    out: dict[str, Any] = {
+        "bytes_received": path.get("bytesReceived"),
+        "ready": bool(path.get("ready", False)),
+    }
+    for track in tracks:
+        if not isinstance(track, str):
+            continue
+        upper = track.strip()
+        if not upper:
+            continue
+        if "codec" not in out:
+            out["codec"] = upper
+    return out or None
+
+
 __all__ = [
     "_MEDIAMTX_API_PORT",
     "_MEDIAMTX_WEBRTC_PORT",
@@ -239,4 +285,5 @@ __all__ = [
     "_probe_mediamtx",
     "_probe_mediamtx_via_whep",
     "mediamtx_whep_alive_sync",
+    "mediamtx_track_info_sync",
 ]

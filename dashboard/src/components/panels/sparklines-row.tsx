@@ -61,7 +61,7 @@ export function SparklinesRow() {
       <MiniCard
         label="Battery"
         unit="V"
-        value={lastBat != null ? lastBat.toFixed(1) : "—"}
+        value={lastBat != null ? lastBat.toFixed(2) : "—"}
         data={battery}
         tone={lastBat != null && lastBat < 14 ? "amber" : "emerald"}
       />

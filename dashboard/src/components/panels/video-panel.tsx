@@ -241,22 +241,40 @@ export function VideoPanel() {
           <div className="text-xs text-muted-foreground">pipeline</div>
           <div className="font-mono">{pipelineState}</div>
 
-          <div className="text-xs text-muted-foreground">codec</div>
-          <div className="font-mono">{codec || "—"}</div>
+          {codec && (
+            <>
+              <div className="text-xs text-muted-foreground">codec</div>
+              <div className="font-mono">{codec}</div>
+            </>
+          )}
 
-          <div className="text-xs text-muted-foreground">res</div>
-          <div className="font-mono">{w && h ? `${w}×${h}` : "—"}</div>
+          {w > 0 && h > 0 && (
+            <>
+              <div className="text-xs text-muted-foreground">res</div>
+              <div className="font-mono">{`${w}×${h}`}</div>
+            </>
+          )}
 
-          <div className="text-xs text-muted-foreground">fps</div>
-          <div className="font-mono">{fps > 0 ? fmtNum(fps, 0) : "—"}</div>
+          {fps > 0 && (
+            <>
+              <div className="text-xs text-muted-foreground">fps</div>
+              <div className="font-mono">{fmtNum(fps, 0)}</div>
+            </>
+          )}
 
-          <div className="text-xs text-muted-foreground">bitrate</div>
-          <div className="font-mono">{fmtBitrate(bitrate)}</div>
+          {bitrate > 0 && (
+            <>
+              <div className="text-xs text-muted-foreground">bitrate</div>
+              <div className="font-mono">{fmtBitrate(bitrate)}</div>
+            </>
+          )}
 
-          <div className="text-xs text-muted-foreground">g2g</div>
-          <div className="font-mono">
-            {g2g != null ? `${fmtNum(g2g, 0)} ms` : "—"}
-          </div>
+          {g2g != null && (
+            <>
+              <div className="text-xs text-muted-foreground">g2g</div>
+              <div className="font-mono">{`${fmtNum(g2g, 0)} ms`}</div>
+            </>
+          )}
         </div>
       </CardContent>
     </Card>

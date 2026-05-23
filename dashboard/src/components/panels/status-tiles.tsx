@@ -31,14 +31,25 @@ function tiles(
   const s = snap.data;
   const cfg = status.data;
 
-  // MAV
+  // MAV — tile reflects MAVLink health. Sats render as the primary
+  // value once GPS reports something; before that the tile shows the
+  // FC link state so a connected-but-unlocked rig does not look dead.
   const fcConnected = s?.fc.connected ?? false;
   const sats = s?.fc.gps.satellites_visible ?? null;
   const mav: Tile = {
     label: "MAV",
     icon: Radio,
-    value: sats != null ? String(sats) : fcConnected ? "—" : "off",
-    sub: fcConnected ? `${sats != null ? "sats" : "no gps"}` : "no fc",
+    value:
+      sats != null && sats > 0
+        ? String(sats)
+        : fcConnected
+          ? "linked"
+          : "off",
+    sub: fcConnected
+      ? sats != null && sats > 0
+        ? "sats"
+        : "waiting for fix"
+      : "no fc",
     severity: fcConnected ? "ok" : "idle",
   };
 
@@ -94,16 +105,34 @@ function tiles(
     severity: uplink && uplink !== "—" ? "ok" : "idle",
   };
 
-  // CLD
+  // CLD — primary value is the operator's chosen cloud posture;
+  // mqtt / http details only appear when a relay is supposed to be
+  // dialing out. Local-mode rigs render as "local" rather than the
+  // stale "unknown" of the runtime probe.
+  const cloudMode = s?.cloud.mode ?? cfg?.cloud_choice?.mode ?? "local";
   const mqtt = s?.cloud.mqtt_state ?? "unknown";
   const http = s?.cloud.http_state ?? "unknown";
-  const cldOk = mqtt === "connected" || mqtt === "online";
+  let cldSub: string;
+  let cldSeverity: Severity;
+  if (cloudMode === "local") {
+    cldSub = "no relay";
+    cldSeverity = "idle";
+  } else if (mqtt === "connected" || mqtt === "online") {
+    cldSub = http !== "unknown" ? `http ${http}` : "online";
+    cldSeverity = "ok";
+  } else if (mqtt === "unknown") {
+    cldSub = "connecting";
+    cldSeverity = "idle";
+  } else {
+    cldSub = `mqtt ${mqtt}`;
+    cldSeverity = "warn";
+  }
   const cld: Tile = {
     label: "CLD",
     icon: Cloud,
-    value: cldOk ? "online" : mqtt,
-    sub: http !== "unknown" ? `http ${http}` : "—",
-    severity: cldOk ? "ok" : mqtt === "unknown" ? "idle" : "warn",
+    value: cloudMode,
+    sub: cldSub,
+    severity: cldSeverity,
   };
 
   // PAIR

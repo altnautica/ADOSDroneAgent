@@ -205,6 +205,7 @@ export interface PluginEntry {
 }
 
 export interface CloudSnapshot {
+  mode?: string;
   mqtt_state: string;
   http_state: string;
   rtt_ms: number | null;

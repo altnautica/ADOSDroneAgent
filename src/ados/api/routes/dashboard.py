@@ -29,6 +29,44 @@ def _safe(fn: Any, default: Any) -> Any:
         return default
 
 
+# MAVLink MAV_AUTOPILOT enum → operator-facing firmware label. The
+# numeric ids land in the heartbeat from any FC; rendering the raw int
+# in the dashboard read as "firmware: 3" which carries zero meaning.
+_AUTOPILOT_NAMES: dict[int, str] = {
+    0: "Generic",
+    3: "ArduPilot",
+    4: "OpenPilot",
+    5: "Generic Waypoints Only",
+    6: "Generic Waypoints + Simple Nav",
+    7: "Generic Full Mission",
+    8: "Invalid",
+    9: "PPZ",
+    10: "UDB",
+    11: "FP",
+    12: "PX4",
+    13: "SMACCM",
+    14: "AutoQuad",
+    15: "Armazila",
+    16: "Aerob",
+    17: "ASLUAV",
+    18: "SmartAP",
+    19: "AirRails",
+    20: "ReflectronUDP",
+}
+
+
+def _autopilot_name(value: Any) -> str | None:
+    """Map the MAVLink autopilot enum id to a human label."""
+    if value is None:
+        return None
+    try:
+        ident = int(value)
+    except (TypeError, ValueError):
+        text = str(value).strip()
+        return text or None
+    return _AUTOPILOT_NAMES.get(ident, f"autopilot {ident}")
+
+
 def _video_devices_present() -> bool:
     """Cheap kernel-side check: any V4L2 node enumerated?
 
@@ -61,12 +99,19 @@ def _video_slice(app: Any) -> dict[str, Any]:
         )
 
     mediamtx_alive = False
+    track_info: dict[str, Any] | None = None
     try:
-        from ados.api.routes.video._common import mediamtx_whep_alive_sync
+        from ados.api.routes.video._common import (
+            mediamtx_track_info_sync,
+            mediamtx_whep_alive_sync,
+        )
 
         mediamtx_alive = mediamtx_whep_alive_sync()
+        if mediamtx_alive:
+            track_info = mediamtx_track_info_sync()
     except Exception:
         mediamtx_alive = False
+        track_info = None
 
     if mediamtx_alive:
         state["state"] = "running"
@@ -74,6 +119,15 @@ def _video_slice(app: Any) -> dict[str, Any]:
         state["state"] = "ready"
     else:
         state["state"] = "no_camera"
+
+    # Prefer live MediaMTX track info over static encoder config when
+    # the stream is actually flowing. The encoder block stays
+    # authoritative when MediaMTX is silent (e.g. no clients have
+    # pulled the stream yet).
+    if track_info:
+        live_codec = track_info.get("codec")
+        if isinstance(live_codec, str) and live_codec.strip():
+            state["codec"] = live_codec.strip()
 
     state.setdefault("glass_to_glass_ms", None)
     return state
@@ -94,9 +148,13 @@ def _fc_slice(app: Any) -> dict[str, Any]:
     # distinguish "FC connected but waiting for telemetry" from
     # "FC reported empty values". Empty strings render as visible
     # blanks in the UI rather than triggering the "—" fallback.
+    rc_block = veh.get("rc") if isinstance(veh.get("rc"), dict) else {}
+    rc_rssi = rc_block.get("rssi") if isinstance(rc_block, dict) else None
+    autopilot_raw = veh.get("autopilot")
     return {
         "vehicle": (str(veh.get("vehicle_type")) if veh.get("vehicle_type") else None),
-        "firmware": (str(veh.get("autopilot")) if veh.get("autopilot") else None),
+        "firmware": _autopilot_name(autopilot_raw),
+        "firmware_id": (int(autopilot_raw) if isinstance(autopilot_raw, (int, float)) else None),
         "mode": (
             str(veh.get("flight_mode") or veh.get("mode"))
             if (veh.get("flight_mode") or veh.get("mode"))
@@ -113,7 +171,7 @@ def _fc_slice(app: Any) -> dict[str, Any]:
             "remaining": battery.get("remaining"),
         },
         "link_quality": veh.get("link_quality"),
-        "rc": veh.get("rc"),
+        "rc": rc_rssi if isinstance(rc_rssi, (int, float)) else None,
         "prearm": veh.get("prearm"),
         "fc_port": fc.port,
         "fc_baud": fc.baud,
@@ -186,10 +244,13 @@ def _cloud_slice(app: Any) -> dict[str, Any]:
     cloud_state = _safe(lambda: app.cloud_relay_summary(), None) or {}
     drone_id = ""
     pairing_code = ""
+    mode = "local"
     if cfg is not None:
         drone_id = _safe(lambda: str(cfg.agent.device_id or ""), "")
         pairing_code = _safe(lambda: str(cfg.cloud.pairing_code or ""), "")
+        mode = _safe(lambda: str(cfg.server.mode or "local"), "local")
     return {
+        "mode": mode,
         "mqtt_state": cloud_state.get("mqtt_state", "unknown"),
         "http_state": cloud_state.get("http_state", "unknown"),
         "rtt_ms": cloud_state.get("rtt_ms"),
