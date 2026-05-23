@@ -67,6 +67,89 @@ def _autopilot_name(value: Any) -> str | None:
     return _AUTOPILOT_NAMES.get(ident, f"autopilot {ident}")
 
 
+# MAVLink MAV_TYPE enum → human-facing vehicle name. The FC sends this
+# in every HEARTBEAT; rendering the raw integer in the FC card read as
+# "vehicle: 2" which carried zero meaning.
+_MAV_TYPE_NAMES: dict[int, str] = {
+    0: "Generic",
+    1: "Fixed Wing",
+    2: "Quadrotor",
+    3: "Coaxial",
+    4: "Helicopter",
+    5: "Antenna Tracker",
+    6: "GCS",
+    7: "Airship",
+    8: "Free Balloon",
+    9: "Rocket",
+    10: "Ground Rover",
+    11: "Surface Boat",
+    12: "Submarine",
+    13: "Hexarotor",
+    14: "Octorotor",
+    15: "Tricopter",
+    16: "Flapping Wing",
+    17: "Kite",
+    18: "Onboard Controller",
+    19: "VTOL Tailsitter Duo",
+    20: "VTOL Quadrotor",
+    21: "VTOL Tiltrotor",
+    22: "VTOL Reserved",
+    23: "VTOL Reserved",
+    24: "VTOL Reserved",
+    25: "VTOL Reserved",
+    26: "VTOL Reserved",
+    27: "VTOL Tailsitter",
+    28: "VTOL Tiltwing",
+    29: "VTOL Reserved",
+    30: "Gimbal",
+    31: "ADSB",
+    32: "Parafoil",
+    33: "Dodecarotor",
+    34: "Camera",
+    35: "Charging Station",
+    36: "FLARM",
+    37: "Servo",
+    38: "ODID",
+    39: "Decarotor",
+    40: "Battery",
+    41: "Parachute",
+}
+
+
+def _mav_type_name(value: Any) -> str | None:
+    """Map the MAVLink MAV_TYPE enum id to a human label."""
+    if value is None:
+        return None
+    try:
+        ident = int(value)
+    except (TypeError, ValueError):
+        text = str(value).strip()
+        return text or None
+    return _MAV_TYPE_NAMES.get(ident, f"vehicle {ident}")
+
+
+def _normalize_rc_rssi(value: Any) -> int | None:
+    """Normalize raw MAVLink RC RSSI byte (0-254) to a 0-100% scale.
+
+    Some FC firmware emit the rssi field directly as a percent in the
+    [0, 100] range; ArduPilot fills the standard 0-254 byte where 254
+    means "max signal". Values <= 100 pass through; anything above is
+    scaled by 100 / 254 and clamped to [0, 100].
+    """
+    if value is None:
+        return None
+    try:
+        raw = float(value)
+    except (TypeError, ValueError):
+        return None
+    if raw <= 0:
+        return 0
+    if raw <= 100:
+        return int(round(raw))
+    pct = round(raw * 100 / 254)
+    return max(0, min(100, int(pct)))
+
+
 def _video_devices_present() -> bool:
     """Cheap kernel-side check: any V4L2 node enumerated?
 
@@ -128,9 +211,42 @@ def _video_slice(app: Any) -> dict[str, Any]:
         live_codec = track_info.get("codec")
         if isinstance(live_codec, str) and live_codec.strip():
             state["codec"] = live_codec.strip()
+        live_kbps = _bitrate_from_mediamtx(track_info)
+        if live_kbps is not None:
+            state["bitrate_kbps"] = live_kbps
 
     state.setdefault("glass_to_glass_ms", None)
     return state
+
+
+# Module-level last-sample cache for the MediaMTX bytes counter so we
+# can turn a monotonically-increasing total into a rolling kbps. Keyed
+# by path name (we only publish ``main`` today). Survives across
+# /api/v1/dashboard/snapshot polls as long as the API process is up.
+_BITRATE_SAMPLE: dict[str, tuple[float, int]] = {}
+
+
+def _bitrate_from_mediamtx(track_info: dict[str, Any]) -> int | None:
+    """Convert MediaMTX bytesReceived deltas into a rolling kbps."""
+    import time
+
+    bytes_received = track_info.get("bytes_received")
+    if not isinstance(bytes_received, int) or bytes_received < 0:
+        return None
+    now = time.monotonic()
+    last = _BITRATE_SAMPLE.get("main")
+    _BITRATE_SAMPLE["main"] = (now, bytes_received)
+    if last is None:
+        return None
+    last_ts, last_bytes = last
+    elapsed = now - last_ts
+    if elapsed <= 0.0 or bytes_received < last_bytes:
+        # Reset (counter rewound on stream restart) — wait for the next
+        # sample to produce a delta.
+        return None
+    delta_bytes = bytes_received - last_bytes
+    kbps = round((delta_bytes * 8) / 1000 / elapsed)
+    return int(max(0, kbps))
 
 
 def _fc_slice(app: Any) -> dict[str, Any]:
@@ -149,10 +265,15 @@ def _fc_slice(app: Any) -> dict[str, Any]:
     # "FC reported empty values". Empty strings render as visible
     # blanks in the UI rather than triggering the "—" fallback.
     rc_block = veh.get("rc") if isinstance(veh.get("rc"), dict) else {}
-    rc_rssi = rc_block.get("rssi") if isinstance(rc_block, dict) else None
+    rc_rssi_raw = rc_block.get("rssi") if isinstance(rc_block, dict) else None
     autopilot_raw = veh.get("autopilot")
+    # state.py emits mav_type (the raw MAVLink enum int from the
+    # HEARTBEAT). vehicle_type is the older alias kept for back-compat
+    # if a downstream consumer ever populates it.
+    mav_type_raw = veh.get("mav_type") if veh.get("mav_type") is not None else veh.get("vehicle_type")
     return {
-        "vehicle": (str(veh.get("vehicle_type")) if veh.get("vehicle_type") else None),
+        "vehicle": _mav_type_name(mav_type_raw),
+        "vehicle_id": (int(mav_type_raw) if isinstance(mav_type_raw, (int, float)) else None),
         "firmware": _autopilot_name(autopilot_raw),
         "firmware_id": (int(autopilot_raw) if isinstance(autopilot_raw, (int, float)) else None),
         "mode": (
@@ -171,7 +292,7 @@ def _fc_slice(app: Any) -> dict[str, Any]:
             "remaining": battery.get("remaining"),
         },
         "link_quality": veh.get("link_quality"),
-        "rc": rc_rssi if isinstance(rc_rssi, (int, float)) else None,
+        "rc": _normalize_rc_rssi(rc_rssi_raw),
         "prearm": veh.get("prearm"),
         "fc_port": fc.port,
         "fc_baud": fc.baud,

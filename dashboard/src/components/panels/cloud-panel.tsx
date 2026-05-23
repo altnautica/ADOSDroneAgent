@@ -22,6 +22,7 @@ export function CloudPanel() {
   const code = cloud?.pairing_code ?? "";
   const mqttSev = severityClasses(severityFromState(cloud?.mqtt_state));
   const httpSev = severityClasses(severityFromState(cloud?.http_state));
+  const isLocal = choice?.mode === "local";
 
   return (
     <Card>
@@ -36,41 +37,47 @@ export function CloudPanel() {
           <span className="text-xs text-muted-foreground">mode</span>
           <span className="font-mono">{choice?.mode ?? "—"}</span>
         </div>
-        <div className="flex items-baseline justify-between text-sm">
-          <span className="text-xs text-muted-foreground">mqtt</span>
-          <span className={cn("font-mono", mqttSev.text)}>
-            {cloud?.mqtt_state ?? "—"}
-          </span>
-        </div>
-        <div className="flex items-baseline justify-between text-sm">
-          <span className="text-xs text-muted-foreground">http</span>
-          <span className={cn("font-mono", httpSev.text)}>
-            {cloud?.http_state ?? "—"}
-          </span>
-        </div>
-        <div className="flex items-baseline justify-between text-sm">
-          <span className="text-xs text-muted-foreground">rtt</span>
-          <span className="font-mono">
-            {cloud?.rtt_ms != null ? `${cloud.rtt_ms} ms` : "—"}
-          </span>
-        </div>
-
-        {choice?.mode !== "local" && (
-          <div className="border-t border-border/50 pt-3 mt-2 space-y-2">
-            <div className="flex items-center gap-2 text-xs text-muted-foreground">
-              <KeyRound className="h-3 w-3" />
-              Pairing
+        {isLocal ? (
+          <p className="text-xs text-muted-foreground">
+            Relay disabled. Mission Control reaches this drone over the LAN.
+          </p>
+        ) : (
+          <>
+            <div className="flex items-baseline justify-between text-sm">
+              <span className="text-xs text-muted-foreground">mqtt</span>
+              <span className={cn("font-mono", mqttSev.text)}>
+                {cloud?.mqtt_state ?? "—"}
+              </span>
             </div>
-            {finalized && !code ? (
-              <Badge variant="ok">paired</Badge>
-            ) : code ? (
-              <div className="font-mono text-2xl tracking-[0.3em] py-1">
-                {code}
+            <div className="flex items-baseline justify-between text-sm">
+              <span className="text-xs text-muted-foreground">http</span>
+              <span className={cn("font-mono", httpSev.text)}>
+                {cloud?.http_state ?? "—"}
+              </span>
+            </div>
+            <div className="flex items-baseline justify-between text-sm">
+              <span className="text-xs text-muted-foreground">rtt</span>
+              <span className="font-mono">
+                {cloud?.rtt_ms != null ? `${cloud.rtt_ms} ms` : "—"}
+              </span>
+            </div>
+
+            <div className="border-t border-border/50 pt-3 mt-2 space-y-2">
+              <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                <KeyRound className="h-3 w-3" />
+                Pairing
               </div>
-            ) : (
-              <p className="text-xs text-muted-foreground">awaiting code…</p>
-            )}
-          </div>
+              {finalized && !code ? (
+                <Badge variant="ok">paired</Badge>
+              ) : code ? (
+                <div className="font-mono text-2xl tracking-[0.3em] py-1">
+                  {code}
+                </div>
+              ) : (
+                <p className="text-xs text-muted-foreground">awaiting code…</p>
+              )}
+            </div>
+          </>
         )}
       </CardContent>
     </Card>

@@ -113,6 +113,14 @@ class ApiRuntimeFacade:
         return False
 
     def health_dict(self) -> dict:
+        # Refresh the sample before serializing. The standalone API
+        # service does not run the supervisor loop that periodically
+        # calls check_system(), so without this the heartbeat would
+        # forever return the default zero-valued SystemHealth().
+        try:
+            self._runtime.health.check_system()
+        except Exception:
+            pass
         return self._runtime.health.last.to_dict()
 
     def uptime_seconds(self) -> float:

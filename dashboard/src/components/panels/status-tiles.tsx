@@ -135,16 +135,29 @@ function tiles(
     severity: cldSeverity,
   };
 
-  // PAIR
+  // PAIR — in local mode there's nothing to pair with; the tile reads
+  // "n/a · local mode" instead of inheriting the historical paired
+  // state from setup-status.
   const code = s?.cloud.pairing_code ?? "";
   const finalized = cfg?.setup_finalized ?? false;
-  const pair: Tile = {
-    label: "PAIR",
-    icon: KeyRound,
-    value: code ? code : finalized ? "paired" : "—",
-    sub: code ? "code rotates" : finalized ? "linked" : "unpaired",
-    severity: code ? "info" : finalized ? "ok" : "idle",
-  };
+  let pair: Tile;
+  if (cloudMode === "local") {
+    pair = {
+      label: "PAIR",
+      icon: KeyRound,
+      value: "n/a",
+      sub: "local mode",
+      severity: "idle",
+    };
+  } else {
+    pair = {
+      label: "PAIR",
+      icon: KeyRound,
+      value: code ? code : finalized ? "paired" : "—",
+      sub: code ? "code rotates" : finalized ? "linked" : "unpaired",
+      severity: code ? "info" : finalized ? "ok" : "idle",
+    };
+  }
 
   return [mav, hw, vid, net, cld, pair];
 }
