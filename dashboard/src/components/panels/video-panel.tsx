@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { useSnapshot } from "@/hooks/use-snapshot";
 import { useStatus } from "@/hooks/use-status";
+import { useWfb } from "@/hooks/use-wfb";
 import { fmtBitrate, fmtNum } from "@/lib/format";
 import { startHls, type HlsSession } from "@/lib/hls";
 import { startWhep, type WhepSession } from "@/lib/whep";
@@ -30,6 +31,7 @@ const WHEP_TIMEOUT_MS = 1200;
 export function VideoPanel() {
   const status = useStatus();
   const snap = useSnapshot();
+  const wfb = useWfb();
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const whepRef = useRef<WhepSession | null>(null);
@@ -48,6 +50,22 @@ export function VideoPanel() {
   const bitrate = v?.bitrate_kbps ?? 0;
   const pipelineState = v?.state ?? "unknown";
   const g2g = v?.glass_to_glass_ms;
+
+  // On the ground-station profile the local video plane is driven by
+  // the WFB-rx pipe into ados-mediamtx-gs. When no WFB packets have
+  // arrived yet the player will spin forever on "connecting (HLS
+  // fallback)…" because MediaMTX has no track to publish. Surface a
+  // clearer message that names the actual upstream condition.
+  const profile = status.data?.profile;
+  const isGround = profile === "ground_station";
+  const wfbPacketsReceived = wfb.data?.packets_received ?? 0;
+  const wfbState = wfb.data?.state ?? "unknown";
+  const wfbChannel = wfb.data?.channel ?? null;
+  const wfbStreaming = wfbPacketsReceived > 0;
+  const waitingForWfb = isGround && !wfbStreaming;
+  const wfbWaitDetail =
+    `drone TX ${wfbState}` +
+    (wfbChannel ? ` on ch ${wfbChannel}` : "");
 
   const pipelineRunning = pipelineState === "running";
   const canStream = pipelineRunning && whepUrl.length > 0;
@@ -183,25 +201,50 @@ export function VideoPanel() {
                 <>
                   <VideoOff className="h-6 w-6 opacity-60" />
                   <div>
-                    {pipelineState === "error"
-                      ? "Pipeline error."
-                      : pipelineState === "starting"
-                        ? "Pipeline starting…"
-                        : !whepUrl
-                          ? "No camera detected."
-                          : "Pipeline idle."}
+                    {waitingForWfb
+                      ? "Waiting for WFB stream from drone."
+                      : pipelineState === "error"
+                        ? "Pipeline error."
+                        : pipelineState === "starting"
+                          ? "Pipeline starting…"
+                          : !whepUrl
+                            ? "No camera detected."
+                            : "Pipeline idle."}
                   </div>
                   <div className="text-[10px] max-w-xs text-center">
-                    Plug in a camera and the agent will publish a WHEP stream
-                    automatically.
+                    {waitingForWfb
+                      ? wfbWaitDetail
+                      : "Plug in a camera and the agent will publish a WHEP stream automatically."}
                   </div>
                 </>
               )}
               {state === "whep-connecting" && (
-                <div>connecting (WebRTC)…</div>
+                <div className="text-center">
+                  {waitingForWfb ? (
+                    <>
+                      Waiting for WFB stream from drone.
+                      <div className="text-[10px] mt-1 opacity-80">
+                        {wfbWaitDetail}
+                      </div>
+                    </>
+                  ) : (
+                    "connecting (WebRTC)…"
+                  )}
+                </div>
               )}
               {state === "hls-connecting" && (
-                <div>connecting (HLS fallback)…</div>
+                <div className="text-center">
+                  {waitingForWfb ? (
+                    <>
+                      Waiting for WFB stream from drone.
+                      <div className="text-[10px] mt-1 opacity-80">
+                        {wfbWaitDetail}
+                      </div>
+                    </>
+                  ) : (
+                    "connecting (HLS fallback)…"
+                  )}
+                </div>
               )}
               {state === "snapshot" && (
                 <div className="absolute bottom-2 left-2 right-2 flex items-center justify-between gap-2 bg-background/80 rounded px-2 py-1">
@@ -222,7 +265,9 @@ export function VideoPanel() {
                 <>
                   <VideoOff className="h-6 w-6 opacity-60" />
                   <div className="text-destructive/90 max-w-md text-center">
-                    {error || "Stream unavailable."}
+                    {waitingForWfb
+                      ? `No video. ${wfbWaitDetail}; WFB-rx received 0 packets.`
+                      : error || "Stream unavailable."}
                   </div>
                   <Button
                     size="sm"
