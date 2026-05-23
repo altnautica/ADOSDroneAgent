@@ -101,7 +101,7 @@ function OfflineHome({ onRetry }: { onRetry: () => void }) {
 
 function DroneHome() {
   return (
-    <div className="space-y-6 max-w-[1400px]">
+    <div className="space-y-4 max-w-[1400px]">
       <header>
         <h1 className="text-xl font-semibold tracking-tight">Home</h1>
         <p className="text-sm text-muted-foreground">
@@ -112,23 +112,21 @@ function DroneHome() {
       <StatusTiles />
       <SparklinesRow />
 
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-stretch">
         <div className="lg:col-span-7 xl:col-span-8">
           <VideoPanel />
         </div>
-        <div className="lg:col-span-5 xl:col-span-4">
+        <div className="lg:col-span-5 xl:col-span-4 flex flex-col gap-4">
           <FcPanel />
-        </div>
-        <div className="lg:col-span-6 xl:col-span-4">
-          <HardwarePanel />
-        </div>
-        <div className="lg:col-span-3 xl:col-span-4">
-          <NetworkPanel />
-        </div>
-        <div className="lg:col-span-3 xl:col-span-4">
           <CloudPanel />
         </div>
-        <div className="lg:col-span-12 xl:col-span-12">
+        <div className="lg:col-span-6">
+          <HardwarePanel />
+        </div>
+        <div className="lg:col-span-6">
+          <NetworkPanel />
+        </div>
+        <div className="lg:col-span-12">
           <ServicesPanel />
         </div>
       </div>
@@ -145,7 +143,7 @@ function GroundHome({ role }: { role: "direct" | "relay" | "receiver" }) {
         : "Direct ground node. Live receive metrics for the drone link.";
 
   return (
-    <div className="space-y-6 max-w-[1400px]">
+    <div className="space-y-4 max-w-[1400px]">
       <header>
         <h1 className="text-xl font-semibold tracking-tight">Home</h1>
         <p className="text-sm text-muted-foreground">{subtitle}</p>
@@ -154,12 +152,13 @@ function GroundHome({ role }: { role: "direct" | "relay" | "receiver" }) {
       <StatusTiles />
       <SparklinesRow />
 
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-stretch">
         <div className="lg:col-span-7 xl:col-span-8">
           <VideoPanel />
         </div>
-        <div className="lg:col-span-5 xl:col-span-4">
+        <div className="lg:col-span-5 xl:col-span-4 flex flex-col gap-4">
           <WfbRxPanel />
+          <CloudPanel />
         </div>
 
         {(role === "relay" || role === "receiver") && (
@@ -173,16 +172,13 @@ function GroundHome({ role }: { role: "direct" | "relay" | "receiver" }) {
           </div>
         )}
 
-        <div className="lg:col-span-6 xl:col-span-4">
+        <div className="lg:col-span-6">
           <HardwarePanel />
         </div>
-        <div className="lg:col-span-3 xl:col-span-4">
+        <div className="lg:col-span-6">
           <NetworkPanel />
         </div>
-        <div className="lg:col-span-3 xl:col-span-4">
-          <CloudPanel />
-        </div>
-        <div className="lg:col-span-12 xl:col-span-12">
+        <div className="lg:col-span-12">
           <ServicesPanel />
         </div>
       </div>
