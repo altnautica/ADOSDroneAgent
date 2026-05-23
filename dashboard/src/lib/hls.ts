@@ -59,10 +59,22 @@ export async function startHls(
     };
   }
 
+  // Standard HLS, not LL-HLS. MediaMTX serves fMP4 with no parts +
+  // no blocking playlist reloads on this rig; turning on
+  // lowLatencyMode here would send _HLS_msn=N&_HLS_part=M query
+  // strings the server doesn't honor and use tighter buffer
+  // thresholds that drain faster than they refill on 1.5 s segments
+  // → player stalls and stops polling while MediaMTX is healthy.
+  // maxBufferLength + liveMaxLatencyDuration give the player room
+  // to absorb a brief network stutter without re-buffering, then
+  // jump forward instead of falling perpetually behind live edge.
   const hls = new HlsCtor({
     enableWorker: true,
-    lowLatencyMode: true,
+    lowLatencyMode: false,
     backBufferLength: 30,
+    maxBufferLength: 30,
+    liveSyncDuration: 4,
+    liveMaxLatencyDuration: 15,
   });
 
   return new Promise<HlsResult>((resolve) => {
@@ -93,13 +105,36 @@ export async function startHls(
     });
 
     hls.on(HlsCtor.Events.ERROR, (_evt, data) => {
-      if (data.fatal) {
-        cleanup();
-        settle({
-          ok: false,
-          error: `HLS error: ${data.details ?? data.type}`,
-        });
+      if (!data.fatal) return;
+      // Recoverable cases: ask HLS.js to retry instead of surfacing
+      // a fatal error to the panel. NETWORK_ERROR covers transient
+      // playlist / segment fetch hiccups; MEDIA_ERROR covers the
+      // BUFFER_STALLED + decode-side resets. Only when neither
+      // recovery works do we fall through to close + settle so the
+      // panel can show the error and try the next transport.
+      switch (data.type) {
+        case HlsCtor.ErrorTypes.NETWORK_ERROR:
+          try {
+            hls.startLoad();
+            return;
+          } catch {
+            /* fall through to error */
+          }
+          break;
+        case HlsCtor.ErrorTypes.MEDIA_ERROR:
+          try {
+            hls.recoverMediaError();
+            return;
+          } catch {
+            /* fall through to error */
+          }
+          break;
       }
+      cleanup();
+      settle({
+        ok: false,
+        error: `HLS error: ${data.details ?? data.type}`,
+      });
     });
 
     hls.attachMedia(videoEl);

@@ -95,15 +95,26 @@ class MediamtxGsManager:
         self._ffmpeg_stderr_task: asyncio.Task | None = None
         self._config_path: str = ""
         self._running = False
-        # TX-liveness tracking. ffmpeg emits `frame=NNNN ...` progress
-        # lines on stderr. The stderr drain parses out N and updates
-        # these two fields; the supervisor in main() compares the wall
-        # time since the last advance against a stall threshold so a
-        # publisher whose downstream RTSP write has wedged (mediamtx
-        # back-pressure / broken pipe build-up) is reaped before the
-        # broken-pipe restart cascade kicks in.
+        # TX-liveness tracking. Two signals:
+        #   1. /proc/<ffmpeg_pid>/io wchar — cumulative write() bytes.
+        #      Advances on every RTSP socket send regardless of how
+        #      chatty ffmpeg's stderr is at the moment. Primary signal.
+        #   2. ffmpeg's `frame=NNNN` stderr progress lines, parsed by
+        #      the stderr drain. Fallback when /proc/<pid>/io is gated
+        #      (kernel.yama.ptrace_scope hardening, rare on the rigs
+        #      we run but kept for resilience).
+        # The supervisor in main() compares the wall time since the
+        # last advance against a stall threshold so a publisher whose
+        # downstream RTSP write has wedged (mediamtx back-pressure /
+        # broken pipe build-up) is reaped before the broken-pipe
+        # restart cascade kicks in. Per Rule 37, a kernel counter
+        # delta is preferred over parsing subprocess stderr because
+        # delayed log flushes can starve the text parser even while
+        # the process is healthy.
         self._ffmpeg_frame_count: int = 0
         self._ffmpeg_last_frame_at: float = 0.0
+        self._ffmpeg_last_wchar: int = -1
+        self._ffmpeg_last_wchar_at: float = 0.0
         # Background task that probes the live RTSP session for SPS +
         # PPS NAL units once after each ffmpeg start and bakes them
         # into the SDP. See _bake_sprop_into_sdp.
@@ -219,6 +230,8 @@ class MediamtxGsManager:
             # whatever the previous process left behind.
             self._ffmpeg_frame_count = 0
             self._ffmpeg_last_frame_at = time.monotonic()
+            self._ffmpeg_last_wchar = -1
+            self._ffmpeg_last_wchar_at = time.monotonic()
             self._ffmpeg_stderr_task = asyncio.create_task(
                 drain_ffmpeg_stderr(self._ffmpeg, self._record_frame)
             )
@@ -272,17 +285,60 @@ class MediamtxGsManager:
         """
         if not self.ffmpeg_alive():
             return False
-        # Cold start: counters were just reset in _start_ffmpeg_ingest.
-        # Give the encoder probe window plus a safety margin before we
-        # consider a zero-frame state a stall. The `-analyzeduration`
-        # ffmpeg flag is set to 20 s above; FFMPEG_FRAME_STALL_SECONDS
-        # is 8 s. Allow up to (probe + stall) before the very first
-        # frame is required.
+        # Primary signal: /proc/<ffmpeg_pid>/io wchar. Advances on
+        # every write() ffmpeg does — including RTSP socket sends —
+        # so a process actively pushing frames is detected as healthy
+        # regardless of whether its stderr progress lines have made
+        # it through the journal buffer yet. Same Rule-37 pattern as
+        # the wfb_tx zombie watchdog: kernel counter delta > userspace
+        # text parse.
+        now = time.monotonic()
+        wchar = self._read_ffmpeg_wchar()
+        if wchar is not None:
+            if self._ffmpeg_last_wchar == -1:
+                self._ffmpeg_last_wchar = wchar
+                self._ffmpeg_last_wchar_at = now
+                # First sample — give it the cold-start grace window
+                # so we don't false-positive before any frame has
+                # been produced.
+                first_frame_grace = 28.0
+                since_start = now - self._ffmpeg_last_frame_at
+                return since_start >= first_frame_grace
+            if wchar > self._ffmpeg_last_wchar:
+                self._ffmpeg_last_wchar = wchar
+                self._ffmpeg_last_wchar_at = now
+                return False
+            return (now - self._ffmpeg_last_wchar_at) >= window_s
+
+        # Fallback: /proc/<pid>/io unreadable. Use the stderr
+        # frame-counter parse. Known false-positive risk on healthy
+        # ffmpeg when the stderr drain is slow to flush; kept here
+        # so a hardened kernel still has some signal.
         first_frame_grace = 28.0
         if self._ffmpeg_frame_count == 0:
-            since_start = time.monotonic() - self._ffmpeg_last_frame_at
+            since_start = now - self._ffmpeg_last_frame_at
             return since_start >= first_frame_grace
-        return (time.monotonic() - self._ffmpeg_last_frame_at) >= window_s
+        return (now - self._ffmpeg_last_frame_at) >= window_s
+
+    def _read_ffmpeg_wchar(self) -> int | None:
+        """Cumulative write() bytes for the live ffmpeg subprocess.
+
+        Returns ``None`` when the process is gone, the file is
+        unreadable, or the kernel gates ``/proc/<pid>/io`` (e.g.,
+        ``kernel.yama.ptrace_scope`` tightened beyond what
+        ``CAP_DAC_OVERRIDE`` covers). Caller falls back to the
+        stderr-frame parser.
+        """
+        if self._ffmpeg is None or self._ffmpeg.pid is None:
+            return None
+        try:
+            with open(f"/proc/{self._ffmpeg.pid}/io") as f:
+                for line in f:
+                    if line.startswith("wchar:"):
+                        return int(line.split(":", 1)[1].strip())
+        except (FileNotFoundError, PermissionError, OSError, ValueError):
+            return None
+        return None
 
     def ffmpeg_frame_count(self) -> int:
         """Latest ``frame=`` value observed in ffmpeg's stderr."""
