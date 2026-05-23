@@ -268,3 +268,47 @@ export interface AgentHeartbeat {
   fc_port?: string;
   fc_baud?: number;
 }
+
+// /api/v1/network/client/* — Wi-Fi client surface
+export interface WifiNetwork {
+  ssid: string;
+  bssid: string;
+  signal: number;
+  security: string;
+  in_use: boolean;
+}
+
+export interface WifiSavedConnection {
+  name: string;
+  type: string;
+  device: string | null;
+  autoconnect: boolean;
+}
+
+export interface WifiStatus {
+  connected: boolean;
+  ssid: string | null;
+  bssid: string;
+  signal: number | null;
+  ip: string | null;
+  gateway: string | null;
+  security: string | null;
+}
+
+export interface WifiJoinResult {
+  joined: boolean;
+  ip: string | null;
+  gateway: string | null;
+  error: string | null;
+}
+
+export interface WifiLeaveResult {
+  left: boolean;
+  previous_ssid: string | null;
+}
+
+export interface WifiForgetResult {
+  forgot: boolean;
+  name: string;
+  error: string | null;
+}
