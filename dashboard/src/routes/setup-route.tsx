@@ -81,7 +81,7 @@ export function SetupRoute() {
     isValid: false,
   });
   const [cloudState, setCloudState] = useState<CloudState>({
-    mode: "cloud",
+    mode: "local",
     isValid: true,
   });
   const [finishState, setFinishState] = useState<FinishState>({

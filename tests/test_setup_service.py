@@ -119,7 +119,7 @@ class _SelfHosted:
 
 
 class _Server:
-    mode = "cloud"
+    mode = "local"
     cloud = _Cloud()
     self_hosted = _SelfHosted()
     mqtt_password = ""

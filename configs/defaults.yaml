@@ -21,7 +21,7 @@ network:
     enabled: true
 
 server:
-  mode: "cloud"
+  mode: "local"
   telemetry_rate: 2
   heartbeat_interval: 5
 
