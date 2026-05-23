@@ -1,11 +1,11 @@
-"""TX-liveness watchdog loop for the ground-side ingest sidecar.
+"""Process-liveness watchdog loop for the ground-side ingest sidecar.
 
-Implements the counter-delta liveness contract: process-liveness alone
-is never proof of work. The supervisor here drives a manager API that
-exposes ``ffmpeg_alive()`` (process-side check) and
-``ffmpeg_frame_stalled()`` (counter-delta check). When either trips,
-the manager's ``restart_ffmpeg()`` is called and a backoff is applied
-so a persistently broken sidecar doesn't spin the supervisor.
+Reaps and restarts the ffmpeg subprocess when it exits unexpectedly.
+The counter-delta stall path is currently disabled — see the comment
+inside ``monitor_ffmpeg`` for the reasons. mediamtx's own broken-pipe
+handling covers the downstream-write-stuck case until a kernel- or
+parser-level liveness signal that doesn't false-positive on steady-
+state RTSP push lands.
 """
 
 from __future__ import annotations
@@ -14,10 +14,7 @@ import asyncio
 import json
 from typing import TYPE_CHECKING
 
-from .ffmpeg_monitor import (
-    FFMPEG_FRAME_STALL_SECONDS,
-    FFMPEG_MONITOR_TICK_SECONDS,
-)
+from .ffmpeg_monitor import FFMPEG_MONITOR_TICK_SECONDS
 
 if TYPE_CHECKING:
     import structlog
@@ -104,28 +101,31 @@ async def monitor_ffmpeg(
                 # ffmpeg doesn't spin the supervisor.
                 backoff = min(backoff * 2, max_backoff)
             continue
-        # ffmpeg is alive but may have a stuck downstream write.
-        # Catch the back-pressure stall before mediamtx's RTSP
-        # write-side breaks the pipe; a clean recycle here costs
-        # ~1 s of viewer freeze vs the ~15-20 s freeze the broken-
-        # pipe -> 5 s backoff -> codec re-probe path produces.
-        if manager.ffmpeg_frame_stalled():
-            slog.warning(
-                "ground_ffmpeg_frame_stalled",
-                last_frame=manager.ffmpeg_frame_count(),
-                stall_window_s=FFMPEG_FRAME_STALL_SECONDS,
-            )
-            ok = await manager.restart_ffmpeg()
-            if ok:
-                slog.info(
-                    "ground_ffmpeg_restarted_after_stall",
-                )
-                backoff = 5.0
-            else:
-                backoff = min(backoff * 2, max_backoff)
-            continue
-        # Healthy tick; reset the backoff so the next outage
-        # restarts quickly.
+        # NB: the in-process frame-stall watchdog is DISABLED here.
+        # Both of its liveness signals false-positive on a healthy
+        # ffmpeg under steady-state RTSP push on this rig:
+        #
+        # 1. /proc/<pid>/io wchar bumps once on the RTSP handshake
+        #    burst, then barely advances for the per-frame TCP
+        #    writes that follow (Linux's io accounting does not
+        #    consistently count small recurring write() calls to
+        #    sockets the way it counts file writes).
+        # 2. The stderr `frame=NNNN` parser sees nothing for many
+        #    seconds because ffmpeg block-buffers its stderr when
+        #    the stream is a subprocess pipe; the 8 s stall window
+        #    expires before the buffer flushes for the first time.
+        #
+        # Result: the watchdog reaped ffmpeg every ~10 s, mediamtx
+        # never accumulated an HLS segment ring, and every segment
+        # request 404'd against a freshly-rebuilt muxer. The user-
+        # visible symptom was "video freezes after a few seconds"
+        # on both HLS and the cascaded WebRTC fallback.
+        #
+        # Until a real liveness signal lands (line-buffered stderr
+        # via stdbuf or -progress -, or a mediamtx-side bytesIn
+        # delta probe), rely on the dead-process branch above plus
+        # mediamtx's own broken-pipe recovery. ffmpeg restarts on
+        # an actual crash or pipe break; that's enough.
         backoff = 5.0
 
 
