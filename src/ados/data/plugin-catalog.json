@@ -5,7 +5,7 @@
     {
       "id": "com.altnautica.battery-health-panel",
       "name": "ADOS Battery Health Panel",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "description": "Cell-level battery diagnostics, predictive time-to-min, and anomaly alerts.",
       "author": "Altnautica",
       "homepage": "https://github.com/altnautica/ADOSExtensions/tree/main/extensions/battery-health-panel",
@@ -13,13 +13,13 @@
       "risk": "low",
       "category": "telemetry",
       "halves": ["gcs"],
-      "download_url": "https://github.com/altnautica/ADOSExtensions/releases/download/battery-health-panel-v1.0.1/com.altnautica.battery-health-panel-1.0.1.signed.adosplug",
-      "archive_sha256": "0cf4af22f4f948e590d3000c5a740899f2b3dabe83a7dc6a4efb4c686c195f46"
+      "download_url": "https://github.com/altnautica/ADOSExtensions/releases/download/battery-health-panel-v1.0.2/com.altnautica.battery-health-panel-1.0.2.signed.adosplug",
+      "archive_sha256": "ac0365e13d405aaa6e54b9b952abc36e4665bd20a344c4893b147508b082c125"
     },
     {
       "id": "com.altnautica.thermal-flir-lepton-usb",
       "name": "ADOS Thermal Camera FLIR Lepton (USB)",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "description": "PureThermal 2 + FLIR Lepton 3.5 driver. Live thermal overlay, palette switching, telemetry.",
       "author": "Altnautica",
       "homepage": "https://github.com/altnautica/ADOSExtensions/tree/main/extensions/thermal-camera-flir-lepton-usb",
@@ -27,13 +27,13 @@
       "risk": "medium",
       "category": "camera",
       "halves": ["agent", "gcs"],
-      "download_url": "https://github.com/altnautica/ADOSExtensions/releases/download/thermal-camera-flir-lepton-usb-v1.0.1/com.altnautica.thermal-flir-lepton-usb-1.0.1.signed.adosplug",
-      "archive_sha256": "788e4d1d5ff64a8e140c7feb7748d30f24c2b58eb84e044bf32c0fc8a65b5c62"
+      "download_url": "https://github.com/altnautica/ADOSExtensions/releases/download/thermal-camera-flir-lepton-usb-v1.0.2/com.altnautica.thermal-flir-lepton-usb-1.0.2.signed.adosplug",
+      "archive_sha256": "a0a791387216a4e13f4b672e9d491d4b59d6daa7cae1586d93c02f5fd1653ea9"
     },
     {
       "id": "com.altnautica.mavlink-gimbal-v2",
       "name": "ADOS MAVLink Gimbal v2 Controller",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "description": "MAVLink Gimbal v2 control. Optional SimpleBGC, Storm32 NT, and Gremsy driver paths.",
       "author": "Altnautica",
       "homepage": "https://github.com/altnautica/ADOSExtensions/tree/main/extensions/mavlink-gimbal-v2",
@@ -41,8 +41,8 @@
       "risk": "medium",
       "category": "gimbal",
       "halves": ["agent", "gcs"],
-      "download_url": "https://github.com/altnautica/ADOSExtensions/releases/download/mavlink-gimbal-v2-v1.0.1/com.altnautica.mavlink-gimbal-v2-1.0.1.signed.adosplug",
-      "archive_sha256": "35818dbde400aff04f92cb3ca859e63a754c8d20205976f4308ed78a7eb269d2"
+      "download_url": "https://github.com/altnautica/ADOSExtensions/releases/download/mavlink-gimbal-v2-v1.0.2/com.altnautica.mavlink-gimbal-v2-1.0.2.signed.adosplug",
+      "archive_sha256": "e98468c86720813db7072a64bbd16e34689c9955d58450184470d820f79331c9"
     },
     {
       "id": "com.altnautica.vision-nav",
