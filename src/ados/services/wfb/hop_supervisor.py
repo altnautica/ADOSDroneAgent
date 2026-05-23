@@ -562,6 +562,31 @@ class HopSupervisor:
         if not (periodic or reactive):
             return
 
+        # Skip the periodic scan when the peer link is healthy.
+        # _pick_target_channel below shells out to `iw <iface> scan`
+        # which locks the radio for ~6 s, dropping the wfb_tx broadcast
+        # frames that are sharing the same wlan0. When the control
+        # plane has decoded a PresenceBeacon in the last minute the
+        # link is fine and the rescan is pure waste, so return early.
+        # Reactive scans (loss / RSSI thresholds tripped) always run
+        # because that's the only way to find a better channel. The
+        # cold-start case (no hop yet executed) also still runs so the
+        # drone can settle on a quiet channel before the ground rig
+        # boots.
+        if periodic and not reactive and self._last_hop_at > 0.0:
+            peer_last_seen = getattr(self._wfb, "_peer_last_seen_unix", None)
+            if (
+                isinstance(peer_last_seen, (int, float))
+                and (time.time() - peer_last_seen) < 60.0
+            ):
+                log.info(
+                    "hop_supervisor_skip_periodic_link_healthy",
+                    peer_last_seen_ago_s=round(
+                        time.time() - peer_last_seen, 1
+                    ),
+                )
+                return
+
         # Confirmation: we got past every gate and are about to attempt
         # a hop. Promoted from no-log so the journal records every
         # periodic-fire decision.
