@@ -11,7 +11,6 @@ lives in per-domain sub-modules alongside this barrel:
 * ``cloud.py`` — cloudflare tunnel + cloud posture + reboot + log stream
 * ``apply.py`` — batch /apply + snapshot/rollback
 * ``_restorers.py`` — per-section restore helpers used by apply
-* ``navigation.py`` — GPS-denied navigation wizard step
 * ``_common.py`` — shared constants + helpers
 * ``_models.py`` — shared request/response models
 
@@ -33,7 +32,6 @@ from . import apply as _apply_mod
 from . import cloud as _cloud_mod
 from . import display as _display_mod
 from . import hardware as _hardware_mod
-from . import navigation as _navigation_mod
 from . import profile as _profile_mod
 from . import state as _state_mod
 from .cloud import _reboot_after_delay  # noqa: F401
@@ -45,6 +43,5 @@ router.include_router(_hardware_mod.router)
 router.include_router(_display_mod.router)
 router.include_router(_cloud_mod.router)
 router.include_router(_apply_mod.router)
-router.include_router(_navigation_mod.router)
 
 __all__ = ["router", "setup_state", "_reboot_after_delay"]
