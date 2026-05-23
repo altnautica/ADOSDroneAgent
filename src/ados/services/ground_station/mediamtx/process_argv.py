@@ -91,18 +91,25 @@ def build_mediamtx_yaml(
         "hlsAddress": ":8888",
         "hlsAllowOrigin": "*",
         "hlsAlwaysRemux": True,
-        # Standard fMP4 HLS (NOT lowLatency). The LL-HLS variant ships
-        # 100ms parts + CAN-BLOCK-RELOAD playlists that browsers cannot
-        # sustain over HTTP/1.1's 6-connection-per-origin pool — the
-        # HLS.js worker saturates connections within a few seconds, the
-        # blocking playlist request stops returning, and the player
-        # freezes while MediaMTX keeps publishing perfectly. Standard
-        # fMP4 with 1s segments + simple non-blocking polling keeps
-        # the player happy at the cost of ~3-5s glass-to-glass latency
-        # (vs LL-HLS's theoretical ~1s). HLS is the freeze-resistant
-        # fallback transport on ground; WebRTC stays available at
-        # /api/whep for operators who need lower latency.
-        "hlsVariant": "fmp4",
+        # MPEG-TS HLS, NOT fmp4 and NOT lowLatency. Variant history
+        # on this rig:
+        #   lowLatency — HLS.js + LL-HLS CAN-BLOCK-RELOAD requests
+        #     saturated the HTTP/1.1 6-connection-per-origin pool and
+        #     the player froze while MediaMTX kept publishing.
+        #   fmp4 — MediaMTX served the playlist + init.mp4 correctly
+        #     but returned HTTP 404 for every segment file (verified
+        #     against /v3/hlsmuxers/list — outboundFramesDiscarded
+        #     stayed at 0 across a 7-minute uptime, meaning zero
+        #     frames ever made it to a served segment). HLS.js
+        #     fetched the playlist, hit 404 on every segment, gave
+        #     up. MediaMTX v1.17.1 fmp4-muxer bug under our config.
+        #   mpegts — original HLS variant, longest-tested code path
+        #     in MediaMTX. Higher latency (~6-10 s glass-to-glass on
+        #     LAN) but actually serves segments. Acceptable tradeoff
+        #     given the alternative is a frozen player.
+        # WebRTC stays available at /<path>/whep for operators who
+        # need <1 s latency. HLS is the freeze-resistant fallback.
+        "hlsVariant": "mpegts",
         "hlsSegmentCount": 7,
         "hlsSegmentDuration": "1s",
         "paths": {

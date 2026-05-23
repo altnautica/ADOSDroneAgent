@@ -31,8 +31,12 @@ export async function startWhep(
     bundlePolicy: "max-bundle",
   });
 
+  // Video-only recvonly. Our stream carries H.264 video only — no
+  // audio track. Offering an audio transceiver makes mediamtx
+  // negotiate an audio m= section in the SDP answer that will never
+  // deliver bytes; that has caused Chrome to mark the whole
+  // PeerConnection as degraded in past sessions.
   pc.addTransceiver("video", { direction: "recvonly" });
-  pc.addTransceiver("audio", { direction: "recvonly" });
 
   const stream = new MediaStream();
   videoEl.srcObject = stream;

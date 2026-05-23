@@ -29,7 +29,13 @@ type PlayerState =
   | "snapshot"
   | "final-error";
 
-const WHEP_TIMEOUT_MS = 1200;
+// Threshold for declaring "transport negotiated but no frame has
+// decoded yet" — keeps the LIVE badge honest. The cascade can take
+// a few seconds on cold-start (mpegts HLS muxer warm-up ~6-10 s;
+// WHEP handshake ~3-5 s on Pi 4B), so we wait at least this long
+// before flipping the badge from "live" to "live · no frames" to
+// surface the truth instead of an optimistic green pill.
+const NO_FRAMES_WARNING_MS = 6000;
 
 export function VideoPanel() {
   const status = useStatus();
@@ -45,6 +51,14 @@ export function VideoPanel() {
   );
   const [error, setError] = useState<string | null>(null);
   const [retryToken, setRetryToken] = useState(0);
+  // Truth signal for the LIVE badge — flips to true on videoEl's
+  // first `loadeddata` event, resets on every cascade restart.
+  // Without this the green pill could show "live · webrtc" while
+  // the video element renders black: startWhep returns ok on
+  // PeerConnection setRemoteDescription, but Chrome's decoder
+  // can still fail to bootstrap if no IDR with SPS/PPS arrives.
+  const [framesArrived, setFramesArrived] = useState(false);
+  const [noFramesWarning, setNoFramesWarning] = useState(false);
 
   const whepUrl = status.data?.video?.whep_url ?? "";
   const hlsUrl = status.data?.video?.hls_url ?? "";
@@ -116,6 +130,8 @@ export function VideoPanel() {
       setState("idle");
       setActiveTransport(null);
       setError(null);
+      setFramesArrived(false);
+      setNoFramesWarning(false);
       return;
     }
 
@@ -127,25 +143,23 @@ export function VideoPanel() {
       setState("connecting");
       setActiveTransport(cascade[0]);
       setError(null);
+      setFramesArrived(false);
+      setNoFramesWarning(false);
 
       for (const transport of cascade) {
         if (cancelled) return;
         setActiveTransport(transport);
         if (transport === "whep") {
-          const result = await new Promise<{
-            ok: boolean;
-            error?: string;
-            session?: WhepSession;
-          }>((resolve) => {
-            const timeoutId = setTimeout(() => {
-              ac.abort();
-              resolve({ ok: false, error: "WHEP handshake timeout" });
-            }, WHEP_TIMEOUT_MS);
-            startWhep(whepUrl, videoRef.current!, ac.signal).then((res) => {
-              clearTimeout(timeoutId);
-              resolve(res);
-            });
-          });
+          // No artificial timeout wrapper. mediamtx's WHEP server
+          // has its own 15 s webrtcHandshakeTimeout. A racy short
+          // timeout (1.2 s in earlier revisions) leaked
+          // PeerConnections when startWhep resolved AFTER the
+          // timeout fired: whepRef.current was never set, close()
+          // was never called, and the live PC kept feeding the
+          // videoEl.srcObject while the cascade moved on to HLS.
+          // ac.signal still aborts on unmount via the cleanup
+          // return below.
+          const result = await startWhep(whepUrl, videoRef.current!, ac.signal);
           if (cancelled) return;
           if (result.ok && result.session) {
             whepRef.current = result.session;
@@ -184,29 +198,78 @@ export function VideoPanel() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [canStream, whepUrl, hlsUrl, retryToken, preferredTransport]);
 
+  // Truth signal: bind to the video element's decode lifecycle so
+  // the LIVE badge cannot lie. loadeddata fires when the first
+  // decoded frame is ready; metadata can be present without
+  // pixels, hence loadeddata not loadedmetadata. Reset by the
+  // cascade effect on every restart.
+  useEffect(() => {
+    const el = videoRef.current;
+    if (!el) return;
+    const onLoadedData = () => setFramesArrived(true);
+    el.addEventListener("loadeddata", onLoadedData);
+    return () => {
+      el.removeEventListener("loadeddata", onLoadedData);
+    };
+  }, []);
+
+  // 6 s after state flips to "live", warn if no frame has yet
+  // decoded. Operator sees "live · no frames" in a warning color
+  // and knows the transport completed handshake but the decoder
+  // never got a usable IDR. Better than a green pill over a
+  // black frame.
+  useEffect(() => {
+    if (state !== "live" || framesArrived) {
+      setNoFramesWarning(false);
+      return;
+    }
+    const t = setTimeout(() => setNoFramesWarning(true), NO_FRAMES_WARNING_MS);
+    return () => clearTimeout(t);
+  }, [state, framesArrived]);
+
   const isLive = state === "live";
+  // Only call it "really live" when frames are actually decoding.
+  // Transports can return ok without delivering pixels (PC
+  // negotiated but no IDR, HLS playlist served but segments 404).
+  const isReallyLive = isLive && framesArrived;
+  const isLivePending = isLive && !framesArrived;
+  // Overlay covers the video element only when the transport
+  // itself isn't yet up. Once state="live", let the video element
+  // show what it has (potentially black if no frames decoded) and
+  // surface the truth via the badge — the overlay div had no
+  // matching inner branch for the live-pending case anyway.
   const showOverlay = !isLive && state !== "snapshot";
   const showSnapshot = state === "snapshot";
 
-  const badgeText = isLive
+  const badgeText = isReallyLive
     ? activeTransport === "hls"
       ? "live · hls"
       : "live · webrtc"
-    : state === "connecting"
-      ? "connecting"
-      : state === "snapshot"
-        ? "snapshot"
-        : state === "final-error"
-          ? "error"
-          : "idle";
-  const badgeClass = isLive
+    : isLivePending && noFramesWarning
+      ? activeTransport === "hls"
+        ? "hls · no frames"
+        : "webrtc · no frames"
+      : isLivePending
+        ? "negotiating"
+        : state === "connecting"
+          ? "connecting"
+          : state === "snapshot"
+            ? "snapshot"
+            : state === "final-error"
+              ? "error"
+              : "idle";
+  const badgeClass = isReallyLive
     ? activeTransport === "hls"
       ? "border-warn/40 text-warn"
       : "border-ok/40 text-ok"
-    : "border-muted-foreground/40 text-muted-foreground/80";
-  const badgeTitle = isLive && activeTransport === "hls"
-    ? "HLS playback. ~3-5 s latency vs WHEP's 100-300 ms; no Chrome-decoder freeze."
-    : undefined;
+    : isLivePending && noFramesWarning
+      ? "border-destructive/40 text-destructive"
+      : "border-muted-foreground/40 text-muted-foreground/80";
+  const badgeTitle = isReallyLive && activeTransport === "hls"
+    ? "HLS playback. ~6-10 s latency vs WHEP's 100-300 ms; no Chrome-decoder freeze."
+    : isLivePending && noFramesWarning
+      ? "Transport handshake completed but no decoded frame yet — likely a codec-parameter or segment-serving issue upstream."
+      : undefined;
 
   return (
     <Card>
