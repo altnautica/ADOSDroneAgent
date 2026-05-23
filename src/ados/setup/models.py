@@ -65,6 +65,10 @@ class NetworkStatus(BaseModel):
     hotspot_enabled: bool = False
     hotspot_ssid: str = ""
     local_ips: list[str] = Field(default_factory=list)
+    uplink_kind: str | None = None
+    wifi_ssid: str | None = None
+    rssi_dbm: int | None = None
+    ip_addresses: dict[str, str] = Field(default_factory=dict)
 
 
 class ServiceState(BaseModel):

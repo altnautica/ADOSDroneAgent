@@ -28,7 +28,11 @@ from ._net_helpers import (
     _first_mavlink_tcp_port,
     _first_mavlink_ws_port,
     _hostname,
+    _local_ip_addresses,
     _local_ips,
+    _probe_active_uplink_kind,
+    _probe_wifi_rssi_dbm,
+    _probe_wifi_ssid,
     _safe_host_for,
 )
 from ._service_inspection import _remote_status, _services
@@ -72,6 +76,9 @@ async def build_setup_status(  # noqa: C901
 
     video = await _video_access(runtime, lan_host)
     remote = _remote_status(config)
+    uplink_kind = _probe_active_uplink_kind()
+    wifi_ssid = _probe_wifi_ssid() if uplink_kind == "wifi" else None
+    rssi_dbm = _probe_wifi_rssi_dbm() if uplink_kind == "wifi" else None
     network = NetworkStatus(
         hostname=_hostname(),
         mdns_host=mdns_host,
@@ -81,6 +88,10 @@ async def build_setup_status(  # noqa: C901
             "{device_id}", config.agent.device_id or "device"
         ),
         local_ips=local_ips,
+        uplink_kind=uplink_kind,
+        wifi_ssid=wifi_ssid,
+        rssi_dbm=rssi_dbm,
+        ip_addresses=_local_ip_addresses(),
     )
     mavlink = MavlinkAccess(
         connected=fc.connected,

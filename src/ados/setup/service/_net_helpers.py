@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import socket
+import subprocess
+from pathlib import Path
 from typing import Any
 
 from ._constants import (
@@ -10,6 +12,12 @@ from ._constants import (
     _USB_GADGET_IP,
     DEFAULT_MAVLINK_TCP_PORT,
 )
+
+# Priority order for the single ``uplink_kind`` field surfaced to the
+# Connectivity tile. Mirrors what an operator cares about first: a wired
+# link beats wireless, and a real WiFi association beats a USB tether
+# fallback. Cellular is last because the modem probe is best-effort.
+_UPLINK_PRIORITY = ("ethernet", "wifi", "usb-tether", "cellular")
 
 
 def _hostname() -> str:
@@ -42,6 +50,145 @@ def _local_ips() -> list[str]:
             pass
 
     return sorted(ips)
+
+
+def _local_ip_addresses() -> dict[str, str]:
+    """Return a {iface: ipv4} map for every non-loopback IPv4 the host owns.
+
+    Same data source as :func:`_local_ips` but keyed so the Connectivity
+    tile can surface ``end0 = 192.168.1.42`` instead of an opaque blob.
+    """
+    addresses: dict[str, str] = {}
+    try:
+        import psutil  # type: ignore[import-untyped]
+
+        for iface, addrs in psutil.net_if_addrs().items():
+            for addr in addrs:
+                if getattr(addr, "family", None) != socket.AF_INET:
+                    continue
+                value = str(getattr(addr, "address", ""))
+                if value and not value.startswith("127."):
+                    addresses[str(iface)] = value
+                    break
+    except Exception:
+        pass
+    return addresses
+
+
+def _probe_active_uplink_kind() -> str | None:
+    """Single-value uplink_kind for the Connectivity tile.
+
+    Re-uses :func:`ados.bootstrap.profile_detect.probe_uplink_kinds` plus
+    the ModemManager probe behind ``_check_uplink`` and reduces the multi
+    answer to one ranked value. Returns ``None`` when nothing is up so the
+    frontend can render the warn-state without inventing a string.
+    """
+    detected: list[str] = []
+    try:
+        from ados.bootstrap.profile_detect import probe_uplink_kinds
+
+        detected.extend(probe_uplink_kinds())
+    except Exception:
+        pass
+    try:
+        from ados.hal.modem import detect_modem
+
+        modem = detect_modem()
+        if modem and str(getattr(modem, "connection_state", "")).lower() in (
+            "connected",
+            "registered",
+        ):
+            detected.append("cellular")
+    except Exception:
+        pass
+
+    normalized = []
+    for kind in detected:
+        token = kind.strip().lower()
+        if token == "wifi" or token == "wi-fi":
+            normalized.append("wifi")
+        elif token == "usb tether" or token == "usb-tether":
+            normalized.append("usb-tether")
+        elif token == "4g" or token == "cellular":
+            normalized.append("cellular")
+        elif token:
+            normalized.append(token)
+
+    for preferred in _UPLINK_PRIORITY:
+        if preferred in normalized:
+            return preferred
+    return normalized[0] if normalized else None
+
+
+def _probe_wifi_ssid() -> str | None:
+    """Best-effort SSID lookup for an associated wlan interface.
+
+    Tries ``iwgetid`` first (`wireless-tools`, almost always present on
+    Linux), falls back to parsing ``iw dev <iface> link`` for any wlan
+    interface in ``/sys/class/net``. Returns ``None`` when no association
+    is found or neither tool is available.
+    """
+    try:
+        result = subprocess.run(
+            ["iwgetid", "-r"],
+            capture_output=True,
+            text=True,
+            timeout=1.5,
+            check=False,
+        )
+        ssid = (result.stdout or "").strip()
+        if ssid:
+            return ssid
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        pass
+
+    try:
+        for wlan_dir in sorted(Path("/sys/class/net").glob("wlan*")):
+            iface = wlan_dir.name
+            try:
+                link = subprocess.run(
+                    ["iw", "dev", iface, "link"],
+                    capture_output=True,
+                    text=True,
+                    timeout=1.5,
+                    check=False,
+                )
+            except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+                continue
+            for line in (link.stdout or "").splitlines():
+                line = line.strip()
+                if line.lower().startswith("ssid:"):
+                    candidate = line.split(":", 1)[1].strip()
+                    if candidate:
+                        return candidate
+    except OSError:
+        pass
+    return None
+
+
+def _probe_wifi_rssi_dbm() -> int | None:
+    """Best-effort RSSI in dBm from ``/proc/net/wireless`` (column 4).
+
+    Returns ``None`` when no associated wlan is found. Values surfaced by
+    the kernel are already in dBm for modern drivers, so a positive
+    intermediate value (older noise-level encoding) is rejected to avoid
+    rendering garbage to the operator.
+    """
+    try:
+        text = Path("/proc/net/wireless").read_text()
+    except OSError:
+        return None
+    for line in text.splitlines()[2:]:
+        parts = line.split()
+        if len(parts) < 4:
+            continue
+        try:
+            value = float(parts[3].rstrip("."))
+        except ValueError:
+            continue
+        if -120.0 <= value <= -10.0:
+            return int(value)
+    return None
 
 
 def _first_mavlink_ws_port(config: Any) -> int:
@@ -156,6 +303,10 @@ def _safe_host_for(host_header: str | None, known_hosts: set[str]) -> str:
 __all__ = [
     "_hostname",
     "_local_ips",
+    "_local_ip_addresses",
+    "_probe_active_uplink_kind",
+    "_probe_wifi_ssid",
+    "_probe_wifi_rssi_dbm",
     "_first_mavlink_ws_port",
     "_first_mavlink_tcp_port",
     "_best_lan_host",

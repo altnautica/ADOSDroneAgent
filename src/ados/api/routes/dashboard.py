@@ -12,6 +12,7 @@ of a blank page when one upstream is misbehaving.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter
@@ -26,6 +27,20 @@ def _safe(fn: Any, default: Any) -> Any:
         return fn()
     except Exception:
         return default
+
+
+def _video_devices_present() -> bool:
+    """Cheap kernel-side check: any V4L2 node enumerated?
+
+    Used by the dashboard snapshot (polled at 1 Hz) to distinguish
+    ``no_camera`` from ``ready`` without paying for a full HAL camera
+    discovery on every tick. The rich camera detail still comes from
+    ``hardware_check`` in the setup-status path.
+    """
+    try:
+        return any(Path("/sys/class/video4linux").iterdir())
+    except OSError:
+        return False
 
 
 def _video_slice(app: Any) -> dict[str, Any]:
@@ -44,7 +59,22 @@ def _video_slice(app: Any) -> dict[str, Any]:
                 "bitrate_kbps": _safe(lambda: int(cfg.encoder.bitrate_kbps or 0), 0),
             }
         )
-    state.setdefault("state", "unknown")
+
+    mediamtx_alive = False
+    try:
+        from ados.api.routes.video._common import mediamtx_whep_alive_sync
+
+        mediamtx_alive = mediamtx_whep_alive_sync()
+    except Exception:
+        mediamtx_alive = False
+
+    if mediamtx_alive:
+        state["state"] = "running"
+    elif _video_devices_present():
+        state["state"] = "ready"
+    else:
+        state["state"] = "no_camera"
+
     state.setdefault("glass_to_glass_ms", None)
     return state
 

@@ -86,11 +86,18 @@ export function ConnectivityStep() {
     },
     {
       label: "Video",
-      state: video?.state === "running" ? "ok" : "warn",
+      state:
+        video?.state === "running" || video?.state === "ready"
+          ? "ok"
+          : "warn",
       detail: video
         ? video.state === "running"
           ? `${video.codec || "h264"} ${video.width}×${video.height} @ ${fmtBitrate(video.bitrate_kbps)}`
-          : `${video.state} — pipeline not streaming yet`
+          : video.state === "ready"
+            ? `${video.codec || "h264"} ${video.width}×${video.height} — ready to stream`
+            : video.state === "no_camera"
+              ? "no camera detected"
+              : `${video.state} — pipeline not streaming yet`
         : "loading…",
     },
     {
@@ -100,7 +107,15 @@ export function ConnectivityStep() {
           ? "ok"
           : "warn",
       detail: network
-        ? network.uplink_kind || network.wifi_ssid || "no uplink yet"
+        ? network.uplink_kind === "wifi" && network.wifi_ssid
+          ? `WiFi · ${network.wifi_ssid}`
+          : network.uplink_kind === "ethernet"
+            ? "ethernet"
+            : network.uplink_kind === "cellular"
+              ? "cellular"
+              : network.uplink_kind === "usb-tether"
+                ? "USB tether"
+                : network.uplink_kind || network.wifi_ssid || "no uplink yet"
         : "loading…",
     },
   ];
