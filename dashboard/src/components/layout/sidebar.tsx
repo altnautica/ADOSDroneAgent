@@ -50,13 +50,14 @@ function droneItems(): NavItem[] {
   return [
     { to: "/telemetry", label: "Telemetry", icon: Radio, enabled: true },
     { to: "/video", label: "Video", icon: Video, enabled: true },
+    { to: "/transmit", label: "WFB Transmit", icon: Antenna, enabled: true },
     { to: "/ros", label: "ROS", icon: Bot, enabled: true },
   ];
 }
 
 function groundItems(role: GroundRole): NavItem[] {
   const items: NavItem[] = [
-    { to: "/receive", label: "Receive", icon: Antenna, enabled: true },
+    { to: "/receive", label: "WFB Receive", icon: Antenna, enabled: true },
     { to: "/io", label: "Display & Joystick", icon: Gamepad2, enabled: true },
   ];
   if (role === "relay" || role === "receiver") {

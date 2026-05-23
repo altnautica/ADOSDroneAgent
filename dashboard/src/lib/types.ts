@@ -312,3 +312,37 @@ export interface WifiForgetResult {
   name: string;
   error: string | null;
 }
+
+// /api/wfb — live WFB-tx / WFB-rx runtime state
+export interface WfbStatus {
+  state: string;
+  interface: string;
+  channel: number;
+  frequency_mhz: number | null;
+  bandwidth_mhz: number | null;
+  adapter: {
+    driver: string;
+    chipset: string;
+    supports_monitor: boolean;
+  };
+  rssi_dbm: number | null;
+  noise_dbm: number | null;
+  snr_db: number | null;
+  packets_received: number;
+  packets_lost: number;
+  loss_percent: number;
+  fec_recovered: number;
+  fec_failed: number;
+  bitrate_kbps: number;
+  restart_count: number;
+  samples: number;
+  tx_power_dbm: number;
+  tx_power_max_dbm: number;
+  topology: string;
+  mcs_index: number;
+  regulatory_domain: string;
+  rssi_min?: number | null;
+  rssi_max?: number | null;
+  profile?: string;
+  bitrate_mbps?: number;
+}

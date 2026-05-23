@@ -8,9 +8,9 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { useWfb } from "@/hooks/use-wfb";
-import { fmtBitrate, fmtNum, fmtRssi } from "@/lib/format";
+import { fmtBitrate, fmtNum } from "@/lib/format";
 
-export function WfbRxPanel() {
+export function WfbTxPanel() {
   const wfb = useWfb();
   const w = wfb.data;
 
@@ -18,19 +18,17 @@ export function WfbRxPanel() {
   const iface = w?.interface ?? "";
   const channel = w?.channel ?? null;
   const freq = w?.frequency_mhz ?? null;
-  const rssi = w?.rssi_dbm ?? null;
-  const snr = w?.snr_db ?? null;
-  const noise = w?.noise_dbm ?? null;
-  const loss = typeof w?.loss_percent === "number" ? w.loss_percent : null;
-  const fecRecovered = w?.fec_recovered ?? null;
-  const fecFailed = w?.fec_failed ?? null;
+  const bw = w?.bandwidth_mhz ?? null;
+  const txPower = w?.tx_power_dbm ?? null;
+  const txPowerMax = w?.tx_power_max_dbm ?? null;
+  const mcs = w?.mcs_index ?? null;
+  const regDomain = w?.regulatory_domain ?? "";
   const bitrate = w?.bitrate_kbps ?? 0;
+  const packetsSent = w?.packets_received ?? 0; // tx adapter reports its own packet counter on receive too
   const restarts = w?.restart_count ?? 0;
+
   const adapterMissing =
     state === "disabled" || (state === "error" && !iface);
-
-  const lossSeverity =
-    loss == null ? null : loss < 1 ? "ok" : loss < 5 ? "warn" : "err";
 
   const badge = stateBadge(state);
 
@@ -39,7 +37,7 @@ export function WfbRxPanel() {
       <CardHeader>
         <CardTitle className="flex items-center gap-2">
           <Antenna className="h-3.5 w-3.5" />
-          WFB Receive
+          WFB Transmit
           {badge && (
             <Badge variant={badge.variant} className="font-normal ml-auto">
               {badge.label}
@@ -50,9 +48,9 @@ export function WfbRxPanel() {
       <CardContent>
         {adapterMissing ? (
           <p className="text-xs text-muted-foreground">
-            WFB-rx is not running. Plug in an RTL8812EU dongle and set the
-            channel in Settings — the agent starts the receive pipeline
-            automatically when an adapter and channel are both present.
+            WFB-tx is not running. Plug in an RTL8812EU dongle and set the
+            channel + tx power in Settings — the agent starts the
+            transmit pipeline automatically when both are present.
           </p>
         ) : (
           <div className="grid grid-cols-2 gap-x-4 gap-y-1.5 text-sm">
@@ -62,49 +60,49 @@ export function WfbRxPanel() {
             <div className="text-xs text-muted-foreground">channel</div>
             <div className="font-mono">
               {channel != null
-                ? `${channel}${freq != null ? ` (${fmtNum(freq, 0)} MHz)` : ""}`
+                ? `${channel}${freq ? ` (${fmtNum(freq, 0)} MHz)` : ""}`
                 : "—"}
             </div>
 
-            <div className="text-xs text-muted-foreground">rssi</div>
-            <div className="font-mono">{fmtRssi(rssi)}</div>
-
-            {snr != null && (
+            {bw != null && bw > 0 && (
               <>
-                <div className="text-xs text-muted-foreground">snr</div>
-                <div className="font-mono">{fmtNum(snr, 1)} dB</div>
+                <div className="text-xs text-muted-foreground">bandwidth</div>
+                <div className="font-mono">{fmtNum(bw, 0)} MHz</div>
               </>
             )}
 
-            {noise != null && (
+            <div className="text-xs text-muted-foreground">tx power</div>
+            <div className="font-mono">
+              {txPower != null
+                ? `${fmtNum(txPower, 0)} dBm${
+                    txPowerMax != null ? ` / ${fmtNum(txPowerMax, 0)}` : ""
+                  }`
+                : "—"}
+            </div>
+
+            {mcs != null && (
               <>
-                <div className="text-xs text-muted-foreground">noise</div>
-                <div className="font-mono">{fmtRssi(noise)}</div>
+                <div className="text-xs text-muted-foreground">MCS</div>
+                <div className="font-mono">{mcs}</div>
+              </>
+            )}
+
+            {regDomain && (
+              <>
+                <div className="text-xs text-muted-foreground">domain</div>
+                <div className="font-mono">{regDomain}</div>
               </>
             )}
 
             <div className="text-xs text-muted-foreground">bitrate</div>
             <div className="font-mono">{fmtBitrate(bitrate)}</div>
 
-            <div className="text-xs text-muted-foreground">packet loss</div>
-            <div
-              className={`font-mono ${
-                lossSeverity === "err"
-                  ? "text-destructive"
-                  : lossSeverity === "warn"
-                    ? "text-warn"
-                    : ""
-              }`}
-            >
-              {loss != null ? `${fmtNum(loss, 1)}%` : "—"}
-            </div>
-
-            <div className="text-xs text-muted-foreground">FEC</div>
-            <div className="font-mono text-xs">
-              {fecRecovered != null || fecFailed != null
-                ? `${fecRecovered ?? 0} ok · ${fecFailed ?? 0} fail`
-                : "—"}
-            </div>
+            {packetsSent > 0 && (
+              <>
+                <div className="text-xs text-muted-foreground">packets</div>
+                <div className="font-mono">{packetsSent.toLocaleString()}</div>
+              </>
+            )}
 
             {restarts > 0 && (
               <>

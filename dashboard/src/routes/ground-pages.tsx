@@ -27,7 +27,7 @@ function PageShell({ title, blurb, children }: ShellProps) {
 export function ReceiveRoute() {
   return (
     <PageShell
-      title="Receive"
+      title="WFB Receive"
       blurb="WFB-rx adapter, channel, link quality, and FEC counters."
     >
       <WfbRxPanel />

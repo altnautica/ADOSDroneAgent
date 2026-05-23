@@ -10,6 +10,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { ComingSoonRoute } from "@/routes/coming-soon";
 import { DiagnosticsRoute } from "@/routes/diagnostics-route";
+import { TransmitRoute } from "@/routes/drone-pages";
 import {
   MeshRoute,
   ReceiveRoute,
@@ -126,6 +127,14 @@ export function App() {
                   element={
                     <ProfileGate allow={["drone"]}>
                       <VideoRoute />
+                    </ProfileGate>
+                  }
+                />
+                <Route
+                  path="/transmit"
+                  element={
+                    <ProfileGate allow={["drone"]}>
+                      <TransmitRoute />
                     </ProfileGate>
                   }
                 />

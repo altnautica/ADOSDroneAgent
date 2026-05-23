@@ -12,6 +12,7 @@ import { SparklinesRow } from "@/components/panels/sparklines-row";
 import { StatusTiles } from "@/components/panels/status-tiles";
 import { VideoPanel } from "@/components/panels/video-panel";
 import { WfbRxPanel } from "@/components/panels/wfb-rx-panel";
+import { WfbTxPanel } from "@/components/panels/wfb-tx-panel";
 import { Button } from "@/components/ui/button";
 import { useCloudPostureNudge } from "@/hooks/use-cloud-posture-nudge";
 import { useHeartbeat } from "@/hooks/use-heartbeat";
@@ -118,6 +119,7 @@ function DroneHome() {
         </div>
         <div className="lg:col-span-5 xl:col-span-4 flex flex-col gap-4">
           <FcPanel />
+          <WfbTxPanel />
           <CloudPanel />
         </div>
         <div className="lg:col-span-6">
