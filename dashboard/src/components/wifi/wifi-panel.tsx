@@ -101,7 +101,35 @@ export function WifiPanel() {
     return map;
   }, [saved.data]);
 
-  const networks = useMemo(() => scan.data?.networks ?? [], [scan.data]);
+  const networks = useMemo(() => {
+    // Collapse same-SSID rows that nmcli emits one per BSSID. Keep the
+    // strongest signal as the surviving row, and inherit `in_use` if
+    // any of the duplicates is the currently-connected BSSID. Hidden
+    // networks (empty SSID) pass through unchanged because they can't
+    // be deduplicated by name.
+    const all = scan.data?.networks ?? [];
+    const grouped = new Map<string, WifiNetwork>();
+    const hidden: WifiNetwork[] = [];
+    for (const net of all) {
+      if (!net.ssid) {
+        hidden.push(net);
+        continue;
+      }
+      const prior = grouped.get(net.ssid);
+      if (!prior) {
+        grouped.set(net.ssid, net);
+        continue;
+      }
+      const strongerSignal = net.signal > prior.signal ? net : prior;
+      grouped.set(net.ssid, {
+        ...strongerSignal,
+        in_use: prior.in_use || net.in_use,
+      });
+    }
+    const merged = [...grouped.values(), ...hidden];
+    merged.sort((a, b) => b.signal - a.signal);
+    return merged;
+  }, [scan.data]);
   const savedNetworks = saved.data?.connections ?? [];
   const currentStatus = status.data ?? null;
   const isConnected = !!currentStatus?.connected;
@@ -213,8 +241,15 @@ export function WifiPanel() {
 
           {/* Nearby networks */}
           <div className="space-y-2">
-            <div className="text-xs uppercase tracking-wider text-muted-foreground">
-              Nearby networks
+            <div className="flex items-center justify-between gap-2">
+              <div className="text-xs uppercase tracking-wider text-muted-foreground">
+                Nearby networks
+              </div>
+              {networks.length > 0 && (
+                <div className="text-[11px] text-muted-foreground font-mono">
+                  {networks.length} found
+                </div>
+              )}
             </div>
             {networks.length === 0 && !scanning && (
               <div className="rounded-md border border-dashed border-border px-3 py-6 text-center text-xs text-muted-foreground">
@@ -222,7 +257,7 @@ export function WifiPanel() {
               </div>
             )}
             {networks.length > 0 && (
-              <div className="rounded-md border border-border divide-y divide-border">
+              <div className="rounded-md border border-border max-h-96 overflow-y-auto divide-y divide-border">
                 {networks.map((n) => (
                   <WifiNetworkRow
                     key={`${n.ssid}-${n.bssid}`}
