@@ -492,6 +492,65 @@ class WifiClientManager:
             })
         return results
 
+    async def forget(self, connection_name: str) -> dict:
+        """Delete a saved NetworkManager connection by name.
+
+        Removes the stored credentials and the autoconnect profile so the
+        agent will not silently rejoin the network on reboot. The active
+        link is dropped as a side effect when the deleted profile is the
+        currently-active one.
+        """
+        if not connection_name or not isinstance(connection_name, str):
+            return {"forgot": False, "name": "", "error": "name_required"}
+        rc, out, err = await _run(
+            ["nmcli", "connection", "delete", connection_name],
+            timeout=10,
+        )
+        if rc != 0:
+            return {
+                "forgot": False,
+                "name": connection_name,
+                "error": (err or out).strip() or "nmcli_failed",
+            }
+        log.info("wifi_connection_forgotten", name=connection_name)
+        return {"forgot": True, "name": connection_name, "error": None}
+
+    async def set_autoconnect(
+        self, connection_name: str, enabled: bool
+    ) -> dict:
+        """Toggle the NetworkManager autoconnect flag for a saved profile."""
+        if not connection_name or not isinstance(connection_name, str):
+            return {
+                "autoconnect": False,
+                "name": "",
+                "error": "name_required",
+            }
+        rc, out, err = await _run(
+            [
+                "nmcli", "connection", "modify",
+                connection_name,
+                "connection.autoconnect",
+                "yes" if enabled else "no",
+            ],
+            timeout=10,
+        )
+        if rc != 0:
+            return {
+                "autoconnect": bool(enabled),
+                "name": connection_name,
+                "error": (err or out).strip() or "nmcli_failed",
+            }
+        log.info(
+            "wifi_autoconnect_updated",
+            name=connection_name,
+            enabled=bool(enabled),
+        )
+        return {
+            "autoconnect": bool(enabled),
+            "name": connection_name,
+            "error": None,
+        }
+
     # -------------------- background poll --------------------
 
     async def _poll_loop(self, interval_s: float = 10.0) -> None:

@@ -23,6 +23,7 @@ from ados.api.routes import (
     fleet,
     ground_station,
     logs,
+    network,
     ota,
     pairing,
     params,
@@ -132,6 +133,7 @@ def create_app(agent: Any) -> FastAPI:
     app.include_router(fleet.router, prefix="/api")
     app.include_router(vision_models.router, prefix="/api")
     app.include_router(ground_station.router, prefix="/api")
+    app.include_router(network.router, prefix="/api")
     # CAN passthrough surface reserved for a future agent-side bridge.
     # Today the route is a 501 stub; the MAVLink relay covers the
     # common case via CAN_FRAME / CANFD_FRAME / CAN_FILTER_MODIFY
