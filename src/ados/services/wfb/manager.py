@@ -891,6 +891,62 @@ class WfbManager:
             except OSError:
                 pass
 
+    async def _stats_publish_loop(self) -> None:
+        """Periodically mirror the current WFB state to wfb-stats.json.
+
+        The ``_read_rx_output`` loop already writes the stats file each
+        time wfb_rx emits a line, but on the drone the bound wfb_rx is
+        the control plane and stays silent until the ground starts
+        acknowledging the pair. Without an independent heartbeat the
+        REST handler at ``/api/wfb`` falls back to the all-zero
+        skeleton block and the dashboard ``WfbTxPanel`` reports the
+        link as ``disabled`` even when wfb_tx is broadcasting at 4
+        Mbps. Persist the current monitor snapshot every 2 s with the
+        TX-side ``extra`` so consumers see the truth.
+
+        State derivation prefers what the operator cares about: when
+        wfb_tx is alive and the radio's tx_bytes counter has moved
+        recently, report ``active`` (RF is leaving the antenna). When
+        wfb_tx is alive but no bytes are crossing yet, report
+        ``connecting``. ``disabled`` is reserved for the case where
+        the subprocess has actually exited.
+        """
+        from ados.core.paths import WFB_STATS_JSON
+
+        while self._running:
+            tx_alive = (
+                self._tx_proc is not None and self._tx_proc.returncode is None
+            )
+            if not tx_alive:
+                derived_state = "disabled"
+            elif (
+                self._last_tx_byte_value > 0
+                and time.monotonic() - self._last_tx_byte_change_at < 5.0
+            ):
+                derived_state = "active"
+            else:
+                derived_state = "connecting"
+
+            try:
+                self._monitor.persist_to_file(
+                    WFB_STATS_JSON,
+                    extra={
+                        "interface": self._interface or "",
+                        "channel": int(self._channel or 0),
+                        "tx_power_dbm": self._effective_tx_power_dbm,
+                        "topology": getattr(self._config, "topology", None),
+                        "mcs_index": getattr(self._config, "mcs_index", None),
+                        "profile": "drone",
+                        "state": derived_state,
+                    },
+                )
+            except Exception as exc:
+                log.debug("wfb_stats_heartbeat_failed", error=str(exc))
+            try:
+                await asyncio.sleep(2.0)
+            except asyncio.CancelledError:
+                return
+
     async def _tx_health_watchdog(self) -> None:
         """Catch wfb_tx zombies (process alive, radio iface tx_bytes flat).
 
@@ -1215,6 +1271,14 @@ class WfbManager:
                 tasks.append(asyncio.create_task(self._tx_health_watchdog()))
                 tasks.append(asyncio.create_task(self._presence_emit_loop()))
                 tasks.append(asyncio.create_task(self._control_plane_listener()))
+                # Periodic stats heartbeat so /api/wfb has fresh data
+                # even when wfb_rx never produces a line (drone-side
+                # control plane stays silent until ground starts
+                # ACKing). Without this the REST handler falls back
+                # to the "disabled" skeleton and the dashboard panel
+                # claims the link is down while wfb_tx is actively
+                # broadcasting at 4 Mbps.
+                tasks.append(asyncio.create_task(self._stats_publish_loop()))
             if self._rx_proc is not None and self._rx_proc.returncode is None:
                 tasks.append(asyncio.create_task(self._rx_proc.wait()))
 
