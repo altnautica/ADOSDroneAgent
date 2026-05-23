@@ -13,6 +13,7 @@ from fastapi import APIRouter, Request
 from ados.api.deps import get_agent_app
 
 from ._common import (
+    _MEDIAMTX_HLS_PORT,
     _MEDIAMTX_WEBRTC_PORT,
     _empty_recording_block,
     _get_video_pipeline,
@@ -76,12 +77,14 @@ async def get_video_status(request: Request):
         if mtx and mtx.get("ready"):
             host = request.headers.get("host", "localhost").split(":")[0]
             whep_url = f"http://{host}:{_MEDIAMTX_WEBRTC_PORT}/main/whep"
+            hls_url = f"http://{host}:{_MEDIAMTX_HLS_PORT}/main/index.m3u8"
             return {
                 "state": "running",
                 "cameras": cameras_payload,
                 "recorder": {"recording": False, "current_path": "", "recordings_dir": ""},
                 "mediamtx": mtx,
                 "whep_url": whep_url,
+                "hls_url": hls_url,
                 "dependencies": deps_dict,
                 **recording_block,
             }
@@ -91,19 +94,26 @@ async def get_video_status(request: Request):
             "recorder": {"recording": False, "current_path": "", "recordings_dir": ""},
             "mediamtx": {"running": False},
             "whep_url": None,
+            "hls_url": None,
             "dependencies": deps_dict,
             **recording_block,
         }
 
     status = pipeline.get_status()
 
-    # Construct WHEP URL from mediamtx state
+    # Construct WHEP + HLS URLs from mediamtx state. The dashboard
+    # picks between them based on profile; ground prefers HLS to
+    # avoid the Chrome WebRTC decoder-sync freeze on the WFB ingest
+    # path, drone prefers WHEP for the local-camera low-latency
+    # path.
     if status.get("mediamtx", {}).get("running"):
-        webrtc_port = status["mediamtx"].get("webrtc_port", 8889)
+        webrtc_port = status["mediamtx"].get("webrtc_port", _MEDIAMTX_WEBRTC_PORT)
         host = request.headers.get("host", "localhost").split(":")[0]
         status["whep_url"] = f"http://{host}:{webrtc_port}/main/whep"
+        status["hls_url"] = f"http://{host}:{_MEDIAMTX_HLS_PORT}/main/index.m3u8"
     else:
         status["whep_url"] = None
+        status["hls_url"] = None
 
     status["dependencies"] = deps_dict
     # Surface the recording state at the top level so the LCD video page

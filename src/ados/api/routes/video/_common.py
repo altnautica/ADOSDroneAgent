@@ -19,6 +19,7 @@ from ados.api.deps import get_agent_app
 # mediamtx default ports — must match the values in mediamtx.py.
 _MEDIAMTX_API_PORT = 9997
 _MEDIAMTX_WEBRTC_PORT = 8889
+_MEDIAMTX_HLS_PORT = 8888
 
 # Serializes /api/video/record/{start,stop} so two simultaneous toggles
 # from the LCD page and the GCS cannot interleave and leave the
@@ -276,6 +277,7 @@ def mediamtx_track_info_sync() -> dict | None:
 __all__ = [
     "_MEDIAMTX_API_PORT",
     "_MEDIAMTX_WEBRTC_PORT",
+    "_MEDIAMTX_HLS_PORT",
     "_RECORD_LOCK",
     "CameraSwitchBody",
     "VideoConfigBody",
