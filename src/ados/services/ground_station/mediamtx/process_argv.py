@@ -91,10 +91,20 @@ def build_mediamtx_yaml(
         "hlsAddress": ":8888",
         "hlsAllowOrigin": "*",
         "hlsAlwaysRemux": True,
-        "hlsVariant": "lowLatency",
+        # Standard fMP4 HLS (NOT lowLatency). The LL-HLS variant ships
+        # 100ms parts + CAN-BLOCK-RELOAD playlists that browsers cannot
+        # sustain over HTTP/1.1's 6-connection-per-origin pool — the
+        # HLS.js worker saturates connections within a few seconds, the
+        # blocking playlist request stops returning, and the player
+        # freezes while MediaMTX keeps publishing perfectly. Standard
+        # fMP4 with 1s segments + simple non-blocking polling keeps
+        # the player happy at the cost of ~3-5s glass-to-glass latency
+        # (vs LL-HLS's theoretical ~1s). HLS is the freeze-resistant
+        # fallback transport on ground; WebRTC stays available at
+        # /api/whep for operators who need lower latency.
+        "hlsVariant": "fmp4",
         "hlsSegmentCount": 7,
-        "hlsSegmentDuration": "200ms",
-        "hlsPartDuration": "100ms",
+        "hlsSegmentDuration": "1s",
         "paths": {
             # ffmpeg pushes RTSP here with -c copy from udp://:5600
             GROUND_RTSP_PATH: {"source": "publisher"},
@@ -180,6 +190,19 @@ def build_ffmpeg_ingest_argv(
         "-f", "sdp",
         "-i", str(sdp_path),
         "-c:v", "copy",
+        # Re-inject SPS/PPS NAL units inline before every IDR frame.
+        # The drone encoder emits parameter sets only at stream start,
+        # so a WebRTC depacketizer that loses sync after a transient
+        # RTP packet loss can never recover — Chrome's libwebrtc
+        # freezes on the last decoded frame indefinitely while the
+        # PeerConnection stays "connected". With dump_extra=freq=
+        # keyframe, ffmpeg writes the SPS+PPS pair before every IDR
+        # (typical interval ~1s at our 30 fps + GOP 15), so the
+        # depacketizer re-bootstraps the decoder context on the next
+        # keyframe and resumes playback. Zero re-encoding cost (the
+        # bsf operates on the NAL unit stream, not YUV pixels), zero
+        # added latency.
+        "-bsf:v", "dump_extra=freq=keyframe",
         # NO h264_mp4toannexb here: rtph264depay already emits
         # Annex-B (start-code-prefixed) NAL units; the bsf was a
         # leftover from the old `-f h264 -i udp://` path that
