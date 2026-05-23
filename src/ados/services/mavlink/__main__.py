@@ -111,6 +111,24 @@ async def main() -> None:
             )
             payload["param_cached_count"] = cached_count
             payload["param_expected_count"] = expected_count
+            # Ship the actual params dict too so the API process can serve
+            # /api/params without having direct access to the cache. The
+            # cache lives in this process; the API service polls the IPC
+            # state at 10 Hz so the dashboard sees up-to-date values.
+            params_blob: dict[str, float] = {}
+            if pc is not None:
+                try:
+                    params_blob = pc.get_all()
+                except Exception:
+                    params_blob = {}
+            else:
+                vs_params = getattr(vehicle_state, "params", None)
+                if isinstance(vs_params, dict):
+                    params_blob = {
+                        k: float(v) for k, v in vs_params.items()
+                        if isinstance(v, (int, float))
+                    }
+            payload["params"] = params_blob
             state_ipc.publish(payload)
             await asyncio.sleep(0.1)  # 10Hz
 

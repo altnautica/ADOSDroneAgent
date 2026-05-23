@@ -119,8 +119,9 @@ async def get_all_params():
         ipc = {}
     cached = int(ipc.get("param_cached_count", 0) or 0)
     expected = int(ipc.get("param_expected_count", 0) or 0)
+    ipc_params = ipc.get("params") if isinstance(ipc.get("params"), dict) else {}
     return {
-        "params": {},
+        "params": ipc_params,
         "count": expected or cached,
         "cached": cached,
         **flags,
