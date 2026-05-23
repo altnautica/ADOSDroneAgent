@@ -1,5 +1,5 @@
 import { Image as ImageIcon, Video, VideoOff } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -9,20 +9,23 @@ import { useWfb } from "@/hooks/use-wfb";
 import { fmtBitrate, fmtNum } from "@/lib/format";
 import { startHls, type HlsSession } from "@/lib/hls";
 import { startWhep, type WhepSession } from "@/lib/whep";
+import { cn } from "@/lib/utils";
 
-// State machine: try WHEP first; on failure (~1.2 s timeout or error),
-// try HLS; if HLS also fails, fall back to a still snapshot. Final-error
-// only when nothing works AND the pipeline says it's running — when
-// the pipeline is idle the panel shows the friendly empty state instead.
-// The aggressive timeout cuts the blank-screen window on networks that
-// drop UDP (the WHEP handshake's primary failure mode).
+// Two transports + a snapshot fallback. The order of attempts is
+// profile-driven and overridable from the UI:
+//
+//   ground_station → HLS first (~3-5 s latency, no freeze)
+//   drone           → WHEP first (~100-300 ms latency, local camera)
+//
+// HLS-first on ground was a deliberate trade-off: the WFB-rx → ffmpeg
+// → MediaMTX path drops WHEP into a Chrome decoder-sync freeze after
+// a few seconds in the field. HLS.js re-fetches segments on stutter
+// and never gets stuck. WHEP stays selectable for low-latency demos.
+type Transport = "whep" | "hls";
 type PlayerState =
   | "idle"
-  | "whep-connecting"
-  | "whep-live"
-  | "whep-failed"
-  | "hls-connecting"
-  | "hls-live"
+  | "connecting"
+  | "live"
   | "snapshot"
   | "final-error";
 
@@ -37,6 +40,9 @@ export function VideoPanel() {
   const whepRef = useRef<WhepSession | null>(null);
   const hlsRef = useRef<HlsSession | null>(null);
   const [state, setState] = useState<PlayerState>("idle");
+  const [activeTransport, setActiveTransport] = useState<Transport | null>(
+    null,
+  );
   const [error, setError] = useState<string | null>(null);
   const [retryToken, setRetryToken] = useState(0);
 
@@ -51,13 +57,23 @@ export function VideoPanel() {
   const pipelineState = v?.state ?? "unknown";
   const g2g = v?.glass_to_glass_ms;
 
-  // On the ground-station profile the local video plane is driven by
-  // the WFB-rx pipe into ados-mediamtx-gs. When no WFB packets have
-  // arrived yet the player will spin forever on "connecting (HLS
-  // fallback)…" because MediaMTX has no track to publish. Surface a
-  // clearer message that names the actual upstream condition.
   const profile = status.data?.profile;
   const isGround = profile === "ground_station";
+
+  // Profile-driven default. Operator can override via the Transport
+  // chip; the override persists in component state until page
+  // reload (no localStorage — most operators want the sensible
+  // default on every reload).
+  const defaultTransport: Transport = isGround ? "hls" : "whep";
+  const [preferredTransport, setPreferredTransport] = useState<Transport>(
+    defaultTransport,
+  );
+  // Keep the preference aligned with the profile when status loads
+  // after first render.
+  useEffect(() => {
+    setPreferredTransport(defaultTransport);
+  }, [defaultTransport]);
+
   const wfbPacketsReceived = wfb.data?.packets_received ?? 0;
   const wfbState = wfb.data?.state ?? "unknown";
   const wfbChannel = wfb.data?.channel ?? null;
@@ -68,7 +84,22 @@ export function VideoPanel() {
     (wfbChannel ? ` on ch ${wfbChannel}` : "");
 
   const pipelineRunning = pipelineState === "running";
-  const canStream = pipelineRunning && whepUrl.length > 0;
+  const haveAnyUrl = whepUrl.length > 0 || hlsUrl.length > 0;
+  const canStream = pipelineRunning && haveAnyUrl;
+
+  // Compute the cascade order based on preferred transport, dropping
+  // any leg whose URL is empty. Snapshot is always the final fallback.
+  const cascade = useMemo(() => {
+    const order: Transport[] = [];
+    if (preferredTransport === "hls") {
+      if (hlsUrl) order.push("hls");
+      if (whepUrl) order.push("whep");
+    } else {
+      if (whepUrl) order.push("whep");
+      if (hlsUrl) order.push("hls");
+    }
+    return order;
+  }, [preferredTransport, whepUrl, hlsUrl]);
 
   function tearDown() {
     const w = whepRef.current;
@@ -80,72 +111,102 @@ export function VideoPanel() {
   }
 
   useEffect(() => {
-    if (!canStream || !videoRef.current) {
+    if (!canStream || !videoRef.current || cascade.length === 0) {
       tearDown();
       setState("idle");
+      setActiveTransport(null);
       setError(null);
       return;
     }
 
-    const ac = new AbortController();
     let cancelled = false;
-    setState("whep-connecting");
-    setError(null);
+    const ac = new AbortController();
+    const errors: string[] = [];
 
-    const tryFallback = (whepError: string) => {
-      if (cancelled) return;
-      if (!hlsUrl) {
-        setState("final-error");
-        setError(whepError);
-        return;
-      }
-      setState("hls-connecting");
-      startHls(hlsUrl, videoRef.current!).then((hlsRes) => {
+    const runCascade = async () => {
+      setState("connecting");
+      setActiveTransport(cascade[0]);
+      setError(null);
+
+      for (const transport of cascade) {
         if (cancelled) return;
-        if (hlsRes.ok && hlsRes.session) {
-          hlsRef.current = hlsRes.session;
-          setState("hls-live");
+        setActiveTransport(transport);
+        if (transport === "whep") {
+          const result = await new Promise<{
+            ok: boolean;
+            error?: string;
+            session?: WhepSession;
+          }>((resolve) => {
+            const timeoutId = setTimeout(() => {
+              ac.abort();
+              resolve({ ok: false, error: "WHEP handshake timeout" });
+            }, WHEP_TIMEOUT_MS);
+            startWhep(whepUrl, videoRef.current!, ac.signal).then((res) => {
+              clearTimeout(timeoutId);
+              resolve(res);
+            });
+          });
+          if (cancelled) return;
+          if (result.ok && result.session) {
+            whepRef.current = result.session;
+            setState("live");
+            return;
+          }
+          errors.push(`WebRTC: ${result.error ?? "handshake failed"}`);
         } else {
-          // Final fallback: render a still snapshot via the JPEG endpoint.
-          setState("snapshot");
-          setError(`WebRTC: ${whepError}; HLS: ${hlsRes.error}`);
+          const result = await startHls(hlsUrl, videoRef.current!);
+          if (cancelled) return;
+          if (result.ok && result.session) {
+            hlsRef.current = result.session;
+            setState("live");
+            return;
+          }
+          errors.push(`HLS: ${result.error ?? "playback failed"}`);
         }
-      });
+      }
+
+      // Every transport in the cascade failed. Fall through to
+      // the still-snapshot fallback so the operator at least sees
+      // the last good frame.
+      if (cancelled) return;
+      setError(errors.join("; "));
+      setState("snapshot");
+      setActiveTransport(null);
     };
 
-    // Race the WHEP handshake against a hard timeout. WHEP can hang
-    // indefinitely on networks that drop UDP — bail at WHEP_TIMEOUT_MS
-    // and fall through to HLS.
-    const timeoutId = setTimeout(() => {
-      if (cancelled) return;
-      ac.abort();
-      tryFallback("WHEP handshake timeout");
-    }, WHEP_TIMEOUT_MS);
-
-    startWhep(whepUrl, videoRef.current, ac.signal).then((res) => {
-      clearTimeout(timeoutId);
-      if (cancelled) return;
-      if (res.ok && res.session) {
-        whepRef.current = res.session;
-        setState("whep-live");
-      } else {
-        tryFallback(res.error || "WebRTC handshake failed");
-      }
-    });
+    void runCascade();
 
     return () => {
       cancelled = true;
-      clearTimeout(timeoutId);
       ac.abort();
       tearDown();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [canStream, whepUrl, hlsUrl, retryToken]);
+  }, [canStream, whepUrl, hlsUrl, retryToken, preferredTransport]);
 
-  const isLive = state === "whep-live" || state === "hls-live";
+  const isLive = state === "live";
   const showOverlay = !isLive && state !== "snapshot";
   const showSnapshot = state === "snapshot";
-  const stateBadge = stateLabel(state);
+
+  const badgeText = isLive
+    ? activeTransport === "hls"
+      ? "live · hls"
+      : "live · webrtc"
+    : state === "connecting"
+      ? "connecting"
+      : state === "snapshot"
+        ? "snapshot"
+        : state === "final-error"
+          ? "error"
+          : "idle";
+  const badgeClass = isLive
+    ? activeTransport === "hls"
+      ? "border-warn/40 text-warn"
+      : "border-ok/40 text-ok"
+    : "border-muted-foreground/40 text-muted-foreground/80";
+  const badgeTitle = isLive && activeTransport === "hls"
+    ? "HLS playback. ~3-5 s latency vs WHEP's 100-300 ms; no Chrome-decoder freeze."
+    : undefined;
 
   return (
     <Card>
@@ -158,24 +219,25 @@ export function VideoPanel() {
           )}
           Video
           <span
-            className={`ml-auto text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded border ${
-              state === "hls-live"
-                ? "border-warn/40 text-warn"
-                : isLive
-                  ? "border-ok/40 text-ok"
-                  : "border-muted-foreground/40 text-muted-foreground/80"
-            }`}
-            title={
-              state === "hls-live"
-                ? "HLS fallback. ~3-5s latency vs WHEP's 100-300ms."
-                : undefined
-            }
+            className={cn(
+              "ml-auto text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded border",
+              badgeClass,
+            )}
+            title={badgeTitle}
           >
-            {stateBadge}
+            {badgeText}
           </span>
         </CardTitle>
       </CardHeader>
       <CardContent className="space-y-3">
+        {whepUrl && hlsUrl && (
+          <TransportChip
+            value={preferredTransport}
+            onChange={setPreferredTransport}
+            isGround={isGround}
+          />
+        )}
+
         <div className="relative aspect-video w-full rounded-md border border-border bg-black overflow-hidden">
           <video
             ref={videoRef}
@@ -207,18 +269,18 @@ export function VideoPanel() {
                         ? "Pipeline error."
                         : pipelineState === "starting"
                           ? "Pipeline starting…"
-                          : !whepUrl
+                          : !haveAnyUrl
                             ? "No camera detected."
                             : "Pipeline idle."}
                   </div>
                   <div className="text-[10px] max-w-xs text-center">
                     {waitingForWfb
                       ? wfbWaitDetail
-                      : "Plug in a camera and the agent will publish a WHEP stream automatically."}
+                      : "Plug in a camera and the agent will publish a video stream automatically."}
                   </div>
                 </>
               )}
-              {state === "whep-connecting" && (
+              {state === "connecting" && (
                 <div className="text-center">
                   {waitingForWfb ? (
                     <>
@@ -228,21 +290,11 @@ export function VideoPanel() {
                       </div>
                     </>
                   ) : (
-                    "connecting (WebRTC)…"
-                  )}
-                </div>
-              )}
-              {state === "hls-connecting" && (
-                <div className="text-center">
-                  {waitingForWfb ? (
                     <>
-                      Waiting for WFB stream from drone.
-                      <div className="text-[10px] mt-1 opacity-80">
-                        {wfbWaitDetail}
-                      </div>
+                      connecting (
+                      {activeTransport === "hls" ? "HLS" : "WebRTC"}
+                      )…
                     </>
-                  ) : (
-                    "connecting (HLS fallback)…"
                   )}
                 </div>
               )}
@@ -326,23 +378,50 @@ export function VideoPanel() {
   );
 }
 
-function stateLabel(s: PlayerState): string {
-  switch (s) {
-    case "whep-live":
-      return "live · webrtc";
-    case "hls-live":
-      return "live · hls";
-    case "snapshot":
-      return "snapshot";
-    case "whep-connecting":
-    case "hls-connecting":
-      return "connecting";
-    case "final-error":
-      return "error";
-    case "whep-failed":
-      return "fallback";
-    case "idle":
-    default:
-      return "idle";
-  }
+function TransportChip({
+  value,
+  onChange,
+  isGround,
+}: {
+  value: Transport;
+  onChange: (next: Transport) => void;
+  isGround: boolean;
+}) {
+  const hint = isGround
+    ? "HLS is preferred on ground (no Chrome decoder freeze). WebRTC has lower latency."
+    : "WebRTC is preferred for low latency. HLS has ~3-5 s lag.";
+  return (
+    <div
+      className="inline-flex items-center gap-1 text-[10px] uppercase tracking-wider"
+      title={hint}
+    >
+      <span className="text-muted-foreground">transport</span>
+      <div className="inline-flex rounded border border-border overflow-hidden">
+        <button
+          type="button"
+          onClick={() => onChange("hls")}
+          className={cn(
+            "px-2 py-0.5 transition-colors",
+            value === "hls"
+              ? "bg-accent text-accent-foreground"
+              : "bg-transparent text-muted-foreground hover:bg-accent/40",
+          )}
+        >
+          HLS
+        </button>
+        <button
+          type="button"
+          onClick={() => onChange("whep")}
+          className={cn(
+            "px-2 py-0.5 transition-colors border-l border-border",
+            value === "whep"
+              ? "bg-accent text-accent-foreground"
+              : "bg-transparent text-muted-foreground hover:bg-accent/40",
+          )}
+        >
+          WebRTC
+        </button>
+      </div>
+    </div>
+  );
 }
