@@ -19,6 +19,23 @@ from ados.core.paths import MESH_STATE_JSON, PROFILE_CONF
 router = APIRouter()
 
 
+def _radio_to_camel(block: dict | None) -> dict | None:
+    """Convert a snake_case radio block to the camelCase shape the GCS reads.
+
+    ``build_radio_block`` emits snake_case (the cloud relay remaps it for
+    the heartbeat path). The LAN-direct poll has no remapper, so convert
+    here once so the consolidated status carries the same canonical shape
+    Mission Control's radio normalizer expects.
+    """
+    if not block:
+        return None
+    out: dict = {}
+    for key, value in block.items():
+        head, *tail = key.split("_")
+        out[head + "".join(p.title() for p in tail)] = value
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Cache TTLs for the consolidated status payload.
 #
@@ -300,7 +317,12 @@ async def get_full_status(request: Request):
         pass
 
     # --- Video (same logic as /api/video with mediamtx probe) ---
-    from ados.api.routes.video import _empty_recording_block, _probe_mediamtx, _recording_block
+    from ados.api.routes.video import (
+        _empty_recording_block,
+        _probe_mediamtx,
+        _probe_mediamtx_via_whep,
+        _recording_block,
+    )
 
     video: dict = {"state": "not_initialized", "whep_url": None, **_empty_recording_block()}
     pipeline = app.video_pipeline()
@@ -322,6 +344,13 @@ async def get_full_status(request: Request):
             }
     else:
         mtx = await _probe_mediamtx()
+        if mtx is None or not mtx.get("ready"):
+            # Ground-station mediamtx puts auth on the management API; the
+            # WHEP probe doesn't. Fall through so the consolidated status
+            # reports running when WHEP is actually serving frames — the
+            # received downlink. Keeps this in sync with the /api/video
+            # route, which the GCS otherwise prefers only on older agents.
+            mtx = await _probe_mediamtx_via_whep() or mtx
         if mtx and mtx.get("ready"):
             host = request.headers.get("host", "localhost").split(":")[0]
             video = {
@@ -375,6 +404,27 @@ async def get_full_status(request: Request):
     from ados.core.profile import current_profile_and_role
     resolved_profile, resolved_role = current_profile_and_role(app.config)
 
+    # --- Radio (WFB link block) — surfaced so the LAN-direct GCS path
+    # populates the same radio snapshot the cloud heartbeat carries,
+    # including the receive-side metrics (SNR, noise, loss, MCS,
+    # receive-liveness). On the GS the WfbRxManager lives in a sibling
+    # process, so read the shared stats file the same way /api/wfb does.
+    radio_block: dict | None = None
+    try:
+        from ados.core.supervisor.heartbeat import build_radio_block
+
+        wfb_mgr = app.wfb_manager()
+        if wfb_mgr is not None:
+            wfb_status = wfb_mgr.get_status()
+        else:
+            from ados.api.routes.wfb import _build_status_from_stats_file
+
+            _wfb_cfg = getattr(getattr(app.config, "video", None), "wfb", None)
+            wfb_status = _build_status_from_stats_file(_wfb_cfg)
+        radio_block = _radio_to_camel(build_radio_block(wfb_status))
+    except Exception:
+        radio_block = None
+
     payload = {
         "version": __version__,
         "uptime_seconds": uptime,
@@ -389,6 +439,7 @@ async def get_full_status(request: Request):
         "telemetry": telemetry,
         "capabilities": capabilities,
         "mesh": mesh_block,
+        "radio": radio_block,
         "profile": resolved_profile,
         "role": resolved_role,
     }

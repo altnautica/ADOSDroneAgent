@@ -4,6 +4,19 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.38.1] - 2026-05-24
+
+### Fixed
+
+- **Ground-station downlink video over the local (LAN-direct) path.** The
+  consolidated `/api/status/full` video block now uses the same WHEP probe
+  as `/api/video`, so a ground station reports its received downlink as
+  running over the direct connection, not only via the cloud relay.
+- **Receive-link metrics over the local path.** `/api/status/full` now
+  carries a camelCase `radio` block (RSSI/SNR/noise/loss/MCS/FEC plus
+  receive-liveness), so Mission Control surfaces the link metrics when
+  connected directly to the agent.
+
 ## [0.38.0] - 2026-05-24
 
 ### Added
