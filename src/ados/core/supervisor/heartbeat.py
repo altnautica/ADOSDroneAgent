@@ -71,10 +71,15 @@ def build_radio_block(wfb_status: dict[str, Any] | None) -> dict[str, Any]:
             "tx_power_max_dbm": None,
             "topology": None,
             "rssi_dbm": None,
+            "snr_db": None,
+            "noise_dbm": None,
             "bitrate_kbps": None,
             "fec_recovered": None,
             "fec_lost": None,
             "packets_lost": None,
+            "loss_percent": None,
+            "mcs_index": None,
+            "rx_silent_seconds": None,
             "paired": False,
             "paired_with_device_id": None,
             "paired_at": None,
@@ -102,10 +107,21 @@ def build_radio_block(wfb_status: dict[str, Any] | None) -> dict[str, Any]:
         "tx_power_max_dbm": wfb_status.get("tx_power_max_dbm"),
         "topology": wfb_status.get("topology"),
         "rssi_dbm": rssi,
+        # RX-side link quality. Populated on both sides: the drone's
+        # WfbManager.get_status() and the ground station's /api/wfb view
+        # carry the same snake_case keys, so no role branch is needed.
+        # On a ground station bitrate_kbps is the received video
+        # throughput; rx_silent_seconds is the receive-liveness signal
+        # (None on the transmit side, which tracks tx_silent_seconds).
+        "snr_db": wfb_status.get("snr_db"),
+        "noise_dbm": wfb_status.get("noise_dbm"),
         "bitrate_kbps": bitrate,
         "fec_recovered": wfb_status.get("fec_recovered"),
         "fec_lost": wfb_status.get("fec_failed"),
         "packets_lost": wfb_status.get("packets_lost"),
+        "loss_percent": wfb_status.get("loss_percent"),
+        "mcs_index": wfb_status.get("mcs_index"),
+        "rx_silent_seconds": wfb_status.get("rx_silent_seconds"),
         # Pair-state surface. Source: the on-disk WfbConfig fields,
         # echoed back through WfbManager.get_status() at the top of
         # this module. Heartbeat consumers (GCS, LCD, Convex schema)

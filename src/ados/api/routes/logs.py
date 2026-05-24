@@ -7,6 +7,7 @@ import json
 import logging
 import os
 from collections import deque
+from datetime import datetime, timezone
 from itertools import count
 
 from fastapi import APIRouter, HTTPException, Query
@@ -75,7 +76,11 @@ class BufferHandler(logging.Handler):
     def emit(self, record: logging.LogRecord) -> None:
         _log_buffer.append({
             "seq": next(_log_seq),
-            "timestamp": self.format(record) if not record.created else record.created,
+            # ISO-8601 string so consumers can slice/parse it directly.
+            # record.created is a float epoch; emit a stable string.
+            "timestamp": datetime.fromtimestamp(
+                record.created, tz=timezone.utc
+            ).isoformat(),
             "level": record.levelname,
             "logger": record.name,
             "message": record.getMessage(),

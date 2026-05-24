@@ -465,6 +465,50 @@ def read_video_recording_state(*, api_key: str | None = None) -> bool | None:
         return None
 
 
+def read_gs_video_state(*, api_key: str | None = None) -> bool | None:
+    """Return whether a ground station is re-streaming received video.
+
+    A ground station receives the drone's H.264 over the radio, decodes
+    it, and republishes it on the local WHEP endpoint at port 8889. This
+    asks the agent's ``/api/wfb`` surface whether frames are actually
+    arriving so the heartbeat only advertises a stream the GCS can play.
+
+    Liveness, not process-liveness: the receive link reports ``state ==
+    "connected"`` only once it has decoded packets, and the same view
+    flips to ``"stale"`` when the stats file stops updating. Gating on
+    ``connected`` + a positive packet count means a starved or dead
+    receiver is reported as not-streaming rather than a dead WHEP link.
+
+    Returns ``True`` (frames flowing), ``False`` (receiver up but no
+    frames / stale), or ``None`` (couldn't tell — API unreachable or
+    malformed), in which case the caller falls back to not-streaming.
+
+    When the agent is paired the API requires X-ADOS-Key; callers must
+    pass the agent's ``pairing.api_key`` or get a 401.
+    """
+    try:
+        import httpx
+
+        headers = {"X-ADOS-Key": api_key} if api_key else None
+        with httpx.Client(timeout=0.2) as client:
+            resp = client.get(
+                "http://127.0.0.1:8080/api/wfb",
+                headers=headers,
+            )
+            if resp.status_code != 200:
+                return None
+            data = resp.json()
+            if not isinstance(data, dict):
+                return None
+            state = data.get("state")
+            packets = data.get("packets_received")
+            if state != "connected":
+                return False
+            return isinstance(packets, (int, float)) and packets > 0
+    except Exception:
+        return None
+
+
 def build_display_enrichment(
     config: Any,
     *,

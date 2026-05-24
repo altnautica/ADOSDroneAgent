@@ -42,6 +42,9 @@ from .heartbeat import (
     get_services_status as _get_services_status,
 )
 from .heartbeat import (
+    read_gs_video_state as _read_gs_video_state,
+)
+from .heartbeat import (
     read_lcd_state_blob as _read_lcd_state_blob,
 )
 
@@ -173,17 +176,29 @@ async def heartbeat_loop(ctx: CloudContext) -> None:  # noqa: C901
                     "agentVersion": __version__,
                 }
 
-                # Video pipeline status for GCS auto-discovery
-                _video_svc = next(
-                    (s for s in payload["services"] if s["name"] == "ados-video"),
-                    None,
-                )
-                payload["videoState"] = (
-                    _video_svc["status"] if _video_svc else "stopped"
-                )
-                payload["videoWhepPort"] = (
-                    8889 if _video_svc and _video_svc["status"] == "running" else 0
-                )
+                # Video pipeline status for GCS auto-discovery. A drone
+                # encodes its camera and runs the ados-video service; a
+                # ground station has no such service — it receives the
+                # drone's stream over the radio and republishes it on the
+                # same WHEP port. Both advertise videoState/videoWhepPort
+                # so the GCS plays either one through the same path.
+                if _profile == "ground-station":
+                    _gs_video_live = _read_gs_video_state(api_key=pairing.api_key)
+                    payload["videoState"] = (
+                        "running" if _gs_video_live else "stopped"
+                    )
+                    payload["videoWhepPort"] = 8889 if _gs_video_live else 0
+                else:
+                    _video_svc = next(
+                        (s for s in payload["services"] if s["name"] == "ados-video"),
+                        None,
+                    )
+                    payload["videoState"] = (
+                        _video_svc["status"] if _video_svc else "stopped"
+                    )
+                    payload["videoWhepPort"] = (
+                        8889 if _video_svc and _video_svc["status"] == "running" else 0
+                    )
                 # The LAN-derived /main/whep URL was retired alongside
                 # the operator-facing access panel earlier this cycle —
                 # MediaMTX does not reliably serve WHEP at that path.

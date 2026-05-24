@@ -114,6 +114,7 @@ def _build_status_from_stats_file(wfb_cfg: object) -> dict:
         "fec_recovered": 0,
         "fec_failed": 0,
         "bitrate_kbps": 0,
+        "rx_silent_seconds": None,
         "restart_count": 0,
         "samples": 0,
         "tx_power_dbm": cfg_tx_power,

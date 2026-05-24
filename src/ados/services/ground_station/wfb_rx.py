@@ -579,6 +579,23 @@ class WfbRxManager:
                                     self._config, "mcs_index", None
                                 ),
                                 "profile": "ground_station",
+                                # RX-liveness signal. Stamped on every
+                                # stats line so a consumer that reads the
+                                # file (API, heartbeat) can tell the
+                                # receiver is producing output, not just
+                                # that the process is alive. ~0.0 while
+                                # frames flow; the file's mtime staleness
+                                # window covers a fully stalled receiver.
+                                "rx_silent_seconds": (
+                                    round(
+                                        time.monotonic()
+                                        - self._last_rx_stdout_at,
+                                        1,
+                                    )
+                                    if self._last_rx_stdout_at > 0
+                                    else None
+                                ),
+                                "rx_zombie_kills": self._rx_zombie_kills,
                             },
                         )
             except Exception as exc:

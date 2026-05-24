@@ -4,6 +4,31 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.38.0] - 2026-05-24
+
+### Added
+
+- **Ground stations re-stream received video to the cloud.** A ground
+  station decodes the drone's H.264 over the radio and republishes it on
+  the local WHEP endpoint. The heartbeat now advertises `videoState` and
+  `videoWhepPort` for the ground-station profile so Mission Control plays
+  the received downlink through the same path it uses for a drone camera.
+  The stream is advertised only when frames are actually arriving
+  (`/api/wfb` reports `connected` with a positive packet count), not on
+  process-liveness alone.
+- **Richer receive-link metrics in the heartbeat radio block.** Added
+  `snr_db`, `noise_dbm`, `loss_percent`, `mcs_index`, and
+  `rx_silent_seconds` (receive-liveness) alongside the existing RSSI /
+  bitrate / FEC fields, on both transmit and receive sides. The ground
+  station's `/api/wfb` view now also persists `rx_silent_seconds`.
+
+### Fixed
+
+- **Log entries now carry an ISO-8601 string timestamp.** The in-memory
+  log buffer was emitting a raw float epoch, which broke clients that
+  treat the timestamp as a string. Both the REST endpoint and the live
+  log stream now return an ISO-8601 string.
+
 ## [0.28.12] - 2026-05-16
 
 ### Added

@@ -21,10 +21,15 @@ def test_radio_block_absent_when_status_missing():
         "tx_power_max_dbm",
         "topology",
         "rssi_dbm",
+        "snr_db",
+        "noise_dbm",
         "bitrate_kbps",
         "fec_recovered",
         "fec_lost",
         "packets_lost",
+        "loss_percent",
+        "mcs_index",
+        "rx_silent_seconds",
     ):
         assert block[key] is None, key
 
@@ -36,14 +41,18 @@ def test_radio_block_with_full_status():
         "interface": "wlan1",
         "channel": 149,
         "rssi_dbm": -55.0,
+        "snr_db": 28.0,
+        "noise_dbm": -90.0,
         "bitrate_kbps": 8000,
         "fec_recovered": 12,
         "fec_failed": 3,
         "packets_lost": 7,
+        "loss_percent": 1.5,
         "tx_power_dbm": 5,
         "tx_power_max_dbm": 15,
         "topology": "host_vbus",
         "mcs_index": 1,
+        "rx_silent_seconds": 0.2,
     }
     block = build_radio_block(status)
     assert block["state"] == "connected"
@@ -52,6 +61,8 @@ def test_radio_block_with_full_status():
     assert block["freq_mhz"] == 5745
     assert block["bandwidth_mhz"] == 20
     assert block["rssi_dbm"] == -55.0
+    assert block["snr_db"] == 28.0
+    assert block["noise_dbm"] == -90.0
     assert block["bitrate_kbps"] == 8000
     assert block["tx_power_dbm"] == 5
     assert block["tx_power_max_dbm"] == 15
@@ -59,6 +70,9 @@ def test_radio_block_with_full_status():
     assert block["fec_recovered"] == 12
     assert block["fec_lost"] == 3
     assert block["packets_lost"] == 7
+    assert block["loss_percent"] == 1.5
+    assert block["mcs_index"] == 1
+    assert block["rx_silent_seconds"] == 0.2
 
 
 def test_radio_block_treats_sentinel_rssi_as_null():
