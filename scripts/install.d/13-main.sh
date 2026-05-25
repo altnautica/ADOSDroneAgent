@@ -289,14 +289,39 @@ main_install_flow() {
             fi
         fi
 
+        # The upgrade leans on the venv's pip for the package install below.
+        # A venv pip can rot independently of the agent (a stale pip vendor
+        # tree, an interrupted self-upgrade, a Python minor bump) and crash on
+        # `python -m pip --version`; left unhandled that aborts the upgrade
+        # under set -e and the box silently stays on the old version. Probe +
+        # self-heal first. The reinstaller closure reinstalls the agent package
+        # into the rebuilt venv when a recreate was needed — channel-correct
+        # (verified wheel on stable, cloned source on edge). A broken pip must
+        # never silently no-op the upgrade.
+        ADOS_CURRENT_STEP="upgrade-pip-package"
+        _upgrade_reinstall_agent() {
+            if is_stable_channel; then
+                install_agent_from_wheel "${upgrade_wheel}"
+            else
+                "${VENV_DIR}/bin/pip" install --upgrade "${tmp_repo}/repo" --quiet
+            fi
+        }
+        if ! ensure_venv_pip _upgrade_reinstall_agent; then
+            error "venv pip could not be recovered; aborting upgrade before the package install."
+            rm -rf "${tmp_repo}"
+            run_health_gate || true
+            unset -f _upgrade_reinstall_agent
+            exit 1
+        fi
+
         # Upgrade the pip package. On stable from the verified wheel; on edge
         # from the cloned source. config.yaml + pairing state are untouched.
+        # When ensure_venv_pip recreated the venv it already reinstalled the
+        # agent via the same closure, so this is idempotent (pip --upgrade is a
+        # no-op when the wheel/source is already the installed version).
         info "Upgrading pip package..."
-        if is_stable_channel; then
-            install_agent_from_wheel "${upgrade_wheel}"
-        else
-            "${VENV_DIR}/bin/pip" install --upgrade "${tmp_repo}/repo" --quiet
-        fi
+        _upgrade_reinstall_agent
+        unset -f _upgrade_reinstall_agent
 
         new_ver=$(get_installed_version)
         if [ "$local_ver" = "$new_ver" ]; then
@@ -536,6 +561,14 @@ main_install_flow() {
     info "Creating Python virtual environment at ${VENV_DIR}..."
     "$PYTHON" -m venv --system-site-packages "${VENV_DIR}"
     checkpoint_mark venv
+
+    # On a resume (agent present but install incomplete) the venv above
+    # already existed, and `python -m venv` leaves an existing tree's pip
+    # untouched — so a rotted pip survives into the package install below.
+    # Probe + self-heal before any `pip install` runs. No reinstall callback
+    # is needed here: the agent-package install steps that immediately follow
+    # populate whatever a recreate cleared.
+    ensure_venv_pip || warn "venv pip could not be recovered before the package install; the health gate will catch a failed import."
 
     # Record the active release channel up front so the journal shows which
     # path was taken. stable installs a signed prebuilt wheel + deploy-bundle

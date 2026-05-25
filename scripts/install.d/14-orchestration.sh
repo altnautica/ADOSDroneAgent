@@ -527,6 +527,91 @@ install_failure_trap() {
     write_install_result "failed"
 }
 
+# ─── Broken-venv-pip self-recovery ────────────────────────────────────────────
+#
+# A venv's pip can rot independently of the agent package: a partial system
+# upgrade, an interrupted `pip install --upgrade pip`, or a Python minor-version
+# bump under the venv can leave the bundled pip importing modules that no longer
+# exist (e.g. a stale pip vendor tree raising ModuleNotFoundError on import).
+# When that happens the next `pip install` on the upgrade path dies before it
+# can touch the agent package, so the box silently stays on the old version.
+#
+# ensure_venv_pip probes the venv pip and self-heals when it is broken, in
+# escalating order so the cheapest fix runs first:
+#
+#   probe   — `python -m pip --version`. Working pip => return 0, no-op.
+#   stage 1 — `python -m ensurepip --upgrade` then bootstrap a fresh pip via
+#             `python -m pip install --upgrade pip`. Re-probe.
+#   stage 2 — pip still broken: recreate the whole venv from scratch using the
+#             same `python -m venv --system-site-packages` flow the fresh
+#             install uses, then re-run the caller-supplied reinstall callback
+#             so the agent package lands in the rebuilt venv. Re-probe.
+#
+# REINSTALL_FN (optional) is a function name invoked after a venv recreate to
+# reinstall the agent package into the rebuilt venv. The caller passes the
+# channel-correct reinstaller (wheel on stable, source tree on edge). When pip
+# cannot be recovered even after a recreate, the function records a REQUIRED
+# failure (`venv-pip`) so the result file attributes the abort, and returns
+# non-zero. A working or recovered pip returns 0.
+#
+# Safe to call on both the fresh and upgrade paths: on a healthy venv it is a
+# single fast probe.
+ensure_venv_pip() {
+    local reinstall_fn="${1:-}"
+
+    # Probe: a working venv pip needs no recovery.
+    if "${VENV_DIR}/bin/python" -m pip --version >/dev/null 2>&1; then
+        return 0
+    fi
+
+    warn "venv pip is broken (\`python -m pip --version\` failed). Attempting in-place repair."
+
+    # Stage 1: re-bootstrap pip inside the existing venv via ensurepip, then
+    # upgrade it. ensurepip ships pip's wheels with the interpreter, so this
+    # recovers a corrupted/stale pip without a network round-trip for the
+    # bootstrap itself.
+    "${VENV_DIR}/bin/python" -m ensurepip --upgrade >/dev/null 2>&1 || true
+    "${VENV_DIR}/bin/python" -m pip install --upgrade pip --quiet >/dev/null 2>&1 || true
+    if "${VENV_DIR}/bin/python" -m pip --version >/dev/null 2>&1; then
+        warn "venv pip repaired via ensurepip; continuing."
+        return 0
+    fi
+
+    # Stage 2: the pip inside this venv is unrecoverable. Recreate the venv
+    # from scratch with the same flags the fresh install uses, then reinstall
+    # the agent package via the caller's channel-correct reinstaller.
+    warn "ensurepip did not recover the venv pip; recreating the virtual environment."
+    local py
+    py="$(find_python)"
+    if [ -z "${py}" ]; then
+        error "No Python 3.11+ interpreter available to recreate the venv."
+        record_failure "venv-pip" required
+        return 1
+    fi
+    rm -rf "${VENV_DIR}"
+    if ! "${py}" -m venv --system-site-packages "${VENV_DIR}"; then
+        error "Recreating the venv failed."
+        record_failure "venv-pip" required
+        return 1
+    fi
+    # The freshly created venv ships a working pip; bring it current.
+    "${VENV_DIR}/bin/python" -m pip install --upgrade pip --quiet >/dev/null 2>&1 || true
+
+    if [ -n "${reinstall_fn}" ] && declare -F "${reinstall_fn}" >/dev/null 2>&1; then
+        warn "Reinstalling the agent package into the rebuilt venv."
+        "${reinstall_fn}" || warn "Agent-package reinstall into the rebuilt venv reported a non-zero status."
+    fi
+
+    if "${VENV_DIR}/bin/python" -m pip --version >/dev/null 2>&1; then
+        warn "venv recreated with a working pip; continuing."
+        return 0
+    fi
+
+    error "venv pip is still broken after recreate; the upgrade cannot proceed."
+    record_failure "venv-pip" required
+    return 1
+}
+
 # install_radio_driver_tracked — run the RTL8812EU driver installer and
 # record an OPTIONAL failure when the kernel module did not land. The
 # driver path is non-fatal by design (a rig with no RTL adapter installs
