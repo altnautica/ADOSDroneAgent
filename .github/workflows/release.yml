@@ -1,0 +1,222 @@
+# Full agent release pipeline (stable channel).
+#
+# Triggers on `v*` tag push. Produces, signs, and publishes the artifacts the
+# stable install channel consumes:
+#
+#   ados_drone_agent-<X.Y.Z>-py3-none-any.whl   the Python package (pure)
+#   ados-drone-agent-deploy-<X.Y.Z>.tar.gz       the deploy-bundle: every
+#                                                install asset that lives
+#                                                OUTSIDE the wheel — scripts/,
+#                                                data/, the vendored radio
+#                                                source (vendor/), LICENSE,
+#                                                README — staged under a top
+#                                                level repo/ dir so the
+#                                                installer can unpack it into
+#                                                the same repo/ layout a git
+#                                                clone would produce.
+#
+# Both artifacts are signed with Ed25519 via minisign (gated on the signing
+# secret being present, so forks and dry-runs skip signing cleanly). Each
+# gets a .sha256 and a .minisig sidecar; a single SHA256SUMS lists them all.
+# The wheel is also published to PyPI.
+#
+# The edge channel (the installer default) needs no artifact from this
+# workflow: edge clones the branch and builds from source on the device.
+
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  id-token: write
+  contents: write
+
+jobs:
+  build:
+    name: build + sign artifacts
+    runs-on: ubuntu-latest
+    # Lift the signing secret into a job-level env so the step-level `if:`
+    # condition can read it. The `secrets` context is not available to
+    # step-level `if:` directly.
+    env:
+      MINISIGN_KEY: ${{ secrets.LITE_AGENT_MINISIGN_KEY }}
+      MINISIGN_PASSWORD: ${{ secrets.LITE_AGENT_MINISIGN_PASSWORD }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The deploy-bundle ships the vendored radio source (vendor/wfb-ng,
+          # vendor/rtl8812eu) the on-device install builds against, so the
+          # submodules must be present in the checkout.
+          submodules: recursive
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build tools
+        run: pip install build
+
+      - name: Install minisign
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y minisign
+
+      - name: Resolve version
+        id: version
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          VERSION="${TAG#v}"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Resolved tag=${TAG} version=${VERSION}"
+
+      - name: Build wheel
+        run: python -m build --wheel --outdir dist
+
+      - name: Build deploy-bundle
+        id: bundle
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          BUNDLE="ados-drone-agent-deploy-${VERSION}.tar.gz"
+          STAGING="$(mktemp -d)"
+          REPO_ROOT="${STAGING}/repo"
+          mkdir -p "${REPO_ROOT}"
+
+          # Stage exactly the install assets that are NOT in the wheel and
+          # that the on-device install lays down: the installer scripts, the
+          # data tree (systemd units, udev, overlays, usb-gadget, avahi,
+          # motd, driver-patches), the vendored radio source, and the
+          # licence + readme. The wheel already carries the Python package
+          # and its package-data.
+          cp -a scripts "${REPO_ROOT}/scripts"
+          cp -a data    "${REPO_ROOT}/data"
+          cp -a vendor  "${REPO_ROOT}/vendor"
+          cp -a LICENSE "${REPO_ROOT}/LICENSE"
+          cp -a README.md "${REPO_ROOT}/README.md"
+
+          # Drop the vendored submodules' .git gitlink files + any nested VCS
+          # metadata + Python bytecode caches so the bundle is a plain,
+          # reproducible source tree (the install reads the working tree, not
+          # git history, and never the .pyc caches). Keeps the artifact small.
+          find "${REPO_ROOT}" -name '.git' -prune -exec rm -rf {} + 2>/dev/null || true
+          find "${REPO_ROOT}" -name '__pycache__' -type d -prune -exec rm -rf {} + 2>/dev/null || true
+          find "${REPO_ROOT}" -name '*.pyc' -delete 2>/dev/null || true
+
+          # Archive root is "repo" so a plain `tar -xzf bundle -C destroot`
+          # yields destroot/repo/... — the exact layout the installer's
+          # FRESH_REPO_DIR + SYSTEMD_SRC_DIR resolution expects.
+          tar -czf "${BUNDLE}" -C "${STAGING}" repo
+          echo "bundle=${BUNDLE}" >> "$GITHUB_OUTPUT"
+          ls -l "${BUNDLE}"
+
+      - name: Collect artifacts + checksums
+        id: collect
+        run: |
+          OUT="release-assets"
+          mkdir -p "${OUT}"
+          cp dist/*.whl "${OUT}/"
+          cp "${{ steps.bundle.outputs.bundle }}" "${OUT}/"
+
+          # Per-artifact .sha256 sidecars (the install verifier checks each
+          # artifact against its own ARTIFACT.sha256 via `sha256sum -c`).
+          ( cd "${OUT}" && for f in *.whl *.tar.gz; do
+              [ -e "$f" ] || continue
+              sha256sum "$f" > "$f.sha256"
+            done )
+          ls -l "${OUT}"
+
+      - name: Sign artifacts (minisign Ed25519)
+        # The job-level env block lifts the secret into env so this
+        # step-level `if:` can gate on it. When the secret is unset (forks,
+        # dry-runs) signing is skipped cleanly; the upload step tolerates the
+        # missing .minisig with if-no-files-found: warn, and the stable
+        # channel install refuses to install an unsigned artifact — which is
+        # correct, an unsigned build must not pass as stable.
+        if: ${{ env.MINISIGN_KEY != '' }}
+        run: |
+          OUT="release-assets"
+          KEY_FILE="$(mktemp)"
+          printf '%s' "${MINISIGN_KEY}" > "${KEY_FILE}"
+          for f in "${OUT}"/*.whl "${OUT}"/*.tar.gz; do
+            [ -e "$f" ] || continue
+            echo "${MINISIGN_PASSWORD}" | minisign -S -s "${KEY_FILE}" -m "$f"
+          done
+          shred -u "${KEY_FILE}"
+          ls -l "${OUT}"
+
+      - name: Build SHA256SUMS
+        working-directory: release-assets
+        run: |
+          rm -f SHA256SUMS
+          for f in *.whl *.tar.gz; do
+            [ -e "$f" ] || continue
+            sha256sum "$f" >> SHA256SUMS
+          done
+          cat SHA256SUMS
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-assets
+          path: release-assets/**
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    name: publish release + PyPI
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-assets
+          path: release-assets
+
+      - name: Resolve tag
+        id: meta
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.meta.outputs.tag }}
+          name: ADOS Drone Agent ${{ steps.meta.outputs.tag }}
+          prerelease: false
+          files: |
+            release-assets/*.whl
+            release-assets/*.whl.sha256
+            release-assets/*.whl.minisig
+            release-assets/*.tar.gz
+            release-assets/*.tar.gz.sha256
+            release-assets/*.tar.gz.minisig
+            release-assets/SHA256SUMS
+          body: |
+            Signed prebuilt release for the stable install channel.
+
+            Install (stable, signed, pinned to this tag):
+              curl -sSL https://raw.githubusercontent.com/altnautica/ADOSDroneAgent/main/scripts/install.sh | sudo bash -s -- --channel stable --pair CODE
+
+            Verify before installing:
+              minisign -V -p <vendored-public-key> -m <artifact>
+              sha256sum -c SHA256SUMS
+
+            The default (edge) channel still installs from source and needs
+            no artifact from this release.
+
+      - name: Stage wheel for PyPI
+        run: |
+          mkdir -p dist
+          cp release-assets/*.whl dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
