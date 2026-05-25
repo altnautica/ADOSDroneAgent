@@ -41,6 +41,8 @@ DEVICE_TREE_STRINGS: dict[str, str] = {
     "NVIDIA Jetson Orin Nano": "NVIDIA Jetson Orin Nano Developer Kit",
     "Orange Pi 5": "Orange Pi 5 Board V1.2",
     "Radxa CM3": "Radxa CM3 IO Board",
+    "Raspberry Pi 3": "Raspberry Pi 3 Model B Plus Rev 1.3",
+    "Raspberry Pi Compute Module 3": "Raspberry Pi Compute Module 3 Plus Rev 1.0",
 }
 
 
@@ -154,6 +156,32 @@ class TestPatternOverlap:
             assert matched.name == expected_name, (
                 f"Expected '{expected_name}' but got '{matched.name}' for '{dt_string}'"
             )
+
+    def test_bcm2837_boards_do_not_cross_match(self):
+        """Raspberry Pi 3 and Compute Module 3 share the BCM2837 SoC.
+
+        Their device-tree model strings must resolve to their own profile
+        and never to the sibling board. The trap is the shared SoC name:
+        neither profile may carry a bare 'BCM2837' pattern, and the board
+        device-tree strings are distinct enough to separate cleanly.
+        """
+        profiles = _load_board_profiles()
+
+        rpi3 = _match_profile(profiles, "Raspberry Pi 3 Model B Plus Rev 1.3")
+        assert rpi3 is not None
+        assert rpi3.name == "Raspberry Pi 3"
+
+        rpi3_plain = _match_profile(profiles, "Raspberry Pi 3 Model B Rev 1.2")
+        assert rpi3_plain is not None
+        assert rpi3_plain.name == "Raspberry Pi 3"
+
+        cm3 = _match_profile(profiles, "Raspberry Pi Compute Module 3 Plus Rev 1.0")
+        assert cm3 is not None
+        assert cm3.name == "Raspberry Pi Compute Module 3"
+
+        cm3_plain = _match_profile(profiles, "Raspberry Pi Compute Module 3 Rev 1.0")
+        assert cm3_plain is not None
+        assert cm3_plain.name == "Raspberry Pi Compute Module 3"
 
 
 # ---------------------------------------------------------------------------

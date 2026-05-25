@@ -1,0 +1,111 @@
+name: "Raspberry Pi 3"
+vendor: "Raspberry Pi"
+soc: "BCM2837"
+arch: "aarch64"
+model_patterns:
+  # Plus variant first so the 3B+ device-tree string matches before the
+  # shorter 3B prefix. The bare SoC string "BCM2837" is deliberately NOT
+  # listed: it is shared with Compute Module 3 and would collide.
+  - "Raspberry Pi 3 Model B Plus"
+  - "Raspberry Pi 3 Model B"
+default_tier: 2
+gpio_pins:
+  - 2   # SDA1
+  - 3   # SCL1
+  - 14  # UART TX
+  - 15  # UART RX
+  - 18  # PWM0
+uart_paths:
+  - /dev/ttyAMA0
+  - /dev/ttyS0
+hw_video_codecs:
+  - h264_dec
+  # No reliable hardware H.264 encode on the VideoCore IV in this SoC
+  # across standard 64-bit Raspberry Pi OS builds, so encode is omitted.
+
+# Pi 3 exposes one MIPI CSI on the board and four USB host ports. A
+# downward-facing optical-flow camera lands on a USB UVC port because
+# the single CSI is consumed by the primary forward camera.
+video:
+  csi_ports: 1
+  max_encode_resolution: null
+  max_encode_fps: null
+  encoder_api: "none"
+  nav_cameras:
+    csi_count: 1
+    usb_uvc_count: 4
+    recommended_role: nav-usb
+
+# Cortex-A53 quad with 1 GB RAM cannot carry VIO at usable frame rates.
+# Optical flow is the practical default. Rangefinder lands on the primary
+# UART or the I2C bus.
+navigation:
+  vio_capable: false
+  rangefinder_ports:
+    - {type: uart, path: /dev/ttyAMA0, baud_max: 115200}
+    - {type: i2c, path: /dev/i2c-1, speed_hz: 400000}
+
+# ground-station bench build uses OLED on I2C1 and four menu buttons.
+buses:
+  i2c:
+    - id: i2c1
+      path: /dev/i2c-1
+      notes: "OLED on pins 3/5 (SDA/SCL)"
+
+# Ground-station menu buttons (BCM GPIO numbering).
+# header_pin is the physical pin on the 40-pin header.
+gpio_buttons:
+  - id: btn_b1
+    pin: 5
+    header_pin: 29
+    function: "ground-station menu up"
+  - id: btn_b2
+    pin: 6
+    header_pin: 31
+    function: "ground-station menu down"
+  - id: btn_b3
+    pin: 13
+    header_pin: 33
+    function: "ground-station menu select"
+  - id: btn_b4
+    pin: 19
+    header_pin: 35
+    function: "ground-station menu back"
+
+# ROS 2: 1 GB RAM is below the practical floor for a Docker ROS stack
+# and there is no NPU. Not supported on this board.
+ros:
+  supported: false
+
+# SPI LCD support via the Waveshare 35A overlay shipped in Raspberry Pi
+# OS at /boot/firmware/overlays/waveshare35a.dtbo. ADS7846 + ILI9486 wire
+# to the canonical BCM pins (T_IRQ = BCM 17 = pin 11, DC = BCM 24 = pin
+# 18, RESET = BCM 25 = pin 22).
+displays:
+  supported:
+    - id: waveshare35a
+      type: spi-lcd
+      controller: ILI9486
+      touch_chip: ADS7846
+      bus: spi0
+      resolution: 480x320
+      default_rotation: 90
+      overlay_source: raspberrypi
+      overlay_ref: waveshare35a
+      gpio:
+        dc:
+          pin: GPIO24
+          header_pin: 18
+          direction: out
+        reset:
+          pin: GPIO25
+          header_pin: 22
+          direction: out
+        touch_irq:
+          pin: GPIO17
+          header_pin: 11
+          direction: in
+      modules_required:
+        - fbtft
+        - fb_ili9486
+        - ads7846

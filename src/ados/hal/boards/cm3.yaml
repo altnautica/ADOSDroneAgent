@@ -1,0 +1,50 @@
+name: "Raspberry Pi Compute Module 3"
+vendor: "Raspberry Pi"
+soc: "BCM2837"
+arch: "aarch64"
+model_patterns:
+  # Plus variant first so the CM3+ device-tree string matches before the
+  # shorter CM3 prefix. The bare SoC string "BCM2837" is deliberately NOT
+  # listed: it is shared with the Raspberry Pi 3 and would collide.
+  - "Raspberry Pi Compute Module 3 Plus"
+  - "Raspberry Pi Compute Module 3"
+default_tier: 2
+gpio_pins:
+  - 2   # SDA1
+  - 3   # SCL1
+  - 14  # UART TX
+  - 15  # UART RX
+  - 18  # PWM0
+uart_paths:
+  - /dev/ttyAMA0
+  - /dev/ttyS0
+hw_video_codecs:
+  - h264_dec
+  # No reliable hardware H.264 encode on the VideoCore IV in this SoC
+  # across standard 64-bit Raspberry Pi OS builds, so encode is omitted.
+
+# CM3 carrier boards typically break out 0-1 MIPI CSI ports depending on
+# the IO board. The default profile assumes no CSI broken out; a
+# downward-facing optical-flow camera lands on USB UVC instead.
+video:
+  csi_ports: 0
+  max_encode_resolution: null
+  max_encode_fps: null
+  encoder_api: "none"
+  nav_cameras:
+    csi_count: 0
+    usb_uvc_count: 2
+    recommended_role: nav-usb
+
+# Cortex-A53 quad with 1 GB RAM cannot carry VIO at usable frame rates.
+# Optical flow only. Rangefinder lands on the primary UART or the I2C bus.
+navigation:
+  vio_capable: false
+  rangefinder_ports:
+    - {type: uart, path: /dev/ttyAMA0, baud_max: 115200}
+    - {type: i2c, path: /dev/i2c-1, speed_hz: 400000}
+
+# ROS 2: 1 GB RAM is below the practical floor for a Docker ROS stack
+# and there is no NPU. Not supported on this board.
+ros:
+  supported: false
