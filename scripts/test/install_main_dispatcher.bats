@@ -64,7 +64,7 @@ setup() {
         source '${INSTALL_D}/lib.sh'
         for m in 00-detect 01-state 02-deps 03-kernel 04-dkms 05-mesh \
                  06-radio 07-systemd 08-plugin 09-config 10-network \
-                 11-artifacts 12-output 14-orchestration; do
+                 11-artifacts 12-output 14-orchestration 15-channel; do
             source '${INSTALL_D}/'\$m.sh
         done
         echo OK
@@ -79,7 +79,7 @@ setup() {
         source '${INSTALL_D}/lib.sh'
         for m in 00-detect 01-state 02-deps 03-kernel 04-dkms 05-mesh \
                  06-radio 07-systemd 08-plugin 09-config 10-network \
-                 11-artifacts 12-output 13-main 14-orchestration; do
+                 11-artifacts 12-output 13-main 14-orchestration 15-channel; do
             source '${INSTALL_D}/'\$m.sh
         done
         echo OK
@@ -130,7 +130,7 @@ setup() {
         source '${INSTALL_D}/lib.sh'
         for m in 00-detect 01-state 02-deps 03-kernel 04-dkms 05-mesh \
                  06-radio 07-systemd 08-plugin 09-config 10-network \
-                 11-artifacts 12-output 14-orchestration; do
+                 11-artifacts 12-output 14-orchestration 15-channel; do
             source '${INSTALL_D}/'\$m.sh
         done
         missing=0
@@ -149,7 +149,11 @@ setup() {
             checkpoint_mark checkpoint_done checkpoint_clear checkpoint_run \
             list_completed_checkpoints expected_profile_units unit_enabled \
             is_install_complete maybe_reexec_detached write_install_result \
-            record_failure run_health_gate git_clone_retry install_radio_driver_tracked; do
+            record_failure run_health_gate git_clone_retry install_radio_driver_tracked \
+            resolve_channel is_stable_channel stable_pubkey_or_empty resolve_stable_tag \
+            stable_version_from_tag stable_wheel_name stable_bundle_name stable_asset_base \
+            fetch_and_verify_stable_asset fetch_and_verify_stable_assets unpack_deploy_bundle \
+            install_agent_from_wheel print_channel_banner show_stable_key; do
             if ! declare -F \"\$fn\" >/dev/null; then
                 echo \"MISSING: \$fn\"
                 missing=\$((missing+1))
@@ -204,8 +208,12 @@ probe_args() {
         BRANCH_NAME=\"\"
         FRESH_REPO_DIR=\"\"
         ADOS_PROFILE=\"\"
+        # show_stable_key is only defined when 15-channel.sh is sourced; the
+        # extracted snippet's --show-key branch calls it, so stub it here so
+        # the parser fragment runs standalone.
+        show_stable_key() { echo 'SHOW_KEY_CALLED'; }
         ${snippet}
-        echo \"FORCE=\${DO_FORCE} UPGRADE=\${DO_UPGRADE} PAIR=\${PAIR_CODE} NAME=\${DRONE_NAME} BRANCH=\${BRANCH_NAME} DISPLAY=\${ADOS_DISPLAY:-}\"
+        echo \"FORCE=\${DO_FORCE} UPGRADE=\${DO_UPGRADE} PAIR=\${PAIR_CODE} NAME=\${DRONE_NAME} BRANCH=\${BRANCH_NAME} DISPLAY=\${ADOS_DISPLAY:-} CHANNEL=\${ADOS_CHANNEL:-} VERSION=\${ADOS_VERSION:-}\"
     " probe_argv "$@"
 }
 
@@ -250,6 +258,37 @@ probe_args() {
 @test "--display VALUE exports ADOS_DISPLAY" {
     output="$(probe_args --display waveshare35a)"
     [[ "$output" == *"DISPLAY=waveshare35a"* ]]
+}
+
+@test "--channel stable sets ADOS_CHANNEL=stable" {
+    output="$(probe_args --channel stable)"
+    [[ "$output" == *"CHANNEL=stable"* ]]
+}
+
+@test "--channel edge sets ADOS_CHANNEL=edge" {
+    output="$(probe_args --channel edge)"
+    [[ "$output" == *"CHANNEL=edge"* ]]
+}
+
+@test "--channel rejects an unknown value" {
+    run probe_args --channel bogus
+    [[ "$output" == *"ERROR:"* ]] || [ "$status" -ne 0 ]
+}
+
+@test "--version pins the tag value" {
+    output="$(probe_args --version 0.40.4)"
+    [[ "$output" == *"VERSION=0.40.4"* ]]
+}
+
+@test "no channel flag leaves ADOS_CHANNEL unset (dispatcher defaults to edge)" {
+    output="$(probe_args --force)"
+    [[ "$output" == *"CHANNEL="* ]]
+    [[ "$output" != *"CHANNEL=stable"* ]]
+}
+
+@test "--show-key hits the show_stable_key path" {
+    output="$(probe_args --show-key 2>&1)"
+    [[ "$output" == *"SHOW_KEY_CALLED"* ]]
 }
 
 @test "--uninstall hits do_uninstall fast path" {
@@ -744,4 +783,220 @@ EOF
     run grep -nE '\-\-foreground\)' "${DISPATCHER}"
     [ "$status" -eq 0 ]
     [ -n "$output" ]
+}
+
+@test "dispatcher accepts --channel and --version flags" {
+    run grep -nE '\-\-channel\)' "${DISPATCHER}"
+    [ "$status" -eq 0 ]
+    [ -n "$output" ]
+    run grep -nE '\-\-version\)' "${DISPATCHER}"
+    [ "$status" -eq 0 ]
+    [ -n "$output" ]
+}
+
+@test "dispatcher defaults ADOS_CHANNEL to edge" {
+    # The dispatcher exports ADOS_CHANNEL with an edge default after arg
+    # parsing so the channel selection survives into the main flow and the
+    # detached re-exec.
+    run grep -nE '^export ADOS_CHANNEL="\$\{ADOS_CHANNEL:-edge\}"' "${DISPATCHER}"
+    [ "$status" -eq 0 ]
+    [ -n "$output" ]
+}
+
+@test "dispatcher sources 15-channel after 14-orchestration in the module loop" {
+    run awk '/for module in/,/; do$/ {printf "%s ", $0} /; do$/ {print ""}' "${DISPATCHER}"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"14-orchestration 15-channel"* ]]
+}
+
+@test "13-main full-install branches on the stable channel" {
+    run grep -cE "is_stable_channel" "${INSTALL_D}/13-main.sh"
+    [ "$status" -eq 0 ]
+    # fresh-install + upgrade + ground-station extras all branch on channel.
+    [ "$output" -ge 3 ]
+    run grep -nE "fetch_and_verify_stable_assets|install_agent_from_wheel|unpack_deploy_bundle" "${INSTALL_D}/13-main.sh"
+    [ "$status" -eq 0 ]
+    [ -n "$output" ]
+}
+
+# -----------------------------------------------------------------------------
+# Channel module (15-channel.sh): channel resolution, tag resolution, stable
+# fetch+verify path, wheel install path. The 15-channel module sources
+# scripts/lib/verify.sh on its own, so we source it standalone over lib.sh +
+# 14-orchestration and mock ados_fetch / ados_verify_artifact / pip so the
+# probes are deterministic on a host with no network and no /opt/ados.
+# -----------------------------------------------------------------------------
+
+chan_setup() {
+    CHAN_TMP="$(mktemp -d)"
+    CHAN_BIN="${CHAN_TMP}/bin"
+    mkdir -p "${CHAN_BIN}"
+    mkdir -p "${CHAN_TMP}/venv/bin"
+    # A pip stub that records its argv so the wheel-vs-source path is testable.
+    cat > "${CHAN_TMP}/venv/bin/pip" <<EOF
+#!/usr/bin/env bash
+echo "PIP_ARGS: \$*" >> "${CHAN_TMP}/pip.log"
+exit 0
+EOF
+    chmod +x "${CHAN_TMP}/venv/bin/pip"
+}
+
+chan_teardown() {
+    [ -n "${CHAN_TMP:-}" ] && rm -rf "${CHAN_TMP}"
+}
+
+chan_run() {
+    local snippet="$1"
+    bash -c "
+        set -uo pipefail
+        export PATH='${CHAN_BIN}:'\$PATH
+        source '${INSTALL_D}/lib.sh'
+        export VENV_DIR='${CHAN_TMP}/venv'
+        source '${INSTALL_D}/14-orchestration.sh'
+        source '${INSTALL_D}/15-channel.sh'
+        ${snippet}
+    "
+}
+
+@test "resolve_channel defaults to edge with no env" {
+    chan_setup
+    run chan_run "unset ADOS_CHANNEL 2>/dev/null; resolve_channel"
+    chan_teardown
+    [[ "$output" == *"edge"* ]]
+    [[ "$output" != *"stable"* ]]
+}
+
+@test "resolve_channel honors ADOS_CHANNEL=stable" {
+    chan_setup
+    run chan_run "export ADOS_CHANNEL=stable; resolve_channel"
+    chan_teardown
+    [[ "$output" == *"stable"* ]]
+}
+
+@test "resolve_channel normalizes a typo back to edge" {
+    chan_setup
+    run chan_run "export ADOS_CHANNEL=stabel; resolve_channel"
+    chan_teardown
+    [[ "$output" == *"edge"* ]]
+}
+
+@test "resolve_stable_tag prefers an explicit X.Y.Z pin and prefixes v" {
+    chan_setup
+    run chan_run "export ADOS_VERSION=0.40.4; resolve_stable_tag"
+    chan_teardown
+    [[ "$output" == *"v0.40.4"* ]]
+}
+
+@test "resolve_stable_tag passes through a vX.Y.Z pin verbatim" {
+    chan_setup
+    run chan_run "export ADOS_VERSION=v1.2.3; resolve_stable_tag"
+    chan_teardown
+    [[ "$output" == "v1.2.3" ]]
+}
+
+@test "resolve_stable_tag reads the latest v* tag from the releases API" {
+    chan_setup
+    run chan_run "
+        ados_fetch() { printf '%s\n' '[{\"tag_name\": \"v0.41.0\"}, {\"tag_name\": \"v0.40.4\"}, {\"tag_name\": \"lite-v0.1.5\"}]'; }
+        unset ADOS_VERSION 2>/dev/null
+        resolve_stable_tag
+    "
+    chan_teardown
+    [[ "$output" == *"v0.41.0"* ]]
+    [[ "$output" != *"lite"* ]]
+}
+
+@test "stable_wheel_name + stable_bundle_name match the release naming" {
+    chan_setup
+    run chan_run "stable_wheel_name 0.40.4; stable_bundle_name 0.40.4"
+    chan_teardown
+    [[ "$output" == *"ados_drone_agent-0.40.4-py3-none-any.whl"* ]]
+    [[ "$output" == *"ados-drone-agent-deploy-0.40.4.tar.gz"* ]]
+}
+
+@test "stable channel REFUSES when the embedded key is still the placeholder" {
+    chan_setup
+    # With the placeholder key, stable_pubkey_or_empty returns empty and
+    # fetch_and_verify_stable_assets must hard-fail before touching the network.
+    run chan_run "
+        ados_fetch() { echo 'NETWORK SHOULD NOT BE HIT' >&2; return 1; }
+        fetch_and_verify_stable_assets v0.40.4 '${CHAN_TMP}/assets' && echo RESULT_OK || echo RESULT_FAIL
+    "
+    chan_teardown
+    [[ "$output" == *"RESULT_FAIL"* ]]
+}
+
+@test "stable channel REFUSES a tampered/unverifiable artifact (mocked verify)" {
+    chan_setup
+    # Real key embedded + downloads succeed, but ados_verify_artifact reports
+    # failure (tamper / bad signature). The fetch helper must propagate the
+    # refusal — stable is allowed to hard-fail on a bad signature.
+    run chan_run "
+        ADOS_STABLE_PUBKEY='RWQrealkeyrealkeyrealkeyrealkeyrealkeyrealkeyrealkeyAA'
+        ados_fetch() { : > \"\$2\"; return 0; }
+        ados_verify_artifact() { return 1; }
+        fetch_and_verify_stable_asset https://example/base art.whl '${CHAN_TMP}/d' KEY && echo RESULT_OK || echo RESULT_FAIL
+    "
+    chan_teardown
+    [[ "$output" == *"RESULT_FAIL"* ]]
+}
+
+@test "stable channel ACCEPTS a verified artifact (mocked verify ok)" {
+    chan_setup
+    run chan_run "
+        ados_fetch() { : > \"\$2\"; return 0; }
+        ados_verify_artifact() { return 0; }
+        fetch_and_verify_stable_asset https://example/base art.whl '${CHAN_TMP}/d' KEY && echo RESULT_OK || echo RESULT_FAIL
+    "
+    chan_teardown
+    [[ "$output" == *"RESULT_OK"* ]]
+}
+
+@test "install_agent_from_wheel records a wheel install in the pip log" {
+    chan_setup
+    chan_run "install_agent_from_wheel '/tmp/w.whl'"
+    run cat "${CHAN_TMP}/pip.log"
+    chan_teardown
+    [[ "$output" == *"w.whl"* ]]
+    [[ "$output" != *"git+"* ]]
+}
+
+@test "install_agent_from_wheel with extras installs the extras group" {
+    chan_setup
+    chan_run "install_agent_from_wheel '/tmp/w.whl' ground-station"
+    run cat "${CHAN_TMP}/pip.log"
+    chan_teardown
+    [[ "$output" == *"w.whl[ground-station]"* ]]
+}
+
+@test "unpack_deploy_bundle extracts into destroot/repo and validates the tree" {
+    chan_setup
+    # Build a minimal bundle whose root dir is "repo" with data/systemd.
+    STAGING="$(mktemp -d)"
+    mkdir -p "${STAGING}/repo/data/systemd"
+    : > "${STAGING}/repo/data/systemd/ados-supervisor.service"
+    tar -czf "${CHAN_TMP}/bundle.tar.gz" -C "${STAGING}" repo
+    rm -rf "${STAGING}"
+    run chan_run "unpack_deploy_bundle '${CHAN_TMP}/bundle.tar.gz' '${CHAN_TMP}/dest' && [ -d '${CHAN_TMP}/dest/repo/data/systemd' ] && echo UNPACKED"
+    chan_teardown
+    [[ "$output" == *"UNPACKED"* ]]
+}
+
+@test "unpack_deploy_bundle fails on a bundle missing the systemd tree" {
+    chan_setup
+    STAGING="$(mktemp -d)"
+    mkdir -p "${STAGING}/repo/scripts"
+    : > "${STAGING}/repo/scripts/placeholder"
+    tar -czf "${CHAN_TMP}/bad.tar.gz" -C "${STAGING}" repo
+    rm -rf "${STAGING}"
+    run chan_run "unpack_deploy_bundle '${CHAN_TMP}/bad.tar.gz' '${CHAN_TMP}/dest2' && echo UNPACKED || echo REFUSED"
+    chan_teardown
+    [[ "$output" == *"REFUSED"* ]]
+}
+
+@test "show_stable_key reports placeholder status while unprovisioned" {
+    chan_setup
+    run chan_run "show_stable_key"
+    chan_teardown
+    [[ "$output" == *"PLACEHOLDER"* ]]
 }
