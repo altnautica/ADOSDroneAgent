@@ -52,6 +52,7 @@ jobs:
           shellcheck scripts/drivers/build-prebuilt-ko.sh
           shellcheck scripts/drivers/lib-prebuilt.sh
           shellcheck scripts/test/run_dispatcher_tests.sh
+          shellcheck scripts/test/e2e-install-rig.sh
           shellcheck scripts/test/defconfig_reproducibility.sh
           shellcheck scripts/test/minisign_verify_smoke.sh
           shellcheck scripts/test/verify_smoke.sh
