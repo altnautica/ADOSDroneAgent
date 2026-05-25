@@ -1017,3 +1017,312 @@ chan_run() {
     chan_teardown
     [[ "$output" == *"PLACEHOLDER"* ]]
 }
+
+# -----------------------------------------------------------------------------
+# Broken-venv-pip self-recovery (ensure_venv_pip).
+#
+# The venv's pip can rot independently of the agent package (stale pip vendor
+# tree, interrupted self-upgrade, Python minor bump). ensure_venv_pip probes
+# the venv pip and self-heals: ensurepip first, then a full venv recreate +
+# agent reinstall. These tests stub the venv python so the recovery ladder is
+# observable without a real interpreter or network. find_python lives in
+# 00-detect.sh (not sourced by orch_run), so each snippet stubs it.
+# -----------------------------------------------------------------------------
+
+@test "ensure_venv_pip is a no-op when venv pip already works" {
+    orch_setup
+    # The default orch_setup python shim succeeds for everything, so
+    # `python -m pip --version` passes and the probe short-circuits. A
+    # sentinel file proves ensurepip / recreate were never reached.
+    run orch_run "
+        find_python() { echo /usr/bin/python3; }
+        ensure_venv_pip && echo RECOVER_OK || echo RECOVER_FAIL
+        echo \"REQFAIL=[\${REQUIRED_FAILURES}]\"
+    "
+    orch_teardown
+    [[ "$output" == *"RECOVER_OK"* ]]
+    # No required failure recorded on a healthy pip.
+    [[ "$output" == *"REQFAIL=[]"* ]]
+}
+
+@test "ensure_venv_pip repairs a broken pip via ensurepip (stage 1)" {
+    orch_setup
+    # python shim: `-m pip --version` fails until ensurepip has been run
+    # (marked by a flag file); `-m ensurepip` drops the flag; afterwards
+    # pip --version succeeds. This exercises the stage-1 in-place repair
+    # without ever recreating the venv.
+    cat > "${ORCH_TMP}/venv/bin/python" <<EOF
+#!/usr/bin/env bash
+FLAG="${ORCH_TMP}/ensurepip.done"
+if [ "\$1" = "-m" ] && [ "\$2" = "ensurepip" ]; then
+    : > "\${FLAG}"
+    exit 0
+fi
+if [ "\$1" = "-m" ] && [ "\$2" = "pip" ] && [ "\$3" = "--version" ]; then
+    [ -f "\${FLAG}" ] && exit 0 || exit 1
+fi
+exit 0
+EOF
+    chmod +x "${ORCH_TMP}/venv/bin/python"
+    run orch_run "
+        find_python() { echo /usr/bin/python3; }
+        ensure_venv_pip && echo RECOVER_OK || echo RECOVER_FAIL
+        # ensurepip must have been the recovery path (marker dropped by the
+        # shim's -m ensurepip branch). Checked inside the snippet because
+        # orch_teardown removes ORCH_TMP before the post-run assertions.
+        [ -f '${ORCH_TMP}/ensurepip.done' ] && echo ENSUREPIP=YES || echo ENSUREPIP=NO
+    "
+    orch_teardown
+    [[ "$output" == *"RECOVER_OK"* ]]
+    [[ "$output" == *"ENSUREPIP=YES"* ]]
+}
+
+@test "ensure_venv_pip recreates the venv when ensurepip cannot repair pip (stage 2)" {
+    orch_setup
+    # python shim: pip --version and ensurepip both keep failing on the
+    # ORIGINAL venv, forcing escalation to a full recreate. find_python
+    # returns a stub interpreter whose `-m venv DIR` writes a NEW python
+    # into DIR that reports a working pip. The recreate path must run and
+    # leave a working pip behind. A marker proves `venv` was invoked.
+    cat > "${ORCH_TMP}/venv/bin/python" <<'EOF'
+#!/usr/bin/env bash
+# Original venv: pip is permanently broken, ensurepip cannot fix it.
+exit 1
+EOF
+    chmod +x "${ORCH_TMP}/venv/bin/python"
+    cat > "${ORCH_BIN}/fakepy" <<EOF
+#!/usr/bin/env bash
+# Stub interpreter used to recreate the venv. \`-m venv DIR\` rebuilds the
+# venv with a healthy python; anything else is a no-op success.
+if [ "\$1" = "-m" ] && [ "\$2" = "venv" ]; then
+    DIR="\${@: -1}"
+    : > "${ORCH_TMP}/recreated"
+    mkdir -p "\${DIR}/bin"
+    cat > "\${DIR}/bin/python" <<'PYEOF'
+#!/usr/bin/env bash
+exit 0
+PYEOF
+    chmod +x "\${DIR}/bin/python"
+    exit 0
+fi
+exit 0
+EOF
+    chmod +x "${ORCH_BIN}/fakepy"
+    run orch_run "
+        find_python() { echo '${ORCH_BIN}/fakepy'; }
+        reinstall() { : > '${ORCH_TMP}/reinstalled'; }
+        ensure_venv_pip reinstall && echo RECOVER_OK || echo RECOVER_FAIL
+        # Emit the marker state into the captured output: orch_teardown rm's
+        # ORCH_TMP before the post-run assertions, so file checks must be made
+        # inside the snippet, not after teardown.
+        [ -f '${ORCH_TMP}/recreated' ] && echo RECREATED=YES || echo RECREATED=NO
+        [ -f '${ORCH_TMP}/reinstalled' ] && echo REINSTALLED=YES || echo REINSTALLED=NO
+    "
+    orch_teardown
+    [[ "$output" == *"RECOVER_OK"* ]]
+    [[ "$output" == *"RECREATED=YES"* ]]
+    [[ "$output" == *"REINSTALLED=YES"* ]]
+}
+
+@test "ensure_venv_pip records a REQUIRED failure when recreate cannot recover pip" {
+    orch_setup
+    # Original venv python broken; recreate produces a venv whose python is
+    # ALSO broken (simulating a fundamentally broken interpreter). The
+    # function must give up, record a required failure, and return non-zero.
+    cat > "${ORCH_TMP}/venv/bin/python" <<'EOF'
+#!/usr/bin/env bash
+exit 1
+EOF
+    chmod +x "${ORCH_TMP}/venv/bin/python"
+    cat > "${ORCH_BIN}/fakepy" <<EOF
+#!/usr/bin/env bash
+if [ "\$1" = "-m" ] && [ "\$2" = "venv" ]; then
+    DIR="\${@: -1}"
+    mkdir -p "\${DIR}/bin"
+    cat > "\${DIR}/bin/python" <<'PYEOF'
+#!/usr/bin/env bash
+exit 1
+PYEOF
+    chmod +x "\${DIR}/bin/python"
+    exit 0
+fi
+exit 0
+EOF
+    chmod +x "${ORCH_BIN}/fakepy"
+    run orch_run "
+        find_python() { echo '${ORCH_BIN}/fakepy'; }
+        ensure_venv_pip && echo RECOVER_OK || echo RECOVER_FAIL
+        echo \"REQFAIL=[\${REQUIRED_FAILURES}]\"
+    "
+    orch_teardown
+    [[ "$output" == *"RECOVER_FAIL"* ]]
+    [[ "$output" == *"venv-pip"* ]]
+}
+
+@test "ensure_venv_pip records a REQUIRED failure when no interpreter is available to recreate" {
+    orch_setup
+    cat > "${ORCH_TMP}/venv/bin/python" <<'EOF'
+#!/usr/bin/env bash
+exit 1
+EOF
+    chmod +x "${ORCH_TMP}/venv/bin/python"
+    run orch_run "
+        find_python() { echo ''; }
+        ensure_venv_pip && echo RECOVER_OK || echo RECOVER_FAIL
+        echo \"REQFAIL=[\${REQUIRED_FAILURES}]\"
+    "
+    orch_teardown
+    [[ "$output" == *"RECOVER_FAIL"* ]]
+    [[ "$output" == *"venv-pip"* ]]
+}
+
+# -----------------------------------------------------------------------------
+# Mid-step abort fallback (install_failure_trap + write-once guard).
+#
+# A hard failure inside the install body under `set -e` kills the script
+# before run_health_gate, so no result file is written. install_failure_trap
+# is the EXIT-trap fallback that writes a "failed" result. It must:
+#   - write a failed result when the body exits non-zero and nothing has been
+#     written yet, recording the current step;
+#   - do NOTHING on a clean (exit 0) body;
+#   - NOT clobber a result the health gate already wrote (write-once via the
+#     ADOS_RESULT_WRITTEN guard).
+# -----------------------------------------------------------------------------
+
+@test "install_failure_trap writes a failed result on a non-zero body exit" {
+    orch_setup
+    cat > "${ORCH_BIN}/uname" <<'EOF'
+#!/usr/bin/env bash
+[ "$1" = "-s" ] && { echo Linux; exit 0; }
+exec /usr/bin/uname "$@"
+EOF
+    chmod +x "${ORCH_BIN}/uname"
+    run orch_run "
+        ADOS_PROFILE=drone
+        get_installed_version() { echo 1.0.0; }
+        ADOS_CURRENT_STEP=upgrade-pip-package
+        install_failure_trap 1
+        /bin/cat '${ORCH_TMP}/state/install-result.json'
+    "
+    orch_teardown
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'"status": "failed"'* ]]
+    [[ "$output" == *"upgrade-pip-package"* ]]
+}
+
+@test "install_failure_trap is a no-op on a clean (exit 0) body" {
+    orch_setup
+    cat > "${ORCH_BIN}/uname" <<'EOF'
+#!/usr/bin/env bash
+[ "$1" = "-s" ] && { echo Linux; exit 0; }
+exec /usr/bin/uname "$@"
+EOF
+    chmod +x "${ORCH_BIN}/uname"
+    run orch_run "
+        ADOS_PROFILE=drone
+        get_installed_version() { echo 1.0.0; }
+        install_failure_trap 0
+        [ -f '${ORCH_TMP}/state/install-result.json' ] && echo WROTE || echo NO_FILE
+    "
+    orch_teardown
+    [[ "$output" == *"NO_FILE"* ]]
+}
+
+@test "install_failure_trap does NOT clobber a result the health gate already wrote (write-once)" {
+    orch_setup
+    cat > "${ORCH_BIN}/uname" <<'EOF'
+#!/usr/bin/env bash
+[ "$1" = "-s" ] && { echo Linux; exit 0; }
+exec /usr/bin/uname "$@"
+EOF
+    cat > "${ORCH_BIN}/systemctl" <<'EOF'
+#!/usr/bin/env bash
+case "$1" in
+  is-active) exit 0 ;;
+  is-enabled) echo enabled; exit 0 ;;
+esac
+exit 0
+EOF
+    cat > "${ORCH_BIN}/curl" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+    chmod +x "${ORCH_BIN}/uname" "${ORCH_BIN}/systemctl" "${ORCH_BIN}/curl"
+    run orch_run "
+        ADOS_PROFILE=drone
+        get_installed_version() { echo 1.0.0; }
+        # Normal path writes 'ok' and flips ADOS_RESULT_WRITTEN.
+        run_health_gate && echo GATE_OK || echo GATE_FAIL
+        # The trap then fires (e.g. a later exit); it must NOT overwrite the ok.
+        install_failure_trap 1
+        echo '---'
+        /bin/cat '${ORCH_TMP}/state/install-result.json'
+    "
+    orch_teardown
+    [[ "$output" == *"GATE_OK"* ]]
+    [[ "$output" == *'"status": "ok"'* ]]
+    [[ "$output" != *'"status": "failed"'* ]]
+}
+
+@test "write_install_result flips the ADOS_RESULT_WRITTEN guard" {
+    orch_setup
+    run orch_run "
+        ADOS_PROFILE=drone
+        get_installed_version() { echo 1.0.0; }
+        echo \"BEFORE=\${ADOS_RESULT_WRITTEN}\"
+        write_install_result ok
+        echo \"AFTER=\${ADOS_RESULT_WRITTEN}\"
+    "
+    orch_teardown
+    [[ "$output" == *"BEFORE=0"* ]]
+    [[ "$output" == *"AFTER=1"* ]]
+}
+
+# -----------------------------------------------------------------------------
+# Source-shape regressions for the three fixes.
+# -----------------------------------------------------------------------------
+
+@test "maybe_reexec_detached clears a stale transient unit before systemd-run" {
+    # reset-failed must run BEFORE the systemd-run --unit=ados-install call so
+    # a lingering same-name unit from a prior install does not force the setsid
+    # fallback on a systemd host.
+    reset_line="$(grep -nE 'systemctl reset-failed ados-install' "${INSTALL_D}/14-orchestration.sh" | head -1 | cut -d: -f1)"
+    run_line="$(grep -nE 'systemd-run --unit=ados-install' "${INSTALL_D}/14-orchestration.sh" | head -1 | cut -d: -f1)"
+    [ -n "$reset_line" ]
+    [ -n "$run_line" ]
+    [ "$reset_line" -lt "$run_line" ]
+}
+
+@test "13-main upgrade path self-heals the venv pip before the package install" {
+    # ensure_venv_pip must be called on the upgrade path before the
+    # 'Upgrading pip package...' info line so a broken pip self-heals instead
+    # of aborting the upgrade.
+    heal_line="$(grep -nE 'ensure_venv_pip _upgrade_reinstall_agent' "${INSTALL_D}/13-main.sh" | head -1 | cut -d: -f1)"
+    upg_line="$(grep -nE 'Upgrading pip package' "${INSTALL_D}/13-main.sh" | head -1 | cut -d: -f1)"
+    [ -n "$heal_line" ]
+    [ -n "$upg_line" ]
+    [ "$heal_line" -lt "$upg_line" ]
+}
+
+@test "dispatcher wires the install-body EXIT trap after the detach handoff" {
+    detach_line="$(grep -nE 'maybe_reexec_detached "\$\{ADOS_ORIG_ARGS' "${DISPATCHER}" | head -1 | cut -d: -f1)"
+    trap_line="$(grep -nE 'trap .+_install_body_exit.+ EXIT' "${DISPATCHER}" | head -1 | cut -d: -f1)"
+    flow_line="$(grep -nE '^main_install_flow[[:space:]]*$' "${DISPATCHER}" | head -1 | cut -d: -f1)"
+    [ -n "$detach_line" ]
+    [ -n "$trap_line" ]
+    [ -n "$flow_line" ]
+    # Trap is wired after the detach handoff and before the main flow.
+    [ "$detach_line" -lt "$trap_line" ]
+    [ "$trap_line" -lt "$flow_line" ]
+}
+
+@test "install-body EXIT trap preserves the bootstrap-dir cleanup" {
+    # The single-slot EXIT trap replaces the bootstrap cleanup; the handler
+    # must fold that cleanup back in so a curl-pipe clone is still removed.
+    run grep -nE 'ADOS_BOOTSTRAP_DIR' "${DISPATCHER}"
+    [ "$status" -eq 0 ]
+    # The _install_body_exit handler references ADOS_BOOTSTRAP_DIR for cleanup.
+    run bash -c "awk '/_install_body_exit\\(\\)/,/^}/' '${DISPATCHER}' | grep -c 'ADOS_BOOTSTRAP_DIR'"
+    [ "$status" -eq 0 ]
+    [ "$output" -ge 1 ]
+}

@@ -340,6 +340,13 @@ maybe_reexec_detached() {
         info "Detaching install into transient unit 'ados-install' (survives SSH drop)."
         info "Follow with: journalctl -u ados-install -f"
         info "Log file:    ${logfile}"
+        # Clear any lingering same-name unit left in a failed state by a prior
+        # install. systemd refuses to start a unit whose name is still
+        # registered as failed, so without this reset systemd-run errors out
+        # and the genuine setsid fallback fires even on a systemd host. --collect
+        # reaps the unit on a clean exit, but a crashed/aborted prior run can
+        # leave it lingering; reset-failed clears that residue idempotently.
+        systemctl reset-failed ados-install >/dev/null 2>&1 || true
         # bash -lc wrapper tees the unit's own stdout to the log file.
         # systemd-run --pipe is avoided (it would re-attach to our tty);
         # the default detached unit is exactly what we want.
