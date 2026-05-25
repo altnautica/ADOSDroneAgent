@@ -23,7 +23,11 @@
 #   ADOS_PREBUILT_BASE_URL        override the manifest base URL (testing)
 #   ADOS_PREBUILT_VERMAGIC_STRICT 1 (default) full vermagic compare;
 #                                 0 relaxes to kernel-version-token match
-#   ADOS_PREBUILT_ALLOW_UNSIGNED  passed through to ados_verify_artifact
+#   ADOS_PREBUILT_ALLOW_UNSIGNED  passed through to ados_verify_artifact.
+#                                 Skips ONLY the minisign signature check; the
+#                                 SHA256 checksum is ALWAYS still enforced.
+#                                 Ignored on the stable channel (signatures
+#                                 there are mandatory).
 # =============================================================================
 
 # Resolve this script's dir + repo root so we can source the net/verify libs.
