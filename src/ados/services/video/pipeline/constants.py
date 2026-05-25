@@ -47,3 +47,20 @@ _FFMPEG_PROGRESS_TOKEN_RE = re.compile(
     r"speed|progress)=",
 )
 _WFB_TEE_SSRC = "0xCAFE"
+
+# Inbound-flow watchdog: the encoder process can be alive (PID present,
+# returncode None) and mediamtx can report a publisher on the path while
+# no actual bytes are crossing — a frozen encoder, a wedged v4l2 capture,
+# or a stalled RTSP socket. mediamtx's per-path `bytesReceived` counter is
+# the authoritative "data is actually arriving" signal. If it stays flat
+# for this window while the encoder PID is alive, restart the publish.
+# Sized above the per-frame cadence + one GOP so a brief IDR gap does not
+# false-positive, and above the cold-start publish handshake.
+# Process-liveness alone is never proof of work; assert the byte counter
+# advances.
+_INBOUND_FLOW_STALL_SECONDS = 12.0
+
+# mediamtx path name the air-side encoder publishes to. The inbound-flow
+# watchdog looks the path up by this name rather than assuming it is the
+# first item in the paths list.
+_MEDIAMTX_MAIN_PATH = "main"

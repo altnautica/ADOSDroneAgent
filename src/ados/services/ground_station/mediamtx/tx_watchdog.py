@@ -22,16 +22,12 @@ if TYPE_CHECKING:
     from .manager import MediamtxGsManager
 
 
-def _wfb_packets_received() -> int | None:
-    """Read packets_received from the shared /run/ados/wfb-stats.json.
+def _read_wfb_stats() -> dict | None:
+    """Read the shared /run/ados/wfb-stats.json snapshot.
 
     The ground-side wfb_rx manager writes this file ~1 Hz. Returns the
-    cumulative packets_received counter when readable, or ``None`` when
-    the file is missing / malformed. Used by the ffmpeg watchdog to
-    gate restarts so we don't loop ffmpeg every 5 s on a cold boot
-    where the drone hasn't paired yet (ffmpeg's SDP probe gives up
-    after 20 s with no packets and the supervisor immediately respawns
-    it into the same empty-input death).
+    parsed dict when readable, or ``None`` when the file is missing /
+    malformed.
     """
     from ados.core.paths import WFB_STATS_JSON
 
@@ -42,10 +38,44 @@ def _wfb_packets_received() -> int | None:
         return None
     if not isinstance(payload, dict):
         return None
+    return payload
+
+
+def _wfb_packets_received() -> int | None:
+    """Read packets_received from the shared wfb-stats snapshot.
+
+    Returns the cumulative packets_received counter when readable, or
+    ``None`` when the file is missing / malformed. Used by the ffmpeg
+    watchdog to gate restarts so we don't loop ffmpeg every 5 s on a
+    cold boot where the drone hasn't paired yet (ffmpeg's SDP probe
+    gives up after 20 s with no packets and the supervisor immediately
+    respawns it into the same empty-input death).
+    """
+    payload = _read_wfb_stats()
+    if payload is None:
+        return None
     value = payload.get("packets_received")
     if isinstance(value, int) and value >= 0:
         return value
     return None
+
+
+def _wfb_acquire_state() -> str:
+    """Channel-acquisition state from the shared wfb-stats snapshot.
+
+    Returns one of ``idle`` / ``searching`` / ``locked`` / ``no-peer``,
+    defaulting to ``idle`` when the field is absent (older agent, or the
+    file not yet written). Lets the ffmpeg gate emit an actionable status
+    distinguishing "the receiver is hunting for the right channel" from
+    "the peer is genuinely silent", instead of an indefinite blind hold.
+    """
+    payload = _read_wfb_stats()
+    if payload is None:
+        return "idle"
+    state = payload.get("acquire_state")
+    if isinstance(state, str):
+        return state
+    return "idle"
 
 
 async def monitor_ffmpeg(
@@ -81,11 +111,19 @@ async def monitor_ffmpeg(
             # actually flowing.
             received = _wfb_packets_received()
             if received is not None and received == 0:
+                # Surface what the receiver is doing instead of a blind
+                # hold. The wfb_rx manager sweeps the band for the
+                # channel the transmitter is actually on; this gate
+                # holds ffmpeg until valid packets flow, then starts it
+                # the moment they do (the next tick sees received > 0).
+                acquire_state = _wfb_acquire_state()
                 slog.info(
                     "ground_ffmpeg_waiting_for_radio_packets",
+                    acquire_state=acquire_state,
                     msg=(
-                        "wfb_rx packets_received=0; holding ffmpeg "
-                        "until the link delivers its first frame"
+                        "no valid packets yet; receiver is "
+                        f"{acquire_state}. Holding ffmpeg until the link "
+                        "delivers its first frame"
                     ),
                 )
                 continue

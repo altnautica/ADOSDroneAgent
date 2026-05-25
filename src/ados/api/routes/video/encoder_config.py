@@ -71,6 +71,55 @@ def _bitrate_controller_snapshot(app: Any) -> dict[str, Any] | None:
     return _read_state_file(str(BITRATE_CONTROLLER_JSON))
 
 
+def _link_snapshot(app: Any, wfb_cfg: Any) -> dict[str, Any]:
+    """Live radio-link liveness fields for the GCS Video Link panel.
+
+    The panel polls only ``GET /video/config`` and reads ``config.link.*``
+    to render its liveness UI. Prefer the in-process WfbManager status
+    (drone, single-process bench). Fall back to the wfb-stats snapshot
+    file the radio managers persist to ``/run/ados/wfb-stats.json`` so
+    the ground-station profile (whose receive manager lives in a
+    separate process) still serves live values. Returns a stable shape
+    with ``None`` placeholders so the panel never sees missing keys.
+    """
+    fields = (
+        "tx_bytes_per_s",
+        "valid_rx_packets_per_s",
+        "video_inbound_bytes_per_s",
+        "rx_silent_seconds",
+        "channel_locked",
+        "acquire_state",
+        "channel",
+    )
+    link: dict[str, Any] = {key: None for key in fields}
+
+    status: dict[str, Any] | None = None
+    wfb_mgr = app.wfb_manager() if hasattr(app, "wfb_manager") else None
+    if wfb_mgr is not None and hasattr(wfb_mgr, "get_status"):
+        try:
+            status = wfb_mgr.get_status()
+        except Exception:  # noqa: BLE001
+            status = None
+    if status is None:
+        # Ground-station path (and any other profile where the manager
+        # lives in a sibling process): the radio manager mirrors its
+        # snapshot to the shared stats file once per stats interval.
+        from ados.core.paths import WFB_STATS_JSON
+
+        status = _read_state_file(str(WFB_STATS_JSON))
+
+    if isinstance(status, dict):
+        for key in fields:
+            if status.get(key) is not None:
+                link[key] = status[key]
+
+    # Channel falls back to the configured value so the panel always has
+    # a number even before the first stats line lands.
+    if link["channel"] is None and wfb_cfg is not None:
+        link["channel"] = getattr(wfb_cfg, "channel", None)
+    return link
+
+
 def _hop_supervisor_snapshot(app: Any) -> dict[str, Any] | None:
     """Read the HopSupervisor snapshot.
 
@@ -160,11 +209,19 @@ async def get_video_config() -> dict[str, Any]:
         }
     else:
         hopping = hop_snap
+
+    # Live radio-link liveness block. The GCS Video Link panel polls
+    # only this endpoint and reads config.link.* to drive its liveness
+    # UI (throughput, valid-decode rate, channel lock, acquisition
+    # state). Without this block the panel renders dead.
+    link = _link_snapshot(app, wfb_cfg)
+
     return {
         "radio": radio,
         "encoder": encoder,
         "adaptive": adaptive,
         "hopping": hopping,
+        "link": link,
     }
 
 
@@ -243,6 +300,7 @@ __all__ = [
     "_read_state_file",
     "_bitrate_controller_snapshot",
     "_hop_supervisor_snapshot",
+    "_link_snapshot",
     "get_video_config",
     "set_video_config",
 ]

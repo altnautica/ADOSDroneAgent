@@ -437,6 +437,37 @@ class MediamtxGsManager:
         """True when the UDP-to-RTSP ffmpeg sidecar process is running."""
         return self._ffmpeg is not None and self._ffmpeg.returncode is None
 
+    async def path_has_publisher(self) -> bool:
+        """True when mediamtx reports an active publisher on /main.
+
+        Readiness signal for consumers (the LCD tap, the heartbeat) that
+        want to know whether the ground path is actually serving video,
+        not just whether the processes are alive. Queries the mediamtx
+        API; returns False on any error so an unreachable API reads as
+        "not ready" rather than a false positive.
+        """
+        import httpx
+
+        api_port = self._core._api_port
+        try:
+            async with httpx.AsyncClient(
+                base_url=f"http://127.0.0.1:{api_port}",
+                timeout=httpx.Timeout(2.0, connect=0.5),
+            ) as client:
+                resp = await client.get(
+                    f"/v3/paths/get/{GROUND_RTSP_PATH}"
+                )
+                if resp.status_code != 200:
+                    return False
+                data = resp.json()
+                if not isinstance(data, dict):
+                    return False
+                return bool(data.get("ready", False)) and bool(
+                    data.get("source")
+                )
+        except Exception:
+            return False
+
     async def restart_ffmpeg(self) -> bool:
         """Reap the dead ffmpeg sidecar and spawn a fresh one.
 

@@ -871,6 +871,69 @@ class HopListener:
         except OSError as exc:
             log.debug("peer_presence_persist_failed", error=str(exc))
 
+    def _maybe_follow_peer_channel(self, peer_channel: int) -> None:
+        """Tune to the peer's announced channel — only if we're not
+        already decoding it.
+
+        The transmitter advertises its operating channel in the presence
+        beacon. But hearing that beacon at all means we are already on
+        the right control-plane channel, so following the announced
+        channel blindly can retune AWAY from a working link. Only follow
+        when we are NOT decoding valid video (valid-rx rate is zero):
+        that is the case where we are mistuned and the beacon's channel
+        is the hint we need. If video is flowing, stay put.
+
+        Also no-op when an acquisition is already in flight (the
+        watchdog's sweep holds the acquirer lock) so a beacon verify
+        never races a sweep on the same radio.
+        """
+        if peer_channel not in _CHANNEL_NUMBERS:
+            return
+        current = getattr(self._wfb, "_channel", None)
+        if current == peer_channel:
+            return
+        acquirer = getattr(self._wfb, "_acquirer", None)
+        if acquirer is None:
+            return
+        # Already running a sweep / verify — don't pile on.
+        if getattr(acquirer, "in_progress", False):
+            return
+        # If we are decoding valid video, we are on the right channel;
+        # do not retune away from a working link.
+        rate = getattr(self._wfb, "_valid_rx_packets_per_s", None)
+        if isinstance(rate, (int, float)) and rate > 0:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+
+        async def _verify() -> None:
+            try:
+                ok = await acquirer.acquire_target(peer_channel)
+                if ok:
+                    try:
+                        self._wfb._channel = peer_channel
+                    except AttributeError:
+                        pass
+                    persist = getattr(
+                        self._wfb, "_persist_locked_channel", None
+                    )
+                    if callable(persist):
+                        persist(peer_channel)
+                    log.info(
+                        "hop_listener_followed_peer_channel",
+                        channel=peer_channel,
+                    )
+            except Exception as exc:  # noqa: BLE001
+                log.debug(
+                    "hop_listener_follow_peer_failed",
+                    channel=peer_channel,
+                    error=str(exc),
+                )
+
+        loop.create_task(_verify())
+
     def _handle_presence(self, beacon: "PresenceBeacon") -> None:
         """Update the in-memory peer cache and back-fill pair state."""
         # Reject self-beacons. Loopback delivery can race against the
@@ -891,6 +954,15 @@ class HopListener:
         self._peer_rssi_dbm = int(beacon.rssi_dbm)
         self._peer_last_seen_unix = time.time()
         self._persist_peer_presence()
+
+        # Short-circuit a band sweep: the peer beacon carries the
+        # transmitter's current operating channel. When we hear a beacon
+        # announcing a channel that differs from where we are tuned, set
+        # that channel directly and verify a valid decode rather than
+        # sweeping the whole band. Best-effort and non-blocking: schedule
+        # the verify as a background task so the listener loop is never
+        # held up by a channel retune.
+        self._maybe_follow_peer_channel(int(beacon.channel))
         if previous_device_id != beacon.device_id:
             log.info(
                 "hop_listener_peer_seen",

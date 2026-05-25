@@ -44,6 +44,62 @@ class TxPowerRequest(BaseModel):
     tx_power_dbm: int = Field(..., description="Requested TX power in dBm.")
 
 
+def _introspect_adapter(interface: str) -> dict[str, object]:
+    """Direct driver / chipset / monitor-capability probe for an iface.
+
+    Fallback for when the full adapter scan does not return an entry for
+    the live interface (common once it is in monitor mode and the scan's
+    name match misses). Reads the bound kernel driver from the sysfs
+    ``device/driver`` symlink, derives a chipset label from the driver
+    name, and checks monitor support from ``iw phy``. Best-effort: any
+    field that cannot be determined comes back empty / False.
+    """
+    result: dict[str, object] = {
+        "driver": "",
+        "chipset": "",
+        "supports_monitor": False,
+    }
+    if not interface:
+        return result
+    # Bound kernel driver via the sysfs symlink target.
+    try:
+        driver_link = os.readlink(f"/sys/class/net/{interface}/device/driver")
+        driver = driver_link.rsplit("/", 1)[-1]
+        result["driver"] = driver
+        result["chipset"] = _chipset_from_driver(driver)
+    except (FileNotFoundError, OSError):
+        pass
+    # Monitor-mode capability from iw phy. The phy index lives at
+    # /sys/class/net/<iface>/phy80211/index; query that phy's modes.
+    try:
+        phy_index = Path(
+            f"/sys/class/net/{interface}/phy80211/index"
+        ).read_text().strip()
+        proc = subprocess.run(
+            ["iw", "phy", f"phy{phy_index}", "info"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if proc.returncode == 0 and "* monitor" in proc.stdout:
+            result["supports_monitor"] = True
+    except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
+        pass
+    return result
+
+
+def _chipset_from_driver(driver: str) -> str:
+    """Map a bound kernel driver name to a human chipset label."""
+    if not driver:
+        return ""
+    lowered = driver.lower()
+    if "88x2eu" in lowered or "8812eu" in lowered:
+        return "RTL8812EU"
+    if "8812au" in lowered or "88xxau" in lowered:
+        return "RTL8812AU"
+    return driver
+
+
 def _read_regulatory_domain() -> str:
     """Best-effort `iw reg get` first-line parse. Returns 'unknown' on failure."""
     try:
@@ -251,10 +307,10 @@ async def get_wfb_status():
         "chipset": "",
         "supports_monitor": False,
     }
+    interface_name = status.get("interface", "")
     try:
         from ados.services.wfb.adapter import detect_wfb_adapters
 
-        interface_name = status.get("interface", "")
         if interface_name:
             adapters = detect_wfb_adapters()
             for adapter in adapters:
@@ -267,6 +323,14 @@ async def get_wfb_status():
                     break
     except Exception:
         pass
+
+    # Fallback: the full scan can miss the live interface once it is in
+    # monitor mode (the name match relies on `iw dev` enumeration that
+    # behaves differently per driver). Probe the sysfs driver symlink +
+    # iw phy directly so driver / chipset / supports_monitor are never
+    # blank when an interface is up.
+    if interface_name and not adapter_info.get("driver"):
+        adapter_info = _introspect_adapter(interface_name)
 
     status["adapter"] = adapter_info
 

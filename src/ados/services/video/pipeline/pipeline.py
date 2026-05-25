@@ -47,6 +47,8 @@ from ados.services.video.recorder import VideoRecorder
 
 from .constants import (
     _HEALTH_CHECK_INTERVAL,
+    _INBOUND_FLOW_STALL_SECONDS,
+    _MEDIAMTX_MAIN_PATH,
 )
 from .discovery import _DiscoveryMixin
 from .health import _HealthMixin
@@ -160,6 +162,16 @@ class VideoPipeline(_DiscoveryMixin, _HealthMixin, _WfbTeeMixin):
         self._base_restart_delay: float = 5.0
         self._started_at: float = 0.0  # monotonic time of last start_stream()
         self._first_packet_seen: bool = False  # set True once mediamtx reports a publisher
+        # Inbound-flow watchdog state. Tracks mediamtx's per-path
+        # bytesReceived counter and the monotonic time it last advanced.
+        # When the publisher is present but the counter sits flat while
+        # the encoder PID is alive, the encoder is frozen and the publish
+        # must be restarted. Process-liveness alone is never proof of
+        # work; assert the byte counter advances. `_inbound_bytes_value`
+        # of -1 means "no sample yet".
+        self._inbound_bytes_value: int = -1
+        self._inbound_bytes_changed_at: float = 0.0
+        self._video_inbound_bytes_per_s: float = 0.0
         # Stamp of the most recent healthy probe. Used to clear
         # `_restart_count` after a sustained run of healthy frames so a
         # transient failure during the day does not leave the counter
@@ -424,6 +436,12 @@ class VideoPipeline(_DiscoveryMixin, _HealthMixin, _WfbTeeMixin):
             self._state = PipelineState.RUNNING
             self._started_at = time.monotonic()
             self._first_packet_seen = False
+            # Reset the inbound-flow window so a fresh publish gets a
+            # clean cold-start window before the byte-counter watchdog
+            # can trip on it.
+            self._inbound_bytes_value = -1
+            self._inbound_bytes_changed_at = time.monotonic()
+            self._video_inbound_bytes_per_s = 0.0
             self._last_start_error = None
             log.info(
                 "pipeline_started",
@@ -989,6 +1007,13 @@ class VideoPipeline(_DiscoveryMixin, _HealthMixin, _WfbTeeMixin):
         if not await self._check_mediamtx_path_ready():
             log.warning("mediamtx_path_not_ready", msg="encoder RTSP connection likely dead")
             return False
+        # Inbound-flow watchdog: the publisher can be present and `ready`
+        # while the encoder has frozen and no bytes are crossing. Assert
+        # mediamtx's per-path bytesReceived counter keeps advancing so a
+        # frozen-but-alive encoder is restarted — process-liveness alone
+        # is never proof of work.
+        if not await self._check_inbound_flow_healthy():
+            return False
         return True
 
     async def _get_mediamtx_client(self) -> httpx.AsyncClient:
@@ -1031,6 +1056,95 @@ class VideoPipeline(_DiscoveryMixin, _HealthMixin, _WfbTeeMixin):
             return items[0].get("ready", False)
         except Exception:
             return False
+
+    async def _read_mediamtx_bytes_received(self) -> int | None:
+        """Read the bytesReceived counter for the encoder's named path.
+
+        Looks the path up by its known name (``_MEDIAMTX_MAIN_PATH``) via
+        ``/v3/paths/get/<name>`` rather than assuming it is the first item
+        in the list — a stray republish path or a future second stream
+        would otherwise shift the index. Returns the cumulative inbound
+        byte count, or ``None`` when the API is unreachable / the path is
+        absent / the field is missing. This is the authoritative "data is
+        actually arriving from the encoder" signal, distinct from the
+        ``ready`` flag (which can stay true on a publisher whose byte flow
+        has frozen).
+        """
+        try:
+            client = await self._get_mediamtx_client()
+            resp = await client.get(
+                f"/v3/paths/get/{_MEDIAMTX_MAIN_PATH}"
+            )
+            if resp.status_code != 200:
+                return None
+            data = resp.json()
+            if not isinstance(data, dict):
+                return None
+            value = data.get("bytesReceived")
+            if isinstance(value, int) and value >= 0:
+                return value
+            return None
+        except Exception:
+            return None
+
+    async def _check_inbound_flow_healthy(self) -> bool:
+        """Verify inbound bytes are still advancing through mediamtx.
+
+        Returns True while the per-path bytesReceived counter keeps
+        climbing (or while the publisher is still in its cold-start
+        window). Returns False when the counter sits flat for
+        _INBOUND_FLOW_STALL_SECONDS while the encoder PID is alive — the
+        encoder has frozen mid-stream and the publish must be restarted.
+        Falls back to "healthy" (returns True) when the counter cannot be
+        read so a transient API hiccup never forces a needless restart;
+        the existing path-ready probe still covers the dead-publisher
+        case.
+        """
+        log = _pkg().log
+        # Only meaningful once a publisher exists and the encoder is the
+        # legacy subprocess (the in-process pipeline runs its own bus +
+        # tx-byte watchdog).
+        if self._air_pipeline is not None:
+            return True
+        if self._encoder_process is None:
+            return True
+        if not self._first_packet_seen:
+            return True
+        current = await self._read_mediamtx_bytes_received()
+        if current is None:
+            return True
+        now = time.monotonic()
+        interval = max(_HEALTH_CHECK_INTERVAL, 0.001)
+        if self._inbound_bytes_value < 0:
+            self._inbound_bytes_value = current
+            self._inbound_bytes_changed_at = now
+            return True
+        if current > self._inbound_bytes_value:
+            delta = current - self._inbound_bytes_value
+            elapsed = max(now - self._inbound_bytes_changed_at, interval)
+            self._video_inbound_bytes_per_s = delta / elapsed
+            self._inbound_bytes_value = current
+            self._inbound_bytes_changed_at = now
+            return True
+        stalled_for = now - self._inbound_bytes_changed_at
+        if stalled_for < _INBOUND_FLOW_STALL_SECONDS:
+            return True
+        self._video_inbound_bytes_per_s = 0.0
+        log.warning(
+            "video_inbound_flow_stalled",
+            bytes_received=current,
+            stalled_seconds=round(stalled_for, 1),
+            threshold_seconds=_INBOUND_FLOW_STALL_SECONDS,
+            note=(
+                "encoder PID alive and publisher present but mediamtx "
+                "bytesReceived flat; restarting publish"
+            ),
+        )
+        return False
+
+    def video_inbound_bytes_per_s(self) -> float:
+        """Most recent inbound video throughput in bytes/s (observability)."""
+        return round(self._video_inbound_bytes_per_s, 1)
 
     async def _check_cloud_push_health(self) -> bool:
         """Check if the cloud push subprocess is still running.
@@ -1541,6 +1655,12 @@ class VideoPipeline(_DiscoveryMixin, _HealthMixin, _WfbTeeMixin):
             self._state = PipelineState.RUNNING
             self._started_at = time.monotonic()
             self._first_packet_seen = False
+            # Reset the inbound-flow window so a fresh publish gets a
+            # clean cold-start window before the byte-counter watchdog
+            # can trip on it.
+            self._inbound_bytes_value = -1
+            self._inbound_bytes_changed_at = time.monotonic()
+            self._video_inbound_bytes_per_s = 0.0
             self._last_start_error = None
             log.info(
                 "pipeline_started",

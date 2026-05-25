@@ -125,6 +125,34 @@ def collect_attached_display() -> dict | None:
     }
 
 
+def get_single_service_state(name: str) -> str:
+    """Cheap single-service active-state probe for per-beat freshness.
+
+    One ``systemctl is-active`` call (no per-PID psutil metrics). Used to
+    refresh the video service state on every heartbeat so the GCS sees a
+    video start/stop within one beat instead of waiting up to the full
+    service-cache refresh window. Returns ``running`` / ``failed`` /
+    ``stopped``.
+    """
+    import subprocess
+
+    try:
+        result = subprocess.run(
+            ["systemctl", "is-active", name],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        raw = result.stdout.strip()
+    except Exception:
+        return "stopped"
+    if raw == "active":
+        return "running"
+    if raw == "failed":
+        return "failed"
+    return "stopped"
+
+
 def get_services_status() -> list[dict]:
     """Query systemd for all ados-* service states + per-PID metrics."""
     import subprocess

@@ -42,6 +42,9 @@ from .heartbeat import (
     get_services_status as _get_services_status,
 )
 from .heartbeat import (
+    get_single_service_state as _get_single_service_state,
+)
+from .heartbeat import (
     read_gs_video_state as _read_gs_video_state,
 )
 from .heartbeat import (
@@ -189,15 +192,31 @@ async def heartbeat_loop(ctx: CloudContext) -> None:  # noqa: C901
                     )
                     payload["videoWhepPort"] = 8889 if _gs_video_live else 0
                 else:
-                    _video_svc = next(
-                        (s for s in payload["services"] if s["name"] == "ados-video"),
-                        None,
+                    # Refresh the video service state every beat (cheap
+                    # single is-active probe) rather than reading it off
+                    # the service cache that only refreshes every few
+                    # beats. Without this, a video service that just
+                    # started or stopped takes up to the full cache
+                    # window to surface in the GCS — the drone card lags
+                    # the actual stream state. Falls back to the cached
+                    # entry if the cheap probe somehow fails.
+                    _video_state = await asyncio.to_thread(
+                        _get_single_service_state, "ados-video"
                     )
-                    payload["videoState"] = (
-                        _video_svc["status"] if _video_svc else "stopped"
-                    )
+                    if _video_state == "stopped":
+                        _video_svc = next(
+                            (
+                                s
+                                for s in payload["services"]
+                                if s["name"] == "ados-video"
+                            ),
+                            None,
+                        )
+                        if _video_svc:
+                            _video_state = _video_svc["status"]
+                    payload["videoState"] = _video_state
                     payload["videoWhepPort"] = (
-                        8889 if _video_svc and _video_svc["status"] == "running" else 0
+                        8889 if _video_state == "running" else 0
                     )
                 # The LAN-derived /main/whep URL was retired alongside
                 # the operator-facing access panel earlier this cycle —

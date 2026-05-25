@@ -152,6 +152,9 @@ class WfbManager:
         self._last_tx_byte_value: int = -1
         self._last_tx_byte_change_at: float = 0.0
         self._tx_zombie_kills: int = 0
+        # Smoothed transmit rate from the tx_bytes counter delta, for
+        # the heartbeat radio block. Updated each watchdog poll.
+        self._tx_bytes_per_s: float = 0.0
         # Upstream-feed tracker. Distinguishes "wfb_tx is wedged" (kill)
         # from "no video is arriving at wfb_tx's UDP 5600 socket" (don't
         # kill — wfb_tx is correctly idle when there is nothing to send).
@@ -299,6 +302,22 @@ class WfbManager:
             "tx_video_stalled": self._tx_video_stalled,
             "tx_video_stall_kills": self._tx_video_stall_kills,
             "tx_video_recvq_bytes": self._last_video_recvq_bytes,
+            # Rate + lock observability for the heartbeat radio block.
+            # tx_bytes_per_s is the smoothed radio transmit rate;
+            # valid_rx_packets_per_s is the uplink valid-decode rate
+            # (0 on a drone-only rig with no rx.key). The transmitter
+            # owns its channel, so channel_locked is always true here.
+            # video_inbound_bytes_per_s is 0 on the drone — it is the
+            # video source, not a receiver.
+            "tx_bytes_per_s": round(self._tx_bytes_per_s, 1),
+            "valid_rx_packets_per_s": round(
+                stats.packets_received / max(
+                    self._monitor.stats_interval_s, 0.001
+                ),
+                2,
+            ),
+            "channel_locked": True,
+            "video_inbound_bytes_per_s": 0.0,
         }
 
     def force_state(self, state: LinkState) -> None:
@@ -1071,12 +1090,23 @@ class WfbManager:
                 )
                 continue
             if current != self._last_tx_byte_value:
+                now_tx = time.monotonic()
+                if self._last_tx_byte_value >= 0:
+                    elapsed = max(
+                        now_tx - self._last_tx_byte_change_at,
+                        _TX_HEALTH_POLL_INTERVAL_S,
+                    )
+                    delta = max(current - self._last_tx_byte_value, 0)
+                    self._tx_bytes_per_s = delta / elapsed
                 self._last_tx_byte_value = current
-                self._last_tx_byte_change_at = time.monotonic()
+                self._last_tx_byte_change_at = now_tx
                 continue
             silent_for = time.monotonic() - self._last_tx_byte_change_at
             if silent_for < _TX_HEALTH_SILENCE_THRESHOLD_S:
                 continue
+            # tx_bytes flat across the poll — transmit rate has dropped
+            # to zero for this window.
+            self._tx_bytes_per_s = 0.0
 
             # tx_bytes has been flat for the silence window. Decide
             # whether wfb_tx is genuinely wedged (consuming UDP but
@@ -1412,14 +1442,17 @@ class WfbManager:
                     note="drone-only rig; uplink RX disabled",
                 )
 
-            # Step 5: control-plane stream (radio_id 1) carrying the
-            # FHSS hop coordination frames. ADOS is local-first / field-
-            # deployed; the inter-rig link is the WFB radio itself, so
-            # HopAnnounce/HopAck must travel here rather than over the
+            # Step 5: control-plane stream (radio_id 1). Always started
+            # when the data plane is up, independent of any
+            # frequency-hopping setting. It carries two frame types:
+            # the periodic presence beacon (always emitted, carrying this
+            # rig's channel so the ground has a peer-presence + channel
+            # signal even when no video is flowing) and HopAnnounce/HopAck
+            # (only when hopping is active). The inter-rig link is the WFB
+            # radio itself, so these must travel here rather than over the
             # operator's LAN where consumer APs frequently drop L2
             # broadcasts wired<->wireless. Failures are non-fatal — the
-            # data plane stays up; only FHSS coordination degrades to
-            # the legacy LAN-broadcast fallback.
+            # data plane stays up.
             if tx_ok:
                 await self.start_tx_control(interface, self._channel)
                 await self.start_rx_control(interface, self._channel)

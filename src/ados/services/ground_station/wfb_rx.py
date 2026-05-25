@@ -34,6 +34,7 @@ from ados.core.config import load_config
 from ados.core.logging import configure_logging, get_logger
 from ados.core.paths import WFB_KEY_DIR
 from ados.services.wfb.adapter import detect_wfb_adapters, set_monitor_mode
+from ados.services.wfb.channel_acquire import ChannelAcquirer
 from ados.services.wfb.key_mgr import get_key_paths, key_exists
 from ados.services.wfb.link_quality import LinkQualityMonitor, LinkStats
 
@@ -43,6 +44,26 @@ from ados.services.wfb.link_quality import LinkQualityMonitor, LinkStats
 # packet count increments per radiotap-framed 802.11 frame regardless.
 _RX_HEALTH_POLL_INTERVAL_S = 5.0
 _RX_HEALTH_SILENCE_THRESHOLD_S = 30.0
+
+# Valid-packet watchdog tunables. The valid-decode counter
+# (packets_received) is the trustworthy receive signal: interface
+# rx_packets is inflated by ambient RF the receiver cannot decode, so a
+# flat packets_received delta while the process is alive means we are
+# tuned to the wrong channel or the transmitter went away. We poll on a
+# rolling window; flat for the threshold first triggers a channel
+# reacquisition sweep, and only terminates the process for restart when
+# reacquisition fails. Process-liveness alone is never proof of work;
+# assert the valid-decode counter advances.
+_VALID_RX_POLL_INTERVAL_S = 5.0
+_VALID_RX_SILENCE_THRESHOLD_S = 12.0
+
+# Peer-presence freshness window. A paired peer emits a presence beacon
+# on the control plane every ~10 s. If we heard one within this window
+# the link is up and the peer is simply not sending video (idle-but-
+# paired), so the valid-packet watchdog must NOT sweep or kill — that
+# would knock a healthy paired link off the air. Sized to tolerate one
+# missed beacon.
+_PEER_PRESENCE_FRESH_S = 30.0
 
 # Phase 11 video pipeline ports.
 # wfb_rx outputs FEC-decoded RTP H.264 to UDP _WFB_RX_INTERNAL_UDP_PORT
@@ -135,6 +156,86 @@ class WfbRxManager:
         # See operating rule 37.
         self._last_rx_stdout_at: float = 0.0
         self._rx_zombie_kills: int = 0
+        # Valid-packet rate + reacquisition state.
+        # `_last_valid_rx_change_at` is the monotonic time the last
+        # interval with a positive valid-decode count landed — the single
+        # canonical "video decoded recently" signal the watchdog reads
+        # (no separate accumulator, so per-interval and cumulative scales
+        # never get mixed). `_valid_rx_packets_per_s` is a smoothed
+        # per-second rate for observability. `_video_inbound_bytes_per_s`
+        # mirrors the receive video throughput.
+        self._last_valid_rx_change_at: float = 0.0
+        self._valid_rx_packets_per_s: float = 0.0
+        self._video_inbound_bytes_per_s: float = 0.0
+        self._reacquire_kills: int = 0
+        # Channel acquirer: sweeps the band on a dry link and locks onto
+        # the first channel that decodes valid packets. Constructed once
+        # an interface + channel are known in run(); reads the live
+        # valid-packet counter through a bound callback.
+        self._acquirer: ChannelAcquirer | None = None
+        # Control-plane listener that decodes presence beacons (peer
+        # liveness + announced channel) and HopAnnounce frames. Held so
+        # the valid-packet watchdog can read the peer-presence cache.
+        self._hop_listener: object | None = None
+        self._hop_listener_task: asyncio.Task | None = None
+        self._hop_listener_stop: asyncio.Event | None = None
+
+    def _valid_rx_counter(self) -> int:
+        """Current per-interval valid-decode packet count.
+
+        The acquirer and the valid-packet watchdog both read this so a
+        decode that lands during a channel dwell is seen by both. Reads
+        from the live monitor snapshot, which `_read_rx_output()` updates
+        on every wfb_rx stats line.
+        """
+        try:
+            return int(self._monitor.get_current().packets_received)
+        except Exception:  # noqa: BLE001
+            return 0
+
+    def _peer_presence_age_s(self) -> float | None:
+        """Seconds since the last presence beacon from the paired peer.
+
+        The control-plane listener decodes the peer's periodic presence
+        beacon and stamps `_peer_last_seen_unix`. A small age means the
+        link is up and the peer is alive even when no video is flowing
+        (idle-but-paired). Returns None when no beacon has ever been
+        decoded, or the listener is absent — caller treats None as
+        "no peer presence". Best-effort, never raises.
+        """
+        listener = self._hop_listener
+        if listener is None:
+            return None
+        get_presence = getattr(listener, "get_peer_presence", None)
+        if not callable(get_presence):
+            return None
+        try:
+            presence = get_presence()
+            last_seen = presence.get("peer_last_seen_unix")
+        except Exception:  # noqa: BLE001
+            return None
+        if not isinstance(last_seen, (int, float)) or last_seen <= 0:
+            return None
+        return max(0.0, time.time() - float(last_seen))
+
+    def _peer_present(self) -> bool:
+        """True when a presence beacon was decoded within the fresh window."""
+        age = self._peer_presence_age_s()
+        return age is not None and age <= _PEER_PRESENCE_FRESH_S
+
+    def _peer_announced_channel(self) -> int | None:
+        """The channel the peer most recently advertised, if known."""
+        listener = self._hop_listener
+        if listener is None:
+            return None
+        get_presence = getattr(listener, "get_peer_presence", None)
+        if not callable(get_presence):
+            return None
+        try:
+            ch = get_presence().get("peer_channel")
+        except Exception:  # noqa: BLE001
+            return None
+        return int(ch) if isinstance(ch, (int, float)) and ch else None
 
     @property
     def state(self) -> LinkState:
@@ -500,6 +601,16 @@ class WfbRxManager:
         except Exception:  # noqa: BLE001
             pass
 
+        acquire_snapshot = (
+            self._acquirer.status()
+            if self._acquirer is not None
+            else {
+                "acquire_state": "idle",
+                "channel_locked": False,
+                "locked_channel": None,
+            }
+        )
+
         return {
             "state": self._state.value,
             "interface": self._interface,
@@ -517,6 +628,21 @@ class WfbRxManager:
             "snr_db": snap.snr_db,
             "restart_count": self._restart_count,
             "samples": self._monitor.sample_count,
+            # Receive-side liveness + acquisition observability. These
+            # snake_case keys ride the same heartbeat shape the transmit
+            # side emits so Mission Control sees the receive link state
+            # remotely. tx_bytes_per_s is the receive video throughput on
+            # this side (named for the shared radio block); the receive
+            # path has no transmit so it reports the inbound rate.
+            "valid_rx_packets_per_s": round(self._valid_rx_packets_per_s, 2),
+            "video_inbound_bytes_per_s": round(
+                self._video_inbound_bytes_per_s, 1
+            ),
+            "tx_bytes_per_s": round(self._video_inbound_bytes_per_s, 1),
+            "channel_locked": bool(acquire_snapshot["channel_locked"]),
+            "acquire_state": acquire_snapshot["acquire_state"],
+            "locked_channel": acquire_snapshot["locked_channel"],
+            "reacquire_kills": self._reacquire_kills,
             # Mirror WfbConfig fields onto the same heartbeat shape the
             # air side emits so `build_radio_block` works without a
             # role branch.
@@ -558,6 +684,7 @@ class WfbRxManager:
                 if line:
                     snap = self._monitor.feed_line(line)
                     if snap is not None:
+                        self._update_rx_rates(snap)
                         self._update_state_from_stats(snap)
                         # Mirror the stats to /run/ados/wfb-stats.json
                         # so the API + OLED dashboard tile + Link
@@ -596,6 +723,26 @@ class WfbRxManager:
                                     else None
                                 ),
                                 "rx_zombie_kills": self._rx_zombie_kills,
+                                # Acquisition state so the cross-process
+                                # ffmpeg gate (separate systemd unit) can
+                                # tell "searching for the right channel"
+                                # apart from "peer is genuinely silent".
+                                "acquire_state": (
+                                    self._acquirer.state.value
+                                    if self._acquirer is not None
+                                    else "idle"
+                                ),
+                                "channel_locked": (
+                                    self._acquirer.channel_locked
+                                    if self._acquirer is not None
+                                    else False
+                                ),
+                                "valid_rx_packets_per_s": round(
+                                    self._valid_rx_packets_per_s, 2
+                                ),
+                                "video_inbound_bytes_per_s": round(
+                                    self._video_inbound_bytes_per_s, 1
+                                ),
                             },
                         )
             except Exception as exc:
@@ -723,6 +870,167 @@ class WfbRxManager:
                 self._last_rx_stdout_at = time.monotonic()
                 return
 
+    def _update_rx_rates(self, snap: LinkStats) -> None:
+        """Track the valid-decode packet rate + inbound video throughput.
+
+        wfb_rx emits per-interval counters (packets_received is the
+        per-interval valid-decode count, bitrate_kbps the per-interval
+        throughput), so the rate is the per-interval value divided by the
+        stats interval. Any interval with a positive valid-decode count
+        refreshes `_last_valid_rx_change_at`; that single timestamp is the
+        canonical "we decoded video recently" signal the watchdog reads.
+        We deliberately do NOT keep a separate running accumulator — the
+        timestamp alone avoids mixing per-interval and cumulative scales.
+        """
+        interval = max(self._monitor.stats_interval_s, 0.001)
+        self._valid_rx_packets_per_s = snap.packets_received / interval
+        self._video_inbound_bytes_per_s = (snap.bitrate_kbps * 1000.0) / 8.0
+        if snap.packets_received > 0:
+            self._last_valid_rx_change_at = time.monotonic()
+
+    async def _valid_packet_watchdog(self) -> None:
+        """Reacquire then restart when the video plane goes silent — but
+        only when the peer is also gone.
+
+        The valid-decode counter is the trustworthy receive signal:
+        interface rx_packets is inflated by ambient RF the receiver
+        cannot decode. `_last_valid_rx_change_at` is refreshed on every
+        interval that decoded a valid video packet; a stale timestamp
+        means no video has arrived recently.
+
+        Silent video alone is NOT a fault. A paired link with the drone
+        simply not transmitting video (idle-but-paired) decodes zero
+        video packets every interval, which is normal. Sweeping or
+        killing on that would knock a healthy link off the air. So the
+        sweep/kill is gated on PEER PRESENCE: when a presence beacon was
+        decoded recently the peer is alive and we stay put, logging
+        "paired, no video". Only when the video plane is silent AND no
+        recent peer presence exists do we act — and even then, if the
+        peer most recently announced a specific channel we do a
+        beacon-guided lock to that channel before a blind band sweep.
+        Reacquisition failure terminates wfb_rx so the run loop respawns
+        it. The stdout-silence watchdog stays as a secondary net.
+        Process-liveness alone is never proof of work; this asserts the
+        valid-decode counter advances.
+        """
+        if self._rx_proc is None or self._acquirer is None:
+            return
+        # Seed the change stamp so the first poll window is full rather
+        # than carrying over silence accumulated while wfb_rx spawned.
+        self._last_valid_rx_change_at = time.monotonic()
+        while (
+            self._running
+            and self._rx_proc is not None
+            and self._rx_proc.returncode is None
+        ):
+            try:
+                await asyncio.sleep(_VALID_RX_POLL_INTERVAL_S)
+            except asyncio.CancelledError:
+                return
+            silent_for = time.monotonic() - self._last_valid_rx_change_at
+            if silent_for < _VALID_RX_SILENCE_THRESHOLD_S:
+                continue
+
+            # Video plane silent for the window. Decide whether this is a
+            # genuine loss-of-link or an idle-but-paired link.
+            if self._peer_present():
+                # The peer is alive (recent presence beacon) but not
+                # sending video. This is normal; do not touch the radio.
+                log.info(
+                    "ground_wfb_paired_no_video",
+                    interface=self._interface,
+                    channel=self._channel,
+                    peer_presence_age_s=round(
+                        self._peer_presence_age_s() or 0.0, 1
+                    ),
+                    note="paired link idle (no video); not sweeping",
+                )
+                continue
+
+            # No peer presence and no video. The link is genuinely down.
+            # Reacquire the channel before resorting to a process restart.
+            self._acquirer.mark_unlocked()
+            log.warning(
+                "ground_wfb_valid_rx_silent",
+                interface=self._interface,
+                silent_seconds=round(silent_for, 1),
+                channel=self._channel,
+                note="no video and no peer presence; reacquiring channel",
+            )
+            locked: int | None = None
+            announced = self._peer_announced_channel()
+            if announced is not None and announced != self._channel:
+                # Beacon-guided lock: try the peer's last announced
+                # channel with a single dwell before the blind sweep.
+                if await self._acquirer.acquire_target(announced):
+                    locked = announced
+            if locked is None:
+                locked = await self._acquirer.acquire()
+            if locked is not None:
+                self._channel = locked
+                self._persist_locked_channel(locked)
+                self._last_valid_rx_change_at = time.monotonic()
+                continue
+            # Reacquisition failed across the whole band. Terminate so
+            # the run loop respawns wfb_rx (the subprocess itself may be
+            # wedged, not just the channel).
+            self._reacquire_kills += 1
+            log.warning(
+                "ground_wfb_reacquire_failed",
+                interface=self._interface,
+                reacquire_kills_total=self._reacquire_kills,
+                note="band sweep found no peer; terminating to trigger restart",
+            )
+            try:
+                self._rx_proc.terminate()
+            except ProcessLookupError:
+                pass
+            self._last_valid_rx_change_at = time.monotonic()
+            return
+
+    def _persist_locked_channel(self, channel: int) -> None:
+        """Write the locked channel into the persisted config.
+
+        A successful lock should survive a restart so the receiver comes
+        up on the right channel next boot instead of sweeping again.
+        Mirrors the tmp-write + replace idiom used elsewhere. A persist
+        failure is not fatal to the live link, but it does mean the next
+        boot will sweep again, so it is logged at warning, not debug.
+        """
+        import yaml as _yaml
+
+        from ados.core.paths import CONFIG_YAML
+
+        try:
+            path = CONFIG_YAML
+            data: dict = {}
+            if path.is_file():
+                loaded = _yaml.safe_load(path.read_text(encoding="utf-8"))
+                if isinstance(loaded, dict):
+                    data = loaded
+            video = data.get("video")
+            if not isinstance(video, dict):
+                video = {}
+            wfb_section = video.get("wfb")
+            if not isinstance(wfb_section, dict):
+                wfb_section = {}
+            wfb_section["channel"] = int(channel)
+            video["wfb"] = wfb_section
+            data["video"] = video
+            body = _yaml.safe_dump(data, sort_keys=False, default_flow_style=False)
+            tmp = path.with_suffix(path.suffix + ".tmp")
+            tmp.parent.mkdir(parents=True, exist_ok=True)
+            tmp.write_text(body, encoding="utf-8")
+            tmp.replace(path)
+            log.info("ground_wfb_channel_persisted", channel=channel)
+        except (OSError, _yaml.YAMLError) as exc:
+            log.warning(
+                "ground_wfb_channel_persist_failed",
+                channel=channel,
+                error=str(exc),
+                note="locked channel not persisted; next boot will sweep again",
+            )
+
     def _update_state_from_stats(self, snap: LinkStats) -> None:
         if snap.loss_percent > 50.0 or snap.rssi_dbm < -85.0:
             self._state = LinkState.DEGRADED
@@ -737,32 +1045,36 @@ class WfbRxManager:
         backoff = 1.0
         unpaired_logged = False
 
-        # Spawn the hop-announce listener as a sibling task. It
-        # listens on the control port for valid HopAnnounce
-        # packets, ACKs them, and schedules a local channel flip
-        # synchronized with the drone's flip epoch. Self-gating:
-        # a drone running older code that doesn't broadcast
-        # HopAnnounce simply produces no packets here, the
-        # listener idles, and the GS stays on the current
-        # channel. Disabled when WfbConfig.auto_hop_enabled is
-        # false (operator opt-out for fixed-frequency ops).
-        if getattr(self._config, "auto_hop_enabled", True):
-            try:
-                from ados.services.wfb.hop_supervisor import (
-                    run_hop_listener,
-                )
-                self._hop_listener_stop = asyncio.Event()
-                self._hop_listener_task = asyncio.create_task(
-                    run_hop_listener(
-                        wfb_manager=self,
-                        band=getattr(self._config, "band", "u-nii-1"),
-                        stop_event=self._hop_listener_stop,
-                    )
-                )
-            except Exception as exc:  # noqa: BLE001
-                log.warning(
-                    "ground_hop_listener_start_failed", error=str(exc)
-                )
+        # Spawn the control-plane listener as a sibling task. It listens
+        # on the control port for two frame types: presence beacons
+        # (always emitted by a paired peer, carrying its channel) and
+        # HopAnnounce packets (only when the peer's frequency-hopping is
+        # active). It updates the peer-presence cache and, on a
+        # HopAnnounce, schedules a synchronized channel flip.
+        #
+        # The listener runs UNCONDITIONALLY, decoupled from the
+        # frequency-hopping feature: even with hopping turned off the GS
+        # must keep decoding presence beacons so the valid-packet
+        # watchdog has a peer-presence signal (and an announced channel
+        # to lock onto) instead of blindly sweeping a paired-but-idle
+        # link. A peer that never hops simply produces no HopAnnounce
+        # frames, so no channel flip happens — only presence is tracked.
+        # We hold a reference to the listener so the watchdog can read
+        # its peer-presence cache in-process.
+        try:
+            from ados.services.wfb.hop_supervisor import HopListener
+            self._hop_listener = HopListener(
+                wfb_manager=self,
+                band=getattr(self._config, "band", "u-nii-1"),
+            )
+            self._hop_listener_stop = asyncio.Event()
+            self._hop_listener_task = asyncio.create_task(
+                self._hop_listener.run(self._hop_listener_stop)
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "ground_control_plane_listener_start_failed", error=str(exc)
+            )
 
         while self._running:
             # Block when no GS-side key (rx.key) is on disk. Pairing
@@ -863,6 +1175,17 @@ class WfbRxManager:
                 backoff = min(backoff * 2, 5.0)
                 continue
 
+            # Construct the channel acquirer for this interface + band.
+            # It reads the live valid-decode counter so a dry link can
+            # sweep for the channel the transmitter actually uses. Built
+            # fresh each run so a band change between restarts is picked
+            # up.
+            self._acquirer = ChannelAcquirer(
+                interface=interface,
+                band=getattr(self._config, "band", "u-nii-1"),
+                valid_packets_fn=self._valid_rx_counter,
+            )
+
             # Phase 11: spawn the UDP fan-out as soon as wfb_rx is up.
             # The fanout reads wfb_rx output and forwards to both
             # mediamtx-gs and the LCD. Start failure is non-fatal — the
@@ -892,6 +1215,15 @@ class WfbRxManager:
                 tasks.append(asyncio.create_task(self._read_rx_output()))
                 tasks.append(asyncio.create_task(self._rx_proc.wait()))
                 tasks.append(asyncio.create_task(self._rx_health_watchdog()))
+                # Valid-packet watchdog: reacquires the channel before
+                # killing the process when the video plane goes silent
+                # AND the peer is gone. Runs alongside the stdout-silence
+                # watchdog, which stays as the secondary net; assert the
+                # valid-decode counter advances, not just that the
+                # process is alive.
+                tasks.append(
+                    asyncio.create_task(self._valid_packet_watchdog())
+                )
                 tasks.append(asyncio.create_task(self._presence_emit_loop()))
 
             try:
