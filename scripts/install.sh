@@ -305,6 +305,15 @@ DO_FORCE=false
 DO_UPGRADE=false
 DO_FOREGROUND=false   # --foreground / ADOS_INSTALL_FOREGROUND=1 opts out of detach
 
+# Snapshot the original argv before the parse loop below consumes it via
+# `shift`. The detached re-exec (maybe_reexec_detached) needs the exact
+# original flags to reproduce the invocation in the transient unit;
+# without this, args parsed away here (--upgrade / --force / --pair CODE /
+# positional pair code) are lost and the detached child runs as if invoked
+# with no flags. Env-mirrored options (--profile / --channel / --version)
+# also forward via child_env, but argv is authoritative for the rest.
+ADOS_ORIG_ARGS=("$@")
+
 # Positional pairing code: first non-flag arg that looks like a 4-8 char alphanumeric code
 if [ $# -gt 0 ] && [[ "$1" =~ ^[A-Za-z0-9]{4,8}$ ]]; then
     PAIR_CODE="$1"
@@ -469,7 +478,7 @@ if is_installed && [ -n "${PAIR_CODE}" ] && ! $DO_FORCE; then
     _is_pair_only_fastpath=true
 fi
 if [ "${_is_pair_only_fastpath}" != "true" ]; then
-    if maybe_reexec_detached "$@"; then
+    if maybe_reexec_detached "${ADOS_ORIG_ARGS[@]+"${ADOS_ORIG_ARGS[@]}"}"; then
         # The detached child now owns ADOS_BOOTSTRAP_DIR (the curl-pipe
         # clone it is executing from + re-registering its own EXIT trap on).
         # Drop OUR cleanup trap before exiting so the parent does not rm the

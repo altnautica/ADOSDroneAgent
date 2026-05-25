@@ -772,11 +772,28 @@ EOF
 @test "dispatcher detaches before main_install_flow" {
     run grep -nE "maybe_reexec_detached" "${DISPATCHER}"
     [ "$status" -eq 0 ]
-    detach_line="$(grep -nE 'maybe_reexec_detached "\$@"' "${DISPATCHER}" | head -1 | cut -d: -f1)"
+    detach_line="$(grep -nE 'maybe_reexec_detached "\$\{ADOS_ORIG_ARGS' "${DISPATCHER}" | head -1 | cut -d: -f1)"
     flow_line="$(grep -nE '^main_install_flow[[:space:]]*$' "${DISPATCHER}" | head -1 | cut -d: -f1)"
     [ -n "$detach_line" ]
     [ -n "$flow_line" ]
     [ "$detach_line" -lt "$flow_line" ]
+}
+
+@test "dispatcher snapshots argv before the parse loop and forwards it to detach" {
+    # The original argv must be captured before the parse loop consumes it
+    # via shift, then handed to the detached re-exec — otherwise flags like
+    # --upgrade / --force / --pair CODE are dropped on detach and the
+    # detached child runs as if invoked with no arguments.
+    snap_line="$(grep -nE '^ADOS_ORIG_ARGS=\("\$@"\)' "${DISPATCHER}" | head -1 | cut -d: -f1)"
+    [ -n "$snap_line" ]
+    # The snapshot must precede the first `shift` that consumes argv.
+    shift_line="$(grep -nE '^[[:space:]]*shift' "${DISPATCHER}" | head -1 | cut -d: -f1)"
+    [ -n "$shift_line" ]
+    [ "$snap_line" -lt "$shift_line" ]
+    # The detach call must forward the snapshot, not the (now-empty) "$@".
+    run grep -nE 'maybe_reexec_detached "\$\{ADOS_ORIG_ARGS\[@\]' "${DISPATCHER}"
+    [ "$status" -eq 0 ]
+    [ -n "$output" ]
 }
 
 @test "dispatcher accepts --foreground flag" {
