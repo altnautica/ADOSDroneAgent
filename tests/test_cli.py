@@ -37,13 +37,23 @@ def _setup_payload() -> dict:
 def test_help_shows_only_public_commands() -> None:
     result = runner.invoke(cli, ["--help"])
     assert result.exit_code == 0
-    assert "status" in result.output
-    assert "update" in result.output
-    assert "uninstall" in result.output
+    # The full public operator surface: every command listed in `ados --help`.
+    for command in (
+        "hardware",
+        "install",
+        "plugin",
+        "profile",
+        "radio",
+        "status",
+        "uninstall",
+        "update",
+    ):
+        assert command in result.output
+    # demo is the only hidden command; legacy names never existed publicly.
+    assert "demo" not in result.output
     assert "tui" not in result.output
     assert "config" not in result.output
     assert "gs" not in result.output
-    assert "plugin" not in result.output
 
 
 def test_status_prints_setup_summary() -> None:
@@ -52,7 +62,7 @@ def test_status_prints_setup_summary() -> None:
     assert result.exit_code == 0
     assert "bench-agent" in result.output
     assert "Open setup: http://127.0.0.1:8080" in result.output
-    assert "Video:   running" in result.output
+    assert "Video:      running" in result.output
 
 
 def test_status_json_outputs_full_payload() -> None:
