@@ -16,11 +16,14 @@ Wants=network-pre.target
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-# For each controller whose otg_role reads "usb_device", switch it to
-# "usb_host". Nodes that are already in host mode, read-only, or absent are
-# left untouched. The shell loop tolerates the no-match glob case so the
-# unit exits 0 on boards with no such node.
-ExecStart=/bin/sh -c 'set -e; for n in /sys/bus/platform/devices/*.usbc*/otg_role /sys/devices/platform/soc*/*.usbc*/otg_role; do [ -e "$n" ] || continue; cur="$(cat "$n" 2>/dev/null || true)"; if [ "$cur" = "usb_device" ]; then echo usb_host > "$n" 2>/dev/null || true; fi; done; exit 0'
+TimeoutStartSec=45
+# Fast-bail unless this is an Allwinner SoC (per device-tree compatible), so
+# the unit is an instant no-op on Rockchip / Pi / others even though it ships
+# everywhere. On Allwinner the usbc driver settles the otg_role node a few
+# seconds into boot and may set it to device mode, so retry for up to ~30 s:
+# re-glob each node and re-assert usb_host until every present node reads host.
+# A single write at a fixed boot point loses this race; the retry wins it.
+ExecStart=/bin/sh -c 'grep -qiE "allwinner|sunxi" /proc/device-tree/compatible 2>/dev/null || exit 0; i=0; while [ "$i" -lt 30 ]; do pending=0; any=0; for n in /sys/bus/platform/devices/*.usbc*/otg_role /sys/devices/platform/soc*/*.usbc*/otg_role; do [ -e "$n" ] || continue; any=1; cur=$(cat "$n" 2>/dev/null || echo); [ "$cur" = usb_device ] && echo usb_host > "$n" 2>/dev/null; cur=$(cat "$n" 2>/dev/null || echo); [ "$cur" = usb_host ] || pending=1; done; { [ "$any" = 1 ] && [ "$pending" = 0 ]; } && exit 0; i=$((i + 1)); sleep 1; done; exit 0'
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=ados-usb-otg-host

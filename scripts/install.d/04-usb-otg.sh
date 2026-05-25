@@ -83,7 +83,8 @@ Wants=network-pre.target
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/bin/sh -c 'set -e; for n in /sys/bus/platform/devices/*.usbc*/otg_role /sys/devices/platform/soc*/*.usbc*/otg_role; do [ -e "$n" ] || continue; cur="$(cat "$n" 2>/dev/null || true)"; if [ "$cur" = "usb_device" ]; then echo usb_host > "$n" 2>/dev/null || true; fi; done; exit 0'
+TimeoutStartSec=45
+ExecStart=/bin/sh -c 'grep -qiE "allwinner|sunxi" /proc/device-tree/compatible 2>/dev/null || exit 0; i=0; while [ "$i" -lt 30 ]; do pending=0; any=0; for n in /sys/bus/platform/devices/*.usbc*/otg_role /sys/devices/platform/soc*/*.usbc*/otg_role; do [ -e "$n" ] || continue; any=1; cur=$(cat "$n" 2>/dev/null || echo); [ "$cur" = usb_device ] && echo usb_host > "$n" 2>/dev/null; cur=$(cat "$n" 2>/dev/null || echo); [ "$cur" = usb_host ] || pending=1; done; { [ "$any" = 1 ] && [ "$pending" = 0 ]; } && exit 0; i=$((i + 1)); sleep 1; done; exit 0'
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=ados-usb-otg-host
