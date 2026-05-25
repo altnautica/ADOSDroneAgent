@@ -281,6 +281,50 @@ fetch_and_verify_stable_assets() {
 unpack_deploy_bundle() {
     local bundle="$1" destroot="$2"
     install -d -m 0755 "${destroot}" 2>/dev/null || true
+
+    # Validate the archive layout BEFORE extracting anything. The bundle is
+    # signature-verified upstream, but defence-in-depth still rejects a
+    # malformed or hostile tarball so a single bad entry cannot escape the
+    # destination directory. tar -tz only lists; nothing is written to disk.
+    local listing
+    if ! listing="$(tar -tzf "${bundle}" 2>/dev/null)"; then
+        error "stable channel: cannot list deploy-bundle ${bundle}"
+        return 1
+    fi
+    if [ -z "${listing}" ]; then
+        error "stable channel: deploy-bundle ${bundle} is empty"
+        return 1
+    fi
+    # Reject path traversal (any entry with a .. component) or absolute paths
+    # (leading /) anywhere in the archive — these would write outside destroot.
+    local entry
+    while IFS= read -r entry; do
+        [ -z "${entry}" ] && continue
+        case "${entry}" in
+            /*)
+                error "stable channel: deploy-bundle rejects absolute path entry: ${entry}"
+                return 1
+                ;;
+            ..|../*|*/../*|*/..)
+                error "stable channel: deploy-bundle rejects path-traversal entry: ${entry}"
+                return 1
+                ;;
+        esac
+    done <<EOF
+${listing}
+EOF
+    # The release pipeline roots every entry under repo/; refuse a bundle whose
+    # archive root is anything else so the post-extract layout check is meaningful.
+    local first_entry
+    first_entry="$(printf '%s\n' "${listing}" | head -n 1)"
+    case "${first_entry}" in
+        repo/|repo) : ;;
+        *)
+            error "stable channel: deploy-bundle root is not repo/ (got: ${first_entry})"
+            return 1
+            ;;
+    esac
+
     info "Unpacking verified deploy-bundle into ${destroot}..."
     if ! tar -xzf "${bundle}" -C "${destroot}"; then
         error "stable channel: failed to unpack deploy-bundle ${bundle}"
