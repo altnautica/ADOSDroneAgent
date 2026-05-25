@@ -202,6 +202,23 @@ class ChannelAcquirer:
         self._state = AcquireState.SEARCHING
         self._locked_channel = None
 
+    def mark_locked(self, channel: int) -> None:
+        """Record that valid video is decoding on ``channel``.
+
+        A sweep is only ONE way the link becomes locked. A rig that boots
+        already tuned to the persisted channel (the common case) never
+        runs a sweep, yet it is plainly locked the moment valid decodes
+        flow. The receive path calls this when packets are arriving so
+        the lock state reflects reality — "I am decoding valid video on
+        this channel" — instead of staying IDLE until an explicit sweep.
+        Idempotent and lock-free (a plain state assignment) so it is safe
+        to call from the per-stats-line hot path.
+        """
+        if self._state != AcquireState.LOCKED or self._locked_channel != channel:
+            log.info("acquire_locked_on_decode", channel=channel)
+        self._state = AcquireState.LOCKED
+        self._locked_channel = channel
+
     async def _try_channel_locked(self, channel: int) -> bool:
         """Retune + dwell on ``channel`` (caller must hold ``_lock``).
 

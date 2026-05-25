@@ -237,6 +237,30 @@ class WfbRxManager:
             return None
         return int(ch) if isinstance(ch, (int, float)) and ch else None
 
+    def _effective_lock_state(self) -> tuple[bool, str, int | None]:
+        """Resolve (channel_locked, acquire_state, locked_channel).
+
+        Single source of truth shared by ``stats()`` and the stats-file
+        writer so the API and the cross-process file never disagree.
+
+        The lock follows REALITY: if valid video is decoding on the
+        current channel right now we are locked, regardless of whether an
+        explicit sweep ever ran. A rig that booted on the persisted
+        channel and is receiving video must NOT report ``searching`` /
+        unlocked just because the acquirer never had to hunt. The
+        acquirer's own state (set by ``mark_locked`` / a sweep) is the
+        primary signal; live decodes are the resilient fallback.
+        """
+        acquirer = self._acquirer
+        if acquirer is not None and acquirer.channel_locked:
+            return True, acquirer.state.value, acquirer.locked_channel
+        # Fallback: decoding valid video on the current channel == locked.
+        if self._valid_rx_packets_per_s > 0:
+            return True, "locked", self._channel
+        if acquirer is not None:
+            return False, acquirer.state.value, acquirer.locked_channel
+        return False, "idle", None
+
     @property
     def state(self) -> LinkState:
         return self._state
@@ -601,14 +625,8 @@ class WfbRxManager:
         except Exception:  # noqa: BLE001
             pass
 
-        acquire_snapshot = (
-            self._acquirer.status()
-            if self._acquirer is not None
-            else {
-                "acquire_state": "idle",
-                "channel_locked": False,
-                "locked_channel": None,
-            }
+        channel_locked, acquire_state, locked_channel = (
+            self._effective_lock_state()
         )
 
         return {
@@ -639,9 +657,9 @@ class WfbRxManager:
                 self._video_inbound_bytes_per_s, 1
             ),
             "tx_bytes_per_s": round(self._video_inbound_bytes_per_s, 1),
-            "channel_locked": bool(acquire_snapshot["channel_locked"]),
-            "acquire_state": acquire_snapshot["acquire_state"],
-            "locked_channel": acquire_snapshot["locked_channel"],
+            "channel_locked": channel_locked,
+            "acquire_state": acquire_state,
+            "locked_channel": locked_channel,
             "reacquire_kills": self._reacquire_kills,
             # Mirror WfbConfig fields onto the same heartbeat shape the
             # air side emits so `build_radio_block` works without a
@@ -686,6 +704,14 @@ class WfbRxManager:
                     if snap is not None:
                         self._update_rx_rates(snap)
                         self._update_state_from_stats(snap)
+                        # Resolve the lock surface AFTER _update_rx_rates
+                        # so a fresh decode that just marked the acquirer
+                        # locked is reflected in this write.
+                        (
+                            channel_locked,
+                            acquire_state,
+                            _locked_channel,
+                        ) = self._effective_lock_state()
                         # Mirror the stats to /run/ados/wfb-stats.json
                         # so the API + OLED dashboard tile + Link
                         # Stats LCD page see real values. The api
@@ -727,16 +753,12 @@ class WfbRxManager:
                                 # ffmpeg gate (separate systemd unit) can
                                 # tell "searching for the right channel"
                                 # apart from "peer is genuinely silent".
-                                "acquire_state": (
-                                    self._acquirer.state.value
-                                    if self._acquirer is not None
-                                    else "idle"
-                                ),
-                                "channel_locked": (
-                                    self._acquirer.channel_locked
-                                    if self._acquirer is not None
-                                    else False
-                                ),
+                                # Sourced from the same resolver stats()
+                                # uses, so the API and this file agree and
+                                # both reflect live decodes (locked even
+                                # when no sweep ran).
+                                "acquire_state": acquire_state,
+                                "channel_locked": channel_locked,
                                 "valid_rx_packets_per_s": round(
                                     self._valid_rx_packets_per_s, 2
                                 ),
@@ -887,6 +909,12 @@ class WfbRxManager:
         self._video_inbound_bytes_per_s = (snap.bitrate_kbps * 1000.0) / 8.0
         if snap.packets_received > 0:
             self._last_valid_rx_change_at = time.monotonic()
+            # Valid decodes on the current channel ARE a lock — a sweep is
+            # only one way to reach that state. Mark it so the lock /
+            # acquire-state surface reflects reality on a rig that booted
+            # already tuned to the persisted channel (no sweep ran).
+            if self._acquirer is not None:
+                self._acquirer.mark_locked(self._channel)
 
     async def _valid_packet_watchdog(self) -> None:
         """Reacquire then restart when the video plane goes silent — but

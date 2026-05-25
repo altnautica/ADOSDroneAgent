@@ -62,10 +62,14 @@ def test_wfb_history_no_manager(client):
 
 
 def test_wfb_history_with_data(agent_app):
-    """GET /api/wfb/history returns samples from monitor."""
+    """GET /api/wfb/history returns samples from monitor.
+
+    The receiver emits paired RX_ANT + PKT lines per interval; both
+    types now append a sample (so RSSI/SNR and the stats write never
+    depend on the PKT line for the interval also parsing). Five
+    intervals therefore produce ten samples.
+    """
     demo = DemoWfbManager()
-    # Feed some stats — wfb-ng v26.4 emits paired RX_ANT + PKT lines.
-    # The monitor only emits a snapshot when PKT is seen.
     for i in range(5):
         ts = 1000 + i
         rssi_avg = -(48 + i)
@@ -83,8 +87,8 @@ def test_wfb_history_with_data(agent_app):
     resp = client.get("/api/wfb/history?seconds=60")
     assert resp.status_code == 200
     data = resp.json()
-    assert data["count"] == 5
-    assert len(data["samples"]) == 5
+    assert data["count"] == 10
+    assert len(data["samples"]) == 10
     assert "rssi_dbm" in data["samples"][0]
 
 

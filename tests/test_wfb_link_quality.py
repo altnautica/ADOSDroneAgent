@@ -116,19 +116,30 @@ def test_legacy_parse_wfb_rx_line_extracts_packets_from_pkt() -> None:
 # --- LinkQualityMonitor (stateful) ---
 
 
-def test_monitor_emits_only_on_pkt_line() -> None:
-    """RX_ANT alone updates internal state but doesn't emit a snapshot.
-    The PKT line that follows is what produces the LinkStats."""
+def test_monitor_emits_on_rx_ant_and_pkt_lines() -> None:
+    """Both line types emit a snapshot so RSSI/SNR (and the stats-file
+    write that rides on a non-None return) never depend on the matching
+    PKT line for the interval also parsing.
+
+    An RX_ANT line before any PKT emits a snapshot with fresh RSSI but
+    zero packet counters; the PKT line that follows emits one with the
+    counters filled in.
+    """
     mon = LinkQualityMonitor()
     rx_line = "1175372\tRX_ANT\t5745:1:20\t1\t649:-50:-48:-45:35:38:42"
     pkt_line = "1175372\tPKT\t720:1075000:0:5:715:715:4:0:0:715:1000000"
 
-    assert mon.feed_line(rx_line) is None
-    assert mon.sample_count == 0
+    rx_snap = mon.feed_line(rx_line)
+    assert rx_snap is not None
+    assert rx_snap.rssi_dbm == -48.0
+    # No PKT seen yet → counters read zero on the RX_ANT-only emit.
+    assert rx_snap.packets_received == 0
+    assert mon.sample_count == 1
 
     snap = mon.feed_line(pkt_line)
     assert snap is not None
-    assert mon.sample_count == 1
+    assert snap.packets_received == 715
+    assert mon.sample_count == 2
 
 
 def test_monitor_combines_rx_ant_and_pkt_into_one_snapshot() -> None:
@@ -175,7 +186,7 @@ def test_monitor_handles_missing_rx_ant_gracefully() -> None:
     assert snap.packets_received == 715  # PKT counters still populated
 
 
-def test_monitor_history_grows_with_pkt_lines() -> None:
+def test_monitor_history_grows_with_stats_lines() -> None:
     mon = LinkQualityMonitor(max_samples=3)
     for i in range(5):
         mon.feed_line(
@@ -184,7 +195,8 @@ def test_monitor_history_grows_with_pkt_lines() -> None:
         mon.feed_line(
             f"{1000+i}\tPKT\t100:100000:0:5:95:95:0:0:0:95:90000"
         )
-    # Ring buffer trimmed to 3
+    # Both RX_ANT and PKT lines append a sample now; the ring buffer is
+    # still bounded to its max regardless of which line type fills it.
     assert mon.sample_count == 3
     history = mon.get_history(seconds=60)
     assert len(history) == 3
@@ -198,7 +210,8 @@ def test_monitor_clear_resets_aggregator_state() -> None:
     mon.feed_line(
         "1175372\tPKT\t720:1075000:0:5:715:715:4:0:0:715:1000000"
     )
-    assert mon.sample_count == 1
+    # RX_ANT and PKT each append a sample now.
+    assert mon.sample_count == 2
 
     mon.clear()
     assert mon.sample_count == 0
@@ -273,3 +286,80 @@ def test_link_stats_to_dict_round_trip() -> None:
     assert d["packets_received"] == 100
     assert d["loss_percent"] == 1.5
     assert "timestamp" in d
+
+
+# --- format-drift tolerance (on-rig observability regression) ---
+
+
+def test_pkt_line_tolerates_extra_trailing_fields() -> None:
+    """A receiver build that appends a 12th counter must still parse.
+
+    A $-anchored 11-field pattern dropped these lines entirely, so
+    packets_received / bitrate read zero while video decoded fine and the
+    stats file never got written.
+    """
+    line = (
+        "1175372\tPKT\t720:1075000:0:5:715:715:4:0:0:715:1000000:9"
+    )
+    pkt = parse_pkt_line(line)
+    assert pkt is not None
+    # Leading fields we consume are still correct; the extra trailing
+    # counter is ignored.
+    assert pkt.count_p_data == 715
+    assert pkt.count_b_outgoing == 1000000
+
+
+def test_rx_ant_line_tolerates_extra_trailing_fields() -> None:
+    line = "1175372\tRX_ANT\t5745:1:20\t1\t649:-50:-48:-45:35:38:42:7"
+    rx = parse_rx_ant_line(line)
+    assert rx is not None
+    assert rx.rssi_avg == -48
+    assert rx.snr_avg == 38
+
+
+def test_packets_bitrate_populated_from_extra_field_pkt_line() -> None:
+    """End-to-end: the 12-field PKT line populates packets + bitrate."""
+    mon = LinkQualityMonitor()
+    mon.feed_line("1175372\tRX_ANT\t5745:1:20\t1\t649:-50:-48:-45:35:38:42")
+    snap = mon.feed_line(
+        "1175372\tPKT\t720:1075000:0:5:715:715:4:0:0:715:1000000:9"
+    )
+    assert snap is not None
+    assert snap.packets_received == 715
+    assert snap.bitrate_kbps == 8000
+    assert snap.rssi_dbm == -48.0
+
+
+def test_rx_ant_emit_carries_forward_last_pkt_counters() -> None:
+    """An RX_ANT-only interval keeps packets/bitrate from the last PKT.
+
+    On a rig whose PKT line for an interval fails to parse, the RX_ANT
+    line still emits a snapshot carrying the most recent packet/bitrate
+    counters so RSSI stays fresh AND the consumer (stats-file writer)
+    keeps seeing live data.
+    """
+    mon = LinkQualityMonitor()
+    mon.feed_line("1\tRX_ANT\t5745:1:20\t1\t100:-50:-48:-45:35:38:42")
+    mon.feed_line("1\tPKT\t720:1075000:0:5:715:715:4:0:0:715:1000000")
+    # A later RX_ANT line with no following PKT still reports the
+    # carried-forward counters.
+    snap = mon.feed_line("2\tRX_ANT\t5745:1:20\t1\t100:-49:-47:-44:36:39:43")
+    assert snap is not None
+    assert snap.rssi_dbm == -47.0  # fresh from the new RX_ANT
+    assert snap.packets_received == 715  # carried forward
+    assert snap.bitrate_kbps == 8000  # carried forward
+
+
+def test_persist_to_file_populated_after_pkt(tmp_path) -> None:
+    """The persisted snapshot carries packets + bitrate after a PKT line."""
+    import json
+
+    mon = LinkQualityMonitor()
+    mon.feed_line("1\tRX_ANT\t5745:1:20\t1\t100:-50:-48:-45:35:38:42")
+    mon.feed_line("1\tPKT\t720:1075000:0:5:715:715:4:0:0:715:1000000")
+    out = tmp_path / "wfb-stats.json"
+    mon.persist_to_file(out, extra={"profile": "ground_station"})
+    payload = json.loads(out.read_text())
+    assert payload["packets_received"] == 715
+    assert payload["bitrate_kbps"] == 8000
+    assert payload["state"] == "connected"

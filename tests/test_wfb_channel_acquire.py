@@ -244,3 +244,25 @@ async def test_in_progress_flag_tracks_lock():
     release.set()
     await task
     assert acq.in_progress is False
+
+
+async def test_mark_locked_without_sweep():
+    """mark_locked() flips locked True on the current channel — no sweep.
+
+    Models the on-rig case: a receiver booted on the persisted channel
+    and is decoding valid video, so it is plainly locked even though the
+    acquirer never ran a sweep.
+    """
+    acq = ChannelAcquirer(
+        interface="wlan0",
+        band="u-nii-1",
+        valid_packets_fn=lambda: 0,
+    )
+    assert acq.channel_locked is False
+    assert acq.state == AcquireState.IDLE
+    acq.mark_locked(149)
+    assert acq.channel_locked is True
+    assert acq.state == AcquireState.LOCKED
+    assert acq.locked_channel == 149
+    assert acq.status()["channel_locked"] is True
+    assert acq.status()["acquire_state"] == "locked"

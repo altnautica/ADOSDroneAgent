@@ -33,16 +33,30 @@ from ados.core.logging import get_logger
 log = get_logger("wfb.link_quality")
 
 # `\d+\tRX_ANT\t<freq>:<mcs>:<bw>\t<ant_id_hex>\t<count>:<rmin>:<ravg>:<rmax>:<smin>:<savg>:<smax>`
+#
+# Same trailing-tolerance rationale as the PKT pattern below: pin only
+# the leading fields we read and ignore any extra trailing counters a
+# newer receiver build appends, so a format bump never silently zeroes
+# the RSSI/SNR display.
 _RX_ANT_RE = re.compile(
     r"^\d+\tRX_ANT\t"
     r"(?P<freq>\d+):(?P<mcs>\d+):(?P<bw>\d+)\t"
     r"(?P<ant_id>[0-9a-fA-F]+)\t"
     r"(?P<count>\d+):"
     r"(?P<rssi_min>-?\d+):(?P<rssi_avg>-?\d+):(?P<rssi_max>-?\d+):"
-    r"(?P<snr_min>-?\d+):(?P<snr_avg>-?\d+):(?P<snr_max>-?\d+)$"
+    r"(?P<snr_min>-?\d+):(?P<snr_avg>-?\d+):(?P<snr_max>-?\d+)(?::-?\d+)*$"
 )
 
 # `\d+\tPKT\t<p_all>:<b_all>:<dec_err>:<sess>:<data>:<uniq>:<fec_rec>:<lost>:<bad>:<out>:<b_out>`
+#
+# The trailing match is intentionally NOT $-anchored after b_outgoing:
+# different builds of the receiver append extra counters to the PKT
+# line (e.g. a bad_session or pkt_drop field) over time. Anchoring to
+# exactly 11 fields means a build with a 12th field fails the whole
+# match, the receiver emits no stats, and packets_received / bitrate
+# silently read zero while video decodes fine. We pin only the leading
+# fields we consume and tolerate (ignore) any extra trailing
+# colon-separated counters.
 _PKT_RE = re.compile(
     r"^\d+\tPKT\t"
     r"(?P<p_all>\d+):"
@@ -55,7 +69,7 @@ _PKT_RE = re.compile(
     r"(?P<lost>\d+):"
     r"(?P<bad>\d+):"
     r"(?P<outgoing>\d+):"
-    r"(?P<b_outgoing>\d+)$"
+    r"(?P<b_outgoing>\d+)(?::\d+)*$"
 )
 
 DEFAULT_HISTORY_SIZE = 300
@@ -257,22 +271,36 @@ class LinkQualityMonitor:
         self._timestamps = deque(maxlen=self.max_samples)
 
     def feed_line(self, line: str) -> LinkStats | None:
-        """Parse a wfb_rx output line and emit a LinkStats on PKT.
+        """Parse a wfb_rx output line and emit a LinkStats snapshot.
 
-        RX_ANT lines update internal state but return None.
-        PKT lines emit a fully-populated LinkStats combining the
-        latest RX_ANT data with the per-interval packet counters.
+        Both line types now emit a snapshot so a consumer (the stats-file
+        writer, REST, the LCD) always gets a fresh, fully-populated view
+        on every stats line:
+
+        * RX_ANT line: updates RSSI/SNR and emits a snapshot that
+          carries FORWARD the most recent PKT counters (packets, bitrate,
+          loss). Previously RX_ANT returned None, so on an interval whose
+          PKT line failed to parse (receiver-build field drift) the whole
+          snapshot was dropped — RSSI/SNR went stale and the stats file
+          was never refreshed even though decodes were flowing.
+        * PKT line: updates the packet/bitrate/loss counters and emits a
+          snapshot combining them with the latest RX_ANT data.
+
         Lines that match neither shape return None silently.
         """
         rx = parse_rx_ant_line(line)
         if rx is not None:
             self._last_rx_ant = rx
-            return None
+            # Emit a snapshot now, carrying forward the last PKT counters
+            # so RSSI/SNR freshness (and the stats-file write that rides
+            # on a non-None return) never depends on the matching PKT
+            # line for this interval also parsing.
+            return self._emit(self._last_pkt, rx)
 
         pkt = parse_pkt_line(line)
         if pkt is None:
             # Surface format drift in journalctl. Without this, a
-            # wfb-ng release that reshapes the stdout stats lines
+            # receiver release that reshapes the stdout stats lines
             # produces zero stats with no log signal — consumers
             # downstream (LCD, REST, heartbeat) all silently render
             # blank values. Rate-limit to one log every 5 s so a
@@ -286,7 +314,13 @@ class LinkQualityMonitor:
             return None
 
         self._last_pkt = pkt
-        stats = self._build_stats(pkt, self._last_rx_ant)
+        return self._emit(pkt, self._last_rx_ant)
+
+    def _emit(
+        self, pkt: PktSnapshot | None, rx: RxAntSnapshot | None
+    ) -> LinkStats:
+        """Build, store, and return a snapshot from the latest counters."""
+        stats = self._build_stats(pkt, rx)
         self._latest = stats
         self._history.append(stats)
         self._timestamps.append(time.monotonic())
@@ -300,9 +334,17 @@ class LinkQualityMonitor:
         return stats
 
     def _build_stats(
-        self, pkt: PktSnapshot, rx: RxAntSnapshot | None
+        self, pkt: PktSnapshot | None, rx: RxAntSnapshot | None
     ) -> LinkStats:
-        """Combine a PKT line and the most recent RX_ANT into LinkStats."""
+        """Combine the latest PKT + RX_ANT counters into LinkStats.
+
+        ``pkt`` may be None when an RX_ANT line arrives before the first
+        PKT line of the session has parsed; in that case the packet /
+        bitrate / loss fields read as zero while RSSI/SNR still reflect
+        the live RX_ANT. Once a PKT line has been seen its counters are
+        carried forward, so the packet/bitrate fields stay populated on
+        an RX_ANT-only emit.
+        """
         if rx is not None:
             rssi_avg = float(rx.rssi_avg)
             rssi_min = float(rx.rssi_min)
@@ -316,6 +358,9 @@ class LinkQualityMonitor:
             rssi_max = -100.0
             snr = 0.0
             noise = -95.0
+
+        if pkt is None:
+            pkt = PktSnapshot()
 
         # bitrate = bytes-forwarded-this-interval * 8 / interval. Each
         # PKT line covers one interval (default 1 s via `-l 1000`).
