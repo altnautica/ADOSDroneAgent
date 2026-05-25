@@ -4,6 +4,34 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.39.0] - 2026-05-25
+
+### Added
+
+- **Per-stream video transmit watchdog.** The WFB manager now watches the
+  video transmitter's UDP ingress backlog independently of the shared
+  radio byte counter. A healthy video stream drains its socket
+  continuously; when the transmitter wedges (process alive but no frames
+  leaving the radio) the backlog pins at the kernel buffer ceiling while
+  the encoder keeps pushing. The watchdog detects that within ~15 s and
+  restarts the pipeline so video recovers on its own, even while the
+  control plane keeps the shared interface counter moving. The heartbeat
+  now carries `tx_video_stalled`, the stall recovery count, and the
+  current ingress backlog so Mission Control can surface a stalled
+  transmitter remotely.
+
+### Fixed
+
+- **Ground-station mesh service no longer flaps on direct-role nodes.** On
+  a node in `direct` role the mesh manager now exits cleanly instead of
+  reporting the intentional no-op as a failure, which had made systemd
+  restart-loop the unit until it landed in a failed state.
+- **Rockchip ISP daemon quieted on USB-camera rigs.** Boards that ship the
+  Rockchip `rkaiq_3A` ISP service but capture from a USB camera no longer
+  carry it in a failed state. The installer masks it only when it is
+  present and not already running, so a board genuinely using a MIPI
+  camera keeps it. Reversible with `systemctl unmask rkaiq_3A`.
+
 ## [0.38.1] - 2026-05-24
 
 ### Fixed

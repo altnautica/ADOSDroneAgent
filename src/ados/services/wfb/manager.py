@@ -27,6 +27,18 @@ _WFB_TX_INGRESS_PORT_HEX = "15E0"
 # Suppress duplicate "upstream silent" warnings to once every 5 minutes
 # so a bench drone with no encoder running does not flood the journal.
 _UPSTREAM_SILENT_LOG_INTERVAL_S = 300.0
+# Per-stream video-tx liveness. The interface-aggregate tx_bytes
+# watchdog cannot see a dead video stream when the control plane
+# (wfb_tx -p 1, presence beacons + hop frames) keeps the shared tx_bytes
+# counter advancing — the silence window never opens. The unambiguous
+# per-stream signal is the video ingress backlog: a healthy wfb_tx -p 0
+# drains its UDP 5600 socket as fast as the encoder fills it, so the
+# kernel receive queue sits near zero. When wfb_tx stops reading
+# (driver injection wedge, internal deadlock) the queue climbs to the
+# socket rmem_max and stays pinned while the encoder keeps pushing.
+# Backlog above the high-water mark for the threshold window is a wedge.
+_TX_VIDEO_RECVQ_HIGH_WATER_BYTES = 262144  # 256 KiB
+_TX_VIDEO_RECVQ_BACKLOG_THRESHOLD_S = 15.0
 
 if TYPE_CHECKING:
     from ados.core.config import WfbConfig
@@ -159,6 +171,17 @@ class WfbManager:
         # drone parked on the bench with no encoder doesn't flood the
         # journal.
         self._last_upstream_silent_log_at: float = 0.0
+        # Per-stream video-tx backlog watchdog state. The aggregate
+        # tx_bytes watchdog above is blind to a dead video stream while
+        # the control plane keeps the shared counter ticking; this tracks
+        # the UDP 5600 ingress backlog instead. `_video_recvq_high_since`
+        # is the monotonic time the backlog first crossed the high-water
+        # mark (None while drained). `_tx_video_stalled` mirrors that for
+        # the heartbeat; `_tx_video_stall_kills` counts watchdog restarts.
+        self._video_recvq_high_since: float | None = None
+        self._last_video_recvq_bytes: int = 0
+        self._tx_video_stalled: bool = False
+        self._tx_video_stall_kills: int = 0
         # Control-plane (-p 1) reception state. wfb_rx_control delivers
         # both the GS's HopAck echoes and its PresenceBeacons here.
         # `_ack_events` maps target_channel -> asyncio.Event the
@@ -272,6 +295,10 @@ class WfbManager:
                 if self._last_tx_byte_change_at > 0
                 else None
             ),
+            # Per-stream video-tx liveness (see _tx_video_recvq_watchdog).
+            "tx_video_stalled": self._tx_video_stalled,
+            "tx_video_stall_kills": self._tx_video_stall_kills,
+            "tx_video_recvq_bytes": self._last_video_recvq_bytes,
         }
 
     def force_state(self, state: LinkState) -> None:
@@ -1174,6 +1201,90 @@ class WfbManager:
             self._last_upstream_change_at = time.monotonic()
             return
 
+    async def _tx_video_recvq_watchdog(self) -> None:
+        """Catch a wedged video wfb_tx via its UDP 5600 ingress backlog.
+
+        The aggregate :meth:`_tx_health_watchdog` cannot see a dead video
+        stream: the control-plane wfb_tx (-p 1) keeps the shared interface
+        tx_bytes counter advancing with presence beacons and hop frames,
+        so that watchdog's silence window never opens. The per-stream
+        signal is the video ingress backlog. A healthy wfb_tx -p 0 drains
+        its UDP 5600 socket as fast as the encoder fills it, so the kernel
+        receive queue sits near zero. When wfb_tx stops reading (driver
+        injection wedge, internal deadlock) the queue climbs to the socket
+        rmem_max and stays pinned while the encoder keeps pushing ~4 Mbps.
+        Backlog above the high-water mark for the threshold window is an
+        unambiguous wedge — the encoder is clearly feeding (the queue
+        could not fill otherwise), so this is never the "idle, nothing to
+        send" case the aggregate watchdog guards against. Terminate
+        wfb_tx so the run() loop respawns the pipeline.
+
+        Per operating rule 37 process-liveness is necessary but never
+        sufficient for radio work; this is the per-stream counterpart of
+        the interface-level liveness check.
+        """
+        if self._tx_proc is None:
+            return
+        # Reset window state so a carried-over high-water timestamp from a
+        # prior wfb_tx instance does not fire immediately on respawn.
+        self._video_recvq_high_since = None
+        self._tx_video_stalled = False
+        while (
+            self._running
+            and self._tx_proc is not None
+            and self._tx_proc.returncode is None
+        ):
+            try:
+                await asyncio.sleep(_TX_HEALTH_POLL_INTERVAL_S)
+            except asyncio.CancelledError:
+                return
+            state = self._read_wfb_tx_udp_state()
+            if state is None:
+                # 5600 socket not present yet (wfb_tx still binding) or
+                # bound on IPv6 where /proc/net/udp doesn't list it.
+                # Nothing to assert; clear the window.
+                self._video_recvq_high_since = None
+                self._tx_video_stalled = False
+                continue
+            rx_queue, _drops = state
+            self._last_video_recvq_bytes = rx_queue
+            if rx_queue < _TX_VIDEO_RECVQ_HIGH_WATER_BYTES:
+                # Draining normally, or genuinely idle with an empty
+                # queue. Either way the tx side is not wedged.
+                self._video_recvq_high_since = None
+                self._tx_video_stalled = False
+                continue
+            now = time.monotonic()
+            if self._video_recvq_high_since is None:
+                self._video_recvq_high_since = now
+                continue
+            backlogged_for = now - self._video_recvq_high_since
+            if backlogged_for < _TX_VIDEO_RECVQ_BACKLOG_THRESHOLD_S:
+                continue
+            # Backlog pinned above the high-water mark for the full window
+            # while wfb_tx is alive. The video stream is wedged: kill it
+            # and let the run() loop respawn the pipeline.
+            self._tx_video_stalled = True
+            self._tx_video_stall_kills += 1
+            log.warning(
+                "wfb_tx_video_stalled",
+                interface=self._interface,
+                recvq_bytes=rx_queue,
+                backlogged_seconds=round(backlogged_for, 1),
+                pid=self._tx_proc.pid if self._tx_proc else None,
+                stall_kills_total=self._tx_video_stall_kills,
+                note=(
+                    "UDP 5600 ingress backlog pinned while process alive; "
+                    "video tx wedged, terminating to trigger restart"
+                ),
+            )
+            try:
+                self._tx_proc.terminate()
+            except ProcessLookupError:
+                pass
+            self._video_recvq_high_since = None
+            return
+
     def _update_state_from_stats(self, stats: LinkStats) -> None:
         """Update link state based on current statistics."""
         if stats.loss_percent > 50.0 or stats.rssi_dbm < -85.0:
@@ -1342,6 +1453,14 @@ class WfbManager:
             if self._tx_proc is not None and self._tx_proc.returncode is None:
                 tasks.append(asyncio.create_task(self._tx_proc.wait()))
                 tasks.append(asyncio.create_task(self._tx_health_watchdog()))
+                # Per-stream video-tx liveness. Sits alongside the
+                # aggregate watchdog: the latter catches a fully wedged
+                # radio, this catches a dead video stream that the live
+                # control plane would otherwise mask on the shared
+                # interface counter. See operating rule 37.
+                tasks.append(
+                    asyncio.create_task(self._tx_video_recvq_watchdog())
+                )
                 tasks.append(asyncio.create_task(self._presence_emit_loop()))
                 tasks.append(asyncio.create_task(self._control_plane_listener()))
                 # Periodic stats heartbeat so /api/wfb has fresh data

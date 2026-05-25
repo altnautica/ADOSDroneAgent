@@ -97,6 +97,10 @@ TMPEOF
     # spot so the upgrade path doesn't need a reboot.
     install_video_sysctl
 
+    # Quiet the Rockchip BSP ISP daemon on UVC-camera rigs. Self-gating;
+    # a no-op on non-Rockchip boards and on boards actually running it.
+    mask_unused_rockchip_isp_service
+
     # Write environment file
     local device_id=""
     if [ -f "${DEVICE_ID_FILE}" ]; then
@@ -282,6 +286,24 @@ mask_conflicting_standalone_services() {
     systemctl stop    dnsmasq.service hostapd.service 2>/dev/null || true
     systemctl disable dnsmasq.service hostapd.service 2>/dev/null || true
     systemctl mask    dnsmasq.service hostapd.service 2>/dev/null || true
+}
+
+# The Rockchip BSP ships rkaiq_3A.service, the ISP 3A tuning daemon for
+# MIPI CSI cameras. On a USB-UVC rig it has no sensor to attach to and
+# lands in a failed state, cluttering `systemctl --failed` even though
+# nothing ADOS uses depends on it (the video pipeline captures from
+# /dev/video0 directly). Mask it ONLY when it is present and not active,
+# so a board genuinely running a MIPI camera (rkaiq healthy) keeps it.
+# Self-gating: a no-op on non-Rockchip boards (unit absent) and on
+# boards where rkaiq is doing real work. Reversible: `systemctl unmask
+# rkaiq_3A`. Runs on every install + upgrade; idempotent.
+mask_unused_rockchip_isp_service() {
+    systemctl list-unit-files rkaiq_3A.service >/dev/null 2>&1 || return 0
+    if systemctl is-active --quiet rkaiq_3A.service; then
+        return 0
+    fi
+    systemctl reset-failed rkaiq_3A.service 2>/dev/null || true
+    systemctl mask        rkaiq_3A.service 2>/dev/null || true
 }
 
 # Enable ground-station systemd units. Safe to run on any profile; a

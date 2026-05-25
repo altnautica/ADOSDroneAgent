@@ -85,6 +85,9 @@ def build_radio_block(wfb_status: dict[str, Any] | None) -> dict[str, Any]:
             "paired_at": None,
             "public_key_fingerprint": None,
             "auto_pair_enabled": None,
+            "tx_video_stalled": None,
+            "tx_video_stall_kills": None,
+            "tx_video_recvq_bytes": None,
         }
 
     iface = wfb_status.get("interface") or None
@@ -132,6 +135,14 @@ def build_radio_block(wfb_status: dict[str, Any] | None) -> dict[str, Any]:
         "paired_at": wfb_status.get("paired_at"),
         "public_key_fingerprint": wfb_status.get("public_key_fingerprint"),
         "auto_pair_enabled": wfb_status.get("auto_pair_enabled"),
+        # Per-stream video transmit liveness (operating rule 37).
+        # `tx_video_stalled` flips true when the watchdog sees the UDP
+        # 5600 ingress backlog pinned while wfb_tx is alive; the kill
+        # counter and current backlog let Mission Control surface a video
+        # stall remotely. Absent on the receive side and on older agents.
+        "tx_video_stalled": wfb_status.get("tx_video_stalled"),
+        "tx_video_stall_kills": wfb_status.get("tx_video_stall_kills"),
+        "tx_video_recvq_bytes": wfb_status.get("tx_video_recvq_bytes"),
     }
 
 

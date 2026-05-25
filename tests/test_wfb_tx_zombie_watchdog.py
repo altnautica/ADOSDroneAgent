@@ -155,3 +155,80 @@ async def test_healthy_both_advancing_skips_kill() -> None:
 
     mgr._tx_proc.terminate.assert_not_called()
     assert mgr._tx_zombie_kills == 0
+
+
+def _make_recvq_manager(udp_series: list[tuple[int, int]]) -> MagicMock:
+    """Construct a WfbManager-like mock with the per-stream video-tx
+    backlog watchdog bound and its UDP-state reader driven by a series of
+    (rx_queue, drops) tuples. Flips _running off once the series is
+    exhausted so a no-kill case still terminates the loop.
+    """
+    from ados.services.wfb.manager import WfbManager
+
+    mgr = MagicMock(spec=WfbManager)
+    mgr._interface = "wlan0"
+    mgr._running = True
+
+    tx_proc = MagicMock()
+    tx_proc.pid = 9999
+    tx_proc.returncode = None
+    mgr._tx_proc = tx_proc
+
+    mgr._video_recvq_high_since = None
+    mgr._last_video_recvq_bytes = 0
+    mgr._tx_video_stalled = False
+    mgr._tx_video_stall_kills = 0
+
+    mgr._tx_video_recvq_watchdog = (
+        WfbManager._tx_video_recvq_watchdog.__get__(mgr, WfbManager)
+    )
+
+    state = {"i": 0}
+
+    def _read_udp() -> tuple[int, int] | None:
+        idx = min(state["i"], len(udp_series) - 1)
+        state["i"] += 1
+        if state["i"] >= len(udp_series):
+            mgr._running = False
+        return udp_series[idx]
+
+    mgr._read_wfb_tx_udp_state = _read_udp
+    return mgr
+
+
+@pytest.mark.asyncio
+async def test_video_recvq_pinned_triggers_terminate() -> None:
+    """UDP 5600 backlog pinned above the high-water mark while wfb_tx is
+    alive → the video-tx watchdog terminates the subprocess even though
+    the aggregate tx_bytes counter would still be moving from the control
+    plane. This is the silent video-stall failure mode (rule 37)."""
+    pinned = 4_195_072  # ~4 MiB, the rmem_max-pinned backlog seen on a
+    # wedged wfb_tx -p 0
+    mgr = _make_recvq_manager([(pinned, 0), (pinned, 0), (pinned, 0)])
+    with patch(
+        "ados.services.wfb.manager._TX_VIDEO_RECVQ_BACKLOG_THRESHOLD_S", 0.0
+    ), patch(
+        "ados.services.wfb.manager._TX_HEALTH_POLL_INTERVAL_S", 0.0
+    ):
+        await _run_one_tick(mgr._tx_video_recvq_watchdog())
+
+    mgr._tx_proc.terminate.assert_called()
+    assert mgr._tx_video_stall_kills == 1
+    assert mgr._tx_video_stalled is True
+
+
+@pytest.mark.asyncio
+async def test_video_recvq_drained_skips_kill() -> None:
+    """Backlog stays near zero (healthy drain, or genuinely idle) → no
+    kill, no stall flag."""
+    mgr = _make_recvq_manager([(0, 0), (128, 0), (0, 0), (64, 0)])
+    with patch(
+        "ados.services.wfb.manager._TX_VIDEO_RECVQ_BACKLOG_THRESHOLD_S", 0.0
+    ), patch(
+        "ados.services.wfb.manager._TX_HEALTH_POLL_INTERVAL_S", 0.0
+    ):
+        await _run_one_tick(mgr._tx_video_recvq_watchdog())
+
+    mgr._tx_proc.terminate.assert_not_called()
+    assert mgr._tx_video_stall_kills == 0
+    assert mgr._tx_video_stalled is False
