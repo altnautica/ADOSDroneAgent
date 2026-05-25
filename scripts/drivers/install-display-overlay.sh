@@ -96,8 +96,15 @@ BUILD_DIR="$(mktemp -d "${BUILD_PARENT}/ados-display-overlay.XXXXXX" 2>/dev/null
     || mktemp -d "${BUILD_PARENT}/ados-display-overlay-$$")"
 trap 'rm -rf "${BUILD_DIR}"' EXIT
 
-DISPLAY_CONF=/etc/ados/display.conf
-MODULES_LOAD_FILE=/etc/modules-load.d/ados-display.conf
+# System paths. Overridable via env so the bats suite can point them at
+# a temp tree and assert exactly which files the installer touches on
+# each path. Defaults are the real on-board locations; production never
+# sets these.
+ETC_ADOS_DIR="${ADOS_ETC_DIR:-/etc/ados}"
+MODULES_LOAD_DIR="${ADOS_MODULES_LOAD_DIR:-/etc/modules-load.d}"
+BOOT_DIR="${ADOS_BOOT_DIR:-/boot}"
+DISPLAY_CONF="${ADOS_DISPLAY_CONF:-${ETC_ADOS_DIR}/display.conf}"
+MODULES_LOAD_FILE="${ADOS_MODULES_LOAD_FILE:-${MODULES_LOAD_DIR}/ados-display.conf}"
 
 # ----------------------------------------------------------------------------
 # Argument parsing
@@ -113,7 +120,11 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-if [ "$(id -u)" -ne 0 ]; then
+# Root is required to write the boot config + modules-load + display.conf
+# on a real install. The bats suite redirects every write path to a temp
+# tree via the ADOS_*_DIR overrides above and sets ADOS_OVERLAY_ALLOW_NONROOT
+# so the auto-skip / explicit-apply branching can be exercised without root.
+if [ "$(id -u)" -ne 0 ] && [ "${ADOS_OVERLAY_ALLOW_NONROOT:-0}" != "1" ]; then
     error "Must run as root (sudo)."
     exit 1
 fi
@@ -127,8 +138,8 @@ fi
 # Board fingerprint helpers (mirror src/ados/hal/detect.py)
 # ----------------------------------------------------------------------------
 detect_board() {
-    if [ -f /etc/ados/board_override ]; then
-        tr -d '\0' < /etc/ados/board_override | head -n1
+    if [ -f "${ETC_ADOS_DIR}/board_override" ]; then
+        tr -d '\0' < "${ETC_ADOS_DIR}/board_override" | head -n1
         return
     fi
     if [ -f /proc/device-tree/model ]; then
@@ -170,6 +181,40 @@ fi
 # ----------------------------------------------------------------------------
 # Display id auto-pick from board YAML
 # ----------------------------------------------------------------------------
+
+# Read the `type` of a display entry from a board's HAL YAML. Scoped to
+# the top-level `displays:` block (the YAML also carries an unrelated
+# compute `supported:` key) and keyed on the display `id`. Pure awk so
+# this works on a fresh BSP without PyYAML. Echoes the type string (e.g.
+# "spi-lcd") or nothing when the board / display / type can't be found.
+display_type_from_yaml() {
+    local board="$1" display="$2"
+    local yaml="${REPO_ROOT}/src/ados/hal/boards/${board}.yaml"
+    [ -f "${yaml}" ] || return 0
+    awk -v want="${display}" '
+        /^displays:/ { in_displays = 1; next }
+        # Any other top-level key (column 0, non-space) closes the block.
+        in_displays && /^[^[:space:]]/ { in_displays = 0 }
+        in_displays {
+            # New list item: "    - id: <value>"
+            if ($0 ~ /^[[:space:]]*-[[:space:]]*id:[[:space:]]*/) {
+                line = $0
+                sub(/^[[:space:]]*-[[:space:]]*id:[[:space:]]*/, "", line)
+                gsub(/[[:space:]]/, "", line)
+                cur_id = line
+                next
+            }
+            if (cur_id == want && $0 ~ /^[[:space:]]*type:[[:space:]]*/) {
+                line = $0
+                sub(/^[[:space:]]*type:[[:space:]]*/, "", line)
+                gsub(/[[:space:]]/, "", line)
+                print line
+                exit
+            }
+        }
+    ' "${yaml}" 2>/dev/null
+}
+
 if [ "${DISPLAY_ID}" = "auto" ]; then
     case "${BOARD_ID}" in
         cubie-a7z|rock-5c-lite|rock-5c|rpi4b|rpi5|pi-zero-2w)
@@ -181,7 +226,49 @@ if [ "${DISPLAY_ID}" = "auto" ]; then
             exit 0
             ;;
     esac
-    info "Auto-selected display: ${DISPLAY_ID}"
+
+    # An auto-selected display must never apply a boot-critical SPI-LCD
+    # overlay. An SPI-LCD bind rewrites the board's boot config (e.g.
+    # extlinux.conf via u-boot-update on Rockchip) and queues a
+    # framebuffer driver to auto-load every boot. On a unit with no
+    # panel physically attached that combination can make the system
+    # unbootable, and because the modules-load + overlay re-apply on
+    # every boot a power cycle cannot recover it. An SPI-LCD also can't
+    # be presence-probed before we touch the boot config. So `auto` only
+    # ever applies a display that is safe to apply blind; for an SPI-LCD
+    # it is a no-op and the operator opts in explicitly with
+    # ADOS_DISPLAY=<id> (or the setup webapp). A future, genuinely
+    # detectable display type (e.g. hdmi) is still eligible for auto.
+    auto_type="$(display_type_from_yaml "${BOARD_ID}" "${DISPLAY_ID}")"
+    if [ "${auto_type}" = "spi-lcd" ]; then
+        info "Board ${BOARD_ID} supports SPI-LCD panel '${DISPLAY_ID}', but auto mode will not provision it."
+        info "An SPI-LCD overlay modifies the boot config and loads a framebuffer driver on every boot;"
+        info "applying it blind on a unit with no panel attached can prevent the system from booting."
+        info "To enable it explicitly: re-run with ADOS_DISPLAY=${DISPLAY_ID} (or use the setup webapp)."
+        DISPLAY_ID="none"
+    else
+        info "Auto-selected display: ${DISPLAY_ID}"
+    fi
+fi
+
+# The auto path may have resolved to "none" (SPI-LCD skip). Write a
+# display.conf reflecting no panel and exit cleanly so the on-board UI
+# service and heartbeat see a consistent "no display" state, matching
+# the explicit --display none contract above. Nothing is written to the
+# boot config or the modules-load directory on this path.
+if [ "${DISPLAY_ID}" = "none" ]; then
+    install -d -m 0755 "${ETC_ADOS_DIR}"
+    cat > "${DISPLAY_CONF}" <<EOF
+# Written by scripts/drivers/install-display-overlay.sh. No display was
+# provisioned (auto mode declined a boot-critical panel, or none was
+# requested). Nothing was written to the boot config or modules-load.d.
+display_id=none
+board=${BOARD_ID}
+has_touch=false
+EOF
+    chmod 0644 "${DISPLAY_CONF}"
+    info "No display provisioned; wrote ${DISPLAY_CONF} (display_id=none)."
+    exit 0
 fi
 
 # ----------------------------------------------------------------------------
@@ -203,18 +290,18 @@ activate_overlay_sun55i() {
     local marker="ados:${overlay_basename}"
 
     # extlinux.conf style (most generic U-Boot extlinux setups)
-    if [ -f /boot/extlinux/extlinux.conf ]; then
-        if grep -q "${marker}" /boot/extlinux/extlinux.conf; then
+    if [ -f "${BOOT_DIR}/extlinux/extlinux.conf" ]; then
+        if grep -q "${marker}" "${BOOT_DIR}/extlinux/extlinux.conf"; then
             info "extlinux.conf already references ${overlay_basename}; skipping."
             return 0
         fi
         # Add an fdtoverlays line under each LABEL block. Anchor on a
         # known append line. If the structure is non-standard the
         # operator can fix it; this is a best-effort additive edit.
-        if grep -q '^[[:space:]]*append' /boot/extlinux/extlinux.conf; then
+        if grep -q '^[[:space:]]*append' "${BOOT_DIR}/extlinux/extlinux.conf"; then
             sed -i "/^[[:space:]]*append/a\\
-    fdtoverlays /boot/overlay-user/${overlay_basename}.dtbo  # ${marker}
-" /boot/extlinux/extlinux.conf
+    fdtoverlays ${BOOT_DIR}/overlay-user/${overlay_basename}.dtbo  # ${marker}
+" "${BOOT_DIR}/extlinux/extlinux.conf"
             info "Appended fdtoverlays line to extlinux.conf."
             return 0
         fi
@@ -223,9 +310,9 @@ activate_overlay_sun55i() {
     fi
 
     # Armbian / Orange Pi style env file
-    if [ -f /boot/armbianEnv.txt ] || [ -f /boot/orangepiEnv.txt ]; then
-        local env_file=/boot/armbianEnv.txt
-        [ -f /boot/orangepiEnv.txt ] && env_file=/boot/orangepiEnv.txt
+    if [ -f "${BOOT_DIR}/armbianEnv.txt" ] || [ -f "${BOOT_DIR}/orangepiEnv.txt" ]; then
+        local env_file="${BOOT_DIR}/armbianEnv.txt"
+        [ -f "${BOOT_DIR}/orangepiEnv.txt" ] && env_file="${BOOT_DIR}/orangepiEnv.txt"
         if grep -q "${marker}" "${env_file}"; then
             info "${env_file} already references ${overlay_basename}; skipping."
             return 0
@@ -240,7 +327,7 @@ activate_overlay_sun55i() {
     fi
 
     warn "No supported boot-config file found (extlinux.conf / armbianEnv.txt / orangepiEnv.txt)."
-    warn "Manual activation required: load DTBO from /boot/overlay-user/${overlay_basename}.dtbo."
+    warn "Manual activation required: load DTBO from ${BOOT_DIR}/overlay-user/${overlay_basename}.dtbo."
     return 1
 }
 
@@ -252,52 +339,50 @@ activate_overlay_sun55i() {
 # ----------------------------------------------------------------------------
 activate_overlay_rk3588() {
     local overlay_name="$1"   # "rk3588-spi4-m2-cs0-waveshare35"
-    local dtbo_src="/boot/dtbo/${overlay_name}.dtbo"
+    local dtbo_src="${BOOT_DIR}/dtbo/${overlay_name}.dtbo"
 
     if [ ! -f "${dtbo_src}" ]; then
         warn "BSP DTBO not found at ${dtbo_src}; will compile from vendored source."
         return 1
     fi
 
-    # Radxa OS Bookworm (rsdk-b1+): u-boot-update reads /boot/dtbo/
-    # and regenerates /boot/extlinux/extlinux.conf with fdtoverlays
-    # lines for every .dtbo (without .disabled suffix). managed.list
-    # tracks which entries the system "owns" so rsetup can rebuild
-    # cleanly across kernel upgrades. The disabled state is the
-    # ".dtbo.disabled" filename suffix; we keep the bare .dtbo we
-    # already installed.
-    if [ -f /boot/dtbo/managed.list ] && command -v u-boot-update >/dev/null 2>&1; then
+    # Radxa OS Bookworm (rsdk-b1+): u-boot-update reads the dtbo dir
+    # and regenerates extlinux.conf with fdtoverlays lines for every
+    # .dtbo (without .disabled suffix). managed.list tracks which
+    # entries the system "owns" so rsetup can rebuild cleanly across
+    # kernel upgrades. The disabled state is the ".dtbo.disabled"
+    # filename suffix; we keep the bare .dtbo we already installed.
+    if [ -f "${BOOT_DIR}/dtbo/managed.list" ] && command -v u-boot-update >/dev/null 2>&1; then
         local entry="${overlay_name}.dtbo"
         local managed_changed=0
-        if grep -qx "${entry}" /boot/dtbo/managed.list; then
+        if grep -qx "${entry}" "${BOOT_DIR}/dtbo/managed.list"; then
             info "managed.list already references ${entry}; skipping append."
         else
-            echo "${entry}" >> /boot/dtbo/managed.list
-            info "Appended ${entry} to /boot/dtbo/managed.list"
+            echo "${entry}" >> "${BOOT_DIR}/dtbo/managed.list"
+            info "Appended ${entry} to ${BOOT_DIR}/dtbo/managed.list"
             managed_changed=1
         fi
         # Defensive: rsetup convention is to keep INACTIVE overlays as
         # ".dtbo.disabled" and ACTIVE ones as bare ".dtbo". Our install
         # step already wrote the bare name so this is a no-op, but if
         # an older state lingered we drop the .disabled twin.
-        local disabled_path="/boot/dtbo/${overlay_name}.dtbo.disabled"
+        local disabled_path="${BOOT_DIR}/dtbo/${overlay_name}.dtbo.disabled"
         if [ -f "${disabled_path}" ]; then
             rm -f "${disabled_path}"
             managed_changed=1
         fi
 
         # Idempotency guard: u-boot-update on Radxa Bookworm rewrites
-        # /boot/extlinux/extlinux.conf, which is the bootloader's only
-        # source of truth on this board. A partial / interrupted rewrite
-        # can leave the file truncated, which surfaces as a bricked
-        # Rock 5C on next power cycle (no kernel load, total network
-        # silence). Only invoke u-boot-update when managed.list actually
-        # changed AND the existing extlinux.conf doesn't already list
-        # our overlay — both must be true for the regen to be worth the
-        # boot risk.
+        # extlinux.conf, which is the bootloader's only source of truth
+        # on this board. A partial / interrupted rewrite can leave the
+        # file truncated, which surfaces as a bricked board on the next
+        # power cycle (no kernel load, total network silence). Only
+        # invoke u-boot-update when managed.list actually changed AND the
+        # existing extlinux.conf doesn't already list our overlay — both
+        # must be true for the regen to be worth the boot risk.
         local already_referenced=0
-        if [ -f /boot/extlinux/extlinux.conf ] && \
-            grep -q "${overlay_name}" /boot/extlinux/extlinux.conf; then
+        if [ -f "${BOOT_DIR}/extlinux/extlinux.conf" ] && \
+            grep -q "${overlay_name}" "${BOOT_DIR}/extlinux/extlinux.conf"; then
             already_referenced=1
         fi
         if [ "${managed_changed}" -eq 0 ] && [ "${already_referenced}" -eq 1 ]; then
@@ -310,7 +395,7 @@ activate_overlay_rk3588() {
         # on a crash), we restore the working file so the next power cycle
         # boots cleanly. The bench-bricking incident of 2026-05-20 was the
         # trigger for adding this guard.
-        local extlinux="/boot/extlinux/extlinux.conf"
+        local extlinux="${BOOT_DIR}/extlinux/extlinux.conf"
         local extlinux_bak="${extlinux}.ados-bak"
         local size_before=0
         if [ -f "${extlinux}" ]; then
@@ -347,7 +432,7 @@ activate_overlay_rk3588() {
         info "extlinux.conf regen OK (${size_before} -> ${size_after} bytes)."
 
         # Confirm the fdtoverlays line landed.
-        if grep -q "${overlay_name}" /boot/extlinux/extlinux.conf; then
+        if grep -q "${overlay_name}" "${BOOT_DIR}/extlinux/extlinux.conf"; then
             info "Overlay reference present in extlinux.conf."
         else
             warn "u-boot-update ran but extlinux.conf does not mention ${overlay_name} — check /etc/default/u-boot."
@@ -356,11 +441,11 @@ activate_overlay_rk3588() {
     fi
 
     # Older Radxa OS / Debian Rockchip style.
-    if [ -f /boot/dtb/rockchip/overlays-list ]; then
-        if grep -qx "${overlay_name}" /boot/dtb/rockchip/overlays-list; then
+    if [ -f "${BOOT_DIR}/dtb/rockchip/overlays-list" ]; then
+        if grep -qx "${overlay_name}" "${BOOT_DIR}/dtb/rockchip/overlays-list"; then
             info "overlays-list already references ${overlay_name}; skipping."
         else
-            echo "${overlay_name}" >> /boot/dtb/rockchip/overlays-list
+            echo "${overlay_name}" >> "${BOOT_DIR}/dtb/rockchip/overlays-list"
             info "Appended ${overlay_name} to overlays-list."
         fi
         return 0
@@ -368,14 +453,14 @@ activate_overlay_rk3588() {
 
     # Armbian Rockchip style.
     if command -v update-u-boot >/dev/null 2>&1; then
-        if [ -f /boot/armbianEnv.txt ]; then
-            if grep -q "${overlay_name}" /boot/armbianEnv.txt; then
+        if [ -f "${BOOT_DIR}/armbianEnv.txt" ]; then
+            if grep -q "${overlay_name}" "${BOOT_DIR}/armbianEnv.txt"; then
                 info "armbianEnv.txt already references ${overlay_name}; skipping."
             else
-                if grep -q '^user_overlays=' /boot/armbianEnv.txt; then
-                    sed -i -E "s/^user_overlays=(.*)\$/user_overlays=\1 ${overlay_name}/" /boot/armbianEnv.txt
+                if grep -q '^user_overlays=' "${BOOT_DIR}/armbianEnv.txt"; then
+                    sed -i -E "s/^user_overlays=(.*)\$/user_overlays=\1 ${overlay_name}/" "${BOOT_DIR}/armbianEnv.txt"
                 else
-                    echo "user_overlays=${overlay_name}" >> /boot/armbianEnv.txt
+                    echo "user_overlays=${overlay_name}" >> "${BOOT_DIR}/armbianEnv.txt"
                 fi
                 info "Updated user_overlays in armbianEnv.txt."
             fi
@@ -404,9 +489,9 @@ compile_and_install_repo_dtbo() {
         cat "${BUILD_DIR}/dtc.log" >&2
         return 2
     fi
-    install -d -m 0755 /boot/overlay-user
-    install -m 0644 "${out}" "/boot/overlay-user/${board}-${display}.dtbo"
-    info "Installed /boot/overlay-user/${board}-${display}.dtbo"
+    install -d -m 0755 "${BOOT_DIR}/overlay-user"
+    install -m 0644 "${out}" "${BOOT_DIR}/overlay-user/${board}-${display}.dtbo"
+    info "Installed ${BOOT_DIR}/overlay-user/${board}-${display}.dtbo"
 }
 
 compile_and_install_upstream_dtbo() {
@@ -440,9 +525,9 @@ compile_and_install_upstream_dtbo() {
         cat "${BUILD_DIR}/dtc.log" >&2
         return 2
     fi
-    install -d -m 0755 /boot/dtbo
-    install -m 0644 "${out}" "/boot/dtbo/${overlay_name}.dtbo"
-    info "Installed /boot/dtbo/${overlay_name}.dtbo"
+    install -d -m 0755 "${BOOT_DIR}/dtbo"
+    install -m 0644 "${out}" "${BOOT_DIR}/dtbo/${overlay_name}.dtbo"
+    info "Installed ${BOOT_DIR}/dtbo/${overlay_name}.dtbo"
 }
 
 # ----------------------------------------------------------------------------
@@ -458,11 +543,11 @@ case "${BOARD_ID}" in
             waveshare35a)
                 compile_and_install_repo_dtbo "${BOARD_ID}" "${DISPLAY_ID}"
                 if activate_overlay_sun55i "${BOARD_ID}-${DISPLAY_ID}"; then
-                    if [ -f /boot/extlinux/extlinux.conf ]; then
+                    if [ -f "${BOOT_DIR}/extlinux/extlinux.conf" ]; then
                         ACTIVATED_VIA="extlinux"
-                    elif [ -f /boot/orangepiEnv.txt ]; then
+                    elif [ -f "${BOOT_DIR}/orangepiEnv.txt" ]; then
                         ACTIVATED_VIA="orangepiEnv"
-                    elif [ -f /boot/armbianEnv.txt ]; then
+                    elif [ -f "${BOOT_DIR}/armbianEnv.txt" ]; then
                         ACTIVATED_VIA="armbianEnv"
                     fi
                 fi
@@ -483,9 +568,9 @@ case "${BOARD_ID}" in
                 # vendored-DTBO path tags /etc/ados/display.conf
                 # consistently with the rest of the installer.
                 detect_activation_method() {
-                    if [ -f /boot/dtbo/managed.list ] && command -v u-boot-update >/dev/null 2>&1; then
+                    if [ -f "${BOOT_DIR}/dtbo/managed.list" ] && command -v u-boot-update >/dev/null 2>&1; then
                         echo "u-boot-update"
-                    elif [ -f /boot/dtb/rockchip/overlays-list ]; then
+                    elif [ -f "${BOOT_DIR}/dtb/rockchip/overlays-list" ]; then
                         echo "overlays-list"
                     else
                         echo "armbianEnv"
@@ -527,12 +612,12 @@ case "${BOARD_ID}" in
                 # claims fb0 + conflicts with the SPI fb so we comment
                 # it out. Reference:
                 # https://www.waveshare.com/wiki/3.5inch_RPi_LCD_(A)_Manual_Configuration
-                if [ -f /boot/firmware/config.txt ]; then
-                    PI_CONFIG="/boot/firmware/config.txt"
-                elif [ -f /boot/config.txt ]; then
-                    PI_CONFIG="/boot/config.txt"
+                if [ -f "${BOOT_DIR}/firmware/config.txt" ]; then
+                    PI_CONFIG="${BOOT_DIR}/firmware/config.txt"
+                elif [ -f "${BOOT_DIR}/config.txt" ]; then
+                    PI_CONFIG="${BOOT_DIR}/config.txt"
                 else
-                    error "Pi config.txt not found at /boot/firmware/config.txt or /boot/config.txt."
+                    error "Pi config.txt not found at ${BOOT_DIR}/firmware/config.txt or ${BOOT_DIR}/config.txt."
                     exit 3
                 fi
                 # Ensure waveshare35a.dtbo exists. Pi OS Bookworm doesn't
@@ -606,7 +691,7 @@ esac
 # ----------------------------------------------------------------------------
 # Module load list
 # ----------------------------------------------------------------------------
-install -d -m 0755 /etc/modules-load.d
+install -d -m 0755 "${MODULES_LOAD_DIR}"
 cat > "${MODULES_LOAD_FILE}" <<'EOF'
 # Loaded by ados-display-overlay installer. Drives the SPI LCD bound
 # at /dev/fb1 plus the resistive touch chip exposed under /dev/input/.
@@ -624,7 +709,7 @@ modprobe ads7846      >/dev/null 2>&1 || true
 # ----------------------------------------------------------------------------
 # Display config — read by the on-board UI service + heartbeat
 # ----------------------------------------------------------------------------
-install -d -m 0755 /etc/ados
+install -d -m 0755 "${ETC_ADOS_DIR}"
 
 # Defaults that match data/overlays/<board>-<display>.dts and the
 # vendored upstream source. Resolution / rotation come from the YAML

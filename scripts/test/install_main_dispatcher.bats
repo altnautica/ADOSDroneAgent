@@ -1326,3 +1326,138 @@ EOF
     [ "$status" -eq 0 ]
     [ "$output" -ge 1 ]
 }
+
+# -----------------------------------------------------------------------------
+# Display overlay: auto mode must never apply a boot-critical SPI-LCD overlay.
+#
+# A headless rig with no panel attached must boot. Auto-selecting and applying
+# an SPI-LCD overlay rewrites the board's only boot config + queues a
+# framebuffer driver every boot, which on an extlinux/u-boot board (Rock 5C
+# and similar) leaves the system unbootable with no power-cycle recovery.
+# These tests drive scripts/drivers/install-display-overlay.sh with its write
+# paths redirected to a temp tree (the ADOS_*_DIR overrides) so they can assert
+# exactly which files each path touches without root.
+# -----------------------------------------------------------------------------
+
+overlay_setup() {
+    OVL_TMP="$(mktemp -d)"
+    OVL_SCRIPT="${REPO_ROOT}/scripts/drivers/install-display-overlay.sh"
+    [ -x "${OVL_SCRIPT}" ] || {
+        echo "missing overlay installer: ${OVL_SCRIPT}" >&2
+        return 1
+    }
+    mkdir -p "${OVL_TMP}/boot" "${OVL_TMP}/etc-ados" "${OVL_TMP}/modules-load" "${OVL_TMP}/bin"
+}
+
+overlay_teardown() {
+    [ -n "${OVL_TMP:-}" ] && rm -rf "${OVL_TMP}"
+}
+
+# Run the overlay installer with every write path redirected into OVL_TMP.
+# $@ = installer args. Extra PATH (mock tools) comes via OVL_EXTRA_PATH.
+overlay_run() {
+    PATH="${OVL_EXTRA_PATH:-}${OVL_EXTRA_PATH:+:}${PATH}" \
+    ADOS_OVERLAY_ALLOW_NONROOT=1 \
+    ADOS_BOOT_DIR="${OVL_TMP}/boot" \
+    ADOS_ETC_DIR="${OVL_TMP}/etc-ados" \
+    ADOS_MODULES_LOAD_DIR="${OVL_TMP}/modules-load" \
+    ADOS_DISPLAY_CONF="${OVL_TMP}/etc-ados/display.conf" \
+    ADOS_MODULES_LOAD_FILE="${OVL_TMP}/modules-load/ados-display.conf" \
+    bash "${OVL_SCRIPT}" "$@"
+}
+
+@test "overlay --display auto is a no-op on a board whose only display is an SPI-LCD" {
+    overlay_setup
+    # rock-5c-lite's HAL YAML lists exactly one display: waveshare35a, type
+    # spi-lcd. Auto must refuse to provision it: return 0, write display_id=none,
+    # touch NOTHING under /boot and NOTHING under /etc/modules-load.d.
+    run overlay_run --board rock-5c-lite --display auto
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"auto mode will not provision it"* ]]
+
+    # No boot-config edit.
+    boot_files="$(find "${OVL_TMP}/boot" -type f 2>/dev/null | wc -l | tr -d ' ')"
+    # No modules-load.d drop-in.
+    ml_files="$(find "${OVL_TMP}/modules-load" -type f 2>/dev/null | wc -l | tr -d ' ')"
+    # display.conf records "none".
+    conf_id="$(grep -E '^display_id=' "${OVL_TMP}/etc-ados/display.conf" 2>/dev/null || true)"
+    overlay_teardown
+    [ "$boot_files" = "0" ]
+    [ "$ml_files" = "0" ]
+    [ "${conf_id}" = "display_id=none" ]
+}
+
+@test "overlay auto-skip writes no extlinux.conf and runs no u-boot-update" {
+    overlay_setup
+    # Belt-and-suspenders: even with a managed.list + extlinux.conf present
+    # (the Radxa Bookworm shape that the brick incident hit), auto mode must
+    # not invoke u-boot-update or modify the boot config.
+    mkdir -p "${OVL_TMP}/boot/dtbo" "${OVL_TMP}/boot/extlinux"
+    : > "${OVL_TMP}/boot/dtbo/managed.list"
+    printf 'LABEL ados\n  append root=/dev/mmcblk0p2 rw\n' > "${OVL_TMP}/boot/extlinux/extlinux.conf"
+    extlinux_before="$(cat "${OVL_TMP}/boot/extlinux/extlinux.conf")"
+    # A u-boot-update mock that screams if it ever runs.
+    cat > "${OVL_TMP}/bin/u-boot-update" <<'EOF'
+#!/usr/bin/env bash
+echo "U_BOOT_UPDATE_RAN_UNEXPECTEDLY"
+exit 0
+EOF
+    chmod +x "${OVL_TMP}/bin/u-boot-update"
+    OVL_EXTRA_PATH="${OVL_TMP}/bin"
+    run overlay_run --board rock-5c-lite --display auto
+    extlinux_after="$(cat "${OVL_TMP}/boot/extlinux/extlinux.conf")"
+    managed_after="$(cat "${OVL_TMP}/boot/dtbo/managed.list")"
+    overlay_teardown
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"U_BOOT_UPDATE_RAN_UNEXPECTEDLY"* ]]
+    [ "${extlinux_before}" = "${extlinux_after}" ]
+    [ -z "${managed_after}" ]
+}
+
+@test "overlay explicit --display waveshare35a still attempts to apply (no auto-skip)" {
+    overlay_setup
+    # The explicit opt-in path (operator / setup webapp passes --display <id>)
+    # MUST proceed into the per-board apply branch — the auto-skip is for the
+    # auto path only. We mock dtc + cpp + u-boot-update so the apply branch can
+    # run on a CI host without real kernel headers, and provide the Radxa
+    # managed.list shape so activation has a real branch to take. We assert the
+    # apply branch was entered (its marker log line) and that the auto-skip
+    # message did NOT appear. We do NOT require full success — only that the
+    # explicit path is not short-circuited to "none".
+    mkdir -p "${OVL_TMP}/boot/dtbo" "${OVL_TMP}/boot/extlinux"
+    : > "${OVL_TMP}/boot/dtbo/managed.list"
+    printf 'LABEL ados\n  append root=/dev/mmcblk0p2 rw\n' > "${OVL_TMP}/boot/extlinux/extlinux.conf"
+    cat > "${OVL_TMP}/bin/dtc" <<'EOF'
+#!/usr/bin/env bash
+out=""; while [ $# -gt 0 ]; do [ "$1" = "-o" ] && out="$2"; shift; done
+[ -n "$out" ] && printf 'DTBO' > "$out"; exit 0
+EOF
+    cat > "${OVL_TMP}/bin/cpp" <<'EOF'
+#!/usr/bin/env bash
+out=""; while [ $# -gt 0 ]; do [ "$1" = "-o" ] && out="$2"; shift; done
+[ -n "$out" ] && printf '/dts-v1/;\n' > "$out"; exit 0
+EOF
+    cat > "${OVL_TMP}/bin/u-boot-update" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+    chmod +x "${OVL_TMP}/bin/dtc" "${OVL_TMP}/bin/cpp" "${OVL_TMP}/bin/u-boot-update"
+    OVL_EXTRA_PATH="${OVL_TMP}/bin"
+    run overlay_run --board rock-5c-lite --display waveshare35a
+    overlay_teardown
+    # The per-board apply branch logs this before compiling the vendored DTS.
+    [[ "$output" == *"Installing vendored DTS"* ]]
+    # The auto-skip must NOT have fired on an explicit request.
+    [[ "$output" != *"auto mode will not provision it"* ]]
+}
+
+@test "overlay explicit --display none is an immediate no-op" {
+    overlay_setup
+    run overlay_run --board rock-5c-lite --display none
+    boot_files="$(find "${OVL_TMP}/boot" -type f 2>/dev/null | wc -l | tr -d ' ')"
+    ml_files="$(find "${OVL_TMP}/modules-load" -type f 2>/dev/null | wc -l | tr -d ' ')"
+    overlay_teardown
+    [ "$status" -eq 0 ]
+    [ "$boot_files" = "0" ]
+    [ "$ml_files" = "0" ]
+}
