@@ -143,10 +143,23 @@ if [ -z "${ADOS_SCRIPT_DIR}" ]; then
     : > "${_BOOT_DIR}/.ados_bootstrap"
     _BOOT_REPO="https://github.com/altnautica/ADOSDroneAgent.git"
     echo "Bootstrapping installer from ${_BOOT_REPO} (branch ${_BOOT_BRANCH})..."
-    if ! git clone --depth 1 --recurse-submodules --shallow-submodules \
-                   --quiet --branch "${_BOOT_BRANCH}" \
-                   "${_BOOT_REPO}" "${_BOOT_DIR}/repo" 2>&1; then
-        echo "ERROR: failed to clone ${_BOOT_REPO} for bootstrap" >&2
+    # Bounded retry around the bootstrap clone so a transient network blip
+    # on a fresh box does not abort the whole install at the first command.
+    # modules are not sourced yet on this path, so the retry is inline.
+    _BOOT_OK=false
+    for _boot_try in 1 2 3; do
+        if git clone --depth 1 --recurse-submodules --shallow-submodules \
+                     --quiet --branch "${_BOOT_BRANCH}" \
+                     "${_BOOT_REPO}" "${_BOOT_DIR}/repo" 2>&1; then
+            _BOOT_OK=true
+            break
+        fi
+        echo "[bootstrap] clone attempt ${_boot_try} failed; retrying in $((_boot_try * 3))s..." >&2
+        rm -rf "${_BOOT_DIR}/repo" 2>/dev/null || true
+        sleep $((_boot_try * 3))
+    done
+    if [ "${_BOOT_OK}" != "true" ]; then
+        echo "ERROR: failed to clone ${_BOOT_REPO} for bootstrap after 3 attempts" >&2
         rm -rf "${_BOOT_DIR}"
         exit 1
     fi

@@ -34,7 +34,20 @@ install_mediamtx() {
     tmp_dir="$(mktemp -d)"
 
     info "Downloading mediamtx v${MEDIAMTX_VERSION} for ${mtx_arch}..."
-    if curl -fSL "$url" -o "$tmp_dir/mediamtx.tar.gz"; then
+    # Route through ados_fetch for uniform retry/backoff. ados_fetch is
+    # sourced by the orchestration module from scripts/lib/net.sh; fall
+    # back to a direct curl when it is unavailable (e.g. this module run
+    # in isolation) so the downloader never hard-depends on source order.
+    local fetched=false
+    if declare -F ados_fetch >/dev/null 2>&1; then
+        if ados_fetch "$url" "$tmp_dir/mediamtx.tar.gz" 120; then
+            fetched=true
+        fi
+    elif curl -fSL --retry 3 --retry-delay 2 "$url" -o "$tmp_dir/mediamtx.tar.gz"; then
+        fetched=true
+    fi
+
+    if [ "${fetched}" = "true" ]; then
         tar -xzf "$tmp_dir/mediamtx.tar.gz" -C "$tmp_dir"
         install -m 755 "$tmp_dir/mediamtx" /usr/local/bin/mediamtx
         info "mediamtx installed to /usr/local/bin/mediamtx"
