@@ -64,7 +64,7 @@ setup() {
         source '${INSTALL_D}/lib.sh'
         for m in 00-detect 01-state 02-deps 03-kernel 04-dkms 05-mesh \
                  06-radio 07-systemd 08-plugin 09-config 10-network \
-                 11-artifacts 12-output; do
+                 11-artifacts 12-output 14-orchestration; do
             source '${INSTALL_D}/'\$m.sh
         done
         echo OK
@@ -79,7 +79,7 @@ setup() {
         source '${INSTALL_D}/lib.sh'
         for m in 00-detect 01-state 02-deps 03-kernel 04-dkms 05-mesh \
                  06-radio 07-systemd 08-plugin 09-config 10-network \
-                 11-artifacts 12-output 13-main; do
+                 11-artifacts 12-output 13-main 14-orchestration; do
             source '${INSTALL_D}/'\$m.sh
         done
         echo OK
@@ -96,6 +96,14 @@ setup() {
     "
     [ "$status" -eq 0 ]
     [[ "$output" == *"OK"* ]]
+}
+
+@test "dispatcher sources 14-orchestration last in the module loop" {
+    run awk '/for module in/,/; do$/ {printf "%s ", $0} /; do$/ {print ""}' "${DISPATCHER}"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"14-orchestration"* ]]
+    # 14-orchestration must come after 13-main so its helpers are in scope.
+    [[ "$output" == *"13-main 14-orchestration"* ]]
 }
 
 @test "dispatcher sources 13-main in the module loop" {
@@ -116,13 +124,13 @@ setup() {
     [ -n "$output" ]
 }
 
-@test "all 37 spec-mapped functions resolve after sourcing modules" {
+@test "all spec-mapped functions resolve after sourcing modules" {
     run bash -c "
         set -e
         source '${INSTALL_D}/lib.sh'
         for m in 00-detect 01-state 02-deps 03-kernel 04-dkms 05-mesh \
                  06-radio 07-systemd 08-plugin 09-config 10-network \
-                 11-artifacts 12-output; do
+                 11-artifacts 12-output 14-orchestration; do
             source '${INSTALL_D}/'\$m.sh
         done
         missing=0
@@ -137,7 +145,11 @@ setup() {
             install_plugin_slice install_plugin_tmpfiles generate_device_id \
             generate_default_config harden_secret_perms provision_plugin_keys \
             write_pairing install_mediamtx persist_repo_artifacts install_motd \
-            wait_for_api_ready print_pairing_code print_hardware_summary print_status; do
+            wait_for_api_ready print_pairing_code print_hardware_summary print_status \
+            checkpoint_mark checkpoint_done checkpoint_clear checkpoint_run \
+            list_completed_checkpoints expected_profile_units unit_enabled \
+            is_install_complete maybe_reexec_detached write_install_result \
+            record_failure run_health_gate git_clone_retry install_radio_driver_tracked; do
             if ! declare -F \"\$fn\" >/dev/null; then
                 echo \"MISSING: \$fn\"
                 missing=\$((missing+1))
@@ -342,4 +354,394 @@ probe_args() {
     run bash -c "awk '/curl-pipe bootstrap/,/^fi$/' '${DISPATCHER}' | grep -cE 'exec.*install\\.sh.*\\\"\\\$@\\\"'"
     [ "$status" -eq 0 ]
     [ "$output" = "1" ]
+}
+
+# -----------------------------------------------------------------------------
+# Orchestration: checkpoints, completeness probe, detach skip, result file,
+# health gate exit code.
+#
+# These exercise the 14-orchestration.sh helpers in isolation against a
+# temp state dir, with systemctl / curl / the venv python stubbed so the
+# probes are deterministic on this CI host (which has no /opt/ados, no
+# systemd units, and is not the target SBC). The harness writes a small
+# driver script that sources lib.sh + 14-orchestration.sh with the contract
+# paths redirected under a temp tree, then runs the function under test.
+# -----------------------------------------------------------------------------
+
+orch_setup() {
+    ORCH_TMP="$(mktemp -d)"
+    ORCH_BIN="${ORCH_TMP}/bin"
+    mkdir -p "${ORCH_BIN}"
+    mkdir -p "${ORCH_TMP}/venv/bin"
+    printf '#!/usr/bin/env bash\nexit 0\n' > "${ORCH_TMP}/venv/bin/ados"
+    chmod +x "${ORCH_TMP}/venv/bin/ados"
+    mkdir -p "${ORCH_TMP}/site/ados"
+    : > "${ORCH_TMP}/site/ados/__init__.py"
+    cat > "${ORCH_TMP}/venv/bin/python" <<PYEOF
+#!/usr/bin/env bash
+exec /usr/bin/env PYTHONPATH="${ORCH_TMP}/site" python3 "\$@"
+PYEOF
+    chmod +x "${ORCH_TMP}/venv/bin/python"
+}
+
+orch_teardown() {
+    [ -n "${ORCH_TMP:-}" ] && rm -rf "${ORCH_TMP}"
+}
+
+orch_run() {
+    local snippet="$1"
+    bash -c "
+        set -uo pipefail
+        export PATH='${ORCH_BIN}:'\$PATH
+        source '${INSTALL_D}/lib.sh'
+        export ADOS_STATE_DIR='${ORCH_TMP}/state'
+        export ADOS_CHECKPOINT_DIR='${ORCH_TMP}/state/install-checkpoints'
+        export ADOS_INSTALL_RESULT='${ORCH_TMP}/state/install-result.json'
+        export ADOS_INSTALL_LOG_DIR='${ORCH_TMP}/log'
+        export VENV_DIR='${ORCH_TMP}/venv'
+        export SERVICE_NAME='ados-supervisor'
+        source '${INSTALL_D}/14-orchestration.sh'
+        ${snippet}
+    "
+}
+
+@test "checkpoint_mark then checkpoint_done round-trips" {
+    orch_setup
+    run orch_run "checkpoint_mark deps && checkpoint_done deps && echo DONE"
+    orch_teardown
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"DONE"* ]]
+}
+
+@test "checkpoint_done is false before a mark" {
+    orch_setup
+    run orch_run "checkpoint_done deps && echo YES || echo NO"
+    orch_teardown
+    [[ "$output" == *"NO"* ]]
+}
+
+@test "checkpoint_clear removes all markers" {
+    orch_setup
+    run orch_run "checkpoint_mark a; checkpoint_mark b; checkpoint_clear; checkpoint_done a && echo HASA || echo NOA"
+    orch_teardown
+    [[ "$output" == *"NOA"* ]]
+}
+
+@test "list_completed_checkpoints reports marked steps" {
+    orch_setup
+    run orch_run "checkpoint_mark deps; checkpoint_mark venv; list_completed_checkpoints"
+    orch_teardown
+    [[ "$output" == *"deps"* ]]
+    [[ "$output" == *"venv"* ]]
+}
+
+@test "checkpoint_run skips a marked step on a non-force run" {
+    orch_setup
+    run orch_run "
+        DO_FORCE=false
+        ran=0
+        work() { ran=1; }
+        checkpoint_mark slowstep
+        checkpoint_run slowstep work
+        echo RAN=\$ran
+    "
+    orch_teardown
+    [[ "$output" == *"RAN=0"* ]]
+}
+
+@test "checkpoint_run runs an unmarked step and marks it" {
+    orch_setup
+    run orch_run "
+        DO_FORCE=false
+        work() { return 0; }
+        checkpoint_run freshstep work && checkpoint_done freshstep && echo MARKED
+    "
+    orch_teardown
+    [[ "$output" == *"MARKED"* ]]
+}
+
+@test "checkpoint_run does NOT mark a failing step" {
+    orch_setup
+    run orch_run "
+        DO_FORCE=false
+        work() { return 7; }
+        checkpoint_run failstep work || true
+        checkpoint_done failstep && echo MARKED || echo UNMARKED
+    "
+    orch_teardown
+    [[ "$output" == *"UNMARKED"* ]]
+}
+
+@test "expected_profile_units lists only supervisor for drone" {
+    orch_setup
+    run orch_run "expected_profile_units drone"
+    orch_teardown
+    [[ "$output" == *"ados-supervisor.service"* ]]
+    [[ "$output" != *"ados-wfb-rx.service"* ]]
+}
+
+@test "expected_profile_units lists GS units for ground_station" {
+    orch_setup
+    run orch_run "expected_profile_units ground_station"
+    orch_teardown
+    [[ "$output" == *"ados-supervisor.service"* ]]
+    [[ "$output" == *"ados-wfb-rx.service"* ]]
+    [[ "$output" == *"ados-hostapd.service"* ]]
+}
+
+@test "is_install_complete is FALSE when venv import fails" {
+    orch_setup
+    # Replace the venv python with a stub that fails the ados import. The
+    # real ados is on this host's path via the editable install, so simply
+    # clearing the shim site dir would not make `import ados` fail; the stub
+    # returns non-zero for `-c "import ados"` and succeeds for anything else.
+    cat > "${ORCH_TMP}/venv/bin/python" <<'EOF'
+#!/usr/bin/env bash
+if [ "$1" = "-c" ] && printf '%s' "$2" | grep -q 'import ados'; then
+    exit 1
+fi
+exit 0
+EOF
+    chmod +x "${ORCH_TMP}/venv/bin/python"
+    cat > "${ORCH_BIN}/uname" <<'EOF'
+#!/usr/bin/env bash
+[ "$1" = "-s" ] && { echo Linux; exit 0; }
+exec /usr/bin/uname "$@"
+EOF
+    cat > "${ORCH_BIN}/systemctl" <<'EOF'
+#!/usr/bin/env bash
+[ "$1" = "is-enabled" ] && { echo enabled; exit 0; }
+exit 0
+EOF
+    chmod +x "${ORCH_BIN}/uname" "${ORCH_BIN}/systemctl"
+    run orch_run "
+        is_install_complete drone || true
+        echo \"MISSING=[\${INSTALL_MISSING}]\"
+    "
+    orch_teardown
+    [[ "$output" == *"venv-import"* ]]
+}
+
+@test "is_install_complete is FALSE when a profile unit is not enabled" {
+    orch_setup
+    cat > "${ORCH_BIN}/uname" <<'EOF'
+#!/usr/bin/env bash
+[ "$1" = "-s" ] && { echo Linux; exit 0; }
+exec /usr/bin/uname "$@"
+EOF
+    cat > "${ORCH_BIN}/systemctl" <<'EOF'
+#!/usr/bin/env bash
+[ "$1" = "is-enabled" ] && { echo disabled; exit 1; }
+exit 0
+EOF
+    chmod +x "${ORCH_BIN}/uname" "${ORCH_BIN}/systemctl"
+    run orch_run "is_install_complete drone || true; echo \"MISSING=[\${INSTALL_MISSING}]\""
+    orch_teardown
+    [[ "$output" == *"unit:ados-supervisor.service"* ]]
+}
+
+@test "maybe_reexec_detached is SKIPPED under --foreground" {
+    orch_setup
+    cat > "${ORCH_BIN}/uname" <<'EOF'
+#!/usr/bin/env bash
+[ "$1" = "-s" ] && { echo Linux; exit 0; }
+exec /usr/bin/uname "$@"
+EOF
+    chmod +x "${ORCH_BIN}/uname"
+    run orch_run "DO_FOREGROUND=true; maybe_reexec_detached && echo DETACHED || echo INLINE"
+    orch_teardown
+    [[ "$output" == *"INLINE"* ]]
+}
+
+@test "maybe_reexec_detached is SKIPPED when already detached" {
+    orch_setup
+    cat > "${ORCH_BIN}/uname" <<'EOF'
+#!/usr/bin/env bash
+[ "$1" = "-s" ] && { echo Linux; exit 0; }
+exec /usr/bin/uname "$@"
+EOF
+    chmod +x "${ORCH_BIN}/uname"
+    run orch_run "ADOS_INSTALL_DETACHED=1; maybe_reexec_detached && echo DETACHED || echo INLINE"
+    orch_teardown
+    [[ "$output" == *"INLINE"* ]]
+}
+
+@test "maybe_reexec_detached is SKIPPED on non-Linux" {
+    orch_setup
+    cat > "${ORCH_BIN}/uname" <<'EOF'
+#!/usr/bin/env bash
+[ "$1" = "-s" ] && { echo Darwin; exit 0; }
+exec /usr/bin/uname "$@"
+EOF
+    chmod +x "${ORCH_BIN}/uname"
+    run orch_run "maybe_reexec_detached && echo DETACHED || echo INLINE"
+    orch_teardown
+    [[ "$output" == *"INLINE"* ]]
+}
+
+@test "write_install_result writes JSON with status ok and ISO timestamp" {
+    orch_setup
+    run orch_run "
+        ADOS_PROFILE=drone
+        get_installed_version() { echo 9.9.9; }
+        write_install_result ok
+        /bin/cat '${ORCH_TMP}/state/install-result.json'
+    "
+    orch_teardown
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'"status": "ok"'* ]]
+    [[ "$output" == *'"version": "9.9.9"'* ]]
+    [[ "$output" == *'"profile": "drone"'* ]]
+    [[ "$output" =~ [0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z ]]
+}
+
+@test "write_install_result records failedSteps and requiredFailures arrays" {
+    orch_setup
+    run orch_run "
+        ADOS_PROFILE=ground_station
+        get_installed_version() { echo 1.2.3; }
+        record_failure radio-driver optional
+        record_failure supervisor-active required
+        write_install_result failed
+        /bin/cat '${ORCH_TMP}/state/install-result.json'
+    "
+    orch_teardown
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'"status": "failed"'* ]]
+    [[ "$output" == *"radio-driver"* ]]
+    [[ "$output" == *"supervisor-active"* ]]
+}
+
+@test "run_health_gate returns NON-ZERO and writes failed when supervisor is down" {
+    orch_setup
+    cat > "${ORCH_BIN}/uname" <<'EOF'
+#!/usr/bin/env bash
+[ "$1" = "-s" ] && { echo Linux; exit 0; }
+exec /usr/bin/uname "$@"
+EOF
+    cat > "${ORCH_BIN}/systemctl" <<'EOF'
+#!/usr/bin/env bash
+case "$1" in
+  is-active) exit 3 ;;
+  is-enabled) echo enabled; exit 0 ;;
+esac
+exit 0
+EOF
+    cat > "${ORCH_BIN}/curl" <<'EOF'
+#!/usr/bin/env bash
+exit 7
+EOF
+    chmod +x "${ORCH_BIN}/uname" "${ORCH_BIN}/systemctl" "${ORCH_BIN}/curl"
+    run orch_run "
+        ADOS_PROFILE=drone
+        get_installed_version() { echo 1.0.0; }
+        run_health_gate && echo GATE_OK || echo GATE_FAIL
+        echo '---'
+        /bin/cat '${ORCH_TMP}/state/install-result.json'
+    "
+    orch_teardown
+    [[ "$output" == *"GATE_FAIL"* ]]
+    [[ "$output" == *'"status": "failed"'* ]]
+    [[ "$output" == *"supervisor-active"* ]]
+}
+
+@test "run_health_gate returns ZERO and writes ok when all required pass" {
+    orch_setup
+    cat > "${ORCH_BIN}/uname" <<'EOF'
+#!/usr/bin/env bash
+[ "$1" = "-s" ] && { echo Linux; exit 0; }
+exec /usr/bin/uname "$@"
+EOF
+    cat > "${ORCH_BIN}/systemctl" <<'EOF'
+#!/usr/bin/env bash
+case "$1" in
+  is-active) exit 0 ;;
+  is-enabled) echo enabled; exit 0 ;;
+esac
+exit 0
+EOF
+    cat > "${ORCH_BIN}/curl" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+    chmod +x "${ORCH_BIN}/uname" "${ORCH_BIN}/systemctl" "${ORCH_BIN}/curl"
+    run orch_run "
+        ADOS_PROFILE=drone
+        get_installed_version() { echo 1.0.0; }
+        run_health_gate && echo GATE_OK || echo GATE_FAIL
+        echo '---'
+        /bin/cat '${ORCH_TMP}/state/install-result.json'
+    "
+    orch_teardown
+    [[ "$output" == *"GATE_OK"* ]]
+    [[ "$output" == *'"status": "ok"'* ]]
+}
+
+@test "run_health_gate returns ZERO with degraded when only optional fails" {
+    orch_setup
+    cat > "${ORCH_BIN}/uname" <<'EOF'
+#!/usr/bin/env bash
+[ "$1" = "-s" ] && { echo Linux; exit 0; }
+exec /usr/bin/uname "$@"
+EOF
+    cat > "${ORCH_BIN}/systemctl" <<'EOF'
+#!/usr/bin/env bash
+case "$1" in
+  is-active) exit 0 ;;
+  is-enabled) echo enabled; exit 0 ;;
+esac
+exit 0
+EOF
+    cat > "${ORCH_BIN}/curl" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+    chmod +x "${ORCH_BIN}/uname" "${ORCH_BIN}/systemctl" "${ORCH_BIN}/curl"
+    run orch_run "
+        ADOS_PROFILE=drone
+        get_installed_version() { echo 1.0.0; }
+        record_failure radio-driver optional
+        run_health_gate && echo GATE_OK || echo GATE_FAIL
+        echo '---'
+        /bin/cat '${ORCH_TMP}/state/install-result.json'
+    "
+    orch_teardown
+    [[ "$output" == *"GATE_OK"* ]]
+    [[ "$output" == *'"status": "degraded"'* ]]
+    [[ "$output" == *"radio-driver"* ]]
+}
+
+# -----------------------------------------------------------------------------
+# Source-shape regressions for the resume gate + detach wiring + health gate.
+# -----------------------------------------------------------------------------
+
+@test "13-main resumes when is_install_complete is false" {
+    run grep -nE "is_install_complete" "${INSTALL_D}/13-main.sh"
+    [ "$status" -eq 0 ]
+    [ -n "$output" ]
+    run grep -nE "ADOS_RESUME=true" "${INSTALL_D}/13-main.sh"
+    [ "$status" -eq 0 ]
+    [ -n "$output" ]
+}
+
+@test "13-main full-install + upgrade paths end with run_health_gate" {
+    run grep -cE "run_health_gate" "${INSTALL_D}/13-main.sh"
+    [ "$status" -eq 0 ]
+    [ "$output" -ge 2 ]
+}
+
+@test "dispatcher detaches before main_install_flow" {
+    run grep -nE "maybe_reexec_detached" "${DISPATCHER}"
+    [ "$status" -eq 0 ]
+    detach_line="$(grep -nE 'maybe_reexec_detached "\$@"' "${DISPATCHER}" | head -1 | cut -d: -f1)"
+    flow_line="$(grep -nE '^main_install_flow[[:space:]]*$' "${DISPATCHER}" | head -1 | cut -d: -f1)"
+    [ -n "$detach_line" ]
+    [ -n "$flow_line" ]
+    [ "$detach_line" -lt "$flow_line" ]
+}
+
+@test "dispatcher accepts --foreground flag" {
+    run grep -nE '\-\-foreground\)' "${DISPATCHER}"
+    [ "$status" -eq 0 ]
+    [ -n "$output" ]
 }

@@ -125,28 +125,54 @@ main_install_flow() {
         exit 0
     fi
 
-    # ─── Fast Path: Already installed, no flags ──────────────────────────────────
+    # ─── Already installed, no flags: complete? short-circuit. incomplete? resume ─
+    #
+    # The old gate short-circuited the moment the `ados` binary existed,
+    # even when the install never finished (units never deployed, supervisor
+    # never enabled). A box left half-installed by a dropped SSH session
+    # would then report "already installed" on the next plain re-run and
+    # silently skip the missing steps forever. Now we probe COMPLETENESS:
+    # global command + importable venv + supervisor unit + every
+    # profile-expected unit enabled. Complete => keep the friendly
+    # already-installed message. Incomplete => fall through to the full
+    # install body, which is idempotent and finishes the missing work
+    # (a resume). No --force required to recover a half-install.
 
     if is_installed && ! $DO_FORCE && ! $DO_UPGRADE; then
-        local_ver=$(get_installed_version)
+        # Resolve the profile so the completeness probe checks the right
+        # unit set. resolve_profile reads the persisted profile.conf.
+        ADOS_PROFILE="$(resolve_profile)"
+        export ADOS_PROFILE
 
-        # Ensure global symlinks exist (fixes installs from before symlink support)
-        install_global_symlinks
+        if is_install_complete "${ADOS_PROFILE}"; then
+            local_ver=$(get_installed_version)
 
-        echo ""
-        info "ADOS Drone Agent already installed (v${local_ver})."
-        echo ""
-        echo "  Status:    sudo systemctl status ${SERVICE_NAME}"
-        echo "  CLI:       ados status"
-        echo ""
-        echo "  Re-run with:"
-        echo "    --upgrade    Update to latest version (skip apt, skip venv rebuild)"
-        echo "    --force      Full reinstall from scratch"
-        echo "    --pair CODE  Update pairing code only (<5s)"
-        echo "    CODE         Same as --pair CODE (positional)"
-        echo ""
-        print_pairing_code
-        exit 0
+            # Ensure global symlinks exist (fixes installs from before symlink support)
+            install_global_symlinks
+
+            echo ""
+            info "ADOS Drone Agent already installed (v${local_ver})."
+            echo ""
+            echo "  Status:    sudo systemctl status ${SERVICE_NAME}"
+            echo "  CLI:       ados status"
+            echo ""
+            echo "  Re-run with:"
+            echo "    --upgrade    Update to latest version (skip apt, skip venv rebuild)"
+            echo "    --force      Full reinstall from scratch"
+            echo "    --pair CODE  Update pairing code only (<5s)"
+            echo "    CODE         Same as --pair CODE (positional)"
+            echo ""
+            print_pairing_code
+            exit 0
+        fi
+
+        warn "Agent present but install is INCOMPLETE (missing: ${INSTALL_MISSING})."
+        warn "Resuming install to finish the missing steps. No --force needed."
+        info "Completed checkpoints: $(list_completed_checkpoints)"
+        # Fall through to the full install body below. Every step is
+        # idempotent; checkpoints make the finished ones fast no-ops.
+        ADOS_RESUME=true
+        export ADOS_RESUME
     fi
 
     # ─── Upgrade Path (skip apt, skip venv creation) ────────────────────────────
@@ -195,12 +221,13 @@ main_install_flow() {
         # Clone repo to temp dir for pip install + systemd files + install script
         tmp_repo="$(mktemp -d)"
         info "Fetching latest source..."
-        # honor --branch for feature-branch installs
+        # honor --branch for feature-branch installs. Bounded retry so a
+        # transient network blip does not abort the upgrade.
         if [ -n "$BRANCH_NAME" ]; then
             info "Using branch: ${BRANCH_NAME}"
-            git clone --depth 1 --recurse-submodules --shallow-submodules --quiet --branch "${BRANCH_NAME}" "${REPO_URL}" "${tmp_repo}/repo"
+            git_clone_retry "${tmp_repo}/repo" "${BRANCH_NAME}"
         else
-            git clone --depth 1 --recurse-submodules --shallow-submodules --quiet "${REPO_URL}" "${tmp_repo}/repo"
+            git_clone_retry "${tmp_repo}/repo"
         fi
 
         # Migrate older venvs that were created without
@@ -344,7 +371,7 @@ main_install_flow() {
         if [ "${ADOS_PROFILE:-}" = "ground_station" ] \
            || [ "${ADOS_PROFILE:-}" = "ground-station" ] \
            || [ "${ADOS_PROFILE:-}" = "drone" ]; then
-            install_ground_station_driver
+            install_radio_driver_tracked
         fi
 
         # iw on upgrade. Required by WFB services for TX power control.
@@ -369,7 +396,15 @@ main_install_flow() {
         echo ""
         info "Upgrade complete."
         print_pairing_code
-        exit 0
+
+        # Same success contract as the fresh-install path. wait_for_api_ready
+        # is not called on the upgrade path's print_status (the upgrade path
+        # has no print_status call), so the gate's own API probe is the one
+        # that matters here.
+        if run_health_gate; then
+            exit 0
+        fi
+        exit 1
     fi
 
     # ─── Full Install (first time or --force) ───────────────────────────────────
@@ -377,6 +412,9 @@ main_install_flow() {
     if $DO_FORCE && is_installed; then
         info "Force reinstall requested. Removing existing venv..."
         rm -rf "${VENV_DIR}"
+        # Drop stale checkpoints so a forced reinstall re-runs every step
+        # and never trusts a marker from a prior partial run.
+        checkpoint_clear
     fi
 
     # Check or install Python
@@ -412,8 +450,9 @@ main_install_flow() {
     fi
     info "Python: ${PYTHON} ($(${PYTHON} --version 2>&1 | awk '{print $2}'))"
 
-    # Install system dependencies
+    # Install system dependencies (REQUIRED)
     install_system_deps
+    checkpoint_mark deps
 
     # Force USB OTG controller(s) into host mode so a powered hub's
     # downstream radio/camera peripherals enumerate. No-op on boards with
@@ -444,24 +483,26 @@ main_install_flow() {
     # unavailable" forever.
     info "Creating Python virtual environment at ${VENV_DIR}..."
     "$PYTHON" -m venv --system-site-packages "${VENV_DIR}"
+    checkpoint_mark venv
 
     # Clone repo for pip install + data files (needed when piped via curl)
     FRESH_REPO_DIR=""
     if [ ! -d "$(dirname "$0" 2>/dev/null)/../data/systemd" ] 2>/dev/null; then
         FRESH_REPO_DIR="$(mktemp -d)"
         info "Cloning repository..."
-        # honor --branch for feature-branch installs
+        # honor --branch for feature-branch installs. Bounded retry so a
+        # transient network blip does not abort the fresh install.
         if [ -n "$BRANCH_NAME" ]; then
             info "Using branch: ${BRANCH_NAME}"
-            git clone --depth 1 --recurse-submodules --shallow-submodules --quiet --branch "${BRANCH_NAME}" "${REPO_URL}" "${FRESH_REPO_DIR}/repo"
+            git_clone_retry "${FRESH_REPO_DIR}/repo" "${BRANCH_NAME}"
         else
-            git clone --depth 1 --recurse-submodules --shallow-submodules --quiet "${REPO_URL}" "${FRESH_REPO_DIR}/repo"
+            git_clone_retry "${FRESH_REPO_DIR}/repo"
         fi
         SYSTEMD_SRC_DIR="${FRESH_REPO_DIR}/repo/data/systemd"
     fi
     export FRESH_REPO_DIR SYSTEMD_SRC_DIR
 
-    # Install the agent package
+    # Install the agent package (REQUIRED)
     info "Installing ados-drone-agent..."
     "${VENV_DIR}/bin/pip" install --upgrade pip --quiet
     if [ -n "${FRESH_REPO_DIR}" ]; then
@@ -469,6 +510,7 @@ main_install_flow() {
     else
         "${VENV_DIR}/bin/pip" install "git+${REPO_URL}" --quiet
     fi
+    checkpoint_mark agent-package
 
     # Resolve agent profile. Ground-station profile pulls extra apt deps,
     # the RTL8812EU DKMS driver, the ground-station python extras, and the
@@ -479,13 +521,13 @@ main_install_flow() {
 
     if [ "${ADOS_PROFILE}" = "ground_station" ] || [ "${ADOS_PROFILE}" = "ground-station" ]; then
         install_ground_station_deps
-        install_ground_station_driver
+        install_radio_driver_tracked
 
     # Drone profile also needs the RTL8812EU DKMS driver (it's the air side
     # of the WFB-ng radio pair, transmitting). Same idempotent installer
     # the ground-station path uses.
     elif [ "${ADOS_PROFILE}" = "drone" ]; then
-        install_ground_station_driver
+        install_radio_driver_tracked
     fi
 
     if [ "${ADOS_PROFILE}" = "ground_station" ] || [ "${ADOS_PROFILE}" = "ground-station" ]; then
@@ -527,8 +569,9 @@ main_install_flow() {
         write_pairing "$PAIR_CODE"
     fi
 
-    # Install systemd service
+    # Install systemd service (REQUIRED — supervisor + profile units)
     install_systemd_service
+    checkpoint_mark systemd
 
     # Persist driver scripts + overlay sources to /opt/ados/source/ so the
     # running agent can re-invoke them later (in particular the wizard's
@@ -545,8 +588,9 @@ main_install_flow() {
         rm -rf "${FRESH_REPO_DIR}"
     fi
 
-    # Install global symlinks (ados, ados-agent → /usr/local/bin/)
+    # Install global symlinks (ados, ados-agent → /usr/local/bin/) (REQUIRED)
     install_global_symlinks
+    checkpoint_mark global-symlinks
 
     # Drop first-party plugin trust keys before the perms pass so they
     # get the same 0600 chmod treatment.
@@ -557,7 +601,17 @@ main_install_flow() {
     # safe to run on every install/upgrade after all file writes have settled.
     harden_secret_perms
 
-    # Print summary
+    # Print summary (blocks on wait_for_api_ready so AGENT_API_VERSION is set
+    # before the health gate re-probes the API).
     print_status
     print_pairing_code
+
+    # Success contract: assert the REQUIRED components are live, write
+    # /var/lib/ados/install-result.json, and propagate a non-zero exit when
+    # a REQUIRED step failed so the detached unit's status reflects reality.
+    # Optional-only failures downgrade to "degraded" and still exit 0.
+    if run_health_gate; then
+        exit 0
+    fi
+    exit 1
 }

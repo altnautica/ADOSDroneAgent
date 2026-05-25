@@ -13,6 +13,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SUITES=(
     "${SCRIPT_DIR}/install_dispatcher.bats"
+    "${SCRIPT_DIR}/install_main_dispatcher.bats"
     "${SCRIPT_DIR}/prebuilt_dispatcher.bats"
 )
 
