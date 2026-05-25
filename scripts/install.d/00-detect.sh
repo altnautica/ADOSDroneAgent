@@ -131,11 +131,15 @@ detect_os() {
 # ─── Python Detection ───────────────────────────────────────────────────────
 
 find_python() {
-    # Finds the best available Python 3.11+ binary
-    for py in python3.13 python3.12 python3.11 python3; do
+    # Finds the best available Python 3.11+ binary. Includes the portable
+    # interpreter provisioned by provision_portable_python (symlinked into
+    # /usr/local/bin/python3.11) so a second call after provisioning picks
+    # it up automatically.
+    for py in python3.13 python3.12 python3.11 \
+              /usr/local/bin/python3.11 python3; do
         if command -v "$py" &>/dev/null; then
             local ver major minor
-            ver=$("$py" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
+            ver=$("$py" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")' 2>/dev/null) || continue
             major=$(echo "$ver" | cut -d. -f1)
             minor=$(echo "$ver" | cut -d. -f2)
             if [ "$major" -ge 3 ] && [ "$minor" -ge 11 ]; then
@@ -145,6 +149,152 @@ find_python() {
         fi
     done
     echo ""
+}
+
+# ─── Portable Python Provisioning ────────────────────────────────────────────
+#
+# Some distributions cannot supply a Python 3.11+ interpreter from their own
+# package repositories. Debian 11 (bullseye) ships Python 3.9 and has neither
+# python3.11 nor python3.12 in its archives, so the apt fallback in the main
+# install flow has nothing to install and the agent venv (which requires 3.11+)
+# can never be created.
+#
+# When that happens, download a self-contained CPython build for the running
+# architecture, extract it under /opt/ados/runtime/python, and expose its
+# interpreter at /usr/local/bin/python3.11 so find_python resolves it like any
+# distro-supplied build. The interpreter is fully relocatable and statically
+# links what it needs, so it runs on bullseye without touching system Python.
+#
+# Idempotent: returns early when /usr/local/bin/python3.11 already resolves to
+# a >=3.11 interpreter, so --upgrade re-runs are a fast no-op. No-op (skipped by
+# the caller) on any distro that already supplies a usable interpreter.
+provision_portable_python() {
+    # Already provisioned (or a distro python3.11 is on PATH at this name)?
+    if [ -x /usr/local/bin/python3.11 ]; then
+        local existing_ver
+        existing_ver="$(/usr/local/bin/python3.11 -c 'import sys; print(sys.version_info.major*100+sys.version_info.minor)' 2>/dev/null || true)"
+        if [ -n "${existing_ver}" ] && [ "${existing_ver}" -ge 311 ]; then
+            info "Portable Python already provisioned: /usr/local/bin/python3.11"
+            return 0
+        fi
+    fi
+
+    # Map the running CPU architecture to the python-build-standalone triple.
+    local uarch triple
+    uarch="$(uname -m)"
+    case "${uarch}" in
+        aarch64|arm64)  triple="aarch64-unknown-linux-gnu" ;;
+        x86_64|amd64)   triple="x86_64-unknown-linux-gnu" ;;
+        armv7l|armv7|armhf) triple="armv7-unknown-linux-gnueabihf" ;;
+        *)
+            warn "No portable Python build available for arch '${uarch}'."
+            return 1
+            ;;
+    esac
+
+    # Pinned known-good build. The asset extracts to a top-level python/ dir
+    # (install_only layout) holding bin/python3.11 + a full stdlib.
+    local pin_version="3.11.15"
+    local pin_date="20260510"
+    local base_url="https://github.com/astral-sh/python-build-standalone/releases"
+    local asset="cpython-${pin_version}+${pin_date}-${triple}-install_only.tar.gz"
+    local pinned_url="${base_url}/download/${pin_date}/${asset}"
+
+    info "Provisioning portable Python ${pin_version} for ${triple}..."
+
+    local runtime_dir="${INSTALL_DIR}/runtime"
+    local tarball
+    tarball="$(mktemp /tmp/ados-python.XXXXXX.tar.gz)"
+
+    # Try the pinned URL first; on a 404 (the pinned tag/asset moved) fall
+    # back to resolving the asset URL for the same triple from the latest
+    # python-build-standalone release via the GitHub API.
+    _download_portable_python() {
+        local url="$1" out="$2"
+        if command -v curl >/dev/null 2>&1; then
+            curl -fsSL --retry 3 --retry-delay 2 -L "${url}" -o "${out}" 2>/dev/null
+        elif command -v wget >/dev/null 2>&1; then
+            wget -q --tries=3 -O "${out}" "${url}" 2>/dev/null
+        else
+            return 1
+        fi
+    }
+
+    local got=false
+    if _download_portable_python "${pinned_url}" "${tarball}" \
+        && [ -s "${tarball}" ]; then
+        got=true
+    else
+        warn "Pinned Python build not reachable; querying latest release for ${triple}."
+        local api_url="https://api.github.com/repos/astral-sh/python-build-standalone/releases/latest"
+        local api_json="" latest_url=""
+        if command -v curl >/dev/null 2>&1; then
+            api_json="$(curl -fsSL --max-time 15 -L "${api_url}" 2>/dev/null || true)"
+        elif command -v wget >/dev/null 2>&1; then
+            api_json="$(wget -q -T 15 -O - "${api_url}" 2>/dev/null || true)"
+        fi
+        if [ -n "${api_json}" ] && command -v python3 >/dev/null 2>&1; then
+            # Match a 3.11.x install_only asset for our triple. Pick the
+            # first such asset's browser_download_url.
+            latest_url="$(printf '%s' "${api_json}" | python3 -c '
+import json, sys
+triple = sys.argv[1]
+try:
+    rel = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+for a in rel.get("assets", []):
+    n = a.get("name", "")
+    if n.startswith("cpython-3.11.") and triple in n and n.endswith("install_only.tar.gz"):
+        print(a.get("browser_download_url", ""))
+        break
+' "${triple}" 2>/dev/null || true)"
+        fi
+        if [ -n "${latest_url}" ] \
+            && _download_portable_python "${latest_url}" "${tarball}" \
+            && [ -s "${tarball}" ]; then
+            got=true
+        fi
+    fi
+
+    if [ "${got}" != "true" ]; then
+        warn "Could not download a portable Python build for ${triple}."
+        rm -f "${tarball}"
+        return 1
+    fi
+
+    # Extract to /opt/ados/runtime/. The archive's top-level dir is "python".
+    # Remove any prior extraction first so the layout is clean on re-provision.
+    mkdir -p "${runtime_dir}"
+    rm -rf "${runtime_dir}/python"
+    if ! tar -xzf "${tarball}" -C "${runtime_dir}" 2>/dev/null; then
+        warn "Failed to extract portable Python tarball."
+        rm -f "${tarball}"
+        return 1
+    fi
+    rm -f "${tarball}"
+
+    # Locate the interpreter inside the extracted tree. install_only builds
+    # ship bin/python3.11; guard against minor layout shifts with a fallback.
+    local interp="${runtime_dir}/python/bin/python3.11"
+    if [ ! -x "${interp}" ]; then
+        interp="$(find "${runtime_dir}/python/bin" -maxdepth 1 -name 'python3.1*' -type f 2>/dev/null | sort | head -n1 || true)"
+    fi
+    if [ -z "${interp}" ] || [ ! -x "${interp}" ]; then
+        warn "Portable Python extracted but no python3.11 interpreter found under ${runtime_dir}/python/bin."
+        return 1
+    fi
+
+    # Expose it as /usr/local/bin/python3.11 so find_python resolves it.
+    mkdir -p /usr/local/bin
+    ln -sf "${interp}" /usr/local/bin/python3.11
+
+    if /usr/local/bin/python3.11 -c 'import sys; assert sys.version_info >= (3, 11)' 2>/dev/null; then
+        info "Portable Python ready: /usr/local/bin/python3.11 -> ${interp}"
+        return 0
+    fi
+    warn "Portable Python symlink created but interpreter check failed."
+    return 1
 }
 
 # ─── Agent Profile Resolution ───────────────────────────────────────────────

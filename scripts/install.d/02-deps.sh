@@ -58,8 +58,6 @@ install_system_deps() {
         libsodium-dev \
         libpcap-dev \
         libevent-dev \
-        libgstreamer1.0-dev \
-        libgstrtspserver-1.0-dev \
         build-essential \
         git \
         curl \
@@ -75,6 +73,20 @@ install_system_deps() {
         gstreamer1.0-rtsp \
         iw \
         wireless-regdb
+
+    # The gstreamer -dev headers are only needed to compile the OPTIONAL
+    # wfb_rtsp demo target; the bind protocol drives wfb-server, not
+    # wfb_rtsp, and the radio build already falls back to building without
+    # wfb_rtsp when these headers are absent. On some BSP repos the -dev
+    # packages pull a runtime dependency at a Debian-archive version that
+    # the BSP has shadowed with its own build, so apt aborts with "held
+    # broken packages". Installing each -dev best-effort and individually
+    # keeps that unsatisfiable case from taking down the whole dependency
+    # step; the required runtime gstreamer packages above already installed.
+    for _devpkg in libgstreamer1.0-dev libgstrtspserver-1.0-dev; do
+        apt-get install -y "${_devpkg}" \
+            || warn "${_devpkg} not installable on this BSP; wfb_rtsp build will be skipped (not required)."
+    done
 
     # Try the Rockchip MPP plugin opportunistically. The package only
     # exists on Radxa BSP repos that have shipped a build for the SoC

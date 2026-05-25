@@ -60,8 +60,8 @@ if [ -n "${ADOS_SCRIPT_DIR}" ] && [ -f "${ADOS_SCRIPT_DIR}/install.d/lib.sh" ]; 
     # is obvious from the directory listing. Function-resolution in bash
     # is dynamic so cross-module calls work regardless of source order;
     # we still go numeric so a code reader can trace responsibility.
-    for module in 00-detect 01-state 02-deps 03-kernel 04-dkms 05-mesh \
-                  06-radio 07-systemd 08-plugin 09-config 10-network \
+    for module in 00-detect 01-state 02-deps 03-kernel 04-dkms 04-usb-otg \
+                  05-mesh 06-radio 07-systemd 08-plugin 09-config 10-network \
                   11-artifacts 12-output 13-main; do
         module_path="${ADOS_SCRIPT_DIR}/install.d/${module}.sh"
         if [ ! -f "${module_path}" ]; then

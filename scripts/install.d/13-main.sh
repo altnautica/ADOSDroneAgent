@@ -305,10 +305,17 @@ main_install_flow() {
         # wfb-ng userspace from the vendored source — must run BEFORE the
         # temp-repo cleanup so vendor/wfb-ng/ is still on disk. Build deps
         # are best-effort; the function bails clean if anything is missing.
+        # The required wfb-ng build deps are installed as one group. The
+        # gstreamer -dev headers (only needed for the optional wfb_rtsp
+        # target) install separately and individually so an unsatisfiable
+        # -dev on a BSP that shadows the Debian runtime version cannot take
+        # the satisfiable deps down with it.
         DEBIAN_FRONTEND=noninteractive apt-get install -y \
             libsodium-dev libpcap-dev libevent-dev \
-            libgstreamer1.0-dev libgstrtspserver-1.0-dev \
             python3-setuptools 2>&1 | tail -2 || true
+        for _devpkg in libgstreamer1.0-dev libgstrtspserver-1.0-dev; do
+            DEBIAN_FRONTEND=noninteractive apt-get install -y "${_devpkg}" 2>&1 | tail -1 || true
+        done
         FRESH_REPO_DIR="${tmp_repo}" install_wfb_ng_from_vendor
 
         # Clean up temp repo
@@ -345,6 +352,10 @@ main_install_flow() {
             DEBIAN_FRONTEND=noninteractive apt-get install -y iw wireless-regdb || \
                 warn "iw install failed; WFB services will not be able to set TX power."
         fi
+
+        # Re-apply USB OTG host mode on upgrade. Idempotent: no-op when the
+        # controller is already host or when the board has no OTG role node.
+        provision_usb_otg_host
         # wfb-ng install moved earlier in the upgrade flow so it can reach
         # the temp-repo's vendor/wfb-ng/ tree before cleanup.
 
@@ -380,6 +391,20 @@ main_install_flow() {
             apt-get install -y -qq python3.11 python3.11-venv python3.11-dev 2>/dev/null
         fi
         PYTHON=$(find_python)
+
+        # Distros without a 3.11+ package (Debian 11 bullseye ships 3.9 and
+        # has neither python3.11 nor python3.12 in its archives) leave PYTHON
+        # empty after the apt attempt. Fall back to a self-contained portable
+        # CPython build so the venv can still be created. The provisioner
+        # symlinks the interpreter at /usr/local/bin/python3.11, which
+        # find_python resolves on the second call.
+        if [ -z "$PYTHON" ]; then
+            info "No Python 3.11+ available from apt; provisioning a portable interpreter..."
+            if provision_portable_python; then
+                PYTHON=$(find_python)
+            fi
+        fi
+
         if [ -z "$PYTHON" ]; then
             error "Could not install Python 3.11+. Install manually and re-run."
             exit 1
@@ -389,6 +414,12 @@ main_install_flow() {
 
     # Install system dependencies
     install_system_deps
+
+    # Force USB OTG controller(s) into host mode so a powered hub's
+    # downstream radio/camera peripherals enumerate. No-op on boards with
+    # no OTG role node (Rockchip / Pi); only acts on controllers reading
+    # usb_device.
+    provision_usb_otg_host
 
     # Install mediamtx for video streaming
     install_mediamtx

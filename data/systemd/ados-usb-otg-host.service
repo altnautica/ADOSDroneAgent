@@ -1,0 +1,29 @@
+[Unit]
+Description=ADOS force USB OTG controllers into host mode
+# Some single-board computers default their USB-C / OTG controller to the
+# USB device (peripheral) role at every boot. In that role a connected
+# powered hub's downstream peripherals never enumerate, so a USB WiFi radio
+# adapter or a USB camera plugged through a hub is invisible to the agent.
+# Writing usb_host to the controller's sysfs otg_role node forces host mode
+# so the hub and its peripherals enumerate. The unit globs every matching
+# otg_role node and no-ops on boards that expose none (the common case),
+# so enabling it everywhere is safe.
+DefaultDependencies=no
+After=systemd-modules-load.service
+Before=ados-supervisor.service network-pre.target
+Wants=network-pre.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# For each controller whose otg_role reads "usb_device", switch it to
+# "usb_host". Nodes that are already in host mode, read-only, or absent are
+# left untouched. The shell loop tolerates the no-match glob case so the
+# unit exits 0 on boards with no such node.
+ExecStart=/bin/sh -c 'set -e; for n in /sys/bus/platform/devices/*.usbc*/otg_role /sys/devices/platform/soc*/*.usbc*/otg_role; do [ -e "$n" ] || continue; cur="$(cat "$n" 2>/dev/null || true)"; if [ "$cur" = "usb_device" ]; then echo usb_host > "$n" 2>/dev/null || true; fi; done; exit 0'
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ados-usb-otg-host
+
+[Install]
+WantedBy=multi-user.target
