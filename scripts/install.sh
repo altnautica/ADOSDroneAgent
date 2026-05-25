@@ -62,7 +62,7 @@ if [ -n "${ADOS_SCRIPT_DIR}" ] && [ -f "${ADOS_SCRIPT_DIR}/install.d/lib.sh" ]; 
     # we still go numeric so a code reader can trace responsibility.
     for module in 00-detect 01-state 02-deps 03-kernel 04-dkms 04-usb-otg \
                   05-mesh 06-radio 07-systemd 08-plugin 09-config 10-network \
-                  11-artifacts 12-output 13-main 14-orchestration; do
+                  11-artifacts 12-output 13-main 14-orchestration 15-channel; do
         module_path="${ADOS_SCRIPT_DIR}/install.d/${module}.sh"
         if [ ! -f "${module_path}" ]; then
             echo "ERROR: missing install.d module: ${module_path}" >&2
@@ -358,6 +358,40 @@ while [ $# -gt 0 ]; do
             fi
             shift
             ;;
+        --channel)
+            # Select the release channel. "stable" installs a prebuilt,
+            # signed wheel + deploy-bundle pinned to a tag (no on-device
+            # source build). "edge" (default) clones and builds from
+            # source. Equivalent to exporting ADOS_CHANNEL.
+            shift
+            ADOS_CHANNEL="${1:-}"
+            if [ -z "$ADOS_CHANNEL" ]; then
+                error "--channel requires a value (stable or edge)"
+                exit 1
+            fi
+            case "$ADOS_CHANNEL" in
+                stable|edge) ;;
+                *)
+                    error "--channel must be 'stable' or 'edge' (got '${ADOS_CHANNEL}')"
+                    exit 1
+                    ;;
+            esac
+            export ADOS_CHANNEL
+            shift
+            ;;
+        --version)
+            # Pin the stable channel to a specific release. Accepts X.Y.Z
+            # or vX.Y.Z. Ignored on the edge channel (which tracks the
+            # branch tip). Equivalent to exporting ADOS_VERSION.
+            shift
+            ADOS_VERSION="${1:-}"
+            if [ -z "$ADOS_VERSION" ]; then
+                error "--version requires a value (e.g. 0.40.4)"
+                exit 1
+            fi
+            export ADOS_VERSION
+            shift
+            ;;
         --profile)
             # Already consumed by the pre-dispatch parser at the top of
             # the script. Skip the value too so we don't loop forever.
@@ -382,6 +416,20 @@ while [ $# -gt 0 ]; do
             # Same — consumed up top.
             shift
             ;;
+        --show-key)
+            # Print the vendored Ed25519 public key used to verify stable
+            # channel release artifacts, then exit. Read-only. Operators
+            # compare this against the fingerprint in the release notes
+            # before trusting a stable install. show_stable_key lives in
+            # 15-channel.sh.
+            if declare -F show_stable_key >/dev/null 2>&1; then
+                show_stable_key
+            else
+                error "--show-key requires the channel module (run from a clone)."
+                exit 1
+            fi
+            exit 0
+            ;;
         *)
             warn "Unknown option: $1"
             shift
@@ -391,8 +439,11 @@ done
 
 # Export shared state so sourced module functions see the same values.
 # DRONE_NAME, PAIR_CODE, etc. are read by generate_default_config + the
-# main flow; the install.d/ modules expect the var names below.
+# main flow; the install.d/ modules expect the var names below. ADOS_CHANNEL
+# / ADOS_VERSION drive the release-channel selection in 13-main.sh + 15-channel.sh.
 export ADOS_PROFILE BRANCH_NAME PAIR_CODE DRONE_NAME DO_FORCE DO_UPGRADE DO_FOREGROUND FRESH_REPO_DIR
+export ADOS_CHANNEL="${ADOS_CHANNEL:-edge}"
+export ADOS_VERSION="${ADOS_VERSION:-}"
 
 # ─── Drop-proof detach ──────────────────────────────────────────────────────
 #

@@ -320,6 +320,12 @@ maybe_reexec_detached() {
     [ -n "${ADOS_PROFILE:-}" ]  && child_env+=("ADOS_PROFILE=${ADOS_PROFILE}")
     [ -n "${ADOS_DISPLAY:-}" ]  && child_env+=("ADOS_DISPLAY=${ADOS_DISPLAY}")
     [ -n "${ADOS_RELEASE_CHANNEL:-}" ] && child_env+=("ADOS_RELEASE_CHANNEL=${ADOS_RELEASE_CHANNEL}")
+    # Carry the release-channel selection + tag pin so the detached child
+    # installs the same channel the operator asked for (argv is passed too,
+    # but the env keeps it robust against the detached re-exec dropping a
+    # flag).
+    [ -n "${ADOS_CHANNEL:-}" ]  && child_env+=("ADOS_CHANNEL=${ADOS_CHANNEL}")
+    [ -n "${ADOS_VERSION:-}" ]  && child_env+=("ADOS_VERSION=${ADOS_VERSION}")
 
     if command -v systemd-run >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
         # --collect reaps the unit when it exits so a re-run can reuse the

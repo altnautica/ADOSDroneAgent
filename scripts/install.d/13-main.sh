@@ -218,16 +218,57 @@ main_install_flow() {
             fi
         done
 
-        # Clone repo to temp dir for pip install + systemd files + install script
+        # Record the active release channel for the journal.
+        print_channel_banner
+
+        # Acquire the install source tree + new agent package per channel.
+        #
+        #   stable — resolve the tag (pin via --version or latest v*), fetch +
+        #            verify the signed wheel and signed deploy-bundle, unpack
+        #            the bundle into tmp_repo (same repo/ layout the clone
+        #            produces), then pip-install the verified wheel. Config is
+        #            preserved (generate_default_config is skip-if-exists and
+        #            is not re-run on the upgrade path). Any miss hard-fails.
+        #
+        #   edge   — clone the repo (honouring --branch) and pip-install from
+        #            source. Unchanged historical behaviour.
         tmp_repo="$(mktemp -d)"
-        info "Fetching latest source..."
-        # honor --branch for feature-branch installs. Bounded retry so a
-        # transient network blip does not abort the upgrade.
-        if [ -n "$BRANCH_NAME" ]; then
-            info "Using branch: ${BRANCH_NAME}"
-            git_clone_retry "${tmp_repo}/repo" "${BRANCH_NAME}"
+        upgrade_wheel=""
+        if is_stable_channel; then
+            local up_tag
+            up_tag="$(resolve_stable_tag)" || {
+                error "stable channel: could not resolve a release tag for upgrade."
+                rm -rf "${tmp_repo}"
+                record_failure "stable-tag-resolve" required
+                run_health_gate || true
+                exit 1
+            }
+            info "Stable channel: pinning upgrade to release ${up_tag}."
+            if ! fetch_and_verify_stable_assets "${up_tag}" "${tmp_repo}/assets"; then
+                error "stable channel: failed to fetch or verify upgrade assets for ${up_tag}."
+                rm -rf "${tmp_repo}"
+                record_failure "stable-assets" required
+                run_health_gate || true
+                exit 1
+            fi
+            if ! unpack_deploy_bundle "${STABLE_BUNDLE_PATH}" "${tmp_repo}"; then
+                error "stable channel: failed to unpack the verified upgrade deploy-bundle."
+                rm -rf "${tmp_repo}"
+                record_failure "stable-bundle-unpack" required
+                run_health_gate || true
+                exit 1
+            fi
+            upgrade_wheel="${STABLE_WHEEL_PATH}"
         else
-            git_clone_retry "${tmp_repo}/repo"
+            info "Fetching latest source..."
+            # honor --branch for feature-branch installs. Bounded retry so a
+            # transient network blip does not abort the upgrade.
+            if [ -n "$BRANCH_NAME" ]; then
+                info "Using branch: ${BRANCH_NAME}"
+                git_clone_retry "${tmp_repo}/repo" "${BRANCH_NAME}"
+            else
+                git_clone_retry "${tmp_repo}/repo"
+            fi
         fi
 
         # Migrate older venvs that were created without
@@ -243,9 +284,14 @@ main_install_flow() {
             fi
         fi
 
-        # Upgrade pip package from cloned source (ensures version match)
+        # Upgrade the pip package. On stable from the verified wheel; on edge
+        # from the cloned source. config.yaml + pairing state are untouched.
         info "Upgrading pip package..."
-        "${VENV_DIR}/bin/pip" install --upgrade "${tmp_repo}/repo" --quiet
+        if is_stable_channel; then
+            install_agent_from_wheel "${upgrade_wheel}"
+        else
+            "${VENV_DIR}/bin/pip" install --upgrade "${tmp_repo}/repo" --quiet
+        fi
 
         new_ver=$(get_installed_version)
         if [ "$local_ver" = "$new_ver" ]; then
@@ -485,32 +531,84 @@ main_install_flow() {
     "$PYTHON" -m venv --system-site-packages "${VENV_DIR}"
     checkpoint_mark venv
 
-    # Clone repo for pip install + data files (needed when piped via curl)
+    # Record the active release channel up front so the journal shows which
+    # path was taken. stable installs a signed prebuilt wheel + deploy-bundle
+    # pinned to a tag; edge (default) clones + builds from source.
+    print_channel_banner
+
+    # Provision the install source tree + agent package per channel.
+    #
+    #   stable — resolve the tag, fetch + verify the signed wheel and the
+    #            signed deploy-bundle, unpack the bundle into FRESH_REPO_DIR
+    #            (same repo/ layout the edge clone produces), then pip-install
+    #            the verified wheel. No on-device source build. Any download
+    #            or verification miss hard-fails the install (that is the
+    #            point of choosing stable).
+    #
+    #   edge   — clone the repo (honouring --branch) and pip-install from
+    #            source. Unchanged from the historical behaviour.
+    #
+    # Both channels leave FRESH_REPO_DIR + SYSTEMD_SRC_DIR pointing at a tree
+    # whose repo/data/systemd, repo/scripts, repo/vendor are present, so every
+    # downstream install helper resolves its source identically.
     FRESH_REPO_DIR=""
-    if [ ! -d "$(dirname "$0" 2>/dev/null)/../data/systemd" ] 2>/dev/null; then
+    STABLE_TAG=""
+    if is_stable_channel; then
+        STABLE_TAG="$(resolve_stable_tag)" || {
+            error "stable channel: could not resolve a release tag (no v* release found, and no --version pin)."
+            record_failure "stable-tag-resolve" required
+            run_health_gate || true
+            exit 1
+        }
+        info "Stable channel: pinning to release ${STABLE_TAG}."
         FRESH_REPO_DIR="$(mktemp -d)"
-        info "Cloning repository..."
-        # honor --branch for feature-branch installs. Bounded retry so a
-        # transient network blip does not abort the fresh install.
-        if [ -n "$BRANCH_NAME" ]; then
-            info "Using branch: ${BRANCH_NAME}"
-            git_clone_retry "${FRESH_REPO_DIR}/repo" "${BRANCH_NAME}"
-        else
-            git_clone_retry "${FRESH_REPO_DIR}/repo"
+        if ! fetch_and_verify_stable_assets "${STABLE_TAG}" "${FRESH_REPO_DIR}/assets"; then
+            error "stable channel: failed to fetch or verify release assets for ${STABLE_TAG}."
+            record_failure "stable-assets" required
+            run_health_gate || true
+            exit 1
+        fi
+        if ! unpack_deploy_bundle "${STABLE_BUNDLE_PATH}" "${FRESH_REPO_DIR}"; then
+            error "stable channel: failed to unpack the verified deploy-bundle."
+            record_failure "stable-bundle-unpack" required
+            run_health_gate || true
+            exit 1
         fi
         SYSTEMD_SRC_DIR="${FRESH_REPO_DIR}/repo/data/systemd"
-    fi
-    export FRESH_REPO_DIR SYSTEMD_SRC_DIR
+        export FRESH_REPO_DIR SYSTEMD_SRC_DIR
 
-    # Install the agent package (REQUIRED)
-    info "Installing ados-drone-agent..."
-    "${VENV_DIR}/bin/pip" install --upgrade pip --quiet
-    if [ -n "${FRESH_REPO_DIR}" ]; then
-        "${VENV_DIR}/bin/pip" install "${FRESH_REPO_DIR}/repo" --quiet
+        # Install the agent package from the verified wheel (REQUIRED). No
+        # source build runs on the device.
+        info "Installing ados-drone-agent (prebuilt wheel ${STABLE_TAG})..."
+        install_agent_from_wheel "${STABLE_WHEEL_PATH}"
+        checkpoint_mark agent-package
     else
-        "${VENV_DIR}/bin/pip" install "git+${REPO_URL}" --quiet
+        # Clone repo for pip install + data files (needed when piped via curl)
+        if [ ! -d "$(dirname "$0" 2>/dev/null)/../data/systemd" ] 2>/dev/null; then
+            FRESH_REPO_DIR="$(mktemp -d)"
+            info "Cloning repository..."
+            # honor --branch for feature-branch installs. Bounded retry so a
+            # transient network blip does not abort the fresh install.
+            if [ -n "$BRANCH_NAME" ]; then
+                info "Using branch: ${BRANCH_NAME}"
+                git_clone_retry "${FRESH_REPO_DIR}/repo" "${BRANCH_NAME}"
+            else
+                git_clone_retry "${FRESH_REPO_DIR}/repo"
+            fi
+            SYSTEMD_SRC_DIR="${FRESH_REPO_DIR}/repo/data/systemd"
+        fi
+        export FRESH_REPO_DIR SYSTEMD_SRC_DIR
+
+        # Install the agent package (REQUIRED)
+        info "Installing ados-drone-agent..."
+        "${VENV_DIR}/bin/pip" install --upgrade pip --quiet
+        if [ -n "${FRESH_REPO_DIR}" ]; then
+            "${VENV_DIR}/bin/pip" install "${FRESH_REPO_DIR}/repo" --quiet
+        else
+            "${VENV_DIR}/bin/pip" install "git+${REPO_URL}" --quiet
+        fi
+        checkpoint_mark agent-package
     fi
-    checkpoint_mark agent-package
 
     # Resolve agent profile. Ground-station profile pulls extra apt deps,
     # the RTL8812EU DKMS driver, the ground-station python extras, and the
@@ -532,7 +630,10 @@ main_install_flow() {
 
     if [ "${ADOS_PROFILE}" = "ground_station" ] || [ "${ADOS_PROFILE}" = "ground-station" ]; then
         info "Installing ground-station Python extras..."
-        if [ -n "${FRESH_REPO_DIR}" ]; then
+        if is_stable_channel; then
+            install_agent_from_wheel "${STABLE_WHEEL_PATH}" ground-station || \
+                warn "Ground-station extras install failed; continuing."
+        elif [ -n "${FRESH_REPO_DIR}" ]; then
             "${VENV_DIR}/bin/pip" install "${FRESH_REPO_DIR}/repo[ground-station]" --quiet || \
                 warn "Ground-station extras install failed; continuing."
         else
