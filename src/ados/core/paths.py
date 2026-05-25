@@ -60,6 +60,13 @@ BITRATE_CONTROLLER_JSON = ADOS_RUN_DIR / "bitrate-controller.json"
 UPLINK_ACTIVE_FLAG = ADOS_RUN_DIR / "uplink-active"
 AP_WAS_ENABLED_FLAG = ADOS_RUN_DIR / "ap-was-enabled"
 
+# Radio-module-source breadcrumb. Written by the install pipeline to
+# record whether the WFB kernel module came from a prebuilt package or
+# a DKMS build. Lives on tmpfs so it disappears on reboot; the heartbeat
+# treats it as a fast hint and prefers the live modinfo path as the
+# authoritative source. Values: "prebuilt" or "dkms".
+WFB_MODULE_SOURCE = ADOS_RUN_DIR / "wfb-module-source"
+
 # USB gadget composer runtime artifacts
 DNSMASQ_USB0_CONF = ADOS_RUN_DIR / "dnsmasq-usb0.conf"
 DNSMASQ_USB0_PID = ADOS_RUN_DIR / "dnsmasq-usb0.pid"
@@ -212,3 +219,11 @@ PLUGINS_INSTALL_DIR = ADOS_VAR_DIR / "plugins"
 PLUGIN_DATA_DIR = ADOS_VAR_DIR / "plugin-data"
 PLUGIN_LOG_DIR = Path("/var/log/ados/plugins")
 PLUGIN_STATE_PATH = STATE_DIR / "plugin-state.json"
+
+# Install-result record. Written atomically by the install pipeline at
+# /var/lib/ados/install-result.json with the outcome of the last
+# install/upgrade (status, version, profile, board, kernel release,
+# radio-module source, failed and required-failure step lists). The
+# heartbeat surfaces install health so the GCS can flag a degraded or
+# failed install without an SSH session. Absent on older installs.
+INSTALL_RESULT = Path("/var/lib/ados/install-result.json")

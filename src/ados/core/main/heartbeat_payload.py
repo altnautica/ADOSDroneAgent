@@ -8,16 +8,103 @@ most of the input data lives on the app instance.
 
 from __future__ import annotations
 
+import json
+import platform
+import subprocess
 import time
 from typing import TYPE_CHECKING
 
 from ados import __version__
+from ados.core.paths import INSTALL_RESULT, WFB_MODULE_SOURCE
 from ados.core.service_tracker import ServiceState
 
 from ._helpers import _get_local_ip
 
 if TYPE_CHECKING:
     from .app import AgentApp
+
+# WFB kernel module name probed via ``modinfo -n`` to locate the loaded
+# module file. The directory the path lands in tells us how it was
+# installed: ``updates/`` for a prebuilt package, ``extra/`` (or a path
+# containing ``dkms``) for a DKMS build.
+_WFB_MODULE_NAME = "8812eu"
+_MODINFO_TIMEOUT_S = 3.0
+
+
+def _read_install_result() -> dict | None:
+    """Best-effort read of the install-result record.
+
+    Returns the parsed dict, or ``None`` if the file is absent,
+    unreadable, or not valid JSON. Never raises — a missing or garbage
+    install record must not break the heartbeat.
+    """
+    try:
+        data = json.loads(INSTALL_RESULT.read_text())
+    except (OSError, ValueError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _wfb_module_source_from_modinfo() -> str | None:
+    """Authoritative radio-module source from the loaded module's path.
+
+    Runs ``modinfo -n <module>`` and classifies the returned path:
+
+    * a path under ``/lib/modules/*/updates/`` ⇒ ``"prebuilt"``
+    * a path under ``/lib/modules/*/extra/`` or containing ``dkms``
+      ⇒ ``"dkms"``
+
+    Returns ``None`` when modinfo is absent, the module is not loaded,
+    the command times out, or the path does not match either pattern.
+    Best-effort; never raises.
+    """
+    try:
+        result = subprocess.run(
+            ["modinfo", "-n", _WFB_MODULE_NAME],
+            capture_output=True,
+            text=True,
+            timeout=_MODINFO_TIMEOUT_S,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    path = (result.stdout or "").strip()
+    if not path:
+        return None
+    if "/updates/" in path:
+        return "prebuilt"
+    if "/extra/" in path or "dkms" in path:
+        return "dkms"
+    return None
+
+
+def _resolve_wfb_module_source() -> str:
+    """Resolve the radio-module source across reboot.
+
+    Resolution order: live modinfo path (source of truth) → the tmpfs
+    breadcrumb (fast hint, vanishes on reboot) → the install-result
+    record → ``"none"``. Best-effort; never raises.
+    """
+    from_modinfo = _wfb_module_source_from_modinfo()
+    if from_modinfo:
+        return from_modinfo
+
+    try:
+        crumb = WFB_MODULE_SOURCE.read_text().strip()
+    except OSError:
+        crumb = ""
+    if crumb in ("prebuilt", "dkms"):
+        return crumb
+
+    install = _read_install_result()
+    if install is not None:
+        src = install.get("wfbModuleSource")
+        if src in ("prebuilt", "dkms"):
+            return src
+
+    return "none"
 
 
 def build_heartbeat_payload(app: AgentApp) -> dict:  # noqa: C901
@@ -244,6 +331,28 @@ def build_heartbeat_payload(app: AgentApp) -> dict:  # noqa: C901
         "cloudRelayUrl": cloud_relay_url,
         "cloudflareUrl": cloudflare_url,
     }
+
+    # Install health + kernel/radio-module telemetry. The GCS surfaces
+    # these so an operator can spot a degraded or failed install and the
+    # provenance of the loaded WFB radio module without SSH'ing in.
+    # All reads are best-effort: a missing or garbage install record
+    # leaves the defaults in place and never breaks the heartbeat.
+    payload["kernelRelease"] = platform.release()
+    payload["wfbModuleSource"] = _resolve_wfb_module_source()
+    _install = _read_install_result()
+    if _install is not None:
+        status = _install.get("status")
+        payload["installStatus"] = (
+            status if isinstance(status, str) and status else "unknown"
+        )
+        version = _install.get("version")
+        if isinstance(version, str) and version:
+            payload["installVersion"] = version
+        failed = _install.get("failedSteps")
+        payload["failedSteps"] = failed if isinstance(failed, list) else []
+    else:
+        payload["installStatus"] = "unknown"
+        payload["failedSteps"] = []
 
     # Foxglove bind status. Defaults to False when no ROS manager is
     # attached; flips True only after a started ROS container fails the
