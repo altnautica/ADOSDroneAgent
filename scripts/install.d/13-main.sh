@@ -380,9 +380,11 @@ main_install_flow() {
 
         # LCD overlay installer needs the cloned scripts + DTS sources,
         # so it runs before the temp-repo cleanup. Runs on every profile;
-        # the function short-circuits on boards whose HAL has no
-        # displays.supported entry, so calling it on a drone rig with no
-        # LCD is a fast no-op.
+        # install_display_driver picks a profile-aware default display
+        # (none on a drone / lite rig, auto on a ground station) unless
+        # the operator forced one with ADOS_DISPLAY. A headless drone
+        # never auto-provisions a boot-critical SPI-LCD overlay, so this
+        # is a fast no-op there.
         #
         # Fail-fast on overlay install failure during the upgrade flow.
         # The installer regenerates /boot/extlinux/extlinux.conf on
@@ -689,14 +691,14 @@ main_install_flow() {
     fi
 
     # SPI LCD on the 40-pin header (e.g. Waveshare 3.5" RPi LCD on Cubie
-    # A7Z or Rock 5C). The driver script auto-detects the board and the
-    # supported display, compiles or activates the right device-tree
+    # A7Z or Rock 5C). The driver script activates the right device-tree
     # overlay, writes /etc/ados/display.conf, and queues the kernel
-    # modules needed at next boot. Runs unconditionally so a drone-profile
-    # rig with a status LCD is provisioned the same way; the function
-    # itself short-circuits on boards whose HAL profile carries no
-    # displays.supported entry. Failure is non-fatal so the agent still
-    # boots when the LCD-overlay step fails.
+    # modules needed at next boot. install_display_driver chooses a
+    # profile-aware default: a headless drone / lite rig defaults to no
+    # display so a boot-critical SPI-LCD overlay is never auto-applied
+    # against absent hardware; a ground station defaults to auto-detect;
+    # an explicit ADOS_DISPLAY always wins. Failure is non-fatal so the
+    # agent still boots when the LCD-overlay step fails.
     install_display_driver
 
     # Generate device identity (idempotent)

@@ -1461,3 +1461,72 @@ EOF
     [ "$boot_files" = "0" ]
     [ "$ml_files" = "0" ]
 }
+
+# -----------------------------------------------------------------------------
+# install_display_driver (03-kernel.sh): the per-profile default display.
+#
+# A drone / lite rig must default the display to "none" (a headless flight rig
+# has no panel, and the auto-pickable display is a boot-critical SPI-LCD). A
+# ground station defaults to "auto". An explicit ADOS_DISPLAY always wins.
+# We stub the overlay script so the function's chosen --display value is
+# captured, and stub the script-discovery so the function finds our stub.
+# -----------------------------------------------------------------------------
+
+idd_run() {
+    # $1 = ADOS_PROFILE value, $2 = ADOS_DISPLAY value (may be empty).
+    # Echoes the --display argument install_display_driver passed to the
+    # overlay script.
+    local profile="$1" display="${2:-}"
+    local tmp; tmp="$(mktemp -d)"
+    mkdir -p "${tmp}/drivers"
+    # Stub overlay installer: record the --display arg, succeed.
+    cat > "${tmp}/drivers/install-display-overlay.sh" <<EOF
+#!/usr/bin/env bash
+while [ \$# -gt 0 ]; do
+    case "\$1" in
+        --display) echo "CAPTURED_DISPLAY=\$2" > "${tmp}/captured"; shift 2 ;;
+        *) shift ;;
+    esac
+done
+exit 0
+EOF
+    chmod +x "${tmp}/drivers/install-display-overlay.sh"
+    bash -c "
+        set -u
+        info()  { :; }
+        warn()  { :; }
+        error() { :; }
+        source '${INSTALL_D}/lib.sh'
+        source '${INSTALL_D}/03-kernel.sh'
+        # Point script discovery at the stub via FRESH_REPO_DIR/repo layout.
+        export FRESH_REPO_DIR='${tmp}'
+        mkdir -p '${tmp}/repo/scripts'
+        cp -r '${tmp}/drivers' '${tmp}/repo/scripts/drivers'
+        export ADOS_PROFILE='${profile}'
+        $( [ -n "${display}" ] && echo "export ADOS_DISPLAY='${display}'" )
+        install_display_driver >/dev/null 2>&1 || true
+        cat '${tmp}/captured' 2>/dev/null || echo 'CAPTURED_DISPLAY=<none-run>'
+    "
+    rm -rf "${tmp}"
+}
+
+@test "install_display_driver defaults to none on the drone profile" {
+    output="$(idd_run drone)"
+    [[ "$output" == *"CAPTURED_DISPLAY=none"* ]]
+}
+
+@test "install_display_driver defaults to none on the lite profile" {
+    output="$(idd_run lite-rs)"
+    [[ "$output" == *"CAPTURED_DISPLAY=none"* ]]
+}
+
+@test "install_display_driver defaults to auto on the ground-station profile" {
+    output="$(idd_run ground_station)"
+    [[ "$output" == *"CAPTURED_DISPLAY=auto"* ]]
+}
+
+@test "install_display_driver honors an explicit ADOS_DISPLAY over the profile default" {
+    # Operator opt-in must win even on a drone profile.
+    output="$(idd_run drone waveshare35a)"
+    [[ "$output" == *"CAPTURED_DISPLAY=waveshare35a"* ]]
+}

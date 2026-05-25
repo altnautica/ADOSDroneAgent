@@ -64,8 +64,42 @@ install_display_driver() {
         warn "LCD overlay installer not found; skipping display provisioning."
         return 0
     fi
-    info "Running LCD overlay installer..."
-    "${script_path}" --display "${ADOS_DISPLAY:-auto}" || {
+
+    # Resolve the display selection. An explicit ADOS_DISPLAY=<id> (or
+    # ADOS_DISPLAY=none) from the operator always wins. With no explicit
+    # value the default is profile-aware:
+    #
+    #   * drone / lite — default to "none". A headless flight rig has no
+    #     panel attached. The auto-pickable display on Rockchip boards is
+    #     a boot-critical SPI-LCD overlay (it rewrites the board's only
+    #     boot config via u-boot-update and queues a framebuffer driver
+    #     to load every boot). Provisioning that against absent hardware
+    #     leaves the box unbootable, and it re-applies on every boot so a
+    #     power cycle cannot recover it. A drone must never auto-provision
+    #     one.
+    #
+    #   * ground-station — default to "auto". A ground unit usually does
+    #     carry a status panel, so it keeps the auto-detect behaviour.
+    #     (The overlay script's own auto path is also defensive and will
+    #     not silently apply a boot-critical SPI-LCD when only that type
+    #     is on offer — see scripts/drivers/install-display-overlay.sh.)
+    local display_arg="${ADOS_DISPLAY:-}"
+    if [ -z "${display_arg}" ]; then
+        case "${ADOS_PROFILE:-drone}" in
+            drone|lite|lite-rs|lite_rs)
+                display_arg="none"
+                ;;
+            ground_station|ground-station)
+                display_arg="auto"
+                ;;
+            *)
+                display_arg="none"
+                ;;
+        esac
+    fi
+
+    info "Running LCD overlay installer (display: ${display_arg})..."
+    "${script_path}" --display "${display_arg}" || {
         warn "LCD overlay install returned non-zero; the agent will boot without an attached panel."
         return 0
     }
