@@ -1,4 +1,4 @@
-# Radxa Cubie A7Z — Allwinner A733 (sun55iw3p1)
+# Radxa Cubie A7Z — Allwinner A733 (SoC family string sun55iw3p1 / sun60iw2)
 #
 # Pi-Zero-sized SBC, 1/2/4/8/16 GB SKUs. ram_mb below documents the
 # smallest SKU; runtime detection via psutil reports the actual amount.
@@ -22,7 +22,11 @@ model_patterns:
   - "Radxa Cubie A7Z"
   - "Cubie A7Z"
   - "cubie-a7z"
+  # The A733 SoC family string varies by BSP: the Debian 11 R6 image
+  # reports sun60iw2 in the device-tree model, earlier docs cite
+  # sun55iw3p1. List both so substring auto-detect matches either.
   - "sun55iw3p1"
+  - "sun60iw2"
   - "Allwinner A733"
 default_tier: 2
 
