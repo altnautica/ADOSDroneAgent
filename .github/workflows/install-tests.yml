@@ -45,11 +45,14 @@ jobs:
           shellcheck scripts/install.sh
           shellcheck scripts/install-lite.sh
           shellcheck scripts/lib/detect-target.sh
+          shellcheck scripts/lib/net.sh
+          shellcheck scripts/lib/verify.sh
           shellcheck scripts/drivers/install-display-overlay.sh
           shellcheck scripts/drivers/install-rtl8812eu.sh
           shellcheck scripts/test/run_dispatcher_tests.sh
           shellcheck scripts/test/defconfig_reproducibility.sh
           shellcheck scripts/test/minisign_verify_smoke.sh
+          shellcheck scripts/test/verify_smoke.sh
           shellcheck scripts/test/lint_overlay_invariants.sh
           shellcheck scripts/test/compile_overlays.sh
 
@@ -61,6 +64,9 @@ jobs:
 
       - name: minisign verify smoke
         run: bash scripts/test/minisign_verify_smoke.sh
+
+      - name: verify.sh smoke
+        run: bash scripts/test/verify_smoke.sh
 
       - name: per-board overlay invariant lint
         run: bash scripts/test/lint_overlay_invariants.sh
