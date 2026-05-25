@@ -47,7 +47,47 @@ fi
 KERNEL="$(uname -r)"
 info "Kernel: ${KERNEL}"
 
-# Check submodule present
+# Translate the running machine arch to the kernel's ARCH naming early so
+# both the prebuilt lookup and the DKMS build agree on it. The vendored
+# Makefile resolves ARCH from `uname -m`, which on aarch64 hosts yields
+# the literal "aarch64" that the kernel build rejects (it expects "arm64").
+# Same for armv7 (kernel uses "arm").
+KARCH=""
+case "$(uname -m)" in
+    aarch64)       KARCH=arm64 ; export ARCH=arm64 ;;
+    armv6l|armv7l) KARCH=arm   ; export ARCH=arm ;;
+    x86_64)        KARCH=amd64 ;;
+esac
+
+# Fast-path: if already loaded and installed, exit clean
+if lsmod | awk '{print $1}' | grep -qx "${MODULE_NAME}"; then
+    info "${MODULE_NAME} module already loaded."
+    exit 0
+fi
+
+# Prebuilt fast-path: try to load a verified prebuilt module for this exact
+# kernel before falling through to a from-scratch DKMS compile. The library
+# never exits (so set -e cannot abort us here) and returns non-zero on any
+# miss — network down, no matching kernel, verification failure — at which
+# point we fall through to the universal DKMS path below. Set
+# ADOS_DRIVER_PREBUILT=0 to skip the prebuilt path and force DKMS.
+PREBUILT_LIB="${SCRIPT_DIR}/lib-prebuilt.sh"
+if [ "${ADOS_DRIVER_PREBUILT:-1}" = "1" ] && [ -f "${PREBUILT_LIB}" ] && [ -n "${KARCH}" ]; then
+    # shellcheck source=scripts/drivers/lib-prebuilt.sh disable=SC1091
+    . "${PREBUILT_LIB}"
+    if try_prebuilt_install "${MODULE_NAME}" "${KERNEL}" "${KARCH}"; then
+        info "RTL8812EU loaded from verified prebuilt module."
+        exit 0
+    fi
+    info "Prebuilt module unavailable; building via DKMS."
+fi
+
+# --- DKMS fallback: build from the vendored source --------------------------
+
+# DKMS needs the vendored source submodule. The prebuilt path above does
+# not, so this presence check only gates the build-from-source path: a box
+# with internet but no checked-out submodule can still use the prebuilt
+# module.
 if [ ! -d "${VENDOR_DIR}" ] || [ ! -f "${VENDOR_DIR}/dkms.conf" ]; then
     error "Vendor source not found at ${VENDOR_DIR}."
     error "Run: git submodule update --init --recursive"
@@ -69,12 +109,6 @@ if [ -z "${DKMS_PACKAGE}" ]; then
 fi
 DKMS_NAME="${DKMS_PACKAGE}/${DRIVER_VERSION}"
 info "Driver: ${DKMS_NAME}"
-
-# Fast-path: if already loaded and installed, exit clean
-if lsmod | awk '{print $1}' | grep -qx "${MODULE_NAME}"; then
-    info "${MODULE_NAME} module already loaded."
-    exit 0
-fi
 
 # Install build deps if missing
 NEED_INSTALL=""
@@ -124,15 +158,8 @@ else
     warn "Mesh-enable patch not found at ${PATCH_FILE}. 802.11s mesh mode will not be compiled in."
 fi
 
-# The vendored Makefile resolves ARCH from `uname -m`. On aarch64 hosts
-# that yields the literal "aarch64", which the kernel build rejects
-# because it expects "arm64". Same for armv7 (kernel uses "arm").
-# Translate before invoking dkms so the kernel build finds the right
-# arch/<name>/Makefile.
-case "$(uname -m)" in
-    aarch64)  export ARCH=arm64 ;;
-    armv6l|armv7l) export ARCH=arm ;;
-esac
+# ARCH was already exported near the top so both the prebuilt lookup and
+# this DKMS build agree on the kernel's arch naming (arm64 / arm).
 
 # The Pi 4B Trixie kernel and the Rock 5C BSP kernel both enable
 # -Werror=misleading-indentation, -Werror=address-of-packed-member,
@@ -191,6 +218,10 @@ if ! lsmod | awk '{print $1}' | grep -qx "${MODULE_NAME}"; then
     error "${MODULE_NAME} not loaded after modprobe."
     exit 3
 fi
+
+# Breadcrumb so diagnostics + the GCS can report how the module was built.
+mkdir -p /run/ados 2>/dev/null || true
+printf 'dkms\n' > /run/ados/wfb-module-source 2>/dev/null || true
 
 info "RTL8812EU driver installed and loaded with 802.11s mesh support."
 exit 0
