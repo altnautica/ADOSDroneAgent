@@ -117,3 +117,82 @@ def test_demo_uses_user_writable_pairing_state(tmp_path) -> None:
     assert apps[0].demo is True
     assert config.pairing.state_path == str(tmp_path / ".ados" / "demo-pairing.json")
     assert config.pairing.convex_url == ""
+
+
+def test_install_command_is_registered() -> None:
+    result = runner.invoke(cli, ["--help"])
+    assert result.exit_code == 0
+    assert "install" in result.output
+
+
+def test_install_help_documents_status_and_resume() -> None:
+    result = runner.invoke(cli, ["install", "--help"])
+    assert result.exit_code == 0
+    assert "--status" in result.output
+    assert "--resume" in result.output
+
+
+def test_install_status_reports_no_result_when_absent(tmp_path) -> None:
+    import ados.cli.main as cli_main
+
+    missing_result = tmp_path / "install-result.json"
+    missing_cp = tmp_path / "install-checkpoints"
+    with (
+        patch.object(cli_main, "INSTALL_RESULT_PATH", missing_result),
+        patch.object(cli_main, "INSTALL_CHECKPOINT_DIR", missing_cp),
+    ):
+        result = runner.invoke(cli, ["install", "--status"])
+    assert result.exit_code == 0
+    assert "No install result recorded" in result.output
+    # Every REQUIRED step shows as missing when nothing has run.
+    assert "Checkpoints missing (5)" in result.output
+
+
+def test_install_status_json_reports_done_and_missing(tmp_path) -> None:
+    import json
+
+    import ados.cli.main as cli_main
+
+    result_file = tmp_path / "install-result.json"
+    result_file.write_text(
+        json.dumps(
+            {
+                "status": "degraded",
+                "version": "1.2.3",
+                "profile": "drone",
+                "board": "Reference",
+                "kernelRelease": "6.1.0",
+                "wfbModuleSource": "dkms",
+                "failedSteps": ["radio-driver"],
+                "requiredFailures": [],
+                "ts": "2026-05-25T10:00:00Z",
+            }
+        ),
+        encoding="utf-8",
+    )
+    cp_dir = tmp_path / "install-checkpoints"
+    cp_dir.mkdir()
+    (cp_dir / "deps.done").touch()
+    (cp_dir / "venv.done").touch()
+
+    with (
+        patch.object(cli_main, "INSTALL_RESULT_PATH", result_file),
+        patch.object(cli_main, "INSTALL_CHECKPOINT_DIR", cp_dir),
+    ):
+        result = runner.invoke(cli, ["install", "--status", "--json"])
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["result"]["status"] == "degraded"
+    assert payload["checkpoints"]["done"] == ["deps", "venv"]
+    assert payload["checkpoints"]["missing"] == [
+        "agent-package",
+        "systemd",
+        "global-symlinks",
+    ]
+
+
+def test_install_resume_is_linux_only() -> None:
+    with patch("ados.cli.main.platform.system", return_value="Darwin"):
+        result = runner.invoke(cli, ["install", "--resume"])
+    assert result.exit_code != 0
+    assert "only supported on Linux" in result.output
