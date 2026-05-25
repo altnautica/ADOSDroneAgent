@@ -178,6 +178,11 @@ main_install_flow() {
     # ─── Upgrade Path (skip apt, skip venv creation) ────────────────────────────
 
     if is_installed && $DO_UPGRADE && ! $DO_FORCE; then
+        # ADOS_CURRENT_STEP tracks the install-body phase so the dispatcher's
+        # EXIT trap (install_failure_trap in 14-orchestration.sh) can attribute
+        # a mid-step abort in the failed install-result.json. Exported so the
+        # trap, which runs in this same process, reads the latest value.
+        export ADOS_CURRENT_STEP="upgrade"
         info "Upgrading ADOS Drone Agent..."
         local_ver=$(get_installed_version)
         info "Current version: ${local_ver}"
@@ -455,6 +460,7 @@ main_install_flow() {
 
     # ─── Full Install (first time or --force) ───────────────────────────────────
 
+    ADOS_CURRENT_STEP="full-install"
     if $DO_FORCE && is_installed; then
         info "Force reinstall requested. Removing existing venv..."
         rm -rf "${VENV_DIR}"
@@ -600,6 +606,7 @@ main_install_flow() {
         export FRESH_REPO_DIR SYSTEMD_SRC_DIR
 
         # Install the agent package (REQUIRED)
+        ADOS_CURRENT_STEP="install-agent-package"
         info "Installing ados-drone-agent..."
         "${VENV_DIR}/bin/pip" install --upgrade pip --quiet
         if [ -n "${FRESH_REPO_DIR}" ]; then

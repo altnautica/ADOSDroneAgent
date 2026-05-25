@@ -391,6 +391,13 @@ maybe_reexec_detached() {
 FAILED_STEPS=""
 REQUIRED_FAILURES=""
 
+# Set to 1 by write_install_result after it lands the result file. The
+# install-body EXIT trap reads this so it only writes a fallback "failed"
+# result when the normal path (run_health_gate -> write_install_result) never
+# ran — i.e. the body aborted mid-step under set -e before reaching the gate.
+# Exactly-once: whichever writer runs first flips the flag.
+ADOS_RESULT_WRITTEN=0
+
 # record_failure STEP REQUIRED — append a failed step to the result
 # accumulators. REQUIRED=required marks it as a hard failure that flips the
 # overall status to "failed" and forces a non-zero exit.
@@ -483,6 +490,41 @@ PY
         } > "${ADOS_INSTALL_RESULT}.tmp" && mv "${ADOS_INSTALL_RESULT}.tmp" "${ADOS_INSTALL_RESULT}"
     fi
     chmod 0644 "${ADOS_INSTALL_RESULT}" 2>/dev/null || true
+    ADOS_RESULT_WRITTEN=1
+}
+
+# ─── Mid-step abort fallback (install-body EXIT trap) ──────────────────────────
+#
+# Under `set -e` a hard failure inside the install body (e.g. the venv pip
+# crashing before ensure_venv_pip's reinstall, an apt step erroring out, a
+# helper returning non-zero) kills the script before run_health_gate runs.
+# Without a fallback no /var/lib/ados/install-result.json is written, so the
+# heartbeat cannot report the failure and the operator sees a half-installed
+# box with no machine-readable signal.
+#
+# install_failure_trap is wired as an EXIT trap by the dispatcher AFTER the
+# detach handoff (so it never fires for the detach-parent or the pair-only
+# fast path, both of which exit cleanly without running the body). It writes a
+# "failed" result only when:
+#   - the script is exiting non-zero (an actual failure, not a clean exit 0), AND
+#   - write_install_result has not already run (the health gate is the normal
+#     path; this is strictly the fallback).
+# The current step name (set by the body via ADOS_CURRENT_STEP) is recorded as
+# a REQUIRED failure so the abort is attributable.
+install_failure_trap() {
+    local rc="$1"
+    # Clean exit: the body finished and run_health_gate already wrote the
+    # result (or this is a non-body exit). Nothing to do.
+    [ "${rc}" -eq 0 ] && return 0
+    # The normal path already wrote a result; don't clobber it.
+    [ "${ADOS_RESULT_WRITTEN:-0}" = "1" ] && return 0
+    # Non-Linux dev mode has no result-file contract.
+    [ "$(uname -s)" = "Linux" ] || return 0
+
+    local step="${ADOS_CURRENT_STEP:-install-aborted}"
+    record_failure "${step}" required
+    warn "Install aborted (exit ${rc}) at step '${step}' before the health gate; writing failed install result."
+    write_install_result "failed"
 }
 
 # install_radio_driver_tracked — run the RTL8812EU driver installer and

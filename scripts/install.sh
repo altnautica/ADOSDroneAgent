@@ -492,6 +492,36 @@ if [ "${_is_pair_only_fastpath}" != "true" ]; then
 fi
 unset _is_pair_only_fastpath
 
+# ─── Mid-step abort fallback trap ────────────────────────────────────────────
+#
+# Wire the install-body EXIT trap here, AFTER the detach handoff above. This
+# placement matters:
+#   - the detach-parent already exited 0 with its EXIT trap cleared, so it
+#     never reaches this line;
+#   - the pair-only fast path runs inside main_install_flow and exits 0, which
+#     the trap ignores (it only writes on a non-zero exit);
+#   - only the real install body (fresh / upgrade / force / resume) is left,
+#     and a hard failure there under `set -e` would otherwise die before
+#     run_health_gate and leave no install-result.json. The trap writes a
+#     "failed" result as the fallback; run_health_gate stays the normal path
+#     and the ADOS_RESULT_WRITTEN guard keeps the result written exactly once.
+# This EXIT trap REPLACES the bootstrap-dir cleanup trap registered near the
+# top of the script (a bash EXIT trap is single-slot), so the handler folds the
+# same bootstrap-clone cleanup back in to preserve it. Order: write the
+# failed-result fallback first (while the clone is still on disk in case it is
+# ever needed for diagnostics), then remove the bootstrap clone. The handler
+# captures $? as its first action so it sees the body's real exit code, and
+# re-exits with it so the dispatcher's exit-code contract is unchanged.
+_install_body_exit() {
+    local rc="$1"
+    install_failure_trap "${rc}"
+    if [ -n "${ADOS_BOOTSTRAP_DIR:-}" ] && [ -d "${ADOS_BOOTSTRAP_DIR}" ]; then
+        rm -rf "${ADOS_BOOTSTRAP_DIR}" 2>/dev/null || true
+    fi
+    exit "${rc}"
+}
+trap '_install_body_exit "$?"' EXIT
+
 # ─── Main Install Flow ──────────────────────────────────────────────────────
 #
 # The actual install + upgrade logic lives in install.d/13-main.sh as a
