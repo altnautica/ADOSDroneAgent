@@ -148,7 +148,7 @@ setup() {
             wait_for_api_ready print_pairing_code print_hardware_summary print_status \
             checkpoint_mark checkpoint_done checkpoint_clear checkpoint_run \
             list_completed_checkpoints expected_profile_units unit_enabled \
-            is_install_complete maybe_reexec_detached write_install_result \
+            is_install_complete write_install_result \
             record_failure run_health_gate git_clone_retry install_radio_driver_tracked \
             resolve_channel is_stable_channel stable_pubkey_or_empty resolve_stable_tag \
             stable_version_from_tag stable_wheel_name stable_bundle_name stable_asset_base \
@@ -396,7 +396,7 @@ probe_args() {
 }
 
 # -----------------------------------------------------------------------------
-# Orchestration: checkpoints, completeness probe, detach skip, result file,
+# Orchestration: checkpoints, completeness probe, result file,
 # health gate exit code.
 #
 # These exercise the 14-orchestration.sh helpers in isolation against a
@@ -436,7 +436,6 @@ orch_run() {
         export ADOS_STATE_DIR='${ORCH_TMP}/state'
         export ADOS_CHECKPOINT_DIR='${ORCH_TMP}/state/install-checkpoints'
         export ADOS_INSTALL_RESULT='${ORCH_TMP}/state/install-result.json'
-        export ADOS_INSTALL_LOG_DIR='${ORCH_TMP}/log'
         export VENV_DIR='${ORCH_TMP}/venv'
         export SERVICE_NAME='ados-supervisor'
         source '${INSTALL_D}/14-orchestration.sh'
@@ -579,45 +578,6 @@ EOF
     [[ "$output" == *"unit:ados-supervisor.service"* ]]
 }
 
-@test "maybe_reexec_detached is SKIPPED under --foreground" {
-    orch_setup
-    cat > "${ORCH_BIN}/uname" <<'EOF'
-#!/usr/bin/env bash
-[ "$1" = "-s" ] && { echo Linux; exit 0; }
-exec /usr/bin/uname "$@"
-EOF
-    chmod +x "${ORCH_BIN}/uname"
-    run orch_run "DO_FOREGROUND=true; maybe_reexec_detached && echo DETACHED || echo INLINE"
-    orch_teardown
-    [[ "$output" == *"INLINE"* ]]
-}
-
-@test "maybe_reexec_detached is SKIPPED when already detached" {
-    orch_setup
-    cat > "${ORCH_BIN}/uname" <<'EOF'
-#!/usr/bin/env bash
-[ "$1" = "-s" ] && { echo Linux; exit 0; }
-exec /usr/bin/uname "$@"
-EOF
-    chmod +x "${ORCH_BIN}/uname"
-    run orch_run "ADOS_INSTALL_DETACHED=1; maybe_reexec_detached && echo DETACHED || echo INLINE"
-    orch_teardown
-    [[ "$output" == *"INLINE"* ]]
-}
-
-@test "maybe_reexec_detached is SKIPPED on non-Linux" {
-    orch_setup
-    cat > "${ORCH_BIN}/uname" <<'EOF'
-#!/usr/bin/env bash
-[ "$1" = "-s" ] && { echo Darwin; exit 0; }
-exec /usr/bin/uname "$@"
-EOF
-    chmod +x "${ORCH_BIN}/uname"
-    run orch_run "maybe_reexec_detached && echo DETACHED || echo INLINE"
-    orch_teardown
-    [[ "$output" == *"INLINE"* ]]
-}
-
 @test "write_install_result writes JSON with status ok and ISO timestamp" {
     orch_setup
     run orch_run "
@@ -751,7 +711,7 @@ EOF
 }
 
 # -----------------------------------------------------------------------------
-# Source-shape regressions for the resume gate + detach wiring + health gate.
+# Source-shape regressions for the resume gate + inline install + health gate.
 # -----------------------------------------------------------------------------
 
 @test "13-main resumes when is_install_complete is false" {
@@ -769,37 +729,20 @@ EOF
     [ "$output" -ge 2 ]
 }
 
-@test "dispatcher detaches before main_install_flow" {
-    run grep -nE "maybe_reexec_detached" "${DISPATCHER}"
-    [ "$status" -eq 0 ]
-    detach_line="$(grep -nE 'maybe_reexec_detached "\$\{ADOS_ORIG_ARGS' "${DISPATCHER}" | head -1 | cut -d: -f1)"
-    flow_line="$(grep -nE '^main_install_flow[[:space:]]*$' "${DISPATCHER}" | head -1 | cut -d: -f1)"
-    [ -n "$detach_line" ]
-    [ -n "$flow_line" ]
-    [ "$detach_line" -lt "$flow_line" ]
-}
+@test "dispatcher runs main_install_flow inline with no re-exec/detach machinery" {
+    # The installer runs in the foreground in this process. There must be no
+    # re-exec into a transient unit or a backgrounded session: no systemd-run,
+    # no setsid, no maybe_reexec_detached anywhere in the dispatcher or its
+    # modules, and the dispatcher must call main_install_flow directly.
+    run grep -rnE 'maybe_reexec_detached|systemd-run|setsid' \
+        "${DISPATCHER}" "${INSTALL_D}/14-orchestration.sh"
+    [ "$status" -ne 0 ]
+    [ -z "$output" ]
 
-@test "dispatcher snapshots argv before the parse loop and forwards it to detach" {
-    # The original argv must be captured before the parse loop consumes it
-    # via shift, then handed to the detached re-exec — otherwise flags like
-    # --upgrade / --force / --pair CODE are dropped on detach and the
-    # detached child runs as if invoked with no arguments.
-    snap_line="$(grep -nE '^ADOS_ORIG_ARGS=\("\$@"\)' "${DISPATCHER}" | head -1 | cut -d: -f1)"
-    [ -n "$snap_line" ]
-    # The snapshot must precede the first `shift` that consumes argv.
-    shift_line="$(grep -nE '^[[:space:]]*shift' "${DISPATCHER}" | head -1 | cut -d: -f1)"
-    [ -n "$shift_line" ]
-    [ "$snap_line" -lt "$shift_line" ]
-    # The detach call must forward the snapshot, not the (now-empty) "$@".
-    run grep -nE 'maybe_reexec_detached "\$\{ADOS_ORIG_ARGS\[@\]' "${DISPATCHER}"
+    # The dispatcher calls main_install_flow exactly once, inline.
+    run grep -cE '^main_install_flow[[:space:]]*$' "${DISPATCHER}"
     [ "$status" -eq 0 ]
-    [ -n "$output" ]
-}
-
-@test "dispatcher accepts --foreground flag" {
-    run grep -nE '\-\-foreground\)' "${DISPATCHER}"
-    [ "$status" -eq 0 ]
-    [ -n "$output" ]
+    [ "$output" = "1" ]
 }
 
 @test "dispatcher accepts --channel and --version flags" {
@@ -813,8 +756,7 @@ EOF
 
 @test "dispatcher defaults ADOS_CHANNEL to edge" {
     # The dispatcher exports ADOS_CHANNEL with an edge default after arg
-    # parsing so the channel selection survives into the main flow and the
-    # detached re-exec.
+    # parsing so the channel selection survives into the main flow.
     run grep -nE '^export ADOS_CHANNEL="\$\{ADOS_CHANNEL:-edge\}"' "${DISPATCHER}"
     [ "$status" -eq 0 ]
     [ -n "$output" ]
@@ -1279,19 +1221,8 @@ EOF
 }
 
 # -----------------------------------------------------------------------------
-# Source-shape regressions for the three fixes.
+# Source-shape regressions for the inline-install wiring.
 # -----------------------------------------------------------------------------
-
-@test "maybe_reexec_detached clears a stale transient unit before systemd-run" {
-    # reset-failed must run BEFORE the systemd-run --unit=ados-install call so
-    # a lingering same-name unit from a prior install does not force the setsid
-    # fallback on a systemd host.
-    reset_line="$(grep -nE 'systemctl reset-failed ados-install' "${INSTALL_D}/14-orchestration.sh" | head -1 | cut -d: -f1)"
-    run_line="$(grep -nE 'systemd-run --unit=ados-install' "${INSTALL_D}/14-orchestration.sh" | head -1 | cut -d: -f1)"
-    [ -n "$reset_line" ]
-    [ -n "$run_line" ]
-    [ "$reset_line" -lt "$run_line" ]
-}
 
 @test "13-main upgrade path self-heals the venv pip before the package install" {
     # ensure_venv_pip must be called on the upgrade path before the
@@ -1304,15 +1235,13 @@ EOF
     [ "$heal_line" -lt "$upg_line" ]
 }
 
-@test "dispatcher wires the install-body EXIT trap after the detach handoff" {
-    detach_line="$(grep -nE 'maybe_reexec_detached "\$\{ADOS_ORIG_ARGS' "${DISPATCHER}" | head -1 | cut -d: -f1)"
+@test "dispatcher wires the install-body EXIT trap before main_install_flow" {
     trap_line="$(grep -nE 'trap .+_install_body_exit.+ EXIT' "${DISPATCHER}" | head -1 | cut -d: -f1)"
     flow_line="$(grep -nE '^main_install_flow[[:space:]]*$' "${DISPATCHER}" | head -1 | cut -d: -f1)"
-    [ -n "$detach_line" ]
     [ -n "$trap_line" ]
     [ -n "$flow_line" ]
-    # Trap is wired after the detach handoff and before the main flow.
-    [ "$detach_line" -lt "$trap_line" ]
+    # The failed-result fallback trap must be wired before the inline run so a
+    # mid-step abort under set -e still lands an install-result.json.
     [ "$trap_line" -lt "$flow_line" ]
 }
 

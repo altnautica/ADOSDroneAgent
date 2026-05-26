@@ -1,25 +1,20 @@
 # shellcheck shell=bash
 # =============================================================================
-# 14-orchestration.sh — drop-proof detach, completeness probe, per-step
-# checkpoints, and the install success contract + result file.
+# 14-orchestration.sh — completeness probe, per-step checkpoints, and the
+# install success contract + result file.
 #
-# Sourced last after 13-main.sh so its helpers are in scope before the
-# dispatcher decides whether to detach and before main_install_flow runs
-# the health gate.
+# Sourced last after 13-main.sh so its helpers are in scope before
+# main_install_flow runs the health gate.
 #
-# Three concerns live here:
+# Two concerns live here:
 #
-#   1. Detach. maybe_reexec_detached re-launches the whole installer under
-#      a transient systemd unit (or setsid) so a dropped SSH session can no
-#      longer SIGHUP a mid-flight compile and leave a half-installed box.
-#
-#   2. Completeness + checkpoints. is_install_complete answers "is every
+#   1. Completeness + checkpoints. is_install_complete answers "is every
 #      REQUIRED component actually present and enabled", not just "is the
 #      binary on disk". Per-step checkpoints under
 #      /var/lib/ados/install-checkpoints let a resumed run skip finished
 #      modules and let `ados install --status` show what is done vs missing.
 #
-#   3. Success contract. run_health_gate asserts the REQUIRED components are
+#   2. Success contract. run_health_gate asserts the REQUIRED components are
 #      live and writes /var/lib/ados/install-result.json with a machine
 #      readable status. The dispatcher's exit code then reflects reality
 #      instead of always returning 0.
@@ -31,7 +26,6 @@
 export ADOS_STATE_DIR="${ADOS_STATE_DIR:-/var/lib/ados}"
 export ADOS_CHECKPOINT_DIR="${ADOS_CHECKPOINT_DIR:-${ADOS_STATE_DIR}/install-checkpoints}"
 export ADOS_INSTALL_RESULT="${ADOS_INSTALL_RESULT:-${ADOS_STATE_DIR}/install-result.json}"
-export ADOS_INSTALL_LOG_DIR="${ADOS_INSTALL_LOG_DIR:-/var/log/ados}"
 
 # Source the shared network fetch helpers (ados_fetch / ados_reachable).
 # install.d/lib.sh has already defined info/warn/error by the time this
@@ -240,141 +234,6 @@ is_install_complete() {
     [ "${ok}" = "true" ]
 }
 
-# ─── Drop-proof detach ───────────────────────────────────────────────────────
-#
-# Re-exec the entire installer detached from the controlling terminal so a
-# dropped SSH session (which delivers SIGHUP to the foreground process
-# group) can no longer kill a mid-flight DKMS compile and leave a
-# half-installed box. Prefers a transient systemd unit (ados-install) so
-# the run survives logout and is followable with journalctl; falls back to
-# setsid on non-systemd hosts, teeing output to a timestamped log.
-#
-# Returns 0 (caller should `return`/exit) when the install was handed off
-# to the detached process. Returns 1 when detach is skipped and the caller
-# should continue running the install inline. Skip conditions:
-#   - --foreground flag or ADOS_INSTALL_FOREGROUND=1
-#   - already inside the detached re-exec (ADOS_INSTALL_DETACHED=1)
-#   - not attached to an interactive/SSH terminal (cron, CI, image build)
-#   - non-Linux (macOS dev mode runs inline)
-#   - uninstall (handled inline up the call stack already)
-maybe_reexec_detached() {
-    # macOS dev installs run inline; no SIGHUP-kills-DKMS problem there.
-    [ "$(uname -s)" = "Linux" ] || return 1
-
-    # Already the detached child — run inline so we don't fork forever.
-    if [ "${ADOS_INSTALL_DETACHED:-0}" = "1" ]; then
-        return 1
-    fi
-
-    # Operator opted out.
-    if [ "${ADOS_INSTALL_FOREGROUND:-0}" = "1" ] || [ "${DO_FOREGROUND:-false}" = "true" ]; then
-        info "Foreground install requested; not detaching."
-        return 1
-    fi
-
-    # Only detach when there is a terminal that could drop. A pipe-fed
-    # bash (curl-pipe) has stdin from the pipe but, post-bootstrap, runs
-    # from the cloned tree where the terminal is still the controlling
-    # tty; treat presence of a tty on any of stdin/stdout/stderr OR an
-    # SSH session as "could be dropped". Headless image builds and CI
-    # have none of these and run inline.
-    if [ ! -t 0 ] && [ ! -t 1 ] && [ ! -t 2 ] \
-        && [ -z "${SSH_CONNECTION:-}" ] && [ -z "${SSH_TTY:-}" ]; then
-        return 1
-    fi
-
-    # Resolve the on-disk installer to re-exec. By the time we reach the
-    # detach point the curl-pipe bootstrap has already cloned + exec'd into
-    # a real file, so the dispatcher's resolved path (exported as
-    # ADOS_INSTALLER_SELF before it calls us) points at the cloned
-    # install.sh. BASH_SOURCE[0] inside a sourced module is this module's
-    # path, not install.sh, so it is not usable here. Refuse to detach if
-    # the path is unresolvable (correctness over cleverness: better to run
-    # inline than to exec the wrong thing).
-    local self="${ADOS_INSTALLER_SELF:-}"
-    if [ -z "${self}" ] || [ ! -f "${self}" ]; then
-        warn "Cannot resolve installer path to detach; running inline."
-        return 1
-    fi
-
-    # Timestamped log so concurrent or repeated installs do not clobber
-    # each other and so the result is auditable after the fact.
-    install -d -m 0755 "${ADOS_INSTALL_LOG_DIR}" 2>/dev/null || true
-    local stamp logfile
-    stamp="$(date -u +%Y%m%dT%H%M%SZ)"
-    logfile="${ADOS_INSTALL_LOG_DIR}/install-${stamp}.log"
-
-    # Mark the child so it does not try to detach again.
-    local -a child_env=(
-        "ADOS_INSTALL_DETACHED=1"
-        "ADOS_INSTALL_LOGFILE=${logfile}"
-    )
-    # Forward the bootstrap dir so the detached child's EXIT trap still
-    # cleans the curl-pipe clone (exec does not inherit traps; the child
-    # re-registers the trap from ADOS_BOOTSTRAP_DIR at the top of install.sh).
-    if [ -n "${ADOS_BOOTSTRAP_DIR:-}" ]; then
-        child_env+=("ADOS_BOOTSTRAP_DIR=${ADOS_BOOTSTRAP_DIR}")
-    fi
-    # Forward profile/branch/display so the detached run resolves the same
-    # way without re-reading argv ambiguities (argv is still passed too).
-    [ -n "${ADOS_PROFILE:-}" ]  && child_env+=("ADOS_PROFILE=${ADOS_PROFILE}")
-    [ -n "${ADOS_DISPLAY:-}" ]  && child_env+=("ADOS_DISPLAY=${ADOS_DISPLAY}")
-    [ -n "${ADOS_RELEASE_CHANNEL:-}" ] && child_env+=("ADOS_RELEASE_CHANNEL=${ADOS_RELEASE_CHANNEL}")
-    # Carry the release-channel selection + tag pin so the detached child
-    # installs the same channel the operator asked for (argv is passed too,
-    # but the env keeps it robust against the detached re-exec dropping a
-    # flag).
-    [ -n "${ADOS_CHANNEL:-}" ]  && child_env+=("ADOS_CHANNEL=${ADOS_CHANNEL}")
-    [ -n "${ADOS_VERSION:-}" ]  && child_env+=("ADOS_VERSION=${ADOS_VERSION}")
-
-    if command -v systemd-run >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
-        # --collect reaps the unit when it exits so a re-run can reuse the
-        # name. --setenv carries our markers into the unit's environment.
-        # The unit captures stdout/stderr to the journal automatically;
-        # also tee to the log file for parity with the setsid path.
-        local -a setenv_args=()
-        local kv
-        for kv in "${child_env[@]}"; do
-            setenv_args+=("--setenv=${kv}")
-        done
-        info "Detaching install into transient unit 'ados-install' (survives SSH drop)."
-        info "Follow with: journalctl -u ados-install -f"
-        info "Log file:    ${logfile}"
-        # Clear any lingering same-name unit left in a failed state by a prior
-        # install. systemd refuses to start a unit whose name is still
-        # registered as failed, so without this reset systemd-run errors out
-        # and the genuine setsid fallback fires even on a systemd host. --collect
-        # reaps the unit on a clean exit, but a crashed/aborted prior run can
-        # leave it lingering; reset-failed clears that residue idempotently.
-        systemctl reset-failed ados-install >/dev/null 2>&1 || true
-        # bash -lc wrapper tees the unit's own stdout to the log file.
-        # systemd-run --pipe is avoided (it would re-attach to our tty);
-        # the default detached unit is exactly what we want.
-        if systemd-run --unit=ados-install --collect --service-type=oneshot \
-            "${setenv_args[@]}" \
-            /usr/bin/env bash -c \
-            "exec bash \"\$0\" \"\$@\" > >(tee -a '${logfile}') 2>&1" \
-            "${self}" "$@" >/dev/null 2>&1; then
-            return 0
-        fi
-        warn "systemd-run detach failed; falling back to setsid."
-    fi
-
-    # Non-systemd / fallback: setsid disowns from the controlling terminal
-    # so SIGHUP on terminal close is not delivered. Redirect all stdio to
-    # the log; the operator follows with tail -f.
-    if command -v setsid >/dev/null 2>&1; then
-        info "Detaching install via setsid (survives SSH drop)."
-        info "Follow with: tail -f ${logfile}"
-        setsid /usr/bin/env "${child_env[@]}" \
-            bash "${self}" "$@" </dev/null >>"${logfile}" 2>&1 &
-        return 0
-    fi
-
-    warn "Neither systemd-run nor setsid available; running install inline (SSH drop will interrupt)."
-    return 1
-}
-
 # ─── Install success contract + result file ──────────────────────────────────
 #
 # write_install_result STATUS — emit /var/lib/ados/install-result.json, the
@@ -509,9 +368,9 @@ PY
 # heartbeat cannot report the failure and the operator sees a half-installed
 # box with no machine-readable signal.
 #
-# install_failure_trap is wired as an EXIT trap by the dispatcher AFTER the
-# detach handoff (so it never fires for the detach-parent or the pair-only
-# fast path, both of which exit cleanly without running the body). It writes a
+# install_failure_trap is wired as an EXIT trap by the dispatcher right before
+# main_install_flow (so it never fires for the pair-only fast path, which exits
+# cleanly without running the body). It writes a
 # "failed" result only when:
 #   - the script is exiting non-zero (an actual failure, not a clean exit 0), AND
 #   - write_install_result has not already run (the health gate is the normal
@@ -643,7 +502,7 @@ install_radio_driver_tracked() {
 # very end of the full-install + upgrade paths in 13-main.sh. Optional
 # failures (radio driver, display overlay, OTG, mesh) downgrade status to
 # "degraded" but still return 0; a REQUIRED failure returns non-zero so the
-# dispatcher (and the detached unit's exit code) reflect the real outcome.
+# dispatcher's exit code reflects the real outcome.
 #
 # REQUIRED components, in order of assertion:
 #   - venv importable           (the agent package installed cleanly)

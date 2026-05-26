@@ -44,12 +44,10 @@
 #                      [--channel edge|stable]
 #                      [--prebuilt|--no-prebuilt]
 #
-# The full agent's production install detaches into a transient unit so a
-# dropped SSH session cannot interrupt a mid-flight compile. The e2e run
-# forces --foreground instead: it wants to observe install completion and
-# the install exit code synchronously, in this process, before it asserts
-# the contract. Foreground is exactly the opt-out the installer documents
-# for non-interactive observers.
+# The full agent's production install runs inline (foreground), streaming its
+# full output to the operator's terminal. The e2e run drives it the same way:
+# it observes install completion and the install exit code synchronously, in
+# this process, before it asserts the contract.
 # =============================================================================
 
 set -uo pipefail
@@ -317,9 +315,9 @@ drive_install() {
 
     # Compose the env the install body reads. ADOS_RELEASE_CHANNEL routes the
     # stable-vs-edge artifact selection; ADOS_DRIVER_PREBUILT toggles the
-    # RTL8812EU prebuilt fast-path vs the DKMS fallback. ADOS_INSTALL_FOREGROUND
-    # forces synchronous (non-detached) execution so we observe the exit code.
-    local env_prefix="ADOS_INSTALL_FOREGROUND=1 ADOS_RELEASE_CHANNEL='${CHANNEL}'"
+    # RTL8812EU prebuilt fast-path vs the DKMS fallback. The install runs
+    # inline, so we observe its exit code synchronously in this process.
+    local env_prefix="ADOS_RELEASE_CHANNEL='${CHANNEL}'"
     case "${PREBUILT}" in
         prebuilt)    env_prefix="${env_prefix} ADOS_DRIVER_PREBUILT=1" ;;
         no-prebuilt) env_prefix="${env_prefix} ADOS_DRIVER_PREBUILT=0" ;;
@@ -331,17 +329,17 @@ drive_install() {
         # Local run on a checkout: invoke the sibling install.sh directly so
         # we test the exact tree under review (no network round-trip to main).
         log "Local checkout detected; running ${REPO_ROOT}/scripts/install.sh"
-        install_cmd="${env_prefix} bash '${REPO_ROOT}/scripts/install.sh' --profile '${PROFILE_FLAG}' --foreground"
+        install_cmd="${env_prefix} bash '${REPO_ROOT}/scripts/install.sh' --profile '${PROFILE_FLAG}'"
     else
         # Remote rig or no local checkout: run the canonical curl-pipe
         # one-liner so we validate the operator's real bootstrap path.
         log "Running curl-pipe install from ${INSTALL_RAW_URL}"
-        install_cmd="${env_prefix} bash -c \"curl -fsSL '${INSTALL_RAW_URL}' | bash -s -- --profile '${PROFILE_FLAG}' --foreground\""
+        install_cmd="${env_prefix} bash -c \"curl -fsSL '${INSTALL_RAW_URL}' | bash -s -- --profile '${PROFILE_FLAG}'\""
     fi
 
     # Run as root, synchronously, and capture the exit code. The install can
-    # take many minutes (DKMS compile on the fallback path), so allow a long
-    # observation window via the SSH session staying open in --foreground.
+    # take many minutes (DKMS compile on the fallback path), so keep the SSH
+    # session open for the full inline run.
     rsh_root "${install_cmd}"
     INSTALL_EXIT=$?
     log "Install process exited with code ${INSTALL_EXIT}"

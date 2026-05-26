@@ -508,13 +508,13 @@ def _install_resume() -> None:
     click.echo(f"Resuming install via {installer} ...")
     # A plain re-run resumes by design: the completeness gate routes an
     # incomplete-but-present agent back through the (idempotent) install
-    # body and skips finished checkpoints. --foreground keeps the resume
-    # attached to this terminal so the operator sees progress directly.
+    # body and skips finished checkpoints. The installer runs inline, so the
+    # resume stays attached to this terminal and the operator sees progress
+    # directly.
     env = dict(os.environ)
-    env["ADOS_INSTALL_FOREGROUND"] = "1"
     try:
         completed = subprocess.run(  # noqa: S603
-            ["/usr/bin/env", "bash", str(installer), "--foreground"],
+            ["/usr/bin/env", "bash", str(installer)],
             env=env,
             check=False,
         )

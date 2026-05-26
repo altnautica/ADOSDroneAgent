@@ -751,7 +751,7 @@ main_install_flow() {
 
     # Success contract: assert the REQUIRED components are live, write
     # /var/lib/ados/install-result.json, and propagate a non-zero exit when
-    # a REQUIRED step failed so the detached unit's status reflects reality.
+    # a REQUIRED step failed so the dispatcher's exit code reflects reality.
     # Optional-only failures downgrade to "degraded" and still exit 0.
     if run_health_gate; then
         exit 0

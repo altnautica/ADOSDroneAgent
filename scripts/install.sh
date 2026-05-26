@@ -288,31 +288,12 @@ BRANCH_NAME=""        # optional feature branch for --branch flag
 FRESH_REPO_DIR=""     # temp clone created by the fresh-install path
 ADOS_PROFILE="${ADOS_PROFILE:-}"
 
-# Resolved path to THIS installer on disk, used by the detached re-exec so
-# the transient unit runs the same file we are running (the cloned tree on
-# the curl-pipe path, the checkout otherwise) rather than re-fetching.
-ADOS_INSTALLER_SELF=""
-if [ -n "${ADOS_SCRIPT_DIR}" ] && [ -f "${ADOS_SCRIPT_DIR}/install.sh" ]; then
-    ADOS_INSTALLER_SELF="${ADOS_SCRIPT_DIR}/install.sh"
-fi
-export ADOS_INSTALLER_SELF
-
 # ─── Flag Parsing ────────────────────────────────────────────────────────────
 
 PAIR_CODE=""
 DRONE_NAME=""
 DO_FORCE=false
 DO_UPGRADE=false
-DO_FOREGROUND=false   # --foreground / ADOS_INSTALL_FOREGROUND=1 opts out of detach
-
-# Snapshot the original argv before the parse loop below consumes it via
-# `shift`. The detached re-exec (maybe_reexec_detached) needs the exact
-# original flags to reproduce the invocation in the transient unit;
-# without this, args parsed away here (--upgrade / --force / --pair CODE /
-# positional pair code) are lost and the detached child runs as if invoked
-# with no flags. Env-mirrored options (--profile / --channel / --version)
-# also forward via child_env, but argv is authoritative for the rest.
-ADOS_ORIG_ARGS=("$@")
 
 # Positional pairing code: first non-flag arg that looks like a 4-8 char alphanumeric code
 if [ $# -gt 0 ] && [[ "$1" =~ ^[A-Za-z0-9]{4,8}$ ]]; then
@@ -349,12 +330,6 @@ while [ $# -gt 0 ]; do
             ;;
         --upgrade)
             DO_UPGRADE=true
-            shift
-            ;;
-        --foreground)
-            # Run the install inline rather than detaching it into a
-            # transient unit. Equivalent to ADOS_INSTALL_FOREGROUND=1.
-            DO_FOREGROUND=true
             shift
             ;;
         --branch)
@@ -450,60 +425,23 @@ done
 # DRONE_NAME, PAIR_CODE, etc. are read by generate_default_config + the
 # main flow; the install.d/ modules expect the var names below. ADOS_CHANNEL
 # / ADOS_VERSION drive the release-channel selection in 13-main.sh + 15-channel.sh.
-export ADOS_PROFILE BRANCH_NAME PAIR_CODE DRONE_NAME DO_FORCE DO_UPGRADE DO_FOREGROUND FRESH_REPO_DIR
+export ADOS_PROFILE BRANCH_NAME PAIR_CODE DRONE_NAME DO_FORCE DO_UPGRADE FRESH_REPO_DIR
 export ADOS_CHANNEL="${ADOS_CHANNEL:-edge}"
 export ADOS_VERSION="${ADOS_VERSION:-}"
 
-# ─── Drop-proof detach ──────────────────────────────────────────────────────
-#
-# Before doing any heavy work, hand the install off to a detached process
-# (transient systemd unit, or setsid) so a dropped SSH session cannot
-# SIGHUP a mid-flight compile and leave the box half-installed. The
-# fast-path pairing-code update and the uninstall path are short and do not
-# detach: --uninstall already exited up the call stack, and the pair-only
-# fast path is sub-5s. maybe_reexec_detached returns 0 when it handed the
-# work off (we then return cleanly), or non-zero when detach was skipped
-# (--foreground, no terminal, already detached, non-Linux) and we run
-# inline. A bare pairing-code update (PAIR_CODE set, agent already
-# installed, no force/upgrade) stays inline so the operator gets the new
-# code box immediately. The detached child carries ADOS_INSTALL_DETACHED=1
-# so it never re-detaches.
-#
-# The pair-only fast path matches main_install_flow's own gate: agent
-# already installed AND a pairing code AND no --force. Everything else
-# (fresh install, --upgrade, --force, paired fresh install) is long-running
-# and detaches.
-_is_pair_only_fastpath=false
-if is_installed && [ -n "${PAIR_CODE}" ] && ! $DO_FORCE; then
-    _is_pair_only_fastpath=true
-fi
-if [ "${_is_pair_only_fastpath}" != "true" ]; then
-    if maybe_reexec_detached "${ADOS_ORIG_ARGS[@]+"${ADOS_ORIG_ARGS[@]}"}"; then
-        # The detached child now owns ADOS_BOOTSTRAP_DIR (the curl-pipe
-        # clone it is executing from + re-registering its own EXIT trap on).
-        # Drop OUR cleanup trap before exiting so the parent does not rm the
-        # tree out from under the running child. The child cleans up when it
-        # finishes.
-        trap - EXIT
-        echo ""
-        info "Install is running detached. This shell can be closed safely."
-        exit 0
-    fi
-fi
-unset _is_pair_only_fastpath
-
 # ─── Mid-step abort fallback trap ────────────────────────────────────────────
 #
-# Wire the install-body EXIT trap here, AFTER the detach handoff above. This
-# placement matters:
-#   - the detach-parent already exited 0 with its EXIT trap cleared, so it
-#     never reaches this line;
+# The install runs inline in this process, streaming its full output (apt →
+# venv → wfb-ng → DKMS → pairing → pair code) to the operator's terminal.
+# This assumes a stable SSH session / network for the duration of the run.
+#
+# Wire the install-body EXIT trap here, right before main_install_flow runs.
+# This placement matters:
 #   - the pair-only fast path runs inside main_install_flow and exits 0, which
 #     the trap ignores (it only writes on a non-zero exit);
-#   - only the real install body (fresh / upgrade / force / resume) is left,
-#     and a hard failure there under `set -e` would otherwise die before
-#     run_health_gate and leave no install-result.json. The trap writes a
-#     "failed" result as the fallback; run_health_gate stays the normal path
+#   - a hard failure in the install body under `set -e` would otherwise die
+#     before run_health_gate and leave no install-result.json. The trap writes
+#     a "failed" result as the fallback; run_health_gate stays the normal path
 #     and the ADOS_RESULT_WRITTEN guard keeps the result written exactly once.
 # This EXIT trap REPLACES the bootstrap-dir cleanup trap registered near the
 # top of the script (a bash EXIT trap is single-slot), so the handler folds the

@@ -25,7 +25,7 @@
 # The deploy-bundle unpacks into the SAME ${FRESH_REPO_DIR}/repo layout the
 # edge clone produces, so install_systemd_service, persist_repo_artifacts,
 # install_wfb_ng_from_vendor, and install_display_driver all resolve their
-# sources without knowing which channel selected them. The detach / resume /
+# sources without knowing which channel selected them. The resume /
 # completeness / checkpoint / health-gate machinery is channel-agnostic and
 # runs identically on both.
 #
