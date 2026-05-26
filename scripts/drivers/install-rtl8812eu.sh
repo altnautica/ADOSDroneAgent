@@ -56,10 +56,23 @@ case "$(uname -m)" in
     armv6l|armv7l) export ARCH=arm ;;
 esac
 
-# Fast-path: if already loaded and installed, exit clean
+# Fast-path: short-circuit ONLY when our DKMS build is installed on disk
+# (loaded + resolvable via modinfo + registered with DKMS). That guarantees
+# the module carries the mesh-enable patch and survives a reboot. A module
+# that is merely resident in RAM (e.g. left over after a `dkms remove` with
+# the .ko already gone from /lib/modules), or an unpatched stock/BSP module,
+# is NOT trusted — we fall through and (re)build it via DKMS below.
 if lsmod | awk '{print $1}' | grep -qx "${MODULE_NAME}"; then
-    info "${MODULE_NAME} module already loaded."
-    exit 0
+    if modinfo "${MODULE_NAME}" >/dev/null 2>&1 \
+       && dkms status 2>/dev/null | grep -qiE 'rtl88x2eu|8812'; then
+        info "${MODULE_NAME} already installed via DKMS and loaded."
+        # Breadcrumb so the heartbeat/GCS report the module source even
+        # though the build steps below are skipped.
+        mkdir -p /run/ados 2>/dev/null || true
+        printf 'dkms\n' > /run/ados/wfb-module-source 2>/dev/null || true
+        exit 0
+    fi
+    info "${MODULE_NAME} is loaded but not a current DKMS build; rebuilding so the mesh-patched module is installed and reboot-persistent."
 fi
 
 # --- Build the module from the vendored source via DKMS ---------------------

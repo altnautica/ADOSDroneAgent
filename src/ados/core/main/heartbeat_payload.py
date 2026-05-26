@@ -48,14 +48,13 @@ def _read_install_result() -> dict | None:
 def _wfb_module_source_from_modinfo() -> str | None:
     """Authoritative radio-module source from the loaded module's path.
 
-    Runs ``modinfo -n <module>`` and classifies the returned path:
-
-    * a path under ``/lib/modules/*/updates/`` ⇒ ``"prebuilt"``
-    * a path under ``/lib/modules/*/extra/`` or containing ``dkms``
-      ⇒ ``"dkms"``
+    Runs ``modinfo -n <module>`` and classifies the returned path. The
+    Wi-Fi driver is always built on the device via DKMS now, which installs
+    under ``/lib/modules/*/updates/dkms/`` or ``/lib/modules/*/extra/``, so
+    any such on-disk path ⇒ ``"dkms"``.
 
     Returns ``None`` when modinfo is absent, the module is not loaded,
-    the command times out, or the path does not match either pattern.
+    the command times out, or the path does not match the pattern.
     Best-effort; never raises.
     """
     try:
@@ -73,9 +72,7 @@ def _wfb_module_source_from_modinfo() -> str | None:
     path = (result.stdout or "").strip()
     if not path:
         return None
-    if "/updates/" in path:
-        return "prebuilt"
-    if "/extra/" in path or "dkms" in path:
+    if "/updates/" in path or "/extra/" in path or "dkms" in path:
         return "dkms"
     return None
 

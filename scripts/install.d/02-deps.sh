@@ -127,23 +127,25 @@ install_ground_station_deps() {
             ;;
     esac
 
-    if ! apt-get install -y \
-        hostapd \
-        dnsmasq \
-        bluetooth \
-        bluez \
-        "${chromium_pkg}" \
-        cage; then
-        # Belt-and-suspenders: if the chosen chromium package fails for
-        # any reason, retry with the other name. Any remaining failure
-        # is silenced (||true) because the rest of the GS profile runs
-        # without chromium just fine — the kiosk service only matters
-        # when an HDMI panel is attached.
+    # Core ground-station packages WITHOUT the kiosk browser first, so a
+    # chromium packaging hiccup can never take these down or leave apt in a
+    # half-configured state that blocks the steps that follow (mesh deps).
+    apt-get install -y hostapd dnsmasq bluetooth bluez cage || \
+        warn "Some core ground-station deps failed to install."
+
+    # Chromium for the HDMI kiosk, isolated + best-effort. Some repos
+    # briefly ship the browser with a version skew against chromium-common;
+    # installing it on its own keeps that failure from leaving apt
+    # half-configured and cascading into later apt-get installs. The kiosk
+    # only matters when an HDMI panel is attached.
+    if ! apt-get install -y "${chromium_pkg}"; then
         local fallback_pkg="chromium"
         [ "${chromium_pkg}" = "chromium" ] && fallback_pkg="chromium-browser"
-        warn "Primary ground-station deps install failed; retrying chromium as ${fallback_pkg}."
-        apt-get install -y hostapd dnsmasq bluetooth bluez cage || true
+        warn "Chromium (${chromium_pkg}) install failed; trying ${fallback_pkg}, then clearing apt state."
         apt-get install -y "${fallback_pkg}" || true
+        # Clear any half-configured/broken state a failed browser install
+        # may have left, so it cannot wedge subsequent apt-get installs.
+        apt-get install -f -y || true
     fi
 
     mask_conflicting_standalone_services

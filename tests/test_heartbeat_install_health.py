@@ -75,16 +75,17 @@ def test_wfb_module_source_none_when_no_sources(
     assert payload["wfbModuleSource"] == "none"
 
 
-def test_wfb_module_source_modinfo_prebuilt(
+def test_wfb_module_source_modinfo_updates_is_dkms(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """A modinfo path under updates/ classifies as prebuilt."""
+    """The driver is always a DKMS build now; a modinfo path under
+    updates/ (where DKMS installs, e.g. updates/dkms/) classifies as dkms."""
 
     def fake_run(*_args, **_kwargs):  # noqa: ANN002, ANN003
         return subprocess.CompletedProcess(
             args=["modinfo"],
             returncode=0,
-            stdout="/lib/modules/6.1.0/updates/8812eu.ko\n",
+            stdout="/lib/modules/6.1.0/updates/dkms/8812eu.ko\n",
             stderr="",
         )
 
@@ -92,7 +93,7 @@ def test_wfb_module_source_modinfo_prebuilt(
     monkeypatch.setattr(hp, "INSTALL_RESULT", tmp_path / "install-result.json")
     monkeypatch.setattr(hp, "WFB_MODULE_SOURCE", tmp_path / "wfb-module-source")
     payload = _fresh_app()._build_heartbeat_payload()
-    assert payload["wfbModuleSource"] == "prebuilt"
+    assert payload["wfbModuleSource"] == "dkms"
 
 
 def test_wfb_module_source_modinfo_dkms_extra(
