@@ -682,6 +682,18 @@ async def _run_service() -> None:
     probe_result = await manager.probe()
     log.info("modem.service_probe", **probe_result)
 
+    # The unit starts on any /dev/ttyUSB* (the systemd ConditionPathExistsGlob),
+    # which a non-modem USB serial adapter also matches. When the probe finds
+    # no actual cellular modem, exit cleanly so the unit goes inactive rather
+    # than idling a 30 s status loop forever against hardware that is not a
+    # modem. A real modem hot-plug re-fires the unit via the udev rule.
+    if not probe_result.get("detected"):
+        log.info(
+            "modem.service_skipped_no_modem",
+            reason="no cellular modem detected behind the matched serial device",
+        )
+        return
+
     if manager._config.get("enabled", True) and probe_result.get("detected"):
         try:
             await manager.bring_up(manager._config.get("apn", "auto"))

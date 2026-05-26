@@ -234,15 +234,51 @@ class ButtonService:
         self._buttons.clear()
 
 
+def _gpio_subsystem_present() -> bool:
+    """True when a GPIO chip the buttons could attach to exists.
+
+    Front-panel buttons only exist on boards that expose a GPIO header. On a
+    board with no GPIO subsystem (no /dev/gpiochip*) there is nothing to
+    attach to, so the service should skip cleanly rather than try to init a
+    pin factory and fail. A read-only filesystem check; no GPIO is driven.
+    """
+    from pathlib import Path
+
+    try:
+        return any(Path("/dev").glob("gpiochip*"))
+    except OSError:
+        return False
+
+
 async def _run() -> int:
+    # Skip cleanly on a board with no GPIO subsystem at all. The systemd
+    # unit's ConditionPathExists=/dev/gpiochip0 already covers the common
+    # case, but the chip can be present with no buttons wired; in that case
+    # we still start (a press is harmless when nothing is attached) and the
+    # only true failure left is a pin-factory init error, which we treat as
+    # skip-clean below so the unit goes inactive instead of FAILED.
+    if not _gpio_subsystem_present():
+        log.info("button_service_skipped_no_gpio", reason="no /dev/gpiochip*")
+        return 0
+
     bus = ButtonEventBus()
     service = ButtonService(bus=bus, pins=list(BUTTON_PINS), loop=asyncio.get_event_loop())
 
     try:
         service.start()
     except Exception as exc:
-        log.error("button service failed to start", error=str(exc))
-        return 1
+        # No usable GPIO pin factory on this board (e.g. lgpio/RPi.GPIO not
+        # backed by real hardware, or the pins are claimed by another
+        # function). There are no buttons to read here. Exit 0 so the unit
+        # is inactive, not FAILED — a board with no physical buttons is a
+        # supported configuration, not an error.
+        log.info(
+            "button_service_skipped_init_failed",
+            error=str(exc),
+            reason="no usable GPIO button factory",
+        )
+        await bus.close()
+        return 0
 
     log.info(
         "button service running",
