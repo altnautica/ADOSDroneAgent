@@ -48,9 +48,30 @@ LOGICAL_HEIGHT = 64
 # on a 480x320 panel with horizontal letterbox cropped to 480.
 DEFAULT_UPSCALE = 4
 
-# /sys path templates. fb_ili9486 typically binds as /dev/fb1 because
-# /dev/fb0 is the primary HDMI / DRM framebuffer (when present).
+# /sys path templates. The fbtft SPI-LCD framebuffer lands on /dev/fb1 when
+# a DRM/HDMI driver claims /dev/fb0, or on /dev/fb0 itself on a headless rig
+# where no primary display driver is active. probe() matches by driver NAME
+# across all indices rather than assuming a fixed index.
 SYS_FB_GLOB = Path("/sys/class/graphics")
+
+# Kernel driver names exported under /sys/class/graphics/fbN/name when a
+# supported SPI LCD is bound. Used as the fallback acceptance set when
+# display.conf carries no explicit framebuffer_name_expected, so the probe
+# never binds to a primary HDMI/DRM framebuffer (e.g. "BCM2708 FB",
+# "rockchip-drm") by accident.
+_SPI_LCD_DRIVER_NAMES = frozenset(
+    {
+        "fb_ili9486",
+        "fb_ili9341",
+        "fb_ili9340",
+        "fb_st7789v",
+        "fb_st7735r",
+        "fb_hx8347d",
+        "fb_hx8353d",
+        "fb_pcd8544",
+        "fb_ssd1351",
+    }
+)
 
 
 def _read_fb_geometry(fb_name: str) -> tuple[int, int, int]:
@@ -260,12 +281,27 @@ class FrameBufferRenderer:
                 )
                 continue
             driver_name = _read_fb_name(fb_name)
-            if expected and driver_name and expected not in driver_name:
+            if expected:
+                # An expected driver name is configured: bind only to a
+                # framebuffer that reports it. A framebuffer that reports a
+                # different (or empty) driver is some other surface (HDMI /
+                # DRM primary); skip it so we never paint the SPI-LCD UI onto
+                # the wrong device.
+                if not driver_name or expected not in driver_name:
+                    log.debug(
+                        "framebuffer_driver_skip",
+                        fb=fb_name,
+                        driver=driver_name,
+                        expected=expected,
+                    )
+                    continue
+            elif driver_name not in _SPI_LCD_DRIVER_NAMES:
+                # No expected name configured: accept only a known SPI-LCD
+                # fbtft driver so we never grab a primary HDMI/DRM fb.
                 log.debug(
-                    "framebuffer_driver_skip",
+                    "framebuffer_driver_not_spi_lcd",
                     fb=fb_name,
                     driver=driver_name,
-                    expected=expected,
                 )
                 continue
             if bpp not in (16, 24, 32):

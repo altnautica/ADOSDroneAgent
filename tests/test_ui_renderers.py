@@ -253,3 +253,88 @@ class TestFrameBufferProbe:
         if Path("/dev/fb1").exists():
             pytest.skip("test host has a real /dev/fb1; skipping probe-absent test")
         assert FrameBufferRenderer.probe() is None
+
+
+class TestFrameBufferProbeByName:
+    """probe() selects the framebuffer by driver NAME across all fb indices.
+
+    Drives probe() against a mocked /sys/class/graphics + /dev tree so the
+    name-matching + acceptance logic is exercised without real hardware.
+    """
+
+    def _mock_fb_tree(self, monkeypatch, tmp_path: Path, fbs: dict[str, str]):
+        """fbs maps fb index name -> driver name. Returns the bound fb name
+        probe() picks, or None.
+
+        Mocks: SYS_FB_GLOB.iterdir() to yield the fb dirs, the per-fb name +
+        geometry readers, the conf parse, and Path.exists for /dev/fbN.
+        """
+        import ados.services.ui.renderers.framebuffer as fbmod
+
+        sysg = tmp_path / "sys_graphics"
+        sysg.mkdir()
+        for name, driver in fbs.items():
+            d = sysg / name
+            d.mkdir()
+            (d / "name").write_text(driver + "\n")
+            (d / "virtual_size").write_text("480,320\n")
+            (d / "bits_per_pixel").write_text("16\n")
+
+        monkeypatch.setattr(fbmod, "SYS_FB_GLOB", sysg)
+        # No conf -> empty expected name path; force the no-expected branch.
+        monkeypatch.setattr(fbmod, "_parse_display_conf", lambda: {})
+        monkeypatch.setattr(fbmod, "read_rotation", lambda: 0)
+        # /dev/fbN exists for each mocked fb; nothing else.
+        real_exists = Path.exists
+        dev_fbs = {f"/dev/{n}" for n in fbs}
+
+        def _fake_exists(self):  # noqa: ANN001
+            s = str(self)
+            if s.startswith("/dev/fb"):
+                return s in dev_fbs
+            return real_exists(self)
+
+        monkeypatch.setattr(Path, "exists", _fake_exists)
+        # Don't actually open/mmap a device — stop after selection by making
+        # the constructor raise; probe() returns the renderer, so instead we
+        # intercept __init__ to capture the chosen fb_name and short-circuit.
+        captured: dict[str, str] = {}
+
+        def _fake_init(self, *a, **kw):  # noqa: ANN001
+            captured["fb_name"] = kw.get("fb_name", "")
+            raise _StopProbe()
+
+        class _StopProbe(Exception):
+            pass
+
+        monkeypatch.setattr(FrameBufferRenderer, "__init__", _fake_init)
+        try:
+            FrameBufferRenderer.probe()
+        except _StopProbe:
+            return captured.get("fb_name")
+        return None
+
+    def test_picks_spi_lcd_over_hdmi_no_expected(self, monkeypatch, tmp_path):
+        # fb0 = HDMI/DRM primary, fb1 = SPI LCD. No expected name configured
+        # -> must accept ONLY the known SPI-LCD driver, never the HDMI fb.
+        chosen = self._mock_fb_tree(
+            monkeypatch,
+            tmp_path,
+            {"fb0": "rockchip-drm", "fb1": "fb_ili9486"},
+        )
+        assert chosen == "fb1"
+
+    def test_rejects_non_spi_only_fb_no_expected(self, monkeypatch, tmp_path):
+        # Only an HDMI framebuffer present, no expected name -> probe must
+        # NOT bind it (returns None), so the UI never paints onto HDMI.
+        chosen = self._mock_fb_tree(
+            monkeypatch, tmp_path, {"fb0": "BCM2708 FB"}
+        )
+        assert chosen is None
+
+    def test_binds_spi_lcd_on_fb0_headless(self, monkeypatch, tmp_path):
+        # Headless rig: SPI LCD lands on fb0. Bound by name, not index.
+        chosen = self._mock_fb_tree(
+            monkeypatch, tmp_path, {"fb0": "fb_ili9486"}
+        )
+        assert chosen == "fb0"

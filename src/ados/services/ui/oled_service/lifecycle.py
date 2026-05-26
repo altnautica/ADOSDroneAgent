@@ -111,11 +111,13 @@ class OledService(
         self._auto_dim_enabled: bool = True
         self._brightness_active: int = CONTRAST_ACTIVE
         self._reload_requested: bool = False
-        # Optional secondary render target. Bound when /dev/fb1 carries a
-        # supported SPI LCD (e.g. ILI9486 via fbtft on Cubie A7Z + Rock
-        # 5C). Stays None on stock Pi 4B benches that only have the I2C
-        # OLED. When bound, the render loop paints the same screens onto
-        # this surface in addition to (or instead of) the OLED.
+        # Optional secondary render target. Bound when a framebuffer
+        # carries a supported SPI LCD (e.g. ILI9486 via fbtft on Cubie A7Z +
+        # Rock 5C + Pi). The renderer matches by driver NAME across all fb
+        # indices (fb0 on a headless rig, fb1 when a DRM/HDMI driver claims
+        # fb0), never by a fixed index. Stays None on benches that only have
+        # the I2C OLED. When bound, the render loop paints the same screens
+        # onto this surface in addition to (or instead of) the OLED.
         self._fb_renderer: Renderer | None = None
         # Dashboard renderer for the SPI LCD path. When bound (any
         # truthy callable) the framebuffer paints the dashboard at
@@ -379,8 +381,9 @@ class OledService(
             log.warning(
                 "no_display_detected",
                 msg=(
-                    "no SSD1306 / SH1106 OLED on i2c-1 and no SPI LCD "
-                    "framebuffer at /dev/fb1, exiting cleanly"
+                    "no SSD1306 / SH1106 OLED on i2c-1 and no bound SPI LCD "
+                    "framebuffer (matched by driver name across /dev/fb*), "
+                    "exiting cleanly"
                 ),
             )
             return 0

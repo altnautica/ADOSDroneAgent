@@ -51,9 +51,39 @@ __all__ = [
 ]
 
 
+def _display_conf_disabled() -> bool:
+    """True when /etc/ados/display.conf explicitly disables the display.
+
+    Defense-in-depth alongside the systemd ConditionPathExists marker gate:
+    if the overlay installer (or the boot-time probe's auto-revert) wrote
+    display_id=none, exit 0 cleanly rather than probing for a panel that the
+    installer already decided is absent. Read failures are non-fatal — the
+    later probe-and-exit-clean path still handles a genuinely empty board.
+    """
+    from ados.core.paths import DISPLAY_CONF_PATH
+
+    try:
+        text = DISPLAY_CONF_PATH.read_text()
+    except OSError:
+        return False
+    for raw in text.splitlines():
+        line = raw.strip()
+        if line.startswith("display_id="):
+            return line.partition("=")[2].strip() == "none"
+    return False
+
+
 async def _amain() -> int:
     cfg = load_config()
     configure_logging(cfg.logging.level)
+
+    # Honour the overlay installer's verdict. When display.conf says
+    # display_id=none (no panel detected, or the boot probe auto-reverted an
+    # unconfirmed overlay), exit 0 so the systemd unit goes inactive cleanly
+    # instead of running a render loop against absent hardware.
+    if _display_conf_disabled():
+        log.info("oled_skipped_display_disabled", reason="display_id=none")
+        return 0
 
     # Honour the operator-set local-display primary path. On boards
     # that boot with both HDMI and the SPI LCD wired (or that ship

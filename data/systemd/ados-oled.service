@@ -1,12 +1,17 @@
 [Unit]
 Description=ADOS OLED UI (ground-station profile)
 PartOf=ados-supervisor.service
-# Start when EITHER an I2C bus exists (small OLED carousel) OR a SPI
-# framebuffer is bound (LCD page mode). systemd treats multiple
-# ConditionPathExistsGlob lines as OR-of-any-match, so listing both
-# means the service starts on a board with EITHER surface present.
-ConditionPathExistsGlob=|/dev/i2c-*
-ConditionPathExistsGlob=|/dev/fb*
+# Start only when a display surface was recognized at install/probe time.
+# The marker is written by install-display-overlay.sh (bound SPI LCD, HDMI,
+# or I2C OLED) and by ados-display-probe.service (confirmed panel), and is
+# removed on the no-display path. Gating on it means the unit SKIPS CLEAN
+# (condition unmet, not FAILED) on a board with no panel, instead of
+# starting against absent hardware. The /dev/i2c-* + /dev/fb* glob it
+# replaced false-positived on every board that merely exposes an I2C bus.
+ConditionPathExists=/etc/ados/display.enabled
+# Wait for the boot-time presence probe to settle its verdict (confirm or
+# revert + marker state) before we read the marker.
+After=ados-display-probe.service
 StartLimitInterval=60s
 StartLimitBurst=5
 
