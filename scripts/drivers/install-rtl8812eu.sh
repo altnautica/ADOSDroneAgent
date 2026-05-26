@@ -47,16 +47,13 @@ fi
 KERNEL="$(uname -r)"
 info "Kernel: ${KERNEL}"
 
-# Translate the running machine arch to the kernel's ARCH naming early so
-# both the prebuilt lookup and the DKMS build agree on it. The vendored
-# Makefile resolves ARCH from `uname -m`, which on aarch64 hosts yields
-# the literal "aarch64" that the kernel build rejects (it expects "arm64").
-# Same for armv7 (kernel uses "arm").
-KARCH=""
+# Translate the running machine arch to the kernel's ARCH naming. The
+# vendored Makefile resolves ARCH from `uname -m`, which on aarch64 hosts
+# yields the literal "aarch64" that the kernel build rejects (it expects
+# "arm64"). Same for armv7 (kernel uses "arm").
 case "$(uname -m)" in
-    aarch64)       KARCH=arm64 ; export ARCH=arm64 ;;
-    armv6l|armv7l) KARCH=arm   ; export ARCH=arm ;;
-    x86_64)        KARCH=amd64 ;;
+    aarch64)       export ARCH=arm64 ;;
+    armv6l|armv7l) export ARCH=arm ;;
 esac
 
 # Fast-path: if already loaded and installed, exit clean
@@ -65,29 +62,9 @@ if lsmod | awk '{print $1}' | grep -qx "${MODULE_NAME}"; then
     exit 0
 fi
 
-# Prebuilt fast-path: try to load a verified prebuilt module for this exact
-# kernel before falling through to a from-scratch DKMS compile. The library
-# never exits (so set -e cannot abort us here) and returns non-zero on any
-# miss — network down, no matching kernel, verification failure — at which
-# point we fall through to the universal DKMS path below. Set
-# ADOS_DRIVER_PREBUILT=0 to skip the prebuilt path and force DKMS.
-PREBUILT_LIB="${SCRIPT_DIR}/lib-prebuilt.sh"
-if [ "${ADOS_DRIVER_PREBUILT:-1}" = "1" ] && [ -f "${PREBUILT_LIB}" ] && [ -n "${KARCH}" ]; then
-    # shellcheck source=scripts/drivers/lib-prebuilt.sh disable=SC1091
-    . "${PREBUILT_LIB}"
-    if try_prebuilt_install "${MODULE_NAME}" "${KERNEL}" "${KARCH}"; then
-        info "RTL8812EU loaded from verified prebuilt module."
-        exit 0
-    fi
-    info "Prebuilt module unavailable; building via DKMS."
-fi
+# --- Build the module from the vendored source via DKMS ---------------------
 
-# --- DKMS fallback: build from the vendored source --------------------------
-
-# DKMS needs the vendored source submodule. The prebuilt path above does
-# not, so this presence check only gates the build-from-source path: a box
-# with internet but no checked-out submodule can still use the prebuilt
-# module.
+# DKMS needs the vendored source submodule.
 if [ ! -d "${VENDOR_DIR}" ] || [ ! -f "${VENDOR_DIR}/dkms.conf" ]; then
     error "Vendor source not found at ${VENDOR_DIR}."
     error "Run: git submodule update --init --recursive"
@@ -195,7 +172,8 @@ dkms add "${VENDOR_DIR}" || {
 }
 
 # Build + install for current kernel (idempotent: dkms skips if already built)
-info "dkms build ${DKMS_NAME} (ARCH=${ARCH:-unset})"
+info "Compiling the Wi-Fi driver against kernel ${KERNEL} (ARCH=${ARCH:-unset})."
+info "This can take several minutes on this board. Build output follows."
 dkms build "${DKMS_NAME}" -k "${KERNEL}" || {
     error "dkms build failed. See /var/lib/dkms/${DKMS_PACKAGE}/${DRIVER_VERSION}/build/make.log"
     exit 2

@@ -42,7 +42,6 @@
 #   e2e-install-rig.sh [--host HOST] [--user USER]
 #                      [--profile drone|ground-station]
 #                      [--channel edge|stable]
-#                      [--prebuilt|--no-prebuilt]
 #
 # The full agent's production install runs inline (foreground), streaming its
 # full output to the operator's terminal. The e2e run drives it the same way:
@@ -57,7 +56,6 @@ RIG_HOST=""
 RIG_USER=""
 PROFILE="drone"
 CHANNEL="edge"
-PREBUILT="default"   # default | prebuilt | no-prebuilt
 
 # The agent REST surface and on-disk contract paths the install ships.
 API_BASE="http://localhost:8080"
@@ -101,7 +99,6 @@ Usage:
   e2e-install-rig.sh [--host HOST] [--user USER]
                      [--profile drone|ground-station]
                      [--channel edge|stable]
-                     [--prebuilt|--no-prebuilt]
                      [-h|--help]
 
 Options:
@@ -109,8 +106,6 @@ Options:
   --user USER        SSH user (defaults to the current user when --host set).
   --profile P        drone (default) or ground-station. Drives expected units.
   --channel C        edge (default) or stable. Sets ADOS_RELEASE_CHANNEL.
-  --prebuilt         Force the prebuilt RTL8812EU fast-path (ADOS_DRIVER_PREBUILT=1).
-  --no-prebuilt      Force the DKMS fallback build       (ADOS_DRIVER_PREBUILT=0).
   -h, --help         Show this help and exit.
 
 Auth (when --host is set):
@@ -121,9 +116,9 @@ Examples:
   # drone, air-side rig
   e2e-install-rig.sh --host skynode.local --user radxa --profile drone
 
-  # ground station, ground-side rig, exercise the DKMS fallback
+  # ground station, ground-side rig
   e2e-install-rig.sh --host groundnode.local --user skynode \
-    --profile ground-station --no-prebuilt
+    --profile ground-station
 EOF
 }
 
@@ -134,8 +129,6 @@ while [ $# -gt 0 ]; do
         --user)       RIG_USER="${2:-}"; shift 2 ;;
         --profile)    PROFILE="${2:-}"; shift 2 ;;
         --channel)    CHANNEL="${2:-}"; shift 2 ;;
-        --prebuilt)   PREBUILT="prebuilt"; shift ;;
-        --no-prebuilt) PREBUILT="no-prebuilt"; shift ;;
         -h|--help)    usage; exit 0 ;;
         *)            err "Unknown option: $1"; usage; exit 2 ;;
     esac
@@ -311,18 +304,12 @@ print(v)
 INSTALL_EXIT=-1
 
 drive_install() {
-    log "Driving full-agent install: profile=${PROFILE_FLAG} channel=${CHANNEL} prebuilt=${PREBUILT}"
+    log "Driving full-agent install: profile=${PROFILE_FLAG} channel=${CHANNEL}"
 
     # Compose the env the install body reads. ADOS_RELEASE_CHANNEL routes the
-    # stable-vs-edge artifact selection; ADOS_DRIVER_PREBUILT toggles the
-    # RTL8812EU prebuilt fast-path vs the DKMS fallback. The install runs
-    # inline, so we observe its exit code synchronously in this process.
+    # stable-vs-edge artifact selection. The install runs inline, so we
+    # observe its exit code synchronously in this process.
     local env_prefix="ADOS_RELEASE_CHANNEL='${CHANNEL}'"
-    case "${PREBUILT}" in
-        prebuilt)    env_prefix="${env_prefix} ADOS_DRIVER_PREBUILT=1" ;;
-        no-prebuilt) env_prefix="${env_prefix} ADOS_DRIVER_PREBUILT=0" ;;
-        default)     : ;;  # let the installer choose (prebuilt is its default)
-    esac
 
     local install_cmd
     if [ -z "${RIG_HOST}" ] && [ -f "${REPO_ROOT}/scripts/install.sh" ]; then
@@ -545,20 +532,20 @@ PY" || true)"
             "status=${status:-unknown}, requiredFailures=${reqfail_count:-?}"
     fi
 
-    # wfbModuleSource must be prebuilt or dkms; echo which path the rig took.
-    # Empty is allowed only if there is genuinely no radio, but on a rig that
-    # passed check_wfb_module_loaded it should be one of the two; treat an
-    # unexpected value as a soft warn so we surface it without flunking the
-    # whole run on a contract-annotation nit.
+    # The Wi-Fi driver is always compiled on-device via DKMS, so
+    # wfbModuleSource should read "dkms" on a rig that built it. Empty is
+    # allowed only when there is genuinely no radio adapter; treat any other
+    # value as a soft warn so we surface it without flunking the whole run on
+    # a contract-annotation nit.
     wfb_src="$(rig_json_file_field "${INSTALL_RESULT}" wfbModuleSource || true)"
     wfb_src="$(printf '%s' "${wfb_src}" | tr -d '[:space:]')"
     case "${wfb_src}" in
-        prebuilt|dkms)
-            record pass optional "wfbModuleSource in {prebuilt,dkms}" "${wfb_src}" ;;
+        dkms)
+            record pass optional "wfbModuleSource is dkms" "${wfb_src}" ;;
         "")
-            record warn optional "wfbModuleSource in {prebuilt,dkms}" "empty (no driver sentinel)" ;;
+            record warn optional "wfbModuleSource is dkms" "empty (no driver sentinel)" ;;
         *)
-            record warn optional "wfbModuleSource in {prebuilt,dkms}" "unexpected '${wfb_src}'" ;;
+            record warn optional "wfbModuleSource is dkms" "unexpected '${wfb_src}'" ;;
     esac
 }
 

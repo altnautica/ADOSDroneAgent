@@ -49,8 +49,6 @@ jobs:
           shellcheck scripts/lib/verify.sh
           shellcheck scripts/drivers/install-display-overlay.sh
           shellcheck scripts/drivers/install-rtl8812eu.sh
-          shellcheck scripts/drivers/build-prebuilt-ko.sh
-          shellcheck scripts/drivers/lib-prebuilt.sh
           shellcheck scripts/test/run_dispatcher_tests.sh
           shellcheck scripts/test/e2e-install-rig.sh
           shellcheck scripts/test/defconfig_reproducibility.sh

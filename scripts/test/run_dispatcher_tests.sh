@@ -2,10 +2,10 @@
 # =============================================================================
 # Run the bats suites for the installer dispatchers.
 #
-# Covers the lightweight installer target dispatcher and the prebuilt
-# kernel-module install path. Wraps `bats` with a clear error message when
-# the binary is not on PATH, so CI logs surface the right install hint
-# instead of a bare "command not found".
+# Covers the lightweight installer target dispatcher and the main install
+# flow dispatcher. Wraps `bats` with a clear error message when the binary
+# is not on PATH, so CI logs surface the right install hint instead of a
+# bare "command not found".
 # =============================================================================
 
 set -euo pipefail
@@ -14,7 +14,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SUITES=(
     "${SCRIPT_DIR}/install_dispatcher.bats"
     "${SCRIPT_DIR}/install_main_dispatcher.bats"
-    "${SCRIPT_DIR}/prebuilt_dispatcher.bats"
 )
 
 if ! command -v bats >/dev/null 2>&1; then
