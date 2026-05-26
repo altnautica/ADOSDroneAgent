@@ -16,6 +16,8 @@ main_install_flow() {
     # is itself a signal that the dispatcher never reached this function
     # (sourcing failed, sudo bailed, redirect target wasn't writable).
     info "ADOS Drone Agent install.sh starting"
+    ADOS_INSTALL_START="$(date +%s)"
+    export ADOS_INSTALL_START
     echo ""
     echo -e "${BOLD}=== ADOS Drone Agent Installer ===${NC}"
     echo ""
@@ -183,6 +185,11 @@ main_install_flow() {
         # a mid-step abort in the failed install-result.json. Exported so the
         # trap, which runs in this same process, reads the latest value.
         export ADOS_CURRENT_STEP="upgrade"
+        # Four operator-facing stages for an upgrade (fewer than a fresh
+        # install: apt + venv are already in place). These feed the staging
+        # helpers sourced from lib.sh (hence the cross-file disable).
+        # shellcheck disable=SC2034
+        ADOS_STEP_NUM=0 ADOS_STEP_TOTAL=4
         info "Upgrading ADOS Drone Agent..."
         local_ver=$(get_installed_version)
         info "Current version: ${local_ver}"
@@ -211,6 +218,7 @@ main_install_flow() {
         # packages that earlier installs may have missed. Includes the
         # wfb-ng runtime Python deps (twisted et al.) so wfb-server can
         # start the bind protocol on rigs first installed before v0.16.4.
+        ados_stage_begin "Checking dependencies"
         info "Checking system dependencies..."
         for pkg in \
             ffmpeg v4l-utils avahi-daemon \
@@ -222,7 +230,9 @@ main_install_flow() {
                 apt-get install -y -qq "$pkg" 2>/dev/null || true
             fi
         done
+        ados_stage_end
 
+        ados_stage_begin "Installing agent software"
         # Record the active release channel for the journal.
         print_channel_banner
 
@@ -329,7 +339,9 @@ main_install_flow() {
         else
             info "Upgraded: ${local_ver} -> ${new_ver}"
         fi
+        ados_stage_end
 
+        ados_stage_begin "Updating services and configuration"
         # Ensure mediamtx is installed
         install_mediamtx
 
@@ -401,7 +413,9 @@ main_install_flow() {
             rm -rf "${tmp_repo}"
             exit 1
         fi
+        ados_stage_end
 
+        ados_stage_begin "Updating radios and finishing up"
         # Persist driver scripts + overlay sources to /opt/ados/source/ so the
         # wizard's display step (and any future CLI re-runs) can find them
         # without a fresh git clone.
@@ -473,13 +487,15 @@ main_install_flow() {
 
         echo ""
         info "Upgrade complete."
-        print_pairing_code
+        ados_stage_end
 
         # Same success contract as the fresh-install path. wait_for_api_ready
         # is not called on the upgrade path's print_status (the upgrade path
         # has no print_status call), so the gate's own API probe is the one
-        # that matters here.
+        # that matters here. The pairing code prints last, only on success.
         if run_health_gate; then
+            ados_install_summary
+            print_pairing_code
             exit 0
         fi
         exit 1
@@ -488,6 +504,12 @@ main_install_flow() {
     # ─── Full Install (first time or --force) ───────────────────────────────────
 
     ADOS_CURRENT_STEP="full-install"
+    # Nine operator-facing stages for a fresh install (same count for drone
+    # and ground station; the ground-station extras fold into the matching
+    # stage). Reset the counter so a resumed run re-numbers from 1. These feed
+    # the staging helpers sourced from lib.sh (hence the cross-file disable).
+    # shellcheck disable=SC2034
+    ADOS_STEP_NUM=0 ADOS_STEP_TOTAL=9
     if $DO_FORCE && is_installed; then
         info "Force reinstall requested. Removing existing venv..."
         rm -rf "${VENV_DIR}"
@@ -495,6 +517,8 @@ main_install_flow() {
         # and never trusts a marker from a prior partial run.
         checkpoint_clear
     fi
+
+    ados_stage_begin "Installing system packages"
 
     # Check or install Python
     PYTHON=$(find_python)
@@ -551,7 +575,9 @@ main_install_flow() {
     mkdir -p "${DATA_DIR}/recordings"
     mkdir -p "${INSTALL_DIR}/models/vision"
     mkdir -p "${DATA_DIR}/state"
+    ados_stage_end
 
+    ados_stage_begin "Setting up Python environment"
     # Create or refresh the Python venv with system site-packages visible.
     # python3-gi (PyGObject) is an apt-only package — it cannot be pip
     # installed because it links against system libffi/glib/gobject-
@@ -571,7 +597,9 @@ main_install_flow() {
     # is needed here: the agent-package install steps that immediately follow
     # populate whatever a recreate cleared.
     ensure_venv_pip || warn "venv pip could not be recovered before the package install; the health gate will catch a failed import."
+    ados_stage_end
 
+    ados_stage_begin "Installing agent software"
     # Record the active release channel up front so the journal shows which
     # path was taken. stable installs a signed prebuilt wheel + deploy-bundle
     # pinned to a tag; edge (default) clones + builds from source.
@@ -642,16 +670,20 @@ main_install_flow() {
 
         # Install the agent package (REQUIRED)
         ADOS_CURRENT_STEP="install-agent-package"
-        info "Installing ados-drone-agent..."
+        info "Installing ados-drone-agent (this can take a couple of minutes)..."
         "${VENV_DIR}/bin/pip" install --upgrade pip --quiet
         if [ -n "${FRESH_REPO_DIR}" ]; then
-            "${VENV_DIR}/bin/pip" install "${FRESH_REPO_DIR}/repo" --quiet
+            ados_with_heartbeat "Installing agent software" \
+                "${VENV_DIR}/bin/pip" install "${FRESH_REPO_DIR}/repo" --quiet
         else
-            "${VENV_DIR}/bin/pip" install "git+${REPO_URL}" --quiet
+            ados_with_heartbeat "Installing agent software" \
+                "${VENV_DIR}/bin/pip" install "git+${REPO_URL}" --quiet
         fi
         checkpoint_mark agent-package
     fi
+    ados_stage_end
 
+    ados_stage_begin "Configuring radio driver"
     # Resolve agent profile. Ground-station profile pulls extra apt deps,
     # the RTL8812EU DKMS driver, the ground-station python extras, and the
     # mesh dependency bundle (batctl + avahi + wpasupplicant-mesh-sae).
@@ -689,7 +721,9 @@ main_install_flow() {
         # `mesh_capable: true` when a carrier adapter is present.
         install_mesh_deps
     fi
+    ados_stage_end
 
+    ados_stage_begin "Configuring display and identity"
     # SPI LCD on the 40-pin header (e.g. Waveshare 3.5" RPi LCD on Cubie
     # A7Z or Rock 5C). The driver script activates the right device-tree
     # overlay, writes /etc/ados/display.conf, and queues the kernel
@@ -711,7 +745,9 @@ main_install_flow() {
     if [ -n "$PAIR_CODE" ]; then
         write_pairing "$PAIR_CODE"
     fi
+    ados_stage_end
 
+    ados_stage_begin "Installing system services"
     # Install systemd service (REQUIRED — supervisor + profile units)
     install_systemd_service
     checkpoint_mark systemd
@@ -720,17 +756,21 @@ main_install_flow() {
     # running agent can re-invoke them later (in particular the wizard's
     # display step). Runs from the freshly-cloned tree before cleanup.
     persist_repo_artifacts
+    ados_stage_end
 
+    ados_stage_begin "Building radio link software"
     # wfb-ng userspace from the vendored source. Runs BEFORE the temp-repo
     # cleanup so vendor/wfb-ng/ is still on disk. Idempotent — skips when
     # wfb_tx is already present from a previous install.
-    install_wfb_ng_from_vendor
+    ados_with_heartbeat "Building radio link software" install_wfb_ng_from_vendor
 
     # Clean up temp repo if we cloned one
     if [ -n "${FRESH_REPO_DIR}" ]; then
         rm -rf "${FRESH_REPO_DIR}"
     fi
+    ados_stage_end
 
+    ados_stage_begin "Finalizing setup"
     # Install global symlinks (ados, ados-agent → /usr/local/bin/) (REQUIRED)
     install_global_symlinks
     checkpoint_mark global-symlinks
@@ -743,17 +783,23 @@ main_install_flow() {
     # Tighten permissions on any secret-bearing files in /etc/ados. Idempotent;
     # safe to run on every install/upgrade after all file writes have settled.
     harden_secret_perms
+    ados_stage_end
 
+    ados_stage_begin "Verifying installation"
     # Print summary (blocks on wait_for_api_ready so AGENT_API_VERSION is set
     # before the health gate re-probes the API).
     print_status
-    print_pairing_code
 
     # Success contract: assert the REQUIRED components are live, write
     # /var/lib/ados/install-result.json, and propagate a non-zero exit when
     # a REQUIRED step failed so the dispatcher's exit code reflects reality.
-    # Optional-only failures downgrade to "degraded" and still exit 0.
+    # Optional-only failures downgrade to "degraded" and still exit 0. The
+    # pairing code is printed last, only on success, so it is the final thing
+    # the operator sees.
     if run_health_gate; then
+        ados_stage_end
+        ados_install_summary
+        print_pairing_code
         exit 0
     fi
     exit 1
