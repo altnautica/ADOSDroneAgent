@@ -67,36 +67,19 @@ install_display_driver() {
 
     # Resolve the display selection. An explicit ADOS_DISPLAY=<id> (or
     # ADOS_DISPLAY=none) from the operator always wins. With no explicit
-    # value the default is profile-aware:
+    # value the default is "auto" on every profile: the overlay installer's
+    # auto path detects what is physically present and resolves to it.
     #
-    #   * drone / lite — default to "none". A headless flight rig has no
-    #     panel attached. The auto-pickable display on Rockchip boards is
-    #     a boot-critical SPI-LCD overlay (it rewrites the board's only
-    #     boot config via u-boot-update and queues a framebuffer driver
-    #     to load every boot). Provisioning that against absent hardware
-    #     leaves the box unbootable, and it re-applies on every boot so a
-    #     power cycle cannot recover it. A drone must never auto-provision
-    #     one.
-    #
-    #   * ground-station — default to "auto". A ground unit usually does
-    #     carry a status panel, so it keeps the auto-detect behaviour.
-    #     (The overlay script's own auto path is also defensive and will
-    #     not silently apply a boot-critical SPI-LCD when only that type
-    #     is on offer — see scripts/drivers/install-display-overlay.sh.)
-    local display_arg="${ADOS_DISPLAY:-}"
-    if [ -z "${display_arg}" ]; then
-        case "${ADOS_PROFILE:-drone}" in
-            drone|lite|lite-rs|lite_rs)
-                display_arg="none"
-                ;;
-            ground_station|ground-station)
-                display_arg="auto"
-                ;;
-            *)
-                display_arg="none"
-                ;;
-        esac
-    fi
+    # A drone (or any board) with no panel attached: detection finds no
+    # bound SPI-LCD, no HDMI, no I2C OLED, and resolves to display_id=none
+    # with zero boot-config writes. A board WITH a panel attached gets it.
+    # A board that declares an SPI-LCD but has not bound it yet goes through
+    # apply-verify-auto-revert (snapshot the boot config, apply the overlay,
+    # arm a boot-time probe that confirms the panel next boot or restores
+    # the snapshot). No profile is treated as "never has a display": the
+    # presence detection decides, so the same safe outcome holds for a
+    # headless drone while a drone WITH a status panel now gets one.
+    local display_arg="${ADOS_DISPLAY:-auto}"
 
     info "Running LCD overlay installer (display: ${display_arg})..."
     "${script_path}" --display "${display_arg}" || {

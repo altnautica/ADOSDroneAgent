@@ -1,0 +1,27 @@
+[Unit]
+Description=ADOS display presence probe (apply-verify-auto-revert)
+# Runs only while a display overlay is on probation: an SPI-LCD overlay was
+# applied to the boot config before the panel was confirmed present. This
+# oneshot fires once on the next boot to either CONFIRM the panel (clear
+# probation, mark the display enabled) or AUTO-REVERT the boot config from
+# the snapshot the installer saved, so a blind apply on a board with no
+# panel self-heals within one reboot instead of leaving it unbootable.
+ConditionPathExists=/etc/ados/display.probation
+# The framebuffer console driver binds the SPI LCD late in kernel boot, so
+# settle udev + wait for modules before we judge presence. Order Before the
+# display-driving services so the verdict (confirm / revert + marker state)
+# is settled before they read it.
+After=local-fs.target systemd-modules-load.service systemd-udev-settle.service
+Wants=systemd-udev-settle.service
+Before=ados-oled.service ados-fbcon-detach.service ados-supervisor.service
+
+[Service]
+Type=oneshot
+ExecStart=/opt/ados/venv/bin/python -m ados.services.display_probe
+RemainAfterExit=yes
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ados-display-probe
+
+[Install]
+WantedBy=multi-user.target

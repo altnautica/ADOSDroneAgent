@@ -112,6 +112,18 @@ PAIRING_JSON = ADOS_ETC_DIR / "pairing.json"
 PROFILE_CONF = ADOS_ETC_DIR / "profile.conf"
 BOARD_OVERRIDE_PATH = ADOS_ETC_DIR / "board_override"
 DISPLAY_CONF_PATH = ADOS_ETC_DIR / "display.conf"
+# Persistent marker written ONLY when a display has been provisioned or a
+# physically-present panel was recognized. Services that drive a display
+# (the on-board UI service, framebuffer-console detach) gate on this file
+# so they skip cleanly on a board with no panel instead of running and
+# failing. Removed on the no-display path.
+DISPLAY_ENABLED_PATH = ADOS_ETC_DIR / "display.enabled"
+# Probation marker for the apply-verify-auto-revert path. Written when a
+# boot-critical SPI-LCD overlay is applied blind on a board that declares
+# the panel but where it is not yet bound. Records the boot-config snapshot
+# path so the boot-time probe can self-heal: confirm the panel after the
+# overlay-applying reboot, or restore the snapshot when it never bound.
+DISPLAY_PROBATION_PATH = ADOS_ETC_DIR / "display.probation"
 ENV_FILE = ADOS_ETC_DIR / "env"
 FIREWALL_RULES_PATH = ADOS_ETC_DIR / "firewall.rules"
 AP_PASSPHRASE_PATH = ADOS_ETC_DIR / "ap-passphrase"

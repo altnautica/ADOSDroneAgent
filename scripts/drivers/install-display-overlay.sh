@@ -105,12 +105,36 @@ MODULES_LOAD_DIR="${ADOS_MODULES_LOAD_DIR:-/etc/modules-load.d}"
 BOOT_DIR="${ADOS_BOOT_DIR:-/boot}"
 DISPLAY_CONF="${ADOS_DISPLAY_CONF:-${ETC_ADOS_DIR}/display.conf}"
 MODULES_LOAD_FILE="${ADOS_MODULES_LOAD_FILE:-${MODULES_LOAD_DIR}/ados-display.conf}"
+# Persistent marker written only when a panel is provisioned or a present
+# panel is recognized; removed on the no-display path. Services that drive a
+# display gate on it so they skip cleanly when no panel is attached.
+DISPLAY_ENABLED_FILE="${ADOS_DISPLAY_ENABLED_FILE:-${ETC_ADOS_DIR}/display.enabled}"
+# Probation marker for the apply-verify-auto-revert path. Records the
+# boot-config snapshot so the boot-time probe can self-heal.
+DISPLAY_PROBATION_FILE="${ADOS_DISPLAY_PROBATION_FILE:-${ETC_ADOS_DIR}/display.probation}"
+
+# Presence-detection roots. Overridable via env so the bats suite can mock
+# the kernel sysfs + /dev surfaces under a temp tree and assert the
+# detection verdict without root or real hardware.
+SYS_GRAPHICS_DIR="${ADOS_SYS_GRAPHICS_DIR:-/sys/class/graphics}"
+SYS_INPUT_DIR="${ADOS_SYS_INPUT_DIR:-/sys/class/input}"
+SYS_DRM_DIR="${ADOS_SYS_DRM_DIR:-/sys/class/drm}"
+DEV_DRI_DIR="${ADOS_DEV_DRI_DIR:-/dev/dri}"
+# i2cdetect can be stubbed in tests via ADOS_I2CDETECT_BIN. The I2C bus the
+# board exposes the OLED on (bus 1 on every supported board today).
+I2CDETECT_BIN="${ADOS_I2CDETECT_BIN:-i2cdetect}"
+I2C_OLED_BUS="${ADOS_I2C_OLED_BUS:-1}"
 
 # ----------------------------------------------------------------------------
 # Argument parsing
 # ----------------------------------------------------------------------------
 BOARD_ID="${ADOS_BOARD_ID:-auto}"
 DISPLAY_ID="${ADOS_DISPLAY:-auto}"
+# Resolved presence verdict, set by the auto branch's detection ladder.
+# "explicit" when the operator forced a panel id (the historical opt-in
+# path: apply the overlay, no probation — the operator asserts the panel
+# is wired). The auto branch overwrites this with the detected state.
+DISPLAY_PRESENCE="explicit"
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -130,7 +154,20 @@ if [ "$(id -u)" -ne 0 ] && [ "${ADOS_OVERLAY_ALLOW_NONROOT:-0}" != "1" ]; then
 fi
 
 if [ "${DISPLAY_ID}" = "none" ]; then
-    info "Display install skipped (--display none)."
+    # Explicit opt-out. Record the disabled state and remove the persistent
+    # marker so display-driving services skip cleanly, matching the auto
+    # no-display path. Touch nothing boot-critical.
+    install -d -m 0755 "${ETC_ADOS_DIR}"
+    cat > "${DISPLAY_CONF}" <<EOF
+# Written by scripts/drivers/install-display-overlay.sh. Display explicitly
+# disabled (--display none). Nothing written to the boot config.
+display_id=none
+has_touch=false
+display_presence=disabled
+EOF
+    chmod 0644 "${DISPLAY_CONF}"
+    rm -f "${DISPLAY_ENABLED_FILE}"
+    info "Display install skipped (--display none); display_id=none, marker removed."
     exit 0
 fi
 
@@ -215,6 +252,157 @@ display_type_from_yaml() {
     ' "${yaml}" 2>/dev/null
 }
 
+# ----------------------------------------------------------------------------
+# Per-panel attribute readers from the board YAML
+# ----------------------------------------------------------------------------
+
+# Read an arbitrary scalar key (controller / touch_chip / ...) of a
+# display entry, scoped to the top-level displays: block and keyed on the
+# display id. Pure awk; mirrors display_type_from_yaml's block scoping so
+# it works on a fresh BSP without PyYAML.
+display_key_from_yaml() {
+    local board="$1" display="$2" key="$3"
+    local yaml="${REPO_ROOT}/src/ados/hal/boards/${board}.yaml"
+    [ -f "${yaml}" ] || return 0
+    awk -v want="${display}" -v key="${key}" '
+        /^displays:/ { in_displays = 1; next }
+        in_displays && /^[^[:space:]]/ { in_displays = 0 }
+        in_displays {
+            if ($0 ~ /^[[:space:]]*-[[:space:]]*id:[[:space:]]*/) {
+                line = $0
+                sub(/^[[:space:]]*-[[:space:]]*id:[[:space:]]*/, "", line)
+                gsub(/[[:space:]]/, "", line)
+                cur_id = line
+                next
+            }
+            if (cur_id == want && $0 ~ ("^[[:space:]]*" key ":[[:space:]]*")) {
+                line = $0
+                sub(("^[[:space:]]*" key ":[[:space:]]*"), "", line)
+                gsub(/[[:space:]]/, "", line)
+                print line
+                exit
+            }
+        }
+    ' "${yaml}" 2>/dev/null
+}
+
+# Map an SPI-LCD controller name (ILI9486 / ST7789V / ...) to the fbtft
+# driver name the kernel exports under /sys/class/graphics/fbN/name. The
+# panel is "bound" only when one of those framebuffers reports this name.
+fbtft_name_for_controller() {
+    local controller
+    controller="$(echo "$1" | tr '[:upper:]' '[:lower:]')"
+    case "${controller}" in
+        ili9486) echo "fb_ili9486" ;;
+        ili9341) echo "fb_ili9341" ;;
+        ili9340) echo "fb_ili9340" ;;
+        st7789v) echo "fb_st7789v" ;;
+        st7735r) echo "fb_st7735r" ;;
+        hx8347d) echo "fb_hx8347d" ;;
+        hx8353d) echo "fb_hx8353d" ;;
+        *)       echo "" ;;
+    esac
+}
+
+# ----------------------------------------------------------------------------
+# Physical presence detection — brick-free, read-only sysfs probes
+# ----------------------------------------------------------------------------
+
+# Is a supported SPI-LCD panel already BOUND right now?
+#
+# Two independent confirmations, both required:
+#   1. a framebuffer whose /sys/class/graphics/fbN/name carries the panel's
+#      fbtft controller name (e.g. fb_ili9486). Matched by NAME across every
+#      fb index because the SPI LCD lands on fb0 when no DRM/HDMI claims it
+#      (headless), or fb1 when one does.
+#   2. an input device whose /sys/class/input/eventN/device/name reports the
+#      panel's resistive touch controller (e.g. "ADS7846 Touchscreen").
+#
+# Echoes the matched fbtft framebuffer device name (e.g. "fb0") on success
+# and returns 0; returns 1 (no output) when not bound. Pure sysfs reads — no
+# boot-config touch, zero brick risk.
+detect_bound_spi_panel() {
+    local controller="$1" touch_chip="$2"
+    local fbtft_name
+    fbtft_name="$(fbtft_name_for_controller "${controller}")"
+    [ -n "${fbtft_name}" ] || return 1
+    [ -d "${SYS_GRAPHICS_DIR}" ] || return 1
+
+    local matched_fb=""
+    local fb_dir name_file fb_name
+    for fb_dir in "${SYS_GRAPHICS_DIR}"/fb*; do
+        [ -d "${fb_dir}" ] || continue
+        name_file="${fb_dir}/name"
+        [ -r "${name_file}" ] || continue
+        fb_name="$(cat "${name_file}" 2>/dev/null || true)"
+        if [ -n "${fb_name}" ] && printf '%s' "${fb_name}" | grep -q "${fbtft_name}"; then
+            matched_fb="$(basename "${fb_dir}")"
+            break
+        fi
+    done
+    [ -n "${matched_fb}" ] || return 1
+
+    # Confirm the touch controller as a second, independent signal so a
+    # framebuffer that merely happens to carry the fbtft name (without the
+    # rest of the panel actually wired) does not falsely confirm presence.
+    if [ -n "${touch_chip}" ]; then
+        detect_touch_input "${touch_chip}" || return 1
+    fi
+    echo "${matched_fb}"
+    return 0
+}
+
+# Is the panel's resistive touch controller present as an input device?
+# Scans /sys/class/input/eventN/device/name for a case-insensitive match on
+# the touch chip token (e.g. ADS7846). Returns 0 when found.
+detect_touch_input() {
+    local touch_chip
+    touch_chip="$(echo "$1" | tr '[:upper:]' '[:lower:]')"
+    [ -n "${touch_chip}" ] || return 1
+    [ -d "${SYS_INPUT_DIR}" ] || return 1
+    local ev_dir name_file dev_name
+    for ev_dir in "${SYS_INPUT_DIR}"/event*; do
+        [ -e "${ev_dir}/device/name" ] || continue
+        name_file="${ev_dir}/device/name"
+        dev_name="$(cat "${name_file}" 2>/dev/null | tr '[:upper:]' '[:lower:]' || true)"
+        case "${dev_name}" in
+            *"${touch_chip}"*) return 0 ;;
+        esac
+    done
+    return 1
+}
+
+# Is an HDMI / DRM display connected? Confirmed by a DRM render node
+# (/dev/dri/card0) plus at least one DRM connector reading "connected" in
+# /sys/class/drm/*/status. Read-only.
+detect_hdmi() {
+    [ -d "${DEV_DRI_DIR}" ] || return 1
+    ls "${DEV_DRI_DIR}"/card* >/dev/null 2>&1 || return 1
+    [ -d "${SYS_DRM_DIR}" ] || return 1
+    local status_file value
+    for status_file in "${SYS_DRM_DIR}"/*/status; do
+        [ -r "${status_file}" ] || continue
+        value="$(cat "${status_file}" 2>/dev/null | tr '[:upper:]' '[:lower:]' || true)"
+        [ "${value}" = "connected" ] && return 0
+    done
+    return 1
+}
+
+# Is an I2C OLED (SSD1306 / SH1106) present? An i2cdetect ACK at 0x3C or
+# 0x3D on the board's I2C bus. Read-only SMBus probe; harmless to the bus.
+detect_i2c_oled() {
+    command -v "${I2CDETECT_BIN}" >/dev/null 2>&1 || return 1
+    local out
+    out="$("${I2CDETECT_BIN}" -y "${I2C_OLED_BUS}" 2>/dev/null | tr '[:upper:]' '[:lower:]' || true)"
+    [ -n "${out}" ] || return 1
+    # i2cdetect prints a found device as its hex address; an unprobed/empty
+    # slot is "--" and a busy slot is "uu". Match the address token only.
+    if printf '%s' "${out}" | grep -qE '(^| )(3c|3d)( |$)'; then
+        return 0
+    fi
+    return 1
+}
+
 if [ "${DISPLAY_ID}" = "auto" ]; then
     case "${BOARD_ID}" in
         cubie-a7z|rock-5c-lite|rock-5c|rpi4b|rpi5|pi-zero-2w)
@@ -227,47 +415,119 @@ if [ "${DISPLAY_ID}" = "auto" ]; then
             ;;
     esac
 
-    # An auto-selected display must never apply a boot-critical SPI-LCD
-    # overlay. An SPI-LCD bind rewrites the board's boot config (e.g.
-    # extlinux.conf via u-boot-update on Rockchip) and queues a
-    # framebuffer driver to auto-load every boot. On a unit with no
-    # panel physically attached that combination can make the system
-    # unbootable, and because the modules-load + overlay re-apply on
-    # every boot a power cycle cannot recover it. An SPI-LCD also can't
-    # be presence-probed before we touch the boot config. So `auto` only
-    # ever applies a display that is safe to apply blind; for an SPI-LCD
-    # it is a no-op and the operator opts in explicitly with
-    # ADOS_DISPLAY=<id> (or the setup webapp). A future, genuinely
-    # detectable display type (e.g. hdmi) is still eligible for auto.
+    # Resolve the board-default panel's attributes once so the presence
+    # probes know what fbtft driver + touch controller to look for.
     auto_type="$(display_type_from_yaml "${BOARD_ID}" "${DISPLAY_ID}")"
-    if [ "${auto_type}" = "spi-lcd" ]; then
-        info "Board ${BOARD_ID} supports SPI-LCD panel '${DISPLAY_ID}', but auto mode will not provision it."
-        info "An SPI-LCD overlay modifies the boot config and loads a framebuffer driver on every boot;"
-        info "applying it blind on a unit with no panel attached can prevent the system from booting."
-        info "To enable it explicitly: re-run with ADOS_DISPLAY=${DISPLAY_ID} (or use the setup webapp)."
+    auto_controller="$(display_key_from_yaml "${BOARD_ID}" "${DISPLAY_ID}" controller)"
+    auto_touch_chip="$(display_key_from_yaml "${BOARD_ID}" "${DISPLAY_ID}" touch_chip)"
+
+    # Auto mode is FULLY AUTOMATIC and brick-safe. It detects what is
+    # physically present and resolves to it, in priority order:
+    #
+    #   1. SPI-LCD already bound  -> recognize it, write display.conf +
+    #      marker, change NO boot config (already applied; zero risk).
+    #   2. HDMI connected         -> resolve to the HDMI/kiosk path.
+    #   3. I2C OLED present       -> provision the OLED (module load only).
+    #   4. SPI-LCD declared but
+    #      NOT bound               -> apply-verify-auto-revert: snapshot the
+    #      boot config, apply the overlay, set probation. A boot-time probe
+    #      confirms the panel on the next reboot or restores the snapshot,
+    #      so a blind apply on a board with no panel self-heals within one
+    #      reboot instead of bricking.
+    #   5. nothing                -> display_id=none (disabled), no writes.
+    DISPLAY_PRESENCE="none"
+    BOUND_FB=""
+    if [ "${auto_type}" = "spi-lcd" ] && \
+        BOUND_FB="$(detect_bound_spi_panel "${auto_controller}" "${auto_touch_chip}")"; then
+        DISPLAY_PRESENCE="spi-bound"
+        info "SPI-LCD panel '${DISPLAY_ID}' is already bound at /dev/${BOUND_FB}; recognizing it (no boot-config change)."
+    elif detect_hdmi; then
+        DISPLAY_PRESENCE="hdmi"
+        info "HDMI display connected; auto mode resolves to the HDMI/kiosk path."
+        # No HDMI overlay panel is modelled in the board YAML today; the
+        # kiosk path is owned by the kiosk service, which binds to the DRM
+        # framebuffer directly. Treat HDMI as "no SPI panel to provision"
+        # and fall through to the none path, but leave the marker behind so
+        # display-driving services know a display surface exists.
         DISPLAY_ID="none"
+    elif detect_i2c_oled; then
+        DISPLAY_PRESENCE="i2c-oled"
+        info "I2C OLED detected; auto mode will provision the OLED (module load only, no boot-critical overlay)."
+        # The OLED needs no device-tree overlay; it binds over I2C at
+        # runtime. Skip the boot-config branch by resolving to none for the
+        # overlay step but still drop the marker so the OLED service runs.
+        DISPLAY_ID="none"
+    elif [ "${auto_type}" = "spi-lcd" ]; then
+        DISPLAY_PRESENCE="spi-probation"
+        info "Board ${BOARD_ID} declares SPI-LCD panel '${DISPLAY_ID}' but it is not bound yet."
+        info "Applying the overlay under probation: a boot-time probe confirms the panel on the next"
+        info "reboot, or auto-reverts the boot config if it never binds (self-healing, brick-safe)."
+        # DISPLAY_ID stays the panel id; the per-board branch applies the
+        # overlay and the probation marker is written after the snapshot.
     else
-        info "Auto-selected display: ${DISPLAY_ID}"
+        info "No display detected (no bound SPI-LCD, no HDMI, no I2C OLED)."
+        DISPLAY_ID="none"
     fi
 fi
 
-# The auto path may have resolved to "none" (SPI-LCD skip). Write a
-# display.conf reflecting no panel and exit cleanly so the on-board UI
-# service and heartbeat see a consistent "no display" state, matching
-# the explicit --display none contract above. Nothing is written to the
-# boot config or the modules-load directory on this path.
+# ----------------------------------------------------------------------------
+# Already-bound SPI-LCD: recognize it, change NO boot config.
+#
+# The panel is physically present and the kernel has already bound it (this
+# is the steady state on a Pi where the overlay was applied a boot ago, or
+# any board where the panel is wired). Write display.conf describing the
+# live framebuffer + the persistent marker, load the modules-load list for
+# resilience across reboots, and exit. We deliberately touch nothing
+# boot-critical — the overlay is already in effect, so re-applying it would
+# add brick risk for zero benefit.
+# ----------------------------------------------------------------------------
+if [ "${DISPLAY_PRESENCE}" = "spi-bound" ]; then
+    # Tag the provenance and skip the per-board overlay branch. The shared
+    # tail below writes the modules-load list (so the panel re-binds across
+    # reboots — modules-load.d is not boot-critical), the display.conf, and
+    # the persistent marker. We deliberately make NO boot-config edit: the
+    # overlay is already in effect, so re-applying it would add brick risk
+    # for zero benefit.
+    OVERLAY_SOURCE="present"
+    OVERLAY_REF="bound:${BOUND_FB}"
+    ACTIVATED_VIA="already-bound"
+    SKIP_BOARD_BRANCH=1
+fi
+
+# The auto path may have resolved to "none" (no panel, or HDMI / I2C-OLED
+# which need no device-tree overlay). Write a display.conf reflecting no
+# SPI panel and exit cleanly so the on-board UI service and heartbeat see a
+# consistent state. Nothing is written to the boot config or the
+# modules-load directory on this path.
+#
+# Marker policy: the persistent display.enabled marker is written when a
+# display SURFACE exists that a display-driving service should run for
+# (HDMI for the kiosk, I2C OLED for the UI service). It is REMOVED when
+# nothing is present so those services skip cleanly instead of failing.
 if [ "${DISPLAY_ID}" = "none" ]; then
     install -d -m 0755 "${ETC_ADOS_DIR}"
     cat > "${DISPLAY_CONF}" <<EOF
-# Written by scripts/drivers/install-display-overlay.sh. No display was
-# provisioned (auto mode declined a boot-critical panel, or none was
-# requested). Nothing was written to the boot config or modules-load.d.
+# Written by scripts/drivers/install-display-overlay.sh. No SPI-LCD panel
+# was provisioned (none requested, or a non-overlay surface was detected).
+# Nothing was written to the boot config or modules-load.d.
 display_id=none
 board=${BOARD_ID}
 has_touch=false
+display_presence=${DISPLAY_PRESENCE}
 EOF
     chmod 0644 "${DISPLAY_CONF}"
-    info "No display provisioned; wrote ${DISPLAY_CONF} (display_id=none)."
+    case "${DISPLAY_PRESENCE}" in
+        hdmi|i2c-oled)
+            : > "${DISPLAY_ENABLED_FILE}"
+            chmod 0644 "${DISPLAY_ENABLED_FILE}"
+            info "Display surface present (${DISPLAY_PRESENCE}); wrote ${DISPLAY_ENABLED_FILE}."
+            ;;
+        *)
+            rm -f "${DISPLAY_ENABLED_FILE}"
+            info "No display present; removed ${DISPLAY_ENABLED_FILE} (services skip cleanly)."
+            ;;
+    esac
+    info "No SPI panel provisioned; wrote ${DISPLAY_CONF} (display_id=none, presence=${DISPLAY_PRESENCE})."
     exit 0
 fi
 
@@ -280,6 +540,36 @@ ensure_dtc() {
     fi
     info "Installing device-tree-compiler..."
     DEBIAN_FRONTEND=noninteractive apt-get install -y device-tree-compiler
+}
+
+# Records the path of the most recently snapshotted boot config so the
+# probation marker can point the boot probe at it for auto-revert. Empty
+# until snapshot_boot_config runs.
+BOOT_CONFIG_SNAPSHOT=""
+BOOT_CONFIG_PATH=""
+
+# Snapshot a boot-config file before we edit it so the apply-verify-auto-
+# revert probe can restore it if the panel never binds. Idempotent: keeps
+# the FIRST (pristine) snapshot if one already exists, so re-runs never
+# overwrite the known-good baseline with an already-edited file. Records the
+# snapshot + live paths in BOOT_CONFIG_* for the probation marker. This is
+# what makes a blind overlay apply brick-safe on every board: a boot config
+# we touch is always restorable.
+snapshot_boot_config() {
+    local target="$1"
+    [ -f "${target}" ] || return 0
+    local bak="${target}.ados-bak"
+    BOOT_CONFIG_PATH="${target}"
+    if [ -f "${bak}" ]; then
+        BOOT_CONFIG_SNAPSHOT="${bak}"
+        return 0
+    fi
+    if cp -f "${target}" "${bak}" 2>/dev/null; then
+        BOOT_CONFIG_SNAPSHOT="${bak}"
+        info "Boot-config snapshot saved to ${bak}."
+    else
+        warn "Could not snapshot ${target}; auto-revert will be unavailable."
+    fi
 }
 
 # ----------------------------------------------------------------------------
@@ -295,6 +585,10 @@ activate_overlay_sun55i() {
             info "extlinux.conf already references ${overlay_basename}; skipping."
             return 0
         fi
+        # Snapshot before the edit so the boot probe can auto-revert if the
+        # panel never binds. Brick-safety: a touched boot config is always
+        # restorable.
+        snapshot_boot_config "${BOOT_DIR}/extlinux/extlinux.conf"
         # Add an fdtoverlays line under each LABEL block. Anchor on a
         # known append line. If the structure is non-standard the
         # operator can fix it; this is a best-effort additive edit.
@@ -317,6 +611,7 @@ activate_overlay_sun55i() {
             info "${env_file} already references ${overlay_basename}; skipping."
             return 0
         fi
+        snapshot_boot_config "${env_file}"
         if grep -q '^user_overlays=' "${env_file}"; then
             sed -i -E "s/^user_overlays=(.*)\$/user_overlays=\1 ${overlay_basename}/" "${env_file}"
         else
@@ -532,7 +827,12 @@ compile_and_install_upstream_dtbo() {
 
 # ----------------------------------------------------------------------------
 # Per-board branch
+#
+# Skipped entirely when the panel is ALREADY BOUND (spi-bound): there is
+# nothing to apply, and re-editing the boot config would only add brick
+# risk. The OVERLAY_* tags were already set on that path; preserve them.
 # ----------------------------------------------------------------------------
+if [ "${SKIP_BOARD_BRANCH:-0}" != "1" ]; then
 ACTIVATED_VIA="unknown"
 OVERLAY_SOURCE="unknown"
 OVERLAY_REF=""
@@ -649,6 +949,11 @@ case "${BOARD_ID}" in
                     info "Installed ${PI_OVERLAYS_DIR}/waveshare35a.dtbo from Waveshare upstream."
                 fi
                 info "Editing ${PI_CONFIG} for Waveshare 3.5 LCD."
+                # Snapshot config.txt before editing so the boot probe can
+                # auto-revert (including re-enabling vc4-kms-v3d) if the panel
+                # never binds. Brick-safety: a touched boot config is always
+                # restorable.
+                snapshot_boot_config "${PI_CONFIG}"
                 # Idempotently ensure dtparam=spi=on. Match a commented or
                 # uncommented variant; if missing, append.
                 if grep -qE '^[[:space:]]*#?[[:space:]]*dtparam=spi=on' "${PI_CONFIG}"; then
@@ -687,14 +992,63 @@ case "${BOARD_ID}" in
         exit 0
         ;;
 esac
+fi  # SKIP_BOARD_BRANCH guard
+
+# ----------------------------------------------------------------------------
+# Apply-verify-auto-revert probation.
+#
+# When the overlay was applied BLIND (auto mode, board declares the panel
+# but it was not yet bound), a boot-critical boot-config edit is now staged
+# but unconfirmed. Arm the self-heal: drop a probation marker recording the
+# boot-config snapshot the apply path saved (extlinux.conf.ados-bak), and
+# install a boot-time oneshot that confirms the panel on the next reboot or
+# restores the snapshot if it never binds. This is the ONLY path that
+# persists a boot-critical overlay without prior confirmed presence, and it
+# self-heals within one reboot.
+#
+# Every board's apply path (Allwinner extlinux/env, Pi config.txt, Rockchip
+# extlinux) snapshots the boot config it edits via snapshot_boot_config, so
+# BOOT_CONFIG_SNAPSHOT + BOOT_CONFIG_PATH point at a restorable baseline. The
+# probe restores that exact file if the panel never binds. The Rockchip
+# u-boot-update path saves its own extlinux.conf.ados-bak; pick that up as a
+# fallback when the helper did not run (BSP-managed rewrite).
+if [ "${DISPLAY_PRESENCE:-explicit}" = "spi-probation" ]; then
+    install -d -m 0755 "${ETC_ADOS_DIR}"
+    snapshot_path="${BOOT_CONFIG_SNAPSHOT}"
+    boot_config="${BOOT_CONFIG_PATH}"
+    if [ -z "${snapshot_path}" ] && [ -f "${BOOT_DIR}/extlinux/extlinux.conf.ados-bak" ]; then
+        snapshot_path="${BOOT_DIR}/extlinux/extlinux.conf.ados-bak"
+        boot_config="${BOOT_DIR}/extlinux/extlinux.conf"
+    fi
+    {
+        echo "# Written by install-display-overlay.sh. A boot-critical SPI-LCD"
+        echo "# overlay was applied blind (panel declared but not yet bound)."
+        echo "# ados-display-probe.service confirms the panel on the next boot"
+        echo "# or restores the boot config from the snapshot below."
+        echo "display_id=${DISPLAY_ID}"
+        echo "board=${BOARD_ID}"
+        echo "snapshot=${snapshot_path}"
+        echo "boot_config=${boot_config}"
+        echo "expected_fb_name=$(fbtft_name_for_controller "${auto_controller:-}")"
+        echo "touch_chip=${auto_touch_chip:-}"
+    } > "${DISPLAY_PROBATION_FILE}"
+    chmod 0644 "${DISPLAY_PROBATION_FILE}"
+    if [ -n "${snapshot_path}" ]; then
+        info "Probation armed: ${DISPLAY_PROBATION_FILE} (snapshot ${snapshot_path})."
+    else
+        warn "Overlay applied but no restorable boot-config snapshot was recorded;"
+        warn "the boot probe will confirm presence but cannot revert. Inspect the panel after reboot."
+    fi
+fi
 
 # ----------------------------------------------------------------------------
 # Module load list
 # ----------------------------------------------------------------------------
 install -d -m 0755 "${MODULES_LOAD_DIR}"
 cat > "${MODULES_LOAD_FILE}" <<'EOF'
-# Loaded by ados-display-overlay installer. Drives the SPI LCD bound
-# at /dev/fb1 plus the resistive touch chip exposed under /dev/input/.
+# Loaded by ados-display-overlay installer. Drives the SPI LCD plus the
+# resistive touch chip exposed under /dev/input/. The framebuffer lands on
+# fb0 or fb1 depending on whether a DRM/HDMI driver also claims a node.
 fbtft
 fb_ili9486
 ads7846
@@ -812,6 +1166,16 @@ activated_via=${ACTIVATED_VIA}
 EOF
 chmod 0644 "${DISPLAY_CONF}"
 info "Wrote ${DISPLAY_CONF}"
+
+# Persistent marker: a panel was provisioned or recognized. The on-board UI
+# service + framebuffer-console detach gate on this file so they run for
+# this board (and skip cleanly on boards with no panel). Written on every
+# provisioned path (spi-bound, spi-probation, explicit). Removed on the
+# none path above.
+install -d -m 0755 "${ETC_ADOS_DIR}"
+: > "${DISPLAY_ENABLED_FILE}"
+chmod 0644 "${DISPLAY_ENABLED_FILE}"
+info "Wrote ${DISPLAY_ENABLED_FILE}"
 
 # Try runtime activation before falling back to the reboot message.
 # On Pi OS the `dtoverlay` tool can apply a config-tree overlay live;

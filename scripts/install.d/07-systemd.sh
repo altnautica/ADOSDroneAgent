@@ -211,10 +211,13 @@ disable_other_profile_units() {
 # of the detected profile.
 enable_universal_units() {
     info "Enabling cross-profile systemd units..."
-    # ados-fbcon-detach is profile-agnostic. The unit's own
-    # ConditionPathExists gates ensure it no-ops on boards that don't
-    # have a provisioned SPI LCD, so enabling it everywhere is safe.
-    for unit in ados-peripherals.service ados-fbcon-detach.service; do
+    # ados-fbcon-detach + ados-display-probe are profile-agnostic. Each
+    # unit's own ConditionPathExists gate makes it a clean no-op on boards
+    # that have no provisioned SPI LCD (fbcon-detach) or no overlay on
+    # probation (display-probe), so enabling them everywhere is safe. The
+    # display probe self-heals a blind overlay apply within one reboot.
+    for unit in ados-peripherals.service ados-fbcon-detach.service \
+                ados-display-probe.service; do
         if [ -f "/etc/systemd/system/${unit}" ]; then
             systemctl enable "${unit}" 2>/dev/null || true
         else

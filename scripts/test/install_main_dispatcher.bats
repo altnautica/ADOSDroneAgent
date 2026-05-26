@@ -1275,15 +1275,26 @@ overlay_setup() {
         echo "missing overlay installer: ${OVL_SCRIPT}" >&2
         return 1
     }
-    mkdir -p "${OVL_TMP}/boot" "${OVL_TMP}/etc-ados" "${OVL_TMP}/modules-load" "${OVL_TMP}/bin"
+    mkdir -p "${OVL_TMP}/boot" "${OVL_TMP}/etc-ados" "${OVL_TMP}/modules-load" \
+        "${OVL_TMP}/bin" "${OVL_TMP}/sys-graphics" "${OVL_TMP}/sys-input" \
+        "${OVL_TMP}/sys-drm" "${OVL_TMP}/dev-dri"
+    # An i2cdetect stub that reports NO OLED by default. Detection is then
+    # deterministic = "no panel present" unless a test mocks one in.
+    cat > "${OVL_TMP}/bin/i2cdetect-none" <<'EOF'
+#!/usr/bin/env bash
+echo "30: -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- --"
+exit 0
+EOF
+    chmod +x "${OVL_TMP}/bin/i2cdetect-none"
 }
 
 overlay_teardown() {
     [ -n "${OVL_TMP:-}" ] && rm -rf "${OVL_TMP}"
 }
 
-# Run the overlay installer with every write path redirected into OVL_TMP.
-# $@ = installer args. Extra PATH (mock tools) comes via OVL_EXTRA_PATH.
+# Run the overlay installer with every write path AND every presence probe
+# redirected into OVL_TMP, so detection is deterministic on a CI host (no
+# real panel). $@ = installer args. Extra PATH (mock tools) via OVL_EXTRA_PATH.
 overlay_run() {
     PATH="${OVL_EXTRA_PATH:-}${OVL_EXTRA_PATH:+:}${PATH}" \
     ADOS_OVERLAY_ALLOW_NONROOT=1 \
@@ -1292,55 +1303,96 @@ overlay_run() {
     ADOS_MODULES_LOAD_DIR="${OVL_TMP}/modules-load" \
     ADOS_DISPLAY_CONF="${OVL_TMP}/etc-ados/display.conf" \
     ADOS_MODULES_LOAD_FILE="${OVL_TMP}/modules-load/ados-display.conf" \
+    ADOS_DISPLAY_ENABLED_FILE="${OVL_TMP}/etc-ados/display.enabled" \
+    ADOS_DISPLAY_PROBATION_FILE="${OVL_TMP}/etc-ados/display.probation" \
+    ADOS_SYS_GRAPHICS_DIR="${OVL_TMP}/sys-graphics" \
+    ADOS_SYS_INPUT_DIR="${OVL_TMP}/sys-input" \
+    ADOS_SYS_DRM_DIR="${OVL_TMP}/sys-drm" \
+    ADOS_DEV_DRI_DIR="${OVL_TMP}/dev-dri" \
+    ADOS_I2CDETECT_BIN="${OVL_I2CDETECT:-${OVL_TMP}/bin/i2cdetect-none}" \
     bash "${OVL_SCRIPT}" "$@"
 }
 
-@test "overlay --display auto is a no-op on a board whose only display is an SPI-LCD" {
+@test "overlay --display auto on an SPI-LCD board with no panel arms self-healing probation" {
     overlay_setup
-    # rock-5c-lite's HAL YAML lists exactly one display: waveshare35a, type
-    # spi-lcd. Auto must refuse to provision it: return 0, write display_id=none,
-    # touch NOTHING under /boot and NOTHING under /etc/modules-load.d.
-    run overlay_run --board rock-5c-lite --display auto
-    [ "$status" -eq 0 ]
-    [[ "$output" == *"auto mode will not provision it"* ]]
-
-    # No boot-config edit.
-    boot_files="$(find "${OVL_TMP}/boot" -type f 2>/dev/null | wc -l | tr -d ' ')"
-    # No modules-load.d drop-in.
-    ml_files="$(find "${OVL_TMP}/modules-load" -type f 2>/dev/null | wc -l | tr -d ' ')"
-    # display.conf records "none".
-    conf_id="$(grep -E '^display_id=' "${OVL_TMP}/etc-ados/display.conf" 2>/dev/null || true)"
+    # cubie-a7z's HAL YAML lists exactly one display: waveshare35a, type
+    # spi-lcd. With no panel physically present (the mocked sysfs tree is
+    # empty), auto takes the apply-verify-auto-revert path: snapshot the boot
+    # config first (the cubie path appends an fdtoverlays line to extlinux),
+    # apply the overlay, and arm a boot-time probe that confirms the panel
+    # next boot or restores the snapshot. Mock dtc so the apply can complete
+    # on a CI host. Brick-safety invariant: the boot config is snapshotted
+    # BEFORE any edit, so a self-heal is always possible.
+    mkdir -p "${OVL_TMP}/boot/extlinux"
+    printf 'LABEL ados\n  append root=/dev/mmcblk0p2 rw\n' \
+        > "${OVL_TMP}/boot/extlinux/extlinux.conf"
+    cat > "${OVL_TMP}/bin/dtc" <<'EOF'
+#!/usr/bin/env bash
+out=""; while [ $# -gt 0 ]; do [ "$1" = "-o" ] && out="$2"; shift; done
+[ -n "$out" ] && printf 'DTBO' > "$out"; exit 0
+EOF
+    chmod +x "${OVL_TMP}/bin/dtc"
+    OVL_EXTRA_PATH="${OVL_TMP}/bin"
+    run overlay_run --board cubie-a7z --display auto
+    status_seen="$status"
+    # The old blunt auto-skip message must be GONE — real detection replaced it.
+    no_skip=1; [[ "$output" == *"auto mode will not provision it"* ]] && no_skip=0
+    # Brick-safety: a snapshot of the boot config exists before any edit.
+    has_snapshot=0
+    [ -f "${OVL_TMP}/boot/extlinux/extlinux.conf.ados-bak" ] && has_snapshot=1
+    # A probation marker was armed for the boot probe.
+    has_probation=0
+    [ -f "${OVL_TMP}/etc-ados/display.probation" ] && has_probation=1
     overlay_teardown
-    [ "$boot_files" = "0" ]
-    [ "$ml_files" = "0" ]
-    [ "${conf_id}" = "display_id=none" ]
+    [ "${status_seen}" -eq 0 ]
+    [ "${no_skip}" -eq 1 ]
+    [ "${has_snapshot}" -eq 1 ]
+    [ "${has_probation}" -eq 1 ]
 }
 
-@test "overlay auto-skip writes no extlinux.conf and runs no u-boot-update" {
+@test "overlay auto snapshots the Radxa extlinux before u-boot-update so a revert is possible" {
     overlay_setup
-    # Belt-and-suspenders: even with a managed.list + extlinux.conf present
-    # (the Radxa Bookworm shape that the brick incident hit), auto mode must
-    # not invoke u-boot-update or modify the boot config.
+    # Radxa Bookworm shape (managed.list + extlinux.conf) — the layout the
+    # brick incident hit. With no panel present, auto applies under probation
+    # but MUST snapshot extlinux.conf first so the boot probe can restore it.
+    # u-boot-update is mocked to succeed; the point is the pre-edit snapshot.
     mkdir -p "${OVL_TMP}/boot/dtbo" "${OVL_TMP}/boot/extlinux"
     : > "${OVL_TMP}/boot/dtbo/managed.list"
-    printf 'LABEL ados\n  append root=/dev/mmcblk0p2 rw\n' > "${OVL_TMP}/boot/extlinux/extlinux.conf"
+    printf 'LABEL ados\n  kernel /vmlinuz\n  fdt /b.dtb\n  append root=/dev/mmcblk0p2 rw rootwait console=ttyS2,1500000\n' \
+        > "${OVL_TMP}/boot/extlinux/extlinux.conf"
     extlinux_before="$(cat "${OVL_TMP}/boot/extlinux/extlinux.conf")"
-    # A u-boot-update mock that screams if it ever runs.
-    cat > "${OVL_TMP}/bin/u-boot-update" <<'EOF'
+    # A u-boot-update mock that regenerates a well-formed extlinux.conf
+    # (> 100 bytes, mentioning the overlay) so the rock path's own size +
+    # reference sanity checks pass and the apply is considered successful.
+    cat > "${OVL_TMP}/bin/u-boot-update" <<EOF
 #!/usr/bin/env bash
-echo "U_BOOT_UPDATE_RAN_UNEXPECTEDLY"
+printf 'LABEL ados\\n  kernel /vmlinuz\\n  fdt /b.dtb\\n  fdtoverlays /boot/dtbo/rk3588-spi4-m2-cs0-waveshare35.dtbo\\n  append root=/dev/mmcblk0p2 rw rootwait console=ttyS2,1500000\\n' > "${OVL_TMP}/boot/extlinux/extlinux.conf"
 exit 0
 EOF
-    chmod +x "${OVL_TMP}/bin/u-boot-update"
+    cat > "${OVL_TMP}/bin/dtc" <<'EOF'
+#!/usr/bin/env bash
+out=""; while [ $# -gt 0 ]; do [ "$1" = "-o" ] && out="$2"; shift; done
+[ -n "$out" ] && printf 'DTBO' > "$out"; exit 0
+EOF
+    cat > "${OVL_TMP}/bin/cpp" <<'EOF'
+#!/usr/bin/env bash
+out=""; while [ $# -gt 0 ]; do [ "$1" = "-o" ] && out="$2"; shift; done
+[ -n "$out" ] && printf '/dts-v1/;\n' > "$out"; exit 0
+EOF
+    chmod +x "${OVL_TMP}/bin/u-boot-update" "${OVL_TMP}/bin/dtc" "${OVL_TMP}/bin/cpp"
     OVL_EXTRA_PATH="${OVL_TMP}/bin"
     run overlay_run --board rock-5c-lite --display auto
-    extlinux_after="$(cat "${OVL_TMP}/boot/extlinux/extlinux.conf")"
-    managed_after="$(cat "${OVL_TMP}/boot/dtbo/managed.list")"
+    # The pre-edit snapshot exists and matches the original extlinux.conf, so
+    # the boot probe can restore a known-good config if the panel never binds.
+    snap_ok=0
+    if [ -f "${OVL_TMP}/boot/extlinux/extlinux.conf.ados-bak" ]; then
+        [ "$(cat "${OVL_TMP}/boot/extlinux/extlinux.conf.ados-bak")" = "${extlinux_before}" ] && snap_ok=1
+    fi
+    probation_points_at_snapshot=0
+    grep -q 'extlinux.conf.ados-bak' "${OVL_TMP}/etc-ados/display.probation" 2>/dev/null && probation_points_at_snapshot=1
     overlay_teardown
-    [ "$status" -eq 0 ]
-    [[ "$output" != *"U_BOOT_UPDATE_RAN_UNEXPECTEDLY"* ]]
-    [ "${extlinux_before}" = "${extlinux_after}" ]
-    [ -z "${managed_after}" ]
+    [ "${snap_ok}" -eq 1 ]
+    [ "${probation_points_at_snapshot}" -eq 1 ]
 }
 
 @test "overlay explicit --display waveshare35a still attempts to apply (no auto-skip)" {
@@ -1439,14 +1491,18 @@ EOF
     rm -rf "${tmp}"
 }
 
-@test "install_display_driver defaults to none on the drone profile" {
+# Every profile now defaults to "auto": the overlay installer's auto path
+# detects what is physically present and resolves to it. A drone with no
+# panel resolves to display_id=none with zero boot writes; a drone WITH a
+# panel now gets it. The profile no longer pre-decides "never has a display".
+@test "install_display_driver defaults to auto on the drone profile" {
     output="$(idd_run drone)"
-    [[ "$output" == *"CAPTURED_DISPLAY=none"* ]]
+    [[ "$output" == *"CAPTURED_DISPLAY=auto"* ]]
 }
 
-@test "install_display_driver defaults to none on the lite profile" {
+@test "install_display_driver defaults to auto on the lite profile" {
     output="$(idd_run lite-rs)"
-    [[ "$output" == *"CAPTURED_DISPLAY=none"* ]]
+    [[ "$output" == *"CAPTURED_DISPLAY=auto"* ]]
 }
 
 @test "install_display_driver defaults to auto on the ground-station profile" {
