@@ -18,6 +18,14 @@ the project follows [Semantic Versioning](https://semver.org/).
   is always enforced; signatures are verified when a key is configured
   (`ADOS_DRIVER_PUBKEY`) and skipped in dev (`ADOS_PREBUILT_ALLOW_UNSIGNED`).
   Skippable with `ADOS_DRIVER_PREBUILT=0`.
+- **Driver build + publish pipeline.** A CI workflow builds the patched
+  RTL8812EU module against the stock Raspberry Pi OS kernels (Pi 3 / 4 / 5 /
+  Zero 2 W) inside distro-matched containers, records each module's SHA256
+  (and an optional minisign signature when a key is configured), and publishes
+  the modules plus a `drivers-manifest.json` as release assets that the
+  fast-path above consumes. Vendor-BSP kernels keep the on-device build path.
+  The fetch plus SHA256 plus vermagic-match chain is hardware-validated; a
+  kernel with no matching module falls back to the on-device build.
 
 ## [0.43.7] - 2026-05-27
 
