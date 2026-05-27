@@ -57,22 +57,28 @@ case "$(uname -m)" in
 esac
 
 # Fast-path: short-circuit ONLY when our DKMS build is installed on disk
-# (loaded + resolvable via modinfo + registered with DKMS). That guarantees
-# the module carries the mesh-enable patch and survives a reboot. A module
-# that is merely resident in RAM (e.g. left over after a `dkms remove` with
-# the .ko already gone from /lib/modules), or an unpatched stock/BSP module,
-# is NOT trusted — we fall through and (re)build it via DKMS below.
+# (loaded + resolvable via modinfo + registered with DKMS) AND its DKMS
+# source carries the current source patches. The patch marker below is the
+# tell: a build from before a driver-patch change reports as installed but
+# lacks the fix, so it must be rebuilt. Update the marker string whenever a
+# new source patch lands. A module merely resident in RAM (e.g. left over
+# after a `dkms remove`), or an unpatched stock/BSP module, is not trusted:
+# we fall through and (re)build it via DKMS below.
+PATCH_MARKER="MLME_IS_MONITOR(padapter) || MLME_IS_NULL(padapter)"
 if lsmod | awk '{print $1}' | grep -qx "${MODULE_NAME}"; then
+    _dkms_src="$(ls -d /usr/src/realtek-rtl88x2eu-*/core/rtw_mlme_ext.c 2>/dev/null | head -n1)"
     if modinfo "${MODULE_NAME}" >/dev/null 2>&1 \
-       && dkms status 2>/dev/null | grep -qiE 'rtl88x2eu|8812'; then
-        info "${MODULE_NAME} already installed via DKMS and loaded."
+       && dkms status 2>/dev/null | grep -qiE 'rtl88x2eu|8812' \
+       && [ -n "${_dkms_src}" ] \
+       && grep -qF "${PATCH_MARKER}" "${_dkms_src}"; then
+        info "${MODULE_NAME} already installed via DKMS (current patches) and loaded."
         # Breadcrumb so the heartbeat/GCS report the module source even
         # though the build steps below are skipped.
         mkdir -p /run/ados 2>/dev/null || true
         printf 'dkms\n' > /run/ados/wfb-module-source 2>/dev/null || true
         exit 0
     fi
-    info "${MODULE_NAME} is loaded but not a current DKMS build; rebuilding so the mesh-patched module is installed and reboot-persistent."
+    info "${MODULE_NAME} is loaded but not a current patched DKMS build; rebuilding so the patched module is installed and reboot-persistent."
 fi
 
 # --- Build the module from the vendored source via DKMS ---------------------
@@ -148,6 +154,30 @@ else
     warn "Mesh-enable patch not found at ${PATCH_FILE}. 802.11s mesh mode will not be compiled in."
 fi
 
+# Suppress the spurious mlme-disconnect warning. rtw_mlmeext_disconnect()
+# maps the adapter's role (AP/MESH/STA/ADHOC) to a disconnect action and
+# hits a catch-all rtw_warn_on(1) for anything else. A monitor-mode
+# interface (which is exactly how the radio link runs) has none of those
+# roles, so every monitor-mode interface-down trips the warning even
+# though the cleanup that follows is harmless. The patch adds an explicit
+# monitor / no-link case so the path stays quiet. Applied before DKMS
+# registers the source; idempotent (the marker line gates re-application).
+MLME_PATCH_FILE="${REPO_ROOT}/data/driver-patches/monitor-disconnect-warn.patch"
+MLME_SRC="${VENDOR_DIR}/core/rtw_mlme_ext.c"
+if [ -f "${MLME_PATCH_FILE}" ] && [ -f "${MLME_SRC}" ]; then
+    if grep -qF "MLME_IS_MONITOR(padapter) || MLME_IS_NULL(padapter)" "${MLME_SRC}"; then
+        info "Monitor-mode disconnect patch already present."
+    else
+        info "Applying monitor-mode disconnect patch to ${MLME_SRC}"
+        ( cd "${VENDOR_DIR}" && patch -p1 -N --forward < "${MLME_PATCH_FILE}" ) || {
+            error "Monitor-mode disconnect patch application failed."
+            exit 2
+        }
+    fi
+else
+    warn "Monitor-mode disconnect patch not found; the harmless mlme-disconnect warning will remain in dmesg."
+fi
+
 # ARCH was already exported near the top so both the prebuilt lookup and
 # this DKMS build agree on the kernel's arch naming (arm64 / arm).
 
@@ -177,6 +207,11 @@ if dkms status "${DKMS_PACKAGE}" 2>/dev/null | grep -q "${DRIVER_VERSION}"; then
     dkms remove "${DKMS_NAME}" --all 2>/dev/null || true
     rm -rf "/var/lib/dkms/${DKMS_PACKAGE}/${DRIVER_VERSION}" 2>/dev/null || true
 fi
+# Always clear the copied source tree before re-adding. The package version
+# is unchanged across source-patch revisions, so a stale /usr/src tree from
+# an earlier build would otherwise be reused (dkms add does not overwrite an
+# existing tree) and the freshly-patched source would never reach the build.
+rm -rf "/usr/src/${DKMS_PACKAGE}-${DRIVER_VERSION}" 2>/dev/null || true
 
 info "dkms add ${VENDOR_DIR}"
 dkms add "${VENDOR_DIR}" || {

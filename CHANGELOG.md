@@ -4,6 +4,23 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.43.4] - 2026-05-27
+
+### Fixed
+
+- **Silenced the spurious Wi-Fi driver warning on monitor-mode teardown.**
+  The radio driver maps the adapter's role (AP / mesh / station / adhoc)
+  to a disconnect action and warns on anything else. A monitor-mode
+  interface, which is how the radio link runs, has none of those roles,
+  so every interface-down logged a kernel warning even though the cleanup
+  that follows is harmless. A source patch
+  (`data/driver-patches/monitor-disconnect-warn.patch`) adds an explicit
+  monitor / no-link case so the path stays quiet. The driver build also
+  rebuilds correctly when only the source patches change: the install
+  now verifies the on-disk DKMS source carries the current patch before
+  taking the already-built fast path, and clears the copied source tree
+  before re-adding so a freshly patched build is never skipped.
+
 ## [0.43.3] - 2026-05-27
 
 ### Fixed

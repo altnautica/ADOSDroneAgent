@@ -1,0 +1,13 @@
+diff --git a/core/rtw_mlme_ext.c b/core/rtw_mlme_ext.c
+index b96cfaf..be220c8 100644
+--- a/core/rtw_mlme_ext.c
++++ b/core/rtw_mlme_ext.c
+@@ -11613,6 +11613,8 @@ static void rtw_mlmeext_disconnect(_adapter *padapter)
+ 		self_action = MLME_STA_DISCONNECTED;
+ 	else if (MLME_IS_ADHOC(padapter) || MLME_IS_ADHOC_MASTER(padapter))
+ 		self_action = MLME_ADHOC_STOPPED;
++	else if (MLME_IS_MONITOR(padapter) || MLME_IS_NULL(padapter))
++		self_action = MLME_ACTION_UNKNOWN;
+ 	else {
+ 		RTW_INFO("state:0x%x\n", MLME_STATE(padapter));
+ 		rtw_warn_on(1);
