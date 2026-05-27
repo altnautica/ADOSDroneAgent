@@ -1134,23 +1134,27 @@ class VideoPipeline(_DiscoveryMixin, _HealthMixin, _WfbTeeMixin):
             self._mediamtx_client = None
 
     async def _check_mediamtx_path_ready(self) -> bool:
-        """Probe mediamtx API to verify the stream path has an active publisher.
+        """Probe mediamtx API to verify the encoder's named path is ready.
+
+        Looks the path up by its known name (``_MEDIAMTX_MAIN_PATH``) via
+        ``/v3/paths/get/<name>`` rather than assuming it is the first
+        entry of ``/v3/paths/list``. The path list also carries the WHEP
+        consumer path, so ``items[0]`` can be an unrelated, never-ready
+        path — reading it falsely reports the source as down and defers
+        the wfb tee forever even while ``main`` is publishing.
 
         Returns False when the API is unreachable, returns an error, or
-        reports no active publisher. Previous versions returned True on
-        exceptions (assuming healthy when unable to check), which hid
-        failures where mediamtx had crashed or the stream was dead.
+        the named path is absent / not ready.
         """
         try:
             client = await self._get_mediamtx_client()
-            resp = await client.get("/v3/paths/list")
+            resp = await client.get(f"/v3/paths/get/{_MEDIAMTX_MAIN_PATH}")
             if resp.status_code != 200:
                 return False
             data = resp.json()
-            items = data.get("items", [])
-            if not items:
+            if not isinstance(data, dict):
                 return False
-            return items[0].get("ready", False)
+            return bool(data.get("ready", False))
         except Exception:
             return False
 
