@@ -728,7 +728,15 @@ class VideoPipeline(_DiscoveryMixin, _HealthMixin, _WfbTeeMixin):
                 pass
         self._encoder_process = None
         if self._encoder_stderr_task is not None:
+            # Await the cancelled drain task so its stderr pipe transport
+            # is fully closed before the next start_stream(). Fire-and-drop
+            # left the read FD pinned until GC, which compounded across
+            # repeated restarts.
             self._encoder_stderr_task.cancel()
+            try:
+                await self._encoder_stderr_task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
             self._encoder_stderr_task = None
         # Tear down mediamtx so the next start_stream() is not blocked by
         # a zombie holding the port.
@@ -745,18 +753,51 @@ class VideoPipeline(_DiscoveryMixin, _HealthMixin, _WfbTeeMixin):
         Logs at WARNING level so ffmpeg errors are visible in journalctl
         at the default info log level. Previously logged at debug, which
         hid every ffmpeg crash reason from the operator.
+
+        Rate-limited: a subprocess hammering a dead device (e.g. ffmpeg
+        against a /dev/video node that no longer opens) can emit tens of
+        lines a second. Logging every one bloats the journal and pins a
+        CPU core. We still drain every line so the pipe never deadlocks,
+        but cap the logged output to a few lines per window and emit a
+        single suppressed-count summary instead of the flood.
         """
         log = _pkg().log
         if proc.stderr is None:
             return
+        window_s = 10.0
+        max_lines_per_window = 5
+        window_start = time.monotonic()
+        logged = 0
+        suppressed = 0
+        last_suppressed_line = ""
         try:
             while True:
                 line = await proc.stderr.readline()
                 if not line:
                     break
                 text = line.decode(errors="replace").rstrip()
-                if text:
+                if not text:
+                    continue
+                now = time.monotonic()
+                if now - window_start >= window_s:
+                    if suppressed:
+                        log.warning(
+                            "subprocess_stderr_suppressed",
+                            label=label,
+                            suppressed=suppressed,
+                            window_s=round(now - window_start, 1),
+                            last_line=last_suppressed_line,
+                        )
+                    window_start = now
+                    logged = 0
+                    suppressed = 0
+                    last_suppressed_line = ""
+                if logged < max_lines_per_window:
                     log.warning("subprocess_stderr", label=label, line=text)
+                    logged += 1
+                else:
+                    suppressed += 1
+                    last_suppressed_line = text
         except (asyncio.CancelledError, Exception):
             pass
 
@@ -1185,7 +1226,12 @@ class VideoPipeline(_DiscoveryMixin, _HealthMixin, _WfbTeeMixin):
                 total = len(cameras.get("cameras", []) or [])
             else:
                 total = 0
-            if primary is not None:
+            # A stale primary can linger in the camera manager while the
+            # live camera count is zero (e.g. a node that was just
+            # unplugged). Never advertise "ready" without at least one
+            # discovered camera — otherwise the GCS pill and heartbeat
+            # show a camera that is not actually there.
+            if primary is not None and total > 0:
                 state = "ready"
                 primary_path = getattr(primary, "device_path", None)
                 primary_name = getattr(primary, "name", None) or getattr(
