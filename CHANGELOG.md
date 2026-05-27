@@ -4,6 +4,21 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.43.8] - 2026-05-27
+
+### Added
+
+- **Prebuilt Wi-Fi driver fast-path.** The radio-driver install now tries a
+  verified prebuilt kernel module matched to the exact running kernel before
+  compiling on the device, so a board on a published kernel skips the slow
+  (and, on marginal hardware, crash-prone) on-device build entirely. Any miss
+  (no manifest reachable, no module for this kernel, vermagic mismatch, failed
+  verification, or failed load) falls through to the existing DKMS build, so
+  behavior is unchanged until a driver manifest is published. SHA256 integrity
+  is always enforced; signatures are verified when a key is configured
+  (`ADOS_DRIVER_PUBKEY`) and skipped in dev (`ADOS_PREBUILT_ALLOW_UNSIGNED`).
+  Skippable with `ADOS_DRIVER_PREBUILT=0`.
+
 ## [0.43.7] - 2026-05-27
 
 ### Fixed

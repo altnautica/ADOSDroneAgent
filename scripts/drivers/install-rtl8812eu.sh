@@ -94,6 +94,24 @@ if lsmod | awk '{print $1}' | grep -qx "${MODULE_NAME}"; then
     info "${MODULE_NAME} is loaded but not a current patched DKMS build; rebuilding so the patched module is installed and reboot-persistent."
 fi
 
+# --- Prebuilt fast-path: load a verified prebuilt module, skip the compile --
+#
+# On-device DKMS compilation is slow and, on marginal hardware, can crash the
+# compiler. Try a verified prebuilt .ko matched to this exact kernel first;
+# any miss (no manifest, no match for this kernel, vermagic mismatch, failed
+# verification, or failed load) falls through to the DKMS build below. Skip
+# with ADOS_DRIVER_PREBUILT=0.
+PREBUILT_LIB="${SCRIPT_DIR}/lib-prebuilt.sh"
+if [ "${ADOS_DRIVER_PREBUILT:-1}" = "1" ] && [ -f "${PREBUILT_LIB}" ] && [ -n "${ARCH:-}" ]; then
+    # shellcheck source=scripts/drivers/lib-prebuilt.sh disable=SC1091
+    . "${PREBUILT_LIB}"
+    if try_prebuilt_install "${MODULE_NAME}" "${KERNEL}" "${ARCH}"; then
+        info "${MODULE_NAME} loaded from a verified prebuilt module (no on-device build)."
+        exit 0
+    fi
+    info "No usable prebuilt ${MODULE_NAME}; building from source via DKMS."
+fi
+
 # --- Build the module from the vendored source via DKMS ---------------------
 
 # DKMS needs the vendored source submodule.
