@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import errno
+import os
 import platform
 import re
 import subprocess
@@ -90,13 +92,37 @@ def _discover_csi_cameras() -> list[CameraInfo]:
     return cameras
 
 
+def _video_node_openable(path: str) -> bool:
+    """Confirm a /dev/videoN node still backs a live, openable device.
+
+    A node left behind by a recently unplugged USB camera keeps showing
+    up in `v4l2-ctl --list-devices` output for a short window but can no
+    longer be opened. Adding it as a camera makes the pipeline launch an
+    encoder against a dead device, which floods stderr and churns
+    restarts until the process runs out of file descriptors. Opening the
+    node non-blocking (then closing it immediately) is the cheapest
+    reliable liveness check — no subprocess, no streaming side effects.
+
+    EBUSY means a real device is present but already claimed (e.g. by the
+    running encoder), so treat that as present, not stale.
+    """
+    try:
+        fd = os.open(path, os.O_RDWR | os.O_NONBLOCK)
+    except OSError as exc:
+        return exc.errno == errno.EBUSY
+    os.close(fd)
+    return True
+
+
 def _discover_usb_cameras() -> list[CameraInfo]:
     """Detect USB cameras via v4l2-ctl --list-devices.
 
     v4l2-ctl exits non-zero when any /dev/videoN node fails to open
     (a stale node from a recently unplugged device, for example), but
     still prints valid cameras to stdout. Parse stdout regardless of
-    exit code so the good data is not thrown away.
+    exit code so the good data is not thrown away, then probe-open each
+    candidate node so a stale ghost from an unplugged camera is dropped
+    instead of handed to the encoder.
 
     UVC cameras create two /dev/videoN nodes per physical camera (a main
     capture stream and a metadata stream). Adding all of them as separate
@@ -151,6 +177,17 @@ def _discover_usb_cameras() -> list[CameraInfo]:
                     or "unicam" in name_lower
                 ):
                     block_consumed = True
+                    continue
+                if not _video_node_openable(stripped):
+                    # Stale node from a recently unplugged camera. Skip it
+                    # without consuming the block so a sibling node in the
+                    # same device can still be tried.
+                    log.debug(
+                        "usb_camera_node_unopenable",
+                        device=stripped,
+                        name=current_name,
+                        msg="node listed but failed to open; treating as absent",
+                    )
                     continue
                 cameras.append(CameraInfo(
                     name=current_name or "USB Camera",

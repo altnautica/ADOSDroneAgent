@@ -87,7 +87,10 @@ class TestDiscoverUsbCameras:
         mock_result.returncode = 0
         mock_result.stdout = output
 
-        with patch("ados.hal.camera.subprocess.run", return_value=mock_result):
+        with (
+            patch("ados.hal.camera.subprocess.run", return_value=mock_result),
+            patch("ados.hal.camera._video_node_openable", return_value=True),
+        ):
             cameras = _discover_usb_cameras()
             # Multiple /dev/videoN entries belonging to the same physical USB
             # device collapse into one CameraInfo (capture node only).
@@ -95,6 +98,26 @@ class TestDiscoverUsbCameras:
             assert cameras[0].type == CameraType.USB
             assert cameras[0].name == "HD Pro Webcam C920"
             assert cameras[0].device_path == "/dev/video0"
+
+    def test_v4l2_stale_node_dropped(self):
+        # A node that v4l2-ctl still lists but which no longer opens (a
+        # ghost from a recently unplugged camera) must not be returned —
+        # otherwise the pipeline launches an encoder against a dead device.
+        output = (
+            "HD Pro Webcam C920 (usb-0000:00:14.0-1):\n"
+            "\t/dev/video0\n"
+            "\t/dev/video1\n"
+            "\n"
+        )
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = output
+
+        with (
+            patch("ados.hal.camera.subprocess.run", return_value=mock_result),
+            patch("ados.hal.camera._video_node_openable", return_value=False),
+        ):
+            assert _discover_usb_cameras() == []
 
     def test_v4l2_failure_returncode(self):
         mock_result = MagicMock()
@@ -129,7 +152,10 @@ class TestDiscoverUsbCameras:
         mock_result.returncode = 0
         mock_result.stdout = output
 
-        with patch("ados.hal.camera.subprocess.run", return_value=mock_result):
+        with (
+            patch("ados.hal.camera.subprocess.run", return_value=mock_result),
+            patch("ados.hal.camera._video_node_openable", return_value=True),
+        ):
             cameras = _discover_usb_cameras()
             names = {c.name for c in cameras}
             assert names == {"Logitech HD Pro Webcam C920"}
