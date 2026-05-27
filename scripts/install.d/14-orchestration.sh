@@ -532,11 +532,20 @@ ensure_venv_pip() {
 # Also marks the optional `radio-driver` checkpoint on success.
 install_radio_driver_tracked() {
     install_ground_station_driver || true
-    if [ -r /run/ados/wfb-module-source ] || lsmod 2>/dev/null | grep -qE '^88(12|2c)[a-z]*u'; then
+    # Confirm the module GENUINELY landed this run: it must be loaded now or
+    # resolvable via modinfo for the running kernel. The breadcrumb file's mere
+    # existence is not proof. It lives on tmpfs and a prior boot's "dkms" can
+    # outlive a later build that failed (e.g. a gcc crash leaves DKMS in the
+    # "added" state with no module), which would otherwise mask a dead radio on
+    # a drone. So verify the real thing.
+    if lsmod 2>/dev/null | grep -qE '^88(12|2c)[a-z]*u' || modinfo 8812eu >/dev/null 2>&1; then
         checkpoint_mark radio-driver
         return 0
     fi
     warn "RTL8812EU kernel module not present after driver install; recording optional failure."
+    # Drop a stale/optimistic breadcrumb so the result reports the radio as
+    # absent (wfbModuleSource empty) rather than a phantom "dkms".
+    rm -f /run/ados/wfb-module-source 2>/dev/null || true
     record_failure "radio-driver" optional
     return 0
 }

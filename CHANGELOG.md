@@ -4,6 +4,25 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.43.9] - 2026-05-27
+
+### Fixed
+
+- **Wi-Fi driver no longer fails to build from a compiler crash.** On some
+  toolchains gcc segfaults (internal compiler error) while optimizing one of
+  the driver's source files at `-O2`, which aborts the whole module build and
+  leaves a board with no radio. The driver now builds at `-O1` (for both the
+  on-device build and the prebuilt pipeline), which compiles cleanly with no
+  measurable runtime cost for a NIC driver. The dkms.conf patch is now
+  content-aware, so a changed compiler-flag set actually re-applies instead of
+  being skipped because an older flag set was already present.
+- **A failed radio driver build is now reported honestly.** The install
+  recorded the radio as present whenever a leftover module-source marker file
+  existed, even if the current build had failed and loaded no module. It now
+  confirms the module is actually loaded or resolvable before claiming success,
+  clears a stale marker otherwise, and records a degraded radio so the fleet
+  view and install result reflect reality.
+
 ## [0.43.8] - 2026-05-27
 
 ### Added

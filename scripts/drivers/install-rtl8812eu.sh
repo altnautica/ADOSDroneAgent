@@ -218,15 +218,23 @@ fi
 # source has all three patterns. KCFLAGS is overwritten by dkms in
 # some versions so we route the relax flags via USER_EXTRA_CFLAGS in
 # dkms.conf, which the module Makefile picks up at line 1 and appends
-# to its own EXTRA_CFLAGS — the LAST -W flag wins, so -Wno-error
-# overrides the kernel's promotion of these warnings. This patch must
-# happen BEFORE dkms add because dkms copies the source at add time
-# and never re-reads it.
-RELAX_CFLAGS="-Wno-error -Wno-misleading-indentation -Wno-address-of-packed-member -Wno-date-time"
+# to its own EXTRA_CFLAGS so the LAST flag wins: -Wno-error overrides the
+# kernel's promotion of these warnings, and -O1 overrides the kernel's -O2.
+# The -O1 is load-bearing: gcc 12 segfaults (internal compiler error) while
+# optimizing core/rtw_btcoex.c at -O2 on at least the RK3588 BSP toolchain,
+# which aborts the whole build; -O1 compiles it cleanly with no measurable
+# runtime cost for an out-of-tree NIC driver. This patch must happen BEFORE
+# dkms add because dkms copies the source at add time and never re-reads it.
+RELAX_CFLAGS="-O1 -Wno-error -Wno-misleading-indentation -Wno-address-of-packed-member -Wno-date-time"
 DKMS_CONF="${VENDOR_DIR}/dkms.conf"
-if ! grep -q "USER_EXTRA_CFLAGS" "${DKMS_CONF}"; then
+# Content-aware: re-patch unless our EXACT flags are already present, so a
+# changed RELAX_CFLAGS (e.g. the newly added -O1) actually takes effect on a
+# config that carries a prior, different USER_EXTRA_CFLAGS. Strip any old
+# value first, then append the current one.
+if ! grep -qF "USER_EXTRA_CFLAGS='${RELAX_CFLAGS}'" "${DKMS_CONF}"; then
     info "Patching dkms.conf with relax cflags."
-    sed -i.bak "s|^MAKE=\"'make' \(.*\)\"|MAKE=\"'make' \1 USER_EXTRA_CFLAGS='${RELAX_CFLAGS}'\"|" "${DKMS_CONF}"
+    sed -i.bak -E "s| USER_EXTRA_CFLAGS='[^']*'||g" "${DKMS_CONF}"
+    sed -i "s|^MAKE=\"'make' \(.*\)\"|MAKE=\"'make' \1 USER_EXTRA_CFLAGS='${RELAX_CFLAGS}'\"|" "${DKMS_CONF}"
 fi
 
 # Register source tree with DKMS. When the source is already registered
