@@ -384,7 +384,7 @@ main_install_flow() {
         # LCD overlay installer needs the cloned scripts + DTS sources,
         # so it runs before the temp-repo cleanup. Runs on every profile;
         # install_display_driver picks a profile-aware default display
-        # (none on a drone / lite rig, auto on a ground station) unless
+        # (none on a drone, auto on a ground station) unless
         # the operator forced one with ADOS_DISPLAY. A headless drone
         # never auto-provisions a boot-critical SPI-LCD overlay, so this
         # is a fast no-op there.
@@ -720,7 +720,7 @@ main_install_flow() {
     # A7Z or Rock 5C). The driver script activates the right device-tree
     # overlay, writes /etc/ados/display.conf, and queues the kernel
     # modules needed at next boot. install_display_driver chooses a
-    # profile-aware default: a headless drone / lite rig defaults to no
+    # profile-aware default: a headless drone defaults to no
     # display so a boot-critical SPI-LCD overlay is never auto-applied
     # against absent hardware; a ground station defaults to auto-detect;
     # an explicit ADOS_DISPLAY always wins. Failure is non-fatal so the

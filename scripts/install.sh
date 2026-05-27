@@ -6,7 +6,7 @@
 #        sudo ./install.sh --upgrade                    (upgrade only)
 #        sudo ./install.sh --force                      (full reinstall)
 #        sudo ./install.sh --uninstall                  (remove)
-#        sudo ./install.sh --profile <drone|ground-station|lite-rs|auto>
+#        sudo ./install.sh --profile <drone|ground-station|auto>
 #        sudo ./install.sh --display  <auto|waveshare35a|none|...>
 #        sudo ./install.sh --branch   <name>            (track a feature branch)
 # Idempotent: re-runs skip completed steps. --pair is a fast path (<5s).
@@ -42,9 +42,8 @@ export DEBCONF_NOWARNINGS=yes
 # Resolve our own script directory so we can locate install.d/ both when
 # the script lives on disk (git clone) and when bash --rcfile / curl-pipe
 # delivers it. When BASH_SOURCE[0] is not a real file (curl-pipe), the
-# install.d/ tree is not present; in that case the script is being run
-# in lite-rs dispatch mode and the dispatch block below either re-execs
-# install-lite.sh or refuses to continue.
+# install.d/ tree is not present; in that case the bootstrap block below
+# git-clones the repo and re-execs this script from a real on-disk path.
 ADOS_SCRIPT_DIR=""
 if [ -f "${BASH_SOURCE[0]:-}" ]; then
     ADOS_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)" || ADOS_SCRIPT_DIR=""
@@ -93,13 +92,12 @@ fi
 # When the operator runs `curl -sSL .../install.sh | sudo bash -s -- ...`,
 # BASH_SOURCE[0] is not a real file so ADOS_SCRIPT_DIR is empty and the
 # install.d/*.sh modules were never sourced above. Without those modules,
-# detect_profile, error, do_uninstall, install_system_deps, ... are all
+# resolve_profile, error, do_uninstall, install_system_deps, ... are all
 # undefined and the next command would die with "command not found".
 #
 # Bootstrap by git-cloning the repo to a temp dir and re-execing this
 # script from there. The re-execed script sees ADOS_SCRIPT_DIR as a real
-# path, sources install.d/*.sh, and proceeds normally. Must run BEFORE
-# the lite-rs pre-dispatch (which calls detect_profile from 00-detect.sh).
+# path, sources install.d/*.sh, and proceeds normally.
 if [ -z "${ADOS_SCRIPT_DIR}" ]; then
     if ! command -v git >/dev/null 2>&1; then
         # Fresh Radxa BSP images (rsdk-b2 and friends) ship without git, so
@@ -171,30 +169,15 @@ if [ -z "${ADOS_SCRIPT_DIR}" ]; then
     exec bash "${_BOOT_DIR}/repo/scripts/install.sh" "$@"
 fi
 
-# ─── Lite-rs Profile Pre-dispatch ───────────────────────────────────────────
+# ─── Profile pre-scan ────────────────────────────────────────────────────────
 #
-# Profile dispatch with board fingerprint auto-detection.
-#
-# Every operator types the same command. The script reads the running SBC
-# (via /proc/device-tree/model + /proc/cpuinfo + /proc/meminfo) and matches
-# against the lite-eligible board manifest (lite-boards.json published
-# alongside each lite-agent release). If the board is in the manifest OR
-# total RAM is at or below 384 MB (failsafe for unknown low-RAM boards),
-# the script exec's install-lite.sh. Otherwise it continues into the
-# Python full-agent install body below.
-#
-# Override priority: --profile lite|full|auto flag > ADOS_PROFILE env var
-# > auto-detect. --dry-run prints the detected profile and exits.
+# Pre-parse the --profile flag without consuming the rest of "$@"; the
+# remaining args still flow to the full flag parser below. resolve_profile()
+# (in 00-detect.sh) reads _PROFILE_OVERRIDE to honour an explicit
+# --profile drone|ground-station selection before falling back to the
+# persisted profile.conf or board auto-detect.
 
-LITE_BOARDS_MANIFEST_URL="${ADOS_LITE_BOARDS_URL:-https://github.com/altnautica/ADOSDroneAgent/releases/download/lite-agent-main/lite-boards.json}"
-LITE_RAM_FAILSAFE_KB=393216  # 384 MB
-export LITE_BOARDS_MANIFEST_URL LITE_RAM_FAILSAFE_KB
-
-# Pre-parse --profile / --dry-run without consuming the rest of "$@"; the
-# remaining args still flow to the full flag parser below or to
-# install-lite.sh on dispatch.
 _PROFILE_OVERRIDE=""
-_DRY_RUN=false
 _PRESCAN_ARGS=("$@")
 _i=0
 while [ ${_i} -lt ${#_PRESCAN_ARGS[@]} ]; do
@@ -203,84 +186,12 @@ while [ ${_i} -lt ${#_PRESCAN_ARGS[@]} ]; do
             _PROFILE_OVERRIDE="${_PRESCAN_ARGS[$((_i+1))]:-}"
             _i=$((_i+2))
             ;;
-        --dry-run)
-            _DRY_RUN=true
-            _i=$((_i+1))
-            ;;
         *)
             _i=$((_i+1))
             ;;
     esac
 done
 export _PROFILE_OVERRIDE
-
-# Resolve the profile.
-_PROFILE=""
-if [ -n "${_PROFILE_OVERRIDE}" ] && [ "${_PROFILE_OVERRIDE}" != "auto" ]; then
-    _PROFILE="${_PROFILE_OVERRIDE}"
-elif [ -n "${ADOS_PROFILE:-}" ] && [ "${ADOS_PROFILE}" != "auto" ]; then
-    _PROFILE="${ADOS_PROFILE}"
-else
-    _PROFILE="$(detect_profile)"
-fi
-# Normalize aliases to canonical profile names. Targeted (not a blanket
-# hyphen replace) so lite-rs keeps its hyphen while the ground-station alias
-# folds to the underscore form used everywhere downstream.
-[ "${_PROFILE}" = "lite" ] && _PROFILE="lite-rs"
-[ "${_PROFILE}" = "ground-station" ] && _PROFILE="ground_station"
-
-if [ "${_DRY_RUN}" = "true" ]; then
-    echo "Detected profile: ${_PROFILE}"
-    echo "(run without --dry-run to proceed)"
-    exit 0
-fi
-
-if [ "${_PROFILE}" = "lite-rs" ]; then
-    # Resolve the lite installer. Two modes:
-    #   - Local checkout: this script lives on disk; its sibling is too.
-    #   - Curl-pipe: this script ran from stdin (BASH_SOURCE[0]="bash"),
-    #     and there is no sibling. Fetch from main.
-    # We only trust ADOS_SCRIPT_DIR if BASH_SOURCE[0] is a real on-disk file —
-    # otherwise dirname resolves to "." and we'd happily exec a random
-    # `./install-lite.sh` from the operator's cwd, which is a script
-    # injection trap.
-    LITE_INSTALLER=""
-    if [ -n "${ADOS_SCRIPT_DIR}" ] && [ -x "${ADOS_SCRIPT_DIR}/install-lite.sh" ]; then
-        LITE_INSTALLER="${ADOS_SCRIPT_DIR}/install-lite.sh"
-    fi
-    if [ -z "${LITE_INSTALLER}" ]; then
-        LITE_INSTALLER="$(mktemp)"
-        # The install-lite.sh script ships as a GitHub Release asset so the
-        # bootstrap pin matches whatever release the operator's invocation
-        # came from. ADOS_RELEASE_CHANNEL=main resolves to the rolling
-        # lite-agent-main pre-release; default and "stable" resolve to the
-        # latest stable lite-v* release via the releases/latest redirect.
-        case "${ADOS_RELEASE_CHANNEL:-stable}" in
-            main)
-                LITE_BOOTSTRAP_URL="https://github.com/altnautica/ADOSDroneAgent/releases/download/lite-agent-main/install-lite.sh"
-                ;;
-            *)
-                LITE_BOOTSTRAP_URL="https://github.com/altnautica/ADOSDroneAgent/releases/latest/download/install-lite.sh"
-                ;;
-        esac
-        # Prefer curl, fall back to wget. Buildroot rootfs images ship wget
-        # only — the Luckfox Pico Zero is the canonical example.
-        if command -v curl >/dev/null 2>&1; then
-            curl -fsSL --retry 3 --retry-delay 2 -L \
-                "${LITE_BOOTSTRAP_URL}" \
-                -o "${LITE_INSTALLER}"
-        elif command -v wget >/dev/null 2>&1; then
-            wget -q --tries=3 -O "${LITE_INSTALLER}" \
-                "${LITE_BOOTSTRAP_URL}"
-        else
-            echo "ERROR: neither curl nor wget is installed; cannot fetch install-lite.sh" >&2
-            exit 1
-        fi
-        chmod +x "${LITE_INSTALLER}"
-    fi
-    exec "${LITE_INSTALLER}" "$@"
-fi
-# else fall through to the Python full-agent install body.
 
 # ─── Full-Agent Install: shared state ───────────────────────────────────────
 #
@@ -380,8 +291,9 @@ while [ $# -gt 0 ]; do
             shift
             ;;
         --profile)
-            # Already consumed by the pre-dispatch parser at the top of
-            # the script. Skip the value too so we don't loop forever.
+            # The value was already read into _PROFILE_OVERRIDE by the
+            # pre-scan at the top of the script (resolve_profile honours
+            # it). Skip the flag and its value here so we don't loop forever.
             shift
             shift 2>/dev/null || true
             ;;
@@ -397,10 +309,6 @@ while [ $# -gt 0 ]; do
                 error "--display requires a value (e.g. waveshare35a, auto, none)"
                 exit 1
             fi
-            shift
-            ;;
-        --dry-run)
-            # Same — consumed up top.
             shift
             ;;
         --show-key)

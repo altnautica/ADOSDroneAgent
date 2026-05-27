@@ -3,92 +3,9 @@
 # 00-detect.sh — host platform, profile, and Python detection helpers.
 #
 # Pure read-only inspection of /proc, /etc/os-release, uname, and the
-# agent venv. detect_profile() is called by the dispatcher pre-parse
-# block to decide between the Python full agent and the Rust lite agent.
-# resolve_profile() runs later, after the agent venv is built, to read
-# the canonical agent.profile from disk + flags.
+# agent venv. resolve_profile() runs after the agent venv is built, to
+# read the canonical agent.profile from disk + flags.
 # =============================================================================
-
-# Profile dispatch: walk /proc/device-tree/model, /proc/cpuinfo, and
-# /proc/meminfo against the lite-eligible board manifest. Returns
-# "lite-rs" when the board matches or RAM <= LITE_RAM_FAILSAFE_KB,
-# "full" otherwise.
-detect_profile() {
-    local model="" model_lower="" mem_kb=""
-
-    # Primary fingerprint: /proc/device-tree/model. Strip the null byte
-    # the kernel terminates the string with.
-    if [ -r /proc/device-tree/model ]; then
-        model="$(tr -d '\000' < /proc/device-tree/model 2>/dev/null || true)"
-    fi
-
-    # Fallback: /proc/cpuinfo "Hardware" line (older Pi kernels, x86 has no
-    # device-tree at all).
-    if [ -z "${model}" ] && [ -r /proc/cpuinfo ]; then
-        model="$(awk -F: '/^Hardware/ {sub(/^ */, "", $2); print $2; exit}' /proc/cpuinfo)"
-    fi
-
-    if [ -n "${model}" ]; then
-        model_lower="$(printf '%s' "${model}" | tr '[:upper:]' '[:lower:]')"
-    fi
-
-    # Fetch the lite-eligible board manifest. 5s timeout so a network blip
-    # doesn't stall every install. Failure falls through to the RAM failsafe.
-    # Prefers curl, falls back to wget so this works on Buildroot rootfs
-    # images (Luckfox SDK, etc.) that ship wget but not curl.
-    local manifest=""
-    if command -v curl >/dev/null 2>&1; then
-        manifest="$(curl -fsSL --max-time 5 "${LITE_BOARDS_MANIFEST_URL}" 2>/dev/null || true)"
-    elif command -v wget >/dev/null 2>&1; then
-        manifest="$(wget -q -T 5 -O - "${LITE_BOARDS_MANIFEST_URL}" 2>/dev/null || true)"
-    fi
-
-    if [ -n "${manifest}" ] && [ -n "${model_lower}" ]; then
-        # Extract every model_pattern from the manifest. Use python3 (always
-        # present on a fresh BSP); jq is faster but not always installed.
-        local patterns=""
-        if command -v python3 >/dev/null 2>&1; then
-            patterns="$(printf '%s' "${manifest}" | python3 -c '
-import json, sys
-try:
-    m = json.load(sys.stdin)
-    for b in m.get("boards", []):
-        for p in b.get("model_patterns", []) or []:
-            print(p)
-except Exception:
-    pass
-' 2>/dev/null || true)"
-        elif command -v jq >/dev/null 2>&1; then
-            patterns="$(printf '%s' "${manifest}" | jq -r '.boards[]?.model_patterns[]?' 2>/dev/null || true)"
-        fi
-
-        if [ -n "${patterns}" ]; then
-            local pattern pattern_lower
-            while IFS= read -r pattern; do
-                [ -z "${pattern}" ] && continue
-                pattern_lower="$(printf '%s' "${pattern}" | tr '[:upper:]' '[:lower:]')"
-                case "${model_lower}" in
-                    *"${pattern_lower}"*)
-                        echo "lite-rs"
-                        return 0
-                        ;;
-                esac
-            done <<< "${patterns}"
-        fi
-    fi
-
-    # Failsafe: any board with <= 384 MB total RAM gets the lite path even
-    # when the manifest fetch failed or didn't list it.
-    if [ -r /proc/meminfo ]; then
-        mem_kb="$(awk '/^MemTotal:/ {print $2; exit}' /proc/meminfo 2>/dev/null || true)"
-        if [ -n "${mem_kb}" ] && [ "${mem_kb}" -le "${LITE_RAM_FAILSAFE_KB}" ]; then
-            echo "lite-rs"
-            return 0
-        fi
-    fi
-
-    echo "full"
-}
 
 # ─── Architecture Detection ─────────────────────────────────────────────────
 

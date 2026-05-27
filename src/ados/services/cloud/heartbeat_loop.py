@@ -144,7 +144,6 @@ async def heartbeat_loop(ctx: CloudContext) -> None:  # noqa: C901
                 payload = {
                     "deviceId": config.agent.device_id,
                     "version": __version__,
-                    "runtimeMode": "full",
                     "profile": _profile,
                     "role": _role,
                     "uptimeSeconds": round(uptime),

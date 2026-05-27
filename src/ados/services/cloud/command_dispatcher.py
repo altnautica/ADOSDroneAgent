@@ -23,7 +23,7 @@ from .heartbeat import get_services_status as _get_services_status
 
 
 def _resolved_wire_profile(config) -> str:
-    """Return the resolved wire-form profile (drone | ground-station | lite-rs).
+    """Return the resolved wire-form profile (drone | ground-station).
 
     Consults /etc/ados/profile.conf when config.agent.profile is "auto"
     so a fresh drone install with the default config is not silently

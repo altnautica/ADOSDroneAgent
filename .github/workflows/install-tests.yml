@@ -4,26 +4,22 @@ on:
   pull_request:
     paths:
       - 'scripts/install.sh'
-      - 'scripts/install-lite.sh'
       - 'scripts/drivers/**'
       - 'scripts/lib/**'
       - 'scripts/test/**'
       - 'data/overlays/**'
       - 'data/systemd/**'
       - '.github/workflows/install-tests.yml'
-      - 'agents/lite-rs/buildroot/configs/**'
   push:
     branches: [main]
     paths:
       - 'scripts/install.sh'
-      - 'scripts/install-lite.sh'
       - 'scripts/drivers/**'
       - 'scripts/lib/**'
       - 'scripts/test/**'
       - 'data/overlays/**'
       - 'data/systemd/**'
       - '.github/workflows/install-tests.yml'
-      - 'agents/lite-rs/buildroot/configs/**'
 
 jobs:
   shell-tests:
@@ -43,29 +39,23 @@ jobs:
       - name: shellcheck library + driver + test scripts
         run: |
           shellcheck scripts/install.sh
-          shellcheck scripts/install-lite.sh
           shellcheck scripts/install.d/*.sh
-          shellcheck scripts/lib/detect-target.sh
           shellcheck scripts/lib/net.sh
           shellcheck scripts/lib/verify.sh
           shellcheck scripts/drivers/install-display-overlay.sh
           shellcheck scripts/drivers/install-rtl8812eu.sh
           shellcheck scripts/test/run_dispatcher_tests.sh
           shellcheck scripts/test/e2e-install-rig.sh
-          shellcheck scripts/test/defconfig_reproducibility.sh
           shellcheck scripts/test/minisign_verify_smoke.sh
           shellcheck scripts/test/verify_smoke.sh
           shellcheck scripts/test/lint_overlay_invariants.sh
           shellcheck scripts/test/compile_overlays.sh
 
-      - name: install pipeline smoke (shellcheck + syntax + dry-run)
+      - name: install pipeline smoke (shellcheck + syntax)
         run: bash scripts/test/install-smoke.sh
 
       - name: dispatcher bats suite
         run: bash scripts/test/run_dispatcher_tests.sh
-
-      - name: defconfig reproducibility
-        run: bash scripts/test/defconfig_reproducibility.sh
 
       - name: minisign verify smoke
         run: bash scripts/test/minisign_verify_smoke.sh

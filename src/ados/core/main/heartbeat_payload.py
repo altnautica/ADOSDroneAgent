@@ -291,7 +291,6 @@ def build_heartbeat_payload(app: AgentApp) -> dict:  # noqa: C901
     payload: dict = {
         "deviceId": app.config.agent.device_id,
         "version": __version__,
-        "runtimeMode": "full",
         "uptimeSeconds": app.uptime_seconds,
         "boardName": app.board_name,
         "boardTier": board_tier,

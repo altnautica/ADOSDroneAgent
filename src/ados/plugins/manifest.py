@@ -188,7 +188,7 @@ class AgentBlock(_StrictModel):
     Default false preserves single-config behavior from the v1
     schema. Schema v2."""
 
-    target_profiles: list[Literal["drone", "ground-station", "lite"]] = Field(
+    target_profiles: list[Literal["drone", "ground-station"]] = Field(
         default_factory=lambda: ["drone"],
     )
     """Node profiles the plugin is compatible with. Default ``["drone"]``
@@ -202,7 +202,7 @@ class AgentBlock(_StrictModel):
     @classmethod
     def _validate_target_profiles(
         cls, value: list[str]
-    ) -> list[Literal["drone", "ground-station", "lite"]]:
+    ) -> list[Literal["drone", "ground-station"]]:
         if not value:
             raise ManifestError(
                 "agent.target_profiles must list at least one profile",
@@ -211,7 +211,7 @@ class AgentBlock(_StrictModel):
         # across reads. Pydantic's Literal validation runs before this
         # hook, so each entry is already a known profile string.
         seen: set[str] = set()
-        deduped: list[Literal["drone", "ground-station", "lite"]] = []
+        deduped: list[Literal["drone", "ground-station"]] = []
         for entry in value:
             if entry in seen:
                 continue

@@ -86,13 +86,9 @@ class BoardProfile(BaseModel):
     uart_paths: list[str] = []
     hw_video_codecs: list[str] = []
 
-    # Optional fields read by the lightweight Rust backend at agents/lite-rs/.
-    # All default to safe values so existing YAMLs without them load unchanged.
-    libc: str = "glibc"
-    init_system: str = "systemd"
-    target_rust_triple: str | None = None
+    # Optional field. Defaults to None so existing YAMLs without it load
+    # unchanged.
     min_kernel_version: str | None = None
-    wifi_chip_driver: str | None = None
 
     # Optional displays section consumed by the LCD-overlay installer and
     # by the renderer-adapter UI service. Boards without any local display

@@ -19,10 +19,10 @@ def _fresh_app() -> AgentApp:
     return app
 
 
-def test_heartbeat_payload_emits_runtime_mode_full() -> None:
+def test_heartbeat_payload_omits_runtime_mode() -> None:
     app = _fresh_app()
     payload = app._build_heartbeat_payload()
-    assert payload["runtimeMode"] == "full"
+    assert "runtimeMode" not in payload
 
 
 def test_heartbeat_payload_video_restart_attempts_default() -> None:

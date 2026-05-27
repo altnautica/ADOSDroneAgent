@@ -37,9 +37,9 @@
 # ─── Vendored Ed25519 public key (release-artifact verification) ─────────────
 #
 # The CI release pipeline substitutes this string with the real minisign
-# public key when a `v*` tag is cut (the same sed-at-tag-time mechanism the
-# lightweight installer uses for its own vendored key). Until a real key is
-# embedded the value stays the clearly-marked placeholder below; on the
+# public key when a `v*` tag is cut (a sed-at-tag-time substitution). Until
+# a real key is embedded the value stays the clearly-marked placeholder
+# below; on the
 # stable channel an unsubstituted placeholder is treated as "no key", which
 # verify.sh turns into a hard refusal — stable never installs unverifiable.
 #
@@ -139,11 +139,10 @@ resolve_stable_tag() {
         return 0
     fi
 
-    # No pin: ask the GitHub releases API for the newest v* tag. The full
-    # agent releases use the `vMAJOR.MINOR.PATCH` convention; the lightweight
-    # agent uses `lite-v*`, so the value-class `"v[0-9]` excludes those
-    # naturally (a lite tag serialises as `"tag_name":"lite-v..."`, which
-    # does not match `"v[0-9]`). grep -oE pulls every tag_name value as its
+    # No pin: ask the GitHub releases API for the newest v* tag. Releases
+    # use the `vMAJOR.MINOR.PATCH` convention, so the value-class `"v[0-9]`
+    # matches a release tag while ignoring any tag that does not begin with
+    # a `v` followed by a digit. grep -oE pulls every tag_name value as its
     # own token regardless of whether the API returns pretty-printed or
     # single-line JSON; the API lists releases newest-first so head -n1 is
     # the latest. The trailing grep peels the bare tag out of the matched

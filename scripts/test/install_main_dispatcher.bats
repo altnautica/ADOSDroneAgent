@@ -136,7 +136,7 @@ setup() {
         missing=0
         for fn in \
             detect_arch detect_os find_python resolve_profile _persist_profile_to_config \
-            detect_profile is_installed get_installed_version do_uninstall \
+            is_installed get_installed_version do_uninstall \
             install_global_symlinks install_system_deps install_ground_station_deps \
             install_video_sysctl install_display_driver install_ground_station_driver \
             install_mesh_deps install_wfb_ng_from_vendor provision_wfb_bind_artifacts \
@@ -171,9 +171,8 @@ setup() {
 # Approach: extract the dispatcher arg-parse block from install.sh by
 # locating the marker lines, source the extracted snippet in a clean
 # shell with stub `error` + `warn` + `do_uninstall`, and dump the
-# parsed state. This avoids invoking install.sh proper (which calls
-# detect_profile, downloads manifest, etc.) but stays faithful to the
-# real parser because the bytes come from the same file.
+# parsed state. This avoids invoking install.sh proper but stays faithful
+# to the real parser because the bytes come from the same file.
 # -----------------------------------------------------------------------------
 
 extract_arg_parser() {
@@ -373,17 +372,17 @@ probe_args() {
     # The dispatcher contains a bootstrap block: when BASH_SOURCE[0] is
     # not a real file (curl-pipe-to-bash), the install.d/*.sh modules
     # were never sourced. The bootstrap must git-clone the repo and
-    # exec install.sh from there BEFORE the lite dispatch tries to call
-    # detect_profile (which lives in 00-detect.sh).
+    # exec install.sh from there BEFORE the profile pre-scan runs, since
+    # the prescan reads args in the re-exec'd process.
     run grep -nE "curl-pipe bootstrap" "${DISPATCHER}"
     [ "$status" -eq 0 ]
     [ -n "$output" ]
-    # And the bootstrap must come before the lite dispatch block.
+    # And the bootstrap must come before the profile pre-scan block.
     bootstrap_line="$(grep -nE 'curl-pipe bootstrap' "${DISPATCHER}" | head -1 | cut -d: -f1)"
-    lite_line="$(grep -nE 'Lite-rs Profile Pre-dispatch' "${DISPATCHER}" | head -1 | cut -d: -f1)"
+    prescan_line="$(grep -nE 'Profile pre-scan' "${DISPATCHER}" | head -1 | cut -d: -f1)"
     [ -n "$bootstrap_line" ]
-    [ -n "$lite_line" ]
-    [ "$bootstrap_line" -lt "$lite_line" ]
+    [ -n "$prescan_line" ]
+    [ "$bootstrap_line" -lt "$prescan_line" ]
 }
 
 @test "bootstrap re-execs into the cloned repo's install.sh" {
@@ -1409,8 +1408,8 @@ EOF
 # -----------------------------------------------------------------------------
 # install_display_driver (03-kernel.sh): the per-profile default display.
 #
-# A drone / lite rig must default the display to "none" (a headless flight rig
-# has no panel, and the auto-pickable display is a boot-critical SPI-LCD). A
+# A drone must default the display to "none" (a headless flight rig has no
+# panel, and the auto-pickable display is a boot-critical SPI-LCD). A
 # ground station defaults to "auto". An explicit ADOS_DISPLAY always wins.
 # We stub the overlay script so the function's chosen --display value is
 # captured, and stub the script-discovery so the function finds our stub.
@@ -1456,16 +1455,11 @@ EOF
 
 # The display default is profile-aware. The on-panel dashboard renderer runs
 # on the ground-station profile only, so the ground station auto-detects and
-# provisions whatever panel is present, while the drone and lite profiles
-# default to "none" (no detection, no boot-config writes): a status panel on
-# the aircraft serves no purpose. An explicit ADOS_DISPLAY still overrides.
+# provisions whatever panel is present, while the drone profile defaults to
+# "none" (no detection, no boot-config writes): a status panel on the
+# aircraft serves no purpose. An explicit ADOS_DISPLAY still overrides.
 @test "install_display_driver defaults to none on the drone profile" {
     output="$(idd_run drone)"
-    [[ "$output" == *"CAPTURED_DISPLAY=none"* ]]
-}
-
-@test "install_display_driver defaults to none on the lite profile" {
-    output="$(idd_run lite-rs)"
     [[ "$output" == *"CAPTURED_DISPLAY=none"* ]]
 }
 

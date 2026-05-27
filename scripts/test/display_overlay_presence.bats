@@ -125,11 +125,12 @@ EOF
 # Invariant 1: NO panel present -> zero boot writes, display_id=none, no marker
 # -----------------------------------------------------------------------------
 
-# pi-zero-2w is in the auto-default board list but its HAL YAML declares NO
-# SPI-LCD panel, so auto resolves to the pure no-display path (case e): zero
-# boot writes, display_id=none, no marker. (A board that DECLARES a panel but
-# has none bound takes the apply-verify-auto-revert probation path instead;
-# that is exercised separately.)
+# pi-zero-2w is in the driver's auto-default board list but resolves no
+# SPI-LCD panel (no displays declared), so auto resolves to the pure
+# no-display path (case e): zero boot writes, display_id=none, no marker.
+# (A board that DECLARES a panel but has none bound takes the
+# apply-verify-auto-revert probation path instead; that is exercised
+# separately.)
 @test "no panel (board declares no display): display_id=none, no marker, no boot change" {
     run_overlay pi-zero-2w
     [ "$status" -eq 0 ]

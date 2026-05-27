@@ -74,7 +74,7 @@ install_display_driver() {
     # aircraft serves no purpose. So provisioning an SPI-LCD overlay on a
     # drone would edit the boot config, arm a probe, and cost an extra
     # reboot to light up a panel that nothing ever draws to. Default the
-    # drone (and lite) profiles to "none" (no detection, no boot-config
+    # drone profile to "none" (no detection, no boot-config
     # writes) and let only the ground station auto-detect and provision
     # whatever panel is physically present. An operator who genuinely
     # wants a panel on a drone can still force it with ADOS_DISPLAY=<id>.

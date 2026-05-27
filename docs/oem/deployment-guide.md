@@ -10,7 +10,7 @@ Before starting production, verify all items:
 
 ### Hardware
 - [ ] Baseboard PCB finalized and tested (rev confirmed)
-- [ ] Compute module sourced (Radxa CM3 or CM4, or Luckfox Pico variants)
+- [ ] Compute module sourced (Radxa CM3 or CM4, or similar)
 - [ ] UART connection to flight controller verified (TX/RX/GND, 3.3V logic)
 - [ ] USB camera tested (UVC compatible, 720p minimum)
 - [ ] 4G modem tested (Quectel EC200 series recommended, USB or UART)
@@ -85,7 +85,7 @@ rkdeveloptool rd   # reboot
 
 ### Method C: SD Card (dd or balenaEtcher)
 
-Best for: Modules that boot from SD card (Luckfox Pico, some Radxa configs).
+Best for: Modules that boot from SD card (some Radxa configs).
 
 ```bash
 # Linux/Mac
