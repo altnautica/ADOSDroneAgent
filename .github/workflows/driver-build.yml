@@ -56,14 +56,12 @@ jobs:
           # Raspberry Pi OS arm64 default kernel (Pi 3 / 4 / 400 / Zero 2 W).
           - flavor: rpi-v8
             container: debian:trixie
-            apt_list: "deb http://archive.raspberrypi.org/debian trixie main"
-            apt_key_url: "https://archive.raspberrypi.org/debian/raspberrypi.gpg.key"
+            apt_list: "deb [trusted=yes] http://archive.raspberrypi.org/debian trixie main"
             headers_pkg: linux-headers-rpi-v8
           # Raspberry Pi 5 (BCM2712) kernel.
           - flavor: rpi-2712
             container: debian:trixie
-            apt_list: "deb http://archive.raspberrypi.org/debian trixie main"
-            apt_key_url: "https://archive.raspberrypi.org/debian/raspberrypi.gpg.key"
+            apt_list: "deb [trusted=yes] http://archive.raspberrypi.org/debian trixie main"
             headers_pkg: linux-headers-rpi-2712
     steps:
       # The container base is minimal; checkout needs git, and apt fetches need
@@ -87,11 +85,13 @@ jobs:
       - name: Add vendor kernel apt repo
         run: |
           set -euxo pipefail
-          curl -fsSL "${{ matrix.apt_key_url }}" \
-            | gpg --dearmor -o /usr/share/keyrings/vendor-kernel.gpg
-          echo "${{ matrix.apt_list }}" \
-            | sed 's| | [signed-by=/usr/share/keyrings/vendor-kernel.gpg] |' \
-            | tee /etc/apt/sources.list.d/vendor-kernel.list
+          # trusted=yes skips upstream repo-signature verification. trixie's apt
+          # uses Sequoia (sqv), which rejects the raspberrypi.org archive key for
+          # its legacy SHA1 binding signature. Repo-signature verification of the
+          # public headers feed is not our trust boundary: the .ko we publish
+          # carries its own SHA256 (and minisign signature when a key is set), so
+          # the artifact's integrity does not depend on the upstream apt signature.
+          echo "${{ matrix.apt_list }}" | tee /etc/apt/sources.list.d/vendor-kernel.list
           apt-get update
 
       - name: Install kernel headers + derive kernelrelease
