@@ -11,6 +11,12 @@ import structlog
 
 log = structlog.get_logger()
 
+# How often the monitor re-attempts a service parked in failed /
+# circuit_open. A crashed hardware service (e.g. ados-video after a
+# camera unplug tripped systemd's start-limit) must keep being retried
+# so it self-recovers when the hardware or condition returns (Rule 26).
+_PARKED_RETRY_COOLDOWN_S = 30.0
+
 
 class MonitorMixin:
     """Periodic monitor loop for the Supervisor."""
@@ -29,35 +35,31 @@ class MonitorMixin:
                         self._check_circuit_breaker(spec)
                         # Auto-restart if circuit not open
                         if spec.state != "circuit_open":
-                            # Skip auto-restart of the wfb units while a
-                            # local bind session is in flight. The bind
-                            # orchestrator stops the normal wfb unit so
-                            # wfb-ng's bind profile can own the radio
-                            # adapter exclusively for the handshake. A
-                            # racing restart here re-acquires the
-                            # adapter, fights monitor mode with the
-                            # bind tunnel, and corrupts the socat key
-                            # exchange. Lazy import avoids a module-
-                            # load cycle and a hard dep at supervisor
-                            # boot.
-                            if name in ("ados-wfb", "ados-wfb-rx"):
-                                try:
-                                    from ados.services.wfb.bind_orchestrator import (
-                                        is_bind_active,
-                                    )
-                                    if is_bind_active():
-                                        log.info(
-                                            "service_restart_skipped_during_bind",
-                                            service=name,
-                                        )
-                                        continue
-                                except Exception:
-                                    # Broken import (test env, missing
-                                    # module) must not gate normal
-                                    # restart behavior. Fall through.
-                                    pass
+                            if self._restart_blocked_by_bind(name):
+                                continue
                             log.info("service_auto_restart", service=name)
                             await self.start_service(name)
+                elif (
+                    spec.state in ("failed", "circuit_open")
+                    and spec.enabled
+                    and spec.category in ("core", "hardware")
+                ):
+                    # Periodically re-attempt a parked service so it
+                    # self-recovers instead of staying dead until a
+                    # manual restart. start_service() clears the systemd
+                    # start-limit (reset-failed) and the circuit-breaker
+                    # half-opens after its window, so the retry actually
+                    # takes once the underlying condition clears.
+                    now = time.monotonic()
+                    if now - spec.last_retry_at < _PARKED_RETRY_COOLDOWN_S:
+                        continue
+                    if self._restart_blocked_by_bind(name):
+                        continue
+                    spec.last_retry_at = now
+                    log.info(
+                        "service_parked_retry", service=name, state=spec.state
+                    )
+                    await self.start_service(name)
 
             # Collect per-PID metrics
             self._collect_metrics()
@@ -66,6 +68,29 @@ class MonitorMixin:
             self._sd_notify_watchdog()
 
             await asyncio.sleep(5)
+
+    @staticmethod
+    def _restart_blocked_by_bind(name: str) -> bool:
+        """True when restarting a wfb unit would collide with a live bind.
+
+        The bind orchestrator stops the normal wfb unit so wfb-ng's bind
+        profile can own the radio adapter exclusively for the handshake.
+        A racing restart re-acquires the adapter, fights monitor mode with
+        the bind tunnel, and corrupts the socat key exchange. Lazy import
+        avoids a module-load cycle and a hard dep at supervisor boot; a
+        broken import (test env) must not gate normal restart behaviour.
+        """
+        if name not in ("ados-wfb", "ados-wfb-rx"):
+            return False
+        try:
+            from ados.services.wfb.bind_orchestrator import is_bind_active
+
+            if is_bind_active():
+                log.info("service_restart_skipped_during_bind", service=name)
+                return True
+        except Exception:
+            pass
+        return False
 
     async def _check_service_active(self, name: str) -> bool:
         """Check if a systemd service is active."""

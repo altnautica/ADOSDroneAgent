@@ -38,6 +38,9 @@ class ServiceSpec:
     memory_mb: float = 0.0
     uptime_seconds: float = 0.0
     state: str = "stopped"  # stopped, starting, running, failed, circuit_open
+    # Monotonic timestamp of the last monitor-driven retry of a parked
+    # (failed / circuit_open) service, so the retry cadence is bounded.
+    last_retry_at: float = 0.0
 
 
 # All services the supervisor knows about

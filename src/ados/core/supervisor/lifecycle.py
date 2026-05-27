@@ -147,6 +147,22 @@ class Supervisor(HotplugMixin, MonitorMixin, HeartbeatMixin):
             spec.failure_times.extend(recent)
 
         spec.state = "starting"
+        # Clear any prior failed / start-limit state first. A unit that
+        # crash-looped past systemd's StartLimitBurst is left in
+        # "failed (start-limit-hit)", and a plain `systemctl start` on it
+        # is a no-op ("start request repeated too quickly") — so the
+        # service would stay dead forever. reset-failed clears both the
+        # failed result and the burst counter so the start below can take.
+        try:
+            await asyncio.to_thread(
+                subprocess.run,
+                ["systemctl", "reset-failed", name],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+        except Exception:  # noqa: BLE001 — best-effort; start still attempted
+            pass
         try:
             result = await asyncio.to_thread(
                 subprocess.run,
