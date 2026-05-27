@@ -418,6 +418,12 @@ install_failure_trap() {
 # pip on the rig). Idempotent and fast when already satisfied; best-effort
 # (warn, not abort) so a blip on one leg does not sink the install.
 ensure_build_toolchain() {
+    # Clear corrupt leftover distributions first. pip renames a package to
+    # ~name when an install or upgrade is interrupted (e.g. a killed build);
+    # the half-written metadata then crashes the next pip run with a SIGSEGV
+    # ("Ignoring invalid distribution ~name"). A glob delete clears them. The
+    # tilde is mid-path here, so the shell does not tilde-expand it.
+    rm -rf "${VENV_DIR}"/lib/python*/site-packages/~* 2>/dev/null || true
     # Pin pip away from the build-isolation regression. This is a wheel
     # install, so it works on the currently-broken pip too.
     "${VENV_DIR}/bin/python" -m pip install --upgrade 'pip>=24,<26' --quiet \
