@@ -4,19 +4,28 @@
 # boards run, so a fresh install can load a verified prebuilt module instead
 # of compiling on the device (slow, and crash-prone on marginal hardware).
 #
-# Each matrix row is a real kernel flavor: the apt repo that ships its headers
-# and the headers package to install. The build derives the exact kernelrelease
-# from the installed headers, runs build-prebuilt-ko.sh against it (which
-# applies the same patches + relax-cflags as the on-device DKMS build), and
-# emits the artifact + a manifest row. The publish job collects the rows into
-# drivers-manifest.json and ships everything as Release assets.
+# Each matrix row is a real kernel flavor. The build runs INSIDE a distro
+# container that matches the target's userspace (Raspberry Pi OS is Debian
+# trixie + the raspberrypi.org apt repo), because the headers packages depend
+# on that distro's 'linux-base' and will not resolve on a plain Ubuntu runner.
+# The build installs the headers, derives the exact kernelrelease, runs
+# build-prebuilt-ko.sh against it (same patches + relax-cflags as the on-device
+# DKMS build), and emits the artifact + a manifest row. The publish job folds
+# the rows into drivers-manifest.json and ships everything as Release assets.
+#
+# Coverage is the stock-kernel boards (Pi 3 / 4 / 5 / Zero 2 W) where the
+# on-device compile is pure overhead. Vendor-BSP boards (e.g. RK3588 Radxa)
+# keep the DKMS fallback: their headers packages age out of the public repo
+# and are pinned to the flashed image, so a reproducible CI build is not
+# durable. To add one later, pin its exact headers package + keyring from a
+# live rig's apt cache and give it its own matrix row + container.
 #
 # Triggers:
-#   - tag 'drivers-v*'   → permanent stable Release (signed when the key secret
-#                          is present; SHA256-only otherwise)
-#   - workflow_dispatch  → manual run for matrix iteration
-#   - schedule (daily)   → refresh the rolling 'prebuilt-drivers' prerelease as
-#                          distro kernels advance
+#   - tag 'drivers-v*'   -> permanent stable Release (signed when the key
+#                           secret is present; SHA256-only otherwise)
+#   - workflow_dispatch  -> manual run for matrix iteration
+#   - schedule (daily)   -> refresh the rolling 'prebuilt-drivers' prerelease
+#                           as distro kernels advance
 #
 # Artifacts carry a SHA256 always; an Ed25519/minisign signature is added when
 # ADOS_DRIVER_SIGNING_KEY is set (forks / unset key skip signing cleanly). The
@@ -39,52 +48,57 @@ jobs:
   build:
     name: build (${{ matrix.flavor }})
     runs-on: ubuntu-24.04-arm
+    container: ${{ matrix.container }}
     strategy:
       fail-fast: false
       matrix:
         include:
           # Raspberry Pi OS arm64 default kernel (Pi 3 / 4 / 400 / Zero 2 W).
           - flavor: rpi-v8
+            container: debian:trixie
             apt_list: "deb http://archive.raspberrypi.org/debian trixie main"
             apt_key_url: "https://archive.raspberrypi.org/debian/raspberrypi.gpg.key"
             headers_pkg: linux-headers-rpi-v8
           # Raspberry Pi 5 (BCM2712) kernel.
           - flavor: rpi-2712
+            container: debian:trixie
             apt_list: "deb http://archive.raspberrypi.org/debian trixie main"
             apt_key_url: "https://archive.raspberrypi.org/debian/raspberrypi.gpg.key"
             headers_pkg: linux-headers-rpi-2712
-          # Radxa RK3588(S2) BSP kernel (Rock 5C / Rock 5 family). Pinned to the
-          # exact release the rsdk-b1 image ships; bump when the BSP advances.
-          - flavor: rock-5c-rk2312
-            apt_list: "deb https://radxa-repo.github.io/rk3588s2-bookworm rk3588s2-bookworm main"
-            apt_key_url: "https://radxa-repo.github.io/rk3588s2-bookworm/rk3588s2-bookworm.gpg.key"
-            headers_pkg: linux-headers-6.1.43-15-rk2312
     steps:
+      # The container base is minimal; checkout needs git, and apt fetches need
+      # TLS roots. Install both before actions/checkout can run.
+      - name: Prepare container
+        run: |
+          set -eux
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y git ca-certificates
+
       - uses: actions/checkout@v4
         with:
           submodules: recursive
 
       - name: Install build toolchain + minisign
         run: |
-          sudo apt-get update
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
-            build-essential bc kmod patch minisign ca-certificates gnupg curl jq
+          set -eux
+          DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            build-essential bc kmod patch minisign gnupg curl jq libelf-dev
 
       - name: Add vendor kernel apt repo
         run: |
           set -euxo pipefail
           curl -fsSL "${{ matrix.apt_key_url }}" \
-            | sudo gpg --dearmor -o /usr/share/keyrings/vendor-kernel.gpg
+            | gpg --dearmor -o /usr/share/keyrings/vendor-kernel.gpg
           echo "${{ matrix.apt_list }}" \
             | sed 's| | [signed-by=/usr/share/keyrings/vendor-kernel.gpg] |' \
-            | sudo tee /etc/apt/sources.list.d/vendor-kernel.list
-          sudo apt-get update
+            | tee /etc/apt/sources.list.d/vendor-kernel.list
+          apt-get update
 
       - name: Install kernel headers + derive kernelrelease
         id: kver
         run: |
           set -euxo pipefail
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y "${{ matrix.headers_pkg }}"
+          DEBIAN_FRONTEND=noninteractive apt-get install -y "${{ matrix.headers_pkg }}"
           # The headers install drops /lib/modules/<KVER>/build; that <KVER> is
           # the exact release the module must match. Pick the newest dir that
           # actually has a build/ tree (find avoids ls-parsing pitfalls).
