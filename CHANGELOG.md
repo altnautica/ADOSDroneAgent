@@ -4,6 +4,53 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.43.1] - 2026-05-27
+
+### Fixed
+
+- **Wi-Fi driver build no longer knocks the board offline mid-install.**
+  The DKMS compile for the RTL8812EU module ran at the default
+  parallelism, which is one job per core. On the small single-board
+  computers this agent targets, the only management link during a
+  headless install is often a USB Wi-Fi dongle whose driver shares the
+  CPU with the build. An all-core gcc run starved that link long enough
+  that the board went unreachable for the rest of the compile, with no
+  kernel fault recorded, and the install appeared to hang. The build is
+  now held to two jobs (via the documented DKMS `parallel_jobs` knob,
+  set idempotently with a one-time backup of `framework.conf`) and
+  reniced, so kernel work and the network link keep enough CPU to stay
+  alive while the driver compiles.
+
+## [0.43.0] - 2026-05-26
+
+### Added
+
+- **Displays auto-configure by physical presence.** The installer now
+  probes for a connected panel and provisions it without operator input:
+  a bound SPI-LCD framebuffer is recognized as-is, an HDMI output is used
+  when a connector reports connected, and an I2C OLED is enabled when it
+  answers on the bus. A declared-but-unbound SPI-LCD is applied on
+  probation and confirmed at next boot by `ados-display-probe`, which
+  restores the previous boot config automatically if the panel fails to
+  bind. When nothing is attached the display resolves to `none` and no
+  boot config is touched. The on-screen UI service is gated on a single
+  `/etc/ados/display.enabled` marker rather than a loose framebuffer
+  glob.
+- **Staged install progress.** The foreground install prints numbered
+  stage banners with elapsed time and emits periodic heartbeats during
+  the long steps (driver compile, dependency install) so a headless
+  operator can see it is still working.
+
+### Changed
+
+- **Services skip cleanly when their hardware is absent.** The OLED,
+  button, and modem services exit without error instead of retrying when
+  their device is not present, so an install on a board without that
+  peripheral leaves no failed units behind.
+- **The Wi-Fi driver is built from source via DKMS only.** The agent
+  trusts the on-disk DKMS module rather than a shipped binary, and the
+  heartbeat reports the module source as `dkms`.
+
 ## [0.39.0] - 2026-05-25
 
 ### Added
