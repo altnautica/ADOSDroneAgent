@@ -70,6 +70,18 @@ _VALID_RX_SILENCE_THRESHOLD_S = 12.0
 # missed beacon.
 _PEER_PRESENCE_FRESH_S = 30.0
 
+# Cold-start home-hold budget. On a cold boot the receiver homes on the
+# configured rendezvous channel and waits there, because the
+# transmitter broadcasts on that same home channel until linked. But if
+# the home channels are mismatched (e.g. one side's config was edited)
+# an indefinite hold would deadlock forever. So after this long unlinked
+# at cold start with zero valid RX and no peer presence, the receiver
+# performs ONE acquire sweep to self-heal, then returns to holding home
+# if the sweep finds nothing. Rendezvous-first is preserved: the sweep
+# does not fire instantly on boot — the drone is on home, so a correctly
+# configured pair links well before this elapses.
+_COLD_START_HOME_HOLD_S = 75.0
+
 # Peer-presence loss window. Between the fresh window and this one the
 # peer was seen recently but a marginal control-plane link is dropping
 # beacons for tens of seconds at a time (bench co-channel interference is
@@ -193,6 +205,15 @@ class WfbRxManager:
         # Set True the first time valid video decodes OR a presence
         # beacon from the peer is seen.
         self._ever_linked: bool = False
+        # Cold-start self-heal bookkeeping. `_cold_start_at` stamps the
+        # monotonic time the receiver began holding the home channel with
+        # no link. After `_COLD_START_HOME_HOLD_S` the watchdog runs one
+        # acquire sweep so a home-channel mismatch cannot deadlock
+        # forever; `_cold_sweep_done` makes that a one-shot per cold-boot
+        # window so we don't sweep on every poll tick once the budget is
+        # blown. Both reset when a link is established.
+        self._cold_start_at: float = time.monotonic()
+        self._cold_sweep_done: bool = False
         # Channel acquirer: sweeps the band on a dry link and locks onto
         # the first channel that decodes valid packets. Constructed once
         # an interface + channel are known in run(); reads the live
@@ -941,8 +962,11 @@ class WfbRxManager:
             self._last_valid_rx_change_at = time.monotonic()
             # A valid decode means we have met the peer at least once;
             # from here a later silence is a genuine loss and the band
-            # sweep is allowed.
+            # sweep is allowed. Clear the cold-start self-heal bookkeeping
+            # so a future loss is treated as a linked loss, not a cold
+            # boot.
             self._ever_linked = True
+            self._cold_sweep_done = False
             # Valid decodes on the current channel ARE a lock — a sweep is
             # only one way to reach that state. Mark it so the lock /
             # acquire-state surface reflects reality on a rig that booted
@@ -980,6 +1004,12 @@ class WfbRxManager:
         # Seed the change stamp so the first poll window is full rather
         # than carrying over silence accumulated while wfb_rx spawned.
         self._last_valid_rx_change_at = time.monotonic()
+        # Restart the cold-start hold budget for this wfb_rx generation.
+        # If the link was never established the receiver gets a fresh
+        # bounded hold on the home channel before the one self-heal sweep.
+        if not self._ever_linked:
+            self._cold_start_at = time.monotonic()
+            self._cold_sweep_done = False
         while (
             self._running
             and self._rx_proc is not None
@@ -1001,6 +1031,7 @@ class WfbRxManager:
                 # Seeing the peer counts as having been linked, so a
                 # later silence is a real loss the sweep may act on.
                 self._ever_linked = True
+                self._cold_sweep_done = False
                 log.info(
                     "ground_wfb_paired_no_video",
                     interface=self._interface,
@@ -1036,23 +1067,75 @@ class WfbRxManager:
                 )
                 continue
 
-            # Rendezvous-first: do NOT sweep from a cold start. Until the
-            # link has been established once (valid video decoded or a
-            # presence beacon seen), the transmitter is broadcasting on
-            # the fixed home channel, so the receiver simply stays there
-            # and waits. Sweeping from cold pulls us off the home channel
-            # the drone is transmitting on and is the divergence this
-            # fixes. Once linked, a later silence with no peer presence
-            # is a genuine loss and the sweep below runs.
+            # Rendezvous-first cold start: hold the home channel rather
+            # than sweep immediately. Until the link has been established
+            # once (valid video decoded or a presence beacon seen), the
+            # transmitter is broadcasting on the fixed home channel, so a
+            # correctly-configured receiver simply stays there and links.
+            # Sweeping from cold pulls us off the home channel the drone
+            # is transmitting on, which is the divergence this guards.
+            #
+            # BUT holding forever would deadlock a pair whose home
+            # channels are mismatched (a config drift on one side). So
+            # after a bounded hold with no link, run exactly ONE acquire
+            # sweep to self-heal, then fall back to holding home if the
+            # sweep finds nothing. The home channel is `_config.channel`,
+            # the operator's immutable rendezvous home (never auto-written).
             if not self._ever_linked:
-                log.info(
-                    "ground_wfb_unlinked_hold_home",
+                home = int(self._config.channel)
+                cold_for = time.monotonic() - self._cold_start_at
+                if cold_for < _COLD_START_HOME_HOLD_S or self._cold_sweep_done:
+                    log.info(
+                        "ground_wfb_unlinked_hold_home",
+                        interface=self._interface,
+                        channel=self._channel,
+                        cold_seconds=round(cold_for, 1),
+                        note=(
+                            "no peer seen yet; holding home channel, "
+                            "no cold sweep within the hold budget"
+                        ),
+                    )
+                    continue
+
+                # Budget elapsed unlinked: one self-heal sweep, then home.
+                self._cold_sweep_done = True
+                self._acquirer.mark_unlocked()
+                log.warning(
+                    "ground_wfb_cold_self_heal_sweep",
                     interface=self._interface,
                     channel=self._channel,
+                    cold_seconds=round(cold_for, 1),
                     note=(
-                        "no peer seen yet; holding home channel, "
-                        "no cold sweep until a lock has been established"
+                        "unlinked past the cold hold budget; one acquire "
+                        "sweep in case the home channels are mismatched"
                     ),
+                )
+                cold_locked: int | None = None
+                cold_announced = self._peer_announced_channel()
+                if cold_announced is not None and cold_announced != self._channel:
+                    if await self._acquirer.acquire_target(cold_announced):
+                        cold_locked = cold_announced
+                if cold_locked is None:
+                    cold_locked = await self._acquirer.acquire()
+                if cold_locked is not None:
+                    self._channel = cold_locked
+                    self._persist_locked_channel(cold_locked)
+                    self._last_valid_rx_change_at = time.monotonic()
+                    continue
+                # Sweep found nothing — return to the home channel so the
+                # next rendezvous attempt happens where the drone homes,
+                # and resume holding (the one-shot flag prevents another
+                # sweep until a link is established or the manager
+                # restarts).
+                if home != self._channel:
+                    await self._acquirer.try_channel(home)
+                    self._channel = home
+                self._last_valid_rx_change_at = time.monotonic()
+                log.info(
+                    "ground_wfb_cold_self_heal_returned_home",
+                    interface=self._interface,
+                    channel=self._channel,
+                    note="cold self-heal sweep found no peer; back on home channel",
                 )
                 continue
 
@@ -1098,47 +1181,60 @@ class WfbRxManager:
             return
 
     def _persist_locked_channel(self, channel: int) -> None:
-        """Write the locked channel into the persisted config.
+        """Record the last-locked channel as a runtime hint.
 
-        A successful lock should survive a restart so the receiver comes
-        up on the right channel next boot instead of sweeping again.
-        Mirrors the tmp-write + replace idiom used elsewhere. A persist
-        failure is not fatal to the live link, but it does mean the next
-        boot will sweep again, so it is logged at warning, not debug.
+        A successful sweep lock is written to a runtime hint file on
+        tmpfs so a restart can try that channel first instead of sweeping
+        from scratch. It is NOT written into config.yaml: the operator's
+        ``video.wfb.channel`` is the immutable rendezvous home where both
+        sides deterministically meet, and the agent must never overwrite
+        it. (Doing so once made the ground home on a previously-locked
+        channel while the drone stayed on the configured home, so the two
+        sides never met on a cold boot.)
+
+        Atomic tmp-write + replace. A failure is not fatal to the live
+        link — it just means a restart sweeps from the home channel
+        again — so it is logged at warning, not debug.
         """
-        import yaml as _yaml
+        from ados.core.paths import WFB_LOCKED_CHANNEL_HINT
 
-        from ados.core.paths import CONFIG_YAML
-
+        path = WFB_LOCKED_CHANNEL_HINT
         try:
-            path = CONFIG_YAML
-            data: dict = {}
-            if path.is_file():
-                loaded = _yaml.safe_load(path.read_text(encoding="utf-8"))
-                if isinstance(loaded, dict):
-                    data = loaded
-            video = data.get("video")
-            if not isinstance(video, dict):
-                video = {}
-            wfb_section = video.get("wfb")
-            if not isinstance(wfb_section, dict):
-                wfb_section = {}
-            wfb_section["channel"] = int(channel)
-            video["wfb"] = wfb_section
-            data["video"] = video
-            body = _yaml.safe_dump(data, sort_keys=False, default_flow_style=False)
+            path.parent.mkdir(parents=True, exist_ok=True)
             tmp = path.with_suffix(path.suffix + ".tmp")
-            tmp.parent.mkdir(parents=True, exist_ok=True)
-            tmp.write_text(body, encoding="utf-8")
+            tmp.write_text(f"{int(channel)}\n", encoding="utf-8")
             tmp.replace(path)
-            log.info("ground_wfb_channel_persisted", channel=channel)
-        except (OSError, _yaml.YAMLError) as exc:
+            log.info("ground_wfb_channel_hint_persisted", channel=channel)
+        except OSError as exc:
             log.warning(
-                "ground_wfb_channel_persist_failed",
+                "ground_wfb_channel_hint_persist_failed",
                 channel=channel,
                 error=str(exc),
-                note="locked channel not persisted; next boot will sweep again",
+                note="locked channel hint not written; next boot homes on config channel",
             )
+
+    @staticmethod
+    def _read_locked_channel_hint() -> int | None:
+        """Read the last-locked channel hint, or None when absent/corrupt.
+
+        The hint is a fast first guess on a cold start, never the source
+        of truth — the home channel always remains the fallback. Missing,
+        empty, or unparseable content returns None. Best-effort; never
+        raises.
+        """
+        from ados.core.paths import WFB_LOCKED_CHANNEL_HINT
+
+        try:
+            raw = WFB_LOCKED_CHANNEL_HINT.read_text(encoding="utf-8").strip()
+        except (OSError, ValueError):
+            return None
+        if not raw:
+            return None
+        try:
+            ch = int(raw)
+        except ValueError:
+            return None
+        return ch if ch > 0 else None
 
     def _update_state_from_stats(self, snap: LinkStats) -> None:
         if snap.loss_percent > 50.0 or snap.rssi_dbm < -85.0:

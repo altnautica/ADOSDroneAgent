@@ -36,6 +36,31 @@ def _radio_to_camel(block: dict | None) -> dict | None:
     return out
 
 
+def _gs_video_delivering(wfb_status: dict | None) -> bool:
+    """True only when the ground-station WFB link is actually delivering video.
+
+    A reachable WHEP endpoint is not proof of a live downlink: the
+    mediamtx ground profile serves WHEP whether or not any frames are
+    arriving over the radio, so probing WHEP alone reports "running" with
+    zero inbound bytes. The trustworthy signal is the receive link state:
+    the stats writer marks ``state == "connected"`` only once valid
+    packets have decoded, and ``valid_rx_packets_per_s`` / packet counters
+    confirm frames are still flowing right now. Require both — link
+    connected AND a positive valid-decode rate — so a paired-but-silent or
+    dead receiver is reported as not-delivering. (Operating rule 37:
+    endpoint-reachable is never proof of data flowing.)
+    """
+    if not isinstance(wfb_status, dict):
+        return False
+    if wfb_status.get("state") != "connected":
+        return False
+    for key in ("valid_rx_packets_per_s", "packets_received"):
+        val = wfb_status.get(key)
+        if isinstance(val, (int, float)) and val > 0:
+            return True
+    return False
+
+
 # ---------------------------------------------------------------------------
 # Cache TTLs for the consolidated status payload.
 #
@@ -316,6 +341,25 @@ async def get_full_status(request: Request):
     except ImportError:
         pass
 
+    # --- WFB radio snapshot, read once and reused below ---
+    # Build the wfb status dict here (once) so both the ground-station
+    # video gate and the radio block read the same view. On the GS the
+    # WfbRxManager lives in a sibling process, so read the shared stats
+    # file the same way /api/wfb does; on the drone the in-process
+    # manager answers directly.
+    wfb_status: dict | None = None
+    try:
+        wfb_mgr = app.wfb_manager()
+        if wfb_mgr is not None:
+            wfb_status = wfb_mgr.get_status()
+        else:
+            from ados.api.routes.wfb import _build_status_from_stats_file
+
+            _wfb_cfg = getattr(getattr(app.config, "video", None), "wfb", None)
+            wfb_status = _build_status_from_stats_file(_wfb_cfg)
+    except Exception:
+        wfb_status = None
+
     # --- Video (same logic as /api/video with mediamtx probe) ---
     from ados.api.routes.video import (
         _empty_recording_block,
@@ -327,6 +371,9 @@ async def get_full_status(request: Request):
     video: dict = {"state": "not_initialized", "whep_url": None, **_empty_recording_block()}
     pipeline = app.video_pipeline()
     if pipeline is not None:
+        # Drone path: the in-process pipeline owns the encoder + mediamtx.
+        # Its own state is authoritative; do not gate on the WFB receive
+        # link (the drone transmits, it does not receive video).
         vid_status = pipeline.get_status()
         if vid_status.get("mediamtx", {}).get("running"):
             host = request.headers.get("host", "localhost").split(":")[0]
@@ -343,19 +390,40 @@ async def get_full_status(request: Request):
                 **_recording_block(pipeline),
             }
     else:
-        mtx = await _probe_mediamtx()
-        if mtx is None or not mtx.get("ready"):
-            # Ground-station mediamtx puts auth on the management API; the
-            # WHEP probe doesn't. Fall through so the consolidated status
-            # reports running when WHEP is actually serving frames — the
-            # received downlink. Keeps this in sync with the /api/video
-            # route, which the GCS otherwise prefers only on older agents.
-            mtx = await _probe_mediamtx_via_whep() or mtx
-        if mtx and mtx.get("ready"):
-            host = request.headers.get("host", "localhost").split(":")[0]
+        # Ground-station path: there is no in-process pipeline. mediamtx
+        # serves WHEP whether or not frames are arriving over the radio,
+        # so a reachable WHEP endpoint is NOT proof of a live downlink.
+        # Gate "running" on the WFB receive link actually delivering
+        # video (connected + valid decodes), not WHEP reachability. When
+        # the link is not delivering, report a non-running state with a
+        # null whep_url so the GCS does not show "Video: Live" over a
+        # dead radio. (Operating rule 37.)
+        if _gs_video_delivering(wfb_status):
+            mtx = await _probe_mediamtx()
+            if mtx is None or not mtx.get("ready"):
+                # mediamtx-gs puts auth on the management API; the WHEP
+                # probe doesn't. Confirm WHEP is serving the live stream.
+                mtx = await _probe_mediamtx_via_whep() or mtx
+            if mtx and mtx.get("ready"):
+                host = request.headers.get("host", "localhost").split(":")[0]
+                video = {
+                    "state": "running",
+                    "whep_url": f"http://{host}:8889/main/whep",
+                    **_empty_recording_block(),
+                }
+            else:
+                # Link delivering frames but WHEP not yet serving — still
+                # coming up rather than live.
+                video = {
+                    "state": "connecting",
+                    "whep_url": None,
+                    **_empty_recording_block(),
+                }
+        else:
+            # No live downlink. Report stopped with no playable endpoint.
             video = {
-                "state": "running",
-                "whep_url": f"http://{host}:8889/main/whep",
+                "state": "stopped",
+                "whep_url": None,
                 **_empty_recording_block(),
             }
 
@@ -407,20 +475,12 @@ async def get_full_status(request: Request):
     # --- Radio (WFB link block) — surfaced so the LAN-direct GCS path
     # populates the same radio snapshot the cloud heartbeat carries,
     # including the receive-side metrics (SNR, noise, loss, MCS,
-    # receive-liveness). On the GS the WfbRxManager lives in a sibling
-    # process, so read the shared stats file the same way /api/wfb does.
+    # receive-liveness). Reuses the wfb_status read once above, so the
+    # video gate and the radio block can never disagree about the link.
     radio_block: dict | None = None
     try:
         from ados.core.supervisor.heartbeat import build_radio_block
 
-        wfb_mgr = app.wfb_manager()
-        if wfb_mgr is not None:
-            wfb_status = wfb_mgr.get_status()
-        else:
-            from ados.api.routes.wfb import _build_status_from_stats_file
-
-            _wfb_cfg = getattr(getattr(app.config, "video", None), "wfb", None)
-            wfb_status = _build_status_from_stats_file(_wfb_cfg)
         radio_block = _radio_to_camel(build_radio_block(wfb_status))
     except Exception:
         radio_block = None

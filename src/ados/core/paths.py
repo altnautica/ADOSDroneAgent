@@ -67,6 +67,18 @@ AP_WAS_ENABLED_FLAG = ADOS_RUN_DIR / "ap-was-enabled"
 # authoritative source. Values: "prebuilt" or "dkms".
 WFB_MODULE_SOURCE = ADOS_RUN_DIR / "wfb-module-source"
 
+# Last-locked WFB channel hint. Written by the ground-side receiver when
+# a channel acquisition sweep locks onto the transmitter, so a restart
+# can try that channel first instead of sweeping from scratch. This is a
+# runtime HINT only: it lives on tmpfs (gone on reboot) and is NEVER the
+# rendezvous home. The home channel is the operator's immutable
+# ``video.wfb.channel`` in config.yaml; the agent must never auto-write
+# that field. On a cold start with no established link the receiver homes
+# on the configured channel and may consult this hint as a fast first
+# guess, but always falls back to home. Single integer channel number as
+# text; atomic tmp+replace write; missing/corrupt tolerated.
+WFB_LOCKED_CHANNEL_HINT = ADOS_RUN_DIR / "wfb-locked-channel"
+
 # USB gadget composer runtime artifacts
 DNSMASQ_USB0_CONF = ADOS_RUN_DIR / "dnsmasq-usb0.conf"
 DNSMASQ_USB0_PID = ADOS_RUN_DIR / "dnsmasq-usb0.pid"

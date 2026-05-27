@@ -64,10 +64,19 @@ def _make_manager(
     mgr._running = True
     mgr._channel = 149
     mgr._reacquire_kills = 0
+    # The configured rendezvous home channel. The cold-start self-heal
+    # path reads it to return there after a sweep finds nothing.
+    mgr._config = MagicMock()
+    mgr._config.channel = 149
+    # Cold-start home-hold bookkeeping. Default to "just started" and the
+    # one-shot sweep not yet done, so the cold-start hold branch is
+    # exercised within the hold budget (no sweep) unless a test overrides.
+    mgr._cold_start_at = time.monotonic()
+    mgr._cold_sweep_done = False
     # The watchdog sweep only runs after a link has been established and
     # then lost. These cases model exactly that, so the rig is marked as
     # having been linked. A cold start (never linked) holds the home
-    # channel instead and is covered by its own test below.
+    # channel instead and is covered by its own tests below.
     mgr._ever_linked = True
     # Stale timestamp (silent) or fresh timestamp (video flowing).
     mgr._last_valid_rx_change_at = (
@@ -273,6 +282,86 @@ async def test_cold_start_never_linked_holds_home_no_sweep():
     mgr._rx_proc.terminate.assert_not_called()
     assert mgr._channel == 149
     assert mgr._reacquire_kills == 0
+
+
+@pytest.mark.asyncio
+async def test_cold_start_budget_elapsed_runs_one_self_heal_sweep():
+    """Cold start unlinked past the hold budget → one acquire sweep.
+
+    Holding the home channel forever would deadlock a pair whose home
+    channels are mismatched. After the bounded hold the receiver runs one
+    self-heal sweep; a successful lock relocates and persists the channel.
+    """
+    mgr = _make_manager(video_silent=True, peer_present=False)
+    mgr._ever_linked = False
+    mgr._cold_start_at = time.monotonic()
+    mgr._cold_sweep_done = False
+    mgr._acquirer = MagicMock()
+    mgr._acquirer.mark_unlocked = MagicMock()
+    mgr._acquirer.acquire = AsyncMock(return_value=157)
+    mgr._acquirer.acquire_target = AsyncMock(return_value=True)
+    mgr._acquirer.try_channel = AsyncMock(return_value=True)
+
+    with patch(
+        "ados.services.ground_station.wfb_rx._VALID_RX_SILENCE_THRESHOLD_S",
+        0.0,
+    ), patch(
+        "ados.services.ground_station.wfb_rx._VALID_RX_POLL_INTERVAL_S",
+        0.0,
+    ), patch(
+        # Zero hold budget so the freshly-seeded cold-start timer is
+        # already past it on the first poll.
+        "ados.services.ground_station.wfb_rx._COLD_START_HOME_HOLD_S",
+        0.0,
+    ):
+        await _run_watchdog(mgr._valid_packet_watchdog())
+
+    mgr._acquirer.acquire.assert_awaited()
+    assert mgr._channel == 157
+    mgr._persist_locked_channel.assert_called_with(157)
+    assert mgr._cold_sweep_done is True
+    mgr._rx_proc.terminate.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_cold_start_budget_elapsed_sweep_fails_returns_home():
+    """Cold self-heal sweep finds nothing → return to the home channel.
+
+    A failed cold sweep must NOT terminate wfb_rx (the process is fine,
+    the peer just isn't there yet); it returns to the home channel where
+    the drone homes and resumes holding (one-shot, no thrash).
+    """
+    mgr = _make_manager(video_silent=True, peer_present=False)
+    mgr._ever_linked = False
+    mgr._channel = 161  # drifted off home from an earlier attempt
+    mgr._config.channel = 149
+    mgr._cold_start_at = time.monotonic()
+    mgr._cold_sweep_done = False
+    mgr._acquirer = MagicMock()
+    mgr._acquirer.mark_unlocked = MagicMock()
+    mgr._acquirer.acquire = AsyncMock(return_value=None)
+    mgr._acquirer.acquire_target = AsyncMock(return_value=False)
+    mgr._acquirer.try_channel = AsyncMock(return_value=True)
+
+    with patch(
+        "ados.services.ground_station.wfb_rx._VALID_RX_SILENCE_THRESHOLD_S",
+        0.0,
+    ), patch(
+        "ados.services.ground_station.wfb_rx._VALID_RX_POLL_INTERVAL_S",
+        0.0,
+    ), patch(
+        "ados.services.ground_station.wfb_rx._COLD_START_HOME_HOLD_S",
+        0.0,
+    ):
+        await _run_watchdog(mgr._valid_packet_watchdog())
+
+    mgr._acquirer.acquire.assert_awaited()
+    # Returned to the home channel; no destructive restart.
+    mgr._acquirer.try_channel.assert_awaited_with(149)
+    assert mgr._channel == 149
+    mgr._rx_proc.terminate.assert_not_called()
+    assert mgr._reacquire_kills == 0
+    assert mgr._cold_sweep_done is True
 
 
 @pytest.mark.asyncio
