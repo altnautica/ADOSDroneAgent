@@ -184,31 +184,47 @@ dkms add "${VENDOR_DIR}" || {
     exit 2
 }
 
-# Cap the compile's parallelism so it never pins every core. On the
-# small SBCs this runs on, the sole management link is a USB Wi-Fi
-# dongle whose driver shares CPU with the build; an all-core gcc run
-# (DKMS defaults parallel_jobs to nproc) starves the USB-Wi-Fi servicing
-# path and the box goes unreachable mid-build with no kernel fault
-# logged. Hold the build to two jobs and renice it so kernel work and
-# the network link keep enough CPU to stay alive. framework.conf is the
-# documented DKMS knob for parallel_jobs; set it idempotently with a
-# one-time backup.
+# Keep the compile from pinning every core. On the small single-board
+# computers this runs on, the only management link during a headless
+# install is often a USB Wi-Fi dongle, and its driver shares the CPU
+# with the build. When an all-core gcc run pins every core, the kernel
+# cannot service the USB controller and the Wi-Fi link fast enough; the
+# link drops and the board goes unreachable for the rest of the build
+# with no kernel fault logged, so the install appears to freeze.
+#
+# DKMS picks its make -j from nproc and ignores framework.conf's
+# parallel_jobs on some versions, so the documented knob is not enough
+# on its own. The reliable cap is CPU affinity: confine the build (and
+# every child gcc it spawns, since affinity is inherited) to a fixed two
+# cores with taskset, leaving the rest fully free for the kernel's USB
+# and network work. parallel_jobs is still set as a hint for DKMS
+# versions that honor it, and the build is reniced. Both are best-effort
+# and degrade gracefully when the tool or the knob is absent.
 DKMS_FRAMEWORK="/etc/dkms/framework.conf"
-DKMS_BUILD_JOBS=2
 if [ -f "${DKMS_FRAMEWORK}" ]; then
     if grep -qE '^[[:space:]]*parallel_jobs=' "${DKMS_FRAMEWORK}"; then
-        sed -i.ados.bak "s|^[[:space:]]*parallel_jobs=.*|parallel_jobs=${DKMS_BUILD_JOBS}|" "${DKMS_FRAMEWORK}"
+        sed -i.ados.bak "s|^[[:space:]]*parallel_jobs=.*|parallel_jobs=2|" "${DKMS_FRAMEWORK}"
     else
         cp -n "${DKMS_FRAMEWORK}" "${DKMS_FRAMEWORK}.ados.bak" 2>/dev/null || true
-        printf 'parallel_jobs=%s\n' "${DKMS_BUILD_JOBS}" >> "${DKMS_FRAMEWORK}"
+        printf 'parallel_jobs=2\n' >> "${DKMS_FRAMEWORK}"
     fi
-    info "Capped DKMS build to ${DKMS_BUILD_JOBS} jobs (keeps cores free for the Wi-Fi link)."
+fi
+
+# Confine the build to two cores when the board has at least three, so
+# the remaining cores stay free for the Wi-Fi link. Fall back to no
+# confinement on dual/single-core boards or when taskset is unavailable.
+BUILD_WRAP="nice -n 10"
+_ncpu="$(nproc 2>/dev/null || echo 1)"
+if command -v taskset >/dev/null 2>&1 && [ "${_ncpu}" -ge 3 ]; then
+    BUILD_WRAP="taskset -c 0-1 nice -n 10"
+    info "Confining the Wi-Fi driver build to 2 of ${_ncpu} cores so the network link stays alive."
 fi
 
 # Build + install for current kernel (idempotent: dkms skips if already built)
 info "Compiling the Wi-Fi driver against kernel ${KERNEL} (ARCH=${ARCH:-unset})."
 info "This can take several minutes on this board. Build output follows."
-nice -n 10 dkms build "${DKMS_NAME}" -k "${KERNEL}" || {
+# shellcheck disable=SC2086  # BUILD_WRAP is an intentional multi-word prefix
+${BUILD_WRAP} dkms build "${DKMS_NAME}" -k "${KERNEL}" || {
     error "dkms build failed. See /var/lib/dkms/${DKMS_PACKAGE}/${DRIVER_VERSION}/build/make.log"
     exit 2
 }

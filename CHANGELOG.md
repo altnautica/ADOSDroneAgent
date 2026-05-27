@@ -4,22 +4,30 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.43.2] - 2026-05-27
+
+### Fixed
+
+- **Wi-Fi driver build is confined by CPU affinity so it cannot knock
+  the board offline.** Setting the DKMS `parallel_jobs` hint alone was
+  not enough: some DKMS versions pick their `make -j` from the core
+  count and ignore `framework.conf`, so the compile still ran one job
+  per core and starved the USB Wi-Fi management link until the board
+  went unreachable mid-build. The build is now pinned to two cores with
+  `taskset` (affinity is inherited by every gcc it spawns), leaving the
+  remaining cores free for the kernel's USB and network work. The
+  `parallel_jobs` hint and renice are kept for DKMS versions that honor
+  them; both degrade gracefully when the tool or knob is absent.
+
 ## [0.43.1] - 2026-05-27
 
 ### Fixed
 
-- **Wi-Fi driver build no longer knocks the board offline mid-install.**
-  The DKMS compile for the RTL8812EU module ran at the default
-  parallelism, which is one job per core. On the small single-board
-  computers this agent targets, the only management link during a
-  headless install is often a USB Wi-Fi dongle whose driver shares the
-  CPU with the build. An all-core gcc run starved that link long enough
-  that the board went unreachable for the rest of the compile, with no
-  kernel fault recorded, and the install appeared to hang. The build is
-  now held to two jobs (via the documented DKMS `parallel_jobs` knob,
-  set idempotently with a one-time backup of `framework.conf`) and
-  reniced, so kernel work and the network link keep enough CPU to stay
-  alive while the driver compiles.
+- **First attempt to keep the Wi-Fi driver build from starving the
+  network link.** Set the DKMS `parallel_jobs` hint to two and reniced
+  the build. Superseded by 0.43.2 after on-hardware testing showed the
+  DKMS version in use ignores `parallel_jobs` and still compiles one job
+  per core; a CPU-affinity cap was needed instead.
 
 ## [0.43.0] - 2026-05-26
 
