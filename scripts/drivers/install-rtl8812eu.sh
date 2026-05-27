@@ -218,18 +218,20 @@ fi
 # source has all three patterns. KCFLAGS is overwritten by dkms in
 # some versions so we route the relax flags via USER_EXTRA_CFLAGS in
 # dkms.conf, which the module Makefile picks up at line 1 and appends
-# to its own EXTRA_CFLAGS so the LAST flag wins: -Wno-error overrides the
-# kernel's promotion of these warnings, and -O1 overrides the kernel's -O2.
-# The -O1 is load-bearing: gcc 12 segfaults (internal compiler error) while
-# optimizing core/rtw_btcoex.c at -O2 on at least the RK3588 BSP toolchain,
-# which aborts the whole build; -O1 compiles it cleanly with no measurable
-# runtime cost for an out-of-tree NIC driver. This patch must happen BEFORE
-# dkms add because dkms copies the source at add time and never re-reads it.
-RELAX_CFLAGS="-O1 -Wno-error -Wno-misleading-indentation -Wno-address-of-packed-member -Wno-date-time"
+# to its own EXTRA_CFLAGS so the LAST -Wno-error wins over the kernel's
+# promotion of these warnings. Optimization is left to the vendored
+# Makefile (which already pins -O1); we do NOT force an -O level here.
+# An earlier -O1 in this flag set was a misdiagnosed fix for a gcc
+# "internal compiler error: Segmentation fault" that is in fact a stack
+# overflow in gcc's recursive type analysis (see the ulimit raise before
+# the build below) — the crash is in the parser, so the -O level is
+# irrelevant. This patch must happen BEFORE dkms add because dkms copies
+# the source at add time and never re-reads it.
+RELAX_CFLAGS="-Wno-error -Wno-misleading-indentation -Wno-address-of-packed-member -Wno-date-time"
 DKMS_CONF="${VENDOR_DIR}/dkms.conf"
 # Content-aware: re-patch unless our EXACT flags are already present, so a
-# changed RELAX_CFLAGS (e.g. the newly added -O1) actually takes effect on a
-# config that carries a prior, different USER_EXTRA_CFLAGS. Strip any old
+# changed RELAX_CFLAGS actually takes effect on a config that carries a
+# prior, different USER_EXTRA_CFLAGS (e.g. one with the retired -O1). Strip any old
 # value first, then append the current one.
 if ! grep -qF "USER_EXTRA_CFLAGS='${RELAX_CFLAGS}'" "${DKMS_CONF}"; then
     info "Patching dkms.conf with relax cflags."
@@ -297,6 +299,18 @@ if [ "${_ncpu}" -ge 3 ] && command -v taskset >/dev/null 2>&1 && taskset -c 0-1 
     BUILD_WRAP="taskset -c 0-1 nice -n 10"
     info "Confining the Wi-Fi driver build to 2 of ${_ncpu} cores so the network link stays alive."
 fi
+
+# Raise the stack limit for the build. gcc's recursive type analysis
+# (variably_modified_type_p) overflows the default 8 MB stack while parsing
+# this kernel's headers on newer gcc, aborting the build with a front-end
+# "internal compiler error: Segmentation fault" that looks like a compiler
+# bug but is plain stack exhaustion (on the RK3588 BSP, stock gcc 12 dies on
+# core/rtw_regdb_rtk.o and gcc 11 dies later on core/crypto/aes-gcm.o; with a
+# larger stack the stock compiler builds the whole module cleanly). ulimit is
+# inherited by dkms build -> make -> gcc. Raise to the hard limit; fall back
+# to a large bounded value if unlimited is rejected.
+ulimit -s unlimited 2>/dev/null || ulimit -s 262144 2>/dev/null || true
+info "Build stack limit: $(ulimit -s)."
 
 # Build + install for current kernel (idempotent: dkms skips if already built)
 info "Compiling the Wi-Fi driver against kernel ${KERNEL} (ARCH=${ARCH:-unset})."

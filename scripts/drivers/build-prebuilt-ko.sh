@@ -62,10 +62,14 @@ if [ -f "${MLME_PATCH}" ] && ! grep -qF "MLME_IS_MONITOR(padapter) || MLME_IS_NU
 fi
 
 # Same flags the DKMS path uses, so the prebuilt matches what the device would
-# have compiled. -O1 is load-bearing: gcc 12 segfaults optimizing
-# core/rtw_btcoex.c at -O2 on some toolchains, and -O1 sidesteps it; the rest
-# relax warnings newer kernels promote to errors.
-RELAX_CFLAGS="-O1 -Wno-error -Wno-misleading-indentation -Wno-address-of-packed-member -Wno-date-time"
+# have compiled. Optimization is left to the vendored Makefile (it pins -O1);
+# these just relax the warnings newer kernels promote to errors.
+RELAX_CFLAGS="-Wno-error -Wno-misleading-indentation -Wno-address-of-packed-member -Wno-date-time"
+
+# Match the DKMS path: a large stack so gcc's recursive type analysis does not
+# overflow the default 8 MB and abort with a front-end "Segmentation fault" ICE
+# while parsing large kernel headers.
+ulimit -s unlimited 2>/dev/null || ulimit -s 262144 2>/dev/null || true
 
 log "building ${MODULE_NAME} for ${KVER} (ARCH=${ARCH})"
 make -C "${WORK}" -j"$(nproc)" \
