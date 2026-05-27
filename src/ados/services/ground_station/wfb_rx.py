@@ -787,6 +787,11 @@ class WfbRxManager:
                                 "valid_rx_packets_per_s": round(
                                     self._valid_rx_packets_per_s, 2
                                 ),
+                                # Destructive-restart counter so a thrashing
+                                # receive link is visible cross-process (API,
+                                # heartbeat, GCS) and not just in this
+                                # manager's in-memory stats().
+                                "reacquire_kills": self._reacquire_kills,
                                 "video_inbound_bytes_per_s": round(
                                     self._video_inbound_bytes_per_s, 1
                                 ),
