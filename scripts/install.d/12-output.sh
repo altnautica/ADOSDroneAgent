@@ -62,7 +62,14 @@ wait_for_api_ready() {
     local now
     local body
     while :; do
-        body=$(curl -fsS --max-time 2 http://127.0.0.1:8080/api/status 2>/dev/null || true)
+        # Probe the unauthenticated pairing-info endpoint, not /api/status.
+        # A paired agent answers /api/status with 401 (auth required), and
+        # curl -f treats 401 as failure — so the old probe recorded a
+        # reachable-but-paired API as "api-reachable" missing and made every
+        # paired upgrade report a false install failure. /api/pairing/info
+        # returns 200 whether or not the agent is paired and carries the
+        # version, so it proves reachability without an auth header.
+        body=$(curl -fsS --max-time 2 http://127.0.0.1:8080/api/pairing/info 2>/dev/null || true)
         if [ -n "${body}" ]; then
             AGENT_API_VERSION=$(printf '%s' "${body}" | python3 -c \
                 'import json,sys

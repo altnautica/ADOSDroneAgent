@@ -589,7 +589,10 @@ run_health_gate() {
     # 4. agent REST reachable — REQUIRED. wait_for_api_ready already polled
     # in print_status; re-probe quickly here so the gate is self-contained.
     local api_ok=false
-    if curl -fsS --max-time 3 http://127.0.0.1:8080/api/status >/dev/null 2>&1; then
+    # Probe the unauthenticated pairing-info endpoint: a paired agent
+    # answers /api/status with 401 (which curl -f treats as failure), so
+    # /api/status would wrongly record this required gate as a miss.
+    if curl -fsS --max-time 3 http://127.0.0.1:8080/api/pairing/info >/dev/null 2>&1; then
         api_ok=true
     elif [ -n "${AGENT_API_VERSION:-}" ]; then
         # print_status already confirmed the API answered this run.
