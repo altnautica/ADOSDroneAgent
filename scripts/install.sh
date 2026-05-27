@@ -223,8 +223,11 @@ elif [ -n "${ADOS_PROFILE:-}" ] && [ "${ADOS_PROFILE}" != "auto" ]; then
 else
     _PROFILE="$(detect_profile)"
 fi
-# Normalize legacy alias.
+# Normalize aliases to canonical profile names. Targeted (not a blanket
+# hyphen replace) so lite-rs keeps its hyphen while the ground-station alias
+# folds to the underscore form used everywhere downstream.
 [ "${_PROFILE}" = "lite" ] && _PROFILE="lite-rs"
+[ "${_PROFILE}" = "ground-station" ] && _PROFILE="ground_station"
 
 if [ "${_DRY_RUN}" = "true" ]; then
     echo "Detected profile: ${_PROFILE}"

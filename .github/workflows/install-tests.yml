@@ -44,6 +44,7 @@ jobs:
         run: |
           shellcheck scripts/install.sh
           shellcheck scripts/install-lite.sh
+          shellcheck scripts/install.d/*.sh
           shellcheck scripts/lib/detect-target.sh
           shellcheck scripts/lib/net.sh
           shellcheck scripts/lib/verify.sh
@@ -56,6 +57,9 @@ jobs:
           shellcheck scripts/test/verify_smoke.sh
           shellcheck scripts/test/lint_overlay_invariants.sh
           shellcheck scripts/test/compile_overlays.sh
+
+      - name: install pipeline smoke (shellcheck + syntax + dry-run)
+        run: bash scripts/test/install-smoke.sh
 
       - name: dispatcher bats suite
         run: bash scripts/test/run_dispatcher_tests.sh

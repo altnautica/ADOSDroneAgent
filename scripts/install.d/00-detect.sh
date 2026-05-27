@@ -340,17 +340,11 @@ EOF
         return 0
     fi
 
-    # Priority 2 — on-disk profile.conf. Try YAML first, then legacy.
+    # Priority 2: on-disk profile.conf (YAML form: `profile: X`).
     if [ -f "${profile_file}" ]; then
         local val
-        # YAML form: `profile: X`
         val="$(grep -E '^profile:[[:space:]]+' "${profile_file}" 2>/dev/null \
             | head -n1 | sed -E 's/^profile:[[:space:]]+//' | tr -d '[:space:]' || true)"
-        if [ -z "${val}" ]; then
-            # Legacy key=value form: `profile=X`
-            val="$(grep -E '^profile=' "${profile_file}" 2>/dev/null \
-                | cut -d= -f2 | tr -d '[:space:]' || true)"
-        fi
         if [[ "${val}" =~ ${valid_re} ]]; then
             local normalized="${val//-/_}"
             echo "${normalized}"

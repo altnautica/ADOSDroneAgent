@@ -150,11 +150,6 @@ print_hardware_summary() {
 # ─── Print Status Summary ───────────────────────────────────────────────────
 
 print_status() {
-    local device_id=""
-    if [ -f "${DEVICE_ID_FILE}" ]; then
-        device_id=$(cat "${DEVICE_ID_FILE}")
-    fi
-
     # Block until the agent is actually serving requests so the operator
     # can run `ados` immediately after this returns. Per Rule 26 every
     # post-install manual step is a bug; if we exit before 8080 is

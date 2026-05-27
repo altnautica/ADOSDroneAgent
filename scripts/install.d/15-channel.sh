@@ -344,7 +344,10 @@ EOF
 # group from the same wheel (e.g. ground-station). Returns pip's exit status.
 install_agent_from_wheel() {
     local wheel="$1" extra="${2:-}"
-    "${VENV_DIR}/bin/pip" install --upgrade pip --quiet
+    # Pin pip to a known-good line before the wheel install (a stray latest
+    # pip has shipped arm64 regressions). A wheel install itself needs no
+    # build isolation, but keeping pip pinned keeps every path consistent.
+    ensure_build_toolchain
     if [ -n "${extra}" ]; then
         info "Installing prebuilt wheel with [${extra}] extras..."
         "${VENV_DIR}/bin/pip" install --upgrade "${wheel}[${extra}]" --quiet

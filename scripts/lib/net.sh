@@ -13,12 +13,6 @@
 #       given, otherwise to stdout. Retries 3x with backoff. Returns
 #       non-zero on failure and never exits, so a caller decides whether a
 #       miss is fatal (the prebuilt path treats it as "fall back to DKMS").
-#   ados_reachable URL [TIMEOUT_SECS]
-#       Fast reachability probe. Returns 0 if URL responds. Timeout defaults
-#       to ADOS_REACHABLE_TIMEOUT (or 5s when unset); an explicit arg wins.
-#       Used as an offline guard before optional network steps so an
-#       off-internet board fails fast instead of hanging. Slow links can raise
-#       the default by exporting ADOS_REACHABLE_TIMEOUT.
 # =============================================================================
 
 # Define minimal loggers only when the caller has not already provided them.
@@ -45,18 +39,6 @@ ados_fetch() {
         fi
     else
         warn "neither curl nor wget available; cannot fetch ${url}"
-        return 1
-    fi
-}
-
-ados_reachable() {
-    local url="$1" timeout_secs="${2:-${ADOS_REACHABLE_TIMEOUT:-5}}"
-    if command -v curl >/dev/null 2>&1; then
-        curl -fsS --connect-timeout "${timeout_secs}" --max-time "${timeout_secs}" \
-            -o /dev/null "${url}" >/dev/null 2>&1
-    elif command -v wget >/dev/null 2>&1; then
-        wget -q -T "${timeout_secs}" --tries=1 -O /dev/null "${url}" >/dev/null 2>&1
-    else
         return 1
     fi
 }

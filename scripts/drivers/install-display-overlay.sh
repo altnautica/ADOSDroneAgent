@@ -567,9 +567,12 @@ snapshot_boot_config() {
     if cp -f "${target}" "${bak}" 2>/dev/null; then
         BOOT_CONFIG_SNAPSHOT="${bak}"
         info "Boot-config snapshot saved to ${bak}."
-    else
-        warn "Could not snapshot ${target}; auto-revert will be unavailable."
+        return 0
     fi
+    # Fail closed: without a restorable baseline a blind overlay edit could
+    # leave the board unbootable with no auto-revert. Refuse the edit instead.
+    error "Could not snapshot ${target}; refusing to edit the boot config without a restorable baseline (brick-safety)."
+    return 1
 }
 
 # ----------------------------------------------------------------------------
@@ -588,7 +591,7 @@ activate_overlay_sun55i() {
         # Snapshot before the edit so the boot probe can auto-revert if the
         # panel never binds. Brick-safety: a touched boot config is always
         # restorable.
-        snapshot_boot_config "${BOOT_DIR}/extlinux/extlinux.conf"
+        snapshot_boot_config "${BOOT_DIR}/extlinux/extlinux.conf" || return 1
         # Add an fdtoverlays line under each LABEL block. Anchor on a
         # known append line. If the structure is non-standard the
         # operator can fix it; this is a best-effort additive edit.
@@ -611,7 +614,7 @@ activate_overlay_sun55i() {
             info "${env_file} already references ${overlay_basename}; skipping."
             return 0
         fi
-        snapshot_boot_config "${env_file}"
+        snapshot_boot_config "${env_file}" || return 1
         if grep -q '^user_overlays=' "${env_file}"; then
             sed -i -E "s/^user_overlays=(.*)\$/user_overlays=\1 ${overlay_basename}/" "${env_file}"
         else
@@ -695,8 +698,18 @@ activate_overlay_rk3588() {
         local size_before=0
         if [ -f "${extlinux}" ]; then
             size_before=$(wc -c < "${extlinux}" 2>/dev/null || echo 0)
-            cp -f "${extlinux}" "${extlinux_bak}" 2>/dev/null && \
+            if cp -f "${extlinux}" "${extlinux_bak}" 2>/dev/null; then
                 info "extlinux.conf snapshot saved to ${extlinux_bak} (${size_before} bytes)"
+                # Record for the probation marker so the boot probe restores
+                # this exact baseline, not a guessed path.
+                BOOT_CONFIG_SNAPSHOT="${extlinux_bak}"
+                BOOT_CONFIG_PATH="${extlinux}"
+            else
+                # Fail closed: never run u-boot-update (which rewrites the
+                # bootloader's only config) without a restorable baseline.
+                error "Could not snapshot ${extlinux}; refusing to run u-boot-update without a restorable baseline (brick-safety)."
+                return 1
+            fi
         fi
 
         info "Running u-boot-update to regenerate extlinux.conf..."
@@ -752,6 +765,10 @@ activate_overlay_rk3588() {
             if grep -q "${overlay_name}" "${BOOT_DIR}/armbianEnv.txt"; then
                 info "armbianEnv.txt already references ${overlay_name}; skipping."
             else
+                # Snapshot before the edit so the boot probe can auto-revert
+                # if the panel never binds. Fail closed: no blind edit without
+                # a restorable baseline (brick-safety).
+                snapshot_boot_config "${BOOT_DIR}/armbianEnv.txt" || return 1
                 if grep -q '^user_overlays=' "${BOOT_DIR}/armbianEnv.txt"; then
                     sed -i -E "s/^user_overlays=(.*)\$/user_overlays=\1 ${overlay_name}/" "${BOOT_DIR}/armbianEnv.txt"
                 else
@@ -953,7 +970,7 @@ case "${BOARD_ID}" in
                 # auto-revert (including re-enabling vc4-kms-v3d) if the panel
                 # never binds. Brick-safety: a touched boot config is always
                 # restorable.
-                snapshot_boot_config "${PI_CONFIG}"
+                snapshot_boot_config "${PI_CONFIG}" || exit 1
                 # Idempotently ensure dtparam=spi=on. Match a commented or
                 # uncommented variant; if missing, append.
                 if grep -qE '^[[:space:]]*#?[[:space:]]*dtparam=spi=on' "${PI_CONFIG}"; then
@@ -1020,24 +1037,27 @@ if [ "${DISPLAY_PRESENCE:-explicit}" = "spi-probation" ]; then
         snapshot_path="${BOOT_DIR}/extlinux/extlinux.conf.ados-bak"
         boot_config="${BOOT_DIR}/extlinux/extlinux.conf"
     fi
-    {
-        echo "# Written by install-display-overlay.sh. A boot-critical SPI-LCD"
-        echo "# overlay was applied blind (panel declared but not yet bound)."
-        echo "# ados-display-probe.service confirms the panel on the next boot"
-        echo "# or restores the boot config from the snapshot below."
-        echo "display_id=${DISPLAY_ID}"
-        echo "board=${BOARD_ID}"
-        echo "snapshot=${snapshot_path}"
-        echo "boot_config=${boot_config}"
-        echo "expected_fb_name=$(fbtft_name_for_controller "${auto_controller:-}")"
-        echo "touch_chip=${auto_touch_chip:-}"
-    } > "${DISPLAY_PROBATION_FILE}"
-    chmod 0644 "${DISPLAY_PROBATION_FILE}"
-    if [ -n "${snapshot_path}" ]; then
-        info "Probation armed: ${DISPLAY_PROBATION_FILE} (snapshot ${snapshot_path})."
+    if [ -z "${snapshot_path}" ]; then
+        # No restorable baseline means an apply path refused the boot-config
+        # edit (brick-safety), so no overlay is staged: there is nothing to
+        # confirm and nothing to revert. Skip arming probation rather than
+        # point the boot probe at a non-existent snapshot.
+        warn "No boot-config snapshot recorded; skipping probation (no blind overlay was applied)."
     else
-        warn "Overlay applied but no restorable boot-config snapshot was recorded;"
-        warn "the boot probe will confirm presence but cannot revert. Inspect the panel after reboot."
+        {
+            echo "# Written by install-display-overlay.sh. A boot-critical SPI-LCD"
+            echo "# overlay was applied blind (panel declared but not yet bound)."
+            echo "# ados-display-probe.service confirms the panel on the next boot"
+            echo "# or restores the boot config from the snapshot below."
+            echo "display_id=${DISPLAY_ID}"
+            echo "board=${BOARD_ID}"
+            echo "snapshot=${snapshot_path}"
+            echo "boot_config=${boot_config}"
+            echo "expected_fb_name=$(fbtft_name_for_controller "${auto_controller:-}")"
+            echo "touch_chip=${auto_touch_chip:-}"
+        } > "${DISPLAY_PROBATION_FILE}"
+        chmod 0644 "${DISPLAY_PROBATION_FILE}"
+        info "Probation armed: ${DISPLAY_PROBATION_FILE} (snapshot ${snapshot_path})."
     fi
 fi
 

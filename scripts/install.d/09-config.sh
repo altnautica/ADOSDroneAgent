@@ -70,15 +70,12 @@ generate_default_config() {
         info "Detected flight controller at: ${fc_port}"
     fi
 
-    # Resolved agent profile, normalised to the underscore form the
-    # AgentConfig validator accepts (drone | ground_station | auto).
-    # install.sh exports ADOS_PROFILE before dispatching here; if it is
-    # somehow unset (manual reentry) fall back to "auto" so the agent
-    # still resolves at runtime via /etc/ados/profile.conf.
+    # Resolved agent profile. resolve_profile always emits the underscore
+    # form the AgentConfig validator accepts (drone | ground_station | auto);
+    # install.sh exports ADOS_PROFILE before dispatching here. If it is
+    # somehow unset (manual reentry) fall back to "auto" so the agent still
+    # resolves at runtime via /etc/ados/profile.conf.
     local agent_profile="${ADOS_PROFILE:-auto}"
-    if [ "$agent_profile" = "ground-station" ]; then
-        agent_profile="ground_station"
-    fi
 
     cat > "$config_file" <<CFGEOF
 # ADOS Drone Agent Configuration

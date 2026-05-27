@@ -81,7 +81,7 @@ install_display_driver() {
     local display_arg="${ADOS_DISPLAY:-}"
     if [ -z "${display_arg}" ]; then
         case "${ADOS_PROFILE:-drone}" in
-            ground_station|ground-station) display_arg="auto" ;;
+            ground_station) display_arg="auto" ;;
             *) display_arg="none" ;;
         esac
     fi

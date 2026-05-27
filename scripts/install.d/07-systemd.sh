@@ -15,14 +15,6 @@
 install_systemd_service() {
     info "Installing systemd services (multi-process architecture)..."
 
-    # Migrate from legacy single-service if present
-    if [ -f "/etc/systemd/system/ados-agent.service" ]; then
-        info "Migrating from legacy ados-agent.service..."
-        systemctl stop ados-agent 2>/dev/null || true
-        systemctl disable ados-agent 2>/dev/null || true
-        rm -f /etc/systemd/system/ados-agent.service
-    fi
-
     # Find systemd unit source directory
     # Check: script-level var (from upgrade clone), repo clone, script-relative
     local systemd_src=""
@@ -142,7 +134,7 @@ ENVEOF
     disable_other_profile_units
 
     # Enable ground-station units if the profile demands them.
-    if [ "${ADOS_PROFILE:-drone}" = "ground_station" ] || [ "${ADOS_PROFILE:-drone}" = "ground-station" ]; then
+    if [ "${ADOS_PROFILE:-drone}" = "ground_station" ]; then
         enable_ground_station_units
     fi
 
@@ -163,7 +155,7 @@ disable_other_profile_units() {
     local profile="${ADOS_PROFILE:-drone}"
     local target_units=""
     case "${profile}" in
-        ground_station|ground-station)
+        ground_station)
             # On a GS rig, the drone TX manager + air-side wfb units
             # must not run. The drone uses ados-wfb (TX); GS uses
             # ados-wfb-rx (RX). Running both is the bug we are

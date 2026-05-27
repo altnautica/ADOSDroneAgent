@@ -27,7 +27,7 @@ export ADOS_STATE_DIR="${ADOS_STATE_DIR:-/var/lib/ados}"
 export ADOS_CHECKPOINT_DIR="${ADOS_CHECKPOINT_DIR:-${ADOS_STATE_DIR}/install-checkpoints}"
 export ADOS_INSTALL_RESULT="${ADOS_INSTALL_RESULT:-${ADOS_STATE_DIR}/install-result.json}"
 
-# Source the shared network fetch helpers (ados_fetch / ados_reachable).
+# Source the shared network fetch helper (ados_fetch).
 # install.d/lib.sh has already defined info/warn/error by the time this
 # module is sourced, so net.sh's fallback loggers stay dormant. Resolve
 # the path relative to this module so it works from a git clone, the
@@ -120,26 +120,6 @@ list_completed_checkpoints() {
     printf '%s\n' "${out:-<none>}"
 }
 
-# checkpoint_run NAME FUNC [ARGS...] — run FUNC once, marking NAME on success.
-# When NAME is already marked AND the install is not being forced, skip the
-# call and narrate the skip so a resumed run is legible in the journal. The
-# step itself stays idempotent, so re-running on a non-resume path is safe;
-# the checkpoint is purely an optimisation + an audit trail.
-checkpoint_run() {
-    local name="$1"; shift
-    if [ "${DO_FORCE:-false}" != "true" ] && checkpoint_done "${name}"; then
-        info "Step '${name}' already complete (checkpoint present); skipping."
-        return 0
-    fi
-    if "$@"; then
-        checkpoint_mark "${name}"
-        return 0
-    fi
-    # Step failed: do NOT mark. A later resume re-runs it. Surface the
-    # failure to the caller so REQUIRED-vs-OPTIONAL classification can act.
-    return 1
-}
-
 # ─── Profile unit expectations ───────────────────────────────────────────────
 #
 # The set of systemd units that MUST be enabled for a given profile to be
@@ -153,7 +133,7 @@ checkpoint_run() {
 expected_profile_units() {
     local profile="${1:-drone}"
     case "${profile}" in
-        ground_station|ground-station)
+        ground_station)
             printf '%s\n' \
                 "ados-supervisor.service" \
                 "ados-wfb-rx.service" \
@@ -422,6 +402,31 @@ install_failure_trap() {
 #
 # Safe to call on both the fresh and upgrade paths: on a healthy venv it is a
 # single fast probe.
+
+# ensure_build_toolchain: make the venv's Python build chain sound before any
+# agent source build. Some recent pip releases (the 26.1.x line) crash with
+# SIGSEGV the moment they spin up the isolated build-dependency environment on
+# certain arm64 kernels, which kills the agent-software step outright. Pinning
+# pip below that line restores correct PEP 517 build isolation for the whole
+# dependency tree, including deps that build from sdist (pymavlink), so we keep
+# normal isolation rather than --no-build-isolation: bypassing isolation would
+# strip those sdist deps of their build environment and trade one breakage for
+# another. We also stage setuptools>=68 (the agent's declared build backend)
+# and wheel into the venv as a second layer. Every step is a plain WHEEL
+# install, which never uses build isolation, so it succeeds even when the
+# current pip's isolation is broken (this is what self-heals an already-broken
+# pip on the rig). Idempotent and fast when already satisfied; best-effort
+# (warn, not abort) so a blip on one leg does not sink the install.
+ensure_build_toolchain() {
+    # Pin pip away from the build-isolation regression. This is a wheel
+    # install, so it works on the currently-broken pip too.
+    "${VENV_DIR}/bin/python" -m pip install --upgrade 'pip>=24,<26' --quiet \
+        || warn "Could not pin pip below 26; continuing with the current pip."
+    # Stage the build backend the agent's pyproject declares. Wheel installs.
+    "${VENV_DIR}/bin/python" -m pip install --upgrade 'setuptools>=68' wheel --quiet \
+        || warn "Could not refresh setuptools/wheel; the source build may be degraded."
+}
+
 ensure_venv_pip() {
     local reinstall_fn="${1:-}"
 
@@ -437,7 +442,7 @@ ensure_venv_pip() {
     # recovers a corrupted/stale pip without a network round-trip for the
     # bootstrap itself.
     "${VENV_DIR}/bin/python" -m ensurepip --upgrade >/dev/null 2>&1 || true
-    "${VENV_DIR}/bin/python" -m pip install --upgrade pip --quiet >/dev/null 2>&1 || true
+    ensure_build_toolchain
     if "${VENV_DIR}/bin/python" -m pip --version >/dev/null 2>&1; then
         warn "venv pip repaired via ensurepip; continuing."
         return 0
@@ -461,7 +466,7 @@ ensure_venv_pip() {
         return 1
     fi
     # The freshly created venv ships a working pip; bring it current.
-    "${VENV_DIR}/bin/python" -m pip install --upgrade pip --quiet >/dev/null 2>&1 || true
+    ensure_build_toolchain
 
     if [ -n "${reinstall_fn}" ] && declare -F "${reinstall_fn}" >/dev/null 2>&1; then
         warn "Reinstalling the agent package into the rebuilt venv."

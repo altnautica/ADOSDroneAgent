@@ -56,6 +56,15 @@ case "$(uname -m)" in
     armv6l|armv7l) export ARCH=arm ;;
 esac
 
+# Resolve the DKMS package + version up front (best-effort) so the fast-path
+# checks the EXACT installed source tree rather than globbing /usr/src, which
+# would pick the wrong tree on a box carrying more than one build version.
+_dkms_pkg=""; _dkms_ver=""
+if [ -f "${VENDOR_DIR}/dkms.conf" ]; then
+    _dkms_pkg="$(awk -F'"' '/^PACKAGE_NAME=/ {print $2}' "${VENDOR_DIR}/dkms.conf" | head -n1)"
+    _dkms_ver="$(awk -F'"' '/^PACKAGE_VERSION=/ {print $2}' "${VENDOR_DIR}/dkms.conf" | head -n1)"
+fi
+
 # Fast-path: short-circuit ONLY when our DKMS build is installed on disk
 # (loaded + resolvable via modinfo + registered with DKMS) AND its DKMS
 # source carries the current source patches. The patch marker below is the
@@ -66,10 +75,14 @@ esac
 # we fall through and (re)build it via DKMS below.
 PATCH_MARKER="MLME_IS_MONITOR(padapter) || MLME_IS_NULL(padapter)"
 if lsmod | awk '{print $1}' | grep -qx "${MODULE_NAME}"; then
-    _dkms_src="$(ls -d /usr/src/realtek-rtl88x2eu-*/core/rtw_mlme_ext.c 2>/dev/null | head -n1)"
+    if [ -n "${_dkms_pkg}" ] && [ -n "${_dkms_ver}" ]; then
+        _dkms_src="/usr/src/${_dkms_pkg}-${_dkms_ver}/core/rtw_mlme_ext.c"
+    else
+        _dkms_src="$(ls -d /usr/src/realtek-rtl88x2eu-*/core/rtw_mlme_ext.c 2>/dev/null | head -n1)"
+    fi
     if modinfo "${MODULE_NAME}" >/dev/null 2>&1 \
        && dkms status 2>/dev/null | grep -qiE 'rtl88x2eu|8812' \
-       && [ -n "${_dkms_src}" ] \
+       && [ -f "${_dkms_src}" ] \
        && grep -qF "${PATCH_MARKER}" "${_dkms_src}"; then
         info "${MODULE_NAME} already installed via DKMS (current patches) and loaded."
         # Breadcrumb so the heartbeat/GCS report the module source even
@@ -250,7 +263,11 @@ fi
 # confinement on dual/single-core boards or when taskset is unavailable.
 BUILD_WRAP="nice -n 10"
 _ncpu="$(nproc 2>/dev/null || echo 1)"
-if command -v taskset >/dev/null 2>&1 && [ "${_ncpu}" -ge 3 ]; then
+# Confine only when there are cores to spare AND taskset actually accepts the
+# 0-1 mask on this box (probe it; a board with non-sequential core IDs or a
+# locked-down cpuset could reject it, and a stale wrapper would then fail the
+# build itself). Fall back to plain nice on any miss.
+if [ "${_ncpu}" -ge 3 ] && command -v taskset >/dev/null 2>&1 && taskset -c 0-1 true >/dev/null 2>&1; then
     BUILD_WRAP="taskset -c 0-1 nice -n 10"
     info "Confining the Wi-Fi driver build to 2 of ${_ncpu} cores so the network link stays alive."
 fi

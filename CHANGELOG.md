@@ -4,6 +4,46 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.43.5] - 2026-05-27
+
+### Fixed
+
+- **The agent install no longer dies on a broken system pip.** A recent
+  pip release crashes (SIGSEGV) the moment it starts an isolated build
+  environment on some arm64 kernels, which killed the agent-software step
+  outright on the edge channel. The install now pins pip below that line
+  and stages the build backend (setuptools, wheel) into the venv via plain
+  wheel installs (which never use build isolation, so they succeed even on
+  the broken pip), then builds the agent with normal isolation on the
+  pinned pip. This also self-heals a venv whose pip was already updated to
+  the broken version.
+- **Wi-Fi driver fast path checks the exact installed source.** It now
+  looks at the precise versioned DKMS source tree instead of globbing, so
+  a board carrying more than one build version cannot match the wrong one,
+  and the build-confinement step is skipped cleanly when the CPU mask is
+  not accepted.
+- **Display provisioning fails closed on every board.** No boot-config
+  file is edited (Allwinner extlinux/env, Pi config.txt, Rockchip
+  extlinux/managed.list, Armbian armbianEnv) unless a restorable snapshot
+  was saved first; if a snapshot cannot be written the overlay is skipped
+  so the board still boots. Probation is only armed when a snapshot exists.
+
+### Changed
+
+- **Pruned dead code and pre-alpha compatibility shims** from the install
+  scripts: unused helpers and variables, a retired config-host migration,
+  legacy profile-file and single-service migrations, and the duplicated
+  profile-name alias handling (the profile name is normalized once at the
+  entry point). No behavior change.
+
+### Added
+
+- **Install smoke test.** `scripts/test/install-smoke.sh` shellchecks every
+  install script (including the modular `install.d/` set, which CI lint
+  previously skipped), syntax-checks them, and probes `--dry-run` profile
+  resolution. Wired into CI so this class of breakage is caught before it
+  reaches a board.
+
 ## [0.43.4] - 2026-05-27
 
 ### Fixed

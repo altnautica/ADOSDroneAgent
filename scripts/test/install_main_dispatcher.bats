@@ -146,7 +146,7 @@ setup() {
             generate_default_config harden_secret_perms provision_plugin_keys \
             write_pairing install_mediamtx persist_repo_artifacts install_motd \
             wait_for_api_ready print_pairing_code print_hardware_summary print_status \
-            checkpoint_mark checkpoint_done checkpoint_clear checkpoint_run \
+            checkpoint_mark checkpoint_done checkpoint_clear \
             list_completed_checkpoints expected_profile_units unit_enabled \
             is_install_complete write_install_result \
             record_failure run_health_gate git_clone_retry install_radio_driver_tracked \
@@ -473,43 +473,6 @@ orch_run() {
     [[ "$output" == *"venv"* ]]
 }
 
-@test "checkpoint_run skips a marked step on a non-force run" {
-    orch_setup
-    run orch_run "
-        DO_FORCE=false
-        ran=0
-        work() { ran=1; }
-        checkpoint_mark slowstep
-        checkpoint_run slowstep work
-        echo RAN=\$ran
-    "
-    orch_teardown
-    [[ "$output" == *"RAN=0"* ]]
-}
-
-@test "checkpoint_run runs an unmarked step and marks it" {
-    orch_setup
-    run orch_run "
-        DO_FORCE=false
-        work() { return 0; }
-        checkpoint_run freshstep work && checkpoint_done freshstep && echo MARKED
-    "
-    orch_teardown
-    [[ "$output" == *"MARKED"* ]]
-}
-
-@test "checkpoint_run does NOT mark a failing step" {
-    orch_setup
-    run orch_run "
-        DO_FORCE=false
-        work() { return 7; }
-        checkpoint_run failstep work || true
-        checkpoint_done failstep && echo MARKED || echo UNMARKED
-    "
-    orch_teardown
-    [[ "$output" == *"UNMARKED"* ]]
-}
-
 @test "expected_profile_units lists only supervisor for drone" {
     orch_setup
     run orch_run "expected_profile_units drone"
@@ -718,7 +681,7 @@ EOF
     run grep -nE "is_install_complete" "${INSTALL_D}/13-main.sh"
     [ "$status" -eq 0 ]
     [ -n "$output" ]
-    run grep -nE "ADOS_RESUME=true" "${INSTALL_D}/13-main.sh"
+    run grep -nE "Resuming install to finish" "${INSTALL_D}/13-main.sh"
     [ "$status" -eq 0 ]
     [ -n "$output" ]
 }
@@ -1491,18 +1454,19 @@ EOF
     rm -rf "${tmp}"
 }
 
-# Every profile now defaults to "auto": the overlay installer's auto path
-# detects what is physically present and resolves to it. A drone with no
-# panel resolves to display_id=none with zero boot writes; a drone WITH a
-# panel now gets it. The profile no longer pre-decides "never has a display".
-@test "install_display_driver defaults to auto on the drone profile" {
+# The display default is profile-aware. The on-panel dashboard renderer runs
+# on the ground-station profile only, so the ground station auto-detects and
+# provisions whatever panel is present, while the drone and lite profiles
+# default to "none" (no detection, no boot-config writes): a status panel on
+# the aircraft serves no purpose. An explicit ADOS_DISPLAY still overrides.
+@test "install_display_driver defaults to none on the drone profile" {
     output="$(idd_run drone)"
-    [[ "$output" == *"CAPTURED_DISPLAY=auto"* ]]
+    [[ "$output" == *"CAPTURED_DISPLAY=none"* ]]
 }
 
-@test "install_display_driver defaults to auto on the lite profile" {
+@test "install_display_driver defaults to none on the lite profile" {
     output="$(idd_run lite-rs)"
-    [[ "$output" == *"CAPTURED_DISPLAY=auto"* ]]
+    [[ "$output" == *"CAPTURED_DISPLAY=none"* ]]
 }
 
 @test "install_display_driver defaults to auto on the ground-station profile" {

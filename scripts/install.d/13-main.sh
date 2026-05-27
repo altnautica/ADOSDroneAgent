@@ -173,8 +173,6 @@ main_install_flow() {
         info "Completed checkpoints: $(list_completed_checkpoints)"
         # Fall through to the full install body below. Every step is
         # idempotent; checkpoints make the finished ones fast no-ops.
-        ADOS_RESUME=true
-        export ADOS_RESUME
     fi
 
     # ─── Upgrade Path (skip apt, skip venv creation) ────────────────────────────
@@ -209,7 +207,7 @@ main_install_flow() {
         # ground-station upgrade so the standalone units cannot keep racing
         # the ADOS-owned ports. No-op on drone profile and no-op on rigs
         # where the units are already masked.
-        if [ "${ADOS_PROFILE}" = "ground_station" ] || [ "${ADOS_PROFILE}" = "ground-station" ]; then
+        if [ "${ADOS_PROFILE}" = "ground_station" ]; then
             mask_conflicting_standalone_services
         fi
 
@@ -276,6 +274,10 @@ main_install_flow() {
             upgrade_wheel="${STABLE_WHEEL_PATH}"
         else
             info "Fetching latest source..."
+            # Attribute a clone failure to this step: git_clone_retry returns
+            # non-zero after its retries, which aborts under set -e and fires
+            # the EXIT trap, which records ADOS_CURRENT_STEP as the failed step.
+            ADOS_CURRENT_STEP="clone-source"
             # honor --branch for feature-branch installs. Bounded retry so a
             # transient network blip does not abort the upgrade.
             if [ -n "$BRANCH_NAME" ]; then
@@ -313,6 +315,7 @@ main_install_flow() {
             if is_stable_channel; then
                 install_agent_from_wheel "${upgrade_wheel}"
             else
+                ensure_build_toolchain
                 "${VENV_DIR}/bin/pip" install --upgrade "${tmp_repo}/repo" --quiet
             fi
         }
@@ -359,20 +362,8 @@ main_install_flow() {
         # via the main install body, but --upgrade never did. Mirror the
         # call here so the AP comes back without an operator running
         # systemctl by hand.
-        if [ "${ADOS_PROFILE}" = "ground_station" ] || [ "${ADOS_PROFILE}" = "ground-station" ]; then
+        if [ "${ADOS_PROFILE}" = "ground_station" ]; then
             enable_ground_station_units
-        fi
-
-        # Config migration: a brief 0.26.7/0.26.8 release rewrote the REST
-        # API host to "::" expecting kernel-default dual-stack. uvicorn on
-        # some Pi kernels treated [::] as IPv6-only and IPv4 connections
-        # were refused. Now the agent binds explicit dual-stack sockets
-        # at startup, so the config host should be the IPv4 wildcard
-        # again. Flip "::" back to "0.0.0.0" idempotently.
-        cfg_file="${CONFIG_DIR}/config.yaml"
-        if [ -f "$cfg_file" ] && grep -q '^[[:space:]]*host:[[:space:]]*"::"' "$cfg_file"; then
-            info "Reverting REST API bind from '::' to '0.0.0.0' (config.yaml; agent now dual-binds at startup)"
-            sed -i 's|^\([[:space:]]*\)host:[[:space:]]*"::"|\1host: "0.0.0.0"|' "$cfg_file"
         fi
 
         # Orphan AP IP cleanup: a previously-active setup-webapp captive
@@ -452,7 +443,7 @@ main_install_flow() {
         # mesh_capable without touching role (stays `direct` until
         # operator sets it). Applied on every ground-station upgrade; a
         # drone-profile node skips this entire block.
-        if [ "${ADOS_PROFILE:-}" = "ground_station" ] || [ "${ADOS_PROFILE:-}" = "ground-station" ]; then
+        if [ "${ADOS_PROFILE:-}" = "ground_station" ]; then
             install_mesh_deps
         fi
 
@@ -461,7 +452,6 @@ main_install_flow() {
         # already loaded. Earlier releases shipped this for ground-station
         # only, so existing drone rigs need a one-time catch-up here.
         if [ "${ADOS_PROFILE:-}" = "ground_station" ] \
-           || [ "${ADOS_PROFILE:-}" = "ground-station" ] \
            || [ "${ADOS_PROFILE:-}" = "drone" ]; then
             install_radio_driver_tracked
         fi
@@ -656,6 +646,8 @@ main_install_flow() {
         if [ ! -d "$(dirname "$0" 2>/dev/null)/../data/systemd" ] 2>/dev/null; then
             FRESH_REPO_DIR="$(mktemp -d)"
             info "Cloning repository..."
+            # Attribute a clone failure to this step (EXIT trap reads it).
+            ADOS_CURRENT_STEP="clone-source"
             # honor --branch for feature-branch installs. Bounded retry so a
             # transient network blip does not abort the fresh install.
             if [ -n "$BRANCH_NAME" ]; then
@@ -671,7 +663,7 @@ main_install_flow() {
         # Install the agent package (REQUIRED)
         ADOS_CURRENT_STEP="install-agent-package"
         info "Installing ados-drone-agent (this can take a couple of minutes)..."
-        "${VENV_DIR}/bin/pip" install --upgrade pip --quiet
+        ensure_build_toolchain
         if [ -n "${FRESH_REPO_DIR}" ]; then
             ados_with_heartbeat "Installing agent software" \
                 "${VENV_DIR}/bin/pip" install "${FRESH_REPO_DIR}/repo" --quiet
@@ -691,7 +683,7 @@ main_install_flow() {
     export ADOS_PROFILE
     info "Agent profile: ${ADOS_PROFILE}"
 
-    if [ "${ADOS_PROFILE}" = "ground_station" ] || [ "${ADOS_PROFILE}" = "ground-station" ]; then
+    if [ "${ADOS_PROFILE}" = "ground_station" ]; then
         install_ground_station_deps
         install_radio_driver_tracked
 
@@ -702,7 +694,7 @@ main_install_flow() {
         install_radio_driver_tracked
     fi
 
-    if [ "${ADOS_PROFILE}" = "ground_station" ] || [ "${ADOS_PROFILE}" = "ground-station" ]; then
+    if [ "${ADOS_PROFILE}" = "ground_station" ]; then
         info "Installing ground-station Python extras..."
         if is_stable_channel; then
             install_agent_from_wheel "${STABLE_WHEEL_PATH}" ground-station || \
