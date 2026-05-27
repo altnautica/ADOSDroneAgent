@@ -188,6 +188,16 @@ class VideoPipeline(_DiscoveryMixin, _HealthMixin, _WfbTeeMixin):
         # the encoder pointed at one device while camera_mgr says
         # another.
         self._switch_lock = asyncio.Lock()
+        # Serializes encoder (re)start across every entry point that
+        # tears the encoder down and spawns a fresh one — cold start,
+        # health-check restart, camera switch. Without it, the
+        # health-check loop and an operator-driven camera switch (or a
+        # bitrate change) can interleave their teardown+respawn, leave
+        # two encoders publishing to mediamtx /main at once, and crash
+        # the wfb_tee reader. Held only around the bounded
+        # teardown+spawn region, never across the long health-check
+        # sleep, so it cannot deadlock the run loop.
+        self._restart_lock = asyncio.Lock()
         # In-process GStreamer air-side pipeline. Mutually exclusive
         # with the legacy encoder + wfb_tee subprocess tree; selected
         # at start_stream() based on the ``use_gst_air_pipeline``
@@ -218,6 +228,59 @@ class VideoPipeline(_DiscoveryMixin, _HealthMixin, _WfbTeeMixin):
     @property
     def mediamtx(self) -> MediamtxManager:
         return self._mediamtx
+
+    @staticmethod
+    async def _terminate_process_group(
+        proc: asyncio.subprocess.Process | None,
+        timeout: float = 5.0,
+    ) -> None:
+        """Reap a subprocess by its PROCESS GROUP, not just the leader.
+
+        Every long-running subprocess the pipeline spawns is started
+        with ``start_new_session=True`` so it becomes a process-group
+        leader. The encoder in particular is a ``bash -c`` wrapper
+        whose ffmpeg children publish the RTSP bridge into mediamtx;
+        a bare ``proc.terminate()`` / ``proc.kill()`` signals ONLY the
+        bash leader and leaves the bridge ffmpeg reparented to init,
+        still holding the mediamtx publisher slot. The next start then
+        spawns a second publisher and the two fight over ``/main``.
+
+        Resolving the pgid via ``os.getpgid(proc.pid)`` and signalling
+        the whole group with ``os.killpg`` reaps the entire
+        ``bash -> ffmpeg | ffmpeg`` tree at once. Falls back to a
+        single-process terminate/kill when the group can't be resolved
+        (already-exited leader, or a child spawned without a new
+        session). Guards every syscall against ``ProcessLookupError`` /
+        ``PermissionError`` / ``OSError`` so a racing reap never raises.
+        """
+        if proc is None or proc.returncode is not None:
+            return
+        pgid: int | None = None
+        try:
+            pgid = os.getpgid(proc.pid)
+        except (ProcessLookupError, PermissionError, OSError):
+            pgid = None
+        try:
+            if pgid is not None:
+                os.killpg(pgid, signal.SIGTERM)
+            else:
+                proc.terminate()
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=timeout)
+        except (TimeoutError, asyncio.CancelledError):
+            try:
+                if pgid is not None:
+                    os.killpg(pgid, signal.SIGKILL)
+                else:
+                    proc.kill()
+            except (ProcessLookupError, PermissionError, OSError):
+                pass
+            try:
+                await proc.wait()
+            except (ProcessLookupError, asyncio.CancelledError):
+                pass
 
     async def _pgrep_and_sigkill(self, pattern: str) -> int:
         """Run ``pgrep -f -- <pattern>``, SIGKILL every matched PID
@@ -309,11 +372,13 @@ class VideoPipeline(_DiscoveryMixin, _HealthMixin, _WfbTeeMixin):
             log.warning("pipeline_already_running")
             return True
 
-        # Clean up any leftover processes from a previous run
+        # Clean up any leftover processes from a previous run. Reap by
+        # process group so the stale encoder's bridge ffmpeg child dies
+        # with the bash leader instead of orphaning onto the mediamtx
+        # /main publisher slot.
         if self._encoder_process is not None and self._encoder_process.returncode is None:
             log.info("killing_stale_encoder", pid=self._encoder_process.pid)
-            self._encoder_process.kill()
-            await self._encoder_process.wait()
+            await self._terminate_process_group(self._encoder_process)
             self._encoder_process = None
 
         self._state = PipelineState.STARTING
@@ -719,13 +784,10 @@ class VideoPipeline(_DiscoveryMixin, _HealthMixin, _WfbTeeMixin):
             except Exception:  # noqa: BLE001
                 pass
             self._sei_tap = None
-        # Encoder may have spawned but not been assigned cleanly; sweep it.
-        if self._encoder_process is not None and self._encoder_process.returncode is None:
-            try:
-                self._encoder_process.kill()
-                await asyncio.wait_for(self._encoder_process.wait(), timeout=2.0)
-            except (TimeoutError, ProcessLookupError, OSError):
-                pass
+        # Encoder may have spawned but not been assigned cleanly; sweep
+        # it by process group so its bridge ffmpeg child can't orphan
+        # onto the mediamtx publisher slot.
+        await self._terminate_process_group(self._encoder_process, timeout=2.0)
         self._encoder_process = None
         if self._encoder_stderr_task is not None:
             # Await the cancelled drain task so its stderr pipe transport
@@ -964,18 +1026,12 @@ class VideoPipeline(_DiscoveryMixin, _HealthMixin, _WfbTeeMixin):
                     log.info("encoder_already_dead", pid=proc.pid)
 
             if pid_alive and proc.returncode is None:
-                try:
-                    proc.terminate()
-                except ProcessLookupError:
-                    pass
-                try:
-                    await asyncio.wait_for(proc.wait(), timeout=5.0)
-                except (TimeoutError, ProcessLookupError, asyncio.CancelledError):
-                    if proc.returncode is None:
-                        try:
-                            proc.kill()
-                        except ProcessLookupError:
-                            pass
+                # Reap by process group: the encoder is a bash leader
+                # whose ffmpeg children include the RTSP bridge that
+                # publishes into mediamtx /main. Signalling only the
+                # leader leaves that bridge alive and orphaned, which
+                # then fights the next start's publisher for /main.
+                await self._terminate_process_group(proc)
             # Don't call proc.wait() for dead processes — it hangs.
             self._encoder_process = None
 
@@ -1339,10 +1395,16 @@ class VideoPipeline(_DiscoveryMixin, _HealthMixin, _WfbTeeMixin):
                             attempt=self._restart_count,
                             backoff_secs=delay,
                         )
-                        # Stop everything cleanly before restarting
-                        await self.stop_stream()
+                        # Back off BEFORE taking the restart lock so the
+                        # lock is never held across the long sleep (a
+                        # concurrent camera switch must not block on it).
                         await asyncio.sleep(max(0, delay - _HEALTH_CHECK_INTERVAL))
-                        success = await self.start_stream()
+                        # Serialize teardown+respawn against camera
+                        # switches / bitrate changes so two paths cannot
+                        # both spawn an encoder publishing to /main.
+                        async with self._restart_lock:
+                            await self.stop_stream()
+                            success = await self.start_stream()
                         if success:
                             self._restart_count = 0
                     elif not await self._check_cloud_push_health():
@@ -1382,21 +1444,40 @@ class VideoPipeline(_DiscoveryMixin, _HealthMixin, _WfbTeeMixin):
                         # 30-second-window of failures (e.g., during install
                         # or a config reload race) left the LCD frozen until
                         # a manual `systemctl restart` cleared the counter.
-                        self._wfb_tee_restart_count += 1
-                        delay = min(
-                            self._base_restart_delay * (2 ** (self._wfb_tee_restart_count - 1)),
-                            5.0,
-                        )
-                        log.warning(
-                            "wfb_tee_restarting",
-                            attempt=self._wfb_tee_restart_count,
-                            backoff_secs=delay,
-                        )
-                        await self.stop_wfb_tee()
-                        await asyncio.sleep(max(0, delay - _HEALTH_CHECK_INTERVAL))
-                        success = await self.start_wfb_tee()
-                        if success:
-                            self._wfb_tee_restart_count = 0
+                        #
+                        # The tee reads the local RTSP source; restarting
+                        # the reader against a dead source just spins it.
+                        # If the source publisher is not ready, stop the
+                        # tee and skip the respawn this tick — the next
+                        # health-check pass restarts the encoder/source,
+                        # and the tee comes back once the source is live.
+                        # No give-up cap; we just stop spinning the
+                        # reader while the source is down.
+                        if not await self._check_mediamtx_path_ready():
+                            log.warning(
+                                "wfb_tee_source_down",
+                                msg=(
+                                    "RTSP source not ready; deferring tee "
+                                    "respawn until the encoder recovers"
+                                ),
+                            )
+                            await self.stop_wfb_tee()
+                        else:
+                            self._wfb_tee_restart_count += 1
+                            delay = min(
+                                self._base_restart_delay * (2 ** (self._wfb_tee_restart_count - 1)),
+                                5.0,
+                            )
+                            log.warning(
+                                "wfb_tee_restarting",
+                                attempt=self._wfb_tee_restart_count,
+                                backoff_secs=delay,
+                            )
+                            await self.stop_wfb_tee()
+                            await asyncio.sleep(max(0, delay - _HEALTH_CHECK_INTERVAL))
+                            success = await self.start_wfb_tee()
+                            if success:
+                                self._wfb_tee_restart_count = 0
 
                 elif self._state in (PipelineState.ERROR, PipelineState.STOPPED):
                     # Retry start_stream with backoff. Covers cases where the
@@ -1445,39 +1526,25 @@ class VideoPipeline(_DiscoveryMixin, _HealthMixin, _WfbTeeMixin):
         finally:
             # Kill the wfb tee first because it has a TCP connection to
             # local mediamtx that needs to drain before mediamtx itself
-            # goes away.
+            # goes away. Reap by process group so ffmpeg children die
+            # with their session leader.
             if self._wfb_tee_process is not None and self._wfb_tee_process.returncode is None:
-                try:
-                    self._wfb_tee_process.terminate()
-                except ProcessLookupError:
-                    pass
-                try:
-                    await asyncio.wait_for(self._wfb_tee_process.wait(), timeout=5.0)
-                except (TimeoutError, asyncio.CancelledError):
-                    try:
-                        self._wfb_tee_process.kill()
-                    except ProcessLookupError:
-                        pass
+                await self._terminate_process_group(self._wfb_tee_process)
                 self._wfb_tee_process = None
                 log.info("wfb_tee_process_cleaned_up")
 
-            # Kill cloud push subprocess on shutdown/cancellation
+            # Kill cloud push subprocess on shutdown/cancellation.
             if self._cloud_push_process is not None and self._cloud_push_process.returncode is None:
-                self._cloud_push_process.terminate()
-                try:
-                    await asyncio.wait_for(self._cloud_push_process.wait(), timeout=5.0)
-                except (TimeoutError, asyncio.CancelledError):
-                    self._cloud_push_process.kill()
+                await self._terminate_process_group(self._cloud_push_process)
                 self._cloud_push_process = None
                 log.info("cloud_push_process_cleaned_up")
 
-            # Kill encoder subprocess on shutdown/cancellation to prevent orphans
+            # Kill encoder subprocess on shutdown/cancellation to prevent
+            # orphans. Reap by group so the RTSP bridge ffmpeg child
+            # cannot survive the bash leader and hold the publisher slot.
             if self._encoder_process is not None and self._encoder_process.returncode is None:
-                self._encoder_process.terminate()
-                try:
-                    await asyncio.wait_for(self._encoder_process.wait(), timeout=5.0)
-                except (TimeoutError, asyncio.CancelledError):
-                    self._encoder_process.kill()
+                await self._terminate_process_group(self._encoder_process)
+                self._encoder_process = None
                 log.info("encoder_process_cleaned_up")
             await self._mediamtx.stop()
             await self._close_mediamtx_client()
@@ -1577,19 +1644,22 @@ class VideoPipeline(_DiscoveryMixin, _HealthMixin, _WfbTeeMixin):
                     )
 
             # Tear down the encoder + mediamtx so start_stream() spawns a
-            # fresh pair pointing at the newly-assigned primary.
-            try:
-                await self.stop_stream()
-            except Exception as exc:  # noqa: BLE001
-                log.warning(
-                    "pipeline_camera_switch_stop_failed",
-                    error=str(exc),
-                )
+            # fresh pair pointing at the newly-assigned primary. Hold the
+            # restart lock across teardown+respawn so the health-check
+            # restart loop cannot interleave and double-publish to /main.
+            async with self._restart_lock:
+                try:
+                    await self.stop_stream()
+                except Exception as exc:  # noqa: BLE001
+                    log.warning(
+                        "pipeline_camera_switch_stop_failed",
+                        error=str(exc),
+                    )
 
-            # Reset the discover hook so the next start_stream() picks up
-            # the new role assignment without re-running auto_assign(),
-            # which would clobber the operator's choice.
-            await self._restart_after_assign()
+                # Reset the discover hook so the next start_stream() picks
+                # up the new role assignment without re-running
+                # auto_assign(), which would clobber the operator's choice.
+                await self._restart_after_assign()
 
             # Resume recording on the post-switch encoder. The new file
             # is generated from the timestamp at this point. The
@@ -1628,11 +1698,12 @@ class VideoPipeline(_DiscoveryMixin, _HealthMixin, _WfbTeeMixin):
         """
         log = _pkg().log
         # Mirror start_stream() but skip _discover_and_assign so the
-        # role bindings we just set are not overwritten.
+        # role bindings we just set are not overwritten. Reap by process
+        # group so the stale encoder's bridge ffmpeg child cannot orphan
+        # onto the mediamtx /main publisher slot.
         if self._encoder_process is not None and self._encoder_process.returncode is None:
             log.info("killing_stale_encoder", pid=self._encoder_process.pid)
-            self._encoder_process.kill()
-            await self._encoder_process.wait()
+            await self._terminate_process_group(self._encoder_process)
             self._encoder_process = None
 
         self._state = PipelineState.STARTING
@@ -1682,6 +1753,15 @@ class VideoPipeline(_DiscoveryMixin, _HealthMixin, _WfbTeeMixin):
             self._state = PipelineState.ERROR
             return False
 
+        # Belt-and-suspenders sweep before respawn: kill any encoder
+        # holding the camera node and any orphan bridge ffmpeg still
+        # publishing to mediamtx /main. The cold-start path does the
+        # same in start_stream(); the camera-switch restart path needs
+        # it too so a reparented bridge from the torn-down encoder can't
+        # fight the fresh publisher.
+        await self._kill_orphan_encoder_ffmpegs(primary.device_path)
+        await self._kill_orphan_bridge_ffmpegs(pipe_uri)
+
         self._mediamtx.generate_config({"main": "publisher"})
         mtx_ok = await self._mediamtx.start()
         if not mtx_ok:
@@ -1694,6 +1774,10 @@ class VideoPipeline(_DiscoveryMixin, _HealthMixin, _WfbTeeMixin):
                 *cmd,
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.PIPE,
+                # New session puts the encoder + its ffmpeg children in
+                # their own process group so the group-kill teardown can
+                # reap the RTSP bridge child instead of orphaning it.
+                start_new_session=True,
             )
             self._encoder_stderr_task = asyncio.create_task(
                 self._drain_stderr(self._encoder_process, "encoder")

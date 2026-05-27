@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import signal
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -877,3 +878,243 @@ class TestEncoderOrphanKill:
         assert len(captured_kwargs) == 1
         # session isolation is on so process-group cleanup is possible.
         assert captured_kwargs[0].get("start_new_session") is True
+
+
+class TestEncoderProcessGroupTeardown:
+    """The encoder is a ``bash -c`` wrapper whose ffmpeg children
+    include the RTSP bridge that publishes into mediamtx /main. Tearing
+    it down must signal the whole process group (os.killpg via the pgid
+    from os.getpgid) so the bridge child dies too instead of orphaning
+    onto the publisher slot and fighting the next start."""
+
+    @pytest.mark.asyncio
+    async def test_stop_stream_kills_encoder_by_process_group(self, monkeypatch):
+        from ados.services.video.pipeline import pipeline as pl_inner
+
+        pipeline = VideoPipeline(VideoConfig())
+        pipeline._state = PipelineState.RUNNING
+        pipeline._mediamtx = MagicMock()
+        pipeline._mediamtx.stop = AsyncMock()
+        pipeline._mediamtx.is_running = MagicMock(return_value=True)
+
+        proc = MagicMock()
+        proc.returncode = None
+        proc.pid = 4242
+        proc.wait = AsyncMock(return_value=0)
+        proc.terminate = MagicMock()
+        proc.kill = MagicMock()
+        pipeline._encoder_process = proc
+
+        # os.kill(pid, 0) liveness probe must report the encoder alive so
+        # stop_stream reaches the termination branch.
+        getpgid_calls: list[int] = []
+        killpg_calls: list[tuple[int, int]] = []
+
+        def _fake_kill(pid, sig):
+            # signal 0 is the liveness probe — succeed silently.
+            return None
+
+        def _fake_getpgid(pid):
+            getpgid_calls.append(pid)
+            return 7777
+
+        def _fake_killpg(pgid, sig):
+            killpg_calls.append((pgid, sig))
+
+        monkeypatch.setattr(pl_inner.os, "kill", _fake_kill)
+        monkeypatch.setattr(pl_inner.os, "getpgid", _fake_getpgid)
+        monkeypatch.setattr(pl_inner.os, "killpg", _fake_killpg)
+
+        await pipeline.stop_stream()
+
+        # The pgid was resolved from the encoder pid and SIGTERM landed
+        # on the GROUP, not on the bare leader handle.
+        assert 4242 in getpgid_calls
+        assert (7777, signal.SIGTERM) in killpg_calls
+        # Bare-handle terminate() must NOT have been used (it would
+        # orphan the bridge ffmpeg child).
+        proc.terminate.assert_not_called()
+        assert pipeline._encoder_process is None
+
+    @pytest.mark.asyncio
+    async def test_terminate_process_group_falls_back_when_no_pgid(
+        self, monkeypatch,
+    ):
+        """When os.getpgid can't resolve the group (already-exited
+        leader), fall back to the single-process terminate()."""
+        from ados.services.video.pipeline import pipeline as pl_inner
+
+        pipeline = VideoPipeline(VideoConfig())
+        proc = MagicMock()
+        proc.returncode = None
+        proc.pid = 555
+        proc.wait = AsyncMock(return_value=0)
+        proc.terminate = MagicMock()
+        proc.kill = MagicMock()
+
+        def _boom(pid):
+            raise ProcessLookupError
+
+        killpg_calls: list = []
+        monkeypatch.setattr(pl_inner.os, "getpgid", _boom)
+        monkeypatch.setattr(
+            pl_inner.os, "killpg", lambda *a: killpg_calls.append(a),
+        )
+
+        await pipeline._terminate_process_group(proc)
+
+        # No group signal could be sent; the single-process fallback fired.
+        assert killpg_calls == []
+        proc.terminate.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_terminate_process_group_noop_on_dead_proc(self):
+        pipeline = VideoPipeline(VideoConfig())
+        proc = MagicMock()
+        proc.returncode = 0  # already exited
+        proc.terminate = MagicMock()
+        proc.kill = MagicMock()
+        # None handle is a clean no-op too.
+        await pipeline._terminate_process_group(None)
+        await pipeline._terminate_process_group(proc)
+        proc.terminate.assert_not_called()
+        proc.kill.assert_not_called()
+
+
+class TestRestartPathOrphanSweep:
+    """The camera-switch / internal restart path must sweep orphan
+    bridge ffmpegs to the mediamtx publisher slot BEFORE spawning a
+    fresh encoder, and must spawn the encoder with
+    ``start_new_session=True`` so the group-kill teardown can reap its
+    bridge child."""
+
+    @pytest.mark.asyncio
+    async def test_restart_after_assign_sweeps_bridge_before_respawn(
+        self, monkeypatch,
+    ):
+        from ados.hal.camera import CameraInfo, CameraType
+        from ados.services.video import pipeline as pl_mod
+        from ados.services.video.encoder import EncoderType
+
+        pipeline = VideoPipeline(VideoConfig())
+        cam = CameraInfo(name="Test", type=CameraType.CSI, device_path="/dev/video0")
+        pipeline._camera_mgr.get_primary = MagicMock(return_value=cam)
+        mtx = MagicMock()
+        mtx.generate_config = MagicMock()
+        mtx.start = AsyncMock(return_value=True)
+        mtx.rtsp_port = 8554
+        pipeline._mediamtx = mtx
+
+        monkeypatch.setattr(
+            "ados.services.video.pipeline.detect_encoder_for_camera",
+            lambda c: EncoderType.FFMPEG,
+        )
+        monkeypatch.setattr(
+            "ados.services.video.pipeline.build_encoder_command",
+            lambda *a, **k: ["bash", "-c", "ffmpeg ... | ffmpeg ... rtsp"],
+        )
+
+        # Record call order: the bridge orphan sweep must precede the
+        # encoder spawn so a reparented bridge can't fight the new one.
+        order: list[str] = []
+        pipeline._kill_orphan_encoder_ffmpegs = AsyncMock(
+            side_effect=lambda *_a: order.append("encoder_sweep")
+        )
+        pipeline._kill_orphan_bridge_ffmpegs = AsyncMock(
+            side_effect=lambda *_a: order.append("bridge_sweep")
+        )
+        pipeline._drain_stderr = AsyncMock()
+        pipeline.start_wfb_tee = AsyncMock(return_value=True)
+
+        spawn_kwargs: list[dict] = []
+
+        async def _fake_spawn(*cmd, **kwargs):
+            order.append("encoder_spawn")
+            spawn_kwargs.append(kwargs)
+            proc = MagicMock()
+            proc.returncode = None
+            proc.pid = 9001
+            proc.stderr = None
+            return proc
+
+        monkeypatch.setattr(pl_mod.asyncio, "create_subprocess_exec", _fake_spawn)
+
+        ok = await pipeline._restart_after_assign()
+        assert ok is True
+
+        # The bridge orphan sweep ran before the encoder spawn.
+        assert "bridge_sweep" in order
+        assert order.index("bridge_sweep") < order.index("encoder_spawn")
+        # The respawned encoder is session-isolated so its group can be
+        # reaped on the next teardown.
+        assert spawn_kwargs[0].get("start_new_session") is True
+
+
+class TestRestartSerialization:
+    """Two concurrent restart entry points (health-check restart and an
+    operator camera switch / bitrate change) must not both tear down and
+    respawn the encoder at once and double-publish to /main. The
+    restart lock serializes the teardown+respawn region."""
+
+    @pytest.mark.asyncio
+    async def test_concurrent_restarts_do_not_both_spawn(self):
+        import asyncio as _asyncio
+
+        pipeline = VideoPipeline(VideoConfig())
+
+        spawns = {"count": 0}
+        active = {"now": 0, "max": 0}
+
+        async def _fake_restart_region():
+            # Stand-in for "stop_stream + start_stream": only safe to run
+            # one at a time. Counts overlap to prove serialization.
+            async with pipeline._restart_lock:
+                active["now"] += 1
+                active["max"] = max(active["max"], active["now"])
+                # Yield so a second un-serialized caller would interleave
+                # here if the lock were not held.
+                await _asyncio.sleep(0)
+                await _asyncio.sleep(0)
+                spawns["count"] += 1
+                active["now"] -= 1
+
+        await _asyncio.gather(
+            _fake_restart_region(),
+            _fake_restart_region(),
+        )
+
+        # Both restarts completed, but never overlapped: the lock forced
+        # them to run one after the other.
+        assert spawns["count"] == 2
+        assert active["max"] == 1
+
+    @pytest.mark.asyncio
+    async def test_restart_lock_blocks_second_caller_until_first_done(self):
+        import asyncio as _asyncio
+
+        pipeline = VideoPipeline(VideoConfig())
+        events: list[str] = []
+        release = _asyncio.Event()
+
+        async def _first():
+            async with pipeline._restart_lock:
+                events.append("first_in")
+                await release.wait()
+                events.append("first_out")
+
+        async def _second():
+            # Give _first a head start so it owns the lock.
+            await _asyncio.sleep(0)
+            async with pipeline._restart_lock:
+                events.append("second_in")
+
+        t1 = _asyncio.create_task(_first())
+        t2 = _asyncio.create_task(_second())
+        await _asyncio.sleep(0)
+        await _asyncio.sleep(0)
+        # _second is parked on the lock while _first holds it.
+        assert events == ["first_in"]
+        release.set()
+        await _asyncio.gather(t1, t2)
+        # _second only entered after _first fully released the lock.
+        assert events == ["first_in", "first_out", "second_in"]
