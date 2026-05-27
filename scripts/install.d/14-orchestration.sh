@@ -417,20 +417,53 @@ install_failure_trap() {
 # current pip's isolation is broken (this is what self-heals an already-broken
 # pip on the rig). Idempotent and fast when already satisfied; best-effort
 # (warn, not abort) so a blip on one leg does not sink the install.
-ensure_build_toolchain() {
-    # Clear corrupt leftover distributions first. pip renames a package to
-    # ~name when an install or upgrade is interrupted (e.g. a killed build);
-    # the half-written metadata then crashes the next pip run with a SIGSEGV
-    # ("Ignoring invalid distribution ~name"). A glob delete clears them. The
-    # tilde is mid-path here, so the shell does not tilde-expand it.
+# _stage_build_toolchain: clear corruption, hold pip off the broken line,
+# and install the build backend the agent's pyproject needs. Returns the
+# status of the setuptools/wheel install, which is the gate: if THAT fails
+# (a SIGSEGV from a half-written distribution, or a venv too damaged to
+# install even a wheel) the caller recreates the venv. Always invoked from a
+# `!`/`||` context so set -e does not abort on the expected failure.
+_stage_build_toolchain() {
+    # pip renames a package to ~name when an install/upgrade is interrupted;
+    # the half-written metadata then crashes the next pip run. Clear them
+    # (the tilde is mid-path, so the shell does not tilde-expand it).
     rm -rf "${VENV_DIR}"/lib/python*/site-packages/~* 2>/dev/null || true
-    # Pin pip away from the build-isolation regression. This is a wheel
-    # install, so it works on the currently-broken pip too.
-    "${VENV_DIR}/bin/python" -m pip install --upgrade 'pip>=24,<26' --quiet \
-        || warn "Could not pin pip below 26; continuing with the current pip."
-    # Stage the build backend the agent's pyproject declares. Wheel installs.
-    "${VENV_DIR}/bin/python" -m pip install --upgrade 'setuptools>=68' wheel --quiet \
-        || warn "Could not refresh setuptools/wheel; the source build may be degraded."
+    # Hold pip off the 26.x line whose build isolation regressed on some
+    # arm64 kernels. No --upgrade: a known-good older pip (the venv-bundled
+    # one) already satisfies <26 and is left untouched; only a broken 26.x is
+    # pulled back to the newest <26.
+    "${VENV_DIR}/bin/python" -m pip install 'pip<26' --quiet 2>/dev/null || true
+    # The build backend the agent's pyproject declares. Wheel installs (no
+    # build isolation), so they work on any sane pip. This line is the gate.
+    "${VENV_DIR}/bin/python" -m pip install --upgrade 'setuptools>=68' wheel --quiet
+}
+
+# ensure_build_toolchain: make the venv able to build the agent. On a clean
+# venv this just stages the toolchain. A venv damaged by an earlier failed
+# run (corrupt distributions, a pip that SIGSEGVs even on a wheel install)
+# cannot be repaired in place, so recreate it from scratch: the fresh venv
+# ships the interpreter-bundled pip (older than the regressed line, with
+# working build isolation) and clean site-packages. Config and pairing live
+# outside the venv and the agent is reinstalled right after, so nothing is
+# lost. Best-effort: warns rather than aborts so the caller still attempts
+# the build.
+ensure_build_toolchain() {
+    if _stage_build_toolchain; then
+        return 0
+    fi
+    warn "Build toolchain could not be staged (corrupt venv?); recreating the virtual environment."
+    local py
+    py="$(find_python)"
+    if [ -z "${py}" ]; then
+        warn "No Python interpreter found to recreate the venv; the source build may fail."
+        return 0
+    fi
+    rm -rf "${VENV_DIR}"
+    if ! "${py}" -m venv --system-site-packages "${VENV_DIR}"; then
+        warn "Recreating the venv failed; the source build may fail."
+        return 0
+    fi
+    _stage_build_toolchain || warn "Build toolchain still unavailable after venv recreate."
 }
 
 ensure_venv_pip() {
@@ -448,7 +481,7 @@ ensure_venv_pip() {
     # recovers a corrupted/stale pip without a network round-trip for the
     # bootstrap itself.
     "${VENV_DIR}/bin/python" -m ensurepip --upgrade >/dev/null 2>&1 || true
-    ensure_build_toolchain
+    _stage_build_toolchain || true
     if "${VENV_DIR}/bin/python" -m pip --version >/dev/null 2>&1; then
         warn "venv pip repaired via ensurepip; continuing."
         return 0
@@ -472,7 +505,7 @@ ensure_venv_pip() {
         return 1
     fi
     # The freshly created venv ships a working pip; bring it current.
-    ensure_build_toolchain
+    _stage_build_toolchain || true
 
     if [ -n "${reinstall_fn}" ] && declare -F "${reinstall_fn}" >/dev/null 2>&1; then
         warn "Reinstalling the agent package into the rebuilt venv."

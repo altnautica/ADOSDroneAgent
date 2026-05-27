@@ -4,6 +4,19 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.43.7] - 2026-05-27
+
+### Fixed
+
+- **Install recreates a virtual environment it cannot repair.** If the
+  build toolchain still cannot be staged after clearing corrupt leftovers
+  (a pip damaged badly enough to crash even on a wheel install), the venv
+  is rebuilt from scratch. The fresh venv ships the interpreter-bundled pip
+  (older than the regressed line, with working build isolation) and clean
+  packages; config and pairing live outside the venv and the agent is
+  reinstalled right after, so nothing is lost. The pip pin now only pulls a
+  broken newer pip back rather than upgrading a known-good bundled one.
+
 ## [0.43.6] - 2026-05-27
 
 ### Fixed
