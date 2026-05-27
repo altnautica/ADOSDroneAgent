@@ -110,8 +110,11 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p out
+          # The build script prints the manifest row (one JSON object) on stdout
+          # and everything else on stderr. Keep only the JSON line so a stray
+          # stdout write can never corrupt the row the publish job slurps.
           bash scripts/drivers/build-prebuilt-ko.sh "${{ steps.kver.outputs.kver }}" out \
-            > "out/row-${{ matrix.flavor }}.json"
+            | grep '^{' > "out/row-${{ matrix.flavor }}.json"
           cat "out/row-${{ matrix.flavor }}.json"
 
       - uses: actions/upload-artifact@v4

@@ -50,13 +50,15 @@ trap 'rm -rf "${WORK}"' EXIT
 cp -a "${VENDOR_DIR}/." "${WORK}/"
 
 # Same patches the device applies, idempotent + forward so a re-run is safe.
+# patch writes "patching file ..." to stdout; route it to stderr so the only
+# thing on this script's stdout is the final manifest-row JSON.
 if [ -f "${MESH_PATCH}" ] && ! grep -qxF "CONFIG_RTW_MESH = y" "${WORK}/Makefile"; then
     log "applying mesh-enable patch"
-    ( cd "${WORK}" && patch -p1 -N --forward < "${MESH_PATCH}" )
+    ( cd "${WORK}" && patch -p1 -N --forward < "${MESH_PATCH}" ) >&2
 fi
 if [ -f "${MLME_PATCH}" ] && ! grep -qF "MLME_IS_MONITOR(padapter) || MLME_IS_NULL(padapter)" "${WORK}/core/rtw_mlme_ext.c"; then
     log "applying monitor-mode disconnect patch"
-    ( cd "${WORK}" && patch -p1 -N --forward < "${MLME_PATCH}" )
+    ( cd "${WORK}" && patch -p1 -N --forward < "${MLME_PATCH}" ) >&2
 fi
 
 # Relax the warnings newer kernels promote to errors (matches the DKMS path).
