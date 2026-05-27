@@ -70,6 +70,18 @@ _VALID_RX_SILENCE_THRESHOLD_S = 12.0
 # missed beacon.
 _PEER_PRESENCE_FRESH_S = 30.0
 
+# Peer-presence loss window. Between the fresh window and this one the
+# peer was seen recently but a marginal control-plane link is dropping
+# beacons for tens of seconds at a time (bench co-channel interference is
+# enough to do it). That is still a paired, idle link — hold the home
+# channel and do NOT sweep or restart wfb_rx. A blind band sweep leaves
+# the home channel the drone transmits on, so it then cannot hear the
+# next beacon, and a restart drops the control plane too — together they
+# produce a self-inflicted reacquire/restart thrash. Only once presence
+# has been absent for longer than this is the link treated as genuinely
+# lost and the reacquisition sweep allowed to run.
+_PEER_PRESENCE_LOST_S = 120.0
+
 # Phase 11 video pipeline ports.
 # wfb_rx outputs FEC-decoded RTP H.264 to UDP _WFB_RX_INTERNAL_UDP_PORT
 # (5599). The video fanout reads from there and emits to:
@@ -992,6 +1004,30 @@ class WfbRxManager:
                         self._peer_presence_age_s() or 0.0, 1
                     ),
                     note="paired link idle (no video); not sweeping",
+                )
+                continue
+
+            # Marginal-link grace: the peer was seen recently (within the
+            # loss window) but not within the strict fresh window. On a
+            # noisy bench the control-plane beacon drops for tens of
+            # seconds at a time. This is still a paired, idle link — hold
+            # the home channel, do not sweep (sweeping leaves the home
+            # channel the drone transmits on, so the next beacon is
+            # missed) and do not terminate wfb_rx (a restart drops the
+            # control plane too). Escalate only once presence has been
+            # gone past the loss window.
+            age = self._peer_presence_age_s()
+            if (
+                self._ever_linked
+                and age is not None
+                and age <= _PEER_PRESENCE_LOST_S
+            ):
+                log.info(
+                    "ground_wfb_presence_gap_hold",
+                    interface=self._interface,
+                    channel=self._channel,
+                    peer_presence_age_s=round(age, 1),
+                    note="marginal presence gap; holding home channel, not sweeping",
                 )
                 continue
 

@@ -273,3 +273,67 @@ async def test_cold_start_never_linked_holds_home_no_sweep():
     mgr._rx_proc.terminate.assert_not_called()
     assert mgr._channel == 149
     assert mgr._reacquire_kills == 0
+
+
+@pytest.mark.asyncio
+async def test_silent_marginal_presence_gap_holds_no_sweep():
+    """Linked + silent + presence gap inside the loss window → hold home.
+
+    A marginal control-plane link drops presence beacons for tens of
+    seconds at a time. As long as the peer was seen within the loss
+    window the link is still paired-idle: hold the home channel rather
+    than sweep (which leaves the channel the drone transmits on) or kill
+    wfb_rx (which drops the control plane) — the self-inflicted thrash
+    this guards against.
+    """
+    mgr = _make_manager(video_silent=True, peer_present=False)
+    # Peer last seen 60 s ago: past the 30 s fresh window but well inside
+    # the 120 s loss window.
+    mgr._peer_presence_age_s = MagicMock(return_value=60.0)
+    mgr._acquirer = MagicMock()
+    mgr._acquirer.mark_unlocked = MagicMock()
+    mgr._acquirer.acquire = AsyncMock(return_value=157)
+    mgr._acquirer.acquire_target = AsyncMock(return_value=True)
+
+    with patch(
+        "ados.services.ground_station.wfb_rx._VALID_RX_SILENCE_THRESHOLD_S",
+        0.0,
+    ), patch(
+        "ados.services.ground_station.wfb_rx._VALID_RX_POLL_INTERVAL_S",
+        0.0,
+    ):
+        await _run_watchdog(mgr._valid_packet_watchdog())
+
+    mgr._acquirer.mark_unlocked.assert_not_called()
+    mgr._acquirer.acquire.assert_not_awaited()
+    mgr._acquirer.acquire_target.assert_not_awaited()
+    mgr._rx_proc.terminate.assert_not_called()
+    assert mgr._channel == 149
+    assert mgr._reacquire_kills == 0
+
+
+@pytest.mark.asyncio
+async def test_silent_presence_lost_beyond_window_sweeps():
+    """Linked + silent + presence gone past the loss window → genuine loss.
+
+    Once the peer has been absent longer than the loss window the link is
+    treated as truly down and the reacquisition sweep runs.
+    """
+    mgr = _make_manager(video_silent=True, peer_present=False)
+    # Peer last seen 200 s ago: beyond the 120 s loss window.
+    mgr._peer_presence_age_s = MagicMock(return_value=200.0)
+    mgr._acquirer = MagicMock()
+    mgr._acquirer.mark_unlocked = MagicMock()
+    mgr._acquirer.acquire = AsyncMock(return_value=157)
+
+    with patch(
+        "ados.services.ground_station.wfb_rx._VALID_RX_SILENCE_THRESHOLD_S",
+        0.0,
+    ), patch(
+        "ados.services.ground_station.wfb_rx._VALID_RX_POLL_INTERVAL_S",
+        0.0,
+    ):
+        await _run_watchdog(mgr._valid_packet_watchdog())
+
+    mgr._acquirer.acquire.assert_awaited()
+    assert mgr._channel == 157
