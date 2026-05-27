@@ -40,6 +40,7 @@ import time
 
 from .constants import (
     _FFMPEG_FRAME_PROGRESS_RE,
+    _FFMPEG_PROGRESS_LINE_RE,
     _FFMPEG_PROGRESS_TOKEN_RE,
     _WFB_TEE_HOST,
     _WFB_TEE_PAYLOAD_TYPE,
@@ -70,6 +71,17 @@ class _WfbTeeMixin:
         log = _pkg().log
         if proc.stderr is None:
             return
+        # Rate-limit the real-diagnostic logging path so an ffmpeg error
+        # storm (e.g. a dead RTSP source retried hard) cannot flood the
+        # journal or pin a CPU core. The per-second -progress telemetry
+        # block is suppressed entirely below — it is parsed for the
+        # liveness stamp but is noise in the log at ~12 lines/s.
+        window_s = 10.0
+        max_lines_per_window = 5
+        window_start = time.monotonic()
+        logged = 0
+        suppressed = 0
+        last_suppressed_line = ""
         try:
             while True:
                 line = await proc.stderr.readline()
@@ -98,7 +110,31 @@ class _WfbTeeMixin:
                                 self._wfb_tee_last_frame_count = frame
                         except (TypeError, ValueError):
                             pass
-                log.warning("subprocess_stderr", label="wfb_tee", line=text)
+                # Suppress the routine -progress telemetry block from the
+                # journal (parsed above for the liveness stamp). Only real
+                # ffmpeg diagnostics reach the log.
+                if _FFMPEG_PROGRESS_TOKEN_RE.search(text) or _FFMPEG_PROGRESS_LINE_RE.match(text):
+                    continue
+                now = time.monotonic()
+                if now - window_start >= window_s:
+                    if suppressed:
+                        log.warning(
+                            "subprocess_stderr_suppressed",
+                            label="wfb_tee",
+                            suppressed=suppressed,
+                            window_s=round(now - window_start, 1),
+                            last_line=last_suppressed_line,
+                        )
+                    window_start = now
+                    logged = 0
+                    suppressed = 0
+                    last_suppressed_line = ""
+                if logged < max_lines_per_window:
+                    log.warning("subprocess_stderr", label="wfb_tee", line=text)
+                    logged += 1
+                else:
+                    suppressed += 1
+                    last_suppressed_line = text
         except (asyncio.CancelledError, Exception):
             pass
 

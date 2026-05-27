@@ -46,6 +46,13 @@ _FFMPEG_PROGRESS_TOKEN_RE = re.compile(
     r"out_time|total_size|fps|dup_frames|drop_frames|"
     r"speed|progress)=",
 )
+# A bare key=value line, which is what `-progress pipe:2` emits one per
+# line (frame=, fps=, stream_0_0_q=, q=, progress=continue, ...). Used to
+# suppress the routine per-second telemetry block from the journal: it is
+# parsed for the liveness stamp but is pure noise to log at ~12 lines/s.
+# Real ffmpeg diagnostics start with "[component @ addr]" or a capital
+# word or a path, so they do not match this lowercase key=value shape.
+_FFMPEG_PROGRESS_LINE_RE = re.compile(r"^[a-z][a-z0-9_]*=")
 _WFB_TEE_SSRC = "0xCAFE"
 
 # Inbound-flow watchdog: the encoder process can be alive (PID present,
