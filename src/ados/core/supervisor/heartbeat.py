@@ -88,6 +88,10 @@ def build_radio_block(wfb_status: dict[str, Any] | None) -> dict[str, Any]:
             "tx_video_stalled": None,
             "tx_video_stall_kills": None,
             "tx_video_recvq_bytes": None,
+            "acquire_state": None,
+            "channel_locked": None,
+            "reacquire_kills": None,
+            "valid_rx_packets_per_s": None,
         }
 
     iface = wfb_status.get("interface") or None
@@ -143,6 +147,15 @@ def build_radio_block(wfb_status: dict[str, Any] | None) -> dict[str, Any]:
         "tx_video_stalled": wfb_status.get("tx_video_stalled"),
         "tx_video_stall_kills": wfb_status.get("tx_video_stall_kills"),
         "tx_video_recvq_bytes": wfb_status.get("tx_video_recvq_bytes"),
+        # Ground-side receive link quality. acquire_state is the channel
+        # acquirer's mode (idle / searching / locked / no-peer);
+        # reacquire_kills counts destructive wfb_rx restarts from the
+        # valid-packet watchdog so Mission Control can flag a thrashing
+        # receiver remotely. Absent on the transmit side and older agents.
+        "acquire_state": wfb_status.get("acquire_state"),
+        "channel_locked": wfb_status.get("channel_locked"),
+        "reacquire_kills": wfb_status.get("reacquire_kills"),
+        "valid_rx_packets_per_s": wfb_status.get("valid_rx_packets_per_s"),
     }
 
 
