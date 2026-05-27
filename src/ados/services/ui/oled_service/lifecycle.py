@@ -424,9 +424,28 @@ class OledService(
         # absolute-URL callers in this service (``_api_base/...`` and
         # the mediamtx 9997 calls) are unaffected — httpx ignores
         # ``base_url`` when the request URL is already absolute.
+        # Authenticate to the agent's own REST API. Once the agent is
+        # paired, /api/* requires an X-ADOS-Key header (the guard that keeps
+        # a remote caller off the API). This UI runs on the same box but in
+        # a separate process, so it cannot reach the in-process pairing
+        # manager; it reads the persisted key from pairing.json on disk and
+        # sets it as a default header so every page's status poll
+        # authenticates instead of 401ing (which left the LCD rendering
+        # blank "- dBm / no kbps"). Empty when unpaired, which is correct —
+        # an unpaired agent does not require the header.
+        _api_headers: dict[str, str] = {}
+        try:
+            from ados.core.pairing import PairingManager
+
+            _api_key = PairingManager().api_key
+            if _api_key:
+                _api_headers["X-ADOS-Key"] = _api_key
+        except Exception:  # noqa: BLE001 — UI must render even if the key read fails
+            pass
         self._http = httpx.AsyncClient(
             base_url=f"http://{self._api_host}:{self._api_port}",
             timeout=0.9,
+            headers=_api_headers,
         )
         # Hand the http client to the page context so pages can make
         # REST calls without each one constructing its own pool.
