@@ -33,7 +33,12 @@ import structlog
 from ados.core.config import load_config
 from ados.core.logging import configure_logging, get_logger
 from ados.core.paths import WFB_KEY_DIR
-from ados.services.wfb.adapter import detect_wfb_adapters, set_monitor_mode
+from ados.services.wfb.adapter import (
+    detect_wfb_adapters,
+    enabled_channels,
+    set_monitor_mode,
+    set_regulatory_domain,
+)
 from ados.services.wfb.channel_acquire import ChannelAcquirer
 from ados.services.wfb.key_mgr import get_key_paths, key_exists
 from ados.services.wfb.link_quality import LinkQualityMonitor, LinkStats
@@ -168,6 +173,14 @@ class WfbRxManager:
         self._valid_rx_packets_per_s: float = 0.0
         self._video_inbound_bytes_per_s: float = 0.0
         self._reacquire_kills: int = 0
+        # Rendezvous-first: stay on the home channel from a cold start and
+        # only sweep the band once a lock has been established and then
+        # lost. A blind cold sweep was part of the divergence that kept
+        # the two sides from meeting; the drone now transmits on the home
+        # channel until linked, so the ground should simply wait there.
+        # Set True the first time valid video decodes OR a presence
+        # beacon from the peer is seen.
+        self._ever_linked: bool = False
         # Channel acquirer: sweeps the band on a dry link and locks onto
         # the first channel that decodes valid packets. Constructed once
         # an interface + channel are known in run(); reads the live
@@ -909,6 +922,10 @@ class WfbRxManager:
         self._video_inbound_bytes_per_s = (snap.bitrate_kbps * 1000.0) / 8.0
         if snap.packets_received > 0:
             self._last_valid_rx_change_at = time.monotonic()
+            # A valid decode means we have met the peer at least once;
+            # from here a later silence is a genuine loss and the band
+            # sweep is allowed.
+            self._ever_linked = True
             # Valid decodes on the current channel ARE a lock — a sweep is
             # only one way to reach that state. Mark it so the lock /
             # acquire-state surface reflects reality on a rig that booted
@@ -964,6 +981,9 @@ class WfbRxManager:
             if self._peer_present():
                 # The peer is alive (recent presence beacon) but not
                 # sending video. This is normal; do not touch the radio.
+                # Seeing the peer counts as having been linked, so a
+                # later silence is a real loss the sweep may act on.
+                self._ever_linked = True
                 log.info(
                     "ground_wfb_paired_no_video",
                     interface=self._interface,
@@ -972,6 +992,26 @@ class WfbRxManager:
                         self._peer_presence_age_s() or 0.0, 1
                     ),
                     note="paired link idle (no video); not sweeping",
+                )
+                continue
+
+            # Rendezvous-first: do NOT sweep from a cold start. Until the
+            # link has been established once (valid video decoded or a
+            # presence beacon seen), the transmitter is broadcasting on
+            # the fixed home channel, so the receiver simply stays there
+            # and waits. Sweeping from cold pulls us off the home channel
+            # the drone is transmitting on and is the divergence this
+            # fixes. Once linked, a later silence with no peer presence
+            # is a genuine loss and the sweep below runs.
+            if not self._ever_linked:
+                log.info(
+                    "ground_wfb_unlinked_hold_home",
+                    interface=self._interface,
+                    channel=self._channel,
+                    note=(
+                        "no peer seen yet; holding home channel, "
+                        "no cold sweep until a lock has been established"
+                    ),
                 )
                 continue
 
@@ -1139,6 +1179,21 @@ class WfbRxManager:
 
             self._interface = interface
 
+            # Apply the regulatory domain once when the operator pinned
+            # one, so the receiver enables the same channel set as the
+            # drone. Best-effort: a failure is logged and the home
+            # channel still works on whatever the kernel allows. iw reg
+            # set is a global (per-phy) call, applied here once the
+            # interface is known.
+            reg_domain = getattr(self._config, "reg_domain", None)
+            if reg_domain:
+                if not set_regulatory_domain(reg_domain):
+                    log.warning(
+                        "ground_wfb_reg_domain_not_applied",
+                        interface=interface,
+                        domain=reg_domain,
+                    )
+
             # Monitor mode was already set by detect_adapter() above as
             # part of its candidate-iteration. Skipping the duplicate
             # call here avoids re-running iw on an interface that's
@@ -1212,6 +1267,7 @@ class WfbRxManager:
                 interface=interface,
                 band=getattr(self._config, "band", "u-nii-1"),
                 valid_packets_fn=self._valid_rx_counter,
+                enabled_channels=enabled_channels(interface),
             )
 
             # Phase 11: spawn the UDP fan-out as soon as wfb_rx is up.

@@ -146,6 +146,9 @@ async def main() -> None:
                     )
                 ),
                 enabled=True,
+                home_channel=int(
+                    getattr(config.video.wfb, "channel", 149)
+                ),
             )
             sibling_tasks.append(
                 asyncio.create_task(supervisor.run(), name="hop-supervisor")

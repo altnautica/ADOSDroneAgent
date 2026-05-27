@@ -362,6 +362,116 @@ def set_monitor_mode(interface: str) -> bool:
     return True
 
 
+def get_interface_mode(interface: str) -> str | None:
+    """Return the interface operating mode ("monitor" | "managed" | ...).
+
+    Reads `iw <iface> info`. Used to VERIFY that set_monitor_mode actually
+    took effect: a managed-mode iface cannot inject, so wfb_tx on it produces
+    zero frames even though every command "succeeded". Returns None when the
+    mode cannot be read.
+    """
+    if platform.system() != "Linux":
+        return None
+    _validate_interface_name(interface)
+    try:
+        result = subprocess.run(
+            ["iw", interface, "info"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    for line in result.stdout.splitlines():
+        line = line.strip()
+        if line.startswith("type "):
+            return line.split(None, 1)[1].strip()
+    return None
+
+
+def enabled_channels(interface: str) -> set[int]:
+    """5 GHz channel numbers this adapter can actually use for the link.
+
+    Parses `iw phy <phyN> channels` and keeps only channels that are not
+    `(disabled)` and not radar/`no IR` (DFS channels need a CAC the link does
+    not do). The drone and ground frequently run different regulatory domains,
+    so the air channel must be in the intersection of both sides' enabled
+    sets; this exposes the local half of that intersection. Empty set means
+    "could not determine"; callers should treat that as "do not restrict".
+    """
+    if platform.system() != "Linux":
+        return set()
+    _validate_interface_name(interface)
+    # interface -> wiphy index -> phyN
+    try:
+        info = subprocess.run(
+            ["iw", interface, "info"], capture_output=True, text=True, timeout=5
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return set()
+    phy = None
+    for line in info.stdout.splitlines():
+        line = line.strip()
+        if line.startswith("wiphy "):
+            phy = f"phy{line.split()[1].strip()}"
+            break
+    if not phy:
+        return set()
+    try:
+        chans = subprocess.run(
+            ["iw", "phy", phy, "channels"], capture_output=True, text=True, timeout=8
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return set()
+    out: set[int] = set()
+    import re as _re
+
+    for line in chans.stdout.splitlines():
+        # e.g. "* 5745 MHz [149]" (usable) / "* 5180 MHz [36] (disabled)" /
+        #      "* 5260 MHz [52] (no IR, radar detection)"
+        m = _re.search(r"\[(\d+)\]", line)
+        if not m:
+            continue
+        low = line.lower()
+        if "disabled" in low or "no ir" in low or "radar" in low:
+            continue
+        out.add(int(m.group(1)))
+    return out
+
+
+def set_regulatory_domain(domain: str) -> bool:
+    """Apply a wifi regulatory domain via `iw reg set <domain>`.
+
+    Optional, opt-in (config `video.wfb.reg_domain`). When the drone and
+    ground run the same domain they enable the same channel set, which lets
+    hopping use U-NII-1 where legal. Left unset by default; the home channel
+    (149, U-NII-3) works without it. Best-effort: a failure is logged and the
+    link still runs on whatever channels the kernel allows.
+    """
+    if platform.system() != "Linux":
+        return False
+    import re as _re
+
+    dom = (domain or "").strip().upper()
+    if not _re.fullmatch(r"[A-Z0-9]{2}", dom):
+        log.warning("reg_domain_invalid", domain=domain)
+        return False
+    try:
+        result = subprocess.run(
+            ["iw", "reg", "set", dom], capture_output=True, text=True, timeout=5
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        log.warning("reg_domain_tool_missing_or_timeout", domain=dom)
+        return False
+    if result.returncode != 0:
+        log.warning("reg_domain_set_failed", domain=dom, stderr=result.stderr.strip())
+        return False
+    log.info("reg_domain_set", domain=dom)
+    return True
+
+
 def set_tx_power(interface: str, dbm: int) -> int | None:
     """Set TX power on a WiFi interface via `iw`. Returns effective dBm.
 

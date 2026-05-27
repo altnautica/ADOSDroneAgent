@@ -4,6 +4,32 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.44.0] - 2026-05-27
+
+### Fixed
+
+- **Radio link now comes up out of the box (rendezvous, then hop).** A drone
+  and ground station could pair but never establish the WFB link: the drone
+  auto-scanned onto 5 GHz U-NII-1 channels (36-48) that the ground adapter's
+  regulatory domain disables, so the two sides settled on different channels
+  and never met, while the drone's adapter sat in managed mode transmitting
+  nothing. Both sides now start on a fixed home channel (149, U-NII-3, enabled
+  under essentially every regulatory domain) and bring the link up there;
+  coordinated channel hopping only activates after the link is established,
+  is constrained to channels the local adapter actually enables, and falls
+  back to the home channel if a hop loses the peer.
+
+### Changed
+
+- Default radio band is U-NII-3 and bind-time channel auto-relocation is off,
+  so the drone and ground deterministically rendezvous on the home channel.
+- The drone verifies its interface actually entered monitor mode before it
+  starts transmitting, and transmits on the home channel as soon as its key is
+  present rather than waiting to hear the ground first.
+- New optional `video.wfb.reg_domain` config applies a wifi regulatory domain
+  on both sides at radio bring-up so they enable the same channel set. Unset
+  by default; the home channel works without it.
+
 ## [0.43.9] - 2026-05-27
 
 ### Fixed

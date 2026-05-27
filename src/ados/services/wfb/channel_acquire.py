@@ -80,12 +80,22 @@ class AcquireState(StrEnum):
     NO_PEER = "no-peer"
 
 
-def candidate_channels(band: str) -> list[int]:
+def candidate_channels(
+    band: str,
+    enabled: set[int] | None = None,
+) -> list[int]:
     """Channel numbers to sweep for ``band``, current-config-first order.
 
     The configured band's channels come first so the common case (the
     peer is on a channel inside the operator's chosen band) locks fast.
     Falls back to all standard channels when the band key is unknown.
+
+    ``enabled`` filters the list to channels this adapter actually
+    permits (per ``enabled_channels``). Channels the regulatory domain
+    disables fail ``iw set channel`` with ``-22`` and waste a dwell on a
+    frequency the receiver can never tune to, so they are dropped. A
+    None or empty set means "could not determine" and leaves the list
+    unfiltered.
     """
     band_numbers = _BAND_CHANNELS.get(band) or _BAND_CHANNELS["all"]
     ordered = list(band_numbers)
@@ -94,6 +104,13 @@ def candidate_channels(band: str) -> list[int]:
     for ch in STANDARD_CHANNELS:
         if ch.channel_number not in ordered:
             ordered.append(ch.channel_number)
+    if enabled:
+        filtered = [ch for ch in ordered if ch in enabled]
+        # Only apply the filter when it leaves something to sweep. If the
+        # enabled set somehow excludes every standard channel we keep the
+        # full list rather than refuse to sweep at all.
+        if filtered:
+            return filtered
     return ordered
 
 
@@ -147,6 +164,7 @@ class ChannelAcquirer:
         set_channel_fn: Callable[[str, int], Awaitable[bool]] | None = None,
         dwell_seconds: float = DWELL_SECONDS,
         max_sweep_rounds: int = MAX_SWEEP_ROUNDS,
+        enabled_channels: set[int] | None = None,
     ) -> None:
         self._interface = interface
         self._band = band
@@ -154,6 +172,11 @@ class ChannelAcquirer:
         self._set_channel_fn = set_channel_fn or _set_channel
         self._dwell_seconds = dwell_seconds
         self._max_sweep_rounds = max_sweep_rounds
+        # Channels this adapter actually permits. The sweep skips any
+        # channel the regulatory domain disables (those fail iw with -22),
+        # so the receiver never thrashes on a frequency it can't tune to.
+        # None / empty leaves the sweep set unfiltered.
+        self._enabled_channels = enabled_channels or None
         self._state = AcquireState.IDLE
         self._locked_channel: int | None = None
         self._last_attempt_at: float = 0.0
@@ -261,7 +284,7 @@ class ChannelAcquirer:
         async with self._lock:
             self._last_attempt_at = time.monotonic()
             self._state = AcquireState.SEARCHING
-            channels = candidate_channels(self._band)
+            channels = candidate_channels(self._band, self._enabled_channels)
             log.info(
                 "acquire_sweep_start",
                 interface=self._interface,

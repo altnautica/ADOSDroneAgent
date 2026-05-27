@@ -47,6 +47,7 @@ import hashlib
 import hmac
 import json
 import socket
+import subprocess
 
 from ados.core.paths import HOP_SUPERVISOR_JSON
 import struct
@@ -56,6 +57,11 @@ from typing import Any
 
 import structlog
 
+from ados.services.wfb.adapter import (
+    enabled_channels,
+    get_interface_mode,
+    set_monitor_mode,
+)
 from ados.services.wfb.channel import (
     STANDARD_CHANNELS,
     WfbChannel,
@@ -93,6 +99,12 @@ _HOP_MAGIC = b"AD05HOP1"
 # up and aborts the hop. 30 rounds * 100 ms = 3 s, matching the
 # countdown.
 _HOP_BROADCAST_ROUNDS = int(HOP_COUNTDOWN_MS / HOP_BROADCAST_INTERVAL_MS)
+
+# After the link has been up, this is how long the peer can be silent
+# before the drone gives up on the current channel and returns to the
+# home / rendezvous channel so the two rigs can re-meet. Two missed
+# presence-beacon intervals (~10 s each) plus margin.
+_HOP_PEER_STALE_S = 25.0
 
 
 # Wire format versions for HopAnnounce.
@@ -341,6 +353,23 @@ def _pick_target_channel(
     band_numbers = _BAND_CHANNELS.get(band) or _BAND_CHANNELS["all"]
     band_set = set(band_numbers)
 
+    # Constrain candidates to channels this adapter actually enables.
+    # The drone and ground frequently run different regulatory domains;
+    # announcing a hop to a channel the ground (or the drone) cannot use
+    # would split the pair onto different frequencies and break the link.
+    # An empty set means "could not determine" (e.g. iw unreadable), in
+    # which case we do not restrict and fall back to the band set alone.
+    local_enabled = enabled_channels(interface)
+    if local_enabled:
+        band_set &= local_enabled
+        if not band_set:
+            log.info(
+                "hop_supervisor_no_enabled_band_channels",
+                band=band,
+                note="no band channel is locally enabled; no hop",
+            )
+            return None
+
     # Re-rank candidates by interference (scan already sorts) but
     # filter to the band and drop the current channel so we don't
     # propose a no-op.
@@ -378,6 +407,7 @@ class HopSupervisor:
         rssi_threshold_dbm: float = -75.0,
         enabled: bool = True,
         control_port: int = HOP_CONTROL_PORT,
+        home_channel: int = 149,
     ) -> None:
         self._wfb = wfb_manager
         self._lqm = link_quality_monitor
@@ -387,10 +417,20 @@ class HopSupervisor:
         self._rssi_threshold = float(rssi_threshold_dbm)
         self._enabled = bool(enabled)
         self._control_port = control_port
+        # The fixed rendezvous channel both rigs come up on and return to
+        # when the link is lost. After being linked, a sustained loss
+        # with no peer ACK pulls the drone back here so the ground (which
+        # also falls back to home) can re-find it.
+        self._home_channel = int(home_channel)
         self._stop_event = asyncio.Event()
         self._last_hop_at: float = 0.0
         self._reactive_cooldown_s = 30.0
         self._history: list[dict[str, Any]] = []
+        # Tracks whether a peer was ever seen this session, so a peer
+        # that goes stale after being linked triggers the home-channel
+        # fallback (vs cold start, which simply waits on the home
+        # channel without hopping).
+        self._was_linked: bool = False
 
     def snapshot(self) -> dict[str, Any]:
         return {
@@ -562,24 +602,69 @@ class HopSupervisor:
         if not (periodic or reactive):
             return
 
-        # Skip the periodic scan when the peer link is healthy.
-        # _pick_target_channel below shells out to `iw <iface> scan`
-        # which locks the radio for ~6 s, dropping the wfb_tx broadcast
-        # frames that are sharing the same wlan0. When the control
-        # plane has decoded a PresenceBeacon in the last minute the
-        # link is fine and the rescan is pure waste, so return early.
-        # Reactive scans (loss / RSSI thresholds tripped) always run
-        # because that's the only way to find a better channel. Cold
-        # start (no peer ever seen, including hops aborted on
-        # no_peer_ack) still scans so the drone can discover the
-        # ground rig — gate engages once any PresenceBeacon has
-        # decoded successfully.
+        # Rendezvous-first gate: do NOT scan or hop until the link has
+        # been established at least once. Both rigs come up on the fixed
+        # home channel and bring the link up there; only after a peer is
+        # seen (a decoded PresenceBeacon / HopAck) does coordinated
+        # hopping turn on. Before that the drone must stay on the home
+        # channel transmitting so the ground can find it. Running an
+        # `iw scan` here would strand the iface in managed mode and pull
+        # the radio away from the home channel, which is the exact
+        # divergence that kept the two sides from ever meeting. The
+        # signal is `_peer_last_seen_unix`: None until the control plane
+        # decodes the first frame from the peer.
+        peer_last_seen = getattr(self._wfb, "_peer_last_seen_unix", None)
+        link_established = isinstance(peer_last_seen, (int, float)) and (
+            peer_last_seen > 0
+        )
+        if not link_established:
+            if periodic:
+                log.info(
+                    "hop_supervisor_skip_unlinked",
+                    note=(
+                        "no peer seen yet; staying on home channel, "
+                        "no scan until the link is established"
+                    ),
+                )
+            return
+
+        # Record that we have been linked this session. Used below to
+        # tell a fresh cold start (never linked) apart from a link that
+        # went away after being up (which should fall back to home).
+        self._was_linked = True
+        peer_age_s = time.time() - float(peer_last_seen)
+
+        # Home-channel fallback: the link was up but the peer has gone
+        # quiet past the freshness window. The drone may have hopped off
+        # the home channel; the ground rig falls back to home on its own
+        # loss, so the drone must return there too for the two to re-meet.
+        # Do this before any scan so a lost link converges on the
+        # rendezvous channel instead of chasing a quiet channel the peer
+        # is no longer on.
+        if (
+            peer_age_s >= _HOP_PEER_STALE_S
+            and self._wfb._channel != self._home_channel
+        ):
+            log.warning(
+                "hop_supervisor_fallback_home",
+                from_channel=self._wfb._channel,
+                home_channel=self._home_channel,
+                peer_last_seen_ago_s=round(peer_age_s, 1),
+                note="link lost after being up; returning to home channel",
+            )
+            await self._return_to_home()
+            return
+
+        # Link is up. Skip the periodic scan while the peer is still
+        # fresh: _pick_target_channel below shells out to `iw <iface>
+        # scan` which locks the radio for ~6 s, dropping the wfb_tx
+        # broadcast frames that share the same wlan0. When the control
+        # plane decoded a PresenceBeacon in the last minute the link is
+        # fine and the rescan is pure waste, so return early. Reactive
+        # scans (loss / RSSI thresholds tripped) always run because that
+        # is the only way to find a better channel.
         if periodic and not reactive:
-            peer_last_seen = getattr(self._wfb, "_peer_last_seen_unix", None)
-            if (
-                isinstance(peer_last_seen, (int, float))
-                and (time.time() - peer_last_seen) < 60.0
-            ):
+            if (time.time() - peer_last_seen) < 60.0:
                 log.info(
                     "hop_supervisor_skip_periodic_link_healthy",
                     peer_last_seen_ago_s=round(
@@ -603,6 +688,13 @@ class HopSupervisor:
             band=self._band,
             current_channel=self._wfb._channel,
         )
+        # _pick_target_channel shells out to `iw scan`, which can leave
+        # the iface in a non-monitor/wedged state on some drivers. The
+        # link is up and wfb_tx must keep injecting, so re-assert monitor
+        # mode immediately after the scan regardless of whether a hop
+        # follows. The channel is set again by _execute_hop on a hop, or
+        # restored to the current channel here when there is no candidate.
+        self._restore_monitor_after_scan()
         if target is None:
             log.info(
                 "hop_supervisor_no_candidate",
@@ -627,6 +719,87 @@ class HopSupervisor:
         )
         if ok:
             self._last_hop_at = now
+
+    def _restore_monitor_after_scan(self) -> None:
+        """Re-assert monitor mode + current channel after an iw scan.
+
+        A scan can leave the iface in managed mode (the scan path needs
+        it) or otherwise wedged on some drivers, which would silently
+        stop wfb_tx injection. The link is up, so put the iface back in
+        monitor mode and retune to the channel wfb_tx expects whenever
+        the observed mode is not monitor. Best-effort and synchronous,
+        the cost is one iw round-trip on the rare non-monitor case.
+        """
+        interface = getattr(self._wfb, "_interface", None)
+        if not interface:
+            return
+        mode = get_interface_mode(interface)
+        if mode == "monitor" or mode is None:
+            return
+        log.warning(
+            "hop_supervisor_monitor_restored_after_scan",
+            interface=interface,
+            observed_mode=mode,
+        )
+        if set_monitor_mode(interface):
+            try:
+                subprocess.run(
+                    [
+                        "iw",
+                        interface,
+                        "set",
+                        "channel",
+                        str(self._wfb._channel),
+                    ],
+                    capture_output=True,
+                    timeout=5,
+                )
+            except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
+                log.debug(
+                    "hop_supervisor_channel_restore_failed",
+                    error=str(exc),
+                )
+
+    async def _return_to_home(self) -> None:
+        """Move the radio back to the home / rendezvous channel.
+
+        Used when a previously-established link has gone quiet. Unlike a
+        hop this needs no announce + ACK handshake: the ground rig falls
+        back to the same home channel on its own loss, so both sides
+        independently converge on the rendezvous frequency where they
+        first met. Mechanics mirror the channel-flip in _execute_hop:
+        stop the data plane, set the channel via iw, then bring wfb_tx
+        and the control plane back up on the home channel.
+        """
+        home = self._home_channel
+        await self._wfb.stop()
+        await asyncio.create_subprocess_exec(
+            "iw",
+            self._wfb._interface,
+            "set",
+            "channel",
+            str(home),
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        self._wfb._channel = home
+        ok = await self._wfb.start_tx(self._wfb._interface, home)
+        start_tx_control = getattr(self._wfb, "start_tx_control", None)
+        start_rx_control = getattr(self._wfb, "start_rx_control", None)
+        if start_tx_control is not None:
+            await start_tx_control(self._wfb._interface, home)
+        if start_rx_control is not None:
+            await start_rx_control(self._wfb._interface, home)
+        self._history.append(
+            {
+                "at": time.time(),
+                "from": self._wfb._channel,
+                "to": home,
+                "trigger": "fallback_home",
+                "ok": bool(ok),
+            }
+        )
+        log.info("hop_supervisor_returned_home", home=home, tx_ok=ok)
 
     async def _execute_hop(
         self,

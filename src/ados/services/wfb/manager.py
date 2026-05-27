@@ -10,7 +10,14 @@ from typing import TYPE_CHECKING, Any
 
 from ados.core.logging import get_logger
 from ados.core.paths import WFB_KEY_DIR
-from ados.services.wfb.adapter import detect_wfb_adapters, set_monitor_mode, set_tx_power
+from ados.services.wfb.adapter import (
+    detect_wfb_adapters,
+    enabled_channels,
+    get_interface_mode,
+    set_monitor_mode,
+    set_regulatory_domain,
+    set_tx_power,
+)
 from ados.services.wfb.key_mgr import get_key_paths, key_exists
 from ados.services.wfb.link_quality import LinkQualityMonitor, LinkStats
 
@@ -39,6 +46,13 @@ _UPSTREAM_SILENT_LOG_INTERVAL_S = 300.0
 # Backlog above the high-water mark for the threshold window is a wedge.
 _TX_VIDEO_RECVQ_HIGH_WATER_BYTES = 262144  # 256 KiB
 _TX_VIDEO_RECVQ_BACKLOG_THRESHOLD_S = 15.0
+# Monitor-mode assertion. set_monitor_mode runs ip/iw commands that can
+# all return success while the iface ends up "managed" (driver wedge,
+# a racing NetworkManager take-over). A managed iface cannot inject, so
+# wfb_tx on it transmits zero 802.11 frames even though every command
+# "succeeded". Re-assert with a short backoff before giving up.
+_MONITOR_MODE_MAX_ATTEMPTS = 4
+_MONITOR_MODE_RETRY_BASE_S = 0.5
 
 if TYPE_CHECKING:
     from ados.core.config import WfbConfig
@@ -108,6 +122,46 @@ def _apply_link_preset(config: WfbConfig, logger: Any) -> None:
         fec_k=fec_k,
         fec_n=fec_n,
     )
+
+
+async def set_monitor_mode_verified(interface: str, logger: Any) -> bool:
+    """Put ``interface`` in monitor mode and confirm it actually took.
+
+    ``set_monitor_mode`` runs ``ip link`` + ``iw set monitor`` and reports
+    success when each command returns 0, but the iface can still end up
+    ``managed`` (a driver wedge, or a racing supplicant claiming it). A
+    managed iface cannot inject, so wfb_tx on it pushes zero frames while
+    looking healthy. Read the mode back via ``get_interface_mode`` and
+    re-assert with a short backoff. Returns True only when the iface is
+    confirmed in monitor mode; False after the attempt budget is spent.
+    """
+    for attempt in range(1, _MONITOR_MODE_MAX_ATTEMPTS + 1):
+        ok = set_monitor_mode(interface)
+        mode = get_interface_mode(interface)
+        if ok and mode == "monitor":
+            if attempt > 1:
+                logger.info(
+                    "wfb_monitor_mode_recovered",
+                    interface=interface,
+                    attempt=attempt,
+                )
+            return True
+        # mode is None when it can't be read (e.g. non-Linux test host).
+        # Treat that as "command succeeded, can't verify" so we don't
+        # block the link on a platform where iw info is unavailable.
+        if ok and mode is None:
+            return True
+        logger.warning(
+            "wfb_monitor_mode_not_monitor",
+            interface=interface,
+            attempt=attempt,
+            observed_mode=mode,
+            command_ok=ok,
+            note="iface not in monitor mode after set; re-asserting",
+        )
+        if attempt < _MONITOR_MODE_MAX_ATTEMPTS:
+            await asyncio.sleep(_MONITOR_MODE_RETRY_BASE_S * attempt)
+    return False
 
 
 class WfbManager:
@@ -1369,9 +1423,32 @@ class WfbManager:
 
             self._interface = interface
 
-            # Step 2: Set monitor mode
-            if not set_monitor_mode(interface):
-                log.error("monitor_mode_failed", interface=interface)
+            # Step 1b: Apply the regulatory domain once before bringing
+            # the iface up, when the operator pinned one. Both rigs in a
+            # pair must enable the same channel set or they can never meet
+            # on a common frequency; forcing the same domain is the
+            # opt-in way to widen the shared set. Best-effort: a failure
+            # is logged and the home channel still works on whatever the
+            # kernel allows.
+            reg_domain = getattr(self._config, "reg_domain", None)
+            if reg_domain:
+                if not set_regulatory_domain(reg_domain):
+                    log.warning(
+                        "wfb_reg_domain_not_applied",
+                        interface=interface,
+                        domain=reg_domain,
+                    )
+
+            # Step 2: Set monitor mode and VERIFY it took. A managed iface
+            # cannot inject; starting wfb_tx on it produces zero frames
+            # while looking healthy, which is exactly the stranded-iface
+            # failure this guards against.
+            if not await set_monitor_mode_verified(interface, log):
+                log.error(
+                    "monitor_mode_failed",
+                    interface=interface,
+                    note="iface not confirmed in monitor mode; not starting TX",
+                )
                 self._state = LinkState.DISCONNECTED
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, 30.0)

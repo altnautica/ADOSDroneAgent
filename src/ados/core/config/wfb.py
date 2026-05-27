@@ -9,7 +9,19 @@ from pydantic import BaseModel, model_validator
 
 class WfbConfig(BaseModel):
     interface: str = ""
+    # Home / rendezvous channel. Both drone and ground start here and
+    # return here on link loss, so the two sides deterministically meet
+    # before any hopping. 149 (U-NII-3) is non-DFS and enabled under
+    # essentially every regulatory domain, unlike U-NII-1 (36-48) which
+    # many domains disable for injection.
     channel: int = 149
+    # Optional regulatory domain applied via ``iw reg set`` on both rigs
+    # at WFB bring-up so the drone and ground enable the same channel
+    # set. None (default) leaves the kernel's current domain untouched;
+    # the home channel works without forcing it. Set a country code
+    # (e.g. "US") to unlock more channels for hopping where legal. The
+    # operator is responsible for setting a value legal in their region.
+    reg_domain: str | None = None
     # TX power in dBm. RTL8812EU + USB host VBUS topology browns out
     # the dongle above ~18 dBm sustained. Default is the floor for
     # bench bring-up; raise via PUT /api/wfb/tx-power once the link is
@@ -28,20 +40,24 @@ class WfbConfig(BaseModel):
     fec_k: int = 8
     fec_n: int = 12
     # Frequency-band whitelist used by ``select_quietest_channel`` when
-    # ``auto_channel_enabled`` is true. U-NII-1 (5180-5240) is almost
-    # always quieter than U-NII-3 (5745-5825) in a home/office because
-    # consumer routers default to 149-161. Operators in regulatory
-    # domains that forbid U-NII-1 should set ``u-nii-3`` here. ``all``
-    # asks the scanner to consider every standard channel without a
-    # band filter.
-    band: Literal["u-nii-1", "u-nii-3", "all"] = "u-nii-1"
+    # ``auto_channel_enabled`` is true and for post-link hop candidates.
+    # Default U-NII-3 (5745-5825, channels 149-165): non-DFS and enabled
+    # under essentially every regulatory domain, so a drone and ground
+    # with mismatched regdomains still share a usable channel set. U-NII-1
+    # (36-48) is often quieter but many domains disable it for injection
+    # (the kernel rejects the channel with -22), which strands a ground
+    # station that cannot follow the drone there. ``all`` considers every
+    # standard channel without a band filter.
+    band: Literal["u-nii-1", "u-nii-3", "all"] = "u-nii-3"
     # When true, the agent scans the configured band on every fresh
     # bind and writes the quietest channel into the persisted config
-    # before bringing wfb_tx / wfb_rx up. Disable this to pin a
-    # specific channel via the ``channel`` field above. The scan is
-    # an `iw scan` round-trip (~1-3 s), only run at bind time — never
-    # on the steady-state link health tick.
-    auto_channel_enabled: bool = True
+    # before bringing wfb_tx / wfb_rx up. Default false: the rig stays
+    # on the home ``channel`` so the drone and ground deterministically
+    # rendezvous there before any hopping. Scanning-and-relocating at
+    # bind is what let the two sides pick different channels and never
+    # meet. The scan is an `iw scan` round-trip (~1-3 s), at bind time
+    # only, never on the steady-state link health tick.
+    auto_channel_enabled: bool = False
     # When true, the agent's auto_pair supervisor opens a local bind
     # window on first boot and pairs to whichever unpaired peer responds
     # first on the radio. Flips to false the moment a pair lands so the

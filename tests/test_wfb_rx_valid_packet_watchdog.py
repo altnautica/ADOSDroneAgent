@@ -64,6 +64,11 @@ def _make_manager(
     mgr._running = True
     mgr._channel = 149
     mgr._reacquire_kills = 0
+    # The watchdog sweep only runs after a link has been established and
+    # then lost. These cases model exactly that, so the rig is marked as
+    # having been linked. A cold start (never linked) holds the home
+    # channel instead and is covered by its own test below.
+    mgr._ever_linked = True
     # Stale timestamp (silent) or fresh timestamp (video flowing).
     mgr._last_valid_rx_change_at = (
         0.0 if video_silent else time.monotonic()
@@ -234,3 +239,37 @@ async def test_silent_no_peer_beacon_guided_lock_tried_first():
     assert mgr._channel == 44
     mgr._persist_locked_channel.assert_called_with(44)
     mgr._rx_proc.terminate.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_cold_start_never_linked_holds_home_no_sweep():
+    """Cold start (never linked) + silent + no peer → hold home, no sweep.
+
+    Rendezvous-first: until a lock has been established, the transmitter
+    is broadcasting on the fixed home channel, so the receiver waits
+    there. A blind cold sweep would pull it off the home channel the
+    drone is transmitting on.
+    """
+    mgr = _make_manager(video_silent=True, peer_present=False)
+    mgr._ever_linked = False
+    mgr._acquirer = MagicMock()
+    mgr._acquirer.mark_unlocked = MagicMock()
+    mgr._acquirer.acquire = AsyncMock(return_value=157)
+    mgr._acquirer.acquire_target = AsyncMock(return_value=True)
+
+    with patch(
+        "ados.services.ground_station.wfb_rx._VALID_RX_SILENCE_THRESHOLD_S",
+        0.0,
+    ), patch(
+        "ados.services.ground_station.wfb_rx._VALID_RX_POLL_INTERVAL_S",
+        0.0,
+    ):
+        await _run_watchdog(mgr._valid_packet_watchdog())
+
+    # Never linked: no sweep, no kill, stay on the home channel.
+    mgr._acquirer.mark_unlocked.assert_not_called()
+    mgr._acquirer.acquire.assert_not_awaited()
+    mgr._acquirer.acquire_target.assert_not_awaited()
+    mgr._rx_proc.terminate.assert_not_called()
+    assert mgr._channel == 149
+    assert mgr._reacquire_kills == 0
