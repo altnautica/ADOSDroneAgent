@@ -66,22 +66,27 @@ install_display_driver() {
     fi
 
     # Resolve the display selection. An explicit ADOS_DISPLAY=<id> (or
-    # ADOS_DISPLAY=none) from the operator always wins. With no explicit
-    # value the default is "auto" on every profile: the overlay installer's
-    # auto path detects what is physically present and resolves to it.
+    # ADOS_DISPLAY=none) from the operator always wins.
     #
-    # A drone (or any board) with no panel attached: detection finds no
-    # bound SPI-LCD, no HDMI, no I2C OLED, and resolves to display_id=none
-    # with zero boot-config writes. A board WITH a panel attached gets it.
-    # A board that declares an SPI-LCD but has not bound it yet goes through
-    # apply-verify-auto-revert (snapshot the boot config, apply the overlay,
-    # arm a boot-time probe that confirms the panel next boot or restores
-    # the snapshot). No profile is treated as "never has a display": the
-    # presence detection decides, so the same safe outcome holds for a
-    # headless drone while a drone WITH a status panel now gets one.
-    local display_arg="${ADOS_DISPLAY:-auto}"
+    # With no explicit value the default is profile-aware. The on-panel
+    # dashboard renderer (ados-oled) runs on the ground-station profile
+    # only; on a drone it is gated off because a status panel on the
+    # aircraft serves no purpose. So provisioning an SPI-LCD overlay on a
+    # drone would edit the boot config, arm a probe, and cost an extra
+    # reboot to light up a panel that nothing ever draws to. Default the
+    # drone (and lite) profiles to "none" (no detection, no boot-config
+    # writes) and let only the ground station auto-detect and provision
+    # whatever panel is physically present. An operator who genuinely
+    # wants a panel on a drone can still force it with ADOS_DISPLAY=<id>.
+    local display_arg="${ADOS_DISPLAY:-}"
+    if [ -z "${display_arg}" ]; then
+        case "${ADOS_PROFILE:-drone}" in
+            ground_station|ground-station) display_arg="auto" ;;
+            *) display_arg="none" ;;
+        esac
+    fi
 
-    info "Running LCD overlay installer (display: ${display_arg})..."
+    info "Running LCD overlay installer (display: ${display_arg}, profile: ${ADOS_PROFILE:-drone})..."
     "${script_path}" --display "${display_arg}" || {
         warn "LCD overlay install returned non-zero; the agent will boot without an attached panel."
         return 0

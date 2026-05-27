@@ -4,6 +4,21 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.43.3] - 2026-05-27
+
+### Fixed
+
+- **Drone installs no longer provision an on-board status panel.** The
+  install defaulted the display to `auto` on every profile, so a drone
+  with a panel physically attached would apply an SPI-LCD overlay, edit
+  the boot config, and cost an extra reboot to light up a panel that
+  nothing draws to: the on-panel dashboard renderer runs on the
+  ground-station profile only. The default is now profile-aware. The
+  ground station auto-detects and provisions whatever panel is present;
+  the drone and lite profiles default to `none` with no detection and no
+  boot-config writes. An operator who wants a panel on a drone can still
+  force it with `ADOS_DISPLAY=<id>`.
+
 ## [0.43.2] - 2026-05-27
 
 ### Fixed
