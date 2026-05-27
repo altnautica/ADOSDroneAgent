@@ -1,0 +1,160 @@
+# Prebuilt RTL8812EU kernel-module pipeline.
+#
+# Builds the patched 8812eu module against the EXACT kernels the supported
+# boards run, so a fresh install can load a verified prebuilt module instead
+# of compiling on the device (slow, and crash-prone on marginal hardware).
+#
+# Each matrix row is a real kernel flavor: the apt repo that ships its headers
+# and the headers package to install. The build derives the exact kernelrelease
+# from the installed headers, runs build-prebuilt-ko.sh against it (which
+# applies the same patches + relax-cflags as the on-device DKMS build), and
+# emits the artifact + a manifest row. The publish job collects the rows into
+# drivers-manifest.json and ships everything as Release assets.
+#
+# Triggers:
+#   - tag 'drivers-v*'   → permanent stable Release (signed when the key secret
+#                          is present; SHA256-only otherwise)
+#   - workflow_dispatch  → manual run for matrix iteration
+#   - schedule (daily)   → refresh the rolling 'prebuilt-drivers' prerelease as
+#                          distro kernels advance
+#
+# Artifacts carry a SHA256 always; an Ed25519/minisign signature is added when
+# ADOS_DRIVER_SIGNING_KEY is set (forks / unset key skip signing cleanly). The
+# agent accepts SHA256-only in its dev posture and requires signatures only
+# when a self-hoster provisions a key.
+name: driver-build
+
+on:
+  push:
+    tags:
+      - "drivers-v*"
+  workflow_dispatch:
+  schedule:
+    - cron: "17 4 * * *"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: build (${{ matrix.flavor }})
+    runs-on: ubuntu-24.04-arm
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Raspberry Pi OS arm64 default kernel (Pi 3 / 4 / 400 / Zero 2 W).
+          - flavor: rpi-v8
+            apt_list: "deb http://archive.raspberrypi.org/debian trixie main"
+            apt_key_url: "https://archive.raspberrypi.org/debian/raspberrypi.gpg.key"
+            headers_pkg: linux-headers-rpi-v8
+          # Raspberry Pi 5 (BCM2712) kernel.
+          - flavor: rpi-2712
+            apt_list: "deb http://archive.raspberrypi.org/debian trixie main"
+            apt_key_url: "https://archive.raspberrypi.org/debian/raspberrypi.gpg.key"
+            headers_pkg: linux-headers-rpi-2712
+          # Radxa RK3588(S2) BSP kernel (Rock 5C / Rock 5 family). Pinned to the
+          # exact release the rsdk-b1 image ships; bump when the BSP advances.
+          - flavor: rock-5c-rk2312
+            apt_list: "deb https://radxa-repo.github.io/rk3588s2-bookworm rk3588s2-bookworm main"
+            apt_key_url: "https://radxa-repo.github.io/rk3588s2-bookworm/rk3588s2-bookworm.gpg.key"
+            headers_pkg: linux-headers-6.1.43-15-rk2312
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install build toolchain + minisign
+        run: |
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            build-essential bc kmod patch minisign ca-certificates gnupg curl jq
+
+      - name: Add vendor kernel apt repo
+        run: |
+          set -euxo pipefail
+          curl -fsSL "${{ matrix.apt_key_url }}" \
+            | sudo gpg --dearmor -o /usr/share/keyrings/vendor-kernel.gpg
+          echo "${{ matrix.apt_list }}" \
+            | sed 's| | [signed-by=/usr/share/keyrings/vendor-kernel.gpg] |' \
+            | sudo tee /etc/apt/sources.list.d/vendor-kernel.list
+          sudo apt-get update
+
+      - name: Install kernel headers + derive kernelrelease
+        id: kver
+        run: |
+          set -euxo pipefail
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y "${{ matrix.headers_pkg }}"
+          # The headers install drops /lib/modules/<KVER>/build; that <KVER> is
+          # the exact release the module must match. Pick the newest dir that
+          # actually has a build/ tree (find avoids ls-parsing pitfalls).
+          KVER="$(for d in /lib/modules/*/build; do [ -d "$d" ] && basename "$(dirname "$d")"; done | sort -V | tail -n1)"
+          test -n "${KVER}" && test -d "/lib/modules/${KVER}/build"
+          echo "kver=${KVER}" >> "$GITHUB_OUTPUT"
+
+      - name: Build the module
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          bash scripts/drivers/build-prebuilt-ko.sh "${{ steps.kver.outputs.kver }}" out \
+            > "out/row-${{ matrix.flavor }}.json"
+          cat "out/row-${{ matrix.flavor }}.json"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ko-${{ matrix.flavor }}
+          path: out/*
+          if-no-files-found: error
+
+  publish:
+    name: publish manifest + modules
+    needs: build
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dl
+
+      - name: Install jq + minisign
+        run: sudo apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y jq minisign
+
+      - name: Assemble manifest + collect artifacts
+        run: |
+          set -euo pipefail
+          mkdir -p rel
+          find dl -name '8812eu-*.ko' -exec cp {} rel/ \;
+          find dl -name '8812eu-*.ko.sha256' -exec cp {} rel/ \;
+          # Fold every per-row JSON into drivers-manifest.json.
+          jq -s '{generated: now | todate, drivers: .}' dl/*/row-*.json > rel/drivers-manifest.json
+          ( cd rel && sha256sum drivers-manifest.json > drivers-manifest.json.sha256 )
+          cat rel/drivers-manifest.json
+
+      - name: Sign artifacts (only when the signing key is present)
+        env:
+          SIGNING_KEY: ${{ secrets.ADOS_DRIVER_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${SIGNING_KEY}" ]; then
+            echo "No ADOS_DRIVER_SIGNING_KEY set; publishing SHA256-only (dev posture)."
+            exit 0
+          fi
+          printf '%s' "${SIGNING_KEY}" > /tmp/driver.key
+          for f in rel/*.ko rel/drivers-manifest.json; do
+            minisign -S -s /tmp/driver.key -m "${f}" -x "${f}.minisig"
+          done
+          rm -f /tmp/driver.key
+
+      - name: Publish rolling prerelease (non-tag runs)
+        if: ${{ github.ref_type != 'tag' }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: prebuilt-drivers
+          prerelease: true
+          name: "Prebuilt RTL8812EU modules (rolling)"
+          files: rel/*
+
+      - name: Publish stable release (drivers-v* tags)
+        if: ${{ github.ref_type == 'tag' }}
+        uses: softprops/action-gh-release@v2
+        with:
+          files: rel/*
