@@ -60,7 +60,7 @@ async fn run_service(cfg: &WfbConfig, cancel: Arc<Notify>) {
         // ── Key guard — block while unpaired ─────────────────────────────
         if !Path::new(WFB_TX_KEY).exists() {
             tracing::info!(key = WFB_TX_KEY, "wfb_blocked_unpaired");
-            write_stats_sidecar("disabled", cfg.channel, cfg);
+            write_stats_sidecar("disabled", cfg.channel, cfg.tx_power_dbm, None, cfg);
             tokio::select! {
                 _ = tokio::time::sleep(KEY_WAIT_INTERVAL) => continue,
                 _ = cancel.notified() => return,
@@ -80,7 +80,7 @@ async fn run_service(cfg: &WfbConfig, cancel: Arc<Notify>) {
         };
         let Some(adapter) = selected else {
             tracing::warn!("wfb_no_adapter_found");
-            write_stats_sidecar("no_adapter", cfg.channel, cfg);
+            write_stats_sidecar("no_adapter", cfg.channel, cfg.tx_power_dbm, None, cfg);
             tokio::select! {
                 _ = tokio::time::sleep(Duration::from_secs(10)) => continue,
                 _ = cancel.notified() => return,
@@ -97,6 +97,13 @@ async fn run_service(cfg: &WfbConfig, cancel: Arc<Notify>) {
         // ── Set channel via iw ────────────────────────────────────────────
         let iface = &adapter.ifname;
         set_channel(iface, cfg.channel).await;
+
+        // ── Clamp TX power BEFORE wfb_tx starts injecting ─────────────────
+        // Critical on host-VBUS rigs: the driver default (~17-20 dBm) browns
+        // out the adapter. Ramps up from the configured floor on rejection.
+        let effective_tx_dbm = ados_radio::adapter::set_tx_power(iface, cfg.tx_power_dbm)
+            .await
+            .unwrap_or(cfg.tx_power_dbm);
 
         // ── Load pair key for HMAC derivation ────────────────────────────
         let drone_key = tokio::fs::read(DRONE_KEY).await.ok();
@@ -117,20 +124,55 @@ async fn run_service(cfg: &WfbConfig, cancel: Arc<Notify>) {
             }
         };
         let pid = { proc.lock().await.data_tx_pid().unwrap_or(0) };
-        write_stats_sidecar("connecting", cfg.channel, cfg);
+        let adapter_info = AdapterInfo {
+            interface: iface.clone(),
+            chipset: adapter.chipset.clone(),
+            injection_ok: adapter.injection_ok,
+        };
+        write_stats_sidecar(
+            "connecting",
+            cfg.channel,
+            effective_tx_dbm,
+            Some(&adapter_info),
+            cfg,
+        );
         tracing::info!(iface, channel = cfg.channel, pid, "wfb_service_ready");
 
         // ── Run watchdogs + hop supervisor concurrently ──────────────────
         let task_cancel = cancel.clone();
         let iface_str = iface.clone();
 
+        // 2 s sidecar heartbeat — keeps wfb-stats.json fresh so the REST
+        // handler never marks it stale (mtime > 10 s).
+        let hb_cancel = task_cancel.clone();
+        let hb_cfg = cfg.clone();
+        let hb_adapter = adapter_info.clone();
+        let hb_channel = cfg.channel;
+        let mut heartbeat = tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_secs(2));
+            loop {
+                tokio::select! {
+                    _ = tick.tick() => {
+                        write_stats_sidecar(
+                            "connecting",
+                            hb_channel,
+                            effective_tx_dbm,
+                            Some(&hb_adapter),
+                            &hb_cfg,
+                        );
+                    }
+                    _ = hb_cancel.notified() => break,
+                }
+            }
+        });
+
         let tx_cancel = task_cancel.clone();
         let tx_iface = iface_str.clone();
-        let watchdog1 =
+        let mut watchdog1 =
             tokio::spawn(async move { tx_health_watchdog(&tx_iface, pid, tx_cancel).await });
 
         let recvq_cancel = task_cancel.clone();
-        let watchdog2 = tokio::spawn(async move { video_recvq_watchdog(recvq_cancel).await });
+        let mut watchdog2 = tokio::spawn(async move { video_recvq_watchdog(recvq_cancel).await });
 
         let hop_cancel = task_cancel.clone();
         let hop_iface = iface_str.clone();
@@ -145,13 +187,13 @@ async fn run_service(cfg: &WfbConfig, cancel: Arc<Notify>) {
         let beacon_key = hop_key;
         let beacon_channel = cfg.channel;
         let beacon_device = device_id.clone();
-        let beacon = tokio::spawn(async move {
+        let mut beacon = tokio::spawn(async move {
             emit_presence_beacons(&beacon_device, beacon_channel, &beacon_key, beacon_cancel).await
         });
 
         // Hop supervisor (enabled only when configured).
         let hop_enabled = hop_cfg.auto_hop_enabled;
-        let hop = tokio::spawn(async move {
+        let mut hop = tokio::spawn(async move {
             if hop_enabled {
                 run_hop_supervisor(
                     &hop_iface, &hop_cfg, hop_proc, &hop_key, &device_id, hop_cancel,
@@ -163,30 +205,51 @@ async fn run_service(cfg: &WfbConfig, cancel: Arc<Notify>) {
         });
 
         // Wait for any task to finish (cancel → shutdown; watchdog → respawn).
+        // `&mut` the handles so the un-selected ones are NOT dropped-and-detached
+        // here — we abort them explicitly below so tasks don't pile up across
+        // respawns.
         tokio::select! {
-            result = watchdog1 => {
+            result = &mut watchdog1 => {
                 if let Ok(WatchdogFired::TxStalled | WatchdogFired::RecvqBacklog) = result {
                     tracing::warn!("watchdog_fired_killing_wfb_tx");
                 }
             }
-            result = watchdog2 => {
+            result = &mut watchdog2 => {
                 if let Ok(WatchdogFired::RecvqBacklog) = result {
                     tracing::warn!("video_recvq_watchdog_fired");
                 }
             }
-            _ = hop => {}
-            _ = beacon => {}
+            _ = &mut hop => {}
+            _ = &mut beacon => {}
+            _ = &mut heartbeat => {}
             _ = cancel.notified() => {
-                // Clean shutdown.
+                // Clean shutdown: stop the tasks then the radio group.
+                heartbeat.abort();
+                watchdog1.abort();
+                watchdog2.abort();
+                hop.abort();
+                beacon.abort();
                 proc.lock().await.kill_all().await;
                 tracing::info!("wfb_service_stopping");
                 return;
             }
         }
 
-        // Watchdog fired or hop task exited unexpectedly — kill the whole group and respawn.
+        // A task exited (watchdog fired / hop ended) — abort the siblings so they
+        // don't accumulate, kill the whole radio group, and respawn.
+        heartbeat.abort();
+        watchdog1.abort();
+        watchdog2.abort();
+        hop.abort();
+        beacon.abort();
         proc.lock().await.kill_all().await;
-        write_stats_sidecar("connecting", cfg.channel, cfg);
+        write_stats_sidecar(
+            "connecting",
+            cfg.channel,
+            effective_tx_dbm,
+            Some(&adapter_info),
+            cfg,
+        );
         tokio::select! {
             _ = tokio::time::sleep(Duration::from_secs(1)) => {}
             _ = cancel.notified() => return,
@@ -372,24 +435,53 @@ async fn set_channel(iface: &str, channel: u8) {
     }
 }
 
-/// Write the `wfb-stats.json` Contract E sidecar.
-fn write_stats_sidecar(state: &str, channel: u8, cfg: &WfbConfig) {
+/// The adapter facts the sidecar surfaces (None until an adapter is selected).
+#[derive(Clone, Default)]
+struct AdapterInfo {
+    interface: String,
+    chipset: String,
+    injection_ok: bool,
+}
+
+/// Write the `wfb-stats.json` Contract E sidecar (full schema the REST handler
+/// at `api/routes/wfb.py` merges over its base, so the GCS/LCD/dashboard radio
+/// panel renders correctly). The link-quality fields (rssi/snr/packets/loss/
+/// bitrate) are left to the REST base defaults until the link-quality monitor
+/// lands; `adapter_chipset`/`adapter_injection_ok`/`tx_power_dbm` must be
+/// present here or the panel shows a false "stranded radio" warning. Re-written
+/// on a 2 s cadence so the handler's `mtime > 10 s → state="stale"` never trips.
+fn write_stats_sidecar(
+    state: &str,
+    channel: u8,
+    effective_tx_dbm: i8,
+    adapter: Option<&AdapterInfo>,
+    cfg: &WfbConfig,
+) {
+    let (interface, chipset, injection_ok) = match adapter {
+        Some(a) => (a.interface.as_str(), a.chipset.as_str(), a.injection_ok),
+        None => ("", "", false),
+    };
     let v = json!({
         "state": state,
+        "interface": interface,
         "channel": channel,
-        "tx_power_dbm": cfg.tx_power_dbm,
+        "adapter_chipset": chipset,
+        "adapter_injection_ok": injection_ok,
+        "tx_power_dbm": effective_tx_dbm,
         "tx_power_max_dbm": cfg.tx_power_max_dbm,
         "topology": cfg.topology,
         "mcs_index": cfg.mcs_index,
+        "channel_locked": true,
         "profile": "drone",
     });
     let path = run_path("wfb-stats.json");
     let _ = write_sidecar(&path, &v);
 }
 
-/// Read the device-id from the standard agent location.
+/// Read the device-id from the canonical agent location (`/etc/ados/device-id`,
+/// hyphen — matches `core/paths.py:122 DEVICE_ID_PATH`).
 fn read_device_id() -> String {
-    std::fs::read_to_string("/etc/ados/device_id")
+    std::fs::read_to_string("/etc/ados/device-id")
         .unwrap_or_default()
         .trim()
         .to_string()

@@ -265,6 +265,54 @@ pub async fn set_managed_mode(iface: &str) {
     let _ = run_cmd("nmcli", &["dev", "set", iface, "managed", "yes"]).await;
 }
 
+/// Build the TX-power fallback ramp: the requested dBm first, then 5/7/10 dBm
+/// (each only if it is higher than the request and not already present).
+/// Mirrors `adapter.py:689-692`. A low request can be rejected by the driver
+/// depending on the regulatory domain, so we ramp UP to a value it accepts.
+pub fn tx_power_ramp(dbm: i8) -> Vec<i8> {
+    let mut ramp = vec![dbm];
+    for fallback in [5i8, 7, 10] {
+        if fallback > dbm && !ramp.contains(&fallback) {
+            ramp.push(fallback);
+        }
+    }
+    ramp
+}
+
+/// Apply TX power via `iw dev <iface> set txpower fixed <mBm>` (mBm = dBm×100),
+/// ramping up through the fallbacks on driver rejection. Returns the effective
+/// dBm that was accepted, or `None` if every step failed.
+///
+/// **Why this matters:** without it the dongle runs at the driver default
+/// (~17-20 dBm), which browns out a host-VBUS-powered RTL adapter — the exact
+/// failure `video.wfb.tx_power_dbm = 5` guards against (`adapter.py:674-732`).
+pub async fn set_tx_power(iface: &str, dbm: i8) -> Option<i8> {
+    for candidate in tx_power_ramp(dbm) {
+        let mbm = (candidate as i32) * 100;
+        if run_cmd(
+            "iw",
+            &["dev", iface, "set", "txpower", "fixed", &mbm.to_string()],
+        )
+        .await
+        .is_ok()
+        {
+            if candidate != dbm {
+                tracing::warn!(
+                    iface,
+                    requested = dbm,
+                    applied = candidate,
+                    "wfb_txpower_fallback"
+                );
+            } else {
+                tracing::info!(iface, dbm = candidate, "wfb_txpower_applied");
+            }
+            return Some(candidate);
+        }
+    }
+    tracing::error!(iface, requested = dbm, "wfb_txpower_all_steps_rejected");
+    None
+}
+
 async fn run_cmd(cmd: &str, args: &[&str]) -> Result<(), ()> {
     let status = tokio::process::Command::new(cmd)
         .args(args)
@@ -297,6 +345,24 @@ mod tests {
     fn deny_aic8800_by_driver() {
         assert!(is_denied("aic8800fwh", None));
         assert!(is_denied("brcmfmac", None));
+    }
+
+    #[test]
+    fn tx_power_ramp_low_request_adds_fallbacks() {
+        // A 5 dBm request: 5 is not < itself, 7 and 10 are higher → ramp up.
+        assert_eq!(tx_power_ramp(5), vec![5, 7, 10]);
+    }
+
+    #[test]
+    fn tx_power_ramp_high_request_has_no_fallbacks() {
+        // A 15 dBm request: no fallback exceeds it.
+        assert_eq!(tx_power_ramp(15), vec![15]);
+    }
+
+    #[test]
+    fn tx_power_ramp_mid_request() {
+        // 7 dBm: only 10 is higher.
+        assert_eq!(tx_power_ramp(7), vec![7, 10]);
     }
 
     #[test]
