@@ -14,6 +14,7 @@ from ados.services.wfb.adapter import (
     detect_wfb_adapters,
     enabled_channels,
     get_interface_mode,
+    select_wfb_interface,
     set_monitor_mode,
     set_regulatory_domain,
     set_tx_power,
@@ -124,16 +125,15 @@ def _apply_link_preset(config: WfbConfig, logger: Any) -> None:
     )
 
 
-async def set_monitor_mode_verified(interface: str, logger: Any) -> bool:
-    """Put ``interface`` in monitor mode and confirm it actually took.
+def set_monitor_mode_verified_sync(interface: str, logger: Any) -> bool:
+    """Synchronous monitor-mode set + read-back verify with bounded retry.
 
-    ``set_monitor_mode`` runs ``ip link`` + ``iw set monitor`` and reports
-    success when each command returns 0, but the iface can still end up
-    ``managed`` (a driver wedge, or a racing supplicant claiming it). A
-    managed iface cannot inject, so wfb_tx on it pushes zero frames while
-    looking healthy. Read the mode back via ``get_interface_mode`` and
-    re-assert with a short backoff. Returns True only when the iface is
-    confirmed in monitor mode; False after the attempt budget is spent.
+    Shared core of ``set_monitor_mode_verified``. Used directly as the
+    ``set_monitor_fn`` callback the shared ``select_wfb_interface`` calls
+    while probing candidates, so the air side rejects an adapter that
+    accepts the commands but never lands in monitor mode (a managed iface
+    cannot inject). Uses ``time.sleep`` between attempts because adapter
+    selection runs once at startup and is not on the hot path.
     """
     for attempt in range(1, _MONITOR_MODE_MAX_ATTEMPTS + 1):
         ok = set_monitor_mode(interface)
@@ -149,6 +149,45 @@ async def set_monitor_mode_verified(interface: str, logger: Any) -> bool:
         # mode is None when it can't be read (e.g. non-Linux test host).
         # Treat that as "command succeeded, can't verify" so we don't
         # block the link on a platform where iw info is unavailable.
+        if ok and mode is None:
+            return True
+        logger.warning(
+            "wfb_monitor_mode_not_monitor",
+            interface=interface,
+            attempt=attempt,
+            observed_mode=mode,
+            command_ok=ok,
+            note="iface not in monitor mode after set; re-asserting",
+        )
+        if attempt < _MONITOR_MODE_MAX_ATTEMPTS:
+            time.sleep(_MONITOR_MODE_RETRY_BASE_S * attempt)
+    return False
+
+
+async def set_monitor_mode_verified(interface: str, logger: Any) -> bool:
+    """Put ``interface`` in monitor mode and confirm it actually took.
+
+    ``set_monitor_mode`` runs ``ip link`` + ``iw set monitor`` and reports
+    success when each command returns 0, but the iface can still end up
+    ``managed`` (a driver wedge, or a racing supplicant claiming it). A
+    managed iface cannot inject, so wfb_tx on it pushes zero frames while
+    looking healthy. Read the mode back via ``get_interface_mode`` and
+    re-assert with a short backoff. Returns True only when the iface is
+    confirmed in monitor mode; False after the attempt budget is spent.
+    Async wrapper over ``set_monitor_mode_verified_sync`` that yields the
+    event loop between attempts instead of blocking it.
+    """
+    for attempt in range(1, _MONITOR_MODE_MAX_ATTEMPTS + 1):
+        ok = set_monitor_mode(interface)
+        mode = get_interface_mode(interface)
+        if ok and mode == "monitor":
+            if attempt > 1:
+                logger.info(
+                    "wfb_monitor_mode_recovered",
+                    interface=interface,
+                    attempt=attempt,
+                )
+            return True
         if ok and mode is None:
             return True
         logger.warning(
@@ -195,6 +234,11 @@ class WfbManager:
         self._rx_control_proc: asyncio.subprocess.Process | None = None
         self._monitor = LinkQualityMonitor()
         self._interface: str = ""
+        # Selected adapter chipset label + injection verdict, surfaced on
+        # the heartbeat so Mission Control can flag a stranded radio link
+        # (no RTL injection-capable adapter found / verified) remotely.
+        self._selected_chipset: str | None = None
+        self._adapter_injection_ok: bool = False
         self._channel: int = config.channel
         self._effective_tx_power_dbm: int | None = None
         self._running = False
@@ -325,6 +369,14 @@ class WfbManager:
         return {
             "state": self._state.value,
             "interface": self._interface,
+            # Selected radio adapter identity + injection verdict. The
+            # selector only ever hands back an iface whose monitor mode
+            # was proven, so injection_ok is true once an iface is set;
+            # both stay falsy/None until a real RTL radio is verified,
+            # which is the loud "stranded link" signal Mission Control
+            # renders.
+            "adapter_chipset": self._selected_chipset,
+            "adapter_injection_ok": self._adapter_injection_ok,
             "channel": self._channel,
             "rssi_dbm": stats.rssi_dbm,
             "noise_dbm": stats.noise_dbm,
@@ -1407,21 +1459,52 @@ class WfbManager:
 
             self._state = LinkState.CONNECTING
 
-            # Step 1: Find a compatible adapter
-            interface = self._config.interface
+            # Step 1: Find a compatible adapter. The shared selector
+            # honors the config override first, otherwise ranks the
+            # RTL injection radios ahead of anything else and PROVES each
+            # candidate by setting + reading back monitor mode, so a
+            # management WiFi (e.g. AIC8800) enumerated first on the bus
+            # can never be auto-picked and strand the radio link. A blind
+            # first-match here was the original failure.
+            configured_iface = self._config.interface
+            adapters = detect_wfb_adapters()
+            interface = select_wfb_interface(
+                adapters,
+                lambda iface: set_monitor_mode_verified_sync(iface, log),
+                configured_iface,
+            )
             if not interface:
-                adapters = detect_wfb_adapters()
-                compatible = [a for a in adapters if a.is_wfb_compatible and a.supports_monitor]
-                if not compatible:
-                    log.warning("no_wfb_adapter_found", total_adapters=len(adapters))
-                    self._state = LinkState.DISCONNECTED
-                    await asyncio.sleep(backoff)
-                    backoff = min(backoff * 2, 30.0)
-                    continue
-                interface = compatible[0].interface_name
-                log.info("wfb_adapter_selected", interface=interface, chipset=compatible[0].chipset)
+                # No RTL injection-capable adapter could be proven. Fail
+                # loudly with the diagnostic counts rather than transmit
+                # on a non-injection iface (which would look healthy but
+                # push zero 802.11 frames).
+                self._selected_chipset = None
+                self._adapter_injection_ok = False
+                log.error(
+                    "wfb_no_injection_adapter",
+                    total_adapters=len(adapters),
+                    compatible=sum(
+                        1
+                        for a in adapters
+                        if a.is_wfb_compatible and a.supports_monitor
+                    ),
+                    note="no RTL injection-capable adapter verified; not starting TX",
+                )
+                self._state = LinkState.DISCONNECTED
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, 30.0)
+                continue
 
             self._interface = interface
+            # Record the selected adapter's chipset + injection verdict
+            # for the heartbeat / radio status surface. select_wfb_interface
+            # only returns an iface whose monitor mode was proven, so
+            # injection_ok is true here.
+            selected = next(
+                (a for a in adapters if a.interface_name == interface), None
+            )
+            self._selected_chipset = selected.chipset if selected else None
+            self._adapter_injection_ok = True
 
             # Step 1b: Apply the regulatory domain once before bringing
             # the iface up, when the operator pinned one. Both rigs in a

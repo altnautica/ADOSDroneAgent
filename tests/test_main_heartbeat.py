@@ -94,3 +94,54 @@ def test_heartbeat_payload_foxglove_bind_failed_reflected() -> None:
     app._ros_manager = FakeRosManager()
     payload = app._build_heartbeat_payload()
     assert payload["foxgloveBindFailed"] is True
+
+
+class _FakeWfb:
+    def __init__(self, status: dict) -> None:
+        self._status = status
+
+    def get_status(self) -> dict:
+        return self._status
+
+
+def test_heartbeat_payload_wfb_adapter_verdict_absent_defaults() -> None:
+    """No wfb manager → chipset null, injectionOk false (never absent)."""
+    app = _fresh_app()
+    payload = app._build_heartbeat_payload()
+    assert payload["wfbAdapterChipset"] is None
+    assert payload["wfbAdapterInjectionOk"] is False
+
+
+def test_heartbeat_payload_wfb_adapter_verdict_reflected() -> None:
+    """A verified RTL radio is hoisted to the payload root."""
+    app = _fresh_app()
+    app._wfb_manager = _FakeWfb(
+        {
+            "state": "connected",
+            "interface": "wlan1",
+            "adapter_chipset": "RTL8812EU",
+            "adapter_injection_ok": True,
+        }
+    )
+    payload = app._build_heartbeat_payload()
+    assert payload["wfbAdapterChipset"] == "RTL8812EU"
+    assert payload["wfbAdapterInjectionOk"] is True
+    # And it also rides inside the radio block.
+    assert payload["radio"]["adapter_chipset"] == "RTL8812EU"
+    assert payload["radio"]["adapter_injection_ok"] is True
+
+
+def test_heartbeat_payload_wfb_no_injection_adapter_is_loud() -> None:
+    """No injection radio found → injectionOk false at the payload root."""
+    app = _fresh_app()
+    app._wfb_manager = _FakeWfb(
+        {
+            "state": "disconnected",
+            "interface": "",
+            "adapter_chipset": None,
+            "adapter_injection_ok": False,
+        }
+    )
+    payload = app._build_heartbeat_payload()
+    assert payload["wfbAdapterChipset"] is None
+    assert payload["wfbAdapterInjectionOk"] is False

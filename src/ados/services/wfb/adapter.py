@@ -5,6 +5,7 @@ from __future__ import annotations
 import platform
 import re
 import subprocess
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -44,6 +45,42 @@ WFB_COMPATIBLE_DRIVERS: set[str] = {
     "rtl88x2eu",
     "rtl88xxau",
 }
+
+# Management-WiFi deny-set. These are onboard / management station radios
+# that CANNOT inject 802.11 frames in monitor mode, so wfb_tx/wfb_rx on
+# them produces zero link even when `iw set monitor` reports success.
+# They must never be tagged WFB-compatible, even as a fallback. The
+# Rock 5C ships an AIC8800 (USB vendor 0xa69c, driver `aic8800*`) as its
+# management WiFi; Broadcom `brcmfmac` is the same class on Pi-family
+# boards. We deny by USB vendor AND by driver-name prefix because the
+# USB sysfs walk on a hub layout can reach a parent that does not expose
+# the AIC8800's idVendor, leaving only the driver string to go on — the
+# original live failure was the manager auto-picking the AIC8800 because
+# it slipped the filter and sorted first by bus order.
+WFB_DENY_USB_VENDORS: frozenset[int] = frozenset(
+    {
+        0xA69C,  # AIcSemi AIC8800 family (Rock 5C management WiFi)
+    }
+)
+WFB_DENY_DRIVER_PREFIXES: tuple[str, ...] = (
+    "aic8800",   # AIC8800 / AIC8800DC / AIC8800D80 variants
+    "brcmfmac",  # Broadcom FullMAC (Pi onboard WiFi)
+)
+
+
+def _is_denied_management_wifi(usb_vid: int, driver: str) -> bool:
+    """True when an adapter is a known non-injection management radio.
+
+    Belt-and-suspenders gate so a management WiFi (AIC8800, brcmfmac)
+    can never be tagged WFB-compatible regardless of how the USB ID walk
+    resolved. Matches on USB vendor first, then a driver-name prefix
+    check that tolerates the `_fdrv` / `_usb` driver suffixes those
+    chips bind under.
+    """
+    if usb_vid and usb_vid in WFB_DENY_USB_VENDORS:
+        return True
+    drv = (driver or "").strip().lower()
+    return any(drv.startswith(prefix) for prefix in WFB_DENY_DRIVER_PREFIXES)
 
 
 @dataclass
@@ -264,6 +301,29 @@ def detect_wfb_adapters() -> list[WifiAdapterInfo]:
         chipset = driver
         is_compat = False
 
+        # Hard deny known management-WiFi radios before any compat path
+        # runs. The AIC8800 (Rock 5C onboard, vendor 0xa69c, driver
+        # aic8800*) and Broadcom brcmfmac advertise monitor mode but
+        # cannot inject; selecting one strands the radio link. This gate
+        # runs first so neither the USB-ID match nor the driver-name
+        # fallback below can ever flip is_compat true for them.
+        if _is_denied_management_wifi(vid, driver):
+            adapters.append(
+                WifiAdapterInfo(
+                    interface_name=name,
+                    driver=driver,
+                    chipset=driver or "management-wifi",
+                    supports_monitor=supports_monitor,
+                    current_mode=current_mode,
+                    phy=phy_name,
+                    usb_vid=vid,
+                    usb_pid=pid,
+                    is_wfb_compatible=False,
+                    capabilities=modes,
+                )
+            )
+            continue
+
         if (vid, pid) in WFB_COMPATIBLE:
             chipset = WFB_COMPATIBLE[(vid, pid)]
             # Disambiguate the (0BDA:A81A) PID: same USB ID ships on
@@ -315,6 +375,97 @@ def detect_wfb_adapters() -> list[WifiAdapterInfo]:
         monitor_capable=sum(1 for a in adapters if a.supports_monitor),
     )
     return adapters
+
+
+def _injection_rank(adapter: WifiAdapterInfo) -> int:
+    """Sort key that floats the real injection radios to the front.
+
+    Lower is better. The RTL8812EU silicon is the validated injection
+    radio, so it ranks first; RTL8812AU rebadges next; any other adapter
+    that merely passed the compat filter last. This makes selection
+    independent of USB bus order so a management WiFi enumerated first
+    can never win by accident.
+    """
+    label = (adapter.chipset or "").upper()
+    driver = (adapter.driver or "").lower()
+    is_eu = (
+        "8812EU" in label
+        or "88X2EU" in label
+        or driver in {"8812eu", "rtl8812eu", "rtl88x2eu"}
+    )
+    is_au = (
+        "8812AU" in label
+        or "88XXAU" in label
+        or driver in {"8812au", "rtl8812au", "rtl88xxau"}
+    )
+    is_known = (
+        (adapter.usb_vid, adapter.usb_pid) in WFB_COMPATIBLE
+        or driver in WFB_COMPATIBLE_DRIVERS
+    )
+    if is_eu:
+        return 0
+    if is_au:
+        return 1
+    if is_known:
+        return 2
+    return 3
+
+
+def select_wfb_interface(
+    adapters: list[WifiAdapterInfo],
+    set_monitor_fn: Callable[[str], bool],
+    configured_iface: str = "",
+) -> str | None:
+    """Pick the WFB interface, RTL-preferred and proven by monitor mode.
+
+    Shared by the air side (`wfb.manager`) and the ground side
+    (`ground_station.wfb_rx`) so both halves choose identically.
+
+    Selection order:
+
+    1. If ``configured_iface`` (the ``video.wfb.interface`` override) is
+       set, return it verbatim — the operator pinned it on purpose.
+    2. Otherwise filter to adapters that are WFB-compatible AND advertise
+       monitor mode, rank them RTL-family-first (EU before AU before any
+       other passing chip) so bus order never decides, then iterate the
+       ranked list trying ``set_monitor_fn`` on each. Return the FIRST
+       interface that actually enters (and verifies, where the callback
+       verifies) monitor mode.
+
+    Returning None means no candidate could be proven injection-capable.
+    A candidate that fails monitor-set is skipped, never retried here, so
+    the caller's own backoff loop owns the retry cadence.
+    """
+    if configured_iface:
+        return configured_iface
+
+    compatible = [a for a in adapters if a.is_wfb_compatible and a.supports_monitor]
+    if not compatible:
+        return None
+
+    ranked = sorted(compatible, key=_injection_rank)
+    for adapter in ranked:
+        iface = adapter.interface_name
+        log.info(
+            "wfb_adapter_candidate",
+            interface=iface,
+            chipset=adapter.chipset,
+            rank=_injection_rank(adapter),
+        )
+        if set_monitor_fn(iface):
+            log.info(
+                "wfb_adapter_selected",
+                interface=iface,
+                chipset=adapter.chipset,
+            )
+            return iface
+        log.warning(
+            "wfb_adapter_monitor_rejected",
+            interface=iface,
+            chipset=adapter.chipset,
+        )
+    log.error("wfb_no_injection_adapter", candidates=len(compatible))
+    return None
 
 
 def set_monitor_mode(interface: str) -> bool:

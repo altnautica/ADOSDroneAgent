@@ -120,6 +120,14 @@ def _print_status_table(data: dict[str, Any]) -> None:
     topology = data.get("topology") or "—"
     fec_r = data.get("fec_recovered")
     fec_l = data.get("fec_failed")
+    # Selected radio adapter identity + injection verdict. The selector
+    # only ever picks an iface whose monitor mode was proven, so a false
+    # verdict means no RTL injection-capable adapter was found — the link
+    # is stranded and we must NOT be transmitting on a management WiFi.
+    selected_chipset = data.get("adapter_chipset")
+    injection_ok = bool(data.get("adapter_injection_ok", False))
+    injection_value = "yes" if injection_ok else "NO — no injection radio"
+    injection_colour = "green" if injection_ok else "red"
 
     click.echo(click.style(f"WFB-ng radio  state={state}", bold=True))
     click.echo("")
@@ -127,6 +135,8 @@ def _print_status_table(data: dict[str, Any]) -> None:
     rows: list[tuple[str, str, str | None]] = [
         ("Interface", str(iface), None),
         ("Driver / chipset", f"{driver} / {chipset}", None),
+        ("Selected radio", str(selected_chipset or "—"), None),
+        ("Injection capable", injection_value, injection_colour),
         (
             "Channel / freq",
             f"{channel}  ({freq} MHz)" if channel else "—",

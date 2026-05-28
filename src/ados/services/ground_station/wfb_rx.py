@@ -36,6 +36,7 @@ from ados.core.paths import WFB_KEY_DIR
 from ados.services.wfb.adapter import (
     detect_wfb_adapters,
     enabled_channels,
+    select_wfb_interface,
     set_monitor_mode,
     set_regulatory_domain,
 )
@@ -167,6 +168,11 @@ class WfbRxManager:
         self._tx_control_proc: asyncio.subprocess.Process | None = None
         self._monitor = LinkQualityMonitor()
         self._interface: str = ""
+        # Selected adapter chipset + injection verdict, surfaced on the
+        # heartbeat so Mission Control can flag a stranded receive link
+        # (no RTL injection-capable adapter found / verified) remotely.
+        self._selected_chipset: str | None = None
+        self._adapter_injection_ok: bool = False
         self._channel: int = config.channel
         self._running = False
         self._restart_count = 0
@@ -327,47 +333,35 @@ class WfbRxManager:
         """Find a WFB-ng compatible adapter that can actually go monitor.
 
         Returns interface name, or None if no compatible adapter accepts
-        the monitor-mode set. Iterates through every compatible adapter
-        and tries to set monitor on each — handles the case where the
-        agent's chipset-fingerprint scan mislabels a non-RTL adapter
-        (e.g., Rock 5C internal AIC8800D80) as WFB-compatible. The
-        false-positive will fail `iw set monitor` (different driver
-        doesn't support that mode) and we'll fall through to the real
-        RTL.
+        the monitor-mode set. Delegates to the shared `select_wfb_interface`
+        so the ground side ranks + proves candidates identically to the
+        air side: the config override wins first, otherwise the RTL
+        injection radios are ranked ahead of anything else and each is
+        proven by `set_monitor_mode` before selection. This rejects a
+        non-RTL management radio (e.g. the Rock 5C internal AIC8800) that
+        slipped the compat filter — it fails the monitor-mode set and we
+        fall through to the real RTL regardless of USB bus order.
 
-        Thin wrapper over the shared wfb.adapter helper so callers outside
-        this module (setup webapp, API, tests) have a single entry point.
+        Records the selected chipset + injection verdict for the heartbeat
+        as a side effect.
         """
-        if self._config.interface:
-            return self._config.interface
         adapters = detect_wfb_adapters()
-        compatible = [a for a in adapters if a.is_wfb_compatible and a.supports_monitor]
-        if not compatible:
+        iface = select_wfb_interface(
+            adapters, set_monitor_mode, self._config.interface
+        )
+        if iface is None:
+            self._selected_chipset = None
+            self._adapter_injection_ok = False
             return None
-        # Try each compatible adapter; first one that accepts monitor-mode
-        # set wins. Adapters that fail are skipped, NOT retried, so the
-        # outer manager loop's backoff timer doesn't spin on a dead chip.
-        for adapter in compatible:
-            iface = adapter.interface_name
-            log.info(
-                "ground_wfb_adapter_candidate",
-                interface=iface,
-                chipset=adapter.chipset,
-            )
-            if set_monitor_mode(iface):
-                log.info(
-                    "ground_wfb_adapter_selected",
-                    interface=iface,
-                    chipset=adapter.chipset,
-                )
-                return iface
-            log.warning(
-                "ground_wfb_adapter_monitor_rejected",
-                interface=iface,
-                chipset=adapter.chipset,
-            )
-        log.error("ground_wfb_no_usable_adapter", candidates=len(compatible))
-        return None
+        selected = next(
+            (a for a in adapters if a.interface_name == iface), None
+        )
+        self._selected_chipset = selected.chipset if selected else None
+        # An override iface is returned verbatim without a monitor probe;
+        # everything else was proven by select_wfb_interface, so mark
+        # injection_ok true only on the proven path.
+        self._adapter_injection_ok = bool(not self._config.interface or selected)
+        return iface
 
     def set_monitor_mode(self, interface: str) -> bool:
         """Set the interface to monitor mode. Thin re-export for API callers."""
@@ -678,6 +672,11 @@ class WfbRxManager:
         return {
             "state": self._state.value,
             "interface": self._interface,
+            # Selected radio adapter identity + injection verdict, parity
+            # with the air-side status payload so `build_radio_block`
+            # carries the same surface from either side.
+            "adapter_chipset": self._selected_chipset,
+            "adapter_injection_ok": self._adapter_injection_ok,
             "channel": self._channel,
             "rssi_dbm": snap.rssi_dbm,
             "bitrate_mbps": round(snap.bitrate_kbps / 1000.0, 3),
@@ -767,6 +766,12 @@ class WfbRxManager:
                             WFB_STATS_JSON,
                             extra={
                                 "interface": self._interface,
+                                # Selected adapter identity + injection
+                                # verdict, so the cross-process API +
+                                # heartbeat see the same stranded-link
+                                # signal this manager holds in stats().
+                                "adapter_chipset": self._selected_chipset,
+                                "adapter_injection_ok": self._adapter_injection_ok,
                                 "channel": self._channel,
                                 "tx_power_dbm": getattr(
                                     self._config, "tx_power_dbm", None
@@ -1331,10 +1336,12 @@ class WfbRxManager:
                         domain=reg_domain,
                     )
 
-            # Monitor mode was already set by detect_adapter() above as
-            # part of its candidate-iteration. Skipping the duplicate
-            # call here avoids re-running iw on an interface that's
-            # already in monitor mode.
+            # Monitor mode was already set + proven by detect_adapter()
+            # for the auto-selected path as part of candidate iteration.
+            # The config-override path returns the iface verbatim without
+            # a probe, so set monitor mode here for that case only.
+            if self._config.interface:
+                set_monitor_mode(interface)
 
             # Apply TX power on the monitor interface BEFORE wfb_rx
             # spawns. Same rationale as the air side: without this the

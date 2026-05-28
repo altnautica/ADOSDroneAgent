@@ -161,6 +161,8 @@ def _build_status_from_stats_file(wfb_cfg: object) -> dict:
             "chipset": "",
             "supports_monitor": False,
         },
+        "adapter_chipset": None,
+        "adapter_injection_ok": False,
         "rssi_dbm": -100.0,
         "noise_dbm": -95.0,
         "snr_db": 0.0,

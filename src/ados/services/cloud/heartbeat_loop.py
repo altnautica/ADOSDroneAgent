@@ -302,9 +302,22 @@ async def heartbeat_loop(ctx: CloudContext) -> None:  # noqa: C901
                     build_radio_block,
                     fetch_wfb_status_via_http,
                 )
-                payload["radio"] = build_radio_block(
-                    fetch_wfb_status_via_http(api_key=pairing.api_key)
-                )
+                _wfb_http_status = fetch_wfb_status_via_http(api_key=pairing.api_key)
+                payload["radio"] = build_radio_block(_wfb_http_status)
+                # Hoist the radio-adapter selection verdict to the payload
+                # root so Mission Control reads the injection check without
+                # unpacking the radio sub-object. Null/false when the radio
+                # status is absent or no injection adapter was verified.
+                if isinstance(_wfb_http_status, dict):
+                    payload["wfbAdapterChipset"] = _wfb_http_status.get(
+                        "adapter_chipset"
+                    )
+                    payload["wfbAdapterInjectionOk"] = bool(
+                        _wfb_http_status.get("adapter_injection_ok", False)
+                    )
+                else:
+                    payload["wfbAdapterChipset"] = None
+                    payload["wfbAdapterInjectionOk"] = False
 
                 # Pair-flag transition detection. When the radio
                 # crosses paired/unpaired we schedule a single

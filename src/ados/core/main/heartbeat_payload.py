@@ -408,6 +408,21 @@ def build_heartbeat_payload(app: AgentApp) -> dict:  # noqa: C901
             wfb_status = None
     payload["radio"] = build_radio_block(wfb_status)
 
+    # Top-level radio-adapter selection verdict. Mirrors the same two
+    # fields inside the radio block but hoists them to the payload root
+    # so Mission Control and the CLI can read the injection check
+    # without unpacking the radio sub-object. chipset is null and
+    # injectionOk is false when no RTL injection-capable adapter was
+    # found/verified — the stranded radio link signal.
+    if isinstance(wfb_status, dict):
+        payload["wfbAdapterChipset"] = wfb_status.get("adapter_chipset")
+        payload["wfbAdapterInjectionOk"] = bool(
+            wfb_status.get("adapter_injection_ok", False)
+        )
+    else:
+        payload["wfbAdapterChipset"] = None
+        payload["wfbAdapterInjectionOk"] = False
+
     # Inter-rig peer presence — sourced cross-process from
     # /run/ados/peer-presence.json, written by the HopListener every
     # time a WFB-radio PresenceBeacon decodes successfully. Fields

@@ -30,6 +30,18 @@ def test_radio_to_camel_maps_wfb_keys():
     assert out["pairedWithDeviceId"] == "groundnode"
 
 
+def test_radio_to_camel_maps_adapter_verdict():
+    out = _radio_to_camel(
+        {
+            "state": "connected",
+            "adapter_chipset": "RTL8812EU",
+            "adapter_injection_ok": True,
+        }
+    )
+    assert out["adapterChipset"] == "RTL8812EU"
+    assert out["adapterInjectionOk"] is True
+
+
 def test_radio_to_camel_none_passthrough():
     assert _radio_to_camel(None) is None
     assert _radio_to_camel({}) is None

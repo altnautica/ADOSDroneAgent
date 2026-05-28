@@ -75,6 +75,41 @@ def test_radio_block_with_full_status():
     assert block["rx_silent_seconds"] == 0.2
 
 
+def test_radio_block_carries_adapter_verdict():
+    """The selected adapter chipset + injection verdict ride the block."""
+    status = {
+        "state": "connected",
+        "interface": "wlan1",
+        "channel": 149,
+        "adapter_chipset": "RTL8812EU",
+        "adapter_injection_ok": True,
+    }
+    block = build_radio_block(status)
+    assert block["adapter_chipset"] == "RTL8812EU"
+    assert block["adapter_injection_ok"] is True
+
+
+def test_radio_block_no_injection_adapter_is_loud():
+    """No injection-capable adapter → chipset null, injection_ok false."""
+    status = {
+        "state": "disconnected",
+        "interface": "",
+        "channel": 149,
+        "adapter_chipset": None,
+        "adapter_injection_ok": False,
+    }
+    block = build_radio_block(status)
+    assert block["adapter_chipset"] is None
+    assert block["adapter_injection_ok"] is False
+
+
+def test_radio_block_absent_defaults_injection_false():
+    """The absent block defaults injection_ok to a falsy verdict."""
+    block = build_radio_block(None)
+    assert block["adapter_chipset"] is None
+    assert block["adapter_injection_ok"] is False
+
+
 def test_radio_block_treats_sentinel_rssi_as_null():
     """RSSI seeded at -100 dBm before first sample is reported as None."""
     status = {

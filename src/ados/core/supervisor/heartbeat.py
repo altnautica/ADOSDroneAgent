@@ -92,6 +92,8 @@ def build_radio_block(wfb_status: dict[str, Any] | None) -> dict[str, Any]:
             "channel_locked": None,
             "reacquire_kills": None,
             "valid_rx_packets_per_s": None,
+            "adapter_chipset": None,
+            "adapter_injection_ok": False,
         }
 
     iface = wfb_status.get("interface") or None
@@ -156,6 +158,13 @@ def build_radio_block(wfb_status: dict[str, Any] | None) -> dict[str, Any]:
         "channel_locked": wfb_status.get("channel_locked"),
         "reacquire_kills": wfb_status.get("reacquire_kills"),
         "valid_rx_packets_per_s": wfb_status.get("valid_rx_packets_per_s"),
+        # Selected radio adapter identity + injection verdict. chipset is
+        # the label of the adapter the selector picked (null until a real
+        # RTL radio is verified); injection_ok is false when no
+        # injection-capable adapter was found/proven — the loud stranded
+        # radio link signal Mission Control renders.
+        "adapter_chipset": wfb_status.get("adapter_chipset"),
+        "adapter_injection_ok": bool(wfb_status.get("adapter_injection_ok", False)),
     }
 
 
