@@ -684,6 +684,11 @@ def _uninstall_linux(*, purge: bool, yes: bool) -> None:
         Path("/etc/udev/rules.d/99-ados-hardware.rules"),
         Path("/etc/udev/rules.d/99-ados-input.rules"),
         Path("/etc/udev/rules.d/99-ados-modem.rules"),
+        Path("/etc/udev/rules.d/99-ados-wifi-powersave.rules"),
+        Path("/etc/udev/rules.d/99-ados-usb-no-autosuspend.rules"),
+        Path("/etc/udev/rules.d/99-ados-eth-no-eee.rules"),
+        Path("/etc/NetworkManager/conf.d/99-ados-wifi-powersave.conf"),
+        Path("/etc/systemd/logind.conf.d/99-ados-nosleep.conf"),
         Path("/etc/avahi/services/ados-gs-ap.service"),
     ]
 

@@ -1,0 +1,12 @@
+[Unit]
+Description=ADOS Power Hardening Re-assert
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/ados/bin/ados-power-reassert.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

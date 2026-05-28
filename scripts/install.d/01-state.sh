@@ -121,6 +121,21 @@ purge_ados_artifacts() {
     rm -f /etc/udev/rules.d/99-ados-modem.rules
     rm -f /etc/avahi/services/ados-gs-ap.service
     rm -f /etc/update-motd.d/30-ados
+
+    # Power hardening artifacts. Drop the NetworkManager / udev / logind
+    # drop-ins, unmask the sleep targets, and tear down the re-assert
+    # oneshot so the box returns to its stock power behavior.
+    rm -f /etc/NetworkManager/conf.d/99-ados-wifi-powersave.conf
+    rm -f /etc/udev/rules.d/99-ados-wifi-powersave.rules
+    rm -f /etc/udev/rules.d/99-ados-usb-no-autosuspend.rules
+    rm -f /etc/udev/rules.d/99-ados-eth-no-eee.rules
+    rm -f /etc/systemd/logind.conf.d/99-ados-nosleep.conf
+    systemctl unmask sleep.target suspend.target hibernate.target \
+        hybrid-sleep.target suspend-then-hibernate.target 2>/dev/null || true
+    systemctl disable ados-power.service 2>/dev/null || true
+    rm -f /etc/systemd/system/ados-power.service
+    rm -f /opt/ados/bin/ados-power-reassert.sh
+
     rm -rf /run/ados
     rm -rf /var/log/ados
     systemctl daemon-reload 2>/dev/null || true

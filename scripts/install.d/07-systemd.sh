@@ -89,6 +89,14 @@ TMPEOF
     # spot so the upgrade path doesn't need a reboot.
     install_video_sysctl
 
+    # Board-agnostic power hardening: keep WiFi, the WFB radio, and the
+    # camera continuously powered by disabling WiFi power-save, USB
+    # autosuspend, and Ethernet EEE, masking the sleep targets, and
+    # enabling the boot re-assert oneshot. Idempotent; applies on the
+    # spot so both fresh-install and upgrade paths pick it up. CPU
+    # governor is intentionally left untouched.
+    install_power_hardening
+
     # Quiet the Rockchip BSP ISP daemon on UVC-camera rigs. Self-gating;
     # a no-op on non-Rockchip boards and on boards actually running it.
     mask_unused_rockchip_isp_service

@@ -358,6 +358,26 @@ def set_monitor_mode(interface: str) -> bool:
             log.error("monitor_mode_timeout", cmd=" ".join(cmd))
             return False
 
+    # Force power-save off on the monitor interface so the radio never
+    # parks and silently stalls wfb_tx/wfb_rx. Best-effort: a driver that
+    # rejects the knob must not fail the monitor-mode bring-up, which has
+    # already succeeded by this point.
+    try:
+        ps_result = subprocess.run(
+            ["iw", "dev", interface, "set", "power_save", "off"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if ps_result.returncode != 0:
+            log.warning(
+                "monitor_mode_powersave_off_failed",
+                interface=interface,
+                stderr=ps_result.stderr.strip(),
+            )
+    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+        log.warning("monitor_mode_powersave_off_error", interface=interface, error=str(exc))
+
     log.info("monitor_mode_set", interface=interface)
     return True
 

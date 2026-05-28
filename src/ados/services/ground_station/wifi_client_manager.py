@@ -295,6 +295,42 @@ class WifiClientManager:
         results.sort(key=lambda r: r["signal"], reverse=True)
         return results
 
+    async def _disable_powersave(self, connection: str) -> None:
+        """Force WiFi power-save off on the active station link.
+
+        Best-effort. Failures are logged and swallowed so a driver that
+        does not expose either knob never fails a successful join.
+        """
+        # Persist the setting on the NetworkManager profile (named after
+        # the SSID for a freshly-created connection) so it survives a
+        # reconnect. 2 = power-save disabled.
+        rc, _out, err = await _run(
+            [
+                "nmcli", "connection", "modify", connection,
+                "802-11-wireless.powersave", "2",
+            ],
+            timeout=10,
+        )
+        if rc != 0:
+            log.warning(
+                "wifi_powersave_nmcli_failed",
+                connection=connection,
+                err=err.strip(),
+            )
+        # Apply at runtime too: the connection-level change does not always
+        # take effect until the next reconnect, and some drivers are only
+        # toggleable via iw.
+        rc, _out, err = await _run(
+            ["iw", "dev", self._interface, "set", "power_save", "off"],
+            timeout=10,
+        )
+        if rc != 0:
+            log.warning(
+                "wifi_powersave_iw_failed",
+                interface=self._interface,
+                err=err.strip(),
+            )
+
     async def join(
         self,
         ssid: str,
@@ -349,6 +385,14 @@ class WifiClientManager:
                     "ip": None,
                     "gateway": None,
                 }
+
+            # Force WiFi power-save OFF on the freshly-joined link so the
+            # radio never parks and drops the uplink under light traffic.
+            # Best-effort: a driver that refuses either knob must not fail
+            # the join. NetworkManager names the new profile after the SSID,
+            # so the connection-level modify keys on the SSID; the iw call
+            # is the runtime fallback for drivers NM cannot toggle live.
+            await self._disable_powersave(ssid)
 
             await asyncio.sleep(2.0)
             st = await self.status()

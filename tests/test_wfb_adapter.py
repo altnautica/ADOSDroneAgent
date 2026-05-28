@@ -155,7 +155,47 @@ def test_monitor_mode_success(mock_platform, mock_subprocess):
     mock_subprocess.run.return_value = ok_result
 
     assert set_monitor_mode("wlan0") is True
-    assert mock_subprocess.run.call_count == 3
+    # 3 mode commands (down / monitor / up) + 1 power_save off.
+    assert mock_subprocess.run.call_count == 4
+
+
+@patch("ados.services.wfb.adapter.subprocess")
+@patch("ados.services.wfb.adapter.platform")
+def test_monitor_mode_disables_powersave(mock_platform, mock_subprocess):
+    """set_monitor_mode forces power_save off after bringing the iface up."""
+    mock_platform.system.return_value = "Linux"
+    ok_result = MagicMock()
+    ok_result.returncode = 0
+    mock_subprocess.run.return_value = ok_result
+
+    assert set_monitor_mode("wlan0") is True
+    issued = [list(call.args[0]) for call in mock_subprocess.run.call_args_list]
+    assert ["iw", "wlan0", "set", "monitor", "none"] in issued
+    assert ["iw", "dev", "wlan0", "set", "power_save", "off"] in issued
+    # power_save off must come after the interface is brought up.
+    assert issued.index(["iw", "dev", "wlan0", "set", "power_save", "off"]) > issued.index(
+        ["ip", "link", "set", "wlan0", "up"]
+    )
+
+
+@patch("ados.services.wfb.adapter.subprocess")
+@patch("ados.services.wfb.adapter.platform")
+def test_monitor_mode_powersave_failure_is_nonfatal(mock_platform, mock_subprocess):
+    """A power_save toggle failure must not fail a successful monitor bring-up."""
+    mock_platform.system.return_value = "Linux"
+
+    def _run(cmd, **_kw):
+        result = MagicMock()
+        if cmd[:1] == ["iw"] and "power_save" in cmd:
+            result.returncode = 1
+            result.stderr = "command failed: Operation not supported"
+        else:
+            result.returncode = 0
+        return result
+
+    mock_subprocess.run.side_effect = _run
+
+    assert set_monitor_mode("wlan0") is True
 
 
 @patch("ados.services.wfb.adapter.subprocess")

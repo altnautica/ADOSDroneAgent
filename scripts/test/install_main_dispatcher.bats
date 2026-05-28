@@ -62,7 +62,7 @@ setup() {
     run bash -c "
         set -e
         source '${INSTALL_D}/lib.sh'
-        for m in 00-detect 01-state 02-deps 03-kernel 04-dkms 05-mesh \
+        for m in 00-detect 01-state 02-deps 03-kernel 03b-power 04-dkms 05-mesh \
                  06-radio 07-systemd 08-plugin 09-config 10-network \
                  11-artifacts 12-output 14-orchestration 15-channel; do
             source '${INSTALL_D}/'\$m.sh
@@ -77,7 +77,7 @@ setup() {
     run bash -c "
         set -e
         source '${INSTALL_D}/lib.sh'
-        for m in 00-detect 01-state 02-deps 03-kernel 04-dkms 05-mesh \
+        for m in 00-detect 01-state 02-deps 03-kernel 03b-power 04-dkms 05-mesh \
                  06-radio 07-systemd 08-plugin 09-config 10-network \
                  11-artifacts 12-output 13-main 14-orchestration 15-channel; do
             source '${INSTALL_D}/'\$m.sh
@@ -128,7 +128,7 @@ setup() {
     run bash -c "
         set -e
         source '${INSTALL_D}/lib.sh'
-        for m in 00-detect 01-state 02-deps 03-kernel 04-dkms 05-mesh \
+        for m in 00-detect 01-state 02-deps 03-kernel 03b-power 04-dkms 05-mesh \
                  06-radio 07-systemd 08-plugin 09-config 10-network \
                  11-artifacts 12-output 14-orchestration 15-channel; do
             source '${INSTALL_D}/'\$m.sh
@@ -138,6 +138,7 @@ setup() {
             detect_arch detect_os find_python resolve_profile _persist_profile_to_config \
             is_installed get_installed_version do_uninstall \
             install_global_symlinks install_system_deps install_ground_station_deps \
+            install_power_hardening \
             install_video_sysctl install_display_driver install_ground_station_driver \
             install_mesh_deps install_wfb_ng_from_vendor provision_wfb_bind_artifacts \
             install_systemd_service disable_other_profile_units enable_universal_units \
@@ -1472,4 +1473,139 @@ EOF
     # Operator opt-in must win even on a drone profile.
     output="$(idd_run drone waveshare35a)"
     [[ "$output" == *"CAPTURED_DISPLAY=waveshare35a"* ]]
+}
+
+# -----------------------------------------------------------------------------
+# install_power_hardening (03b-power.sh): board-agnostic power hardening.
+#
+# The function writes a NetworkManager drop-in, three udev rules, a logind
+# drop-in, a boot oneshot + its helper script, masks the sleep targets, and
+# enables the oneshot. We sandbox the writes under ADOS_FS_ROOT (a temp tree)
+# and stub systemctl / udevadm / nmcli on PATH so nothing touches the real
+# host. Then we assert each artifact exists with the expected content, that
+# the rules match generically (wlan* / usb / eth*) with no per-board strings,
+# and that a second run is idempotent.
+# -----------------------------------------------------------------------------
+
+power_setup() {
+    PWR_TMP="$(mktemp -d)"
+    PWR_ROOT="${PWR_TMP}/root"
+    PWR_BIN="${PWR_TMP}/bin"
+    mkdir -p "${PWR_ROOT}" "${PWR_BIN}"
+    # A NetworkManager dir so the WiFi drop-in branch is exercised.
+    mkdir -p "${PWR_ROOT}/etc/NetworkManager"
+    # Stub the system tools so the function never touches the host. Each
+    # records its argv so we can assert the masks/enables happened.
+    for tool in systemctl udevadm nmcli; do
+        cat > "${PWR_BIN}/${tool}" <<EOF
+#!/usr/bin/env bash
+echo "${tool} \$*" >> "${PWR_TMP}/syscalls.log"
+exit 0
+EOF
+        chmod +x "${PWR_BIN}/${tool}"
+    done
+}
+
+power_teardown() {
+    [ -n "${PWR_TMP:-}" ] && rm -rf "${PWR_TMP}"
+}
+
+power_run() {
+    # Run install_power_hardening once under the sandbox. FRESH_REPO_DIR is
+    # left empty so the inline fallbacks for the helper script + unit fire,
+    # making the test independent of the on-disk data/ tree shape.
+    bash -c "
+        set -u
+        export PATH='${PWR_BIN}:'\$PATH
+        info()  { :; }
+        warn()  { :; }
+        error() { :; }
+        source '${INSTALL_D}/lib.sh'
+        source '${INSTALL_D}/03b-power.sh'
+        export ADOS_FS_ROOT='${PWR_ROOT}'
+        export FRESH_REPO_DIR=''
+        install_power_hardening >/dev/null 2>&1
+        echo RC=\$?
+    "
+}
+
+@test "install_power_hardening writes the NetworkManager WiFi power-save drop-in" {
+    power_setup
+    run power_run
+    local conf="${PWR_ROOT}/etc/NetworkManager/conf.d/99-ados-wifi-powersave.conf"
+    run cat "${conf}"
+    power_teardown
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"wifi.powersave = 2"* ]]
+}
+
+@test "install_power_hardening writes the three udev rules with generic matchers" {
+    power_setup
+    power_run >/dev/null
+    local rd="${PWR_ROOT}/etc/udev/rules.d"
+    run cat "${rd}/99-ados-wifi-powersave.rules"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'KERNEL=="wlan*"'* ]]
+    [[ "$output" == *"set power_save off"* ]]
+    run cat "${rd}/99-ados-usb-no-autosuspend.rules"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'SUBSYSTEM=="usb"'* ]]
+    [[ "$output" == *'ATTR{power/control}="on"'* ]]
+    run cat "${rd}/99-ados-eth-no-eee.rules"
+    power_teardown
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'KERNEL=="eth*|end*|enP*|enx*"'* ]]
+    [[ "$output" == *"eee off"* ]]
+}
+
+@test "install_power_hardening writes the logind no-sleep drop-in" {
+    power_setup
+    power_run >/dev/null
+    run cat "${PWR_ROOT}/etc/systemd/logind.conf.d/99-ados-nosleep.conf"
+    power_teardown
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"IdleAction=ignore"* ]]
+    [[ "$output" == *"HandleLidSwitch=ignore"* ]]
+}
+
+@test "install_power_hardening installs + enables the boot re-assert oneshot" {
+    power_setup
+    power_run >/dev/null
+    # Unit file written under the sandbox.
+    run cat "${PWR_ROOT}/etc/systemd/system/ados-power.service"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Type=oneshot"* ]]
+    [[ "$output" == *"ExecStart=/opt/ados/bin/ados-power-reassert.sh"* ]]
+    # Helper script written + executable.
+    [ -x "${PWR_ROOT}/opt/ados/bin/ados-power-reassert.sh" ]
+    # systemctl enable + mask were issued.
+    run cat "${PWR_TMP}/syscalls.log"
+    power_teardown
+    [[ "$output" == *"systemctl enable ados-power.service"* ]]
+    [[ "$output" == *"systemctl mask sleep.target"* ]]
+}
+
+@test "install_power_hardening is idempotent across two runs" {
+    power_setup
+    power_run >/dev/null
+    # Capture the artifact set after the first run.
+    first="$(find "${PWR_ROOT}" -type f | sort)"
+    run power_run
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"RC=0"* ]]
+    second="$(find "${PWR_ROOT}" -type f | sort)"
+    power_teardown
+    [ "${first}" = "${second}" ]
+}
+
+@test "install_power_hardening rules carry no per-board hardcoding" {
+    power_setup
+    power_run >/dev/null
+    # The udev + NM + logind artifacts must not name a specific SoC, board,
+    # or chip; the matchers are generic (wlan*/usb/eth*). Grep the whole
+    # artifact tree for board-specific tokens; zero hits required.
+    run grep -rniE 'rk3582|rk3588|rk3566|bcm2|rpi4|rock-?5|cubie|luckfox|jetson|orange-?pi|allwinner|broadcom|aic8800|rtl88' "${PWR_ROOT}"
+    power_teardown
+    # grep returns non-zero (no matches) when board-agnostic.
+    [ "$status" -ne 0 ]
 }

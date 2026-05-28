@@ -72,6 +72,7 @@ install_system_deps() {
         gstreamer1.0-libav \
         gstreamer1.0-rtsp \
         iw \
+        ethtool \
         wireless-regdb
 
     # The gstreamer -dev headers are only needed to compile the OPTIONAL
