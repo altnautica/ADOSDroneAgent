@@ -7,7 +7,11 @@ StartLimitBurst=5
 
 [Service]
 Type=simple
-ExecStart=/opt/ados/venv/bin/python -m ados.services.wfb
+# Prefer the prebuilt native radio manager when present, fall back to the
+# packaged Python service otherwise (the prebuilt fetch is best-effort). `exec`
+# replaces the shell image in place so the CAP_NET_RAW/CAP_NET_ADMIN ambient
+# caps below carry to the chosen binary unchanged.
+ExecStart=/bin/sh -c 'if [ -x /opt/ados/bin/ados-radio ]; then exec /opt/ados/bin/ados-radio; else exec /opt/ados/venv/bin/python -m ados.services.wfb; fi'
 Restart=on-failure
 RestartSec=5
 Environment=ADOS_CONFIG=/etc/ados/config.yaml

@@ -6,6 +6,10 @@ license.workspace = true
 repository.workspace = true
 description = "WFB-ng radio link manager: adapter selection, monitor-mode, TX subprocess with setsid/killpg, FHSS hop supervisor, Rule-37 watchdogs."
 
+[[bin]]
+name = "ados-radio"
+path = "src/main.rs"
+
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }

@@ -196,4 +196,7 @@ install_global_symlinks() {
     # Fetch the prebuilt MAVLink router binary. The ados-mavlink unit's ExecStart
     # shim runs it when present, else the packaged Python service.
     install_mavlink_router_binary
+    # Fetch the prebuilt WFB radio binary. The ados-wfb unit's ExecStart shim
+    # runs it when present (drone profile), else the packaged Python service.
+    install_radio_binary
 }
