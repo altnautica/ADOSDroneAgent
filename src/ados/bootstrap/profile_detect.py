@@ -21,6 +21,7 @@ import json
 import os
 import re
 import socket
+import struct
 import subprocess
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -327,45 +328,83 @@ def probe_gps_serial(timeout: float = 2.0) -> tuple[int, int, bool]:
 def probe_fc_heartbeat(timeout: float = 1.5) -> tuple[int, int, bool]:
     """Read the agent state socket for a live FC heartbeat.
 
-    The mavlink service publishes a 10 Hz state snapshot to the unix
-    socket at `/run/ados/state.sock`. The first line on connect is the
+    The mavlink service publishes a ~10 Hz state snapshot to the unix
+    socket at `/run/ados/state.sock`. The first frame on connect is the
     most recent snapshot, so a single short read is enough to tell us
-    whether the FC is connected. On a brand-new boot the socket may
-    not exist yet; that's expected and the probe returns zero so the
-    decision falls back to the persistence tiebreaker.
+    whether the FC is connected. The wire is self-describing, so this probe
+    decodes either format without needing to know which the producer emits:
+
+    - a length-prefixed msgpack frame (4-byte big-endian length + body) —
+      a snapshot is far under 16 MB so the leading length byte is ``0x00``;
+    - a newline-terminated JSON object (leading byte ``{``).
+
+    On a brand-new boot the socket may not exist yet; that's expected and
+    the probe returns zero so the decision falls back to the persistence
+    tiebreaker. The JSON path needs only the stdlib; the msgpack path
+    imports ``msgpack`` lazily and degrades to "no signal" if it is absent.
     """
+    # Sanity cap mirrors core.ipc.STATE_MAX_FRAME_SIZE; a snapshot is well
+    # under this, so a larger "length" means we did not read a v2 frame.
+    state_max_frame = 1024 * 1024
     state_sock = "/run/ados/state.sock"
     if not Path(state_sock).exists():
         return 0, 0, False
 
     deadline = time.monotonic() + timeout
-    buf = bytearray()
+    data: Any = None
     try:
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         try:
             sock.settimeout(timeout)
             sock.connect(state_sock)
-            while time.monotonic() < deadline and b"\n" not in buf:
-                remaining = max(0.05, deadline - time.monotonic())
-                sock.settimeout(remaining)
-                chunk = sock.recv(4096)
-                if not chunk:
-                    break
-                buf.extend(chunk)
+
+            def _recv_exact(n: int) -> bytes | None:
+                """Read exactly n bytes before the deadline, else None."""
+                chunk = bytearray()
+                while len(chunk) < n and time.monotonic() < deadline:
+                    sock.settimeout(max(0.05, deadline - time.monotonic()))
+                    part = sock.recv(n - len(chunk))
+                    if not part:
+                        return None
+                    chunk.extend(part)
+                return bytes(chunk) if len(chunk) == n else None
+
+            first = _recv_exact(1)
+            if first == b"\x00":
+                # v2: length-prefixed msgpack (leading length byte is 0x00).
+                rest = _recv_exact(3)
+                if rest is not None:
+                    (length,) = struct.unpack("!I", first + rest)
+                    if 0 < length <= state_max_frame:
+                        body = _recv_exact(length)
+                        if body is not None:
+                            try:
+                                import msgpack
+
+                                data = msgpack.unpackb(body, raw=False)
+                            except Exception:  # noqa: BLE001
+                                data = None
+            elif first:
+                # v1: newline-terminated JSON; `first` is the opening byte.
+                buf = bytearray(first)
+                while time.monotonic() < deadline and b"\n" not in buf:
+                    sock.settimeout(max(0.05, deadline - time.monotonic()))
+                    part = sock.recv(4096)
+                    if not part:
+                        break
+                    buf.extend(part)
+                line, _, _ = bytes(buf).partition(b"\n")
+                if line:
+                    try:
+                        data = json.loads(line)
+                    except json.JSONDecodeError:
+                        data = None
         finally:
             try:
                 sock.close()
             except OSError:
                 pass
-    except (OSError, socket.timeout):
-        return 0, 0, False
-
-    line, _, _ = bytes(buf).partition(b"\n")
-    if not line:
-        return 0, 0, False
-    try:
-        data = json.loads(line)
-    except json.JSONDecodeError:
+    except (OSError, TimeoutError):
         return 0, 0, False
 
     if isinstance(data, dict) and bool(data.get("fc_connected")):

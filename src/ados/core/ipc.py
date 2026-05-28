@@ -405,12 +405,12 @@ class StateIPCServer:
     def publish(self, state: dict) -> None:
         """Broadcast state snapshot to all clients (non-blocking).
 
-        The wire format is newline-terminated JSON. A msgpack alternative is
-        scaffolded at module import (see ``_USE_MSGPACK``) and would yield a
-        ~3-5x serialization speedup on Pi-class hardware, but switching the
-        encoder requires a paired framing change (length prefix instead of
-        newline terminator) plus a coordinated update on the consumer side.
-        Until both halves land together the JSON path stays canonical.
+        The encoder is chosen by ``_USE_MSGPACK`` (the ``ADOS_STATE_IPC_MSGPACK``
+        env flag): length-prefixed msgpack (v2, ~3-5x cheaper to serialize on
+        Pi-class hardware) when set, else newline-terminated JSON (v1). The
+        flag can be flipped across a deployment without lock-stepping consumer
+        restarts because the reader (``StateIPCClient.read_loop``) is
+        self-describing and decodes either format per frame.
         """
         self._last_state = state
         if not self._clients:
@@ -497,43 +497,67 @@ class StateIPCClient:
         self._connected = False
         if self._writer:
             self._writer.close()
+            self._writer = None
+        # Null the reader so an in-flight read_loop sees the shutdown on its
+        # next iteration (it snapshots self._reader at the top of each loop).
+        self._reader = None
 
     async def read_loop(self) -> None:
-        """Read state updates.
+        """Read state updates, auto-detecting the wire format per frame.
 
-        v1 (default): each line is a newline-terminated JSON snapshot. v2
-        (``_USE_MSGPACK``): each frame is a 4-byte big-endian length + msgpack
-        body. The wire is chosen by the same flag the server encodes with, so
-        both halves of a deployment stay in lock-step.
+        The frame is self-describing, so a reader decodes either format no
+        matter which one the producer is currently emitting:
+
+        - **v2** is a 4-byte big-endian length prefix + msgpack body. A state
+          snapshot is far smaller than 16 MB, so the most-significant length
+          byte (the first byte on the wire) is always ``0x00``.
+        - **v1** is a newline-terminated JSON object, which always starts with
+          ``{`` (``0x7B``).
+
+        Sniffing that first byte means the encoder flag
+        (``ADOS_STATE_IPC_MSGPACK``) can be flipped across a deployment without
+        lock-stepping every consumer restart: a producer-v2 / consumer-just-
+        restarted-on-v1 window decodes correctly either way.
         """
         if not self._reader:
             raise RuntimeError("Not connected")
         try:
             while self._connected:
-                if _USE_MSGPACK:
-                    header = await self._reader.readexactly(HEADER_SIZE)
-                    (length,) = struct.unpack("!I", header)
+                # Snapshot the reader: disconnect() can null it mid-read.
+                reader = self._reader
+                if reader is None:
+                    break
+                first = await reader.readexactly(1)
+                if first == b"\x00":
+                    # v2: length-prefixed msgpack (leading length byte is 0x00).
+                    rest = await reader.readexactly(HEADER_SIZE - 1)
+                    (length,) = struct.unpack("!I", first + rest)
                     if length == 0 or length > STATE_MAX_FRAME_SIZE:
                         log.warning("state_ipc_bad_frame_length", length=length)
                         break
-                    body = await self._reader.readexactly(length)
+                    body = await reader.readexactly(length)
+                    if _msgpack is None:
+                        log.warning("state_ipc_msgpack_unavailable")
+                        break
                     try:
                         self._state = _msgpack.unpackb(body, raw=False)
                         if self._on_state:
                             self._on_state(self._state)
-                    except Exception:  # noqa: BLE001 - tolerate a bad frame
+                    except Exception:  # noqa: BLE001 — tolerate a bad frame
                         pass
                 else:
-                    line = await self._reader.readline()
-                    if not line:
-                        break
+                    # v1: newline-terminated JSON; `first` is the opening byte.
+                    rest = await reader.readline()
                     try:
-                        self._state = json.loads(line)
+                        self._state = json.loads(first + rest)
                         if self._on_state:
                             self._on_state(self._state)
-                    except json.JSONDecodeError:
+                    except (json.JSONDecodeError, ValueError):
                         pass
         except (asyncio.IncompleteReadError, ConnectionResetError, OSError):
+            pass
+        except AttributeError:
+            # Reader dropped mid-read during a shutdown race.
             pass
         finally:
             self._connected = False

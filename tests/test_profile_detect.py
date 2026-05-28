@@ -201,6 +201,62 @@ def test_fc_heartbeat_probe_reads_state_socket(
     assert result == expected
 
 
+@pytest.mark.parametrize(
+    "fc_connected,expected",
+    [
+        (True, (0, 3, True)),
+        (False, (0, 0, False)),
+    ],
+)
+def test_fc_heartbeat_probe_reads_state_socket_v2_msgpack(
+    monkeypatch, fc_connected: bool, expected: tuple[int, int, bool]
+) -> None:
+    """The probe also decodes the length-prefixed msgpack (v2) state wire.
+
+    A v2 frame is `struct.pack("!I", len) + msgpack_body`; the leading
+    length byte is 0x00, which is how the probe tells it apart from the
+    v1 JSON line (leading `{`).
+    """
+    import struct
+
+    msgpack = pytest.importorskip("msgpack")
+    body = msgpack.packb({"fc_connected": fc_connected}, use_bin_type=True)
+    payload = struct.pack("!I", len(body)) + body
+
+    class _FakeSocket:
+        def __init__(self, *args, **kwargs):
+            self._buf = payload
+            self._closed = False
+
+        def settimeout(self, _t):
+            pass
+
+        def connect(self, _addr):
+            pass
+
+        def recv(self, n: int) -> bytes:
+            if self._closed or not self._buf:
+                return b""
+            chunk, self._buf = self._buf[:n], self._buf[n:]
+            return chunk
+
+        def close(self):
+            self._closed = True
+
+    class _PathStub:
+        def __init__(self, p):
+            self._p = str(p)
+
+        def exists(self) -> bool:
+            return self._p == "/run/ados/state.sock"
+
+    monkeypatch.setattr(profile_detect, "Path", _PathStub)
+    monkeypatch.setattr(profile_detect.socket, "socket", _FakeSocket)
+
+    result = profile_detect.probe_fc_heartbeat(timeout=1.0)
+    assert result == expected
+
+
 def test_fc_heartbeat_probe_returns_zero_when_socket_missing(monkeypatch) -> None:
     class _NoFile:
         def __init__(self, _p):

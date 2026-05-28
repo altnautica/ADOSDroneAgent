@@ -51,14 +51,14 @@ async def test_mavlink_broadcast_fast_consumer_receives_all(tmp_sock_dir):
         # Give the server a tick to register the client
         await asyncio.sleep(0.05)
 
-        N = 200
-        for i in range(N):
+        n = 200
+        for i in range(n):
             server.broadcast(f"frame-{i}".encode())
         # Drain
         received: list[bytes] = []
-        for _ in range(N):
+        for _ in range(n):
             received.append(await asyncio.wait_for(_read_frame(reader), timeout=2.0))
-        assert received == [f"frame-{i}".encode() for i in range(N)]
+        assert received == [f"frame-{i}".encode() for i in range(n)]
 
         writer.close()
         await asyncio.sleep(0.05)
@@ -153,11 +153,11 @@ async def test_mavlink_multi_client_fanout(tmp_sock_dir):
         await asyncio.sleep(0.1)
         assert server.client_count == 3
 
-        N = 50
-        for i in range(N):
+        n = 50
+        for i in range(n):
             server.broadcast(f"m{i}".encode())
         for r in readers:
-            for i in range(N):
+            for i in range(n):
                 frame = await asyncio.wait_for(_read_frame(r), timeout=2.0)
                 assert frame == f"m{i}".encode()
 
@@ -252,5 +252,94 @@ async def test_state_publish_round_trip(tmp_sock_dir):
         assert json.loads(line.decode()) == snap
 
         writer.close()
+    finally:
+        await server.stop()
+
+
+@pytest.mark.asyncio
+async def test_state_client_sniffs_v2_msgpack(tmp_sock_dir, monkeypatch):
+    """With the msgpack encoder enabled the sniffing client decodes v2 frames.
+
+    The client never reads the encoder flag itself, so it must detect the
+    length-prefixed msgpack frame purely from the wire.
+    """
+    import ados.core.ipc as ipc_mod
+
+    if ipc_mod._msgpack is None:
+        pytest.skip("msgpack not installed")
+    # Flip the server-side encoder to v2 for this test only.
+    monkeypatch.setattr(ipc_mod, "_USE_MSGPACK", True)
+
+    sock = tmp_sock_dir / "state.sock"
+    server = StateIPCServer(sock_path=sock)
+    await server.start()
+    try:
+        client = StateIPCClient(sock_path=sock)
+        await client.connect(retries=5, delay=0.1)
+        states: list[dict] = []
+        client.set_state_handler(states.append)
+        loop_task = asyncio.create_task(client.read_loop())
+
+        server.publish({"alt": 12.5, "armed": True, "n": 7})
+        for _ in range(20):
+            await asyncio.sleep(0.05)
+            if states:
+                break
+        assert states, "client did not decode any v2 frame"
+        assert states[-1]["n"] == 7
+        assert states[-1]["armed"] is True
+
+        await client.disconnect()
+        loop_task.cancel()
+        with pytest.raises((asyncio.CancelledError, BaseException)):
+            await loop_task
+    finally:
+        await server.stop()
+
+
+@pytest.mark.asyncio
+async def test_state_client_sniffs_v1_after_v2(tmp_sock_dir, monkeypatch):
+    """A single client read_loop decodes a v2 frame then a v1 frame on one wire.
+
+    Proves the per-frame sniff survives an encoder flip mid-stream (the
+    deployment-flip window), not just a uniform stream.
+    """
+    import ados.core.ipc as ipc_mod
+
+    if ipc_mod._msgpack is None:
+        pytest.skip("msgpack not installed")
+
+    sock = tmp_sock_dir / "state.sock"
+    server = StateIPCServer(sock_path=sock)
+    await server.start()
+    try:
+        client = StateIPCClient(sock_path=sock)
+        await client.connect(retries=5, delay=0.1)
+        states: list[dict] = []
+        client.set_state_handler(states.append)
+        loop_task = asyncio.create_task(client.read_loop())
+
+        # First publish a v2 (msgpack) frame, then flip the encoder to v1
+        # (JSON) and publish again, all on the same connection.
+        monkeypatch.setattr(ipc_mod, "_USE_MSGPACK", True)
+        server.publish({"wire": "v2", "n": 1})
+        for _ in range(20):
+            await asyncio.sleep(0.05)
+            if any(s.get("wire") == "v2" for s in states):
+                break
+        monkeypatch.setattr(ipc_mod, "_USE_MSGPACK", False)
+        server.publish({"wire": "v1", "n": 2})
+        for _ in range(20):
+            await asyncio.sleep(0.05)
+            if any(s.get("wire") == "v1" for s in states):
+                break
+
+        wires = {s.get("wire") for s in states}
+        assert "v2" in wires and "v1" in wires
+
+        await client.disconnect()
+        loop_task.cancel()
+        with pytest.raises((asyncio.CancelledError, BaseException)):
+            await loop_task
     finally:
         await server.stop()

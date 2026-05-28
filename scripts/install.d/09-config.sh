@@ -144,6 +144,28 @@ CFGEOF
     info "Default config written."
 }
 
+# ─── Generate Agent Environment File ────────────────────────────────────────
+
+generate_env_file() {
+    # /etc/ados/env is loaded by every long-running ados-* unit via
+    # `EnvironmentFile=-/etc/ados/env`. Ensure ADOS_STATE_IPC_MSGPACK=1 so the
+    # state socket uses the compact length-prefixed msgpack wire instead of
+    # newline-JSON. Runs on install AND upgrade so the setting reaches existing
+    # deployments. Idempotent, and preserves any other operator-set variables
+    # already in the file.
+    local env_file="${CONFIG_DIR}/env"
+    mkdir -p "${CONFIG_DIR}"
+    if [ ! -f "${env_file}" ]; then
+        printf 'ADOS_STATE_IPC_MSGPACK=1\n' > "${env_file}"
+    elif grep -q '^ADOS_STATE_IPC_MSGPACK=' "${env_file}"; then
+        sed -i 's/^ADOS_STATE_IPC_MSGPACK=.*/ADOS_STATE_IPC_MSGPACK=1/' "${env_file}"
+    else
+        printf 'ADOS_STATE_IPC_MSGPACK=1\n' >> "${env_file}"
+    fi
+    chmod 0600 "${env_file}" 2>/dev/null || true
+    info "Agent environment file ensured (state IPC msgpack enabled)."
+}
+
 # ─── Harden Secret File Permissions ─────────────────────────────────────────
 
 harden_secret_perms() {
