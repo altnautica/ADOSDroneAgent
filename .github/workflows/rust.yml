@@ -14,8 +14,11 @@ on:
       - "src/ados/plugins/_capabilities_generated.py"
       - ".github/workflows/rust.yml"
 
+# Default to read-only so the build-test job (which runs on pull requests, i.e.
+# fork-controlled code) never holds a release-write token. Only publish-tui
+# elevates to contents: write, and it runs only on pushes to main.
 permissions:
-  contents: write
+  contents: read
 
 defaults:
   run:
@@ -70,6 +73,8 @@ jobs:
     needs: build-test
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
 
@@ -90,6 +95,20 @@ jobs:
           mkdir -p rel
           cp target/aarch64-unknown-linux-musl/release/ados-tui rel/ados-tui-aarch64
           ( cd rel && sha256sum ados-tui-aarch64 > ados-tui-aarch64.sha256 )
+
+      - name: Sign artifact (only when the signing key is present)
+        env:
+          SIGNING_KEY: ${{ secrets.ADOS_DRIVER_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${SIGNING_KEY}" ]; then
+            echo "No ADOS_DRIVER_SIGNING_KEY set; publishing SHA256-only (dev posture)."
+            exit 0
+          fi
+          sudo apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y minisign
+          printf '%s' "${SIGNING_KEY}" > /tmp/sign.key
+          minisign -S -s /tmp/sign.key -m rel/ados-tui-aarch64 -x rel/ados-tui-aarch64.minisig
+          rm -f /tmp/sign.key
 
       - name: Publish rolling prerelease
         uses: softprops/action-gh-release@v2

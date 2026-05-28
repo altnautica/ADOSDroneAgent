@@ -13,6 +13,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use ados_protocol::rest::RestClient;
 use anyhow::Result;
 use ratatui::backend::CrosstermBackend;
+use ratatui::crossterm::cursor::Show;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -54,12 +55,31 @@ fn now_hms() -> String {
     )
 }
 
+/// Restore the terminal out of raw mode and the alternate screen.
+fn restore_terminal() {
+    let _ = disable_raw_mode();
+    let _ = execute!(std::io::stdout(), LeaveAlternateScreen, Show);
+}
+
+/// Restore the terminal from a panic hook before the default hook runs, so a
+/// panic in the render loop never strands the operator's shell in raw mode +
+/// the alternate screen. The release profile aborts on panic, but a hook still
+/// runs before the abort.
+fn install_panic_hook() {
+    let default = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        restore_terminal();
+        default(info);
+    }));
+}
+
 fn main() -> Result<()> {
     let mut client = RestClient::local();
     if let Some(key) = load_api_key() {
         client = client.with_api_key(key);
     }
 
+    install_panic_hook();
     enable_raw_mode()?;
     let mut stdout = std::io::stdout();
     stdout.execute(EnterAlternateScreen)?;
@@ -67,10 +87,9 @@ fn main() -> Result<()> {
 
     let result = run(&mut terminal, &client);
 
-    // Always restore the terminal, even on error.
-    disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
-    terminal.show_cursor()?;
+    // Always restore the terminal on a clean exit too.
+    restore_terminal();
+    let _ = terminal.show_cursor();
     result
 }
 
