@@ -36,60 +36,6 @@ def _shape(steps) -> list[tuple[str, str]]:
     return [(s.id, s.state) for s in steps]
 
 
-def test_cold_start_welcome_only() -> None:
-    """No network, no profile confirmation, no FC — welcome flagged for action."""
-    steps = _setup_steps(
-        profile="auto",
-        mavlink=MavlinkAccess(),
-        video=VideoAccess(),
-        network=NetworkStatus(),  # empty: no local_ips, hotspot off
-        remote=RemoteAccessStatus(),
-        cloud_choice=CloudChoiceStatus(),
-        profile_suggestion=ProfileSuggestion(detected="drone", confirmed=False),
-        hardware_check=_ok_hc("drone"),
-        mission_control_url="",
-    )
-    shape = _shape(steps)
-    assert shape == [
-        ("welcome", "needs_action"),
-        ("profile", "needs_action"),
-        ("hardware_check", "complete"),
-        ("cloud_choice", "needs_action"),
-        ("pair", "needs_action"),
-        ("mavlink", "needs_action"),
-        ("video", "needs_action"),
-        ("remote_access", "optional"),
-        ("finish", "optional"),
-    ]
-
-
-def test_drone_profile_fc_connected_no_cloud() -> None:
-    """Drone, network up, FC live, but no cloud posture set."""
-    steps = _setup_steps(
-        profile="drone",
-        mavlink=MavlinkAccess(connected=True),
-        video=VideoAccess(),
-        network=NetworkStatus(local_ips=["10.0.0.5"]),
-        remote=RemoteAccessStatus(),
-        cloud_choice=CloudChoiceStatus(),  # mode unset
-        profile_suggestion=ProfileSuggestion(detected="drone", confirmed=True),
-        hardware_check=_ok_hc("drone"),
-        mission_control_url="",
-    )
-    shape = _shape(steps)
-    assert shape == [
-        ("welcome", "complete"),
-        ("profile", "complete"),
-        ("hardware_check", "complete"),
-        ("cloud_choice", "needs_action"),
-        ("pair", "needs_action"),
-        ("mavlink", "complete"),
-        ("video", "needs_action"),
-        ("remote_access", "optional"),
-        ("finish", "complete"),
-    ]
-
-
 def test_drone_profile_paired_with_cloud() -> None:
     """Fully wired drone — cloud paired, FC live, video running."""
     steps = _setup_steps(

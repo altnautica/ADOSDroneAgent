@@ -279,9 +279,12 @@ class TestInstallShellPersistence:
         from pathlib import Path
 
         repo_root = Path(__file__).resolve().parents[1]
-        script = repo_root / "scripts" / "install.sh"
-        assert script.exists(), f"install.sh missing at {script}"
-        text = script.read_text()
+        # install.sh is a thin dispatcher; the real logic lives in the
+        # install.d/*.sh modules (definition in 11-artifacts.sh, calls in
+        # 13-main.sh). Scan the whole module tree.
+        install_d = repo_root / "scripts" / "install.d"
+        assert install_d.is_dir(), f"install.d missing at {install_d}"
+        text = "\n".join(p.read_text() for p in sorted(install_d.glob("*.sh")))
         # The function definition must exist...
         assert "persist_repo_artifacts()" in text
         # ...and it must be called from somewhere (both fresh-install and --upgrade paths).

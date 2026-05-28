@@ -187,9 +187,17 @@ def _has_dtc() -> bool:
     return shutil.which("dtc") is not None
 
 
+# Overlays that use C-preprocessor directives (#define / #include) cannot
+# compile under plain dtc; they are exercised by the preprocessed upstream
+# path below instead.
+_PLAIN_DTC_OVERLAYS = [
+    p for p in OVERLAY_DTS_FILES if p.name != "cubie-a7z-waveshare35a.dts"
+]
+
+
 @pytest.mark.skipif(not _has_dtc(), reason="device-tree-compiler not installed")
 class TestOverlayDtcCompiles:
-    @pytest.mark.parametrize("dts", OVERLAY_DTS_FILES, ids=lambda p: p.name)
+    @pytest.mark.parametrize("dts", _PLAIN_DTC_OVERLAYS, ids=lambda p: p.name)
     def test_repo_overlay_compiles(self, dts: Path, tmp_path: Path):
         """Each repo-shipped DTS in data/overlays/ must compile via dtc.
 

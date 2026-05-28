@@ -361,6 +361,11 @@ def test_pair_revoke_wrong_role(client, patch_role):
 
 
 def test_wfb_pair_post_requires_body(client):
-    """POST /wfb/pair requires a pair_key field."""
+    """POST /wfb/pair requires a pair_key field.
+
+    The ground-station routes report a bad request body as 400 (the
+    convention shared with the camera/mesh/network routes), not FastAPI's
+    default 422.
+    """
     resp = client.post(f"{GS_PREFIX}/wfb/pair", json={})
-    assert resp.status_code == 422
+    assert resp.status_code == 400
