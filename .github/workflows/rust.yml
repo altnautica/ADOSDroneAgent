@@ -1,0 +1,64 @@
+name: Rust
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "crates/**"
+      - "src/ados/plugins/_capabilities_generated.py"
+      - ".github/workflows/rust.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "crates/**"
+      - "src/ados/plugins/_capabilities_generated.py"
+      - ".github/workflows/rust.yml"
+
+defaults:
+  run:
+    working-directory: crates
+
+jobs:
+  build-test:
+    # Native arm64 so the build and tests run on the same architecture as the
+    # target boards (Rock 5C, Pi 4B); no cross-compile needed.
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            crates/target
+          key: arm64-cargo-${{ hashFiles('crates/Cargo.lock') }}
+          restore-keys: arm64-cargo-
+
+      - name: Format check
+        run: cargo fmt --check
+
+      - name: Clippy (all features)
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Test (default features)
+        run: cargo test
+
+      - name: Test (all features)
+        run: cargo test --all-features
+
+      - name: Capability catalog drift check
+        run: cargo run -q -p ados-capabilities-codegen -- --check
+
+      - name: Release build (arm64)
+        run: cargo build --release --all-features
+
+      # The shippable arm64 binary (the TUI) lands in a later change; this
+      # workflow currently proves the arm64 toolchain, the contracts, and the
+      # capability drift gate. Artifact signing is intentionally not wired.
