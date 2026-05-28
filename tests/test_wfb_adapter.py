@@ -155,8 +155,9 @@ def test_monitor_mode_success(mock_platform, mock_subprocess):
     mock_subprocess.run.return_value = ok_result
 
     assert set_monitor_mode("wlan0") is True
-    # 3 mode commands (down / monitor / up) + 1 power_save off.
-    assert mock_subprocess.run.call_count == 4
+    # nmcli unmanage + 3 mode commands (down / set type monitor / up) +
+    # 1 power_save off. The type form succeeds so no fallback fires.
+    assert mock_subprocess.run.call_count == 5
 
 
 @patch("ados.services.wfb.adapter.subprocess")
@@ -170,7 +171,7 @@ def test_monitor_mode_disables_powersave(mock_platform, mock_subprocess):
 
     assert set_monitor_mode("wlan0") is True
     issued = [list(call.args[0]) for call in mock_subprocess.run.call_args_list]
-    assert ["iw", "wlan0", "set", "monitor", "none"] in issued
+    assert ["iw", "wlan0", "set", "type", "monitor"] in issued
     assert ["iw", "dev", "wlan0", "set", "power_save", "off"] in issued
     # power_save off must come after the interface is brought up.
     assert issued.index(["iw", "dev", "wlan0", "set", "power_save", "off"]) > issued.index(
@@ -206,6 +207,70 @@ def test_monitor_mode_failure(mock_platform, mock_subprocess):
     fail_result.returncode = 1
     fail_result.stderr = "Operation not permitted"
     mock_subprocess.run.return_value = fail_result
+
+    assert set_monitor_mode("wlan0") is False
+
+
+@patch("ados.services.wfb.adapter.subprocess")
+@patch("ados.services.wfb.adapter.platform")
+def test_monitor_mode_unmanages_networkmanager(mock_platform, mock_subprocess):
+    """The radio is released from NetworkManager before the monitor switch."""
+    mock_platform.system.return_value = "Linux"
+    ok_result = MagicMock()
+    ok_result.returncode = 0
+    mock_subprocess.run.return_value = ok_result
+
+    assert set_monitor_mode("wlan0") is True
+    issued = [list(call.args[0]) for call in mock_subprocess.run.call_args_list]
+    assert ["nmcli", "dev", "set", "wlan0", "managed", "no"] in issued
+    # NM release must precede the interface-down / monitor switch.
+    assert issued.index(["nmcli", "dev", "set", "wlan0", "managed", "no"]) < issued.index(
+        ["ip", "link", "set", "wlan0", "down"]
+    )
+
+
+@patch("ados.services.wfb.adapter.subprocess")
+@patch("ados.services.wfb.adapter.platform")
+def test_monitor_mode_falls_back_to_flag_form(mock_platform, mock_subprocess):
+    """A driver that rejects `set type monitor` still succeeds via the flag form."""
+    mock_platform.system.return_value = "Linux"
+
+    def _run(cmd, **_kw):
+        result = MagicMock()
+        if cmd == ["iw", "wlan0", "set", "type", "monitor"]:
+            result.returncode = 1
+            result.stderr = "command failed: Invalid argument (-22)"
+        else:
+            result.returncode = 0
+            result.stderr = ""
+        return result
+
+    mock_subprocess.run.side_effect = _run
+
+    assert set_monitor_mode("wlan0") is True
+    issued = [list(call.args[0]) for call in mock_subprocess.run.call_args_list]
+    assert ["iw", "wlan0", "set", "type", "monitor"] in issued
+    assert ["iw", "wlan0", "set", "monitor", "none"] in issued
+
+
+@patch("ados.services.wfb.adapter.subprocess")
+@patch("ados.services.wfb.adapter.platform")
+def test_monitor_mode_both_forms_fail(mock_platform, mock_subprocess):
+    """When neither monitor form takes (e.g. EIO on both), report failure."""
+    mock_platform.system.return_value = "Linux"
+
+    def _run(cmd, **_kw):
+        result = MagicMock()
+        # Both `set type monitor` and `set monitor none` carry "monitor".
+        if cmd[:1] == ["iw"] and "monitor" in cmd:
+            result.returncode = 1
+            result.stderr = "command failed: Input/output error (-5)"
+        else:
+            result.returncode = 0
+            result.stderr = ""
+        return result
+
+    mock_subprocess.run.side_effect = _run
 
     assert set_monitor_mode("wlan0") is False
 

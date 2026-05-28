@@ -471,8 +471,15 @@ def select_wfb_interface(
 def set_monitor_mode(interface: str) -> bool:
     """Put a WiFi interface into monitor mode.
 
-    Runs: ip link set <iface> down, iw <iface> set monitor none, ip link set <iface> up.
-    Returns True on success.
+    Releases the interface from NetworkManager first (best-effort) so NM
+    cannot hold it in managed mode or revert the switch, then brings the
+    iface down, sets monitor mode, and brings it back up.
+
+    Some RTL8812xx driver builds reject ``iw <iface> set monitor none``
+    with EIO (-5) while accepting the older ``iw <iface> set type monitor``,
+    so the type form is tried first and the flag form is the fallback. This
+    keeps a dedicated RTL radio working on boards (e.g. Rockchip running
+    NetworkManager) where the flag form fails. Returns True on success.
     """
     system = platform.system()
     if system != "Linux":
@@ -481,33 +488,54 @@ def set_monitor_mode(interface: str) -> bool:
 
     _validate_interface_name(interface)
 
-    commands = [
-        ["ip", "link", "set", interface, "down"],
-        ["iw", interface, "set", "monitor", "none"],
-        ["ip", "link", "set", interface, "up"],
-    ]
+    # Release the radio from NetworkManager. A NM-managed interface can
+    # refuse the monitor switch with EIO or silently revert it. Best-effort:
+    # nmcli may be absent (minimal rootfs) or the iface already unmanaged.
+    try:
+        subprocess.run(
+            ["nmcli", "dev", "set", interface, "managed", "no"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
 
-    for cmd in commands:
+    def _run(cmd: list[str]) -> tuple[bool, str]:
         try:
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-            if result.returncode != 0:
-                log.error(
-                    "monitor_mode_cmd_failed",
-                    cmd=" ".join(cmd),
-                    stderr=result.stderr.strip(),
-                )
-                return False
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+            return result.returncode == 0, (result.stderr or "").strip()
         except FileNotFoundError:
             log.error("monitor_mode_tool_missing", cmd=cmd[0])
-            return False
+            return False, "tool missing"
         except subprocess.TimeoutExpired:
             log.error("monitor_mode_timeout", cmd=" ".join(cmd))
+            return False, "timeout"
+
+    # Bring the iface down before changing type — RTL drivers require it.
+    ok, stderr = _run(["ip", "link", "set", interface, "down"])
+    if not ok:
+        log.error("monitor_mode_cmd_failed", cmd=f"ip link set {interface} down", stderr=stderr)
+        return False
+
+    # Set monitor mode. The type form works on RTL8812xx where the flag
+    # form returns EIO; fall back to the flag form for any driver that
+    # only accepts it.
+    ok, stderr = _run(["iw", interface, "set", "type", "monitor"])
+    if not ok:
+        ok_fallback, stderr_fb = _run(["iw", interface, "set", "monitor", "none"])
+        if not ok_fallback:
+            log.error(
+                "monitor_mode_cmd_failed",
+                cmd=f"iw {interface} set type monitor (fallback: set monitor none)",
+                stderr=f"type: {stderr} | none: {stderr_fb}",
+            )
             return False
+
+    ok, stderr = _run(["ip", "link", "set", interface, "up"])
+    if not ok:
+        log.error("monitor_mode_cmd_failed", cmd=f"ip link set {interface} up", stderr=stderr)
+        return False
 
     # Force power-save off on the monitor interface so the radio never
     # parks and silently stalls wfb_tx/wfb_rx. Best-effort: a driver that
