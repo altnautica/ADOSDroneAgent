@@ -23,7 +23,7 @@ use ados_radio::hop::{
     HOP_CONTROL_PORT, PRESENCE_INTERVAL,
 };
 use ados_radio::paths::{run_path, write_sidecar, DRONE_KEY, WFB_TX_KEY};
-use ados_radio::process::WfbTxProcess;
+use ados_radio::process::RadioProcesses;
 use ados_radio::watchdog::{tx_health_watchdog, video_recvq_watchdog, WatchdogFired};
 
 const CONFIG_YAML: &str = "/etc/ados/config.yaml";
@@ -102,19 +102,21 @@ async fn run_service(cfg: &WfbConfig, cancel: Arc<Notify>) {
         let drone_key = tokio::fs::read(DRONE_KEY).await.ok();
         let pair_key = derive_pair_key(drone_key.as_deref());
 
-        // ── Spawn wfb_tx (in its own process group — the orphan fix) ──────
+        // ── Spawn the radio process group: data wfb_tx + tx/rx control ────
+        // (each in its own session — the orphan fix; control plane carries
+        // HopAnnounce/HopAck over the air, so it MUST run for FHSS to work.)
         let key_path = Path::new(WFB_TX_KEY);
-        let proc = match WfbTxProcess::spawn(iface, cfg.channel, cfg, key_path).await {
+        let proc = match RadioProcesses::spawn(iface, cfg, key_path).await {
             Ok(p) => Arc::new(tokio::sync::Mutex::new(p)),
             Err(e) => {
-                tracing::warn!(error = %e, "wfb_tx_spawn_failed");
+                tracing::warn!(error = %e, "wfb_spawn_failed");
                 tokio::select! {
                     _ = tokio::time::sleep(Duration::from_secs(5)) => continue,
                     _ = cancel.notified() => return,
                 }
             }
         };
-        let pid = { proc.lock().await.pid().unwrap_or(0) };
+        let pid = { proc.lock().await.data_tx_pid().unwrap_or(0) };
         write_stats_sidecar("connecting", cfg.channel, cfg);
         tracing::info!(iface, channel = cfg.channel, pid, "wfb_service_ready");
 
@@ -176,14 +178,14 @@ async fn run_service(cfg: &WfbConfig, cancel: Arc<Notify>) {
             _ = beacon => {}
             _ = cancel.notified() => {
                 // Clean shutdown.
-                proc.lock().await.kill().await;
+                proc.lock().await.kill_all().await;
                 tracing::info!("wfb_service_stopping");
                 return;
             }
         }
 
-        // Watchdog fired or hop task exited unexpectedly — kill wfb_tx and respawn.
-        proc.lock().await.kill().await;
+        // Watchdog fired or hop task exited unexpectedly — kill the whole group and respawn.
+        proc.lock().await.kill_all().await;
         write_stats_sidecar("connecting", cfg.channel, cfg);
         tokio::select! {
             _ = tokio::time::sleep(Duration::from_secs(1)) => {}
@@ -229,7 +231,7 @@ async fn emit_presence_beacons(
 async fn run_hop_supervisor(
     iface: &str,
     cfg: &WfbConfig,
-    proc: Arc<tokio::sync::Mutex<WfbTxProcess>>,
+    proc: Arc<tokio::sync::Mutex<RadioProcesses>>,
     pair_key: &[u8; 32],
     device_id: &str,
     cancel: Arc<Notify>,
@@ -302,9 +304,9 @@ async fn run_hop_supervisor(
                     if delay > 0.0 {
                         tokio::time::sleep(Duration::from_secs_f64(delay)).await;
                     }
-                    proc.lock().await.kill().await;
+                    proc.lock().await.kill_all().await;
                     set_channel(iface, target).await;
-                    match WfbTxProcess::spawn(iface, target, cfg, Path::new(WFB_TX_KEY)).await {
+                    match RadioProcesses::spawn(iface, cfg, Path::new(WFB_TX_KEY)).await {
                         Ok(new_proc) => {
                             *proc.lock().await = new_proc;
                             state.on_hop(target);
@@ -320,15 +322,10 @@ async fn run_hop_supervisor(
             _ = tokio::time::sleep(Duration::from_secs(5)) => {
                 if state.should_return_home() {
                     tracing::info!(home = state.home_channel, "hop_return_home");
-                    proc.lock().await.kill().await;
+                    proc.lock().await.kill_all().await;
                     set_channel(iface, state.home_channel).await;
-                    if let Ok(new_proc) = WfbTxProcess::spawn(
-                        iface,
-                        state.home_channel,
-                        cfg,
-                        Path::new(WFB_TX_KEY),
-                    )
-                    .await
+                    if let Ok(new_proc) =
+                        RadioProcesses::spawn(iface, cfg, Path::new(WFB_TX_KEY)).await
                     {
                         *proc.lock().await = new_proc;
                         state.on_hop(state.home_channel);
