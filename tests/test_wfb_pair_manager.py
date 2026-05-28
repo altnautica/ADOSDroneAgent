@@ -158,6 +158,23 @@ def test_apply_flips_auto_pair_off(isolated_pm: PairManager) -> None:
     assert wfb.get("auto_pair_enabled") is False
 
 
+def test_apply_flips_auto_pair_off_without_peer_id(isolated_pm: PairManager) -> None:
+    """A local radio bind carries no peer device-id, but a successful key
+    write is still a real pair: auto_pair must disarm so the next boot does
+    not re-run the bind and wipe the freshly written key."""
+    fake_state: dict = {}
+
+    def fake_save(data: dict) -> bool:
+        fake_state.clear()
+        fake_state.update(data)
+        return True
+
+    with patch.object(pm_mod, "_save_config_dict", side_effect=fake_save):
+        asyncio.run(isolated_pm.apply_keypair(_make_blob(0xAB), "drone"))
+    wfb = fake_state.get("video", {}).get("wfb", {})
+    assert wfb.get("auto_pair_enabled") is False
+
+
 def test_set_auto_pair_blocked_when_paired(
     isolated_pm: PairManager,
 ) -> None:

@@ -353,18 +353,20 @@ class PairManager:
         fingerprint = read_public_fingerprint(target)
         paired_at = _iso_now()
 
-        # auto_pair flips off only when we know who we paired with.
-        # A "half pair" where peer_device_id is None means the local
-        # protocol completed (keys are on disk) but the cross-side
-        # device_id was never exchanged — disarming here would leave the
-        # rig stuck with a half-state that no auto-retry can climb out of.
-        # Passing None to _persist_pair_state leaves the existing flag
-        # untouched so auto_pair stays armed and retries on next cycle.
+        # Reaching here means the bind tunnel completed the key transfer
+        # and a valid keypair is now on disk, so this is a real pair —
+        # disarm auto_pair regardless of whether a peer device-id was
+        # exchanged. The local radio-bind protocol does not carry a
+        # device-id, so gating the disarm on peer_device_id left every
+        # local bind armed: the next boot re-ran auto_pair, which wipes the
+        # freshly written tx.key/rx.key, and the pairing never survived a
+        # reboot. The device-id remains optional metadata for UI display
+        # and the fingerprint cross-check; the link does not need it.
         _persist_pair_state(
             role=role,
             peer_device_id=peer_device_id,
             paired_at=paired_at,
-            auto_pair_enabled=False if peer_device_id else None,
+            auto_pair_enabled=False,
         )
 
         # Drop the setup-complete sentinel so captive_dns.py stops
