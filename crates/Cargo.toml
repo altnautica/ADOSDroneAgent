@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["ados-protocol", "ados-capabilities-codegen"]
+members = ["ados-protocol", "ados-capabilities-codegen", "ados-tui"]
 
 [workspace.package]
 version = "0.1.0"
@@ -22,6 +22,10 @@ toml = "0.8"
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "net", "io-util", "sync", "time"] }
 # HTTP-only (no TLS): the REST client targets the agent on localhost:8080.
 ureq = { version = "2", default-features = false, features = ["json"] }
+# TUI. ratatui re-exports a matching crossterm, so the binary uses
+# `ratatui::crossterm` rather than a separately versioned crossterm dependency.
+ratatui = "0.29"
+anyhow = "1"
 
 [profile.release]
 strip = true

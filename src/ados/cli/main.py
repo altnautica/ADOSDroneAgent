@@ -9,8 +9,6 @@ import shutil
 import signal
 import subprocess
 import sys
-import time
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -66,14 +64,6 @@ def _request(method: str, path: str, **kwargs: Any) -> dict[str, Any]:
 
 def _setup_status() -> dict[str, Any]:
     return _request("GET", "/api/v1/setup/status")
-
-
-def _state_label(value: str) -> str:
-    if value == "complete":
-        return "ready"
-    if value == "needs_action":
-        return "needs action"
-    return value.replace("_", " ")
 
 
 def _viewer_url_from_whep(whep_url: str | None) -> str | None:
@@ -164,151 +154,24 @@ def _plain_status(data: dict[str, Any]) -> None:
     click.echo(f"Next: {data.get('next_action', 'Open setup in a browser')}")
 
 
-def _render_dashboard(data: dict[str, Any]) -> Any:
-    from rich.align import Align
-    from rich.console import Group
-    from rich.layout import Layout
-    from rich.panel import Panel
-    from rich.table import Table
-    from rich.text import Text
+def _tui_binary() -> str | None:
+    """Locate the ados-tui dashboard binary, if installed.
 
-    layout = Layout()
-    layout.split_column(
-        Layout(name="header", size=3),
-        Layout(name="body"),
-        Layout(name="footer", size=3),
-    )
-    layout["body"].split_row(Layout(name="left"), Layout(name="right"))
-    layout["right"].split_column(Layout(name="status"), Layout(name="telemetry"))
-
-    profile = data.get("profile", "?")
-    title = Text()
-    title.append("ADOS Drone Agent", style="bold cyan")
-    title.append(f"  v{data.get('version', '?')}  ")
-    title.append(f"{data.get('device_name', '?')} / {profile}", style="white")
-    paired = bool(data.get("paired", False))
-    code = data.get("pairing_code")
-    if paired:
-        title.append("  paired", style="bold green")
-    elif code:
-        title.append(f"  code {code}", style="bold yellow")
-    title.append(f"  refreshed {datetime.now().strftime('%H:%M:%S')}", style="dim")
-    layout["header"].update(Panel(title, border_style="cyan"))
-
-    url_table = Table.grid(padding=(0, 1))
-    url_table.add_column(style="bold")
-    url_table.add_column(overflow="fold")
-    for item in data.get("access_urls", [])[:10]:
-        label = str(item.get("label", "URL"))
-        url = str(item.get("url", ""))
-        marker = "*" if item.get("primary") else " "
-        url_table.add_row(f"{marker} {label}", url)
-    layout["left"].update(Panel(url_table, title="Open Setup And Access", border_style="green"))
-
-    status_table = Table.grid(padding=(0, 1))
-    status_table.add_column(style="bold")
-    status_table.add_column(overflow="fold")
-    for step in data.get("steps", []):
-        state = _state_label(str(step.get("state", "")))
-        status_table.add_row(str(step.get("label", "")), state)
-    video = data.get("video", {})
-    mavlink = data.get("mavlink", {})
-    network = data.get("network", {})
-    remote = data.get("remote_access", {})
-    cloud_choice = data.get("cloud_choice", {}) or {}
-
-    status_table.add_row(
-        "MAVLink FC",
-        "connected" if mavlink.get("connected") else "not connected",
-    )
-    if mavlink.get("tcp_url"):
-        status_table.add_row("MAVLink TCP", str(mavlink.get("tcp_url")))
-    if mavlink.get("websocket_url"):
-        status_table.add_row("MAVLink WS", str(mavlink.get("websocket_url")))
-
-    viewer_url = _viewer_url_from_whep(video.get("whep_url"))
-    if viewer_url:
-        status_table.add_row(
-            "Video viewer", f"{video.get('state', '?')}  {viewer_url}"
-        )
-    else:
-        status_table.add_row("Video", str(video.get("state", "unknown")))
-
-    status_table.add_row("Hotspot", str(network.get("hotspot_ssid", "")))
-
-    cloud_paired = bool(cloud_choice.get("paired"))
-    backend_url = str(cloud_choice.get("backend_url", "") or "")
-    cloud_mode = str(cloud_choice.get("mode", "") or "")
-    if cloud_paired and backend_url:
-        status_table.add_row("Cloud relay", f"paired ({backend_url})")
-    elif backend_url and cloud_mode != "local":
-        status_table.add_row("Cloud relay", f"configured ({backend_url})")
-    elif cloud_mode == "local":
-        status_table.add_row("Cloud relay", "disabled (local mode)")
-    else:
-        status_table.add_row("Cloud relay", "not configured")
-    status_table.add_row("Cloudflare", str(remote.get("status", "disabled")))
-    layout["status"].update(Panel(status_table, title="Status", border_style="blue"))
-
-    telemetry = data.get("telemetry") or {}
-    telem_table = Table.grid(padding=(0, 1))
-    telem_table.add_column(style="bold")
-    telem_table.add_column()
-    for key in ("mode", "armed", "battery_remaining", "gps_fix", "satellites", "alt"):
-        if key in telemetry:
-            telem_table.add_row(key.replace("_", " ").title(), str(telemetry.get(key)))
-    if not telemetry:
-        telem_table.add_row("Telemetry", "waiting for MAVLink")
-    services = data.get("services", [])
-    running = sum(1 for item in services if item.get("state") == "running")
-    telem_table.add_row("Services", f"{running}/{len(services)} running")
-    layout["telemetry"].update(
-        Panel(
-            Group(telem_table, Text(str(data.get("next_action", "")), style="dim")),
-            title="Telemetry",
-        )
-    )
-
-    layout["footer"].update(
-        Panel(
-            Align.left("Open the URL above in a browser | ados status --json | q quit | Ctrl-C"),
-            border_style="dim",
-        )
-    )
-    return layout
-
-
-def _interactive_dashboard() -> None:
-    import select
-    import termios
-    import tty
-
-    from rich.console import Console
-    from rich.live import Live
-
-    console = Console()
-    old_settings = termios.tcgetattr(sys.stdin)
-    tty.setcbreak(sys.stdin.fileno())
-    try:
-        data = _setup_status()
-        with Live(
-            _render_dashboard(data),
-            console=console,
-            screen=True,
-            refresh_per_second=4,
-        ) as live:
-            last_fetch = 0.0
-            while True:
-                now = time.monotonic()
-                if now - last_fetch >= 2.0:
-                    data = _setup_status()
-                    live.update(_render_dashboard(data))
-                    last_fetch = now
-                readable, _, _ = select.select([sys.stdin], [], [], 0.1)
-                if readable and sys.stdin.read(1).lower() == "q":
-                    return
-    finally:
-        termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
+    The live terminal dashboard is the Rust ``ados-tui`` binary. It is
+    installed alongside the agent; an override is honoured for development.
+    """
+    candidates: list[str] = []
+    override = os.environ.get("ADOS_TUI_BIN")
+    if override:
+        candidates.append(override)
+    candidates.append("/opt/ados/bin/ados-tui")
+    on_path = shutil.which("ados-tui")
+    if on_path:
+        candidates.append(on_path)
+    for candidate in candidates:
+        if candidate and Path(candidate).is_file() and os.access(candidate, os.X_OK):
+            return candidate
+    return None
 
 
 @click.group(invoke_without_command=True)
@@ -316,11 +179,17 @@ def _interactive_dashboard() -> None:
 def cli(ctx: click.Context) -> None:
     """ADOS Drone Agent."""
     if ctx.invoked_subcommand is None:
-        data = _setup_status()
+        # An interactive terminal hands off to the Rust dashboard binary; this
+        # process is replaced by it. Without a TTY (or a dashboard binary),
+        # fall back to the one-shot plain status.
         if sys.stdin.isatty() and sys.stdout.isatty():
-            _interactive_dashboard()
-        else:
-            _plain_status(data)
+            tui = _tui_binary()
+            if tui:
+                try:
+                    os.execv(tui, [tui])  # replaces this process; does not return
+                except OSError:
+                    pass
+        _plain_status(_setup_status())
 
 
 @cli.command()
