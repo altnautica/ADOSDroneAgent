@@ -1,0 +1,47 @@
+{
+  "envelope": {
+    "args": {
+      "n": 7,
+      "topic": "demo"
+    },
+    "body_hex": "88a17601a174a772657175657374a16dad6576656e742e7075626c697368a163ad6576656e742e7075626c697368a16182a5746f706963a464656d6fa16e07a26964a77265712d303031a3746f6bb676317c707c737c307c3630307c7c6465616462656566a3657272c0",
+    "capability": "event.publish",
+    "error": null,
+    "frame_hex": "0000006a88a17601a174a772657175657374a16dad6576656e742e7075626c697368a163ad6576656e742e7075626c697368a16182a5746f706963a464656d6fa16e07a26964a77265712d303031a3746f6bb676317c707c737c307c3630307c7c6465616462656566a3657272c0",
+    "method": "event.publish",
+    "request_id": "req-001",
+    "token": "v1|p|s|0|600||deadbeef",
+    "type": "request",
+    "version": 1
+  },
+  "state_v1": {
+    "state": {
+      "armed": false,
+      "battery": {
+        "remaining": 87,
+        "voltage": 16.4
+      },
+      "gps": {
+        "fix": 3,
+        "sats": 14
+      },
+      "mode": "STABILIZE"
+    },
+    "wire_hex": "7b2261726d6564223a2066616c73652c20226d6f6465223a202253544142494c495a45222c202262617474657279223a207b22766f6c74616765223a2031362e342c202272656d61696e696e67223a2038377d2c2022677073223a207b22666978223a20332c202273617473223a2031347d7d0a"
+  },
+  "token": {
+    "expires_at": 1700000600,
+    "granted_caps": [
+      "event.publish",
+      "mavlink.read",
+      "telemetry.read"
+    ],
+    "issued_at": 1700000000,
+    "plugin_id": "com.altnautica.example",
+    "secret_hex": "696e7465726f702d7365637265742d3031323334353637383961626364656621",
+    "session_id": "0123456789abcdef",
+    "signature": "bfdd90ec008b5e34c386fc4da38545c52775d9cbcad8683aef0c0e3c6518a852",
+    "token_string": "v1|com.altnautica.example|0123456789abcdef|1700000000|1700000600|6576656e742e7075626c6973682c6d61766c696e6b2e726561642c74656c656d657472792e72656164|bfdd90ec008b5e34c386fc4da38545c52775d9cbcad8683aef0c0e3c6518a852",
+    "ttl": 600
+  }
+}

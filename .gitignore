@@ -52,3 +52,8 @@ logs/
 *.tar.gz
 *.whl
 .claude/
+
+# Rust
+crates/target/
+target/
+**/*.rs.bk

@@ -1,0 +1,18 @@
+[package]
+name = "ados-protocol"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Canonical implementation of the ADOS Drone Agent IPC wire contracts: length-prefixed framing, plugin RPC envelope and capability tokens, and the vehicle-state codec."
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+rmp-serde = { workspace = true }
+rmpv = { workspace = true }
+hmac = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+thiserror = { workspace = true }
+getrandom = { workspace = true }
