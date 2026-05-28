@@ -16,7 +16,12 @@ StartLimitBurst=5
 
 [Service]
 Type=notify
-ExecStart=/opt/ados/venv/bin/ados-supervisor
+# Prefer the prebuilt native orchestrator when it is present on disk, and fall
+# back to the packaged entry point otherwise. The prebuilt fetch is best-effort
+# (offline / non-arm64 hosts skip it), so the unit must never point at a binary
+# that may be absent. `exec` hands the process identity to the chosen binary so
+# Type=notify readiness, the watchdog, and the cgroup all track the real PID.
+ExecStart=/bin/sh -c 'if [ -x /opt/ados/bin/ados-supervisor ]; then exec /opt/ados/bin/ados-supervisor; else exec /opt/ados/venv/bin/ados-supervisor; fi'
 Restart=always
 RestartSec=1
 WatchdogSec=30
