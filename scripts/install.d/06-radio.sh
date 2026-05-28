@@ -171,6 +171,21 @@ provision_wfb_bind_artifacts() {
         fi
     fi
 
+    # Pin the bind channel to the link's home channel (149). wfb-server's
+    # --gen-bind-yaml defaults the bind profiles to channel 165 (top of the
+    # U-NII-3 band), which many regulatory domains cap at zero TX power or
+    # disable outright. On those domains an RTL8812EU emits no 802.11 frames
+    # on 165, so the drone<->ground bind never crosses the air and pairing
+    # silently fails (the key-transfer tunnel times out with no bytes moved).
+    # Channel 149 is the link's home channel and is widely permitted, so bind
+    # and data stay on one known-good channel. Runs on every install/upgrade
+    # because the generation step above only fires when the file is absent;
+    # idempotent once the channel is already 149.
+    if [ -f /etc/bind.yaml ] && grep -q 'wifi_channel: 165' /etc/bind.yaml 2>/dev/null; then
+        info "Pinning bind channel to 149 (165 is TX-restricted in many regions)"
+        sed -i 's/wifi_channel: 165/wifi_channel: 149/g' /etc/bind.yaml
+    fi
+
     # Install the wfb-ng template unit so `wifibroadcast@drone_bind` and
     # `wifibroadcast@gs_bind` are addressable via systemctl. setup.py
     # ships it in the deb layout at /usr/lib/systemd/system/, but Radxa
