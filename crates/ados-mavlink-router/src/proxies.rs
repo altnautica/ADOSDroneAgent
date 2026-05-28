@@ -12,10 +12,12 @@ use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use futures_util::{SinkExt, StreamExt};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, UdpSocket};
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::{Mutex, Notify};
+use tokio_tungstenite::tungstenite::Message;
 
 use crate::connection::FcConnection;
 
@@ -122,4 +124,62 @@ pub async fn run_udp_proxy(fc: Arc<FcConnection>, port: u16, cancel: Arc<Notify>
             }
         }
     }
+}
+
+/// WebSocket MAVLink proxy. Binds `0.0.0.0:<port>` and bridges binary WebSocket
+/// frames to/from the FC, the way a browser GCS connects. Text/ping frames are
+/// ignored; only binary frames carry MAVLink.
+pub async fn run_ws_proxy(fc: Arc<FcConnection>, port: u16, cancel: Arc<Notify>) {
+    let listener = match TcpListener::bind(("0.0.0.0", port)).await {
+        Ok(l) => l,
+        Err(e) => {
+            tracing::warn!(port, error = %e, "ws_proxy_bind_failed");
+            return;
+        }
+    };
+    tracing::info!(port, "ws_proxy_listening");
+    loop {
+        tokio::select! {
+            accepted = listener.accept() => {
+                if let Ok((stream, _addr)) = accepted {
+                    tokio::spawn(handle_ws_client(fc.clone(), stream));
+                }
+            }
+            _ = cancel.notified() => return,
+        }
+    }
+}
+
+async fn handle_ws_client(fc: Arc<FcConnection>, stream: tokio::net::TcpStream) {
+    let ws = match tokio_tungstenite::accept_async(stream).await {
+        Ok(w) => w,
+        Err(_) => return,
+    };
+    let (mut write, mut read) = ws.split();
+    let mut rx = fc.subscribe();
+
+    // FC -> client (binary frames).
+    let writer = tokio::spawn(async move {
+        loop {
+            match rx.recv().await {
+                Ok(frame) => {
+                    if write.send(Message::Binary(frame)).await.is_err() {
+                        break;
+                    }
+                }
+                Err(RecvError::Lagged(_)) => continue,
+                Err(RecvError::Closed) => break,
+            }
+        }
+    });
+
+    // client -> FC (binary frames only; ignore text/ping/pong).
+    while let Some(msg) = read.next().await {
+        match msg {
+            Ok(Message::Binary(data)) => fc.send_bytes(&data).await,
+            Ok(Message::Close(_)) | Err(_) => break,
+            _ => {}
+        }
+    }
+    writer.abort();
 }

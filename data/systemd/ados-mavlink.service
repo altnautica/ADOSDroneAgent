@@ -7,7 +7,10 @@ StartLimitBurst=5
 
 [Service]
 Type=simple
-ExecStart=/opt/ados/venv/bin/python -m ados.services.mavlink
+# Prefer the prebuilt native router when present, fall back to the packaged
+# Python service otherwise (the prebuilt fetch is best-effort). `exec` hands the
+# process identity to the chosen binary so the cgroup + restart track it.
+ExecStart=/bin/sh -c 'if [ -x /opt/ados/bin/ados-mavlink-router ]; then exec /opt/ados/bin/ados-mavlink-router; else exec /opt/ados/venv/bin/python -m ados.services.mavlink; fi'
 Restart=always
 RestartSec=1
 Environment=ADOS_CONFIG=/etc/ados/config.yaml
@@ -17,7 +20,8 @@ EnvironmentFile=-/etc/ados/env
 SupplementaryGroups=dialout
 NoNewPrivileges=yes
 ProtectSystem=strict
-ReadWritePaths=/var/ados /run/ados /dev /etc/ados
+# /var/lib/ados holds the persistent parameter cache (params.json).
+ReadWritePaths=/var/ados /var/lib/ados /run/ados /dev /etc/ados
 
 # Resource limits
 MemoryMax=50M

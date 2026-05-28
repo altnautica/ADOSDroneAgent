@@ -193,4 +193,7 @@ install_global_symlinks() {
     # the systemd unit decides which ExecStart to run, so a present binary is a
     # no-op until a unit points at it.
     install_supervisor_binary
+    # Fetch the prebuilt MAVLink router binary. The ados-mavlink unit's ExecStart
+    # shim runs it when present, else the packaged Python service.
+    install_mavlink_router_binary
 }

@@ -19,7 +19,7 @@ use tokio::sync::{Mutex, Notify};
 use ados_mavlink_router::config::MavlinkConfig;
 use ados_mavlink_router::connection::FcConnection;
 use ados_mavlink_router::param_cache::ParamCache;
-use ados_mavlink_router::proxies::{run_tcp_proxy, run_udp_proxy};
+use ados_mavlink_router::proxies::{run_tcp_proxy, run_udp_proxy, run_ws_proxy};
 use ados_mavlink_router::state::VehicleState;
 
 const MAVLINK_QUEUE_DEPTH: usize = 256;
@@ -208,6 +208,13 @@ async fn main() {
         let cancel = cancel.clone();
         tasks.push(tokio::spawn(async move {
             run_udp_proxy(fc, port, cancel).await
+        }));
+    }
+    if let Some(ws_port) = cfg.websocket_port() {
+        let fc = fc.clone();
+        let cancel = cancel.clone();
+        tasks.push(tokio::spawn(async move {
+            run_ws_proxy(fc, ws_port, cancel).await
         }));
     }
 
