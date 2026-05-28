@@ -186,4 +186,7 @@ install_global_symlinks() {
         ln -sf "${VENV_DIR}/bin/ados-supervisor" /usr/local/bin/ados-supervisor
     fi
     info "Global commands installed: ados, ados-agent, ados-supervisor"
+    # Fetch the terminal dashboard binary that `ados` (no subcommand) launches.
+    # Best-effort; `ados` falls back to plain status if it is not present.
+    install_tui_binary
 }
