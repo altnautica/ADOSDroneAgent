@@ -20,7 +20,6 @@ layer so the suite runs in milliseconds on macOS and Linux.
 from __future__ import annotations
 
 import json
-import platform
 import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -235,10 +234,6 @@ def test_update_transport_error_surfaces_as_click_exception() -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.skipif(
-    platform.system() != "Linux",
-    reason="uninstall --purge Linux path requires Linux geteuid()",
-)
 def test_uninstall_linux_purge_dry_run_calls_systemctl_and_cleanup(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -260,16 +255,22 @@ def test_uninstall_linux_purge_dry_run_calls_systemctl_and_cleanup(
         "data": tmp_path / "var-ados",
         "motd": tmp_path / "30-ados",
     }
-    for p in install_paths.values():
-        if p.suffix:
+    for key, p in install_paths.items():
+        # motd maps to a file (/etc/update-motd.d/30-ados) that uninstall
+        # unlinks; the rest are directories that get rmtree'd.
+        if key == "motd":
             p.write_text("")
         else:
             p.mkdir()
 
+    # Units are discovered by globbing /etc/systemd/system for ados-*.service,
+    # so they must live in a directory the glob can see and be named ados-*.
+    systemd_dir = tmp_path / "systemd-system"
+    systemd_dir.mkdir()
     service_files = [
-        tmp_path / "ados-supervisor.service",
-        tmp_path / "ados-agent.service",
-        tmp_path / "cloudflared.service",
+        systemd_dir / "ados-supervisor.service",
+        systemd_dir / "ados-agent.service",
+        systemd_dir / "ados-cloud.service",
     ]
     for sf in service_files:
         sf.write_text("[Unit]\n")
@@ -282,7 +283,8 @@ def test_uninstall_linux_purge_dry_run_calls_systemctl_and_cleanup(
     def _fake_rmtree(path: Path, *_args, **_kwargs) -> None:
         rmtree_calls.append(Path(path))
 
-    with patch.object(cli_main.os, "geteuid", return_value=0), \
+    with patch.object(cli_main.platform, "system", return_value="Linux"), \
+         patch.object(cli_main.os, "geteuid", return_value=0), \
          patch.object(cli_main.shutil, "which", return_value="/bin/systemctl"), \
          patch.object(cli_main.subprocess, "run", side_effect=_fake_run), \
          patch.object(cli_main.shutil, "rmtree", side_effect=_fake_rmtree), \
@@ -297,12 +299,8 @@ def test_uninstall_linux_purge_dry_run_calls_systemctl_and_cleanup(
                 return install_paths["data"]
             if arg == "/etc/update-motd.d/30-ados":
                 return install_paths["motd"]
-            if arg.startswith("/etc/systemd/system/"):
-                name = arg.rsplit("/", 1)[-1]
-                for sf in service_files:
-                    if sf.name == name:
-                        return sf
-                return tmp_path / name
+            if arg == "/etc/systemd/system":
+                return systemd_dir
             if arg.startswith("/usr/local/bin/"):
                 name = arg.rsplit("/", 1)[-1]
                 return tmp_path / f"bin-{name}"
