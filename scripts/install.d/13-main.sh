@@ -345,12 +345,6 @@ main_install_flow() {
         ados_stage_end
 
         ados_stage_begin "Updating services and configuration"
-        # Ensure the agent environment file carries the current runtime/wire
-        # settings on an upgrade too (the fresh-install path writes it later,
-        # but --upgrade exits before reaching that block). Written before the
-        # unit files are reinstalled below so the supervisor restart picks it up.
-        generate_env_file
-
         # Ensure mediamtx is installed
         install_mediamtx
 
@@ -738,11 +732,6 @@ main_install_flow() {
 
     # Generate default config (idempotent, skips if exists)
     generate_default_config
-
-    # Ensure the agent environment file. Runs on install AND upgrade (config
-    # generation is skip-if-exists, but the env settings must still reach
-    # existing deployments).
-    generate_env_file
 
     # Write pairing state if code was provided
     if [ -n "$PAIR_CODE" ]; then

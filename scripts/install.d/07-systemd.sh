@@ -111,6 +111,9 @@ TMPEOF
 ADOS_DEVICE_ID=${device_id}
 ADOS_CONFIG=${CONFIG_DIR}/config.yaml
 ADOS_RUN_DIR=/run/ados
+# State IPC wire: length-prefixed msgpack (v2). The reader auto-detects the
+# format per frame, so this only selects which encoding the producer emits.
+ADOS_STATE_IPC_MSGPACK=1
 ENVEOF
 
     # Provision the cgroup slice that hosts third-party plugin

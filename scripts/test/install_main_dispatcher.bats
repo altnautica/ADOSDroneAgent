@@ -144,7 +144,7 @@ setup() {
             install_systemd_service disable_other_profile_units enable_universal_units \
             mask_conflicting_standalone_services enable_ground_station_units \
             install_plugin_slice install_plugin_tmpfiles generate_device_id \
-            generate_default_config generate_env_file harden_secret_perms provision_plugin_keys \
+            generate_default_config harden_secret_perms provision_plugin_keys \
             write_pairing install_mediamtx persist_repo_artifacts install_motd \
             wait_for_api_ready print_pairing_code print_hardware_summary print_status \
             checkpoint_mark checkpoint_done checkpoint_clear \
