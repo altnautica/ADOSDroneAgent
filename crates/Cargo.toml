@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["ados-protocol", "ados-capabilities-codegen", "ados-tui"]
+members = ["ados-protocol", "ados-capabilities-codegen", "ados-tui", "ados-supervisor"]
 
 [workspace.package]
 version = "0.1.0"
@@ -19,13 +19,24 @@ hex = "0.4"
 thiserror = "2"
 getrandom = "0.2"
 toml = "0.8"
-tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "net", "io-util", "sync", "time"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "net", "io-util", "sync", "time", "process", "signal"] }
 # HTTP-only (no TLS): the REST client targets the agent on localhost:8080.
 ureq = { version = "2", default-features = false, features = ["json"] }
 # TUI. ratatui re-exports a matching crossterm, so the binary uses
 # `ratatui::crossterm` rather than a separately versioned crossterm dependency.
 ratatui = "0.29"
 anyhow = "1"
+# YAML config reader (/etc/ados/config.yaml + profile.conf). serde_yaml is
+# archived and serde_yml has an outstanding advisory; serde_norway is the
+# maintained pick.
+serde_norway = "0.9"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# Linux-only deps (systemd notify + journald). Declared here; the consuming
+# crate pulls them in only under `[target.'cfg(target_os = "linux")'.dependencies]`
+# so the pure-logic core still builds and tests on a non-Linux host.
+sd-notify = "0.4"
+tracing-journald = "0.3"
 
 [profile.release]
 strip = true

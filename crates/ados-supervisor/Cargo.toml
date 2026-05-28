@@ -1,0 +1,29 @@
+[package]
+name = "ados-supervisor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Process orchestrator for the ADOS Drone Agent: gates, starts, and supervises the systemd service units."
+
+[[bin]]
+name = "ados-supervisor"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_norway = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+
+# Linux-only edges (systemd notify + journald + udev hotplug). Confined to a
+# target section so the pure-logic core still builds and `cargo test`s on a
+# non-Linux dev host; the edge call sites are cfg-gated with inert fallbacks.
+[target.'cfg(target_os = "linux")'.dependencies]
+sd-notify = { workspace = true }
+tracing-journald = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
