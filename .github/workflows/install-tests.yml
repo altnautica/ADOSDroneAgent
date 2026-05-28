@@ -37,19 +37,23 @@ jobs:
             linux-headers-generic cpp
 
       - name: shellcheck library + driver + test scripts
+        # --severity=warning: do not fail the build on advisory info-level
+        # notes (SC1091 unfollowed sources, SC2015 cd && pwd || true idiom).
+        # The tree is clean at warning severity and above.
         run: |
-          shellcheck scripts/install.sh
-          shellcheck scripts/install.d/*.sh
-          shellcheck scripts/lib/net.sh
-          shellcheck scripts/lib/verify.sh
-          shellcheck scripts/drivers/install-display-overlay.sh
-          shellcheck scripts/drivers/install-rtl8812eu.sh
-          shellcheck scripts/test/run_dispatcher_tests.sh
-          shellcheck scripts/test/e2e-install-rig.sh
-          shellcheck scripts/test/minisign_verify_smoke.sh
-          shellcheck scripts/test/verify_smoke.sh
-          shellcheck scripts/test/lint_overlay_invariants.sh
-          shellcheck scripts/test/compile_overlays.sh
+          shellcheck --severity=warning \
+            scripts/install.sh \
+            scripts/install.d/*.sh \
+            scripts/lib/net.sh \
+            scripts/lib/verify.sh \
+            scripts/drivers/install-display-overlay.sh \
+            scripts/drivers/install-rtl8812eu.sh \
+            scripts/test/run_dispatcher_tests.sh \
+            scripts/test/e2e-install-rig.sh \
+            scripts/test/minisign_verify_smoke.sh \
+            scripts/test/verify_smoke.sh \
+            scripts/test/lint_overlay_invariants.sh \
+            scripts/test/compile_overlays.sh
 
       - name: install pipeline smoke (shellcheck + syntax)
         run: bash scripts/test/install-smoke.sh

@@ -24,7 +24,9 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[dev]"
+          # ground-station extra carries Pillow + luma, which the OLED/LCD/
+          # widget UI test modules import at collection time.
+          pip install -e ".[dev,ground-station]"
 
       - name: Lint with ruff
         run: ruff check src/ tests/
