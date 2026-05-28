@@ -194,6 +194,20 @@ def test_set_auto_pair_allowed_when_unpaired(
     assert result["auto_pair_enabled"] is True
 
 
+def test_recover_half_pair_keeps_valid_local_key(isolated_pm: PairManager) -> None:
+    """A valid local-bind key (no peer device-id) must survive the boot
+    half-pair check. The local bind protocol never records a peer device-id,
+    so an unknown peer is the normal shape of a real pairing, not a half-pair.
+    Wiping it here is what made local pairings evaporate across reboots."""
+    asyncio.run(isolated_pm.apply_keypair(_make_blob(0x5A), "drone"))
+    target = isolated_pm._key_path_for_role("drone")
+    assert target.is_file()
+    result = asyncio.run(isolated_pm.recover_half_pair_state("drone"))
+    assert result["recovered"] is False
+    assert result["reason"] == "local_bind_no_peer_id"
+    assert target.is_file()  # key preserved across the boot check
+
+
 def test_status_when_no_key_present(isolated_pm: PairManager) -> None:
     status = asyncio.run(isolated_pm.status("gs"))
     assert status["paired"] is False

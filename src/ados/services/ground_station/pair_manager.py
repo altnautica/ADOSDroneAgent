@@ -480,42 +480,23 @@ class PairManager:
             if isinstance(cfg.get("video"), dict) else {}
         )
         peer = wfb_section.get("paired_with_device_id")
-        # "unknown" comes from older builds that wrote the literal
-        # placeholder when peer_device_id was missing at apply time.
-        # Treat both shapes as the same half-pair condition.
-        if isinstance(peer, str) and peer and peer != "unknown":
-            return {"recovered": False, "reason": "real_peer_known"}
-
-        try:
-            target.unlink()
-        except OSError as exc:
-            log.warning(
-                "half_pair_key_delete_failed",
-                path=str(target),
-                error=str(exc),
-            )
-            return {"recovered": False, "reason": "unlink_failed"}
-
-        _persist_pair_state(
-            role=role,
-            peer_device_id=None,
-            paired_at=None,
-            auto_pair_enabled=True,
+        # A local radio bind never records a peer device-id (the bind
+        # protocol exchanges keys, not ADOS device ids), so an unknown
+        # peer is NOT evidence of a half-pair — it is the normal shape of
+        # a successful local bind. A valid-sized key file on disk means the
+        # rig paired; keep it. Deleting it here on every boot was what made
+        # local pairings evaporate across reboots: the key vanished, auto
+        # pair re-armed, and the rig rebound (re-keying away from its peer)
+        # on every restart. A cloud-relay pairing does carry a device-id
+        # and is equally healthy. Either way a present valid key is left
+        # untouched; a genuinely broken pairing is cleared by the operator
+        # with `ados radio pair unpair`, not silently wiped on boot.
+        reason = (
+            "real_peer_known"
+            if isinstance(peer, str) and peer and peer != "unknown"
+            else "local_bind_no_peer_id"
         )
-
-        log.warning(
-            "half_pair_recovered",
-            role=role,
-            cleared_key=str(target),
-            note="local key existed but peer_device_id was unknown; "
-                 "cleared so auto_pair can rebind cleanly",
-        )
-
-        return {
-            "recovered": True,
-            "cleared_key": str(target),
-            "role": role,
-        }
+        return {"recovered": False, "reason": reason}
 
     async def status(self, role: Role) -> dict[str, Any]:
         """Return live pair status for the given role.
