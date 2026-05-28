@@ -71,5 +71,15 @@ install_supervisor_binary() {
     install -m 0755 "${tmp}/${ADOS_SUPERVISOR_ASSET}" "${dest}"
     rm -rf "${tmp}"
     info "Supervisor binary installed: ${dest}"
+
+    # The unit restarts earlier in the install, when this binary may not yet be
+    # on disk, so its ExecStart shim would have selected the packaged fallback.
+    # Re-assert the running supervisor now that the binary is present so the
+    # install lands fully working with no manual restart. Only when it is
+    # already running (a fresh install starts it later, with the binary present).
+    if systemctl is-active --quiet ados-supervisor 2>/dev/null; then
+        systemctl restart ados-supervisor 2>/dev/null || true
+        info "Supervisor restarted onto the installed binary."
+    fi
 }
 export -f install_supervisor_binary
