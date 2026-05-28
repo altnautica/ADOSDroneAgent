@@ -345,6 +345,12 @@ main_install_flow() {
         ados_stage_end
 
         ados_stage_begin "Updating services and configuration"
+        # Ensure the agent environment file carries the current runtime/wire
+        # settings on an upgrade too (the fresh-install path writes it later,
+        # but --upgrade exits before reaching that block). Written before the
+        # unit files are reinstalled below so the supervisor restart picks it up.
+        generate_env_file
+
         # Ensure mediamtx is installed
         install_mediamtx
 
