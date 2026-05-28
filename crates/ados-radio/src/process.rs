@@ -69,9 +69,9 @@ impl WfbTxProcess {
         let child = cmd.spawn()?;
         #[cfg(target_os = "linux")]
         let pgid = {
-            let raw_pid = child.id().ok_or_else(|| {
-                std::io::Error::new(std::io::ErrorKind::Other, "wfb_tx has no PID yet")
-            })?;
+            let raw_pid = child
+                .id()
+                .ok_or_else(|| std::io::Error::other("wfb_tx has no PID yet"))?;
             // After setsid the child is its own process group leader: PGID == PID.
             nix::unistd::Pid::from_raw(raw_pid as i32)
         };
