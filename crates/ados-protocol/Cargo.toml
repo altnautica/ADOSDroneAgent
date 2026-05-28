@@ -18,3 +18,12 @@ thiserror = { workspace = true }
 getrandom = { workspace = true }
 tokio = { workspace = true }
 ureq = { workspace = true }
+# The MAVLink dialect is a large, slow-to-compile generated enum, and most
+# consumers (e.g. the TUI) do not need it, so it is behind the `mavlink`
+# feature. Renamed to avoid clashing with this crate's own `mavlink` module.
+rust_mavlink = { package = "mavlink", version = "0.13", default-features = false, features = ["ardupilotmega", "std"], optional = true }
+
+[features]
+default = []
+# Enable the MAVLink codec module (ardupilotmega dialect).
+mavlink = ["dep:rust_mavlink"]

@@ -19,6 +19,8 @@
 pub mod capabilities;
 pub mod frame;
 pub mod ipc;
+#[cfg(feature = "mavlink")]
+pub mod mavlink;
 pub mod plugin;
 pub mod rest;
 pub mod state;
