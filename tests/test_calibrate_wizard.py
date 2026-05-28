@@ -4,15 +4,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
 from PIL import Image
 
 from ados.services.ui.theme import DARK
 from ados.services.ui.touch.calibrate import (
-    CalibrationWizard,
     REJECT_RMS_PX,
     STEP_COUNT,
     TARGETS,
+    CalibrationWizard,
 )
 from ados.services.ui.touch.transform import load as load_calib
 

@@ -91,7 +91,7 @@ def _canonical_payload_hash(entries: dict[str, bytes]) -> bytes:
         if path == SIGNATURE_FILENAME:
             continue
         digest = hashlib.sha256(entries[path]).hexdigest()
-        h.update(f"{path}\n{digest}\n".encode("utf-8"))
+        h.update(f"{path}\n{digest}\n".encode())
     return h.digest()
 
 

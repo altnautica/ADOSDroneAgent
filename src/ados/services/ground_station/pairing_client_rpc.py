@@ -24,7 +24,6 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-from pathlib import Path
 from typing import Any, Protocol
 
 from ados.core.logging import get_logger
@@ -51,7 +50,7 @@ async def _call(op: str, args: dict[str, Any] | None = None) -> dict[str, Any]:
             asyncio.open_unix_connection(str(SOCKET_PATH)),
             timeout=CONNECT_TIMEOUT_S,
         )
-    except (OSError, asyncio.TimeoutError) as exc:
+    except (TimeoutError, OSError) as exc:
         raise PairingRpcError(f"pairing daemon unreachable: {exc}") from exc
 
     try:
@@ -60,7 +59,7 @@ async def _call(op: str, args: dict[str, Any] | None = None) -> dict[str, Any]:
         await writer.drain()
         try:
             raw = await asyncio.wait_for(reader.readline(), timeout=IO_TIMEOUT_S)
-        except asyncio.TimeoutError as exc:
+        except TimeoutError as exc:
             raise PairingRpcError("pairing daemon read timeout") from exc
         if not raw:
             raise PairingRpcError("pairing daemon closed connection early")

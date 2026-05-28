@@ -12,7 +12,6 @@ as the host APIs stabilise.
 
 from __future__ import annotations
 
-from ados.sdk.testing import PluginTestHarness, load_fixture
 from ados.sdk.drivers import (
     CameraCandidate,
     CameraCapabilities,
@@ -50,6 +49,7 @@ from ados.sdk.drivers import (
     PayloadSession,
     PayloadState,
 )
+from ados.sdk.testing import PluginTestHarness, load_fixture
 
 __all__ = [
     # Testing

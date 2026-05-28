@@ -9,8 +9,9 @@ per-subscriber queues, drop-on-full, structural fanout.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from typing import AsyncIterator, Literal, Optional
+from typing import Literal
 
 __all__ = [
     "UplinkEventKind",
@@ -29,10 +30,10 @@ class UplinkEvent:
     """A routing, health, or data-cap state change."""
 
     kind: UplinkEventKind
-    active_uplink: Optional[str]
+    active_uplink: str | None
     available: list[str]
     internet_reachable: bool
-    data_cap_state: Optional[DataCapState]
+    data_cap_state: DataCapState | None
     timestamp_ms: int
 
 

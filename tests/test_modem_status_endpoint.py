@@ -9,7 +9,6 @@ import pytest
 
 from ados.api.routes.ground_station import modem as modem_module
 
-
 # ── Helpers to mock asyncio.create_subprocess_exec ──────────────────
 
 

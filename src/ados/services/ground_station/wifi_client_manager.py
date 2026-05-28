@@ -35,13 +35,14 @@ import re
 import signal
 import sys
 import time
-from dataclasses import asdict, dataclass
+from collections.abc import AsyncIterator
+from dataclasses import dataclass
 from pathlib import Path
-from typing import AsyncIterator, Literal
+from typing import Literal
 
 from ados.core.logging import get_logger
-from ados.core.subprocess import CmdTimeout, run_cmd_sync
 from ados.core.paths import GS_WIFI_CLIENT_JSON
+from ados.core.subprocess import CmdTimeout, run_cmd_sync
 
 log = get_logger("ground_station.wifi_client")
 
@@ -131,7 +132,7 @@ async def _run(cmd: list[str], timeout: float = 15.0) -> tuple[int, str, str]:
 
     try:
         result = await run_cmd(cmd, timeout=timeout)
-    except asyncio.TimeoutError:
+    except TimeoutError:
         return 124, "", "timeout"
     except (OSError, asyncio.CancelledError) as exc:
         log.warning("run_failed", cmd=cmd, error=str(exc))
@@ -665,9 +666,10 @@ def get_wifi_client_manager() -> WifiClientManager:
 
 async def main() -> None:
     """Entry point for a future ados-wifi-client.service unit."""
+    import structlog
+
     from ados.core.config import load_config
     from ados.core.logging import configure_logging
-    import structlog
 
     cfg = load_config()
     configure_logging(cfg.logging.level)

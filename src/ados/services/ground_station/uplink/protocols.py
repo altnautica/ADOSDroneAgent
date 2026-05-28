@@ -11,7 +11,7 @@ stub through the router constructor.
 
 from __future__ import annotations
 
-from typing import Optional, Protocol
+from typing import Protocol
 
 __all__ = [
     "UplinkManagerProto",
@@ -24,7 +24,7 @@ class UplinkManagerProto(Protocol):
 
     async def is_up(self) -> bool: ...
     def get_iface(self) -> str: ...
-    async def get_gateway(self) -> Optional[str]: ...
+    async def get_gateway(self) -> str | None: ...
 
 
 class _StubManager:
@@ -39,5 +39,5 @@ class _StubManager:
     def get_iface(self) -> str:
         return self._iface
 
-    async def get_gateway(self) -> Optional[str]:
+    async def get_gateway(self) -> str | None:
         return None

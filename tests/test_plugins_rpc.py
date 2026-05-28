@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import time
 
 import pytest
@@ -17,7 +16,6 @@ from ados.plugins.rpc import (
     encode_frame,
     read_frame,
 )
-
 
 # ---------------------------------------------------------------------
 # Envelope round-trip

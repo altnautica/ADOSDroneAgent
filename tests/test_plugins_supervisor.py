@@ -8,7 +8,6 @@ verification on the bench rig.
 
 from __future__ import annotations
 
-import io
 import zipfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -17,8 +16,6 @@ import pytest
 
 from ados.plugins.archive import MANIFEST_FILENAME
 from ados.plugins.errors import SupervisorError
-from ados.plugins.signing import TrustedKey
-from ados.plugins.state import PluginInstall
 from ados.plugins.supervisor import PluginSupervisor
 
 

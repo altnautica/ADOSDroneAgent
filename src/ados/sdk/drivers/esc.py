@@ -10,8 +10,9 @@ through the FC, not through the agent.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from typing import Any, AsyncIterator
+from typing import Any
 
 
 @dataclass(frozen=True)

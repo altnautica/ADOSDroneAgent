@@ -30,14 +30,13 @@ import signal
 import sys
 import time
 from dataclasses import dataclass
-from pathlib import Path
 
 import structlog
 
 from ados.core.config import load_config
 from ados.core.logging import configure_logging, get_logger
-from ados.services.wfb.adapter import detect_wfb_adapters, set_monitor_mode
 from ados.core.paths import WFB_RELAY_JSON
+from ados.services.wfb.adapter import detect_wfb_adapters, set_monitor_mode
 from ados.services.wfb.key_mgr import get_key_paths, key_exists
 
 from .events import MeshEvent, get_mesh_event_bus
@@ -136,7 +135,7 @@ async def _resolve_receiver(
         ServiceBrowser(zc, service_fullname, _Listener())
         try:
             return await asyncio.wait_for(found, timeout=timeout)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             return None
     finally:
         zc.close()
@@ -144,7 +143,9 @@ async def _resolve_receiver(
 
 def _iface_ip(iface: str) -> str | None:
     try:
-        import socket, fcntl, struct
+        import fcntl
+        import socket
+        import struct
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         try:
             # SIOCGIFADDR = 0x8915
@@ -315,7 +316,7 @@ async def main() -> None:
                         proc.terminate()
                         try:
                             await asyncio.wait_for(proc.wait(), timeout=3.0)
-                        except asyncio.TimeoutError:
+                        except TimeoutError:
                             proc.kill()
                     current_receiver = resolved
                     state.receiver_ip = resolved[0]
@@ -348,14 +349,14 @@ async def main() -> None:
 
             try:
                 await asyncio.wait_for(shutdown.wait(), timeout=_POLL_INTERVAL_S)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 continue
     finally:
         if proc is not None and proc.returncode is None:
             proc.terminate()
             try:
                 await asyncio.wait_for(proc.wait(), timeout=3.0)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 proc.kill()
         state.up = False
         _write_state(state)

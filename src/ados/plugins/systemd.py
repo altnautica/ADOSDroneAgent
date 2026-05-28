@@ -47,7 +47,6 @@ from __future__ import annotations
 from pathlib import Path
 
 from ados.core.paths import (
-    PLUGIN_LOG_DIR,
     PLUGIN_UNIT_DIR,
     PLUGIN_UNIT_PREFIX,
 )

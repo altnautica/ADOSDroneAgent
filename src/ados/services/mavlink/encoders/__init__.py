@@ -20,7 +20,8 @@ Three taxonomies are exported alongside the functions:
 
 from __future__ import annotations
 
-from typing import Callable, Dict, Final
+from collections.abc import Callable
+from typing import Final
 
 from .rangefinder import (
     CRC_DISTANCE_SENSOR,
@@ -87,7 +88,7 @@ _CAP_ESTIMATOR_POSE_INJECT: Final = "estimator.pose.inject"
 #: Dispatch table from message id to its encoder function. A caller
 #: with a typed payload dict and a message id can do
 #: ``frame = MESSAGE_ID_TO_ENCODER[msg_id](sys_id, comp_id, seq, **payload)``.
-MESSAGE_ID_TO_ENCODER: Dict[int, Callable[..., bytes]] = {
+MESSAGE_ID_TO_ENCODER: dict[int, Callable[..., bytes]] = {
     MSG_ID_OPTICAL_FLOW: encode_optical_flow,
     MSG_ID_GLOBAL_VISION_POSITION_ESTIMATE: encode_global_vision_position_estimate,
     MSG_ID_VISION_POSITION_ESTIMATE: encode_vision_position_estimate,
@@ -106,7 +107,7 @@ MESSAGE_ID_TO_ENCODER: Dict[int, Callable[..., bytes]] = {
 #: route through their own capability so a plugin can be allowed to
 #: stream vision odometry without also being able to set arbitrary
 #: parameters or trigger commands.
-ENCODER_CAPABILITY_GATES: Dict[int, str] = {
+ENCODER_CAPABILITY_GATES: dict[int, str] = {
     # Sensor publishers — "I observed something, here it is."
     MSG_ID_OPTICAL_FLOW: _CAP_MAVLINK_WRITE,
     MSG_ID_OPTICAL_FLOW_RAD: _CAP_MAVLINK_WRITE,
@@ -125,7 +126,7 @@ ENCODER_CAPABILITY_GATES: Dict[int, str] = {
 
 #: Message id to canonical name. Mirrors the dialect XML msgname so log
 #: lines and error strings can render a human-readable label.
-MESSAGE_NAMES: Dict[int, str] = {
+MESSAGE_NAMES: dict[int, str] = {
     MSG_ID_OPTICAL_FLOW: "OPTICAL_FLOW",
     MSG_ID_GLOBAL_VISION_POSITION_ESTIMATE: "GLOBAL_VISION_POSITION_ESTIMATE",
     MSG_ID_VISION_POSITION_ESTIMATE: "VISION_POSITION_ESTIMATE",
@@ -141,7 +142,7 @@ MESSAGE_NAMES: Dict[int, str] = {
 #: Message id to dialect CRC_EXTRA byte. Exported for diagnostic tools
 #: and for tests that want to assert frame integrity without going
 #: through a full decoder.
-CRC_EXTRA_TABLE: Dict[int, int] = {
+CRC_EXTRA_TABLE: dict[int, int] = {
     MSG_ID_OPTICAL_FLOW: CRC_OPTICAL_FLOW,
     MSG_ID_GLOBAL_VISION_POSITION_ESTIMATE: CRC_GLOBAL_VISION_POSITION_ESTIMATE,
     MSG_ID_VISION_POSITION_ESTIMATE: CRC_VISION_POSITION_ESTIMATE,

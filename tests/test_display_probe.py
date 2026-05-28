@@ -17,7 +17,6 @@ import pytest
 
 from ados.services import display_probe
 
-
 # A valid extlinux.conf is comfortably over the 100-byte sanity floor the
 # revert path enforces before restoring a snapshot.
 _GOOD_BOOT_CONFIG = (

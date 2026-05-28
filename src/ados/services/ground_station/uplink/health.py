@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import asyncio
 import socket
-from typing import Optional
 
 import structlog
 
@@ -36,7 +35,7 @@ HEALTH_PORT = 443
 HEALTH_PATH = "/"
 
 
-async def probe_host(iface: Optional[str]) -> bool:
+async def probe_host(iface: str | None) -> bool:
     """TCP connect to the cloud relay, optionally bound to an iface.
 
     Returns True on a successful connect, False on DNS failure, timeout,
@@ -83,7 +82,7 @@ async def probe_host(iface: Optional[str]) -> bool:
                 timeout=HEALTH_TIMEOUT_SECONDS,
             )
             return True
-        except (asyncio.TimeoutError, OSError) as exc:
+        except (TimeoutError, OSError) as exc:
             log.debug("uplink.connect_failed", iface=iface, error=str(exc))
             return False
         finally:

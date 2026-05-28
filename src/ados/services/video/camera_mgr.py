@@ -32,7 +32,7 @@ class RoleConflict(Exception):
     def __init__(
         self,
         device_path: str,
-        role: "CameraRole",
+        role: CameraRole,
         current_holder: str,
         requested_by: str,
     ) -> None:

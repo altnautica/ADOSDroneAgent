@@ -13,8 +13,8 @@ from ados.plugins.archive import (
     MANIFEST_FILENAME,
     SIGNATURE_FILENAME,
     open_archive,
-    parse_archive_bytes,
     pack_directory,
+    parse_archive_bytes,
     unpack_to,
 )
 from ados.plugins.errors import ArchiveError, SignatureError

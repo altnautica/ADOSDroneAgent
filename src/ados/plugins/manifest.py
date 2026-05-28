@@ -247,7 +247,7 @@ class AgentBlock(_StrictModel):
         return [_normalize_permission(item) for item in raw]
 
     @model_validator(mode="after")
-    def _warn_unknown_capabilities(self) -> "AgentBlock":
+    def _warn_unknown_capabilities(self) -> AgentBlock:
         """Log a warning for any permission id not in the canonical
         catalog. Older or experimental manifests must still load, so
         this never rejects; it only flags drift between the manifest
@@ -262,7 +262,7 @@ class AgentBlock(_StrictModel):
         return self
 
     @model_validator(mode="after")
-    def _validate_vendor_attribution_pairing(self) -> "AgentBlock":
+    def _validate_vendor_attribution_pairing(self) -> AgentBlock:
         """``contains_vendor_binary`` and ``vendor_attribution`` must
         agree. A vendor-binary plugin without a source-offer record
         would ship a GPL-incompatible install dialog; a source-offer
@@ -286,7 +286,7 @@ class AgentBlock(_StrictModel):
         return self
 
     @model_validator(mode="after")
-    def _validate_subprocess_spawn_capability(self) -> "AgentBlock":
+    def _validate_subprocess_spawn_capability(self) -> AgentBlock:
         """If ``subprocess_spawn`` lists any binary, the plugin must
         declare the ``process.spawn`` capability so the operator sees
         the Critical-tier risk badge at install time. The supervisor
@@ -474,7 +474,7 @@ class PluginManifest(_StrictModel):
         return v
 
     @model_validator(mode="after")
-    def _at_least_one_half(self) -> "PluginManifest":
+    def _at_least_one_half(self) -> PluginManifest:
         if self.agent is None and self.gcs is None:
             raise ManifestError(
                 f"plugin {self.id} declares neither agent nor gcs half; "
@@ -483,7 +483,7 @@ class PluginManifest(_StrictModel):
         return self
 
     @classmethod
-    def from_yaml_text(cls, text: str) -> "PluginManifest":
+    def from_yaml_text(cls, text: str) -> PluginManifest:
         try:
             data = yaml.safe_load(text)
         except yaml.YAMLError as exc:
@@ -496,7 +496,7 @@ class PluginManifest(_StrictModel):
             raise ManifestError(str(exc)) from exc
 
     @classmethod
-    def from_yaml_file(cls, path: str | Path) -> "PluginManifest":
+    def from_yaml_file(cls, path: str | Path) -> PluginManifest:
         p = Path(path)
         try:
             text = p.read_text(encoding="utf-8")

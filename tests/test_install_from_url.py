@@ -13,9 +13,10 @@ from __future__ import annotations
 
 import hashlib
 import zipfile
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, AsyncIterator
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import httpx
@@ -27,7 +28,6 @@ from ados.api.server import create_app
 from ados.plugins.archive import MANIFEST_FILENAME
 from ados.plugins.supervisor import PluginSupervisor
 from tests.api_runtime_utils import build_api_runtime
-
 
 # ---------------------------------------------------------------------
 # Fixtures

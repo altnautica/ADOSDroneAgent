@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import asyncio
 import signal
-from typing import Optional
 
 import structlog
 
@@ -23,17 +22,17 @@ __all__ = [
 
 log = structlog.get_logger(__name__)
 
-_instance: "UplinkRouter | None" = None
+_instance: UplinkRouter | None = None
 
 
-def get_uplink_router() -> "UplinkRouter":
+def get_uplink_router() -> UplinkRouter:
     global _instance
     if _instance is None:
         _instance = _build_router_with_concrete_managers()
     return _instance
 
 
-def _build_router_with_concrete_managers() -> "UplinkRouter":
+def _build_router_with_concrete_managers() -> UplinkRouter:
     """Construct the router wrapping the real singleton managers.
 
     Imports are local so test harnesses or callers that want a stub-only
@@ -43,14 +42,14 @@ def _build_router_with_concrete_managers() -> "UplinkRouter":
     from .adapters import _EthernetAdapter, _ModemAdapter, _WifiClientAdapter
 
     try:
+        from ados.services.ground_station.ethernet_manager import (
+            get_ethernet_manager,
+        )
         from ados.services.ground_station.modem_manager import (
             get_modem_manager,
         )
         from ados.services.ground_station.wifi_client_manager import (
             get_wifi_client_manager,
-        )
-        from ados.services.ground_station.ethernet_manager import (
-            get_ethernet_manager,
         )
     except Exception as exc:
         log.warning("uplink.manager_import_failed", error=str(exc))
@@ -80,11 +79,11 @@ def _start_manager_polling() -> None:
     running event loop.
     """
     try:
-        from ados.services.ground_station.wifi_client_manager import (
-            get_wifi_client_manager,
-        )
         from ados.services.ground_station.ethernet_manager import (
             get_ethernet_manager,
+        )
+        from ados.services.ground_station.wifi_client_manager import (
+            get_wifi_client_manager,
         )
     except Exception as exc:
         log.debug("uplink.poll_import_failed", error=str(exc))
@@ -101,7 +100,7 @@ def _start_manager_polling() -> None:
         log.warning("uplink.eth_polling_start_failed", error=str(exc))
 
 
-async def _run_data_cap_throttle_consumer(router: "UplinkRouter") -> None:
+async def _run_data_cap_throttle_consumer(router: UplinkRouter) -> None:
     """Subscribe to the router bus and apply throttle on cap transitions.
 
     Severity ladder:
@@ -130,7 +129,7 @@ async def _run_data_cap_throttle_consumer(router: "UplinkRouter") -> None:
             if state is None:
                 continue
 
-            active_iface: Optional[str] = None
+            active_iface: str | None = None
             active_name = router.active_uplink
             if active_name:
                 try:
@@ -224,7 +223,7 @@ async def _run_service() -> None:
     # bus and calls share_uplink_firewall.apply_throttle on each
     # DataCapState transition. Direct bus subscribe matches the pattern
     # used by CloudRelayBridge and the manager-event bridges.
-    throttle_task: Optional[asyncio.Task] = None
+    throttle_task: asyncio.Task | None = None
     try:
         throttle_task = asyncio.create_task(
             _run_data_cap_throttle_consumer(router)

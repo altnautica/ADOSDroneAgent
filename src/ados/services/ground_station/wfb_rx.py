@@ -606,7 +606,7 @@ class WfbRxManager:
                     pass
                 try:
                     await asyncio.wait_for(proc.wait(), timeout=1.0)
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     pass
                 log.warning(f"{name}_killed", pid=proc.pid)
             except ProcessLookupError:
@@ -842,11 +842,12 @@ class WfbRxManager:
         """
         try:
             import socket as _socket
+
             from ados.core.identity import get_or_create_device_id
             from ados.services.wfb.hop_supervisor import (
-                PresenceBeacon,
                 _PRESENCE_ROLE_GS,
                 _PRESENCE_VERSION_CURRENT,
+                PresenceBeacon,
                 _resolve_pair_key,
             )
         except ImportError as exc:

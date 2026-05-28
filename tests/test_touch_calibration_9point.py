@@ -25,7 +25,6 @@ from ados.services.ui.touch import session as session_mod
 from ados.services.ui.touch.calibrate import REJECT_RMS_PX, TARGETS
 from ados.services.ui.touch.transform import Affine, compute_from_samples
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------

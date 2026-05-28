@@ -285,8 +285,8 @@ async def test_unavailable_tap_does_not_retry_within_cooldown(
     window elapses. Earlier code cached the failure forever — this
     test guards against regression in the OTHER direction (retrying
     on every render tick, which would re-spin gstreamer at ~1 Hz)."""
-    from ados.services.video import local_tap as lt
     from ados.services.ui.pages import video as video_mod
+    from ados.services.video import local_tap as lt
 
     attempts: list[int] = []
 
@@ -317,8 +317,8 @@ async def test_unavailable_tap_retries_after_cooldown(
     """After the cooldown window elapses, the page must clear the
     cached failure and re-attempt tap.start() so the LCD recovers
     once mediamtx-gs and the ffmpeg sidecar finish coming up."""
-    from ados.services.video import local_tap as lt
     from ados.services.ui.pages import video as video_mod
+    from ados.services.video import local_tap as lt
 
     attempts: list[float] = []
 
@@ -365,8 +365,8 @@ async def test_first_attempt_records_failure_timestamp(
 ) -> None:
     """The cached failure must come with a monotonic timestamp so the
     cooldown gate has something to compare against."""
-    from ados.services.video import local_tap as lt
     from ados.services.ui.pages import video as video_mod
+    from ados.services.video import local_tap as lt
 
     async def _fail_start(self) -> None:  # type: ignore[no-untyped-def]
         raise lt.LocalVideoTapUnavailable("stub")
@@ -395,8 +395,8 @@ async def test_render_drives_retry_when_user_sits_on_failed_page(
     on_enter ever called _ensure_tap, so a tap that failed at first
     open stayed unavailable forever even after RTSP came up.
     """
-    from ados.services.video import local_tap as lt
     from ados.services.ui.pages import video as video_mod
+    from ados.services.video import local_tap as lt
 
     call_idx = {"n": 0}
 
@@ -441,8 +441,8 @@ async def test_render_skips_retry_when_tap_already_alive(
 ) -> None:
     """The render-side retry hook must short-circuit when the tap is
     already alive so we don't pay attribute reads on the happy path."""
-    from ados.services.video import local_tap as lt
     from ados.services.ui.pages import video as video_mod
+    from ados.services.video import local_tap as lt
 
     start_calls = {"n": 0}
 

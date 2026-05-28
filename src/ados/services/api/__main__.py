@@ -19,7 +19,6 @@ from ados.core.config import load_config
 from ados.core.ipc import StateIPCClient
 from ados.core.logging import configure_logging
 
-
 _PROFILE_SEED_DELAY_S = 5.0
 _PROFILE_SEED_RETRY_GAP_S = 30.0
 _PROFILE_SEED_MAX_RETRIES = 4

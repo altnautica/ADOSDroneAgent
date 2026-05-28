@@ -30,7 +30,6 @@ import uuid
 from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Deque
 
 from ados.core.logging import get_logger
 from ados.core.paths import DISPLAY_CONF_PATH
@@ -84,7 +83,7 @@ class _JobHandle:
         self.started_at: str = _now_iso()
         self.finished_at: str | None = None
         self.exit_code: int | None = None
-        self.log_tail: Deque[str] = deque(maxlen=LOG_TAIL_CAP)
+        self.log_tail: deque[str] = deque(maxlen=LOG_TAIL_CAP)
         self._proc: asyncio.subprocess.Process | None = None
 
     def to_dict(self) -> dict[str, object]:

@@ -18,7 +18,6 @@ from ados.api.routes.ground_station._common import (
     WfbUpdate,
 )
 
-
 router = APIRouter(prefix="/v1/ground-station", tags=["ground-station"])
 
 

@@ -15,7 +15,11 @@ from ados.core.logging import get_logger
 from ados.core.paths import (
     DOWNLOADS_DIR,
     OTA_STATE_PATH,
+)
+from ados.core.paths import (
     SLOT_A_PATH as _SLOT_A_PATH,
+)
+from ados.core.paths import (
     SLOT_B_PATH as _SLOT_B_PATH,
 )
 from ados.services.ota.checker import UpdateChecker

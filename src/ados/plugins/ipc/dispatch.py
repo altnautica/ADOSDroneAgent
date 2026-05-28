@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING
 from ados.plugins.ipc import handlers as _handlers
 
 if TYPE_CHECKING:
-    from ados.plugins.ipc_server import PluginIpcServer, PluginSession
+    pass
 
 
 def _adapt(fn):

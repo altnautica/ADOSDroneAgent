@@ -41,10 +41,10 @@ from pathlib import Path
 
 from ados.core.logging import get_logger
 from ados.core.paths import (
-    PLUGINS_INSTALL_DIR,
     PLUGIN_LOG_DIR,
-    PLUGIN_RUN_DIR,
+    PLUGINS_INSTALL_DIR,
 )
+from ados.plugins import systemd as _systemd
 from ados.plugins.archive import (
     MANIFEST_FILENAME,
     open_archive,
@@ -73,7 +73,6 @@ from ados.plugins.state import (
     state_lock,
     upsert_install,
 )
-from ados.plugins import systemd as _systemd
 from ados.plugins.systemd import (
     render_unit,
     slice_unit_content,

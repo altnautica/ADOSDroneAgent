@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from typing import Awaitable, Callable
+from collections.abc import Awaitable, Callable
 
 from ados.core.logging import get_logger
 
@@ -58,6 +58,6 @@ async def resilient_task(
             try:
                 await asyncio.wait_for(shutdown_event.wait(), timeout=backoff)
                 return
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 pass
             backoff = min(backoff * 2, max_backoff)

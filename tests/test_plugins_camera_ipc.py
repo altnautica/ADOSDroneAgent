@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import pytest
 
-from ados.plugins.ipc_server import _RpcError as RpcError
 from ados.plugins.ipc import handlers
 from ados.plugins.ipc.host_services import (
     CameraClaim,
@@ -19,6 +18,7 @@ from ados.plugins.ipc.host_services import (
     HostServices,
     default_host_services,
 )
+from ados.plugins.ipc_server import _RpcError as RpcError
 
 
 def _make_frame(*, format: str = "nv12", fid: int = 1) -> CameraFrame:

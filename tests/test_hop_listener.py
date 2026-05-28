@@ -8,22 +8,17 @@ the bench LCD would show the empty state forever.
 
 from __future__ import annotations
 
-import asyncio
 import json
 from pathlib import Path
-from typing import Any
-
-import pytest
 
 from ados.services.wfb.hop_supervisor import (
-    HOP_CONTROL_PORT,
-    HopAnnounce,
-    HopListener,
     _HOP_ANNOUNCE_VERSION_CURRENT,
     _TRIGGER_PERIODIC,
     _TRIGGER_REACTIVE,
+    HOP_CONTROL_PORT,
+    HopAnnounce,
+    HopListener,
 )
-
 
 # ---- wire format round-trip ----
 

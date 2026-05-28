@@ -20,8 +20,8 @@ from __future__ import annotations
 import asyncio
 import shlex
 import subprocess
+from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Iterable
 
 import structlog
 
@@ -106,7 +106,7 @@ async def run_cmd(
             proc.communicate(input=encoded_input),
             timeout=timeout,
         )
-    except asyncio.TimeoutError:
+    except TimeoutError:
         proc.kill()
         try:
             await proc.wait()

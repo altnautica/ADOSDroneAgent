@@ -13,7 +13,7 @@ from unittest.mock import MagicMock, patch
 from ados.core.config import WfbConfig
 
 
-def _drone_manager() -> "object":
+def _drone_manager() -> object:
     from ados.services.wfb.manager import WfbManager
 
     return WfbManager(

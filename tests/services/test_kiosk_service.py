@@ -11,8 +11,6 @@ is invoked.
 from __future__ import annotations
 
 import asyncio
-import os
-from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -28,7 +26,6 @@ from ados.services.kiosk.kiosk_service import (
     _low_ram_board,
     _resolve_target_url,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -81,7 +78,7 @@ class _FakeProc:
             if self._wait_delay > 0:
                 try:
                     await asyncio.wait_for(self._exit_event.wait(), timeout=self._wait_delay)
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     pass
             if not self._exit_event.is_set():
                 # Fall through and resolve so wait_for in the supervisor returns.

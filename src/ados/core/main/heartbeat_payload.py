@@ -429,6 +429,7 @@ def build_heartbeat_payload(app: AgentApp) -> dict:  # noqa: C901
     # stay None until the radio link delivers a beacon and freshness
     # is within the staleness window.
     import json as _json
+
     from ados.core.paths import PEER_PRESENCE_JSON
     _PEER_STALE_AFTER_S = 60.0
     try:

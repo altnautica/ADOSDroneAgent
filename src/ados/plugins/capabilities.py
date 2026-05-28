@@ -30,7 +30,7 @@ self-check on top of the generated data.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Optional, TypedDict
+from typing import TYPE_CHECKING, TypedDict
 
 from ados.plugins._capabilities_generated import (
     AGENT_CAPABILITIES,
@@ -98,7 +98,7 @@ def is_known_agent_capability(cap: str) -> bool:
     return cap in AGENT_CAPABILITIES
 
 
-def get_capability_meta(cap_id: str) -> Optional[CapabilityMeta]:
+def get_capability_meta(cap_id: str) -> CapabilityMeta | None:
     """Return the catalog entry for ``cap_id`` or ``None`` if unknown."""
     return CAPABILITY_CATALOG.get(cap_id)
 
@@ -115,7 +115,7 @@ def is_known_capability(cap_id: str) -> bool:
 
 
 def get_granted_caps(
-    supervisor: "PluginSupervisor", plugin_id: str
+    supervisor: PluginSupervisor, plugin_id: str
 ) -> set[str]:
     """Return the set of capability ids currently granted to plugin_id.
 
@@ -136,14 +136,14 @@ def get_granted_caps(
 
 
 def has_capability(
-    supervisor: "PluginSupervisor", plugin_id: str, cap: str
+    supervisor: PluginSupervisor, plugin_id: str, cap: str
 ) -> bool:
     """Return True if ``cap`` is currently granted to ``plugin_id``."""
     return cap in get_granted_caps(supervisor, plugin_id)
 
 
 def require_capability(
-    supervisor: "PluginSupervisor", plugin_id: str, cap: str
+    supervisor: PluginSupervisor, plugin_id: str, cap: str
 ) -> None:
     """Raise :class:`CapabilityDenied` if ``cap`` is not granted to ``plugin_id``."""
     if not has_capability(supervisor, plugin_id, cap):

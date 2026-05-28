@@ -13,7 +13,6 @@ import json
 import os
 import subprocess
 from pathlib import Path
-from typing import Optional
 
 import structlog
 
@@ -89,8 +88,8 @@ def validate_priority(priority_list: list[str]) -> None:
 def select_failover_target(
     priority: list[str],
     available: list[str],
-    current: Optional[str],
-) -> Optional[str]:
+    current: str | None,
+) -> str | None:
     """Pick the next viable uplink below the current one.
 
     First tries strictly lower-priority entries below the current
@@ -112,7 +111,7 @@ def select_failover_target(
 def select_higher_priority(
     priority: list[str],
     available: list[str],
-    current: Optional[str],
+    current: str | None,
 ) -> list[str]:
     """Return available uplinks ranked above the current one."""
     if current is None or current not in priority:
@@ -124,7 +123,7 @@ def select_higher_priority(
     ]
 
 
-def apply_default_route(iface: str, gateway: Optional[str]) -> bool:
+def apply_default_route(iface: str, gateway: str | None) -> bool:
     """Replace the kernel default route to point at `iface`."""
     metric = PRIORITY_METRIC.get(iface, 500)
     cmd: list[str]

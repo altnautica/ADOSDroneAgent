@@ -91,7 +91,7 @@ class WifiApManager:
                 line = line.strip()
                 if line.startswith("Interface"):
                     return line.split()[-1]
-        except (FileNotFoundError, asyncio.TimeoutError):
+        except (TimeoutError, FileNotFoundError):
             pass
 
         # Fallback: check sysfs
@@ -165,7 +165,7 @@ class WifiApManager:
                 proc.terminate()
                 try:
                     await asyncio.wait_for(proc.wait(), timeout=5)
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     proc.kill()
                 log.info("daemon_stopped", daemon=name)
         # Release the AP IP so it does not linger on the interface
@@ -180,7 +180,7 @@ class WifiApManager:
                     stderr=asyncio.subprocess.DEVNULL,
                 )
                 await asyncio.wait_for(proc.wait(), timeout=2)
-            except (FileNotFoundError, asyncio.TimeoutError):
+            except (TimeoutError, FileNotFoundError):
                 pass
             log.info("ap_ip_released", ip=self.ap_ip, iface=self._iface)
         # Cleanup temp files

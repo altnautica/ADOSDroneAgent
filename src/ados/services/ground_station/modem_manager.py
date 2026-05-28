@@ -35,13 +35,13 @@ import re
 import signal
 import time
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 import structlog
 
 from ados.core.paths import GS_MODEM_JSON
 from ados.core.subprocess import run_cmd
-from ados.hal.modem import detect_modem, get_modem_status
+from ados.hal.modem import detect_modem
 
 log = structlog.get_logger(__name__)
 
@@ -250,9 +250,9 @@ class GroundStationModemManager:
 
     async def configure(
         self,
-        apn: Optional[str] = None,
-        cap_gb: Optional[float] = None,
-        enabled: Optional[bool] = None,
+        apn: str | None = None,
+        cap_gb: float | None = None,
+        enabled: bool | None = None,
     ) -> dict:
         async with self._lock:
             current = dict(self._config)
@@ -289,12 +289,12 @@ class GroundStationModemManager:
     # ------------------------------------------------------------------
     # dbus-next path
     # ------------------------------------------------------------------
-    async def _get_bus(self) -> Optional[Any]:
+    async def _get_bus(self) -> Any | None:
         if self._bus is not None:
             return self._bus
         try:
-            from dbus_next.aio import MessageBus  # type: ignore
             from dbus_next import BusType  # type: ignore
+            from dbus_next.aio import MessageBus  # type: ignore
         except ImportError as exc:
             log.warning("modem.dbus_unavailable", error=str(exc))
             self._fallback_mode = True
@@ -359,7 +359,7 @@ class GroundStationModemManager:
             self._register_dbus_failure(str(exc))
             return []
 
-    async def _bring_up_dbus(self, apn: str) -> Optional[dict]:
+    async def _bring_up_dbus(self, apn: str) -> dict | None:
         paths = await self._list_modem_objects()
         if not paths:
             return None
@@ -435,7 +435,7 @@ class GroundStationModemManager:
             self._register_dbus_failure(str(exc))
             return False
 
-    async def _status_dbus(self) -> Optional[dict]:
+    async def _status_dbus(self) -> dict | None:
         # Use mmcli parsing (hal/modem.py) rather than re-introspecting
         # every property. mmcli goes over dbus under the hood, so we
         # still register failure on exec error.
@@ -463,7 +463,7 @@ class GroundStationModemManager:
         # which we skip for now.
         return state if state else "unknown"
 
-    async def _read_imei_via_dbus(self) -> Optional[str]:
+    async def _read_imei_via_dbus(self) -> str | None:
         # Lightweight path: parse mmcli -m N for 'equipment identifier'.
         try:
             result = await run_cmd(["mmcli", "-L"], timeout=5.0)
@@ -478,7 +478,7 @@ class GroundStationModemManager:
                     digits = re.findall(r"\d{14,17}", line)
                     if digits:
                         return digits[0]
-        except (OSError, FileNotFoundError, asyncio.TimeoutError):
+        except (TimeoutError, OSError, FileNotFoundError):
             return None
         return None
 
@@ -516,7 +516,7 @@ class GroundStationModemManager:
                     break
             shutdown.set()
             await asyncio.wait_for(svc_task, timeout=5.0)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             svc_task.cancel()
         finally:
             deadline_task.cancel()
@@ -537,7 +537,7 @@ class GroundStationModemManager:
                 timeout=5.0,
             )
             return result.ok
-        except (OSError, asyncio.TimeoutError):
+        except (TimeoutError, OSError):
             return False
 
     async def _status_at(self) -> dict:
@@ -579,7 +579,7 @@ class GroundStationModemManager:
             return _USB_IFACE
         return _WWAN_IFACE
 
-    async def _read_iface_ip(self, iface: str) -> Optional[str]:
+    async def _read_iface_ip(self, iface: str) -> str | None:
         try:
             result = await run_cmd(
                 ["ip", "-4", "addr", "show", iface],
@@ -589,11 +589,11 @@ class GroundStationModemManager:
                 line = line.strip()
                 if line.startswith("inet "):
                     return line.split()[1].split("/")[0]
-        except (OSError, asyncio.TimeoutError):
+        except (TimeoutError, OSError):
             return None
         return None
 
-    async def _find_serial_port(self) -> Optional[str]:
+    async def _find_serial_port(self) -> str | None:
         """Reuse `modem_at.AtModemService._find_modem` path detection.
 
         We do not instantiate the service, just enumerate its known
@@ -610,7 +610,7 @@ class GroundStationModemManager:
         usb_ports = [p for p in candidates if "ttyUSB" in p]
         return usb_ports[-1] if usb_ports else candidates[-1]
 
-    async def _auto_detect_apn(self) -> Optional[str]:
+    async def _auto_detect_apn(self) -> str | None:
         """Read IMSI via mmcli and pick an APN from the static map."""
         try:
             result = await run_cmd(["mmcli", "-L"], timeout=5.0)
@@ -640,7 +640,7 @@ class GroundStationModemManager:
                     )
                     return apn
             log.info("modem.apn_no_match", imsi_prefix=imsi[:6])
-        except (OSError, FileNotFoundError, asyncio.TimeoutError):
+        except (TimeoutError, OSError, FileNotFoundError):
             return None
         return None
 
@@ -648,10 +648,10 @@ class GroundStationModemManager:
 # ----------------------------------------------------------------------
 # Module-level singleton
 # ----------------------------------------------------------------------
-_instance: "GroundStationModemManager | None" = None
+_instance: GroundStationModemManager | None = None
 
 
-def get_modem_manager() -> "GroundStationModemManager":
+def get_modem_manager() -> GroundStationModemManager:
     global _instance
     if _instance is None:
         _instance = GroundStationModemManager()
@@ -712,7 +712,7 @@ async def _run_service() -> None:
         try:
             await asyncio.wait_for(stop_event.wait(), timeout=30.0)
             break
-        except asyncio.TimeoutError:
+        except TimeoutError:
             pass
 
     try:

@@ -27,7 +27,6 @@ from ados.services.ui.touch.transform import (
     save_skip_marker,
 )
 
-
 # ---------------------------------------------------------------------------
 # Affine math (deterministic, no I/O)
 # ---------------------------------------------------------------------------

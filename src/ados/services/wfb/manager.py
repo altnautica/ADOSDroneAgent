@@ -12,7 +12,6 @@ from ados.core.logging import get_logger
 from ados.core.paths import WFB_KEY_DIR
 from ados.services.wfb.adapter import (
     detect_wfb_adapters,
-    enabled_channels,
     get_interface_mode,
     select_wfb_interface,
     set_monitor_mode,
@@ -672,7 +671,7 @@ class WfbManager:
                     # the GS-side stop_rx() pattern.
                     try:
                         await asyncio.wait_for(proc.wait(), timeout=1.0)
-                    except asyncio.TimeoutError:
+                    except TimeoutError:
                         pass
                     log.warning("wfb_process_killed", name=name, pid=proc.pid)
                 except ProcessLookupError:
@@ -898,6 +897,7 @@ class WfbManager:
         """Mirror HopListener._persist_peer_presence on the drone side."""
         try:
             import json as _json
+
             from ados.core.paths import PEER_PRESENCE_JSON
             payload = {
                 "peer_device_id": self._peer_device_id,
@@ -930,11 +930,12 @@ class WfbManager:
         """
         try:
             import socket as _socket
+
             from ados.core.identity import get_or_create_device_id
             from ados.services.wfb.hop_supervisor import (
+                _PRESENCE_MAGIC,
                 HopAnnounce,
                 PresenceBeacon,
-                _PRESENCE_MAGIC,
                 _resolve_pair_key,
             )
         except ImportError as exc:
@@ -966,7 +967,7 @@ class WfbManager:
                     data = await asyncio.wait_for(
                         loop.sock_recv(sock, 256), timeout=1.0
                     )
-                except (asyncio.TimeoutError, OSError):
+                except (TimeoutError, OSError):
                     continue
                 pair_key = _resolve_pair_key()
                 if data.startswith(_PRESENCE_MAGIC):
@@ -1031,11 +1032,12 @@ class WfbManager:
         """
         try:
             import socket as _socket
+
             from ados.core.identity import get_or_create_device_id
             from ados.services.wfb.hop_supervisor import (
-                PresenceBeacon,
                 _PRESENCE_ROLE_DRONE,
                 _PRESENCE_VERSION_CURRENT,
+                PresenceBeacon,
                 _resolve_pair_key,
             )
         except ImportError as exc:
@@ -1591,6 +1593,7 @@ class WfbManager:
             # into a restart loop that hits max_restarts and gives up).
             tx_ok = await self.start_tx(interface, self._channel)
             from pathlib import Path as _P
+
             from ados.core.paths import WFB_KEY_DIR as _WD
             rx_key_present = _P(str(_WD)) / "rx.key"
             rx_ok = False

@@ -74,7 +74,7 @@ class PeripheralManifest(BaseModel):
     extra: dict = Field(default_factory=dict)
 
     @classmethod
-    def from_yaml_file(cls, path: str | Path) -> "PeripheralManifest":
+    def from_yaml_file(cls, path: str | Path) -> PeripheralManifest:
         """Load and validate a manifest from a YAML file.
 
         Raises ManifestError with a path-qualified message on any

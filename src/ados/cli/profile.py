@@ -28,7 +28,6 @@ import click
 from ados.core.paths import CONFIG_YAML, PROFILE_CONF
 from ados.core.profile import _read_profile_conf_value, current_profile_and_role
 
-
 _VALID = ("drone", "ground_station")
 
 

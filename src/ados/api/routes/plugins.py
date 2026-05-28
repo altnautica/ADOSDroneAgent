@@ -54,7 +54,6 @@ from ados.api.routes._plugins_helpers import (
     write_sidecar,
 )
 from ados.core.logging import get_logger
-from ados.plugins.archive import open_archive
 from ados.plugins.capabilities import get_capability_meta, is_known_capability
 from ados.plugins.errors import (
     ArchiveError,
@@ -63,7 +62,6 @@ from ados.plugins.errors import (
     SupervisorError,
 )
 from ados.plugins.install_from_url_impl import (
-    DEFAULT_ALLOWED_HOSTS,
     DOWNLOAD_CONNECT_TIMEOUT,
     DOWNLOAD_TOTAL_TIMEOUT,
     ArchiveDownloadError,

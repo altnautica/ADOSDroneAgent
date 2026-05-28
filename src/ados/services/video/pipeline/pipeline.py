@@ -1279,6 +1279,7 @@ class VideoPipeline(_DiscoveryMixin, _HealthMixin, _WfbTeeMixin):
         """
         try:
             import json as _json
+
             from ados.core.paths import CAMERA_STATE_JSON
             primary = self._camera_mgr.get_primary()
             cameras = self._camera_mgr.to_dict()
@@ -1332,7 +1333,7 @@ class VideoPipeline(_DiscoveryMixin, _HealthMixin, _WfbTeeMixin):
             # Drain the event so the next backoff cycle requires a
             # fresh hotplug to short-circuit.
             self._camera_plugged_event.clear()
-        except asyncio.TimeoutError:
+        except TimeoutError:
             pass
 
     async def run(self) -> None:

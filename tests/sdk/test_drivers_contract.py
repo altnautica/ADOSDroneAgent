@@ -8,11 +8,12 @@ value dataclasses frozen.
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from dataclasses import FrozenInstanceError
-from typing import AsyncIterator
 
 import pytest
 
+from ados.plugins.errors import PluginError
 from ados.sdk.drivers import (
     CameraCandidate,
     CameraCapabilities,
@@ -50,8 +51,6 @@ from ados.sdk.drivers import (
     PayloadSession,
     PayloadState,
 )
-from ados.plugins.errors import PluginError
-
 
 # ---------------------------------------------------------------------------
 # Base class abstract-ness

@@ -22,7 +22,6 @@ from __future__ import annotations
 import secrets
 import threading
 import time
-from typing import Optional
 
 
 class CaptiveTokenStore:
@@ -60,7 +59,7 @@ class CaptiveTokenStore:
             self._tokens.clear()
 
 
-_store: Optional[CaptiveTokenStore] = None
+_store: CaptiveTokenStore | None = None
 
 
 def get_captive_token_store() -> CaptiveTokenStore:

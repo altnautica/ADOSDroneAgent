@@ -24,10 +24,11 @@ import socket
 import struct
 import subprocess
 import time
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 try:
     import structlog
@@ -39,7 +40,6 @@ except ImportError:  # pragma: no cover - fall back to stdlib logging
     log = logging.getLogger(__name__)
 
 from ados.core.paths import PROFILE_CONF
-
 
 # RTL8812 family USB IDs used on WFB-ng primary adapters.
 # (vendor 0x0bda Realtek, known product IDs for the RTL8812 series).

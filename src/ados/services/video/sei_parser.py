@@ -12,7 +12,7 @@ pay the cost of loading PIL just to walk bytes.
 
 from __future__ import annotations
 
-from typing import Iterator
+from collections.abc import Iterator
 
 # Mirror of sei_injector.ADOS_LATENCY_SEI_UUID. Kept as a literal so
 # this module imports cheaply.

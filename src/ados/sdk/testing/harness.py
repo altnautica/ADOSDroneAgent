@@ -74,7 +74,7 @@ class PluginTestHarness:
         self._fixtures_root = Path(fixtures_root) if fixtures_root else None
         self._named_fixtures = dict(named_fixtures or {})
 
-    async def __aenter__(self) -> "PluginTestHarness":
+    async def __aenter__(self) -> PluginTestHarness:
         return self
 
     async def __aexit__(self, *_: object) -> None:

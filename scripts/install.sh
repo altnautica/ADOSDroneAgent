@@ -53,6 +53,7 @@ fi
 # rest of the modules cannot resolve INSTALL_DIR / CONFIG_DIR / etc.
 if [ -n "${ADOS_SCRIPT_DIR}" ] && [ -f "${ADOS_SCRIPT_DIR}/install.d/lib.sh" ]; then
     # shellcheck source=install.d/lib.sh
+    # shellcheck disable=SC1091  # sourced at runtime, not analyzed without -x
     source "${ADOS_SCRIPT_DIR}/install.d/lib.sh"
 
     # Source modules in explicit numeric order so the dependency graph

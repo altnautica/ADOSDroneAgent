@@ -14,7 +14,6 @@ unreadable after the retries are exhausted.
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import patch
 
 from ados.services.cloud.__main__ import (
     _read_json_with_retry,
@@ -39,7 +38,6 @@ def test_retries_on_empty_file_then_succeeds(tmp_path: Path, monkeypatch):
     target = tmp_path / "lcd-state.json"
     target.write_text("")  # empty initial content
     call_count = {"reads": 0}
-    real_read_text = Path.read_text
 
     def flaky_read_text(self, *args, **kwargs):
         call_count["reads"] += 1

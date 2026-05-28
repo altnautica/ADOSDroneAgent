@@ -145,9 +145,8 @@ def test_supervisor_heartbeat_payload_includes_radio_block():
     from collections import deque
     from unittest.mock import patch
 
-    from ados.core.supervisor.lifecycle import Supervisor
-
     from ados.core.config import ADOSConfig
+    from ados.core.supervisor.lifecycle import Supervisor
     sup = Supervisor(ADOSConfig())
     # Empty service registry is fine; the mixin still needs the deques.
     sup._cpu_history = deque(maxlen=10)

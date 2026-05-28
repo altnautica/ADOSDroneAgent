@@ -34,7 +34,6 @@ from ados.core.paths import (
     TOUCH_CALIB_PATH,
 )
 
-
 # PID → psutil.Process cache for CPU baseline. psutil's
 # ``cpu_percent(interval=0)`` reports the delta since the previous
 # call on the same Process instance, so we hold the instance alive

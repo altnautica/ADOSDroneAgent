@@ -2,13 +2,11 @@
 
 from __future__ import annotations
 
-from typing import Any
-
 import pytest
 import structlog
 from PIL import Image
 
-from ados.services.ui.pages import PageNavigator, PageContext
+from ados.services.ui.pages import PageContext, PageNavigator
 from ados.services.ui.theme import DARK
 from ados.services.ui.touch.events import TouchGesture
 from ados.services.ui.widgets.enum_picker import EnumPickerModal

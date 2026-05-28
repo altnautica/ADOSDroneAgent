@@ -114,7 +114,7 @@ def test_divider_below_paints_border() -> None:
 
 
 def test_divider_off_skips_border() -> None:
-    img = _blank()
+    _blank()
     # Force a color background so the absence of border_default is meaningful.
     base = Image.new("RGB", (480, ROW_H), (128, 128, 128))
     draw_list_row(

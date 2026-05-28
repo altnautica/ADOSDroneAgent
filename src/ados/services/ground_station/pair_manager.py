@@ -601,10 +601,10 @@ class PairManager:
 # ---------------------------------------------------------------------
 # Module-level singleton
 # ---------------------------------------------------------------------
-_instance: "PairManager | None" = None
+_instance: PairManager | None = None
 
 
-def get_pair_manager() -> "PairManager":
+def get_pair_manager() -> PairManager:
     """Return the process-wide PairManager singleton."""
     global _instance
     if _instance is None:

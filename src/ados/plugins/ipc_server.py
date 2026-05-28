@@ -27,12 +27,13 @@ from __future__ import annotations
 
 import asyncio
 import os
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Awaitable, Callable
 
 from ados.core.asyncio_util import log_task_exceptions
 from ados.core.logging import get_logger
+from ados.plugins.errors import CapabilityDenied as _CapabilityDenied
 from ados.plugins.events import (
     Event,
     EventBus,
@@ -40,7 +41,6 @@ from ados.plugins.events import (
     is_subscribe_allowed,
     now_ms,
 )
-from ados.plugins.errors import CapabilityDenied as _CapabilityDenied
 from ados.plugins.ipc.host_services import HostServices, default_host_services
 from ados.plugins.process_sandbox import AllowlistViolation as _AllowlistViolation
 from ados.plugins.rpc import (

@@ -61,6 +61,8 @@ from ados.core.paths import MESH_ID_PATH, PAIRING_SOCK
 from .pairing_manager import (
     InviteBundle,
     get_pairing_manager,
+)
+from .pairing_manager import (
     revoke as revoke_device,
 )
 
@@ -171,7 +173,7 @@ async def _serve_connection(
     """One request per connection. Close after replying."""
     try:
         raw = await asyncio.wait_for(reader.readline(), timeout=5.0)
-    except asyncio.TimeoutError:
+    except TimeoutError:
         writer.close()
         await writer.wait_closed()
         return

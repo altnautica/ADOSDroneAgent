@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 from pathlib import Path
 from typing import ClassVar
@@ -11,7 +10,7 @@ import pytest
 import structlog
 from PIL import Image
 
-from ados.services.ui.pages import HitZone, Page, PageContext, PageNavigator
+from ados.services.ui.pages import HitZone, PageContext, PageNavigator
 from ados.services.ui.pages.dashboard import DashboardPage
 from ados.services.ui.theme import DARK
 from ados.services.ui.touch.events import TouchGesture

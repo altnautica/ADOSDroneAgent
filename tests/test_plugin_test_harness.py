@@ -19,7 +19,6 @@ from ados.sdk.testing import (
     load_fixture,
 )
 
-
 PLUGIN_ID = "com.example.harness"
 
 

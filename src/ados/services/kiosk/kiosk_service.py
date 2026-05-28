@@ -201,7 +201,7 @@ class KioskSupervisor:
                         proc.wait(), timeout=_SHUTDOWN_GRACE_SECONDS
                     )
                     log.info("kiosk_child_terminated", rc=proc.returncode)
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     log.warning("kiosk_child_sigterm_timeout", pid=proc.pid)
                     try:
                         proc.kill()
@@ -236,7 +236,7 @@ class KioskSupervisor:
             )
             try:
                 await asyncio.wait_for(proc.wait(), timeout=3.0)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 try:
                     proc.kill()
                 except ProcessLookupError:
@@ -327,7 +327,7 @@ class KioskSupervisor:
                 await asyncio.wait_for(self._stop.wait(), timeout=backoff)
                 # If stop fires during backoff, exit cleanly.
                 return 0
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 pass
             backoff = min(backoff * 2, _BACKOFF_MAX_SECONDS)
 

@@ -12,7 +12,6 @@ Two layers covered:
 
 from __future__ import annotations
 
-import asyncio
 import shutil
 import tempfile
 from pathlib import Path
@@ -32,9 +31,8 @@ from ados.plugins.errors import CapabilityDenied
 from ados.plugins.events import EventBus
 from ados.plugins.ipc_client import PluginIpcClient
 from ados.plugins.ipc_server import PluginIpcServer
-from ados.plugins.rpc import Envelope, TokenIssuer, encode_frame, read_frame
+from ados.plugins.rpc import Envelope, TokenIssuer
 from ados.plugins.state import PermissionGrant, PluginInstall
-
 
 PLUGIN_ID = "com.example.gated"
 

@@ -15,6 +15,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=scripts/lib/verify.sh
+# shellcheck disable=SC1091  # sourced at runtime, not analyzed without -x
 . "${SCRIPT_DIR}/../lib/verify.sh"
 
 if ! command -v minisign >/dev/null 2>&1; then

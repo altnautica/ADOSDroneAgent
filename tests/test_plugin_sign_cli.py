@@ -26,7 +26,6 @@ from ados.plugins.signing import (
     verify_archive_signature,
 )
 
-
 _MANIFEST_YAML = """\
 schema_version: 1
 id: com.example.signed

@@ -27,30 +27,32 @@ import os
 import socket
 import time
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
-
-from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
 from ados.core.config import load_config
 from ados.core.logging import get_logger
+from ados.core.paths import (
+    MESH_DIR as _MESH_DIR,
+)
+from ados.core.paths import (
+    MESH_ID_PATH as _MESH_ID_PATH,
+)
+from ados.core.paths import (
+    MESH_PSK_PATH as _MESH_PSK_PATH,
+)
+from ados.core.paths import (
+    MESH_RECEIVER_JSON,
+    WFB_KEY_DIR,
+    WFB_RX_KEY_PATH,
+)
 
 from .events import PairingEvent, get_pairing_event_bus
 from .mdns_announce import iface_ip, resolve_receiver
 from .pairing_manager import (
-    InviteBundle,
     PAIR_UDP_PORT,
+    InviteBundle,
     decrypt_invite,
     generate_keypair,
-)
-
-from ados.core.paths import (
-    MESH_DIR as _MESH_DIR,
-    MESH_ID_PATH as _MESH_ID_PATH,
-    MESH_PSK_PATH as _MESH_PSK_PATH,
-    MESH_RECEIVER_JSON,
-    WFB_KEY_DIR,
-    WFB_RX_KEY_PATH,
 )
 
 log = get_logger("ground_station.pairing_client")
@@ -229,7 +231,7 @@ async def request_join(
                     loop.sock_recvfrom(sock, 4096),
                     timeout=remaining,
                 )
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 return JoinResult(
                     ok=False,
                     error_code="E_JOIN_TIMEOUT",

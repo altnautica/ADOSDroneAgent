@@ -14,7 +14,6 @@ from fastapi import APIRouter
 from ados.api.routes import ground_station as _gs
 from ados.core.paths import MESH_STATE_JSON, PROFILE_CONF
 
-
 router = APIRouter(prefix="/v1/ground-station", tags=["ground-station"])
 
 

@@ -22,9 +22,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from ados.services import discovery as discovery_pkg
 from ados.services.discovery import SERVICE_TYPE, DiscoveryService
-
 
 # ---------------------------------------------------------------------------
 # Constants + helpers

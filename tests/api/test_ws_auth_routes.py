@@ -28,7 +28,6 @@ from ados.api.middleware.ws_auth import (
 from ados.api.server import create_app
 from tests.api_runtime_utils import build_api_runtime
 
-
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------

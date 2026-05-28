@@ -18,7 +18,6 @@ task supervisor and benefits from push updates rather than 10Hz polling.
 from __future__ import annotations
 
 import asyncio
-from typing import Optional
 
 import structlog
 
@@ -45,13 +44,13 @@ class StateReader:
 
     def __init__(
         self,
-        vehicle_state: Optional[VehicleState] = None,
-        sock_client: Optional[StateIPCClient] = None,
+        vehicle_state: VehicleState | None = None,
+        sock_client: StateIPCClient | None = None,
     ) -> None:
         self.vehicle_state: VehicleState = vehicle_state or VehicleState()
         self._client: StateIPCClient = sock_client or StateIPCClient()
-        self._task: Optional[asyncio.Task] = None
-        self._stop_event: Optional[asyncio.Event] = None
+        self._task: asyncio.Task | None = None
+        self._stop_event: asyncio.Event | None = None
         self._connected_once: bool = False
         self._fallback_warned: bool = False
 
@@ -161,5 +160,5 @@ class StateReader:
                     timeout=_RECONNECT_BACKOFF_SECONDS,
                 )
                 break
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 pass

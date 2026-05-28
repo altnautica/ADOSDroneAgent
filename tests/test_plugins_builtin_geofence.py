@@ -17,6 +17,8 @@ from ados.plugins.builtin.geofence import (
     PLUGIN_ID,
     GeofencePlugin,
     get_manifest,
+)
+from ados.plugins.builtin.geofence import (
     manifest as module_manifest,
 )
 from ados.plugins.manifest import PluginManifest

@@ -67,7 +67,6 @@ from ados.plugins.remote_install_download import (
 )
 from ados.plugins.state import (
     PluginInstall,
-    PermissionGrant,
     load_state,
     save_state,
     state_lock,
@@ -668,7 +667,7 @@ async def _sleep_with_shutdown(
     """Sleep up to ``seconds`` or until shutdown fires. Returns True on shutdown."""
     try:
         await asyncio.wait_for(shutdown.wait(), timeout=seconds)
-    except asyncio.TimeoutError:
+    except TimeoutError:
         return False
     return True
 

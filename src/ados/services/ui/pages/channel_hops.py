@@ -36,7 +36,6 @@ from ados.services.ui.dashboards.components import primitives as p
 from ados.services.ui.pages.base import HitZone, PageContext
 from ados.services.ui.touch.events import TouchGesture
 
-
 PAGE_W = 480
 PAGE_H = 244
 

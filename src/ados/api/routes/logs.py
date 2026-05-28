@@ -123,7 +123,7 @@ async def _fanout_loop() -> None:
         try:
             await asyncio.wait_for(_log_event.wait(), timeout=_SSE_KEEPALIVE_S)
             had_event = True
-        except asyncio.TimeoutError:
+        except TimeoutError:
             had_event = False
         if had_event:
             _log_event.clear()

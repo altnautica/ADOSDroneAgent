@@ -29,6 +29,8 @@ from ados.plugins.ipc.host_services import (
 from ados.plugins.process_sandbox import (
     AllowlistViolation,
     SpawnError,
+)
+from ados.plugins.process_sandbox import (
     spawn as sandbox_spawn,
 )
 from ados.plugins.rpc import Envelope, encode_frame
@@ -78,7 +80,7 @@ def _mavlink_msg_id(frame: bytes) -> int | None:
 
 
 async def handle_mavlink_send(
-    server: "PluginIpcServer", session: "PluginSession", env: Envelope
+    server: PluginIpcServer, session: PluginSession, env: Envelope
 ) -> dict[str, Any]:
     msg_bytes = env.args.get("msg_bytes")
     component_id = env.args.get("component_id")
@@ -128,7 +130,7 @@ async def handle_mavlink_send(
 
 
 async def handle_mavlink_subscribe(
-    server: "PluginIpcServer", session: "PluginSession", env: Envelope
+    server: PluginIpcServer, session: PluginSession, env: Envelope
 ) -> dict[str, Any]:
     msg_name = env.args.get("msg_name")
     if not isinstance(msg_name, str) or not msg_name:
@@ -141,7 +143,7 @@ async def handle_mavlink_subscribe(
 
 
 async def handle_mavlink_register_component(
-    server: "PluginIpcServer", session: "PluginSession", env: Envelope
+    server: PluginIpcServer, session: PluginSession, env: Envelope
 ) -> dict[str, Any]:
     comp_id = env.args.get("component_id")
     kind = env.args.get("kind")
@@ -177,7 +179,7 @@ async def handle_mavlink_register_component(
 
 
 async def handle_telemetry_extend(
-    server: "PluginIpcServer", session: "PluginSession", env: Envelope
+    server: PluginIpcServer, session: PluginSession, env: Envelope
 ) -> dict[str, Any]:
     channel = env.args.get("channel")
     payload = env.args.get("payload") or {}
@@ -218,7 +220,7 @@ _DRIVER_KIND_TO_CAP: dict[str, str] = {
 
 
 async def handle_peripheral_register_driver(
-    server: "PluginIpcServer", session: "PluginSession", env: Envelope
+    server: PluginIpcServer, session: PluginSession, env: Envelope
 ) -> dict[str, Any]:
     """Register a driver of any kind.
 
@@ -251,7 +253,7 @@ async def handle_peripheral_register_driver(
 
 
 async def handle_peripheral_unregister_driver(
-    server: "PluginIpcServer", session: "PluginSession", env: Envelope
+    server: PluginIpcServer, session: PluginSession, env: Envelope
 ) -> dict[str, Any]:
     handle_id = env.args.get("handle_id")
     if not isinstance(handle_id, str) or not handle_id:
@@ -266,7 +268,7 @@ async def handle_peripheral_unregister_driver(
 
 
 async def handle_camera_claim(
-    server: "PluginIpcServer", session: "PluginSession", env: Envelope
+    server: PluginIpcServer, session: PluginSession, env: Envelope
 ) -> dict[str, Any]:
     device_path = env.args.get("device_path")
     exclusive = bool(env.args.get("exclusive", True))
@@ -286,7 +288,7 @@ async def handle_camera_claim(
 
 
 async def handle_camera_release(
-    server: "PluginIpcServer", session: "PluginSession", env: Envelope
+    server: PluginIpcServer, session: PluginSession, env: Envelope
 ) -> dict[str, Any]:
     device_path = env.args.get("device_path")
     if not isinstance(device_path, str) or not device_path:
@@ -305,7 +307,7 @@ _SUPPORTED_CAMERA_FORMATS: set[str] = {"nv12", "rgb888", "yuv420p"}
 
 
 async def handle_camera_get_frame(
-    server: "PluginIpcServer", session: "PluginSession", env: Envelope
+    server: PluginIpcServer, session: PluginSession, env: Envelope
 ) -> dict[str, Any]:
     device_path = env.args.get("device_path")
     fmt = env.args.get("format", "nv12")
@@ -369,7 +371,7 @@ async def handle_camera_get_frame(
 
 
 async def handle_config_get(
-    server: "PluginIpcServer", session: "PluginSession", env: Envelope
+    server: PluginIpcServer, session: PluginSession, env: Envelope
 ) -> dict[str, Any]:
     key = env.args.get("key")
     default = env.args.get("default")
@@ -383,7 +385,7 @@ async def handle_config_get(
 
 
 async def handle_config_set(
-    server: "PluginIpcServer", session: "PluginSession", env: Envelope
+    server: PluginIpcServer, session: PluginSession, env: Envelope
 ) -> dict[str, Any]:
     key = env.args.get("key")
     if not isinstance(key, str) or not key:
@@ -404,7 +406,7 @@ async def handle_config_set(
     return {"set": True, "scope": scope}
 
 
-def _agent_id_for(server: "PluginIpcServer", plugin_id: str) -> str:
+def _agent_id_for(server: PluginIpcServer, plugin_id: str) -> str:
     lookup = server.host.agent_id_lookup
     if lookup is None:
         return ""
@@ -420,7 +422,7 @@ def _agent_id_for(server: "PluginIpcServer", plugin_id: str) -> str:
 
 
 async def handle_process_spawn(
-    server: "PluginIpcServer", session: "PluginSession", env: Envelope
+    server: PluginIpcServer, session: PluginSession, env: Envelope
 ) -> dict[str, Any]:
     """Spawn a vendor binary on behalf of the plugin runner.
 

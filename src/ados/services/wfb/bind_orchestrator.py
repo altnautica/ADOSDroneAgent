@@ -295,7 +295,7 @@ async def _run_socat_with_kill_on_cancel(
                 pass
             try:
                 await asyncio.wait_for(proc.wait(), timeout=5.0)
-            except (asyncio.TimeoutError, ProcessLookupError):
+            except (TimeoutError, ProcessLookupError):
                 pass
 
 
@@ -881,10 +881,10 @@ class BindBusyError(BindError):
 # ---------------------------------------------------------------------
 # Module-level singleton
 # ---------------------------------------------------------------------
-_instance: "BindOrchestrator | None" = None
+_instance: BindOrchestrator | None = None
 
 
-def get_bind_orchestrator() -> "BindOrchestrator":
+def get_bind_orchestrator() -> BindOrchestrator:
     """Process-wide BindOrchestrator singleton."""
     global _instance
     if _instance is None:

@@ -22,7 +22,6 @@ from ados.core.config.ground_station import DisplayConfig, GroundStationConfig
 from ados.services.cloud import heartbeat as cloud_heartbeat
 from ados.services.ui.oled_service import service as oled_service
 
-
 # --- DisplayConfig defaults ------------------------------------------------
 
 

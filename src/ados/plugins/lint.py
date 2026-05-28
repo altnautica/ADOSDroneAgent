@@ -24,8 +24,6 @@ from ados.plugins.archive import (
     SIGNATURE_FILENAME,
     parse_archive_bytes,
 )
-from ados.plugins.errors import ArchiveError
-
 
 SEVERITY_INFO = "info"
 SEVERITY_WARN = "warn"

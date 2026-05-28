@@ -40,10 +40,8 @@ import json
 import os
 import secrets
 import socket
-import struct
 import time
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any
 
 from cryptography.hazmat.primitives import hashes, hmac
@@ -307,7 +305,7 @@ class _PairingProtocol(asyncio.DatagramProtocol):
     same socket for the reply.
     """
 
-    def __init__(self, manager: "PairingManager") -> None:
+    def __init__(self, manager: PairingManager) -> None:
         self._manager = manager
         self.transport: asyncio.DatagramTransport | None = None
 

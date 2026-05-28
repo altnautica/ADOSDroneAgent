@@ -15,7 +15,8 @@ NB on message ids:
 from __future__ import annotations
 
 import struct
-from typing import Final, Sequence
+from collections.abc import Sequence
+from typing import Final
 
 from ._framing import pack_v2
 

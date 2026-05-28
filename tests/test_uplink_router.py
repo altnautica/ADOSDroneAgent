@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
-from typing import Any, Optional
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -26,13 +25,12 @@ from ados.services.ground_station.uplink_router import (
     _WifiClientAdapter,
 )
 
-
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
 
 
-def _make_event(kind: str = "uplink_changed", active: Optional[str] = "eth0") -> UplinkEvent:
+def _make_event(kind: str = "uplink_changed", active: str | None = "eth0") -> UplinkEvent:
     return UplinkEvent(
         kind=kind,  # type: ignore[arg-type]
         active_uplink=active,
@@ -370,7 +368,7 @@ def test_data_cap_get_usage_payload(tmp_path: Path):
 class _FakeManager:
     """Lightweight test double matching the uplink manager protocol."""
 
-    def __init__(self, iface: str, up: bool = True, gateway: Optional[str] = "10.0.0.1") -> None:
+    def __init__(self, iface: str, up: bool = True, gateway: str | None = "10.0.0.1") -> None:
         self._iface = iface
         self._up = up
         self._gateway = gateway
@@ -381,7 +379,7 @@ class _FakeManager:
     def get_iface(self) -> str:
         return self._iface
 
-    async def get_gateway(self) -> Optional[str]:
+    async def get_gateway(self) -> str | None:
         return self._gateway
 
 

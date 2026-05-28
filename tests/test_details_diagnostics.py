@@ -13,7 +13,6 @@ from ados.services.ui.pages.details.diagnostics import DiagnosticsDetailPage
 from ados.services.ui.theme import DARK
 from ados.services.ui.touch.events import TouchGesture, TouchMoveBus
 
-
 _STUB_DIAG = {
     "agent": {
         "version": "0.18.2",

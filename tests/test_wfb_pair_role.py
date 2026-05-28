@@ -32,7 +32,6 @@ import pytest
 
 from ados.api.routes.wfb import _agent_role_from_profile, _current_role
 
-
 # --- helpers -----------------------------------------------------------------
 
 

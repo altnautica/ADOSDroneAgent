@@ -14,10 +14,10 @@ Template resolution order:
 from __future__ import annotations
 
 import asyncio
-import shutil
 import subprocess
+from collections.abc import AsyncGenerator
 from pathlib import Path
-from typing import Any, AsyncGenerator
+from typing import Any
 
 import structlog
 from jinja2 import Environment, FileSystemLoader

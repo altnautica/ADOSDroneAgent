@@ -130,7 +130,21 @@ extend-exclude = ["src/ados/plugins/_capabilities_generated.py"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "W", "UP"]
-ignore = ["UP017"]  # datetime.UTC requires Python 3.12+, we target 3.11
+ignore = [
+    "UP017",  # datetime.UTC requires Python 3.12+, we target 3.11
+    "E501",   # line-too-long: line length is left to the formatter, not the linter
+    "E402",   # module-import-not-at-top: several modules import after a re-export
+              # loop or doc block on purpose (e.g. ground_station package router
+              # aggregation, plugins.supervisor circular-import guard)
+    "N818",   # exception names without an Error suffix are part of the public API
+              # (CmdTimeout, CapabilityDenied, TokenInvalid, ...); renaming breaks callers
+    "N806",   # uppercase locals are deliberate function-scoped constants (SLEEP_S, ...)
+    "N805",   # first-arg name: inner helper classes use _self to avoid shadowing self
+    "N802",   # function name casing: a few test helper factories use PascalCase on purpose
+    "N814",   # camelcase-imported-as-constant: intentional short aliases (Path as _P)
+    "N815",   # mixed-case class attrs map to serialized wire field names (lastModified)
+    "UP042",  # replace-str-enum: str-enum modernization deferred (behavior-sensitive)
+]
 
 [tool.mypy]
 python_version = "3.11"

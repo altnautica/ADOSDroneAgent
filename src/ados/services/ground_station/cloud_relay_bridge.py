@@ -17,7 +17,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from typing import Any, Optional
+from typing import Any
 
 import structlog
 
@@ -64,9 +64,9 @@ class CloudRelayBridge:
         uplink_bus: UplinkEventBus,
         mqtt_gateway: Any,
         mavlink_relay: Any,
-        paired_drone_id: Optional[str],
+        paired_drone_id: str | None,
         convex_base_url: str = "https://convex.altnautica.com",
-        api_key: Optional[str] = None,
+        api_key: str | None = None,
         state_reader: Any = None,
     ) -> None:
         self._bus = uplink_bus
@@ -81,22 +81,22 @@ class CloudRelayBridge:
         self._state_reader = state_reader
 
         self._running = False
-        self._main_task: Optional[asyncio.Task] = None
-        self._mqtt_task: Optional[asyncio.Task] = None
-        self._relay_task: Optional[asyncio.Task] = None
-        self._heartbeat_task: Optional[asyncio.Task] = None
-        self._mqtt_shutdown: Optional[asyncio.Event] = None
-        self._relay_shutdown: Optional[asyncio.Event] = None
+        self._main_task: asyncio.Task | None = None
+        self._mqtt_task: asyncio.Task | None = None
+        self._relay_task: asyncio.Task | None = None
+        self._heartbeat_task: asyncio.Task | None = None
+        self._mqtt_shutdown: asyncio.Event | None = None
+        self._relay_shutdown: asyncio.Event | None = None
 
         self._throttle_state: str = _THROTTLE_NONE
         self._forward_video: bool = True
         self._forward_telemetry: bool = True
         self._mqtt_connected: bool = False
-        self._last_mqtt_ok: Optional[float] = None
-        self._last_convex_ok: Optional[float] = None
+        self._last_mqtt_ok: float | None = None
+        self._last_convex_ok: float | None = None
         self._reconnect_attempts: int = 0
         self._reconnect_delay: float = _RECONNECT_BASE_SECONDS
-        self._current_uplink: Optional[str] = None
+        self._current_uplink: str | None = None
 
     # ------------------------------------------------------------------
     # Public lifecycle
@@ -316,7 +316,7 @@ class CloudRelayBridge:
         if self._relay_task is not None:
             try:
                 await asyncio.wait_for(self._relay_task, timeout=5.0)
-            except (asyncio.TimeoutError, asyncio.CancelledError):
+            except (TimeoutError, asyncio.CancelledError):
                 self._relay_task.cancel()
             except Exception as exc:
                 log.debug("cloud_relay.relay_stop_error", error=str(exc))
@@ -330,7 +330,7 @@ class CloudRelayBridge:
         if self._mqtt_task is not None:
             try:
                 await asyncio.wait_for(self._mqtt_task, timeout=5.0)
-            except (asyncio.TimeoutError, asyncio.CancelledError):
+            except (TimeoutError, asyncio.CancelledError):
                 self._mqtt_task.cancel()
             except Exception as exc:
                 log.debug("cloud_relay.mqtt_stop_error", error=str(exc))
@@ -421,10 +421,10 @@ class CloudRelayBridge:
 # ----------------------------------------------------------------------
 # Module-level singleton
 # ----------------------------------------------------------------------
-_instance: "CloudRelayBridge | None" = None
+_instance: CloudRelayBridge | None = None
 
 
-def get_cloud_relay_bridge() -> "CloudRelayBridge":
+def get_cloud_relay_bridge() -> CloudRelayBridge:
     """Return (and lazily construct) the singleton bridge.
 
     Lazy construction pulls in the uplink router, MQTT gateway,
@@ -438,14 +438,14 @@ def get_cloud_relay_bridge() -> "CloudRelayBridge":
     return _instance
 
 
-def _build_default_bridge() -> "CloudRelayBridge":
+def _build_default_bridge() -> CloudRelayBridge:
     try:
         from ados.core.config import load_config
-        from ados.services.ground_station.uplink_router import get_uplink_router
-        from ados.services.mqtt.gateway import MqttGateway
         from ados.services.cloud.mavlink_relay import MavlinkMqttRelay
-        from ados.services.mavlink.state import VehicleState
         from ados.services.ground_station.pair_manager import get_pair_manager
+        from ados.services.ground_station.uplink_router import get_uplink_router
+        from ados.services.mavlink.state import VehicleState
+        from ados.services.mqtt.gateway import MqttGateway
     except Exception as exc:
         log.warning("cloud_relay.dependency_import_failed", error=str(exc))
         return CloudRelayBridge(
@@ -459,7 +459,7 @@ def _build_default_bridge() -> "CloudRelayBridge":
         config = load_config()
         router = get_uplink_router()
         pair = get_pair_manager()
-        drone_id: Optional[str] = None
+        drone_id: str | None = None
         # Read paired_drone_id from PairManager.status() rather than
         # config.ground_station.paired_drone_id. The pair manager is
         # the authoritative source. `status()` is async so we run it

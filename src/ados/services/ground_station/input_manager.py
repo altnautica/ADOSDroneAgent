@@ -50,12 +50,12 @@ import asyncio
 import json
 import os
 import signal
-import subprocess
 import sys
 import tempfile
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, AsyncIterator, Literal
+from typing import Any, Literal
 
 import structlog
 
@@ -344,7 +344,7 @@ class InputManager:
             stdout_b, stderr_b = await asyncio.wait_for(
                 proc.communicate(), timeout=timeout
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             log.warning("btctl_timeout", args=args, timeout=timeout)
             try:
                 proc.kill()
@@ -352,7 +352,7 @@ class InputManager:
                 pass
             try:
                 await asyncio.wait_for(proc.wait(), timeout=1.0)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 pass
             return 124, "", "timeout"
 
@@ -577,10 +577,10 @@ class InputManager:
 # Module-level singleton
 # ----------------------------------------------------------------------
 
-_instance: "InputManager | None" = None
+_instance: InputManager | None = None
 
 
-def get_input_manager() -> "InputManager":
+def get_input_manager() -> InputManager:
     """Return the process-wide `InputManager` singleton.
 
     Creates it on first call. Safe to call from REST route handlers,

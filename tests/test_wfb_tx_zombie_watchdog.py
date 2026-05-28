@@ -22,7 +22,6 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-
 _REAL_SLEEP = asyncio.sleep
 
 
@@ -38,7 +37,7 @@ async def _run_one_tick(watchdog_coro) -> None:
     with patch("ados.services.wfb.manager.asyncio.sleep", side_effect=_instant):
         try:
             await asyncio.wait_for(watchdog_coro, timeout=2.0)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             pass
 
 

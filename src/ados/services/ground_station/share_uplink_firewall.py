@@ -26,7 +26,6 @@ import os
 import shutil
 import tempfile
 from pathlib import Path
-from typing import Optional
 
 import structlog
 
@@ -136,7 +135,7 @@ async def _run(*cmd: str) -> tuple[int, str, str]:
     )
 
 
-async def apply_sysctl_runtime(enabled: bool) -> Optional[str]:
+async def apply_sysctl_runtime(enabled: bool) -> str | None:
     """Apply ip_forward at runtime via `sysctl -w`. Returns error or None."""
     rc, _out, err = await _run(
         "sysctl", "-w", f"net.ipv4.ip_forward={1 if enabled else 0}"
@@ -157,7 +156,7 @@ async def _iptables_rule_present(iface: str) -> bool:
     return rc == 0
 
 
-async def _iptables_add_rule(iface: str) -> Optional[str]:
+async def _iptables_add_rule(iface: str) -> str | None:
     rc, _o, err = await _run(
         "iptables", "-t", "nat", "-A", "POSTROUTING",
         "-o", iface, "-j", "MASQUERADE",
@@ -167,7 +166,7 @@ async def _iptables_add_rule(iface: str) -> Optional[str]:
     return None
 
 
-async def _iptables_remove_rule(iface: str) -> Optional[str]:
+async def _iptables_remove_rule(iface: str) -> str | None:
     if not await _iptables_rule_present(iface):
         return None
     rc, _o, err = await _run(
@@ -179,7 +178,7 @@ async def _iptables_remove_rule(iface: str) -> Optional[str]:
     return None
 
 
-async def _iptables_save() -> Optional[str]:
+async def _iptables_save() -> str | None:
     """Persist current rules to /etc/iptables/rules.v4 atomically."""
     rc, out, err = await _run("iptables-save")
     if rc != 0:
@@ -199,7 +198,7 @@ _NFT_TABLE = "ados_nat"
 _NFT_CHAIN = "postrouting"
 
 
-async def _nft_ensure_table_chain() -> Optional[str]:
+async def _nft_ensure_table_chain() -> str | None:
     rc, _o, err = await _run("nft", "add", "table", "ip", _NFT_TABLE)
     if rc != 0 and "exists" not in err.lower():
         return err or "nft_table_failed"
@@ -221,7 +220,7 @@ async def _nft_rule_present(iface: str) -> bool:
     return f'oifname "{iface}"' in out and "masquerade" in out
 
 
-async def _nft_add_rule(iface: str) -> Optional[str]:
+async def _nft_add_rule(iface: str) -> str | None:
     err = await _nft_ensure_table_chain()
     if err is not None:
         return err
@@ -236,7 +235,7 @@ async def _nft_add_rule(iface: str) -> Optional[str]:
     return None
 
 
-async def _nft_remove_rule(iface: str) -> Optional[str]:
+async def _nft_remove_rule(iface: str) -> str | None:
     """Flush our table chain rather than hunt by handle. Cheaper, idempotent."""
     rc, _o, err = await _run(
         "nft", "flush", "chain", "ip", _NFT_TABLE, _NFT_CHAIN,
@@ -246,7 +245,7 @@ async def _nft_remove_rule(iface: str) -> Optional[str]:
     return None
 
 
-async def _nft_save() -> Optional[str]:
+async def _nft_save() -> str | None:
     rc, out, err = await _run("nft", "list", "ruleset")
     if rc != 0:
         return err or "nft_save_failed"
@@ -260,7 +259,7 @@ async def _nft_save() -> Optional[str]:
 # ----------------------------------------------------------------------
 # Public entry points
 # ----------------------------------------------------------------------
-async def apply_share_uplink(enabled: bool, active_iface: Optional[str]) -> dict:
+async def apply_share_uplink(enabled: bool, active_iface: str | None) -> dict:
     """Apply or remove sysctl + NAT MASQUERADE and persist to disk.
 
     Returns a dict {applied: bool, backend: str, apply_error: str|None}.
@@ -273,7 +272,7 @@ async def apply_share_uplink(enabled: bool, active_iface: Optional[str]) -> dict
         log.error("share_uplink.no_backend", error=msg)
         return {"applied": False, "backend": backend, "apply_error": msg}
 
-    apply_error: Optional[str] = None
+    apply_error: str | None = None
 
     # --- sysctl -----------------------------------------------------
     rt_err = await apply_sysctl_runtime(enabled)
@@ -355,7 +354,7 @@ async def apply_share_uplink(enabled: bool, active_iface: Optional[str]) -> dict
 # qdisc is deleted before a new one is added so repeated calls converge.
 
 
-async def _tc_add_throttle(iface: str, rate_kbps: int) -> Optional[str]:
+async def _tc_add_throttle(iface: str, rate_kbps: int) -> str | None:
     """Install a `tbf` root qdisc on `iface` at `rate_kbps` kbit."""
     # Delete any existing root qdisc first. Ignore failures (absence is fine).
     await _run("tc", "qdisc", "del", "dev", iface, "root")
@@ -369,7 +368,7 @@ async def _tc_add_throttle(iface: str, rate_kbps: int) -> Optional[str]:
     return None
 
 
-async def _tc_remove_throttle(iface: str) -> Optional[str]:
+async def _tc_remove_throttle(iface: str) -> str | None:
     """Remove the root qdisc on `iface`. No-op when absent."""
     rc, _out, err = await _run("tc", "qdisc", "del", "dev", iface, "root")
     if rc != 0 and "no such" not in err.lower() and "cannot find" not in err.lower():
@@ -378,7 +377,7 @@ async def _tc_remove_throttle(iface: str) -> Optional[str]:
 
 
 async def apply_throttle(
-    active_iface: Optional[str],
+    active_iface: str | None,
     state: str,
     rate_kbps_95: int = 256,
 ) -> dict:
@@ -426,7 +425,7 @@ async def apply_throttle(
         # Remove throttle (block supersedes it) and drop the MASQUERADE rule.
         await _tc_remove_throttle(active_iface)
         backend = detect_firewall_backend()
-        nat_err: Optional[str] = None
+        nat_err: str | None = None
         if backend in ("iptables-persistent", "iptables-runtime"):
             nat_err = await _iptables_remove_rule(active_iface)
             if backend == "iptables-persistent":
@@ -458,7 +457,7 @@ async def reconcile_on_start() -> dict:
         return {"reconciled": False, "error": str(exc)}
 
     # Discover the active uplink iface. Best-effort only.
-    active_iface: Optional[str] = None
+    active_iface: str | None = None
     try:
         from ados.services.ground_station.uplink_router import get_uplink_router
         router = get_uplink_router()

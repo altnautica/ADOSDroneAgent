@@ -46,7 +46,7 @@ def _scan_all() -> list[dict]:
 
     # Cameras and video hardware
     try:
-        from ados.hal.camera import discover_cameras, HardwareRole
+        from ados.hal.camera import HardwareRole, discover_cameras
         raw_cameras = []
         for cam in discover_cameras():
             role = getattr(cam, "hardware_role", HardwareRole.CAMERA)
@@ -98,7 +98,7 @@ def _scan_all() -> list[dict]:
 
 def _classify_usb(vid: int, pid: int) -> str:
     """Classify USB device by VID:PID."""
-    from ados.hal.usb import categorize_device, UsbCategory
+    from ados.hal.usb import UsbCategory, categorize_device
     _, category = categorize_device(vid, pid, "")
     category_map = {
         UsbCategory.FC: "sensor",

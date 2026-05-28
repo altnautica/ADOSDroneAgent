@@ -30,14 +30,13 @@ import socket
 import sys
 import time
 from dataclasses import dataclass, field
-from pathlib import Path
 
 import structlog
 
 from ados.core.config import load_config
 from ados.core.logging import configure_logging, get_logger
-from ados.services.wfb.adapter import detect_wfb_adapters, set_monitor_mode
 from ados.core.paths import WFB_RECEIVER_JSON
+from ados.services.wfb.adapter import detect_wfb_adapters, set_monitor_mode
 from ados.services.wfb.key_mgr import get_key_paths, key_exists
 
 from .events import MeshEvent, get_mesh_event_bus
@@ -337,7 +336,7 @@ async def main() -> None:
             _write_state(state)
             try:
                 await asyncio.wait_for(shutdown.wait(), timeout=_POLL_INTERVAL_S)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 continue
 
     writer_task = asyncio.create_task(_periodic_write(), name="rx-writer")
@@ -356,7 +355,7 @@ async def main() -> None:
         proc.terminate()
         try:
             await asyncio.wait_for(proc.wait(), timeout=3.0)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             proc.kill()
 
     if zc is not None:

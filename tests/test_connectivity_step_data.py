@@ -15,14 +15,10 @@ Hardware-detail panel showed everything green:
 from __future__ import annotations
 
 from types import SimpleNamespace
-from unittest.mock import patch
-
-import pytest
 
 from ados.api.routes import dashboard as dashboard_route
 from ados.setup.models import NetworkStatus
 from ados.setup.service import _net_helpers
-
 
 # ---- NetworkStatus + helpers --------------------------------------------
 

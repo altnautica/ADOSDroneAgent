@@ -216,7 +216,6 @@ def test_run_socat_with_kill_on_cancel_kills_subprocess() -> None:
     caused every retry after the first to fail with `Address already
     in use` on 10.5.99.2:5555."""
     import os
-    import signal
 
     async def _scenario() -> int:
         # /bin/sleep is universally available; stand-in for a hung socat.
@@ -243,7 +242,7 @@ def test_run_socat_with_kill_on_cancel_kills_subprocess() -> None:
                         pass
                     try:
                         await asyncio.wait_for(proc.wait(), timeout=5.0)
-                    except (asyncio.TimeoutError, ProcessLookupError):
+                    except (TimeoutError, ProcessLookupError):
                         pass
 
         with pytest.raises(asyncio.TimeoutError):
@@ -428,7 +427,7 @@ def test_unbounded_wait_does_not_self_exit(
                 await asyncio.wait_for(asyncio.shield(bind_task), timeout=2.0)
                 bind_task.cancel()
                 return False  # bound: orchestrator self-exited
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 bind_task.cancel()
                 try:
                     await bind_task

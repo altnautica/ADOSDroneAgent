@@ -9,8 +9,6 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-import pytest
-
 from ados.setup import hardware_check, hardware_state
 from ados.setup.models import HardwareCheckItem, HardwareCheckStatus
 

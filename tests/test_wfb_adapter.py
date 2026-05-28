@@ -302,8 +302,8 @@ def test_multi_radio_does_not_tag_onboard_as_rtl(monkeypatch):
     cross-correlated by name substring then by global lsusb sweep,
     which marked the onboard adapter as compatible whenever any RTL
     happened to be plugged in elsewhere."""
-    from ados.services.wfb import adapter as adapter_mod
     from ados.hal.usb import UsbCategory
+    from ados.services.wfb import adapter as adapter_mod
 
     # Mock platform Linux so detection runs.
     monkeypatch.setattr(adapter_mod.platform, "system", lambda: "Linux")

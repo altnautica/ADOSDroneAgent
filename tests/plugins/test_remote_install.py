@@ -10,7 +10,7 @@ from unittest.mock import MagicMock, patch
 import httpx
 import pytest
 
-from ados.api.routes._plugins_helpers import read_sidecar, sidecar_path
+from ados.api.routes._plugins_helpers import read_sidecar
 from ados.plugins import remote_install as rinstall
 from ados.plugins import remote_install_download as rdl
 from ados.plugins.errors import SignatureError, SupervisorError
@@ -21,7 +21,6 @@ from ados.plugins.remote_install import (
     is_plugin_command,
     mark_seen,
 )
-
 
 # ---------------------------------------------------------------------
 # Fixtures

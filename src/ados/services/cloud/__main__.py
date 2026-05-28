@@ -42,20 +42,6 @@ import structlog
 from ados.core.config import load_config
 from ados.core.ipc import StateIPCClient
 from ados.core.logging import configure_logging
-from ados.services.cloud.heartbeat import (
-    _proc_cache,  # noqa: F401  (re-exported for tests/observability)
-    _read_json_with_retry,
-    build_display_enrichment as _build_display_enrichment,
-    collect_attached_display as _collect_attached_display,
-    get_local_ip as _get_local_ip,
-    get_services_status as _get_services_status,
-    read_display_rotation as _read_display_rotation,
-    read_lcd_state_blob as _read_lcd_state_blob,
-    read_lcd_video_tap as _read_lcd_video_tap,
-    read_recent_touch as _read_recent_touch,
-    read_touch_calib_status as _read_touch_calib_status,
-    read_video_recording_state as _read_video_recording_state,
-)
 
 # Re-export the path constants the helper module uses so existing
 # tests that ``patch.object(cloud_main, "DISPLAY_CONF_PATH", ...)``
@@ -64,9 +50,43 @@ from ados.services.cloud.heartbeat import (
 # need to patch the heartbeat module if they actually want to redirect
 # the underlying file read. See ``tests/test_heartbeat_enrichment.py``.
 from ados.core.paths import (  # noqa: E402  re-export
-    DISPLAY_CONF_PATH,
-    LCD_VIDEO_TAP_PATH,
-    TOUCH_CALIB_PATH,
+    DISPLAY_CONF_PATH,  # noqa: F401  re-exported for test patching
+    LCD_VIDEO_TAP_PATH,  # noqa: F401  re-exported for test patching
+    TOUCH_CALIB_PATH,  # noqa: F401  re-exported for test patching
+)
+from ados.services.cloud.heartbeat import (
+    _proc_cache,  # noqa: F401  re-exported for tests/observability
+    _read_json_with_retry,  # noqa: F401  re-exported for tests
+)
+from ados.services.cloud.heartbeat import (
+    build_display_enrichment as _build_display_enrichment,  # noqa: F401  re-exported
+)
+from ados.services.cloud.heartbeat import (
+    collect_attached_display as _collect_attached_display,  # noqa: F401  re-exported
+)
+from ados.services.cloud.heartbeat import (
+    get_local_ip as _get_local_ip,  # noqa: F401  re-exported
+)
+from ados.services.cloud.heartbeat import (
+    get_services_status as _get_services_status,  # noqa: F401  re-exported
+)
+from ados.services.cloud.heartbeat import (
+    read_display_rotation as _read_display_rotation,  # noqa: F401  re-exported
+)
+from ados.services.cloud.heartbeat import (
+    read_lcd_state_blob as _read_lcd_state_blob,  # noqa: F401  re-exported
+)
+from ados.services.cloud.heartbeat import (
+    read_lcd_video_tap as _read_lcd_video_tap,  # noqa: F401  re-exported
+)
+from ados.services.cloud.heartbeat import (
+    read_recent_touch as _read_recent_touch,  # noqa: F401  re-exported
+)
+from ados.services.cloud.heartbeat import (
+    read_touch_calib_status as _read_touch_calib_status,  # noqa: F401  re-exported
+)
+from ados.services.cloud.heartbeat import (
+    read_video_recording_state as _read_video_recording_state,  # noqa: F401  re-exported
 )
 
 from ._context import CloudContext

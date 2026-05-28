@@ -24,7 +24,6 @@ from ados.api.routes.ground_station._common import (
 )
 from ados.core.paths import MESH_ID_PATH
 
-
 router = APIRouter(prefix="/v1/ground-station", tags=["ground-station"])
 
 

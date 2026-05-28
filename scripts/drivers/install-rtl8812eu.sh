@@ -78,6 +78,7 @@ if lsmod | awk '{print $1}' | grep -qx "${MODULE_NAME}"; then
     if [ -n "${_dkms_pkg}" ] && [ -n "${_dkms_ver}" ]; then
         _dkms_src="/usr/src/${_dkms_pkg}-${_dkms_ver}/core/rtw_mlme_ext.c"
     else
+        # shellcheck disable=SC2012  # controlled DKMS path, no special chars
         _dkms_src="$(ls -d /usr/src/realtek-rtl88x2eu-*/core/rtw_mlme_ext.c 2>/dev/null | head -n1)"
     fi
     if modinfo "${MODULE_NAME}" >/dev/null 2>&1 \

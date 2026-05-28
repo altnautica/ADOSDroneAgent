@@ -583,11 +583,23 @@ def test_run_hardware_check_ground_relay_requires_mesh_dongle(monkeypatch) -> No
 
 from ados.setup.models import (  # noqa: E402
     HardwareCheckItem as _HCItem,
+)
+from ados.setup.models import (
     HardwareCheckStatus as _HCStatus,
+)
+from ados.setup.models import (
     MavlinkAccess as _Mav,
+)
+from ados.setup.models import (
     NetworkStatus as _Net,
+)
+from ados.setup.models import (
     ProfileSuggestion as _Sug,
+)
+from ados.setup.models import (
     RemoteAccessStatus as _Rem,
+)
+from ados.setup.models import (
     VideoAccess as _Vid,
 )
 from ados.setup.service import _setup_steps  # noqa: E402

@@ -11,7 +11,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
 from PIL import Image
 
 from ados.services.ui.dashboards.groundnode_landscape import (
@@ -20,7 +19,6 @@ from ados.services.ui.dashboards.groundnode_landscape import (
     _mock_state,
     render,
 )
-
 
 SNAPSHOT_DIR = Path(__file__).resolve().parent / "snapshots"
 SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)

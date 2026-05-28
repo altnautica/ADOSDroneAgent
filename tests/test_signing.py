@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from unittest.mock import MagicMock
 
 import pytest
@@ -17,7 +16,6 @@ from ados.services.mavlink.signing import (
     parse_key_hex,
     set_require,
 )
-
 
 # ──────────────────────────────────────────────────────────────
 # parse_key_hex

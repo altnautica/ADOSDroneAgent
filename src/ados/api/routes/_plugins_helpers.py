@@ -71,10 +71,14 @@ log = get_logger("api.plugins.helpers")
 
 
 from ados.api.middleware.ws_auth import (
-    WS_JOB_TICKET_PROTOCOL,
-    WS_TICKET_PROTOCOL as _WS_TICKET_PROTOCOL,
-    authenticate_websocket as _authenticate_websocket_unified,
+    WS_JOB_TICKET_PROTOCOL,  # noqa: F401  re-exported from historical location
     ws_ticket_store,
+)
+from ados.api.middleware.ws_auth import (
+    WS_TICKET_PROTOCOL as _WS_TICKET_PROTOCOL,  # noqa: F401  re-exported
+)
+from ados.api.middleware.ws_auth import (
+    authenticate_websocket as _authenticate_websocket_unified,
 )
 
 # Re-export so the test suite and any external callers can pick the

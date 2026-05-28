@@ -18,10 +18,10 @@ Why this shape:
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Protocol
-
+from typing import Any, Protocol
 
 # ---------------------------------------------------------------------
 # MAVLink

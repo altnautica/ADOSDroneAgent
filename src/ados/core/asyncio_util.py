@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+
 import structlog
 
 log = structlog.get_logger(__name__)

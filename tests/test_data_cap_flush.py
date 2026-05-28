@@ -8,7 +8,6 @@ power loss between write() and the kernel flushing the page cache.
 
 from __future__ import annotations
 
-import asyncio
 import json
 import os
 from pathlib import Path

@@ -12,9 +12,10 @@ introduced here; this module is pure orchestration.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 from ados.core.logging import get_logger
 from ados.setup.models import HardwareCheckItem, HardwareCheckStatus
@@ -126,7 +127,7 @@ def _check_fc(runtime: Any) -> HardwareCheckItem:
 
 def _check_camera() -> HardwareCheckItem:
     try:
-        from ados.hal.camera import CameraType, discover_cameras
+        from ados.hal.camera import discover_cameras
 
         cameras = discover_cameras()
     except Exception as exc:

@@ -22,7 +22,7 @@ class _StubClient:
     def __init__(self, resp: _Resp | Exception) -> None:
         self._resp = resp
 
-    def __enter__(self) -> "_StubClient":
+    def __enter__(self) -> _StubClient:
         return self
 
     def __exit__(self, *exc: object) -> bool:

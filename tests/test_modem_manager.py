@@ -19,7 +19,6 @@ from ados.hal.modem import ModemInfo
 from ados.services.ground_station import modem_manager as mm
 from ados.services.ground_station.modem_manager import GroundStationModemManager
 
-
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -270,7 +269,7 @@ async def test_data_usage_reads_byte_counters(
             else:
                 self._inner = real_path(joined)
 
-        def __truediv__(self, other: str) -> "FakePath":
+        def __truediv__(self, other: str) -> FakePath:
             inst = FakePath.__new__(FakePath)
             inst._inner = self._inner / other
             return inst

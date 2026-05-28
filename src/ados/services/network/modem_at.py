@@ -147,7 +147,7 @@ class AtModemService:
                         timeout=self.signal_poll_interval,
                     )
                     break  # Shutdown signaled
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     pass  # Continue polling
         finally:
             if self._serial and self._serial.is_open:

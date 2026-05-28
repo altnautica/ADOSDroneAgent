@@ -14,7 +14,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import httpx
 import pytest
@@ -26,7 +26,6 @@ from ados.services.vision.model_manager import (
     ModelInfo,
     ModelManager,
 )
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -107,7 +106,7 @@ class _FakeAsyncClient:
         self._response = response
         self.calls: list[tuple[str, dict[str, str]]] = []
 
-    async def __aenter__(self) -> "_FakeAsyncClient":
+    async def __aenter__(self) -> _FakeAsyncClient:
         return self
 
     async def __aexit__(self, *_exc: Any) -> None:

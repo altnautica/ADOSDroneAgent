@@ -2,11 +2,8 @@
 
 from __future__ import annotations
 
-import io
 import zipfile
 from pathlib import Path
-
-import pytest
 
 from ados.plugins.archive import MANIFEST_FILENAME
 from ados.plugins.lint import (
@@ -16,7 +13,6 @@ from ados.plugins.lint import (
     format_report,
     lint_archive,
 )
-
 
 GOOD_MANIFEST = """\
 schema_version: 1

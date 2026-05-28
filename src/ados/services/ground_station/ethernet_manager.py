@@ -23,9 +23,10 @@ import re
 import signal
 import sys
 import time
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import AsyncIterator, Literal
+from typing import Literal
 
 from ados.core.logging import get_logger
 from ados.core.subprocess import run_cmd
@@ -115,7 +116,7 @@ async def _run(cmd: list[str], timeout: float = 10.0) -> tuple[int, str, str]:
     """Tuple-shaped wrapper over :func:`run_cmd` for legacy call sites."""
     try:
         result = await run_cmd(cmd, timeout=timeout)
-    except asyncio.TimeoutError:
+    except TimeoutError:
         return 124, "", "timeout"
     except (OSError, asyncio.CancelledError) as exc:
         return 1, "", str(exc)
@@ -515,9 +516,10 @@ async def main() -> None:
     """Optional standalone entry. Normal deployment embeds this manager
     inside the uplink_router process; this entry is for bench testing or
     when a dedicated systemd unit is preferred."""
+    import structlog
+
     from ados.core.config import load_config
     from ados.core.logging import configure_logging
-    import structlog
 
     cfg = load_config()
     configure_logging(cfg.logging.level)

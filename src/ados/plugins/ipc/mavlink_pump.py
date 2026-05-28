@@ -28,7 +28,7 @@ if TYPE_CHECKING:
 log = get_logger("plugins.ipc.mavlink_pump")
 
 
-def spawn_pump(server: "PluginIpcServer", session: "PluginSession", msg_name: str) -> None:
+def spawn_pump(server: PluginIpcServer, session: PluginSession, msg_name: str) -> None:
     """Subscribe the plugin to MAVLink frames matching ``msg_name``."""
     router = server.host.mavlink
     if router is None:
@@ -54,10 +54,10 @@ def spawn_pump(server: "PluginIpcServer", session: "PluginSession", msg_name: st
 
 
 async def _pump_loop(
-    session: "PluginSession",
+    session: PluginSession,
     msg_name: str,
     queue: asyncio.Queue,
-    router: "MAVLinkRouter",
+    router: MAVLinkRouter,
 ) -> None:
     try:
         while True:

@@ -19,7 +19,7 @@ from ados.services.ui.screens import (
     link as screen_link,
 )
 from ados.services.ui.screens import (
-    menu as screen_menu,
+    menu as screen_menu,  # noqa: F401  re-exported for tests
 )
 from ados.services.ui.screens import (
     net as screen_net,

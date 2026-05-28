@@ -47,8 +47,10 @@ from ados.plugins.ipc_client import (
 from ados.plugins.manifest import PluginManifest
 from ados.plugins.process_sandbox import (
     SpawnedProcess,
-    spawn as sandbox_spawn,
     terminate_all,
+)
+from ados.plugins.process_sandbox import (
+    spawn as sandbox_spawn,
 )
 
 log = get_logger("plugins.runner")

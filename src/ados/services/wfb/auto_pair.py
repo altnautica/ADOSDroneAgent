@@ -148,7 +148,6 @@ class AutoPairSupervisor:
         from ados.services.wfb.adapter import detect_wfb_adapters
         from ados.services.wfb.bind_orchestrator import (
             BindBusyError,
-            BindError,
             get_bind_orchestrator,
         )
 
@@ -164,7 +163,7 @@ class AutoPairSupervisor:
         try:
             await asyncio.wait_for(self._stop.wait(), timeout=START_DELAY_S)
             return  # explicit stop during settle delay
-        except asyncio.TimeoutError:
+        except TimeoutError:
             pass
 
         pm = get_pair_manager()
@@ -322,20 +321,20 @@ class AutoPairSupervisor:
         try:
             await asyncio.wait_for(self._stop.wait(), timeout=seconds)
             return True
-        except asyncio.TimeoutError:
+        except TimeoutError:
             return False
 
 
 # ---------------------------------------------------------------------
 # Module-level singleton helpers
 # ---------------------------------------------------------------------
-_instance: "AutoPairSupervisor | None" = None
+_instance: AutoPairSupervisor | None = None
 
 
 def get_auto_pair_supervisor(
     role: str,
     shutdown_event: asyncio.Event | None = None,
-) -> "AutoPairSupervisor":
+) -> AutoPairSupervisor:
     """Return the process-wide AutoPairSupervisor singleton.
 
     The role and shutdown_event parameters are used only on first

@@ -129,7 +129,7 @@ async def test_supervisor_skips_wfb_restart_during_bind(monkeypatch) -> None:
     sup._shutdown.set()
     try:
         await asyncio.wait_for(loop_task, timeout=2.0)
-    except asyncio.TimeoutError:
+    except TimeoutError:
         loop_task.cancel()
         try:
             await loop_task
@@ -166,7 +166,7 @@ async def test_supervisor_restarts_wfb_when_no_bind(monkeypatch) -> None:
     sup._shutdown.set()
     try:
         await asyncio.wait_for(loop_task, timeout=2.0)
-    except asyncio.TimeoutError:
+    except TimeoutError:
         loop_task.cancel()
         try:
             await loop_task

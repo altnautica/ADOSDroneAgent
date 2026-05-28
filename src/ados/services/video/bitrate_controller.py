@@ -287,7 +287,7 @@ class BitrateController:
                 await asyncio.wait_for(
                     self._stop_event.wait(), timeout=self._tick_interval_s
                 )
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 pass
 
     def _persist_snapshot(self) -> None:
@@ -297,9 +297,10 @@ class BitrateController:
         at debug.
         """
         try:
-            from ados.core.paths import BITRATE_CONTROLLER_JSON
             import json
             import time as _time
+
+            from ados.core.paths import BITRATE_CONTROLLER_JSON
 
             path = BITRATE_CONTROLLER_JSON
             payload = self.snapshot()

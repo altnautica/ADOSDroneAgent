@@ -12,7 +12,7 @@ working against the same handle.
 from __future__ import annotations
 
 import asyncio
-from typing import Any, Optional
+from typing import Any
 
 import structlog
 
@@ -52,7 +52,7 @@ class _ModemAdapter:
                 pass
         return self._iface
 
-    async def get_gateway(self) -> Optional[str]:
+    async def get_gateway(self) -> str | None:
         iface = self.get_iface()
         try:
             proc = await asyncio.create_subprocess_exec(
@@ -97,7 +97,7 @@ class _WifiClientAdapter:
             return inner
         return self._iface
 
-    async def get_gateway(self) -> Optional[str]:
+    async def get_gateway(self) -> str | None:
         try:
             st = await self._wifi.status()
         except Exception:
@@ -127,7 +127,7 @@ class _EthernetAdapter:
             return inner
         return self._iface
 
-    async def get_gateway(self) -> Optional[str]:
+    async def get_gateway(self) -> str | None:
         try:
             st = await self._eth.status()
         except Exception:

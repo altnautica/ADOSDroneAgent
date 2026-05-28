@@ -222,7 +222,8 @@ seed_default_peripherals() {
         [ -d "${src_dir}" ] || continue
         for manifest in "${src_dir}"/*.yaml; do
             [ -f "${manifest}" ] || continue
-            local target="${dst_dir}/$(basename "${manifest}")"
+            local target
+            target="${dst_dir}/$(basename "${manifest}")"
             if [ ! -f "${target}" ]; then
                 install -m 0644 "${manifest}" "${target}"
                 copied=$((copied + 1))

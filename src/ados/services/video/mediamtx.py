@@ -48,7 +48,7 @@ async def _wait_for_tcp_port(host: str, port: int, timeout_s: float) -> bool:
             except Exception:
                 pass
             return True
-        except (OSError, asyncio.TimeoutError):
+        except (TimeoutError, OSError):
             pass
         if asyncio.get_event_loop().time() >= deadline:
             return False

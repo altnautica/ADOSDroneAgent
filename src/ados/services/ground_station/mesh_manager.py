@@ -43,12 +43,18 @@ from ados.core.config import ADOSConfig, load_config
 from ados.core.logging import configure_logging, get_logger
 from ados.core.paths import (
     MESH_GATEWAY_JSON,
-    MESH_ID_PATH as _MESH_ID_PATH,
-    MESH_PSK_PATH as _MESH_PSK_PATH,
     MESH_ROLE_PATH,
     MESH_SOCK,
-    MESH_STATE_JSON as _MESH_STATE_JSON,
     UPLINK_ACTIVE_FLAG,
+)
+from ados.core.paths import (
+    MESH_ID_PATH as _MESH_ID_PATH,
+)
+from ados.core.paths import (
+    MESH_PSK_PATH as _MESH_PSK_PATH,
+)
+from ados.core.paths import (
+    MESH_STATE_JSON as _MESH_STATE_JSON,
 )
 
 from .events import MeshEvent, get_mesh_event_bus

@@ -32,8 +32,9 @@ import os
 import secrets
 import signal
 import time
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from typing import AsyncIterator, Literal, Optional
+from typing import Literal
 
 import structlog
 
@@ -70,7 +71,7 @@ class PicEvent:
     """
 
     kind: PicEventKind
-    client_id: Optional[str]
+    client_id: str | None
     claim_counter: int
     timestamp_ms: int
 
@@ -157,17 +158,17 @@ class PicArbiter:
 
     def __init__(self) -> None:
         self.state: Literal["unclaimed", "claimed"] = "unclaimed"
-        self.claimed_by: Optional[str] = None
-        self.claimed_since: Optional[float] = None
+        self.claimed_by: str | None = None
+        self.claimed_since: float | None = None
         self.claim_counter: int = 0
-        self.primary_gamepad_id: Optional[str] = None
-        self.last_heartbeat_ts: Optional[float] = None
+        self.primary_gamepad_id: str | None = None
+        self.last_heartbeat_ts: float | None = None
 
         self.bus = PicEventBus()
         self._lock = asyncio.Lock()
         self._confirm_tokens: dict[str, _ConfirmToken] = {}
-        self._watchdog_task: Optional[asyncio.Task] = None
-        self._watchdog_stop: Optional[asyncio.Event] = None
+        self._watchdog_task: asyncio.Task | None = None
+        self._watchdog_stop: asyncio.Event | None = None
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -217,7 +218,7 @@ class PicArbiter:
     async def claim(
         self,
         client_id: str,
-        confirm_token: Optional[str] = None,
+        confirm_token: str | None = None,
         force: bool = False,
     ) -> dict:
         """Attempt to claim PIC for `client_id`.
@@ -504,10 +505,10 @@ class PicArbiter:
                     stop.wait(), timeout=self._WATCHDOG_INTERVAL_SECONDS
                 )
                 return
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 pass
 
-            expired_client: Optional[str] = None
+            expired_client: str | None = None
             async with self._lock:
                 if (
                     self.state == "claimed"
@@ -544,7 +545,7 @@ class PicArbiter:
         if task is not None and not task.done():
             try:
                 await asyncio.wait_for(task, timeout=2.0)
-            except (asyncio.TimeoutError, asyncio.CancelledError):
+            except (TimeoutError, asyncio.CancelledError):
                 task.cancel()
         self._watchdog_task = None
         self._watchdog_stop = None
@@ -555,7 +556,7 @@ class PicArbiter:
     async def run_hotplug_integration(
         self,
         client_id_hint: str = "hdmi-kiosk",
-        stop_event: Optional[asyncio.Event] = None,
+        stop_event: asyncio.Event | None = None,
     ) -> None:
         """Subscribe to InputManager bus and auto-claim on first gamepad.
 
@@ -597,10 +598,10 @@ class PicArbiter:
 # ----------------------------------------------------------------------
 # Module-level singleton
 # ----------------------------------------------------------------------
-_instance: "PicArbiter | None" = None
+_instance: PicArbiter | None = None
 
 
-def get_pic_arbiter() -> "PicArbiter":
+def get_pic_arbiter() -> PicArbiter:
     global _instance
     if _instance is None:
         _instance = PicArbiter()

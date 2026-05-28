@@ -134,7 +134,7 @@ async def update_config(update: ConfigUpdate):
                 }
             },
         ) from e
-    except Exception as e:  # noqa: BLE001
+    except Exception:  # noqa: BLE001
         # Defensive: model_dump should never raise on a valid Pydantic
         # instance, but if it does (custom __get_pydantic_core_schema__
         # quirks, etc.) we'd rather skip the strict validation than

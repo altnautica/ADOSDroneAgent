@@ -28,7 +28,6 @@ from ados.plugins.rpc import (
     TokenInvalid,
 )
 
-
 # ---------------------------------------------------------------------
 # HKDF derivation + agent issuer mint/verify
 # ---------------------------------------------------------------------

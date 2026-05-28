@@ -15,14 +15,12 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
 
 from ados.core.paths import TOUCH_CALIB_PATH
 from ados.services.ui.theme import current_palette
 from ados.services.ui.touch.events import TouchGesture
 from ados.services.ui.touch.recent import record_touch
 from ados.services.ui.touch.session import get_session_registry
-from ados.services.ui.touch.transform import load as load_calib
 
 from .menu_tree import _now
 

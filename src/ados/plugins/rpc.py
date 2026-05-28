@@ -24,11 +24,11 @@ import base64
 import hashlib
 import hmac
 import json
-import os
 import secrets
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Callable, Literal
+from typing import Any, Literal
 
 import msgpack
 
@@ -66,7 +66,7 @@ class Envelope:
         }
 
     @classmethod
-    def from_dict(cls, raw: dict[str, Any]) -> "Envelope":
+    def from_dict(cls, raw: dict[str, Any]) -> Envelope:
         return cls(
             version=int(raw.get("v", PROTOCOL_VERSION)),
             type=raw["t"],
@@ -166,7 +166,7 @@ class CapabilityToken:
         )
 
     @classmethod
-    def from_string(cls, encoded: str) -> "CapabilityToken":
+    def from_string(cls, encoded: str) -> CapabilityToken:
         parts = encoded.split("|")
         if len(parts) != 7 or parts[0] != "v1":
             raise TokenError("malformed capability token")

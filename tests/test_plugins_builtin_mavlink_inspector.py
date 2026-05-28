@@ -19,6 +19,8 @@ from ados.plugins.builtin.mavlink_inspector import (
     SUBSCRIBED_TOPICS,
     MavlinkInspectorPlugin,
     get_manifest,
+)
+from ados.plugins.builtin.mavlink_inspector import (
     manifest as module_manifest,
 )
 from ados.plugins.manifest import PluginManifest

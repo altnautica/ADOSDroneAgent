@@ -29,7 +29,7 @@ import asyncio
 import subprocess
 import time
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 import structlog
 
@@ -51,11 +51,11 @@ class UplinkRouter:
 
     def __init__(
         self,
-        modem_manager: Optional[Any] = None,
-        wifi_client_manager: Optional[Any] = None,
-        ethernet_manager: Optional[Any] = None,
-        usb_tether_check: Optional[Any] = None,
-        priority: Optional[list[str]] = None,
+        modem_manager: Any | None = None,
+        wifi_client_manager: Any | None = None,
+        ethernet_manager: Any | None = None,
+        usb_tether_check: Any | None = None,
+        priority: list[str] | None = None,
         priority_config_path: Path = GS_UPLINK_JSON,
     ) -> None:
         # Resolve the physical ethernet iface lazily, inside __init__ rather
@@ -84,7 +84,7 @@ class UplinkRouter:
             self._priority_config_path
         )
 
-        self.active_uplink: Optional[str] = None
+        self.active_uplink: str | None = None
         self.internet_reachable: bool = False
         self._fail_streak: int = 0
         self._success_streak: int = 0
@@ -93,7 +93,7 @@ class UplinkRouter:
         self.bus = UplinkEventBus()
         self._lock = asyncio.Lock()
         self._stop = asyncio.Event()
-        self._health_task: Optional[asyncio.Task] = None
+        self._health_task: asyncio.Task | None = None
         self._manager_event_tasks: list[asyncio.Task] = []
 
         self.data_cap = (
@@ -159,7 +159,7 @@ class UplinkRouter:
     # ------------------------------------------------------------------
     # Uplink probing
     # ------------------------------------------------------------------
-    async def _manager_for(self, name: str) -> Optional[Any]:
+    async def _manager_for(self, name: str) -> Any | None:
         if name == "wwan0":
             return self._modem
         if name == "wlan0_client":
@@ -197,7 +197,7 @@ class UplinkRouter:
             log.debug("uplink.is_up_failed", uplink=name, error=str(exc))
             return False
 
-    async def _uplink_iface(self, name: str) -> Optional[str]:
+    async def _uplink_iface(self, name: str) -> str | None:
         if name == "usb0":
             return "usb0"
         mgr = await self._manager_for(name)
@@ -211,7 +211,7 @@ class UplinkRouter:
                 return None
         return name
 
-    async def _uplink_gateway(self, name: str) -> Optional[str]:
+    async def _uplink_gateway(self, name: str) -> str | None:
         if name == "usb0":
             return self._read_iface_gateway("usb0")
         mgr = await self._manager_for(name)
@@ -226,7 +226,7 @@ class UplinkRouter:
             log.debug("uplink.get_gateway_failed", uplink=name, error=str(exc))
             return None
 
-    def _read_iface_gateway(self, iface: str) -> Optional[str]:
+    def _read_iface_gateway(self, iface: str) -> str | None:
         try:
             result = subprocess.run(
                 ["ip", "route", "show", "dev", iface],
@@ -255,10 +255,10 @@ class UplinkRouter:
     # ------------------------------------------------------------------
     # Routing table + health probe shims
     # ------------------------------------------------------------------
-    def _apply_default_route(self, iface: str, gateway: Optional[str]) -> bool:
+    def _apply_default_route(self, iface: str, gateway: str | None) -> bool:
         return _failover.apply_default_route(iface, gateway)
 
-    async def _probe_host(self, iface: Optional[str]) -> bool:
+    async def _probe_host(self, iface: str | None) -> bool:
         return await _health.probe_host(iface)
 
     # ------------------------------------------------------------------
@@ -267,14 +267,14 @@ class UplinkRouter:
     def _now_ms(self) -> int:
         return int(time.time() * 1000)
 
-    def _data_cap_state(self) -> Optional[str]:
+    def _data_cap_state(self) -> str | None:
         if self.data_cap is None:
             return None
         return self.data_cap.get_usage()["state"]
 
     async def _publish_health_change(
         self,
-        active: Optional[str],
+        active: str | None,
         available: list[str],
         reachable: bool,
     ) -> None:
@@ -290,7 +290,7 @@ class UplinkRouter:
         )
 
     async def _switch_to(
-        self, uplink: Optional[str], available: list[str]
+        self, uplink: str | None, available: list[str]
     ) -> None:
         previous = self.active_uplink
         self.active_uplink = uplink
@@ -431,7 +431,7 @@ class UplinkRouter:
                     timeout=_health.HEALTH_INTERVAL_SECONDS,
                 )
                 break
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 pass
         log.info("uplink.health_loop_stop")
 
@@ -470,7 +470,7 @@ class UplinkRouter:
         log.info("uplink.router_stopped")
 
     def get_state(self) -> dict:
-        usage: Optional[dict] = None
+        usage: dict | None = None
         if self.data_cap is not None:
             usage = self.data_cap.get_usage()
         return {

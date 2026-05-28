@@ -18,6 +18,8 @@ from ados.plugins.builtin.telemetry_logger import (
     PUBLIC_TOPICS,
     TelemetryLoggerPlugin,
     get_manifest,
+)
+from ados.plugins.builtin.telemetry_logger import (
     manifest as module_manifest,
 )
 from ados.plugins.manifest import PluginManifest

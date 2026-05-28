@@ -14,7 +14,7 @@ import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 import structlog
 
@@ -53,7 +53,7 @@ class _UsageState:
         }
 
     @classmethod
-    def from_json(cls, data: dict) -> "_UsageState":
+    def from_json(cls, data: dict) -> _UsageState:
         return cls(
             window_started_at=float(data.get("window_started_at", time.time())),
             cumulative_bytes=int(data.get("cumulative_bytes", 0)),
@@ -78,8 +78,8 @@ class DataCapTracker:
         self._cap_bytes = int(cap_gb * 1024 * 1024 * 1024)
         self._state_path = state_path
         self._state = self._load_state()
-        self._last_threshold: Optional[DataCapState] = None
-        self._task: Optional[asyncio.Task] = None
+        self._last_threshold: DataCapState | None = None
+        self._task: asyncio.Task | None = None
         self._stop = asyncio.Event()
 
     def set_cap(self, gb: float) -> None:
@@ -254,6 +254,6 @@ class DataCapTracker:
                     self._stop.wait(), timeout=_DATA_CAP_INTERVAL_SECONDS
                 )
                 break
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 pass
         log.info("uplink.datacap_stopped")

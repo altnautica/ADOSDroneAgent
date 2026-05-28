@@ -29,7 +29,6 @@ from ados.hal.detect import (
     _load_board_profiles,
 )
 
-
 REPO_ROOT = Path(__file__).resolve().parents[1]
 OVERLAY_DIR = REPO_ROOT / "data" / "overlays"
 OVERLAY_DTS_FILES = sorted(p for p in OVERLAY_DIR.glob("*.dts") if p.is_file())

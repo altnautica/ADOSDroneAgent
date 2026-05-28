@@ -13,11 +13,9 @@ Covers:
 from __future__ import annotations
 
 import asyncio
-from pathlib import Path
 from typing import Any
 
 import structlog
-
 from fastapi import (
     APIRouter,
     HTTPException,
@@ -43,7 +41,6 @@ from ados.api.routes.ground_station._common import (
     ScreensUpdate,
 )
 from ados.core.paths import MESH_GATEWAY_JSON
-
 
 log = structlog.get_logger("ground_station.ui")
 

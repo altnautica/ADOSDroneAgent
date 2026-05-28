@@ -47,25 +47,24 @@ import hashlib
 import hmac
 import json
 import socket
-import subprocess
-
-from ados.core.paths import HOP_SUPERVISOR_JSON
 import struct
+import subprocess
 import time
 from dataclasses import dataclass
 from typing import Any
 
 import structlog
 
+from ados.core.paths import HOP_SUPERVISOR_JSON
 from ados.services.wfb.adapter import (
     enabled_channels,
     get_interface_mode,
     set_monitor_mode,
 )
 from ados.services.wfb.channel import (
+    _BAND_CHANNELS,
     STANDARD_CHANNELS,
     WfbChannel,
-    _BAND_CHANNELS,
     get_channel,
     scan_channels,
 )
@@ -169,7 +168,7 @@ class HopAnnounce:
         return body + tag
 
     @classmethod
-    def decode(cls, raw: bytes, pair_key: bytes) -> "HopAnnounce | None":
+    def decode(cls, raw: bytes, pair_key: bytes) -> HopAnnounce | None:
         if len(raw) != 51:
             return None
         if not raw.startswith(_HOP_MAGIC):
@@ -251,7 +250,7 @@ class PresenceBeacon:
         return body + tag
 
     @classmethod
-    def decode(cls, raw: bytes, pair_key: bytes) -> "PresenceBeacon | None":
+    def decode(cls, raw: bytes, pair_key: bytes) -> PresenceBeacon | None:
         if len(raw) != _PRESENCE_BEACON_TOTAL_BYTES:
             return None
         if not raw.startswith(_PRESENCE_MAGIC):
@@ -500,7 +499,7 @@ class HopSupervisor:
                 next_persist = now + 5.0
             try:
                 await asyncio.wait_for(self._stop_event.wait(), timeout=1.0)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 pass
 
     def _persist_snapshot(self) -> None:
@@ -1107,7 +1106,7 @@ class HopListener:
 
         loop.create_task(_verify())
 
-    def _handle_presence(self, beacon: "PresenceBeacon") -> None:
+    def _handle_presence(self, beacon: PresenceBeacon) -> None:
         """Update the in-memory peer cache and back-fill pair state."""
         # Reject self-beacons. Loopback delivery can race against the
         # wfb_tx_control bind when the emit loop misroutes; rather than
@@ -1230,7 +1229,7 @@ class HopListener:
                     data, _peer = await asyncio.wait_for(
                         loop.sock_recvfrom(sock, 256), timeout=1.0
                     )
-                except (asyncio.TimeoutError, OSError):
+                except (TimeoutError, OSError):
                     # Periodic wake to fire the scheduled hop if
                     # its epoch has arrived, and to push a fresh
                     # snapshot to disk every ~5 s.
@@ -1387,7 +1386,7 @@ async def _apply_hop(wfb_manager: Any, target_channel: int) -> bool:
         try:
             proc.terminate()
             await asyncio.wait_for(proc.wait(), timeout=3.0)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             try:
                 proc.kill()
             except ProcessLookupError:

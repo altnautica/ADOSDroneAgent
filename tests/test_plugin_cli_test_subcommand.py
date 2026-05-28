@@ -15,7 +15,6 @@ from click.testing import CliRunner
 
 from ados.cli.plugin import plugin_group
 
-
 _VALID_MANIFEST = """
 schema_version: 1
 id: com.example.cli

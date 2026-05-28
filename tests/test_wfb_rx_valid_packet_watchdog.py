@@ -39,7 +39,7 @@ async def _run_watchdog(coro) -> None:
     ):
         try:
             await asyncio.wait_for(coro, timeout=2.0)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             pass
 
 

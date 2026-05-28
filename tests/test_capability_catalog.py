@@ -34,7 +34,6 @@ from ados.plugins.capabilities import (
 from ados.plugins.supervisor import PluginSupervisor
 from tests.api_runtime_utils import build_api_runtime
 
-
 # ---------------------------------------------------------------------
 # Catalog completeness
 # ---------------------------------------------------------------------

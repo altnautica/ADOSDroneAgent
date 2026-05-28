@@ -34,7 +34,7 @@ def _matches(pattern: str, topic: str) -> bool:
 
 
 class _EventsClient:
-    def __init__(self, ipc: "PluginIpcClient") -> None:
+    def __init__(self, ipc: PluginIpcClient) -> None:
         self._ipc = ipc
 
     async def publish(self, topic: str, payload: dict | None = None) -> int:
@@ -59,7 +59,7 @@ class _MAVLinkClient:
     plugins keep working without source changes.
     """
 
-    def __init__(self, ipc: "PluginIpcClient") -> None:
+    def __init__(self, ipc: PluginIpcClient) -> None:
         self._ipc = ipc
 
     async def send(
@@ -103,7 +103,7 @@ class _PeripheralManagerClient:
     address space.
     """
 
-    def __init__(self, ipc: "PluginIpcClient") -> None:
+    def __init__(self, ipc: PluginIpcClient) -> None:
         self._ipc = ipc
 
     async def register_camera_driver(self, driver: Any) -> dict:
@@ -173,7 +173,7 @@ class _CameraClient:
     a host-side cap so a runaway plugin cannot DOS the camera pipeline.
     """
 
-    def __init__(self, ipc: "PluginIpcClient") -> None:
+    def __init__(self, ipc: PluginIpcClient) -> None:
         self._ipc = ipc
 
     async def claim(self, device_path: str, exclusive: bool = True) -> dict:
@@ -217,7 +217,7 @@ class _CameraClient:
 
 
 class _TelemetryClient:
-    def __init__(self, ipc: "PluginIpcClient") -> None:
+    def __init__(self, ipc: PluginIpcClient) -> None:
         self._ipc = ipc
 
     async def extend(self, channel: str, payload: dict) -> dict:
@@ -230,7 +230,7 @@ class _ConfigClient:
     Read order: drone scope (when bound) -> global -> default.
     """
 
-    def __init__(self, ipc: "PluginIpcClient", static_config: dict) -> None:
+    def __init__(self, ipc: PluginIpcClient, static_config: dict) -> None:
         self._ipc = ipc
         self._static = dict(static_config or {})
 
@@ -246,7 +246,7 @@ class _ConfigClient:
 
 
 class _ProcessClient:
-    def __init__(self, ipc: "PluginIpcClient") -> None:
+    def __init__(self, ipc: PluginIpcClient) -> None:
         self._ipc = ipc
 
     async def spawn(
@@ -267,7 +267,7 @@ class _LifecycleClient:
     via ``ctx.config.set`` during pause.
     """
 
-    def __init__(self, ipc: "PluginIpcClient") -> None:
+    def __init__(self, ipc: PluginIpcClient) -> None:
         self._ipc = ipc
 
     async def on_pause(
@@ -312,7 +312,7 @@ class PluginContext:
         plugin_id: str,
         plugin_version: str,
         config: dict,
-        ipc: "PluginIpcClient",
+        ipc: PluginIpcClient,
         agent_id: str = "",
         data_dir: Path | None = None,
         config_dir: Path | None = None,

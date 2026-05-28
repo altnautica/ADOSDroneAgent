@@ -77,7 +77,7 @@ def test_atomic_write_text_happy_path(tmp_path: Path) -> None:
 def test_atomic_write_text_encoding(tmp_path: Path) -> None:
     target = tmp_path / "note.txt"
     atomic.atomic_write_text(target, "naïve", encoding="utf-8")
-    assert target.read_bytes() == "naïve".encode("utf-8")
+    assert target.read_bytes() == "naïve".encode()
 
 
 # ---------------------------------------------------------------------------
