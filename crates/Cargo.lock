@@ -48,6 +48,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "ados-radio"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "hex",
+ "hmac",
+ "nix 0.29.0",
+ "serde",
+ "serde_json",
+ "serde_norway",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-journald",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "ados-supervisor"
 version = "0.1.0"
 dependencies = [
