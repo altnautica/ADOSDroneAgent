@@ -14,6 +14,8 @@ pub const WFB_LOCKED_CHANNEL: &str = "/run/ados/wfb-locked-channel";
 pub const WFB_KEY_DIR: &str = "/etc/ados/wfb";
 /// Drone TX keypair (present ⟺ this rig is WFB-paired as a drone).
 pub const WFB_TX_KEY: &str = "/etc/ados/wfb/tx.key";
+/// Drone RX key (decrypts the GS uplink). Present ⟺ the stats RX can run.
+pub const WFB_RX_KEY: &str = "/etc/ados/wfb/rx.key";
 /// The canonical drone key shared with the ground station after bind.
 pub const DRONE_KEY: &str = "/etc/drone.key";
 

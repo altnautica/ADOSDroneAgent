@@ -12,6 +12,7 @@
 pub mod adapter;
 pub mod config;
 pub mod hop;
+pub mod link_quality;
 pub mod paths;
 pub mod process;
 pub mod watchdog;

@@ -60,6 +60,7 @@ dependencies = [
  "serde_norway",
  "sha2",
  "tempfile",
+ "time",
  "tokio",
  "tracing",
  "tracing-journald",

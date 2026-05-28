@@ -89,6 +89,27 @@ pub fn rx_control_args(iface: &str, key_path: &Path) -> Vec<String> {
     ]
 }
 
+/// Data-plane stats `wfb_rx` args (radio_id 0). `-l 1000` emits the per-second
+/// PKT/RX_ANT stats lines the link-quality monitor parses. The decoded payload
+/// goes to **127.0.0.1:5601** — deliberately NOT 5600 (the data-plane TX's
+/// video ingress) so the stats receiver can never inject into the video path.
+/// Uses the **rx** key (decrypts the GS uplink).
+pub fn stats_rx_args(iface: &str, rx_key_path: &Path) -> Vec<String> {
+    vec![
+        "-p".into(),
+        "0".into(),
+        "-c".into(),
+        "127.0.0.1".into(),
+        "-u".into(),
+        "5601".into(),
+        "-K".into(),
+        key_str(rx_key_path),
+        "-l".into(),
+        "1000".into(),
+        iface.into(),
+    ]
+}
+
 /// A live wfb child (data or control plane) in its own process group.
 pub struct WfbProcess {
     #[cfg(target_os = "linux")]
@@ -132,6 +153,19 @@ impl WfbProcess {
         .await
     }
 
+    /// Spawn the **stats** `wfb_rx` (data plane, port 5601) with stdout PIPED so
+    /// the caller can read the per-second PKT/RX_ANT stats lines.
+    pub async fn spawn_stats_rx(iface: &str, rx_key_path: &Path) -> std::io::Result<Self> {
+        // stderr → null (we only want stdout's stats stream); stdout piped.
+        Self::spawn_in_group_piped_stdout("wfb_rx", &stats_rx_args(iface, rx_key_path)).await
+    }
+
+    /// Take the child's stdout handle (for the stats reader). Returns `None` if
+    /// stdout was not piped or already taken.
+    pub fn take_stdout(&mut self) -> Option<tokio::process::ChildStdout> {
+        self.inner.stdout.take()
+    }
+
     /// Spawn `program` with `args` as a process-group leader (setsid). When
     /// `stderr_log` is `Some`, stderr is redirected to that file (truncated);
     /// otherwise stderr is piped for the caller to drain. stdout is always
@@ -158,6 +192,21 @@ impl WfbProcess {
             }
         }
 
+        Self::finish_spawn(cmd)
+    }
+
+    /// Like [`spawn_in_group`] but pipes stdout (for the stats reader) and
+    /// discards stderr. setsid + killpg discipline is identical.
+    async fn spawn_in_group_piped_stdout(program: &str, args: &[String]) -> std::io::Result<Self> {
+        let mut cmd = tokio::process::Command::new(program);
+        cmd.args(args)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null());
+        Self::finish_spawn(cmd)
+    }
+
+    /// Apply the setsid pre-exec hook, spawn, and capture the process group.
+    fn finish_spawn(mut cmd: tokio::process::Command) -> std::io::Result<Self> {
         // Move the child into its own session so killpg later kills it cleanly.
         #[cfg(target_os = "linux")]
         // Safety: setsid() is async-signal-safe and is the only call in this hook.
@@ -219,25 +268,58 @@ impl Drop for WfbProcess {
     }
 }
 
-/// The drone's three radio subprocesses, spawned and torn down in lock-step.
-/// The control plane MUST restart with the data plane on every channel hop so
-/// HopAnnounce/HopAck keep flowing on the new channel.
+/// The drone's radio subprocesses, spawned and torn down in lock-step. The
+/// control plane MUST restart with the data plane on every channel hop so
+/// HopAnnounce/HopAck keep flowing on the new channel; the stats RX likewise
+/// follows the channel.
 pub struct RadioProcesses {
     pub data_tx: WfbProcess,
     pub tx_control: WfbProcess,
     pub rx_control: WfbProcess,
+    /// Data-plane stats RX (only when an rx key is present). Drives link stats.
+    stats_rx: Option<WfbProcess>,
+    /// The task reading the stats RX stdout into the shared `LinkStats`.
+    stats_reader: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl RadioProcesses {
-    /// Spawn all three (data tx + tx control + rx control) on `iface`.
-    pub async fn spawn(iface: &str, cfg: &WfbConfig, key_path: &Path) -> std::io::Result<Self> {
+    /// Spawn the data plane + both control planes, and (when `/etc/ados/wfb/rx.key`
+    /// exists) the stats RX with a reader task that updates `link` from the
+    /// `wfb_rx` stats stream.
+    pub async fn spawn(
+        iface: &str,
+        cfg: &WfbConfig,
+        key_path: &Path,
+        link: std::sync::Arc<tokio::sync::Mutex<crate::link_quality::LinkStats>>,
+    ) -> std::io::Result<Self> {
         let data_tx = WfbProcess::spawn_data_tx(iface, cfg, key_path).await?;
         let tx_control = WfbProcess::spawn_tx_control(iface, cfg, key_path).await?;
         let rx_control = WfbProcess::spawn_rx_control(iface, key_path).await?;
+
+        // Stats RX is best-effort + gated on the rx key (the GS-uplink decryptor).
+        // Without it the link block stays at default sentinels — same as Python.
+        let (stats_rx, stats_reader) = if Path::new(crate::paths::WFB_RX_KEY).exists() {
+            match WfbProcess::spawn_stats_rx(iface, Path::new(crate::paths::WFB_RX_KEY)).await {
+                Ok(mut p) => {
+                    let stdout = p.take_stdout();
+                    let reader = stdout.map(|out| tokio::spawn(stats_reader_loop(out, link)));
+                    (Some(p), reader)
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "stats_rx_spawn_failed");
+                    (None, None)
+                }
+            }
+        } else {
+            (None, None)
+        };
+
         Ok(Self {
             data_tx,
             tx_control,
             rx_control,
+            stats_rx,
+            stats_reader,
         })
     }
 
@@ -246,12 +328,43 @@ impl RadioProcesses {
         self.data_tx.pid()
     }
 
-    /// Kill all three process groups.
+    /// Kill every process group + stop the stats reader.
     pub async fn kill_all(&mut self) {
+        if let Some(r) = self.stats_reader.take() {
+            r.abort();
+        }
         self.data_tx.kill().await;
         self.tx_control.kill().await;
         self.rx_control.kill().await;
+        if let Some(mut s) = self.stats_rx.take() {
+            s.kill().await;
+        }
     }
+}
+
+/// Read `wfb_rx` stdout line-by-line, feed the link-quality monitor, and update
+/// the shared `LinkStats` the sidecar + reactive-hop logic read. Ends on EOF
+/// (process death) or task abort.
+async fn stats_reader_loop(
+    stdout: tokio::process::ChildStdout,
+    link: std::sync::Arc<tokio::sync::Mutex<crate::link_quality::LinkStats>>,
+) {
+    use tokio::io::AsyncBufReadExt;
+    let mut lines = tokio::io::BufReader::new(stdout).lines();
+    let mut mon = crate::link_quality::LinkQualityMonitor::new();
+    while let Ok(Some(line)) = lines.next_line().await {
+        let now_iso = now_iso();
+        if let Some(stats) = mon.feed_line(&line, &now_iso) {
+            *link.lock().await = stats;
+        }
+    }
+}
+
+/// Current ISO-8601 UTC timestamp for the link-stats `timestamp` field.
+fn now_iso() -> String {
+    time::OffsetDateTime::now_utc()
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_default()
 }
 
 #[cfg(test)]

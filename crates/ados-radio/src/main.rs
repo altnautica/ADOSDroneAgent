@@ -22,6 +22,7 @@ use ados_radio::hop::{
     hop_announce_rounds, hop_epoch_ms, parse_hop_ack, parse_presence_beacon, HopState, HopTrigger,
     HOP_ACK_PORT, HOP_CONTROL_PORT, PRESENCE_INTERVAL,
 };
+use ados_radio::link_quality::LinkStats;
 use ados_radio::paths::{run_path, write_sidecar, DRONE_KEY, WFB_TX_KEY};
 use ados_radio::process::RadioProcesses;
 use ados_radio::watchdog::{tx_health_watchdog, video_recvq_watchdog, WatchdogFired};
@@ -60,7 +61,14 @@ async fn run_service(cfg: &WfbConfig, cancel: Arc<Notify>) {
         // ── Key guard — block while unpaired ─────────────────────────────
         if !Path::new(WFB_TX_KEY).exists() {
             tracing::info!(key = WFB_TX_KEY, "wfb_blocked_unpaired");
-            write_stats_sidecar("disabled", cfg.channel, cfg.tx_power_dbm, None, cfg);
+            write_stats_sidecar(
+                "disabled",
+                cfg.channel,
+                cfg.tx_power_dbm,
+                None,
+                &LinkStats::default(),
+                cfg,
+            );
             tokio::select! {
                 _ = tokio::time::sleep(KEY_WAIT_INTERVAL) => continue,
                 _ = cancel.notified() => return,
@@ -80,7 +88,14 @@ async fn run_service(cfg: &WfbConfig, cancel: Arc<Notify>) {
         };
         let Some(adapter) = selected else {
             tracing::warn!("wfb_no_adapter_found");
-            write_stats_sidecar("no_adapter", cfg.channel, cfg.tx_power_dbm, None, cfg);
+            write_stats_sidecar(
+                "no_adapter",
+                cfg.channel,
+                cfg.tx_power_dbm,
+                None,
+                &LinkStats::default(),
+                cfg,
+            );
             tokio::select! {
                 _ = tokio::time::sleep(Duration::from_secs(10)) => continue,
                 _ = cancel.notified() => return,
@@ -109,11 +124,14 @@ async fn run_service(cfg: &WfbConfig, cancel: Arc<Notify>) {
         let drone_key = tokio::fs::read(DRONE_KEY).await.ok();
         let pair_key = derive_pair_key(drone_key.as_deref());
 
-        // ── Spawn the radio process group: data wfb_tx + tx/rx control ────
-        // (each in its own session — the orphan fix; control plane carries
-        // HopAnnounce/HopAck over the air, so it MUST run for FHSS to work.)
+        // ── Shared live link stats (fed by the stats-RX reader task) ──────
+        let link = Arc::new(tokio::sync::Mutex::new(LinkStats::default()));
+
+        // ── Spawn the radio process group: data wfb_tx + tx/rx control + ──
+        // stats rx (each in its own session — the orphan fix; control plane
+        // carries HopAnnounce/HopAck over the air, so it MUST run for FHSS).
         let key_path = Path::new(WFB_TX_KEY);
-        let proc = match RadioProcesses::spawn(iface, cfg, key_path).await {
+        let proc = match RadioProcesses::spawn(iface, cfg, key_path, link.clone()).await {
             Ok(p) => Arc::new(tokio::sync::Mutex::new(p)),
             Err(e) => {
                 tracing::warn!(error = %e, "wfb_spawn_failed");
@@ -134,6 +152,7 @@ async fn run_service(cfg: &WfbConfig, cancel: Arc<Notify>) {
             cfg.channel,
             effective_tx_dbm,
             Some(&adapter_info),
+            &LinkStats::default(),
             cfg,
         );
         tracing::info!(iface, channel = cfg.channel, pid, "wfb_service_ready");
@@ -142,22 +161,26 @@ async fn run_service(cfg: &WfbConfig, cancel: Arc<Notify>) {
         let task_cancel = cancel.clone();
         let iface_str = iface.clone();
 
-        // 2 s sidecar heartbeat — keeps wfb-stats.json fresh so the REST
-        // handler never marks it stale (mtime > 10 s).
+        // 2 s sidecar heartbeat — reads the live link stats, derives the
+        // connected/connecting state, and keeps wfb-stats.json fresh so the
+        // REST handler never marks it stale (mtime > 10 s).
         let hb_cancel = task_cancel.clone();
         let hb_cfg = cfg.clone();
         let hb_adapter = adapter_info.clone();
         let hb_channel = cfg.channel;
+        let hb_link = link.clone();
         let mut heartbeat = tokio::spawn(async move {
             let mut tick = tokio::time::interval(Duration::from_secs(2));
             loop {
                 tokio::select! {
                     _ = tick.tick() => {
+                        let stats = hb_link.lock().await.clone();
                         write_stats_sidecar(
-                            "connecting",
+                            derive_state(&stats),
                             hb_channel,
                             effective_tx_dbm,
                             Some(&hb_adapter),
+                            &stats,
                             &hb_cfg,
                         );
                     }
@@ -193,10 +216,11 @@ async fn run_service(cfg: &WfbConfig, cancel: Arc<Notify>) {
 
         // Hop supervisor (enabled only when configured).
         let hop_enabled = hop_cfg.auto_hop_enabled;
+        let hop_link = link.clone();
         let mut hop = tokio::spawn(async move {
             if hop_enabled {
                 run_hop_supervisor(
-                    &hop_iface, &hop_cfg, hop_proc, &hop_key, &device_id, hop_cancel,
+                    &hop_iface, &hop_cfg, hop_proc, &hop_key, &device_id, hop_link, hop_cancel,
                 )
                 .await;
             } else {
@@ -248,6 +272,7 @@ async fn run_service(cfg: &WfbConfig, cancel: Arc<Notify>) {
             cfg.channel,
             effective_tx_dbm,
             Some(&adapter_info),
+            &LinkStats::default(),
             cfg,
         );
         tokio::select! {
@@ -293,12 +318,14 @@ async fn emit_presence_beacons(
 /// (HopAck + the peer's PresenceBeacon) and drives the shared `HopState`; the
 /// hop loop announces a target, waits for the matching ACK, then executes the
 /// channel change. Writes `hop-supervisor.json` (5 s) + `peer-presence.json`.
+#[allow(clippy::too_many_arguments)]
 async fn run_hop_supervisor(
     iface: &str,
     cfg: &WfbConfig,
     proc: Arc<tokio::sync::Mutex<RadioProcesses>>,
     pair_key: &[u8; 32],
     _device_id: &str,
+    link: Arc<tokio::sync::Mutex<LinkStats>>,
     cancel: Arc<Notify>,
 ) {
     let state = Arc::new(tokio::sync::Mutex::new(HopState::new(cfg.channel)));
@@ -399,7 +426,7 @@ async fn run_hop_supervisor(
                     sleep_to_epoch(epoch).await;
                     proc.lock().await.kill_all().await;
                     set_channel(iface, target).await;
-                    match RadioProcesses::spawn(iface, cfg, Path::new(WFB_TX_KEY)).await {
+                    match RadioProcesses::spawn(iface, cfg, Path::new(WFB_TX_KEY), link.clone()).await {
                         Ok(new_proc) => {
                             *proc.lock().await = new_proc;
                             state.lock().await.record_hop(target, "periodic", true);
@@ -422,7 +449,7 @@ async fn run_hop_supervisor(
                     tracing::info!(home, "hop_return_home");
                     proc.lock().await.kill_all().await;
                     set_channel(iface, home).await;
-                    let ok = match RadioProcesses::spawn(iface, cfg, Path::new(WFB_TX_KEY)).await {
+                    let ok = match RadioProcesses::spawn(iface, cfg, Path::new(WFB_TX_KEY), link.clone()).await {
                         Ok(new_proc) => {
                             *proc.lock().await = new_proc;
                             true
@@ -550,6 +577,7 @@ fn write_stats_sidecar(
     channel: u8,
     effective_tx_dbm: i8,
     adapter: Option<&AdapterInfo>,
+    link: &LinkStats,
     cfg: &WfbConfig,
 ) {
     let (interface, chipset, injection_ok) = match adapter {
@@ -568,9 +596,32 @@ fn write_stats_sidecar(
         "mcs_index": cfg.mcs_index,
         "channel_locked": true,
         "profile": "drone",
+        // Link-quality block (from the stats wfb_rx; defaults until frames flow).
+        "rssi_dbm": link.rssi_dbm,
+        "rssi_min": link.rssi_min,
+        "rssi_max": link.rssi_max,
+        "noise_dbm": link.noise_dbm,
+        "snr_db": link.snr_db,
+        "packets_received": link.packets_received,
+        "packets_lost": link.packets_lost,
+        "fec_recovered": link.fec_recovered,
+        "fec_failed": link.fec_failed,
+        "bitrate_kbps": link.bitrate_kbps,
+        "loss_percent": link.loss_percent,
+        "timestamp": link.timestamp,
     });
     let path = run_path("wfb-stats.json");
     let _ = write_sidecar(&path, &v);
+}
+
+/// Derive the radio state for the sidecar: "connected" once the stats RX has
+/// decoded data packets, else "connecting".
+fn derive_state(link: &LinkStats) -> &'static str {
+    if link.packets_received > 0 {
+        "connected"
+    } else {
+        "connecting"
+    }
 }
 
 /// Read the device-id from the canonical agent location (`/etc/ados/device-id`,
