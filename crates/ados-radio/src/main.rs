@@ -398,49 +398,48 @@ async fn run_hop_supervisor(
                     continue;
                 }
                 let cur = state.lock().await.channel;
-                let target = next_candidate_channel(cur, cfg);
+                // Scan live for the quietest in-band channel (rotates if the
+                // scan is flat, e.g. monitor mode rejected it).
+                let target = ados_radio::channel::pick_hop_target(iface, cur, &cfg.band).await;
                 if target == cur {
                     continue;
                 }
-                let epoch = hop_epoch_ms();
-                let pkt = build_hop_announce(epoch, target, HopTrigger::Periodic, &pair_key);
-                // Drain any stale acks so we only count one for THIS announce.
-                while ack_rx.try_recv().is_ok() {}
-
-                // Announce up to 30×@100ms, stop early on the matching ACK.
-                let mut acked = false;
-                for _ in 0..hop_announce_rounds() {
-                    let _ = announce_sock
-                        .send_to(&pkt, format!("127.0.0.1:{HOP_CONTROL_PORT}"))
-                        .await;
-                    if let Ok(Some(ch)) =
-                        tokio::time::timeout(hop_announce_interval(), ack_rx.recv()).await
-                    {
-                        if ch == target {
-                            acked = true;
-                            break;
-                        }
-                    }
-                }
-                if acked {
-                    sleep_to_epoch(epoch).await;
-                    proc.lock().await.kill_all().await;
-                    set_channel(iface, target).await;
-                    match RadioProcesses::spawn(iface, cfg, Path::new(WFB_TX_KEY), link.clone()).await {
-                        Ok(new_proc) => {
-                            *proc.lock().await = new_proc;
-                            state.lock().await.record_hop(target, "periodic", true);
-                            tracing::info!(iface, channel = target, "hop_executed");
-                        }
-                        Err(e) => {
-                            state.lock().await.record_hop(target, "periodic", false);
-                            tracing::warn!(error = %e, "hop_wfb_restart_failed");
-                        }
-                    }
-                }
+                try_execute_hop(
+                    iface, cfg, &proc, &state, &announce_sock, &mut ack_rx, &pair_key,
+                    target, HopTrigger::Periodic, "periodic", &link,
+                )
+                .await;
             }
-            // Peer-stale check — return to home channel (no ACK handshake).
+            // Reactive trigger + peer-stale return-to-home (every 5 s).
             _ = stale_tick.tick() => {
+                // Reactive: the live link crossed a loss/RSSI threshold. Gated on
+                // REAL data (timestamp + packets) so default stats never trip it.
+                let do_reactive = {
+                    let s = state.lock().await;
+                    if s.reactive_allowed() {
+                        let l = link.lock().await;
+                        let has_real = !l.timestamp.is_empty() && l.packets_received > 0;
+                        has_real
+                            && (l.loss_percent > cfg.hop_loss_threshold_percent as f64
+                                || l.rssi_dbm < cfg.hop_rssi_threshold_dbm as f64)
+                    } else {
+                        false
+                    }
+                };
+                if do_reactive {
+                    let cur = state.lock().await.channel;
+                    let target =
+                        ados_radio::channel::pick_hop_target(iface, cur, &cfg.band).await;
+                    if target != cur {
+                        tracing::info!(target, "hop_reactive_trigger");
+                        try_execute_hop(
+                            iface, cfg, &proc, &state, &announce_sock, &mut ack_rx, &pair_key,
+                            target, HopTrigger::Reactive, "reactive", &link,
+                        )
+                        .await;
+                    }
+                }
+
                 let (return_home, home) = {
                     let s = state.lock().await;
                     (s.should_return_home(), s.home_channel)
@@ -467,6 +466,61 @@ async fn run_hop_supervisor(
                 hb_writer.abort();
                 return;
             }
+        }
+    }
+}
+
+/// Announce a hop to `target`, wait for the matching ACK, and on success
+/// execute the channel change (kill the radio group → `iw set channel` →
+/// respawn). Records the outcome in the hop history with `label`. Shared by the
+/// periodic and reactive triggers.
+#[allow(clippy::too_many_arguments)]
+async fn try_execute_hop(
+    iface: &str,
+    cfg: &WfbConfig,
+    proc: &Arc<tokio::sync::Mutex<RadioProcesses>>,
+    state: &Arc<tokio::sync::Mutex<HopState>>,
+    announce_sock: &tokio::net::UdpSocket,
+    ack_rx: &mut tokio::sync::mpsc::Receiver<u8>,
+    pair_key: &[u8; 32],
+    target: u8,
+    trigger: HopTrigger,
+    label: &str,
+    link: &Arc<tokio::sync::Mutex<LinkStats>>,
+) {
+    let epoch = hop_epoch_ms();
+    let pkt = build_hop_announce(epoch, target, trigger, pair_key);
+    // Drain stale acks so we only count one for THIS announce.
+    while ack_rx.try_recv().is_ok() {}
+
+    // Announce up to 30×@100ms, stop early on the matching ACK.
+    let mut acked = false;
+    for _ in 0..hop_announce_rounds() {
+        let _ = announce_sock
+            .send_to(&pkt, format!("127.0.0.1:{HOP_CONTROL_PORT}"))
+            .await;
+        if let Ok(Some(ch)) = tokio::time::timeout(hop_announce_interval(), ack_rx.recv()).await {
+            if ch == target {
+                acked = true;
+                break;
+            }
+        }
+    }
+    if !acked {
+        return;
+    }
+    sleep_to_epoch(epoch).await;
+    proc.lock().await.kill_all().await;
+    set_channel(iface, target).await;
+    match RadioProcesses::spawn(iface, cfg, Path::new(WFB_TX_KEY), link.clone()).await {
+        Ok(new_proc) => {
+            *proc.lock().await = new_proc;
+            state.lock().await.record_hop(target, label, true);
+            tracing::info!(iface, channel = target, trigger = label, "hop_executed");
+        }
+        Err(e) => {
+            state.lock().await.record_hop(target, label, false);
+            tracing::warn!(error = %e, "hop_wfb_restart_failed");
         }
     }
 }
@@ -525,23 +579,6 @@ async fn write_hop_supervisor_json(state: &Arc<tokio::sync::Mutex<HopState>>, cf
         })
     };
     let _ = write_sidecar(&run_path("hop-supervisor.json"), &v);
-}
-
-/// Pick the next candidate channel in the configured band (simple rotation;
-/// the full Python version uses iw scan for the quietest channel).
-fn next_candidate_channel(current: u8, cfg: &WfbConfig) -> u8 {
-    let unii3 = [149u8, 153, 157, 161, 165];
-    let unii1 = [36u8, 40, 44, 48];
-    let candidates: &[u8] = if cfg.band.contains("unii-1") || cfg.band.contains("u-nii-1") {
-        &unii1
-    } else {
-        &unii3
-    };
-    candidates
-        .iter()
-        .find(|&&c| c != current)
-        .copied()
-        .unwrap_or(current)
 }
 
 /// `iw <iface> set channel <ch>` (best-effort; failures are logged).

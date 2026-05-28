@@ -306,6 +306,20 @@ impl HopState {
         self.was_linked && self.peer_is_stale() && self.channel != self.home_channel
     }
 
+    /// True if a REACTIVE hop is allowed: the link was established and the 30s
+    /// reactive cooldown has elapsed. Unlike [`can_hop`], this does NOT gate on
+    /// peer-freshness — a degrading link (the reactive trigger) is exactly when
+    /// the peer may be going stale, and fleeing the bad channel is the point.
+    pub fn reactive_allowed(&self) -> bool {
+        if !self.was_linked {
+            return false;
+        }
+        match self.last_hop_at {
+            Some(t) => t.elapsed().as_secs() >= 30,
+            None => true,
+        }
+    }
+
     /// Record that a hop was executed, appending a history entry.
     pub fn on_hop(&mut self, new_channel: u8) {
         self.record_hop(new_channel, "periodic", true);

@@ -10,6 +10,7 @@
 //! the on-rig bench gate on the drone profile.
 
 pub mod adapter;
+pub mod channel;
 pub mod config;
 pub mod hop;
 pub mod link_quality;
