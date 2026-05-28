@@ -22,4 +22,16 @@ for _ctl in /sys/bus/usb/devices/*/power/control; do
     echo on > "${_ctl}" 2>/dev/null || true
 done
 
+# Ethernet EEE off — but NEVER the interface that owns the default route.
+# Changing EEE renegotiates the PHY (a brief link bounce); on some Rockchip
+# GbE PHYs the wired link does not recover, which would cut off a rig reached
+# over Ethernet. So skip the management NIC and only touch other wired ports.
+_def_if="$(ip route show default 2>/dev/null | awk '{print $5; exit}')"
+for _ed in /sys/class/net/eth* /sys/class/net/end* /sys/class/net/enP* /sys/class/net/enx*; do
+    [ -e "${_ed}" ] || continue
+    _eif="$(basename "${_ed}")"
+    [ "${_eif}" = "${_def_if}" ] && continue
+    ethtool --set-eee "${_eif}" eee off 2>/dev/null || true
+done
+
 exit 0

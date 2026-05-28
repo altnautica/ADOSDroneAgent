@@ -142,27 +142,20 @@ USBEOF
     chmod 0644 "${usb_rule}"
 
     # ── 4. Ethernet EEE off ─────────────────────────────────────────────
-    # Energy-Efficient-Ethernet introduces link-down/up flaps on some PHYs
-    # that drops the management link when wired. Disable it on every wired
-    # netdev as it appears. PHYs without EEE support fail the ethtool call
-    # harmlessly (the rule ignores the result).
-    local ethtool_bin
-    ethtool_bin="$(_power_resolve_ethtool)"
-    {
-        echo '# ADOS: disable Energy-Efficient-Ethernet on wired interfaces.'
-        if [ -n "${ethtool_bin}" ]; then
-            echo "ACTION==\"add\", SUBSYSTEM==\"net\", KERNEL==\"eth*|end*|enP*|enx*\", RUN+=\"${ethtool_bin} --set-eee %k eee off\""
-        else
-            echo 'ACTION=="add", SUBSYSTEM=="net", KERNEL=="eth*|end*|enP*|enx*", RUN+="/bin/sh -c '"'"'ethtool --set-eee %k eee off'"'"'"'
-        fi
-    } > "${eth_rule}"
-    chmod 0644 "${eth_rule}"
+    # EEE-off is handled by the boot oneshot (ados-power-reassert.sh), which
+    # SKIPS the interface that owns the default route so it can never reset
+    # the management link. A per-interface udev rule was tried first, but it
+    # fired on every interface-add and changing EEE renegotiates the PHY — on
+    # some Rockchip GbE PHYs the wired management link did not recover, cutting
+    # the rig off the network. Remove any stale rule a prior install wrote.
+    rm -f "${eth_rule}" 2>/dev/null || true
 
-    # Reload udev and re-fire on already-bound devices so an upgrade applies
-    # the new rules without requiring a physical replug or a reboot.
+    # Reload udev and re-fire on already-bound USB devices so an upgrade
+    # applies the new rules without requiring a physical replug or a reboot.
+    # NOTE: we deliberately do NOT trigger the net subsystem here — that would
+    # re-run interface-add rules and risk bouncing the wired management link.
     udevadm control --reload 2>/dev/null || true
     udevadm trigger --subsystem-match=usb --action=change 2>/dev/null || true
-    udevadm trigger --subsystem-match=net --action=add 2>/dev/null || true
 
     # ── 5. Mask system sleep ────────────────────────────────────────────
     # A drone or ground station must never suspend or hibernate. Masking

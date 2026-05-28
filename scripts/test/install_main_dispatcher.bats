@@ -1551,11 +1551,12 @@ power_run() {
     [ "$status" -eq 0 ]
     [[ "$output" == *'SUBSYSTEM=="usb"'* ]]
     [[ "$output" == *'ATTR{power/control}="on"'* ]]
+    # EEE-off is no longer a per-interface udev rule (it bounced the wired
+    # management link on Rockchip PHYs); it is handled by the boot oneshot,
+    # skipping the default-route NIC. The udev rule must NOT be written.
     run cat "${rd}/99-ados-eth-no-eee.rules"
     power_teardown
-    [ "$status" -eq 0 ]
-    [[ "$output" == *'KERNEL=="eth*|end*|enP*|enx*"'* ]]
-    [[ "$output" == *"eee off"* ]]
+    [ "$status" -ne 0 ]
 }
 
 @test "install_power_hardening writes the logind no-sleep drop-in" {
