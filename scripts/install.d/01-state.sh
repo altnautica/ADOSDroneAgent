@@ -189,4 +189,8 @@ install_global_symlinks() {
     # Fetch the terminal dashboard binary that `ados` (no subcommand) launches.
     # Best-effort; `ados` falls back to plain status if it is not present.
     install_tui_binary
+    # Fetch the prebuilt orchestrator binary onto disk. Best-effort and inert:
+    # the systemd unit decides which ExecStart to run, so a present binary is a
+    # no-op until a unit points at it.
+    install_supervisor_binary
 }
