@@ -11,6 +11,12 @@ ados-protocol = { path = "../ados-protocol", features = ["mavlink"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_norway = { workspace = true }
+tokio = { workspace = true }
+tokio-serial = "5.4"
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+time = { version = "0.3", features = ["std", "formatting"] }
 
 [dev-dependencies]
 tempfile = "3"

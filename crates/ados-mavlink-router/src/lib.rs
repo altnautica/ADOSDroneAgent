@@ -12,5 +12,6 @@
 //! parity with the Python producer.
 
 pub mod config;
+pub mod connection;
 pub mod param_cache;
 pub mod state;
