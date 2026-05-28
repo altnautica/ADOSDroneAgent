@@ -20,6 +20,8 @@ thiserror = "2"
 getrandom = "0.2"
 toml = "0.8"
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "net", "io-util", "sync", "time"] }
+# HTTP-only (no TLS): the REST client targets the agent on localhost:8080.
+ureq = { version = "2", default-features = false, features = ["json"] }
 
 [profile.release]
 strip = true

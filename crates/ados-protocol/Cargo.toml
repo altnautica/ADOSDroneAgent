@@ -17,3 +17,4 @@ hex = { workspace = true }
 thiserror = { workspace = true }
 getrandom = { workspace = true }
 tokio = { workspace = true }
+ureq = { workspace = true }
