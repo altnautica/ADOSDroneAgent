@@ -257,6 +257,19 @@ async fn verify_monitor_mode(iface: &str) -> bool {
     }
 }
 
+/// Apply the regulatory domain via `iw reg set <domain>` (best-effort). Without
+/// it the driver may reject channels the domain doesn't allow (`-22`). Mirrors
+/// `adapter.py:643-671`. No-op when `domain` is empty.
+pub async fn set_reg_domain(domain: &str) {
+    if domain.is_empty() {
+        return;
+    }
+    match run_cmd("iw", &["reg", "set", domain]).await {
+        Ok(()) => tracing::info!(domain, "wfb_reg_domain_applied"),
+        Err(()) => tracing::warn!(domain, "wfb_reg_domain_failed"),
+    }
+}
+
 /// Restore an interface to managed mode (used on shutdown or profile switch).
 pub async fn set_managed_mode(iface: &str) {
     let _ = run_cmd("ip", &["link", "set", iface, "down"]).await;

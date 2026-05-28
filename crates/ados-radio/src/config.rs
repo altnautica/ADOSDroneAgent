@@ -124,6 +124,49 @@ impl WfbConfig {
     }
 }
 
+/// True when the agent profile resolves to `ground_station` — the WFB TX service
+/// must idle there (the GS runs `ados-wfb-rx`, not this) so it doesn't clobber
+/// the GS's own `wfb-stats.json`. Reads `agent.profile` from the config file,
+/// falling back to `profile.conf`. Defensive: the systemd unit is already
+/// profile-gated by the supervisor.
+pub fn profile_is_ground_station(
+    config_path: &std::path::Path,
+    profile_conf: &std::path::Path,
+) -> bool {
+    #[derive(Debug, Default, Deserialize)]
+    struct Raw {
+        #[serde(default)]
+        agent: AgentSection,
+    }
+    #[derive(Debug, Default, Deserialize)]
+    struct AgentSection {
+        #[serde(default)]
+        profile: Option<String>,
+    }
+    let cfg_profile = std::fs::read_to_string(config_path)
+        .ok()
+        .and_then(|t| serde_norway::from_str::<Raw>(&t).ok())
+        .and_then(|r| r.agent.profile);
+    match cfg_profile.as_deref() {
+        Some("ground_station") | Some("ground-station") => return true,
+        Some("drone") => return false,
+        _ => {} // empty/auto/missing → consult profile.conf
+    }
+    if let Ok(text) = std::fs::read_to_string(profile_conf) {
+        for line in text.lines() {
+            let s = line.trim();
+            if let Some(v) = s
+                .strip_prefix("profile:")
+                .or_else(|| s.strip_prefix("profile="))
+            {
+                let v = v.trim().trim_matches(|c| c == '"' || c == '\'');
+                return matches!(v, "ground_station" | "ground-station");
+            }
+        }
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -140,6 +183,29 @@ mod tests {
         assert!((c.hop_rssi_threshold_dbm - (-75.0)).abs() < 0.01);
         assert_eq!(c.fec_k, 8);
         assert_eq!(c.fec_n, 12);
+    }
+
+    #[test]
+    fn profile_gate_detects_ground_station_and_drone() {
+        let dir = tempfile::tempdir().unwrap();
+        let none = dir.path().join("nope.yaml");
+        let none2 = dir.path().join("nope.conf");
+        // Missing everything → not GS (default drone).
+        assert!(!profile_is_ground_station(&none, &none2));
+        // Explicit GS in config.yaml.
+        let gs = dir.path().join("gs.yaml");
+        std::fs::write(&gs, "agent:\n  profile: ground_station\n").unwrap();
+        assert!(profile_is_ground_station(&gs, &none2));
+        // Explicit drone in config.yaml.
+        let dr = dir.path().join("dr.yaml");
+        std::fs::write(&dr, "agent:\n  profile: drone\n").unwrap();
+        assert!(!profile_is_ground_station(&dr, &none2));
+        // auto in config.yaml → consult profile.conf (GS).
+        let auto = dir.path().join("auto.yaml");
+        std::fs::write(&auto, "agent:\n  profile: auto\n").unwrap();
+        let pc = dir.path().join("profile.conf");
+        std::fs::write(&pc, "profile: ground-station\n").unwrap();
+        assert!(profile_is_ground_station(&auto, &pc));
     }
 
     #[test]

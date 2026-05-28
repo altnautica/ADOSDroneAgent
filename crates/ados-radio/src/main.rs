@@ -28,6 +28,7 @@ use ados_radio::process::RadioProcesses;
 use ados_radio::watchdog::{tx_health_watchdog, video_recvq_watchdog, WatchdogFired};
 
 const CONFIG_YAML: &str = "/etc/ados/config.yaml";
+const PROFILE_CONF: &str = "/etc/ados/profile.conf";
 /// Poll interval while waiting for the WFB TX key (unpaired state).
 const KEY_WAIT_INTERVAL: Duration = Duration::from_secs(5);
 
@@ -41,6 +42,19 @@ async fn main() {
     tracing::info!("wfb_service_starting");
 
     let cfg = WfbConfig::load_from(Path::new(CONFIG_YAML));
+
+    // Profile gate: the WFB TX service is drone-only. On a ground station this
+    // binary must idle (the GS runs ados-wfb-rx) so it doesn't clobber the GS's
+    // wfb-stats.json. Defensive — the supervisor already profile-gates the unit.
+    if ados_radio::config::profile_is_ground_station(
+        Path::new(CONFIG_YAML),
+        Path::new(PROFILE_CONF),
+    ) {
+        tracing::warn!("wfb_tx_idle_on_ground_station_profile");
+        wait_for_shutdown().await;
+        return;
+    }
+
     let cancel = Arc::new(Notify::new());
 
     // ── Signal handler ────────────────────────────────────────────────────
@@ -109,8 +123,11 @@ async fn run_service(cfg: &WfbConfig, cancel: Arc<Notify>) {
             "adapter_selected"
         );
 
-        // ── Set channel via iw ────────────────────────────────────────────
+        // ── Regulatory domain (best-effort) then channel ─────────────────
         let iface = &adapter.ifname;
+        if let Some(domain) = &cfg.reg_domain {
+            ados_radio::adapter::set_reg_domain(domain).await;
+        }
         set_channel(iface, cfg.channel).await;
 
         // ── Clamp TX power BEFORE wfb_tx starts injecting ─────────────────
@@ -247,13 +264,15 @@ async fn run_service(cfg: &WfbConfig, cancel: Arc<Notify>) {
             _ = &mut beacon => {}
             _ = &mut heartbeat => {}
             _ = cancel.notified() => {
-                // Clean shutdown: stop the tasks then the radio group.
+                // Clean shutdown: stop the tasks, the radio group, then restore
+                // the adapter to managed mode so it isn't left stuck in monitor.
                 heartbeat.abort();
                 watchdog1.abort();
                 watchdog2.abort();
                 hop.abort();
                 beacon.abort();
                 proc.lock().await.kill_all().await;
+                ados_radio::adapter::set_managed_mode(iface).await;
                 tracing::info!("wfb_service_stopping");
                 return;
             }
