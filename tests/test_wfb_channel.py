@@ -16,7 +16,7 @@ from ados.services.wfb.channel import (
 
 
 def test_standard_channels():
-    assert len(STANDARD_CHANNELS) == 7
+    assert len(STANDARD_CHANNELS) == 9
     nums = [ch.channel_number for ch in STANDARD_CHANNELS]
     assert 36 in nums
     assert 149 in nums
@@ -68,7 +68,7 @@ def test_parse_scan_results_empty():
 def test_scan_channels_non_linux(mock_platform):
     mock_platform.system.return_value = "Darwin"
     result = scan_channels("wlan0")
-    assert len(result) == 7
+    assert len(result) == 9
     # All should have zero interference
     for _ch, count in result:
         assert count == 0
@@ -84,7 +84,7 @@ def test_scan_channels_with_networks(mock_platform, mock_subprocess):
     mock_subprocess.run.return_value = mock_result
 
     results = scan_channels("wlan0")
-    assert len(results) == 7
+    assert len(results) == 9
 
     # Results should be sorted by interference (ascending)
     counts = [c for _ch, c in results]

@@ -1,4 +1,4 @@
-"""Tests for the 5-point touch calibration wizard."""
+"""Tests for the 9-point touch calibration wizard."""
 
 from __future__ import annotations
 
@@ -15,6 +15,21 @@ from ados.services.ui.touch.calibrate import (
 )
 from ados.services.ui.touch.transform import load as load_calib
 
+# Nine raw ADC samples that are an exact linear image of the nine LCD
+# TARGETS (one per 3x3 grid point), so compute_from_samples recovers a
+# near-zero-residual affine. Ordered to match TARGETS.
+CLEAN_SAMPLES: list[tuple[int, int]] = [
+    (100, 100),
+    (2048, 100),
+    (3995, 100),
+    (100, 2048),
+    (2048, 2048),
+    (3995, 2048),
+    (100, 3995),
+    (2048, 3995),
+    (3995, 3995),
+]
+
 
 def test_wizard_starts_at_step_zero(tmp_path: Path):
     w = CalibrationWizard(save_path=tmp_path / "touch.calib")
@@ -25,19 +40,12 @@ def test_wizard_starts_at_step_zero(tmp_path: Path):
     assert w.current_target == TARGETS[0]
 
 
-def test_wizard_advances_through_five_steps(tmp_path: Path):
+def test_wizard_advances_through_all_steps(tmp_path: Path):
     w = CalibrationWizard(save_path=tmp_path / "touch.calib")
     w.start()
-    # Submit five well-spread raw samples that match the targets
-    # exactly under the identity-on-raw mapping.
-    samples = [
-        (100, 100),
-        (3995, 100),
-        (2047, 2047),
-        (100, 3995),
-        (3995, 3995),
-    ]
-    for i, (xr, yr) in enumerate(samples):
+    # Submit nine well-spread raw samples that are an exact linear
+    # image of the nine LCD targets, so the affine fit is clean.
+    for i, (xr, yr) in enumerate(CLEAN_SAMPLES):
         w.submit_sample(i, xr, yr)
     assert w.is_done
     assert w.step == STEP_COUNT
@@ -47,14 +55,7 @@ def test_wizard_complete_succeeds_with_clean_samples(tmp_path: Path):
     target = tmp_path / "touch.calib"
     w = CalibrationWizard(save_path=target)
     w.start()
-    samples = [
-        (100, 100),
-        (3995, 100),
-        (2047, 2047),
-        (100, 3995),
-        (3995, 3995),
-    ]
-    for i, (xr, yr) in enumerate(samples):
+    for i, (xr, yr) in enumerate(CLEAN_SAMPLES):
         w.submit_sample(i, xr, yr)
     result = w.complete()
     assert result.success is True

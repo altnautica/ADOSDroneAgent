@@ -42,14 +42,16 @@ def _v2_manifest_dict() -> dict:
                 {"component_id": 197, "component_kind": "vio"},
             ],
             "contains_vendor_binary": True,
-            "vendor_attribution": {
-                "upstream_repo": "https://github.com/rpng/open_vins",
-                "commit_sha": "6f1d2a0badc0ffee",
-                "license": "GPL-3.0-or-later",
-                "source_offer_url": (
-                    "https://altnautica.com/oss/source-offer/openvins-6f1d2a.tar.gz"
-                ),
-            },
+            "vendor_attribution": [
+                {
+                    "upstream_repo": "https://github.com/rpng/open_vins",
+                    "commit_sha": "6f1d2a0badc0ffee",
+                    "license": "GPL-3.0-or-later",
+                    "source_offer_url": (
+                        "https://altnautica.com/oss/source-offer/openvins-6f1d2a.tar.gz"
+                    ),
+                },
+            ],
             "subprocess_spawn": [
                 "bin/openvins_run",
                 "bin/openvins_calibrate",
@@ -82,9 +84,9 @@ def test_v2_manifest_parses() -> None:
     assert m.schema_version == 2
     assert m.agent is not None
     assert m.agent.contains_vendor_binary is True
-    assert m.agent.vendor_attribution is not None
-    assert m.agent.vendor_attribution.commit_sha.startswith("6f1d2a")
-    assert m.agent.vendor_attribution.license == "GPL-3.0-or-later"
+    assert len(m.agent.vendor_attribution) == 1
+    assert m.agent.vendor_attribution[0].commit_sha.startswith("6f1d2a")
+    assert m.agent.vendor_attribution[0].license == "GPL-3.0-or-later"
     assert m.agent.subprocess_spawn == [
         "bin/openvins_run",
         "bin/openvins_calibrate",
@@ -99,7 +101,7 @@ def test_v1_manifest_still_parses_under_v2_code() -> None:
     m = PluginManifest.from_yaml_text(_yaml(_v1_baseline_dict()))
     assert m.schema_version == 1
     assert m.agent is not None
-    assert m.agent.vendor_attribution is None
+    assert m.agent.vendor_attribution == []
     assert m.agent.subprocess_spawn is None
     assert m.agent.per_drone_config is False
 
@@ -175,10 +177,10 @@ def test_round_trip_preserves_v2_fields() -> None:
     assert m2.agent is not None
     assert m2.agent.subprocess_spawn == src["agent"]["subprocess_spawn"]
     assert m2.agent.per_drone_config is True
-    assert m2.agent.vendor_attribution is not None
+    assert len(m2.agent.vendor_attribution) == 1
     assert (
-        m2.agent.vendor_attribution.upstream_repo
-        == src["agent"]["vendor_attribution"]["upstream_repo"]
+        m2.agent.vendor_attribution[0].upstream_repo
+        == src["agent"]["vendor_attribution"][0]["upstream_repo"]
     )
 
 

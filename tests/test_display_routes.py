@@ -106,17 +106,24 @@ def test_calibrate_sample_accepts_in_order_and_rejects_out_of_order(
 def test_calibrate_save_persists_affine_round_trip(
     client: TestClient, session_save_path: Path,
 ) -> None:
-    """A full start -> 5 samples -> save round-trip writes a real file."""
+    """A full start -> all samples -> save round-trip writes a real file."""
     # Patch the registry's save path so we don't touch /etc/ados.
     registry = get_session_registry()
     registry.start(save_path=session_save_path)
+    # Nine raw ADC samples that are an exact linear image of the nine
+    # LCD targets, so the affine fit produces a near-zero residual.
     samples = [
         (100, 100),
+        (2048, 100),
         (3995, 100),
-        (2047, 2047),
+        (100, 2048),
+        (2048, 2048),
+        (3995, 2048),
         (100, 3995),
+        (2048, 3995),
         (3995, 3995),
     ]
+    assert len(samples) == STEP_COUNT
     for i, (xr, yr) in enumerate(samples):
         r = client.post(
             "/api/v1/display/calibrate/sample",

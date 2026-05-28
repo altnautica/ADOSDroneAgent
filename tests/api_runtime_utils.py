@@ -51,6 +51,10 @@ class ApiRuntimeTestDouble:
         self.model_manager = None
         self.pairing_manager = MagicMock()
         self.pairing_manager.is_paired = False
+        # The setup-status builder reads the live pairing code when the
+        # agent is unpaired; the real PairingManager returns a 6-char
+        # string here, so the double must too or model validation fails.
+        self.pairing_manager.get_or_create_code.return_value = "ABC234"
         self.raw_runtime = _RawRuntimeStub()
 
     @property

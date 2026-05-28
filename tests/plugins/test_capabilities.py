@@ -88,7 +88,10 @@ def test_gcs_capability_count_matches_ts_catalog() -> None:
     """The GCS-side catalog lives in TypeScript. This test reads the
     TS file and confirms the entry count matches the schema-v2 GCS
     surface. The TS file is authoritative for the GCS side; we read
-    rather than duplicate the list."""
+    rather than duplicate the list. ``GCS_CAPABILITIES`` is emitted by
+    the capability codegen into ``gcs-capabilities.generated.ts`` and
+    re-exported from ``capabilities.ts``; we read the generated file
+    where the literal array lives."""
     import re
     from pathlib import Path
 
@@ -98,7 +101,7 @@ def test_gcs_capability_count_matches_ts_catalog() -> None:
         / "src"
         / "lib"
         / "plugins"
-        / "capabilities.ts"
+        / "gcs-capabilities.generated.ts"
     )
     if not ts_path.exists():  # GCS submodule may be absent in CI
         return

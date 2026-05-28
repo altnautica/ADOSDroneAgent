@@ -47,6 +47,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from ados.core.paths import (
+    PLUGIN_LOG_DIR,
     PLUGIN_UNIT_DIR,
     PLUGIN_UNIT_PREFIX,
 )
@@ -103,7 +104,9 @@ def render_unit(manifest: PluginManifest) -> str:
             f"plugin {manifest.id} is inprocess; no systemd unit needed"
         )
     res = manifest.agent.resources
-    log_path = globals()["PLUGIN_LOG_DIR"] / f"{_sanitize_unit_name(manifest.id)}.log"
+    # Reference the module global by name so tests can rebind it via
+    # monkeypatch.setattr and the runtime resolves the current value.
+    log_path = PLUGIN_LOG_DIR / f"{_sanitize_unit_name(manifest.id)}.log"
     return UNIT_TEMPLATE.format(
         plugin_id=manifest.id,
         slice_name=PLUGIN_SLICE_NAME,

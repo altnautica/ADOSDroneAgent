@@ -66,8 +66,11 @@ class PageNavigator:
         # exists on first boot. Without this, the file is only written
         # when go() runs after operator navigation, and the cloud
         # heartbeat consumer reads an empty state until the operator
-        # touches the LCD.
-        self._persist_active_id(self.active_page_id)
+        # touches the LCD. Only write when the file is absent so a valid
+        # persisted id is never clobbered by a default that resolved
+        # before pages were registered (pages may register after init).
+        if not self._state_path.exists():
+            self._persist_active_id(self.active_page_id)
 
     # ── registration ────────────────────────────────────────────
 
