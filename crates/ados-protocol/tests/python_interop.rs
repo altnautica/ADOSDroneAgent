@@ -45,7 +45,10 @@ fn capability_token_matches_python() {
     // The HMAC signature must match the one the Python issuer produced.
     assert_eq!(minted.signature, t["signature"].as_str().unwrap());
     // And the full pipe-delimited string form must be byte-identical.
-    assert_eq!(minted.to_token_string(), t["token_string"].as_str().unwrap());
+    assert_eq!(
+        minted.to_token_string(),
+        t["token_string"].as_str().unwrap()
+    );
 
     // Parsing the Python-produced string back must reconstruct the same token,
     // and verification against the same secret must pass.
@@ -75,8 +78,14 @@ fn plugin_envelope_frame_is_byte_identical_to_python() {
         error: None,
     };
 
-    assert_eq!(hex::encode(env.to_msgpack().unwrap()), e["body_hex"].as_str().unwrap());
-    assert_eq!(hex::encode(env.encode_frame().unwrap()), e["frame_hex"].as_str().unwrap());
+    assert_eq!(
+        hex::encode(env.to_msgpack().unwrap()),
+        e["body_hex"].as_str().unwrap()
+    );
+    assert_eq!(
+        hex::encode(env.encode_frame().unwrap()),
+        e["frame_hex"].as_str().unwrap()
+    );
 }
 
 #[test]

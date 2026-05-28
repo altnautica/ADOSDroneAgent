@@ -1,0 +1,473 @@
+# ADOS capability catalog — single source of truth.
+#
+# Codegen (`cargo run -p ados-capabilities-codegen`) emits, from this file:
+#   - Python: src/ados/plugins/_capabilities_generated.py  (agent catalog)
+#   - Rust:   crates/ados-protocol/src/capabilities.rs       (agent catalog)
+#   - TS:     ADOSMissionControl/src/lib/plugins/agent-capabilities.generated.ts (agent mirror)
+#   - TS:     ADOSMissionControl/src/lib/plugins/gcs-capabilities.generated.ts   (GCS catalog)
+#
+# Two sections:
+#   [[agent]] — capabilities a plugin manifest may declare for the agent half.
+#               `enforced = true` marks those with a runtime gate today.
+#   [[gcs]]   — capabilities for the GCS half (UI slots + GCS data access).
+#
+# category is one of: hardware | flight_control | data_network | compute_process | ui_slot
+# risk is one of:     low | medium | high | critical
+#
+# Edit here, then run codegen. Do not edit the generated files by hand.
+
+# ===========================================================================
+# AGENT capabilities (32)
+# ===========================================================================
+
+[[agent]]
+id = "event.publish"
+label = "Publish events on the plugin event bus"
+description = "Lets the plugin emit events on topics it has been granted access to. Other plugins and host services that subscribe to the same topic will receive the payload."
+category = "data_network"
+risk = "low"
+risk_reason = "Bus messages are sandboxed and do not affect flight."
+enforced = true
+
+[[agent]]
+id = "event.subscribe"
+label = "Receive events from the plugin event bus"
+description = "Lets the plugin subscribe to topics it has been granted access to. The plugin sees payloads from other plugins and from host services that publish on those topics."
+category = "data_network"
+risk = "low"
+risk_reason = "Read-only on a sandboxed in-process bus."
+enforced = true
+
+[[agent]]
+id = "mavlink.read"
+label = "Read MAVLink messages from the flight controller"
+description = "Lets the plugin observe the live MAVLink message stream, including telemetry, mode changes, and status text. Useful for analytics, logging, and dashboards."
+category = "flight_control"
+risk = "low"
+risk_reason = "Read-only on the MAVLink stream."
+enforced = false
+
+[[agent]]
+id = "mavlink.write"
+label = "Send MAVLink commands to the flight controller"
+description = "Lets the plugin inject MAVLink commands to the autopilot, including mode changes, arming, and parameter writes. An untrusted plugin with this capability can take control of the aircraft."
+category = "flight_control"
+risk = "high"
+risk_reason = "Can change flight mode, arm motors, and alter parameters in flight."
+enforced = false
+
+[[agent]]
+id = "mavlink.component.camera"
+label = "Act as a MAVLink camera component"
+description = "Lets the plugin register itself as a MAVLink camera component and respond to camera-related MAVLink messages from the GCS and the autopilot."
+category = "flight_control"
+risk = "medium"
+risk_reason = "Owns a MAVLink component id; can interfere with the real camera if mis-configured."
+enforced = false
+
+[[agent]]
+id = "mavlink.component.gimbal"
+label = "Act as a MAVLink gimbal component"
+description = "Lets the plugin register itself as a MAVLink gimbal manager or device and handle gimbal control messages. Required by gimbal driver plugins."
+category = "flight_control"
+risk = "medium"
+risk_reason = "Owns a MAVLink component id and can move the gimbal."
+enforced = false
+
+[[agent]]
+id = "mavlink.component.payload"
+label = "Act as a MAVLink payload component"
+description = "Lets the plugin register itself as a MAVLink payload component for actuators, droppers, and other mission-specific hardware."
+category = "flight_control"
+risk = "medium"
+risk_reason = "Owns a MAVLink component id and can trigger payload actuators."
+enforced = false
+
+[[agent]]
+id = "mavlink.component.peripheral"
+label = "Act as a generic MAVLink peripheral component"
+description = "Lets the plugin claim a MAVLink component id for a peripheral that does not fit the camera, gimbal, or payload categories. Used by sensor bridges and experimental devices."
+category = "flight_control"
+risk = "medium"
+risk_reason = "Owns a MAVLink component id on the same bus as the autopilot."
+enforced = false
+
+[[agent]]
+id = "mavlink.component.vio"
+label = "Act as a MAVLink visual-inertial-odometry source"
+description = "Lets the plugin register as a VIO source that publishes pose estimates over MAVLink. The autopilot can fuse these directly into the EKF, so a faulty source can cause unsafe flight behavior."
+category = "flight_control"
+risk = "high"
+risk_reason = "Pose estimates feed the EKF and influence position control."
+enforced = false
+
+[[agent]]
+id = "estimator.pose.inject"
+label = "Inject pose estimates into the EKF"
+description = "Lets the plugin push pose samples (position, attitude, or both) directly into the autopilot state estimator. A bad pose stream produces unsafe position commands and fly-aways."
+category = "flight_control"
+risk = "high"
+risk_reason = "Directly biases the EKF; a malicious or buggy plugin can crash the aircraft."
+enforced = false
+
+[[agent]]
+id = "telemetry.read"
+label = "Read telemetry streams from the agent"
+description = "Lets the plugin read the same telemetry feed the GCS consumes (battery, GPS, attitude, mode). Useful for logging and analytics."
+category = "data_network"
+risk = "low"
+risk_reason = "Read-only on existing telemetry topics."
+enforced = false
+
+[[agent]]
+id = "telemetry.extend"
+label = "Publish new telemetry fields to the GCS"
+description = "Lets the plugin add new fields to the telemetry stream that ships to the GCS. Used by sensor plugins that surface custom readings on the dashboard."
+category = "data_network"
+risk = "low"
+risk_reason = "Adds fields; does not alter existing ones."
+enforced = false
+
+[[agent]]
+id = "sensor.camera.register"
+label = "Register a camera as a system sensor"
+description = "Lets the plugin declare a camera device the rest of the agent and the GCS can address (live preview, recording, mission usage)."
+category = "hardware"
+risk = "medium"
+risk_reason = "Camera streams may be recorded and uploaded; sensor identity matters for safety."
+enforced = false
+
+[[agent]]
+id = "sensor.depth.register"
+label = "Register a depth sensor as a system sensor"
+description = "Lets the plugin declare a depth-camera or stereo sensor. Downstream services can consume depth maps for obstacle avoidance and SLAM."
+category = "hardware"
+risk = "medium"
+risk_reason = "Depth data may feed obstacle avoidance; faulty data can influence avoidance decisions."
+enforced = false
+
+[[agent]]
+id = "sensor.lidar.register"
+label = "Register a LiDAR as a system sensor"
+description = "Lets the plugin declare a LiDAR device. Downstream services can consume point clouds for mapping and obstacle avoidance."
+category = "hardware"
+risk = "medium"
+risk_reason = "Point clouds may feed obstacle avoidance; faulty data can influence avoidance decisions."
+enforced = false
+
+[[agent]]
+id = "sensor.imu.register"
+label = "Register an auxiliary IMU as a system sensor"
+description = "Lets the plugin declare a secondary IMU device the rest of the agent can address. Often paired with VIO and odometry workflows."
+category = "hardware"
+risk = "medium"
+risk_reason = "IMU output may feed state estimation downstream."
+enforced = false
+
+[[agent]]
+id = "sensor.payload.register"
+label = "Register a payload device as a system sensor"
+description = "Lets the plugin declare a payload device (sprayer, dropper, sampler) so missions and the GCS can address it."
+category = "hardware"
+risk = "medium"
+risk_reason = "Payload identity drives mission actions; mis-registration can trigger the wrong actuator."
+enforced = false
+
+[[agent]]
+id = "hardware.uart"
+label = "Open UART serial ports on the host"
+description = "Lets the plugin open and exchange data over UART serial ports. Required by GPS, range-finder, and modem drivers."
+category = "hardware"
+risk = "medium"
+risk_reason = "Serial ports may be shared with the autopilot or critical peripherals."
+enforced = false
+
+[[agent]]
+id = "hardware.i2c"
+label = "Read and write I2C devices on the host"
+description = "Lets the plugin talk to I2C devices on the SBC's I2C buses. Used by sensor drivers and small peripherals."
+category = "hardware"
+risk = "medium"
+risk_reason = "I2C buses are shared; a misbehaving plugin can stall the bus for other devices."
+enforced = false
+
+[[agent]]
+id = "hardware.spi"
+label = "Read and write SPI devices on the host"
+description = "Lets the plugin talk to SPI devices on the SBC's SPI buses. Used by displays and high-rate sensor drivers."
+category = "hardware"
+risk = "medium"
+risk_reason = "SPI buses are shared with on-board peripherals like the front-panel display."
+enforced = false
+
+[[agent]]
+id = "hardware.gpio"
+label = "Read and toggle GPIO pins on the host"
+description = "Lets the plugin read input pins and drive output pins on the SBC. Used by switches, LEDs, and discrete peripheral control."
+category = "hardware"
+risk = "medium"
+risk_reason = "GPIO outputs can drive external hardware; mis-driven pins can damage attached devices."
+enforced = false
+
+[[agent]]
+id = "hardware.usb"
+label = "Claim raw USB devices on the host"
+description = "Lets the plugin attach to and exchange bulk transfers with USB devices. Required by vendor SDK drivers that talk to specific USB peripherals."
+category = "hardware"
+risk = "medium"
+risk_reason = "Claiming a USB device prevents other software from using it."
+enforced = false
+
+[[agent]]
+id = "hardware.usb.uvc"
+label = "Read frames from USB UVC cameras"
+description = "Lets the plugin capture video frames from USB Video Class cameras. Required by webcam and machine-vision drivers."
+category = "hardware"
+risk = "medium"
+risk_reason = "Video frames may be recorded, transmitted, or processed off-vehicle."
+enforced = false
+
+[[agent]]
+id = "hardware.camera.csi"
+label = "Read frames from MIPI CSI cameras"
+description = "Lets the plugin capture video frames from CSI-attached cameras on the SBC's camera connector. Required by native camera drivers."
+category = "hardware"
+risk = "medium"
+risk_reason = "Video frames may be recorded, transmitted, or processed off-vehicle."
+enforced = false
+
+[[agent]]
+id = "hardware.audio"
+label = "Access audio capture and playback devices"
+description = "Lets the plugin record from microphones or play to speakers connected to the host. Required by audio alert and voice plugins."
+category = "hardware"
+risk = "medium"
+risk_reason = "Audio capture may pick up private conversations near the aircraft."
+enforced = false
+
+[[agent]]
+id = "vehicle.command"
+label = "Issue high-level vehicle commands"
+description = "Lets the plugin send high-level vehicle commands (arm, takeoff, RTL, land, mode change) through the agent's command pipeline rather than raw MAVLink."
+category = "flight_control"
+risk = "high"
+risk_reason = "Can arm, take off, or land the aircraft."
+enforced = false
+
+[[agent]]
+id = "mission.read"
+label = "Read mission plans loaded on the agent"
+description = "Lets the plugin read the active mission, waypoints, fences, and rally points stored on the agent."
+category = "flight_control"
+risk = "low"
+risk_reason = "Read-only on mission data."
+enforced = false
+
+[[agent]]
+id = "mission.write"
+label = "Upload or modify mission plans on the agent"
+description = "Lets the plugin upload new missions, edit waypoints, or change fence and rally definitions. Used by mission-planner and pattern-generator plugins."
+category = "flight_control"
+risk = "high"
+risk_reason = "Mission changes drive autonomous flight paths."
+enforced = false
+
+[[agent]]
+id = "network.outbound"
+label = "Open outbound network connections"
+description = "Lets the plugin make outbound TCP, UDP, and HTTP connections from the agent host. Required by plugins that talk to external services."
+category = "data_network"
+risk = "medium"
+risk_reason = "Exfiltration risk; outbound traffic can carry telemetry off the aircraft."
+enforced = false
+
+[[agent]]
+id = "filesystem.host"
+label = "Read and write files on the host filesystem"
+description = "Lets the plugin read and write files outside its own data directory. Required by plugins that ingest logs, maps, or other host-provided files."
+category = "compute_process"
+risk = "medium"
+risk_reason = "Broad host filesystem access; mis-use can corrupt agent state."
+enforced = false
+
+[[agent]]
+id = "recording.write"
+label = "Write recordings into the agent recording store"
+description = "Lets the plugin save video, telemetry, or analysis outputs into the agent's recording store so the GCS and post-flight tools can find them."
+category = "data_network"
+risk = "low"
+risk_reason = "Writes are sandboxed to the recording directory."
+enforced = false
+
+[[agent]]
+id = "process.spawn"
+label = "Spawn subprocesses on the agent host"
+description = "Lets the plugin launch helper subprocesses listed in its manifest's spawn allowlist. Required to ship vendor-binary drivers and language runtimes outside the Python plugin host."
+category = "compute_process"
+risk = "high"
+risk_reason = "Subprocesses run outside the plugin host sandbox and with the plugin's privileges."
+enforced = false
+
+# ===========================================================================
+# GCS capabilities (20): 13 UI slots + 7 data/command/mission/cloud
+# ===========================================================================
+
+[[gcs]]
+id = "ui.slot.fc-tab"
+label = "Add a tab to the flight controller panel"
+description = "Lets the plugin add a tab to the per-drone flight controller area. The tab renders inside a sandboxed iframe with no host DOM access."
+category = "ui_slot"
+risk = "low"
+risk_reason = "Sandboxed iframe; no host DOM access."
+
+[[gcs]]
+id = "ui.slot.command-tab"
+label = "Add a tab to the command page"
+description = "Lets the plugin add a top-level tab in the Command area for fleet-wide tools. The tab renders inside a sandboxed iframe."
+category = "ui_slot"
+risk = "low"
+risk_reason = "Sandboxed iframe; fleet-scoped read-only by default."
+
+[[gcs]]
+id = "ui.slot.hardware-tab"
+label = "Add a tab to the hardware page"
+description = "Lets the plugin add a tab on the Hardware page so the operator can inspect or configure devices the plugin manages."
+category = "ui_slot"
+risk = "low"
+risk_reason = "Sandboxed iframe inside the Hardware page."
+
+[[gcs]]
+id = "ui.slot.suite-widget"
+label = "Add a widget to a mission suite"
+description = "Lets the plugin contribute a widget to a mission suite layout (Agriculture, Survey, Inspection, etc.) for in-mission readouts and controls."
+category = "ui_slot"
+risk = "low"
+risk_reason = "Sandboxed iframe inside a suite layout."
+
+[[gcs]]
+id = "ui.slot.mission-template"
+label = "Register a mission template"
+description = "Lets the plugin add a new entry to the mission template picker so the operator can start missions with the plugin's parameters."
+category = "ui_slot"
+risk = "low"
+risk_reason = "Template metadata only; missions still need approval."
+
+[[gcs]]
+id = "ui.slot.map-overlay"
+label = "Draw an overlay on the map"
+description = "Lets the plugin draw geometry on the map view (polygons, markers, heatmaps). The overlay is rendered in a sandboxed canvas."
+category = "ui_slot"
+risk = "low"
+risk_reason = "Visual layer only; no flight-control effect."
+
+[[gcs]]
+id = "ui.slot.video-overlay"
+label = "Draw an overlay on the live video"
+description = "Lets the plugin draw overlays on top of the live video feed (detection boxes, telemetry HUDs). The overlay is rendered above the player."
+category = "ui_slot"
+risk = "low"
+risk_reason = "Visual layer above the video element."
+
+[[gcs]]
+id = "ui.slot.notification-channel"
+label = "Show notifications in the GCS"
+description = "Lets the plugin push notifications into the GCS notification center so it can surface alerts and status changes to the operator."
+category = "ui_slot"
+risk = "low"
+risk_reason = "Toasts only; the operator can mute or dismiss any channel."
+
+[[gcs]]
+id = "ui.slot.smart-function"
+label = "Register a smart function"
+description = "Lets the plugin add an entry to the Smart Functions list so the operator can trigger a plugin-driven action from the GCS toolbar."
+category = "ui_slot"
+risk = "medium"
+risk_reason = "Smart functions can chain commands; the operator must approve each invocation."
+
+[[gcs]]
+id = "ui.slot.settings-section"
+label = "Add a section to the Settings page"
+description = "Lets the plugin add its own section to the GCS Settings page so the operator can configure the plugin from a single place."
+category = "ui_slot"
+risk = "low"
+risk_reason = "Sandboxed iframe inside the Settings page."
+
+[[gcs]]
+id = "ui.slot.connection-protocol"
+label = "Register a custom connection protocol"
+description = "Lets the plugin offer a new connection protocol in the Connect dialog (for example a vendor radio or a custom transport)."
+category = "ui_slot"
+risk = "medium"
+risk_reason = "Connection protocols sit on the path between the GCS and the aircraft."
+
+[[gcs]]
+id = "ui.slot.recording-processor"
+label = "Process recordings after a flight"
+description = "Lets the plugin run a post-flight processing step over recordings (transcoding, analysis, upload). Runs inside a sandboxed worker."
+category = "ui_slot"
+risk = "low"
+risk_reason = "Operates on stored recordings; no live flight effect."
+
+[[gcs]]
+id = "ui.slot.drone-detail-tab"
+label = "Add a tab to the drone detail panel"
+description = "Lets the plugin add a per-drone tab inside the drone detail panel. The tab is scoped to the currently selected drone."
+category = "ui_slot"
+risk = "low"
+risk_reason = "Sandboxed iframe scoped to one drone."
+
+[[gcs]]
+id = "telemetry.subscribe"
+label = "Read live telemetry from drones"
+description = "Lets the plugin subscribe to live telemetry streams (attitude, GPS, battery, mode) for the drones the operator has paired with the GCS."
+category = "data_network"
+risk = "low"
+risk_reason = "Read-only on the telemetry stream."
+
+[[gcs]]
+id = "command.send"
+label = "Send commands to drones from the GCS"
+description = "Lets the plugin send commands to a paired drone through the GCS bridge (arm, takeoff, mode change). The operator approves each install but in-flight commands fire without further prompts."
+category = "flight_control"
+risk = "medium"
+risk_reason = "Commands take effect immediately during a flight."
+
+[[gcs]]
+id = "recording.write"
+label = "Save recordings to the GCS library"
+description = "Lets the plugin write recordings (video, telemetry CSV, analysis output) into the GCS recording library so the operator can replay them later."
+category = "data_network"
+risk = "low"
+risk_reason = "Writes are scoped to the recording library."
+
+[[gcs]]
+id = "mission.read"
+label = "Read mission plans loaded in the GCS"
+description = "Lets the plugin read the active mission, waypoints, fences, and rally points that the operator has loaded into the GCS planner."
+category = "flight_control"
+risk = "low"
+risk_reason = "Read-only on mission data."
+
+[[gcs]]
+id = "mission.write"
+label = "Edit mission plans in the GCS"
+description = "Lets the plugin upload, edit, or replace missions in the GCS planner. Used by pattern generators and mission-template plugins."
+category = "flight_control"
+risk = "high"
+risk_reason = "Mission changes drive autonomous flight paths."
+
+[[gcs]]
+id = "cloud.read"
+label = "Read fleet data from the cloud"
+description = "Lets the plugin read shared fleet data from the cloud backend (drone status rows, paired devices, fleet roster)."
+category = "data_network"
+risk = "low"
+risk_reason = "Read-only on the cloud rows the user is authorised for."
+
+[[gcs]]
+id = "cloud.write"
+label = "Write fleet data to the cloud"
+description = "Lets the plugin write fleet data to the cloud backend. Used by plugins that synchronise mission outputs or sensor catalogues across operators."
+category = "data_network"
+risk = "medium"
+risk_reason = "Cloud writes can affect other operators on the same fleet."
