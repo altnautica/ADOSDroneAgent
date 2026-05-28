@@ -30,12 +30,20 @@ use tokio::task::JoinHandle;
 
 use crate::frame;
 
+/// One connected client: its outbound queue plus the writer and reader tasks,
+/// so both can be aborted when the client is pruned or the server is dropped.
+struct ClientHandle {
+    tx: mpsc::Sender<Vec<u8>>,
+    writer: JoinHandle<()>,
+    reader: JoinHandle<()>,
+}
+
 /// A Unix-socket broadcast server. Drops slow clients; optionally replays the
 /// last buffer on connect; optionally decodes inbound length-prefixed frames.
 pub struct IpcBroadcast {
     path: PathBuf,
     queue_depth: usize,
-    clients: Arc<Mutex<Vec<mpsc::Sender<Vec<u8>>>>>,
+    clients: Arc<Mutex<Vec<ClientHandle>>>,
     last: Arc<Mutex<Option<Vec<u8>>>>,
     keep_last: bool,
     accept_task: JoinHandle<()>,
@@ -67,7 +75,7 @@ impl IpcBroadcast {
         let listener = UnixListener::bind(&path)?;
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666))?;
 
-        let clients: Arc<Mutex<Vec<mpsc::Sender<Vec<u8>>>>> = Arc::new(Mutex::new(Vec::new()));
+        let clients: Arc<Mutex<Vec<ClientHandle>>> = Arc::new(Mutex::new(Vec::new()));
         let last: Arc<Mutex<Option<Vec<u8>>>> = Arc::new(Mutex::new(None));
 
         let (inbound_tx, inbound_rx) = match inbound {
@@ -115,7 +123,7 @@ impl IpcBroadcast {
         stream: UnixStream,
         queue_depth: usize,
         keep_last: bool,
-        clients: Arc<Mutex<Vec<mpsc::Sender<Vec<u8>>>>>,
+        clients: Arc<Mutex<Vec<ClientHandle>>>,
         last: Arc<Mutex<Option<Vec<u8>>>>,
         inbound_tx: Option<mpsc::Sender<Vec<u8>>>,
     ) {
@@ -129,11 +137,9 @@ impl IpcBroadcast {
             }
         }
 
-        clients.lock().await.push(tx);
-
         // Writer task: drain the queue to the socket, await flush so kernel
         // backpressure stays inside the task and never blocks the producer.
-        tokio::spawn(async move {
+        let writer = tokio::spawn(async move {
             while let Some(buf) = rx.recv().await {
                 if write_half.write_all(&buf).await.is_err() {
                     break;
@@ -144,30 +150,41 @@ impl IpcBroadcast {
             }
         });
 
-        // Reader task (MAVLink command path): decode length-prefixed frames and
-        // forward the payloads. For a write-only socket (state) we still drain
-        // the read half to detect disconnect, but discard the bytes.
-        tokio::spawn(async move {
-            loop {
-                let mut header = [0u8; frame::HEADER_SIZE];
-                if read_half.read_exact(&mut header).await.is_err() {
-                    break;
-                }
-                let len = match frame::decode_len(header, frame::MAVLINK_MAX_FRAME, false) {
-                    Ok(n) => n,
-                    Err(_) => break,
-                };
-                let mut payload = vec![0u8; len];
-                if len > 0 && read_half.read_exact(&mut payload).await.is_err() {
-                    break;
-                }
-                if let Some(ref tx) = inbound_tx {
+        // Reader task. The MAVLink socket (inbound channel present) decodes
+        // length-prefixed frames and forwards the payloads as commands toward
+        // the flight controller. The write-only state socket has no inbound
+        // protocol, so it just drains raw bytes to detect EOF, matching the
+        // Python state server which only waits for the client to disconnect.
+        let reader = tokio::spawn(async move {
+            match inbound_tx {
+                Some(tx) => loop {
+                    let mut header = [0u8; frame::HEADER_SIZE];
+                    if read_half.read_exact(&mut header).await.is_err() {
+                        break;
+                    }
+                    let len = match frame::decode_len(header, frame::MAVLINK_MAX_FRAME, false) {
+                        Ok(n) => n,
+                        Err(_) => break,
+                    };
+                    let mut payload = vec![0u8; len];
+                    if len > 0 && read_half.read_exact(&mut payload).await.is_err() {
+                        break;
+                    }
                     if tx.send(payload).await.is_err() {
                         break;
                     }
+                },
+                None => {
+                    let mut scratch = [0u8; 256];
+                    while read_half.read(&mut scratch).await.unwrap_or(0) > 0 {}
                 }
             }
         });
+
+        clients
+            .lock()
+            .await
+            .push(ClientHandle { tx, writer, reader });
     }
 
     /// Broadcast a byte buffer to all connected clients. Clients whose queue is
@@ -178,11 +195,20 @@ impl IpcBroadcast {
             *self.last.lock().await = Some(buf.clone());
         }
         let mut clients = self.clients.lock().await;
-        clients.retain(|tx| match tx.try_send(buf.clone()) {
-            Ok(()) => true,
-            Err(mpsc::error::TrySendError::Full(_)) => false, // slow client: drop
-            Err(mpsc::error::TrySendError::Closed(_)) => false, // gone: prune
-        });
+        let mut keep = Vec::with_capacity(clients.len());
+        for client in clients.drain(..) {
+            match client.tx.try_send(buf.clone()) {
+                Ok(()) => keep.push(client),
+                // Slow (queue full) or gone (closed): abort both tasks so a
+                // dropped MAVLink client can no longer inject commands and
+                // nothing is leaked, then drop the handle.
+                Err(_) => {
+                    client.reader.abort();
+                    client.writer.abort();
+                }
+            }
+        }
+        *clients = keep;
     }
 
     /// Number of currently connected clients.
@@ -199,6 +225,13 @@ impl IpcBroadcast {
 impl Drop for IpcBroadcast {
     fn drop(&mut self) {
         self.accept_task.abort();
+        // Abort the per-client reader/writer tasks so none survive the server.
+        if let Ok(clients) = self.clients.try_lock() {
+            for client in clients.iter() {
+                client.reader.abort();
+                client.writer.abort();
+            }
+        }
         let _ = std::fs::remove_file(&self.path);
     }
 }
@@ -250,8 +283,13 @@ pub async fn read_length_prefixed<R: AsyncReadExt + Unpin>(
 
 /// Read one newline-terminated line (state socket v1) from a stream. Returns
 /// `Ok(None)` on clean EOF. The returned buffer excludes the trailing newline.
+///
+/// `max` caps the line length so a peer that never sends a newline cannot grow
+/// the buffer without bound. A line that reaches `max` without a newline
+/// returns `InvalidData`.
 pub async fn read_newline_line<R: AsyncReadExt + Unpin>(
     reader: &mut R,
+    max: usize,
 ) -> io::Result<Option<Vec<u8>>> {
     let mut buf = Vec::new();
     let mut byte = [0u8; 1];
@@ -260,6 +298,12 @@ pub async fn read_newline_line<R: AsyncReadExt + Unpin>(
             Ok(_) => {
                 if byte[0] == b'\n' {
                     return Ok(Some(buf));
+                }
+                if buf.len() >= max {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "state line exceeded maximum length without a newline",
+                    ));
                 }
                 buf.push(byte[0]);
             }
@@ -328,7 +372,9 @@ mod tests {
         let mut client = connect_with_retry(&path, 10, Duration::from_millis(20))
             .await
             .unwrap();
-        let line = read_newline_line(&mut client).await.unwrap();
+        let line = read_newline_line(&mut client, crate::state::STATE_V2_MAX_FRAME)
+            .await
+            .unwrap();
         assert_eq!(line.as_deref(), Some(&b"{\"armed\":false}"[..]));
     }
 
@@ -391,5 +437,28 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(got.as_deref(), Some(&b"command"[..]));
+    }
+
+    #[tokio::test]
+    async fn read_newline_line_caps_an_endless_line() {
+        // A peer that never sends a newline must not grow the buffer past the
+        // cap: the reader returns InvalidData instead of allocating unbounded.
+        let (mut a, mut b) = UnixStream::pair().unwrap();
+        let writer = tokio::spawn(async move {
+            // Send more bytes than the cap, with no newline.
+            let chunk = vec![b'x'; 64];
+            for _ in 0..10 {
+                if a.write_all(&chunk).await.is_err() {
+                    break;
+                }
+                let _ = a.flush().await;
+            }
+            // Keep the stream open so the reader hits the cap, not EOF.
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        });
+
+        let err = read_newline_line(&mut b, 128).await.unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        writer.abort();
     }
 }

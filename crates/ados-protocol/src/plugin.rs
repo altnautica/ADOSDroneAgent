@@ -14,7 +14,7 @@ use std::collections::BTreeSet;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use hmac::{Hmac, Mac};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use sha2::Sha256;
 use thiserror::Error;
 
@@ -46,6 +46,19 @@ fn default_version() -> i64 {
     PROTOCOL_VERSION
 }
 
+/// Deserialize the `args` field, coercing a `nil` value to an empty map so the
+/// behaviour matches the Python `from_dict`, which does `raw.get("a") or {}`.
+fn de_args<'de, D>(deserializer: D) -> Result<rmpv::Value, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = rmpv::Value::deserialize(deserializer)?;
+    Ok(match value {
+        rmpv::Value::Nil => empty_args(),
+        other => other,
+    })
+}
+
 /// One RPC message. Serializes to a msgpack map with the short keys the Python
 /// side uses: `v`, `t`, `m`, `c`, `a`, `id`, `tok`, `err`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -59,7 +72,7 @@ pub struct Envelope {
     pub method: String,
     #[serde(rename = "c", default)]
     pub capability: String,
-    #[serde(rename = "a", default = "empty_args")]
+    #[serde(rename = "a", default = "empty_args", deserialize_with = "de_args")]
     pub args: rmpv::Value,
     #[serde(rename = "id")]
     pub request_id: String,
@@ -203,10 +216,12 @@ impl TokenIssuer {
         granted_caps: &BTreeSet<String>,
         ttl_seconds: i64,
     ) -> CapabilityToken {
+        // Tolerate a clock set before the epoch (a freshly booted SBC before
+        // NTP sync) by clamping to 0 rather than aborting the process.
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .expect("system clock before unix epoch")
-            .as_secs() as i64;
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
         let mut session_bytes = [0u8; 8];
         getrandom::getrandom(&mut session_bytes).expect("OS RNG unavailable");
         let session_id = hex::encode(session_bytes);
@@ -222,7 +237,10 @@ impl TokenIssuer {
         now: i64,
         session_id: &str,
     ) -> CapabilityToken {
-        let expires_at = now + ttl_seconds;
+        // Saturating add so a far-future clock or a misconfigured ttl cannot
+        // overflow (which would panic under the workspace's panic=abort, or
+        // wrap to an always-expired token in release).
+        let expires_at = now.saturating_add(ttl_seconds);
         let signature = self.sign(plugin_id, session_id, now, expires_at, granted_caps);
         CapabilityToken {
             plugin_id: plugin_id.to_owned(),
@@ -317,6 +335,25 @@ mod tests {
         let body = env.to_msgpack().unwrap();
         let back = Envelope::from_msgpack(&body).unwrap();
         assert_eq!(env, back);
+    }
+
+    #[test]
+    fn nil_args_decode_to_empty_map() {
+        // Python `from_dict` coerces `raw.get("a") or {}`, so an envelope
+        // carrying `a: nil` must decode to an empty map, not nil.
+        let env = Envelope {
+            version: 1,
+            kind: "event".into(),
+            method: "m".into(),
+            capability: String::new(),
+            args: rmpv::Value::Nil,
+            request_id: "id".into(),
+            token: String::new(),
+            error: None,
+        };
+        let body = env.to_msgpack().unwrap();
+        let back = Envelope::from_msgpack(&body).unwrap();
+        assert_eq!(back.args, rmpv::Value::Map(Vec::new()));
     }
 
     #[test]

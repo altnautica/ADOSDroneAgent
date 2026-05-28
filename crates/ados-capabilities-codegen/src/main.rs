@@ -37,8 +37,17 @@ struct Cap {
 const GENERATED_HEADER: &str =
     "ados-capabilities-codegen from capabilities.toml. Do not edit by hand.";
 
+/// Escape a string for emission inside a double-quoted string literal. The
+/// backslash must be escaped first. Control characters are escaped too, so a
+/// stray newline/CR/tab in a catalog value cannot corrupt the generated line;
+/// the `\n`/`\r`/`\t` escapes are interpreted identically by Rust, Python, and
+/// TypeScript double-quoted strings.
 fn esc(s: &str) -> String {
-    s.replace('\\', "\\\\").replace('"', "\\\"")
+    s.replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+        .replace('\t', "\\t")
 }
 
 fn emit_rust(cat: &Catalog) -> String {
