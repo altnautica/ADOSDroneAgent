@@ -7,11 +7,15 @@ StartLimitBurst=5
 
 [Service]
 Type=simple
-# Prefer the prebuilt native radio manager when present, fall back to the
-# packaged Python service otherwise (the prebuilt fetch is best-effort). `exec`
-# replaces the shell image in place so the CAP_NET_RAW/CAP_NET_ADMIN ambient
-# caps below carry to the chosen binary unchanged.
-ExecStart=/bin/sh -c 'if [ -x /opt/ados/bin/ados-radio ]; then exec /opt/ados/bin/ados-radio; else exec /opt/ados/venv/bin/python -m ados.services.wfb; fi'
+# The native radio manager is OPT-IN until it reaches feature parity with the
+# Python service: run it only when BOTH the binary is present AND the operator
+# has explicitly enabled it via the flag file. Default (no flag) = the packaged
+# Python service, so a routine upgrade never silently swaps the live radio for
+# an under-parity binary. To A/B test the native binary on the bench:
+#   touch /etc/ados/wfb-rust-enabled && systemctl restart ados-wfb
+# `exec` replaces the shell image in place so the CAP_NET_RAW/CAP_NET_ADMIN
+# ambient caps below carry to the chosen binary unchanged.
+ExecStart=/bin/sh -c 'if [ -e /etc/ados/wfb-rust-enabled ] && [ -x /opt/ados/bin/ados-radio ]; then exec /opt/ados/bin/ados-radio; else exec /opt/ados/venv/bin/python -m ados.services.wfb; fi'
 Restart=on-failure
 RestartSec=5
 Environment=ADOS_CONFIG=/etc/ados/config.yaml

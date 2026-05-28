@@ -62,13 +62,13 @@ install_radio_binary() {
     rm -rf "${tmp}"
     info "WFB radio binary installed: ${dest}"
 
-    # The unit may have restarted earlier in the install before this binary was
-    # on disk, so its ExecStart shim would have selected the Python fallback.
-    # Re-assert the running service (drone profile only) now that the binary is
-    # present so the install lands on the native binary with no manual restart.
-    if systemctl is-active --quiet ados-wfb 2>/dev/null; then
+    # The native binary is OPT-IN (under-parity): re-assert the running service
+    # onto it ONLY when the operator has enabled the flag. Without the flag the
+    # unit keeps running the Python service, so a routine upgrade never bounces
+    # the radio for a binary it would not select anyway.
+    if [ -e "${CONFIG_DIR}/wfb-rust-enabled" ] && systemctl is-active --quiet ados-wfb 2>/dev/null; then
         systemctl restart ados-wfb 2>/dev/null || true
-        info "WFB service restarted onto the installed binary."
+        info "WFB service restarted onto the installed native binary (flag enabled)."
     fi
 }
 export -f install_radio_binary
