@@ -16,3 +16,4 @@ sha2 = { workspace = true }
 hex = { workspace = true }
 thiserror = { workspace = true }
 getrandom = { workspace = true }
+tokio = { workspace = true }

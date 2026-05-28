@@ -18,5 +18,6 @@
 
 pub mod capabilities;
 pub mod frame;
+pub mod ipc;
 pub mod plugin;
 pub mod state;

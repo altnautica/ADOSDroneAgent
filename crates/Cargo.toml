@@ -19,6 +19,7 @@ hex = "0.4"
 thiserror = "2"
 getrandom = "0.2"
 toml = "0.8"
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "net", "io-util", "sync", "time"] }
 
 [profile.release]
 strip = true
