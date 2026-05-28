@@ -15,7 +15,10 @@ name = "ados-mavlink-router"
 version = "0.1.0"
 dependencies = [
  "ados-protocol",
+ "serde",
  "serde_json",
+ "serde_norway",
+ "tempfile",
 ]
 
 [[package]]

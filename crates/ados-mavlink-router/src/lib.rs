@@ -11,4 +11,6 @@
 //! I/O so it can be unit-tested against constructed messages for byte-level
 //! parity with the Python producer.
 
+pub mod config;
+pub mod param_cache;
 pub mod state;

@@ -1,0 +1,194 @@
+//! MAVLink service configuration.
+//!
+//! Reads the `mavlink:` section of `/etc/ados/config.yaml`. Mirrors the Python
+//! `MavlinkConfig` (core/config/mavlink.py): the same field names and the same
+//! defaults so a config written by the Python agent is read identically here.
+//! serde ignores every other section, so the large operator config is
+//! untouched.
+
+use std::path::Path;
+
+use serde::Deserialize;
+
+/// Canonical config location (overridable via the `ADOS_CONFIG` env var, which
+/// the systemd unit sets).
+pub const CONFIG_YAML: &str = "/etc/ados/config.yaml";
+
+fn default_baud_rate() -> u32 {
+    57600
+}
+fn default_system_id() -> u8 {
+    1
+}
+fn default_component_id() -> u8 {
+    191
+}
+fn default_endpoint_type() -> String {
+    "websocket".to_string()
+}
+fn default_endpoint_host() -> String {
+    "0.0.0.0".to_string()
+}
+fn default_endpoint_port() -> u16 {
+    8765
+}
+fn default_endpoint_enabled() -> bool {
+    true
+}
+fn default_endpoints() -> Vec<EndpointConfig> {
+    vec![EndpointConfig::default()]
+}
+
+/// A network entry point. v1 ships only the `websocket` type.
+#[derive(Debug, Clone, Deserialize)]
+pub struct EndpointConfig {
+    #[serde(rename = "type", default = "default_endpoint_type")]
+    pub kind: String,
+    #[serde(default = "default_endpoint_host")]
+    pub host: String,
+    #[serde(default = "default_endpoint_port")]
+    pub port: u16,
+    #[serde(default = "default_endpoint_enabled")]
+    pub enabled: bool,
+}
+
+impl Default for EndpointConfig {
+    fn default() -> Self {
+        Self {
+            kind: default_endpoint_type(),
+            host: default_endpoint_host(),
+            port: default_endpoint_port(),
+            enabled: default_endpoint_enabled(),
+        }
+    }
+}
+
+/// The `mavlink:` config section.
+#[derive(Debug, Clone, Deserialize)]
+pub struct MavlinkConfig {
+    #[serde(default)]
+    pub serial_port: String,
+    #[serde(default = "default_baud_rate")]
+    pub baud_rate: u32,
+    #[serde(default = "default_system_id")]
+    pub system_id: u8,
+    #[serde(default = "default_component_id")]
+    pub component_id: u8,
+    #[serde(default = "default_endpoints")]
+    pub endpoints: Vec<EndpointConfig>,
+}
+
+impl Default for MavlinkConfig {
+    fn default() -> Self {
+        Self {
+            serial_port: String::new(),
+            baud_rate: default_baud_rate(),
+            system_id: default_system_id(),
+            component_id: default_component_id(),
+            endpoints: default_endpoints(),
+        }
+    }
+}
+
+impl MavlinkConfig {
+    /// Load from the canonical path (or `ADOS_CONFIG` when set). A missing or
+    /// unreadable file yields the defaults, matching the Python loader.
+    pub fn load() -> Self {
+        let path = std::env::var("ADOS_CONFIG").unwrap_or_else(|_| CONFIG_YAML.to_string());
+        Self::load_from(Path::new(&path))
+    }
+
+    /// Load from an explicit path (testable).
+    pub fn load_from(path: &Path) -> Self {
+        #[derive(Debug, Default, Deserialize)]
+        struct RawConfig {
+            #[serde(default)]
+            mavlink: MavlinkConfig,
+        }
+        let Ok(text) = std::fs::read_to_string(path) else {
+            return MavlinkConfig::default();
+        };
+        let raw: RawConfig = serde_norway::from_str(&text).unwrap_or_default();
+        raw.mavlink
+    }
+
+    /// The first enabled WebSocket endpoint port, if any (the proxy bind port).
+    pub fn websocket_port(&self) -> Option<u16> {
+        self.endpoints
+            .iter()
+            .find(|e| e.enabled && e.kind == "websocket")
+            .map(|e| e.port)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    fn write(path: &Path, contents: &str) {
+        let mut f = std::fs::File::create(path).unwrap();
+        f.write_all(contents.as_bytes()).unwrap();
+    }
+
+    #[test]
+    fn missing_file_yields_python_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let c = MavlinkConfig::load_from(&dir.path().join("nope.yaml"));
+        assert_eq!(c.serial_port, "");
+        assert_eq!(c.baud_rate, 57600);
+        assert_eq!(c.system_id, 1);
+        assert_eq!(c.component_id, 191);
+        assert_eq!(c.websocket_port(), Some(8765));
+    }
+
+    #[test]
+    fn reads_explicit_mavlink_section_and_ignores_others() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("config.yaml");
+        write(
+            &cfg,
+            "agent:\n  profile: drone\nmavlink:\n  serial_port: /dev/ttyACM0\n  baud_rate: 921600\n  system_id: 1\n  component_id: 191\nvideo:\n  mode: auto\n",
+        );
+        let c = MavlinkConfig::load_from(&cfg);
+        assert_eq!(c.serial_port, "/dev/ttyACM0");
+        assert_eq!(c.baud_rate, 921600);
+        // endpoints omitted -> default websocket 8765
+        assert_eq!(c.websocket_port(), Some(8765));
+    }
+
+    #[test]
+    fn partial_mavlink_section_fills_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("config.yaml");
+        write(&cfg, "mavlink:\n  serial_port: /dev/ttyAMA0\n");
+        let c = MavlinkConfig::load_from(&cfg);
+        assert_eq!(c.serial_port, "/dev/ttyAMA0");
+        assert_eq!(c.baud_rate, 57600);
+        assert_eq!(c.component_id, 191);
+    }
+
+    #[test]
+    fn explicit_endpoints_override_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("config.yaml");
+        write(
+            &cfg,
+            "mavlink:\n  endpoints:\n    - type: websocket\n      host: 0.0.0.0\n      port: 9000\n      enabled: true\n",
+        );
+        let c = MavlinkConfig::load_from(&cfg);
+        assert_eq!(c.websocket_port(), Some(9000));
+    }
+
+    #[test]
+    fn disabled_websocket_endpoint_is_not_selected() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("config.yaml");
+        write(
+            &cfg,
+            "mavlink:\n  endpoints:\n    - type: websocket\n      port: 8765\n      enabled: false\n",
+        );
+        let c = MavlinkConfig::load_from(&cfg);
+        assert_eq!(c.websocket_port(), None);
+    }
+}
