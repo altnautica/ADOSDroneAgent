@@ -121,3 +121,22 @@ fn state_v1_decodes_python_bytes() {
     // is the canonical forward wire.)
     assert_eq!(decoded, s["state"]);
 }
+
+#[test]
+fn state_v2_decodes_python_msgpack() {
+    let f = fixtures();
+    let s = &f["state_v2"];
+
+    // The Python agent's v2 wire body is msgpack(state); the Rust state hub
+    // must decode it to the same snapshot. (body_hex is the frame payload
+    // without the 4-byte length prefix.)
+    let body = hex::decode(s["body_hex"].as_str().unwrap()).unwrap();
+    let decoded = state::decode_v2(&body).unwrap();
+    assert_eq!(decoded, s["state"]);
+
+    // And a frame the Rust side encodes round-trips back to the same state,
+    // so a Python v2 consumer reading Rust output sees identical fields.
+    let frame = state::encode_v2(&decoded).unwrap();
+    let reparsed = state::decode_v2(&frame[frame::HEADER_SIZE..]).unwrap();
+    assert_eq!(reparsed, s["state"]);
+}

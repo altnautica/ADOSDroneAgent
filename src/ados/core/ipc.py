@@ -62,6 +62,27 @@ MAX_FRAME_SIZE = 65536
 MAVLINK_QUEUE_DEPTH = 256
 STATE_QUEUE_DEPTH = 32
 
+# State v2 wire: length-prefixed msgpack (the same 4-byte big-endian frame the
+# MAVLink socket uses). Gated by ADOS_STATE_IPC_MSGPACK so it lands inert; when
+# the flag is set, every service in a deployment must agree (server + clients),
+# otherwise the state socket stays newline-terminated JSON (v1). A state
+# snapshot with the full parameter dict is larger than a MAVLink frame, so it
+# gets its own cap.
+STATE_MAX_FRAME_SIZE = 1024 * 1024
+
+
+def _encode_state_frame(state: dict) -> bytes:
+    """Encode a state snapshot for the wire.
+
+    Length-prefixed msgpack when ``_USE_MSGPACK`` is set (v2), else
+    newline-terminated JSON (v1). Both halves of a deployment switch together
+    via the ``ADOS_STATE_IPC_MSGPACK`` env flag.
+    """
+    if _USE_MSGPACK:
+        body = _msgpack.packb(state, use_bin_type=True)
+        return struct.pack("!I", len(body)) + body
+    return json.dumps(state).encode() + b"\n"
+
 
 def _ensure_run_dir(path: Path | None = None) -> None:
     """Create the directory for the given socket path (or default)."""
@@ -394,7 +415,7 @@ class StateIPCServer:
         self._last_state = state
         if not self._clients:
             return
-        payload = json.dumps(state).encode() + b"\n"
+        payload = _encode_state_frame(state)
         slow: list[_ClientChannel] = []
         for client in self._clients:
             if not client.enqueue(payload):
@@ -416,7 +437,7 @@ class StateIPCServer:
         self._clients.add(client)
         # Send current state immediately so client doesn't wait for next publish
         if self._last_state is not None:
-            initial = json.dumps(self._last_state).encode() + b"\n"
+            initial = _encode_state_frame(self._last_state)
             client.enqueue(initial)
         # Keep connection alive until client disconnects
         try:
@@ -478,21 +499,41 @@ class StateIPCClient:
             self._writer.close()
 
     async def read_loop(self) -> None:
-        """Read state updates. Each line is a JSON snapshot."""
+        """Read state updates.
+
+        v1 (default): each line is a newline-terminated JSON snapshot. v2
+        (``_USE_MSGPACK``): each frame is a 4-byte big-endian length + msgpack
+        body. The wire is chosen by the same flag the server encodes with, so
+        both halves of a deployment stay in lock-step.
+        """
         if not self._reader:
             raise RuntimeError("Not connected")
         try:
             while self._connected:
-                line = await self._reader.readline()
-                if not line:
-                    break
-                try:
-                    self._state = json.loads(line)
-                    if self._on_state:
-                        self._on_state(self._state)
-                except json.JSONDecodeError:
-                    pass
-        except (ConnectionResetError, OSError):
+                if _USE_MSGPACK:
+                    header = await self._reader.readexactly(HEADER_SIZE)
+                    (length,) = struct.unpack("!I", header)
+                    if length == 0 or length > STATE_MAX_FRAME_SIZE:
+                        log.warning("state_ipc_bad_frame_length", length=length)
+                        break
+                    body = await self._reader.readexactly(length)
+                    try:
+                        self._state = _msgpack.unpackb(body, raw=False)
+                        if self._on_state:
+                            self._on_state(self._state)
+                    except Exception:  # noqa: BLE001 - tolerate a bad frame
+                        pass
+                else:
+                    line = await self._reader.readline()
+                    if not line:
+                        break
+                    try:
+                        self._state = json.loads(line)
+                        if self._on_state:
+                            self._on_state(self._state)
+                    except json.JSONDecodeError:
+                        pass
+        except (asyncio.IncompleteReadError, ConnectionResetError, OSError):
             pass
         finally:
             self._connected = False

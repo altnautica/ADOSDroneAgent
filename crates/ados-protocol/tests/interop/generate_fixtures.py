@@ -82,16 +82,27 @@ def envelope_fixture() -> dict:
     }
 
 
-def state_v1_fixture() -> dict:
-    # Mirrors core/ipc.py StateIPCServer.publish: json.dumps(state) + "\n".
-    state = {
+def _sample_state() -> dict:
+    return {
         "armed": False,
         "mode": "STABILIZE",
         "battery": {"voltage": 16.4, "remaining": 87},
         "gps": {"fix": 3, "sats": 14},
     }
+
+
+def state_v1_fixture() -> dict:
+    # Mirrors core/ipc.py StateIPCServer.publish (v1): json.dumps(state) + "\n".
+    state = _sample_state()
     wire = json.dumps(state).encode() + b"\n"
     return {"state": state, "wire_hex": wire.hex()}
+
+
+def state_v2_fixture() -> dict:
+    # Mirrors core/ipc.py _encode_state_frame (v2) body: msgpack, use_bin_type.
+    state = _sample_state()
+    body = msgpack.packb(state, use_bin_type=True)
+    return {"state": state, "body_hex": body.hex()}
 
 
 def main() -> None:
@@ -99,6 +110,7 @@ def main() -> None:
         "token": token_fixture(),
         "envelope": envelope_fixture(),
         "state_v1": state_v1_fixture(),
+        "state_v2": state_v2_fixture(),
     }
     dest = Path(__file__).with_name("fixtures.json")
     dest.write_text(json.dumps(out, indent=2, sort_keys=True) + "\n")
