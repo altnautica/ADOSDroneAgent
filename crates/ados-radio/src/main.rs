@@ -19,8 +19,8 @@ use ados_radio::adapter;
 use ados_radio::config::WfbConfig;
 use ados_radio::hop::{
     build_hop_announce, build_presence_beacon, derive_pair_key, hop_announce_interval,
-    hop_announce_rounds, hop_epoch_ms, verify_hop_packet, HopState, HopTrigger, HOP_ACK_PORT,
-    HOP_CONTROL_PORT, PRESENCE_INTERVAL,
+    hop_announce_rounds, hop_epoch_ms, parse_hop_ack, parse_presence_beacon, HopState, HopTrigger,
+    HOP_ACK_PORT, HOP_CONTROL_PORT, PRESENCE_INTERVAL,
 };
 use ados_radio::paths::{run_path, write_sidecar, DRONE_KEY, WFB_TX_KEY};
 use ados_radio::process::RadioProcesses;
@@ -289,20 +289,22 @@ async fn emit_presence_beacons(
     }
 }
 
-/// Minimal FHSS hop supervisor: broadcasts HopAnnounce and listens for HopAck.
-/// If ACK arrives, executes: stop wfb_tx → iw set channel → restart wfb_tx.
+/// FHSS hop supervisor. A dedicated 5810 listener decodes the control plane
+/// (HopAck + the peer's PresenceBeacon) and drives the shared `HopState`; the
+/// hop loop announces a target, waits for the matching ACK, then executes the
+/// channel change. Writes `hop-supervisor.json` (5 s) + `peer-presence.json`.
 async fn run_hop_supervisor(
     iface: &str,
     cfg: &WfbConfig,
     proc: Arc<tokio::sync::Mutex<RadioProcesses>>,
     pair_key: &[u8; 32],
-    device_id: &str,
+    _device_id: &str,
     cancel: Arc<Notify>,
 ) {
-    let mut state = HopState::new(cfg.channel);
-    let mut hop_tick = tokio::time::interval(Duration::from_secs(cfg.hop_period_seconds as u64));
+    let state = Arc::new(tokio::sync::Mutex::new(HopState::new(cfg.channel)));
+    let pair_key = *pair_key; // [u8;32] is Copy — move into tasks freely.
 
-    // Listener socket for HopAck (drone receives on 5810).
+    // ── Control-plane listener on 5810: HopAck vs PresenceBeacon ──────────
     let ack_sock = match tokio::net::UdpSocket::bind(format!("0.0.0.0:{HOP_ACK_PORT}")).await {
         Ok(s) => Arc::new(s),
         Err(e) => {
@@ -311,98 +313,191 @@ async fn run_hop_supervisor(
             return;
         }
     };
+    // Acked target channels flow from the listener to the hop loop.
+    let (ack_tx, mut ack_rx) = tokio::sync::mpsc::channel::<u8>(8);
+    let lst_state = state.clone();
+    let lst_cancel = cancel.clone();
+    let lst_sock = ack_sock.clone();
+    let listener = tokio::spawn(async move {
+        let mut buf = [0u8; 128];
+        loop {
+            tokio::select! {
+                r = lst_sock.recv_from(&mut buf) => {
+                    let Ok((n, _)) = r else { continue };
+                    let pkt = &buf[..n];
+                    if let Some(target) = parse_hop_ack(pkt, &pair_key) {
+                        let _ = ack_tx.try_send(target);
+                    } else if let Some(p) = parse_presence_beacon(pkt, &pair_key) {
+                        lst_state.lock().await.on_peer_beacon(p);
+                        write_peer_presence_json(&lst_state).await;
+                    }
+                }
+                _ = lst_cancel.notified() => break,
+            }
+        }
+    });
 
-    // Broadcast socket for HopAnnounce.
+    // ── hop-supervisor.json writer (5 s) ──────────────────────────────────
+    let hb_state = state.clone();
+    let hb_cancel = cancel.clone();
+    let hb_cfg = cfg.clone();
+    let hb_writer = tokio::spawn(async move {
+        let mut t = tokio::time::interval(Duration::from_secs(5));
+        loop {
+            tokio::select! {
+                _ = t.tick() => write_hop_supervisor_json(&hb_state, &hb_cfg).await,
+                _ = hb_cancel.notified() => break,
+            }
+        }
+    });
+
     let announce_sock = match tokio::net::UdpSocket::bind("0.0.0.0:0").await {
         Ok(s) => s,
         Err(_) => {
+            listener.abort();
+            hb_writer.abort();
             cancel.notified().await;
             return;
         }
     };
 
-    let mut ack_buf = [0u8; 64];
+    let mut hop_tick = tokio::time::interval(Duration::from_secs(cfg.hop_period_seconds as u64));
+    let mut stale_tick = tokio::time::interval(Duration::from_secs(5));
 
     loop {
         tokio::select! {
             _ = hop_tick.tick() => {
-                if !state.can_hop() {
+                if !state.lock().await.can_hop() {
                     continue;
                 }
-                // Scan for the quietest channel (stub: use next channel in band).
-                let target = next_candidate_channel(state.channel, cfg);
-                if target == state.channel {
+                let cur = state.lock().await.channel;
+                let target = next_candidate_channel(cur, cfg);
+                if target == cur {
                     continue;
                 }
                 let epoch = hop_epoch_ms();
-                let pkt = build_hop_announce(epoch, target, HopTrigger::Periodic, pair_key);
+                let pkt = build_hop_announce(epoch, target, HopTrigger::Periodic, &pair_key);
+                // Drain any stale acks so we only count one for THIS announce.
+                while ack_rx.try_recv().is_ok() {}
 
-                // Broadcast 30 rounds × 100ms, stop early on ACK.
+                // Announce up to 30×@100ms, stop early on the matching ACK.
                 let mut acked = false;
                 for _ in 0..hop_announce_rounds() {
                     let _ = announce_sock
                         .send_to(&pkt, format!("127.0.0.1:{HOP_CONTROL_PORT}"))
                         .await;
-                    // Non-blocking check for ACK.
-                    if let Ok(Ok((n, _))) = tokio::time::timeout(
-                        hop_announce_interval(),
-                        ack_sock.recv_from(&mut ack_buf),
-                    )
-                    .await
+                    if let Ok(Some(ch)) =
+                        tokio::time::timeout(hop_announce_interval(), ack_rx.recv()).await
                     {
-                        if verify_hop_packet(&ack_buf[..n], pair_key) {
+                        if ch == target {
                             acked = true;
                             break;
                         }
                     }
                 }
                 if acked {
-                    // Sleep to epoch, then execute the hop.
-                    let epoch_secs = epoch as f64 / 1000.0;
-                    let now_secs = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_secs_f64();
-                    let delay = epoch_secs - now_secs;
-                    if delay > 0.0 {
-                        tokio::time::sleep(Duration::from_secs_f64(delay)).await;
-                    }
+                    sleep_to_epoch(epoch).await;
                     proc.lock().await.kill_all().await;
                     set_channel(iface, target).await;
                     match RadioProcesses::spawn(iface, cfg, Path::new(WFB_TX_KEY)).await {
                         Ok(new_proc) => {
                             *proc.lock().await = new_proc;
-                            state.on_hop(target);
+                            state.lock().await.record_hop(target, "periodic", true);
                             tracing::info!(iface, channel = target, "hop_executed");
                         }
                         Err(e) => {
+                            state.lock().await.record_hop(target, "periodic", false);
                             tracing::warn!(error = %e, "hop_wfb_restart_failed");
                         }
                     }
                 }
             }
-            // Peer stale check — return to home channel.
-            _ = tokio::time::sleep(Duration::from_secs(5)) => {
-                if state.should_return_home() {
-                    tracing::info!(home = state.home_channel, "hop_return_home");
+            // Peer-stale check — return to home channel (no ACK handshake).
+            _ = stale_tick.tick() => {
+                let (return_home, home) = {
+                    let s = state.lock().await;
+                    (s.should_return_home(), s.home_channel)
+                };
+                if return_home {
+                    tracing::info!(home, "hop_return_home");
                     proc.lock().await.kill_all().await;
-                    set_channel(iface, state.home_channel).await;
-                    if let Ok(new_proc) =
-                        RadioProcesses::spawn(iface, cfg, Path::new(WFB_TX_KEY)).await
-                    {
-                        *proc.lock().await = new_proc;
-                        state.on_hop(state.home_channel);
-                    }
+                    set_channel(iface, home).await;
+                    let ok = match RadioProcesses::spawn(iface, cfg, Path::new(WFB_TX_KEY)).await {
+                        Ok(new_proc) => {
+                            *proc.lock().await = new_proc;
+                            true
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = %e, "return_home_restart_failed");
+                            false
+                        }
+                    };
+                    state.lock().await.record_hop(home, "return_home", ok);
                 }
             }
-            // PresenceBeacon inbound (updates the _was_linked gate).
-            Ok((n, _)) = ack_sock.recv_from(&mut ack_buf) => {
-                let _ = (n, device_id); // consumed to update hop state
-                state.on_peer_seen();
+            _ = cancel.notified() => {
+                listener.abort();
+                hb_writer.abort();
+                return;
             }
-            _ = cancel.notified() => return,
         }
     }
+}
+
+/// Sleep until the hop epoch (wall-clock ms). No-op if the epoch is past.
+async fn sleep_to_epoch(epoch_ms: u64) {
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs_f64();
+    let delay = (epoch_ms as f64 / 1000.0) - now_secs;
+    if delay > 0.0 {
+        tokio::time::sleep(Duration::from_secs_f64(delay)).await;
+    }
+}
+
+/// Write `peer-presence.json` (Contract E) from the shared hop state.
+async fn write_peer_presence_json(state: &Arc<tokio::sync::Mutex<HopState>>) {
+    let v = {
+        let s = state.lock().await;
+        match s.peer() {
+            Some(p) => json!({
+                "peer_device_id": p.device_id,
+                "peer_role": p.role,
+                "peer_channel": p.channel,
+                "peer_rssi_dbm": p.rssi_dbm,
+                "peer_last_seen_unix": s.peer_last_seen_unix(),
+            }),
+            None => json!({
+                "peer_device_id": serde_json::Value::Null,
+                "peer_role": serde_json::Value::Null,
+                "peer_channel": serde_json::Value::Null,
+                "peer_rssi_dbm": serde_json::Value::Null,
+                "peer_last_seen_unix": serde_json::Value::Null,
+            }),
+        }
+    };
+    let _ = write_sidecar(&run_path("peer-presence.json"), &v);
+}
+
+/// Write `hop-supervisor.json` (Contract E) from the shared hop state + config.
+async fn write_hop_supervisor_json(state: &Arc<tokio::sync::Mutex<HopState>>, cfg: &WfbConfig) {
+    let v = {
+        let s = state.lock().await;
+        let history =
+            serde_json::to_value(s.history()).unwrap_or_else(|_| serde_json::Value::Array(vec![]));
+        json!({
+            "enabled": cfg.auto_hop_enabled,
+            "band": cfg.band,
+            "hop_period_seconds": cfg.hop_period_seconds,
+            "loss_threshold_percent": cfg.hop_loss_threshold_percent as f64,
+            "rssi_threshold_dbm": cfg.hop_rssi_threshold_dbm as f64,
+            "last_hop_at": s.last_hop_at_unix(),
+            "history": history,
+            "wall_time_unix": ados_radio::hop::now_unix(),
+        })
+    };
+    let _ = write_sidecar(&run_path("hop-supervisor.json"), &v);
 }
 
 /// Pick the next candidate channel in the configured band (simple rotation;
