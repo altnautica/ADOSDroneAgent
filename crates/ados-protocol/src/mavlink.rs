@@ -15,6 +15,11 @@ use thiserror::Error;
 pub use rust_mavlink::ardupilotmega::MavMessage;
 pub use rust_mavlink::{MavHeader, MavlinkVersion};
 
+// Re-export the dialect module so services built on this crate (the router)
+// can construct and match the concrete message payloads and enums without
+// declaring their own copy of the dialect dependency.
+pub use rust_mavlink::ardupilotmega;
+
 #[derive(Debug, Error)]
 pub enum MavlinkError {
     #[error("failed to read MAVLink v2 frame: {0}")]

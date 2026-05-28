@@ -11,6 +11,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "ados-mavlink-router"
+version = "0.1.0"
+dependencies = [
+ "ados-protocol",
+ "serde_json",
+]
+
+[[package]]
 name = "ados-protocol"
 version = "0.1.0"
 dependencies = [
