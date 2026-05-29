@@ -18,10 +18,10 @@ from ados.core.paths import CONFIG_YAML
 from ados.services.wfb.auto_pair import FAILOVER_STATE_PATH
 from ados.services.wfb.channel import STANDARD_CHANNELS, get_channel
 
-# HTTP-level cap on the local-bind endpoint. The orchestrator itself is
-# unbounded in its rendezvous wait; this just prevents browsers and
-# reverse proxies from cutting the request mid-flight. Operator-driven
-# cancel is also wired through POST /wfb/pair/cancel.
+# HTTP-level cap on the local-bind endpoint. The bind rendezvous itself
+# is unbounded; this just prevents browsers and reverse proxies from
+# cutting the request mid-flight. When the cap elapses the request
+# fires a cancel and returns the terminal session snapshot.
 _REST_LOCAL_BIND_TIMEOUT_S = 300.0  # 5 minutes
 
 router = APIRouter()
@@ -541,11 +541,10 @@ async def post_wfb_pair_local_bind(request: LocalBindRequest) -> dict[str, Any]:
 
     Returns a session dict (`session_id`, `state`, `started_at`,
     `finished_at`, `error`, `fingerprint`, `peer_device_id`, `source`).
-    The orchestrator itself waits for a peer indefinitely, so this
-    endpoint enforces an HTTP-level cap (5 minutes) before returning
-    whatever state the session is in. The bind is cancellable mid-flight
-    via POST `/wfb/pair/cancel`. Concurrent local-bind calls fail-fast
-    with a 409.
+    The bind itself waits for a peer indefinitely, so this endpoint
+    enforces an HTTP-level cap (5 minutes); when the cap elapses the
+    request drives a cancel and returns whatever terminal state the
+    session reached. Concurrent local-bind calls fail-fast with a 409.
     """
     app = get_agent_app()
     role = (
@@ -554,57 +553,45 @@ async def post_wfb_pair_local_bind(request: LocalBindRequest) -> dict[str, Any]:
         else _current_role(app)
     )
 
-    from ados.services.wfb.bind_orchestrator import (
-        BindBusyError,
-        get_bind_orchestrator,
-    )
+    from ados.services.wfb.bind_client import BindBusyError, forward_start_bind
 
-    orch = get_bind_orchestrator()
     cancel_event = asyncio.Event()
-    bind_task = asyncio.create_task(
-        orch.start_local_bind(
-            role=role,
-            peer_device_id=request.peer_device_id,
-            source="operator",
-            cancel_event=cancel_event,
-        ),
-        name="rest-local-bind",
-    )
     try:
-        return await asyncio.wait_for(bind_task, timeout=_REST_LOCAL_BIND_TIMEOUT_S)
-    except TimeoutError:
-        # Don't let an idle rendezvous tie up the HTTP connection past
-        # what proxies / browsers tolerate. Fire the cancel hook so the
-        # orchestrator drops its socat and returns a clean session
-        # snapshot, then surface whatever state we got.
-        cancel_event.set()
-        try:
-            return await bind_task
-        except Exception as exc:  # noqa: BLE001
-            raise HTTPException(
-                status_code=504,
-                detail={
-                    "error": {
-                        "code": "E_BIND_TIMEOUT",
-                        "message": f"bind did not complete within "
-                        f"{_REST_LOCAL_BIND_TIMEOUT_S}s",
-                    }
-                },
-            ) from exc
+        return await forward_start_bind(
+            role=role,
+            source="operator",
+            peer_device_id=request.peer_device_id,
+            cancel_event=cancel_event,
+            timeout=_REST_LOCAL_BIND_TIMEOUT_S,
+        )
     except BindBusyError as exc:
         raise HTTPException(
             status_code=409,
             detail={"error": {"code": "E_BIND_IN_PROGRESS", "message": str(exc)}},
+        ) from exc
+    except TimeoutError as exc:
+        # forward_start_bind returns the terminal session on its own
+        # internal timeout, so this only fires if it surfaces a
+        # TimeoutError to us. Preserve the original 504 envelope so the
+        # GCS error handling stays valid.
+        raise HTTPException(
+            status_code=504,
+            detail={
+                "error": {
+                    "code": "E_BIND_TIMEOUT",
+                    "message": f"bind did not complete within "
+                    f"{_REST_LOCAL_BIND_TIMEOUT_S}s",
+                }
+            },
         ) from exc
 
 
 @router.get("/wfb/pair/local-bind")
 async def get_wfb_pair_local_bind() -> dict[str, Any]:
     """Latest bind-session snapshot, or `{}` if none has run since boot."""
-    from ados.services.wfb.bind_orchestrator import get_bind_orchestrator
+    from ados.services.wfb.bind_client import forward_status
 
-    snap = await get_bind_orchestrator().status()
-    return snap or {}
+    return await forward_status()
 
 
 @router.post("/wfb/pair/unpair")

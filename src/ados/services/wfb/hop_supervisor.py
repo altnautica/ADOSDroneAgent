@@ -523,20 +523,20 @@ class HopSupervisor:
 
     async def _tick(self, periodic_due: bool) -> None:
         # Defensive: never trigger a channel change while a local bind
-        # session is in flight. The bind orchestrator stops the normal
-        # wfb unit so wfb-ng's bind profile can own the radio adapter
-        # exclusively; a racing iw-channel + wfb_tx restart from this
-        # supervisor would fight the bind tunnel and corrupt the socat
-        # key exchange. Lazy import keeps this module independent of
-        # the bind orchestrator at import time.
+        # session is in flight. The bind stops the normal wfb unit so
+        # wfb-ng's bind profile can own the radio adapter exclusively;
+        # a racing iw-channel + wfb_tx restart from this supervisor
+        # would fight the bind tunnel and corrupt the socat key
+        # exchange. The liveness sentinel is a cheap sync file read, so
+        # no socket round-trip on this hot tick.
         now = time.monotonic()
         # `periodic_due` is computed and pre-advanced by _loop; reuse
         # the name `periodic` to keep the rest of this function readable.
         periodic = periodic_due
 
         try:
-            from ados.services.wfb.bind_orchestrator import is_bind_active
-            if is_bind_active():
+            from ados.services.wfb.bind_client import read_bind_sentinel_active
+            if read_bind_sentinel_active():
                 if periodic:
                     log.info("hop_supervisor_skip_during_bind")
                 return

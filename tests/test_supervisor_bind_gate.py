@@ -98,49 +98,11 @@ def test_is_bind_active_non_terminal_states(state: BindState) -> None:
     assert is_bind_active() is True
 
 
-@pytest.mark.asyncio
-async def test_supervisor_skips_wfb_restart_during_bind(monkeypatch) -> None:
-    """A dead ados-wfb during an active bind must NOT trigger auto-restart.
-
-    Mocks the supervisor's monitor pieces: ados-wfb is reported as
-    inactive by systemctl, is_bind_active() returns True, and the
-    monitor loop must NOT call start_service.
-    """
-    _seed_session(BindState.TRANSFERRING_KEYS)
-    assert is_bind_active() is True
-
-    sup = Supervisor(ADOSConfig())
-    # Mark ados-wfb as running so the monitor loop will probe it.
-    sup._services["ados-wfb"].state = "running"
-
-    start_service = AsyncMock(return_value=True)
-    monkeypatch.setattr(sup, "start_service", start_service)
-    # Pretend systemctl reports the unit as dead.
-    monkeypatch.setattr(
-        sup, "_check_service_active", AsyncMock(return_value=False)
-    )
-    # Sentinel: psutil paths are off-topic for this test.
-    monkeypatch.setattr(sup, "_collect_metrics", lambda: None)
-    monkeypatch.setattr(sup, "_sd_notify_watchdog", lambda: None)
-
-    # Drive a single iteration of the monitor loop and stop.
-    loop_task = asyncio.create_task(sup._monitor_loop())
-    await asyncio.sleep(0.05)
-    sup._shutdown.set()
-    try:
-        await asyncio.wait_for(loop_task, timeout=2.0)
-    except TimeoutError:
-        loop_task.cancel()
-        try:
-            await loop_task
-        except (asyncio.CancelledError, Exception):
-            pass
-
-    assert start_service.await_count == 0, (
-        "ados-wfb must not be auto-restarted while bind is in flight"
-    )
-    # The service state was flipped to failed, but it stays there.
-    assert sup._services["ados-wfb"].state == "failed"
+# The bind-gate on supervisor auto-restart now lives in the Rust supervisor
+# (it owns the bind orchestrator in-process), so the Python fallback supervisor
+# no longer carries the gate — the prior `test_supervisor_skips_wfb_restart_
+# during_bind` test covered behaviour that moved to the Rust crate and was
+# removed with the Python gate.
 
 
 @pytest.mark.asyncio

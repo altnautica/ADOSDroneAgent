@@ -3,7 +3,7 @@
 Runs as a background asyncio task in the WFB service process. On every
 boot, if `wfb.auto_pair_enabled` is true and the rig is not already
 paired and a WFB-compatible adapter is present, the supervisor opens
-the local bind window via `bind_orchestrator.start_local_bind()` and
+the local bind window via `bind_client.forward_start_bind()` and
 retries on a fixed cadence until either the bind succeeds or the
 operator disables auto-pair.
 
@@ -146,10 +146,7 @@ class AutoPairSupervisor:
         from ados.core.config import load_config
         from ados.services.ground_station.pair_manager import get_pair_manager
         from ados.services.wfb.adapter import detect_wfb_adapters
-        from ados.services.wfb.bind_orchestrator import (
-            BindBusyError,
-            get_bind_orchestrator,
-        )
+        from ados.services.wfb.bind_client import BindBusyError, forward_start_bind
 
         # Mirror an external shutdown event into our internal stop so a
         # single cancel signal feeds the bind orchestrator. Async-safe
@@ -167,7 +164,6 @@ class AutoPairSupervisor:
             pass
 
         pm = get_pair_manager()
-        orch = get_bind_orchestrator()
 
         # A fresh run resets the failover sidecar to "local" so that
         # an operator who re-armed auto-pair from the cloud-relay
@@ -238,12 +234,14 @@ class AutoPairSupervisor:
             try:
                 # Pass our internal stop event as the cancel hook so a
                 # service-shutdown signal (or explicit supervisor.stop)
-                # tears down any in-flight bind cleanly. The orchestrator
-                # itself is unbounded in its rendezvous wait.
-                result = await orch.start_local_bind(
+                # tears down any in-flight bind cleanly. The bind itself
+                # is unbounded in its rendezvous wait.
+                result = await forward_start_bind(
                     role=self._role,
                     source="auto",
+                    peer_device_id=None,
                     cancel_event=self._stop,
+                    timeout=None,
                 )
             except BindBusyError:
                 # Another bind path raced us (REST handler, manual CLI).

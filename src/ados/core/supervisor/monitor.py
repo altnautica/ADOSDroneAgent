@@ -35,8 +35,6 @@ class MonitorMixin:
                         self._check_circuit_breaker(spec)
                         # Auto-restart if circuit not open
                         if spec.state != "circuit_open":
-                            if self._restart_blocked_by_bind(name):
-                                continue
                             log.info("service_auto_restart", service=name)
                             await self.start_service(name)
                 elif (
@@ -53,8 +51,6 @@ class MonitorMixin:
                     now = time.monotonic()
                     if now - spec.last_retry_at < _PARKED_RETRY_COOLDOWN_S:
                         continue
-                    if self._restart_blocked_by_bind(name):
-                        continue
                     spec.last_retry_at = now
                     log.info(
                         "service_parked_retry", service=name, state=spec.state
@@ -68,29 +64,6 @@ class MonitorMixin:
             self._sd_notify_watchdog()
 
             await asyncio.sleep(5)
-
-    @staticmethod
-    def _restart_blocked_by_bind(name: str) -> bool:
-        """True when restarting a wfb unit would collide with a live bind.
-
-        The bind orchestrator stops the normal wfb unit so wfb-ng's bind
-        profile can own the radio adapter exclusively for the handshake.
-        A racing restart re-acquires the adapter, fights monitor mode with
-        the bind tunnel, and corrupts the socat key exchange. Lazy import
-        avoids a module-load cycle and a hard dep at supervisor boot; a
-        broken import (test env) must not gate normal restart behaviour.
-        """
-        if name not in ("ados-wfb", "ados-wfb-rx"):
-            return False
-        try:
-            from ados.services.wfb.bind_orchestrator import is_bind_active
-
-            if is_bind_active():
-                log.info("service_restart_skipped_during_bind", service=name)
-                return True
-        except Exception:
-            pass
-        return False
 
     async def _check_service_active(self, name: str) -> bool:
         """Check if a systemd service is active."""
