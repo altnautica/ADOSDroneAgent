@@ -1160,8 +1160,8 @@ class WfbManager:
           be flat as a consequence; restarting wfb_tx changes nothing.
 
         Process-liveness is necessary but never sufficient for radio
-        work — see operating rule 37. Modeled on RubyFPV's shared-memory
-        watchdog and OpenHD's link-statistics polling.
+        work — see operating rule 37: the watchdog asserts the byte and
+        packet counters advance, not just that the process is alive.
         """
         if not self._interface or self._tx_proc is None:
             return

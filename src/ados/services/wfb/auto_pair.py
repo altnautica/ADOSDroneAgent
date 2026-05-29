@@ -1,4 +1,4 @@
-"""Auto-pair supervisor — RubyFPV-style first-boot bind.
+"""Auto-pair supervisor — first-boot local-radio bind.
 
 Runs as a background asyncio task in the WFB service process. On every
 boot, if `wfb.auto_pair_enabled` is true and the rig is not already

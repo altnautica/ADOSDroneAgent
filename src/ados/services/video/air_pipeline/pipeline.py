@@ -169,8 +169,8 @@ class AirPipeline:
                 # Encoder keyframe interval in frames. A 1-second GOP
                 # at the camera fps trades a bit of bandwidth for fast
                 # late-joiner recovery and resync after a wfb-ng FEC
-                # block loss. Matches the OpenHD reference's GOP
-                # budget on the same class of hardware.
+                # block loss, sized to the GOP budget that suits this
+                # class of hardware.
                 keyframe_interval=max(1, int(cam.fps)),
                 cloud_branch_enabled=self._cloud_relay_enabled,
                 cloud_rtp_port=int(self._config.cloud_rtp_port),

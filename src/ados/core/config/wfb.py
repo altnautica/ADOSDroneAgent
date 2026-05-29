@@ -99,8 +99,8 @@ class WfbConfig(BaseModel):
     wfb_link_preset: Literal[
         "conservative", "balanced", "aggressive"
     ] = "conservative"
-    # Closed-loop adaptive bitrate + FEC ladder, modelled on OpenHD
-    # WBLink. When true, a 1 Hz background controller watches the
+    # Closed-loop adaptive bitrate + FEC ladder. When true, a 1 Hz
+    # background controller watches the
     # link quality monitor and steps a four-tier ladder
     # (4 Mbps/8-12 -> 3 Mbps/8-14 -> 2 Mbps/8-16 -> 1.2 Mbps/4-12)
     # up or down based on packet loss + RSSI hysteresis. Each tier

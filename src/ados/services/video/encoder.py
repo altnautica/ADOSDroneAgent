@@ -745,8 +745,8 @@ def _build_gstreamer_command(
         # late-joiner compatibility. rc-mode=1 selects VBR with
         # bounded bps-max/bps-min so the encoder cannot starve the
         # wfb_tx FEC pipeline with a runaway bitrate spike on a
-        # scene change. qp-min=5/qp-max=51 mirrors the OpenHD bench
-        # values for live FPV.
+        # scene change. qp-min=5/qp-max=51 are bench-tuned values for
+        # live FPV.
         encoder = (
             f"mpph264enc bps={config.bitrate_kbps * 1000} "
             f"bps-max={int(config.bitrate_kbps * 1.5) * 1000} "

@@ -2,9 +2,8 @@
 
 Watches the live link quality stats and steps a four-tier
 bitrate/FEC ladder up or down based on packet loss and RSSI
-hysteresis. Modeled on the OpenHD WBLink rate-adjustment loop but
-scaled to our Python + ffmpeg multi-process stack — the controller
-restarts wfb_tx on each tier change (~500 ms blackout) and asks
+hysteresis, scaled to our Python + ffmpeg multi-process stack: the
+controller restarts wfb_tx on each tier change (~500 ms blackout) and asks
 the pipeline supervisor for a matching encoder restart (~1 s
 blackout). Total tier-change cost is well inside the operator's
 tolerance for a "the link automatically adapted" stutter.
@@ -24,9 +23,6 @@ Manual override:
   active and accepts set_manual_tier() for operator-pinned ops.
 - set_auto(True) returns to closed-loop control starting from
   the manual tier.
-
-Reference: ``wb_link.cpp:1741-1827`` (OpenHD rate adjustment),
-``processor_rx_video.cpp:191`` (RubyFPV retransmit threshold).
 """
 
 from __future__ import annotations
@@ -400,8 +396,8 @@ class BitrateController:
 
         # Order matters. Push the new bitrate to the encoder first
         # so when wfb_tx comes back up the air is already on the
-        # lower datarate (or the upgraded one). This is the same
-        # ordering OpenHD uses — see wb_link.cpp:1741-1827.
+        # lower datarate (or the upgraded one), keeping the air on a
+        # consistent datarate across the restart.
         try:
             fec_ok = await self._set_fec(new_tier.fec_k, new_tier.fec_n)
         except Exception as exc:

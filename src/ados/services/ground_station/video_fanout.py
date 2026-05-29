@@ -13,10 +13,10 @@ downstream localhost ports. Per-packet relay cost is sub-millisecond.
 
 Architecture notes:
 
-* This is the same pattern OpenHD uses (their ground daemon is a
-  stateless RTP forwarder; viewers read UDP directly). The ADOS
-  monolithic agent embeds the fan-out as a subprocess so the lifecycle
-  is supervised by ``WfbRxManager`` alongside ``wfb_rx`` itself.
+* The fan-out is a stateless RTP forwarder (viewers read UDP
+  directly). The ADOS monolithic agent embeds it as a subprocess so
+  the lifecycle is supervised by ``WfbRxManager`` alongside ``wfb_rx``
+  itself.
 * Datagrams are RTP packets; we don't parse them. Just memcpy + sendto.
 * Single thread, blocking ``recvfrom``. No queueing, no reordering, no
   drop policy beyond what the kernel UDP socket buffer enforces.
