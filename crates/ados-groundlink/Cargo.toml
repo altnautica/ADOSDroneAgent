@@ -28,6 +28,8 @@ serde_norway = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
+# ISO-8601 UTC timestamps for the link-stats `timestamp` field on the sidecar.
+time = { version = "0.3", features = ["std", "formatting"] }
 
 # Linux-only edges (systemd notify + journald + setsid/killpg + flock).
 # Confined to a target section so the pure-logic core still builds and

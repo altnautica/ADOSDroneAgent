@@ -4,16 +4,21 @@
 //!
 //! The radio adapter lifecycle and the FHSS/TX-liveness machinery live in the
 //! sibling `ados-radio` crate; this crate owns the receive-side glue: the video
-//! UDP fan-out, the Contract-E sidecar files, and (in a later chunk) the
-//! channel-acquisition receive loop and the mesh role manager.
+//! UDP fan-out, the Contract-E sidecar files, the channel-acquisition receive
+//! loop + presence cache, and (in a later chunk) the mesh role manager.
 
 pub mod acquire;
 pub mod fanout;
 pub mod paths;
+pub mod presence;
+pub mod process_spawn;
 pub mod sidecars;
 pub mod watchdog;
+pub mod wfb_rx;
 
 pub use acquire::{AcquireState, ChannelAcquirer};
 pub use fanout::{run_default_fanout, run_fanout};
+pub use presence::GsPresenceCache;
 pub use sidecars::write_json_atomic;
 pub use watchdog::ValidPacketWatchdog;
+pub use wfb_rx::WfbRxManager;
