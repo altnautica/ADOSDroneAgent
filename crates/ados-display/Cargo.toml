@@ -4,5 +4,36 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+description = "Display layer: the off-thread framebuffer writer (latest-wins, dup-skip), the SPI-LCD/OLED probe + geometry parse, the RGB565/RGB888/xRGB packers, the SSD1306/SH1106 OLED driver, and the boot-time display probe with apply-verify-auto-revert."
+
+[lib]
+name = "ados_display"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ados-display"
+path = "src/bin/ados-display.rs"
+
+[[bin]]
+name = "ados-display-probe"
+path = "src/bin/ados-display-probe.rs"
 
 [dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+tokio = { workspace = true }
+time = { version = "0.3", features = ["std", "formatting"] }
+# Framebuffer mmap. Pure-Rust (no C build-script); the real /dev/fbN map is
+# target-gated, but the type is used in the cross-platform writer signatures.
+memmap2 = "0.9"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+nix = { workspace = true }
+tracing-journald = { workspace = true }
+sd-notify = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
