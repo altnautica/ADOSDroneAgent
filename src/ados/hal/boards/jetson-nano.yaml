@@ -41,9 +41,3 @@ navigation:
   rangefinder_ports:
     - {type: uart, path: /dev/ttyTHS1, baud_max: 115200}
     - {type: i2c, path: /dev/i2c-1, speed_hz: 400000}
-
-# ROS 2: 4 GB RAM. Docker fits but Tegra X1 GPU (no dedicated NPU) limits vision.
-# MAVLink bridge + foxglove_bridge only. No VIO.
-ros:
-  supported: true
-  max_profile: minimal

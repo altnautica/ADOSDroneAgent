@@ -9,7 +9,6 @@ import {
   ScrollText,
   Wrench,
   Settings as SettingsIcon,
-  Bot,
   Antenna,
   Network,
   Layers,
@@ -44,14 +43,10 @@ const COMMON_BOTTOM: NavItem[] = [
 ];
 
 function droneItems(): NavItem[] {
-  // ROS is always linked — the route itself shows an "install ROS"
-  // empty state when the overlay isn't present, which is friendlier
-  // than hiding the link and leaving operators wondering where to go.
   return [
     { to: "/telemetry", label: "Telemetry", icon: Radio, enabled: true },
     { to: "/video", label: "Video", icon: Video, enabled: true },
     { to: "/transmit", label: "WFB Transmit", icon: Antenna, enabled: true },
-    { to: "/ros", label: "ROS", icon: Bot, enabled: true },
   ];
 }
 

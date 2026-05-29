@@ -154,11 +154,6 @@ thermal:
   throttle_85c: "CPU 50%, NPU 50%"
   throttle_95c: "emergency shutdown"
 
-# ROS 2: 4 GB RAM + 6 TOPS NPU. Jazzy Docker fits. VIO viable with NPU acceleration.
-ros:
-  supported: true
-  max_profile: vio
-
 # Full VIO target. 6 TOPS NPU + LPDDR5 carry OpenVINS comfortably. The
 # reference carrier exposes UART4 (FC), UART5 (GPS / expansion), and
 # I2C4 on the sensor expansion header.

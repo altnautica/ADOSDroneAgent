@@ -72,11 +72,6 @@ gpio_buttons:
     header_pin: 35
     function: "ground-station menu back"
 
-# ROS 2: 1 GB RAM is below the practical floor for a Docker ROS stack
-# and there is no NPU. Not supported on this board.
-ros:
-  supported: false
-
 # SPI LCD support via the Waveshare 35A overlay shipped in Raspberry Pi
 # OS at /boot/firmware/overlays/waveshare35a.dtbo. ADS7846 + ILI9486 wire
 # to the canonical BCM pins (T_IRQ = BCM 17 = pin 11, DC = BCM 24 = pin

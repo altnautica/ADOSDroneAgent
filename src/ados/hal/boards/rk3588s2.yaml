@@ -102,11 +102,6 @@ power:
   max_watts: 8.0
   voltage: 5.0
 
-# ROS 2: 4 GB RAM + 6 TOPS NPU. Jazzy Docker fits. VIO viable with NPU acceleration.
-ros:
-  supported: true
-  max_profile: vio
-
 # Full VIO target. 6 TOPS NPU + Cortex-A76 quad easily drives 30 fps
 # OpenVINS. Two UART and two I2C buses give the rangefinder plenty of
 # placement options.

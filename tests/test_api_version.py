@@ -67,7 +67,6 @@ def test_capabilities_includes_known_flags(client):
         "ota.updater",
         "pairing.mnemonic",
         "ground_station.profile",
-        "ros.environment",
         "signing.mavlink",
     }
     missing = expected - caps
@@ -108,7 +107,6 @@ AGENT_CAPABILITIES_FROZEN: tuple[str, ...] = (
     "fleet.roster",
     "features.catalog",
     "ground_station.profile",
-    "ros.environment",
     "signing.mavlink",
     "webrtc.signaling.last_error",
     "can.passthrough",

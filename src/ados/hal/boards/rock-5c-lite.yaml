@@ -152,10 +152,6 @@ power:
   voltage: 5.0
   input: "USB-C 5V/3A"
 
-ros:
-  supported: true
-  max_profile: vio          # 16 GB RAM, 6 TOPS NPU. VIO fits comfortably.
-
 # Full VIO target. NPU intact at 6 TOPS, 16 GB RAM, Cortex-A76 pair drives
 # the front-end at 30 fps comfortably. Rangefinder choices: a free UART
 # header or either I2C bus.

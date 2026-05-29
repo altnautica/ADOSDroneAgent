@@ -30,7 +30,6 @@ from ados.api.routes import (
     peripherals,
     peripherals_v1,
     plugins,
-    ros,
     scripts,
     services,
     setup,
@@ -139,8 +138,6 @@ def create_app(agent: Any) -> FastAPI:
     # common case via CAN_FRAME / CANFD_FRAME / CAN_FILTER_MODIFY
     # passthrough plus the CAN_FORWARD command.
     app.include_router(can.router, prefix="/api")
-    # ROS 2 environment management (opt-in).
-    app.include_router(ros.router, prefix="/api")
     # MAVLink v2 message signing: capability + one-shot FC enrollment.
     # Agent holds no key material; key lives in the GCS browser.
     app.include_router(signing.router, prefix="/api")

@@ -175,12 +175,6 @@ FastAPI server at `:8080`. Full OpenAPI docs at `/docs`. Domain route modules co
 | `/api/pairing/*` | GET / POST | GCS pairing management |
 | `/api/system` | GET / POST | System info, reboot, shutdown |
 | `/api/ota` | GET / POST | Update check, upgrade, rollback |
-| `/api/ros/status` | GET | ROS 2 environment state and container info |
-| `/api/ros/init` | POST | Initialize ROS environment (SSE progress stream) |
-| `/api/ros/nodes` | GET | Running ROS 2 nodes with publisher/subscriber info |
-| `/api/ros/topics` | GET | Active topics with types and rates |
-| `/api/ros/workspace` | GET | Workspace packages and build status |
-| `/api/ros/recordings` | GET | MCAP recording files with metadata |
 | `/api/v1/ground-station/*` | GET / PUT / POST / DELETE | Ground-station profile only. Role, mesh, pairing, WFB-ng relay/receiver, uplinks, physical UI |
 
 ```bash
@@ -214,27 +208,6 @@ The agent connects to ADOS Mission Control over a three-layer relay.
 
 ---
 
-## ROS 2 Integration
-
-Opt-in ROS 2 Jazzy environment running inside a Docker container alongside the agent. Designed for researchers, commercial integrators, and developers who want to connect the drone to the wider robotics ecosystem without affecting users who don't need ROS.
-
-**How it works.** A single `ados ros init` command pulls the Docker image, starts the container, and launches the MAVLink bridge node. The bridge reads the agent's IPC socket and publishes 11 mavros-compatible ROS 2 topics (IMU, GPS, battery, state, rangefinder, and more). Foxglove Studio connects to port 8766 for real-time visualization.
-
-**Three access tiers.** LAN Direct (ws://drone:8766, no cloud dependency), Altnautica Cloud Relay (wss://ros-*.altnautica.com via Cloudflare Tunnel), or Self-Hosted (Tailscale, ZeroTier, WireGuard, or your own tunnel).
-
-**Developer workspace.** Write ROS 2 nodes in Python or C++, auto-build on save, scaffold from templates (`ados ros create-node my_planner --template planner`). MCAP recording with automatic rotation policy.
-
-**Profiles.** Minimal (bridge + Foxglove only, ~340 MB RAM), VIO (+ camera + VINS-Fusion, ~900 MB), Mapping (+ octomap, ~900 MB).
-
-| Config | Default | Description |
-|---|---|---|
-| `ros.enabled` | `false` | Enable ROS 2 integration |
-| `ros.middleware` | `zenoh` | `zenoh` (NAT-friendly) or `cyclonedds` (LAN, lower latency) |
-| `ros.profile` | `minimal` | `minimal`, `vio`, `mapping`, or `custom` |
-| `ros.foxglove_port` | `8766` | Foxglove bridge WebSocket port |
-
----
-
 ## Architecture
 
 ```
@@ -253,23 +226,21 @@ Opt-in ROS 2 Jazzy environment running inside a Docker container alongside the a
 └──┬───────┬───────┬───────┘
    │       │       │
    ▼       ▼       ▼
-┌──────────┐ ┌──────────┐ ┌──────────┐   ┌─────────────────────┐
-│ Main     │ │Standalone│ │State IPC │   │  ROS 2 Container    │  Optional (Docker)
-│ runtime  │ │API svc   │ │snapshots │   │  MAVLink bridge     │
-└────┬─────┘ └────┬─────┘ └────┬─────┘   │  Foxglove bridge    │
-     │            │            │          │  User nodes         │
-     ▼            ▼            ▼          └─────────┬───────────┘
-┌──────┐ ┌──────┐ ┌──────┐                         │
-│ MAV  │ │ MQTT │ │Video │                         │
-│Proxy │ │ GW   │ │Pipe  │                         │
-└──────┘ └──────┘ └──────┘                         │
-   │                                                │
-   ▼                                                │
-┌──────────┐                                        │
-│   FC     │   Flight controller                    │  /run/ados/mavlink.sock
-└──────────┘   (serial/USB)                         │  (IPC bind mount)
-   ▲                                                │
-   └────────────────────────────────────────────────┘
+┌──────────┐ ┌──────────┐ ┌──────────┐
+│ Main     │ │Standalone│ │State IPC │
+│ runtime  │ │API svc   │ │snapshots │
+└────┬─────┘ └────┬─────┘ └────┬─────┘
+     │            │            │
+     ▼            ▼            ▼
+┌──────┐ ┌──────┐ ┌──────┐
+│ MAV  │ │ MQTT │ │Video │
+│Proxy │ │ GW   │ │Pipe  │
+└──────┘ └──────┘ └──────┘
+   │
+   ▼
+┌──────────┐
+│   FC     │   Flight controller
+└──────────┘   (serial/USB)
 ```
 
 The API facade keeps route modules independent from runtime internals. Routes read
@@ -296,7 +267,6 @@ accessors instead of reaching into private process fields.
 | OTA updates (upgrade + rollback) | Working |
 | Video pipeline (RTSP + cloud relay) | In Progress |
 | WFB-ng long-range video link | Planned |
-| ROS 2 integration (Docker, Foxglove) | Planned |
 | Suite runtime (YAML manifest execution) | Planned |
 | Script executor (Python SDK, REST) | Planned |
 | Swarm coordination (mesh, formation) | Planned |

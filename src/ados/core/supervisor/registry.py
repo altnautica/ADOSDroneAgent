@@ -104,6 +104,4 @@ SERVICE_REGISTRY: list[dict] = [
     {"name": "ados-batman", "category": "hardware", "profile_gate": "ground_station", "role_gate": "relay|receiver"},
     {"name": "ados-wfb-relay", "category": "hardware", "profile_gate": "ground_station", "role_gate": "relay"},
     {"name": "ados-wfb-receiver", "category": "hardware", "profile_gate": "ground_station", "role_gate": "receiver"},
-    # ROS 2 environment (opt-in, Docker-managed).
-    {"name": "ados-ros", "category": "ondemand"},
 ]

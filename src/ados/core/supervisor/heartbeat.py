@@ -319,15 +319,6 @@ class HeartbeatMixin:
         except Exception:
             video_restart_attempts = 0
 
-        # Foxglove bind status, parity with the in-process builder.
-        rm = getattr(self, "_ros_manager", None)
-        try:
-            foxglove_bind_failed = (
-                bool(rm.foxglove_bind_failed()) if rm is not None else False
-            )
-        except Exception:
-            foxglove_bind_failed = False
-
         return {
             "version": __version__,
             "uptimeSeconds": self.uptime_seconds,
@@ -351,7 +342,6 @@ class HeartbeatMixin:
             "memoryHistory": list(self._memory_history),
             "services": self.get_services_status(),
             "videoRestartAttempts": video_restart_attempts,
-            "foxgloveBindFailed": foxglove_bind_failed,
             "setupState": setup_state,
             "profileSource": profile_source,
             # Forward-compatible radio link block; older GCS ignore it.

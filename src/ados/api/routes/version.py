@@ -52,8 +52,6 @@ CAPABILITIES: list[str] = [
     "features.catalog",
     # /api/ground-station/* full ground-agent profile surface.
     "ground_station.profile",
-    # /api/ros/* opt-in ROS 2 Jazzy environment management.
-    "ros.environment",
     # /api/signing/* MAVLink v2 signing key enrollment.
     "signing.mavlink",
     # WebRTC SDP signaling broker rejection surfaced via cloud status.

@@ -43,9 +43,3 @@ navigation:
   rangefinder_ports:
     - {type: uart, path: /dev/ttyTHS1, baud_max: 115200}
     - {type: i2c, path: /dev/i2c-1, speed_hz: 400000}
-
-# ROS 2: 4-8 GB RAM. Orin GPU with NVDLA accelerator. Docker fits.
-# Minimal profile conservative default; 8 GB variant could run VIO.
-ros:
-  supported: true
-  max_profile: minimal

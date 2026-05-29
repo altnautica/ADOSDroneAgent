@@ -6,7 +6,7 @@ Six messages cover the typical CV / VIO injection surface:
 * OPTICAL_FLOW_RAD (106)          — angular-rate flow (PX4FLOW class)
 * VISION_POSITION_ESTIMATE (102)  — local-frame pose from CV
 * GLOBAL_VISION_POSITION_ESTIMATE (101) — global-frame pose from CV
-* ODOMETRY (331)                  — full ROS-style odom (pose + twist + covariance)
+* ODOMETRY (331)                  — full odometry (pose + twist + covariance)
 * VISION_POSITION_DELTA (11011)   — body-frame delta (ardupilotmega dialect)
 
 All functions take a sequence number from the caller. SEQ is a per

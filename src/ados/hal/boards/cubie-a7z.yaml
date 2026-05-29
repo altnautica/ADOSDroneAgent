@@ -122,9 +122,6 @@ power:
   voltage: 5.0
   input: "USB-C 5V/2A"
 
-ros:
-  supported: false
-
 # Cortex-A76 pair + 2 TOPS NPU can host VIO on the 4 GB+ SKUs. The 1 GB
 # SKU is too tight; the runtime should gate the VIO front-end on real
 # RAM. Rangefinder lands on the FC UART link (shared with the FC) or

@@ -43,8 +43,3 @@ navigation:
   rangefinder_ports:
     - {type: uart, path: /dev/ttyAMA0, baud_max: 115200}
     - {type: i2c, path: /dev/i2c-1, speed_hz: 400000}
-
-# ROS 2: 1 GB RAM is below the practical floor for a Docker ROS stack
-# and there is no NPU. Not supported on this board.
-ros:
-  supported: false

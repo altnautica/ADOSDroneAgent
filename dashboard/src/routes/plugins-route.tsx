@@ -106,7 +106,7 @@ export function PluginsRoute() {
   }
 
   // Window-level drag-drop. Lets the operator drop a .adosplug
-  // anywhere on the page (Foxglove pattern, spec section 1).
+  // anywhere on the page, not just onto the file picker.
   useEffect(() => {
     const onDragOver = (e: globalThis.DragEvent) => {
       if (e.dataTransfer?.types.includes("Files")) {

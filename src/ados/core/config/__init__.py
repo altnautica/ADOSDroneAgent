@@ -18,7 +18,7 @@ per-domain files alongside this barrel:
 * ``scripting.py`` — :class:`ScriptingConfig` and friends (suite framework retired)
 * ``system.py`` — :class:`OtaConfig`, :class:`VisionConfig`,
   :class:`LoggingConfig`, :class:`PairingConfig`, :class:`DiscoveryConfig`,
-  :class:`RosConfig`, :class:`SwarmConfig`, :class:`LoraConfig`,
+  :class:`SwarmConfig`, :class:`LoraConfig`,
   :class:`WifiDirectConfig`, :class:`UiConfig`
 * ``ground_station.py`` — ground-station-profile-only models
 * ``root.py`` — :class:`ADOSConfig` (top-level)
@@ -81,7 +81,6 @@ from .system import (
     LoraConfig,
     OtaConfig,
     PairingConfig,
-    RosConfig,
     SwarmConfig,
     UiConfig,
     VisionConfig,
@@ -133,7 +132,6 @@ __all__ = [
     "LoraConfig",
     "OtaConfig",
     "PairingConfig",
-    "RosConfig",
     "SwarmConfig",
     "UiConfig",
     "VisionConfig",

@@ -230,11 +230,6 @@ SETUP_STATE_PATH = SETUP_STATE_DIR / "state.json"
 # cached runner. Owned by the agent; readable by the GCS.
 HARDWARE_STATE_PATH = SETUP_STATE_DIR / "hardware-state.json"
 
-# ROS recordings + compose file
-ROS_DIR = ADOS_VAR_DIR / "ros"
-ROS_COMPOSE_PATH = ROS_DIR / "docker-compose.yml"
-ROS_RECORDINGS_DIR = ROS_DIR / "recordings"
-
 # Audit log
 AUDIT_LOG_PATH = ADOS_VAR_DIR / "audit.jsonl"
 

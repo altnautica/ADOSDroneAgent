@@ -132,8 +132,6 @@ pub const SERVICE_REGISTRY: &[ServiceDef] = &[
         Some("ground_station"),
         Some("receiver"),
     ),
-    // ROS 2 environment (opt-in, Docker-managed).
-    def("ados-ros", OnDemand, None, None),
 ];
 
 /// Per-service mutable runtime state held by the supervisor.

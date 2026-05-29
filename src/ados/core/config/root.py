@@ -18,7 +18,6 @@ from .system import (
     LoggingConfig,
     OtaConfig,
     PairingConfig,
-    RosConfig,
     SwarmConfig,
     UiConfig,
     VisionConfig,
@@ -42,7 +41,6 @@ class ADOSConfig(BaseModel):
     vision: VisionConfig = VisionConfig()
     swarm: SwarmConfig = SwarmConfig()
     ground_station: GroundStationConfig = GroundStationConfig()
-    ros: RosConfig = RosConfig()
     ui: UiConfig = Field(default_factory=UiConfig)
 
     model_config = {"extra": "ignore"}

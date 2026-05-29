@@ -232,7 +232,7 @@ Confirmed running Android with 4GB RAM + 64GB Flash. Target SoC for the ADOS And
 - Overkill for basic ADOS Drone Agent
 - Higher thermal output in enclosed drone housing
 
-**Recommended Use:** High-end companion computer for customers who need multi-camera, AI inference, and full ROS 2. Not the initial ADOS Drone Agent target. Same baseboard as RK3566 (CM3 connector compatible with CM4).
+**Recommended Use:** High-end companion computer for customers who need multi-camera, AI inference, and heavy on-board compute. Not the initial ADOS Drone Agent target. Same baseboard as RK3566 (CM3 connector compatible with CM4).
 
 ---
 

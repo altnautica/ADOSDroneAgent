@@ -145,8 +145,6 @@ suites:
   manifest_dir: "/etc/ados/suites"
   # Active suite (empty for none)
   active: ""
-  # ROS2 workspace path
-  ros2_workspace: "/opt/ados/ros2_ws"
 
 # =============================================================================
 # Scripting

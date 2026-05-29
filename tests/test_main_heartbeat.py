@@ -76,26 +76,6 @@ def test_heartbeat_payload_mavlink_ws_url_prev_absent_when_unset() -> None:
     assert "mavlinkWsUrlPrev" not in payload
 
 
-def test_heartbeat_payload_foxglove_bind_failed_default_false() -> None:
-    """No ROS manager attached → field emits False, never absent."""
-    app = _fresh_app()
-    payload = app._build_heartbeat_payload()
-    assert payload["foxgloveBindFailed"] is False
-
-
-def test_heartbeat_payload_foxglove_bind_failed_reflected() -> None:
-    """A ROS manager that reports bind failure shows up on the wire."""
-    app = _fresh_app()
-
-    class FakeRosManager:
-        def foxglove_bind_failed(self) -> bool:
-            return True
-
-    app._ros_manager = FakeRosManager()
-    payload = app._build_heartbeat_payload()
-    assert payload["foxgloveBindFailed"] is True
-
-
 class _FakeWfb:
     def __init__(self, status: dict) -> None:
         self._status = status

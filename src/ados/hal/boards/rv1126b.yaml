@@ -90,10 +90,6 @@ power:
   max_watts: 3.5
   voltage: 5.0
 
-# ROS 2: 1 GB RAM, armv7l. Too tight for Jazzy Docker image.
-ros:
-  supported: false
-
 # Quad-A7 + 2 TOPS NPU + 1 GB RAM can host a lightweight VIO front-end
 # alongside optical flow. Two UART and two I2C buses give flexible
 # rangefinder placement.

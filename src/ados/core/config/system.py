@@ -1,10 +1,10 @@
-"""System-level service configuration (OTA, vision, logging, pairing, discovery, ROS, swarm, UI)."""
+"""System-level service configuration (OTA, vision, logging, pairing, discovery, swarm, UI)."""
 
 from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel
 
 from ados.core.paths import FLIGHT_LOGS_DIR, PAIRING_JSON
 
@@ -55,36 +55,6 @@ class PairingConfig(BaseModel):
 class DiscoveryConfig(BaseModel):
     mdns_enabled: bool = True
     service_type: str = "_ados._tcp.local."
-
-
-class RosConfig(BaseModel):
-    enabled: bool = False
-    domain_id: int = 0
-    middleware: str = "zenoh"           # zenoh | cyclonedds
-    profile: str = "minimal"           # minimal | vio | mapping | custom
-    image_name: str = "ados-ros"
-    image_tag: str = "jazzy"
-    foxglove_port: int = 8766          # 8765 taken by MAVLink WS proxy
-    workspace_path: str = "/opt/ados/ros-ws"
-    offline_image_path: str = "/opt/ados/ros-offline/jazzy-base.tar.zst"
-    memory_limit_mb: int = 4096
-    cpu_limit: float = 2.0
-
-    @field_validator("middleware")
-    @classmethod
-    def _validate_middleware(cls, value: str) -> str:
-        allowed = {"zenoh", "cyclonedds"}
-        if value not in allowed:
-            raise ValueError(f"ros.middleware must be one of {sorted(allowed)}, got '{value}'")
-        return value
-
-    @field_validator("profile")
-    @classmethod
-    def _validate_profile(cls, value: str) -> str:
-        allowed = {"minimal", "vio", "mapping", "custom"}
-        if value not in allowed:
-            raise ValueError(f"ros.profile must be one of {sorted(allowed)}, got '{value}'")
-        return value
 
 
 class LoraConfig(BaseModel):

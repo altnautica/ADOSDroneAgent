@@ -39,7 +39,7 @@ AmbientCapabilities=CAP_SYS_ADMIN CAP_NET_ADMIN
 # ~10M each). Anything under ~100M caused the bind to silently OOM-thrash
 # inside the cgroup — wfb-server stuck in mem_cgroup swap reclaim, never
 # responding to the VERSION/BIND handshake. 256M leaves comfortable
-# headroom and matches the sibling video / mediamtx-gs / ROS scale.
+# headroom and matches the sibling video / mediamtx-gs scale.
 MemoryMax=256M
 # CPU cap removed — the bind protocol is bursty (a few seconds of work
 # every 60 s when unpaired, near-zero post-pair), so capping was

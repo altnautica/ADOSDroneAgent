@@ -44,9 +44,3 @@ navigation:
     - {type: uart, path: /dev/ttyS1, baud_max: 115200}
     - {type: i2c, path: /dev/i2c-0, speed_hz: 400000}
     - {type: i2c, path: /dev/i2c-1, speed_hz: 400000}
-
-# ROS 2: RK3588S with 4-16 GB variants. Docker fits. Minimal profile conservative
-# default for 4 GB; 8+ GB boards could run VIO but RAM is not guaranteed at HAL level.
-ros:
-  supported: true
-  max_profile: minimal

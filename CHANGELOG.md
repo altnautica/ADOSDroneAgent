@@ -4,6 +4,18 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.49.0] - 2026-05-29
+
+### Removed
+
+- **ROS 2 integration.** The opt-in ROS 2 environment has been removed: the
+  Docker container, the MAVLink bridge, the workspace and recording managers,
+  the `/api/ros/*` routes, the `ros.environment` capability flag, the `ros`
+  config section, the `ados-ros` service, the dashboard ROS page, and the
+  per-board ROS capability flags are all gone. The agent no longer manages a
+  robotics environment; integrations that need one can be built on the plugin
+  system instead.
+
 ## [0.44.0] - 2026-05-27
 
 ### Fixed

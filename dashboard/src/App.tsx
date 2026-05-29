@@ -23,7 +23,6 @@ import { LogsRoute } from "@/routes/logs-route";
 import { OtaRoute } from "@/routes/ota-route";
 import { PairingRoute } from "@/routes/pairing-route";
 import { PeripheralsRoute } from "@/routes/peripherals-route";
-import { RosRoute } from "@/routes/ros-route";
 import { AdvancedSettings } from "@/routes/settings/advanced-settings";
 import { CloudSettings } from "@/routes/settings/cloud-settings";
 import { DisplaySettings } from "@/routes/settings/display-settings";
@@ -105,14 +104,6 @@ export function App() {
                 <Route path="/peripherals" element={<PeripheralsRoute />} />
                 <Route path="/ota" element={<OtaRoute />} />
                 <Route path="/logs" element={<LogsRoute />} />
-                <Route
-                  path="/ros"
-                  element={
-                    <ProfileGate allow={["drone"]}>
-                      <RosRoute />
-                    </ProfileGate>
-                  }
-                />
                 <Route path="/diagnostics" element={<DiagnosticsRoute />} />
                 <Route
                   path="/telemetry"

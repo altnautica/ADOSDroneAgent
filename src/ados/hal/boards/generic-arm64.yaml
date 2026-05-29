@@ -31,7 +31,3 @@ navigation:
   rangefinder_ports:
     - {type: uart, path: /dev/ttyUSB0, baud_max: 115200}
     - {type: i2c, path: /dev/i2c-1, speed_hz: 400000}
-
-# ROS 2: unknown hardware. Cannot guarantee Docker or sufficient RAM.
-ros:
-  supported: false

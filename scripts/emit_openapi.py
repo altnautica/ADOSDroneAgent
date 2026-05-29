@@ -41,7 +41,6 @@ from ados.api.routes import (  # noqa: E402
     peripherals,
     peripherals_v1,
     plugins,
-    ros,
     scripts,
     services,
     signing,
@@ -84,7 +83,6 @@ def build_spec_app() -> FastAPI:
     app.include_router(fleet.router, prefix="/api")
     app.include_router(vision_models.router, prefix="/api")
     app.include_router(ground_station.router, prefix="/api")
-    app.include_router(ros.router, prefix="/api")
     app.include_router(signing.router, prefix="/api")
     app.include_router(plugins.router, prefix="/api")
 
