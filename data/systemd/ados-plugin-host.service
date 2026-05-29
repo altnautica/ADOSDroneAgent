@@ -24,6 +24,12 @@ EnvironmentFile=-/etc/ados/env
 
 NoNewPrivileges=yes
 ProtectSystem=strict
+# The shipping daemon only discovers plugins + serves sockets (read-only), so
+# the current grants suffice and plugin lifecycle writes stay on the privileged
+# install path. When install/enable/remove move into this daemon, it will write
+# per-plugin unit files + the shared slice under /etc/systemd/system, append
+# logs under /var/log/ados/plugins, and unpack under /var/ados/plugins — add
+# those to ReadWritePaths at that cutover.
 ReadWritePaths=/var/ados /run/ados /etc/ados
 LimitNOFILE=8192
 

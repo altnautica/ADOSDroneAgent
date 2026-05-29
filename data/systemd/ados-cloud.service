@@ -26,18 +26,18 @@ ProtectSystem=strict
 # config + drone.key during the bind protocol. Without PrivateTmp,
 # ProtectSystem=strict makes /tmp read-only and mktemp fails.
 PrivateTmp=yes
-# /etc is in the writable set because the WFB bind orchestrator hosted
-# in this service spawns wfb_keygen + the upstream bind-protocol scripts
-# which write /etc/drone.key, /etc/gs.key, /etc/wifibroadcast.cfg, and
-# /etc/bind.yaml. Loosens the sandbox during the (rare) bind window.
+# /etc is writable because a remote plugin-install command unpacks the
+# plugin and writes its per-plugin unit + the shared slice under
+# /etc/systemd/system. The radio bind keygen no longer runs here (it moved
+# to the supervisor); runtime config writes land under /etc/ados.
 ReadWritePaths=/var/ados /var/lib/ados /run/ados /etc/ados /etc
 
-# The bind orchestrator calls `systemctl stop ados-wfb` /
-# `systemctl start wifibroadcast@gs_bind` to flip wfb-ng profiles. Those
-# hops require CAP_SYS_ADMIN via PID 1; bumping the bounding set is
-# the systemd-friendly way to permit it without dropping ProtectSystem.
-CapabilityBoundingSet=CAP_SYS_ADMIN CAP_NET_ADMIN
-AmbientCapabilities=CAP_SYS_ADMIN CAP_NET_ADMIN
+# No elevated capabilities needed: the cloud relay does HTTP + MQTT
+# heartbeat and, on a remote-install command, asks PID 1 to reload/enable
+# units over the system bus (which needs no caller capability). The bind
+# orchestrator that previously justified CAP_SYS_ADMIN/CAP_NET_ADMIN moved
+# to the supervisor, so the bounding set is emptied.
+CapabilityBoundingSet=
 
 # Memory cap sized for the bind orchestrator's worst case: the cloud
 # service itself (~30M Python runtime + plugins) plus the bind window's

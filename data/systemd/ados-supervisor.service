@@ -34,7 +34,14 @@ NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes
-ReadWritePaths=/var/ados /var/lib/ados /etc/ados /run/ados
+# /etc is writable so the radio bind handshake can write its key material:
+# wfb_keygen produces /etc/gs.key + /etc/drone.key, and the bind-protocol
+# helper scripts drop /etc/drone.key, /etc/wifibroadcast.cfg, and
+# /etc/bind.yaml into place. Without it ProtectSystem=strict returns EROFS
+# and the bind fails on keygen before any radio frame flows. PrivateTmp=yes
+# (above) already gives the helper scripts a writable /tmp for their mktemp
+# staging dir, so /tmp does not need to be listed here.
+ReadWritePaths=/var/ados /var/lib/ados /etc/ados /run/ados /etc
 
 # Logging
 StandardOutput=journal

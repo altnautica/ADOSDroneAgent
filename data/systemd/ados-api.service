@@ -15,18 +15,13 @@ EnvironmentFile=-/etc/ados/env
 
 NoNewPrivileges=yes
 ProtectSystem=strict
-# /etc is writable to support runtime re-pair via the upstream wfb-ng
-# bind protocol: wfb_keygen writes /etc/gs.key and /etc/drone.key on the
-# GS, and wfb_bind_server.sh copies /etc/drone.key, /etc/wifibroadcast.cfg,
-# and /etc/bind.yaml into place on the drone during the bind handshake.
-# Also covers plugin unit drops at /etc/systemd/system (supervisor writes
-# ados-plugin-<id>.service files during install and removes them during
-# uninstall) and runtime config at /etc/ados. /var/lib/ados holds plugin
-# state and the plugin-data unpack target. /tmp is writable so the
-# upstream wfb_bind_client.sh + wfb_bind_server.sh scripts (invoked via
-# socat under this service's sandbox) can `mktemp -d` their staging dir
-# for the keypair tarball — without it the GS side fails the bind with
-# 'Read-only file system' before the BIND command even reaches the drone.
+# Plugin lifecycle runs inside this service: POST /api/plugins/install drives
+# the supervisor, which writes per-plugin unit files and the shared slice
+# under /etc/systemd/system and removes them on uninstall, so /etc must be
+# writable. Runtime config writes (config.yaml, peripherals, display.conf)
+# land under /etc/ados. /var/lib/ados holds plugin state. /tmp is writable so
+# the plugin upload is staged via a temp file before the supervisor unpacks
+# it. The radio bind keygen no longer runs here (it moved to the supervisor).
 ReadWritePaths=/var/ados /run/ados /etc /tmp /var/lib/ados
 
 MemoryMax=128M
