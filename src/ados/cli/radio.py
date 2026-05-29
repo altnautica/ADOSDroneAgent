@@ -101,7 +101,20 @@ def _format_int_or_dash(value: Any) -> str:
     return str(value)
 
 
-def _print_status_table(data: dict[str, Any]) -> None:
+_BIND_TERMINAL_STATES = {"idle", "paired", "failed", "aborted"}
+
+
+def _bind_session_state(bind: dict[str, Any] | None) -> str | None:
+    """Pull the bind-session state from the /api/wfb/pair/local-bind snapshot,
+    tolerating either a flat session dict or one nested under 'session'."""
+    if not isinstance(bind, dict):
+        return None
+    sess = bind.get("session") if isinstance(bind.get("session"), dict) else bind
+    state = sess.get("state")
+    return state if isinstance(state, str) else None
+
+
+def _print_status_table(data: dict[str, Any], bind: dict[str, Any] | None = None) -> None:
     """Pretty-print /api/wfb status to the terminal."""
     state = str(data.get("state") or "unknown")
     iface = data.get("interface") or "—"
@@ -126,8 +139,21 @@ def _print_status_table(data: dict[str, Any]) -> None:
     # is stranded and we must NOT be transmitting on a management WiFi.
     selected_chipset = data.get("adapter_chipset")
     injection_ok = bool(data.get("adapter_injection_ok", False))
-    injection_value = "yes" if injection_ok else "NO — no injection radio"
-    injection_colour = "green" if injection_ok else "red"
+    # A bind session that is mid-flight (any non-terminal state) tears the
+    # radio down and rebuilds it, so a transient 'no injection radio' verdict
+    # is expected and not an error — show the bind phase instead of the
+    # alarming red line.
+    bind_state = _bind_session_state(bind)
+    bind_active = bool(bind_state) and bind_state not in _BIND_TERMINAL_STATES
+    if injection_ok:
+        injection_value = "yes"
+        injection_colour = "green"
+    elif bind_active:
+        injection_value = f"binding ({bind_state}) — connecting"
+        injection_colour = "yellow"
+    else:
+        injection_value = "NO — no injection radio"
+        injection_colour = "red"
 
     click.echo(click.style(f"WFB-ng radio  state={state}", bold=True))
     click.echo("")
@@ -183,11 +209,23 @@ def radio_group() -> None:
 @click.option("--json", "as_json", is_flag=True, help="Machine-readable output.")
 def radio_status(as_json: bool) -> None:
     _, data = _request("GET", "/api/wfb")
+    # Also pull the bind-session snapshot so a transient 'no injection radio'
+    # verdict during an active bind is not rendered as a red error. Best-effort:
+    # any failure leaves bind empty and the data-plane view is shown as before.
+    bind: dict[str, Any] = {}
+    try:
+        _, bind = _request("GET", "/api/wfb/pair/local-bind")
+    except Exception:
+        bind = {}
+    if not isinstance(bind, dict):
+        bind = {}
     if as_json:
-        click.echo(json.dumps(data, indent=2, sort_keys=True))
+        click.echo(json.dumps({"radio": data, "bind": bind}, indent=2, sort_keys=True))
     else:
-        _print_status_table(data)
-    if data.get("state") == "absent" or data.get("state") == "disabled":
+        _print_status_table(data, bind)
+    bind_state = _bind_session_state(bind)
+    bind_active = bool(bind_state) and bind_state not in _BIND_TERMINAL_STATES
+    if (data.get("state") in ("absent", "disabled")) and not bind_active:
         raise click.exceptions.Exit(code=1)
 
 

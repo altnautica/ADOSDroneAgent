@@ -174,7 +174,23 @@ def _tui_binary() -> str | None:
     return None
 
 
+def _print_version(ctx: click.Context, _param: click.Parameter, value: bool) -> None:
+    if not value or ctx.resilient_parsing:
+        return
+    from ados import __version__
+    click.echo(__version__)
+    ctx.exit()
+
+
 @click.group(invoke_without_command=True)
+@click.option(
+    "--version",
+    is_flag=True,
+    is_eager=True,
+    expose_value=False,
+    callback=_print_version,
+    help="Show the agent version and exit.",
+)
 @click.pass_context
 def cli(ctx: click.Context) -> None:
     """ADOS Drone Agent."""
@@ -201,6 +217,13 @@ def status(as_json: bool) -> None:
         click.echo(json.dumps(data, indent=2))
         return
     _plain_status(data)
+
+
+@cli.command()
+def version() -> None:
+    """Print the installed agent version (works when the service is down)."""
+    from ados import __version__
+    click.echo(__version__)
 
 
 @cli.command()
