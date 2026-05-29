@@ -203,6 +203,9 @@ install_global_symlinks() {
     # ExecStart shim runs it when present AND the operator opted in via the
     # flag, else the packaged Python service.
     install_video_binary
+    # Fetch the prebuilt vision-engine binary. The ados-vision unit's ExecStart
+    # shim runs it when present; the service stays inert until then.
+    install_vision_binary
     # Fetch the prebuilt plugin-host binary. The ados-plugin-host unit is a new
     # opt-in service shipped disabled; its ExecStart shim runs the binary only
     # when present AND the operator enabled the flag, else /bin/true.

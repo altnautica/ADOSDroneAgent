@@ -1,0 +1,31 @@
+[Unit]
+Description=ADOS Vision Engine
+After=ados-mavlink.service
+PartOf=ados-supervisor.service
+StartLimitInterval=60s
+StartLimitBurst=5
+
+[Service]
+Type=simple
+# The native vision engine is the only implementation; there is no Python
+# fallback. exec the binary when present (failing loudly if it is absent rather
+# than running a stale path); the installer provisions it best-effort. `exec`
+# replaces the shell image so the chosen binary owns the cgroup + restart track.
+ExecStart=/bin/sh -c 'if [ -x /opt/ados/bin/ados-vision ]; then exec /opt/ados/bin/ados-vision; else echo "ados-vision binary missing; reinstall to fetch it" >&2; exit 1; fi'
+Restart=on-failure
+RestartSec=3
+Environment=ADOS_CONFIG=/etc/ados/config.yaml
+EnvironmentFile=-/etc/ados/env
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/var/ados /run/ados /etc/ados /dev/shm
+
+MemoryMax=256M
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ados-vision
+
+[Install]
+WantedBy=ados-supervisor.service
