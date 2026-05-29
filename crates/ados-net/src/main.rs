@@ -26,6 +26,7 @@ use ados_net::managers::{
     EthernetManager, HostapdManager, ModemManager, UsbGadgetManager, WifiClientManager,
 };
 use ados_net::router::failover;
+use ados_net::sysfs::detect_ethernet_iface;
 use ados_net::{run_throttle_consumer, ShareUplinkFirewall, UplinkManager, UplinkRouter};
 
 fn init_logging() {
@@ -64,37 +65,6 @@ fn read_device_id() -> String {
     std::fs::read_to_string(ados_net::paths::DEVICE_ID_PATH)
         .map(|s| s.trim().to_string())
         .unwrap_or_default()
-}
-
-/// Resolve the physical ethernet iface name. Predictable names vary across
-/// BSPs (`eth0`, `end1`, `enp*`, `enx*`), so scan `/sys/class/net` for the
-/// first non-virtual wired device that exposes a carrier file; fall back to
-/// `eth0` when nothing matches (the manager then reads a missing carrier as
-/// "down", which is correct on a board with no NIC).
-fn detect_ethernet_iface() -> String {
-    let read = match std::fs::read_dir("/sys/class/net") {
-        Ok(rd) => rd,
-        Err(_) => return "eth0".to_string(),
-    };
-    let mut candidates: Vec<String> = Vec::new();
-    for entry in read.flatten() {
-        let name = entry.file_name().to_string_lossy().into_owned();
-        let wired = name.starts_with("eth") || name.starts_with("en");
-        if !wired {
-            continue;
-        }
-        // Skip virtual ifaces (no device symlink under the iface dir).
-        let dev_link = entry.path().join("device");
-        let carrier = entry.path().join("carrier");
-        if dev_link.exists() && carrier.exists() {
-            candidates.push(name);
-        }
-    }
-    candidates.sort();
-    candidates
-        .into_iter()
-        .next()
-        .unwrap_or_else(|| "eth0".to_string())
 }
 
 /// Wire the real ethernet + Wi-Fi-client + cellular modem managers. The modem

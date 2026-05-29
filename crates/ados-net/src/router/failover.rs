@@ -13,6 +13,7 @@ use serde_json::Value;
 use tracing::{info, warn};
 
 use crate::sidecar;
+use crate::sysfs::detect_ethernet_iface;
 
 /// Default priority chain. The LAN-side AP SSID served to phones and laptops
 /// is not an uplink, so it is absent here.
@@ -22,15 +23,29 @@ pub const DEFAULT_PRIORITY: [&str; 4] = ["eth0", "wlan0_client", "wwan0", "usb0"
 /// kept large to survive manual `ip route` probes. Unknown ifaces use 500.
 pub const PRIORITY_METRIC_DEFAULT: u32 = 500;
 
-/// Resolve the route metric for `iface`, mirroring `PRIORITY_METRIC.get(iface, 500)`.
-pub fn priority_metric(iface: &str) -> u32 {
+/// Resolve the route metric for `iface` given the resolved wired iface name.
+///
+/// The wired uplink is the top-priority route, but its kernel name varies by
+/// BSP (`eth0`, `end1`, `enp*`). Matching the resolved name (not a hard-coded
+/// `eth0`) makes the wired link metric 100 wherever it lands. Pure so the
+/// mapping is unit-testable without touching sysfs.
+pub fn priority_metric_for(iface: &str, wired_iface: &str) -> u32 {
+    if iface == wired_iface {
+        return 100;
+    }
     match iface {
-        "eth0" => 100,
         "wlan0_client" => 200,
         "wwan0" => 300,
         "usb0" => 400,
         _ => PRIORITY_METRIC_DEFAULT,
     }
+}
+
+/// Resolve the route metric for `iface`, detecting the wired iface from sysfs.
+/// Mirrors `PRIORITY_METRIC.get(iface, 500)` with the wired slot resolved to
+/// whatever the board calls its NIC.
+pub fn priority_metric(iface: &str) -> u32 {
+    priority_metric_for(iface, &detect_ethernet_iface())
 }
 
 /// Three consecutive fails flip us down to the next viable uplink.
@@ -223,11 +238,25 @@ mod tests {
 
     #[test]
     fn priority_metric_table_and_default() {
-        assert_eq!(priority_metric("eth0"), 100);
-        assert_eq!(priority_metric("wlan0_client"), 200);
-        assert_eq!(priority_metric("wwan0"), 300);
-        assert_eq!(priority_metric("usb0"), 400);
-        assert_eq!(priority_metric("anything-else"), 500);
+        // The classic eth0 board: eth0 is the wired iface, metric 100.
+        assert_eq!(priority_metric_for("eth0", "eth0"), 100);
+        assert_eq!(priority_metric_for("wlan0_client", "eth0"), 200);
+        assert_eq!(priority_metric_for("wwan0", "eth0"), 300);
+        assert_eq!(priority_metric_for("usb0", "eth0"), 400);
+        assert_eq!(priority_metric_for("anything-else", "eth0"), 500);
+    }
+
+    #[test]
+    fn detected_wired_iface_gets_top_metric() {
+        // A board whose NIC is `end1`: the detected wired iface, not a literal
+        // `eth0`, must be the metric-100 route. The plain `eth0` string is then
+        // just another unknown iface (metric 500).
+        assert_eq!(priority_metric_for("end1", "end1"), 100);
+        assert_eq!(priority_metric_for("eth0", "end1"), 500);
+        // The other slots are unchanged.
+        assert_eq!(priority_metric_for("wlan0_client", "end1"), 200);
+        assert_eq!(priority_metric_for("wwan0", "end1"), 300);
+        assert_eq!(priority_metric_for("usb0", "end1"), 400);
     }
 
     #[test]
