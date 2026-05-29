@@ -30,6 +30,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "ados-plugin-host"
+version = "0.1.0"
+dependencies = [
+ "ados-protocol",
+ "anyhow",
+ "nix 0.29.0",
+ "rmp-serde",
+ "rmpv",
+ "serde",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "ados-protocol"
 version = "0.1.0"
 dependencies = [
