@@ -22,9 +22,9 @@ NEW_AGENT_CAPS = (
 )
 
 
-def test_agent_capability_count_is_32() -> None:
-    """The baseline catalog shipped 29 entries; schema v2 adds three."""
-    assert len(AGENT_CAPABILITIES) == 32
+def test_agent_capability_count_is_35() -> None:
+    """29 baseline entries + three schema-v2 caps + three vision caps = 35."""
+    assert len(AGENT_CAPABILITIES) == 35
 
 
 def test_new_agent_capabilities_present() -> None:

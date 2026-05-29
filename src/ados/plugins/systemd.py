@@ -110,14 +110,16 @@ def render_unit(manifest: PluginManifest, install_dir: Path) -> str:
     log_path = PLUGIN_LOG_DIR / f"{_sanitize_unit_name(manifest.id)}.log"
     # The ExecStart line is the only part that differs by agent.runtime.
     if manifest.agent.runtime == "rust":
-        # Rust: exec the plugin's own binary directly. The capability token and
-        # agent id are delivered via the unit environment (ADOS_PLUGIN_TOKEN /
-        # ADOS_PLUGIN_AGENT_ID) at cutover, never on the command line (a
+        # Rust: exec the plugin's own binary directly with the plugin id as the
+        # leading positional argument (non-secret; it is already in the install
+        # path, and the SDK runner reads it positionally). The capability token
+        # and agent id are delivered via the unit environment (ADOS_PLUGIN_TOKEN
+        # / ADOS_PLUGIN_AGENT_ID) at cutover, never on the command line (a
         # /proc/<pid>/cmdline is world-readable).
         socket_path = PLUGIN_RUN_DIR / f"{manifest.id}.sock"
         exec_start = (
             f"{install_dir}/{manifest.id}/{manifest.agent.entrypoint} "
-            f"--socket {socket_path}"
+            f"{manifest.id} --socket {socket_path}"
         )
     else:
         # Python (default): the shared runner takes the plugin id and resolves

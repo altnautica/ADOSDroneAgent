@@ -120,6 +120,7 @@ def test_render_unit_rust_runtime_execs_the_plugin_binary() -> None:
     assert (
         "ExecStart=/var/ados/plugins/com.example.rustplug/"
         "agent/bin/com.example.rustplug "
+        "com.example.rustplug "
         "--socket /run/ados/plugins/com.example.rustplug.sock" in unit
     )
     # The token is never on the ExecStart line (it comes from the unit env).
