@@ -205,7 +205,7 @@ mod tests {
     #[test]
     fn registry_has_expected_shape() {
         let specs = build_specs();
-        assert_eq!(specs.len(), 30, "service count drifted from the catalog");
+        assert_eq!(specs.len(), 29, "service count drifted from the catalog");
         // Core tier members.
         let core: Vec<_> = specs
             .iter()

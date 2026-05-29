@@ -306,13 +306,11 @@ where
                         pending_y = Some(ev.value());
                     }
                 }
-                InputEventKind::Synchronization(_) => {
-                    if fsm.pen_down() {
-                        if let (Some(x), Some(y)) = (pending_x, pending_y) {
-                            let (x_lcd, y_lcd) = affine.apply(x, y);
-                            if let Some(m) = fsm.record_move(x_lcd, y_lcd, now_ms) {
-                                on_step(StrokeStep::Move(m));
-                            }
+                InputEventKind::Synchronization(_) if fsm.pen_down() => {
+                    if let (Some(x), Some(y)) = (pending_x, pending_y) {
+                        let (x_lcd, y_lcd) = affine.apply(x, y);
+                        if let Some(m) = fsm.record_move(x_lcd, y_lcd, now_ms) {
+                            on_step(StrokeStep::Move(m));
                         }
                     }
                 }
