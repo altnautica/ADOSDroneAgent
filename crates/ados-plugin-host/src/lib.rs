@@ -26,13 +26,39 @@
 //! - [`host`] — the [`host::HostServices`] facade trait and [`host::NoopHost`].
 //! - [`server`] — the per-plugin socket server: handshake, dispatch loop, and
 //!   event push path.
+//!
+//! Lifecycle modules (install / enable / disable / remove):
+//! - [`manifest`] — the `manifest.yaml` model the controller reads.
+//! - [`archive`] — the `.adosplug` reader and the canonical payload hash.
+//! - [`signing`] — Ed25519 verify, trusted-keys store, revocation list, and the
+//!   hardcoded first-party allowlist.
+//! - [`state`] — the on-disk install state, atomic write + advisory lock, and
+//!   the permission-against-manifest filter.
+//! - [`systemd`] — the per-plugin unit + slice string builders.
+//! - [`supervisor`] — the lifecycle controller tying the above together.
+//! - [`errors`] — the lifecycle error hierarchy.
 
+pub mod archive;
 pub mod dispatch;
+pub mod errors;
 pub mod handlers;
 pub mod host;
+pub mod manifest;
 pub mod server;
+pub mod signing;
+pub mod state;
+pub mod supervisor;
+pub mod systemd;
 
 pub use dispatch::{gate, Gate, Method};
+pub use errors::{
+    ArchiveError, LifecycleError, ManifestError, SignatureError, SignatureErrorKind,
+    SupervisorError,
+};
 pub use handlers::{Event, EventBus};
 pub use host::{HostResult, HostServices, NoopHost};
+pub use manifest::PluginManifest;
 pub use server::{PluginIpcServer, ServerError, DEFAULT_SOCKET_DIR};
+pub use signing::{is_first_party_signer, FIRST_PARTY_SIGNERS};
+pub use state::{PluginInstall, PluginSource, PluginStatus};
+pub use supervisor::{semver_in_range, InstallResult, Paths, PluginSupervisor, SystemctlRunner};

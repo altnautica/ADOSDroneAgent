@@ -13,15 +13,27 @@ description = "Plugin RPC host: serves a per-plugin Unix socket, verifies the ca
 ados-protocol = { path = "../ados-protocol" }
 tokio = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
 rmp-serde = { workspace = true }
 rmpv = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 anyhow = { workspace = true }
+# Lifecycle additions: archive parse, the canonical payload hash, Ed25519
+# signature verify, and the YAML manifest model. These power the install/
+# enable/disable/remove controller and the .adosplug reader; the crate stays
+# lib-only and never spawns a process from a test.
+sha2 = { workspace = true }
+hex = { workspace = true }
+base64 = { workspace = true }
+ed25519-dalek = { workspace = true }
+zip = { workspace = true }
+serde_norway = { workspace = true }
 
-# Linux-only edge: setting the socket file mode to 0o660 after bind. Confined to
-# a target section so the pure-logic core still builds and tests on a non-Linux
-# dev host (where the mode set is a no-op).
+# Linux-only edge: setting the socket file mode to 0o660 after bind, and the
+# advisory file lock around the state read-modify-write. Confined to a target
+# section so the pure-logic core still builds and tests on a non-Linux dev
+# host (where the mode set and the lock are no-ops).
 [target.'cfg(target_os = "linux")'.dependencies]
 nix = { workspace = true }
 
