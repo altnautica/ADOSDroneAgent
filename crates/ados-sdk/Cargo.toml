@@ -1,0 +1,35 @@
+[package]
+name = "ados-sdk"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Plugin author SDK for the ADOS Drone Agent: an async IPC client, the plugin-facing context facade, the hardware driver traits, and the lifecycle runner. A Rust plugin built on this SDK speaks the same length-prefixed msgpack wire and capability-token handshake as the Python plugin host."
+
+[dependencies]
+# The wire (frame + envelope + capability token) lives in ados-protocol and is
+# byte-parity tested against the Python supervisor. The SDK client speaks it
+# unchanged; it never re-implements the framing or the token. The capability
+# catalog is re-exported from here so plugin authors reference one source.
+ados-protocol = { path = "../ados-protocol" }
+tokio = { workspace = true }
+rmpv = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+# Async trait methods on the driver and plugin-lifecycle traits, so a driver
+# plugin can `impl CameraDriver` with `async fn` bodies and the trait stays
+# object-safe behind a `Box<dyn ...>`.
+async-trait = { workspace = true }
+# `Stream` for the frame/fix/telemetry iterators that mirror the Python
+# `AsyncIterator` return of the driver base classes. futures-core is the
+# minimal trait-only crate; the SDK does not pull the full `futures` stack.
+futures-core = { workspace = true }
+
+[dev-dependencies]
+# The round-trip test stands up a real ados-plugin-host server and drives it
+# with this SDK's client over a Unix socket, proving Rust-plugin -> Rust-host
+# interop on the same Contract C the Python host serves.
+ados-plugin-host = { path = "../ados-plugin-host" }
+tempfile = "3"
+futures-util = "0.3"

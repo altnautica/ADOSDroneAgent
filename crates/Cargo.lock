@@ -97,6 +97,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "ados-sdk"
+version = "0.1.0"
+dependencies = [
+ "ados-plugin-host",
+ "ados-protocol",
+ "async-trait",
+ "futures-core",
+ "futures-util",
+ "rmpv",
+ "serde",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "ados-supervisor"
 version = "0.1.0"
 dependencies = [
@@ -172,6 +189,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c3d036a3c4ab069c7b410a2ce876bd74808d2d0888a82667669f8e783a898bf1"
 dependencies = [
  "derive_arbitrary",
+]
+
+[[package]]
+name = "async-trait"
+version = "0.1.89"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9035ad2d096bed7955a320ee7e2230574d28fd3c3a0f186cbea1ff3c7eed5dbb"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
 ]
 
 [[package]]

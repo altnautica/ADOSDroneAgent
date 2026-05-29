@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["ados-protocol", "ados-capabilities-codegen", "ados-tui", "ados-supervisor", "ados-mavlink-router", "ados-radio", "ados-video", "ados-plugin-host"]
+members = ["ados-protocol", "ados-capabilities-codegen", "ados-tui", "ados-supervisor", "ados-mavlink-router", "ados-radio", "ados-video", "ados-plugin-host", "ados-sdk"]
 
 [workspace.package]
 version = "0.1.0"
@@ -44,6 +44,12 @@ anyhow = "1"
 serde_norway = "0.9"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# Async methods on the plugin SDK's driver and lifecycle traits; keeps the
+# traits object-safe behind a `Box<dyn ...>`.
+async-trait = "0.1"
+# Trait-only `Stream` for the SDK driver iterators (mirrors the Python
+# `AsyncIterator` returns). The minimal crate, no full futures stack.
+futures-core = "0.3"
 # Linux-only deps (systemd notify + journald). Declared here; the consuming
 # crate pulls them in only under `[target.'cfg(target_os = "linux")'.dependencies]`
 # so the pure-logic core still builds and tests on a non-Linux host.
