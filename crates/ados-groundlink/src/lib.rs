@@ -7,9 +7,13 @@
 //! UDP fan-out, the Contract-E sidecar files, and (in a later chunk) the
 //! channel-acquisition receive loop and the mesh role manager.
 
+pub mod acquire;
 pub mod fanout;
 pub mod paths;
 pub mod sidecars;
+pub mod watchdog;
 
+pub use acquire::{AcquireState, ChannelAcquirer};
 pub use fanout::{run_default_fanout, run_fanout};
 pub use sidecars::write_json_atomic;
+pub use watchdog::ValidPacketWatchdog;
