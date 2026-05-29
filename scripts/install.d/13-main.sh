@@ -364,10 +364,10 @@ main_install_flow() {
         # systemctl by hand.
         if [ "${ADOS_PROFILE}" = "ground_station" ]; then
             enable_ground_station_units
-            # Reconcile native-consolidator masks against the cutover flags.
-            # Ground-station only (cross-profile ados-wifi-client never masked
-            # on drone).
-            reconcile_rust_cutover_masks
+            # Reconcile the units a native consolidator daemon subsumes against
+            # the cutover flags. Ground-station only (cross-profile
+            # ados-wifi-client is never disabled on a drone rig).
+            reconcile_rust_cutover_units
         fi
 
         # Orphan AP IP cleanup: a previously-active setup-webapp captive

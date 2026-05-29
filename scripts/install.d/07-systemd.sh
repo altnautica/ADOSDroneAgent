@@ -150,7 +150,7 @@ ENVEOF
         # Reconcile the packaged units a native consolidator daemon subsumes
         # against the cutover flags. Ground-station only, so it never touches a
         # drone rig (notably ados-wifi-client, which is cross-profile).
-        reconcile_rust_cutover_masks
+        reconcile_rust_cutover_units
     fi
 
     # Drop the SSH login banner so operators see the setup URL the
@@ -494,42 +494,47 @@ enable_ground_station_units() {
 # When the ados-net flag is set, the native uplink daemon owns the AP, the
 # USB-gadget tether, and the ethernet/wifi/modem managers in one process, so the
 # packaged units for those would fight it for wlan0 / iptables / configfs /
-# /dev/ttyUSB*. Mask them while the flag is set; unmask when it is cleared. When
-# the ados-hid flag is set the native arbiter reads the front-panel buttons
-# in-process, so the packaged ados-buttons would co-own /dev/gpiochip0; mask it
+# /dev/ttyUSB*. Disable them while the flag is set; re-enable when it is cleared.
+# When the ados-hid flag is set the native arbiter reads the front-panel buttons
+# in-process, so the packaged ados-buttons would co-own /dev/gpiochip0; disable it
 # likewise.
 #
-# Masking (not a registry change) keeps the supervisor's catalog stable: a
-# `systemctl start` against a masked unit is a clean no-op. Default posture (no
-# flag) unmasks everything, so a routine upgrade leaves the packaged units live.
-# Idempotent: mask/unmask are no-ops when already in the target state.
-reconcile_rust_cutover_masks() {
+# Disable (remove the WantedBy symlink), NOT mask. Every packaged unit is a real
+# file in /etc/systemd/system, and `systemctl mask` refuses to overwrite a real
+# unit file with the /dev/null symlink it would drop there ("File ... already
+# exists"), so a mask attempt silently no-ops and the unit keeps running. These
+# units are pulled in only by ados-supervisor.service.wants/ — the supervisor
+# process never start()s them itself — so removing that symlink (disable) plus a
+# stop is the complete teardown: on the next boot systemd has nothing to pull in.
+# Default posture (no flag) re-enables everything, so a routine upgrade leaves the
+# packaged units live. Idempotent: enable/disable are no-ops in the target state.
+reconcile_rust_cutover_units() {
     local net_subsumed="ados-ethernet.service ados-wifi-client.service ados-modem.service ados-hostapd.service ados-usb-gadget.service"
     local hid_subsumed="ados-buttons.service"
     local unit
 
     if [ -e "${CONFIG_DIR}/net-rust-enabled" ]; then
-        info "net-rust-enabled set: masking the units the native uplink daemon subsumes."
+        info "net-rust-enabled set: disabling the units the native uplink daemon subsumes."
         for unit in ${net_subsumed}; do
             systemctl stop "${unit}" 2>/dev/null || true
-            systemctl mask "${unit}" 2>/dev/null || true
+            systemctl disable "${unit}" 2>/dev/null || true
         done
     else
         for unit in ${net_subsumed}; do
-            systemctl unmask "${unit}" 2>/dev/null || true
+            systemctl enable "${unit}" 2>/dev/null || true
         done
     fi
 
     if [ -e "${CONFIG_DIR}/hid-rust-enabled" ]; then
-        info "hid-rust-enabled set: masking the unit the native arbiter subsumes."
+        info "hid-rust-enabled set: disabling the unit the native arbiter subsumes."
         for unit in ${hid_subsumed}; do
             systemctl stop "${unit}" 2>/dev/null || true
-            systemctl mask "${unit}" 2>/dev/null || true
+            systemctl disable "${unit}" 2>/dev/null || true
         done
     else
         for unit in ${hid_subsumed}; do
-            systemctl unmask "${unit}" 2>/dev/null || true
+            systemctl enable "${unit}" 2>/dev/null || true
         done
     fi
 }
-export -f reconcile_rust_cutover_masks
+export -f reconcile_rust_cutover_units
