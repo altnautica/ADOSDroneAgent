@@ -18,6 +18,7 @@
 //! `is_bind_active()`), every transition writes an atomic sentinel at
 //! [`BIND_STATE_SENTINEL`] that any process can read lock-free.
 
+pub mod control;
 pub mod fsm;
 pub mod iface;
 pub mod keys;

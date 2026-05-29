@@ -5,21 +5,21 @@
 //! so no service state is shared across tasks and there is no lock to hold
 //! across a `systemctl` await.
 
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tokio::time::sleep;
 
+use crate::bind::orchestrator::BindOrchestrator;
 use crate::config::AgentConfig;
 use crate::registry::{build_specs, Category, ServiceSpec, ServiceState, PARKED_RETRY_COOLDOWN};
 use crate::systemctl;
 
 /// Units whose auto-restart the monitor skips while a bind handshake owns the
-/// radio. **Parity note:** the Python check (`is_bind_active`) reads an
-/// in-process bind-orchestrator global that lives in the `ados-wfb` process,
-/// so in multi-process production the separate supervisor process always sees
-/// "no bind" and the gate is effectively inert. We reproduce that inert
-/// behavior here rather than invent a new cross-process signal; a real bind
-/// sentinel is a follow-up that belongs with the radio services.
+/// radio adapter. The bind FSM now lives in this supervisor process, so the
+/// gate reads the orchestrator's in-process liveness directly. (The Python
+/// check read an in-process global that the separate supervisor never saw, so
+/// it was inert in production; hosting the FSM here makes the gate real.)
 const BIND_GATED_UNITS: [&str; 2] = ["ados-wfb", "ados-wfb-rx"];
 
 /// Whether a service's profile + role gates allow it to run under `config`.
@@ -43,13 +43,17 @@ pub fn gate_allows(spec: &ServiceSpec, config: &AgentConfig) -> bool {
 pub struct Supervisor {
     services: Vec<ServiceSpec>,
     config: AgentConfig,
+    /// The bind orchestrator, shared with the control socket task. The monitor
+    /// consults its in-process liveness to gate radio-unit auto-restart.
+    bind: Arc<BindOrchestrator>,
 }
 
 impl Supervisor {
-    pub fn new(config: AgentConfig) -> Self {
+    pub fn new(config: AgentConfig, bind: Arc<BindOrchestrator>) -> Self {
         Supervisor {
             services: build_specs(),
             config,
+            bind,
         }
     }
 
@@ -257,11 +261,11 @@ impl Supervisor {
         }
     }
 
-    /// Whether the monitor should skip auto-restarting `name` (bind gate).
-    fn restart_blocked_by_bind(&self, name: &str) -> bool {
-        // See BIND_GATED_UNITS: inert in multi-process production, by parity.
-        let _ = BIND_GATED_UNITS.contains(&name);
-        false
+    /// Whether the monitor should skip auto-restarting `name` because a bind
+    /// handshake owns the radio adapter. Real now that the FSM is in-process:
+    /// only the radio units are gated, and only while a bind is live.
+    async fn restart_blocked_by_bind(&self, name: &str) -> bool {
+        BIND_GATED_UNITS.contains(&name) && self.bind.is_active().await
     }
 
     /// One monitor pass: detect deaths + auto-restart, retry parked services.
@@ -306,9 +310,8 @@ impl Supervisor {
                 if !opened {
                     self.services[i].state = ServiceState::Failed;
                 }
-                if self.services[i].state != ServiceState::CircuitOpen
-                    && !self.restart_blocked_by_bind(name)
-                {
+                let blocked = self.restart_blocked_by_bind(name).await;
+                if self.services[i].state != ServiceState::CircuitOpen && !blocked {
                     tracing::info!(service = name, "auto-restart");
                     self.start_service(name).await;
                 }
@@ -317,7 +320,7 @@ impl Supervisor {
 
         // Parked-service retry (bounded by the cooldown).
         for name in to_retry {
-            if self.restart_blocked_by_bind(name) {
+            if self.restart_blocked_by_bind(name).await {
                 continue;
             }
             if let Some(i) = self.index_of(name) {

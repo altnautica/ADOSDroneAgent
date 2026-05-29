@@ -79,6 +79,10 @@ pub struct BindOrchestrator {
     lock: Mutex<()>,
     /// The live session (None when idle). Shared with the peer-poll task.
     session: Arc<Mutex<Option<BindSession>>>,
+    /// Out-of-band abort: the control socket's `cancel_bind` op (which arrives
+    /// on a different connection than the blocked `start_bind`) notifies this so
+    /// the in-flight session aborts. `start_local_bind` races it in its select.
+    cancel: Arc<tokio::sync::Notify>,
 }
 
 impl Default for BindOrchestrator {
@@ -92,6 +96,7 @@ impl BindOrchestrator {
         Self {
             lock: Mutex::new(()),
             session: Arc::new(Mutex::new(None)),
+            cancel: Arc::new(tokio::sync::Notify::new()),
         }
     }
 
@@ -99,6 +104,14 @@ impl BindOrchestrator {
     /// Out-of-process callers use [`read_sentinel_active`].
     pub async fn is_active(&self) -> bool {
         matches!(self.session.lock().await.as_ref(), Some(s) if s.state.is_active())
+    }
+
+    /// Abort the in-flight bind session, if any. Idempotent + safe when idle
+    /// (the notify is simply dropped with no waiter). Invoked by the control
+    /// socket's `cancel_bind` op from a connection separate from the blocked
+    /// `start_bind`.
+    pub fn cancel_current(&self) {
+        self.cancel.notify_waiters();
     }
 
     /// Snapshot of the current session for the REST surface, or None if idle.
@@ -130,6 +143,7 @@ impl BindOrchestrator {
 
         let run = self.run_session(role, peer_device_id);
         tokio::pin!(cancel);
+        let internal_cancel = self.cancel.clone();
 
         enum Outcome {
             Done(Result<(), BindError>),
@@ -141,10 +155,14 @@ impl BindOrchestrator {
         // completes in the same tick the watchdog/cancel becomes ready still
         // wins and a just-reached PAIRED is preserved — the equivalent of the
         // Python `session_task in done` guard. Do NOT reorder these arms.
+        // Two cancel sources: the caller-supplied `cancel` future (e.g. auto-
+        // pair's stop signal) and the out-of-band `cancel_current()` notify
+        // (the control socket's `cancel_bind` op). Either aborts.
         let outcome = tokio::select! {
             biased;
             r = run => Outcome::Done(r),
             _ = &mut cancel => Outcome::Cancelled,
+            _ = internal_cancel.notified() => Outcome::Cancelled,
             _ = tokio::time::sleep(WAITING_PEER_WATCHDOG) => Outcome::Watchdog,
         };
 

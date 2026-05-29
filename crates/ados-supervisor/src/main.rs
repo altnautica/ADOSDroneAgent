@@ -9,7 +9,9 @@ use anyhow::Result;
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::mpsc;
 
-use ados_supervisor::{config::AgentConfig, hotplug, lifecycle::Supervisor, sdnotify};
+use std::sync::Arc;
+
+use ados_supervisor::{bind, config::AgentConfig, hotplug, lifecycle::Supervisor, sdnotify};
 
 const MONITOR_INTERVAL: Duration = Duration::from_secs(5);
 
@@ -46,11 +48,29 @@ async fn main() -> Result<()> {
         "resolved agent profile"
     );
 
-    let mut supervisor = Supervisor::new(config);
+    // The bind orchestrator is shared between the monitor (which gates radio
+    // auto-restart on a live bind) and the control socket task.
+    let bind_orch = Arc::new(bind::orchestrator::BindOrchestrator::new());
+
+    let mut supervisor = Supervisor::new(config, bind_orch.clone());
     supervisor.start().await;
 
     // Tell systemd we are up (no-op off Linux / outside a notify unit).
     sdnotify::ready();
+
+    // Cross-process bind trigger seam: the FastAPI pairing route + the cloud
+    // auto-pair supervisor forward start/cancel/status here over the control
+    // socket. Always served (cheap); the Python side connects when it wants a
+    // bind.
+    {
+        let bind_orch = bind_orch.clone();
+        tokio::spawn(async move {
+            let path = std::path::Path::new(bind::control::SUPERVISOR_SOCK);
+            if let Err(e) = bind::control::serve(bind_orch, path).await {
+                tracing::error!(error = %e, "bind control socket exited");
+            }
+        });
+    }
 
     // Hot-plug poller runs on its own task and only forwards device-class
     // transitions; the supervisor state stays owned by this loop.
