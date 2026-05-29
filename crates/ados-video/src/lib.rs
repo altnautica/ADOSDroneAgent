@@ -17,7 +17,11 @@
 
 pub mod camera_state;
 pub mod config;
+pub mod discover;
 pub mod encoder;
 pub mod mediamtx;
+pub mod orchestrator;
 pub mod process;
+pub mod shutdown;
+pub mod stderr_drain;
 pub mod wfb_tee;

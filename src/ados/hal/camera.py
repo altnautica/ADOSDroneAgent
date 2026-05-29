@@ -252,3 +252,12 @@ def discover_cameras(
 
     log.info("camera_discovery_complete", total=len(cameras), platform=system)
     return cameras
+
+
+if __name__ == "__main__":
+    # `python -m ados.hal.camera --json`: one-shot discovery for the video
+    # orchestrator seam. The body lives in camera_cli so this module stays a
+    # pure library import for everything else.
+    from ados.hal.camera_cli import main
+
+    raise SystemExit(main())

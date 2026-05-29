@@ -6,6 +6,14 @@ license.workspace = true
 repository.workspace = true
 description = "Video pipeline orchestrator: supervises the ffmpeg/mediamtx/wfb_tee subprocesses with setsid/killpg process-group ownership, drives the encoder + local RTSP + RTP-to-WFB tap."
 
+[lib]
+name = "ados_video"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ados-video"
+path = "src/main.rs"
+
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }

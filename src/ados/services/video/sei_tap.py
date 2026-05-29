@@ -251,3 +251,43 @@ class HeadlessSeiTap:
             os.replace(tmp, self._output_path)
         except OSError as exc:
             log.warning("headless_sei_tap_persist_failed", error=str(exc))
+
+
+def _run_once_main(argv: list[str] | None = None) -> int:
+    """`python -m ados.services.video.sei_tap --once --rtsp <url>`.
+
+    One ffmpeg session of the SEI reader, then exit. The video
+    orchestrator spawns this as a supervised subprocess (gated on the
+    mediamtx path being ready) so latency telemetry is written to
+    ``/run/ados/lcd-latency.json`` on a drone with no LCD attached. The
+    long-running ``_run_loop`` / ``start`` path is untouched so the
+    in-process OLED tap caller is unaffected.
+    """
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        prog="ados.services.video.sei_tap",
+        description="One-shot SEI latency sample reader.",
+    )
+    parser.add_argument(
+        "--once",
+        action="store_true",
+        help="Run a single ffmpeg read session then exit.",
+    )
+    parser.add_argument(
+        "--rtsp",
+        required=True,
+        help="Local mediamtx RTSP URL to read SEI markers from.",
+    )
+    args = parser.parse_args(argv)
+
+    tap = HeadlessSeiTap(rtsp_url=args.rtsp)
+    try:
+        asyncio.run(tap._read_once())
+    except KeyboardInterrupt:
+        return 130
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(_run_once_main())
