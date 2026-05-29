@@ -7,14 +7,14 @@ StartLimitBurst=5
 
 [Service]
 Type=simple
-# The native video orchestrator is OPT-IN until it is camera-bench-validated:
-# run it only when BOTH the binary is present AND the operator enabled the flag
-# file. Default (no flag) = the packaged Python service, so a routine upgrade
-# never silently swaps the live video pipeline for an unproven binary. To A/B
-# test the native binary on the bench:
-#   touch /etc/ados/video-rust-enabled && systemctl restart ados-video
-# `exec` replaces the shell image so SupplementaryGroups=video carries over.
-ExecStart=/bin/sh -c 'if [ -e /etc/ados/video-rust-enabled ] && [ -x /opt/ados/bin/ados-video ]; then exec /opt/ados/bin/ados-video; else exec /opt/ados/venv/bin/python -m ados.services.video; fi'
+# The native video orchestrator is the only implementation; the standalone
+# Python video service was removed once the binary was bench-validated. exec the
+# binary unconditionally (failing loudly if it is absent rather than running a
+# stale path); the installer always provisions it. `exec` replaces the shell
+# image so SupplementaryGroups=video carries over. The reusable video library
+# modules (pipeline, encoder, mediamtx, camera_mgr, local_tap, sei_*) stay in
+# Python for the in-process demo pipeline and the ground-station consumers.
+ExecStart=/bin/sh -c 'if [ -x /opt/ados/bin/ados-video ]; then exec /opt/ados/bin/ados-video; else echo "ados-video binary missing; reinstall to fetch it" >&2; exit 1; fi'
 Restart=on-failure
 RestartSec=3
 Environment=ADOS_CONFIG=/etc/ados/config.yaml

@@ -8,9 +8,12 @@
 # Ed25519/minisign signature is enforced automatically once a key + .minisig
 # are published).
 #
-# Best-effort by design: if the fetch or verification fails (offline, no asset
-# yet, non-arm64 host), the install continues and the ados-video unit's
-# ExecStart shim runs the packaged Python service. Idempotent.
+# The native binary is the ONLY video orchestrator now (the standalone Python
+# service was removed once it was bench-validated), so the ados-video unit execs
+# it unconditionally and fails loudly if it is absent. The fetch is still
+# best-effort here (a transient offline/no-asset case must not abort the whole
+# install); a missing binary surfaces as a failed ados-video unit in journald.
+# Idempotent.
 # =============================================================================
 
 ADOS_VIDEO_RELEASE_BASE="https://github.com/altnautica/ADOSDroneAgent/releases/download/prebuilt-video"
@@ -63,13 +66,13 @@ install_video_binary() {
     rm -rf "${tmp}"
     info "Video orchestrator binary installed: ${dest}"
 
-    # The native binary is OPT-IN (not yet camera-bench-validated): re-assert the
-    # running service onto it ONLY when the operator has enabled the flag.
-    # Without the flag the unit keeps running the Python service, so a routine
-    # upgrade never bounces video for a binary it would not select anyway.
-    if [ -e "${CONFIG_DIR}/video-rust-enabled" ] && systemctl is-active --quiet ados-video 2>/dev/null; then
+    # The native binary is the only video orchestrator now. On an upgrade that
+    # refreshes the binary, restart a running ados-video so it picks up the new
+    # build. On a fresh install the unit is not up yet (the supervisor starts it
+    # later), so this is a no-op there.
+    if systemctl is-active --quiet ados-video 2>/dev/null; then
         systemctl restart ados-video 2>/dev/null || true
-        info "Video service restarted onto the installed native binary (flag enabled)."
+        info "Video service restarted onto the installed native binary."
     fi
 }
 export -f install_video_binary
