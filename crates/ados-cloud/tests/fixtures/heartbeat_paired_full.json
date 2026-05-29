@@ -1,0 +1,112 @@
+{
+  "agentVersion": "0.49.3",
+  "apiUrl": "http://127.0.0.1:8080/api",
+  "boardArch": "",
+  "boardName": "unknown",
+  "boardRamMb": 4096,
+  "boardSoc": "",
+  "boardTier": 0,
+  "canBuses": [
+    {
+      "bitrate": 1000000,
+      "driver": 1,
+      "port": 1,
+      "protocol": 1
+    }
+  ],
+  "cpuCores": 4,
+  "cpuHistory": [
+    1.5
+  ],
+  "cpuPercent": 1.5,
+  "deviceId": "ados-test",
+  "diskPercent": 3.0,
+  "diskTotalGb": 64.0,
+  "diskUsedGb": 2.0,
+  "displayType": "lcd",
+  "fcBaud": 0,
+  "fcConnected": false,
+  "fcPort": "",
+  "lastIp": "127.0.0.1",
+  "last_plugin_update_check_at": 1716940800000,
+  "lcdRotation": 90,
+  "lcdTouchCalibrated": true,
+  "mavlinkWsPort": 0,
+  "mdnsHost": "",
+  "memoryHistory": [
+    12.0
+  ],
+  "memoryPercent": 12.0,
+  "memoryTotalMb": 4096,
+  "memoryUsedMb": 256,
+  "missionControlUrl": "https://mc.example",
+  "peripherals": [
+    {
+      "address": "/dev/fb1",
+      "bus": "spi",
+      "category": "display",
+      "extra": {
+        "controller": "ili9486",
+        "has_touch": true
+      },
+      "id": "local-display",
+      "last_reading": "2026-05-29T00:00:00+00:00",
+      "name": "Waveshare 3.5\" SPI LCD",
+      "rate_hz": 0,
+      "status": "ok",
+      "type": "spi-lcd"
+    }
+  ],
+  "profile": "ground-station",
+  "radio": {
+    "acquire_state": null,
+    "adapter_chipset": "RTL8812EU",
+    "adapter_injection_ok": true,
+    "auto_pair_enabled": null,
+    "bandwidth_mhz": 20,
+    "bitrate_kbps": 4096,
+    "channel": 149,
+    "channel_locked": null,
+    "driver": null,
+    "fec_lost": null,
+    "fec_recovered": null,
+    "freq_mhz": 5745,
+    "iface": "wlan1",
+    "loss_percent": null,
+    "mcs_index": null,
+    "noise_dbm": null,
+    "packets_lost": null,
+    "paired": true,
+    "paired_at": null,
+    "paired_with_device_id": "ados-peer",
+    "public_key_fingerprint": null,
+    "reacquire_kills": null,
+    "rssi_dbm": -48.0,
+    "rx_silent_seconds": null,
+    "snr_db": 30.0,
+    "state": "connected",
+    "topology": "one-to-one",
+    "tx_power_dbm": 20,
+    "tx_power_max_dbm": null,
+    "tx_video_recvq_bytes": null,
+    "tx_video_stall_kills": null,
+    "tx_video_stalled": null,
+    "valid_rx_packets_per_s": null
+  },
+  "remoteAccess": {
+    "provider": "none",
+    "publicUrls": []
+  },
+  "role": "receiver",
+  "services": [],
+  "setupUrl": "http://127.0.0.1:8080",
+  "uiTheme": "dark",
+  "uptimeSeconds": 10,
+  "version": "0.49.3",
+  "videoRecording": false,
+  "videoState": "stopped",
+  "videoWhepPort": 0,
+  "videoWhepUrl": "https://tunnel.example/main/",
+  "wfbAdapterChipset": "RTL8812EU",
+  "wfbAdapterInjectionOk": true
+}

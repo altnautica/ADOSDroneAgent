@@ -1,0 +1,45 @@
+[package]
+name = "ados-cloud"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Cloud relay for the ADOS Drone Agent: heartbeat status push, command poll, MAVLink and WebRTC-signaling relays, and the update poller."
+
+# The crate is lib + a daemon binary skeleton. The lib carries the wire model
+# and the update poller now; the long-running tasks are added incrementally.
+[[bin]]
+name = "ados-cloud"
+path = "src/bin/ados-cloud.rs"
+
+[dependencies]
+# Wire primitives + the frozen plugin-supervisor contract the command
+# dispatcher will drive (path deps; the supervisor consumer wiring lands with
+# the command-dispatcher task).
+ados-protocol = { path = "../ados-protocol" }
+ados-plugin-host = { path = "../ados-plugin-host" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+# YAML config reader (/etc/ados/config.yaml), the same reader the other crates
+# use so a config written by the Python agent is read identically here.
+serde_norway = { workspace = true }
+# SHA256 verify of the downloaded update wheel.
+sha2 = { workspace = true }
+hex = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+# No HTTP client yet: the update-poll logic (version compare, tag filter,
+# release pick, SHA256SUMS parse, the 304/403 cache + rate-limit branches) is
+# exercised through the `ReleaseSource` seam with no network. The live HTTPS
+# transport shim is introduced with the relay's networking layer so the TLS
+# dependency is added once for both the oneshot poll and the long-running
+# transport.
+
+# Linux-only edge: systemd readiness/watchdog notify + journald log layer for
+# the daemon. Confined to a target section so the pure-logic lib still builds
+# and tests on a non-Linux dev host.
+[target.'cfg(target_os = "linux")'.dependencies]
+sd-notify = { workspace = true }
+tracing-journald = { workspace = true }

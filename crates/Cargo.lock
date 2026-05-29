@@ -17,6 +17,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "ados-cloud"
+version = "0.1.0"
+dependencies = [
+ "ados-plugin-host",
+ "ados-protocol",
+ "anyhow",
+ "hex",
+ "sd-notify",
+ "serde",
+ "serde_json",
+ "serde_norway",
+ "sha2",
+ "thiserror 2.0.18",
+ "tracing",
+ "tracing-journald",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "ados-mavlink-router"
 version = "0.1.0"
 dependencies = [
