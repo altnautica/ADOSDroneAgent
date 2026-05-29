@@ -207,4 +207,8 @@ install_global_symlinks() {
     # opt-in service shipped disabled; its ExecStart shim runs the binary only
     # when present AND the operator enabled the flag, else /bin/true.
     install_plugin_host_binary
+    # Fetch the prebuilt cloud-relay binaries (ados-cloud + ados-ota). The
+    # ados-cloud unit's ExecStart shim runs the native binary when present AND
+    # the operator enabled the flag, else the packaged Python service.
+    install_cloud_binary
 }

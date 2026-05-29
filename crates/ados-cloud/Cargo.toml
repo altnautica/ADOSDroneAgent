@@ -6,11 +6,15 @@ license.workspace = true
 repository.workspace = true
 description = "Cloud relay for the ADOS Drone Agent: heartbeat status push, command poll, MAVLink and WebRTC-signaling relays, and the update poller."
 
-# The crate is lib + a daemon binary skeleton. The lib carries the wire model
-# and the update poller now; the long-running tasks are added incrementally.
+# The crate is lib + two binaries: the cloud relay daemon and the OTA oneshot
+# update poller.
 [[bin]]
 name = "ados-cloud"
 path = "src/bin/ados-cloud.rs"
+
+[[bin]]
+name = "ados-ota"
+path = "src/bin/ados-ota.rs"
 
 [dependencies]
 # Wire primitives + the frozen plugin-supervisor contract the command
@@ -73,3 +77,10 @@ rumqttc = { package = "rumqttc-next", version = "0.33", default-features = false
 [target.'cfg(target_os = "linux")'.dependencies]
 sd-notify = { workspace = true }
 tracing-journald = { workspace = true }
+
+[dev-dependencies]
+# Temp dirs/files for the dispatch + seen-jobs + auto-pair-socket tests.
+tempfile = "3"
+# Build a signed-free `.adosplug` in the plugin-command dispatch tests so the
+# install path runs end-to-end against a real PluginSupervisor.
+zip = { workspace = true }

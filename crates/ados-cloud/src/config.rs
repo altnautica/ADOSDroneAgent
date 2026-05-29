@@ -46,19 +46,123 @@ impl Default for OtaSection {
     }
 }
 
-/// The cloud-relay endpoint under `server.cloud.url`. The relay POSTs the
-/// heartbeat to `{url}/agent/status`.
-#[derive(Debug, Clone, Default, Deserialize)]
+/// The cloud-relay endpoint under `server.cloud.url`, plus the MQTT broker
+/// host/port the relays dial. Mirrors the Python `CloudConfig` fields the relay
+/// reads.
+#[derive(Debug, Clone, Deserialize)]
 pub struct CloudSection {
     #[serde(default)]
     pub url: String,
+    #[serde(default = "default_mqtt_broker")]
+    pub mqtt_broker: String,
+    #[serde(default = "default_mqtt_port")]
+    pub mqtt_port: u16,
 }
 
-/// The `server:` section (only the cloud endpoint is read here).
-#[derive(Debug, Clone, Default, Deserialize)]
+fn default_mqtt_broker() -> String {
+    "mqtt.altnautica.com".to_string()
+}
+fn default_mqtt_port() -> u16 {
+    443
+}
+fn default_server_mode() -> String {
+    "local".to_string()
+}
+fn default_mqtt_transport() -> String {
+    "websockets".to_string()
+}
+fn default_telemetry_rate() -> u32 {
+    2
+}
+
+impl Default for CloudSection {
+    fn default() -> Self {
+        CloudSection {
+            url: String::new(),
+            mqtt_broker: default_mqtt_broker(),
+            mqtt_port: default_mqtt_port(),
+        }
+    }
+}
+
+/// The `server:` section: the cloud endpoint + the relay mode + transport.
+#[derive(Debug, Clone, Deserialize)]
 pub struct ServerSection {
+    #[serde(default = "default_server_mode")]
+    pub mode: String,
     #[serde(default)]
     pub cloud: CloudSection,
+    #[serde(default = "default_mqtt_transport")]
+    pub mqtt_transport: String,
+    #[serde(default = "default_telemetry_rate")]
+    pub telemetry_rate: u32,
+}
+
+impl Default for ServerSection {
+    fn default() -> Self {
+        ServerSection {
+            mode: default_server_mode(),
+            cloud: CloudSection::default(),
+            mqtt_transport: default_mqtt_transport(),
+            telemetry_rate: default_telemetry_rate(),
+        }
+    }
+}
+
+/// The `agent:` section. The device identity the relay reports.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AgentSection {
+    #[serde(default)]
+    pub device_id: String,
+    #[serde(default = "default_agent_name")]
+    pub name: String,
+    #[serde(default = "default_agent_profile")]
+    pub profile: String,
+}
+
+fn default_agent_name() -> String {
+    "my-drone".to_string()
+}
+fn default_agent_profile() -> String {
+    "auto".to_string()
+}
+
+impl Default for AgentSection {
+    fn default() -> Self {
+        AgentSection {
+            device_id: String::new(),
+            name: default_agent_name(),
+            profile: default_agent_profile(),
+        }
+    }
+}
+
+/// The `pairing:` section: the convex URL the loops POST to + the beacon gate.
+#[derive(Debug, Clone, Deserialize)]
+pub struct PairingSection {
+    #[serde(default)]
+    pub convex_url: String,
+    #[serde(default = "default_beacon_interval")]
+    pub beacon_interval: u32,
+    #[serde(default = "default_beacon_enabled")]
+    pub beacon_enabled: bool,
+}
+
+fn default_beacon_interval() -> u32 {
+    30
+}
+fn default_beacon_enabled() -> bool {
+    true
+}
+
+impl Default for PairingSection {
+    fn default() -> Self {
+        PairingSection {
+            convex_url: String::new(),
+            beacon_interval: default_beacon_interval(),
+            beacon_enabled: default_beacon_enabled(),
+        }
+    }
 }
 
 /// The slice of the agent config the cloud relay reads. Every field defaults so
@@ -66,9 +170,26 @@ pub struct ServerSection {
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct CloudConfig {
     #[serde(default)]
+    pub agent: AgentSection,
+    #[serde(default)]
     pub ota: OtaSection,
     #[serde(default)]
     pub server: ServerSection,
+    #[serde(default)]
+    pub pairing: PairingSection,
+}
+
+impl CloudConfig {
+    /// The convex URL the loops POST to, or empty when the relay is disabled
+    /// (`server.mode == "local"`). Mirrors `cloud_enabled` gating in the Python
+    /// `__main__`: local-mode operators stay off the cloud relay.
+    pub fn effective_convex_url(&self) -> String {
+        if self.server.mode == "local" {
+            String::new()
+        } else {
+            self.pairing.convex_url.clone()
+        }
+    }
 }
 
 impl CloudConfig {
