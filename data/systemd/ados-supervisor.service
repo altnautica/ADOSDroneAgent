@@ -34,7 +34,7 @@ NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes
-ReadWritePaths=/var/ados /etc/ados /run/ados
+ReadWritePaths=/var/ados /var/lib/ados /etc/ados /run/ados
 
 # Logging
 StandardOutput=journal

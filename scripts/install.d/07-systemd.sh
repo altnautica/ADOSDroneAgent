@@ -527,6 +527,12 @@ reconcile_rust_cutover_units() {
         for unit in ${net_subsumed}; do
             systemctl stop "${unit}" 2>/dev/null || true
             systemctl disable "${unit}" 2>/dev/null || true
+            # A packaged manager that is slow to honor SIGTERM gets SIGKILLed by
+            # the stop timeout, which leaves the unit in `failed` even though it
+            # is now disabled. Clear that residue so `systemctl --failed` is
+            # clean and a health check does not trip on a unit we took out of
+            # service on purpose.
+            systemctl reset-failed "${unit}" 2>/dev/null || true
         done
     else
         for unit in ${net_subsumed}; do
@@ -539,6 +545,7 @@ reconcile_rust_cutover_units() {
         for unit in ${hid_subsumed}; do
             systemctl stop "${unit}" 2>/dev/null || true
             systemctl disable "${unit}" 2>/dev/null || true
+            systemctl reset-failed "${unit}" 2>/dev/null || true
         done
     else
         for unit in ${hid_subsumed}; do
