@@ -64,7 +64,8 @@ if [ -n "${ADOS_SCRIPT_DIR}" ] && [ -f "${ADOS_SCRIPT_DIR}/install.d/lib.sh" ]; 
                   05-mesh 06-radio 07-systemd 08-plugin 09-config 10-network \
                   11-artifacts 12-output 13-main 14-orchestration 15-channel 16-tui \
                   17-supervisor 18-mavlink-router 19-radio 20-video \
-                  21-plugin-host 22-cloud; do
+                  21-plugin-host 22-cloud 23-groundlink 24-net 25-hid \
+                  26-display; do
         module_path="${ADOS_SCRIPT_DIR}/install.d/${module}.sh"
         if [ ! -f "${module_path}" ]; then
             echo "ERROR: missing install.d module: ${module_path}" >&2

@@ -211,4 +211,20 @@ install_global_symlinks() {
     # ados-cloud unit's ExecStart shim runs the native binary when present AND
     # the operator enabled the flag, else the packaged Python service.
     install_cloud_binary
+    # Fetch the prebuilt ground-station data-plane binary. The ados-wfb-rx unit's
+    # ExecStart shim runs it when present AND the operator enabled the flag, else
+    # the packaged Python service.
+    install_groundlink_binary
+    # Fetch the prebuilt uplink-matrix binary. The ados-uplink-router unit's
+    # ExecStart shim runs it when present AND the operator enabled the flag, else
+    # the packaged Python service.
+    install_net_binary
+    # Fetch the prebuilt human-interface binaries (ados-pic + ados-input). The
+    # ados-pic / ados-input unit ExecStart shims run them when present AND the
+    # operator enabled the flag, else the packaged Python services.
+    install_hid_binary
+    # Fetch the prebuilt display binaries (ados-display + ados-display-probe). The
+    # ados-oled / ados-display-probe unit ExecStart shims run them when present
+    # AND the operator enabled the flag, else the packaged Python services.
+    install_display_binary
 }

@@ -10,7 +10,14 @@ Type=simple
 User=root
 Environment=ADOS_CONFIG=/etc/ados/config.yaml
 EnvironmentFile=-/etc/ados/env
-ExecStart=/opt/ados/venv/bin/python -m ados.services.ground_station.pic_arbiter
+# Flag-gated cutover: the native arbiter runs only when BOTH the operator
+# enabled the flag file AND the binary is present; otherwise the packaged Python
+# service is the default, so a routine upgrade never changes behavior. The native
+# daemon also reads the front-panel GPIO buttons in-process, so enabling its flag
+# masks the packaged ados-buttons unit (handled by the installer). To turn the
+# native arbiter on for a bench:
+#   touch /etc/ados/hid-rust-enabled && systemctl restart ados-pic
+ExecStart=/bin/sh -c 'if [ -e /etc/ados/hid-rust-enabled ] && [ -x /opt/ados/bin/ados-pic ]; then exec /opt/ados/bin/ados-pic; else exec /opt/ados/venv/bin/python -m ados.services.ground_station.pic_arbiter; fi'
 Restart=on-failure
 RestartSec=5
 

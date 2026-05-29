@@ -9,7 +9,16 @@ StartLimitBurst=5
 [Service]
 Type=simple
 User=root
-ExecStart=/opt/ados/venv/bin/python -m ados.services.ground_station.uplink_router
+# Flag-gated cutover: the native uplink matrix runs only when BOTH the operator
+# enabled the flag file AND the binary is present; otherwise the packaged Python
+# service is the default, so a routine upgrade never changes behavior. The native
+# daemon also owns the AP, USB-gadget tether, and the ethernet/wifi/modem
+# managers in-process, so enabling its flag masks those packaged units (handled
+# by the installer). To turn the native matrix on for a bench:
+#   touch /etc/ados/net-rust-enabled && systemctl restart ados-uplink-router
+# `exec` replaces the shell image so the CAP_NET_ADMIN/CAP_NET_RAW ambient caps
+# below carry to the chosen binary unchanged.
+ExecStart=/bin/sh -c 'if [ -e /etc/ados/net-rust-enabled ] && [ -x /opt/ados/bin/ados-net ]; then exec /opt/ados/bin/ados-net; else exec /opt/ados/venv/bin/python -m ados.services.ground_station.uplink_router; fi'
 Restart=on-failure
 RestartSec=10
 Environment=ADOS_CONFIG=/etc/ados/config.yaml

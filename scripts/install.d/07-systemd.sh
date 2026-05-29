@@ -147,6 +147,10 @@ ENVEOF
     # Enable ground-station units if the profile demands them.
     if [ "${ADOS_PROFILE:-drone}" = "ground_station" ]; then
         enable_ground_station_units
+        # Reconcile the packaged units a native consolidator daemon subsumes
+        # against the cutover flags. Ground-station only, so it never touches a
+        # drone rig (notably ados-wifi-client, which is cross-profile).
+        reconcile_rust_cutover_masks
     fi
 
     # Drop the SSH login banner so operators see the setup URL the
@@ -482,3 +486,50 @@ enable_ground_station_units() {
         warn "Avahi service source not found; skipping ados-gs-ap.service install."
     fi
 }
+
+# Reconcile the packaged units that a native consolidator daemon takes over.
+# GROUND-STATION ONLY: this is called from the ground_station branch of the
+# install flow, so it never touches a drone rig.
+#
+# When the ados-net flag is set, the native uplink daemon owns the AP, the
+# USB-gadget tether, and the ethernet/wifi/modem managers in one process, so the
+# packaged units for those would fight it for wlan0 / iptables / configfs /
+# /dev/ttyUSB*. Mask them while the flag is set; unmask when it is cleared. When
+# the ados-hid flag is set the native arbiter reads the front-panel buttons
+# in-process, so the packaged ados-buttons would co-own /dev/gpiochip0; mask it
+# likewise.
+#
+# Masking (not a registry change) keeps the supervisor's catalog stable: a
+# `systemctl start` against a masked unit is a clean no-op. Default posture (no
+# flag) unmasks everything, so a routine upgrade leaves the packaged units live.
+# Idempotent: mask/unmask are no-ops when already in the target state.
+reconcile_rust_cutover_masks() {
+    local net_subsumed="ados-ethernet.service ados-wifi-client.service ados-modem.service ados-hostapd.service ados-usb-gadget.service"
+    local hid_subsumed="ados-buttons.service"
+    local unit
+
+    if [ -e "${CONFIG_DIR}/net-rust-enabled" ]; then
+        info "net-rust-enabled set: masking the units the native uplink daemon subsumes."
+        for unit in ${net_subsumed}; do
+            systemctl stop "${unit}" 2>/dev/null || true
+            systemctl mask "${unit}" 2>/dev/null || true
+        done
+    else
+        for unit in ${net_subsumed}; do
+            systemctl unmask "${unit}" 2>/dev/null || true
+        done
+    fi
+
+    if [ -e "${CONFIG_DIR}/hid-rust-enabled" ]; then
+        info "hid-rust-enabled set: masking the unit the native arbiter subsumes."
+        for unit in ${hid_subsumed}; do
+            systemctl stop "${unit}" 2>/dev/null || true
+            systemctl mask "${unit}" 2>/dev/null || true
+        done
+    else
+        for unit in ${hid_subsumed}; do
+            systemctl unmask "${unit}" 2>/dev/null || true
+        done
+    fi
+}
+export -f reconcile_rust_cutover_masks

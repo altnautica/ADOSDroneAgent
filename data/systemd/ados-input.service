@@ -10,7 +10,14 @@ User=root
 SupplementaryGroups=input plugdev bluetooth
 Environment=ADOS_CONFIG=/etc/ados/config.yaml
 EnvironmentFile=-/etc/ados/env
-ExecStart=/opt/ados/venv/bin/python -m ados.services.ground_station.input_manager
+# Flag-gated cutover: the native input manager runs only when BOTH the operator
+# enabled the flag file AND the binary is present; otherwise the packaged Python
+# service is the default, so a routine upgrade never changes behavior. To turn
+# the native input manager on for a bench:
+#   touch /etc/ados/hid-rust-enabled && systemctl restart ados-input
+# `exec` replaces the shell image so SupplementaryGroups=input plugdev bluetooth
+# carry to the chosen binary.
+ExecStart=/bin/sh -c 'if [ -e /etc/ados/hid-rust-enabled ] && [ -x /opt/ados/bin/ados-input ]; then exec /opt/ados/bin/ados-input; else exec /opt/ados/venv/bin/python -m ados.services.ground_station.input_manager; fi'
 Restart=on-failure
 RestartSec=5
 

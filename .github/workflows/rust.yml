@@ -428,3 +428,220 @@ jobs:
           prerelease: true
           name: "Prebuilt ados-cloud (rolling)"
           files: crates/rel/*
+
+  # Build the ground-station data-plane as a static arm64 binary and publish it
+  # to a rolling prerelease the installer fetches. Static (musl) so one binary
+  # runs on every supported board regardless of its glibc. Runs only on pushes
+  # to main.
+  publish-groundlink:
+    needs: build-test
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (musl target)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-musl
+
+      - name: Install musl tools
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Build static ados-groundlink
+        run: cargo build --release --target aarch64-unknown-linux-musl -p ados-groundlink
+
+      - name: Stage artifact + checksum
+        run: |
+          set -euo pipefail
+          mkdir -p rel
+          cp target/aarch64-unknown-linux-musl/release/ados-groundlink rel/ados-groundlink-aarch64
+          ( cd rel && sha256sum ados-groundlink-aarch64 > ados-groundlink-aarch64.sha256 )
+
+      - name: Sign artifact (only when the signing key is present)
+        env:
+          SIGNING_KEY: ${{ secrets.ADOS_DRIVER_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${SIGNING_KEY}" ]; then
+            echo "No ADOS_DRIVER_SIGNING_KEY set; publishing SHA256-only (dev posture)."
+            exit 0
+          fi
+          sudo apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y minisign
+          printf '%s' "${SIGNING_KEY}" > /tmp/sign.key
+          minisign -S -s /tmp/sign.key -m rel/ados-groundlink-aarch64 -x rel/ados-groundlink-aarch64.minisig
+          rm -f /tmp/sign.key
+
+      - name: Publish rolling prerelease
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: prebuilt-groundlink
+          prerelease: true
+          name: "Prebuilt ados-groundlink (rolling)"
+          files: crates/rel/*
+
+  # Build the uplink matrix as a static arm64 binary and publish it to a rolling
+  # prerelease the installer fetches. Static (musl) so one binary runs on every
+  # supported board regardless of its glibc. Runs only on pushes to main.
+  publish-net:
+    needs: build-test
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (musl target)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-musl
+
+      - name: Install musl tools
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Build static ados-net
+        run: cargo build --release --target aarch64-unknown-linux-musl -p ados-net
+
+      - name: Stage artifact + checksum
+        run: |
+          set -euo pipefail
+          mkdir -p rel
+          cp target/aarch64-unknown-linux-musl/release/ados-net rel/ados-net-aarch64
+          ( cd rel && sha256sum ados-net-aarch64 > ados-net-aarch64.sha256 )
+
+      - name: Sign artifact (only when the signing key is present)
+        env:
+          SIGNING_KEY: ${{ secrets.ADOS_DRIVER_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${SIGNING_KEY}" ]; then
+            echo "No ADOS_DRIVER_SIGNING_KEY set; publishing SHA256-only (dev posture)."
+            exit 0
+          fi
+          sudo apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y minisign
+          printf '%s' "${SIGNING_KEY}" > /tmp/sign.key
+          minisign -S -s /tmp/sign.key -m rel/ados-net-aarch64 -x rel/ados-net-aarch64.minisig
+          rm -f /tmp/sign.key
+
+      - name: Publish rolling prerelease
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: prebuilt-net
+          prerelease: true
+          name: "Prebuilt ados-net (rolling)"
+          files: crates/rel/*
+
+  # Build the human-interface daemons (ados-pic + ados-input) as static arm64
+  # binaries and publish them to a rolling prerelease the installer fetches.
+  # Static (musl) so one binary runs on every supported board regardless of its
+  # glibc. Runs only on pushes to main.
+  publish-hid:
+    needs: build-test
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (musl target)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-musl
+
+      - name: Install musl tools
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Build static ados-pic + ados-input
+        run: cargo build --release --target aarch64-unknown-linux-musl -p ados-hid
+
+      - name: Stage artifacts + checksums
+        run: |
+          set -euo pipefail
+          mkdir -p rel
+          cp target/aarch64-unknown-linux-musl/release/ados-pic rel/ados-pic-aarch64
+          cp target/aarch64-unknown-linux-musl/release/ados-input rel/ados-input-aarch64
+          ( cd rel && sha256sum ados-pic-aarch64 > ados-pic-aarch64.sha256 )
+          ( cd rel && sha256sum ados-input-aarch64 > ados-input-aarch64.sha256 )
+
+      - name: Sign artifacts (only when the signing key is present)
+        env:
+          SIGNING_KEY: ${{ secrets.ADOS_DRIVER_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${SIGNING_KEY}" ]; then
+            echo "No ADOS_DRIVER_SIGNING_KEY set; publishing SHA256-only (dev posture)."
+            exit 0
+          fi
+          sudo apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y minisign
+          printf '%s' "${SIGNING_KEY}" > /tmp/sign.key
+          minisign -S -s /tmp/sign.key -m rel/ados-pic-aarch64 -x rel/ados-pic-aarch64.minisig
+          minisign -S -s /tmp/sign.key -m rel/ados-input-aarch64 -x rel/ados-input-aarch64.minisig
+          rm -f /tmp/sign.key
+
+      - name: Publish rolling prerelease
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: prebuilt-hid
+          prerelease: true
+          name: "Prebuilt ados-hid (rolling)"
+          files: crates/rel/*
+
+  # Build the display daemons (ados-display + ados-display-probe) as static arm64
+  # binaries and publish them to a rolling prerelease the installer fetches.
+  # Static (musl) so one binary runs on every supported board regardless of its
+  # glibc. Runs only on pushes to main.
+  publish-display:
+    needs: build-test
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (musl target)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-musl
+
+      - name: Install musl tools
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Build static ados-display + ados-display-probe
+        run: cargo build --release --target aarch64-unknown-linux-musl -p ados-display
+
+      - name: Stage artifacts + checksums
+        run: |
+          set -euo pipefail
+          mkdir -p rel
+          cp target/aarch64-unknown-linux-musl/release/ados-display rel/ados-display-aarch64
+          cp target/aarch64-unknown-linux-musl/release/ados-display-probe rel/ados-display-probe-aarch64
+          ( cd rel && sha256sum ados-display-aarch64 > ados-display-aarch64.sha256 )
+          ( cd rel && sha256sum ados-display-probe-aarch64 > ados-display-probe-aarch64.sha256 )
+
+      - name: Sign artifacts (only when the signing key is present)
+        env:
+          SIGNING_KEY: ${{ secrets.ADOS_DRIVER_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${SIGNING_KEY}" ]; then
+            echo "No ADOS_DRIVER_SIGNING_KEY set; publishing SHA256-only (dev posture)."
+            exit 0
+          fi
+          sudo apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y minisign
+          printf '%s' "${SIGNING_KEY}" > /tmp/sign.key
+          minisign -S -s /tmp/sign.key -m rel/ados-display-aarch64 -x rel/ados-display-aarch64.minisig
+          minisign -S -s /tmp/sign.key -m rel/ados-display-probe-aarch64 -x rel/ados-display-probe-aarch64.minisig
+          rm -f /tmp/sign.key
+
+      - name: Publish rolling prerelease
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: prebuilt-display
+          prerelease: true
+          name: "Prebuilt ados-display (rolling)"
+          files: crates/rel/*
