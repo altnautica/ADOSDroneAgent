@@ -4,7 +4,7 @@ The supervisor lives in the ados-cloud process and writes a sidecar
 file to /run/ados/wfb_failover.json so the ados-api process can serve
 the current state over REST. These tests skip the 15-second settle
 delay, point the sidecar at a tmp_path, and stub the heavy collaborators
-(load_config, pair_manager, adapter detection, bind orchestrator).
+(load_config, pair_manager, adapter detection, the bind-client forward).
 """
 
 from __future__ import annotations
@@ -37,19 +37,20 @@ class _StubPairManager:
         return {"auto_pair_enabled": enabled}
 
 
-class _StubBindOrchestrator:
-    """Bind orchestrator double that returns a programmable script.
+class _StubForwardBind:
+    """Stand-in for ``bind_client.forward_start_bind`` with a script.
 
-    Each call to ``start_local_bind`` pops the next entry from the
-    script. Entries can be either a result dict (terminal state) or a
-    callable that returns one (used to raise on a specific attempt).
+    Each invocation pops the next entry from the script. Entries can be
+    either a result dict (terminal state) or a callable that returns one
+    (used to raise on a specific attempt). The instance is callable so it
+    drops directly into the supervisor's ``forward_start_bind`` lookup.
     """
 
     def __init__(self, script: list[Any]) -> None:
         self._script = list(script)
         self.call_count = 0
 
-    async def start_local_bind(self, *, role: str, source: str = "auto", **_: Any) -> dict[str, Any]:
+    async def __call__(self, **_: Any) -> dict[str, Any]:
         self.call_count += 1
         if not self._script:
             return {"state": "failed", "error": "exhausted"}
@@ -79,25 +80,25 @@ def _install_stubs(
     monkeypatch: pytest.MonkeyPatch,
     *,
     pair_mgr: _StubPairManager,
-    orch: _StubBindOrchestrator,
+    forward: _StubForwardBind,
 ) -> None:
     """Wire stubs into the modules the supervisor imports lazily."""
     # Skip the 15 s settle delay and any RETRY_BACKOFF_S sleeps.
     monkeypatch.setattr(auto_pair_mod, "START_DELAY_S", 0.0)
     monkeypatch.setattr(auto_pair_mod, "RETRY_BACKOFF_S", 0.0)
 
-    # load_config / pair_manager / detect_wfb_adapters / orchestrator
+    # load_config / pair_manager / detect_wfb_adapters / forward_start_bind
     # are imported inside _run; install module-level stubs that the
     # ``from … import …`` lookup will resolve to.
     import ados.core.config as cfg_mod
     import ados.services.ground_station.pair_manager as pm_mod
     import ados.services.wfb.adapter as adapter_mod
-    import ados.services.wfb.bind_orchestrator as orch_mod
+    import ados.services.wfb.bind_client as bind_client_mod
 
     monkeypatch.setattr(cfg_mod, "load_config", lambda: _StubConfig())
     monkeypatch.setattr(pm_mod, "get_pair_manager", lambda: pair_mgr)
     monkeypatch.setattr(adapter_mod, "detect_wfb_adapters", lambda: [_FakeAdapter()])
-    monkeypatch.setattr(orch_mod, "get_bind_orchestrator", lambda: orch)
+    monkeypatch.setattr(bind_client_mod, "forward_start_bind", forward)
 
 
 def _run_supervisor(role: str = "drone", timeout: float = 5.0) -> AutoPairSupervisor:
@@ -125,15 +126,15 @@ def test_failover_triggers_after_max_attempts(
     """N consecutive failed attempts flip the sidecar to cloud_relay."""
     pair_mgr = _StubPairManager()
     # Every attempt returns a non-paired terminal state.
-    orch = _StubBindOrchestrator(
+    forward = _StubForwardBind(
         [{"state": "failed", "error": "no peer"}] * (MAX_LOCAL_BIND_ATTEMPTS + 5)
     )
-    _install_stubs(monkeypatch, pair_mgr=pair_mgr, orch=orch)
+    _install_stubs(monkeypatch, pair_mgr=pair_mgr, forward=forward)
 
     sup = _run_supervisor()
 
     # The supervisor stops once it gives up.
-    assert orch.call_count == MAX_LOCAL_BIND_ATTEMPTS
+    assert forward.call_count == MAX_LOCAL_BIND_ATTEMPTS
     assert sup.failover_state == "cloud_relay"
     assert sidecar.exists()
     body = json.loads(sidecar.read_text())
@@ -150,12 +151,12 @@ def test_failover_stays_local_when_pair_succeeds_within_cap(
         {"state": "failed", "error": "no peer"} for _ in range(MAX_LOCAL_BIND_ATTEMPTS - 1)
     ]
     script.append({"state": "paired", "fingerprint": "abc"})
-    orch = _StubBindOrchestrator(script)
-    _install_stubs(monkeypatch, pair_mgr=pair_mgr, orch=orch)
+    forward = _StubForwardBind(script)
+    _install_stubs(monkeypatch, pair_mgr=pair_mgr, forward=forward)
 
     sup = _run_supervisor()
 
-    assert orch.call_count == MAX_LOCAL_BIND_ATTEMPTS  # 9 failed + 1 success
+    assert forward.call_count == MAX_LOCAL_BIND_ATTEMPTS  # 9 failed + 1 success
     assert sup.failover_state == "local"
     body = json.loads(sidecar.read_text())
     assert body == {"state": "local"}
@@ -172,8 +173,8 @@ def test_run_resets_failover_state_at_start(
 
     pair_mgr = _StubPairManager()
     # First attempt succeeds so we observe the initial reset only.
-    orch = _StubBindOrchestrator([{"state": "paired", "fingerprint": "abc"}])
-    _install_stubs(monkeypatch, pair_mgr=pair_mgr, orch=orch)
+    forward = _StubForwardBind([{"state": "paired", "fingerprint": "abc"}])
+    _install_stubs(monkeypatch, pair_mgr=pair_mgr, forward=forward)
 
     sup = _run_supervisor()
 

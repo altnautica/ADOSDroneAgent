@@ -141,8 +141,8 @@ install_wfb_ng_from_vendor() {
     provision_wfb_bind_artifacts "${vendor_dir}"
 }
 
-# Provision artifacts for the local-radio bind protocol used by the
-# Python bind orchestrator (services/wfb/bind_orchestrator.py):
+# Provision artifacts for the local-radio bind protocol driven by the
+# supervisor's bind state machine:
 #   /etc/bind.key      hardcoded default shared key (matches upstream)
 #   /etc/bind.yaml     wfb-server profiles for drone_bind / gs_bind
 #   wifibroadcast@.service  systemd template for the bind profile

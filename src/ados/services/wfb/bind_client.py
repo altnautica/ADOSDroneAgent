@@ -30,11 +30,11 @@ A cross-process liveness sentinel at ``/run/ados/bind-state.json``
 that cannot afford a socket round-trip (the hop supervisor's hot tick)
 cheaply gate on "is a bind in flight right now".
 
-When the control socket is unreachable (binary not yet deployed, or
-running on the fallback Python supervisor that does not serve it), the
-forwarding helpers fall back to the in-process bind orchestrator so the
-agent keeps pairing. That fallback path is temporary and will be
-removed once the socket is the only producer.
+The control socket is the sole producer of bind sessions. The
+supervisor process serves it on every target, so an unreachable
+socket is a hard error: ``forward_start_bind`` raises
+``BindUnavailableError`` and ``forward_status`` returns ``{}`` (no
+session info available). There is no in-process fallback.
 """
 
 from __future__ import annotations
@@ -64,10 +64,18 @@ _POST_CANCEL_READ_TIMEOUT_S = 10.0
 class BindBusyError(RuntimeError):
     """Raised when a bind session is already in progress.
 
-    Kept here (not only in the orchestrator) so callers import the
-    exception from this module and their ``except BindBusyError``
-    branches keep working regardless of which producer served the
-    request.
+    Callers import the exception from this module so their
+    ``except BindBusyError`` branches map onto the
+    ``E_BIND_IN_PROGRESS`` reply the control socket returns.
+    """
+
+
+class BindUnavailableError(RuntimeError):
+    """Raised when the bind control socket cannot be reached.
+
+    The supervisor serves the socket on every target, so an
+    unreachable socket means the producer is down. There is no
+    in-process fallback; the caller surfaces this as a hard error.
     """
 
 
@@ -152,21 +160,16 @@ async def forward_start_bind(
     returned. The caller therefore always gets a session dict back on
     those paths rather than an exception.
 
-    Falls back to the in-process orchestrator when the socket is
-    unreachable.
+    Raises ``BindUnavailableError`` when the control socket is
+    unreachable: the socket is the sole producer of bind sessions.
     """
     try:
         reader, writer = await _open()
     except (TimeoutError, OSError) as exc:
-        log.debug("bind_socket_unreachable_fallback", op="start_bind", error=str(exc))
-        from ados.services.wfb.bind_orchestrator import get_bind_orchestrator
-
-        return await get_bind_orchestrator().start_local_bind(
-            role=role,
-            peer_device_id=peer_device_id,
-            source=source,
-            cancel_event=cancel_event,
-        )
+        log.warning("bind_socket_unreachable", op="start_bind", error=str(exc))
+        raise BindUnavailableError(
+            "bind control socket unavailable at " + SUPERVISOR_SOCK
+        ) from exc
 
     try:
         await _send(
@@ -226,16 +229,14 @@ async def forward_start_bind(
 async def forward_status() -> dict:
     """Return the latest bind-session snapshot, or ``{}`` if none.
 
-    Falls back to the in-process orchestrator when the socket is
-    unreachable.
+    Status is best-effort: an unreachable control socket means "no
+    session info available", which ``{}`` already represents.
     """
     try:
         reader, writer = await _open()
     except (TimeoutError, OSError) as exc:
-        log.debug("bind_socket_unreachable_fallback", op="bind_status", error=str(exc))
-        from ados.services.wfb.bind_orchestrator import get_bind_orchestrator
-
-        return await get_bind_orchestrator().status() or {}
+        log.debug("bind_socket_unreachable", op="bind_status", error=str(exc))
+        return {}
 
     try:
         await _send(writer, {"op": "bind_status"})

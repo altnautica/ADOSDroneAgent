@@ -553,7 +553,11 @@ async def post_wfb_pair_local_bind(request: LocalBindRequest) -> dict[str, Any]:
         else _current_role(app)
     )
 
-    from ados.services.wfb.bind_client import BindBusyError, forward_start_bind
+    from ados.services.wfb.bind_client import (
+        BindBusyError,
+        BindUnavailableError,
+        forward_start_bind,
+    )
 
     cancel_event = asyncio.Event()
     try:
@@ -568,6 +572,11 @@ async def post_wfb_pair_local_bind(request: LocalBindRequest) -> dict[str, Any]:
         raise HTTPException(
             status_code=409,
             detail={"error": {"code": "E_BIND_IN_PROGRESS", "message": str(exc)}},
+        ) from exc
+    except BindUnavailableError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={"error": {"code": "E_BIND_UNAVAILABLE", "message": str(exc)}},
         ) from exc
     except TimeoutError as exc:
         # forward_start_bind returns the terminal session on its own
