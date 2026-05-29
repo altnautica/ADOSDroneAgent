@@ -18,4 +18,6 @@
 pub mod camera_state;
 pub mod config;
 pub mod encoder;
+pub mod mediamtx;
 pub mod process;
+pub mod wfb_tee;
