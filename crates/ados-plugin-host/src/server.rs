@@ -124,6 +124,17 @@ impl<H: HostServices> PluginIpcServer<H> {
         });
         Ok((path, task))
     }
+
+    /// Stop serving a plugin: remove its bound socket file. The caller owns the
+    /// accept [`JoinHandle`] returned by [`serve_plugin`] and aborts it; this
+    /// only unlinks the socket so a later re-serve binds cleanly and no stale
+    /// socket lingers. A live connection's `release_plugin` already runs on
+    /// disconnect (see [`serve_plugin`]); aborting the accept task stops new
+    /// connections.
+    pub fn stop_plugin(&self, plugin_id: &str) {
+        let path = self.socket_path(plugin_id);
+        let _ = std::fs::remove_file(&path);
+    }
 }
 
 /// One accepted connection from a plugin runner.
@@ -615,4 +626,41 @@ fn set_socket_mode(path: &Path) -> Result<(), ServerError> {
 #[cfg(not(target_os = "linux"))]
 fn set_socket_mode(_path: &Path) -> Result<(), ServerError> {
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::host::NoopHost;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn stop_plugin_removes_the_socket_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let issuer = Arc::new(TokenIssuer::new(b"stop-plugin-secret".to_vec()));
+        let bus = Arc::new(EventBus::new());
+        let host = Arc::new(NoopHost);
+        let server = PluginIpcServer::new(dir.path(), issuer, bus, host);
+
+        let (path, accept) = server.serve_plugin("com.example.demo").expect("serve");
+        // The socket is bound and connectable.
+        let mut connected = false;
+        for _ in 0..50 {
+            if UnixStream::connect(&path).await.is_ok() {
+                connected = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(connected, "expected the bound socket to be connectable");
+        assert!(path.exists(), "socket file should exist while served");
+
+        // Stop: the caller aborts the accept task, stop_plugin unlinks the file.
+        accept.abort();
+        server.stop_plugin("com.example.demo");
+        assert!(
+            !path.exists(),
+            "socket file should be gone after stop_plugin"
+        );
+    }
 }

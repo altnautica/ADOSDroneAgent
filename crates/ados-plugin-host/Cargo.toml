@@ -6,6 +6,12 @@ license.workspace = true
 repository.workspace = true
 description = "Plugin RPC host: serves a per-plugin Unix socket, verifies the capability token at handshake, and gates each request on its required capability before routing to a host service."
 
+# The crate is lib + daemon binary. The lib is the host wiring; the binary is
+# the runnable daemon that serves the enabled subprocess plugins.
+[[bin]]
+name = "ados-plugin-host"
+path = "src/bin/ados-plugin-host.rs"
+
 [dependencies]
 # The wire (frame + envelope + capability token) lives in ados-protocol and is
 # byte-parity tested against the Python supervisor. This crate speaks it
@@ -18,6 +24,7 @@ rmp-serde = { workspace = true }
 rmpv = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
 # Lifecycle additions: archive parse, the canonical payload hash, Ed25519
 # signature verify, and the YAML manifest model. These power the install/
@@ -30,12 +37,15 @@ ed25519-dalek = { workspace = true }
 zip = { workspace = true }
 serde_norway = { workspace = true }
 
-# Linux-only edge: setting the socket file mode to 0o660 after bind, and the
-# advisory file lock around the state read-modify-write. Confined to a target
+# Linux-only edge: setting the socket file mode to 0o660 after bind, the
+# advisory file lock around the state read-modify-write, and the daemon's
+# systemd readiness/watchdog notify + journald log layer. Confined to a target
 # section so the pure-logic core still builds and tests on a non-Linux dev
-# host (where the mode set and the lock are no-ops).
+# host (where the mode set, the lock, and the notify are no-ops).
 [target.'cfg(target_os = "linux")'.dependencies]
 nix = { workspace = true }
+sd-notify = { workspace = true }
+tracing-journald = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"

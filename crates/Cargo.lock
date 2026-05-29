@@ -47,6 +47,7 @@ dependencies = [
  "nix 0.29.0",
  "rmp-serde",
  "rmpv",
+ "sd-notify",
  "serde",
  "serde_json",
  "serde_norway",
@@ -55,6 +56,8 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "tracing-journald",
+ "tracing-subscriber",
  "zip",
 ]
 
