@@ -22,11 +22,11 @@ use tokio::sync::Mutex;
 
 use ados_net::cmd::TokioCmdRunner;
 use ados_net::data_cap::{DataCapTracker, SysfsUsageSource, DATA_CAP_INTERVAL};
-use ados_net::managers::{EthernetManager, HostapdManager, UsbGadgetManager, WifiClientManager};
-use ados_net::router::failover;
-use ados_net::{
-    run_throttle_consumer, ShareUplinkFirewall, StubManager, UplinkManager, UplinkRouter,
+use ados_net::managers::{
+    EthernetManager, HostapdManager, ModemManager, UsbGadgetManager, WifiClientManager,
 };
+use ados_net::router::failover;
+use ados_net::{run_throttle_consumer, ShareUplinkFirewall, UplinkManager, UplinkRouter};
 
 fn init_logging() {
     let filter = std::env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string());
@@ -97,10 +97,16 @@ fn detect_ethernet_iface() -> String {
         .unwrap_or_else(|| "eth0".to_string())
 }
 
-/// Wire the real ethernet + Wi-Fi-client managers. The cellular `wwan0` slot
-/// stays a stub until the modem manager chunk lands; `usb0` has no manager
-/// (the FSM checks its sysfs carrier directly).
-fn build_managers(runner: Arc<TokioCmdRunner>) -> HashMap<String, Arc<dyn UplinkManager>> {
+/// Wire the real ethernet + Wi-Fi-client + cellular modem managers. The modem
+/// fills the `wwan0` slot; its `is_up` only reports kernel-iface liveness, so
+/// the router never auto-connects it (bring-up is an explicit, config-gated
+/// step in `main`). `usb0` has no manager (the FSM checks its sysfs carrier
+/// directly). The `ModemManager` is returned separately too so `main` can gate
+/// its bring-up on the sidecar.
+fn build_managers(
+    runner: Arc<TokioCmdRunner>,
+    modem: Arc<ModemManager>,
+) -> HashMap<String, Arc<dyn UplinkManager>> {
     let eth_iface = detect_ethernet_iface();
     let mut m: HashMap<String, Arc<dyn UplinkManager>> = HashMap::new();
     m.insert(
@@ -111,7 +117,7 @@ fn build_managers(runner: Arc<TokioCmdRunner>) -> HashMap<String, Arc<dyn Uplink
         "wlan0_client".to_string(),
         Arc::new(WifiClientManager::new(runner.clone())),
     );
-    m.insert("wwan0".to_string(), Arc::new(StubManager::new("wwan0")));
+    m.insert("wwan0".to_string(), modem);
     m
 }
 
@@ -125,11 +131,12 @@ async fn main() -> Result<()> {
     tracing::info!(
         priority = ?priority,
         host = ados_net::health::HEALTH_HOST,
-        "uplink router starting (cellular slot stubbed until the modem chunk)"
+        "uplink router starting"
     );
 
+    let modem = Arc::new(ModemManager::new());
     let router = Arc::new(UplinkRouter::new(
-        build_managers(runner.clone()),
+        build_managers(runner.clone(), Arc::clone(&modem)),
         Some(priority),
         None,
     ));
@@ -182,6 +189,22 @@ async fn main() -> Result<()> {
         tracing::info!("usb_gadget_configfs_absent_skipping");
     }
 
+    // Cellular modem is HW-gated and DISABLED by default: only bring it up when
+    // the operator has written the config sidecar AND left `enabled` set. A
+    // bare board with no modem config never auto-dials. The data session uses
+    // the persisted APN (or "auto"); IMSI-based APN auto-detect over D-Bus is
+    // resolved inside the modem manager's bring-up.
+    let modem_config_present = std::path::Path::new(ados_net::paths::GS_MODEM_JSON).is_file();
+    if modem_config_present && modem.enabled().await {
+        let result = modem.bring_up("auto", None).await;
+        tracing::info!(result = %result, "modem_bring_up");
+    } else {
+        tracing::info!(
+            config = modem_config_present,
+            "modem_disabled_by_default_not_dialing"
+        );
+    }
+
     notify_ready();
 
     // Health loop: tick now, then every HEALTH_INTERVAL, until SIGTERM/SIGINT.
@@ -203,10 +226,14 @@ async fn main() -> Result<()> {
         }
     }
 
-    // Graceful shutdown: flush the data-cap counter, tear down the gadget +
-    // AP, and stop the background tasks.
+    // Graceful shutdown: flush the data-cap counter, bring the modem down (only
+    // if it was dialed), tear down the gadget + AP, and stop the background
+    // tasks.
     data_cap_task.abort();
     data_cap.lock().await.flush();
+    if modem_config_present && modem.enabled().await {
+        let _ = modem.bring_down().await;
+    }
     usb_gadget.teardown().await;
     hostapd.stop().await;
     throttle.abort();

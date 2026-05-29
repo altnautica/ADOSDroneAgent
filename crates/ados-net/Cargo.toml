@@ -48,3 +48,12 @@ tempfile = "3"
 sd-notify = { workspace = true }
 tracing-journald = { workspace = true }
 nix = { workspace = true }
+# System D-Bus client for the ModemManager1 path. zbus is a from-scratch
+# pure-Rust D-Bus implementation: with default-features off + the `tokio`
+# feature it links NO C library (no dbus-sys / libdbus-sys), pulls no `ring`,
+# and reuses the tokio runtime instead of the async-io stack — so it
+# cross-compiles to aarch64-unknown-linux-musl as a clean static binary. D-Bus
+# is a Linux concept, so this is confined to the Linux target; off Linux the
+# modem manager compiles with the D-Bus path disabled (always-fallback).
+# Crate-specific (no other crate speaks D-Bus), declared here.
+zbus = { version = "5", default-features = false, features = ["tokio"] }

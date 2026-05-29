@@ -1,9 +1,9 @@
 //! Ground-station uplink matrix: priority failover, cloud-reachability health
 //! probing, the active-uplink sidecar that drives mesh gateway election, the
 //! router control-loop FSM, the hardware managers (ethernet + Wi-Fi client +
-//! hostapd AP + USB-gadget tether), the cellular data-cap tracker, and the
-//! share-uplink firewall / throttle. The modem manager (HW-gated) lands in the
-//! last chunk.
+//! hostapd AP + USB-gadget tether + cellular modem), the cellular data-cap
+//! tracker, and the share-uplink firewall / throttle. The modem speaks D-Bus
+//! (ModemManager1) and delegates its AT fallback to the Python service.
 
 pub mod cmd;
 pub mod data_cap;
@@ -21,7 +21,8 @@ pub use cmd::{CmdOut, CmdRunner, TokioCmdRunner};
 pub use data_cap::{DataCapTracker, SysfsUsageSource, UsageSource};
 pub use firewall::{FirewallBackend, ShareUplinkFirewall};
 pub use managers::{
-    build_ssid, EthernetManager, HostapdManager, UsbGadgetManager, WifiClientManager,
+    apn_for_imsi, build_ssid, EthernetManager, HostapdManager, ModemConfig, ModemManager,
+    UsbGadgetManager, WifiClientManager,
 };
 pub use process::ManagedProcess;
 pub use router::active_flag::{ActiveFlagWriter, ActiveUplinkFlag};

@@ -45,6 +45,10 @@ pub const DNSMASQ_USB0_CONF: &str = "/run/ados/dnsmasq-usb0.conf";
 /// USB-gadget dnsmasq pid file (`DNSMASQ_USB0_PID`).
 pub const DNSMASQ_USB0_PID: &str = "/run/ados/dnsmasq-usb0.pid";
 
+/// Cellular modem config sidecar (`GS_MODEM_JSON`). Owner-written JSON
+/// `{"apn":..,"cap_gb":..,"enabled":..}`.
+pub const GS_MODEM_JSON: &str = "/etc/ados/ground-station-modem.json";
+
 /// Build the canonical `GS_UPLINK_JSON` path.
 pub fn gs_uplink_json() -> &'static Path {
     Path::new(GS_UPLINK_JSON)
