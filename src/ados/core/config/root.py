@@ -48,11 +48,25 @@ class ADOSConfig(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def fill_device_id(cls, data: Any) -> Any:
-        """Auto-generate device_id if empty."""
+        """Fill device_id if empty, preferring the persisted /etc/ados/device-id.
+
+        Reading the persisted identity (instead of minting a throwaway UUID on
+        every validation) keeps the short device_id deterministic across
+        restarts and prefix-consistent with the WFB peer-id derived from the
+        same file. Only mints a fallback when no persisted id is available.
+        """
         if isinstance(data, dict):
             agent = data.get("agent", {})
             if isinstance(agent, dict) and not agent.get("device_id"):
-                import uuid
-                agent["device_id"] = str(uuid.uuid4())[:8]
+                short = ""
+                try:
+                    from ados.core.identity import get_or_create_device_id
+                    short = get_or_create_device_id()[:8]
+                except Exception:
+                    short = ""
+                if not short:
+                    import uuid
+                    short = uuid.uuid4().hex[:8]
+                agent["device_id"] = short
                 data["agent"] = agent
         return data

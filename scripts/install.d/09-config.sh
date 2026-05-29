@@ -16,15 +16,19 @@ generate_device_id() {
         return
     fi
 
+    # Store a normalized 12-char hex (no dashes) so the file format matches
+    # the runtime identity helper (ados.core.identity) and the short forms
+    # derived from it stay prefix-consistent.
     local device_id
     if [ -f /proc/sys/kernel/random/uuid ]; then
-        device_id=$(cat /proc/sys/kernel/random/uuid)
+        device_id=$(tr -d '-' < /proc/sys/kernel/random/uuid | cut -c1-12)
     elif command -v python3 >/dev/null 2>&1; then
-        device_id=$(python3 -c "import uuid; print(uuid.uuid4())")
+        device_id=$(python3 -c "import uuid; print(uuid.uuid4().hex[:12])")
     elif command -v openssl >/dev/null 2>&1; then
-        device_id=$(openssl rand -hex 16)
+        device_id=$(openssl rand -hex 16 | cut -c1-12)
     else
-        device_id="$(hostname)-$(date +%s)-$$"
+        device_id=$(printf '%s%s%s' "$(hostname)" "$(date +%s)" "$$" | md5sum 2>/dev/null | cut -c1-12)
+        [ -n "$device_id" ] || device_id=$(date +%s | tail -c 13)
     fi
 
     echo "$device_id" > "${DEVICE_ID_FILE}"
@@ -32,14 +36,62 @@ generate_device_id() {
     info "Device identity generated: ${device_id}"
 }
 
+# ─── Reconcile Identity Into An Existing Config ─────────────────────────────
+
+reconcile_config_identity() {
+    # Inject agent.name + agent.device_id into an EXISTING config.yaml without
+    # rewriting the rest of the file. Used when a prior stage wrote a partial
+    # config (profile resolution writes a minimal one), or on --upgrade with
+    # --name. Idempotent: never clobbers an operator-set name. Uses python so
+    # YAML round-trips safely; no-ops if no python is available.
+    local config_file="$1"
+    local py="${VENV_DIR:-/opt/ados/venv}/bin/python"
+    [ -x "$py" ] || py="$(command -v python3 || true)"
+    [ -n "$py" ] || return 0
+
+    local device_id=""
+    [ -f "${DEVICE_ID_FILE}" ] && device_id=$(cat "${DEVICE_ID_FILE}")
+    local short_id="${device_id:0:8}"
+
+    DRONE_NAME="${DRONE_NAME:-}" ADOS_SHORT_ID="${short_id}" "$py" - "$config_file" <<'PY' || \
+        warn "Could not reconcile identity into config.yaml; continuing."
+import os, sys
+from pathlib import Path
+import yaml
+p = Path(sys.argv[1])
+cfg = {}
+if p.exists():
+    try:
+        cfg = yaml.safe_load(p.read_text()) or {}
+    except Exception:
+        cfg = {}
+agent = cfg.setdefault("agent", {})
+short_id = os.environ.get("ADOS_SHORT_ID", "").strip()
+if short_id and not agent.get("device_id"):
+    agent["device_id"] = short_id
+name = os.environ.get("DRONE_NAME", "").strip()
+if name and agent.get("name", "") in ("", "my-drone"):
+    agent["name"] = name
+elif not agent.get("name") and short_id:
+    agent["name"] = f"ados-{short_id}"
+p.parent.mkdir(parents=True, exist_ok=True)
+p.write_text(yaml.safe_dump(cfg, sort_keys=False, default_flow_style=False))
+PY
+    chmod 0600 "$config_file" 2>/dev/null || true
+}
+
 # ─── Generate Default Config ────────────────────────────────────────────────
 
 generate_default_config() {
     local config_file="${CONFIG_DIR}/config.yaml"
 
-    # Idempotent: skip if config already exists
+    # If a config already exists (a minimal one written during profile
+    # resolution, or an --upgrade), do NOT regenerate from scratch — only
+    # reconcile the install-provided name + the stable short device_id into
+    # it, then return.
     if [ -f "$config_file" ]; then
-        info "Config already exists at ${config_file}, skipping generation."
+        reconcile_config_identity "$config_file"
+        info "Config already exists at ${config_file}; reconciled identity fields."
         return
     fi
 
@@ -257,4 +309,57 @@ write_pairing() {
 }
 PAIREOF
     chmod 0600 "$pairing_file"
+}
+
+# ─── Set System Hostname From --name ────────────────────────────────────────
+
+set_hostname() {
+    # Only act when the operator passed --name. Slugify to a DNS-safe label
+    # (lowercase, [a-z0-9-] only, collapsed, trimmed, max 63 chars) and set the
+    # system hostname so <slug>.local resolves via avahi alongside the agent's
+    # own ados-<id>.local advertisement. Idempotent: no-op if already set.
+    [ -n "${DRONE_NAME:-}" ] || return 0
+
+    local slug
+    slug=$(printf '%s' "${DRONE_NAME}" \
+        | tr '[:upper:]' '[:lower:]' \
+        | sed -E 's/[^a-z0-9-]+/-/g; s/-+/-/g; s/^-+//; s/-+$//' \
+        | cut -c1-63)
+    slug=$(printf '%s' "$slug" | sed -E 's/-+$//')
+    [ -n "$slug" ] || { warn "--name '${DRONE_NAME}' slugified to empty; leaving hostname unchanged."; return 0; }
+
+    local current
+    current=$(hostname 2>/dev/null || cat /etc/hostname 2>/dev/null || echo "")
+    if [ "$current" = "$slug" ]; then
+        info "Hostname already '${slug}'."
+        return 0
+    fi
+
+    if command -v hostnamectl >/dev/null 2>&1; then
+        if hostnamectl set-hostname "$slug" 2>/dev/null; then
+            info "Hostname set to '${slug}'."
+        else
+            warn "hostnamectl failed; falling back to /etc/hostname."
+            printf '%s\n' "$slug" > /etc/hostname 2>/dev/null || true
+        fi
+    else
+        printf '%s\n' "$slug" > /etc/hostname 2>/dev/null || true
+        hostname "$slug" 2>/dev/null || true
+        info "Hostname set to '${slug}' (no hostnamectl)."
+    fi
+
+    # Keep the /etc/hosts 127.0.1.1 entry consistent so name resolution does
+    # not stall. Idempotent rewrite of that one line only.
+    if [ -f /etc/hosts ]; then
+        if grep -qE '^127\.0\.1\.1[[:space:]]' /etc/hosts; then
+            sed -i -E "s/^127\.0\.1\.1[[:space:]].*/127.0.1.1\t${slug}/" /etc/hosts 2>/dev/null || true
+        else
+            printf '127.0.1.1\t%s\n' "$slug" >> /etc/hosts 2>/dev/null || true
+        fi
+    fi
+
+    # Reconcile mDNS so <slug>.local resolves. Best-effort.
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl restart avahi-daemon 2>/dev/null || true
+    fi
 }

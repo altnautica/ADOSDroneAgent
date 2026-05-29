@@ -734,8 +734,11 @@ main_install_flow() {
     # Generate device identity (idempotent)
     generate_device_id
 
-    # Generate default config (idempotent, skips if exists)
+    # Generate default config (idempotent; reconciles identity if one exists)
     generate_default_config
+
+    # Set the system hostname from --name (idempotent; no-op without --name)
+    set_hostname
 
     # Write pairing state if code was provided
     if [ -n "$PAIR_CODE" ]; then

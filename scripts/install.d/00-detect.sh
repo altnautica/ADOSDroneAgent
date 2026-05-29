@@ -357,6 +357,15 @@ if cfg_path.exists():
 agent = cfg.setdefault("agent", {})
 agent["profile"] = target
 
+# Seed agent.name from the install --name flag when one was passed and the
+# config has no non-default name yet, so the name survives this early
+# minimal-config write (DRONE_NAME is exported by install.sh). Idempotent:
+# never clobbers an operator-set name.
+import os
+_drone_name = os.environ.get("DRONE_NAME", "").strip()
+if _drone_name and agent.get("name", "") in ("", "my-drone"):
+    agent["name"] = _drone_name
+
 # When promoting to ground_station, seed a default role so the agent
 # has something to work with before the operator opens the wizard.
 # Idempotent — never overwrites a role the operator has already set.
