@@ -1,6 +1,6 @@
 # OEM Deployment Guide — Manufacturing Integration
 
-This document covers the full process of flashing, testing, and shipping ADOS ADOS Drone Agent on companion computer hardware.
+This document covers the full process of flashing, testing, and shipping ADOS Drone Agent on companion computer hardware.
 
 ---
 

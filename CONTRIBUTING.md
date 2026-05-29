@@ -70,25 +70,41 @@ When opening an issue, please include:
 
 ## Architecture Overview
 
-The agent is a systemd-managed process supervisor with modular services:
+The agent is a hybrid Rust/Python systemd-managed process supervisor with
+modular services. Long-running and safety-critical services (process
+supervision, MAVLink routing, video pipeline, cloud relay, networking,
+radio/WFB, display/HID) run as native Rust services. Python handles the REST
+API, AI/ML inference, HAL detection, drivers, scripting, and the plugin system.
 
 ```
-src/
-  core/           # Process supervisor, config, logging
+crates/           # Native Rust services (one crate per service)
+  ados-supervisor/        # Process supervisor / systemd orchestration
+  ados-mavlink-router/    # MAVLink proxy and routing
+  ados-video/             # Video pipeline management
+  ados-cloud/             # Cloud relay (Convex HTTP + MQTT)
+  ados-radio/             # WFB-ng radio control
+  ados-groundlink/        # Ground-station receive and mesh
+  ados-net/               # Ground-station uplink matrix
+  ados-display/           # Physical UI (OLED / SPI LCD)
+  ados-hid/               # Buttons and joystick input
+  ados-plugin-host/       # Plugin host runtime
+  ados-protocol/ ados-sdk/ ados-tui/ ados-capabilities-codegen/
+
+src/                # Python runtime
+  core/           # Config, logging, IPC
   services/
-    mavlink/      # MAVLink proxy and routing
-    video/        # WFB-ng video pipeline management
-    mqtt/         # MQTT gateway for fleet telemetry
-    suite/        # Suite runtime (YAML manifest execution)
-    script/       # Script executor (text commands, Python SDK)
+    scripting/    # Script executor (text commands, Python SDK)
     ota/          # Over-the-air update manager
     sensor/       # Sensor discovery and management
+    vision/       # Vision model registry
+  hal/            # Hardware detection and board profiles
   plugins/        # Plugin system (Python entry points)
   sdk/            # Python SDK (ados package)
   api/            # REST API (FastAPI)
 ```
 
-Each service runs as a systemd unit. Plugins extend functionality via Python entry points.
+Each service runs as a systemd unit. Plugins extend functionality via Python or
+Rust entry points through the plugin host.
 
 ## License
 

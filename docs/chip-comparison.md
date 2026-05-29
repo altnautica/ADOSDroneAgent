@@ -1,22 +1,22 @@
 # Companion Computer Chip Comparison
 
-> **Internal hardware reference.** Bench-rig sourcing notes and pricing in
-> this document reflect the maintainers' local supply chain (₹ INR, named
-> vendor) and are indicative, not a global recommendation. The chips
-> themselves are evaluated on technical merit only.
+> **Hardware evaluation guide.** This document compares companion computer
+> chips for ADOS Drone Agent deployment. All prices are approximate market
+> estimates and regional pricing varies. Chips are evaluated on technical
+> merit for the ADOS use case.
 
-> All chips evaluated for ADOS ADOS Drone Agent. Updated 2026-03-21.
+> Updated 2026-03-21.
 
 ## Summary Table
 
 | Chip | Arch | Cores | Speed | RAM Options | NPU | Video Encode | Video Decode | Chip Price | Board Price | Viability |
 |------|------|-------|-------|-------------|-----|-------------|-------------|-----------|------------|-----------|
-| RV1103 | Cortex-A7 | 1 | 1.2 GHz | 64MB (PoP) | 0.5 TOPS | H.264 1080p | H.264 1080p | ~$2-3 | ~₹700 (Luckfox Pico) | Marginal |
-| RV1106 | Cortex-A7 | 1 | 1.2 GHz | 128-256MB (PoP) | 0.5 TOPS | H.264/H.265 1080p | H.264/H.265 | ~$3-5 | ₹1,190-2,400 (Luckfox) | Viable (256MB) |
-| RV1106G3 | Cortex-A7 | 1 | 1.2 GHz | 256MB (PoP) | 0.5 TOPS | H.264/H.265 | H.264/H.265 | ~$4-5 | ~₹2,400 (Luckfox Pico Zero) | Viable |
-| RK3506G2 | Cortex-A7 | 3 | 1.5 GHz | 256MB (PoP) | None | None (decode only) | H.264 | ~$3-4 | ~₹1,350 (Luckfox Lyra) | Not Recommended |
+| RV1103 | Cortex-A7 | 1 | 1.2 GHz | 64MB (PoP) | 0.5 TOPS | H.264 1080p | H.264 1080p | ~$2-3 | ~$8 (Luckfox Pico) | Marginal |
+| RV1106 | Cortex-A7 | 1 | 1.2 GHz | 128-256MB (PoP) | 0.5 TOPS | H.264/H.265 1080p | H.264/H.265 | ~$3-5 | ~$14-29 (Luckfox) | Viable (256MB) |
+| RV1106G3 | Cortex-A7 | 1 | 1.2 GHz | 256MB (PoP) | 0.5 TOPS | H.264/H.265 | H.264/H.265 | ~$4-5 | ~$29 (Luckfox Pico Zero) | Viable |
+| RK3506G2 | Cortex-A7 | 3 | 1.5 GHz | 256MB (PoP) | None | None (decode only) | H.264 | ~$3-4 | ~$16 (Luckfox Lyra) | Not Recommended |
 | RK3566 | Cortex-A55 | 4 | 1.8 GHz | 1-8GB | 0.8 TOPS | H.264 1080p60 | H.264/H.265 4K | ~$8-12 | $36 (Radxa CM3) | **RECOMMENDED** |
-| RV1126B | Cortex-A7 | 4 | 1.5 GHz | 256MB-1GB | 2.0 TOPS | H.265 4K30 | H.264/H.265 | ~$8-10 | Not available in India | Strong |
+| RV1126B | Cortex-A7 | 4 | 1.5 GHz | 256MB-1GB | 2.0 TOPS | H.265 4K30 | H.264/H.265 | ~$8-10 | Limited regional availability | Strong |
 | RK3576 | A72+A53 | 4+4 | 2.2+1.8 GHz | 2-16GB | 6 TOPS | H.265 4K60 | 8K | ~$15-20 | $70 (Radxa CM4) | **ACTIVE** (Android RC) |
 | RK3588S2 | A76+A55 | 4+4 | 2.4+1.8 GHz | 4-32GB | 6 TOPS | H.265 8K30 | 8K | ~$35-40 | $72 (Radxa CM4) | High end |
 
@@ -34,7 +34,7 @@
 - **NPU:** 0.5 TOPS. Could run tiny inference models (gesture detection, simple object tracking). Not useful at 64MB RAM.
 
 **Pros:**
-- Cheapest option (~₹700 for a complete board)
+- Cheapest option (~$8 for a complete board)
 - Tiny form factor (25.4 x 18mm on Luckfox Pico)
 - Extremely low power draw
 - CSI camera input available
@@ -61,7 +61,7 @@
 - **NPU:** 0.5 TOPS. Same as RV1103. Limited practical use at this tier.
 
 **Pros:**
-- Very cheap (₹1,190 for 128MB, ₹2,400 for 256MB)
+- Very cheap (~$14 for 128MB, ~$29 for 256MB)
 - H.265 hardware encode (rare at this price point)
 - Small form factor
 - Built-in ISP (Image Signal Processor) for camera processing
@@ -112,7 +112,7 @@
 
 **Pros:**
 - Three A7 cores (more CPU than RV1103/RV1106)
-- Cheap (~₹1,350 for Luckfox Lyra board)
+- Cheap (~$16 for Luckfox Lyra board)
 - Ethernet + USB host
 - Triple UART (good for MAVLink + GPS + spare)
 
@@ -143,7 +143,7 @@
 - CM3 form factor (100-pin Hirose connectors). Same connector layout proposed for the reference companion baseboard
 - PCIe 2.1, USB 3.0, dual CSI, HDMI. Real I/O
 - Proven in production (Radxa ships thousands of CM3 units)
-- Available in India
+- Widely available worldwide
 - Runs full Debian with apt. Much easier development than Buildroot-only chips
 
 **Cons:**
@@ -172,13 +172,13 @@
 - Chip price is competitive with RK3566
 
 **Cons:**
-- **Not readily available in India.** This is the primary blocker
-- Sourcing for Indian production is uncertain
+- **Limited general availability.** This is the primary blocker
+- Sourcing for volume production is uncertain
 - A7 cores (not A55). Weaker per-core performance than RK3566
 - Limited board ecosystem (fewer dev boards than RK3566)
 - Buildroot preferred (Debian support is patchy)
 
-**Recommended Use:** If the OEM partner handles hardware and manufacturing, this is a strong pick. For independent or India-side prototyping, the RK3566 is more practical due to availability.
+**Recommended Use:** If the OEM partner handles hardware and manufacturing, this is a strong pick. For cost-constrained deployments, the RK3566 offers the best availability and developer experience globally.
 
 ---
 
@@ -225,7 +225,7 @@ Confirmed running Android with 4GB RAM + 64GB Flash. Target SoC for the ADOS And
 - 6 TOPS NPU for real AI workloads
 - Same Hirose connector as CM3 (same baseboard works)
 - Well-supported by Radxa (Debian, Ubuntu, Android)
-- Available in India
+- Widely available worldwide
 
 **Cons:**
 - 5-8W power draw requires active cooling or heatsink
@@ -244,8 +244,8 @@ Confirmed running Android with 4GB RAM + 64GB Flash. Target SoC for the ADOS And
 | Video HW Encode | Yes* | Yes | No | Yes | Yes | Yes |
 | H.265 Encode | No | Yes | No | No | Yes | Yes |
 | RAM Headroom | None | Moderate | N/A | Large | Moderate | Huge |
-| India Availability | Yes | Yes | Yes | Yes | No | Yes |
-| Board Cost | ₹700 | ₹2,400 | ₹1,350 | $36 | N/A | $72 |
+| General Availability | Yes | Yes | Yes | Yes | Limited | Yes |
+| Board Cost | ~$8 | ~$29 | ~$16 | $36 | N/A | $72 |
 | Power Draw | 0.3W | 0.5W | 0.6W | 2W | 1.5W | 6W |
 | Debian Support | No | No | No | Yes | Partial | Yes |
 | NPU | 0.5T | 0.5T | None | 0.8T | 2.0T | 6T |

@@ -13,16 +13,20 @@ GET /api/v1/ground-station/role
 200 OK
 {
   "role": "direct",
-  "mesh_capable": true,
-  "pending": null
+  "configured": "direct",
+  "supported": ["direct", "relay", "receiver"],
+  "units": [],
+  "all_mesh_units": []
 }
 ```
 
 Fields:
 
-- `role`. one of `direct`, `relay`, `receiver`
-- `mesh_capable`. `true` if the node has batctl and a second WiFi dongle
-- `pending`. the role the node is transitioning to, or `null`
+- `role`. current active role: one of `direct`, `relay`, `receiver`
+- `configured`. intended role from the configuration
+- `supported`. roles available on this device
+- `units`. systemd units gated by the current role
+- `all_mesh_units`. all mesh-capable systemd units
 
 ### PUT /role
 
@@ -168,17 +172,17 @@ Receiver only. Post-FEC-combine output stream stats: kbit/s, fraction of packets
 
 ### POST /pair/accept
 
-Receiver only. Open a pairing accept window. Body: `{"window_s": 60}`.
+Receiver only. Open a pairing accept window. Body: `{"duration_s": 60}`.
 
 ```
 POST /api/v1/ground-station/pair/accept
-{"window_s": 60}
+{"duration_s": 60}
 
 200 OK
 {
-  "open": true,
   "opened_at_ms": 1713339123000,
-  "closes_at_ms": 1713339183000
+  "closes_at_ms": 1713339183000,
+  "duration_s": 60
 }
 ```
 
@@ -221,11 +225,11 @@ Receiver only. Add the device to `/etc/ados/mesh/revocations.json`. Future invit
 
 ### POST /pair/join
 
-Relay only. Send an invite request to a receiver. Body: `{"host": "<ip>", "port": 5801}`. With an empty body, the relay resolves `_ados-receiver._tcp` over mDNS on `bat0` and picks the first result.
+Relay only. Send an invite request to a receiver. Body: `{"receiver_host": "<ip>", "receiver_port": 5801}`. With an empty body, the relay resolves `_ados-receiver._tcp` over mDNS on `bat0` and picks the first result.
 
 ```
 POST /api/v1/ground-station/pair/join
-{"host": "10.20.0.1", "port": 5801}
+{"receiver_host": "10.20.0.1", "receiver_port": 5801}
 
 200 OK
 {"sent_at_ms": 1713339131000}

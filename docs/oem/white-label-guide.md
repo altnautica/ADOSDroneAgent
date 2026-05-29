@@ -1,6 +1,6 @@
 # White-Label Customization Guide
 
-OEM partners can rebrand ADOS ADOS Drone Agent to match their product identity. All customization is done through the `branding/` directory and config fields. No source code changes needed.
+OEM partners can rebrand ADOS Drone Agent to match their product identity. All customization is done through the `branding/` directory and config fields. No source code changes needed.
 
 ---
 
@@ -136,7 +136,7 @@ branding:
 }
 ```
 
-**Default:** `"ADOS ADOS Drone Agent"`
+**Default:** `"ADOS Drone Agent"`
 
 ---
 
@@ -180,7 +180,7 @@ branding:
   webapp_header: "DroneLink"                 # Header bar text (next to logo)
 ```
 
-**Defaults:** `"ADOS ADOS Drone Agent Setup"` and `"ADOS ADOS Drone Agent"`
+**Defaults:** `"ADOS Drone Agent Setup"` and `"ADOS Drone Agent"`
 
 ---
 

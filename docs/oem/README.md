@@ -1,6 +1,6 @@
 # OEM Documentation
 
-These documents are for hardware OEM partners building companion computer products with ADOS ADOS Drone Agent software.
+These documents are for hardware OEM partners building companion computer products with ADOS Drone Agent software.
 
 ## Reading Order
 

@@ -101,16 +101,39 @@ If the accept window expires before every relay has joined, reopen another windo
 
 ## REST API Status
 
-`GET http://192.168.4.1:8080/api/status` returns JSON with service health:
+`GET http://192.168.4.1:8080/api/v1/ground-station/status` returns JSON with the ground station snapshot aligned with the OLED display schema:
 
 ```json
 {
-  "mode": "rx",
-  "wfb": { "status": "connected", "rssi": -45, "snr": 28 },
-  "video": { "status": "streaming", "resolution": "1920x1080", "fps": 30 },
-  "mavlink": { "status": "active", "heartbeat_hz": 1.0 },
-  "wifi_ap": { "clients": 2, "ssid": "ADOS-GS-A1B2" },
-  "uptime_seconds": 3842
+  "profile": "ground_station",
+  "paired_drone": {
+    "device_id": "ados-abc123",
+    "key_fingerprint": "...",
+    "fc_mode": null,
+    "battery_pct": null,
+    "gps_sats": null
+  },
+  "link": {
+    "rssi_dbm": -45,
+    "bitrate_mbps": 8.5,
+    "fec_recovered": 12,
+    "fec_lost": 2,
+    "channel": 6,
+    "snr_db": 28,
+    "noise_dbm": -100,
+    "packets_received": 1520,
+    "packets_lost": 8,
+    "loss_percent": 0.5,
+    "state": "connected"
+  },
+  "role": {
+    "current": "direct",
+    "mesh_capable": true
+  },
+  "mesh": {
+    "up": true,
+    "peer_count": 2
+  }
 }
 ```
 

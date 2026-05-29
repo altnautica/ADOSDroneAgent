@@ -2,7 +2,7 @@
 
 **Open-source onboard agent for software-defined drones. 50km data link. HD video. Full remote control.**
 
-![License: GPL-3.0](https://img.shields.io/badge/License-GPL--3.0-green.svg) ![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-blue.svg) ![Status: Alpha](https://img.shields.io/badge/Status-Alpha-orange.svg) [![Discord](https://img.shields.io/badge/Discord-Join-5865F2.svg)](https://discord.gg/uxbvuD4d5q)
+![License: GPL-3.0](https://img.shields.io/badge/License-GPL--3.0-green.svg) ![Hybrid: Rust + Python](https://img.shields.io/badge/Hybrid-Rust%20%2B%20Python-blue.svg) ![Status: Alpha](https://img.shields.io/badge/Status-Alpha-orange.svg) [![Discord](https://img.shields.io/badge/Discord-Join-5865F2.svg)](https://discord.gg/uxbvuD4d5q)
 
 ADOS Drone Agent is the onboard intelligence layer for software-defined drones. It runs on your companion computer, proxies MAVLink from the flight controller to WebSocket and TCP, handles the 50km data link, streams HD video, and gives you full remote control from ADOS Mission Control or any HTTP client.
 
@@ -265,10 +265,9 @@ accessors instead of reaching into private process fields.
 | Cloud relay (Convex HTTP + MQTT) | Working |
 | GCS pairing (Mission Control link) | Working |
 | OTA updates (upgrade + rollback) | Working |
-| Video pipeline (RTSP + cloud relay) | In Progress |
-| WFB-ng long-range video link | Planned |
-| Suite runtime (YAML manifest execution) | Planned |
-| Script executor (Python SDK, REST) | Planned |
+| Video pipeline (RTSP + cloud relay) | Working |
+| WFB-ng long-range video link (5.8GHz, FEC, WebRTC) | Working |
+| Script executor (text commands + Python SDK) | Working |
 | Swarm coordination (mesh, formation) | Planned |
 
 ---

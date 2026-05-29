@@ -23,7 +23,7 @@ Common endpoints:
 | Area | Endpoint |
 |---|---|
 | Role | `/api/v1/ground-station/role` |
-| Mesh health | `/api/v1/ground-station/mesh/health` |
+| Mesh health | `/api/v1/ground-station/mesh` |
 | Mesh neighbors | `/api/v1/ground-station/mesh/neighbors` |
 | Mesh gateways | `/api/v1/ground-station/mesh/gateways` |
 | Pair accept | `/api/v1/ground-station/pair/accept` |

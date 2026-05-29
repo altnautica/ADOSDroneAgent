@@ -1,7 +1,7 @@
 # AGENTS.md - ADOS Drone Agent
 
-Agentic coding instructions for ADOS Drone Agent, the open-source Python agent
-for drone companion computers and ground-station Linux nodes.
+Agentic coding instructions for ADOS Drone Agent, the open-source hybrid
+Rust/Python agent for drone companion computers and ground-station Linux nodes.
 
 ## Purpose
 
