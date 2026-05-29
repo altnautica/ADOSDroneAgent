@@ -15,6 +15,8 @@ rmp-serde = "1.3"
 rmpv = { version = "1.3", features = ["with-serde"] }
 hmac = "0.12"
 sha2 = "0.10"
+# blake2b-8 → the 16-hex WFB key fingerprint (peer-public-half digest).
+blake2 = "0.10"
 hex = "0.4"
 thiserror = "2"
 getrandom = "0.2"
@@ -39,7 +41,7 @@ sd-notify = "0.4"
 tracing-journald = "0.3"
 # Unix process-group management (setsid + killpg) — the structural fix for
 # the orphaned-wfb_tx bug class. Linux-only; consuming crates target-gate it.
-nix = { version = "0.29", default-features = false, features = ["process", "signal", "fs"] }
+nix = { version = "0.29", default-features = false, features = ["process", "signal", "fs", "user"] }
 
 [profile.release]
 strip = true

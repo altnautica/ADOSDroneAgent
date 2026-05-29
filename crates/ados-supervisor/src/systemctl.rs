@@ -36,6 +36,12 @@ pub async fn stop(unit: &str) -> bool {
     ok(&run(&["stop", unit], ACT_TIMEOUT).await)
 }
 
+/// `systemctl restart <unit>` — the prompt path to a fresh spawn cycle (used
+/// after a key write so the wfb unit reloads the new key).
+pub async fn restart(unit: &str) -> bool {
+    ok(&run(&["restart", unit], ACT_TIMEOUT).await)
+}
+
 /// `systemctl reset-failed <unit>` — clears a `failed (start-limit-hit)` state
 /// + the burst counter so a following `start` is not a no-op.
 pub async fn reset_failed(unit: &str) {
