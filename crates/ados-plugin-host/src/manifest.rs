@@ -36,6 +36,18 @@ pub enum AgentIsolation {
     Inprocess,
 }
 
+/// Agent-half runtime: which executor systemd starts for the plugin process.
+/// `python` (the default) runs the plugin through the shared Python runner;
+/// `rust` execs the plugin's own binary directly. Additive and optional, so an
+/// old manifest with no `runtime:` field parses as `python` unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AgentRuntime {
+    #[default]
+    Python,
+    Rust,
+}
+
 /// GCS-half isolation levels. `inline` is first-party only; the controller
 /// rejects it for third-party signers even though the browser runtime polices
 /// it as well. `iframe` is the default, matching the Pydantic
@@ -139,6 +151,10 @@ pub struct AgentBlock {
     pub entrypoint: String,
     #[serde(default)]
     pub isolation: AgentIsolation,
+    /// Which executor systemd starts: the shared Python runner (default) or the
+    /// plugin's own binary (`rust`). Additive and optional.
+    #[serde(default)]
+    pub runtime: AgentRuntime,
     #[serde(default)]
     pub permissions: Vec<PermissionRef>,
     #[serde(default)]
@@ -240,6 +256,12 @@ impl PluginManifest {
             Some(a) if a.isolation == AgentIsolation::Subprocess
         )
     }
+
+    /// The agent half's runtime, or `None` when there is no agent half. A
+    /// gcs-only plugin has no agent runtime.
+    pub fn agent_runtime(&self) -> Option<AgentRuntime> {
+        self.agent.as_ref().map(|a| a.runtime)
+    }
 }
 
 #[cfg(test)]
@@ -330,6 +352,44 @@ agent:
         assert!(!PluginManifest::from_yaml_text(yaml)
             .unwrap()
             .is_subprocess_agent());
+    }
+
+    #[test]
+    fn agent_runtime_defaults_to_python_when_absent() {
+        // An old manifest with no runtime: field parses and is python.
+        let m = PluginManifest::from_yaml_text(MINIMAL).unwrap();
+        assert_eq!(m.agent.as_ref().unwrap().runtime, AgentRuntime::Python);
+        assert_eq!(m.agent_runtime(), Some(AgentRuntime::Python));
+    }
+
+    #[test]
+    fn agent_runtime_rust_parses() {
+        let yaml = r#"
+id: com.example.rustplug
+version: 1.0.0
+compatibility:
+  ados_version: ">=0.1.0"
+agent:
+  entrypoint: agent/bin/com.example.rustplug
+  runtime: rust
+"#;
+        let m = PluginManifest::from_yaml_text(yaml).unwrap();
+        assert_eq!(m.agent.as_ref().unwrap().runtime, AgentRuntime::Rust);
+        assert_eq!(m.agent_runtime(), Some(AgentRuntime::Rust));
+    }
+
+    #[test]
+    fn gcs_only_plugin_has_no_agent_runtime() {
+        let yaml = r#"
+id: com.example.panel
+version: 0.1.0
+compatibility:
+  ados_version: ">=0.1.0"
+gcs:
+  entrypoint: gcs/dist/index.js
+"#;
+        let m = PluginManifest::from_yaml_text(yaml).unwrap();
+        assert_eq!(m.agent_runtime(), None);
     }
 
     #[test]

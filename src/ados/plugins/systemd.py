@@ -48,6 +48,7 @@ from pathlib import Path
 
 from ados.core.paths import (
     PLUGIN_LOG_DIR,
+    PLUGIN_RUN_DIR,
     PLUGIN_UNIT_DIR,
     PLUGIN_UNIT_PREFIX,
 )
@@ -94,7 +95,7 @@ def _sanitize_unit_name(plugin_id: str) -> str:
     return plugin_id.replace(".", "-")
 
 
-def render_unit(manifest: PluginManifest) -> str:
+def render_unit(manifest: PluginManifest, install_dir: Path) -> str:
     if manifest.agent is None:
         raise ValueError(
             f"plugin {manifest.id} has no agent half; no systemd unit needed"
@@ -107,10 +108,25 @@ def render_unit(manifest: PluginManifest) -> str:
     # Reference the module global by name so tests can rebind it via
     # monkeypatch.setattr and the runtime resolves the current value.
     log_path = PLUGIN_LOG_DIR / f"{_sanitize_unit_name(manifest.id)}.log"
+    # The ExecStart line is the only part that differs by agent.runtime.
+    if manifest.agent.runtime == "rust":
+        # Rust: exec the plugin's own binary directly. The capability token and
+        # agent id are delivered via the unit environment (ADOS_PLUGIN_TOKEN /
+        # ADOS_PLUGIN_AGENT_ID) at cutover, never on the command line (a
+        # /proc/<pid>/cmdline is world-readable).
+        socket_path = PLUGIN_RUN_DIR / f"{manifest.id}.sock"
+        exec_start = (
+            f"{install_dir}/{manifest.id}/{manifest.agent.entrypoint} "
+            f"--socket {socket_path}"
+        )
+    else:
+        # Python (default): the shared runner takes the plugin id and resolves
+        # the manifest + entrypoint itself. Unchanged.
+        exec_start = f"{PLUGIN_RUNNER_BINARY} {manifest.id}"
     return UNIT_TEMPLATE.format(
         plugin_id=manifest.id,
         slice_name=PLUGIN_SLICE_NAME,
-        runner=PLUGIN_RUNNER_BINARY,
+        exec_start=exec_start,
         max_ram_mb=res.max_ram_mb,
         max_cpu_percent=res.max_cpu_percent,
         max_pids=res.max_pids,
@@ -127,7 +143,7 @@ PartOf=ados-supervisor.service
 [Service]
 Slice={slice_name}
 Type=simple
-ExecStart={runner} {plugin_id}
+ExecStart={exec_start}
 Restart=on-failure
 RestartSec=2s
 StartLimitInterval=60s

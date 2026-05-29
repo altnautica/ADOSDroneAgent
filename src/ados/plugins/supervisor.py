@@ -200,7 +200,9 @@ class PluginSupervisor:
             ):
                 self._ensure_slice_exists()
                 unit_path = unit_path_for(manifest.id)
-                unit_path.write_text(render_unit(manifest), encoding="utf-8")
+                unit_path.write_text(
+                    render_unit(manifest, self._install_dir), encoding="utf-8"
+                )
                 self._systemctl("daemon-reload")
 
             manifest_hash = hashlib.sha256(

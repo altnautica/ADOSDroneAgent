@@ -11,7 +11,8 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::manifest::{AgentIsolation, PluginManifest};
+use crate::manifest::{AgentIsolation, AgentRuntime, PluginManifest};
+use crate::server::DEFAULT_SOCKET_DIR;
 
 /// Path to the per-plugin runner binary that systemd starts.
 pub const PLUGIN_RUNNER_BINARY: &str = "/opt/ados/venv/bin/ados-plugin-runner";
@@ -83,13 +84,37 @@ fn log_path_for(plugin_id: &str) -> String {
 /// unit (no agent half, or `inprocess` isolation) — the caller treats that as
 /// "do not write a unit", mirroring the Python `render_unit` raising for those
 /// cases.
-pub fn render_unit(manifest: &PluginManifest) -> Option<String> {
+///
+/// The `ExecStart` line is the only part that differs by `agent.runtime`:
+/// * `python` (default): the shared Python runner is started with the plugin id.
+/// * `rust`: the plugin's own binary is exec'd directly with its socket path.
+///
+/// `install_dir` is the unpacked-plugin install root (e.g. `/var/ados/plugins`);
+/// the rust `ExecStart` resolves to `{install_dir}/{id}/{entrypoint}`. The slice,
+/// hardening, limits, and log lines are identical for both runtimes.
+pub fn render_unit(manifest: &PluginManifest, install_dir: &Path) -> Option<String> {
     let agent = manifest.agent.as_ref()?;
     if agent.isolation != AgentIsolation::Subprocess {
         return None;
     }
     let res = &agent.resources;
     let log_path = log_path_for(&manifest.id);
+    let exec_start = match agent.runtime {
+        // Python (default): the shared runner takes the plugin id and resolves
+        // the manifest + entrypoint itself. Unchanged.
+        AgentRuntime::Python => format!("{PLUGIN_RUNNER_BINARY} {}", manifest.id),
+        // Rust: exec the plugin's own binary directly. The capability token and
+        // agent id are delivered via the unit environment (ADOS_PLUGIN_TOKEN /
+        // ADOS_PLUGIN_AGENT_ID) at cutover, never on the command line (a
+        // /proc/<pid>/cmdline is world-readable).
+        AgentRuntime::Rust => format!(
+            "{install_dir}/{plugin_id}/{entrypoint} --socket {socket_dir}/{plugin_id}.sock",
+            install_dir = install_dir.display(),
+            plugin_id = manifest.id,
+            entrypoint = agent.entrypoint,
+            socket_dir = DEFAULT_SOCKET_DIR,
+        ),
+    };
     Some(format!(
         "\
 [Unit]
@@ -100,7 +125,7 @@ PartOf=ados-supervisor.service
 [Service]
 Slice={slice_name}
 Type=simple
-ExecStart={runner} {plugin_id}
+ExecStart={exec_start}
 Restart=on-failure
 RestartSec=2s
 StartLimitInterval=60s
@@ -126,7 +151,7 @@ WantedBy=ados-supervisor.service
 ",
         plugin_id = manifest.id,
         slice_name = PLUGIN_SLICE_NAME,
-        runner = PLUGIN_RUNNER_BINARY,
+        exec_start = exec_start,
         max_ram_mb = res.max_ram_mb,
         max_cpu_percent = res.max_cpu_percent,
         max_pids = res.max_pids,
@@ -159,8 +184,9 @@ mod tests {
 
     #[test]
     fn unit_contains_slice_hardening_execstart_and_limits() {
-        let unit = render_unit(&subprocess_manifest()).unwrap();
+        let unit = render_unit(&subprocess_manifest(), Path::new("/var/ados/plugins")).unwrap();
         assert!(unit.contains("Slice=ados-plugins.slice"));
+        // Python runtime (default): the shared runner takes the plugin id.
         assert!(unit.contains(
             "ExecStart=/opt/ados/venv/bin/ados-plugin-runner com.example.thermal-lepton"
         ));
@@ -186,18 +212,48 @@ mod tests {
     }
 
     #[test]
+    fn rust_runtime_unit_execs_the_plugin_binary() {
+        let m = PluginManifest::from_yaml_text(
+            "id: com.example.rustplug\nversion: 1.0.0\ncompatibility:\n  ados_version: \">=0.1.0\"\nagent:\n  entrypoint: agent/bin/com.example.rustplug\n  runtime: rust\n  resources:\n    max_ram_mb: 64\n    max_cpu_percent: 30\n    max_pids: 8\n",
+        )
+        .unwrap();
+        let unit = render_unit(&m, Path::new("/var/ados/plugins")).unwrap();
+        // ExecStart points at the unpacked plugin binary with its socket path.
+        assert!(
+            unit.contains(
+                "ExecStart=/var/ados/plugins/com.example.rustplug/agent/bin/com.example.rustplug --socket /run/ados/plugins/com.example.rustplug.sock"
+            ),
+            "{unit}"
+        );
+        // The token is never on the ExecStart line (it comes from the unit env).
+        let exec_line = unit
+            .lines()
+            .find(|l| l.starts_with("ExecStart="))
+            .expect("ExecStart line");
+        assert!(!exec_line.contains("ADOS_PLUGIN_TOKEN"), "{exec_line}");
+        assert!(!exec_line.to_lowercase().contains("token"), "{exec_line}");
+        // The shared/hardening/limit lines are identical to the python branch.
+        assert!(unit.contains("Slice=ados-plugins.slice"));
+        assert!(unit.contains("MemoryMax=64M"));
+        assert!(unit.contains("NoNewPrivileges=yes"));
+        assert!(
+            unit.contains("StandardOutput=append:/var/log/ados/plugins/com-example-rustplug.log")
+        );
+    }
+
+    #[test]
     fn inprocess_and_gcs_only_render_no_unit() {
         let inproc = PluginManifest::from_yaml_text(
             "id: com.altnautica.builtin\nversion: 0.1.0\ncompatibility:\n  ados_version: \">=0.1.0\"\nagent:\n  entrypoint: pkg:Class\n  isolation: inprocess\n",
         )
         .unwrap();
-        assert!(render_unit(&inproc).is_none());
+        assert!(render_unit(&inproc, Path::new("/var/ados/plugins")).is_none());
 
         let gcs_only = PluginManifest::from_yaml_text(
             "id: com.example.panel\nversion: 0.1.0\ncompatibility:\n  ados_version: \">=0.1.0\"\ngcs:\n  entrypoint: gcs/dist/index.js\n",
         )
         .unwrap();
-        assert!(render_unit(&gcs_only).is_none());
+        assert!(render_unit(&gcs_only, Path::new("/var/ados/plugins")).is_none());
     }
 
     #[test]

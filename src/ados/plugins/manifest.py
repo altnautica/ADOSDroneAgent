@@ -157,6 +157,11 @@ class AgentBlock(_StrictModel):
     """Default subprocess. ``inprocess`` is allowed only for first-party
     built-in plugins; the supervisor enforces this."""
 
+    runtime: Literal["python", "rust"] = "python"
+    """Which executor systemd starts: the shared Python runner (default)
+    or the plugin's own binary (``rust``). Additive and optional, so an
+    older manifest with no ``runtime`` field loads as ``python``."""
+
     permissions: list[PermissionRef] = Field(default_factory=list)
     resources: ResourceLimits = Field(default_factory=ResourceLimits)
     contributes: AgentContributes = Field(default_factory=AgentContributes)
@@ -304,6 +309,18 @@ class AgentBlock(_StrictModel):
                 "process.spawn capability is not declared in "
                 "agent.permissions; add it so the operator can "
                 "review the spawn allowlist at install time"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_runtime_isolation(self) -> AgentBlock:
+        """A rust runtime always runs as its own binary under systemd, so
+        there is no in-process Python analog. Reject the combination up
+        front rather than letting it reach the supervisor."""
+        if self.runtime == "rust" and self.isolation == "inprocess":
+            raise ManifestError(
+                "Rust plugins have no in-process analog; rust runtime "
+                "requires subprocess isolation"
             )
         return self
 

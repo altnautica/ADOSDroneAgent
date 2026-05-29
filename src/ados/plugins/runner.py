@@ -105,6 +105,20 @@ async def _run(
         log.error("plugin_manifest_invalid", error=str(exc))
         return 2
 
+    # A rust plugin runs as its own binary; systemd execs it directly. The
+    # Python runner must never load a rust plugin (there is no Python entry
+    # point to import). Refuse with a non-zero exit so a misrouted unit fails
+    # loudly rather than crashing in the import path.
+    if manifest.agent is not None and manifest.agent.runtime == "rust":
+        log.error(
+            "plugin_runtime_mismatch",
+            plugin_id=plugin_id,
+            runtime="rust",
+            detail="rust plugins exec their own binary; the python runner "
+            "must not load them",
+        )
+        return 2
+
     try:
         klass = _load_plugin_class(install_dir, manifest)
     except (ManifestError, ImportError) as exc:

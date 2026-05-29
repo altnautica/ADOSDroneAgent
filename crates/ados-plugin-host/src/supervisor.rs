@@ -260,7 +260,7 @@ impl PluginSupervisor {
         if manifest.is_subprocess_agent() {
             self.ensure_slice_exists()?;
             let unit_path = unit_path_for(&manifest.id, Some(&self.paths.unit_dir));
-            if let Some(unit) = render_unit(&manifest) {
+            if let Some(unit) = render_unit(&manifest, &self.paths.install_dir) {
                 std::fs::write(&unit_path, unit.as_bytes())?;
             }
             self.systemctl.run(&["daemon-reload"])?;

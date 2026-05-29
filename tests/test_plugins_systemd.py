@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from ados.plugins.manifest import PluginManifest
@@ -12,6 +14,8 @@ from ados.plugins.systemd import (
     unit_name_for,
     unit_path_for,
 )
+
+_INSTALL_DIR = Path("/var/ados/plugins")
 
 
 def _subprocess_manifest() -> PluginManifest:
@@ -69,8 +73,30 @@ def test_unit_path_lives_in_systemd_dir() -> None:
     assert str(p).endswith(".service")
 
 
+def _rust_manifest() -> PluginManifest:
+    return PluginManifest.from_yaml_text(
+        """\
+schema_version: 1
+id: com.example.rustplug
+version: 1.0.0
+name: Rust Plug
+license: GPL-3.0-or-later
+risk: medium
+compatibility:
+  ados_version: ">=0.9.0"
+agent:
+  entrypoint: agent/bin/com.example.rustplug
+  runtime: rust
+  resources:
+    max_ram_mb: 64
+    max_cpu_percent: 30
+    max_pids: 8
+"""
+    )
+
+
 def test_render_unit_emits_resource_limits() -> None:
-    unit = render_unit(_subprocess_manifest())
+    unit = render_unit(_subprocess_manifest(), _INSTALL_DIR)
     assert "MemoryMax=80M" in unit
     assert "CPUQuota=30%" in unit
     assert "TasksMax=16" in unit
@@ -81,11 +107,35 @@ def test_render_unit_emits_resource_limits() -> None:
     assert "PrivateTmp=yes" in unit
     assert "ProtectSystem=strict" in unit
     assert "NoNewPrivileges=yes" in unit
+    # Python runtime (default): the shared runner takes the plugin id.
+    assert (
+        "ExecStart=/opt/ados/venv/bin/ados-plugin-runner "
+        "com.example.thermal-lepton" in unit
+    )
+
+
+def test_render_unit_rust_runtime_execs_the_plugin_binary() -> None:
+    unit = render_unit(_rust_manifest(), _INSTALL_DIR)
+    # ExecStart points at the unpacked plugin binary with its socket path.
+    assert (
+        "ExecStart=/var/ados/plugins/com.example.rustplug/"
+        "agent/bin/com.example.rustplug "
+        "--socket /run/ados/plugins/com.example.rustplug.sock" in unit
+    )
+    # The token is never on the ExecStart line (it comes from the unit env).
+    exec_line = next(
+        line for line in unit.splitlines() if line.startswith("ExecStart=")
+    )
+    assert "token" not in exec_line.lower()
+    # Shared / hardening / limit lines are identical to the python branch.
+    assert f"Slice={PLUGIN_SLICE_NAME}" in unit
+    assert "MemoryMax=64M" in unit
+    assert "NoNewPrivileges=yes" in unit
 
 
 def test_render_unit_rejects_inprocess() -> None:
     with pytest.raises(ValueError):
-        render_unit(_inprocess_manifest())
+        render_unit(_inprocess_manifest(), _INSTALL_DIR)
 
 
 def test_slice_content_has_accounting_directives() -> None:

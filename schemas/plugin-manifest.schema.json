@@ -17,6 +17,15 @@
           "title": "Isolation",
           "type": "string"
         },
+        "runtime": {
+          "default": "python",
+          "enum": [
+            "python",
+            "rust"
+          ],
+          "title": "Runtime",
+          "type": "string"
+        },
         "permissions": {
           "items": {
             "$ref": "#/$defs/PermissionRef"
