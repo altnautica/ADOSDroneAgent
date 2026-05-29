@@ -491,13 +491,22 @@ enable_ground_station_units() {
 # GROUND-STATION ONLY: this is called from the ground_station branch of the
 # install flow, so it never touches a drone rig.
 #
-# When the ados-net flag is set, the native uplink daemon owns the AP, the
-# USB-gadget tether, and the ethernet/wifi/modem managers in one process, so the
-# packaged units for those would fight it for wlan0 / iptables / configfs /
-# /dev/ttyUSB*. Disable them while the flag is set; re-enable when it is cleared.
-# When the ados-hid flag is set the native arbiter reads the front-panel buttons
-# in-process, so the packaged ados-buttons would co-own /dev/gpiochip0; disable it
-# likewise.
+# When the ados-net flag is set, the native uplink daemon runs the ethernet, wifi
+# client, and USB-gadget tether managers in-process, so the packaged units for
+# those would fight it for wlan0 / iptables / configfs. Disable them while the
+# flag is set; re-enable when it is cleared. When the ados-hid flag is set the
+# native arbiter reads the front-panel buttons in-process, so the packaged
+# ados-buttons would co-own /dev/gpiochip0; disable it likewise.
+#
+# NOT subsumed (deliberately left enabled even when ados-net owns the uplink):
+#   - ados-hostapd: the native daemon supervises the hostapd C binary *through*
+#     this unit (systemctl start/stop) rather than replacing it, and the health
+#     gate's expected_profile_units requires it enabled. Disabling it would only
+#     drop its WantedBy auto-start, but the gate would then fail and ados-net
+#     would have to re-start a disabled unit.
+#   - ados-modem: the native modem manager ships the D-Bus path only and delegates
+#     AT/serial work to this Python service until a real SIM bench validates a
+#     serial port, so the unit stays available. It is HW-gated off by default.
 #
 # Disable (remove the WantedBy symlink), NOT mask. Every packaged unit is a real
 # file in /etc/systemd/system, and `systemctl mask` refuses to overwrite a real
@@ -509,7 +518,7 @@ enable_ground_station_units() {
 # Default posture (no flag) re-enables everything, so a routine upgrade leaves the
 # packaged units live. Idempotent: enable/disable are no-ops in the target state.
 reconcile_rust_cutover_units() {
-    local net_subsumed="ados-ethernet.service ados-wifi-client.service ados-modem.service ados-hostapd.service ados-usb-gadget.service"
+    local net_subsumed="ados-ethernet.service ados-wifi-client.service ados-usb-gadget.service"
     local hid_subsumed="ados-buttons.service"
     local unit
 
