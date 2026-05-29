@@ -199,4 +199,8 @@ install_global_symlinks() {
     # Fetch the prebuilt WFB radio binary. The ados-wfb unit's ExecStart shim
     # runs it when present (drone profile), else the packaged Python service.
     install_radio_binary
+    # Fetch the prebuilt video orchestrator binary. The ados-video unit's
+    # ExecStart shim runs it when present AND the operator opted in via the
+    # flag, else the packaged Python service.
+    install_video_binary
 }

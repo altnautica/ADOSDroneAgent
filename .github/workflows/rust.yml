@@ -271,3 +271,52 @@ jobs:
           prerelease: true
           name: "Prebuilt ados-radio (rolling)"
           files: crates/rel/*
+
+  publish-video:
+    needs: build-test
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (musl target)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-musl
+
+      - name: Install musl tools
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Build static ados-video
+        run: cargo build --release --target aarch64-unknown-linux-musl -p ados-video
+
+      - name: Stage artifact + checksum
+        run: |
+          set -euo pipefail
+          mkdir -p rel
+          cp target/aarch64-unknown-linux-musl/release/ados-video rel/ados-video-aarch64
+          ( cd rel && sha256sum ados-video-aarch64 > ados-video-aarch64.sha256 )
+
+      - name: Sign artifact (only when the signing key is present)
+        env:
+          SIGNING_KEY: ${{ secrets.ADOS_DRIVER_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${SIGNING_KEY}" ]; then
+            echo "No ADOS_DRIVER_SIGNING_KEY set; publishing SHA256-only (dev posture)."
+            exit 0
+          fi
+          sudo apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y minisign
+          printf '%s' "${SIGNING_KEY}" > /tmp/sign.key
+          minisign -S -s /tmp/sign.key -m rel/ados-video-aarch64 -x rel/ados-video-aarch64.minisig
+          rm -f /tmp/sign.key
+
+      - name: Publish rolling prerelease
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: prebuilt-video
+          prerelease: true
+          name: "Prebuilt ados-video (rolling)"
+          files: crates/rel/*

@@ -7,7 +7,14 @@ StartLimitBurst=5
 
 [Service]
 Type=simple
-ExecStart=/opt/ados/venv/bin/python -m ados.services.video
+# The native video orchestrator is OPT-IN until it is camera-bench-validated:
+# run it only when BOTH the binary is present AND the operator enabled the flag
+# file. Default (no flag) = the packaged Python service, so a routine upgrade
+# never silently swaps the live video pipeline for an unproven binary. To A/B
+# test the native binary on the bench:
+#   touch /etc/ados/video-rust-enabled && systemctl restart ados-video
+# `exec` replaces the shell image so SupplementaryGroups=video carries over.
+ExecStart=/bin/sh -c 'if [ -e /etc/ados/video-rust-enabled ] && [ -x /opt/ados/bin/ados-video ]; then exec /opt/ados/bin/ados-video; else exec /opt/ados/venv/bin/python -m ados.services.video; fi'
 Restart=on-failure
 RestartSec=3
 Environment=ADOS_CONFIG=/etc/ados/config.yaml
