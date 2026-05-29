@@ -1,0 +1,32 @@
+[Unit]
+Description=ADOS Plugin Host
+After=ados-mavlink.service
+PartOf=ados-supervisor.service
+StartLimitInterval=60s
+StartLimitBurst=5
+
+[Service]
+Type=simple
+# The native plugin host is a NEW, opt-in service. It runs only when BOTH the
+# binary is present AND the operator enabled the flag file; there is no Python
+# host-server fallback, so the off path is /bin/true and the unit stays
+# inactive. A routine upgrade never starts it, and there is no [Install] section
+# so it is not pulled in until explicitly enabled. To turn it on for a bench:
+#   touch /etc/ados/plugin-host-rust-enabled && systemctl enable --now ados-plugin-host
+# Resolved at cutover (deliberately NOT wired here): per-runner capability-token
+# delivery, per-plugin socket ownership for the runner user, and whether the
+# host runs standalone (as here) or embedded in another service.
+ExecStart=/bin/sh -c 'if [ -e /etc/ados/plugin-host-rust-enabled ] && [ -x /opt/ados/bin/ados-plugin-host ]; then exec /opt/ados/bin/ados-plugin-host; else exec /bin/true; fi'
+Restart=on-failure
+RestartSec=3
+Environment=ADOS_CONFIG=/etc/ados/config.yaml
+EnvironmentFile=-/etc/ados/env
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/var/ados /run/ados /etc/ados
+LimitNOFILE=8192
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ados-plugin-host
