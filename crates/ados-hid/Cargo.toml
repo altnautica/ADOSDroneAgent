@@ -4,11 +4,15 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Human-interface devices: touchscreen affine calibration, the pilot-in-command arbiter FSM, and the PIC/input event bus. The pure-logic core; gpio/evdev device layers land in later chunks."
+description = "Human-interface devices: touchscreen affine calibration, the pilot-in-command arbiter FSM + IPC seam, the ados-pic daemon, and the GPIO front-panel button service. Touch/input device layers land in later chunks."
 
 [lib]
 name = "ados_hid"
 path = "src/lib.rs"
+
+[[bin]]
+name = "ados-pic"
+path = "src/bin/ados-pic.rs"
 
 [dependencies]
 serde = { workspace = true }
@@ -20,10 +24,16 @@ getrandom = { workspace = true }
 hex = { workspace = true }
 tokio = { workspace = true }
 time = { version = "0.3", features = ["std", "formatting"] }
+serde_norway = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 nix = { workspace = true }
 tracing-journald = { workspace = true }
+sd-notify = { workspace = true }
+# Pure-Rust character-device GPIO (no libgpiod C dependency). Only the
+# chip-open + edge-event read path is target-gated; the press classification is
+# host-portable and unit-tested without it.
+gpio-cdev = "0.6"
 
 [dev-dependencies]
 tempfile = "3"
