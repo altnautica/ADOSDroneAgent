@@ -24,4 +24,5 @@ pub mod orchestrator;
 pub mod process;
 pub mod shutdown;
 pub mod stderr_drain;
+pub mod tap;
 pub mod wfb_tee;

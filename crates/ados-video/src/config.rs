@@ -95,6 +95,91 @@ fn default_cloud_rtp_port() -> u16 {
     8000
 }
 
+// --- vision frame-tap sub-block ----------------------------------------------
+
+fn default_vision_fps() -> u32 {
+    10
+}
+fn default_vision_width() -> u32 {
+    640
+}
+fn default_vision_height() -> u32 {
+    480
+}
+fn default_vision_format() -> String {
+    "rgb24".to_string()
+}
+fn default_vision_sink() -> String {
+    "/run/ados/vision-tap-main.sock".to_string()
+}
+
+/// The `video.vision:` sub-block. Configures an additive, optional frame tap
+/// that feeds raw decoded frames to the on-box vision engine without touching
+/// the encode + radio byte path. Default OFF: an unconfigured rig runs the
+/// exact same encoder + wfb_tee commands it always has, byte-for-byte.
+///
+/// The tap reads the local mediamtx RTSP `/main` stream with a third ffmpeg
+/// (`-c:v copy` is not used here — frames are decoded, downscaled, and emitted
+/// as `rawvideo`), so a crash or stall on this leg never reaches the encoder or
+/// the wfb radio fan-out. When `raw_tap` is set the tap instead rides a
+/// pre-encode `-filter_complex` split inside the encoder command itself, gated
+/// behind the flag and off by default.
+#[derive(Debug, Clone, Deserialize)]
+pub struct VisionTapConfig {
+    /// Master switch. `false` ⇒ no tap is ever spawned and the encoder command
+    /// is unchanged.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Frames per second delivered to the vision engine (the tap throttles the
+    /// RTSP stream down to this rate before scaling).
+    #[serde(default = "default_vision_fps")]
+    pub fps: u32,
+    /// Output frame width the vision engine expects.
+    #[serde(default = "default_vision_width")]
+    pub width: u32,
+    /// Output frame height the vision engine expects.
+    #[serde(default = "default_vision_height")]
+    pub height: u32,
+    /// Raw pixel format of the emitted frames: "rgb24" | "nv12" | "yuv420p".
+    #[serde(default = "default_vision_format")]
+    pub format: String,
+    /// When `true`, ride a pre-encode filter split inside the encoder command
+    /// (lower latency, single decode) instead of the decoupled third-ffmpeg
+    /// tap. Off by default; the decoupled tap is the safe default because it
+    /// cannot perturb the encode output.
+    #[serde(default)]
+    pub raw_tap: bool,
+    /// Filesystem path the vision engine reads raw frames from (a unix socket
+    /// or fifo). The tap writes `rawvideo` here.
+    #[serde(default = "default_vision_sink")]
+    pub sink: String,
+}
+
+impl Default for VisionTapConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            fps: default_vision_fps(),
+            width: default_vision_width(),
+            height: default_vision_height(),
+            format: default_vision_format(),
+            raw_tap: false,
+            sink: default_vision_sink(),
+        }
+    }
+}
+
+impl VisionTapConfig {
+    /// Normalise the configured pixel format to one ffmpeg accepts, falling
+    /// back to "rgb24" on an unrecognised value so a typo never wedges the tap.
+    pub fn pixel_format(&self) -> &str {
+        match self.format.as_str() {
+            "rgb24" | "nv12" | "yuv420p" => self.format.as_str(),
+            _ => "rgb24",
+        }
+    }
+}
+
 /// The `video.wfb:` sub-block fields the orchestrator reads. Only
 /// `sei_latency` matters here; everything else in the WFB block is read by
 /// other crates.
@@ -137,6 +222,9 @@ pub struct AgentVideoConfig {
     /// The `video.wfb:` sub-block (only `sei_latency` is read here).
     #[serde(default)]
     pub wfb: WfbVideoConfig,
+    /// The `video.vision:` sub-block (the additive frame tap). Default OFF.
+    #[serde(default)]
+    pub vision: VisionTapConfig,
 }
 
 impl Default for AgentVideoConfig {
@@ -148,6 +236,7 @@ impl Default for AgentVideoConfig {
             cloud_rtp_port: default_cloud_rtp_port(),
             use_gst_air_pipeline: false,
             wfb: WfbVideoConfig::default(),
+            vision: VisionTapConfig::default(),
         }
     }
 }
@@ -185,6 +274,8 @@ impl AgentVideoConfig {
             use_gst_air_pipeline: bool,
             #[serde(default)]
             wfb: WfbVideoConfig,
+            #[serde(default)]
+            vision: VisionTapConfig,
         }
         impl Default for VideoSection {
             fn default() -> Self {
@@ -195,6 +286,7 @@ impl AgentVideoConfig {
                     cloud_rtp_port: default_cloud_rtp_port(),
                     use_gst_air_pipeline: false,
                     wfb: WfbVideoConfig::default(),
+                    vision: VisionTapConfig::default(),
                 }
             }
         }
@@ -212,6 +304,7 @@ impl AgentVideoConfig {
             cloud_rtp_port: raw.video.cloud_rtp_port,
             use_gst_air_pipeline: raw.video.use_gst_air_pipeline,
             wfb: raw.video.wfb,
+            vision: raw.video.vision,
         }
     }
 
@@ -303,6 +396,64 @@ mod tests {
         assert!(!c.is_ground_station());
         assert!(!c.is_disabled());
         assert!(!c.cloud_enabled());
+        // The vision tap is off by default with the documented defaults.
+        assert!(!c.vision.enabled);
+        assert_eq!(c.vision.fps, 10);
+        assert_eq!(c.vision.width, 640);
+        assert_eq!(c.vision.height, 480);
+        assert_eq!(c.vision.format, "rgb24");
+        assert!(!c.vision.raw_tap);
+        assert_eq!(c.vision.sink, "/run/ados/vision-tap-main.sock");
+    }
+
+    #[test]
+    fn vision_tap_loads_full_block() {
+        let yaml = "\
+video:
+  vision:
+    enabled: true
+    fps: 5
+    width: 1280
+    height: 720
+    format: nv12
+    raw_tap: true
+    sink: /run/ados/custom.sock
+";
+        let (_dir, path) = write_tmp(yaml);
+        let c = AgentVideoConfig::load_from(&path);
+        assert!(c.vision.enabled);
+        assert_eq!(c.vision.fps, 5);
+        assert_eq!(c.vision.width, 1280);
+        assert_eq!(c.vision.height, 720);
+        assert_eq!(c.vision.format, "nv12");
+        assert!(c.vision.raw_tap);
+        assert_eq!(c.vision.sink, "/run/ados/custom.sock");
+        assert_eq!(c.vision.pixel_format(), "nv12");
+    }
+
+    #[test]
+    fn vision_tap_partial_block_fills_defaults() {
+        // Only enabled flipped on; everything else must take the defaults.
+        let yaml = "video:\n  vision:\n    enabled: true\n";
+        let (_dir, path) = write_tmp(yaml);
+        let c = AgentVideoConfig::load_from(&path);
+        assert!(c.vision.enabled);
+        assert_eq!(c.vision.fps, 10);
+        assert_eq!(c.vision.width, 640);
+        assert_eq!(c.vision.height, 480);
+        assert_eq!(c.vision.format, "rgb24");
+        assert!(!c.vision.raw_tap);
+        assert_eq!(c.vision.sink, "/run/ados/vision-tap-main.sock");
+    }
+
+    #[test]
+    fn vision_pixel_format_falls_back_on_garbage() {
+        let mut v = VisionTapConfig::default();
+        assert_eq!(v.pixel_format(), "rgb24");
+        v.format = "yuv420p".to_string();
+        assert_eq!(v.pixel_format(), "yuv420p");
+        v.format = "bogus".to_string();
+        assert_eq!(v.pixel_format(), "rgb24");
     }
 
     #[test]

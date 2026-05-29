@@ -30,12 +30,13 @@ use tokio::sync::{Mutex, Notify};
 use crate::config::{AgentVideoConfig, CameraConfig};
 use crate::discover::{self, DiscoveryResult};
 use crate::encoder::{
-    binary_present, build_encoder_command, detect_encoder_for_camera, wrap_with_sei_inject,
-    EncoderEnv, EncoderKind, EncoderParams,
+    augment_encoder_with_raw_tap, binary_present, build_encoder_command, detect_encoder_for_camera,
+    wrap_with_sei_inject, EncoderEnv, EncoderKind, EncoderParams,
 };
 use crate::mediamtx::{MediamtxManager, MAIN_PATH};
 use crate::process::{kill_orphans, ManagedProcess};
 use crate::shutdown::Shutdown;
+use crate::tap::{self, spawn_vision_tap};
 use crate::wfb_tee::{
     drain_wfb_tee_stderr, orphan_pattern, spawn_wfb_tee, wfb_tee_progress_is_stale,
     ProgressTracker, WFB_TEE_PROGRESS_TIMEOUT,
@@ -207,12 +208,20 @@ pub struct VideoOrchestrator {
     wfb_tee: Option<ManagedProcess>,
     cloud_push: Option<ManagedProcess>,
     sei_tap: Option<ManagedProcess>,
+    /// The decoupled vision frame tap (a third ffmpeg → rawvideo → sink).
+    /// Spawned only when `video.vision.enabled` and `raw_tap` is off. Additive:
+    /// a crash here never touches the encode or wfb path.
+    vision_tap: Option<ManagedProcess>,
     /// The GStreamer air pipeline (deferred — kept as a supervised Python
     /// subprocess slot for the future GST branch; never spawned on the legacy
     /// path).
     gst_air: Option<ManagedProcess>,
 
     wfb_tee_progress: ProgressTracker,
+    /// Output-progress clock for the decoupled vision tap (Rule 37: liveness
+    /// alone is never proof of work; the tap can hold the sink open while
+    /// pushing nothing).
+    vision_tap_progress: ProgressTracker,
 
     last_cameras: DiscoveryResult,
     encoder_type: Option<EncoderKind>,
@@ -234,6 +243,7 @@ pub struct VideoOrchestrator {
     restart_count: u32,
     cloud_restart_count: u32,
     wfb_tee_restart_count: u32,
+    vision_tap_restart_count: u32,
     last_start_error: StartError,
 
     /// Serializes teardown+respawn across the cold start, the health-check
@@ -268,8 +278,10 @@ impl VideoOrchestrator {
             wfb_tee: None,
             cloud_push: None,
             sei_tap: None,
+            vision_tap: None,
             gst_air: None,
             wfb_tee_progress: ProgressTracker::new(),
+            vision_tap_progress: ProgressTracker::new(),
             last_cameras: DiscoveryResult::empty(),
             encoder_type: None,
             state: PipelineState::Stopped,
@@ -282,6 +294,7 @@ impl VideoOrchestrator {
             restart_count: 0,
             cloud_restart_count: 0,
             wfb_tee_restart_count: 0,
+            vision_tap_restart_count: 0,
             last_start_error: StartError::None,
             restart_lock: Arc::new(Mutex::new(())),
             switch_lock: Arc::new(Mutex::new(())),
@@ -414,6 +427,39 @@ impl VideoOrchestrator {
             cmd
         };
 
+        // Opt-in pre-encode vision tap: augment the encoder command with a
+        // strictly-appended second rawvideo output to the vision sink, WITHOUT
+        // changing the existing encode/RTSP output bytes. No-op (returns the
+        // command unchanged) unless the command is a raw ffmpeg invocation
+        // ending in the RTSP output — bash-pipeline / gstreamer / SEI-wrapped
+        // commands fall back to the decoupled third-ffmpeg tap below, which
+        // never touches the encoder. Off by default.
+        let cmd = if self.vision_enabled() && self.config.vision.raw_tap {
+            let v = &self.config.vision;
+            let augmented = augment_encoder_with_raw_tap(
+                &cmd,
+                &pipe_uri,
+                v.fps,
+                v.width,
+                v.height,
+                v.pixel_format(),
+                &v.sink,
+            );
+            if augmented.len() != cmd.len() {
+                tracing::info!(
+                    sink = %v.sink,
+                    "vision_raw_tap_spliced_into_encoder"
+                );
+            } else {
+                tracing::info!(
+                    "vision_raw_tap_requested_but_command_not_eligible; using decoupled tap"
+                );
+            }
+            augmented
+        } else {
+            cmd
+        };
+
         // Configure + start mediamtx (gates on the RTSP port internally).
         if let Err(e) = self
             .mediamtx
@@ -472,7 +518,21 @@ impl VideoOrchestrator {
         if self.sei_latency_on() {
             self.start_sei_tap().await;
         }
+        // Optional additive vision frame tap. When raw_tap is on the frames are
+        // already produced by the spliced encoder output, so no separate
+        // process is spawned; otherwise spawn the decoupled third ffmpeg.
+        if self.vision_enabled() && !self.config.vision.raw_tap {
+            self.start_vision_tap().await;
+        }
         true
+    }
+
+    /// True when the additive vision frame tap is configured to run on this
+    /// node: enabled in config AND this is not a ground-station profile (the
+    /// air-side pipeline never runs on a ground station, so neither does the
+    /// tap). This is the single gate the tap consults.
+    fn vision_enabled(&self) -> bool {
+        self.config.vision.enabled && !self.config.is_ground_station()
     }
 
     /// Spawn the wfb radio tap (idempotent). Best-effort: a failure leaves the
@@ -513,6 +573,67 @@ impl VideoOrchestrator {
         }
         // Belt-and-suspenders orphan sweep.
         kill_orphans(&orphan_pattern()).await;
+    }
+
+    /// Spawn the decoupled vision frame tap (idempotent). Best-effort and
+    /// strictly additive: a failure leaves the encode + radio path fully up.
+    /// Mirrors [`start_wfb_tee`](Self::start_wfb_tee) — same setsid/killpg
+    /// ownership, same orphan sweep, same output-progress watchdog.
+    pub async fn start_vision_tap(&mut self) {
+        if !self.vision_enabled() || self.config.vision.raw_tap {
+            return;
+        }
+        if self.state != PipelineState::Running {
+            tracing::warn!("vision_tap_skipped: pipeline not running");
+            return;
+        }
+        if let Some(p) = self.vision_tap.as_mut() {
+            if p.is_running() {
+                return;
+            }
+        }
+        let v = &self.config.vision;
+        // Sweep any stale reader holding the sink before respawn.
+        kill_orphans(&tap::orphan_pattern(&v.sink)).await;
+        let mut t = match spawn_vision_tap(
+            self.mediamtx.rtsp_port(),
+            v.fps,
+            v.width,
+            v.height,
+            v.pixel_format(),
+            &v.sink,
+        ) {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::error!(error = %e, "vision_tap_start_failed");
+                return;
+            }
+        };
+        // Fresh tracker so the just-spawned tap gets the full progress window.
+        let tracker = ProgressTracker::new();
+        if let Some(stderr) = t.take_stderr() {
+            tokio::spawn(drain_wfb_tee_stderr(stderr, tracker.clone()));
+        }
+        self.vision_tap_progress = tracker;
+        self.vision_tap = Some(t);
+        tracing::info!(
+            sink = %v.sink,
+            fps = v.fps,
+            width = v.width,
+            height = v.height,
+            format = %v.pixel_format(),
+            "vision_tap_started"
+        );
+    }
+
+    /// Stop the decoupled vision frame tap. Mirrors
+    /// [`stop_wfb_tee`](Self::stop_wfb_tee).
+    pub async fn stop_vision_tap(&mut self) {
+        if let Some(mut p) = self.vision_tap.take() {
+            p.terminate(Duration::from_secs(5)).await;
+        }
+        // Belt-and-suspenders orphan sweep for the sink.
+        kill_orphans(&tap::orphan_pattern(&self.config.vision.sink)).await;
     }
 
     /// Spawn the headless SEI latency tap as a one-shot Python subprocess,
@@ -628,6 +749,7 @@ impl VideoOrchestrator {
     async fn teardown_after_partial_start(&mut self) {
         self.stop_gst_air().await;
         self.stop_wfb_tee().await;
+        self.stop_vision_tap().await;
         if let Some(mut tap) = self.sei_tap.take() {
             tap.terminate(Duration::from_secs(2)).await;
         }
@@ -644,6 +766,7 @@ impl VideoOrchestrator {
         tracing::info!("stop_stream_begin");
         self.stop_gst_air().await;
         self.stop_wfb_tee().await;
+        self.stop_vision_tap().await;
         if let Some(mut tap) = self.sei_tap.take() {
             tap.terminate(Duration::from_secs(5)).await;
         }
@@ -790,6 +913,30 @@ impl VideoOrchestrator {
         true
     }
 
+    /// Is the vision frame tap alive AND producing? `true` when healthy or
+    /// never started. Same Rule-37 liveness-plus-work contract as the wfb tap
+    /// (a tap alive but pushing nothing is a zombie). Only the decoupled tap is
+    /// supervised here; the raw_tap split rides the encoder's own health.
+    async fn check_vision_tap_health(&mut self) -> bool {
+        let Some(p) = self.vision_tap.as_mut() else {
+            return true;
+        };
+        if !p.is_running() {
+            tracing::warn!("vision_tap_process_exited");
+            self.vision_tap = None;
+            return true; // the run loop will respawn via the vision ladder
+        }
+        let last = self.vision_tap_progress.last_progress_at().await;
+        if wfb_tee_progress_is_stale(last, Instant::now()) {
+            tracing::warn!(
+                threshold_s = WFB_TEE_PROGRESS_TIMEOUT.as_secs(),
+                "vision_tap_zombie_detected: alive but progress flat; forcing restart"
+            );
+            return false;
+        }
+        true
+    }
+
     /// The main service loop. Drives the 5 s health tick, the restart ladders,
     /// and the camera-hotplug-woken retry, terminating on `shutdown` with a
     /// full teardown of every child process.
@@ -810,11 +957,12 @@ impl VideoOrchestrator {
             }
         }
 
-        // Final teardown: gst air → wfb tee → cloud push → encoder → mediamtx.
-        // The ManagedProcess Drop killpg is the backstop; this is the graceful
-        // ordered path.
+        // Final teardown: gst air → wfb tee → vision tap → cloud push →
+        // encoder → mediamtx. The ManagedProcess Drop killpg is the backstop;
+        // this is the graceful ordered path.
         self.stop_gst_air().await;
         self.stop_wfb_tee().await;
+        self.stop_vision_tap().await;
         self.stop_cloud_push().await;
         if let Some(mut tap) = self.sei_tap.take() {
             tap.terminate(Duration::from_secs(2)).await;
@@ -940,6 +1088,40 @@ impl VideoOrchestrator {
                 self.start_wfb_tee().await;
                 if self.wfb_tee.is_some() {
                     self.wfb_tee_restart_count = 0;
+                }
+            }
+            return;
+        }
+
+        // Vision tap ladder (additive, lowest priority). Same shape as the wfb
+        // tap: defer the respawn when the RTSP source is down, otherwise back
+        // off and restart. No circuit breaker — an additive consumer retries
+        // forever and never affects the encode/radio verdict above.
+        let vision_supervised = self.vision_enabled() && !self.config.vision.raw_tap;
+        if vision_supervised && !self.check_vision_tap_health().await {
+            if !self.mediamtx.path_ready(MAIN_PATH).await {
+                tracing::warn!(
+                    "vision_tap_source_down: RTSP source not ready; deferring tap respawn"
+                );
+                self.stop_vision_tap().await;
+            } else {
+                self.vision_tap_restart_count += 1;
+                let delay = backoff_delay(
+                    self.vision_tap_restart_count,
+                    BASE_RESTART_DELAY,
+                    WFB_TEE_RESTART_CEILING,
+                );
+                tracing::warn!(
+                    attempt = self.vision_tap_restart_count,
+                    backoff_s = delay.as_secs_f64(),
+                    "vision_tap_restarting"
+                );
+                self.stop_vision_tap().await;
+                let pre = delay.saturating_sub(HEALTH_CHECK_INTERVAL);
+                interruptible_sleep(pre, shutdown, &self.camera_plugged, false).await;
+                self.start_vision_tap().await;
+                if self.vision_tap.is_some() {
+                    self.vision_tap_restart_count = 0;
                 }
             }
             return;
@@ -1246,6 +1428,46 @@ mod tests {
             CameraConfig::default(),
             std::path::Path::new("/tmp"),
         )
+    }
+
+    #[test]
+    fn vision_gate_off_by_default() {
+        let o = test_orch();
+        // Default config has the vision tap disabled → never enabled.
+        assert!(!o.vision_enabled());
+        // No tap process slot is occupied at construction.
+        assert!(o.vision_tap.is_none());
+    }
+
+    #[test]
+    fn vision_gate_respects_ground_station_profile() {
+        let mut cfg = AgentVideoConfig::default();
+        cfg.vision.enabled = true;
+        // On a drone profile the gate opens.
+        cfg.profile = Some("drone".into());
+        let o = VideoOrchestrator::new(cfg.clone(), CameraConfig::default(), std::path::Path::new("/tmp"));
+        assert!(o.vision_enabled());
+        // On a ground-station profile the air-side tap is suppressed even when
+        // enabled in config.
+        cfg.profile = Some("ground_station".into());
+        let o = VideoOrchestrator::new(cfg, CameraConfig::default(), std::path::Path::new("/tmp"));
+        assert!(!o.vision_enabled());
+    }
+
+    #[tokio::test]
+    async fn vision_tap_health_true_when_not_started() {
+        let mut o = test_orch();
+        // No tap spawned → health is vacuously true (nothing to supervise).
+        assert!(o.check_vision_tap_health().await);
+    }
+
+    #[tokio::test]
+    async fn start_vision_tap_noop_when_disabled() {
+        let mut o = test_orch();
+        // Disabled config: start is a no-op even if we force Running.
+        o.state = PipelineState::Running;
+        o.start_vision_tap().await;
+        assert!(o.vision_tap.is_none());
     }
 
     #[test]

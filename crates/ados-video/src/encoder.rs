@@ -796,6 +796,71 @@ pub fn wrap_with_sei_inject(cmd: &[String], output_uri: &str, env: &EncoderEnv) 
     }
 }
 
+/// Augment a raw `ffmpeg` encoder command with an additive second `rawvideo`
+/// output for the vision frame tap, WITHOUT changing the existing encode/RTSP
+/// output bytes.
+///
+/// This is the opt-in pre-encode split (gated by `video.vision.raw_tap`). The
+/// strategy is purely additive: the original argv is kept verbatim through its
+/// existing output URI, then a SECOND output is appended that re-reads the same
+/// decoded input via an `-filter_complex` split. ffmpeg's `-filter_complex
+/// split` duplicates the decoded frames into two labelled streams; the first
+/// (`[enc]`) is mapped nowhere extra — the original output keeps consuming the
+/// input exactly as before — and the second (`[vis]`) is throttled, scaled, and
+/// written as `rawvideo` to the sink. Because the original output args are
+/// untouched and appear first, the existing encode bytes are bit-identical;
+/// the tap is a strictly appended `-map [vis] ... <sink>` block.
+///
+/// Returns the command unchanged when it is not a raw `ffmpeg` command (e.g.
+/// the rpicam / gstreamer `bash -c` pipelines): those callers fall back to the
+/// decoupled third-ffmpeg tap, which never perturbs the encoder at all.
+///
+/// `existing_output` is the original output URI (the last token of the encoder
+/// command). The split feeds it through the named `[enc]` label so the encoder
+/// settings still apply to the wire output.
+pub fn augment_encoder_with_raw_tap(
+    cmd: &[String],
+    existing_output: &str,
+    fps: u32,
+    width: u32,
+    height: u32,
+    pixel_format: &str,
+    sink: &str,
+) -> Vec<String> {
+    // Only a raw ffmpeg command can carry a second mapped output. bash-pipeline
+    // (rpicam / gstreamer) and gst-launch commands are left untouched.
+    if cmd.first().map(String::as_str) != Some("ffmpeg") {
+        return cmd.to_vec();
+    }
+    // The existing output URI must be the last token; if the command does not
+    // end the way we expect, do not risk perturbing it — leave it unchanged.
+    if cmd.last().map(String::as_str) != Some(existing_output) {
+        return cmd.to_vec();
+    }
+
+    let fps = fps.max(1);
+    let mut out: Vec<String> = cmd.to_vec();
+    // Append a strictly additive second output. The split duplicates the input
+    // frames; `[enc]` carries the untouched primary output, `[vis]` carries the
+    // throttled/scaled raw tap. The primary output args above already encode
+    // `[enc]` because, absent an explicit `-map`, ffmpeg routes the single
+    // filtered video stream to the first output — so we keep the original
+    // output as-is and only add the explicitly-mapped `[vis]` sink after it.
+    out.push("-filter_complex".into());
+    out.push(format!(
+        "split=2[enc][vis];[vis]fps={fps},scale={width}:{height}[visout]"
+    ));
+    out.push("-map".into());
+    out.push("[visout]".into());
+    out.push("-an".into());
+    out.push("-pix_fmt".into());
+    out.push(pixel_format.to_string());
+    out.push("-f".into());
+    out.push("rawvideo".into());
+    out.push(sink.to_string());
+    out
+}
+
 /// Remove the last occurrence of `flag` and its following value from `args`,
 /// scanning right-to-left. Mirrors the Python reverse-scan + double-pop.
 fn strip_flag_with_value(args: &mut Vec<String>, flag: &str) {
@@ -1332,5 +1397,83 @@ mod tests {
         assert_eq!(shell_quote("a b"), "'a b'");
         assert_eq!(shell_quote("it's"), "'it'\\''s'");
         assert_eq!(shell_quote("a|b"), "'a|b'");
+    }
+
+    // --- opt-in pre-encode raw tap (Option B) --------------------------
+
+    #[test]
+    fn raw_tap_appends_without_changing_encode_prefix() {
+        // The existing encode/RTSP output bytes MUST be untouched: the original
+        // command is a strict prefix of the augmented one.
+        let base = build_encoder_command(
+            &params(EncoderKind::Ffmpeg, 1280, 720, 30, 4000),
+            "/dev/video1",
+            RTSP_OUT,
+            Some(&usb_mjpeg()),
+            &rockchip(),
+        )
+        .unwrap();
+        let augmented = augment_encoder_with_raw_tap(
+            &base,
+            RTSP_OUT,
+            10,
+            640,
+            480,
+            "rgb24",
+            "/run/ados/vision-tap-main.sock",
+        );
+        // Every original token, in order, comes first.
+        assert!(augmented.len() > base.len());
+        assert_eq!(&augmented[..base.len()], base.as_slice());
+        // The appended block is the additive raw-tap output.
+        let tail = &augmented[base.len()..];
+        assert!(tail.iter().any(|t| t == "-filter_complex"));
+        assert!(tail.iter().any(|t| t == "rawvideo"));
+        assert_eq!(tail.last().unwrap(), "/run/ados/vision-tap-main.sock");
+        let pf = tail.iter().position(|t| t == "-pix_fmt").unwrap();
+        assert_eq!(tail[pf + 1], "rgb24");
+    }
+
+    #[test]
+    fn raw_tap_leaves_bash_pipeline_unchanged() {
+        // The rpicam path is a `bash -c` pipeline: it cannot safely carry a
+        // second mapped output, so the augmentation is a no-op (the caller
+        // falls back to the decoupled tap).
+        let base = build_encoder_command(
+            &params(EncoderKind::RpicamVid, 1280, 720, 30, 4000),
+            "/dev/video0",
+            RTSP_OUT,
+            Some(&csi()),
+            &rockchip(),
+        )
+        .unwrap();
+        assert_eq!(base[0], "bash");
+        let augmented =
+            augment_encoder_with_raw_tap(&base, RTSP_OUT, 10, 640, 480, "rgb24", "/s.sock");
+        assert_eq!(augmented, base);
+    }
+
+    #[test]
+    fn raw_tap_leaves_mismatched_output_unchanged() {
+        // If the last token is not the expected output URI, do not risk
+        // perturbing the command — return it unchanged.
+        let base = build_encoder_command(
+            &params(EncoderKind::Ffmpeg, 1280, 720, 30, 4000),
+            "/dev/video1",
+            RTSP_OUT,
+            Some(&usb_mjpeg()),
+            &rockchip(),
+        )
+        .unwrap();
+        let augmented = augment_encoder_with_raw_tap(
+            &base,
+            "rtsp://wrong/output",
+            10,
+            640,
+            480,
+            "rgb24",
+            "/s.sock",
+        );
+        assert_eq!(augmented, base);
     }
 }
