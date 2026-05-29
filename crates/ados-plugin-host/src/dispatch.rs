@@ -141,6 +141,12 @@ pub mod errors {
     pub fn capability_denied(cap: &str) -> String {
         format!("capability_denied: {cap}")
     }
+
+    /// `allowlist_violation: <basename>` — emitted when a `process.spawn` names
+    /// a basename outside the plugin's manifest `subprocess_spawn` allowlist.
+    pub fn allowlist_violation(basename: &str) -> String {
+        format!("allowlist_violation: {basename}")
+    }
 }
 
 /// Gate one request. `token_expired` is checked first (matching the Python

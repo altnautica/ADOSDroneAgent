@@ -36,6 +36,10 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
+          # The static target the prebuilt binaries ship as. Linting against it
+          # catches Linux/musl-only lints (nix, flock, setsid) the host target
+          # cannot surface, so both targets are part of the code-ready gate.
+          targets: aarch64-unknown-linux-musl
 
       - name: Cache cargo
         uses: actions/cache@v4
@@ -50,8 +54,11 @@ jobs:
       - name: Format check
         run: cargo fmt --check
 
-      - name: Clippy (all features)
+      - name: Clippy (host target, all features)
         run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Clippy (aarch64-musl target, all features)
+        run: cargo clippy --all-targets --all-features --target aarch64-unknown-linux-musl -- -D warnings
 
       - name: Test (default features)
         run: cargo test

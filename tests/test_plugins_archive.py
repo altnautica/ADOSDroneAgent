@@ -133,6 +133,27 @@ def test_pack_and_unpack_round_trip(tmp_path: Path) -> None:
     assert (dest / "agent" / "plugin.py").read_text() == "# stub"
 
 
+def test_unpack_restores_exec_bit_for_executable_entries(tmp_path: Path) -> None:
+    """An exec-marked agent/bin entry must come back runnable (systemd
+    ExecStart needs it); a plain entry must stay non-executable."""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr(MANIFEST_FILENAME, _good_manifest_yaml().encode())
+        # An executable binary entry: external_attr upper 16 bits carry 0o755.
+        info = zipfile.ZipInfo("agent/bin/geofence")
+        info.external_attr = 0o755 << 16
+        zf.writestr(info, b"#!/bin/sh\n")
+    raw = buf.getvalue()
+
+    dest = tmp_path / "unpacked"
+    unpack_to(raw, dest)
+
+    bin_mode = (dest / "agent" / "bin" / "geofence").stat().st_mode
+    assert bin_mode & 0o111, f"agent/bin entry must be executable (mode {oct(bin_mode)})"
+    mani_mode = (dest / MANIFEST_FILENAME).stat().st_mode
+    assert not (mani_mode & 0o111), "plain entry must not gain exec bits"
+
+
 def test_payload_hash_deterministic() -> None:
     archive_a = _make_zip(
         {

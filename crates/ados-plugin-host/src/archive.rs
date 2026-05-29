@@ -262,16 +262,13 @@ pub fn unpack_to(archive_bytes: &[u8], dest: &Path) -> Result<(), ArchiveError> 
     let mut zf = zip::ZipArchive::new(Cursor::new(archive_bytes))
         .map_err(|e| ArchiveError(format!("not a valid zip archive: {e}")))?;
     for i in 0..zf.len() {
-        let (name, external_attr, is_dir) = {
+        let (name, unix_mode, is_dir) = {
             let file = zf
                 .by_index(i)
                 .map_err(|e| ArchiveError(format!("corrupt zip entry {i}: {e}")))?;
-            (
-                file.name().to_string(),
-                file.unix_mode().map(|m| m << 16).unwrap_or(0),
-                file.is_dir(),
-            )
+            (file.name().to_string(), file.unix_mode(), file.is_dir())
         };
+        let external_attr = unix_mode.map(|m| m << 16).unwrap_or(0);
         let safe = safe_member_path(&name)?.to_string();
         if is_dir || safe.ends_with('/') {
             continue;
@@ -296,7 +293,36 @@ pub fn unpack_to(archive_bytes: &[u8], dest: &Path) -> Result<(), ArchiveError> 
         }
         std::fs::write(&target, &buf)
             .map_err(|e| ArchiveError(format!("write of {} failed: {e}", target.display())))?;
+        restore_exec_mode(&target, unix_mode)?;
     }
+    Ok(())
+}
+
+/// Restore the executable Unix mode when the zip entry carried one, so an
+/// unpacked `agent/bin/<id>` Rust-plugin binary is runnable by the generated
+/// systemd `ExecStart`. Without this, `std::fs::write` leaves the file at the
+/// process umask default (typically `0644`) and the unit dies with `EACCES`.
+///
+/// Only acts when the entry's mode has an exec bit set, and preserves the
+/// entry's own permission bits (masked to `0o777`). The canonical payload hash
+/// is computed over file *content*, so restoring the mode never affects the
+/// signature. Unix-only; a no-op elsewhere so the crate builds on a non-Unix
+/// dev host.
+#[cfg(unix)]
+fn restore_exec_mode(target: &Path, unix_mode: Option<u32>) -> Result<(), ArchiveError> {
+    use std::os::unix::fs::PermissionsExt;
+    if let Some(mode) = unix_mode {
+        if mode & 0o111 != 0 {
+            let perms = std::fs::Permissions::from_mode(mode & 0o777);
+            std::fs::set_permissions(target, perms)
+                .map_err(|e| ArchiveError(format!("chmod of {} failed: {e}", target.display())))?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn restore_exec_mode(_target: &Path, _unix_mode: Option<u32>) -> Result<(), ArchiveError> {
     Ok(())
 }
 
@@ -450,5 +476,43 @@ mod tests {
         unpack_to(&zip, dir.path()).unwrap();
         let got = std::fs::read(dir.path().join("agent/py/thermal.py")).unwrap();
         assert_eq!(got, b"print('hi')");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unpack_restores_exec_bit_for_executable_entries() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        // Build a zip carrying an exec-mode binary entry plus a plain entry.
+        let mut buf = Vec::new();
+        {
+            let mut w = zip::ZipWriter::new(Cursor::new(&mut buf));
+            let stored =
+                SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+            w.start_file("manifest.yaml", stored).unwrap();
+            w.write_all(manifest_yaml().as_bytes()).unwrap();
+            w.start_file("agent/bin/geofence", stored.unix_permissions(0o755))
+                .unwrap();
+            w.write_all(b"#!/bin/sh\n").unwrap();
+            w.finish().unwrap();
+        }
+        unpack_to(&buf, dir.path()).unwrap();
+
+        // The exec-marked binary comes back runnable...
+        let bin_mode = std::fs::metadata(dir.path().join("agent/bin/geofence"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_ne!(
+            bin_mode & 0o111,
+            0,
+            "agent/bin entry must be executable after unpack (mode {bin_mode:o})"
+        );
+        // ...and the plain manifest entry stays non-executable.
+        let mani_mode = std::fs::metadata(dir.path().join("manifest.yaml"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mani_mode & 0o111, 0, "plain entry must not gain exec bits");
     }
 }

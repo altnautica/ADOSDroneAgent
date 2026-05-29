@@ -18,7 +18,7 @@ use rmpv::Value;
 use tokio::sync::broadcast;
 
 use crate::dispatch::Method;
-use crate::host::{HostResult, HostServices};
+use crate::host::{HostError, HostResult, HostServices};
 
 /// Per-subscriber event-bus depth. Matches the Python `events.QUEUE_DEPTH`.
 pub const EVENT_QUEUE_DEPTH: usize = 256;
@@ -286,13 +286,15 @@ pub fn event_deliver_args(event: &Event) -> Value {
 /// Route a host-coupled method to its [`HostServices`] hook. The event surface
 /// and `ping` are handled in the server before this is reached; this routes the
 /// 17 host-coupled methods. With the [`NoopHost`](crate::host::NoopHost) every
-/// one returns the `not_implemented` shape, mirroring the Python stub bodies.
+/// one returns `Ok(not_implemented(...))`, mirroring the Python stub bodies; a
+/// real host returns [`Err(HostError)`](HostError) for a soft failure, which
+/// the server renders into the response envelope `error` field.
 pub fn route_host_method<H: HostServices + ?Sized>(
     host: &H,
     method: Method,
     plugin_id: &str,
     args: &Value,
-) -> HostResult {
+) -> Result<HostResult, HostError> {
     match method {
         Method::TelemetrySubscribe => host.telemetry_subscribe(plugin_id, args),
         Method::TelemetryExtend => host.telemetry_extend(plugin_id, args),
@@ -314,7 +316,7 @@ pub fn route_host_method<H: HostServices + ?Sized>(
         // The event surface and ping never reach here; the server short-circuits
         // them. Treat as a programming error guarded by a stable response.
         Method::EventPublish | Method::EventSubscribe | Method::Ping => {
-            crate::host::not_implemented("event")
+            Ok(crate::host::not_implemented("event"))
         }
     }
 }

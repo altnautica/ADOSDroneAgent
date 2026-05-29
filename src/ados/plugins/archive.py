@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import os
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -188,6 +189,21 @@ def _read_signature(blob: bytes | None) -> tuple[str | None, str | None]:
     return lines[0], lines[1]
 
 
+def _restore_exec_mode(target: Path, info: zipfile.ZipInfo) -> None:
+    """Restore the executable Unix mode when the zip entry carried one.
+
+    An unpacked ``agent/bin/<id>`` Rust-plugin binary must be runnable by the
+    generated systemd ``ExecStart``; ``write_bytes`` otherwise leaves the file
+    at the umask default (typically ``0644``) and the unit dies with
+    ``EACCES``. Only acts when an exec bit is set, and preserves the entry's
+    own permission bits (masked to ``0o777``). The canonical payload hash is
+    over file content, so restoring the mode never affects the signature.
+    """
+    mode = (info.external_attr >> 16) & 0o777
+    if mode & 0o111:
+        os.chmod(target, mode)
+
+
 def unpack_to(archive_bytes: bytes, dest: Path) -> None:
     """Unpack archive bytes to ``dest`` directory. Caller is responsible for
     having validated the archive (signature etc.) first."""
@@ -204,6 +220,7 @@ def unpack_to(archive_bytes: bytes, dest: Path) -> None:
             target = dest / name
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(zf.read(info.filename))
+            _restore_exec_mode(target, info)
 
 
 def pack_directory(src: Path, manifest: PluginManifest, output: Path) -> Path:

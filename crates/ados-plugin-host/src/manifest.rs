@@ -143,6 +143,12 @@ pub struct AgentBlock {
     pub permissions: Vec<PermissionRef>,
     #[serde(default)]
     pub resources: ResourceLimits,
+    /// Basenames the plugin may `process.spawn` at runtime. The host enforces
+    /// the `process.spawn` allowlist against this list (mirrors the Python
+    /// `AgentBlock.subprocess_spawn`). Empty (the default) means no spawn is
+    /// permitted even with the `process.spawn` capability.
+    #[serde(default)]
+    pub subprocess_spawn: Vec<String>,
     #[serde(flatten)]
     pub extra: BTreeMap<String, serde_norway::Value>,
 }
@@ -281,6 +287,31 @@ agent:
         assert!(perms[0].required);
         assert_eq!(perms[1].id, "vehicle.command");
         assert!(!perms[1].required);
+    }
+
+    #[test]
+    fn subprocess_spawn_allowlist_parses_and_defaults_empty() {
+        // Default: absent → empty allowlist.
+        let m = PluginManifest::from_yaml_text(MINIMAL).unwrap();
+        assert!(m.agent.as_ref().unwrap().subprocess_spawn.is_empty());
+
+        // Explicit: a list of basenames the plugin may process.spawn.
+        let yaml = r#"
+id: com.example.spawner
+version: 1.0.0
+compatibility:
+  ados_version: ">=0.1.0"
+agent:
+  entrypoint: agent/py/x.py
+  subprocess_spawn:
+    - ffmpeg
+    - v4l2-ctl
+"#;
+        let m = PluginManifest::from_yaml_text(yaml).unwrap();
+        assert_eq!(
+            m.agent.as_ref().unwrap().subprocess_spawn,
+            vec!["ffmpeg".to_string(), "v4l2-ctl".to_string()]
+        );
     }
 
     #[test]

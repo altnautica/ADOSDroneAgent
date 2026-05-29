@@ -302,12 +302,15 @@ impl<H: HostServices> Connection<H> {
                     Err(e) => send_error(write_half, &env.request_id, &e.0).await,
                 }
             }
-            // Host-coupled methods route to the facade (NoopHost ->
-            // not_implemented, mirroring the Python stub bodies).
+            // Host-coupled methods route to the facade. NoopHost returns
+            // Ok(not_implemented) (mirroring the Python stub bodies); a real
+            // host returns Err(HostError) for a soft failure, which becomes the
+            // response envelope `error` field with the exact Python wire body.
             other => {
-                let result =
-                    handlers::route_host_method(&*self.host, other, &self.plugin_id, &env.args);
-                send_response(write_half, &env.request_id, result).await
+                match handlers::route_host_method(&*self.host, other, &self.plugin_id, &env.args) {
+                    Ok(result) => send_response(write_half, &env.request_id, result).await,
+                    Err(e) => send_error(write_half, &env.request_id, &e.body()).await,
+                }
             }
         }
     }

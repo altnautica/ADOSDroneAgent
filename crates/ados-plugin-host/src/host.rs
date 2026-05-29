@@ -22,8 +22,51 @@
 
 use rmpv::Value;
 
+use crate::dispatch::errors;
+
 /// A msgpack map the dispatcher returns to the plugin as the response `args`.
 pub type HostResult = Value;
+
+/// A soft host-method failure that becomes the response envelope `error` field.
+///
+/// Mirrors the three exception types the Python dispatch loop converts to the
+/// wire `error` string (`src/ados/plugins/ipc_server.py`): `_RpcError` (the
+/// message verbatim), `CapabilityDenied` (`capability_denied: <cap>`, the
+/// inline pose-inject / VIO-component / driver-kind / component-kind gates),
+/// and `AllowlistViolation` (`allowlist_violation: <basename>`). [`body`](Self::body)
+/// renders the exact wire string for each, so a Rust host is byte-identical to
+/// the Python host. A real host returns these; [`NoopHost`] never does.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HostError {
+    /// An arbitrary handler failure; the body is the message verbatim.
+    Rpc(String),
+    /// An inline capability gate refused the call; the body renders
+    /// `capability_denied: <cap>` (the stored string is the capability).
+    CapabilityDenied(String),
+    /// A `process.spawn` basename outside the manifest allowlist; the body
+    /// renders `allowlist_violation: <basename>` (the stored string is the
+    /// basename).
+    AllowlistViolation(String),
+}
+
+impl HostError {
+    /// The exact wire `error` body the Python server emits for this failure.
+    pub fn body(&self) -> String {
+        match self {
+            HostError::Rpc(msg) => msg.clone(),
+            HostError::CapabilityDenied(cap) => errors::capability_denied(cap),
+            HostError::AllowlistViolation(basename) => errors::allowlist_violation(basename),
+        }
+    }
+}
+
+impl std::fmt::Display for HostError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.body())
+    }
+}
+
+impl std::error::Error for HostError {}
 
 /// Build the `{"error": "not_implemented", "method": <method>}` result the
 /// Python `_handle_*` stub bodies return verbatim, so a plugin sees the same
@@ -44,56 +87,72 @@ pub fn not_implemented(method: &str) -> HostResult {
 /// stabilize. The event surface is not on this trait — it is served in-process
 /// by the host's own event bus (see [`crate::handlers`]).
 pub trait HostServices: Send + Sync + 'static {
-    fn telemetry_subscribe(&self, _plugin_id: &str, _args: &Value) -> HostResult {
-        not_implemented("telemetry.subscribe")
+    fn telemetry_subscribe(
+        &self,
+        _plugin_id: &str,
+        _args: &Value,
+    ) -> Result<HostResult, HostError> {
+        Ok(not_implemented("telemetry.subscribe"))
     }
-    fn telemetry_extend(&self, _plugin_id: &str, _args: &Value) -> HostResult {
-        not_implemented("telemetry.extend")
+    fn telemetry_extend(&self, _plugin_id: &str, _args: &Value) -> Result<HostResult, HostError> {
+        Ok(not_implemented("telemetry.extend"))
     }
-    fn mission_read(&self, _plugin_id: &str, _args: &Value) -> HostResult {
-        not_implemented("mission.read")
+    fn mission_read(&self, _plugin_id: &str, _args: &Value) -> Result<HostResult, HostError> {
+        Ok(not_implemented("mission.read"))
     }
-    fn mission_write(&self, _plugin_id: &str, _args: &Value) -> HostResult {
-        not_implemented("mission.write")
+    fn mission_write(&self, _plugin_id: &str, _args: &Value) -> Result<HostResult, HostError> {
+        Ok(not_implemented("mission.write"))
     }
-    fn recording_start(&self, _plugin_id: &str, _args: &Value) -> HostResult {
-        not_implemented("recording.start")
+    fn recording_start(&self, _plugin_id: &str, _args: &Value) -> Result<HostResult, HostError> {
+        Ok(not_implemented("recording.start"))
     }
-    fn recording_stop(&self, _plugin_id: &str, _args: &Value) -> HostResult {
-        not_implemented("recording.stop")
+    fn recording_stop(&self, _plugin_id: &str, _args: &Value) -> Result<HostResult, HostError> {
+        Ok(not_implemented("recording.stop"))
     }
-    fn mavlink_subscribe(&self, _plugin_id: &str, _args: &Value) -> HostResult {
-        not_implemented("mavlink.subscribe")
+    fn mavlink_subscribe(&self, _plugin_id: &str, _args: &Value) -> Result<HostResult, HostError> {
+        Ok(not_implemented("mavlink.subscribe"))
     }
-    fn mavlink_send(&self, _plugin_id: &str, _args: &Value) -> HostResult {
-        not_implemented("mavlink.send")
+    fn mavlink_send(&self, _plugin_id: &str, _args: &Value) -> Result<HostResult, HostError> {
+        Ok(not_implemented("mavlink.send"))
     }
-    fn mavlink_register_component(&self, _plugin_id: &str, _args: &Value) -> HostResult {
-        not_implemented("mavlink.register_component")
+    fn mavlink_register_component(
+        &self,
+        _plugin_id: &str,
+        _args: &Value,
+    ) -> Result<HostResult, HostError> {
+        Ok(not_implemented("mavlink.register_component"))
     }
-    fn peripheral_register_driver(&self, _plugin_id: &str, _args: &Value) -> HostResult {
-        not_implemented("peripheral.register_driver")
+    fn peripheral_register_driver(
+        &self,
+        _plugin_id: &str,
+        _args: &Value,
+    ) -> Result<HostResult, HostError> {
+        Ok(not_implemented("peripheral.register_driver"))
     }
-    fn peripheral_unregister_driver(&self, _plugin_id: &str, _args: &Value) -> HostResult {
-        not_implemented("peripheral.unregister_driver")
+    fn peripheral_unregister_driver(
+        &self,
+        _plugin_id: &str,
+        _args: &Value,
+    ) -> Result<HostResult, HostError> {
+        Ok(not_implemented("peripheral.unregister_driver"))
     }
-    fn camera_claim(&self, _plugin_id: &str, _args: &Value) -> HostResult {
-        not_implemented("camera.claim")
+    fn camera_claim(&self, _plugin_id: &str, _args: &Value) -> Result<HostResult, HostError> {
+        Ok(not_implemented("camera.claim"))
     }
-    fn camera_release(&self, _plugin_id: &str, _args: &Value) -> HostResult {
-        not_implemented("camera.release")
+    fn camera_release(&self, _plugin_id: &str, _args: &Value) -> Result<HostResult, HostError> {
+        Ok(not_implemented("camera.release"))
     }
-    fn camera_get_frame(&self, _plugin_id: &str, _args: &Value) -> HostResult {
-        not_implemented("camera.get_frame")
+    fn camera_get_frame(&self, _plugin_id: &str, _args: &Value) -> Result<HostResult, HostError> {
+        Ok(not_implemented("camera.get_frame"))
     }
-    fn config_get(&self, _plugin_id: &str, _args: &Value) -> HostResult {
-        not_implemented("config.get")
+    fn config_get(&self, _plugin_id: &str, _args: &Value) -> Result<HostResult, HostError> {
+        Ok(not_implemented("config.get"))
     }
-    fn config_set(&self, _plugin_id: &str, _args: &Value) -> HostResult {
-        not_implemented("config.set")
+    fn config_set(&self, _plugin_id: &str, _args: &Value) -> Result<HostResult, HostError> {
+        Ok(not_implemented("config.set"))
     }
-    fn process_spawn(&self, _plugin_id: &str, _args: &Value) -> HostResult {
-        not_implemented("process.spawn")
+    fn process_spawn(&self, _plugin_id: &str, _args: &Value) -> Result<HostResult, HostError> {
+        Ok(not_implemented("process.spawn"))
     }
 
     /// Release every per-session host resource a plugin held when its
@@ -122,7 +181,9 @@ mod tests {
     #[test]
     fn noop_host_returns_not_implemented_with_the_method_name() {
         let host = NoopHost;
-        let result = host.mission_read("p", &Value::Map(vec![]));
+        let result = host
+            .mission_read("p", &Value::Map(vec![]))
+            .expect("NoopHost methods never error");
         let map = match result {
             Value::Map(m) => m,
             other => panic!("expected map, got {other:?}"),
@@ -138,5 +199,20 @@ mod tests {
             .and_then(|(_, v)| v.as_str());
         assert_eq!(error, Some("not_implemented"));
         assert_eq!(method, Some("mission.read"));
+    }
+
+    #[test]
+    fn host_error_renders_the_exact_python_wire_bodies() {
+        // These strings are the contract SDK clients string-match on
+        // (e.g. error.startswith("allowlist_violation:")). Lock them.
+        assert_eq!(HostError::Rpc("boom".to_string()).body(), "boom");
+        assert_eq!(
+            HostError::CapabilityDenied("mavlink.write".to_string()).body(),
+            "capability_denied: mavlink.write"
+        );
+        assert_eq!(
+            HostError::AllowlistViolation("ffmpeg".to_string()).body(),
+            "allowlist_violation: ffmpeg"
+        );
     }
 }
