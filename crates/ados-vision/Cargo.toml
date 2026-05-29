@@ -1,0 +1,47 @@
+[package]
+name = "ados-vision"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Vision engine host: owns the per-camera shared-memory frame rings, the model registry, the accelerator lease arbiter, and the vision.sock plugin bridge."
+
+[lib]
+name = "ados_vision"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ados-vision"
+path = "src/bin/ados-vision.rs"
+
+[features]
+# The default build carries no native inference runtime so it compiles fast
+# everywhere; the MockBackend and the RKNN sidecar IPC client cover Phase 1.
+default = []
+# Opt-in ONNX Runtime backend. Pulls a heavy native runtime, so it is never on
+# by default.
+onnx = ["dep:ort"]
+
+[dependencies]
+ados-protocol = { path = "../ados-protocol", features = ["mavlink"] }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_norway = { workspace = true }
+rmp-serde = { workspace = true }
+rmpv = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+memmap2 = { workspace = true }
+# ONNX Runtime, gated behind the `onnx` feature.
+ort = { version = "2.0.0-rc.9", optional = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+sd-notify = { workspace = true }
+tracing-journald = { workspace = true }
+nix = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
