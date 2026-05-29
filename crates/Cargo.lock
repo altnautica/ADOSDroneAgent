@@ -43,6 +43,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "ados-groundlink"
+version = "0.1.0"
+
+[[package]]
+name = "ados-hid"
+version = "0.1.0"
+
+[[package]]
 name = "ados-mavlink-router"
 version = "0.1.0"
 dependencies = [
@@ -60,6 +68,10 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
 ]
+
+[[package]]
+name = "ados-net"
+version = "0.1.0"
 
 [[package]]
 name = "ados-plugin-host"
