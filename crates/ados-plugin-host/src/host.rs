@@ -200,6 +200,57 @@ pub trait HostServices: Send + Sync + 'static {
     ) -> Option<tokio::sync::broadcast::Receiver<Vec<u8>>> {
         None
     }
+
+    /// A receiver for the vision engine's frame-descriptor fanout, when this
+    /// host has a wired vision client. The server obtains one per
+    /// `vision.subscribe_frames` and pushes each descriptor to the plugin as a
+    /// `vision.deliver` envelope, mirroring the MAVLink frame pump. The bytes are
+    /// an encoded `ados_protocol::framebus::FrameDescriptor`; the actual pixels
+    /// live in the shared-memory ring the descriptor names.
+    ///
+    /// The default returns `None`, keeping [`NoopHost`] unaffected (no push
+    /// stream). A real host returns a receiver when its vision slot is wired and
+    /// `None` when the engine socket has not surfaced yet.
+    fn vision_subscribe_stream(
+        &self,
+        _plugin_id: &str,
+        _camera_id: &str,
+    ) -> Option<tokio::sync::broadcast::Receiver<Vec<u8>>> {
+        None
+    }
+
+    /// Register an inference model with the vision engine. The host proxies the
+    /// request to `/run/ados/vision.sock` and returns the engine's response.
+    /// Async because the proxy awaits the engine's reply on the socket, unlike
+    /// the in-process methods above. The default returns the `not_implemented`
+    /// shape so [`NoopHost`] stays inert.
+    fn vision_register_model(
+        &self,
+        _plugin_id: &str,
+        _args: &Value,
+    ) -> impl std::future::Future<Output = Result<HostResult, HostError>> + Send {
+        std::future::ready(Ok(not_implemented("vision.register_model")))
+    }
+
+    /// Run a registered model against one frame on the engine's shared backend
+    /// and return the detections. Proxied to the engine over the vision socket.
+    fn vision_infer(
+        &self,
+        _plugin_id: &str,
+        _args: &Value,
+    ) -> impl std::future::Future<Output = Result<HostResult, HostError>> + Send {
+        std::future::ready(Ok(not_implemented("vision.infer")))
+    }
+
+    /// Publish a detection batch on `vision.detection`. Proxied to the engine,
+    /// which fans it out to overlay consumers and any subscribed plugin.
+    fn vision_publish_detection(
+        &self,
+        _plugin_id: &str,
+        _args: &Value,
+    ) -> impl std::future::Future<Output = Result<HostResult, HostError>> + Send {
+        std::future::ready(Ok(not_implemented("vision.publish_detection")))
+    }
 }
 
 /// The default host: every host-coupled method returns `not_implemented`.

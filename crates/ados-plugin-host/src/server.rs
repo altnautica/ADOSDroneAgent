@@ -220,6 +220,14 @@ impl<H: HostServices> Connection<H> {
         let (mav_tx, mut mav_rx) = tokio::sync::mpsc::channel::<MavlinkDelivery>(256);
         let mut forwarders: Vec<JoinHandle<()>> = Vec::new();
 
+        // Vision frame-descriptor subscriptions. Each `vision.subscribe_frames`
+        // records the camera_id and a descriptor receiver from the host's vision
+        // client; a per-subscription forwarder pulls descriptor bytes into one
+        // merged channel, so a single select branch writes the `vision.deliver`
+        // envelopes without competing writers. Same shape as the MAVLink pump.
+        let mut vision_subs: Vec<String> = Vec::new();
+        let (vis_tx, mut vis_rx) = tokio::sync::mpsc::channel::<VisionDelivery>(256);
+
         // ---- dispatch loop --------------------------------------------
         let result = loop {
             // Race the inbound request against an outgoing event or MAVLink frame
@@ -241,6 +249,8 @@ impl<H: HostServices> Connection<H> {
                             &mut subscriptions,
                             &mut mavlink_subs,
                             &mav_tx,
+                            &mut vision_subs,
+                            &vis_tx,
                             &mut forwarders,
                         )
                         .await
@@ -276,6 +286,18 @@ impl<H: HostServices> Connection<H> {
                         }
                     }
                 }
+                delivery = vis_rx.recv() => {
+                    // None means every vision forwarder dropped its sender; keep
+                    // serving requests rather than tearing down.
+                    if let Some(VisionDelivery { descriptor }) = delivery {
+                        if let Err(e) = self
+                            .deliver_vision_frame(&mut write_half, &token, &descriptor)
+                            .await
+                        {
+                            break Err(e);
+                        }
+                    }
+                }
             }
         };
 
@@ -296,6 +318,8 @@ impl<H: HostServices> Connection<H> {
         subscriptions: &mut Vec<String>,
         mavlink_subs: &mut Vec<String>,
         mav_tx: &tokio::sync::mpsc::Sender<MavlinkDelivery>,
+        vision_subs: &mut Vec<String>,
+        vis_tx: &tokio::sync::mpsc::Sender<VisionDelivery>,
         forwarders: &mut Vec<JoinHandle<()>>,
     ) -> Result<(), ServerError> {
         let req_id = env.request_id.clone();
@@ -315,6 +339,8 @@ impl<H: HostServices> Connection<H> {
                     subscriptions,
                     mavlink_subs,
                     mav_tx,
+                    vision_subs,
+                    vis_tx,
                     forwarders,
                 )
                 .await
@@ -334,6 +360,8 @@ impl<H: HostServices> Connection<H> {
         subscriptions: &mut Vec<String>,
         mavlink_subs: &mut Vec<String>,
         mav_tx: &tokio::sync::mpsc::Sender<MavlinkDelivery>,
+        vision_subs: &mut Vec<String>,
+        vis_tx: &tokio::sync::mpsc::Sender<VisionDelivery>,
         forwarders: &mut Vec<JoinHandle<()>>,
     ) -> Result<(), ServerError> {
         match method {
@@ -437,6 +465,51 @@ impl<H: HostServices> Connection<H> {
                 ]);
                 send_response(write_half, &env.request_id, result).await
             }
+            // vision.subscribe_frames arms the per-connection frame-descriptor
+            // push stream, exactly like mavlink.subscribe arms the frame pump. On
+            // the first subscribe to a camera we obtain a descriptor receiver from
+            // the host's vision client (if wired) and spawn a forwarder that pushes
+            // each descriptor into the merged delivery channel, so the select loop
+            // writes `vision.deliver` envelopes. A camera_id of "" subscribes to
+            // every camera (the host fans out all descriptors); the response echoes
+            // the requested camera_id.
+            Method::VisionSubscribeFrames => {
+                let camera_id = vision_subscribe_camera_id(&env.args);
+                if vision_subs.iter().any(|c| c == &camera_id) {
+                    let result = Value::Map(vec![(
+                        Value::from("already_subscribed"),
+                        Value::Boolean(true),
+                    )]);
+                    return send_response(write_half, &env.request_id, result).await;
+                }
+                vision_subs.push(camera_id.clone());
+                if let Some(mut rx) = self
+                    .host
+                    .vision_subscribe_stream(&self.plugin_id, &camera_id)
+                {
+                    let tx = vis_tx.clone();
+                    forwarders.push(tokio::spawn(async move {
+                        loop {
+                            match rx.recv().await {
+                                Ok(descriptor) => {
+                                    if tx.send(VisionDelivery { descriptor }).await.is_err() {
+                                        break; // connection gone
+                                    }
+                                }
+                                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                                    continue
+                                }
+                                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                            }
+                        }
+                    }));
+                }
+                let result = Value::Map(vec![
+                    (Value::from("subscribed"), Value::Boolean(true)),
+                    (Value::from("camera_id"), Value::from(camera_id.as_str())),
+                ]);
+                send_response(write_half, &env.request_id, result).await
+            }
             // Host-coupled methods route to the facade. The three payload-gated
             // methods (mavlink.send, mavlink.register_component,
             // peripheral.register_driver) receive the token's granted caps and
@@ -452,7 +525,9 @@ impl<H: HostServices> Connection<H> {
                     &self.plugin_id,
                     &env.args,
                     &token.granted_caps,
-                ) {
+                )
+                .await
+                {
                     Ok(result) => send_response(write_half, &env.request_id, result).await,
                     Err(e) => send_error(write_half, &env.request_id, &e.body()).await,
                 }
@@ -509,6 +584,35 @@ impl<H: HostServices> Connection<H> {
         };
         write_frame(write_half, &env).await
     }
+
+    /// Push a vision frame descriptor to the plugin as a `vision.deliver`
+    /// envelope. Mirrors the `mavlink.deliver` shape: kind `event`, method
+    /// `vision.deliver`, capability `vision.frame.read`, args `{descriptor:
+    /// bytes, timestamp_ms}`, request_id `vis-<ms>`. The `descriptor` bytes are
+    /// an encoded `ados_protocol::framebus::FrameDescriptor`; the plugin decodes
+    /// it and maps the shared-memory ring it names to read the pixels.
+    async fn deliver_vision_frame<W: AsyncWriteExt + Unpin>(
+        &self,
+        write_half: &mut W,
+        token: &CapabilityToken,
+        descriptor: &[u8],
+    ) -> Result<(), ServerError> {
+        let ts = now_ms();
+        let env = Envelope {
+            version: PROTOCOL_VERSION,
+            kind: "event".to_string(),
+            method: ados_protocol::framebus::methods::DELIVER_FRAME.to_string(),
+            capability: "vision.frame.read".to_string(),
+            args: Value::Map(vec![
+                (Value::from("descriptor"), Value::Binary(descriptor.to_vec())),
+                (Value::from("timestamp_ms"), Value::Integer(ts.into())),
+            ]),
+            request_id: format!("vis-{ts}"),
+            token: token.to_token_string(),
+            error: None,
+        };
+        write_frame(write_half, &env).await
+    }
 }
 
 /// One subscribed MAVLink frame to push, tagged with the subscription's
@@ -530,6 +634,29 @@ fn mavlink_subscribe_msg_name(args: &Value) -> Option<String> {
             .filter(|s| !s.is_empty())
             .map(str::to_owned),
         _ => None,
+    }
+}
+
+/// One subscribed vision frame descriptor to push. The per-subscription
+/// forwarder builds these into the merged delivery channel the connection's
+/// select loop drains.
+struct VisionDelivery {
+    descriptor: Vec<u8>,
+}
+
+/// Extract the `camera_id` arg for `vision.subscribe_frames`. Unlike the MAVLink
+/// `msg_name`, an absent or empty `camera_id` is valid and means "every camera"
+/// (the host fans out all descriptors), so this returns a plain `String` that is
+/// `""` for the subscribe-all case rather than an `Option`.
+fn vision_subscribe_camera_id(args: &Value) -> String {
+    match args {
+        Value::Map(entries) => entries
+            .iter()
+            .find(|(k, _)| k.as_str() == Some("camera_id"))
+            .and_then(|(_, v)| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        _ => String::new(),
     }
 }
 

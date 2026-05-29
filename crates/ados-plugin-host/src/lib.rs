@@ -52,6 +52,7 @@ pub mod signing;
 pub mod state;
 pub mod supervisor;
 pub mod systemd;
+pub mod vision_client;
 
 pub use dispatch::{gate, Gate, Method};
 pub use errors::{
@@ -62,6 +63,7 @@ pub use handlers::{Event, EventBus};
 pub use host::{HostResult, HostServices, NoopHost};
 pub use manifest::{AgentRuntime, PluginManifest};
 pub use server::{PluginIpcServer, ServerError, DEFAULT_SOCKET_DIR};
+pub use vision_client::{VisionClient, VisionRpcError};
 pub use signing::{is_first_party_signer, FIRST_PARTY_SIGNERS};
 pub use state::{PluginInstall, PluginSource, PluginStatus};
 pub use supervisor::{semver_in_range, InstallResult, Paths, PluginSupervisor, SystemctlRunner};

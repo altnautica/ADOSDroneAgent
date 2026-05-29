@@ -15,6 +15,8 @@
 
 use std::collections::BTreeSet;
 
+use ados_protocol::framebus::methods as vision_methods;
+
 /// One dispatchable method. The variant set is exhaustive over the 12 surfaces
 /// the Python dispatch table covers (`build_dispatch_table`):
 /// event publish/subscribe, ping, telemetry, mission, recording, mavlink,
@@ -48,6 +50,13 @@ pub enum Method {
     ConfigSet,
     // Vendor binary spawn.
     ProcessSpawn,
+    // Vision: frame-descriptor subscribe, model register, inference, and
+    // detection publish. The engine owns the cameras and the inference backend;
+    // the host proxies these to it over its socket.
+    VisionSubscribeFrames,
+    VisionRegisterModel,
+    VisionInfer,
+    VisionPublishDetection,
 }
 
 impl Method {
@@ -55,6 +64,20 @@ impl Method {
     /// keys the Python dispatch table uses. Returns `None` for an unknown
     /// method, which the gate maps to `unknown method <m>`.
     pub fn from_wire(name: &str) -> Option<Self> {
+        // The vision method names are the shared constants in `ados-protocol`,
+        // so match them against those rather than re-spelling the strings here.
+        if name == vision_methods::SUBSCRIBE_FRAMES {
+            return Some(Self::VisionSubscribeFrames);
+        }
+        if name == vision_methods::REGISTER_MODEL {
+            return Some(Self::VisionRegisterModel);
+        }
+        if name == vision_methods::INFER {
+            return Some(Self::VisionInfer);
+        }
+        if name == vision_methods::PUBLISH_DETECTION {
+            return Some(Self::VisionPublishDetection);
+        }
         Some(match name {
             "event.publish" => Self::EventPublish,
             "event.subscribe" => Self::EventSubscribe,
@@ -105,6 +128,12 @@ impl Method {
             // Per-drone / global config kv is ungated at the dispatch level.
             Self::ConfigGet | Self::ConfigSet => None,
             Self::ProcessSpawn => Some("process.spawn"),
+            // Vision: reading frames needs the frame-read cap; registering a
+            // model and running inference both need the model-register cap;
+            // publishing a detection needs the detection-publish cap.
+            Self::VisionSubscribeFrames => Some("vision.frame.read"),
+            Self::VisionRegisterModel | Self::VisionInfer => Some("vision.model.register"),
+            Self::VisionPublishDetection => Some("vision.detection.publish"),
         }
     }
 }
@@ -251,10 +280,73 @@ mod tests {
             ("config.get", None),
             ("config.set", None),
             ("process.spawn", Some("process.spawn")),
+            ("vision.subscribe_frames", Some("vision.frame.read")),
+            ("vision.register_model", Some("vision.model.register")),
+            ("vision.infer", Some("vision.model.register")),
+            ("vision.publish_detection", Some("vision.detection.publish")),
         ];
         for (name, cap) in expected {
             let method = Method::from_wire(name).expect("method in table");
             assert_eq!(method.required_cap(), *cap, "required cap for {name}");
         }
+    }
+
+    #[test]
+    fn vision_wire_names_match_the_shared_constants() {
+        assert_eq!(
+            Method::from_wire(vision_methods::SUBSCRIBE_FRAMES),
+            Some(Method::VisionSubscribeFrames)
+        );
+        assert_eq!(
+            Method::from_wire(vision_methods::REGISTER_MODEL),
+            Some(Method::VisionRegisterModel)
+        );
+        assert_eq!(
+            Method::from_wire(vision_methods::INFER),
+            Some(Method::VisionInfer)
+        );
+        assert_eq!(
+            Method::from_wire(vision_methods::PUBLISH_DETECTION),
+            Some(Method::VisionPublishDetection)
+        );
+    }
+
+    #[test]
+    fn vision_methods_gate_on_their_capability() {
+        // Each vision method is refused without its cap and allowed with it.
+        let g = gate(vision_methods::SUBSCRIBE_FRAMES, false, &caps(&[]));
+        assert_eq!(
+            g,
+            Gate::CapabilityDenied("capability_denied: vision.frame.read".to_string())
+        );
+        assert_eq!(
+            gate(vision_methods::SUBSCRIBE_FRAMES, false, &caps(&["vision.frame.read"])),
+            Gate::Allow(Method::VisionSubscribeFrames)
+        );
+
+        // register_model and infer share the model-register cap.
+        for m in [vision_methods::REGISTER_MODEL, vision_methods::INFER] {
+            assert_eq!(
+                gate(m, false, &caps(&[])),
+                Gate::CapabilityDenied("capability_denied: vision.model.register".to_string())
+            );
+            assert!(matches!(
+                gate(m, false, &caps(&["vision.model.register"])),
+                Gate::Allow(_)
+            ));
+        }
+
+        assert_eq!(
+            gate(vision_methods::PUBLISH_DETECTION, false, &caps(&[])),
+            Gate::CapabilityDenied("capability_denied: vision.detection.publish".to_string())
+        );
+        assert_eq!(
+            gate(
+                vision_methods::PUBLISH_DETECTION,
+                false,
+                &caps(&["vision.detection.publish"])
+            ),
+            Gate::Allow(Method::VisionPublishDetection)
+        );
     }
 }

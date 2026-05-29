@@ -131,9 +131,13 @@ pub const PUBLIC_TOPICS_FOR_SUBSCRIBE: &[&str] = &[
 ];
 
 /// Reserved namespaces a plugin must not publish into. Mirrors the
-/// `reserved_prefixes` tuple in `events.is_publish_allowed`.
+/// `reserved_prefixes` tuple in `events.is_publish_allowed`. The `vision.`
+/// prefix is host-publish-only: the engine publishes frame descriptors and
+/// detections there, and a plugin reaches the surface through the gated
+/// `vision.*` methods, not by publishing the topic itself. A plugin may still
+/// subscribe to `vision.*` with `event.subscribe` plus the matching read cap.
 const RESERVED_PUBLISH_PREFIXES: &[&str] = &[
-    "vehicle.", "mavlink.", "mission.", "safety.", "agent.", "swarm.", "gps.",
+    "vehicle.", "mavlink.", "mission.", "safety.", "agent.", "swarm.", "gps.", "vision.",
 ];
 
 /// Whether the plugin may subscribe to `topic_pattern`. Mirrors
@@ -283,12 +287,17 @@ pub fn event_deliver_args(event: &Event) -> Value {
     ])
 }
 
-/// Route a host-coupled method to its [`HostServices`] hook. The event surface
-/// and `ping` are handled in the server before this is reached; this routes the
-/// 17 host-coupled methods. With the [`NoopHost`](crate::host::NoopHost) every
-/// one returns `Ok(not_implemented(...))`, mirroring the Python stub bodies; a
-/// real host returns [`Err(HostError)`](HostError) for a soft failure, which
-/// the server renders into the response envelope `error` field.
+/// Route a host-coupled method to its [`HostServices`] hook. The event surface,
+/// `ping`, `mavlink.subscribe`, and `vision.subscribe_frames` are handled in the
+/// server before this is reached (they arm a push stream); this routes the
+/// remaining host-coupled methods. With the [`NoopHost`](crate::host::NoopHost)
+/// every one returns `Ok(not_implemented(...))`, mirroring the Python stub
+/// bodies; a real host returns [`Err(HostError)`](HostError) for a soft failure,
+/// which the server renders into the response envelope `error` field.
+///
+/// Async because the three vision request methods proxy to the vision engine
+/// socket and await its reply; the other methods complete synchronously and are
+/// awaited as already-ready futures.
 ///
 /// `granted_caps` is the caller's verified capability set. Only the three
 /// payload-gated methods (`mavlink.send`, `mavlink.register_component`,
@@ -296,7 +305,7 @@ pub fn event_deliver_args(event: &Event) -> Value {
 /// inside the handler, after argument validation, exactly where the Python
 /// handlers apply it. The other methods are fully gated at the dispatch level and
 /// ignore it.
-pub fn route_host_method<H: HostServices + ?Sized>(
+pub async fn route_host_method<H: HostServices + ?Sized>(
     host: &H,
     method: Method,
     plugin_id: &str,
@@ -325,11 +334,19 @@ pub fn route_host_method<H: HostServices + ?Sized>(
         Method::ConfigGet => host.config_get(plugin_id, args),
         Method::ConfigSet => host.config_set(plugin_id, args),
         Method::ProcessSpawn => host.process_spawn(plugin_id, args),
-        // The event surface and ping never reach here; the server short-circuits
-        // them. Treat as a programming error guarded by a stable response.
-        Method::EventPublish | Method::EventSubscribe | Method::Ping => {
-            Ok(crate::host::not_implemented("event"))
-        }
+        // Vision request/response methods proxy to the engine and await its
+        // reply. (vision.subscribe_frames is handled in the server, where it
+        // arms the frame-descriptor push stream, never reaching here.)
+        Method::VisionRegisterModel => host.vision_register_model(plugin_id, args).await,
+        Method::VisionInfer => host.vision_infer(plugin_id, args).await,
+        Method::VisionPublishDetection => host.vision_publish_detection(plugin_id, args).await,
+        // The event surface, ping, and the two subscribe methods never reach
+        // here; the server short-circuits them. Treat as a programming error
+        // guarded by a stable response.
+        Method::EventPublish
+        | Method::EventSubscribe
+        | Method::Ping
+        | Method::VisionSubscribeFrames => Ok(crate::host::not_implemented("event")),
     }
 }
 
