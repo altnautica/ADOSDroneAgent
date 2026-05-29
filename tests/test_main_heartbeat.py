@@ -1,9 +1,8 @@
 """Direct tests for AgentApp._build_heartbeat_payload.
 
-The cloud subprocess in `services/cloud/__main__.py` is the production
-heartbeat path; this module exercises the parallel single-process
-builder in `core/main.py` so the contract stays in lockstep across
-both surfaces.
+The native Rust cloud relay is the production heartbeat path; this
+module exercises the parallel in-process builder in `core/main.py`,
+which serves the same heartbeat contract from inside the API process.
 """
 
 from __future__ import annotations

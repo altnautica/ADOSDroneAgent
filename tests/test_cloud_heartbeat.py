@@ -16,18 +16,6 @@ from ados.core.config import ADOSConfig
 from ados.services.cloud import heartbeat
 
 
-def test_proc_cache_is_module_global() -> None:
-    """The CPU baseline cache is a single module-global mapping.
-
-    Duplicating the cache (e.g. one in ``__main__`` and one in
-    ``heartbeat``) silently drops the psutil baseline, so this pins
-    that the cache identity is stable across importers.
-    """
-    from ados.services.cloud import __main__ as cloud_main
-
-    assert cloud_main._proc_cache is heartbeat._proc_cache
-
-
 def test_get_services_status_handles_missing_systemd(monkeypatch) -> None:
     """When ``systemctl is-active`` fails for every unit, all rows report stopped."""
     import subprocess as _subprocess

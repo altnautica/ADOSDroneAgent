@@ -8,12 +8,13 @@
 # the shared artifact verifier (SHA256 always; an Ed25519/minisign signature is
 # enforced automatically once a key + .minisig are published).
 #
-# Best-effort by design: if the fetch or verification fails (offline, no asset
-# yet, non-arm64 host), the install continues. Placing the binary on disk is
-# inert: the ados-cloud unit's ExecStart shim runs the native binary only when
-# the operator both enabled the flag file (/etc/ados/cloud-rust-enabled) and the
-# binary is present; otherwise the packaged Python cloud service is the default.
-# Idempotent: re-running re-fetches and overwrites.
+# The native binary is the ONLY cloud-relay implementation now (the Python
+# service was removed once it passed its bench gate), so the ados-cloud unit's
+# ExecStart execs this binary unconditionally and fails loudly if it is absent.
+# The fetch is still best-effort here (a transient offline/no-asset case must
+# not abort the whole install); a missing binary surfaces as a failed
+# ados-cloud unit in journald rather than a silent stale path. Idempotent:
+# re-running re-fetches and overwrites.
 # =============================================================================
 
 ADOS_CLOUD_RELEASE_BASE="https://github.com/altnautica/ADOSDroneAgent/releases/download/prebuilt-cloud"
@@ -78,11 +79,11 @@ install_cloud_binary() {
     _install_cloud_asset "${ADOS_CLOUD_ASSET}"
     _install_cloud_asset "${ADOS_OTA_ASSET}"
 
-    # The unit ships with the Python service as the default; the native relay is
-    # opt-in. Only re-assert a restart when the operator has already enabled the
-    # flag AND the service is running, so a routine upgrade that refreshes the
-    # binary never flips a Python-default deployment onto the native binary.
-    if [ -e /etc/ados/cloud-rust-enabled ] && systemctl is-active --quiet ados-cloud 2>/dev/null; then
+    # The native binary is the only cloud-relay path now. On an upgrade that
+    # refreshes the binary, restart a running ados-cloud so it picks up the new
+    # build. On a fresh install the unit is not up yet (the supervisor starts it
+    # later), so this is a no-op there.
+    if systemctl is-active --quiet ados-cloud 2>/dev/null; then
         systemctl restart ados-cloud 2>/dev/null || true
         info "Cloud relay restarted onto the installed binary."
     fi

@@ -7,12 +7,13 @@ StartLimitBurst=5
 
 [Service]
 Type=simple
-# Flag-gated cutover: the native cloud relay runs only when BOTH the operator
-# enabled the flag file AND the binary is present; otherwise the Python module
-# is the default fallback, so a routine upgrade never changes behavior. To turn
-# the native relay on for a bench:
-#   touch /etc/ados/cloud-rust-enabled && systemctl restart ados-cloud
-ExecStart=/bin/sh -c 'if [ -e /etc/ados/cloud-rust-enabled ] && [ -x /opt/ados/bin/ados-cloud ]; then exec /opt/ados/bin/ados-cloud; else exec /opt/ados/venv/bin/python -m ados.services.cloud; fi'
+# The native cloud relay is the only implementation; the Python service was
+# removed once the Rust binary passed its bench gate. install.d always fetches
+# the binary, so this normally just execs it; if it is somehow absent the unit
+# fails loudly rather than running a stale path. Cloud relay still defaults to
+# local mode — this service is the secondary, opt-in remote path, not
+# cloud-first.
+ExecStart=/bin/sh -c 'if [ -x /opt/ados/bin/ados-cloud ]; then exec /opt/ados/bin/ados-cloud; else echo "ados-cloud binary missing; reinstall to fetch it" >&2; exit 1; fi'
 Restart=on-failure
 RestartSec=5
 Environment=ADOS_CONFIG=/etc/ados/config.yaml
