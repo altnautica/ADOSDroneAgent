@@ -30,6 +30,18 @@ tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
 # ISO-8601 UTC timestamps for the link-stats `timestamp` field on the sidecar.
 time = { version = "0.3", features = ["std", "formatting"] }
+# Mesh pairing crypto. The session-key KDF is the CUSTOM 2-step HMAC-SHA256
+# construction (NOT rfc5869), built from the workspace hmac + sha2 deps; the
+# `hkdf` crate is deliberately NOT used.
+hmac = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+getrandom = { workspace = true }
+# X25519 ECDH for the invite key exchange (raw 32-byte public keys). Pure-Rust;
+# `static_secrets` enables the owned-key API the pairing flow needs. No `ring`.
+x25519-dalek = { version = "2", default-features = false, features = ["static_secrets"] }
+# ChaCha20Poly1305 AEAD for the invite bundle. Pure-Rust (RustCrypto), no `ring`.
+chacha20poly1305 = "0.10"
 
 # Linux-only edges (systemd notify + journald + setsid/killpg + flock).
 # Confined to a target section so the pure-logic core still builds and

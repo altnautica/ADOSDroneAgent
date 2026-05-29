@@ -27,7 +27,7 @@ use ados_radio::link_quality::LinkStats;
 use ados_groundlink::wfb_rx::{
     self, DataRxHandle, IwChannelSetter, SharedValidCounter, SystemClock, WfbRxManager,
 };
-use ados_groundlink::{fanout, presence, GsPresenceCache};
+use ados_groundlink::{fanout, mesh, presence, GsPresenceCache};
 
 const CONFIG_YAML: &str = "/etc/ados/config.yaml";
 const RX_KEY: &str = ados_radio::paths::WFB_RX_KEY;
@@ -82,6 +82,22 @@ async fn main() -> Result<()> {
         // on the sidecar, not the beacon).
         let beacon_channel = config.channel;
         tokio::spawn(presence::emit_loop(move || beacon_channel));
+    }
+
+    // Distributed-RX role: on a relay or receiver node, publish the mesh
+    // snapshot so the REST layer + OLED see neighbors/gateways. The batman-adv
+    // carrier bringup and the relay/receiver FEC supervision run in their own
+    // role-gated systemd units (`ados-batman`, `ados-wfb-relay`,
+    // `ados-wfb-receiver`); this data-plane service only spins the mesh-state
+    // poll for observability when the role calls for it. A `direct` node has no
+    // mesh and skips this entirely.
+    let role = mesh::get_current_role();
+    if role == "relay" || role == "receiver" {
+        tracing::info!(role, "distributed-rx role active; starting mesh-state poll");
+        let snap = mesh::MeshSnapshot::new(&role, "bat0", "802.11s");
+        tokio::spawn(mesh::run_poll_loop(snap));
+    } else {
+        tracing::info!(role, "direct role; no mesh services");
     }
 
     // Run the receive loop until a shutdown signal arrives.

@@ -89,10 +89,51 @@ impl GsWfbProcess {
         })
     }
 
+    /// Spawn `program` with `args` as a process-group leader (setsid), stdout
+    /// discarded and **stderr piped** for the caller to read. The relay /
+    /// receiver wfb_rx subprocesses print their `PKT` stats on stderr, so the
+    /// stats tail reads from there.
+    pub async fn spawn_stderr_piped(program: &str, args: &[String]) -> std::io::Result<Self> {
+        let mut cmd = tokio::process::Command::new(program);
+        cmd.args(args)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped());
+
+        #[cfg(target_os = "linux")]
+        // Safety: setsid() is async-signal-safe and is the only call in the hook.
+        unsafe {
+            cmd.pre_exec(|| {
+                nix::unistd::setsid().map_err(|e| std::io::Error::from_raw_os_error(e as i32))?;
+                Ok(())
+            });
+        }
+
+        let child = cmd.spawn()?;
+        #[cfg(target_os = "linux")]
+        let pgid = {
+            let raw_pid = child
+                .id()
+                .ok_or_else(|| std::io::Error::other("wfb child has no PID yet"))?;
+            nix::unistd::Pid::from_raw(raw_pid as i32)
+        };
+
+        Ok(Self {
+            #[cfg(target_os = "linux")]
+            pgid,
+            inner: child,
+        })
+    }
+
     /// Take the child's stdout handle (for the stats reader). `None` if stdout
     /// was not piped or already taken.
     pub fn take_stdout(&mut self) -> Option<tokio::process::ChildStdout> {
         self.inner.stdout.take()
+    }
+
+    /// Take the child's stderr handle (for the relay/receiver stats tail).
+    /// `None` if stderr was not piped or already taken.
+    pub fn take_stderr(&mut self) -> Option<tokio::process::ChildStderr> {
+        self.inner.stderr.take()
     }
 
     /// True if the process has not yet exited.
