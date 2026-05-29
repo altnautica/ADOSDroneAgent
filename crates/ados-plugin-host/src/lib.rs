@@ -14,9 +14,10 @@
 //! wired; the 17 host-coupled methods route to a [`host::HostServices`] trait
 //! whose default [`host::NoopHost`] returns the `not_implemented` shape,
 //! mirroring the Python `_handle_*` stub bodies until the agent's service
-//! surfaces expose stable hooks. Plugin lifecycle (install / enable / remove /
-//! archive / signing / state) and the plugin SDK are deliberate follow-ons and
-//! are not part of this crate.
+//! surfaces expose stable hooks (the real wiring is [`realhost::RealHost`]).
+//! Plugin lifecycle (install / enable / disable / remove / archive / signing /
+//! state) lives here too, in the modules below; the plugin SDK ships as the
+//! separate `ados-sdk` crate.
 //!
 //! Modules:
 //! - [`dispatch`] — the `method -> (handler, required_cap)` table and the gate

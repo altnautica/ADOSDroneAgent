@@ -18,6 +18,29 @@
 //! The `systemctl` calls and filesystem ops are real, but the crate stays
 //! lib-only: no test invokes systemd (the [`SystemctlRunner`] is injectable and
 //! the tests use a no-op recorder).
+//!
+//! ## Stable consumer contract
+//!
+//! This controller is consumed in-process as a library by the agent's other
+//! long-running services (notably the cloud relay, which drives plugin
+//! install/enable/disable/remove from remote commands and a periodic
+//! auto-update loop). Those callers depend on the surface below; treat it as
+//! stable and change it deliberately:
+//!
+//! * [`install_archive`](PluginSupervisor::install_archive) `(&Path) -> Result<InstallResult, LifecycleError>`
+//! * [`enable`](PluginSupervisor::enable), [`disable`](PluginSupervisor::disable),
+//!   [`remove`](PluginSupervisor::remove) `(&str, keep_data: bool)`
+//! * [`grant_permission`](PluginSupervisor::grant_permission),
+//!   [`revoke_permission`](PluginSupervisor::revoke_permission)
+//! * [`installs`](PluginSupervisor::installs),
+//!   [`find_install`](PluginSupervisor::find_install)
+//!
+//! [`InstallResult`] (plugin_id, version, signer_id, risk, permissions_requested)
+//! and [`PluginInstall`] (the on-disk install record) are part of the same
+//! contract. There is no `configure` method: a batched permission change is the
+//! caller's own grant/revoke sequence. [`SystemctlRunner`] is injectable, so a
+//! consumer constructs the controller with the real runner in production and a
+//! recorder in tests without touching systemd.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
