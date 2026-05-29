@@ -4,6 +4,41 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.49.26] - 2026-05-29
+
+### Changed
+
+- **The native cloud relay and video orchestrator are now the only
+  implementations.** Both passed on-rig validation, so their service units exec
+  the native binaries unconditionally and the installer always provisions them.
+  The standalone Python cloud-relay service and the Python video service entry
+  point have been removed. The reusable video library modules (pipeline,
+  encoder, mediamtx manager, camera manager, local tap, SEI tools) and the cloud
+  MQTT MAVLink relay and heartbeat helpers stay, since the in-process demo
+  pipeline and the ground-station services still use them. Cloud relay continues
+  to default to local mode; it is the secondary, opt-in remote path.
+
+### Added
+
+- **Native ground-station binaries.** The ground-station data plane, uplink
+  matrix, human-interface arbiter and input reader, and display writer ship as
+  prebuilt binaries. Each ground-station service selects the native binary when
+  it is present and the matching opt-in flag is set, falling back to the
+  packaged Python service otherwise.
+
+### Fixed
+
+- **Native uplink cutover no longer leaves the per-interface managers running.**
+  When the native uplink daemon owns the link, the packaged ethernet, wifi
+  client, and USB-gadget managers are now disabled (their start link removed)
+  rather than masked, which silently failed on units that ship as real files;
+  hostapd and the modem service stay available because the native daemon drives
+  them. A manager slow to stop is reset so it does not linger in a failed state.
+- **Native services can persist state.** The uplink, cloud, and supervisor
+  service units now include the agent state directory in their writable paths,
+  so the data-cap counter, command-idempotency records, and the setup-complete
+  marker write correctly under the strict filesystem sandbox.
+
 ## [0.49.0] - 2026-05-29
 
 ### Removed
