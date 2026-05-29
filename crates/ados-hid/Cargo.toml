@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Human-interface devices: touchscreen affine calibration, the pilot-in-command arbiter FSM + IPC seam, the ados-pic daemon, and the GPIO front-panel button service. Touch/input device layers land in later chunks."
+description = "Human-interface devices: touchscreen affine calibration + gesture FSM, the pilot-in-command arbiter FSM + IPC seam, the ados-pic / ados-input daemons, the GPIO front-panel button service, and gamepad enumeration + hotplug."
 
 [lib]
 name = "ados_hid"
@@ -13,6 +13,10 @@ path = "src/lib.rs"
 [[bin]]
 name = "ados-pic"
 path = "src/bin/ados-pic.rs"
+
+[[bin]]
+name = "ados-input"
+path = "src/bin/ados-input.rs"
 
 [dependencies]
 serde = { workspace = true }
@@ -34,6 +38,10 @@ sd-notify = { workspace = true }
 # chip-open + edge-event read path is target-gated; the press classification is
 # host-portable and unit-tested without it.
 gpio-cdev = "0.6"
+# Pure-Rust Linux input (joystick/touch) over the evinput ioctls (built on
+# nix/libc, no C build-script). Only the node-open + read path is target-gated;
+# the gesture classifier and the gamepad-detection predicate stay host-portable.
+evdev = "0.12"
 
 [dev-dependencies]
 tempfile = "3"
