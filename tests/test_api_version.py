@@ -103,6 +103,7 @@ AGENT_CAPABILITIES_FROZEN: tuple[str, ...] = (
     "scripts.runtime",
     "ota.updater",
     "pairing.mnemonic",
+    "pairing.bind_state",
     "peripherals.registry",
     "fleet.roster",
     "features.catalog",

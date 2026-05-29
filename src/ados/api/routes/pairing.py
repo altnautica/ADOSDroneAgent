@@ -52,6 +52,14 @@ class PairingInfo(BaseModel):
     mdns_host: str
     profile: str
     role: str | None = None
+    # Folded WFB bind-session snapshot read from the cross-process bind
+    # sentinel. Null when no bind has run since boot. Lets Mission Control
+    # render "binding…" / "bind failed: <error>" during/after a radio pair.
+    bind_state: dict | None = None
+    # Folded radio link snapshot {state, rssi_dbm, packets_received}. Null
+    # from this process today (the radio manager lives in ados-wfb); reserved
+    # for a future in-process reader. The GCS falls back to radio_paired.
+    radio: dict | None = None
 
 
 @router.get("/pairing/info", response_model=PairingInfo)
@@ -115,6 +123,29 @@ async def get_pairing_info():
         except Exception as exc:
             log.debug("pairing_info_key_check_failed", error=str(exc))
 
+        # Fold the WFB bind-session snapshot from the cross-process sentinel
+        # the supervisor writes on every bind transition. Absent file (no bind
+        # has run) leaves bind_state None. Each field is .get()-guarded so a
+        # partial sentinel never breaks the guaranteed-200 contract.
+        bind_state: dict | None = None
+        try:
+            import json as _json
+            from pathlib import Path as _Path
+
+            from ados.services.wfb.bind_client import BIND_STATE_SENTINEL
+            sess = _json.loads(_Path(BIND_STATE_SENTINEL).read_text(encoding="utf-8"))
+            if isinstance(sess, dict) and sess.get("state"):
+                bind_state = {
+                    "state": sess.get("state"),
+                    "phase": sess.get("phase"),
+                    "active": bool(sess.get("active", False)),
+                    "error": sess.get("error"),
+                    "finished_at": sess.get("finished_at"),
+                    "fingerprint": sess.get("fingerprint"),
+                }
+        except Exception as exc:
+            log.debug("pairing_info_bind_state_failed", error=str(exc))
+
         return PairingInfo(
             device_id=device_id,
             name=name,
@@ -129,6 +160,8 @@ async def get_pairing_info():
             mdns_host=mdns_host,
             profile=profile,
             role=role,
+            bind_state=bind_state,
+            radio=None,
         )
     except HTTPException:
         raise

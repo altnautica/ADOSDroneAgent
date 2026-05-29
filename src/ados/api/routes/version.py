@@ -44,6 +44,8 @@ CAPABILITIES: list[str] = [
     "ota.updater",
     # /api/pairing/* device-link mnemonic + token rotation.
     "pairing.mnemonic",
+    # /api/pairing/info carries a folded bind_state + radio snapshot.
+    "pairing.bind_state",
     # /api/peripherals/* legacy hardware scan + /v1 plugin registry.
     "peripherals.registry",
     # /api/fleet/* fleet roster surface.
