@@ -396,6 +396,88 @@ impl PluginIpcClient {
             .args)
     }
 
+    // ---- Vision -------------------------------------------------------
+
+    /// Subscribe to vision frame descriptors. The host starts (or widens) the
+    /// engine's frame stream toward this plugin and then delivers descriptors
+    /// as `vision.deliver` events. `camera_id` of `None` requests every
+    /// camera's frames; `Some(id)` narrows the stream at the engine. The
+    /// required cap is `vision.frame.read`. The caller registers the matching
+    /// event callback separately (the frame topic is the reserved
+    /// `vision.frame`).
+    pub async fn vision_subscribe_frames(
+        &self,
+        camera_id: Option<&str>,
+    ) -> Result<Value, ClientError> {
+        let mut entries = Vec::new();
+        if let Some(id) = camera_id {
+            entries.push((Value::from("camera_id"), Value::from(id)));
+        }
+        Ok(self
+            .send_request(
+                ados_protocol::framebus::methods::SUBSCRIBE_FRAMES,
+                "vision.frame.read",
+                Value::Map(entries),
+            )
+            .await?
+            .args)
+    }
+
+    /// Register an inference model, carrying its metadata as a msgpack blob the
+    /// engine decodes. The required cap is `vision.model.register`.
+    pub async fn vision_register_model(&self, model_blob: &[u8]) -> Result<Value, ClientError> {
+        let args = Value::Map(vec![(
+            Value::from("model"),
+            Value::Binary(model_blob.to_vec()),
+        )]);
+        Ok(self
+            .send_request(
+                ados_protocol::framebus::methods::REGISTER_MODEL,
+                "vision.model.register",
+                args,
+            )
+            .await?
+            .args)
+    }
+
+    /// Run a registered model against one frame (named by descriptor blob) on
+    /// the shared backend and return the engine's response. The required cap is
+    /// `vision.model.register`.
+    pub async fn vision_infer(
+        &self,
+        model_id: &str,
+        descriptor_blob: &[u8],
+    ) -> Result<Value, ClientError> {
+        let args = Value::Map(vec![
+            (Value::from("model_id"), Value::from(model_id)),
+            (
+                Value::from("descriptor"),
+                Value::Binary(descriptor_blob.to_vec()),
+            ),
+        ]);
+        Ok(self
+            .send_request(ados_protocol::framebus::methods::INFER, "vision.model.register", args)
+            .await?
+            .args)
+    }
+
+    /// Publish a detection batch (a msgpack blob) on `vision.detection`. The
+    /// required cap is `vision.detection.publish`.
+    pub async fn vision_publish_detection(&self, batch_blob: &[u8]) -> Result<Value, ClientError> {
+        let args = Value::Map(vec![(
+            Value::from("batch"),
+            Value::Binary(batch_blob.to_vec()),
+        )]);
+        Ok(self
+            .send_request(
+                ados_protocol::framebus::methods::PUBLISH_DETECTION,
+                "vision.detection.publish",
+                args,
+            )
+            .await?
+            .args)
+    }
+
     // ------------------------------------------------------------------
     // Internals
     // ------------------------------------------------------------------

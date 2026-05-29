@@ -11,9 +11,16 @@ description = "Plugin author SDK for the ADOS Drone Agent: an async IPC client, 
 # byte-parity tested against the Python supervisor. The SDK client speaks it
 # unchanged; it never re-implements the framing or the token. The capability
 # catalog is re-exported from here so plugin authors reference one source.
-ados-protocol = { path = "../ados-protocol" }
+# The `mavlink` feature is enabled so the vision pose helper can build a
+# VISION_POSITION_ESTIMATE / ODOMETRY frame from the shared ardupilotmega
+# codec rather than hand-assembling bytes in every VIO plugin.
+ados-protocol = { path = "../ados-protocol", features = ["mavlink"] }
 tokio = { workspace = true }
 rmpv = { workspace = true }
+# msgpack codec for the vision payloads the SDK serializes (model metadata,
+# detection batches, frame descriptors) the same way ados-protocol's framebus
+# contract does, so a Rust plugin and the engine agree byte-for-byte.
+rmp-serde = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
@@ -25,6 +32,11 @@ async-trait = { workspace = true }
 # `AsyncIterator` return of the driver base classes. futures-core is the
 # minimal trait-only crate; the SDK does not pull the full `futures` stack.
 futures-core = { workspace = true }
+# Map the vision frame ring out of /dev/shm read-only so a frame consumer
+# resolves a FrameDescriptor to pixels without copying through the RPC
+# envelope. The ring layout + per-slot seqlock live in ados-protocol::framebus;
+# this crate only maps the named region and reads the descriptor's slot.
+memmap2 = { workspace = true }
 
 [dev-dependencies]
 # The round-trip test stands up a real ados-plugin-host server and drives it

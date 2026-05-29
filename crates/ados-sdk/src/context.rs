@@ -13,6 +13,7 @@ use std::sync::Arc;
 use rmpv::Value;
 
 use crate::client::{ClientError, EventCallback, PluginIpcClient};
+use crate::vision::VisionClient;
 
 /// `ctx.events` — the event bus facade.
 #[derive(Clone)]
@@ -260,6 +261,9 @@ pub struct PluginContext {
     /// Alias for `peripheral_manager` (Python `ctx.peripherals`).
     pub peripherals: PeripheralClient,
     pub camera: CameraClient,
+    /// `ctx.vision` — subscribe to engine frames, register models, run
+    /// inference, publish detections, and inject visual-odometry pose.
+    pub vision: VisionClient,
     pub config: ConfigClient,
     pub process: ProcessClient,
     pub lifecycle: LifecycleClient,
@@ -287,6 +291,7 @@ impl PluginContext {
             peripherals: peripheral_manager.clone(),
             peripheral_manager,
             camera: CameraClient { ipc: ipc.clone() },
+            vision: VisionClient::new(ipc.clone()),
             config: ConfigClient {
                 ipc: ipc.clone(),
                 static_config: Arc::new(static_config),

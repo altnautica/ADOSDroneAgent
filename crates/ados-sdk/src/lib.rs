@@ -31,6 +31,8 @@ pub mod client;
 pub mod context;
 pub mod drivers;
 pub mod lifecycle;
+pub mod testing;
+pub mod vision;
 
 pub use client::{ClientError, EventCallback, PluginIpcClient};
 pub use context::{
@@ -38,6 +40,7 @@ pub use context::{
     PluginContext, ProcessClient, TelemetryClient,
 };
 pub use lifecycle::{run_plugin, run_plugin_with, Plugin, RunnerArgs, RunnerError};
+pub use vision::{Frame, FrameCallback, Odometry, Pose, VisionClient, VIO_COMPONENT_ID};
 
 /// The generated agent capability catalog, re-exported from `ados-protocol` so
 /// a plugin author references one source of truth for capability ids. The
