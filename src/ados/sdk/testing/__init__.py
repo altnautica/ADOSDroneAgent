@@ -20,10 +20,13 @@ from __future__ import annotations
 
 from ados.sdk.testing.fixtures import FixtureEvent, load_fixture
 from ados.sdk.testing.harness import PluginTestHarness, PublishedEvent
+from ados.sdk.testing.vision import DetectionHandler, FakeVisionEngine
 
 __all__ = [
     "PluginTestHarness",
     "PublishedEvent",
     "FixtureEvent",
     "load_fixture",
+    "FakeVisionEngine",
+    "DetectionHandler",
 ]

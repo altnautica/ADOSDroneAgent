@@ -21,6 +21,7 @@ from ados.core.logging import get_logger
 
 if TYPE_CHECKING:
     from ados.plugins.ipc_client import PluginIpcClient
+    from ados.sdk.vision import VisionClient
 
 
 def _matches(pattern: str, topic: str) -> bool:
@@ -333,6 +334,14 @@ class PluginContext:
         # keep working without changes to their on_start body.
         self.peripherals = self.peripheral_manager
         self.camera = _CameraClient(ipc)
+        # Vision engine facade: frame subscription (shared-memory ring),
+        # model registration, inference, detection publishing, and
+        # visual-odometry pose injection. The host gates the vision caps.
+        # Imported lazily so the plugins package does not pull the full SDK
+        # graph (which re-imports this module via the test harness) at load.
+        from ados.sdk.vision import VisionClient
+
+        self.vision = VisionClient(ipc)
         self.telemetry = _TelemetryClient(ipc)
         self.config_kv = _ConfigClient(ipc, config)
         self.process = _ProcessClient(ipc)
@@ -345,6 +354,7 @@ class PluginContext:
 
 __all__ = [
     "PluginContext",
+    "VisionClient",
     "_EventsClient",
     "_MAVLinkClient",
     "_PeripheralManagerClient",

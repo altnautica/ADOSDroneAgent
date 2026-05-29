@@ -49,12 +49,46 @@ from ados.sdk.drivers import (
     PayloadSession,
     PayloadState,
 )
-from ados.sdk.testing import PluginTestHarness, load_fixture
+from ados.sdk.testing import (
+    FakeVisionEngine,
+    PluginTestHarness,
+    load_fixture,
+)
+from ados.sdk.vision import (
+    BoundingBox,
+    Detection,
+    DetectionBatch,
+    Frame,
+    FrameDescriptor,
+    FrameFormat,
+    ModelExecution,
+    ModelKind,
+    ModelMetadata,
+    Odometry,
+    Pose,
+    RingLayout,
+    VisionClient,
+)
 
 __all__ = [
     # Testing
     "PluginTestHarness",
+    "FakeVisionEngine",
     "load_fixture",
+    # Vision
+    "VisionClient",
+    "FrameFormat",
+    "FrameDescriptor",
+    "Frame",
+    "RingLayout",
+    "ModelKind",
+    "ModelExecution",
+    "ModelMetadata",
+    "BoundingBox",
+    "Detection",
+    "DetectionBatch",
+    "Pose",
+    "Odometry",
     # Errors
     "DriverError",
     "DriverDeviceNotFound",
