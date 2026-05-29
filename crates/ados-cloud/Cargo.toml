@@ -30,12 +30,42 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
-# No HTTP client yet: the update-poll logic (version compare, tag filter,
-# release pick, SHA256SUMS parse, the 304/403 cache + rate-limit branches) is
-# exercised through the `ReleaseSource` seam with no network. The live HTTPS
-# transport shim is introduced with the relay's networking layer so the TLS
-# dependency is added once for both the oneshot poll and the long-running
-# transport.
+tokio = { workspace = true }
+# Async methods on the transport trait, kept object-safe behind a Box<dyn>.
+async-trait = { workspace = true }
+
+# TLS stack: pure-Rust rustls with the RustCrypto crypto provider. This keeps
+# the cross-compile to aarch64-unknown-linux-musl free of any C toolchain
+# (no ring, no aws-lc, no OpenSSL) and produces a clean static binary. The
+# CryptoProvider seam keeps the backend swappable. These deps are specific to
+# this crate (no other crate links a TLS client), so they are declared here
+# rather than in the workspace table.
+rustls = { version = "0.23", default-features = false, features = [
+    "custom-provider",
+    "std",
+    "tls12",
+    "logging",
+] }
+# Pinned to the exact alpha: it is the canonical RustCrypto provider for rustls
+# and its dependencies are all mature RustCrypto crates already in the tree
+# (ed25519-dalek, x25519-dalek, sha2, aes-gcm, ...). Pin so a provider bump is a
+# deliberate change, not a silent float.
+rustls-rustcrypto = "=0.0.2-alpha"
+webpki-roots = "0.26"
+# Sync HTTP client for the oneshot update poll over HTTPS, on the no-provider
+# rustls path (no ring); the preconfigured rustls ClientConfig carries the
+# RustCrypto provider.
+reqwest = { version = "0.12", default-features = false, features = [
+    "rustls-tls-manual-roots-no-provider",
+    "blocking",
+    "json",
+] }
+# Async MQTT v5 client (the v5 line — the Python relay speaks MQTTv5). The
+# no-provider rustls path avoids ring; `websocket` carries the WSS transport.
+rumqttc = { package = "rumqttc-next", version = "0.33", default-features = false, features = [
+    "use-rustls-no-provider",
+    "websocket",
+] }
 
 # Linux-only edge: systemd readiness/watchdog notify + journald log layer for
 # the daemon. Confined to a target section so the pure-logic lib still builds

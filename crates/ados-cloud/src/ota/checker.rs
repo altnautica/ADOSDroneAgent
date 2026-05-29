@@ -293,14 +293,93 @@ impl<S: ReleaseSource> UpdateChecker<S> {
     }
 }
 
-// The live releases source — a synchronous HTTPS client to `GITHUB_API`
-// implementing [`ReleaseSource`] — lands with the relay's networking layer,
-// where the HTTPS/TLS dependency is introduced once for both this oneshot poll
-// and the long-running cloud transport. The version-compare, tag-filter,
-// release-pick, SHA256SUMS-parse, and 304/403 cache-and-rate-limit branches
-// above are the risk of the port and are exercised here through the
-// [`ReleaseSource`] seam with no network, so the live client is a thin transport
-// shim over already-verified logic.
+/// The live releases source: a synchronous HTTPS client to `GITHUB_API` on the
+/// pure-Rust rustls path. A thin transport shim over the already-verified
+/// release-pick / version-compare / SHA256SUMS-parse logic above. The poll is a
+/// oneshot the daily loop drives, so a blocking client is the right tool.
+///
+/// TLS is the RustCrypto-backed rustls config from [`crate::tls`] (no ring), so
+/// this links into the same C-toolchain-free static binary as the rest of the
+/// relay.
+pub struct GithubSource {
+    client: reqwest::blocking::Client,
+}
+
+impl GithubSource {
+    /// Build a source with the shared RustCrypto rustls config and the timeouts
+    /// the Python checker used (30 s for the releases list).
+    pub fn new() -> Self {
+        let client = reqwest::blocking::Client::builder()
+            .use_preconfigured_tls(crate::tls::client_config())
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .expect("reqwest blocking client builds with the rustls config");
+        GithubSource { client }
+    }
+}
+
+impl Default for GithubSource {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ReleaseSource for GithubSource {
+    fn fetch_releases(&self, repo: &str, etag: &str) -> FetchOutcome {
+        let url = format!("{GITHUB_API}/repos/{repo}/releases");
+        let mut req = self
+            .client
+            .get(&url)
+            .header("Accept", "application/vnd.github+json")
+            // GitHub requires a User-Agent or it 403s.
+            .header("User-Agent", "ados-agent");
+        if !etag.is_empty() {
+            req = req.header("If-None-Match", etag);
+        }
+        let resp = match req.send() {
+            Ok(r) => r,
+            Err(e) => return FetchOutcome::Error(format!("transport: {e}")),
+        };
+        let status = resp.status();
+        // The two codes the Python checker special-cases.
+        if status.as_u16() == 304 {
+            return FetchOutcome::NotModified;
+        }
+        if status.as_u16() == 403 {
+            return FetchOutcome::RateLimited;
+        }
+        if !status.is_success() {
+            return FetchOutcome::Error(format!("github status {}", status.as_u16()));
+        }
+        let new_etag = resp
+            .headers()
+            .get(reqwest::header::ETAG)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string();
+        match resp.json::<Vec<Release>>() {
+            Ok(releases) => FetchOutcome::Ok {
+                releases,
+                etag: new_etag,
+            },
+            Err(e) => FetchOutcome::Error(format!("releases decode: {e}")),
+        }
+    }
+
+    fn fetch_sha256sums(&self, url: &str) -> Option<String> {
+        let resp = self
+            .client
+            .get(url)
+            .header("User-Agent", "ados-agent")
+            .timeout(std::time::Duration::from_secs(15))
+            .send()
+            .ok()?;
+        if !resp.status().is_success() {
+            return None;
+        }
+        resp.text().ok()
+    }
+}
 
 #[cfg(test)]
 mod tests {
