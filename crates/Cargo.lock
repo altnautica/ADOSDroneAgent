@@ -99,6 +99,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "ados-video"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "nix 0.29.0",
+ "serde",
+ "serde_json",
+ "serde_norway",
+ "tempfile",
+ "time",
+ "tokio",
+ "tracing",
+ "tracing-journald",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "aho-corasick"
 version = "1.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
