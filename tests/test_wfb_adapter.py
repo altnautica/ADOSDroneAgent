@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 from ados.services.wfb.adapter import (
     _parse_iw_dev,
     _parse_phy_info,
+    control_interface,
     detect_wfb_adapters,
     set_managed_mode,
     set_monitor_mode,
@@ -114,7 +115,14 @@ def test_detect_linux_with_adapters(mock_platform, mock_usb, mock_subprocess):
     driver_result.returncode = 0
     driver_result.stdout = "/sys/bus/usb/drivers/rtl88xxau\n"
 
-    mock_subprocess.run.side_effect = [dev_result, phy_result, driver_result]
+    # control_interface() probes `ip route show default` once per scan,
+    # between iw phy and the per-iface driver lookup. Return no default route
+    # so wlan0 is not treated as the operator's control path.
+    control_result = MagicMock()
+    control_result.returncode = 0
+    control_result.stdout = ""
+
+    mock_subprocess.run.side_effect = [dev_result, phy_result, control_result, driver_result]
 
     result = detect_wfb_adapters()
     assert len(result) == 1
@@ -155,9 +163,10 @@ def test_monitor_mode_success(mock_platform, mock_subprocess):
     mock_subprocess.run.return_value = ok_result
 
     assert set_monitor_mode("wlan0") is True
-    # nmcli unmanage + 3 mode commands (down / set type monitor / up) +
-    # 1 power_save off. The type form succeeds so no fallback fires.
-    assert mock_subprocess.run.call_count == 5
+    # control-iface probe (ip route) + nmcli unmanage + 3 mode commands
+    # (down / set type monitor / up) + 1 power_save off. The type form
+    # succeeds so no fallback fires.
+    assert mock_subprocess.run.call_count == 6
 
 
 @patch("ados.services.wfb.adapter.subprocess")
@@ -415,3 +424,75 @@ def test_compat_via_driver_name_when_sysfs_walk_misses(monkeypatch):
     adapters = detect_wfb_adapters()
     assert len(adapters) == 1
     assert adapters[0].is_wfb_compatible is True
+
+
+# --- control-interface guard ---
+
+
+@patch("ados.services.wfb.adapter.subprocess")
+def test_control_interface_parses_default_route(mock_subprocess):
+    res = MagicMock()
+    res.returncode = 0
+    res.stdout = (
+        "default via 192.168.200.1 dev end1 proto dhcp src 192.168.200.115 metric 100\n"
+    )
+    mock_subprocess.run.return_value = res
+    assert control_interface() == "end1"
+
+
+@patch("ados.services.wfb.adapter.subprocess")
+def test_control_interface_none_when_no_default(mock_subprocess):
+    res = MagicMock()
+    res.returncode = 0
+    res.stdout = ""
+    mock_subprocess.run.return_value = res
+    assert control_interface() is None
+
+
+@patch("ados.services.wfb.adapter.subprocess")
+def test_control_interface_never_raises_on_bad_output(mock_subprocess):
+    # Non-zero rc / odd output must yield None, never raise — the safety probe
+    # must never break the radio path.
+    res = MagicMock()
+    res.returncode = 1
+    res.stdout = "garbage"
+    mock_subprocess.run.return_value = res
+    assert control_interface() is None
+
+
+@patch("ados.services.wfb.adapter.subprocess")
+@patch("ados.services.wfb.adapter.discover_usb_devices")
+@patch("ados.services.wfb.adapter.platform")
+def test_detect_excludes_control_interface(mock_platform, mock_usb, mock_subprocess):
+    mock_platform.system.return_value = "Linux"
+    mock_usb.return_value = []
+
+    dev_result = MagicMock()
+    dev_result.returncode = 0
+    dev_result.stdout = "phy#0\n\tInterface wlan0\n\t\ttype managed\n"
+    phy_result = MagicMock()
+    phy_result.returncode = 0
+    phy_result.stdout = (
+        "Wiphy phy0\n\tSupported interface modes:\n\t\t * managed\n\t\t * monitor\n"
+    )
+    # wlan0 IS the default-route (control) iface -> excluded entirely, before
+    # any driver lookup, so no candidate remains.
+    control_result = MagicMock()
+    control_result.returncode = 0
+    control_result.stdout = "default via 192.168.200.1 dev wlan0 proto dhcp metric 600\n"
+    mock_subprocess.run.side_effect = [dev_result, phy_result, control_result]
+
+    assert detect_wfb_adapters() == []
+
+
+@patch("ados.services.wfb.adapter.subprocess")
+@patch("ados.services.wfb.adapter.platform")
+def test_monitor_mode_refuses_control_interface(mock_platform, mock_subprocess):
+    mock_platform.system.return_value = "Linux"
+    res = MagicMock()
+    res.returncode = 0
+    res.stdout = "default via 192.168.200.1 dev wlan0 proto dhcp metric 600\n"
+    mock_subprocess.run.return_value = res
+    # wlan0 carries the control session -> monitor mode refused before any
+    # nmcli / ip link command runs.
+    assert set_monitor_mode("wlan0") is False

@@ -86,11 +86,19 @@ async fn scan_adapters() -> Vec<Adapter> {
     let Ok(ifaces) = tokio::fs::read_dir("/sys/class/net").await else {
         return out;
     };
+    // The iface carrying the default route is the operator's control path; it
+    // must never be claimed as an injection radio.
+    let control_iface = control_interface().await;
     let mut ifaces = ifaces;
     while let Ok(Some(entry)) = ifaces.next_entry().await {
         let ifname = entry.file_name().to_string_lossy().to_string();
         // Only USB-backed (wireless) — skip lo, eth*, etc.
         if !is_wireless(&ifname).await {
+            continue;
+        }
+        // Never claim the control interface, even if it is wireless.
+        if control_iface.as_deref() == Some(ifname.as_str()) {
+            tracing::info!(iface = %ifname, "adapter_excluded_control_iface");
             continue;
         }
         let driver = driver_name(&ifname).await;
@@ -193,6 +201,36 @@ async fn usb_vid_pid(iface: &str) -> Option<(u16, u16)> {
     Some((vid, pid))
 }
 
+/// Parse the iface carrying the kernel default route out of `ip route` output.
+/// Returns the first `dev <iface>` on a `default ...` line, or `None`.
+fn parse_default_route_iface(text: &str) -> Option<String> {
+    for line in text.lines() {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.first() == Some(&"default") {
+            if let Some(idx) = parts.iter().position(|p| *p == "dev") {
+                if let Some(iface) = parts.get(idx + 1) {
+                    return Some((*iface).to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Return the interface carrying the kernel default route, or `None`.
+///
+/// This is the operator's control path (the iface their SSH / Mission Control
+/// session arrives over). The radio adapter selection and monitor-mode setup
+/// must never touch it: bringing it down or flipping it to monitor mode would
+/// sever the only management link with no fallback and strand the box. Best
+/// effort — a missing default route (isolated rig) returns `None`.
+async fn control_interface() -> Option<String> {
+    match run_cmd_output("ip", &["-4", "route", "show", "default"]).await {
+        Ok(out) => parse_default_route_iface(&out),
+        Err(()) => None,
+    }
+}
+
 /// Set monitor mode on an interface and verify the readback. Retries up to
 /// `max_retries` times with 500ms backoff. Returns true only on verified
 /// monitor mode.
@@ -218,6 +256,12 @@ pub async fn set_monitor_mode_verified(iface: &str, max_retries: u32) -> bool {
 }
 
 async fn set_monitor_mode(iface: &str) -> bool {
+    // Defense in depth: never flip the operator's control path to monitor mode.
+    // Bringing it down or changing its type would sever the only management link.
+    if control_interface().await.as_deref() == Some(iface) {
+        tracing::error!(iface = %iface, "monitor_mode_refused_control_iface");
+        return false;
+    }
     // Best-effort: release from NetworkManager.
     let _ = run_cmd("nmcli", &["dev", "set", iface, "managed", "no"]).await;
     // Bring down.
@@ -409,5 +453,23 @@ mod tests {
     fn unknown_is_rank_3() {
         let (_, rank) = classify("unknown_wifi_driver", None);
         assert_eq!(rank, 3);
+    }
+
+    #[test]
+    fn parse_default_route_extracts_dev_iface() {
+        let line = "default via 192.168.200.1 dev end1 proto dhcp metric 100";
+        assert_eq!(parse_default_route_iface(line).as_deref(), Some("end1"));
+        // A `dev`-first ordering (no `via`) still resolves.
+        assert_eq!(
+            parse_default_route_iface("default dev wwan0 scope link").as_deref(),
+            Some("wwan0")
+        );
+    }
+
+    #[test]
+    fn parse_default_route_no_default_is_none() {
+        // No default-route line in the output → None.
+        assert!(parse_default_route_iface("10.0.0.0/24 dev eth0 scope link").is_none());
+        assert!(parse_default_route_iface("").is_none());
     }
 }

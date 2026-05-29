@@ -83,6 +83,36 @@ def _is_denied_management_wifi(usb_vid: int, driver: str) -> bool:
     return any(drv.startswith(prefix) for prefix in WFB_DENY_DRIVER_PREFIXES)
 
 
+def control_interface() -> str | None:
+    """Return the interface carrying the kernel default route, or None.
+
+    This is the operator's control path (the iface their SSH / Mission Control
+    session arrives over). The radio adapter selection and monitor-mode setup
+    must never touch it: bringing it down or flipping it to monitor mode would
+    sever the only management link with no fallback and strand the box. Best
+    effort — a missing default route (isolated rig) returns None.
+    """
+    try:
+        result = subprocess.run(
+            ["ip", "-4", "route", "show", "default"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode != 0:
+            return None
+        for line in (result.stdout or "").splitlines():
+            parts = line.split()
+            if parts[:1] == ["default"] and "dev" in parts:
+                return parts[parts.index("dev") + 1]
+    except Exception:
+        # Best-effort safety probe: it must never raise into the radio
+        # adapter path. Any failure (no `ip`, timeout, odd output) means
+        # "control path unknown" → do not exclude/refuse anything.
+        return None
+    return None
+
+
 @dataclass
 class WifiAdapterInfo:
     """Information about a detected WiFi adapter."""
@@ -277,10 +307,20 @@ def detect_wfb_adapters() -> list[WifiAdapterInfo]:
     except (FileNotFoundError, subprocess.TimeoutExpired):
         phy_modes = {}
 
+    # The operator's control-path interface (default route) is never a WFB
+    # candidate. iw normally only lists wireless ifaces, but a WiFi-client
+    # uplink (e.g. the management WiFi) can be the control path, and putting
+    # it in monitor mode would sever the session. Resolved once per scan.
+    control_iface = control_interface()
+
     adapters: list[WifiAdapterInfo] = []
     for iface in iw_interfaces:
         name = iface.get("interface", "")
         if not name:
+            continue
+
+        if control_iface and name == control_iface:
+            log.info("wfb_adapter_excluded_control_iface", interface=name)
             continue
 
         phy_name = iface.get("phy", "").replace("phy#", "phy")
@@ -487,6 +527,15 @@ def set_monitor_mode(interface: str) -> bool:
         return False
 
     _validate_interface_name(interface)
+
+    # Never put the operator's control-path interface into monitor mode — that
+    # downs it and severs the management session with no fallback. Defense in
+    # depth: detect_wfb_adapters() already excludes it, but a config override
+    # or a stale selection could still reach here.
+    ctrl = control_interface()
+    if ctrl and interface == ctrl:
+        log.error("monitor_mode_refused_control_iface", interface=interface)
+        return False
 
     # Release the radio from NetworkManager. A NM-managed interface can
     # refuse the monitor switch with EIO or silently revert it. Best-effort:
