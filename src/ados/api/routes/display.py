@@ -109,13 +109,51 @@ def _read_display_conf() -> dict[str, str]:
     return out
 
 
+def _resolve_fb_path(conf: dict[str, str]) -> str | None:
+    """Return the ``/dev/fbN`` node the SPI LCD is actually bound to.
+
+    The overlay installer records ``framebuffer_path`` (commonly
+    ``/dev/fb1``), but the kernel can assign the SPI LCD a different
+    node than expected: when the DRM primary is disabled it does not
+    claim ``/dev/fb0``, so the fbtft panel lands on ``fb0`` instead.
+    Trust the configured path only when it exists and reports the
+    expected driver; otherwise scan ``/sys/class/graphics/*`` for the
+    framebuffer whose driver name matches ``framebuffer_name_expected``.
+    This mirrors the resolution the OLED renderer's ``probe()`` performs
+    so the remote snapshot and the on-panel UI agree on the device.
+    """
+    expected = (conf.get("framebuffer_name_expected") or "fb_ili9486").strip()
+    candidates: list[str] = []
+    configured = conf.get("framebuffer_path", "")
+    if configured and Path(configured).exists():
+        candidates.append(configured)
+    sys_glob = Path("/sys/class/graphics")
+    if sys_glob.exists():
+        for entry in sorted(sys_glob.iterdir()):
+            dev = f"/dev/{entry.name}"
+            if (
+                entry.name.startswith("fb")
+                and dev not in candidates
+                and Path(dev).exists()
+            ):
+                candidates.append(dev)
+    for dev in candidates:
+        if not expected:
+            return dev
+        try:
+            name = (
+                Path("/sys/class/graphics") / Path(dev).name / "name"
+            ).read_text().strip()
+        except OSError:
+            continue
+        if expected in name:
+            return dev
+    return None
+
+
 def _lcd_is_bound() -> bool:
     """Best-effort check: is an SPI LCD framebuffer present?"""
-    conf = _read_display_conf()
-    fb_path = conf.get("framebuffer_path", "")
-    if not fb_path:
-        return False
-    return Path(fb_path).exists()
+    return _resolve_fb_path(_read_display_conf()) is not None
 
 
 def _read_lcd_state() -> dict[str, Any]:
@@ -165,8 +203,8 @@ def _read_framebuffer_image(conf: dict[str, str]) -> Any | None:
     except ImportError:
         return None
 
-    fb_path = conf.get("framebuffer_path", "/dev/fb1")
-    if not Path(fb_path).exists():
+    fb_path = _resolve_fb_path(conf)
+    if fb_path is None:
         return None
 
     fb_name = Path(fb_path).name

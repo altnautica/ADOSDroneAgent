@@ -2,13 +2,14 @@
 Description=ADOS Captive Portal DNS + HTTP responder (first-boot only)
 After=ados-hostapd.service
 PartOf=ados-supervisor.service
+# Only run while setup is incomplete. Once the sentinel exists the unit
+# is skipped (shown inactive, condition unmet) instead of reporting a
+# spurious failed state on every already-configured boot.
+ConditionPathExists=!/var/lib/ados/setup-complete
 
 [Service]
 Type=simple
 User=root
-# Negated path check: only start while setup is incomplete. Once the
-# sentinel file exists the unit exits 0 and does not come back.
-ExecStartPre=/bin/bash -c '[ ! -f /var/lib/ados/setup-complete ] || exit 1'
 ExecStart=/opt/ados/venv/bin/python -m ados.services.setup_webapp.captive_dns
 Restart=no
 Environment=ADOS_CONFIG=/etc/ados/config.yaml
