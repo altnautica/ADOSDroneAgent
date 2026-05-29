@@ -197,22 +197,53 @@ impl<H: HostServices> Connection<H> {
         let mut subscriptions: Vec<String> = Vec::new();
         let mut bus_rx = self.bus.subscribe();
 
+        // MAVLink subscriptions. Each `mavlink.subscribe` records the msg_name
+        // and a frame receiver from the host's MAVLink client; a per-subscription
+        // forwarder task pulls frames and tags them with the msg_name into one
+        // merged channel, so a single select branch writes the `mavlink.deliver`
+        // envelopes without competing writers on the socket. Mirrors the Python
+        // pump (one pump task per subscription) collapsed onto this connection's
+        // single writer. The Vec records active names for the already-subscribed
+        // dedupe; the forwarders own the receivers.
+        let mut mavlink_subs: Vec<String> = Vec::new();
+        let (mav_tx, mut mav_rx) = tokio::sync::mpsc::channel::<MavlinkDelivery>(256);
+        let mut forwarders: Vec<JoinHandle<()>> = Vec::new();
+
         // ---- dispatch loop --------------------------------------------
-        loop {
-            // Race the inbound request against an outgoing event to deliver, so
-            // a long-lived subscriber both serves requests and receives pushes
-            // on the one connection (the Python server uses two coroutines; one
-            // select loop is the single-task equivalent).
+        let result = loop {
+            // Race the inbound request against an outgoing event or MAVLink frame
+            // to deliver, so a long-lived subscriber both serves requests and
+            // receives pushes on the one connection (the Python server uses
+            // coroutines; one select loop is the single-task equivalent).
             tokio::select! {
                 frame = read_envelope(&mut read_half) => {
-                    let Some(env) = frame? else { return Ok(()); };
-                    self.handle_request(&mut write_half, &token, env, &mut subscriptions).await?;
+                    let env = match frame {
+                        Ok(Some(env)) => env,
+                        Ok(None) => break Ok(()),
+                        Err(e) => break Err(e),
+                    };
+                    if let Err(e) = self
+                        .handle_request(
+                            &mut write_half,
+                            &token,
+                            env,
+                            &mut subscriptions,
+                            &mut mavlink_subs,
+                            &mav_tx,
+                            &mut forwarders,
+                        )
+                        .await
+                    {
+                        break Err(e);
+                    }
                 }
                 evt = bus_rx.recv() => {
                     match evt {
                         Ok(event) => {
                             if subscriptions.iter().any(|p| handlers::topic_matches(p, &event.topic)) {
-                                self.deliver_event(&mut write_half, &token, &event).await?;
+                                if let Err(e) = self.deliver_event(&mut write_half, &token, &event).await {
+                                    break Err(e);
+                                }
                             }
                         }
                         // Lagged: a slow subscriber missed events. Keep serving
@@ -222,17 +253,39 @@ impl<H: HostServices> Connection<H> {
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => {}
                     }
                 }
+                delivery = mav_rx.recv() => {
+                    // None means every forwarder dropped its sender; nothing more
+                    // to deliver, but keep serving requests, so do nothing.
+                    if let Some(MavlinkDelivery { msg_name, frame }) = delivery {
+                        if let Err(e) = self
+                            .deliver_mavlink(&mut write_half, &token, &msg_name, &frame)
+                            .await
+                        {
+                            break Err(e);
+                        }
+                    }
+                }
             }
+        };
+
+        // Stop the per-subscription forwarder tasks so none survive the session.
+        for f in forwarders {
+            f.abort();
         }
+        result
     }
 
     /// Gate and route one request envelope.
+    #[allow(clippy::too_many_arguments)]
     async fn handle_request<W: AsyncWriteExt + Unpin>(
         &self,
         write_half: &mut W,
         token: &CapabilityToken,
         env: Envelope,
         subscriptions: &mut Vec<String>,
+        mavlink_subs: &mut Vec<String>,
+        mav_tx: &tokio::sync::mpsc::Sender<MavlinkDelivery>,
+        forwarders: &mut Vec<JoinHandle<()>>,
     ) -> Result<(), ServerError> {
         let req_id = env.request_id.clone();
         let expired = token.is_expired(now_secs());
@@ -243,14 +296,24 @@ impl<H: HostServices> Connection<H> {
             Gate::UnknownMethod(msg) => send_error(write_half, &req_id, &msg).await,
             Gate::CapabilityDenied(msg) => send_error(write_half, &req_id, &msg).await,
             Gate::Allow(method) => {
-                self.route(write_half, token, method, &env, subscriptions)
-                    .await
+                self.route(
+                    write_half,
+                    token,
+                    method,
+                    &env,
+                    subscriptions,
+                    mavlink_subs,
+                    mav_tx,
+                    forwarders,
+                )
+                .await
             }
         }
     }
 
     /// Run a gated method. The event surface and ping are served in-process;
     /// every other method routes to the host facade.
+    #[allow(clippy::too_many_arguments)]
     async fn route<W: AsyncWriteExt + Unpin>(
         &self,
         write_half: &mut W,
@@ -258,6 +321,9 @@ impl<H: HostServices> Connection<H> {
         method: Method,
         env: &Envelope,
         subscriptions: &mut Vec<String>,
+        mavlink_subs: &mut Vec<String>,
+        mav_tx: &tokio::sync::mpsc::Sender<MavlinkDelivery>,
+        forwarders: &mut Vec<JoinHandle<()>>,
     ) -> Result<(), ServerError> {
         match method {
             Method::Ping => {
@@ -302,12 +368,80 @@ impl<H: HostServices> Connection<H> {
                     Err(e) => send_error(write_half, &env.request_id, &e.0).await,
                 }
             }
-            // Host-coupled methods route to the facade. NoopHost returns
-            // Ok(not_implemented) (mirroring the Python stub bodies); a real
-            // host returns Err(HostError) for a soft failure, which becomes the
-            // response envelope `error` field with the exact Python wire body.
+            // mavlink.subscribe both validates (the host method shapes the
+            // response) and arms the per-connection push stream. The host
+            // returns `{"already_subscribed": true}` or `{"subscribed": true,
+            // "msg_name": <m>}`; on the first subscribe to a name we obtain a
+            // frame receiver from the host's MAVLink client (if wired) and spawn
+            // a forwarder that tags each frame with the msg_name into the merged
+            // delivery channel, so the select loop pushes `mavlink.deliver`
+            // envelopes. Mirrors `handle_mavlink_subscribe` + `spawn_mavlink_pump`.
+            Method::MavlinkSubscribe => {
+                let Some(name) = mavlink_subscribe_msg_name(&env.args) else {
+                    return send_error(
+                        write_half,
+                        &env.request_id,
+                        "msg_name must be a non-empty string",
+                    )
+                    .await;
+                };
+                if mavlink_subs.iter().any(|n| n == &name) {
+                    let result = Value::Map(vec![(
+                        Value::from("already_subscribed"),
+                        Value::Boolean(true),
+                    )]);
+                    return send_response(write_half, &env.request_id, result).await;
+                }
+                mavlink_subs.push(name.clone());
+                // Arm the push stream when the host has a MAVLink client. The
+                // forwarder tags every frame with this name and forwards into the
+                // merged channel; it forwards every frame the host fans out (no
+                // per-name byte filtering), matching the Python pump.
+                if let Some(mut rx) = self.host.mavlink_subscribe_stream(&self.plugin_id, &name) {
+                    let tx = mav_tx.clone();
+                    let fwd_name = name.clone();
+                    forwarders.push(tokio::spawn(async move {
+                        loop {
+                            match rx.recv().await {
+                                Ok(frame) => {
+                                    let delivery = MavlinkDelivery {
+                                        msg_name: fwd_name.clone(),
+                                        frame,
+                                    };
+                                    if tx.send(delivery).await.is_err() {
+                                        break; // connection gone
+                                    }
+                                }
+                                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                                    continue
+                                }
+                                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                            }
+                        }
+                    }));
+                }
+                let result = Value::Map(vec![
+                    (Value::from("subscribed"), Value::Boolean(true)),
+                    (Value::from("msg_name"), Value::from(name.as_str())),
+                ]);
+                send_response(write_half, &env.request_id, result).await
+            }
+            // Host-coupled methods route to the facade. The three payload-gated
+            // methods (mavlink.send, mavlink.register_component,
+            // peripheral.register_driver) receive the token's granted caps and
+            // apply their capability gate inside the handler, after argument
+            // validation, exactly where the Python handlers apply it. NoopHost
+            // returns Ok(not_implemented) (mirroring the Python stub bodies); a
+            // real host returns Err(HostError) for a soft failure, which becomes
+            // the response envelope `error` field with the exact Python wire body.
             other => {
-                match handlers::route_host_method(&*self.host, other, &self.plugin_id, &env.args) {
+                match handlers::route_host_method(
+                    &*self.host,
+                    other,
+                    &self.plugin_id,
+                    &env.args,
+                    &token.granted_caps,
+                ) {
                     Ok(result) => send_response(write_half, &env.request_id, result).await,
                     Err(e) => send_error(write_half, &env.request_id, &e.body()).await,
                 }
@@ -334,6 +468,57 @@ impl<H: HostServices> Connection<H> {
             error: None,
         };
         write_frame(write_half, &env).await
+    }
+
+    /// Push a subscribed MAVLink frame to the plugin as a `mavlink.deliver`
+    /// envelope. Mirrors the envelope shape in `mavlink_pump._pump_loop`:
+    /// kind `event`, method `mavlink.deliver`, capability `mavlink.read`, args
+    /// `{msg_name, frame: bytes, timestamp_ms}`, request_id `mav-<ms>`.
+    async fn deliver_mavlink<W: AsyncWriteExt + Unpin>(
+        &self,
+        write_half: &mut W,
+        token: &CapabilityToken,
+        msg_name: &str,
+        frame: &[u8],
+    ) -> Result<(), ServerError> {
+        let ts = now_ms();
+        let env = Envelope {
+            version: PROTOCOL_VERSION,
+            kind: "event".to_string(),
+            method: "mavlink.deliver".to_string(),
+            capability: "mavlink.read".to_string(),
+            args: Value::Map(vec![
+                (Value::from("msg_name"), Value::from(msg_name)),
+                (Value::from("frame"), Value::Binary(frame.to_vec())),
+                (Value::from("timestamp_ms"), Value::Integer(ts.into())),
+            ]),
+            request_id: format!("mav-{ts}"),
+            token: token.to_token_string(),
+            error: None,
+        };
+        write_frame(write_half, &env).await
+    }
+}
+
+/// One subscribed MAVLink frame to push, tagged with the subscription's
+/// msg_name. The per-subscription forwarder builds these into the merged
+/// delivery channel the connection's select loop drains.
+struct MavlinkDelivery {
+    msg_name: String,
+    frame: Vec<u8>,
+}
+
+/// Extract the `msg_name` arg for `mavlink.subscribe`: a non-empty string, else
+/// `None` (the `_rpc_error("msg_name must be a non-empty string")` path).
+fn mavlink_subscribe_msg_name(args: &Value) -> Option<String> {
+    match args {
+        Value::Map(entries) => entries
+            .iter()
+            .find(|(k, _)| k.as_str() == Some("msg_name"))
+            .and_then(|(_, v)| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned),
+        _ => None,
     }
 }
 

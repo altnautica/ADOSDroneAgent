@@ -86,6 +86,15 @@ pub fn not_implemented(method: &str) -> HostResult {
 /// bodies; a real host implements the methods as the agent's service surfaces
 /// stabilize. The event surface is not on this trait — it is served in-process
 /// by the host's own event bus (see [`crate::handlers`]).
+///
+/// Three methods (`mavlink_send`, `mavlink_register_component`,
+/// `peripheral_register_driver`) additionally take the caller's
+/// `granted_caps`. They are the only methods whose capability gate is decided
+/// from the request payload (the pose-inject / VIO-component classification, the
+/// component kind, the driver kind), so the gate must run inside the handler,
+/// after argument validation, exactly where the Python handlers apply it. The
+/// other 14 methods are fully gated at the dispatch level and do not see the
+/// caps. The asymmetry documents which methods gate on payload.
 pub trait HostServices: Send + Sync + 'static {
     fn telemetry_subscribe(
         &self,
@@ -112,20 +121,33 @@ pub trait HostServices: Send + Sync + 'static {
     fn mavlink_subscribe(&self, _plugin_id: &str, _args: &Value) -> Result<HostResult, HostError> {
         Ok(not_implemented("mavlink.subscribe"))
     }
-    fn mavlink_send(&self, _plugin_id: &str, _args: &Value) -> Result<HostResult, HostError> {
+    /// Gates on the payload (pose-inject msg ids, VIO component id) after arg
+    /// validation, so it takes the caller's `granted_caps`.
+    fn mavlink_send(
+        &self,
+        _plugin_id: &str,
+        _args: &Value,
+        _granted_caps: &std::collections::BTreeSet<String>,
+    ) -> Result<HostResult, HostError> {
         Ok(not_implemented("mavlink.send"))
     }
+    /// Gates on the requested component kind after arg validation, so it takes
+    /// the caller's `granted_caps`.
     fn mavlink_register_component(
         &self,
         _plugin_id: &str,
         _args: &Value,
+        _granted_caps: &std::collections::BTreeSet<String>,
     ) -> Result<HostResult, HostError> {
         Ok(not_implemented("mavlink.register_component"))
     }
+    /// Gates on the requested driver kind after arg validation, so it takes the
+    /// caller's `granted_caps`.
     fn peripheral_register_driver(
         &self,
         _plugin_id: &str,
         _args: &Value,
+        _granted_caps: &std::collections::BTreeSet<String>,
     ) -> Result<HostResult, HostError> {
         Ok(not_implemented("peripheral.register_driver"))
     }
@@ -160,6 +182,24 @@ pub trait HostServices: Send + Sync + 'static {
     /// claims, telemetry channels). Mirrors `_release_session_resources` in the
     /// Python server. The default is a no-op; a real host releases its state.
     fn release_plugin(&self, _plugin_id: &str) {}
+
+    /// A receiver for the MAVLink frame fanout, when this host has a wired
+    /// MAVLink client. The server obtains one per `mavlink.subscribe` and pushes
+    /// each frame to the plugin as a `mavlink.deliver` envelope. Mirrors the
+    /// pump-subscription seam in `src/ados/plugins/ipc/mavlink_pump.py`, where
+    /// the host's MAVLink router exposes a per-subscriber frame queue.
+    ///
+    /// The default returns `None`, which keeps [`NoopHost`] unaffected (no push
+    /// stream). A real host returns a receiver when its MAVLink slot is wired and
+    /// `None` when the router has not surfaced yet (the Python pump logs
+    /// `router_missing` and does nothing in that case).
+    fn mavlink_subscribe_stream(
+        &self,
+        _plugin_id: &str,
+        _msg_name: &str,
+    ) -> Option<tokio::sync::broadcast::Receiver<Vec<u8>>> {
+        None
+    }
 }
 
 /// The default host: every host-coupled method returns `not_implemented`.

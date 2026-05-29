@@ -44,6 +44,8 @@ pub mod errors;
 pub mod handlers;
 pub mod host;
 pub mod manifest;
+pub mod mavlink_client;
+pub mod realhost;
 pub mod server;
 pub mod signing;
 pub mod state;

@@ -289,11 +289,19 @@ pub fn event_deliver_args(event: &Event) -> Value {
 /// one returns `Ok(not_implemented(...))`, mirroring the Python stub bodies; a
 /// real host returns [`Err(HostError)`](HostError) for a soft failure, which
 /// the server renders into the response envelope `error` field.
+///
+/// `granted_caps` is the caller's verified capability set. Only the three
+/// payload-gated methods (`mavlink.send`, `mavlink.register_component`,
+/// `peripheral.register_driver`) consume it; they apply their capability gate
+/// inside the handler, after argument validation, exactly where the Python
+/// handlers apply it. The other methods are fully gated at the dispatch level and
+/// ignore it.
 pub fn route_host_method<H: HostServices + ?Sized>(
     host: &H,
     method: Method,
     plugin_id: &str,
     args: &Value,
+    granted_caps: &BTreeSet<String>,
 ) -> Result<HostResult, HostError> {
     match method {
         Method::TelemetrySubscribe => host.telemetry_subscribe(plugin_id, args),
@@ -303,9 +311,13 @@ pub fn route_host_method<H: HostServices + ?Sized>(
         Method::RecordingStart => host.recording_start(plugin_id, args),
         Method::RecordingStop => host.recording_stop(plugin_id, args),
         Method::MavlinkSubscribe => host.mavlink_subscribe(plugin_id, args),
-        Method::MavlinkSend => host.mavlink_send(plugin_id, args),
-        Method::MavlinkRegisterComponent => host.mavlink_register_component(plugin_id, args),
-        Method::PeripheralRegisterDriver => host.peripheral_register_driver(plugin_id, args),
+        Method::MavlinkSend => host.mavlink_send(plugin_id, args, granted_caps),
+        Method::MavlinkRegisterComponent => {
+            host.mavlink_register_component(plugin_id, args, granted_caps)
+        }
+        Method::PeripheralRegisterDriver => {
+            host.peripheral_register_driver(plugin_id, args, granted_caps)
+        }
         Method::PeripheralUnregisterDriver => host.peripheral_unregister_driver(plugin_id, args),
         Method::CameraClaim => host.camera_claim(plugin_id, args),
         Method::CameraRelease => host.camera_release(plugin_id, args),

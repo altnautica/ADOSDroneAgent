@@ -88,8 +88,8 @@ async def handle_mavlink_send(
         # msgpack may decode bytes-of-ints as a list on some configs.
         try:
             msg_bytes = bytes(msg_bytes)
-        except (TypeError, ValueError) as exc:
-            raise _rpc_error(f"msg_bytes coercion failed: {exc}")
+        except (TypeError, ValueError):
+            raise _rpc_error("msg_bytes coercion failed")
     if not isinstance(msg_bytes, (bytes, bytearray)):
         raise _rpc_error("msg_bytes must be bytes")
     msg_bytes = bytes(msg_bytes)
@@ -104,8 +104,8 @@ async def handle_mavlink_send(
     if component_id is not None:
         try:
             comp_id_int = int(component_id)
-        except (TypeError, ValueError) as exc:
-            raise _rpc_error(f"component_id not integer: {exc}")
+        except (TypeError, ValueError):
+            raise _rpc_error("component_id not integer")
         if comp_id_int in VIO_COMPONENT_IDS:
             if "mavlink.component.vio" not in session.token.granted_caps:
                 raise CapabilityDenied(session.plugin_id, "mavlink.component.vio")
@@ -151,8 +151,8 @@ async def handle_mavlink_register_component(
         raise _rpc_error("kind must be a non-empty string")
     try:
         comp_id_int = int(comp_id)
-    except (TypeError, ValueError) as exc:
-        raise _rpc_error(f"component_id not integer: {exc}")
+    except (TypeError, ValueError):
+        raise _rpc_error("component_id not integer")
     required = f"mavlink.component.{kind}"
     if required not in session.token.granted_caps:
         raise CapabilityDenied(session.plugin_id, required)
