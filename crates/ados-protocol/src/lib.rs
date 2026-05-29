@@ -9,6 +9,8 @@
 //! Modules:
 //! - [`frame`] — 4-byte big-endian length-prefixed framing, shared by the
 //!   MAVLink socket, the state socket v2, and the plugin RPC socket.
+//! - [`framebus`] — the vision frame transport: the `vision.frame` descriptor
+//!   wire shape and the shared-memory ring layout frames travel in.
 //! - [`plugin`] — the plugin RPC envelope (msgpack, short keys) and the
 //!   pipe-delimited HMAC-SHA256 capability token.
 //! - [`state`] — the vehicle-state codec: a v1 newline-JSON reader for the
@@ -18,6 +20,7 @@
 
 pub mod capabilities;
 pub mod frame;
+pub mod framebus;
 pub mod ipc;
 #[cfg(feature = "mavlink")]
 pub mod mavlink;

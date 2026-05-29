@@ -41,6 +41,9 @@ AGENT_CAPABILITIES: frozenset[str] = frozenset(
         "filesystem.host",
         "recording.write",
         "process.spawn",
+        "vision.frame.read",
+        "vision.model.register",
+        "vision.detection.publish",
     }
 )
 
@@ -275,5 +278,26 @@ CAPABILITY_CATALOG: dict[str, dict[str, str]] = {
         "category": "compute_process",
         "risk": "high",
         "risk_reason": "Subprocesses run outside the plugin host sandbox and with the plugin's privileges.",
+    },
+    "vision.frame.read": {
+        "label": "Read camera frames from the vision engine",
+        "description": "Lets the plugin subscribe to normalized camera frames the vision engine publishes (resolution and pixel format set by the engine). Frames are shared read-only; the plugin does not open the camera itself.",
+        "category": "compute_process",
+        "risk": "medium",
+        "risk_reason": "Frames may contain sensitive imagery; a frame consumer can process it off the normal recording path.",
+    },
+    "vision.model.register": {
+        "label": "Register an inference model with the vision engine",
+        "description": "Lets the plugin register an inference model (and its input format and output classes) so the vision engine can load and run it, or so the plugin can run it against shared frames. Registered models appear to detection consumers.",
+        "category": "compute_process",
+        "risk": "medium",
+        "risk_reason": "A model can consume the shared accelerator and CPU; a heavy or faulty model can starve other vision consumers.",
+    },
+    "vision.detection.publish": {
+        "label": "Publish detections to the vision engine",
+        "description": "Lets the plugin publish detection results (bounding boxes, class labels, confidence, track ids) that other plugins, overlays, and mission logic can consume. Detections are derived data; they do not command the vehicle.",
+        "category": "data_network",
+        "risk": "low",
+        "risk_reason": "Detections are derived data on a sandboxed topic and do not affect flight.",
     },
 }
