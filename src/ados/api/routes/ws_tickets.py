@@ -34,6 +34,7 @@ ALLOWED_SCOPES: frozenset[str] = frozenset(
         "gs.mavlink_ws",
         "gs.uplink_events",
         "gs.mesh_events",
+        "vision.detections",
     }
 )
 

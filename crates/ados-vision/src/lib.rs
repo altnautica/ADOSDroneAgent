@@ -23,10 +23,14 @@
 //! - [`engine`] — the per-camera rings + sources, the model registry, the
 //!   accelerator lease arbiter, and the detection publisher.
 //! - [`visionsock`] — the `/run/ados/vision.sock` request/response server.
+//! - [`detection_bus`] — the `/run/ados/vision-detections.sock` broadcast that
+//!   re-publishes every detection batch as length-prefixed msgpack so the API
+//!   process can forward it to the browser over a WebSocket.
 //! - [`config`] — the `vision:` block of the agent config.
 
 pub mod backend;
 pub mod config;
+pub mod detection_bus;
 pub mod engine;
 pub mod ring;
 pub mod source;

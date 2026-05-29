@@ -19,6 +19,7 @@ use std::time::Duration;
 
 use ados_vision::backend::{select_backend, BackendPrefs};
 use ados_vision::config::{CameraEntry, VisionConfig};
+use ados_vision::detection_bus;
 use ados_vision::engine::VisionEngine;
 use ados_vision::ring::now_ms;
 use ados_vision::source::{
@@ -146,6 +147,20 @@ async fn main() {
         tasks.push(tokio::spawn(async move {
             if let Err(e) = visionsock::serve(engine, &sock, cancel).await {
                 tracing::error!(error = %e, "vision_sock_serve_failed");
+            }
+        }));
+    }
+
+    // The vision-detections.sock broadcast: every published detection batch is
+    // re-framed onto a Unix socket the agent's API process subscribes to and
+    // forwards to the browser over a WebSocket.
+    {
+        let engine = engine.clone();
+        let cancel = cancel.clone();
+        let sock = config.detections_socket_path();
+        tasks.push(tokio::spawn(async move {
+            if let Err(e) = detection_bus::serve(engine, &sock, cancel).await {
+                tracing::error!(error = %e, "vision_detections_serve_failed");
             }
         }));
     }

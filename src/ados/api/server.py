@@ -38,6 +38,7 @@ from ados.api.routes import (
     system,
     version,
     video,
+    vision_detections,
     vision_models,
     wfb,
     whep,
@@ -131,6 +132,9 @@ def create_app(agent: Any) -> FastAPI:
     app.include_router(peripherals_v1.router, prefix="/api")
     app.include_router(fleet.router, prefix="/api")
     app.include_router(vision_models.router, prefix="/api")
+    # Live vision-detection WebSocket bridge. Forwards the engine's
+    # detection-batch broadcast socket to the browser as JSON.
+    app.include_router(vision_detections.router, prefix="/api")
     app.include_router(ground_station.router, prefix="/api")
     app.include_router(network.router, prefix="/api")
     # CAN passthrough surface reserved for a future agent-side bridge.

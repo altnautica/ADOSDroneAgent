@@ -157,6 +157,18 @@ impl VisionConfig {
         format!("{}/vision.sock", self.socket_dir.trim_end_matches('/'))
     }
 
+    /// The `vision-detections.sock` path: a last-state broadcast socket the
+    /// API process subscribes to so the browser can receive live detection
+    /// batches over a WebSocket. Distinct from `vision.sock` (the request /
+    /// response plugin bridge) — this one is broadcast-only and carries
+    /// length-prefixed msgpack [`ados_protocol::framebus::DetectionBatch`].
+    pub fn detections_socket_path(&self) -> String {
+        format!(
+            "{}/vision-detections.sock",
+            self.socket_dir.trim_end_matches('/')
+        )
+    }
+
     /// The accelerator sidecar socket path the RKNN backend talks to.
     pub fn rknn_socket_path(&self) -> String {
         format!("{}/vision-rknn.sock", self.socket_dir.trim_end_matches('/'))
@@ -248,6 +260,10 @@ vision:
         assert_eq!(c.vision_socket_path(), "/tmp/run/vision.sock");
         assert_eq!(c.rknn_socket_path(), "/tmp/run/vision-rknn.sock");
         assert_eq!(c.tap_socket_for("fpv"), "/tmp/run/vision-tap-fpv.sock");
+        assert_eq!(
+            c.detections_socket_path(),
+            "/tmp/run/vision-detections.sock"
+        );
     }
 
     #[test]
