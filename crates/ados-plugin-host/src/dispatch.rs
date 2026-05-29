@@ -320,7 +320,11 @@ mod tests {
             Gate::CapabilityDenied("capability_denied: vision.frame.read".to_string())
         );
         assert_eq!(
-            gate(vision_methods::SUBSCRIBE_FRAMES, false, &caps(&["vision.frame.read"])),
+            gate(
+                vision_methods::SUBSCRIBE_FRAMES,
+                false,
+                &caps(&["vision.frame.read"])
+            ),
             Gate::Allow(Method::VisionSubscribeFrames)
         );
 

@@ -456,7 +456,11 @@ impl PluginIpcClient {
             ),
         ]);
         Ok(self
-            .send_request(ados_protocol::framebus::methods::INFER, "vision.model.register", args)
+            .send_request(
+                ados_protocol::framebus::methods::INFER,
+                "vision.model.register",
+                args,
+            )
             .await?
             .args)
     }

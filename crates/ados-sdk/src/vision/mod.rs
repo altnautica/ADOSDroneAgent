@@ -130,7 +130,11 @@ impl VisionClient {
     /// `vision.model.register`); the engine arbitrates access to the
     /// accelerator. The frame is passed by descriptor (the engine reads the
     /// same ring), so no pixels cross the RPC envelope.
-    pub async fn infer(&self, model_id: &str, frame: &Frame) -> Result<Vec<Detection>, ClientError> {
+    pub async fn infer(
+        &self,
+        model_id: &str,
+        frame: &Frame,
+    ) -> Result<Vec<Detection>, ClientError> {
         let desc = frame
             .descriptor
             .to_msgpack()
@@ -220,7 +224,10 @@ fn resolve_frame(cache: &Arc<Mutex<RingCache>>, descriptor: FrameDescriptor) -> 
         None => {
             let mapped = map_ring(&descriptor.shm_name)?;
             guard.rings.insert(descriptor.shm_name.clone(), mapped);
-            guard.rings.get(&descriptor.shm_name).expect("just inserted")
+            guard
+                .rings
+                .get(&descriptor.shm_name)
+                .expect("just inserted")
         }
     };
     let pixels = framebus::read_slot(&ring.map, &ring.layout, descriptor.slot, descriptor.seq)

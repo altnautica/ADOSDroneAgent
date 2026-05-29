@@ -17,6 +17,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
+use ados_protocol::framebus::FrameFormat;
 use ados_vision::backend::{select_backend, BackendPrefs};
 use ados_vision::config::{CameraEntry, VisionConfig};
 use ados_vision::detection_bus;
@@ -26,7 +27,6 @@ use ados_vision::source::{
     discover_cameras_default, AnySource, CaptureSource, FrameSource, TapSource,
 };
 use ados_vision::visionsock;
-use ados_protocol::framebus::FrameFormat;
 use tokio::sync::Notify;
 
 /// Canonical agent config file.
@@ -211,7 +211,11 @@ async fn resolve_cameras(config: &VisionConfig) -> Vec<ResolvedCamera> {
         .await
         .into_iter()
         .map(|d| ResolvedCamera {
-            id: d.device_path.replace('/', "-").trim_start_matches('-').to_string(),
+            id: d
+                .device_path
+                .replace('/', "-")
+                .trim_start_matches('-')
+                .to_string(),
             kind: "tap".to_string(),
             tap_socket: config.tap_socket_for(&d.device_path.replace('/', "-")),
             device_path: Some(d.device_path),

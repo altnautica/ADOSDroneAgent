@@ -604,7 +604,10 @@ impl<H: HostServices> Connection<H> {
             method: ados_protocol::framebus::methods::DELIVER_FRAME.to_string(),
             capability: "vision.frame.read".to_string(),
             args: Value::Map(vec![
-                (Value::from("descriptor"), Value::Binary(descriptor.to_vec())),
+                (
+                    Value::from("descriptor"),
+                    Value::Binary(descriptor.to_vec()),
+                ),
                 (Value::from("timestamp_ms"), Value::Integer(ts.into())),
             ]),
             request_id: format!("vis-{ts}"),

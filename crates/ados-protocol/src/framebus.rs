@@ -467,7 +467,10 @@ mod tests {
     fn frame_bytes_matches_format() {
         assert_eq!(FrameFormat::Rgb24.frame_bytes(640, 480), 640 * 480 * 3);
         assert_eq!(FrameFormat::Nv12.frame_bytes(640, 480), 640 * 480 * 3 / 2);
-        assert_eq!(FrameFormat::Yuv420p.frame_bytes(1280, 720), 1280 * 720 * 3 / 2);
+        assert_eq!(
+            FrameFormat::Yuv420p.frame_bytes(1280, 720),
+            1280 * 720 * 3 / 2
+        );
     }
 
     #[test]
@@ -540,7 +543,10 @@ mod tests {
         write_slot(&mut region, &layout, 0, 101, &[8, 8, 8, 8]).unwrap();
         // A consumer still holding the old descriptor sees the new seq and drops.
         assert_eq!(read_slot(&region, &layout, 0, 100).unwrap(), None);
-        assert_eq!(read_slot(&region, &layout, 0, 101).unwrap(), Some(vec![8; 4]));
+        assert_eq!(
+            read_slot(&region, &layout, 0, 101).unwrap(),
+            Some(vec![8; 4])
+        );
     }
 
     #[test]

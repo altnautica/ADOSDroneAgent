@@ -1445,7 +1445,11 @@ mod tests {
         cfg.vision.enabled = true;
         // On a drone profile the gate opens.
         cfg.profile = Some("drone".into());
-        let o = VideoOrchestrator::new(cfg.clone(), CameraConfig::default(), std::path::Path::new("/tmp"));
+        let o = VideoOrchestrator::new(
+            cfg.clone(),
+            CameraConfig::default(),
+            std::path::Path::new("/tmp"),
+        );
         assert!(o.vision_enabled());
         // On a ground-station profile the air-side tap is suppressed even when
         // enabled in config.

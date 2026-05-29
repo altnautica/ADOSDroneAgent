@@ -232,7 +232,10 @@ mod tests {
         assert_eq!((d3.seq, d3.slot), (3, 1)); // recycled slot 1 from d1
 
         // The recycled slot now holds frame 3; the old d1 descriptor is torn.
-        assert_eq!(read_slot(w.region.as_mut_slice(), &layout, 1, d1.seq).unwrap(), None);
+        assert_eq!(
+            read_slot(w.region.as_mut_slice(), &layout, 1, d1.seq).unwrap(),
+            None
+        );
         assert_eq!(
             read_slot(w.region.as_mut_slice(), &layout, 1, d3.seq).unwrap(),
             Some(vec![3; 4])

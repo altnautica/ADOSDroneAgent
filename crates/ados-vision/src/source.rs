@@ -105,7 +105,12 @@ fn format_from_tag(t: u8) -> Option<FrameFormat> {
 
 /// Encode the tap frame header. Exposed so the video-pipeline tap writer can
 /// share the exact byte layout the reader expects.
-pub fn encode_tap_header(format: FrameFormat, width: u32, height: u32, byte_len: u32) -> [u8; TAP_HEADER_LEN] {
+pub fn encode_tap_header(
+    format: FrameFormat,
+    width: u32,
+    height: u32,
+    byte_len: u32,
+) -> [u8; TAP_HEADER_LEN] {
     let mut h = [0u8; TAP_HEADER_LEN];
     h[0..4].copy_from_slice(&TAP_MAGIC.to_le_bytes());
     h[4] = format_tag(format);
@@ -402,7 +407,12 @@ pub async fn write_tap_frame<W: AsyncWriteExt + Unpin>(
     w: &mut W,
     frame: &RawFrame,
 ) -> std::io::Result<()> {
-    let header = encode_tap_header(frame.format, frame.width, frame.height, frame.data.len() as u32);
+    let header = encode_tap_header(
+        frame.format,
+        frame.width,
+        frame.height,
+        frame.data.len() as u32,
+    );
     w.write_all(&header).await?;
     if !frame.data.is_empty() {
         w.write_all(&frame.data).await?;

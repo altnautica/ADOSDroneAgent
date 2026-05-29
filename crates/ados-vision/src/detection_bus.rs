@@ -133,10 +133,7 @@ mod tests {
 
     #[tokio::test]
     async fn published_detection_reaches_a_socket_subscriber() {
-        let engine = crate::engine::VisionEngine::new(
-            Box::new(crate::backend::MockBackend),
-            4,
-        );
+        let engine = crate::engine::VisionEngine::new(Box::new(crate::backend::MockBackend), 4);
         let cancel = Arc::new(Notify::new());
 
         let dir = tempfile::tempdir().unwrap();
@@ -150,7 +147,9 @@ mod tests {
         let server_cancel = cancel.clone();
         let server_sock = sock.clone();
         let server = tokio::spawn(async move {
-            serve(server_engine, &server_sock, server_cancel).await.unwrap();
+            serve(server_engine, &server_sock, server_cancel)
+                .await
+                .unwrap();
         });
 
         // Connect a subscriber, then publish.
@@ -176,10 +175,7 @@ mod tests {
 
     #[tokio::test]
     async fn late_subscriber_gets_the_last_batch_replayed() {
-        let engine = crate::engine::VisionEngine::new(
-            Box::new(crate::backend::MockBackend),
-            4,
-        );
+        let engine = crate::engine::VisionEngine::new(Box::new(crate::backend::MockBackend), 4);
         let cancel = Arc::new(Notify::new());
 
         let dir = tempfile::tempdir().unwrap();
@@ -193,7 +189,9 @@ mod tests {
         let server_cancel = cancel.clone();
         let server_sock = sock.clone();
         let server = tokio::spawn(async move {
-            serve(server_engine, &server_sock, server_cancel).await.unwrap();
+            serve(server_engine, &server_sock, server_cancel)
+                .await
+                .unwrap();
         });
 
         // Wait for the socket to bind (a probe connect that we immediately

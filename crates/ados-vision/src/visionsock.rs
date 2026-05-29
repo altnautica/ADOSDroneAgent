@@ -131,11 +131,21 @@ async fn handle_client(
 
         if env.method == methods::SUBSCRIBE_FRAMES {
             // Acknowledge, then start (or restart) the descriptor push task.
-            send_response(&writer, &env.request_id, ok_map(&[("subscribed", Value::Boolean(true))]), None).await?;
+            send_response(
+                &writer,
+                &env.request_id,
+                ok_map(&[("subscribed", Value::Boolean(true))]),
+                None,
+            )
+            .await?;
             if let Some(t) = frame_task.take() {
                 t.abort();
             }
-            frame_task = Some(spawn_frame_push(engine.clone(), writer.clone(), filter_camera(&env.args)));
+            frame_task = Some(spawn_frame_push(
+                engine.clone(),
+                writer.clone(),
+                filter_camera(&env.args),
+            ));
             continue;
         }
 
@@ -272,7 +282,11 @@ async fn send_response(
         kind: "response".to_string(),
         method: "response".to_string(),
         capability: String::new(),
-        args: if error.is_some() { Value::Map(Vec::new()) } else { args },
+        args: if error.is_some() {
+            Value::Map(Vec::new())
+        } else {
+            args
+        },
         request_id: request_id.to_string(),
         token: String::new(),
         error,

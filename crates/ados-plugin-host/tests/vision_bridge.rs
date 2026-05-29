@@ -109,13 +109,14 @@ fn args_bool(env: &Envelope, key: &str) -> Option<bool> {
 
 fn args_bytes(env: &Envelope, key: &str) -> Option<Vec<u8>> {
     match &env.args {
-        Value::Map(m) => m
-            .iter()
-            .find(|(k, _)| k.as_str() == Some(key))
-            .and_then(|(_, v)| match v {
-                Value::Binary(b) => Some(b.clone()),
-                _ => None,
-            }),
+        Value::Map(m) => {
+            m.iter()
+                .find(|(k, _)| k.as_str() == Some(key))
+                .and_then(|(_, v)| match v {
+                    Value::Binary(b) => Some(b.clone()),
+                    _ => None,
+                })
+        }
         _ => None,
     }
 }
@@ -267,13 +268,12 @@ async fn register_model_routes_to_the_host() {
     let _ = recv(&mut client).await; // ready
 
     let args = Value::Map(vec![(Value::from("model_id"), Value::from("m1"))]);
-    send(
-        &mut client,
-        &request(methods::REGISTER_MODEL, &token, args),
-    )
-    .await;
+    send(&mut client, &request(methods::REGISTER_MODEL, &token, args)).await;
     let resp = recv(&mut client).await;
-    assert_eq!(resp.error, None, "granted cap must not produce a gate error");
+    assert_eq!(
+        resp.error, None,
+        "granted cap must not produce a gate error"
+    );
     assert_eq!(args_bool(&resp, "registered"), Some(true));
 }
 

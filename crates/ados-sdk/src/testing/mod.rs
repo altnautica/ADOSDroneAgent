@@ -37,9 +37,7 @@
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use ados_protocol::framebus::{
-    self, DetectionBatch, FrameDescriptor, FrameFormat, RingLayout,
-};
+use ados_protocol::framebus::{self, DetectionBatch, FrameDescriptor, FrameFormat, RingLayout};
 
 use crate::vision::{Frame, FrameCallback};
 

@@ -104,8 +104,12 @@ impl VisionEngine {
             None => true,
         };
         if recreate {
-            let layout =
-                ados_protocol::framebus::RingLayout::for_frame(self.slot_count, width, height, format);
+            let layout = ados_protocol::framebus::RingLayout::for_frame(
+                self.slot_count,
+                width,
+                height,
+                format,
+            );
             let shm_name = format!("ados-vision-{camera_id}");
             let writer = RingWriter::open_or_create(&shm_name, layout)
                 .map_err(|e| anyhow!("ring open for {camera_id}: {e}"))?;
@@ -194,7 +198,9 @@ impl VisionEngine {
             .get(model_id)
             .ok_or_else(|| anyhow!("unknown model {model_id}"))?;
         if reg.meta.execution == ModelExecution::PluginSide {
-            return Err(anyhow!("model {model_id} is plugin-side; the plugin runs it"));
+            return Err(anyhow!(
+                "model {model_id} is plugin-side; the plugin runs it"
+            ));
         }
         let loaded = reg
             .loaded
@@ -290,7 +296,10 @@ mod tests {
     #[tokio::test]
     async fn registers_engine_run_model_and_infers() {
         let e = engine();
-        let (exec, had_backend) = e.register_model(meta("m1", ModelExecution::EngineRun)).await.unwrap();
+        let (exec, had_backend) = e
+            .register_model(meta("m1", ModelExecution::EngineRun))
+            .await
+            .unwrap();
         assert_eq!(exec, ModelExecution::EngineRun);
         assert!(had_backend);
         assert_eq!(e.model_count().await, 1);
@@ -305,7 +314,9 @@ mod tests {
     #[tokio::test]
     async fn plugin_side_model_cannot_be_inferred_by_engine() {
         let e = engine();
-        e.register_model(meta("m2", ModelExecution::PluginSide)).await.unwrap();
+        e.register_model(meta("m2", ModelExecution::PluginSide))
+            .await
+            .unwrap();
         let err = e.infer("m2", &[0u8; 4], 1, 1, FrameFormat::Rgb24).await;
         assert!(err.is_err());
     }
@@ -313,7 +324,10 @@ mod tests {
     #[tokio::test]
     async fn unknown_model_inference_errors() {
         let e = engine();
-        assert!(e.infer("nope", &[0u8; 4], 1, 1, FrameFormat::Rgb24).await.is_err());
+        assert!(e
+            .infer("nope", &[0u8; 4], 1, 1, FrameFormat::Rgb24)
+            .await
+            .is_err());
     }
 
     #[tokio::test]
@@ -326,7 +340,12 @@ mod tests {
             frame_id: 1,
             ts_ms: 0,
             detections: vec![Detection {
-                bbox: BoundingBox { x: 0.0, y: 0.0, width: 1.0, height: 1.0 },
+                bbox: BoundingBox {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 1.0,
+                    height: 1.0,
+                },
                 class_label: "x".into(),
                 confidence: 0.5,
                 track_id: None,
@@ -340,7 +359,9 @@ mod tests {
     #[tokio::test]
     async fn infer_and_publish_builds_batch_from_descriptor() {
         let e = engine();
-        e.register_model(meta("m", ModelExecution::EngineRun)).await.unwrap();
+        e.register_model(meta("m", ModelExecution::EngineRun))
+            .await
+            .unwrap();
         let mut rx = e.subscribe_detections();
         let desc = FrameDescriptor {
             camera_id: "uvc-0".into(),

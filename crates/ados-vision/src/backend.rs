@@ -261,7 +261,10 @@ mod tests {
         assert_eq!(b.socket_path(), "/run/ados/vision-rknn.sock");
         let m = b.load(&meta()).unwrap();
         // No sidecar present in test ⇒ infer is a no-op (empty), never panics.
-        assert!(m.infer(&[0u8; 4], 1, 1, FrameFormat::Rgb24).unwrap().is_empty());
+        assert!(m
+            .infer(&[0u8; 4], 1, 1, FrameFormat::Rgb24)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]

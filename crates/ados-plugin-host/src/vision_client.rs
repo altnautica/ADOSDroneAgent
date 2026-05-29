@@ -132,12 +132,8 @@ impl VisionClient {
     /// Proxy a `publish_detection` request to the engine and return its response
     /// `args`.
     pub async fn publish_detection(&self, args: &Value) -> Result<Value, VisionRpcError> {
-        self.request(
-            methods::PUBLISH_DETECTION,
-            "vision.detection.publish",
-            args,
-        )
-        .await
+        self.request(methods::PUBLISH_DETECTION, "vision.detection.publish", args)
+            .await
     }
 
     /// Write one request envelope toward the engine and await the response. The
@@ -263,8 +259,8 @@ fn now_ms() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ados_protocol::framebus::FrameDescriptor;
     use ados_protocol::frame::encode_frame;
+    use ados_protocol::framebus::FrameDescriptor;
     use ados_protocol::framebus::FrameFormat;
     use ados_protocol::ipc::IpcBroadcast;
 
@@ -381,7 +377,9 @@ mod tests {
             error: Some("model not found".to_string()),
         };
         let body = env.to_msgpack().unwrap();
-        server.broadcast(encode_frame(&body, PLUGIN_MAX_FRAME).unwrap()).await;
+        server
+            .broadcast(encode_frame(&body, PLUGIN_MAX_FRAME).unwrap())
+            .await;
 
         let args = Value::Map(vec![(Value::from("model_id"), Value::from("missing"))]);
         let err = client.infer(&args).await.unwrap_err();
