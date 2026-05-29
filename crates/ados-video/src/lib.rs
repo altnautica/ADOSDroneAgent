@@ -15,4 +15,7 @@
 //! stay Python; this crate is the long-running supervisor that those surfaces
 //! read through the sidecar files + the local RTSP server.
 
+pub mod camera_state;
+pub mod config;
+pub mod encoder;
 pub mod process;
