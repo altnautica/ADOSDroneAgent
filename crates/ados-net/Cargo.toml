@@ -4,5 +4,41 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+description = "Ground-station uplink matrix: priority failover, cloud-reachability health probing, and the active-uplink sidecar that drives mesh gateway election."
+
+# lib + a daemon binary skeleton. The lib carries the failover policy, the
+# health probe, the event bus, the active-uplink sidecar, and the router FSM;
+# the hardware managers (wifi-client / ethernet / hostapd / modem) plus the
+# firewall and USB-gadget surfaces land in later chunks.
+[[bin]]
+name = "ados-net"
+path = "src/main.rs"
 
 [dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+tokio = { workspace = true }
+# Async methods on the UplinkManager / Prober traits, kept object-safe behind
+# Arc<dyn ...> so the router FSM is generic over real and stub managers.
+async-trait = { workspace = true }
+# Bind the cloud-reachability TCP probe to a specific interface via
+# SO_BINDTODEVICE. socket2 is pure Rust (it links libc only, no C build, no
+# crypto), so it cross-compiles to aarch64-unknown-linux-musl cleanly. The
+# `all` feature unlocks `bind_device` (SO_BINDTODEVICE) on Linux. Crate-
+# specific (no other crate needs raw-socket options), declared here.
+socket2 = { version = "0.5", features = ["all"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+# Linux-only edge: systemd readiness/watchdog notify + journald log layer for
+# the daemon. Confined to a target section so the pure-logic lib still builds
+# and tests on a non-Linux dev host (where the probe falls back to a plain
+# connect). The process-group manager (nix) lands with the firewall /
+# USB-gadget chunks that fork helper binaries.
+[target.'cfg(target_os = "linux")'.dependencies]
+sd-notify = { workspace = true }
+tracing-journald = { workspace = true }

@@ -4,5 +4,39 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+description = "Ground-station data-plane: WFB receive, channel acquisition, video UDP fan-out, and the self-healing local wireless mesh."
+
+[lib]
+name = "ados_groundlink"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ados-groundlink"
+path = "src/main.rs"
 
 [dependencies]
+# Sibling Rust crates: the radio adapter/manager, the process orchestrator, and
+# the shared wire-contract types. Pulled in by path within the workspace.
+ados-radio = { path = "../ados-radio" }
+ados-supervisor = { path = "../ados-supervisor" }
+ados-protocol = { path = "../ados-protocol" }
+
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_norway = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+
+# Linux-only edges (systemd notify + journald + setsid/killpg + flock).
+# Confined to a target section so the pure-logic core still builds and
+# `cargo test`s on a non-Linux dev host; the edge call sites are cfg-gated
+# with inert fallbacks.
+[target.'cfg(target_os = "linux")'.dependencies]
+sd-notify = { workspace = true }
+tracing-journald = { workspace = true }
+nix = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

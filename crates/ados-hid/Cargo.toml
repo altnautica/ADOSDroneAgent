@@ -4,5 +4,26 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+description = "Human-interface devices: touchscreen affine calibration, the pilot-in-command arbiter FSM, and the PIC/input event bus. The pure-logic core; gpio/evdev device layers land in later chunks."
+
+[lib]
+name = "ados_hid"
+path = "src/lib.rs"
 
 [dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+getrandom = { workspace = true }
+hex = { workspace = true }
+tokio = { workspace = true }
+time = { version = "0.3", features = ["std", "formatting"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+nix = { workspace = true }
+tracing-journald = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
