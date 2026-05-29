@@ -449,6 +449,14 @@ impl UplinkRouter {
         self.switch_to(st, Some(next_uplink), available).await;
     }
 
+    /// The kernel iface name of the currently-active uplink, or `None` when no
+    /// uplink is active. Used by the data-cap throttle consumer to scope the tc
+    /// qdisc + MASQUERADE actions to the right interface.
+    pub async fn active_iface(&self) -> Option<String> {
+        let name = self.state.lock().await.active_uplink.clone()?;
+        self.uplink_iface(&name).await
+    }
+
     /// A snapshot of the live router state. Key names match the Python
     /// `get_state` dict (data-cap usage lands with the modem chunk).
     pub async fn get_state(&self) -> serde_json::Value {

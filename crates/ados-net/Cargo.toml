@@ -17,6 +17,10 @@ path = "src/main.rs"
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
+# YAML config reader (/etc/ados/config.yaml) for the share_uplink reconcile.
+# Same reader the sibling crates use so a config written by the Python agent
+# reads identically here.
+serde_norway = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
@@ -35,10 +39,12 @@ socket2 = { version = "0.5", features = ["all"] }
 tempfile = "3"
 
 # Linux-only edge: systemd readiness/watchdog notify + journald log layer for
-# the daemon. Confined to a target section so the pure-logic lib still builds
-# and tests on a non-Linux dev host (where the probe falls back to a plain
-# connect). The process-group manager (nix) lands with the firewall /
-# USB-gadget chunks that fork helper binaries.
+# the daemon, plus the advisory file lock that serializes the wlan0 AP/STA
+# handover. Confined to a target section so the pure-logic lib still builds and
+# tests on a non-Linux dev host (where the probe falls back to a plain connect).
+# nix gives `flock` (LOCK_EX|LOCK_NB) held in the manager struct across the
+# stop-hostapd → nmcli-connect window, released only on leave().
 [target.'cfg(target_os = "linux")'.dependencies]
 sd-notify = { workspace = true }
 tracing-journald = { workspace = true }
+nix = { workspace = true }

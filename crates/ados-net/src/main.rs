@@ -1,18 +1,20 @@
 //! `ados-net` binary skeleton.
 //!
-//! The runnable ground-station uplink-router daemon. For now it initializes
-//! logging, resolves the priority list, wires the router FSM with stub
-//! managers, signals systemd readiness, and runs the health loop until a
-//! shutdown signal. The real hardware managers (Wi-Fi client, ethernet,
-//! hostapd, modem), the firewall, the USB-gadget surface, and the data-cap
-//! tracker are added incrementally on top of this skeleton. Modeled on the
-//! `ados-cloud` binary shape: journald logging on Linux with an fmt fallback.
+//! The runnable ground-station uplink-router daemon. It initializes logging,
+//! resolves the priority list, wires the router FSM with the real ethernet and
+//! Wi-Fi-client managers (the still-HW-gated cellular slot stays a stub),
+//! signals systemd readiness, and runs the health loop until a shutdown signal.
+//! The hostapd and modem managers plus the USB-gadget surface are added in
+//! later chunks. Modeled on the `ados-cloud` binary shape: journald logging on
+//! Linux with an fmt fallback.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::Result;
 
+use ados_net::cmd::TokioCmdRunner;
+use ados_net::managers::{EthernetManager, WifiClientManager};
 use ados_net::router::failover;
 use ados_net::{StubManager, UplinkManager, UplinkRouter};
 
@@ -46,15 +48,51 @@ fn notify_ready() {
 #[cfg(not(target_os = "linux"))]
 fn notify_ready() {}
 
-/// Build the router with inert stub managers for every real-manager slot. A
-/// stub's `is_up` is `false`, so until the hardware managers are wired the only
-/// uplink that can go viable is `usb0` (detected via its sysfs carrier).
-fn stub_managers() -> HashMap<String, Arc<dyn UplinkManager>> {
+/// Resolve the physical ethernet iface name. Predictable names vary across
+/// BSPs (`eth0`, `end1`, `enp*`, `enx*`), so scan `/sys/class/net` for the
+/// first non-virtual wired device that exposes a carrier file; fall back to
+/// `eth0` when nothing matches (the manager then reads a missing carrier as
+/// "down", which is correct on a board with no NIC).
+fn detect_ethernet_iface() -> String {
+    let read = match std::fs::read_dir("/sys/class/net") {
+        Ok(rd) => rd,
+        Err(_) => return "eth0".to_string(),
+    };
+    let mut candidates: Vec<String> = Vec::new();
+    for entry in read.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let wired = name.starts_with("eth") || name.starts_with("en");
+        if !wired {
+            continue;
+        }
+        // Skip virtual ifaces (no device symlink under the iface dir).
+        let dev_link = entry.path().join("device");
+        let carrier = entry.path().join("carrier");
+        if dev_link.exists() && carrier.exists() {
+            candidates.push(name);
+        }
+    }
+    candidates.sort();
+    candidates
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| "eth0".to_string())
+}
+
+/// Wire the real ethernet + Wi-Fi-client managers. The cellular `wwan0` slot
+/// stays a stub until the modem manager chunk lands; `usb0` has no manager
+/// (the FSM checks its sysfs carrier directly).
+fn build_managers() -> HashMap<String, Arc<dyn UplinkManager>> {
+    let runner = Arc::new(TokioCmdRunner);
+    let eth_iface = detect_ethernet_iface();
     let mut m: HashMap<String, Arc<dyn UplinkManager>> = HashMap::new();
-    m.insert("eth0".to_string(), Arc::new(StubManager::new("eth0")));
+    m.insert(
+        "eth0".to_string(),
+        Arc::new(EthernetManager::new(eth_iface, runner.clone())),
+    );
     m.insert(
         "wlan0_client".to_string(),
-        Arc::new(StubManager::new("wlan0_client")),
+        Arc::new(WifiClientManager::new(runner.clone())),
     );
     m.insert("wwan0".to_string(), Arc::new(StubManager::new("wwan0")));
     m
@@ -68,10 +106,10 @@ async fn main() -> Result<()> {
     tracing::info!(
         priority = ?priority,
         host = ados_net::health::HEALTH_HOST,
-        "uplink router starting (skeleton: real managers not yet wired)"
+        "uplink router starting (cellular slot stubbed until the modem chunk)"
     );
 
-    let router = Arc::new(UplinkRouter::new(stub_managers(), Some(priority), None));
+    let router = Arc::new(UplinkRouter::new(build_managers(), Some(priority), None));
 
     notify_ready();
 

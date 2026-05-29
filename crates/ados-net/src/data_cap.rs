@@ -1,0 +1,593 @@
+//! Cellular data-cap tracker.
+//!
+//! Polls a usage source at 60-second intervals, accumulates bytes, persists to
+//! `/var/lib/ados/modem-usage.json`, and emits `data_cap_threshold` events on
+//! the [`UplinkEventBus`] when crossing 80, 95, and 100 percent of the cap.
+//! Ports `uplink/data_cap.py`.
+//!
+//! In the all-Python agent the byte counters came from the modem manager's
+//! `data_usage()` coroutine. Here the modem manager is HW-gated and lands in a
+//! later chunk, so the default [`SysfsUsageSource`] reads the kernel counters
+//! at `/sys/class/net/{wwan0,usb0}/statistics/{rx,tx}_bytes` directly. Those
+//! reads return 0 when the iface is absent, so the tracker is bench-runnable on
+//! a board with no modem.
+
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use async_trait::async_trait;
+use serde::Deserialize;
+use serde_json::Value;
+use tracing::{debug, info, warn};
+
+use crate::router::events::{DataCapState, UplinkEvent, UplinkEventBus, UplinkEventKind};
+use crate::sidecar;
+
+/// Poll cadence.
+pub const DATA_CAP_INTERVAL: Duration = Duration::from_secs(60);
+/// Default monthly cap.
+pub const DEFAULT_CAP_GB: f64 = 5.0;
+/// Persisted counter path.
+pub const USAGE_STATE_PATH: &str = "/var/lib/ados/modem-usage.json";
+
+/// rx/tx byte counters from a usage source.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct UsageBytes {
+    pub rx_bytes: u64,
+    pub tx_bytes: u64,
+}
+
+/// A source of cumulative rx/tx byte counters. The default impl reads sysfs;
+/// tests inject a scripted source.
+#[async_trait]
+pub trait UsageSource: Send + Sync {
+    async fn data_usage(&self) -> UsageBytes;
+}
+
+/// Reads `/sys/class/net/<iface>/statistics/{rx,tx}_bytes` for the cellular /
+/// USB-tether ifaces. Returns 0 for any counter whose iface is absent, so a
+/// bench board with no modem reports zero usage rather than failing.
+#[derive(Debug, Clone)]
+pub struct SysfsUsageSource {
+    ifaces: Vec<String>,
+}
+
+impl SysfsUsageSource {
+    /// Default cellular + USB-tether ifaces (`wwan0`, `usb0`).
+    pub fn new() -> Self {
+        Self {
+            ifaces: vec!["wwan0".to_string(), "usb0".to_string()],
+        }
+    }
+
+    /// Explicit iface list (tests).
+    pub fn with_ifaces(ifaces: Vec<String>) -> Self {
+        Self { ifaces }
+    }
+
+    fn read_counter(iface: &str, counter: &str) -> u64 {
+        let path = format!("/sys/class/net/{iface}/statistics/{counter}");
+        std::fs::read_to_string(path)
+            .ok()
+            .and_then(|s| s.trim().parse::<u64>().ok())
+            .unwrap_or(0)
+    }
+}
+
+impl Default for SysfsUsageSource {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
+impl UsageSource for SysfsUsageSource {
+    async fn data_usage(&self) -> UsageBytes {
+        let mut total = UsageBytes::default();
+        for iface in &self.ifaces {
+            total.rx_bytes += Self::read_counter(iface, "rx_bytes");
+            total.tx_bytes += Self::read_counter(iface, "tx_bytes");
+        }
+        total
+    }
+}
+
+/// Persisted cumulative-usage window. Mirrors `_UsageState`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct UsageState {
+    pub window_started_at: f64,
+    pub cumulative_bytes: u64,
+    pub last_rx: u64,
+    pub last_tx: u64,
+    pub last_reset_month: String,
+}
+
+impl UsageState {
+    fn fresh(month: String) -> Self {
+        Self {
+            window_started_at: now_secs(),
+            cumulative_bytes: 0,
+            last_rx: 0,
+            last_tx: 0,
+            last_reset_month: month,
+        }
+    }
+
+    /// Render byte-identically to Python `json.dumps(state.to_json())`: fixed
+    /// key order, `", "` / `": "` separators with spaces, floats rendered the
+    /// same way serde and Python both render them, no trailing newline.
+    pub fn render_json(&self) -> String {
+        // serde_json renders f64 identically to Python json.dumps for these
+        // values; the integers are exact. Only the separator spacing differs
+        // from a compact `to_string`, so the body is assembled by hand.
+        let w = serde_json::to_string(&self.window_started_at).unwrap_or_else(|_| "0.0".into());
+        let m = serde_json::to_string(&self.last_reset_month).unwrap_or_else(|_| "\"\"".into());
+        format!(
+            "{{\"window_started_at\": {w}, \"cumulative_bytes\": {}, \"last_rx\": {}, \"last_tx\": {}, \"last_reset_month\": {m}}}",
+            self.cumulative_bytes, self.last_rx, self.last_tx
+        )
+    }
+}
+
+/// Lenient loader mirror of `_UsageState.from_json` (missing fields default).
+#[derive(Debug, Default, Deserialize)]
+struct RawUsageState {
+    window_started_at: Option<f64>,
+    cumulative_bytes: Option<u64>,
+    last_rx: Option<u64>,
+    last_tx: Option<u64>,
+    last_reset_month: Option<String>,
+}
+
+/// Tracks cellular data usage across month windows.
+pub struct DataCapTracker {
+    source: Arc<dyn UsageSource>,
+    bus: Arc<UplinkEventBus>,
+    cap_bytes: u64,
+    state_path: PathBuf,
+    state: UsageState,
+    last_threshold: Option<DataCapState>,
+}
+
+impl DataCapTracker {
+    /// Build a tracker with the default cap and state path.
+    pub fn new(source: Arc<dyn UsageSource>, bus: Arc<UplinkEventBus>) -> Self {
+        Self::with_config(source, bus, DEFAULT_CAP_GB, PathBuf::from(USAGE_STATE_PATH))
+    }
+
+    /// Full constructor (tests).
+    pub fn with_config(
+        source: Arc<dyn UsageSource>,
+        bus: Arc<UplinkEventBus>,
+        cap_gb: f64,
+        state_path: PathBuf,
+    ) -> Self {
+        let cap_bytes = cap_to_bytes(cap_gb);
+        let state = load_state(&state_path);
+        Self {
+            source,
+            bus,
+            cap_bytes,
+            state_path,
+            state,
+            last_threshold: None,
+        }
+    }
+
+    /// Reset the monthly cap.
+    pub fn set_cap(&mut self, gb: f64) {
+        self.cap_bytes = cap_to_bytes(gb);
+        info!(cap_gb = gb, "uplink.datacap_set");
+    }
+
+    /// Classify the current usage. Mirrors `_classify`: cap<=0 → ok; >=100
+    /// blocked_100; >=95 throttle_95; >=80 warn_80; else ok.
+    pub fn classify(&self) -> DataCapState {
+        classify(self.cap_bytes, self.state.cumulative_bytes)
+    }
+
+    /// Month-window reset check. Returns `true` when a reset happened. Mirrors
+    /// `_check_month_reset` (compares against the local-time `%Y-%m`).
+    pub fn check_month_reset(&mut self) -> bool {
+        let now_month = current_month();
+        if self.state.last_reset_month != now_month {
+            info!(
+                from_month = %self.state.last_reset_month,
+                to_month = %now_month,
+                bytes_used = self.state.cumulative_bytes,
+                "uplink.datacap_month_reset"
+            );
+            self.state = UsageState::fresh(now_month);
+            self.last_threshold = None;
+            self.save_state();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// fsync-before-rename persist. Mirrors `_save_state`: the fsync defends
+    /// against power loss between write and the kernel flushing dirty pages,
+    /// which would otherwise roll the cap counter back.
+    fn save_state(&self) {
+        let body = self.state.render_json();
+        if let Err(exc) = sidecar::write_atomic_fsync(&self.state_path, body.as_bytes()) {
+            warn!(error = %exc, "uplink.datacap_save_failed");
+        }
+    }
+
+    /// One poll. Reads the source, applies counter-reset handling, accumulates,
+    /// persists, and emits a `data_cap_threshold` event ONLY on a state
+    /// transition. Mirrors `_poll_once`.
+    pub async fn poll_once(&mut self) {
+        let usage = self.source.data_usage().await;
+        let rx = usage.rx_bytes;
+        let tx = usage.tx_bytes;
+
+        // Counter-reset handling: a new value smaller than the last sample
+        // means the modem (or kernel iface) re-counted from zero, so the delta
+        // for that sample is dropped rather than counted as a huge spike.
+        let (drx, dtx) = if rx < self.state.last_rx || tx < self.state.last_tx {
+            (0, 0)
+        } else {
+            (rx - self.state.last_rx, tx - self.state.last_tx)
+        };
+
+        self.state.last_rx = rx;
+        self.state.last_tx = tx;
+        self.state.cumulative_bytes += drx + dtx;
+        self.save_state();
+
+        let new_state = self.classify();
+        if Some(new_state) != self.last_threshold {
+            self.last_threshold = Some(new_state);
+            info!(
+                state = ?new_state,
+                used_mb = self.state.cumulative_bytes / (1024 * 1024),
+                cap_mb = self.cap_bytes / (1024 * 1024),
+                "uplink.datacap_threshold"
+            );
+            self.bus.publish(UplinkEvent {
+                kind: UplinkEventKind::DataCapThreshold,
+                active_uplink: None,
+                available: Vec::new(),
+                internet_reachable: true,
+                data_cap_state: Some(new_state),
+                timestamp_ms: now_ms(),
+            });
+        }
+    }
+
+    /// Usage snapshot. Key names + rounding match the Python `get_usage`.
+    pub fn get_usage(&self) -> Value {
+        let used_mb = self.state.cumulative_bytes / (1024 * 1024);
+        let cap_mb = self.cap_bytes / (1024 * 1024);
+        let pct = if self.cap_bytes > 0 {
+            round2((self.state.cumulative_bytes as f64 / self.cap_bytes as f64) * 100.0)
+        } else {
+            0.0
+        };
+        serde_json::json!({
+            "data_used_mb": used_mb,
+            "cap_mb": cap_mb,
+            "percent": pct,
+            "state": self.classify(),
+            "window_reset_at": self.state.window_started_at,
+            "last_reset_month": self.state.last_reset_month,
+        })
+    }
+
+    /// Flush the latest counter to disk (clean-shutdown hook).
+    pub fn flush(&self) {
+        self.save_state();
+    }
+}
+
+fn cap_to_bytes(gb: f64) -> u64 {
+    (gb * 1024.0 * 1024.0 * 1024.0) as u64
+}
+
+/// Shared classifier so the tracker and any external caller agree.
+pub fn classify(cap_bytes: u64, cumulative_bytes: u64) -> DataCapState {
+    if cap_bytes == 0 {
+        return DataCapState::Ok;
+    }
+    let pct = (cumulative_bytes as f64 / cap_bytes as f64) * 100.0;
+    if pct >= 100.0 {
+        DataCapState::Blocked100
+    } else if pct >= 95.0 {
+        DataCapState::Throttle95
+    } else if pct >= 80.0 {
+        DataCapState::Warn80
+    } else {
+        DataCapState::Ok
+    }
+}
+
+fn load_state(path: &Path) -> UsageState {
+    match std::fs::read(path) {
+        Ok(bytes) => match serde_json::from_slice::<RawUsageState>(&bytes) {
+            Ok(raw) => UsageState {
+                window_started_at: raw.window_started_at.unwrap_or_else(now_secs),
+                cumulative_bytes: raw.cumulative_bytes.unwrap_or(0),
+                last_rx: raw.last_rx.unwrap_or(0),
+                last_tx: raw.last_tx.unwrap_or(0),
+                last_reset_month: raw.last_reset_month.unwrap_or_default(),
+            },
+            Err(exc) => {
+                warn!(error = %exc, "uplink.datacap_load_failed");
+                UsageState::fresh(current_month())
+            }
+        },
+        Err(exc) if exc.kind() == std::io::ErrorKind::NotFound => {
+            UsageState::fresh(current_month())
+        }
+        Err(exc) => {
+            debug!(error = %exc, "uplink.datacap_load_failed");
+            UsageState::fresh(current_month())
+        }
+    }
+}
+
+/// Local-time `%Y-%m`, matching Python `time.strftime("%Y-%m")`.
+fn current_month() -> String {
+    // Derive year-month from local time without a chrono dependency. We read
+    // the local broken-down time via libc on unix; off-unix we fall back to a
+    // UTC computation. Both render `YYYY-MM`.
+    local_year_month().unwrap_or_else(utc_year_month)
+}
+
+#[cfg(unix)]
+fn local_year_month() -> Option<String> {
+    // SAFETY: localtime_r writes into a caller-owned tm; time() needs no args.
+    unsafe {
+        let t = libc_time();
+        let mut tm: LibcTm = std::mem::zeroed();
+        if localtime_r(&t, &mut tm).is_null() {
+            return None;
+        }
+        Some(format!("{:04}-{:02}", tm.tm_year + 1900, tm.tm_mon + 1))
+    }
+}
+
+#[cfg(not(unix))]
+fn local_year_month() -> Option<String> {
+    None
+}
+
+// Minimal libc FFI for localtime_r so the crate does not pull a date library
+// for a single `%Y-%m` format. tm layout matches the C `struct tm` prefix we
+// read (year + month); the remaining fields are present so the struct size is
+// correct for the FFI call.
+#[cfg(unix)]
+#[repr(C)]
+struct LibcTm {
+    tm_sec: i32,
+    tm_min: i32,
+    tm_hour: i32,
+    tm_mday: i32,
+    tm_mon: i32,
+    tm_year: i32,
+    tm_wday: i32,
+    tm_yday: i32,
+    tm_isdst: i32,
+    tm_gmtoff: i64,
+    tm_zone: *const i8,
+}
+
+#[cfg(unix)]
+extern "C" {
+    #[link_name = "time"]
+    fn c_time(tloc: *mut i64) -> i64;
+    fn localtime_r(timep: *const i64, result: *mut LibcTm) -> *mut LibcTm;
+}
+
+#[cfg(unix)]
+unsafe fn libc_time() -> i64 {
+    c_time(std::ptr::null_mut())
+}
+
+/// UTC fallback year-month from the unix epoch (no leap-second handling; only
+/// used off-unix or if localtime_r fails).
+fn utc_year_month() -> String {
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0) as i64;
+    let days = secs.div_euclid(86_400);
+    // Civil-from-days (Howard Hinnant's algorithm).
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = if m <= 2 { y + 1 } else { y };
+    format!("{year:04}-{m:02}")
+}
+
+fn now_secs() -> f64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0)
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// Round to 2 decimals the same way Python `round(x, 2)` does for the percent
+/// field (banker's rounding is not observable at the precision we emit).
+fn round2(x: f64) -> f64 {
+    (x * 100.0).round() / 100.0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct FixedSource(UsageBytes);
+    #[async_trait]
+    impl UsageSource for FixedSource {
+        async fn data_usage(&self) -> UsageBytes {
+            self.0
+        }
+    }
+
+    fn tracker(
+        cap_gb: f64,
+        state_path: PathBuf,
+        rx: u64,
+        tx: u64,
+    ) -> (DataCapTracker, Arc<UplinkEventBus>) {
+        let bus = Arc::new(UplinkEventBus::new());
+        let src = Arc::new(FixedSource(UsageBytes {
+            rx_bytes: rx,
+            tx_bytes: tx,
+        }));
+        let t = DataCapTracker::with_config(src, Arc::clone(&bus), cap_gb, state_path);
+        (t, bus)
+    }
+
+    #[test]
+    fn classify_thresholds_match_python() {
+        let cap = cap_to_bytes(1.0); // 1 GiB
+                                     // Pick values comfortably inside each band (rounding `as u64` down can
+                                     // pull an exact-boundary value back under the threshold, so nudge up).
+        let at = |frac: f64| ((cap as f64 * frac) as u64) + 1;
+        assert_eq!(classify(cap, 0), DataCapState::Ok);
+        assert_eq!(classify(cap, at(0.79)), DataCapState::Ok);
+        assert_eq!(classify(cap, at(0.80)), DataCapState::Warn80);
+        assert_eq!(classify(cap, at(0.85)), DataCapState::Warn80);
+        assert_eq!(classify(cap, at(0.95)), DataCapState::Throttle95);
+        assert_eq!(classify(cap, at(0.97)), DataCapState::Throttle95);
+        assert_eq!(classify(cap, cap), DataCapState::Blocked100);
+        assert_eq!(classify(cap, cap + 1), DataCapState::Blocked100);
+        // cap <= 0 → ok regardless.
+        assert_eq!(classify(0, 999_999), DataCapState::Ok);
+    }
+
+    #[test]
+    fn render_json_is_byte_exact_to_python_json_dumps() {
+        let st = UsageState {
+            window_started_at: 1_700_000_000.0,
+            cumulative_bytes: 123_456,
+            last_rx: 1000,
+            last_tx: 2000,
+            last_reset_month: "2026-05".to_string(),
+        };
+        assert_eq!(
+            st.render_json(),
+            r#"{"window_started_at": 1700000000.0, "cumulative_bytes": 123456, "last_rx": 1000, "last_tx": 2000, "last_reset_month": "2026-05"}"#
+        );
+    }
+
+    #[test]
+    fn save_then_load_round_trips_and_fsync_leaves_no_tmp() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("modem-usage.json");
+        let (mut t, _bus) = tracker(5.0, path.clone(), 0, 0);
+        t.state.cumulative_bytes = 42;
+        t.state.last_reset_month = "2026-05".to_string();
+        t.save_state();
+        // No torn tmp (with_suffix(".json.tmp")).
+        assert!(!dir.path().join("modem-usage.json.tmp").exists());
+        let loaded = load_state(&path);
+        assert_eq!(loaded.cumulative_bytes, 42);
+        assert_eq!(loaded.last_reset_month, "2026-05");
+    }
+
+    #[tokio::test]
+    async fn poll_accumulates_and_handles_counter_reset() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("modem-usage.json");
+        // Start at rx=1000 tx=500.
+        let bus = Arc::new(UplinkEventBus::new());
+        let src = Arc::new(FixedSource(UsageBytes {
+            rx_bytes: 1000,
+            tx_bytes: 500,
+        }));
+        let mut t = DataCapTracker::with_config(src, Arc::clone(&bus), 5.0, path);
+        // First poll baselines: delta from last_rx/tx=0 → +1500.
+        t.poll_once().await;
+        assert_eq!(t.state.cumulative_bytes, 1500);
+        assert_eq!(t.state.last_rx, 1000);
+        // Simulate a counter reset: new sample smaller than last → delta 0.
+        let bus2 = Arc::new(UplinkEventBus::new());
+        let src2 = Arc::new(FixedSource(UsageBytes {
+            rx_bytes: 10,
+            tx_bytes: 5,
+        }));
+        t.source = src2 as Arc<dyn UsageSource>;
+        let _ = bus2;
+        t.poll_once().await;
+        // cumulative unchanged (reset dropped the delta), baseline re-set.
+        assert_eq!(t.state.cumulative_bytes, 1500);
+        assert_eq!(t.state.last_rx, 10);
+    }
+
+    #[tokio::test]
+    async fn poll_emits_threshold_event_only_on_transition() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("modem-usage.json");
+        // cap 1 KiB so a small counter trips blocked_100 immediately.
+        let bus = Arc::new(UplinkEventBus::new());
+        let mut rx = bus.subscribe();
+        let src = Arc::new(FixedSource(UsageBytes {
+            rx_bytes: 4096,
+            tx_bytes: 0,
+        }));
+        let mut t = DataCapTracker::with_config(
+            src,
+            Arc::clone(&bus),
+            // 1 KiB cap.
+            1.0 / (1024.0 * 1024.0),
+            path,
+        );
+        t.poll_once().await;
+        let evt = rx
+            .try_recv()
+            .expect("a threshold event on the first crossing");
+        assert_eq!(evt.kind, UplinkEventKind::DataCapThreshold);
+        assert_eq!(evt.data_cap_state, Some(DataCapState::Blocked100));
+        // Second poll, same state → NO new event.
+        t.poll_once().await;
+        assert!(rx.try_recv().is_err(), "no event when state is unchanged");
+    }
+
+    #[test]
+    fn get_usage_keys_match_python() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("modem-usage.json");
+        let (t, _bus) = tracker(5.0, path, 0, 0);
+        let u = t.get_usage();
+        for k in [
+            "data_used_mb",
+            "cap_mb",
+            "percent",
+            "state",
+            "window_reset_at",
+            "last_reset_month",
+        ] {
+            assert!(u.get(k).is_some(), "missing key {k}");
+        }
+        assert_eq!(u["state"], "ok");
+    }
+
+    #[test]
+    fn current_month_is_year_dash_month() {
+        let m = current_month();
+        // YYYY-MM shape.
+        assert_eq!(m.len(), 7);
+        assert_eq!(&m[4..5], "-");
+        assert!(m[0..4].chars().all(|c| c.is_ascii_digit()));
+        assert!(m[5..7].chars().all(|c| c.is_ascii_digit()));
+    }
+}
