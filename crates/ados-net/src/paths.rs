@@ -26,6 +26,25 @@ pub const UPLINK_ACTIVE_FLAG: &str = "/run/ados/uplink-active";
 /// dedicated manager is wired.
 pub const USB0_CARRIER: &str = "/sys/class/net/usb0/carrier";
 
+/// Device-id file (`DEVICE_ID_PATH`). The AP SSID derives its short suffix from
+/// the first four hex chars of this id.
+pub const DEVICE_ID_PATH: &str = "/etc/ados/device-id";
+
+/// hostapd config (`HOSTAPD_CONF_PATH`), written 0600.
+pub const HOSTAPD_CONF_PATH: &str = "/etc/ados/hostapd-gs.conf";
+
+/// AP dnsmasq config (`DNSMASQ_CONF_PATH`), written 0644.
+pub const DNSMASQ_CONF_PATH: &str = "/etc/ados/dnsmasq-gs.conf";
+
+/// AP passphrase file (`AP_PASSPHRASE_PATH`), written 0600 + trailing newline.
+pub const AP_PASSPHRASE_PATH: &str = "/etc/ados/ap-passphrase";
+
+/// USB-gadget dnsmasq runtime config (`DNSMASQ_USB0_CONF`).
+pub const DNSMASQ_USB0_CONF: &str = "/run/ados/dnsmasq-usb0.conf";
+
+/// USB-gadget dnsmasq pid file (`DNSMASQ_USB0_PID`).
+pub const DNSMASQ_USB0_PID: &str = "/run/ados/dnsmasq-usb0.pid";
+
 /// Build the canonical `GS_UPLINK_JSON` path.
 pub fn gs_uplink_json() -> &'static Path {
     Path::new(GS_UPLINK_JSON)
