@@ -65,7 +65,7 @@ def test_enable_writes_flag_and_reconciles_subsumed(tmp_path, monkeypatch):
     monkeypatch.setattr(rust_mod, "_binaries_present", lambda svc: True)
     monkeypatch.setattr(rust_mod, "_unit_active", lambda unit: True)
     calls: list[tuple[str, ...]] = []
-    monkeypatch.setattr(rust_mod, "_systemctl", lambda *a: calls.append(a) or 0)
+    monkeypatch.setattr(rust_mod, "_systemctl", lambda *a, **k: calls.append(a) or 0)
     result = CliRunner().invoke(rust_group, ["enable", "net"])
     assert result.exit_code == 0, result.output
     assert (tmp_path / _SERVICES["net"].flag).exists()
@@ -82,9 +82,31 @@ def test_disable_removes_flag_and_restores_subsumed(tmp_path, monkeypatch):
     monkeypatch.setattr(rust_mod, "_unit_active", lambda unit: False)
     (tmp_path / _SERVICES["net"].flag).touch()
     calls: list[tuple[str, ...]] = []
-    monkeypatch.setattr(rust_mod, "_systemctl", lambda *a: calls.append(a) or 0)
+    monkeypatch.setattr(rust_mod, "_systemctl", lambda *a, **k: calls.append(a) or 0)
     result = CliRunner().invoke(rust_group, ["disable", "net"])
     assert result.exit_code == 0, result.output
     assert not (tmp_path / _SERVICES["net"].flag).exists()
     for unit in _SERVICES["net"].subsumes:
         assert ("enable", unit) in calls
+
+
+def test_enable_kills_subsumed_unit_that_will_not_stop(tmp_path, monkeypatch):
+    """A subsumed unit slow to honor SIGTERM is SIGKILLed and reset-failed so
+    it ends cleanly inactive instead of lingering as failed."""
+    monkeypatch.setattr(rust_mod, "ADOS_ETC_DIR", tmp_path)
+    monkeypatch.setattr(rust_mod.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(rust_mod, "_binaries_present", lambda svc: True)
+    monkeypatch.setattr(rust_mod, "_unit_active", lambda unit: True)
+    calls: list[tuple[str, ...]] = []
+
+    def fake(*a, **k):
+        calls.append(a)
+        # Every stop "times out" so the kill fallback must engage.
+        return 124 if a and a[0] == "stop" else 0
+
+    monkeypatch.setattr(rust_mod, "_systemctl", fake)
+    result = CliRunner().invoke(rust_group, ["enable", "net"])
+    assert result.exit_code == 0, result.output
+    for unit in _SERVICES["net"].subsumes:
+        assert ("kill", "-s", "SIGKILL", unit) in calls
+        assert ("reset-failed", unit) in calls

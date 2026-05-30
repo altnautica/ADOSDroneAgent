@@ -111,8 +111,9 @@ def _require_root() -> None:
         )
 
 
-def _systemctl(*args: str) -> int:
-    """Best-effort systemctl call. Returns the exit code; never raises."""
+def _systemctl(*args: str, timeout: float = 60.0) -> int:
+    """Best-effort systemctl call. Returns the exit code (124 on timeout);
+    never raises."""
     if not shutil.which("systemctl"):
         return 0
     try:
@@ -120,12 +121,31 @@ def _systemctl(*args: str) -> int:
             ["systemctl", *args],
             capture_output=True,
             text=True,
-            timeout=60,
+            timeout=timeout,
         )
         return result.returncode
-    except (subprocess.TimeoutExpired, OSError) as exc:
+    except subprocess.TimeoutExpired:
+        return 124
+    except OSError as exc:
         click.echo(click.style(f"  warn: systemctl {' '.join(args)}: {exc}", fg="yellow"))
         return 1
+
+
+def _mask_unit(unit: str) -> None:
+    """Stop, SIGKILL if stubborn, disable, then clear any failed state.
+
+    A packaged manager that is slow to honor SIGTERM would otherwise blow
+    past the stop timeout and get SIGKILLed by systemd into the ``failed``
+    state *after* a bare ``reset-failed`` already ran, leaving a disabled
+    unit lingering as failed in ``systemctl --failed``. Escalating to
+    SIGKILL before the disable + reset-failed makes the unit end cleanly
+    inactive.
+    """
+    if _systemctl("stop", unit, timeout=15.0) == 124:
+        _systemctl("kill", "-s", "SIGKILL", unit, timeout=10.0)
+        _systemctl("stop", unit, timeout=10.0)
+    _systemctl("disable", unit)
+    _systemctl("reset-failed", unit)
 
 
 def _flag_path(svc: _Service):
@@ -180,9 +200,7 @@ def _apply(svc: _Service, *, enable: bool) -> None:
         # Mask the packaged units the native daemon absorbs so they do not
         # fight it for the same device or socket.
         for unit in svc.subsumes:
-            _systemctl("stop", unit)
-            _systemctl("disable", unit)
-            _systemctl("reset-failed", unit)
+            _mask_unit(unit)
         # Swap units carry both implementations: a restart re-execs the
         # native branch. Extra units exist only for the native path.
         for unit in svc.swap_units:
@@ -195,9 +213,7 @@ def _apply(svc: _Service, *, enable: bool) -> None:
             path.unlink()
         # Retire the native-only units, then bring the packaged ones back.
         for unit in svc.extra_units:
-            _systemctl("stop", unit)
-            _systemctl("disable", unit)
-            _systemctl("reset-failed", unit)
+            _mask_unit(unit)
         for unit in svc.subsumes:
             _systemctl("enable", unit)
             _systemctl("restart", unit)
