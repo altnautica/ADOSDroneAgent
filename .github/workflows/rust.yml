@@ -397,7 +397,7 @@ jobs:
       - name: Install musl tools
         run: sudo apt-get update && sudo apt-get install -y musl-tools
 
-      - name: Build static ados-cloud + ados-ota
+      - name: Build static ados-cloud
         run: cargo build --release --target aarch64-unknown-linux-musl -p ados-cloud
 
       - name: Stage artifacts + checksums
@@ -405,9 +405,7 @@ jobs:
           set -euo pipefail
           mkdir -p rel
           cp target/aarch64-unknown-linux-musl/release/ados-cloud rel/ados-cloud-aarch64
-          cp target/aarch64-unknown-linux-musl/release/ados-ota rel/ados-ota-aarch64
           ( cd rel && sha256sum ados-cloud-aarch64 > ados-cloud-aarch64.sha256 )
-          ( cd rel && sha256sum ados-ota-aarch64 > ados-ota-aarch64.sha256 )
 
       - name: Sign artifacts (only when the signing key is present)
         env:
@@ -421,7 +419,6 @@ jobs:
           sudo apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y minisign
           printf '%s' "${SIGNING_KEY}" > /tmp/sign.key
           minisign -S -s /tmp/sign.key -m rel/ados-cloud-aarch64 -x rel/ados-cloud-aarch64.minisig
-          minisign -S -s /tmp/sign.key -m rel/ados-ota-aarch64 -x rel/ados-ota-aarch64.minisig
           rm -f /tmp/sign.key
 
       - name: Publish rolling prerelease
