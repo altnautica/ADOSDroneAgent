@@ -57,8 +57,11 @@ jobs:
       - name: Clippy (host target, all features)
         run: cargo clippy --all-targets --all-features -- -D warnings
 
-      - name: Clippy (aarch64-musl target, all features)
-        run: cargo clippy --all-targets --all-features --target aarch64-unknown-linux-musl -- -D warnings
+      # The musl prebuilts ship default features. The onnx backend pulls ort,
+      # which has no aarch64-musl prebuilt, so --all-features cannot target
+      # musl; the host clippy above already covers the onnx path.
+      - name: Clippy (aarch64-musl target, default features)
+        run: cargo clippy --all-targets --target aarch64-unknown-linux-musl -- -D warnings
 
       - name: Test (default features)
         run: cargo test
