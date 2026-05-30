@@ -11,6 +11,28 @@
 # accessible without explicit parameters.
 # =============================================================================
 
+ados_reboot_if_required() {
+    # Perform the single automatic reboot the install may need when a
+    # boot-critical overlay (camera/display) was NEWLY staged this run. The
+    # overlay binds only after a reboot (u-boot reads the device tree at boot);
+    # the matching boot-time probe self-heals if it never binds. The
+    # provisioner writes /run/ados/reboot-required; absent that file, no
+    # reboot. ADOS_NO_REBOOT=1 suppresses it (CI, dev, or an operator who
+    # prefers to reboot themselves). Called once, last, on the success path
+    # after the summary + pairing code have printed.
+    local flag="${ADOS_REBOOT_REQUIRED_FILE:-/run/ados/reboot-required}"
+    [ -f "${flag}" ] || return 0
+    if [ "${ADOS_NO_REBOOT:-0}" = "1" ]; then
+        warn "A reboot is required to bind a staged overlay, but ADOS_NO_REBOOT=1 is set."
+        warn "Reboot to finish binding the camera/display: sudo reboot"
+        return 0
+    fi
+    info "A boot-critical overlay was staged; rebooting once to bind it (set ADOS_NO_REBOOT=1 to skip)."
+    rm -f "${flag}" 2>/dev/null || true
+    sync
+    systemctl reboot 2>/dev/null || reboot 2>/dev/null || /sbin/reboot 2>/dev/null || true
+}
+
 main_install_flow() {
     # Mandatory entry log. If the install log is empty after a run, that
     # is itself a signal that the dispatcher never reached this function
@@ -408,6 +430,9 @@ main_install_flow() {
             rm -rf "${tmp_repo}"
             exit 1
         fi
+        # CSI camera overlay (non-fatal: the installer snapshots + restores the
+        # boot config itself on failure, so it never blocks the upgrade).
+        FRESH_REPO_DIR="${tmp_repo}" install_camera_overlay
         ados_stage_end
 
         ados_stage_begin "Updating radios and finishing up"
@@ -490,6 +515,7 @@ main_install_flow() {
         if run_health_gate; then
             ados_install_summary
             print_pairing_code
+            ados_reboot_if_required
             exit 0
         fi
         exit 1
@@ -731,6 +757,10 @@ main_install_flow() {
     # agent still boots when the LCD-overlay step fails.
     install_display_driver
 
+    # CSI camera overlay (drone default auto, ground_station none). Non-fatal:
+    # the installer snapshots + restores the boot config itself on failure.
+    install_camera_overlay
+
     # Generate device identity (idempotent)
     generate_device_id
 
@@ -799,6 +829,7 @@ main_install_flow() {
         ados_stage_end
         ados_install_summary
         print_pairing_code
+        ados_reboot_if_required
         exit 0
     fi
     exit 1

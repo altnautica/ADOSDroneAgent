@@ -92,3 +92,42 @@ install_display_driver() {
         return 0
     }
 }
+
+# CSI camera overlay provisioner for boards that declare cameras.supported in
+# their YAML profile. Enables the board's device-tree camera overlay via the
+# boot mechanism the running image actually uses (managed.list + u-boot-update
+# on Radxa rsdk images), writes /etc/ados/camera.conf, queues the sensor
+# modules, and signals a one-time reboot when an overlay is newly staged.
+# Profile-aware default (inverse of the display default): a drone carries the
+# camera so it defaults to "auto"; a ground station has no CSI camera so it
+# defaults to "none"; an explicit ADOS_CAMERA always wins. Failure is
+# non-fatal — the camera installer snapshots and restores the boot config
+# itself, so a failed overlay enable never leaves an unbootable box.
+install_camera_overlay() {
+    local script_path=""
+    if [ -n "${FRESH_REPO_DIR:-}" ] && [ -x "${FRESH_REPO_DIR}/repo/scripts/drivers/install-camera-overlay.sh" ]; then
+        script_path="${FRESH_REPO_DIR}/repo/scripts/drivers/install-camera-overlay.sh"
+    elif [ -x "$(dirname "$0" 2>/dev/null)/drivers/install-camera-overlay.sh" ] 2>/dev/null; then
+        script_path="$(cd "$(dirname "$0")/drivers" && pwd)/install-camera-overlay.sh"
+    elif [ -x /opt/ados/source/scripts/drivers/install-camera-overlay.sh ]; then
+        script_path="/opt/ados/source/scripts/drivers/install-camera-overlay.sh"
+    fi
+    if [ -z "${script_path}" ] || [ ! -x "${script_path}" ]; then
+        warn "Camera overlay installer not found; skipping camera provisioning."
+        return 0
+    fi
+
+    local camera_arg="${ADOS_CAMERA:-}"
+    if [ -z "${camera_arg}" ]; then
+        case "${ADOS_PROFILE:-drone}" in
+            ground_station) camera_arg="none" ;;
+            *) camera_arg="auto" ;;
+        esac
+    fi
+
+    info "Running CSI camera overlay installer (camera: ${camera_arg}, profile: ${ADOS_PROFILE:-drone})..."
+    "${script_path}" --camera "${camera_arg}" || {
+        warn "Camera overlay install returned non-zero; the agent will boot without the CSI camera."
+        return 0
+    }
+}
