@@ -204,10 +204,19 @@ pub struct FcConnection {
     params: std::sync::Arc<Mutex<ParamCache>>,
     frame_tx: broadcast::Sender<Vec<u8>>,
     writer: Mutex<Option<BoxedWriteHalf>>,
+    /// Raised by a write/flush failure to ask the run loop to tear down the
+    /// current link and re-open it (installing a fresh writer). A transient FC
+    /// write error must not permanently declare the FC disconnected, so the run
+    /// loop owns recovery rather than latching the writer to `None`.
+    reconnect: tokio::sync::Notify,
     seq: AtomicU8,
     /// FC system id learned from inbound heartbeats (default 1 = ArduPilot).
     target_system: AtomicU8,
     connected: AtomicBool,
+    /// True once a write to the FC has succeeded since the current link opened.
+    /// Drives the reconnect backoff: a session that proved writable resets to
+    /// the minimum, while a port that opens but never accepts a write backs off.
+    wrote_since_open: AtomicBool,
     port: Mutex<String>,
     baud: AtomicU32,
     last_msg_at: Mutex<Instant>,
@@ -234,9 +243,11 @@ impl FcConnection {
             params,
             frame_tx,
             writer: Mutex::new(None),
+            reconnect: tokio::sync::Notify::new(),
             seq: AtomicU8::new(0),
             target_system: AtomicU8::new(1),
             connected: AtomicBool::new(false),
+            wrote_since_open: AtomicBool::new(false),
             port: Mutex::new(String::new()),
             baud: AtomicU32::new(0),
             last_msg_at: Mutex::new(Instant::now()),
@@ -286,15 +297,24 @@ impl FcConnection {
         }
     }
 
-    /// Write raw bytes to the FC (a client command). No-op when disconnected;
-    /// a write error drops the link so the run loop reconnects. Mirrors the
-    /// Python `send_bytes` (best-effort, swallow on closed link).
+    /// Write raw bytes to the FC (a client command). No-op when disconnected.
+    /// On a write/flush error the current writer is dropped and a reconnect is
+    /// signalled so the run loop tears the link down and re-opens it with a
+    /// fresh writer. The write path deliberately does NOT clear `connected`:
+    /// the run loop owns that lifecycle, so a transient write error during a
+    /// heavy parameter dump (with reads still flowing) recovers to a live link
+    /// rather than latching the FC permanently "disconnected".
     pub async fn send_bytes(&self, data: &[u8]) {
         let mut guard = self.writer.lock().await;
         if let Some(w) = guard.as_mut() {
-            if w.write_all(data).await.is_err() || w.flush().await.is_err() {
-                *guard = None;
-                self.connected.store(false, Ordering::Relaxed);
+            match write_then_flush(w, data).await {
+                Ok(()) => self.wrote_since_open.store(true, Ordering::Relaxed),
+                Err(e) => {
+                    *guard = None;
+                    drop(guard);
+                    tracing::warn!(error = %e, "fc_write_failed");
+                    self.reconnect.notify_one();
+                }
             }
         }
     }
@@ -418,6 +438,15 @@ impl FcConnection {
     }
 
     /// Connect-and-read loop. Returns only on shutdown via `cancel`.
+    ///
+    /// Three things end a live session: the read half hits EOF/error (the FC
+    /// went away), `cancel` fires (shutdown), or a write failure raises the
+    /// reconnect signal (a transient agent->FC write error). All three fall
+    /// through to one teardown + re-open path so the writer is always replaced
+    /// with a fresh half. A persistently unwritable port is kept from
+    /// tight-looping by a bounded backoff that only grows while the link never
+    /// proves healthy, and resets the moment a session holds long enough to be
+    /// considered up.
     pub async fn run(&self, cancel: std::sync::Arc<tokio::sync::Notify>) {
         let mut backoff = RECONNECT_MIN;
         loop {
@@ -433,16 +462,23 @@ impl FcConnection {
                 backoff = (backoff * 2).min(RECONNECT_MAX);
                 continue;
             };
-            backoff = RECONNECT_MIN;
             *self.port.lock().await = port.clone();
             self.baud.store(baud, Ordering::Relaxed);
             *self.writer.lock().await = Some(write_half);
             self.connected.store(true, Ordering::Relaxed);
+            self.wrote_since_open.store(false, Ordering::Relaxed);
             *self.last_msg_at.lock().await = Instant::now();
             tracing::info!(port = %port, baud, "fc_connected");
 
             tokio::select! {
                 _ = self.read_loop(read_half) => {}
+                // A write failure asks the loop to rebuild the link. Tear down
+                // the read half and fall through to the re-open below, which
+                // installs a fresh writer; do not declare the FC disconnected
+                // permanently for what may be a transient write error.
+                _ = self.reconnect.notified() => {
+                    tracing::warn!("fc_write_failed_reconnecting");
+                }
                 _ = cancel.notified() => {
                     self.connected.store(false, Ordering::Relaxed);
                     *self.writer.lock().await = None;
@@ -450,13 +486,30 @@ impl FcConnection {
                 }
             }
 
-            // Link dropped: reset state and reconnect.
+            // Link dropped (read EOF/error or a write failure): reset state and
+            // reconnect.
             self.connected.store(false, Ordering::Relaxed);
             *self.writer.lock().await = None;
             self.param_priming.store(false, Ordering::Relaxed);
             *self.param_sweep_started.lock().await = None;
             *self.param_last_request.lock().await = None;
             tracing::warn!("fc_disconnected");
+
+            // A session that proved writable (at least one write to the FC
+            // succeeded) is healthy: reset and re-open immediately so the common
+            // transient case recovers fast. A port that opens but never accepts
+            // a write (readable-but-unwritable) never sets this, so it backs off
+            // instead of re-opening on every failed write — including the 1 Hz
+            // companion heartbeat, which would otherwise pin the loop at ~1 Hz.
+            if self.wrote_since_open.load(Ordering::Relaxed) {
+                backoff = RECONNECT_MIN;
+            } else {
+                tokio::select! {
+                    _ = tokio::time::sleep(backoff) => {}
+                    _ = cancel.notified() => return,
+                }
+                backoff = (backoff * 2).min(RECONNECT_MAX);
+            }
         }
     }
 
@@ -606,6 +659,14 @@ impl FcConnection {
             Err(_) => Vec::new(),
         }
     }
+}
+
+/// Write the full buffer and flush it, surfacing the first io error so the
+/// caller can log it. Split out from `send_bytes` so a writer can be swapped
+/// for a fault-injecting one in tests.
+async fn write_then_flush(w: &mut BoxedWriteHalf, data: &[u8]) -> std::io::Result<()> {
+    w.write_all(data).await?;
+    w.flush().await
 }
 
 /// Open a serial port at the given baud as an async stream.
@@ -851,5 +912,80 @@ mod tests {
         assert_eq!(parse_net_spec(""), None);
         // An unknown scheme is not a network transport.
         assert_eq!(parse_net_spec("serial:/dev/ttyUSB0"), None);
+    }
+
+    /// A write half whose first `write_all` fails, standing in for a serial
+    /// port that drops writes while reads keep flowing (the failure mode that
+    /// used to latch the FC "disconnected" forever).
+    struct FailingWriter;
+
+    impl AsyncWrite for FailingWriter {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            _data: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            Poll::Ready(Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "injected write failure",
+            )))
+        }
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    fn test_connection() -> std::sync::Arc<FcConnection> {
+        let state = std::sync::Arc::new(Mutex::new(VehicleState::default()));
+        let params = std::sync::Arc::new(Mutex::new(ParamCache::new("/tmp/ados-test-params.json")));
+        FcConnection::new(MavlinkConfig::default(), state, params)
+    }
+
+    #[tokio::test]
+    async fn write_failure_does_not_latch_disconnected_and_signals_reconnect() {
+        let conn = test_connection();
+
+        // Simulate a live link with a writer that will fail on the next write.
+        conn.connected.store(true, Ordering::Relaxed);
+        *conn.writer.lock().await = Some(Box::pin(FailingWriter));
+
+        conn.send_bytes(b"\xfd\x00").await;
+
+        // The failing writer is dropped so the run loop reinstalls a fresh one.
+        assert!(
+            conn.writer.lock().await.is_none(),
+            "writer must be cleared after a write failure"
+        );
+
+        // The write path must NOT declare the FC permanently disconnected; the
+        // run loop owns `connected` and clears it only on a real teardown.
+        assert!(
+            conn.connected(),
+            "send_bytes must not latch connected=false on a transient write error"
+        );
+
+        // The reconnect signal must have been raised so run() rebuilds the link.
+        // notify_one() leaves a permit, so notified() resolves immediately.
+        let signalled = tokio::time::timeout(Duration::from_millis(100), conn.reconnect.notified())
+            .await
+            .is_ok();
+        assert!(signalled, "a write failure must signal a reconnect");
+    }
+
+    #[tokio::test]
+    async fn send_bytes_is_a_noop_when_no_writer() {
+        let conn = test_connection();
+        // No writer installed: send_bytes does nothing and raises no reconnect.
+        conn.send_bytes(b"\xfd\x00").await;
+        let signalled = tokio::time::timeout(Duration::from_millis(50), conn.reconnect.notified())
+            .await
+            .is_ok();
+        assert!(
+            !signalled,
+            "no writer means nothing to fail and no reconnect to raise"
+        );
     }
 }
