@@ -1,12 +1,12 @@
 //! Direct GCS transport proxies.
 //!
-//! Mirror the Python TCP (`tcp_proxy.py`, port 5760) and UDP (`udp_proxy.py`,
-//! ports 14550/14551) proxies: a GCS connects directly and exchanges raw
-//! MAVLink frames with the FC, bypassing the cloud relay. Each proxy relays the
-//! FC frame stream (via [`FcConnection::subscribe`]) out to its clients and
-//! forwards client bytes back to the FC with [`FcConnection::send_bytes`].
-//!
-//! The WebSocket proxy (8765) is a separate follow-up (needs a WS dependency).
+//! Mirror the Python TCP (`tcp_proxy.py`, port 5760), UDP (`udp_proxy.py`,
+//! ports 14550/14551), and WebSocket (port 8765) proxies: a GCS connects
+//! directly and exchanges raw MAVLink frames with the FC, bypassing the cloud
+//! relay. Each proxy relays the FC frame stream (via [`FcConnection::subscribe`])
+//! out to its clients and forwards client bytes back to the FC with
+//! [`FcConnection::send_bytes`]. The WebSocket proxy ([`run_ws_proxy`]) carries
+//! MAVLink in binary WebSocket frames, the way a browser GCS connects.
 
 use std::collections::HashSet;
 use std::net::SocketAddr;

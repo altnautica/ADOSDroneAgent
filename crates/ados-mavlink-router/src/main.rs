@@ -11,6 +11,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use ados_protocol::frame::{encode_frame, MAVLINK_MAX_FRAME};
 use ados_protocol::ipc::IpcBroadcast;
 use ados_protocol::state::{encode_v1, encode_v2};
 use serde_json::{json, Map, Value};
@@ -132,7 +133,10 @@ async fn main() {
         }));
     }
 
-    // FC frames -> MAVLink socket clients.
+    // FC frames -> MAVLink socket clients. The socket contract is 4-byte
+    // big-endian length-prefixed in both directions (the inbound reader decodes
+    // the prefix), so each raw FC frame is framed before it is broadcast. The
+    // proxies consume the raw frame stream directly and are unaffected.
     {
         let mavlink_ipc = mavlink_ipc.clone();
         let cancel = cancel.clone();
@@ -141,7 +145,10 @@ async fn main() {
             loop {
                 tokio::select! {
                     frame = rx.recv() => match frame {
-                        Ok(f) => mavlink_ipc.broadcast(f).await,
+                        Ok(f) => match encode_frame(&f, MAVLINK_MAX_FRAME) {
+                            Ok(framed) => mavlink_ipc.broadcast(framed).await,
+                            Err(e) => tracing::warn!(error = %e, "mavlink_frame_encode_failed"),
+                        },
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                     },

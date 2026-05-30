@@ -8,10 +8,13 @@
 //! toward the FC (client commands, the 1 Hz companion heartbeat, the adaptive
 //! stream-interval requests, and the parameter sweep).
 //!
-//! Transport scope: real serial only (the production path on the dev rigs).
-//! SITL `tcp:`/`udp:` connection strings are a separate transport follow-up.
+//! Transport scope: serial is the default and the production path on the dev
+//! rigs. A configured port starting with `tcp:` or `udp:` opens a TCP or UDP
+//! MAVLink transport instead, for SITL bench and demo use.
 
+use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
+use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
 use ados_protocol::mavlink::ardupilotmega::{
@@ -19,7 +22,8 @@ use ados_protocol::mavlink::ardupilotmega::{
     HEARTBEAT_DATA, PARAM_REQUEST_LIST_DATA,
 };
 use ados_protocol::mavlink::{self, MavHeader};
-use tokio::io::{AsyncReadExt, AsyncWriteExt, ReadHalf, WriteHalf};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
+use tokio::net::{TcpStream, UdpSocket};
 use tokio::sync::{broadcast, Mutex};
 use tokio_serial::{SerialPortBuilderExt, SerialPortType, SerialStream};
 
@@ -27,11 +31,53 @@ use crate::config::MavlinkConfig;
 use crate::param_cache::ParamCache;
 use crate::state::VehicleState;
 
+/// A duplex MAVLink byte transport: serial, TCP, or (datagram) UDP. Reading and
+/// writing go through the boxed [`AsyncRead`]/[`AsyncWrite`] halves below, so the
+/// run loop is transport-agnostic. Serial is the default on the dev rigs; the
+/// `tcp:`/`udp:` connection strings exist for SITL.
+type BoxedReadHalf = Pin<Box<dyn AsyncRead + Send + Unpin>>;
+type BoxedWriteHalf = Pin<Box<dyn AsyncWrite + Send + Unpin>>;
+
+/// Wraps a connected [`UdpSocket`] as a duplex byte stream. MAVLink datagrams
+/// arrive one frame per packet, so a read yields one datagram's bytes and a
+/// write sends one datagram. The socket is connected to the peer first so plain
+/// `send`/`recv` reach it.
+struct UdpAdapter {
+    sock: std::sync::Arc<UdpSocket>,
+}
+
+impl AsyncRead for UdpAdapter {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        self.sock.poll_recv(cx, buf)
+    }
+}
+
+impl AsyncWrite for UdpAdapter {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        data: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        self.sock.poll_send(cx, data)
+    }
+    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+    fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+}
+
 /// Serial device name prefixes scanned when no explicit port is configured.
 const SERIAL_PREFIXES: &[&str] = &[
     "/dev/ttyACM",
     "/dev/ttyAMA",
     "/dev/ttyUSB",
+    "/dev/ttyS",
     "/dev/tty.usbmodem",
     "/dev/tty.usbserial",
 ];
@@ -81,19 +127,50 @@ fn now_iso() -> String {
         .unwrap_or_default()
 }
 
-/// Drain every complete MAVLink v2 frame from the head of `buf`, returning the
-/// raw frame byte vectors and leaving any partial trailing frame in `buf`.
+/// Both MAVLink start-of-frame magic bytes: `0xFD` (v2) and `0xFE` (v1).
+const STX_V2: u8 = 0xFD;
+const STX_V1: u8 = 0xFE;
+
+/// Total byte length of a complete frame whose head is at `buf[0]`, or `None`
+/// when more bytes are needed (or the head is not a recognised magic byte).
 ///
 /// A v2 frame is `0xFD`, a 1-byte payload length `L`, the rest of the 10-byte
 /// header, `L` payload bytes, a 2-byte checksum, and (when the incompat-flags
-/// signed bit is set) a 13-byte signature. Junk before the magic byte is
-/// dropped. Returns when the buffer holds only a partial frame.
+/// signed bit is set) a 13-byte signature. A v1 frame is `0xFE`, a 1-byte
+/// payload length `L`, a 6-byte header total, `L` payload bytes, and a 2-byte
+/// checksum (no incompat/compat flags, no signature).
+fn frame_total_len(buf: &[u8]) -> Option<usize> {
+    match buf.first().copied() {
+        Some(STX_V2) => {
+            // Need the length and incompat-flags bytes to size a v2 frame.
+            if buf.len() < 3 {
+                return None;
+            }
+            let payload_len = buf[1] as usize;
+            let signed = (buf[2] & 0x01) != 0;
+            Some(10 + payload_len + 2 + if signed { 13 } else { 0 })
+        }
+        Some(STX_V1) => {
+            // Need the length byte to size a v1 frame.
+            if buf.len() < 2 {
+                return None;
+            }
+            let payload_len = buf[1] as usize;
+            Some(6 + payload_len + 2)
+        }
+        _ => None,
+    }
+}
+
+/// Drain every complete MAVLink frame (v1 `0xFE` and v2 `0xFD`) from the head of
+/// `buf`, returning the raw frame byte vectors and leaving any partial trailing
+/// frame in `buf`. Junk before the next magic byte is dropped. Returns when the
+/// buffer holds only a partial frame.
 fn extract_frames(buf: &mut Vec<u8>) -> Vec<Vec<u8>> {
-    const STX: u8 = 0xFD;
     let mut out = Vec::new();
     loop {
-        // Drop bytes before the next start-of-frame magic.
-        match buf.iter().position(|&b| b == STX) {
+        // Drop bytes before the next start-of-frame magic (either version).
+        match buf.iter().position(|&b| b == STX_V2 || b == STX_V1) {
             Some(0) => {}
             Some(n) => {
                 buf.drain(..n);
@@ -103,13 +180,12 @@ fn extract_frames(buf: &mut Vec<u8>) -> Vec<Vec<u8>> {
                 break;
             }
         }
-        // Need the length and incompat-flags bytes to size the frame.
-        if buf.len() < 3 {
+        let Some(total) = frame_total_len(buf) else {
+            // Either too few bytes to size the frame yet, or the head byte is
+            // not a magic byte (cannot happen after the search above). Wait for
+            // more bytes.
             break;
-        }
-        let payload_len = buf[1] as usize;
-        let signed = (buf[2] & 0x01) != 0;
-        let total = 10 + payload_len + 2 + if signed { 13 } else { 0 };
+        };
         if buf.len() < total {
             break;
         }
@@ -127,7 +203,7 @@ pub struct FcConnection {
     state: std::sync::Arc<Mutex<VehicleState>>,
     params: std::sync::Arc<Mutex<ParamCache>>,
     frame_tx: broadcast::Sender<Vec<u8>>,
-    writer: Mutex<Option<WriteHalf<SerialStream>>>,
+    writer: Mutex<Option<BoxedWriteHalf>>,
     seq: AtomicU8,
     /// FC system id learned from inbound heartbeats (default 1 = ArduPilot).
     target_system: AtomicU8,
@@ -349,7 +425,7 @@ impl FcConnection {
                 s = self.open() => s,
                 _ = cancel.notified() => return,
             };
-            let Some((stream, port, baud)) = stream else {
+            let Some((read_half, write_half, port, baud)) = stream else {
                 tokio::select! {
                     _ = tokio::time::sleep(backoff) => {}
                     _ = cancel.notified() => return,
@@ -360,7 +436,6 @@ impl FcConnection {
             backoff = RECONNECT_MIN;
             *self.port.lock().await = port.clone();
             self.baud.store(baud, Ordering::Relaxed);
-            let (read_half, write_half) = tokio::io::split(stream);
             *self.writer.lock().await = Some(write_half);
             self.connected.store(true, Ordering::Relaxed);
             *self.last_msg_at.lock().await = Instant::now();
@@ -385,7 +460,7 @@ impl FcConnection {
         }
     }
 
-    async fn read_loop(&self, mut reader: ReadHalf<SerialStream>) {
+    async fn read_loop(&self, mut reader: BoxedReadHalf) {
         let mut buf: Vec<u8> = Vec::with_capacity(4096);
         let mut chunk = [0u8; 2048];
         let mut since_save = Instant::now();
@@ -401,10 +476,12 @@ impl FcConnection {
                 buf.clear();
             }
             for frame in extract_frames(&mut buf) {
-                // Fan the raw frame out (drop if no consumers / lagging).
+                // Fan the raw frame out verbatim (drop if no consumers / lagging).
+                // The original bytes are forwarded unchanged for both protocol
+                // versions; nothing here re-encodes a received frame.
                 let _ = self.frame_tx.send(frame.clone());
                 *self.last_msg_at.lock().await = Instant::now();
-                if let Ok((header, msg)) = mavlink::parse_v2(&frame) {
+                if let Ok((header, msg)) = mavlink::parse_any(&frame) {
                     // Learn the FC system id from its (non-GCS) heartbeats.
                     if let MavMessage::HEARTBEAT(_) = &msg {
                         if header.system_id != self.cfg.system_id {
@@ -431,31 +508,79 @@ impl FcConnection {
         }
     }
 
-    /// Discover (or use the configured) serial port, baud-probe it, and open it.
-    /// Returns `(stream, port, baud)` on success.
-    async fn open(&self) -> Option<(SerialStream, String, u32)> {
+    /// Open the configured (or discovered) transport. A configured port that
+    /// starts with `tcp:` or `udp:` opens a network MAVLink transport; otherwise
+    /// the serial discovery + baud-probe path runs. Returns the read/write halves
+    /// plus the port label and (serial only) baud on success.
+    async fn open(&self) -> Option<(BoxedReadHalf, BoxedWriteHalf, String, u32)> {
+        // SITL / network transport: detected from the configured connection
+        // string, never from serial discovery (baud is not meaningful here).
+        let configured = self.cfg.serial_port.trim();
+        if let Some(spec) = parse_net_spec(configured) {
+            return self.open_net(spec).await;
+        }
+
         let candidates = self.candidate_ports();
         for port in candidates {
             // A configured baud skips the probe; otherwise probe the candidates.
             if self.cfg.baud_rate != 0 && !self.cfg.serial_port.is_empty() {
                 if let Some(stream) = open_serial(&port, self.cfg.baud_rate) {
-                    return Some((stream, port, self.cfg.baud_rate));
+                    return Some(split_serial(stream, port, self.cfg.baud_rate));
                 }
                 continue;
             }
             for &baud in BAUD_CANDIDATES {
                 if probe_baud(&port, baud).await {
                     if let Some(stream) = open_serial(&port, baud) {
-                        return Some((stream, port, baud));
+                        return Some(split_serial(stream, port, baud));
                     }
                 }
             }
             // Last-ditch: open at the fallback baud without a positive probe.
             if let Some(stream) = open_serial(&port, BAUD_FALLBACK) {
-                return Some((stream, port, BAUD_FALLBACK));
+                return Some(split_serial(stream, port, BAUD_FALLBACK));
             }
         }
         None
+    }
+
+    /// Open a TCP or UDP MAVLink transport for SITL. TCP connects to the peer;
+    /// UDP binds a local socket and connects it to the peer so plain send/recv
+    /// reach it. Baud is reported as 0 for network transports.
+    async fn open_net(&self, spec: NetSpec) -> Option<(BoxedReadHalf, BoxedWriteHalf, String, u32)> {
+        match spec {
+            NetSpec::Tcp(addr) => match TcpStream::connect(&addr).await {
+                Ok(stream) => {
+                    let _ = stream.set_nodelay(true);
+                    let (rd, wr) = tokio::io::split(stream);
+                    let label = format!("tcp:{addr}");
+                    tracing::info!(addr = %addr, "fc_tcp_connecting");
+                    Some((Box::pin(rd), Box::pin(wr), label, 0))
+                }
+                Err(e) => {
+                    tracing::warn!(addr = %addr, error = %e, "fc_tcp_connect_failed");
+                    None
+                }
+            },
+            NetSpec::Udp(addr) => {
+                let sock = match UdpSocket::bind(("0.0.0.0", 0)).await {
+                    Ok(s) => s,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "fc_udp_bind_failed");
+                        return None;
+                    }
+                };
+                if let Err(e) = sock.connect(&addr).await {
+                    tracing::warn!(addr = %addr, error = %e, "fc_udp_connect_failed");
+                    return None;
+                }
+                let sock = std::sync::Arc::new(sock);
+                let (rd, wr) = tokio::io::split(UdpAdapter { sock: sock.clone() });
+                let label = format!("udp:{addr}");
+                tracing::info!(addr = %addr, "fc_udp_bound");
+                Some((Box::pin(rd), Box::pin(wr), label, 0))
+            }
+        }
     }
 
     fn candidate_ports(&self) -> Vec<String> {
@@ -485,6 +610,45 @@ fn open_serial(port: &str, baud: u32) -> Option<SerialStream> {
     tokio_serial::new(port, baud).open_native_async().ok()
 }
 
+/// Split a serial stream into the boxed read/write halves the run loop expects.
+fn split_serial(
+    stream: SerialStream,
+    port: String,
+    baud: u32,
+) -> (BoxedReadHalf, BoxedWriteHalf, String, u32) {
+    let (rd, wr) = tokio::io::split(stream);
+    (Box::pin(rd), Box::pin(wr), port, baud)
+}
+
+/// A parsed network connection target.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum NetSpec {
+    Tcp(String),
+    Udp(String),
+}
+
+/// Parse a `tcp:host:port` or `udp:host:port` connection string into a
+/// `host:port` address. A bare host with no port defaults to 14550 (the
+/// conventional MAVLink UDP port). Returns `None` for plain serial paths.
+fn parse_net_spec(s: &str) -> Option<NetSpec> {
+    let (scheme, rest) = s.split_once(':')?;
+    let rest = rest.trim_start_matches('/');
+    let addr = if rest.contains(':') {
+        rest.to_string()
+    } else if rest.is_empty() {
+        return None;
+    } else {
+        format!("{rest}:14550")
+    };
+    match scheme {
+        "tcp" => Some(NetSpec::Tcp(addr)),
+        // The UDP connect/bind variants (udp/udpout/udpin) all resolve to one
+        // path here: the router connects its socket to the configured peer.
+        "udp" | "udpout" | "udpin" => Some(NetSpec::Udp(addr)),
+        _ => None,
+    }
+}
+
 /// Open at `baud` and listen for an FC HEARTBEAT within [`PROBE_WINDOW`].
 async fn probe_baud(port: &str, baud: u32) -> bool {
     let Some(mut stream) = open_serial(port, baud) else {
@@ -503,7 +667,7 @@ async fn probe_baud(port: &str, baud: u32) -> bool {
             Ok(Ok(n)) => {
                 buf.extend_from_slice(&chunk[..n]);
                 for frame in extract_frames(&mut buf) {
-                    if let Ok((_, MavMessage::HEARTBEAT(_))) = mavlink::parse_v2(&frame) {
+                    if let Ok((_, MavMessage::HEARTBEAT(_))) = mavlink::parse_any(&frame) {
                         return true;
                     }
                 }
@@ -581,5 +745,108 @@ mod tests {
         let frame = heartbeat_frame();
         let (_h, msg) = mavlink::parse_v2(&frame).unwrap();
         assert!(matches!(msg, MavMessage::HEARTBEAT(_)));
+    }
+
+    fn heartbeat_frame_v1() -> Vec<u8> {
+        let msg = MavMessage::HEARTBEAT(HEARTBEAT_DATA {
+            custom_mode: 0,
+            mavtype: MavType::MAV_TYPE_QUADROTOR,
+            autopilot: MavAutopilot::MAV_AUTOPILOT_ARDUPILOTMEGA,
+            base_mode: MavModeFlag::empty(),
+            system_status: MavState::MAV_STATE_STANDBY,
+            mavlink_version: 3,
+        });
+        mavlink::serialize_v1(
+            MavHeader {
+                system_id: 1,
+                component_id: 1,
+                sequence: 0,
+            },
+            &msg,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn extract_one_v1_frame() {
+        let frame = heartbeat_frame_v1();
+        assert_eq!(frame[0], 0xFE);
+        let mut buf = frame.clone();
+        let frames = extract_frames(&mut buf);
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0], frame);
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn extracted_v1_frame_decodes_and_round_trips_bytes() {
+        let frame = heartbeat_frame_v1();
+        // The framer returns the exact bytes (re-broadcast verbatim, no re-encode).
+        let mut buf = frame.clone();
+        let frames = extract_frames(&mut buf);
+        assert_eq!(frames[0], frame);
+        // The decode path recognises it as a v1 heartbeat.
+        let (_h, msg) = mavlink::parse_any(&frames[0]).unwrap();
+        assert!(matches!(msg, MavMessage::HEARTBEAT(_)));
+    }
+
+    #[test]
+    fn extract_mixed_v1_and_v2_frames_in_one_buffer() {
+        let v2 = heartbeat_frame();
+        let v1 = heartbeat_frame_v1();
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&v2);
+        buf.extend_from_slice(&v1);
+        buf.extend_from_slice(&v2);
+        let frames = extract_frames(&mut buf);
+        assert_eq!(frames.len(), 3);
+        assert_eq!(frames[0], v2);
+        assert_eq!(frames[1], v1);
+        assert_eq!(frames[2], v2);
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn partial_v1_frame_is_retained() {
+        let frame = heartbeat_frame_v1();
+        let split = frame.len() - 2;
+        let mut buf = frame[..split].to_vec();
+        assert!(extract_frames(&mut buf).is_empty());
+        buf.extend_from_slice(&frame[split..]);
+        let frames = extract_frames(&mut buf);
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0], frame);
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn parse_net_spec_detects_tcp_and_udp() {
+        assert_eq!(
+            parse_net_spec("tcp:127.0.0.1:5760"),
+            Some(NetSpec::Tcp("127.0.0.1:5760".to_string()))
+        );
+        assert_eq!(
+            parse_net_spec("udp:127.0.0.1:14550"),
+            Some(NetSpec::Udp("127.0.0.1:14550".to_string()))
+        );
+        // udpout/udpin map to the same connect path.
+        assert_eq!(
+            parse_net_spec("udpout:10.0.0.5:14555"),
+            Some(NetSpec::Udp("10.0.0.5:14555".to_string()))
+        );
+        // A bare host defaults to the conventional MAVLink UDP port.
+        assert_eq!(
+            parse_net_spec("udp:localhost"),
+            Some(NetSpec::Udp("localhost:14550".to_string()))
+        );
+    }
+
+    #[test]
+    fn parse_net_spec_rejects_serial_paths() {
+        assert_eq!(parse_net_spec("/dev/ttyACM0"), None);
+        assert_eq!(parse_net_spec("/dev/ttyS0"), None);
+        assert_eq!(parse_net_spec(""), None);
+        // An unknown scheme is not a network transport.
+        assert_eq!(parse_net_spec("serial:/dev/ttyUSB0"), None);
     }
 }
