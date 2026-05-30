@@ -22,6 +22,8 @@ Per-plugin unit:
     [Service]
     Slice=ados-plugins.slice
     Type=simple
+    Environment=ADOS_PLUGIN_SOCKET=/run/ados/plugins/<plugin-id>.sock
+    EnvironmentFile=-/run/ados/plugins/<plugin-id>.token.env
     ExecStart=/opt/ados/venv/bin/ados-plugin-runner <plugin-id>
     Restart=on-failure
     RestartSec=2s
@@ -108,15 +110,14 @@ def render_unit(manifest: PluginManifest, install_dir: Path) -> str:
     # Reference the module global by name so tests can rebind it via
     # monkeypatch.setattr and the runtime resolves the current value.
     log_path = PLUGIN_LOG_DIR / f"{_sanitize_unit_name(manifest.id)}.log"
+    socket_path = PLUGIN_RUN_DIR / f"{manifest.id}.sock"
     # The ExecStart line is the only part that differs by agent.runtime.
     if manifest.agent.runtime == "rust":
         # Rust: exec the plugin's own binary directly with the plugin id as the
         # leading positional argument (non-secret; it is already in the install
         # path, and the SDK runner reads it positionally). The capability token
-        # and agent id are delivered via the unit environment (ADOS_PLUGIN_TOKEN
-        # / ADOS_PLUGIN_AGENT_ID) at cutover, never on the command line (a
-        # /proc/<pid>/cmdline is world-readable).
-        socket_path = PLUGIN_RUN_DIR / f"{manifest.id}.sock"
+        # and socket path are delivered via the unit environment, never on the
+        # command line (a /proc/<pid>/cmdline is world-readable).
         exec_start = (
             f"{install_dir}/{manifest.id}/{manifest.agent.entrypoint} "
             f"{manifest.id} --socket {socket_path}"
@@ -125,9 +126,18 @@ def render_unit(manifest: PluginManifest, install_dir: Path) -> str:
         # Python (default): the shared runner takes the plugin id and resolves
         # the manifest + entrypoint itself. Unchanged.
         exec_start = f"{PLUGIN_RUNNER_BINARY} {manifest.id}"
+    # Token delivery: a 0600 EnvironmentFile carries ADOS_PLUGIN_TOKEN (and
+    # ADOS_PLUGIN_SOCKET) into the runner, which reads both from its
+    # environment (the click options default to os.environ.get). The file is
+    # rewritten with a fresh token on each start; the `-` prefix tolerates its
+    # absence before the first mint without failing the unit. The socket path
+    # is also a static Environment line as a fallback for the env-file race.
+    token_env_file = PLUGIN_RUN_DIR / f"{manifest.id}.token.env"
     return UNIT_TEMPLATE.format(
         plugin_id=manifest.id,
         slice_name=PLUGIN_SLICE_NAME,
+        socket_path=socket_path,
+        token_env_file=token_env_file,
         exec_start=exec_start,
         max_ram_mb=res.max_ram_mb,
         max_cpu_percent=res.max_cpu_percent,
@@ -145,6 +155,8 @@ PartOf=ados-supervisor.service
 [Service]
 Slice={slice_name}
 Type=simple
+Environment=ADOS_PLUGIN_SOCKET={socket_path}
+EnvironmentFile=-{token_env_file}
 ExecStart={exec_start}
 Restart=on-failure
 RestartSec=2s

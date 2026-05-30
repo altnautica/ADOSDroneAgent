@@ -134,6 +134,19 @@ def test_render_unit_rust_runtime_execs_the_plugin_binary() -> None:
     assert "NoNewPrivileges=yes" in unit
 
 
+def test_render_unit_delivers_token_via_environment_file() -> None:
+    # Both runtimes deliver the capability token to the runner via a 0600
+    # EnvironmentFile (the `-` prefix tolerates its absence before the first
+    # mint) and expose the socket path as a static Environment line. The runner
+    # reads ADOS_PLUGIN_TOKEN / ADOS_PLUGIN_SOCKET from its environment.
+    for manifest in (_subprocess_manifest(), _rust_manifest()):
+        unit = render_unit(manifest, _INSTALL_DIR)
+        sock = f"/run/ados/plugins/{manifest.id}.sock"
+        env_file = f"/run/ados/plugins/{manifest.id}.token.env"
+        assert f"Environment=ADOS_PLUGIN_SOCKET={sock}" in unit
+        assert f"EnvironmentFile=-{env_file}" in unit
+
+
 def test_render_unit_rejects_inprocess() -> None:
     with pytest.raises(ValueError):
         render_unit(_inprocess_manifest(), _INSTALL_DIR)

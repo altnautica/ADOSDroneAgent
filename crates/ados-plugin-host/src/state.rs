@@ -290,6 +290,19 @@ pub fn is_permission_granted(install: &PluginInstall, permission_id: &str) -> bo
         .unwrap_or(false)
 }
 
+/// The set of capability ids currently granted to an install. Capability ids
+/// are the granted permission ids (the gate checks `token.granted_caps`
+/// against the method's required capability). Mirrors the Python
+/// `get_granted_caps`: the granted permission keys of the install record.
+pub fn granted_caps(install: &PluginInstall) -> std::collections::BTreeSet<String> {
+    install
+        .permissions
+        .iter()
+        .filter(|(_, g)| g.granted)
+        .map(|(k, _)| k.clone())
+        .collect()
+}
+
 /// Drop any granted permission the manifest no longer declares.
 ///
 /// **Security** — defends against a tampered state file granting permissions

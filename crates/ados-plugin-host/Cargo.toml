@@ -36,6 +36,10 @@ base64 = { workspace = true }
 ed25519-dalek = { workspace = true }
 zip = { workspace = true }
 serde_norway = { workspace = true }
+# OS RNG for the persisted HMAC issuer secret (32 bytes, owner-only on disk).
+# The shared secret lets a runner spawned by a separate systemd unit present a
+# token the daemon can verify; a per-process random secret could not.
+getrandom = { workspace = true }
 
 # Linux-only edge: setting the socket file mode to 0o660 after bind, the
 # advisory file lock around the state read-modify-write, and the daemon's

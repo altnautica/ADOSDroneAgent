@@ -8,12 +8,14 @@
 //! logging on Linux with an fmt fallback, a `Type=notify` readiness ping, and a
 //! single select loop over the shutdown signals.
 //!
-//! Token delivery: the daemon owns the per-process [`TokenIssuer`]. Each plugin
-//! runner must present a token minted by this issuer at the `hello` handshake.
-//! Production handoff of a minted token to the systemd-started runner process
-//! (a token file or a unit env) is a separate cutover concern and is NOT wired
-//! here; the issuer is created per process and held in memory only. The smoke
-//! test mints a token directly via this issuer to exercise the in-process wiring.
+//! Token delivery: the daemon builds its [`TokenIssuer`] from a *persisted*
+//! HMAC secret (0600 under `/etc/ados/secrets`), not a per-process random key,
+//! so a runner started by its own systemd unit can present a token this daemon
+//! verifies. When the daemon serves a plugin's socket it mints a fresh token
+//! from that shared issuer and writes the 0600 env file the unit references via
+//! `EnvironmentFile=`; the runner reads `ADOS_PLUGIN_TOKEN` / `ADOS_PLUGIN_SOCKET`
+//! from its environment and connects. The token rotates on every serve (daemon
+//! restart) and on every permission change (the granted caps feed the mint).
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -43,6 +45,17 @@ fn run_dir() -> PathBuf {
 /// crate version is the inert fallback when the env is unset.
 fn agent_version() -> String {
     std::env::var("ADOS_AGENT_VERSION").unwrap_or_else(|_| env!("CARGO_PKG_VERSION").to_string())
+}
+
+/// The persisted HMAC issuer secret path. Overridable via
+/// `ADOS_PLUGIN_TOKEN_SECRET` for tests / non-default layouts; otherwise the
+/// 0600 file under `/etc/ados/secrets` both the daemon and the unit-generation
+/// path read so a runner's token verifies in this daemon.
+fn secret_path() -> PathBuf {
+    PathBuf::from(
+        std::env::var("ADOS_PLUGIN_TOKEN_SECRET")
+            .unwrap_or_else(|_| ados_plugin_host::PLUGIN_TOKEN_SECRET_PATH.to_string()),
+    )
 }
 
 fn init_logging() {
@@ -168,13 +181,31 @@ async fn build_host(install_dir: PathBuf, run_dir: PathBuf) -> Arc<RealHost> {
 ///
 /// `supervisor` must already have `discover()`-ed. The socket dir is where the
 /// per-plugin sockets bind; the install dir / run dir feed the host lookups.
+/// `secret_path` is the persisted HMAC secret the issuer is built from; the
+/// same file feeds the unit-generation path, so a runner's token verifies here.
 async fn wire(
     supervisor: &PluginSupervisor,
     install_dir: PathBuf,
     socket_dir: PathBuf,
     run_dir: PathBuf,
+    secret_path: &Path,
 ) -> WiredDaemon<RealHost> {
-    let issuer = Arc::new(TokenIssuer::new_random());
+    // Build the issuer from the persisted secret so a runner started by its own
+    // unit can present a token this daemon verifies. A failure to read/create
+    // the secret falls back to a per-process random key (the in-process smoke
+    // test still works; cross-process verify degrades, surfaced by the warn).
+    let issuer = Arc::new(match ados_plugin_host::shared_issuer(secret_path) {
+        Ok(i) => i,
+        Err(e) => {
+            tracing::warn!(
+                path = %secret_path.display(),
+                error = %e,
+                "persisted token secret unavailable; falling back to a per-process key \
+                 (runner tokens will not verify cross-process)"
+            );
+            TokenIssuer::new_random()
+        }
+    });
     let bus = Arc::new(EventBus::new());
     let host = build_host(install_dir.clone(), run_dir).await;
 
@@ -205,6 +236,24 @@ async fn wire(
                     socket = %path.display(),
                     "serving plugin socket"
                 );
+                // Mint the runner's token from the shared issuer and write the
+                // 0600 env file the unit references. The runner then reads
+                // ADOS_PLUGIN_TOKEN / ADOS_PLUGIN_SOCKET from its environment
+                // and connects. The granted caps come from the install record.
+                let caps = ados_plugin_host::state::granted_caps(install);
+                if let Err(e) = ados_plugin_host::write_token_env(
+                    &issuer,
+                    &install.plugin_id,
+                    &caps,
+                    &path,
+                    Some(&socket_dir),
+                ) {
+                    tracing::warn!(
+                        plugin_id = %install.plugin_id,
+                        error = %e,
+                        "failed to write plugin token env; runner will fall back to null IPC"
+                    );
+                }
                 served.push((install.plugin_id.clone(), handle));
             }
             Err(e) => {
@@ -247,11 +296,11 @@ async fn main() -> Result<()> {
         tracing::error!(error = %e, "plugin discovery failed");
     }
 
-    let daemon = wire(&supervisor, install_dir, socket_dir, run).await;
-    // The per-process token issuer is owned by the daemon for the session
-    // lifetime; the production handoff of a minted token to each runner process
-    // is wired at cutover (see the module note). It is held, not minted-from,
-    // in the daemon's own run path.
+    let secret = secret_path();
+    let daemon = wire(&supervisor, install_dir, socket_dir, run, &secret).await;
+    // The shared-secret issuer is owned by the daemon for the session lifetime;
+    // it both verifies the runner's `hello` token and (in `wire`) minted the
+    // token env file each served plugin's unit reads.
     let _ = &daemon.issuer;
     tracing::info!(served = daemon.served.len(), "plugin host daemon ready");
 
@@ -376,18 +425,41 @@ mod tests {
         supervisor.discover().expect("discover");
 
         // Wire the daemon (no mavlink router up -> slot stays None, fine).
-        let daemon = wire(&supervisor, install_dir, socket_dir.clone(), run).await;
+        // A tempdir secret path makes the issuer persist a shared secret.
+        let secret = dir.path().join("secrets/plugin-token-secret");
+        let daemon =
+            wire(&supervisor, install_dir, socket_dir.clone(), run, &secret).await;
         assert_eq!(
             daemon.served.len(),
             1,
             "the enabled plugin should be served"
         );
 
-        // Mint a token via the daemon's issuer (the smoke-test handoff) and ping.
-        let token = daemon
-            .issuer
-            .mint(PLUGIN_ID, &caps(&[]), 600)
-            .to_token_string();
+        // The serve path wrote the runner's token env file from the shared
+        // issuer; the token it carries must verify against a SEPARATE issuer
+        // reloaded from the same persisted secret (the cross-process contract:
+        // a runner unit's env file is consumed by a different process). The
+        // ping below then proves the daemon itself accepts that exact token.
+        let env_path =
+            ados_plugin_host::token_env_path(PLUGIN_ID, Some(&socket_dir));
+        let env_body = std::fs::read_to_string(&env_path).expect("token env written");
+        let token_line = env_body
+            .lines()
+            .find_map(|l| l.strip_prefix("ADOS_PLUGIN_TOKEN="))
+            .expect("ADOS_PLUGIN_TOKEN in env file");
+        let parsed = ados_protocol::plugin::CapabilityToken::from_token_string(token_line)
+            .expect("env token parses");
+        let reloaded_issuer =
+            ados_plugin_host::shared_issuer(&secret).expect("reload issuer");
+        let now = parsed.issued_at + 1;
+        assert!(
+            reloaded_issuer.verify(&parsed, now).is_ok(),
+            "the runner's env token must verify in a separately-constructed issuer"
+        );
+
+        // Use that very token (as a runner would, read from its env) for the
+        // hello + ping, proving the daemon accepts it.
+        let token = token_line.to_string();
         let sock_path = socket_dir.join(format!("{PLUGIN_ID}.sock"));
         let mut client = {
             let mut s = None;
@@ -443,5 +515,85 @@ mod tests {
         let miss = Value::Map(vec![(Value::from("basename"), Value::from("rm"))]);
         let err = host.process_spawn(PLUGIN_ID, &miss).expect_err("denied");
         assert_eq!(err.body(), "allowlist_violation: rm");
+    }
+
+    /// The generated unit (for BOTH the Python and the Rust runtime branches)
+    /// references the EnvironmentFile the daemon writes, with a socket path that
+    /// matches what the env file declares, and the env token verifies against an
+    /// issuer built from the same persisted secret. This is the unit-level proof
+    /// that "the generated unit env + token + socket are consistent" for both
+    /// runtimes — the practical stand-in for a full live two-process launch.
+    #[test]
+    fn unit_env_token_and_socket_are_consistent_for_both_runtimes() {
+        use ados_plugin_host::systemd::render_unit;
+        use ados_protocol::plugin::CapabilityToken;
+
+        for runtime in ["python", "rust"] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let socket_dir = dir.path().join("plugins");
+            let secret = dir.path().join("secrets/plugin-token-secret");
+            let plugin_id = "com.example.consistency";
+
+            // The unit the install path writes: it must reference the env file
+            // and carry the static socket Environment line.
+            let manifest_yaml = format!(
+                "id: {plugin_id}\nversion: 1.0.0\ncompatibility:\n  ados_version: \">=0.1.0,<99.0.0\"\nagent:\n  entrypoint: agent/x\n  runtime: {runtime}\n  permissions:\n    - mavlink.read\n"
+            );
+            let manifest =
+                ados_plugin_host::PluginManifest::from_yaml_text(&manifest_yaml).expect("manifest");
+            let unit = render_unit(&manifest, dir.path()).expect("unit");
+            // Both runtimes deliver the token via the same env file + static
+            // socket Environment line.
+            assert!(
+                unit.contains("EnvironmentFile=-/run/ados/plugins/com.example.consistency.token.env"),
+                "{runtime} unit missing EnvironmentFile: {unit}"
+            );
+            assert!(
+                unit.contains(
+                    "Environment=ADOS_PLUGIN_SOCKET=/run/ados/plugins/com.example.consistency.sock"
+                ),
+                "{runtime} unit missing socket Environment: {unit}"
+            );
+            // Never on the command line.
+            let exec = unit
+                .lines()
+                .find(|l| l.starts_with("ExecStart="))
+                .expect("ExecStart");
+            assert!(!exec.to_lowercase().contains("token"), "{exec}");
+
+            // The daemon-side: an issuer from the persisted secret mints the
+            // runner token and writes the env file. A separately-built issuer
+            // (a stand-in for the serving daemon process) verifies it.
+            let minting = ados_plugin_host::shared_issuer(&secret).expect("issuer");
+            let sock = socket_dir.join(format!("{plugin_id}.sock"));
+            ados_plugin_host::write_token_env(
+                &minting,
+                plugin_id,
+                &caps(&["mavlink.read"]),
+                &sock,
+                Some(&socket_dir),
+            )
+            .expect("write env");
+
+            let env_path = ados_plugin_host::token_env_path(plugin_id, Some(&socket_dir));
+            let body = std::fs::read_to_string(&env_path).expect("env file");
+            let token_line = body
+                .lines()
+                .find_map(|l| l.strip_prefix("ADOS_PLUGIN_TOKEN="))
+                .expect("token line");
+            let socket_line = body
+                .lines()
+                .find_map(|l| l.strip_prefix("ADOS_PLUGIN_SOCKET="))
+                .expect("socket line");
+            assert_eq!(socket_line, sock.to_string_lossy());
+
+            let parsed = CapabilityToken::from_token_string(token_line).expect("parse");
+            assert_eq!(parsed.plugin_id, plugin_id);
+            let verifying = ados_plugin_host::shared_issuer(&secret).expect("issuer 2");
+            assert!(
+                verifying.verify(&parsed, parsed.issued_at + 1).is_ok(),
+                "{runtime}: env token must verify against the shared persisted secret"
+            );
+        }
     }
 }

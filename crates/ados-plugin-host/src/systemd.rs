@@ -99,22 +99,31 @@ pub fn render_unit(manifest: &PluginManifest, install_dir: &Path) -> Option<Stri
     }
     let res = &agent.resources;
     let log_path = log_path_for(&manifest.id);
+    let socket_path = format!("{DEFAULT_SOCKET_DIR}/{}.sock", manifest.id);
     let exec_start = match agent.runtime {
         // Python (default): the shared runner takes the plugin id and resolves
         // the manifest + entrypoint itself. Unchanged.
         AgentRuntime::Python => format!("{PLUGIN_RUNNER_BINARY} {}", manifest.id),
-        // Rust: exec the plugin's own binary directly. The capability token and
-        // agent id are delivered via the unit environment (ADOS_PLUGIN_TOKEN /
-        // ADOS_PLUGIN_AGENT_ID) at cutover, never on the command line (a
-        // /proc/<pid>/cmdline is world-readable).
+        // Rust: exec the plugin's own binary directly with the plugin id as the
+        // leading positional argument (the SDK runner reads it positionally;
+        // it is non-secret and already in the install path). The capability
+        // token and socket path are delivered via the unit environment, never
+        // on the command line (a /proc/<pid>/cmdline is world-readable).
         AgentRuntime::Rust => format!(
-            "{install_dir}/{plugin_id}/{entrypoint} --socket {socket_dir}/{plugin_id}.sock",
+            "{install_dir}/{plugin_id}/{entrypoint} {plugin_id} --socket {socket_path}",
             install_dir = install_dir.display(),
             plugin_id = manifest.id,
             entrypoint = agent.entrypoint,
-            socket_dir = DEFAULT_SOCKET_DIR,
+            socket_path = socket_path,
         ),
     };
+    // Token delivery: a 0600 EnvironmentFile carries ADOS_PLUGIN_TOKEN (and
+    // ADOS_PLUGIN_SOCKET) into the runner, which reads both from its
+    // environment. The file is rewritten with a fresh token on each start, so
+    // the `-` prefix tolerates its absence during install (before the first
+    // mint) without failing the unit. The socket path is also a static
+    // Environment line as a belt-and-suspenders fallback for the env-file race.
+    let token_env_file = format!("{DEFAULT_SOCKET_DIR}/{}.token.env", manifest.id);
     Some(format!(
         "\
 [Unit]
@@ -125,6 +134,8 @@ PartOf=ados-supervisor.service
 [Service]
 Slice={slice_name}
 Type=simple
+Environment=ADOS_PLUGIN_SOCKET={socket_path}
+EnvironmentFile=-{token_env_file}
 ExecStart={exec_start}
 Restart=on-failure
 RestartSec=2s
@@ -151,6 +162,8 @@ WantedBy=ados-supervisor.service
 ",
         plugin_id = manifest.id,
         slice_name = PLUGIN_SLICE_NAME,
+        socket_path = socket_path,
+        token_env_file = token_env_file,
         exec_start = exec_start,
         max_ram_mb = res.max_ram_mb,
         max_cpu_percent = res.max_cpu_percent,
@@ -218,20 +231,28 @@ mod tests {
         )
         .unwrap();
         let unit = render_unit(&m, Path::new("/var/ados/plugins")).unwrap();
-        // ExecStart points at the unpacked plugin binary with its socket path.
+        // ExecStart points at the unpacked plugin binary, the plugin id as the
+        // leading positional (the SDK runner requires it), then the socket path.
         assert!(
             unit.contains(
-                "ExecStart=/var/ados/plugins/com.example.rustplug/agent/bin/com.example.rustplug --socket /run/ados/plugins/com.example.rustplug.sock"
+                "ExecStart=/var/ados/plugins/com.example.rustplug/agent/bin/com.example.rustplug com.example.rustplug --socket /run/ados/plugins/com.example.rustplug.sock"
             ),
             "{unit}"
         );
-        // The token is never on the ExecStart line (it comes from the unit env).
+        // The token is never on the ExecStart line (it comes from the env file).
         let exec_line = unit
             .lines()
             .find(|l| l.starts_with("ExecStart="))
             .expect("ExecStart line");
         assert!(!exec_line.contains("ADOS_PLUGIN_TOKEN"), "{exec_line}");
         assert!(!exec_line.to_lowercase().contains("token"), "{exec_line}");
+        // Token delivery: the socket is a static Environment line and the token
+        // rides in an owner-only EnvironmentFile (the `-` prefix tolerates its
+        // absence before the first mint).
+        assert!(unit
+            .contains("Environment=ADOS_PLUGIN_SOCKET=/run/ados/plugins/com.example.rustplug.sock"));
+        assert!(unit
+            .contains("EnvironmentFile=-/run/ados/plugins/com.example.rustplug.token.env"));
         // The shared/hardening/limit lines are identical to the python branch.
         assert!(unit.contains("Slice=ados-plugins.slice"));
         assert!(unit.contains("MemoryMax=64M"));
