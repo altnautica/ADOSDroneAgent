@@ -27,9 +27,16 @@
 //! {"op":"confirm_token","client_id":"..."} -> {"ok":true,"token":"<32hex>"}
 //! {"op":"heartbeat","client_id":"..."}   -> {"ok":true,"ok_heartbeat":<bool>,...}
 //! {"op":"disconnect"}                    -> {"ok":true}   (PIC client drop hook)
+//! {"op":"gamepad_connected","device_id":"...","client_id_hint":"..."}
+//!   -> {"ok":true}   (auto-claim PIC for the hint + bind the gamepad as the
+//!      primary if nobody holds PIC; no-op when already claimed)
 //! {"op":"subscribe"}                     -> streams one line per transition:
 //!   {"event":"claimed|released|disconnected","client_id":...,
 //!    "claim_counter":N,"timestamp_ms":M}  until the client disconnects.
+//! {"op":"subscribe_buttons"}             -> streams one line per front-panel
+//!   button press: {"button":N,"kind":"short|long","action":<str|null>,
+//!   "timestamp_ms":M}  until the client disconnects. The display/OLED layer is
+//!   the consumer.
 //! ```
 
 use std::path::Path;
@@ -41,7 +48,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::Mutex;
 
-use crate::eventbus::PicEventKind;
+use crate::eventbus::{ButtonEventBus, PicEventKind};
 use crate::pic::{ClaimOutcome, HeartbeatOutcome, PicArbiter, PicState, ReleaseOutcome};
 
 /// PIC control socket path (sibling to supervisor.sock / mavlink.sock).
@@ -62,13 +69,32 @@ struct Request {
     confirm_token: Option<String>,
     #[serde(default)]
     force: bool,
+    /// Gamepad device id for the `gamepad_connected` op.
+    #[serde(default)]
+    device_id: Option<String>,
+    /// Client id the gamepad auto-claim runs under (defaults to the kiosk hint).
+    #[serde(default)]
+    client_id_hint: Option<String>,
 }
+
+/// Default client id the gamepad auto-claim binds to when the caller does not
+/// pass `client_id_hint`. Matches the kiosk hint the Python hotplug integration
+/// uses.
+const DEFAULT_CLIENT_HINT: &str = "hdmi-kiosk";
 
 /// Bind the control socket and serve requests until the listener errors. Run as
 /// its own task. Removes a stale socket first and chmods it 0660 (root-owned;
 /// the api service runs as root on target). Returns only on a bind error; the
 /// accept loop never exits on the happy path.
-pub async fn serve(arbiter: SharedArbiter, sock_path: &Path) -> std::io::Result<()> {
+///
+/// The `buttons` handle is the fanout the `subscribe_buttons` op streams from;
+/// pass a clone of the daemon's button bus so the display/OLED consumer can
+/// reach front-panel presses over the same socket.
+pub async fn serve(
+    arbiter: SharedArbiter,
+    buttons: ButtonEventBus,
+    sock_path: &Path,
+) -> std::io::Result<()> {
     // A stale socket from a prior run makes bind() fail with EADDRINUSE.
     let _ = std::fs::remove_file(sock_path);
     if let Some(parent) = sock_path.parent() {
@@ -86,8 +112,9 @@ pub async fn serve(arbiter: SharedArbiter, sock_path: &Path) -> std::io::Result<
         match listener.accept().await {
             Ok((stream, _addr)) => {
                 let arbiter = arbiter.clone();
+                let buttons = buttons.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = handle_conn(stream, arbiter).await {
+                    if let Err(e) = handle_conn(stream, arbiter, buttons).await {
                         tracing::debug!(error = %e, "pic conn error");
                     }
                 });
@@ -102,8 +129,12 @@ pub async fn serve(arbiter: SharedArbiter, sock_path: &Path) -> std::io::Result<
 }
 
 /// Read one newline-terminated request and either write one newline-terminated
-/// response (the request/response ops) or stream events (the subscribe op).
-async fn handle_conn(mut stream: UnixStream, arbiter: SharedArbiter) -> std::io::Result<()> {
+/// response (the request/response ops) or stream events (the subscribe ops).
+async fn handle_conn(
+    mut stream: UnixStream,
+    arbiter: SharedArbiter,
+    buttons: ButtonEventBus,
+) -> std::io::Result<()> {
     let mut buf = Vec::new();
     let mut chunk = [0u8; 1024];
     loop {
@@ -121,10 +152,12 @@ async fn handle_conn(mut stream: UnixStream, arbiter: SharedArbiter) -> std::io:
         None => &buf[..],
     };
 
-    // The subscribe op holds the connection open and streams events; everything
+    // The subscribe ops hold the connection open and stream events; everything
     // else is one request -> one response.
-    if is_subscribe(line) {
-        return stream_events(stream, arbiter).await;
+    match op_of(line).as_deref() {
+        Some("subscribe") => return stream_events(stream, arbiter).await,
+        Some("subscribe_buttons") => return stream_button_events(stream, buttons).await,
+        _ => {}
     }
 
     let resp = dispatch(line, &arbiter).await;
@@ -136,10 +169,10 @@ async fn handle_conn(mut stream: UnixStream, arbiter: SharedArbiter) -> std::io:
     Ok(())
 }
 
-fn is_subscribe(line: &[u8]) -> bool {
-    serde_json::from_slice::<Request>(line)
-        .map(|r| r.op == "subscribe")
-        .unwrap_or(false)
+/// The `op` field of a request line, if it parses; used to route the streaming
+/// ops before the one-shot dispatch.
+fn op_of(line: &[u8]) -> Option<String> {
+    serde_json::from_slice::<Request>(line).ok().map(|r| r.op)
 }
 
 /// Parse + route one request to the arbiter. Pure async over the shared handle
@@ -189,9 +222,21 @@ async fn dispatch(line: &[u8], arbiter: &SharedArbiter) -> Value {
             arb.on_pic_disconnected();
             json!({"ok": true})
         }
-        // subscribe is handled before dispatch; reaching here means it was
-        // routed wrong, so report it rather than silently hanging.
+        "gamepad_connected" => {
+            let Some(device_id) = req.device_id.as_deref() else {
+                return json!({"ok": false, "error": "E_MISSING_DEVICE_ID"});
+            };
+            let hint = req.client_id_hint.as_deref().unwrap_or(DEFAULT_CLIENT_HINT);
+            // The arbiter records this gamepad as the PIC-bound primary and
+            // auto-claims for the hint when nobody holds PIC. No-op when held.
+            let mut arb = arbiter.lock().await;
+            arb.on_gamepad_connected(device_id, hint);
+            json!({"ok": true})
+        }
+        // the subscribe ops are handled before dispatch; reaching here means a
+        // routing miss, so report it rather than silently hanging.
         "subscribe" => json!({"ok": false, "error": "E_SUBSCRIBE_NOT_STREAMED"}),
+        "subscribe_buttons" => json!({"ok": false, "error": "E_SUBSCRIBE_NOT_STREAMED"}),
         other => json!({"ok": false, "error": format!("E_UNKNOWN_OP: {other}")}),
     }
 }
@@ -339,6 +384,40 @@ async fn stream_events(mut stream: UnixStream, arbiter: SharedArbiter) -> std::i
     Ok(())
 }
 
+/// Stream front-panel button presses to a subscriber as newline-JSON until the
+/// client disconnects or the bus is dropped. The display/OLED layer is the
+/// consumer; the wire shape (`button` / `kind` / `action` / `timestamp_ms`)
+/// matches the Python button event so either runtime can read it.
+async fn stream_button_events(
+    mut stream: UnixStream,
+    buttons: ButtonEventBus,
+) -> std::io::Result<()> {
+    let mut rx = buttons.subscribe();
+    loop {
+        match rx.recv().await {
+            Ok(ev) => {
+                let mut body = serde_json::to_vec(&json!({
+                    "button": ev.button,
+                    "kind": ev.kind,
+                    "action": ev.action,
+                    "timestamp_ms": ev.timestamp_ms,
+                }))
+                .unwrap_or_default();
+                body.push(b'\n');
+                if stream.write_all(&body).await.is_err() {
+                    break;
+                }
+                if stream.flush().await.is_err() {
+                    break;
+                }
+            }
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -431,10 +510,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let sock = dir.path().join("pic.sock");
         let arbiter = fresh();
+        let buttons = ButtonEventBus::new();
         let server = tokio::spawn({
             let arbiter = arbiter.clone();
+            let buttons = buttons.clone();
             let sock = sock.clone();
-            async move { serve(arbiter, &sock).await }
+            async move { serve(arbiter, buttons, &sock).await }
         });
         // Wait for the socket to appear.
         for _ in 0..50 {
@@ -476,6 +557,97 @@ mod tests {
         assert_eq!(ev["event"], "claimed");
         assert_eq!(ev["client_id"], "op-a");
         assert_eq!(ev["claim_counter"], 1);
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn dispatch_gamepad_connected_binds_primary_and_auto_claims() {
+        let arb = fresh();
+        // A gamepad connect on an unclaimed arbiter auto-claims for the hint and
+        // records the device as the PIC-bound primary.
+        let v = dispatch(
+            br#"{"op":"gamepad_connected","device_id":"usb:045e:028e:event3"}"#,
+            &arb,
+        )
+        .await;
+        assert_eq!(v["ok"], true);
+        let v = dispatch(br#"{"op":"get_state"}"#, &arb).await;
+        assert_eq!(v["state"], "claimed");
+        assert_eq!(v["claimed_by"], "hdmi-kiosk");
+        assert_eq!(v["primary_gamepad_id"], "usb:045e:028e:event3");
+    }
+
+    #[tokio::test]
+    async fn dispatch_gamepad_connected_missing_device_id_errors() {
+        let arb = fresh();
+        let v = dispatch(br#"{"op":"gamepad_connected"}"#, &arb).await;
+        assert_eq!(v["ok"], false);
+        assert_eq!(v["error"], "E_MISSING_DEVICE_ID");
+    }
+
+    #[tokio::test]
+    async fn dispatch_gamepad_connected_honours_custom_hint() {
+        let arb = fresh();
+        let v = dispatch(
+            br#"{"op":"gamepad_connected","device_id":"usb:1","client_id_hint":"bench-op"}"#,
+            &arb,
+        )
+        .await;
+        assert_eq!(v["ok"], true);
+        let v = dispatch(br#"{"op":"get_state"}"#, &arb).await;
+        assert_eq!(v["claimed_by"], "bench-op");
+    }
+
+    #[tokio::test]
+    async fn end_to_end_button_event_stream() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("pic.sock");
+        let arbiter = fresh();
+        let buttons = ButtonEventBus::new();
+        let server = tokio::spawn({
+            let arbiter = arbiter.clone();
+            let buttons = buttons.clone();
+            let sock = sock.clone();
+            async move { serve(arbiter, buttons, &sock).await }
+        });
+        for _ in 0..50 {
+            if sock.exists() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+
+        // A consumer subscribes to the button stream.
+        let sub = UnixStream::connect(&sock).await.unwrap();
+        let mut sub = BufReader::new(sub);
+        sub.get_mut()
+            .write_all(b"{\"op\":\"subscribe_buttons\"}\n")
+            .await
+            .unwrap();
+        // Wait until the server registered the subscriber before publishing.
+        for _ in 0..50 {
+            if buttons.receiver_count() > 0 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+
+        // The daemon's button reader publishes a press onto the bus.
+        buttons.publish(crate::eventbus::ButtonBusEvent {
+            button: 5,
+            kind: "short",
+            action: Some("cycle_screen".into()),
+            timestamp_ms: 1500,
+        });
+
+        let mut ev_line = String::new();
+        sub.read_line(&mut ev_line).await.unwrap();
+        let ev: Value = serde_json::from_str(ev_line.trim()).unwrap();
+        assert_eq!(ev["button"], 5);
+        assert_eq!(ev["kind"], "short");
+        assert_eq!(ev["action"], "cycle_screen");
+        assert_eq!(ev["timestamp_ms"], 1500);
 
         server.abort();
     }

@@ -18,6 +18,7 @@ use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::Mutex;
 
 use ados_hid::buttons::{self, default_button_mapping};
+use ados_hid::eventbus::ButtonEventBus;
 use ados_hid::pic::{PicArbiter, WATCHDOG_INTERVAL_SECONDS};
 use ados_hid::pic_ipc::{self, PIC_SOCK};
 
@@ -68,13 +69,21 @@ async fn main() -> Result<()> {
 
     let arbiter: pic_ipc::SharedArbiter = Arc::new(Mutex::new(PicArbiter::new()));
 
+    // The button fanout: the GPIO reader publishes classified presses here, and
+    // the display/OLED layer subscribes over the control socket
+    // (`subscribe_buttons`). Front-panel presses reach a consumer rather than
+    // only the journal.
+    let button_bus = ButtonEventBus::new();
+
     // The IPC seam: the FastAPI /pic/* routes + the kiosk reach the arbiter
-    // here. Always served — every ground station needs it.
+    // here, and the display layer streams button presses here. Always served —
+    // every ground station needs it.
     {
         let arbiter = arbiter.clone();
+        let button_bus = button_bus.clone();
         tokio::spawn(async move {
             let path = Path::new(PIC_SOCK);
-            if let Err(e) = pic_ipc::serve(arbiter, path).await {
+            if let Err(e) = pic_ipc::serve(arbiter, button_bus, path).await {
                 tracing::error!(error = %e, "pic control socket exited");
             }
         });
@@ -84,7 +93,7 @@ async fn main() -> Result<()> {
     // mapping handle is shared with the SIGHUP task so a remap is seen by the
     // next release.
     let mapping = Arc::new(RwLock::new(load_button_mapping()));
-    spawn_button_reader(mapping.clone());
+    spawn_button_reader(mapping.clone(), button_bus.clone());
 
     sd_ready();
     tracing::info!(sock = PIC_SOCK, "ados-pic ready");
@@ -157,10 +166,16 @@ fn read_buttons_block() -> Option<serde_norway::Value> {
 
 /// Spawn the button reader on a blocking task when a GPIO chip exists; otherwise
 /// log the skip and return. Only the chip-open is hardware-coupled; the
-/// classification runs through the shared [`PressClassifier`].
+/// classification runs through the shared [`PressClassifier`]. Each classified
+/// press is published to `button_bus` so the display/OLED subscriber acts on it
+/// (and logged for the journal).
 #[cfg(target_os = "linux")]
-fn spawn_button_reader(mapping: Arc<RwLock<std::collections::HashMap<String, String>>>) {
+fn spawn_button_reader(
+    mapping: Arc<RwLock<std::collections::HashMap<String, String>>>,
+    button_bus: ButtonEventBus,
+) {
     use ados_hid::buttons::{gpio_subsystem_present, ButtonEvent, PressClassifier, BUTTON_PINS};
+    use ados_hid::eventbus::ButtonBusEvent;
 
     if !gpio_subsystem_present() {
         tracing::info!("button reader skipped: no /dev/gpiochip*");
@@ -175,6 +190,13 @@ fn spawn_button_reader(mapping: Arc<RwLock<std::collections::HashMap<String, Str
                 action = ?ev.action,
                 "button event"
             );
+            // Fan out to the display/OLED consumer over the control socket.
+            button_bus.publish(ButtonBusEvent {
+                button: ev.pin,
+                kind: ev.kind.as_str(),
+                action: ev.action.clone(),
+                timestamp_ms: ev.timestamp_ms,
+            });
         };
         // gpiochip0 is the conventional primary chip on the supported boards.
         if let Err(e) =
@@ -190,6 +212,9 @@ fn spawn_button_reader(mapping: Arc<RwLock<std::collections::HashMap<String, Str
 /// Off Linux there is no character-device GPIO; the reader is a no-op so the
 /// daemon still builds and serves the PIC seam on a dev host.
 #[cfg(not(target_os = "linux"))]
-fn spawn_button_reader(_mapping: Arc<RwLock<std::collections::HashMap<String, String>>>) {
+fn spawn_button_reader(
+    _mapping: Arc<RwLock<std::collections::HashMap<String, String>>>,
+    _button_bus: ButtonEventBus,
+) {
     tracing::debug!("button reader unavailable off Linux");
 }

@@ -1,3 +1,7 @@
+// Unused in this crate today: the touch/LCD path is owned by the display layer.
+// Kept as the host-portable gesture FSM for that layer to wire when its touch
+// path lands; do not delete here.
+//
 //! Touch input: raw evdev samples -> rotated/calibrated -> classified gesture.
 //!
 //! Ports `src/ados/services/ui/touch/bridge.py`: the per-stroke state machine

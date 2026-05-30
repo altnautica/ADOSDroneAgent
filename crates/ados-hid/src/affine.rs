@@ -1,3 +1,7 @@
+// Unused in this crate today: the touch/LCD path is owned by the display layer.
+// Kept as the host-portable affine transform for that layer to wire when its
+// touch path lands; do not delete here.
+//
 //! Touchscreen affine transform: raw ADC -> LCD pixel coordinates.
 //!
 //! The resistive-touch driver reports raw 12-bit ADC counts in 0..4095. The

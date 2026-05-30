@@ -2,9 +2,18 @@
 //!
 //! Owns the input-device lifecycle for the ground-station profile: a 1 Hz
 //! hotplug poll of the attached gamepads, primary-device persistence, and the
-//! auto-claim feed into the PIC arbiter. On a gamepad connect it forwards
-//! `on_gamepad_connected` to the `ados-pic` daemon over the PIC control socket
-//! (the IPC seam) rather than holding its own arbiter, keeping a single owner.
+//! auto-claim feed into the PIC arbiter. On a gamepad connect it forwards a
+//! `gamepad_connected` op to the `ados-pic` daemon over the PIC control socket
+//! (the IPC seam) so the arbiter both auto-claims and records the device as the
+//! PIC-bound primary, rather than holding its own arbiter, keeping a single
+//! owner of PIC state.
+//!
+//! On a gamepad DISCONNECT it asks the arbiter which device is the PIC-bound
+//! primary (`get_state` -> `primary_gamepad_id`) and, when the removed device is
+//! that primary, forwards a `disconnect` op so the arbiter drops PIC. Pulling
+//! the primary stick must release control; the arbiter is the single source of
+//! truth for which gamepad is bound, so the daemon reads it rather than tracking
+//! a separate copy.
 //!
 //! On a host with no `/dev/input` gamepads the poll simply reports an empty set;
 //! the daemon stays up so a later hotplug is caught. Modelled on the supervisor
@@ -138,36 +147,81 @@ async fn handle_outcome(outcome: &PollOutcome, state_path: &Path) {
         match ev.kind {
             HotplugKind::Connected => {
                 tracing::info!(device_id = %ev.device_id, name = %ev.name, "gamepad connected");
-                // Auto-claim PIC for the kiosk on first gamepad. The arbiter
-                // is a no-op when PIC is already held.
+                // Auto-claim PIC for the kiosk and bind this gamepad as the
+                // PIC-bound primary. The arbiter is a no-op when PIC is held.
                 if let Err(e) = forward_gamepad_connected(&ev.device_id).await {
                     tracing::debug!(error = %e, "pic auto-claim forward failed");
                 }
             }
             HotplugKind::Disconnected => {
                 tracing::info!(device_id = %ev.device_id, "gamepad disconnected");
+                // Drop PIC when the removed device is the arbiter's PIC-bound
+                // primary. Pulling the primary stick must release control.
+                match forward_primary_disconnect(&ev.device_id).await {
+                    Ok(true) => tracing::warn!(
+                        device_id = %ev.device_id,
+                        "primary gamepad removed; dropped PIC"
+                    ),
+                    Ok(false) => {}
+                    Err(e) => tracing::debug!(error = %e, "pic disconnect forward failed"),
+                }
             }
         }
     }
 }
 
-/// Send the auto-claim to the `ados-pic` daemon over the PIC control socket. The
-/// arbiter's `on_gamepad_connected` is the no-op-if-claimed path; here it is
-/// expressed as a non-forced `claim` under the kiosk client id, so a gamepad
-/// connect grants PIC only when nobody holds it.
-async fn forward_gamepad_connected(device_id: &str) -> std::io::Result<()> {
+/// One newline-JSON request -> the one-line reply, parsed as JSON. Used for the
+/// request/response ops on the PIC control socket.
+async fn pic_request(req: &serde_json::Value) -> std::io::Result<serde_json::Value> {
     let mut stream = UnixStream::connect(PIC_SOCK).await?;
-    let req = serde_json::json!({
-        "op": "claim",
-        "client_id": CLIENT_HINT,
-        "device_id": device_id,
-    });
-    let mut body = serde_json::to_vec(&req)?;
+    let mut body = serde_json::to_vec(req)?;
     body.push(b'\n');
     stream.write_all(&body).await?;
     stream.flush().await?;
-    // Drain the one-line reply so the socket closes cleanly.
-    let mut buf = [0u8; 512];
-    let _ = stream.read(&mut buf).await;
+    let mut buf = Vec::new();
+    let mut chunk = [0u8; 512];
+    loop {
+        let n = stream.read(&mut chunk).await?;
+        if n == 0 {
+            break;
+        }
+        buf.extend_from_slice(&chunk[..n]);
+        if buf.contains(&b'\n') {
+            break;
+        }
+    }
+    let line = match buf.iter().position(|&b| b == b'\n') {
+        Some(i) => &buf[..i],
+        None => &buf[..],
+    };
+    serde_json::from_slice(line)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+}
+
+/// Forward a gamepad connect to the `ados-pic` daemon over the control socket.
+/// The arbiter records the device as the PIC-bound primary and auto-claims for
+/// the kiosk hint when nobody holds PIC; it is a no-op when PIC is already held.
+async fn forward_gamepad_connected(device_id: &str) -> std::io::Result<()> {
+    let req = serde_json::json!({
+        "op": "gamepad_connected",
+        "device_id": device_id,
+        "client_id_hint": CLIENT_HINT,
+    });
+    let _ = pic_request(&req).await?;
     Ok(())
+}
+
+/// When `device_id` is the arbiter's PIC-bound primary, forward a `disconnect`
+/// op so PIC is dropped, and return `true`. Returns `false` when the removed
+/// device is not the primary (no PIC change). The arbiter owns
+/// `primary_gamepad_id`, so this reads it from `get_state` rather than keeping a
+/// local copy that could drift across the process boundary.
+async fn forward_primary_disconnect(device_id: &str) -> std::io::Result<bool> {
+    let state = pic_request(&serde_json::json!({"op": "get_state"})).await?;
+    let primary = state.get("primary_gamepad_id").and_then(|v| v.as_str());
+    if primary != Some(device_id) {
+        return Ok(false);
+    }
+    let _ = pic_request(&serde_json::json!({"op": "disconnect"})).await?;
+    Ok(true)
 }
