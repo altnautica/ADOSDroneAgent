@@ -1,0 +1,836 @@
+//! The uplink-aware cloud relay bridge.
+//!
+//! Lifecycle + decision logic ported from `cloud_relay_bridge.py`. The decision
+//! surface (what to tear down / bring up / forward on each uplink, health, and
+//! data-cap transition) is factored into pure methods so it is unit-testable
+//! with no MQTT and no network; the live supervision (`start`/`run`) drives the
+//! MQTT gateway + MAVLink relay tasks and the 30 s GS status heartbeat.
+
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+use serde::{Deserialize, Serialize};
+use tokio::sync::watch;
+use tracing::{debug, info, warn};
+
+use crate::mqtt::transport::TransportConfig;
+use crate::mqtt::MavlinkMqttRelay;
+
+/// The active-uplink sidecar the `ados-net` uplink router writes. Presence ==
+/// an active uplink; the body carries the live uplink + reachability + data-cap
+/// level. The bridge reads this each tick as the cross-process replacement for
+/// the old in-process uplink event bus.
+pub const UPLINK_ACTIVE_FLAG: &str = "/run/ados/uplink-active";
+
+/// The MAVLink IPC socket the relay bridges FC frames over.
+pub const MAVLINK_SOCK: &str = "/run/ados/mavlink.sock";
+
+/// The vehicle-state IPC socket the GS heartbeat enriches from.
+pub const STATE_SOCK: &str = "/run/ados/state.sock";
+
+// ── Reconnect tunables (mirror the Python module constants) ──────────────
+const RECONNECT_BASE: Duration = Duration::from_secs(2);
+const RECONNECT_MAX: Duration = Duration::from_secs(300);
+const RECONNECT_MULTIPLIER: u32 = 2;
+const UPLINK_SETTLE: Duration = Duration::from_secs(2);
+const STATUS_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
+
+/// The data-cap throttle level driving what the bridge forwards to the cloud.
+/// Maps the active-flag `data_cap_state` strings to forwarding decisions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThrottleState {
+    /// Forward video + telemetry.
+    None,
+    /// Approaching cap: still forward everything (warning only).
+    Warn,
+    /// 95 %: stop video forwarding, keep telemetry.
+    VideoOff,
+    /// 100 %: drop everything except the minimal status heartbeat.
+    Blocked,
+}
+
+impl ThrottleState {
+    /// Parse the active-flag `data_cap_state` string. Unknown / absent → None.
+    pub fn from_cap_str(s: &str) -> Self {
+        match s {
+            "warn_80" => ThrottleState::Warn,
+            "throttle_95" => ThrottleState::VideoOff,
+            "blocked_100" => ThrottleState::Blocked,
+            _ => ThrottleState::None,
+        }
+    }
+
+    /// The wire string carried on the GS heartbeat (`throttle_state`). Matches
+    /// the Python `_THROTTLE_*` values.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ThrottleState::None => "none",
+            ThrottleState::Warn => "warn_80",
+            ThrottleState::VideoOff => "throttle_95",
+            ThrottleState::Blocked => "blocked_100",
+        }
+    }
+
+    /// Whether video is forwarded to the cloud at this level.
+    pub fn forward_video(&self) -> bool {
+        matches!(self, ThrottleState::None | ThrottleState::Warn)
+    }
+
+    /// Whether telemetry is forwarded to the cloud at this level.
+    pub fn forward_telemetry(&self) -> bool {
+        !matches!(self, ThrottleState::Blocked)
+    }
+}
+
+/// One read of the active-uplink sidecar. `present` is the file's existence
+/// (the legacy mesh signal); the rest is the parsed body.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
+pub struct UplinkSnapshot {
+    #[serde(default)]
+    pub active_uplink: String,
+    #[serde(default)]
+    pub internet_reachable: bool,
+    #[serde(default = "default_cap")]
+    pub data_cap_state: String,
+}
+
+fn default_cap() -> String {
+    "ok".to_string()
+}
+
+impl UplinkSnapshot {
+    /// Read the active-uplink sidecar. Returns `None` when the file is absent
+    /// (no active uplink) — the bridge treats that as "idle".
+    pub fn read(path: &Path) -> Option<Self> {
+        let text = std::fs::read_to_string(path).ok()?;
+        serde_json::from_str(&text).ok()
+    }
+}
+
+/// The 30 s GS status payload posted to `{convex}/agent/status`. This is a
+/// SEPARATE, smaller document from the frozen agent heartbeat: it reports the
+/// relay's own forwarding state, not the full board/service enrichment. Fields
+/// mirror the Python `_convex_heartbeat_loop` payload (snake_case), with an
+/// optional `telemetry` block folded from the live vehicle state.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct GsHeartbeat {
+    pub drone_id: Option<String>,
+    pub uplink: String,
+    pub mqtt_connected: bool,
+    pub throttle_state: String,
+    pub forwarding_video: bool,
+    pub forwarding_telemetry: bool,
+    pub ts_ms: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub telemetry: Option<serde_json::Value>,
+}
+
+/// A reader of the live vehicle state for heartbeat enrichment. The production
+/// impl connects to the state IPC socket; tests inject a fake snapshot.
+pub trait StateSnapshotSource: Send + Sync {
+    /// The latest vehicle-state snapshot, or `None` when no snapshot has arrived
+    /// yet (or no reader is wired). The bridge folds it into the heartbeat's
+    /// optional `telemetry` block.
+    fn latest(&self) -> Option<serde_json::Value>;
+}
+
+/// The current connection backoff, exposed so the supervision loop and tests
+/// share the same ladder (2 s → ×2 → 300 s cap).
+#[derive(Debug, Clone, Copy)]
+pub struct Backoff {
+    current: Duration,
+}
+
+impl Backoff {
+    pub fn new() -> Self {
+        Self {
+            current: RECONNECT_BASE,
+        }
+    }
+    /// The delay to wait before the next attempt.
+    pub fn delay(&self) -> Duration {
+        self.current
+    }
+    /// Advance the backoff after a failed attempt (×2, capped at 300 s).
+    pub fn advance(&mut self) {
+        let next = self.current.saturating_mul(RECONNECT_MULTIPLIER);
+        self.current = next.min(RECONNECT_MAX);
+    }
+    /// Reset to the base delay after a successful connect.
+    pub fn reset(&mut self) {
+        self.current = RECONNECT_BASE;
+    }
+}
+
+impl Default for Backoff {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// What the bridge should do in response to an uplink/health transition. The
+/// pure decision the live loop then executes. Keeping this as data makes the
+/// reconcile logic testable without driving real MQTT.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MqttAction {
+    /// Tear MQTT down, settle, then (re)connect over the new uplink.
+    TeardownThenReconnect,
+    /// Tear MQTT down and stay idle (no uplink or not reachable).
+    TeardownIdle,
+    /// Bring MQTT up (health restored while it was down).
+    BringUp,
+    /// Nothing to do.
+    Noop,
+}
+
+/// The uplink-aware cloud relay bridge.
+pub struct CloudRelayBridge {
+    device_id: String,
+    drone_id: Option<String>,
+    convex_base: String,
+    api_key: Option<String>,
+    relay_transport: TransportConfig,
+    flag_path: PathBuf,
+    mavlink_sock: PathBuf,
+    state_source: Option<std::sync::Arc<dyn StateSnapshotSource>>,
+
+    // Live reconciliation state.
+    current_uplink: Option<String>,
+    internet_reachable: bool,
+    throttle: ThrottleState,
+    mqtt_connected: bool,
+    backoff: Backoff,
+}
+
+impl CloudRelayBridge {
+    /// Build a bridge. `relay_transport` is the dial config for the MAVLink
+    /// relay (`ados-{id}` username, broker host/port/password); `drone_id` is
+    /// the paired drone id reported on the heartbeat.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        device_id: impl Into<String>,
+        drone_id: Option<String>,
+        convex_base: impl Into<String>,
+        api_key: Option<String>,
+        relay_transport: TransportConfig,
+    ) -> Self {
+        Self {
+            device_id: device_id.into(),
+            drone_id,
+            convex_base: convex_base.into().trim_end_matches('/').to_string(),
+            api_key,
+            relay_transport,
+            flag_path: PathBuf::from(UPLINK_ACTIVE_FLAG),
+            mavlink_sock: PathBuf::from(MAVLINK_SOCK),
+            state_source: None,
+            current_uplink: None,
+            internet_reachable: false,
+            throttle: ThrottleState::None,
+            mqtt_connected: false,
+            backoff: Backoff::new(),
+        }
+    }
+
+    /// Override the active-flag path (tests).
+    pub fn with_flag_path(mut self, path: PathBuf) -> Self {
+        self.flag_path = path;
+        self
+    }
+
+    /// Wire a live vehicle-state source for heartbeat enrichment.
+    pub fn with_state_source(mut self, src: std::sync::Arc<dyn StateSnapshotSource>) -> Self {
+        self.state_source = Some(src);
+        self
+    }
+
+    /// Whether video is currently forwarded (derived from the throttle level).
+    pub fn forwarding_video(&self) -> bool {
+        self.throttle.forward_video()
+    }
+
+    /// Whether telemetry is currently forwarded.
+    pub fn forwarding_telemetry(&self) -> bool {
+        self.throttle.forward_telemetry()
+    }
+
+    /// The current throttle level.
+    pub fn throttle_state(&self) -> ThrottleState {
+        self.throttle
+    }
+
+    // ── Pure decision logic (testable) ──────────────────────────────────
+
+    /// Decide the MQTT action for a new uplink snapshot, updating the bridge's
+    /// tracked uplink + reachability. Mirrors `_on_uplink_changed`: any uplink
+    /// change tears MQTT down; a live + reachable uplink then reconnects, else
+    /// the bridge idles.
+    pub fn reconcile_uplink(&mut self, snap: Option<&UplinkSnapshot>) -> MqttAction {
+        let (new_uplink, reachable) = match snap {
+            Some(s) if !s.active_uplink.is_empty() => {
+                (Some(s.active_uplink.clone()), s.internet_reachable)
+            }
+            _ => (None, false),
+        };
+
+        let uplink_changed = new_uplink != self.current_uplink;
+        let reach_changed = reachable != self.internet_reachable;
+
+        // Fold the data-cap level on every read so a cap transition that rides
+        // in on the same file is applied.
+        if let Some(s) = snap {
+            self.throttle = ThrottleState::from_cap_str(&s.data_cap_state);
+        }
+
+        if uplink_changed {
+            self.current_uplink = new_uplink.clone();
+            self.internet_reachable = reachable;
+            return match new_uplink {
+                Some(_) if reachable => MqttAction::TeardownThenReconnect,
+                _ => MqttAction::TeardownIdle,
+            };
+        }
+
+        if reach_changed {
+            // Same uplink, reachability flipped: mirror `_on_health_changed`.
+            self.internet_reachable = reachable;
+            if reachable && !self.mqtt_connected {
+                return MqttAction::BringUp;
+            }
+            if !reachable && self.mqtt_connected {
+                return MqttAction::TeardownIdle;
+            }
+        }
+
+        MqttAction::Noop
+    }
+
+    /// Apply a data-cap level, returning `true` when the relay must be torn down
+    /// (the 100 % heartbeat-only case). Mirrors `_on_data_cap_threshold`.
+    pub fn apply_data_cap(&mut self, state: ThrottleState) -> bool {
+        let previous = self.throttle;
+        self.throttle = state;
+        match state {
+            ThrottleState::Blocked => {
+                warn!(previous = previous.as_str(), "cloud_relay.data_cap_blocked");
+                true // tear the relay down; heartbeat-only.
+            }
+            ThrottleState::VideoOff => {
+                warn!(previous = previous.as_str(), "cloud_relay.data_cap_throttle");
+                false
+            }
+            _ => {
+                info!(previous = previous.as_str(), "cloud_relay.data_cap_ok");
+                false
+            }
+        }
+    }
+
+    /// Build the GS heartbeat payload from the current relay state, folding the
+    /// live vehicle-state telemetry when a state source is wired and has a
+    /// snapshot. Returns `None` when there is no uplink to report on (the Python
+    /// loop skips posting in that case).
+    pub fn build_heartbeat(&self, ts_ms: i64) -> Option<GsHeartbeat> {
+        let uplink = self.current_uplink.clone()?;
+        let telemetry = self
+            .state_source
+            .as_ref()
+            .and_then(|s| s.latest())
+            .map(fold_telemetry);
+        Some(GsHeartbeat {
+            drone_id: self.drone_id.clone(),
+            uplink,
+            mqtt_connected: self.mqtt_connected,
+            throttle_state: self.throttle.as_str().to_string(),
+            forwarding_video: self.throttle.forward_video(),
+            forwarding_telemetry: self.throttle.forward_telemetry(),
+            ts_ms,
+            telemetry,
+        })
+    }
+
+    // ── Live supervision ────────────────────────────────────────────────
+
+    /// Run the bridge until `shutdown` fires. Polls the active-flag file on a
+    /// short cadence and reconciles MQTT on each transition (explicit
+    /// teardown/reconnect on uplink change), and posts the GS heartbeat every
+    /// 30 s. Best-effort throughout: a transport failure schedules a backoff
+    /// retry, never a crash.
+    pub async fn run(
+        &mut self,
+        http: std::sync::Arc<reqwest::Client>,
+        mut shutdown: watch::Receiver<bool>,
+    ) {
+        info!(
+            drone_id = ?self.drone_id,
+            convex_base = %self.convex_base,
+            "cloud_relay.start"
+        );
+        // The live relay task handle + its shutdown.
+        let mut relay_task: Option<tokio::task::JoinHandle<()>> = None;
+        let mut relay_shutdown: Option<watch::Sender<bool>> = None;
+
+        let mut poll = tokio::time::interval(Duration::from_secs(2));
+        let mut heartbeat = tokio::time::interval(STATUS_HEARTBEAT_INTERVAL);
+        // Skip the immediate heartbeat tick (the Python loop sleeps first).
+        heartbeat.tick().await;
+
+        loop {
+            tokio::select! {
+                _ = shutdown.changed() => {
+                    if *shutdown.borrow() { break; }
+                }
+                _ = poll.tick() => {
+                    let snap = UplinkSnapshot::read(&self.flag_path);
+                    let action = self.reconcile_uplink(snap.as_ref());
+                    match action {
+                        MqttAction::TeardownThenReconnect => {
+                            teardown_relay(&mut relay_task, &mut relay_shutdown).await;
+                            self.mqtt_connected = false;
+                            tokio::time::sleep(UPLINK_SETTLE).await;
+                            self.bring_up_relay(&mut relay_task, &mut relay_shutdown);
+                        }
+                        MqttAction::TeardownIdle => {
+                            teardown_relay(&mut relay_task, &mut relay_shutdown).await;
+                            self.mqtt_connected = false;
+                        }
+                        MqttAction::BringUp => {
+                            self.bring_up_relay(&mut relay_task, &mut relay_shutdown);
+                        }
+                        MqttAction::Noop => {
+                            // If video-off→ok and the relay is down, restore it.
+                            if self.throttle.forward_telemetry()
+                                && relay_task.is_none()
+                                && self.current_uplink.is_some()
+                                && self.internet_reachable
+                            {
+                                self.bring_up_relay(&mut relay_task, &mut relay_shutdown);
+                            }
+                            // At 100 % drop the relay, keep the heartbeat.
+                            if self.throttle == ThrottleState::Blocked {
+                                teardown_relay(&mut relay_task, &mut relay_shutdown).await;
+                            }
+                        }
+                    }
+                }
+                _ = heartbeat.tick() => {
+                    let ts_ms = now_ms();
+                    if let Some(body) = self.build_heartbeat(ts_ms) {
+                        self.post_status(&http, &body).await;
+                    }
+                }
+            }
+        }
+
+        teardown_relay(&mut relay_task, &mut relay_shutdown).await;
+        info!("cloud_relay.stop");
+    }
+
+    /// Spawn the MAVLink relay task when the throttle allows telemetry. The relay
+    /// owns its own broker connection over the bound uplink (the kernel route was
+    /// re-programmed by the failover before this reconnect).
+    fn bring_up_relay(
+        &mut self,
+        relay_task: &mut Option<tokio::task::JoinHandle<()>>,
+        relay_shutdown: &mut Option<watch::Sender<bool>>,
+    ) {
+        if relay_task.as_ref().is_some_and(|h| !h.is_finished()) {
+            return;
+        }
+        if !self.throttle.forward_telemetry() {
+            debug!("cloud_relay.relay_suppressed_by_data_cap");
+            return;
+        }
+        let (tx, rx) = watch::channel(false);
+        let relay = MavlinkMqttRelay::new(self.device_id.clone(), self.relay_transport.clone());
+        let sock = self.mavlink_sock.clone();
+        let handle = tokio::spawn(async move {
+            if let Err(e) = relay.run(&sock, rx).await {
+                warn!(error = %e, "cloud_relay.relay_exited");
+            }
+        });
+        *relay_task = Some(handle);
+        *relay_shutdown = Some(tx);
+        self.mqtt_connected = true;
+        self.backoff.reset();
+        info!("cloud_relay.mavlink_relay_started");
+    }
+
+    /// POST the GS status heartbeat. Best-effort; a non-2xx / transport error is
+    /// logged at debug.
+    async fn post_status(&self, http: &reqwest::Client, body: &GsHeartbeat) {
+        let url = format!("{}/agent/status", self.convex_base);
+        let mut req = http.post(&url).json(body);
+        if let Some(key) = &self.api_key {
+            req = req.header("x-ados-key", key);
+        }
+        match req.send().await {
+            Ok(resp) if resp.status().is_success() => debug!("cloud_relay.convex_ok"),
+            Ok(resp) => debug!(status = resp.status().as_u16(), "cloud_relay.convex_non2xx"),
+            Err(e) => debug!(error = %e, "cloud_relay.convex_post_failed"),
+        }
+    }
+}
+
+/// Tear the relay task down: signal its shutdown, await with a timeout, abort on
+/// stall. Mirrors `_teardown_relay`.
+async fn teardown_relay(
+    relay_task: &mut Option<tokio::task::JoinHandle<()>>,
+    relay_shutdown: &mut Option<watch::Sender<bool>>,
+) {
+    if let Some(tx) = relay_shutdown.take() {
+        let _ = tx.send(true);
+    }
+    if let Some(handle) = relay_task.take() {
+        match tokio::time::timeout(Duration::from_secs(5), handle).await {
+            Ok(_) => {}
+            Err(_) => debug!("cloud_relay.relay_teardown_timeout"),
+        }
+    }
+}
+
+/// Fold a raw vehicle-state JSON snapshot into the heartbeat telemetry block.
+/// Picks the small set of fields the Python loop forwarded; unknown shapes pass
+/// through as the raw object so a schema change does not drop data.
+fn fold_telemetry(state: serde_json::Value) -> serde_json::Value {
+    let obj = match state.as_object() {
+        Some(o) => o,
+        None => return serde_json::json!({}),
+    };
+    let pick = |k: &str| obj.get(k).cloned().unwrap_or(serde_json::Value::Null);
+    serde_json::json!({
+        "armed": pick("armed"),
+        "mode": pick("mode"),
+        "lat": pick("lat"),
+        "lon": pick("lon"),
+        "alt_rel": pick("alt_rel"),
+        "battery_voltage": pick("voltage_battery"),
+        "battery_remaining": pick("battery_remaining"),
+        "last_heartbeat": pick("last_heartbeat"),
+    })
+}
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+/// A live vehicle-state reader over the state IPC socket (`/run/ados/state.sock`).
+/// Connects on demand, reads the newest newline-JSON snapshot, and caches it for
+/// the heartbeat. The reader holds the latest snapshot behind a mutex so the
+/// synchronous [`StateSnapshotSource::latest`] never blocks the heartbeat tick.
+pub struct StateIpcReader {
+    latest: std::sync::Arc<std::sync::Mutex<Option<serde_json::Value>>>,
+}
+
+impl StateIpcReader {
+    /// Build a reader and spawn its background poll against `path`
+    /// (`/run/ados/state.sock` by default). The poll reconnects on any read
+    /// error; absence of the socket simply leaves `latest` empty.
+    pub fn spawn(path: PathBuf, mut shutdown: watch::Receiver<bool>) -> Self {
+        let latest = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let store = latest.clone();
+        tokio::spawn(async move {
+            loop {
+                if *shutdown.borrow() {
+                    return;
+                }
+                match tokio::net::UnixStream::connect(&path).await {
+                    Ok(stream) => {
+                        let mut reader = tokio::io::BufReader::new(stream);
+                        let mut line = String::new();
+                        loop {
+                            use tokio::io::AsyncBufReadExt;
+                            tokio::select! {
+                                _ = shutdown.changed() => { if *shutdown.borrow() { return; } }
+                                read = reader.read_line(&mut line) => {
+                                    match read {
+                                        Ok(0) => break, // socket closed; reconnect.
+                                        Ok(_) => {
+                                            if let Ok(v) =
+                                                ados_protocol::state::decode_v1_line(line.as_bytes())
+                                            {
+                                                if let Ok(mut g) = store.lock() {
+                                                    *g = Some(v);
+                                                }
+                                            }
+                                            line.clear();
+                                        }
+                                        Err(_) => break,
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Err(_) => {
+                        // No socket yet; wait and retry.
+                        tokio::select! {
+                            _ = shutdown.changed() => { if *shutdown.borrow() { return; } }
+                            _ = tokio::time::sleep(Duration::from_secs(2)) => {}
+                        }
+                    }
+                }
+            }
+        });
+        Self { latest }
+    }
+}
+
+impl StateSnapshotSource for StateIpcReader {
+    fn latest(&self) -> Option<serde_json::Value> {
+        self.latest.lock().ok().and_then(|g| g.clone())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn transport() -> TransportConfig {
+        TransportConfig {
+            client_id: "ados-dev1".to_string(),
+            host: "mqtt.example".to_string(),
+            port: 443,
+            ws_path: "/mqtt".to_string(),
+            username: "ados-dev1".to_string(),
+            password: "k".to_string(),
+            inflight: 1000,
+            keep_alive: Duration::from_secs(30),
+        }
+    }
+
+    fn bridge() -> CloudRelayBridge {
+        CloudRelayBridge::new(
+            "dev1",
+            Some("paired-drone".to_string()),
+            "https://convex.example/",
+            Some("api-key".to_string()),
+            transport(),
+        )
+    }
+
+    struct FixedState(serde_json::Value);
+    impl StateSnapshotSource for FixedState {
+        fn latest(&self) -> Option<serde_json::Value> {
+            Some(self.0.clone())
+        }
+    }
+
+    #[test]
+    fn throttle_maps_cap_strings_and_forwarding_rules() {
+        assert_eq!(ThrottleState::from_cap_str("ok"), ThrottleState::None);
+        assert_eq!(ThrottleState::from_cap_str("warn_80"), ThrottleState::Warn);
+        assert_eq!(
+            ThrottleState::from_cap_str("throttle_95"),
+            ThrottleState::VideoOff
+        );
+        assert_eq!(
+            ThrottleState::from_cap_str("blocked_100"),
+            ThrottleState::Blocked
+        );
+        // 95 %: video off, telemetry on.
+        assert!(!ThrottleState::VideoOff.forward_video());
+        assert!(ThrottleState::VideoOff.forward_telemetry());
+        // 100 %: both off.
+        assert!(!ThrottleState::Blocked.forward_video());
+        assert!(!ThrottleState::Blocked.forward_telemetry());
+        // ok / warn: both on.
+        assert!(ThrottleState::None.forward_video());
+        assert!(ThrottleState::Warn.forward_video());
+    }
+
+    #[test]
+    fn backoff_ladder_doubles_to_300s_cap_and_resets() {
+        let mut b = Backoff::new();
+        assert_eq!(b.delay(), Duration::from_secs(2));
+        b.advance();
+        assert_eq!(b.delay(), Duration::from_secs(4));
+        b.advance();
+        assert_eq!(b.delay(), Duration::from_secs(8));
+        // Climb to the cap.
+        for _ in 0..20 {
+            b.advance();
+        }
+        assert_eq!(b.delay(), Duration::from_secs(300));
+        b.reset();
+        assert_eq!(b.delay(), Duration::from_secs(2));
+    }
+
+    #[test]
+    fn first_uplink_with_reachability_triggers_teardown_then_reconnect() {
+        let mut br = bridge();
+        let snap = UplinkSnapshot {
+            active_uplink: "eth0".to_string(),
+            internet_reachable: true,
+            data_cap_state: "ok".to_string(),
+        };
+        assert_eq!(
+            br.reconcile_uplink(Some(&snap)),
+            MqttAction::TeardownThenReconnect
+        );
+        // Same snapshot again → no change.
+        assert_eq!(br.reconcile_uplink(Some(&snap)), MqttAction::Noop);
+    }
+
+    #[test]
+    fn uplink_change_always_tears_down_then_reconnects_over_new_iface() {
+        let mut br = bridge();
+        let eth = UplinkSnapshot {
+            active_uplink: "eth0".to_string(),
+            internet_reachable: true,
+            data_cap_state: "ok".to_string(),
+        };
+        br.reconcile_uplink(Some(&eth));
+        // Failover to cellular: a different uplink → explicit teardown+reconnect
+        // (the whole point — rumqttc would NOT re-bind to wwan0 on its own).
+        let wwan = UplinkSnapshot {
+            active_uplink: "wwan0".to_string(),
+            internet_reachable: true,
+            data_cap_state: "ok".to_string(),
+        };
+        assert_eq!(
+            br.reconcile_uplink(Some(&wwan)),
+            MqttAction::TeardownThenReconnect
+        );
+    }
+
+    #[test]
+    fn losing_all_uplinks_tears_down_to_idle() {
+        let mut br = bridge();
+        let eth = UplinkSnapshot {
+            active_uplink: "eth0".to_string(),
+            internet_reachable: true,
+            data_cap_state: "ok".to_string(),
+        };
+        br.reconcile_uplink(Some(&eth));
+        // File gone → no uplink → idle.
+        assert_eq!(br.reconcile_uplink(None), MqttAction::TeardownIdle);
+    }
+
+    #[test]
+    fn health_flip_on_same_uplink_brings_up_or_tears_down() {
+        let mut br = bridge();
+        // Start with a reachable uplink and mark MQTT connected.
+        let up = UplinkSnapshot {
+            active_uplink: "eth0".to_string(),
+            internet_reachable: true,
+            data_cap_state: "ok".to_string(),
+        };
+        br.reconcile_uplink(Some(&up));
+        br.mqtt_connected = true;
+        // Reachability lost on the same uplink → teardown.
+        let down = UplinkSnapshot {
+            active_uplink: "eth0".to_string(),
+            internet_reachable: false,
+            data_cap_state: "ok".to_string(),
+        };
+        assert_eq!(br.reconcile_uplink(Some(&down)), MqttAction::TeardownIdle);
+        br.mqtt_connected = false;
+        // Reachability restored → bring up.
+        assert_eq!(br.reconcile_uplink(Some(&up)), MqttAction::BringUp);
+    }
+
+    #[test]
+    fn data_cap_downshift_blocks_and_recovers() {
+        let mut br = bridge();
+        // 95 %: video off, telemetry kept, relay stays up.
+        assert!(!br.apply_data_cap(ThrottleState::VideoOff));
+        assert!(!br.forwarding_video());
+        assert!(br.forwarding_telemetry());
+        // 100 %: heartbeat-only, relay torn down.
+        assert!(br.apply_data_cap(ThrottleState::Blocked));
+        assert!(!br.forwarding_video());
+        assert!(!br.forwarding_telemetry());
+        // Recover to ok.
+        assert!(!br.apply_data_cap(ThrottleState::None));
+        assert!(br.forwarding_video());
+        assert!(br.forwarding_telemetry());
+    }
+
+    #[test]
+    fn data_cap_rides_in_on_the_uplink_snapshot() {
+        let mut br = bridge();
+        let snap = UplinkSnapshot {
+            active_uplink: "wwan0".to_string(),
+            internet_reachable: true,
+            data_cap_state: "throttle_95".to_string(),
+        };
+        br.reconcile_uplink(Some(&snap));
+        // The cap level carried on the same file is applied.
+        assert_eq!(br.throttle_state(), ThrottleState::VideoOff);
+        assert!(!br.forwarding_video());
+        assert!(br.forwarding_telemetry());
+    }
+
+    #[test]
+    fn heartbeat_is_none_without_an_uplink_and_carries_relay_state_with_one() {
+        let mut br = bridge();
+        // No uplink yet → no heartbeat.
+        assert!(br.build_heartbeat(1).is_none());
+        // After an uplink, the heartbeat carries the relay's forwarding state.
+        let snap = UplinkSnapshot {
+            active_uplink: "eth0".to_string(),
+            internet_reachable: true,
+            data_cap_state: "throttle_95".to_string(),
+        };
+        br.reconcile_uplink(Some(&snap));
+        let hb = br.build_heartbeat(1234).unwrap();
+        assert_eq!(hb.uplink, "eth0");
+        assert_eq!(hb.drone_id.as_deref(), Some("paired-drone"));
+        assert_eq!(hb.throttle_state, "throttle_95");
+        assert!(!hb.forwarding_video);
+        assert!(hb.forwarding_telemetry);
+        assert_eq!(hb.ts_ms, 1234);
+        // No state source → no telemetry block.
+        assert!(hb.telemetry.is_none());
+    }
+
+    #[test]
+    fn heartbeat_folds_live_telemetry_when_a_state_source_is_wired() {
+        let state = serde_json::json!({
+            "armed": true, "mode": "GUIDED", "lat": 12.97, "lon": 77.59,
+            "alt_rel": 30.0, "voltage_battery": 16.2, "battery_remaining": 88,
+            "last_heartbeat": 1700000000.0
+        });
+        let mut br = bridge().with_state_source(std::sync::Arc::new(FixedState(state)));
+        let snap = UplinkSnapshot {
+            active_uplink: "eth0".to_string(),
+            internet_reachable: true,
+            data_cap_state: "ok".to_string(),
+        };
+        br.reconcile_uplink(Some(&snap));
+        let hb = br.build_heartbeat(1).unwrap();
+        let t = hb.telemetry.unwrap();
+        assert_eq!(t["armed"], true);
+        assert_eq!(t["mode"], "GUIDED");
+        assert_eq!(t["battery_voltage"], 16.2);
+        assert_eq!(t["battery_remaining"], 88);
+    }
+
+    #[test]
+    fn snapshot_reads_the_active_flag_file_with_cap_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("uplink-active");
+        // Absent → None (idle).
+        assert!(UplinkSnapshot::read(&path).is_none());
+        // The ados-net writer's body shape, including the additive cap field.
+        std::fs::write(
+            &path,
+            r#"{"active_uplink":"wwan0","internet_reachable":true,"timestamp_ms":1700000000000,"data_cap_state":"warn_80"}"#,
+        )
+        .unwrap();
+        let s = UplinkSnapshot::read(&path).unwrap();
+        assert_eq!(s.active_uplink, "wwan0");
+        assert!(s.internet_reachable);
+        assert_eq!(s.data_cap_state, "warn_80");
+        // A legacy body without the cap field defaults to "ok".
+        std::fs::write(
+            &path,
+            r#"{"active_uplink":"eth0","internet_reachable":true,"timestamp_ms":1}"#,
+        )
+        .unwrap();
+        let s = UplinkSnapshot::read(&path).unwrap();
+        assert_eq!(s.data_cap_state, "ok");
+    }
+}

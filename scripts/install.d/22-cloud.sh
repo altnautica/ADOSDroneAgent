@@ -1,7 +1,6 @@
 # shellcheck shell=bash
 # =============================================================================
-# 22-cloud.sh — install the prebuilt ados-cloud relay binary (+ the ados-ota
-# oneshot poller).
+# 22-cloud.sh — install the prebuilt ados-cloud relay binary.
 #
 # CI builds the cloud relay as a static arm64 binary and publishes it to the
 # rolling 'prebuilt-cloud' prerelease; here we fetch it and verify it through
@@ -19,7 +18,6 @@
 
 ADOS_CLOUD_RELEASE_BASE="https://github.com/altnautica/ADOSDroneAgent/releases/download/prebuilt-cloud"
 ADOS_CLOUD_ASSET="ados-cloud-aarch64"
-ADOS_OTA_ASSET="ados-ota-aarch64"
 # Public key for signature verification. Empty until a signing key is
 # provisioned; with it empty the edge channel is SHA256-checked only.
 ADOS_CLOUD_PUBKEY="${ADOS_CLOUD_PUBKEY:-}"
@@ -77,7 +75,6 @@ install_cloud_binary() {
     fi
 
     _install_cloud_asset "${ADOS_CLOUD_ASSET}"
-    _install_cloud_asset "${ADOS_OTA_ASSET}"
 
     # The native binary is the only cloud-relay path now. On an upgrade that
     # refreshes the binary, restart a running ados-cloud so it picks up the new

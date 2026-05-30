@@ -165,6 +165,24 @@ impl Default for PairingSection {
     }
 }
 
+/// The `video.wfb:` slice the auto-pair supervisor reads. Only the arm flag is
+/// typed; every other wfb field is tolerated.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct WfbSection {
+    /// Whether auto-pair is armed. Default false — the operator arms it via the
+    /// GCS / captive portal / REST, and a successful pair disarms it again.
+    /// Mirrors the Python `video.wfb.auto_pair_enabled`.
+    #[serde(default)]
+    pub auto_pair_enabled: bool,
+}
+
+/// The `video:` section. Only the nested `wfb` slice is read here.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct VideoSection {
+    #[serde(default)]
+    pub wfb: WfbSection,
+}
+
 /// The slice of the agent config the cloud relay reads. Every field defaults so
 /// a missing section never fails the load.
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -177,6 +195,8 @@ pub struct CloudConfig {
     pub server: ServerSection,
     #[serde(default)]
     pub pairing: PairingSection,
+    #[serde(default)]
+    pub video: VideoSection,
 }
 
 impl CloudConfig {
@@ -259,6 +279,22 @@ video:
         assert_eq!(cfg.ota.channel, "beta");
         assert_eq!(cfg.ota.check_interval, 12);
         assert_eq!(cfg.server.cloud.url, "https://relay.example/convex");
+        // Default arm flag is off when no wfb section is present.
+        assert!(!cfg.video.wfb.auto_pair_enabled);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn reads_the_wfb_auto_pair_arm_flag() {
+        let yaml = "\
+video:
+  wfb:
+    channel: 149
+    auto_pair_enabled: true
+";
+        let path = temp_yaml("wfb", yaml);
+        let cfg = CloudConfig::load_from(&path);
+        assert!(cfg.video.wfb.auto_pair_enabled);
         let _ = std::fs::remove_file(&path);
     }
 }

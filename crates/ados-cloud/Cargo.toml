@@ -6,15 +6,13 @@ license.workspace = true
 repository.workspace = true
 description = "Cloud relay for the ADOS Drone Agent: heartbeat status push, command poll, MAVLink and WebRTC-signaling relays, and the update poller."
 
-# The crate is lib + two binaries: the cloud relay daemon and the OTA oneshot
-# update poller.
+# The crate is lib + the cloud relay daemon binary. The update path stays in the
+# Python agent (the `/api/ota` surface + updater/downloader/rollback back the GCS
+# and the `ados update` CLI); it is API-coupled and not hot/safety-critical, so a
+# native binary buys nothing.
 [[bin]]
 name = "ados-cloud"
 path = "src/bin/ados-cloud.rs"
-
-[[bin]]
-name = "ados-ota"
-path = "src/bin/ados-ota.rs"
 
 [dependencies]
 # Wire primitives + the frozen plugin-supervisor contract the command
