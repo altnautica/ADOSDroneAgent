@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["ados-protocol", "ados-capabilities-codegen", "ados-tui", "ados-supervisor", "ados-mavlink-router", "ados-radio", "ados-video", "ados-plugin-host", "ados-sdk", "ados-cloud", "ados-groundlink", "ados-net", "ados-hid", "ados-display", "ados-vision"]
+members = ["ados-protocol", "ados-capabilities-codegen", "ados-tui", "ados-supervisor", "ados-mavlink-router", "ados-radio", "ados-video", "ados-plugin-host", "ados-sdk", "ados-cloud", "ados-groundlink", "ados-net", "ados-hid", "ados-display", "ados-vision", "ados-hal-probe"]
 
 [workspace.package]
 version = "0.1.0"

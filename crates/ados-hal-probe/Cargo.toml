@@ -1,0 +1,20 @@
+[package]
+name = "ados-hal-probe"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Probe-first hardware-capability detection: derives capabilities by reading real silicon (sysfs, device-tree, ioctl, sandboxed trial-init) rather than trusting declarations."
+
+[dependencies]
+ados-protocol = { path = "../ados-protocol" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+anyhow = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+nix = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

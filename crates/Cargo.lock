@@ -74,6 +74,7 @@ dependencies = [
  "getrandom 0.2.17",
  "hex",
  "hmac",
+ "mdns-sd",
  "nix 0.29.0",
  "sd-notify",
  "serde",
@@ -87,6 +88,19 @@ dependencies = [
  "tracing-journald",
  "tracing-subscriber",
  "x25519-dalek",
+]
+
+[[package]]
+name = "ados-hal-probe"
+version = "0.1.0"
+dependencies = [
+ "ados-protocol",
+ "anyhow",
+ "nix 0.29.0",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tracing",
 ]
 
 [[package]]
@@ -144,6 +158,7 @@ dependencies = [
  "socket2 0.5.10",
  "tempfile",
  "tokio",
+ "tokio-serial",
  "tracing",
  "tracing-journald",
  "tracing-subscriber",
@@ -158,6 +173,7 @@ dependencies = [
  "anyhow",
  "base64",
  "ed25519-dalek",
+ "getrandom 0.2.17",
  "hex",
  "nix 0.29.0",
  "rmp-serde",
@@ -268,6 +284,8 @@ dependencies = [
 name = "ados-video"
 version = "0.1.0"
 dependencies = [
+ "ados-hal-probe",
+ "ados-protocol",
  "anyhow",
  "nix 0.29.0",
  "serde",
@@ -1036,6 +1054,17 @@ dependencies = [
 
 [[package]]
 name = "flume"
+version = "0.11.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "da0e4dd2a88388a1f4ccc7c9ce104604dab68d9f408dc34cd45823d5a9069095"
+dependencies = [
+ "futures-core",
+ "futures-sink",
+ "spin",
+]
+
+[[package]]
+name = "flume"
 version = "0.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5e139bc46ca777eb5efaf62df0ab8cc5fd400866427e56c68b22e414e53bd3be"
@@ -1527,6 +1556,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "if-addrs"
+version = "0.13.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "69b2eeee38fef3aa9b4cc5f1beea8a2444fc00e7377cafae396de3f5c2065e24"
+dependencies = [
+ "libc",
+ "windows-sys 0.59.0",
+]
+
+[[package]]
 name = "indexmap"
 version = "2.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1750,6 +1789,20 @@ checksum = "0e64d975ca3cf0ad8a7c278553f91d77de15fcde9b79bf6bc542e209dd0c7dee"
 dependencies = [
  "byteorder",
  "crc-any",
+]
+
+[[package]]
+name = "mdns-sd"
+version = "0.13.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "328f4e1041f7cfeb3affccb814ddbe2f004856a2ce769c8bf22080d74c5204c6"
+dependencies = [
+ "fastrand",
+ "flume 0.11.1",
+ "if-addrs",
+ "log",
+ "mio",
+ "socket2 0.5.10",
 ]
 
 [[package]]
@@ -2602,7 +2655,7 @@ dependencies = [
  "async-tungstenite",
  "bytes",
  "fixedbitset",
- "flume",
+ "flume 0.12.0",
  "futures-io",
  "futures-util",
  "http",

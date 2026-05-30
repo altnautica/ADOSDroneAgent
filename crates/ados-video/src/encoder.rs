@@ -11,21 +11,25 @@
 //! ## Encoder selection
 //! - **CSI** camera → `rpicam-vid` (Pi VideoCore HW encoder), falling back to
 //!   ffmpeg when rpicam is absent.
-//! - **USB / IP** camera → ffmpeg `libx264` (software). On Rockchip SoCs the
-//!   `h264_v4l2m2m` ffmpeg plugin is present but hangs when probed, and
-//!   GStreamer's `mpph264enc` VPU path emits corrupt frames that stall the
-//!   browser decoder — so Rockchip is short-circuited to `libx264` and the HW
-//!   encoder probe is skipped entirely. On non-Rockchip boards the HW
-//!   `h264_v4l2m2m` path is used when ffmpeg advertises it.
+//! - **USB / IP** camera → ffmpeg. The H.264 backend is chosen by *probing for a
+//!   real V4L2 hardware encoder device*, not by trusting ffmpeg's `-encoders`
+//!   listing. A board can list the `h264_v4l2m2m` wrapper while shipping no
+//!   backing encoder device; ffmpeg then exits at init and the camera streams
+//!   zero bytes. The HAL probe opens the real V4L2 nodes, confirms one
+//!   enumerates an H.264 output FourCC, and trial-inits it; only a device that
+//!   passes selects `h264_v4l2m2m`. Otherwise the builder uses software
+//!   `libx264`.
 //!
 //! ## Hardware detection as an input
-//! All runtime probes (the Rockchip `/proc/device-tree/compatible` read, the
-//! ffmpeg `-encoders` probe, the `gst-inspect-1.0` probes) are gathered into
-//! [`EncoderEnv`] so the builder itself is pure and testable without touching
-//! `/proc` or any subprocess. [`EncoderEnv::detect`] does the real probing on
-//! Linux; the builder takes the resolved env.
+//! The H.264 encoder decision is a probed [`Probed<EncoderDevice>`] carried on
+//! [`EncoderEnv`]; the GStreamer-element probes are plain booleans. Gathering
+//! them up front keeps the builder itself pure and testable without touching any
+//! device or subprocess. [`EncoderEnv::detect`] does the real probing on Linux
+//! (the HW encoder via [`ados_hal_probe`]); the builder takes the resolved env.
 
 use std::path::Path;
+
+use ados_protocol::hwcaps::{EncoderDevice, Probed};
 
 use crate::config::CameraConfig;
 
@@ -65,12 +69,12 @@ pub enum CameraType {
 /// up front keeps [`build_encoder_command`] pure and unit-testable.
 #[derive(Debug, Clone)]
 pub struct EncoderEnv {
-    /// `/proc/device-tree/compatible` contains "rockchip". On Rockchip the HW
-    /// H.264 probe is short-circuited to `None` (forces `libx264`).
-    pub is_rockchip: bool,
-    /// The ffmpeg HW H.264 encoder name (e.g. `h264_v4l2m2m`) when ffmpeg
-    /// advertises one *and* the board is not Rockchip; otherwise `None`.
-    pub hw_h264: Option<String>,
+    /// The probed hardware H.264 encoder device. `Present` only when a real
+    /// V4L2 node enumerates an H.264 output FourCC AND accepted a bounded
+    /// trial-init; the builder then selects `h264_v4l2m2m`. `Absent`
+    /// (or `NotProbed`) selects software `libx264`. This is a *probe*, not a
+    /// trust of ffmpeg's `-encoders` listing.
+    pub hw_h264: Probed<EncoderDevice>,
     /// GStreamer `mpph264enc` (Rockchip VPU) is installed.
     pub has_mpph264enc: bool,
     /// GStreamer `rtspclientsink` element is installed (direct RTSP RECORD;
@@ -87,21 +91,15 @@ impl EncoderEnv {
     /// so the builder is exercisable on the dev host; the rig path is Linux.
     #[cfg(target_os = "linux")]
     pub fn detect() -> Self {
-        let is_rockchip = std::fs::read("/proc/device-tree/compatible")
-            .map(|b| b.windows(8).any(|w| w == b"rockchip"))
-            .unwrap_or(false);
-
-        // ffmpeg's h264_v4l2m2m plugin is listed on Rockchip but hangs when
-        // probed, so the probe is skipped entirely on Rockchip (matches the
-        // Python short-circuit before the ffmpeg -encoders call).
-        let hw_h264 = if is_rockchip {
-            None
-        } else {
-            detect_hw_h264_encoder()
-        };
+        // Probe for a REAL hardware H.264 encoder device rather than trusting
+        // the ffmpeg `-encoders` listing. Runs at the pre-arm boot phase: the
+        // trial-init opens and configures a device, so it is never run during
+        // armed runtime (the probe defers to its cached result there).
+        let hw_h264 = ados_hal_probe::probe::video::probe_h264_encoder(
+            ados_protocol::hwcaps::ProbePhase::BootPreArm,
+        );
 
         Self {
-            is_rockchip,
             hw_h264,
             has_mpph264enc: gst_element_present("mpph264enc"),
             has_rtspclientsink: gst_element_present("rtspclientsink"),
@@ -113,29 +111,12 @@ impl EncoderEnv {
     #[cfg(not(target_os = "linux"))]
     pub fn detect() -> Self {
         Self {
-            is_rockchip: false,
-            hw_h264: None,
+            hw_h264: Probed::NotProbed,
             has_mpph264enc: false,
             has_rtspclientsink: false,
             python_executable: current_python_executable(),
         }
     }
-}
-
-#[cfg(target_os = "linux")]
-fn detect_hw_h264_encoder() -> Option<String> {
-    let output = std::process::Command::new("ffmpeg")
-        .args(["-hide_banner", "-encoders"])
-        .output()
-        .ok()?;
-    let text = String::from_utf8_lossy(&output.stdout);
-    // Hardware encoders in order of preference (same list as the Python probe).
-    for enc in ["h264_v4l2m2m", "h264_nvenc", "h264_vaapi", "h264_omx"] {
-        if text.contains(enc) {
-            return Some(enc.to_string());
-        }
-    }
-    None
 }
 
 #[cfg(target_os = "linux")]
@@ -399,16 +380,14 @@ fn build_ffmpeg_command(
     camera: Option<&CameraInfo>,
     env: &EncoderEnv,
 ) -> Vec<String> {
-    // Try the HW H.264 encoder first (already short-circuited to None on
-    // Rockchip inside EncoderEnv); otherwise map the codec to a sw encoder.
-    let hw_encoder = if matches!(params.codec.as_str(), "h264" | "H264") {
-        env.hw_h264.clone()
-    } else {
-        None
-    };
+    // Use the HW H.264 encoder only when the HAL probe confirmed a real V4L2
+    // encoder device is Present; otherwise map the codec to a sw encoder. A
+    // mere `-encoders` listing is NOT enough — a wrapper with no backing device
+    // makes ffmpeg exit at init and the camera streams zero bytes.
+    let use_hw_h264 = matches!(params.codec.as_str(), "h264" | "H264") && env.hw_h264.is_present();
 
-    let ffmpeg_codec: String = if let Some(hw) = hw_encoder {
-        hw
+    let ffmpeg_codec: String = if use_hw_h264 {
+        "h264_v4l2m2m".to_string()
     } else {
         match params.codec.as_str() {
             "h264" => "libx264",
@@ -580,7 +559,9 @@ fn build_gstreamer_command(
     };
 
     let gop = (params.fps / 2).max(1);
-    let encoder = if env.is_rockchip && env.has_mpph264enc {
+    // The Rockchip VPU element is only installable on a board with the VPU, so
+    // its presence is itself the honest gate — no separate SoC-family check.
+    let encoder = if env.has_mpph264enc {
         // mpph264enc HW VPU: bps = bits/sec, VBR (rc-mode=1) with bounded
         // bps-max/bps-min so a scene change cannot starve the wfb_tx FEC,
         // header-mode=1 inserts SPS/PPS before every IDR for late joiners.
@@ -988,10 +969,32 @@ mod tests {
         }
     }
 
+    use ados_protocol::hwcaps::{AbsenceReason, Evidence};
+
+    /// A probed-Present HW encoder device (a real V4L2 node passed trial-init).
+    fn hw_present() -> Probed<EncoderDevice> {
+        Probed::present(
+            EncoderDevice {
+                node: "/dev/video11".into(),
+                fourcc: *b"H264",
+            },
+            Evidence::TrialInit {
+                node: "/dev/video11".into(),
+                ms: 120,
+            },
+        )
+    }
+
+    /// The board advertised an encoder wrapper but no real device exists. This
+    /// is the live-bug case the probe-first HAL fixes: the builder must pick
+    /// software libx264, never the wrapper.
+    fn hw_node_missing() -> Probed<EncoderDevice> {
+        Probed::absent(AbsenceReason::NodeMissing)
+    }
+
     fn rockchip() -> EncoderEnv {
         EncoderEnv {
-            is_rockchip: true,
-            hw_h264: None,
+            hw_h264: hw_node_missing(),
             has_mpph264enc: false,
             has_rtspclientsink: true,
             python_executable: PY_EXE.into(),
@@ -999,8 +1002,7 @@ mod tests {
     }
     fn non_rk_sw() -> EncoderEnv {
         EncoderEnv {
-            is_rockchip: false,
-            hw_h264: None,
+            hw_h264: hw_node_missing(),
             has_mpph264enc: false,
             has_rtspclientsink: true,
             python_executable: PY_EXE.into(),
@@ -1008,8 +1010,7 @@ mod tests {
     }
     fn non_rk_hw() -> EncoderEnv {
         EncoderEnv {
-            is_rockchip: false,
-            hw_h264: Some("h264_v4l2m2m".into()),
+            hw_h264: hw_present(),
             has_mpph264enc: false,
             has_rtspclientsink: true,
             python_executable: PY_EXE.into(),
@@ -1017,8 +1018,7 @@ mod tests {
     }
     fn rk_mpp() -> EncoderEnv {
         EncoderEnv {
-            is_rockchip: true,
-            hw_h264: None,
+            hw_h264: hw_node_missing(),
             has_mpph264enc: true,
             has_rtspclientsink: true,
             python_executable: PY_EXE.into(),
@@ -1306,6 +1306,56 @@ mod tests {
             true,
         );
         assert_eq!(got, expected("gst_usb_mjpeg_rtsp_rk_mpp_sei_skip"));
+    }
+
+    // --- probe-first HW encoder selection ------------------------------
+
+    #[test]
+    fn probe_absent_node_selects_libx264() {
+        // The live bug: a board advertises the h264_v4l2m2m wrapper but ships
+        // no real V4L2 encoder device. With the probe reporting NodeMissing the
+        // builder MUST fall back to software libx264 — never the wrapper, which
+        // would make ffmpeg exit at init and stream zero bytes.
+        let env = EncoderEnv {
+            hw_h264: hw_node_missing(),
+            has_mpph264enc: false,
+            has_rtspclientsink: true,
+            python_executable: PY_EXE.into(),
+        };
+        let got = build(
+            &params(EncoderKind::Ffmpeg, 1280, 720, 30, 4000),
+            "/dev/video1",
+            RTSP_OUT,
+            &usb_mjpeg(),
+            &env,
+            false,
+        );
+        let ci = got.iter().position(|t| t == "-c:v").unwrap();
+        assert_eq!(got[ci + 1], "libx264");
+        assert!(!got.iter().any(|t| t == "h264_v4l2m2m"));
+    }
+
+    #[test]
+    fn probe_present_device_selects_h264_v4l2m2m() {
+        // A real V4L2 M2M node enumerated H.264 and passed the bounded
+        // trial-init → the builder uses the hardware encoder.
+        let env = EncoderEnv {
+            hw_h264: hw_present(),
+            has_mpph264enc: false,
+            has_rtspclientsink: true,
+            python_executable: PY_EXE.into(),
+        };
+        let got = build(
+            &params(EncoderKind::Ffmpeg, 1280, 720, 30, 4000),
+            "/dev/video1",
+            RTSP_OUT,
+            &usb_mjpeg(),
+            &env,
+            false,
+        );
+        let ci = got.iter().position(|t| t == "-c:v").unwrap();
+        assert_eq!(got[ci + 1], "h264_v4l2m2m");
+        assert!(!got.iter().any(|t| t == "libx264"));
     }
 
     // --- builder-logic unit tests (not fixture-driven) -----------------

@@ -21,6 +21,7 @@
 pub mod capabilities;
 pub mod frame;
 pub mod framebus;
+pub mod hwcaps;
 pub mod ipc;
 #[cfg(feature = "mavlink")]
 pub mod mavlink;
