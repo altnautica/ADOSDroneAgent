@@ -117,13 +117,17 @@ install_camera_overlay() {
         return 0
     fi
 
-    local camera_arg="${ADOS_CAMERA:-}"
-    if [ -z "${camera_arg}" ]; then
-        case "${ADOS_PROFILE:-drone}" in
-            ground_station) camera_arg="none" ;;
-            *) camera_arg="auto" ;;
-        esac
-    fi
+    # SAFETY GATE: enabling a CSI camera overlay is BOOT-CRITICAL on these BSPs
+    # (u-boot loads the dtbo at boot), and we do not yet ship a boot-time
+    # auto-revert probe for the camera the way the display path does
+    # (ados-display-probe). An overlay that hangs the kernel — e.g. an
+    # unresponsive or miswired sensor, or a vendor-ISP init that stalls — would
+    # strand the board with no self-heal. Until the camera boot-probe lands,
+    # auto-enable is OPT-IN: the overlay is only enabled when the operator sets
+    # ADOS_CAMERA=<id> explicitly. The provisioner is fully built and brick-safe
+    # (snapshot + restore on a failed u-boot-update); this gate only governs the
+    # blind auto-enable on a fresh install, which must wait for the auto-revert.
+    local camera_arg="${ADOS_CAMERA:-none}"
 
     info "Running CSI camera overlay installer (camera: ${camera_arg}, profile: ${ADOS_PROFILE:-drone})..."
     "${script_path}" --camera "${camera_arg}" || {
