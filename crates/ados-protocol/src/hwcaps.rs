@@ -255,10 +255,7 @@ mod tests {
     #[test]
     fn midr_maps_known_cortex_parts() {
         // implementer bits are ignored; only part [15:4] matters.
-        assert_eq!(
-            Midr(0x41_0fd0_b0 & 0xFFF0).cortex_name(),
-            Some("Cortex-A76")
-        );
+        assert_eq!(Midr(0x410f_d0b0 & 0xFFF0).cortex_name(), Some("Cortex-A76"));
         assert_eq!(Midr(0xd0b << 4).cortex_name(), Some("Cortex-A76"));
         assert_eq!(Midr(0xd05 << 4).cortex_name(), Some("Cortex-A55"));
         assert_eq!(Midr(0xd03 << 4).cortex_name(), Some("Cortex-A53"));
@@ -299,16 +296,18 @@ mod tests {
 
     #[test]
     fn snapshot_round_trips_json() {
-        let mut caps = HardwareCapabilities::default();
-        caps.h264_encoder = Probed::absent(AbsenceReason::TrialInitFailed { exit_after_ms: 130 });
-        caps.cpu = Probed::present(
-            vec![CoreCluster {
-                cortex: "Cortex-A55".into(),
-                midr: Midr(0xd05 << 4),
-                count: 8,
-            }],
-            Evidence::ProcCpuinfo { midr: 0xd05 << 4 },
-        );
+        let caps = HardwareCapabilities {
+            h264_encoder: Probed::absent(AbsenceReason::TrialInitFailed { exit_after_ms: 130 }),
+            cpu: Probed::present(
+                vec![CoreCluster {
+                    cortex: "Cortex-A55".into(),
+                    midr: Midr(0xd05 << 4),
+                    count: 8,
+                }],
+                Evidence::ProcCpuinfo { midr: 0xd05 << 4 },
+            ),
+            ..Default::default()
+        };
         let json = serde_json::to_string(&caps).unwrap();
         let back: HardwareCapabilities = serde_json::from_str(&json).unwrap();
         assert_eq!(caps, back);
