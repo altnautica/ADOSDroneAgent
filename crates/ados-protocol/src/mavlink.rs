@@ -191,7 +191,10 @@ mod tests {
         assert!(matches!(m1, MavMessage::HEARTBEAT(_)));
 
         // An unknown start byte is rejected, not silently parsed.
-        assert!(matches!(parse_any(&[0x00, 0x01, 0x02]), Err(MavlinkError::Read(_))));
+        assert!(matches!(
+            parse_any(&[0x00, 0x01, 0x02]),
+            Err(MavlinkError::Read(_))
+        ));
         assert!(matches!(parse_any(&[]), Err(MavlinkError::Read(_))));
     }
 }
