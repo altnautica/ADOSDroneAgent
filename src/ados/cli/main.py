@@ -745,11 +745,13 @@ from ados.cli.hardware import hardware_group  # noqa: E402
 from ados.cli.plugin import plugin_group  # noqa: E402
 from ados.cli.profile import profile_group  # noqa: E402
 from ados.cli.radio import radio_group  # noqa: E402
+from ados.cli.rust import rust_group  # noqa: E402
 
 cli.add_command(hardware_group)
 cli.add_command(plugin_group)
 cli.add_command(profile_group)
 cli.add_command(radio_group)
+cli.add_command(rust_group)
 
 
 if __name__ == "__main__":
