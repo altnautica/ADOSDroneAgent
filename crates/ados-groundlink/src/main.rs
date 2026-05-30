@@ -1,17 +1,26 @@
 //! Entry point for the ground-station data-plane service.
 //!
-//! Initializes logging (journald on Linux, fmt fallback elsewhere), signals
-//! readiness to systemd, then runs the WFB receive manager: per generation it
-//! spawns the data RX + both control planes, starts the video fan-out and the
-//! presence emit/listen loops as sub-services, and runs the stats reader, the
-//! valid-packet watchdog, and the stdout-silence zombie watchdog concurrently.
-//! When the data RX exits (or a watchdog terminates it), the generation ends and
-//! the loop respawns with a bounded backoff.
+//! Dispatches on the mesh role: `direct` runs the standalone WFB receive
+//! manager (this file's `receive_loop`); `relay` forwards drone fragments to a
+//! receiver over batman-adv; `receiver` aggregates the local NIC + remote relay
+//! forwards and republishes the combined FEC stream. The role comes from the
+//! `--role` argument when present, else the `/etc/ados/mesh/role` sentinel
+//! (`role_manager` owns that file). The relay/receiver roles run as their own
+//! systemd units (`ados-wfb-relay` / `ados-wfb-receiver`), each invoking this
+//! binary with the matching `--role`.
 //!
-//! Adapter detection, the rx-key pairing gate, monitor-mode setup, and the
-//! regulatory-domain/tx-power application stay in Python (the HAL and pairing
-//! flow own those); this binary takes the already-prepared interface from
-//! config and drives the live receive plane.
+//! Direct-role detail: per generation it spawns the data RX + both control
+//! planes, starts the video fan-out and the presence emit/listen loops as
+//! sub-services, and runs the stats reader, the valid-packet watchdog, and the
+//! stdout-silence zombie watchdog concurrently. When the data RX exits (or a
+//! watchdog terminates it), the generation ends and the loop respawns with a
+//! bounded backoff.
+//!
+//! Adapter detection for the direct receive plane takes the already-prepared
+//! interface from config; the relay/receiver roles run the shared radio
+//! selector themselves (adapter detect + monitor mode) before spawning their
+//! forwarder/aggregator. The rx-key pairing gate and regulatory-domain/tx-power
+//! application stay where they were.
 
 use std::sync::atomic::AtomicU32;
 use std::sync::Arc;
@@ -19,7 +28,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use tokio::signal::unix::{signal, SignalKind};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Notify};
 
 use ados_radio::config::WfbConfig;
 use ados_radio::link_quality::LinkStats;
@@ -27,10 +36,32 @@ use ados_radio::link_quality::LinkStats;
 use ados_groundlink::wfb_rx::{
     self, DataRxHandle, IwChannelSetter, SharedValidCounter, SystemClock, WfbRxManager,
 };
-use ados_groundlink::{fanout, mesh, presence, GsPresenceCache};
+use ados_groundlink::{fanout, mesh, presence, receiver, relay, GsPresenceCache};
 
 const CONFIG_YAML: &str = "/etc/ados/config.yaml";
 const RX_KEY: &str = ados_radio::paths::WFB_RX_KEY;
+
+/// Resolve the run role: an explicit `--role <value>` argument wins, else the
+/// on-disk sentinel. Unknown values fall back to `direct`.
+fn resolve_role() -> String {
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
+        if arg == "--role" {
+            if let Some(v) = args.next() {
+                if matches!(v.as_str(), "direct" | "relay" | "receiver") {
+                    return v;
+                }
+                tracing::warn!(value = %v, "unknown_role_arg_falling_back");
+            }
+        } else if let Some(v) = arg.strip_prefix("--role=") {
+            if matches!(v, "direct" | "relay" | "receiver") {
+                return v.to_string();
+            }
+            tracing::warn!(value = %v, "unknown_role_arg_falling_back");
+        }
+    }
+    mesh::get_current_role()
+}
 
 fn init_logging() {
     let filter = std::env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string());
@@ -57,19 +88,86 @@ fn init_logging() {
 async fn main() -> Result<()> {
     init_logging();
 
-    let config = WfbConfig::load_from(std::path::Path::new(CONFIG_YAML));
-    tracing::info!(
-        channel = config.channel,
-        band = %config.band,
-        interface = %config.interface,
-        "ground-station data-plane starting"
-    );
-
     // Tell systemd we are up (reuses the orchestrator's notify shim).
     ados_supervisor::sdnotify::ready();
 
     let mut sigterm = signal(SignalKind::terminate())?;
     let mut sigint = signal(SignalKind::interrupt())?;
+
+    let role = resolve_role();
+    match role.as_str() {
+        "relay" => {
+            tracing::info!("ground-station relay role starting");
+            run_relay_or_receiver(true, &mut sigterm, &mut sigint).await;
+        }
+        "receiver" => {
+            tracing::info!("ground-station receiver role starting");
+            run_relay_or_receiver(false, &mut sigterm, &mut sigint).await;
+        }
+        _ => {
+            run_direct(&mut sigterm, &mut sigint).await?;
+        }
+    }
+
+    tracing::info!("ground-station data-plane stopping");
+    Ok(())
+}
+
+/// Run the relay (`is_relay`) or receiver loop until a shutdown signal. The
+/// chosen loop owns its own adapter detect + monitor-mode + mDNS + state file;
+/// a SIGTERM/SIGINT fires the shared `Notify` so the loop tears down cleanly.
+async fn run_relay_or_receiver(
+    is_relay: bool,
+    sigterm: &mut tokio::signal::unix::Signal,
+    sigint: &mut tokio::signal::unix::Signal,
+) {
+    let shutdown = Arc::new(Notify::new());
+
+    // Observability: publish the mesh snapshot (neighbors / gateways /
+    // selected-gateway) so the REST layer + OLED see the fabric. This is the
+    // same poll the direct path skips; the relay/receiver FEC supervision below
+    // is independent of it.
+    let role_label = if is_relay { "relay" } else { "receiver" };
+    let snap = mesh::MeshSnapshot::new(role_label, "bat0", "802.11s");
+    tokio::spawn(mesh::run_poll_loop(snap));
+
+    let role_task = {
+        let shutdown = shutdown.clone();
+        tokio::spawn(async move {
+            if is_relay {
+                relay::run(shutdown).await;
+            } else {
+                receiver::run(shutdown).await;
+            }
+        })
+    };
+    tokio::select! {
+        _ = role_task => {}
+        _ = sigterm.recv() => {
+            tracing::info!("received SIGTERM");
+            shutdown.notify_waiters();
+        }
+        _ = sigint.recv() => {
+            tracing::info!("received SIGINT");
+            shutdown.notify_waiters();
+        }
+    }
+    // Give the loop a moment to flush its down-state on signal-triggered exit.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+}
+
+/// The standalone (`direct`) receive plane.
+async fn run_direct(
+    sigterm: &mut tokio::signal::unix::Signal,
+    sigint: &mut tokio::signal::unix::Signal,
+) -> Result<()> {
+    let config = WfbConfig::load_from(std::path::Path::new(CONFIG_YAML));
+    tracing::info!(
+        channel = config.channel,
+        band = %config.band,
+        interface = %config.interface,
+        "ground-station data-plane starting (direct role)"
+    );
 
     // The presence listen loop + cache run for the whole service lifetime (the
     // listener feeds the per-generation watchdog its peer-presence signal). The
@@ -84,22 +182,6 @@ async fn main() -> Result<()> {
         tokio::spawn(presence::emit_loop(move || beacon_channel));
     }
 
-    // Distributed-RX role: on a relay or receiver node, publish the mesh
-    // snapshot so the REST layer + OLED see neighbors/gateways. The batman-adv
-    // carrier bringup and the relay/receiver FEC supervision run in their own
-    // role-gated systemd units (`ados-batman`, `ados-wfb-relay`,
-    // `ados-wfb-receiver`); this data-plane service only spins the mesh-state
-    // poll for observability when the role calls for it. A `direct` node has no
-    // mesh and skips this entirely.
-    let role = mesh::get_current_role();
-    if role == "relay" || role == "receiver" {
-        tracing::info!(role, "distributed-rx role active; starting mesh-state poll");
-        let snap = mesh::MeshSnapshot::new(&role, "bat0", "802.11s");
-        tokio::spawn(mesh::run_poll_loop(snap));
-    } else {
-        tracing::info!(role, "direct role; no mesh services");
-    }
-
     // Run the receive loop until a shutdown signal arrives.
     tokio::select! {
         _ = receive_loop(&config, presence_cache) => {}
@@ -110,8 +192,6 @@ async fn main() -> Result<()> {
             tracing::info!("received SIGINT");
         }
     }
-
-    tracing::info!("ground-station data-plane stopping");
     Ok(())
 }
 

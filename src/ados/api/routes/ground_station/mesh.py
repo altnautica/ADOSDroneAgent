@@ -27,6 +27,27 @@ from ados.core.paths import MESH_GATEWAY_JSON, PROFILE_CONF
 
 router = APIRouter(prefix="/v1/ground-station", tags=["ground-station"])
 
+# Process-wide singleton for the cross-process mesh-event tailer. When the
+# relay/receiver loops run as their own process (the native data-plane binary),
+# they append events to the mesh-event journal instead of the in-process bus.
+# This tailer follows that journal and republishes each event onto the bus the
+# WebSocket below subscribes to, so a native-relay node lights up the GCS mesh
+# events exactly like a same-process manager would. Started lazily on the first
+# /ws/mesh connection so it only runs on the ground-station profile.
+_mesh_event_tailer_task: asyncio.Task | None = None
+
+
+def _ensure_mesh_event_tailer() -> None:
+    """Start the cross-process mesh-event tailer once per API process."""
+    global _mesh_event_tailer_task
+    if _mesh_event_tailer_task is not None and not _mesh_event_tailer_task.done():
+        return
+    from ados.services.ground_station.mesh_event_tailer import tail_mesh_events
+
+    _mesh_event_tailer_task = asyncio.create_task(
+        tail_mesh_events(), name="mesh-event-tailer"
+    )
+
 
 # ---------------------------------------------------------------------------
 # /role
@@ -397,6 +418,9 @@ async def ws_mesh_events(websocket: WebSocket) -> None:
         get_mesh_event_bus,
         get_pairing_event_bus,
     )
+    # Bridge the cross-process mesh-event journal onto the in-process bus so a
+    # native relay/receiver process's events reach this WebSocket.
+    _ensure_mesh_event_tailer()
     mesh_bus = get_mesh_event_bus()
     pair_bus = get_pairing_event_bus()
 

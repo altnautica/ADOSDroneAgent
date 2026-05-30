@@ -22,6 +22,14 @@ pub const WFB_RELAY_JSON: &str = "/run/ados/wfb-relay.json";
 /// Receiver-role snapshot (merged-stream FEC combine stats).
 pub const WFB_RECEIVER_JSON: &str = "/run/ados/wfb-receiver.json";
 
+/// Cross-process mesh-event journal: a newline-delimited JSON stream the
+/// relay/receiver loops append to and the REST/OLED layer tails. Each line is
+/// one event object (`{"bus","kind","timestamp_ms","payload"}`) matching the
+/// in-process `MeshEvent` shape, so the tailer can republish it onto the
+/// process-local asyncio bus the WebSocket + OLED already consume. Append-only,
+/// best-effort; a reader seeks to end on start and follows new lines.
+pub const MESH_EVENTS_JSONL: &str = "/run/ados/mesh-events.jsonl";
+
 /// Last-locked WFB channel hint. Written by the receiver when a channel
 /// acquisition sweep locks onto the transmitter so a restart can try that
 /// channel first instead of sweeping from scratch. Runtime HINT only: it lives

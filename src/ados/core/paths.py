@@ -36,6 +36,12 @@ HEALTH_JSON = ADOS_RUN_DIR / "health.json"
 MESH_STATE_JSON = ADOS_RUN_DIR / "mesh-state.json"
 WFB_RELAY_JSON = ADOS_RUN_DIR / "wfb-relay.json"
 WFB_RECEIVER_JSON = ADOS_RUN_DIR / "wfb-receiver.json"
+# Cross-process mesh-event journal. When the relay/receiver loops run in their
+# own process (the native data-plane binary), they cannot reach the in-process
+# asyncio mesh event bus, so they append newline-delimited JSON events here.
+# The mesh-event tailer follows this file and republishes each line onto the
+# in-process bus so the REST WebSocket + OLED light up unchanged.
+MESH_EVENTS_JSONL = ADOS_RUN_DIR / "mesh-events.jsonl"
 
 # Live wfb-ng radio stats snapshot (rssi, snr, packets, fec, bitrate).
 # Written ~once per second by whichever wfb manager owns the radio:

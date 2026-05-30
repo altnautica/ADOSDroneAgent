@@ -42,6 +42,11 @@ getrandom = { workspace = true }
 x25519-dalek = { version = "2", default-features = false, features = ["static_secrets"] }
 # ChaCha20Poly1305 AEAD for the invite bundle. Pure-Rust (RustCrypto), no `ring`.
 chacha20poly1305 = "0.10"
+# mDNS service discovery on the batman-adv fabric: the receiver advertises
+# `_ados-receiver._tcp` on bat0 and the relay browses for it. Pure-Rust daemon
+# (no Avahi/Bonjour dependency); the `async` default feature gives the flume
+# `recv_async()` the browse loop awaits.
+mdns-sd = "0.13"
 
 # Linux-only edges (systemd notify + journald + setsid/killpg + flock).
 # Confined to a target section so the pure-logic core still builds and

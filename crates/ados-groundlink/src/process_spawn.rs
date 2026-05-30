@@ -152,6 +152,34 @@ impl GsWfbProcess {
         let _ = self.inner.wait().await;
     }
 
+    /// Graceful shutdown: send SIGTERM to the whole process group, wait up to
+    /// `grace` for the child to exit, then SIGKILL the group if it is still
+    /// alive. Mirrors the Python `proc.terminate(); wait(3s); proc.kill()`
+    /// sequence the relay/receiver loops use when a peer changes or shuts down,
+    /// giving `wfb_rx` a chance to flush before the hard kill.
+    pub async fn terminate_then_kill(&mut self, grace: std::time::Duration) {
+        self.termpg_now();
+        match tokio::time::timeout(grace, self.inner.wait()).await {
+            Ok(_) => {}
+            Err(_) => {
+                // Still alive after the grace window: hard-kill the group.
+                self.killpg_now();
+                let _ = self.inner.wait().await;
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn termpg_now(&self) {
+        use nix::sys::signal::{self, Signal};
+        let _ = signal::killpg(self.pgid, Signal::SIGTERM);
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn termpg_now(&self) {
+        // No-op off Linux.
+    }
+
     #[cfg(target_os = "linux")]
     fn killpg_now(&self) {
         use nix::sys::signal::{self, Signal};
@@ -191,6 +219,26 @@ mod tests {
         #[cfg(not(target_os = "linux"))]
         {
             let _ = Stdout::Null;
+        }
+    }
+
+    #[tokio::test]
+    async fn terminate_then_kill_reaps_a_sleeper() {
+        // A `sleep 60` ignores nothing but must be reaped well inside the grace
+        // window once SIGTERM hits the group.
+        #[cfg(target_os = "linux")]
+        {
+            let mut p =
+                GsWfbProcess::spawn("sleep", &["60".to_string()], Stdout::Null, None)
+                    .await
+                    .expect("spawn sleep");
+            assert!(p.is_running());
+            p.terminate_then_kill(std::time::Duration::from_secs(3)).await;
+            assert!(!p.is_running());
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = Stdout::Piped;
         }
     }
 }

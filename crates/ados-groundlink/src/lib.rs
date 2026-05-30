@@ -10,7 +10,10 @@
 
 pub mod acquire;
 pub mod fanout;
+pub mod gs_config;
+pub mod mdns;
 pub mod mesh;
+pub mod mesh_events;
 pub mod pairing;
 pub mod paths;
 pub mod presence;
@@ -23,6 +26,7 @@ pub mod wfb_rx;
 
 pub use acquire::{AcquireState, ChannelAcquirer};
 pub use fanout::{run_default_fanout, run_fanout};
+pub use gs_config::GroundStationConfig;
 pub use mesh::{get_current_role, MeshSnapshot};
 pub use pairing::{decrypt_invite, encrypt_invite, InviteBundle};
 pub use presence::GsPresenceCache;
