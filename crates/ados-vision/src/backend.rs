@@ -78,6 +78,7 @@ mod onnx_backend {
         meta: ModelMetadata,
     }
 
+    #[allow(clippy::new_without_default)]
     impl OnnxBackend {
         pub fn new() -> Self {
             OnnxBackend

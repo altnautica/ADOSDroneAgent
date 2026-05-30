@@ -42,6 +42,7 @@ enum Region {
         map: memmap2::MmapMut,
         _file: std::fs::File,
     },
+    #[allow(dead_code)]
     Heap(Vec<u8>),
 }
 
@@ -93,13 +94,13 @@ impl RingWriter {
             // exactly the file and this writer is the only one mutating it.
             let mut map = unsafe { memmap2::MmapMut::map_mut(&file)? };
             layout.write_header(&mut map[..])?;
-            return Ok(Self {
+            Ok(Self {
                 shm_name: shm_name.to_string(),
                 shm_path: Some(path),
                 layout,
                 region: Region::Mmap { map, _file: file },
                 seq: 1,
-            });
+            })
         }
 
         #[cfg(not(target_os = "linux"))]

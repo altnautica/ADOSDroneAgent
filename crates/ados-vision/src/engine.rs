@@ -120,6 +120,7 @@ impl VisionEngine {
 
     /// Write one captured frame into the camera's ring and publish its
     /// descriptor on `vision.frame`. Returns the descriptor.
+    #[allow(clippy::too_many_arguments)]
     pub async fn publish_frame(
         &self,
         camera_id: &str,
