@@ -457,6 +457,22 @@ impl UplinkRouter {
         self.uplink_iface(&name).await
     }
 
+    /// Record the cellular data-cap throttle level on the active-uplink flag so
+    /// a reader of `/run/ados/uplink-active` learns the throttle level. Called
+    /// by the data-cap throttle consumer on each threshold transition. Re-syncs
+    /// the flag against the current active uplink + reachability so the change
+    /// reaches disk immediately (when an uplink is active).
+    pub async fn set_data_cap_state(&self, state: events::DataCapState) {
+        let (active, reachable) = {
+            let st = self.state.lock().await;
+            (st.active_uplink.clone(), st.internet_reachable)
+        };
+        let mut flag = self.active_flag.lock().await;
+        if flag.set_data_cap_state(state) {
+            flag.sync(active.as_deref(), reachable);
+        }
+    }
+
     /// A snapshot of the live router state. Key names match the Python
     /// `get_state` dict (data-cap usage lands with the modem chunk).
     pub async fn get_state(&self) -> serde_json::Value {

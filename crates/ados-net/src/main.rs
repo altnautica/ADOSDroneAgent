@@ -166,8 +166,11 @@ async fn main() -> Result<()> {
     // resolved inside the modem manager's bring-up.
     let modem_config_present = std::path::Path::new(ados_net::paths::GS_MODEM_JSON).is_file();
     if modem_config_present && modem.enabled().await {
-        let result = modem.bring_up("auto", None).await;
-        tracing::info!(result = %result, "modem_bring_up");
+        // Read the live SIM IMSI so carrier-APN auto-detection works on the
+        // D-Bus path; the AT fallback reads AT+CIMI itself if D-Bus has none.
+        let imsi = modem.read_imsi().await;
+        let result = modem.bring_up("auto", imsi.as_deref()).await;
+        tracing::info!(imsi_known = imsi.is_some(), result = %result, "modem_bring_up");
     } else {
         tracing::info!(
             config = modem_config_present,

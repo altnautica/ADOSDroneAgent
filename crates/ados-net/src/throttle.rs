@@ -38,6 +38,9 @@ pub async fn run_throttle_consumer(
                 let Some(state) = evt.data_cap_state else {
                     continue;
                 };
+                // Record the level on the active-uplink sidecar so a reader of
+                // `/run/ados/uplink-active` learns the throttle level too.
+                router.set_data_cap_state(state).await;
                 let iface = router.active_iface().await;
                 let result = firewall.apply_throttle(iface.as_deref(), state).await;
                 debug!(state = ?state, iface = ?iface, result = %result, "uplink.throttle_applied");

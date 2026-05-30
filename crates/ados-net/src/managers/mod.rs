@@ -10,6 +10,7 @@
 pub mod ethernet;
 pub mod hostapd;
 pub mod modem;
+pub mod modem_at;
 pub mod usb_gadget;
 pub mod wifi_client;
 

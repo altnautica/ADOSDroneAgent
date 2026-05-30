@@ -32,6 +32,20 @@ pub enum DataCapState {
     Blocked100,
 }
 
+impl DataCapState {
+    /// The wire string for this state, matching the serde rename and the
+    /// `data_cap_state` values readers expect (`ok`/`warn_80`/`throttle_95`/
+    /// `blocked_100`).
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            DataCapState::Ok => "ok",
+            DataCapState::Warn80 => "warn_80",
+            DataCapState::Throttle95 => "throttle_95",
+            DataCapState::Blocked100 => "blocked_100",
+        }
+    }
+}
+
 /// A routing, health, or data-cap state change. Field set matches the Python
 /// `UplinkEvent` dataclass.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

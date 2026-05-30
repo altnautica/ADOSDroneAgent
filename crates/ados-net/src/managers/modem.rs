@@ -6,13 +6,12 @@
 //! manager flips to AT-fallback mode and recovers on the next D-Bus success.
 //! Ports `modem_manager.py`.
 //!
-//! AT/serial seam: the Python predecessor delegates the AT fallback to a
-//! separate `AtModemService` over `/dev/ttyUSB*`. This Rust cut ships the
-//! **D-Bus path only**; when D-Bus is unavailable the manager enters
-//! `fallback` state and reports `needs_at_fallback`, leaving the actual AT
-//! serial work to the existing Python `ados-modem` service until a real
-//! SIM7600 bench validates a `tokio-serial` port. The serial path is the
-//! hardware-gated risk; D-Bus-only-in-Rust keeps this chunk low-risk.
+//! AT/serial path: when D-Bus is unavailable the manager drives the modem's AT
+//! control port directly (see [`crate::managers::modem_at`]): open
+//! `/dev/ttyUSB2` at 115200 8N1, run the AT bring-up sequence, wait for the
+//! `usb0` netdev, and poll signal / technology / operator / imei over AT. The
+//! serial port is opened only on a board that has actually flipped to fallback,
+//! so a board with ModemManager never touches the serial path.
 //!
 //! The modem is HW-gated and DISABLED by default. It never auto-connects: the
 //! daemon only brings it up when `/etc/ados/ground-station-modem.json` has
@@ -30,6 +29,7 @@ use serde_json::{json, Value};
 use tokio::sync::Mutex;
 use tracing::{info, warn};
 
+use crate::managers::modem_at::{self, SerialTransport};
 use crate::router::UplinkManager;
 use crate::sidecar;
 
@@ -153,6 +153,9 @@ pub trait ModemDbus: Send + Sync {
     async fn bring_down(&self) -> Result<(), String>;
     /// True if at least one modem object is present on the bus.
     async fn modem_present(&self) -> Result<bool, String>;
+    /// The first modem's SIM IMSI, for carrier-APN auto-detection. `Ok(None)`
+    /// when the bus has a modem but no readable IMSI; `Err` on any bus error.
+    async fn imsi(&self) -> Result<Option<String>, String>;
 }
 
 /// D-Bus path disabled (non-Linux dev host, or a build with no bus). Every call
@@ -170,23 +173,51 @@ impl ModemDbus for DisabledDbus {
     async fn modem_present(&self) -> Result<bool, String> {
         Err("dbus_disabled".into())
     }
+    async fn imsi(&self) -> Result<Option<String>, String> {
+        Err("dbus_disabled".into())
+    }
 }
 
-/// Single-modem cellular data manager with D-Bus-first, AT-fallback (AT
-/// delegated to Python). HW-gated and disabled by default.
+/// The AT control-port seam. The production impl opens the first answering
+/// serial port via `modem_at`; tests inject a fake that hands back a scripted
+/// transport so the fallback bring-up is exercised without a real modem.
+#[async_trait]
+pub trait AtPortOpener: Send + Sync {
+    /// Open and AT-probe a control port. `None` when no port answers (no modem
+    /// present, or a non-Linux host).
+    async fn open(&self) -> Option<Box<dyn SerialTransport>>;
+}
+
+/// Production AT opener: scans `/dev` for a serial control port that answers AT.
+pub struct RealAtPortOpener;
+
+#[async_trait]
+impl AtPortOpener for RealAtPortOpener {
+    async fn open(&self) -> Option<Box<dyn SerialTransport>> {
+        modem_at::open_control_port().await
+    }
+}
+
+/// Single-modem cellular data manager with D-Bus-first, AT-fallback. HW-gated
+/// and disabled by default.
 pub struct ModemManager {
     dbus: Arc<dyn ModemDbus>,
+    at_opener: Arc<dyn AtPortOpener>,
     config_path: PathBuf,
     net_dir: PathBuf,
     state: Mutex<ModemState>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Default)]
 struct ModemState {
     dbus_fail_count: u32,
     fallback_mode: bool,
     config: ModemConfig,
     brought_up: bool,
+    /// The AT control port held open across an AT-fallback bring-up so status
+    /// polls reuse it. `None` until a fallback bring-up succeeds. Not `Debug`,
+    /// so this struct does not derive `Debug`.
+    at_port: Option<Box<dyn SerialTransport>>,
 }
 
 impl ModemManager {
@@ -200,11 +231,25 @@ impl ModemManager {
         )
     }
 
-    /// Full constructor (tests inject a fake D-Bus client + tempdir paths).
+    /// Constructor with the real AT opener (tests inject a fake D-Bus client +
+    /// tempdir paths but exercise the production serial scan, which no-ops off a
+    /// modem).
     pub fn with_parts(dbus: Arc<dyn ModemDbus>, config_path: PathBuf, net_dir: PathBuf) -> Self {
+        Self::with_parts_at(dbus, Arc::new(RealAtPortOpener), config_path, net_dir)
+    }
+
+    /// Full constructor (tests inject a fake D-Bus client + a fake AT opener +
+    /// tempdir paths) so the AT-fallback bring-up is unit-testable.
+    pub fn with_parts_at(
+        dbus: Arc<dyn ModemDbus>,
+        at_opener: Arc<dyn AtPortOpener>,
+        config_path: PathBuf,
+        net_dir: PathBuf,
+    ) -> Self {
         let config = load_config(&config_path);
         Self {
             dbus,
+            at_opener,
             config_path,
             net_dir,
             state: Mutex::new(ModemState {
@@ -284,17 +329,41 @@ impl ModemManager {
             }
         }
 
-        // Fallback: the Rust modem does not drive the AT serial path; report
-        // that the Python AT service should take over.
-        st.brought_up = false;
-        json!({
-            "connected": false,
-            "iface": USB_IFACE,
-            "ip": "",
-            "apn": resolved,
-            "fallback_mode": true,
-            "needs_at_fallback": true,
-        })
+        // Fallback: D-Bus is unavailable. Drive the AT control port directly.
+        // `apn` is passed through as "auto" so the AT driver reads the SIM IMSI
+        // (AT+CIMI) and maps the carrier APN itself, matching the D-Bus path's
+        // auto behaviour. On a board with no modem the port opener returns None
+        // and the manager reports it still needs AT (nothing to drive).
+        let net_dir = self.net_dir.clone();
+        let iface_present = move |iface: &str| net_dir.join(iface).exists();
+        match self.at_opener.open().await {
+            Some(mut port) => {
+                let result = modem_at::bring_up_over(port.as_mut(), apn, iface_present).await;
+                let connected = result
+                    .get("connected")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                if connected {
+                    st.brought_up = true;
+                    // Cache the open port so status polls reuse it.
+                    st.at_port = Some(port);
+                } else {
+                    st.brought_up = false;
+                }
+                result
+            }
+            None => {
+                st.brought_up = false;
+                json!({
+                    "connected": false,
+                    "iface": USB_IFACE,
+                    "ip": "",
+                    "apn": resolved,
+                    "fallback_mode": true,
+                    "needs_at_fallback": true,
+                })
+            }
+        }
     }
 
     /// Tear the data session down (best-effort D-Bus, then a raw link-down via
@@ -312,7 +381,54 @@ impl ModemManager {
             }
         }
         st.brought_up = false;
+        // Drop the cached AT port so the next bring-up re-opens a clean port.
+        st.at_port = None;
         json!({ "ok": ok })
+    }
+
+    /// Daemon-side modem status: liveness + mode + (in AT fallback) the
+    /// AT-polled signal / technology / operator / imei. The D-Bus path exposes
+    /// these properties through ModemManager and the in-process Python manager
+    /// reads them via mmcli, so on a D-Bus board the daemon does not duplicate
+    /// that read; it reports `mode: dbus` and leaves the rich fields to the REST
+    /// layer. In AT fallback the daemon owns the only serial handle, so it polls
+    /// AT here. Always reports iface liveness from sysfs.
+    pub async fn status(&self) -> Value {
+        let mut st = self.state.lock().await;
+        let present = self.dbus.modem_present().await.unwrap_or(false);
+        let iface = self.current_iface();
+        let up = self.iface_up();
+        let mode = if st.fallback_mode { "at" } else { "dbus" };
+
+        let mut out = json!({
+            "mode": mode,
+            "modem_present": present || st.fallback_mode,
+            "iface": iface,
+            "iface_up": up,
+            "brought_up": st.brought_up,
+            "needs_at_fallback": st.fallback_mode,
+        });
+
+        // In AT fallback, poll the held-open port for the rich fields.
+        if st.fallback_mode {
+            if let Some(port) = st.at_port.as_mut() {
+                let at = modem_at::status_over(port.as_mut()).await;
+                if let (Value::Object(dst), Value::Object(src)) = (&mut out, at) {
+                    dst.extend(src);
+                }
+            }
+        }
+        out
+    }
+
+    /// True if a modem is reachable: a present D-Bus modem, or (in fallback) an
+    /// up `usb0`/`wwan0` iface. A cheap liveness probe for the daemon's health
+    /// loop that never auto-connects.
+    pub async fn probe(&self) -> bool {
+        if self.dbus.modem_present().await.unwrap_or(false) {
+            return true;
+        }
+        self.iface_up()
     }
 
     /// Read byte counters from `/sys/class/net/<iface>/statistics`. Pure sysfs;
@@ -385,6 +501,18 @@ impl ModemManager {
             }
         }
         config_to_json(&st.config)
+    }
+
+    /// Read the live SIM IMSI for carrier-APN auto-detection. Prefers the D-Bus
+    /// 3GPP property; if the bus has none (D-Bus absent or no SIM) returns
+    /// `None` and the AT fallback reads `AT+CIMI` itself during bring-up. Used
+    /// by the daemon to pass a resolved IMSI to [`bring_up`] so `apn_for_imsi`
+    /// works on the D-Bus path.
+    ///
+    /// [`bring_up`]: ModemManager::bring_up
+    pub async fn read_imsi(&self) -> Option<String> {
+        // Err (bus failure) and Ok(None) both mean "no IMSI to pass through".
+        self.dbus.imsi().await.unwrap_or_default()
     }
 
     /// The active cellular iface: wwan0 (MBIM/QMI) preferred, else usb0
@@ -609,6 +737,31 @@ mod zbus_impl {
                 Err(e) => Err(e),
             }
         }
+
+        async fn imsi(&self) -> Result<Option<String>, String> {
+            let conn = self.connect().await?;
+            let path = match self.first_modem_path(&conn).await {
+                Ok(p) => p,
+                Err(e) if e == "no_modem" => return Ok(None),
+                Err(e) => return Err(e),
+            };
+            // The SIM IMSI lives on the 3GPP interface's `Imsi` property.
+            let modem3gpp = Proxy::new(
+                &conn,
+                MM_SERVICE,
+                path,
+                "org.freedesktop.ModemManager1.Modem.Modem3gpp",
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+            match tokio::time::timeout(DBUS_TIMEOUT, modem3gpp.get_property::<String>("Imsi")).await
+            {
+                Ok(Ok(imsi)) if !imsi.is_empty() => Ok(Some(imsi)),
+                // Property absent / empty (no SIM) → no IMSI, not an error.
+                Ok(_) => Ok(None),
+                Err(_) => Err("dbus_imsi_timeout".to_string()),
+            }
+        }
     }
 }
 
@@ -618,16 +771,25 @@ mod tests {
     use std::sync::atomic::{AtomicU32, Ordering};
 
     /// A scripted D-Bus fake: each `bring_up` consumes the next verdict from a
-    /// fixed sequence (true = success, false = failure).
+    /// fixed sequence (true = success, false = failure). `imsi` is fixed.
     struct ScriptedDbus {
         verdicts: Vec<bool>,
         idx: AtomicU32,
+        imsi: Option<String>,
     }
     impl ScriptedDbus {
         fn new(verdicts: Vec<bool>) -> Self {
             Self {
                 verdicts,
                 idx: AtomicU32::new(0),
+                imsi: None,
+            }
+        }
+        fn with_imsi(verdicts: Vec<bool>, imsi: &str) -> Self {
+            Self {
+                verdicts,
+                idx: AtomicU32::new(0),
+                imsi: Some(imsi.to_string()),
             }
         }
         fn next(&self) -> bool {
@@ -658,10 +820,27 @@ mod tests {
         async fn modem_present(&self) -> Result<bool, String> {
             Ok(true)
         }
+        async fn imsi(&self) -> Result<Option<String>, String> {
+            Ok(self.imsi.clone())
+        }
+    }
+
+    /// An AT opener that never finds a port (tests on a dev host with no modem).
+    struct NoAtPort;
+    #[async_trait]
+    impl AtPortOpener for NoAtPort {
+        async fn open(&self) -> Option<Box<dyn SerialTransport>> {
+            None
+        }
     }
 
     fn mgr(dbus: Arc<dyn ModemDbus>, dir: &std::path::Path) -> ModemManager {
-        ModemManager::with_parts(dbus, dir.join("ground-station-modem.json"), dir.join("net"))
+        ModemManager::with_parts_at(
+            dbus,
+            Arc::new(NoAtPort),
+            dir.join("ground-station-modem.json"),
+            dir.join("net"),
+        )
     }
 
     #[test]
@@ -775,6 +954,44 @@ mod tests {
         let ok = m.bring_up("internet", None).await; // success 3 → counter reset
         assert_eq!(ok["connected"], true);
         assert!(!m.needs_at_fallback().await);
+    }
+
+    #[tokio::test]
+    async fn auto_apn_resolves_from_live_imsi_on_dbus_path() {
+        let dir = tempfile::tempdir().unwrap();
+        // A D-Bus modem that succeeds and carries a Jio IMSI.
+        let dbus = Arc::new(ScriptedDbus::with_imsi(vec![true], "405857999888777"));
+        let m = ModemManager::with_parts_at(
+            dbus,
+            Arc::new(NoAtPort),
+            dir.path().join("ground-station-modem.json"),
+            dir.path().join("net"),
+        );
+        // The daemon reads the live IMSI and passes it so "auto" maps to jionet.
+        let imsi = m.read_imsi().await;
+        assert_eq!(imsi.as_deref(), Some("405857999888777"));
+        let out = m.bring_up("auto", imsi.as_deref()).await;
+        assert_eq!(out["connected"], true);
+        assert_eq!(out["apn"], "jionet");
+    }
+
+    #[tokio::test]
+    async fn status_reports_mode_and_iface_liveness() {
+        let dir = tempfile::tempdir().unwrap();
+        let net = dir.path().join("net");
+        // D-Bus present (modem_present → true), not in fallback → mode "dbus".
+        let m = mgr(Arc::new(ScriptedDbus::new(vec![true])), dir.path());
+        let s = m.status().await;
+        assert_eq!(s["mode"], "dbus");
+        assert_eq!(s["needs_at_fallback"], false);
+        // Bring wwan0 up in sysfs → iface_up true.
+        let wwan = net.join("wwan0");
+        std::fs::create_dir_all(&wwan).unwrap();
+        std::fs::write(wwan.join("operstate"), "up\n").unwrap();
+        let s = m.status().await;
+        assert_eq!(s["iface_up"], true);
+        assert_eq!(s["iface"], "wwan0");
+        assert!(m.probe().await);
     }
 
     #[tokio::test]

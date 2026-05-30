@@ -26,9 +26,16 @@ use serde::Serialize;
 use tracing::{debug, warn};
 
 use crate::paths;
+use crate::router::events::DataCapState;
 use crate::sidecar;
 
 /// The JSON body written to `/run/ados/uplink-active`.
+///
+/// The first three fields are the legacy contract that existing readers parse;
+/// `data_cap_state` is an additive field, always emitted, so a subscriber can
+/// learn the cellular throttle level (`ok`/`warn_80`/`throttle_95`/`blocked_100`)
+/// without a separate file. Legacy readers ignore the unknown key, so the body
+/// stays compatible.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ActiveUplinkFlag {
     /// The router's currently-selected uplink (`Some` whenever the file
@@ -38,6 +45,9 @@ pub struct ActiveUplinkFlag {
     pub internet_reachable: bool,
     /// Wall-clock write time in milliseconds.
     pub timestamp_ms: u64,
+    /// Current cellular data-cap throttle level. `ok` until a data-cap
+    /// threshold consumer pushes a higher level.
+    pub data_cap_state: String,
 }
 
 /// Stateful writer that dedups identical syncs and owns the write-vs-unlink
@@ -47,9 +57,13 @@ pub struct ActiveUplinkFlag {
 #[derive(Debug)]
 pub struct ActiveFlagWriter {
     path: PathBuf,
-    /// Last `(active_uplink, internet_reachable)` we persisted, to skip a
-    /// redundant rewrite when neither changed. `None` means "file absent".
-    last: Option<(String, bool)>,
+    /// Last `(active_uplink, internet_reachable, data_cap_state)` we persisted,
+    /// to skip a redundant rewrite when nothing changed. `None` means "file
+    /// absent".
+    last: Option<(String, bool, String)>,
+    /// Current cellular data-cap throttle level, mirrored into the body on every
+    /// write. Defaults to `ok`; the data-cap throttle consumer updates it.
+    cap_state: String,
 }
 
 impl ActiveFlagWriter {
@@ -60,7 +74,28 @@ impl ActiveFlagWriter {
 
     /// Writer targeting an explicit path (tests).
     pub fn with_path(path: PathBuf) -> Self {
-        Self { path, last: None }
+        Self {
+            path,
+            last: None,
+            cap_state: DataCapState::Ok.as_str().to_string(),
+        }
+    }
+
+    /// Update the data-cap throttle level reflected in the body. Returns `true`
+    /// when the level changed (the caller can then re-`sync` to persist it).
+    /// The change does not write on its own; the next `sync` carries it.
+    pub fn set_data_cap_state(&mut self, state: DataCapState) -> bool {
+        let next = state.as_str().to_string();
+        if self.cap_state == next {
+            return false;
+        }
+        self.cap_state = next;
+        true
+    }
+
+    /// The current data-cap throttle level string.
+    pub fn data_cap_state(&self) -> &str {
+        &self.cap_state
     }
 
     /// Reconcile the on-disk flag to the router's current state.
@@ -74,7 +109,7 @@ impl ActiveFlagWriter {
     pub fn sync(&mut self, active_uplink: Option<&str>, internet_reachable: bool) -> bool {
         match active_uplink {
             Some(name) => {
-                let key = (name.to_string(), internet_reachable);
+                let key = (name.to_string(), internet_reachable, self.cap_state.clone());
                 if self.last.as_ref() == Some(&key) && self.path.is_file() {
                     return false;
                 }
@@ -82,6 +117,7 @@ impl ActiveFlagWriter {
                     active_uplink: name.to_string(),
                     internet_reachable,
                     timestamp_ms: now_ms(),
+                    data_cap_state: self.cap_state.clone(),
                 };
                 match serde_json::to_vec(&body) {
                     Ok(bytes) => match sidecar::write_atomic(&self.path, &bytes) {
@@ -176,6 +212,41 @@ mod tests {
         // Drop to no-uplink → file unlinked, legacy reader sees no uplink.
         assert!(w.sync(None, false));
         assert!(!path.is_file());
+    }
+
+    #[test]
+    fn data_cap_state_is_additive_and_defaults_to_ok() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("uplink-active");
+        let mut w = ActiveFlagWriter::with_path(path.clone());
+
+        // Default body carries data_cap_state: "ok".
+        assert!(w.sync(Some("eth0"), true));
+        let body: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(body["data_cap_state"], "ok");
+        // Legacy keys still present and parseable by an old reader.
+        assert_eq!(body["active_uplink"], "eth0");
+        assert_eq!(body["internet_reachable"], true);
+        assert!(body["timestamp_ms"].as_u64().unwrap() > 0);
+
+        // A cap-state change is staged, then carried by the next sync.
+        assert!(w.set_data_cap_state(DataCapState::Throttle95));
+        assert!(!w.set_data_cap_state(DataCapState::Throttle95)); // no-op repeat.
+        assert!(w.sync(Some("eth0"), true)); // same uplink+reachable, but cap changed → rewrite.
+        let body: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(body["data_cap_state"], "throttle_95");
+
+        // No change → dedup, no rewrite.
+        assert!(!w.sync(Some("eth0"), true));
+
+        // Escalate to blocked_100.
+        assert!(w.set_data_cap_state(DataCapState::Blocked100));
+        assert!(w.sync(Some("eth0"), true));
+        let body: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(body["data_cap_state"], "blocked_100");
     }
 
     #[test]
