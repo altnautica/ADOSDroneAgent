@@ -1,31 +1,13 @@
-"""ADOS Process Supervisor: manages child systemd services.
+"""Process orchestration is owned by the native ados-supervisor binary.
 
-This package re-exports the public Supervisor surface from per-concern
-modules. The barrel keeps `from ados.core.supervisor import Supervisor`
-working for callers that already import it that way.
+The long-running orchestrator (service lifecycle, USB hotplug routing,
+health monitoring, heartbeat) runs as a standalone native binary started
+by the ados-supervisor systemd unit. This package no longer ships a
+Python orchestrator.
 
-Modules:
-  registry.py:  ServiceSpec, SERVICE_REGISTRY, circuit-breaker constants
-  hotplug.py:   HotplugMixin (USB add/remove routing)
-  monitor.py:   MonitorMixin (periodic health check + metrics + watchdog)
-  heartbeat.py: HeartbeatMixin (per-service status + heartbeat payload)
-  lifecycle.py: Supervisor class, run_supervisor, main entry point
+The radio-block builder and WFB status helpers used by heartbeat
+payloads live in :mod:`ados.core.radio_block`, a neutral library module
+with no orchestration coupling.
 """
 
-from .lifecycle import Supervisor, main, run_supervisor
-from .registry import (
-    FAILURE_WINDOW_SECS,
-    MAX_FAILURES,
-    SERVICE_REGISTRY,
-    ServiceSpec,
-)
-
-__all__ = [
-    "FAILURE_WINDOW_SECS",
-    "MAX_FAILURES",
-    "SERVICE_REGISTRY",
-    "ServiceSpec",
-    "Supervisor",
-    "main",
-    "run_supervisor",
-]
+__all__: list[str] = []

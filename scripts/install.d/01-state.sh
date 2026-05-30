@@ -182,16 +182,13 @@ do_uninstall() {
 install_global_symlinks() {
     ln -sf "${VENV_DIR}/bin/ados" /usr/local/bin/ados
     ln -sf "${VENV_DIR}/bin/ados-agent" /usr/local/bin/ados-agent
-    if [ -f "${VENV_DIR}/bin/ados-supervisor" ]; then
-        ln -sf "${VENV_DIR}/bin/ados-supervisor" /usr/local/bin/ados-supervisor
-    fi
-    info "Global commands installed: ados, ados-agent, ados-supervisor"
+    info "Global commands installed: ados, ados-agent"
     # Fetch the terminal dashboard binary that `ados` (no subcommand) launches.
     # Best-effort; `ados` falls back to plain status if it is not present.
     install_tui_binary
-    # Fetch the prebuilt orchestrator binary onto disk. Best-effort and inert:
-    # the systemd unit decides which ExecStart to run, so a present binary is a
-    # no-op until a unit points at it.
+    # Fetch the native orchestrator binary onto disk. Hard gate on a supported
+    # arch: there is no Python fallback, so a missing or unverifiable binary
+    # aborts the install rather than leaving the agent with no orchestrator.
     install_supervisor_binary
     # Fetch the prebuilt MAVLink router binary. The ados-mavlink unit's ExecStart
     # shim runs it when present, else the packaged Python service.

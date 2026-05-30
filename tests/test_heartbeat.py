@@ -1,4 +1,4 @@
-"""Tests for the supervisor heartbeat radio block."""
+"""Tests for the heartbeat radio block builder."""
 
 from __future__ import annotations
 
@@ -138,65 +138,3 @@ def test_channel_to_freq_known_and_unknown():
     assert _channel_to_freq(999) is None
     assert _channel_to_freq(None) is None
     assert _channel_to_freq("abc") is None
-
-
-def test_supervisor_heartbeat_payload_includes_radio_block():
-    """Supervisor.get_heartbeat_payload() emits a `radio` key, sourced via fallback when no manager."""
-    from collections import deque
-    from unittest.mock import patch
-
-    from ados.core.config import ADOSConfig
-    from ados.core.supervisor.lifecycle import Supervisor
-    sup = Supervisor(ADOSConfig())
-    # Empty service registry is fine; the mixin still needs the deques.
-    sup._cpu_history = deque(maxlen=10)
-    sup._memory_history = deque(maxlen=10)
-
-    # No in-process WfbManager and the localhost fallback fails (no
-    # agent running in the test process), so the block is `absent`.
-    with patch(
-        "ados.core.supervisor.heartbeat.fetch_wfb_status_via_http",
-        return_value=None,
-    ):
-        payload = sup.get_heartbeat_payload()
-
-    assert "radio" in payload
-    assert payload["radio"]["state"] == "absent"
-
-
-def test_supervisor_heartbeat_payload_uses_attached_manager():
-    """When the supervisor has an attached manager, its status drives the radio block."""
-    from collections import deque
-
-    from ados.core.supervisor.lifecycle import Supervisor
-
-    class FakeManager:
-        def get_status(self):
-            return {
-                "state": "connected",
-                "interface": "wlan1",
-                "channel": 161,
-                "rssi_dbm": -60.0,
-                "bitrate_kbps": 12000,
-                "fec_recovered": 4,
-                "fec_failed": 1,
-                "packets_lost": 2,
-                "tx_power_dbm": 5,
-                "tx_power_max_dbm": 15,
-                "topology": "host_vbus",
-            }
-
-    from ados.core.config import ADOSConfig
-    sup = Supervisor(ADOSConfig())
-    sup._cpu_history = deque(maxlen=10)
-    sup._memory_history = deque(maxlen=10)
-    sup._wfb_manager = FakeManager()
-
-    payload = sup.get_heartbeat_payload()
-
-    assert payload["radio"]["state"] == "connected"
-    assert payload["radio"]["iface"] == "wlan1"
-    assert payload["radio"]["channel"] == 161
-    assert payload["radio"]["freq_mhz"] == 5805
-    assert payload["radio"]["rssi_dbm"] == -60.0
-    assert payload["radio"]["tx_power_dbm"] == 5

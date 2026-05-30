@@ -8,10 +8,11 @@
 # signature is enforced automatically once a key + .minisig are published,
 # with no change here).
 #
-# Best-effort by design: if the fetch or verification fails (offline, no asset
-# yet, non-arm64 host), the install continues and the systemd unit runs
-# whichever ExecStart it carries. Placing the binary on disk is inert until a
-# unit's ExecStart points at it. Idempotent: re-running re-fetches and overwrites.
+# Hard install gate on a supported arch: the native binary is the only
+# supervisor. If the fetch or verification fails on aarch64/arm64 the install
+# FAILS, because there is no Python fallback and a fresh install must never end
+# up with no orchestrator. Non-arm64 dev hosts skip cleanly (no prebuilt is
+# published for them). Idempotent: re-running re-fetches and overwrites.
 # =============================================================================
 
 ADOS_SUPERVISOR_RELEASE_BASE="https://github.com/altnautica/ADOSDroneAgent/releases/download/prebuilt-supervisor"
@@ -48,9 +49,9 @@ install_supervisor_binary() {
 
     if ! curl -fsSL "${ADOS_SUPERVISOR_RELEASE_BASE}/${ADOS_SUPERVISOR_ASSET}" -o "${tmp}/${ADOS_SUPERVISOR_ASSET}" \
         || ! curl -fsSL "${ADOS_SUPERVISOR_RELEASE_BASE}/${ADOS_SUPERVISOR_ASSET}.sha256" -o "${tmp}/${ADOS_SUPERVISOR_ASSET}.sha256"; then
-        warn "Could not fetch the ados-supervisor prebuilt; skipping."
+        error "Could not fetch the ados-supervisor binary on ${arch}; the install cannot complete without it."
         rm -rf "${tmp}"
-        return 0
+        return 1
     fi
     # Signature sidecar is optional today; fetch best-effort so verification
     # upgrades to signature-checked automatically once CI starts signing.
@@ -58,14 +59,14 @@ install_supervisor_binary() {
 
     if command -v ados_verify_artifact >/dev/null 2>&1; then
         if ! ados_verify_artifact "${tmp}/${ADOS_SUPERVISOR_ASSET}" "${ADOS_SUPERVISOR_PUBKEY}" "edge" 0; then
-            warn "ados-supervisor failed verification; not installing the binary."
+            error "ados-supervisor failed verification on ${arch}; refusing to install an unverified orchestrator."
             rm -rf "${tmp}"
-            return 0
+            return 1
         fi
     elif ! ( cd "${tmp}" && sha256sum -c "${ADOS_SUPERVISOR_ASSET}.sha256" >/dev/null 2>&1 ); then
-        warn "ados-supervisor checksum mismatch; not installing the binary."
+        error "ados-supervisor checksum mismatch on ${arch}; refusing to install a corrupt orchestrator."
         rm -rf "${tmp}"
-        return 0
+        return 1
     fi
 
     install -m 0755 "${tmp}/${ADOS_SUPERVISOR_ASSET}" "${dest}"

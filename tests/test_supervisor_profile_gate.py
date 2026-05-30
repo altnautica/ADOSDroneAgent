@@ -1,12 +1,11 @@
-"""Regression tests for the supervisor's profile-gate.
+"""Regression tests for the profile-gate resolution.
 
-Earlier the gate at ``src/ados/core/supervisor/lifecycle.py`` read
-``config.agent.profile`` directly. When the operator left the config
-field on the documented onboarding default (``"auto"``) the gate
-compared the literal string ``"auto"`` against each service's
-required profile and refused to start anything. ads-wfb stayed dead
-on every drone-profile install; ados-cloud-relay stayed dead on every
-ground-station install.
+Earlier the gate read ``config.agent.profile`` directly. When the
+operator left the config field on the documented onboarding default
+(``"auto"``) the gate compared the literal string ``"auto"`` against
+each service's required profile and refused to start anything. ados-wfb
+stayed dead on every drone-profile install; ados-cloud-relay stayed
+dead on every ground-station install.
 
 The fix routes the check through ``ados.core.profile.current_profile_and_role``,
 which already implements the documented resolution order:
@@ -119,41 +118,3 @@ def test_resolver_unrecognised_value_falls_back(
     # "lite" is not in the recognised set, _read_profile_conf_value
     # returns None, normalize_profile then returns "drone".
     assert profile == "drone"
-
-
-# --- gate plumbing (asserts the lifecycle.py call path) ----------------------
-
-
-def test_gate_calls_resolver_not_raw_config(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """When the gate fires, it must consult current_profile_and_role,
-    not read config.agent.profile directly. Catches the regression
-    where the gate compared the literal "auto" against a service's
-    required profile and refused to start anything."""
-    from ados.core import profile as profile_module
-
-    _patched_resolver(monkeypatch, _write_profile_conf(tmp_path, "drone"))
-
-    calls: list[tuple] = []
-    original = profile_module.current_profile_and_role
-
-    def _spy(config):
-        calls.append(("resolver_called", config))
-        return original(config)
-
-    monkeypatch.setattr(profile_module, "current_profile_and_role", _spy)
-
-    # Re-import the lifecycle module's gate logic in isolation by
-    # importing it fresh under the patched resolver. We only inspect
-    # that the import path resolves and the resolver call is wired up;
-    # full lifecycle integration is out of scope for a unit test.
-    from ados.core.supervisor import lifecycle as _  # noqa: F401
-
-    # The actual gate runs inside start_service; we re-implement the
-    # same call shape here to verify the resolver is the source of
-    # truth.
-    config = _make_config("auto")
-    wire_profile, _role = profile_module.current_profile_and_role(config)
-    assert wire_profile == "drone"
-    assert any(call[0] == "resolver_called" for call in calls)
