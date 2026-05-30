@@ -149,10 +149,7 @@ fn receiver_is_stale(last_seen_ms: i64, was_up: bool, now_ms: i64) -> bool {
 /// Tail a forwarder's stderr, folding each `PKT` line into the shared state's
 /// fragment counters. Mirrors the Python `_tail_stats`. Returns when the stderr
 /// pipe closes (the forwarder exited).
-async fn tail_forwarder_stats(
-    stderr: tokio::process::ChildStderr,
-    state: Arc<Mutex<RelayState>>,
-) {
+async fn tail_forwarder_stats(stderr: tokio::process::ChildStderr, state: Arc<Mutex<RelayState>>) {
     use tokio::io::{AsyncBufReadExt, BufReader};
     let mut lines = BufReader::new(stderr).lines();
     while let Ok(Some(line)) = lines.next_line().await {
@@ -418,7 +415,11 @@ mod tests {
         // Up but within grace → not stale.
         assert!(!receiver_is_stale(100_000, true, 110_000));
         // Up and past grace → stale.
-        assert!(receiver_is_stale(100_000, true, 100_000 + RECEIVER_LOST_GRACE_MS + 1));
+        assert!(receiver_is_stale(
+            100_000,
+            true,
+            100_000 + RECEIVER_LOST_GRACE_MS + 1
+        ));
         // Already down → not re-fired.
         assert!(!receiver_is_stale(
             100_000,
@@ -438,14 +439,11 @@ mod tests {
 
             let state = Arc::new(Mutex::new(RelayState::default()));
             // `sh -c 'printf ... 1>&2'` writes the PKT stats to stderr.
-            let script =
-                "printf 'X PKT n_all:100 n_out:90\\nX PKT n_all:200 n_out:185\\n' 1>&2";
-            let mut proc = GsWfbProcess::spawn_stderr_piped(
-                "sh",
-                &["-c".to_string(), script.to_string()],
-            )
-            .await
-            .expect("spawn sh");
+            let script = "printf 'X PKT n_all:100 n_out:90\\nX PKT n_all:200 n_out:185\\n' 1>&2";
+            let mut proc =
+                GsWfbProcess::spawn_stderr_piped("sh", &["-c".to_string(), script.to_string()])
+                    .await
+                    .expect("spawn sh");
             let stderr = proc.take_stderr().expect("stderr piped");
             tail_forwarder_stats(stderr, state.clone()).await;
 

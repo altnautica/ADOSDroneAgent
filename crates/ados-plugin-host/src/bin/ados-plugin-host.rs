@@ -427,8 +427,7 @@ mod tests {
         // Wire the daemon (no mavlink router up -> slot stays None, fine).
         // A tempdir secret path makes the issuer persist a shared secret.
         let secret = dir.path().join("secrets/plugin-token-secret");
-        let daemon =
-            wire(&supervisor, install_dir, socket_dir.clone(), run, &secret).await;
+        let daemon = wire(&supervisor, install_dir, socket_dir.clone(), run, &secret).await;
         assert_eq!(
             daemon.served.len(),
             1,
@@ -440,8 +439,7 @@ mod tests {
         // reloaded from the same persisted secret (the cross-process contract:
         // a runner unit's env file is consumed by a different process). The
         // ping below then proves the daemon itself accepts that exact token.
-        let env_path =
-            ados_plugin_host::token_env_path(PLUGIN_ID, Some(&socket_dir));
+        let env_path = ados_plugin_host::token_env_path(PLUGIN_ID, Some(&socket_dir));
         let env_body = std::fs::read_to_string(&env_path).expect("token env written");
         let token_line = env_body
             .lines()
@@ -449,8 +447,7 @@ mod tests {
             .expect("ADOS_PLUGIN_TOKEN in env file");
         let parsed = ados_protocol::plugin::CapabilityToken::from_token_string(token_line)
             .expect("env token parses");
-        let reloaded_issuer =
-            ados_plugin_host::shared_issuer(&secret).expect("reload issuer");
+        let reloaded_issuer = ados_plugin_host::shared_issuer(&secret).expect("reload issuer");
         let now = parsed.issued_at + 1;
         assert!(
             reloaded_issuer.verify(&parsed, now).is_ok(),
@@ -545,7 +542,9 @@ mod tests {
             // Both runtimes deliver the token via the same env file + static
             // socket Environment line.
             assert!(
-                unit.contains("EnvironmentFile=-/run/ados/plugins/com.example.consistency.token.env"),
+                unit.contains(
+                    "EnvironmentFile=-/run/ados/plugins/com.example.consistency.token.env"
+                ),
                 "{runtime} unit missing EnvironmentFile: {unit}"
             );
             assert!(

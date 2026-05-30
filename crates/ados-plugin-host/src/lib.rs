@@ -68,7 +68,6 @@ pub use signing::{is_first_party_signer, FIRST_PARTY_SIGNERS};
 pub use state::{PluginInstall, PluginSource, PluginStatus};
 pub use supervisor::{semver_in_range, InstallResult, Paths, PluginSupervisor, SystemctlRunner};
 pub use token_secret::{
-    load_or_create_secret, shared_issuer, token_env_path, write_token_env,
-    PLUGIN_TOKEN_SECRET_PATH,
+    load_or_create_secret, shared_issuer, token_env_path, write_token_env, PLUGIN_TOKEN_SECRET_PATH,
 };
 pub use vision_client::{VisionClient, VisionRpcError};

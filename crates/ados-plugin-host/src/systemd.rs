@@ -249,10 +249,10 @@ mod tests {
         // Token delivery: the socket is a static Environment line and the token
         // rides in an owner-only EnvironmentFile (the `-` prefix tolerates its
         // absence before the first mint).
-        assert!(unit
-            .contains("Environment=ADOS_PLUGIN_SOCKET=/run/ados/plugins/com.example.rustplug.sock"));
-        assert!(unit
-            .contains("EnvironmentFile=-/run/ados/plugins/com.example.rustplug.token.env"));
+        assert!(unit.contains(
+            "Environment=ADOS_PLUGIN_SOCKET=/run/ados/plugins/com.example.rustplug.sock"
+        ));
+        assert!(unit.contains("EnvironmentFile=-/run/ados/plugins/com.example.rustplug.token.env"));
         // The shared/hardening/limit lines are identical to the python branch.
         assert!(unit.contains("Slice=ados-plugins.slice"));
         assert!(unit.contains("MemoryMax=64M"));

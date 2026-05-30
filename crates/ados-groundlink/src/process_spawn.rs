@@ -228,12 +228,12 @@ mod tests {
         // window once SIGTERM hits the group.
         #[cfg(target_os = "linux")]
         {
-            let mut p =
-                GsWfbProcess::spawn("sleep", &["60".to_string()], Stdout::Null, None)
-                    .await
-                    .expect("spawn sleep");
+            let mut p = GsWfbProcess::spawn("sleep", &["60".to_string()], Stdout::Null, None)
+                .await
+                .expect("spawn sleep");
             assert!(p.is_running());
-            p.terminate_then_kill(std::time::Duration::from_secs(3)).await;
+            p.terminate_then_kill(std::time::Duration::from_secs(3))
+                .await;
             assert!(!p.is_running());
         }
         #[cfg(not(target_os = "linux"))]

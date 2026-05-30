@@ -215,12 +215,8 @@ async fn tail_aggregator_stats(
 /// `bat0`; the churn watcher folds them into the per-relay map. Returns an
 /// empty vec on a batctl error so a wedged module never stalls the loop.
 async fn neighbor_macs(_mesh_iface: &str) -> Vec<String> {
-    let (rc, out, _e) = crate::mesh::batctl::run(
-        "batctl",
-        &["n", "-H"],
-        Duration::from_secs(3),
-    )
-    .await;
+    let (rc, out, _e) =
+        crate::mesh::batctl::run("batctl", &["n", "-H"], Duration::from_secs(3)).await;
     if rc != 0 {
         return Vec::new();
     }
@@ -525,12 +521,10 @@ mod tests {
         {
             let state = Arc::new(Mutex::new(ReceiverState::default()));
             let script = "printf 'X PKT n_out:1500 fec_rec:12 bitrate_kbps:4200\\n' 1>&2";
-            let mut proc = GsWfbProcess::spawn_stderr_piped(
-                "sh",
-                &["-c".to_string(), script.to_string()],
-            )
-            .await
-            .expect("spawn sh");
+            let mut proc =
+                GsWfbProcess::spawn_stderr_piped("sh", &["-c".to_string(), script.to_string()])
+                    .await
+                    .expect("spawn sh");
             let stderr = proc.take_stderr().expect("stderr piped");
             tail_aggregator_stats(stderr, state.clone()).await;
             let s = state.lock().await;
@@ -560,8 +554,7 @@ mod tests {
         };
         upsert_relays(&mut s, &["aa:bb:cc:dd:ee:ff".into()], 42);
         s.write().unwrap();
-        let written =
-            std::fs::read_to_string(dir.path().join("wfb-receiver.json")).unwrap();
+        let written = std::fs::read_to_string(dir.path().join("wfb-receiver.json")).unwrap();
         let v: serde_json::Value = serde_json::from_str(&written).unwrap();
         assert_eq!(v["up"], true);
         assert_eq!(v["relays"][0]["mac"], "aa:bb:cc:dd:ee:ff");

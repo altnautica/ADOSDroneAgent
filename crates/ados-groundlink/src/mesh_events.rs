@@ -49,12 +49,7 @@ pub fn emit(kind: &str, payload: serde_json::Value) {
 /// Testable core: append the event line to an explicit path with an explicit
 /// timestamp. Creates the parent dir and opens the file append-only so
 /// concurrent processes never truncate each other's lines.
-pub fn emit_to(
-    path: &std::path::Path,
-    kind: &str,
-    payload: serde_json::Value,
-    timestamp_ms: i64,
-) {
+pub fn emit_to(path: &std::path::Path, kind: &str, payload: serde_json::Value, timestamp_ms: i64) {
     let line = json!({
         "bus": "mesh",
         "kind": kind,

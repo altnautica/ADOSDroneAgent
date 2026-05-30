@@ -233,13 +233,16 @@ mod tests {
         let issuer = shared_issuer(&secret_path).unwrap();
         let sock = dir.path().join("x.sock");
         let env_dir = dir.path().join("plugins");
-        write_token_env(&issuer, "com.example.x", &BTreeSet::new(), &sock, Some(&env_dir)).unwrap();
+        write_token_env(
+            &issuer,
+            "com.example.x",
+            &BTreeSet::new(),
+            &sock,
+            Some(&env_dir),
+        )
+        .unwrap();
         let env_path = token_env_path("com.example.x", Some(&env_dir));
-        let mode = std::fs::metadata(&env_path)
-            .unwrap()
-            .permissions()
-            .mode()
-            & 0o777;
+        let mode = std::fs::metadata(&env_path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "token env file must be 0600");
     }
 
@@ -254,8 +257,11 @@ mod tests {
         let secret_path = dir.path().join("plugin-token-secret");
 
         let minting_issuer = shared_issuer(&secret_path).unwrap();
-        let token =
-            minting_issuer.mint("com.example.demo", &caps(&["mavlink.read"]), TOKEN_TTL_SECONDS);
+        let token = minting_issuer.mint(
+            "com.example.demo",
+            &caps(&["mavlink.read"]),
+            TOKEN_TTL_SECONDS,
+        );
 
         // A separate issuer instance, reloaded from disk, must verify it.
         let verifying_issuer = shared_issuer(&secret_path).unwrap();

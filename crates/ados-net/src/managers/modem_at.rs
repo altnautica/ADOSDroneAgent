@@ -61,11 +61,7 @@ pub async fn open_control_port() -> Option<Box<dyn SerialTransport>> {
 /// APN is used verbatim. Returns a status dict mirroring the D-Bus path's shape
 /// plus the AT-only fields. `iface_present` probes the netdev (injected in tests
 /// so the wait is deterministic).
-pub async fn bring_up_over<F>(
-    port: &mut dyn SerialTransport,
-    apn: &str,
-    iface_present: F,
-) -> Value
+pub async fn bring_up_over<F>(port: &mut dyn SerialTransport, apn: &str, iface_present: F) -> Value
 where
     F: Fn(&str) -> bool,
 {
@@ -196,9 +192,14 @@ fn parse_cops(resp: &str) -> (Option<String>, Option<String>) {
         if let Some(rest) = line.trim().strip_prefix("+COPS:") {
             let fields: Vec<&str> = rest.split(',').collect();
             // Operator name is the quoted field (index 2 when present).
-            let operator = fields.get(2).map(|s| s.trim().trim_matches('"').to_string());
+            let operator = fields
+                .get(2)
+                .map(|s| s.trim().trim_matches('"').to_string());
             // Access technology is the trailing numeric field.
-            let technology = fields.get(3).and_then(|s| s.trim().parse::<u32>().ok()).map(act_label);
+            let technology = fields
+                .get(3)
+                .and_then(|s| s.trim().parse::<u32>().ok())
+                .map(act_label);
             return (technology, operator.filter(|s| !s.is_empty()));
         }
     }
@@ -210,12 +211,12 @@ fn act_label(act: u32) -> String {
     match act {
         0 => "gsm",
         1 => "gsm_compact",
-        2 => "utran",        // 3G
-        3 => "gsm_egprs",    // 2.5G
-        4 => "utran_hsdpa",  // 3G+
-        5 => "utran_hsupa",  // 3G+
-        6 => "utran_hspa",   // 3G+
-        7 => "eutran",       // LTE / 4G
+        2 => "utran",       // 3G
+        3 => "gsm_egprs",   // 2.5G
+        4 => "utran_hsdpa", // 3G+
+        5 => "utran_hsupa", // 3G+
+        6 => "utran_hspa",  // 3G+
+        7 => "eutran",      // LTE / 4G
         _ => "unknown",
     }
     .to_string()
@@ -354,12 +355,12 @@ mod tests {
     async fn bring_up_auto_resolves_apn_from_imsi_and_connects() {
         // ATE0, CFUN, CPIN?(READY), CIMI(Jio imsi), CGDCONT, CGACT.
         let mut port = ScriptedPort::new(&[
-            "OK",                  // ATE0
-            "OK",                  // AT+CFUN=1
-            "+CPIN: READY\r\nOK",  // AT+CPIN?
+            "OK",                    // ATE0
+            "OK",                    // AT+CFUN=1
+            "+CPIN: READY\r\nOK",    // AT+CPIN?
             "405857123456789\r\nOK", // AT+CIMI → Jio
-            "OK",                  // AT+CGDCONT
-            "OK",                  // AT+CGACT
+            "OK",                    // AT+CGDCONT
+            "OK",                    // AT+CGACT
         ]);
         let out = bring_up_over(&mut port, "auto", |_iface| true).await;
         assert_eq!(out["connected"], true);
@@ -388,9 +389,9 @@ mod tests {
     #[tokio::test]
     async fn bring_up_reports_sim_not_ready() {
         let mut port = ScriptedPort::new(&[
-            "OK",                       // ATE0
-            "OK",                       // CFUN
-            "+CPIN: SIM PIN\r\nOK",     // CPIN? not ready
+            "OK",                   // ATE0
+            "OK",                   // CFUN
+            "+CPIN: SIM PIN\r\nOK", // CPIN? not ready
         ]);
         let out = bring_up_over(&mut port, "auto", |_| true).await;
         assert_eq!(out["connected"], false);
@@ -450,9 +451,9 @@ mod tests {
     #[tokio::test]
     async fn status_over_parses_all_fields() {
         let mut port = ScriptedPort::new(&[
-            "+CSQ: 20,99\r\nOK",                 // AT+CSQ
-            "+COPS: 0,0,\"Airtel\",7\r\nOK",     // AT+COPS?
-            "865000000000001\r\nOK",             // AT+GSN
+            "+CSQ: 20,99\r\nOK",             // AT+CSQ
+            "+COPS: 0,0,\"Airtel\",7\r\nOK", // AT+COPS?
+            "865000000000001\r\nOK",         // AT+GSN
         ]);
         let s = status_over(&mut port).await;
         assert_eq!(s["signal_quality"], 20);

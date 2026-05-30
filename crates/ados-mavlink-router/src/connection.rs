@@ -547,7 +547,10 @@ impl FcConnection {
     /// Open a TCP or UDP MAVLink transport for SITL. TCP connects to the peer;
     /// UDP binds a local socket and connects it to the peer so plain send/recv
     /// reach it. Baud is reported as 0 for network transports.
-    async fn open_net(&self, spec: NetSpec) -> Option<(BoxedReadHalf, BoxedWriteHalf, String, u32)> {
+    async fn open_net(
+        &self,
+        spec: NetSpec,
+    ) -> Option<(BoxedReadHalf, BoxedWriteHalf, String, u32)> {
         match spec {
             NetSpec::Tcp(addr) => match TcpStream::connect(&addr).await {
                 Ok(stream) => {

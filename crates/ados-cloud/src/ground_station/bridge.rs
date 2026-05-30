@@ -315,7 +315,10 @@ impl CloudRelayBridge {
                 true // tear the relay down; heartbeat-only.
             }
             ThrottleState::VideoOff => {
-                warn!(previous = previous.as_str(), "cloud_relay.data_cap_throttle");
+                warn!(
+                    previous = previous.as_str(),
+                    "cloud_relay.data_cap_throttle"
+                );
                 false
             }
             _ => {
