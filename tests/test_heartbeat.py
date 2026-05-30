@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from ados.core.supervisor.heartbeat import (
+from ados.core.radio_block import (
     _channel_to_freq,
     build_radio_block,
 )

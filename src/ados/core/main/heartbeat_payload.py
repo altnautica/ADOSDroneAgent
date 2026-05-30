@@ -387,7 +387,7 @@ def build_heartbeat_payload(app: AgentApp) -> dict:  # noqa: C901
 
     # Forward-compatible radio link block — sourced from
     # the in-process WfbManager directly when present.
-    from ados.core.supervisor.heartbeat import build_radio_block
+    from ados.core.radio_block import build_radio_block
     wfb = getattr(app, "_wfb_manager", None)
     wfb_status: dict | None = None
     if wfb is not None:

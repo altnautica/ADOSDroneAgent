@@ -26,10 +26,10 @@ getrandom = { workspace = true }
 # ISO-8601 second-precision UTC timestamps for the bind session + pair state.
 time = { version = "0.3", features = ["std", "formatting", "macros"] }
 
-# Linux-only edges (systemd notify + journald + udev hotplug + setsid/killpg +
-# flock). Confined to a target section so the pure-logic core still builds and
-# `cargo test`s on a non-Linux dev host; the edge call sites are cfg-gated with
-# inert fallbacks.
+# Linux-only edges (systemd notify + journald + USB presence enumeration for
+# the hot-plug poller + setsid/killpg + flock). Confined to a target section so
+# the pure-logic core still builds and `cargo test`s on a non-Linux dev host;
+# the edge call sites are cfg-gated with inert fallbacks.
 [target.'cfg(target_os = "linux")'.dependencies]
 sd-notify = { workspace = true }
 tracing-journald = { workspace = true }

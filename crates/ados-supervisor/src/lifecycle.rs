@@ -23,6 +23,14 @@ use crate::systemctl;
 const BIND_GATED_UNITS: [&str; 2] = ["ados-wfb", "ados-wfb-rx"];
 
 /// Whether a service's profile + role gates allow it to run under `config`.
+///
+/// The role gate re-reads the on-disk role sentinel on every call rather than
+/// trusting the boot-time snapshot. An operator role switch flips the sentinel
+/// and stops/starts the role-gated units without restarting this process, so a
+/// cached role would leave the monitor self-healing the wrong unit set (it
+/// would skip the now-active relay/receiver units and churn the now-masked
+/// direct unit). Reading the sentinel here keeps the gate in lock-step with the
+/// live role, matching the Python `start_service` semantics.
 pub fn gate_allows(spec: &ServiceSpec, config: &AgentConfig) -> bool {
     if let Some(gate) = spec.profile_gate {
         // The registry gates are the underscore form; the resolved profile is
@@ -32,7 +40,7 @@ pub fn gate_allows(spec: &ServiceSpec, config: &AgentConfig) -> bool {
         }
     }
     if let Some(role_gate) = spec.role_gate {
-        let active = config.role.as_deref().unwrap_or("direct");
+        let active = config.live_role();
         if !role_gate.split('|').any(|r| r == active) {
             return false;
         }
@@ -46,6 +54,9 @@ pub struct Supervisor {
     /// The bind orchestrator, shared with the control socket task. The monitor
     /// consults its in-process liveness to gate radio-unit auto-restart.
     bind: Arc<BindOrchestrator>,
+    /// Debounces + coalesces hot-plug-driven restarts so a re-enumerating
+    /// device does not thrash `systemctl`.
+    hotplug_coord: crate::hotplug::HotplugCoordinator,
 }
 
 impl Supervisor {
@@ -54,6 +65,7 @@ impl Supervisor {
             services: build_specs(),
             config,
             bind,
+            hotplug_coord: crate::hotplug::HotplugCoordinator::new(),
         }
     }
 
@@ -255,10 +267,21 @@ impl Supervisor {
             DevKind::Fc => "ados-mavlink",
             DevKind::Radio => "ados-wfb",
         };
-        if self.index_of(name).is_some() {
-            tracing::info!(service = name, ?kind, "hot-plug triggered restart");
-            self.restart_service(name).await;
+        if self.index_of(name).is_none() {
+            return;
         }
+        // Coalesce re-enumeration storms: a device that drops and re-appears
+        // within the debounce window (DFU → flight, a flaky cable) must not
+        // issue a second `systemctl restart` while the first is still settling.
+        if !self
+            .hotplug_coord
+            .should_restart(kind, std::time::Instant::now())
+        {
+            tracing::debug!(service = name, ?kind, "hot-plug restart coalesced");
+            return;
+        }
+        tracing::info!(service = name, ?kind, "hot-plug triggered restart");
+        self.restart_service(name).await;
     }
 
     /// Whether the monitor should skip auto-restarting `name` because a bind
@@ -336,15 +359,40 @@ impl Supervisor {
 mod tests {
     use super::*;
     use crate::registry::SERVICE_REGISTRY;
+    use std::io::Write;
+    use std::path::Path;
 
-    fn cfg(profile_wire: &str, role: Option<&str>) -> AgentConfig {
+    /// Build a config whose role gate reads from `role_path`. The boot-time
+    /// `role` snapshot is set from the file's current contents (or `direct`),
+    /// but the gate itself always re-reads the path.
+    fn cfg_with_role_path(profile_wire: &str, role_path: &Path) -> AgentConfig {
+        let boot_role = if profile_wire == "ground-station" {
+            Some(crate::config::read_current_role(role_path))
+        } else {
+            None
+        };
         AgentConfig {
             profile_wire: profile_wire.to_string(),
-            role: role.map(str::to_string),
+            role: boot_role,
             video_enabled: true,
-            configured_gs_role: role.unwrap_or("direct").to_string(),
+            configured_gs_role: "direct".to_string(),
             raw_agent_profile: Some(profile_wire.replace('-', "_")),
+            mesh_role_path: role_path.to_path_buf(),
         }
+    }
+
+    /// A config pointed at a nonexistent sentinel (gate sees `direct`). Used by
+    /// the drone-profile test where role is irrelevant.
+    fn cfg(profile_wire: &str) -> AgentConfig {
+        cfg_with_role_path(profile_wire, Path::new("/nonexistent/ados/mesh/role"))
+    }
+
+    fn write_role(path: &Path, role: &str) {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        let mut f = std::fs::File::create(path).unwrap();
+        f.write_all(format!("{role}\n").as_bytes()).unwrap();
     }
 
     fn spec(name: &str) -> ServiceSpec {
@@ -354,7 +402,7 @@ mod tests {
 
     #[test]
     fn drone_gate_blocks_ground_station_units() {
-        let c = cfg("drone", None);
+        let c = cfg("drone");
         assert!(gate_allows(&spec("ados-mavlink"), &c)); // core, no gate
         assert!(gate_allows(&spec("ados-wfb"), &c)); // drone-gated
         assert!(!gate_allows(&spec("ados-wfb-rx"), &c)); // ground_station-gated
@@ -364,24 +412,62 @@ mod tests {
 
     #[test]
     fn ground_station_role_gate() {
+        let dir = tempfile::tempdir().unwrap();
+        let role = dir.path().join("mesh/role");
+
         // direct role: wfb-rx runs, relay/receiver/batman do not.
-        let direct = cfg("ground-station", Some("direct"));
+        write_role(&role, "direct");
+        let direct = cfg_with_role_path("ground-station", &role);
         assert!(gate_allows(&spec("ados-wfb-rx"), &direct));
         assert!(!gate_allows(&spec("ados-batman"), &direct));
         assert!(!gate_allows(&spec("ados-wfb-relay"), &direct));
         assert!(!gate_allows(&spec("ados-wfb"), &direct)); // drone-only
 
         // relay role: batman + wfb-relay run, wfb-rx (direct) + receiver do not.
-        let relay = cfg("ground-station", Some("relay"));
+        write_role(&role, "relay");
+        let relay = cfg_with_role_path("ground-station", &role);
         assert!(gate_allows(&spec("ados-batman"), &relay)); // relay|receiver
         assert!(gate_allows(&spec("ados-wfb-relay"), &relay));
         assert!(!gate_allows(&spec("ados-wfb-receiver"), &relay));
         assert!(!gate_allows(&spec("ados-wfb-rx"), &relay)); // direct-only
 
         // receiver role: batman + wfb-receiver run.
-        let receiver = cfg("ground-station", Some("receiver"));
+        write_role(&role, "receiver");
+        let receiver = cfg_with_role_path("ground-station", &role);
         assert!(gate_allows(&spec("ados-batman"), &receiver));
         assert!(gate_allows(&spec("ados-wfb-receiver"), &receiver));
         assert!(!gate_allows(&spec("ados-wfb-relay"), &receiver));
+    }
+
+    /// A runtime role switch (operator flips the sentinel on disk, without
+    /// restarting the supervisor) changes which units the gate permits, using
+    /// the SAME config object. This is the regression guard: the gate must not
+    /// trust a boot-time role snapshot.
+    #[test]
+    fn live_role_switch_flips_gate_without_reconstructing_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let role = dir.path().join("mesh/role");
+        write_role(&role, "direct");
+
+        // Config captured while the sentinel said "direct".
+        let config = cfg_with_role_path("ground-station", &role);
+        assert_eq!(config.role.as_deref(), Some("direct"));
+        assert!(gate_allows(&spec("ados-wfb-rx"), &config)); // direct-only unit
+        assert!(!gate_allows(&spec("ados-wfb-relay"), &config)); // relay-only unit
+        assert!(!gate_allows(&spec("ados-batman"), &config)); // relay|receiver
+
+        // Operator switches the node to relay: only the sentinel changes.
+        write_role(&role, "relay");
+
+        // Same config object, no reconstruction. The gate follows the sentinel.
+        assert!(!gate_allows(&spec("ados-wfb-rx"), &config)); // now masked off
+        assert!(gate_allows(&spec("ados-wfb-relay"), &config)); // now permitted
+        assert!(gate_allows(&spec("ados-batman"), &config)); // now permitted
+
+        // And on to receiver.
+        write_role(&role, "receiver");
+        assert!(gate_allows(&spec("ados-wfb-receiver"), &config));
+        assert!(!gate_allows(&spec("ados-wfb-relay"), &config));
+        assert!(gate_allows(&spec("ados-batman"), &config));
     }
 }

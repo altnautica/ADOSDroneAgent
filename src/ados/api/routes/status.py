@@ -479,7 +479,7 @@ async def get_full_status(request: Request):
     # video gate and the radio block can never disagree about the link.
     radio_block: dict | None = None
     try:
-        from ados.core.supervisor.heartbeat import build_radio_block
+        from ados.core.radio_block import build_radio_block
 
         radio_block = _radio_to_camel(build_radio_block(wfb_status))
     except Exception:

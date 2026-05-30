@@ -51,7 +51,11 @@ struct GroundStationSection {
 pub struct AgentConfig {
     /// Wire-contract profile: `"drone"` or `"ground-station"`.
     pub profile_wire: String,
-    /// Active ground-station role (`direct`/`relay`/`receiver`), or `None` on a drone.
+    /// Active ground-station role at boot (`direct`/`relay`/`receiver`), or
+    /// `None` on a drone. This is the snapshot taken at config load. The
+    /// service gate does NOT read this — it re-reads the on-disk sentinel
+    /// every check so a runtime role switch is honored without restarting
+    /// the supervisor (see `live_role`). Kept for display / boot reporting.
     pub role: Option<String>,
     /// `video.mode` is set and not `"disabled"`.
     pub video_enabled: bool,
@@ -62,6 +66,12 @@ pub struct AgentConfig {
     /// resolved one, to match the Python supervisor exactly. See
     /// `raw_is_ground_station`.
     pub raw_agent_profile: Option<String>,
+    /// Where the on-disk role sentinel lives. The role gate re-reads this on
+    /// every check so an operator-driven role switch (which flips the sentinel
+    /// and stops/starts units without restarting this process) is reflected in
+    /// self-healing immediately. Defaults to `MESH_ROLE_PATH`; overridable in
+    /// tests.
+    pub mesh_role_path: PathBuf,
 }
 
 impl AgentConfig {
@@ -106,18 +116,24 @@ impl AgentConfig {
             video_enabled,
             configured_gs_role,
             raw_agent_profile,
+            mesh_role_path: mesh_role.to_path_buf(),
         }
+    }
+
+    /// The active ground-station role read fresh from the on-disk sentinel.
+    /// Falls back to `direct` when the sentinel is missing/unreadable/unknown.
+    /// This is the source of truth for role gating: an operator role switch
+    /// flips the sentinel and stops/starts units WITHOUT restarting this
+    /// process, so a cached boot-time role would leave self-healing acting on
+    /// the wrong unit set. Mirrors the Python `start_service` live-sentinel
+    /// read.
+    pub fn live_role(&self) -> String {
+        read_current_role(&self.mesh_role_path)
     }
 
     /// The underscore form used to compare against a service's `profile_gate`.
     pub fn profile_gate(&self) -> String {
         self.profile_wire.replace('-', "_")
-    }
-
-    /// True when the *resolved* wire profile is ground-station (used for
-    /// service gating, matching the Python `start_service` gate).
-    pub fn is_ground_station(&self) -> bool {
-        self.profile_wire == "ground-station"
     }
 
     /// True only when the *raw* `config.agent.profile` is explicitly
