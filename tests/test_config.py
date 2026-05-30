@@ -65,6 +65,26 @@ def test_config_extra_ignored():
     assert cfg.agent.name == "test"
 
 
+def test_load_config_tolerates_unquoted_timestamp():
+    """An unquoted ISO-8601 timestamp (as the native config writers emit for
+    video.wfb.paired_at) must load as a string, not a datetime that would fail
+    the str-typed field and crash the API at startup."""
+    raw = (
+        "profile: drone\n"
+        "video:\n"
+        "  mode: auto\n"
+        "  wfb:\n"
+        "    paired_at: 2026-05-30T10:18:35+00:00\n"
+        "    auto_pair_enabled: false\n"
+    )
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+        f.write(raw)
+        f.flush()
+        cfg = load_config(f.name)
+    assert isinstance(cfg.video.wfb.paired_at, str)
+    assert cfg.video.wfb.paired_at == "2026-05-30T10:18:35+00:00"
+
+
 def test_mavlink_endpoints_default():
     """Default endpoints should include one WebSocket on 8765."""
     cfg = ADOSConfig()

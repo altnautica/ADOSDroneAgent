@@ -145,6 +145,27 @@ __all__ = [
 ]
 
 
+class _StringTimestampLoader(yaml.SafeLoader):
+    """A SafeLoader that keeps ISO-8601 timestamps as plain strings.
+
+    The native config writers persist timestamps (e.g. ``video.wfb.paired_at``)
+    as unquoted ISO-8601 values. The stock loader resolves those to ``datetime``,
+    which then fails the str-typed config fields. Dropping the timestamp implicit
+    resolver keeps every unquoted timestamp a string on the read side, so the
+    YAML written by any process round-trips into the models unchanged.
+    """
+
+
+_StringTimestampLoader.yaml_implicit_resolvers = {
+    first_char: [
+        (tag, regexp)
+        for tag, regexp in resolvers
+        if tag != "tag:yaml.org,2002:timestamp"
+    ]
+    for first_char, resolvers in yaml.SafeLoader.yaml_implicit_resolvers.items()
+}
+
+
 def load_config(path: str | Path | None = None) -> ADOSConfig:
     """Load config from YAML file, merging with defaults.
 
@@ -167,7 +188,7 @@ def load_config(path: str | Path | None = None) -> ADOSConfig:
     for candidate in candidates:
         if candidate.is_file():
             with open(candidate) as f:
-                loaded = yaml.safe_load(f)
+                loaded = yaml.load(f, Loader=_StringTimestampLoader)
                 if isinstance(loaded, dict):
                     raw = loaded
             picked_path = candidate
@@ -185,7 +206,7 @@ def load_config(path: str | Path | None = None) -> ADOSConfig:
     try:
         defaults_ref = importlib.resources.files("ados.core").joinpath("defaults.yaml")
         defaults_text = defaults_ref.read_text(encoding="utf-8")
-        loaded = yaml.safe_load(defaults_text)
+        loaded = yaml.load(defaults_text, Loader=_StringTimestampLoader)
         if isinstance(loaded, dict):
             defaults = loaded
     except (FileNotFoundError, TypeError):
