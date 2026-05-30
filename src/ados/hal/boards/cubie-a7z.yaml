@@ -60,10 +60,10 @@ board:
 
 compute:
   cores: 8
-  core_type: "Cortex-A76 x4 + Cortex-A55 x4"
+  core_type: "Cortex-A76 x2 + Cortex-A55 x6"
   max_freq_mhz: 2200
-  gpu: "Mali-G57 MC1"
-  npu_tops: 2.0
+  gpu: "Imagination BXM-4-64 MC1"
+  npu_tops: 3.0
   hw_encoder: ["h264"]
   hw_decoder: ["h264", "h265"]
   ram_mb: 1024
@@ -116,20 +116,89 @@ video:
     usb_uvc_count: 1
     recommended_role: nav-usb
 
+# Cameras this board can drive. Generalises the displays: pattern — the
+# universal provisioner enables overlay_required cameras at install time and
+# the camera service binds them at runtime. Boards with no camera omit this.
+# overlay_ref is a glob token matched under /boot/dtbo (the BSP basename
+# carries a board-family prefix), never a hardcoded full filename.
+cameras:
+  supported:
+    - id: csi-imx214
+      type: csi
+      sensor: "Sony IMX214"
+      bus: csi
+      orientation: forward
+      overlay_required: true
+      # bsp-disabled: the BSP ships the dtbo as *.dtbo.disabled; enable in place.
+      overlay_source: bsp-disabled
+      overlay_ref: "radxa-camera-13m-214"
+      # vendor_isp: use the vendor ISP v4l2 source, not plain UVC.
+      vendor_isp: true
+      isp_flags: ["en-awisp=1", "en-largemode=0"]
+      modules_required: [sunxi-vin]
+      modes:
+        - {node: /dev/video0, width: 1920, height: 1080, fps: 30, format: NV12, isp_flags: ["en-awisp=1", "en-largemode=0"]}
+        - {node: /dev/video1, width: 4208, height: 3120, fps: 24, format: NV12, isp_flags: ["en-awisp=1", "en-largemode=1"]}
+      default_mode: "1920x1080@30"
+    - id: usb-nav
+      type: usb
+      bus: usb
+      orientation: downward
+      overlay_required: false
+      vendor_isp: false
+
+# Radios this board carries. Drives install-time driver provisioning via the
+# universal provisioner. The onboard management Wi-Fi is intentionally NOT
+# listed — it is excluded from injection use by the adapter selector.
+radios:
+  supported:
+    - id: wfb-rtl8812eu
+      role: wfb-injection
+      chipset: RTL8812EU
+      driver: rtl8812eu
+      install: dkms
+      modules_required: [8812eu]
+      mesh_capable: true
+
+# Flight-controller link hints, priority-ordered. The provisioner seeds
+# serial_port/baud_rate from the first matching interface; the runtime router
+# still probes and falls back. uart3 owns /dev/ttyS3 here (see buses), so the
+# rangefinder uses the I2C port, not the UART.
+flight_controller:
+  interfaces:
+    - id: fc-uart3
+      type: uart
+      path: /dev/ttyS3
+      baud: 921600
+      priority: 1
+    - id: fc-usb
+      type: usb-acm
+      baud_candidates: [921600, 115200, 57600]
+      priority: 2
+
+# Universal provisioning manifest walked by the install-time provisioner:
+# ensure packages, enable declared overlays, install declared drivers.
+provisioning:
+  packages:
+    - {id: camera-userspace, when: camera, apt: [gstreamer1.0-tools, v4l-utils]}
+  overlays:
+    - {camera: csi-imx214, when: camera_overlay_required}
+  drivers:
+    - {radio: wfb-rtl8812eu}
+
 power:
   typical_watts: 2.0
   max_watts: 5.0
   voltage: 5.0
   input: "USB-C 5V/2A"
 
-# Cortex-A76 pair + 2 TOPS NPU can host VIO on the 4 GB+ SKUs. The 1 GB
+# Cortex-A76 pair + 3 TOPS NPU can host VIO on the 4 GB+ SKUs. The 1 GB
 # SKU is too tight; the runtime should gate the VIO front-end on real
-# RAM. Rangefinder lands on the FC UART link (shared with the FC) or
-# the broken-out I2C bus.
+# RAM. The flight controller owns /dev/ttyS3 (see flight_controller), so
+# the rangefinder lands on the broken-out I2C bus.
 navigation:
   vio_capable: true
   rangefinder_ports:
-    - {type: uart, path: /dev/ttyS3, baud_max: 115200}
     - {type: i2c, path: /dev/i2c-11, speed_hz: 400000}
 
 displays:

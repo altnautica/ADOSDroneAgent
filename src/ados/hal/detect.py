@@ -73,6 +73,106 @@ class DisplaysSection(BaseModel):
     supported: list[DisplayBinding] = Field(default_factory=list)
 
 
+class CameraMode(BaseModel):
+    """One capture mode a camera binding exposes on a specific video node.
+
+    ``isp_flags`` are vendor-ISP source properties (e.g. the Allwinner
+    ``en-awisp``/``en-largemode`` v4l2 source props) spliced into the
+    capture element when ``vendor_isp`` is set on the parent binding.
+    """
+
+    node: str | None = None
+    width: int | None = None
+    height: int | None = None
+    fps: int | None = None
+    format: str | None = None
+    isp_flags: list[str] = Field(default_factory=list)
+
+
+class CameraBinding(BaseModel):
+    """One supported camera and how the agent brings it up.
+
+    Generalises the display binding: ``overlay_required``/``overlay_source``/
+    ``overlay_ref`` drive install-time provisioning, ``vendor_isp``/
+    ``isp_flags``/``modes`` drive the runtime capture pipeline. ``overlay_ref``
+    is a glob token matched under ``/boot/dtbo`` (the BSP basename carries a
+    board-family prefix), never a hardcoded full filename. ``overlay_source =
+    "bsp-disabled"`` means the BSP ships the DTBO as ``<name>.dtbo.disabled``
+    and the provisioner enables it in place.
+    """
+
+    id: str
+    type: Literal["csi", "usb", "ip"] = "usb"
+    sensor: str | None = None
+    bus: str | None = None
+    orientation: str = "forward"
+    overlay_required: bool = False
+    overlay_source: Literal[
+        "repo", "upstream", "upstream-vendored", "raspberrypi", "bsp-disabled"
+    ] = "repo"
+    overlay_ref: str | None = None
+    vendor_isp: bool = False
+    isp_flags: list[str] = Field(default_factory=list)
+    modules_required: list[str] = Field(default_factory=list)
+    modes: list[CameraMode] = Field(default_factory=list)
+    default_mode: str | None = None
+
+
+class CamerasSection(BaseModel):
+    """All cameras a board can drive. Boards with none leave this empty."""
+
+    supported: list[CameraBinding] = Field(default_factory=list)
+
+
+class RadioBinding(BaseModel):
+    """One radio the board carries that the provisioner installs a driver for.
+
+    Declarative only; runtime adapter selection is unchanged. The onboard
+    management Wi-Fi is intentionally never listed here.
+    """
+
+    id: str
+    role: str | None = None
+    chipset: str | None = None
+    driver: str | None = None
+    install: str = "dkms"
+    modules_required: list[str] = Field(default_factory=list)
+    mesh_capable: bool = False
+
+
+class RadiosSection(BaseModel):
+    supported: list[RadioBinding] = Field(default_factory=list)
+
+
+class FcInterface(BaseModel):
+    """A priority-ordered flight-controller link hint.
+
+    The provisioner seeds ``serial_port``/``baud_rate`` from the highest
+    priority interface; the runtime router still probes and falls back.
+    """
+
+    id: str
+    type: Literal["uart", "usb-acm", "usb"] = "uart"
+    path: str | None = None
+    baud: int | None = None
+    baud_candidates: list[int] = Field(default_factory=list)
+    priority: int = 10
+
+
+class FlightControllerSection(BaseModel):
+    interfaces: list[FcInterface] = Field(default_factory=list)
+
+
+class VideoSection(BaseModel):
+    """Video/encoder knobs. Extra keys (e.g. nav_cameras) are ignored."""
+
+    csi_ports: int | None = None
+    csi_connector: str | None = None
+    max_encode_resolution: str | None = None
+    max_encode_fps: int | None = None
+    encoder_api: str | None = None
+
+
 class BoardProfile(BaseModel):
     """Pydantic model for YAML board profile validation."""
 
@@ -94,6 +194,16 @@ class BoardProfile(BaseModel):
     # by the renderer-adapter UI service. Boards without any local display
     # leave this absent and resolve to an empty supported list.
     displays: DisplaysSection = Field(default_factory=DisplaysSection)
+
+    # Optional declarative hardware sections consumed by the universal
+    # provisioner (install-time) and the camera/radio/FC services (runtime).
+    # All default empty so boards that omit them load unchanged.
+    video: VideoSection = Field(default_factory=VideoSection)
+    cameras: CamerasSection = Field(default_factory=CamerasSection)
+    radios: RadiosSection = Field(default_factory=RadiosSection)
+    flight_controller: FlightControllerSection = Field(
+        default_factory=FlightControllerSection
+    )
 
 
 @dataclass
@@ -230,14 +340,16 @@ def _board_from_profile(
 # for the service lifetime. invalidate_board_info_cache() clears it for tests
 # or in case the override file is changed by an operator action.
 _BOARD_INFO_CACHE: BoardInfo | None = None
+_BOARD_PROFILE_CACHE: BoardProfile | None = None
 _BOARD_INFO_CACHE_LOCK = threading.Lock()
 
 
 def invalidate_board_info_cache() -> None:
     """Clear the cached board detection result."""
-    global _BOARD_INFO_CACHE
+    global _BOARD_INFO_CACHE, _BOARD_PROFILE_CACHE
     with _BOARD_INFO_CACHE_LOCK:
         _BOARD_INFO_CACHE = None
+        _BOARD_PROFILE_CACHE = None
 
 
 def detect_board(force: bool = False) -> BoardInfo:
@@ -261,6 +373,51 @@ def detect_board(force: bool = False) -> BoardInfo:
         info = _detect_board_uncached()
         _BOARD_INFO_CACHE = info
         return info
+
+
+def _match_current_profile() -> BoardProfile | None:
+    """Run the override/device-tree/cpuinfo match and return the BoardProfile.
+
+    Mirrors the matching order of ``_detect_board_uncached`` but returns the
+    full validated profile (with the declarative cameras/radios/video/FC
+    blocks) instead of the flat ``BoardInfo``. Returns None when nothing
+    matches (generic fallback).
+    """
+    profiles = _load_board_profiles()
+    override_name = _read_board_override()
+    if override_name:
+        for profile in profiles:
+            if profile.name.lower() == override_name.lower():
+                return profile
+    model_string = _read_device_model()
+    if model_string:
+        matched = _match_profile(profiles, model_string)
+        if matched:
+            return matched
+    cpuinfo_model = _read_cpuinfo_model()
+    if cpuinfo_model:
+        matched = _match_profile(profiles, cpuinfo_model)
+        if matched:
+            return matched
+    return None
+
+
+def detect_board_profile(force: bool = False) -> BoardProfile | None:
+    """Return the matched full board profile for the current hardware.
+
+    Services that need the declarative blocks (``cameras``, ``radios``,
+    ``video.encoder_api``, ``flight_controller``) call this; everything else
+    uses the lighter ``detect_board``. Cached for the service lifetime.
+    Returns None on the generic fallback (no matching profile).
+    """
+    global _BOARD_PROFILE_CACHE
+    if not force and _BOARD_PROFILE_CACHE is not None:
+        return _BOARD_PROFILE_CACHE
+    with _BOARD_INFO_CACHE_LOCK:
+        if not force and _BOARD_PROFILE_CACHE is not None:
+            return _BOARD_PROFILE_CACHE
+        _BOARD_PROFILE_CACHE = _match_current_profile()
+        return _BOARD_PROFILE_CACHE
 
 
 def _detect_board_uncached() -> BoardInfo:
