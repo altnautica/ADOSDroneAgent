@@ -36,6 +36,7 @@ const UNIVERSAL_UNITS: &[&str] = &[
     "ados-peripherals.service",
     "ados-fbcon-detach.service",
     "ados-display-probe.service",
+    "ados-usb-otg-host.service",
 ];
 
 /// Ground-station units enable-linked here (the START half is the `start`
@@ -107,6 +108,8 @@ const ETH_NO_EEE_RULE: &str = "/etc/udev/rules.d/99-ados-eth-no-eee.rules";
 const LOGIND_NOSLEEP_CONF: &str = "/etc/systemd/logind.conf.d/99-ados-nosleep.conf";
 /// The SSH login banner copied from `data/motd/30-ados`.
 const MOTD_FILE: &str = "/etc/update-motd.d/30-ados";
+/// Static avahi service file advertising the AP-side `_ados._tcp` record.
+const AVAHI_GS_AP_FILE: &str = "/etc/avahi/services/ados-gs-ap.service";
 
 /// Build the video-pipeline UDP-buffer sysctl drop-in body (pure). Mirrors
 /// 03-kernel.sh `install_video_sysctl`: bumps the kernel socket-buffer ceilings
@@ -605,6 +608,32 @@ fn install_motd(source: Option<&Path>) {
     }
 }
 
+/// Install the static avahi service file (GROUND-STATION only) so the AP-side
+/// `_ados._tcp` record is browseable even while the agent process is restarting.
+/// The agent also registers the same service in-process with live TXT records;
+/// this static copy is a fallback baseline. Best-effort, then reload avahi so the
+/// new service is picked up without a full restart.
+fn install_avahi_gs_ap(source: Option<&Path>) {
+    let src = match source.map(|s| s.join("data/avahi/ados-gs-ap.service")) {
+        Some(p) if p.is_file() => p,
+        _ => {
+            tracing::warn!("avahi service source not found; skipping ados-gs-ap.service install");
+            return;
+        }
+    };
+    if let Some(parent) = Path::new(AVAHI_GS_AP_FILE).parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if std::fs::copy(&src, AVAHI_GS_AP_FILE).is_err() {
+        tracing::warn!("copying avahi service file failed");
+        return;
+    }
+    set_mode(Path::new(AVAHI_GS_AP_FILE), 0o644);
+    // Reload avahi so the new service file is picked up without a full restart.
+    let _ = exec::run("systemctl", &["reload", "avahi-daemon"]);
+    tracing::info!(path = AVAHI_GS_AP_FILE, "avahi service file installed");
+}
+
 /// Install the env-gated libcomposite USB-gadget composer (GROUND-STATION only).
 /// Gated on `ADOS_ENABLE_USB_GADGET=1` (default off) until the gadget is bench
 /// validated. Ports the gated block at the head of `enable_ground_station_units`:
@@ -688,7 +717,7 @@ impl Step for Systemd {
         "systemd"
     }
     fn requires(&self) -> &[&str] {
-        &["fetch_binaries", "config_identity"]
+        &["fetch_binaries", "config_identity", "wfb_ng"]
     }
     fn checkpoint(&self) -> Option<&str> {
         Some("systemd")
@@ -751,6 +780,7 @@ impl Step for Systemd {
             // hardware-access group memberships are GS-only — they belong to the
             // tether + button/joystick/OLED service set.
             install_usb_gadget_composer(Some(&source));
+            install_avahi_gs_ap(Some(&source));
             for unit in GROUND_STATION_ENABLE_UNITS {
                 enable_if_present(unit);
             }

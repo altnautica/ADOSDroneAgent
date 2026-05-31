@@ -65,7 +65,7 @@ impl RunMode {
     /// True when checkpoints must be cleared before the run.
     ///
     /// Both a force reinstall and an upgrade clear them. An upgrade MUST: the
-    /// per-step checkpoints (`agent-package`, `systemd`, `global-symlinks`,
+    /// per-step checkpoints (`venv`, `systemd`, `global-symlinks`,
     /// `radio-driver`, `deps`) exist to resume an interrupted FRESH install, so
     /// if they survive into an upgrade the graph would skip the very steps that
     /// refetch the new code, units, and prebuilt binaries — `--upgrade` would

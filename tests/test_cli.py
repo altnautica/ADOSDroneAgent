@@ -155,7 +155,7 @@ def test_install_status_reports_no_result_when_absent(tmp_path) -> None:
     assert result.exit_code == 0
     assert "No install result recorded" in result.output
     # Every REQUIRED step shows as missing when nothing has run.
-    assert "Checkpoints missing (5)" in result.output
+    assert "Checkpoints missing (4)" in result.output
 
 
 def test_install_status_json_reports_done_and_missing(tmp_path) -> None:
@@ -195,7 +195,6 @@ def test_install_status_json_reports_done_and_missing(tmp_path) -> None:
     assert payload["result"]["status"] == "degraded"
     assert payload["checkpoints"]["done"] == ["deps", "venv"]
     assert payload["checkpoints"]["missing"] == [
-        "agent-package",
         "systemd",
         "global-symlinks",
     ]

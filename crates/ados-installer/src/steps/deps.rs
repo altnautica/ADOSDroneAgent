@@ -63,9 +63,18 @@ pub fn optional_packages() -> &'static [&'static str] {
 
 /// Core ground-station apt packages (the AP + bluetooth + kiosk-compositor
 /// stack, minus the chromium browser which installs separately/best-effort).
-/// Required for the ground_station profile.
+/// Required for the ground_station profile. `batctl` + `wpasupplicant` back the
+/// self-healing local mesh carrier on dual-RTL ground stations.
 pub fn ground_station_core_packages() -> &'static [&'static str] {
-    &["hostapd", "dnsmasq", "bluetooth", "bluez", "cage"]
+    &[
+        "hostapd",
+        "dnsmasq",
+        "bluetooth",
+        "bluez",
+        "cage",
+        "batctl",
+        "wpasupplicant",
+    ]
 }
 
 /// Assemble the REQUIRED package set for a profile (pure). The drone profile
@@ -83,10 +92,21 @@ pub fn required_packages(profile: &str) -> Vec<&'static str> {
     pkgs
 }
 
+/// Run `apt-get` with `DEBIAN_FRONTEND=noninteractive` forced into the
+/// environment so a package that ships a debconf prompt (or upgrades a service
+/// mid-install) can never block the unattended installer on stdin. We route
+/// through `env` rather than the process environment so the setting is explicit
+/// and local to the apt shell-outs. `apt-get` args follow.
+fn apt(args: &[&str]) -> exec::CmdResult {
+    let mut argv: Vec<&str> = vec!["DEBIAN_FRONTEND=noninteractive", "apt-get"];
+    argv.extend_from_slice(args);
+    exec::run("env", &argv)
+}
+
 /// `apt-get update`, surfacing failure. Errors propagate so the caller fails
 /// the step (a stale index breaks every install below).
 fn apt_update() -> anyhow::Result<()> {
-    let res = exec::run("apt-get", &["update", "-qq"]);
+    let res = apt(&["update", "-qq"]);
     if res.success() {
         Ok(())
     } else if !res.spawned {
@@ -104,7 +124,7 @@ fn apt_install(pkgs: &[&str], required: bool) -> anyhow::Result<()> {
     }
     let mut argv: Vec<&str> = vec!["install", "-y", "-qq"];
     argv.extend_from_slice(pkgs);
-    let res = exec::run("apt-get", &argv);
+    let res = apt(&argv);
     if res.success() {
         return Ok(());
     }
@@ -167,6 +187,27 @@ fn parse_py_version_ge_311(ver: &str) -> bool {
     major > 3 || (major == 3 && minor >= 11)
 }
 
+/// True when the device-tree marks this as a Rockchip board (the model string
+/// or the SoC `compatible` list mentions `rockchip`). Used to opportunistically
+/// pull the hardware MPP gstreamer plugin for HW video accel; harmless to skip
+/// on other SoCs (we fall through to software/V4L2 decode). Reads two stable
+/// device-tree files so a board that omits the vendor name from the model
+/// string is still recognised via its `compatible` list.
+fn is_rockchip_board() -> bool {
+    for path in ["/proc/device-tree/model", "/proc/device-tree/compatible"] {
+        if let Ok(s) = std::fs::read_to_string(path) {
+            // Device-tree strings are NUL-delimited; drop NULs before matching.
+            if s.replace('\0', " ")
+                .to_ascii_lowercase()
+                .contains("rockchip")
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// System dependency installation.
 pub struct Deps;
 
@@ -196,6 +237,40 @@ impl Step for Deps {
         // Optional headers tolerate failure (wfb_rtsp demo target only).
         if let Err(e) = apt_install(optional_packages(), false) {
             tracing::warn!(error = %e, "optional dev headers not installed; wfb_rtsp build skipped");
+        }
+
+        // Rockchip boards get the hardware MPP gstreamer plugin opportunistically
+        // for HW video accel. The package only exists in BSP repos that shipped a
+        // build for the SoC at hand; elsewhere it is simply absent and we fall
+        // through to software/V4L2 decode, so a failure here is tolerated.
+        if is_rockchip_board() {
+            if let Err(e) = apt_install(&["gstreamer1.0-rockchip-mpp"], false) {
+                tracing::warn!(error = %e, "hardware MPP plugin not available; software decode will be used");
+            }
+        }
+
+        // Cellular hardware is opt-in: a board with no modem should not pull the
+        // ModemManager + QMI/MBIM stack. Gated on ADOS_ENABLE_MODEM=1.
+        if std::env::var("ADOS_ENABLE_MODEM").as_deref() == Ok("1") {
+            if let Err(e) = apt_install(&["modemmanager", "libqmi-utils", "libmbim-utils"], false) {
+                tracing::warn!(error = %e, "modem stack not installed");
+            }
+        }
+
+        // Firewall-rule persistence for uplink sharing is opt-in: only pull
+        // iptables-persistent when the operator asks for it. Gated on
+        // ADOS_ENABLE_SHARE_UPLINK=1.
+        if std::env::var("ADOS_ENABLE_SHARE_UPLINK").as_deref() == Ok("1") {
+            if let Err(e) = apt_install(&["iptables-persistent"], false) {
+                tracing::warn!(error = %e, "iptables-persistent not installed; uplink sharing will use the nftables fallback when available");
+            }
+        }
+
+        // An apt run can upgrade systemd itself mid-install, which transiently
+        // breaks `systemctl` until the manager re-execs. Re-exec it best-effort
+        // so the unit-management steps below are talking to the new binary.
+        if !exec::run_ok("systemctl", &["daemon-reexec"]) {
+            tracing::warn!("systemctl daemon-reexec did not succeed; continuing");
         }
 
         // A usable Python 3.11+ must exist before the venv step. We do not try
@@ -252,7 +327,15 @@ mod tests {
     #[test]
     fn ground_station_adds_ap_kiosk_core() {
         let gs = required_packages("ground_station");
-        for p in ["hostapd", "dnsmasq", "bluetooth", "bluez", "cage"] {
+        for p in [
+            "hostapd",
+            "dnsmasq",
+            "bluetooth",
+            "bluez",
+            "cage",
+            "batctl",
+            "wpasupplicant",
+        ] {
             assert!(gs.contains(&p), "ground_station deps must include {p}");
         }
         // No duplicates after merge.

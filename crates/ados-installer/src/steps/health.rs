@@ -16,6 +16,14 @@
 //!      `fetch_binaries` ran but never re-verified the Hard binaries are still
 //!      on disk by health time; this closes that gap so a vanished/zero-length
 //!      Hard binary is caught here, not at first supervisor exec.
+//!   6. **NEW** — the radio stack is on disk, for BOTH the drone and the ground
+//!      station profile: the wfb-ng userspace binaries on PATH, the bind
+//!      artifacts (`/etc/bind.key` + `/etc/bind.yaml`), and the `wifibroadcast@`
+//!      service template. Without these a fresh rig cannot auto-pair, so their
+//!      absence must FAIL the gate rather than report a misleading `ok` (the
+//!      bash gate never asserted them here).
+//!   7. **NEW** — `mediamtx` (the video relay) is present. Best-effort: a miss
+//!      degrades streaming but does not fail the install (recorded non-required).
 //!
 //! Each miss is recorded into `ctx.failures` as Required, so the graph's
 //! status derivation flips to `failed` and the result names the missing piece.
@@ -134,6 +142,73 @@ where
         .collect()
 }
 
+/// The wfb-ng userspace binaries the bind protocol + radio services need on
+/// PATH. Mirrors the set the radio step provisions; checked here so a fresh rig
+/// that lost the radio stack fails the gate instead of reporting a hollow `ok`.
+const RADIO_BINS: &[&str] = &["wfb_tx", "wfb_rx", "wfb_keygen", "wfb-server"];
+
+/// The bind artifacts the supervisor's bind FSM requires before it can run.
+const BIND_ARTIFACTS: &[&str] = &["/etc/bind.key", "/etc/bind.yaml"];
+
+/// The locations the `wifibroadcast@` service template may live in (a deployed
+/// drop-in under `/etc/systemd/system` or a packaged unit under
+/// `/usr/lib/systemd/system`).
+const WIFIBROADCAST_UNIT_DIRS: &[&str] = &["/etc/systemd/system", "/usr/lib/systemd/system"];
+
+/// True when `bin` resolves on PATH or in the two dirs install writes console
+/// scripts to. Matches the radio step's resolution so the gate agrees with what
+/// the build actually lands.
+fn radio_bin_present(bin: &str) -> bool {
+    if let Ok(path) = std::env::var("PATH") {
+        if std::env::split_paths(&path).any(|dir| dir.join(bin).is_file()) {
+            return true;
+        }
+    }
+    Path::new("/usr/bin").join(bin).is_file() || Path::new("/usr/local/bin").join(bin).is_file()
+}
+
+/// True when the `wifibroadcast@.service` template is deployed (under either the
+/// drop-in or the packaged unit directory).
+fn wifibroadcast_template_present() -> bool {
+    WIFIBROADCAST_UNIT_DIRS
+        .iter()
+        .any(|dir| Path::new(dir).join("wifibroadcast@.service").is_file())
+}
+
+/// True when the `mediamtx` media server is on disk (its install location or on
+/// PATH). The video pipeline cannot publish without it.
+fn mediamtx_present() -> bool {
+    if Path::new("/usr/local/bin/mediamtx").is_file() {
+        return true;
+    }
+    radio_bin_present("mediamtx")
+}
+
+/// The names of the radio-stack components that are MISSING for a rig (the
+/// wfb-ng binaries, the bind artifacts, the service template). Both the drone
+/// and the ground station profile require the full set to auto-pair, so this is
+/// profile-independent. mediamtx is intentionally NOT here: it is best-effort
+/// (a missing video relay degrades streaming but must not abort the install), so
+/// the gate checks it separately. The labels are namespaced so they read clearly
+/// in the failure list.
+fn missing_radio_stack() -> Vec<String> {
+    let mut missing: Vec<String> = Vec::new();
+    for bin in RADIO_BINS {
+        if !radio_bin_present(bin) {
+            missing.push(format!("radio-bin:{bin}"));
+        }
+    }
+    for artifact in BIND_ARTIFACTS {
+        if !Path::new(artifact).exists() {
+            missing.push(format!("bind-artifact:{artifact}"));
+        }
+    }
+    if !wifibroadcast_template_present() {
+        missing.push("wifibroadcast-template".to_string());
+    }
+    missing
+}
+
 /// Post-start health gate.
 pub struct Health;
 
@@ -184,6 +259,19 @@ impl Step for Health {
         // 5. NEW: every Hard prebuilt binary is present + executable.
         for svc in missing_hard_binaries(&ctx.profile, |dest| is_executable(Path::new(dest))) {
             misses.push(format!("binary-missing:{svc}"));
+        }
+
+        // 6. The radio stack is on disk (both drone + ground station need it):
+        // without the wfb-ng binaries, the bind artifacts, or the service
+        // template a fresh rig cannot auto-pair, so each is a required miss.
+        misses.extend(missing_radio_stack());
+
+        // 7. mediamtx is best-effort (the video relay). A missing one degrades
+        // streaming but must not abort an otherwise-working install, so record
+        // it as a non-required failure rather than adding it to `misses`.
+        if !mediamtx_present() {
+            ctx.failures.record("mediamtx-missing", false);
+            tracing::warn!("mediamtx not present; video streaming degraded");
         }
 
         if misses.is_empty() {
@@ -254,6 +342,23 @@ mod tests {
         }
         // ados-radio is best-effort on drone → must not appear.
         assert!(!all.contains(&"ados-radio"));
+    }
+
+    #[test]
+    fn radio_stack_set_covers_the_bind_protocol() {
+        // The bind FSM tools + artifacts the auto-pair path needs at boot.
+        assert!(RADIO_BINS.contains(&"wfb_keygen"));
+        assert!(RADIO_BINS.contains(&"wfb-server"));
+        assert!(BIND_ARTIFACTS.contains(&"/etc/bind.key"));
+        assert!(BIND_ARTIFACTS.contains(&"/etc/bind.yaml"));
+    }
+
+    #[test]
+    fn wifibroadcast_template_checked_in_both_unit_dirs() {
+        // Both the deployed drop-in dir and the packaged unit dir are searched
+        // so a template in either location satisfies the gate.
+        assert!(WIFIBROADCAST_UNIT_DIRS.contains(&"/etc/systemd/system"));
+        assert!(WIFIBROADCAST_UNIT_DIRS.contains(&"/usr/lib/systemd/system"));
     }
 
     #[test]

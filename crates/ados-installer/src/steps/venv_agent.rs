@@ -1,5 +1,5 @@
 //! Venv + agent package: create the Python virtualenv and install the agent
-//! package into it. Required. Checkpoint `agent-package`.
+//! package into it. Required. Checkpoint `venv`.
 //!
 //! Ports the venv + agent-install portion of `scripts/install.d/13-main.sh`
 //! (fresh-install path) plus `ensure_venv_pip` from 14-orchestration.sh:
@@ -191,7 +191,7 @@ impl Step for VenvAgent {
         &["deps"]
     }
     fn checkpoint(&self) -> Option<&str> {
-        Some("agent-package")
+        Some("venv")
     }
     fn kind(&self) -> StepKind {
         StepKind::Required
@@ -206,9 +206,8 @@ impl Step for VenvAgent {
             }
         };
 
-        // (1) Create the venv. Checkpoint `venv` is the bash midpoint marker;
-        // this crate's single checkpoint for the step is `agent-package`, so we
-        // only mark on full success (the graph engine handles that).
+        // (1) Create the venv. This crate's single checkpoint for the step is
+        // `venv`, marked only on full success (the graph engine handles that).
         if let Err(e) = create_venv(&python) {
             return StepOutcome::Failed(e.to_string());
         }

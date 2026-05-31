@@ -274,7 +274,6 @@ INSTALL_CHECKPOINT_DIR = Path("/var/lib/ados/install-checkpoints")
 INSTALL_CHECKPOINT_STEPS = (
     "deps",
     "venv",
-    "agent-package",
     "systemd",
     "global-symlinks",
 )

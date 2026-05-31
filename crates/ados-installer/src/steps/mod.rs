@@ -35,6 +35,7 @@ pub mod purge_residue;
 pub mod start;
 pub mod systemd;
 pub mod venv_agent;
+pub mod wfb_ng;
 
 /// Assemble the full fresh-install step chain. The graph engine orders these
 /// by their declared `requires`, so the insertion order here is only the
@@ -45,6 +46,7 @@ pub fn full_install_chain() -> Vec<Box<dyn Step>> {
         Box::new(purge_residue::PurgeResidue),
         Box::new(deps::Deps),
         Box::new(venv_agent::VenvAgent),
+        Box::new(wfb_ng::WfbNg),
         Box::new(fetch_binaries::FetchBinaries),
         Box::new(dkms::Dkms),
         Box::new(config_identity::ConfigIdentity),
@@ -63,7 +65,7 @@ mod tests {
     fn full_chain_orders_cleanly() {
         let steps = full_install_chain();
         let order = topo_order(&steps).expect("the install chain must be a valid DAG");
-        assert_eq!(order.len(), 10);
+        assert_eq!(order.len(), 11);
 
         let pos = |id: &str| order.iter().position(|x| x == id).unwrap();
         // Spot-check the load-bearing edges.
@@ -71,6 +73,8 @@ mod tests {
         assert!(pos("deps") < pos("venv_agent"));
         assert!(pos("deps") < pos("fetch_binaries"));
         assert!(pos("deps") < pos("dkms"));
+        assert!(pos("venv_agent") < pos("wfb_ng"));
+        assert!(pos("wfb_ng") < pos("systemd"));
         assert!(pos("venv_agent") < pos("config_identity"));
         assert!(pos("fetch_binaries") < pos("systemd"));
         assert!(pos("config_identity") < pos("systemd"));

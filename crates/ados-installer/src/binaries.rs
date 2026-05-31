@@ -1,11 +1,12 @@
 //! The prebuilt-binary catalog.
 //!
-//! Each Rust service ships as an `<service>-aarch64` asset attached to a
-//! per-service prebuilt release tag. The fetch step downloads the assets for
-//! the active profile, verifies them, and drops each at
-//! `/opt/ados/bin/<service>`. A `Hard` gate means a missing/failed binary
-//! fails the install; a `BestEffort` gate degrades it. Multiple services can
-//! share one release tag (the HID and display binaries are built and published
+//! Each service ships as an `<asset>` attached to a per-service prebuilt
+//! release tag. The fetch step downloads the assets for the active profile,
+//! verifies them, and drops each at its destination (the `ados-*` services
+//! under `/opt/ados/bin/<service>`; a mirrored third-party relay under the
+//! system bin dir). A `Hard` gate means a missing/failed binary fails the
+//! install; a `BestEffort` gate degrades it. Multiple services can share one
+//! release tag (the HID and display binaries are built and published
 //! together), so the table maps service → tag, not the reverse.
 
 /// Whether a missing prebuilt binary is fatal (`Hard`) or degrading
@@ -41,7 +42,7 @@ const BOTH: &[&str] = &["drone", "ground_station"];
 const DRONE: &[&str] = &["drone"];
 const GROUND: &[&str] = &["ground_station"];
 
-/// The full catalog of 14 prebuilt service binaries.
+/// The full catalog of prebuilt service binaries.
 ///
 /// Gate rationale: the agent cannot do its job without the orchestrator
 /// (`ados-supervisor`), the video pipeline (`ados-video`), the cloud-relay
@@ -161,6 +162,18 @@ pub const PREBUILT: &[PrebuiltBinary] = &[
         gate: Gate::Hard,
         profiles: DRONE,
     },
+    // The video relay the pipeline streams through. It is a mirrored
+    // third-party binary rather than an `ados-*` service, so it lands in the
+    // system bin dir. Best-effort: a missing relay degrades video without
+    // aborting the install (the health gate verifies its presence separately).
+    PrebuiltBinary {
+        service: "mediamtx",
+        asset: "mediamtx-aarch64",
+        release_tag: "prebuilt-mediamtx",
+        dest: "/usr/local/bin/mediamtx",
+        gate: Gate::BestEffort,
+        profiles: BOTH,
+    },
 ];
 
 /// The subset of the catalog needed by `profile` (`drone` | `ground_station`).
@@ -176,8 +189,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn catalog_has_fourteen_entries() {
-        assert_eq!(PREBUILT.len(), 14);
+    fn catalog_has_fifteen_entries() {
+        assert_eq!(PREBUILT.len(), 15);
     }
 
     #[test]
@@ -201,8 +214,8 @@ mod tests {
     }
 
     #[test]
-    fn dest_is_under_bin_dir() {
-        for b in PREBUILT {
+    fn ados_service_dest_is_under_bin_dir() {
+        for b in PREBUILT.iter().filter(|b| b.service.starts_with("ados-")) {
             assert_eq!(b.dest, format!("/opt/ados/bin/{}", b.service).as_str());
         }
     }
