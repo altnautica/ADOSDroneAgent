@@ -16,6 +16,9 @@ StartLimitInterval=60s
 StartLimitBurst=5
 
 [Service]
+# Join the shared accounting slice so MemoryCurrent/CPUUsage are
+# observable per unit (the slice sets MemoryAccounting=yes).
+Slice=ados.slice
 Type=simple
 User=root
 # Flag-gated cutover: the native display writer runs only when BOTH the operator

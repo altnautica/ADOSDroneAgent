@@ -6,6 +6,9 @@ StartLimitInterval=60s
 StartLimitBurst=5
 
 [Service]
+# Join the shared accounting slice so MemoryCurrent/CPUUsage are
+# observable per unit (the slice sets MemoryAccounting=yes).
+Slice=ados.slice
 Type=simple
 # The native radio manager is OPT-IN until it reaches feature parity with the
 # Python service: run it only when BOTH the binary is present AND the operator

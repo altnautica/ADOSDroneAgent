@@ -112,6 +112,24 @@ def _get_process_metrics() -> dict:
     return _proc_cache
 
 
+def _attach_service_memory(services: list[dict]) -> None:
+    """Add a ``memory_mb`` field to every service entry, in place.
+
+    Resolves each entry's owning systemd unit, probes ``MemoryCurrent``
+    once per distinct unit (cgroup accounting), and writes the MiB value
+    back onto every entry that maps to that unit. Entries with no
+    dedicated unit, or whose unit has accounting off / is stopped, get
+    ``0.0``. Best-effort: a systemctl failure leaves every entry at 0.0.
+    """
+    from ados.core.systemd_memory import services_memory_mb, unit_for_service
+
+    unit_by_entry: list[str | None] = [unit_for_service(s.get("name", "")) for s in services]
+    distinct_units = sorted({u for u in unit_by_entry if u})
+    by_unit = services_memory_mb(distinct_units) if distinct_units else {}
+    for svc, unit in zip(services, unit_by_entry):
+        svc["memory_mb"] = by_unit.get(unit, 0.0) if unit else 0.0
+
+
 def _infer_service_state(app, name: str, tracker_state: str, task_done: bool) -> str:
     """Infer true operational state from observable conditions.
 
@@ -234,6 +252,12 @@ async def list_services():
         if fallback:
             services = fallback
             running_count = sum(1 for s in services if s.get("active"))
+
+    # Per-service memory from cgroup accounting. Each entry's owning unit
+    # is read once via systemctl; entries with no dedicated unit (or a
+    # stopped unit) land at 0.0. Resolved units are deduped so each unit
+    # is probed at most once even when two entries map to it.
+    _attach_service_memory(services)
 
     return {
         "services": services,

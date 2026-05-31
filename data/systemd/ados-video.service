@@ -6,6 +6,9 @@ StartLimitInterval=60s
 StartLimitBurst=5
 
 [Service]
+# Join the shared accounting slice so MemoryCurrent/CPUUsage are
+# observable per unit (the slice sets MemoryAccounting=yes).
+Slice=ados.slice
 Type=simple
 # The native video orchestrator is the only implementation; the standalone
 # Python video service was removed once the binary was bench-validated. exec the

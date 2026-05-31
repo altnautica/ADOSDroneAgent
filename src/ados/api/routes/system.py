@@ -89,7 +89,12 @@ async def get_system_resources():
 
         cpu_percent = psutil.cpu_percent(interval=0.1)
         mem = psutil.virtual_memory()
+        swap = psutil.swap_memory()
         disk = psutil.disk_usage("/")
+
+        # cached + buffers is Linux-only; absent on a dev host, so guard
+        # with getattr and fall back to 0 so the field is always present.
+        mem_cache_bytes = getattr(mem, "cached", 0) + getattr(mem, "buffers", 0)
 
         # Temperature (Linux only, best-effort)
         temps = {}
@@ -105,7 +110,12 @@ async def get_system_resources():
             "cpu_count": psutil.cpu_count(),
             "memory_total_mb": round(mem.total / (1024 * 1024)),
             "memory_used_mb": round(mem.used / (1024 * 1024)),
+            "memory_available_mb": round(mem.available / (1024 * 1024)),
+            "memory_cache_mb": round(mem_cache_bytes / (1024 * 1024)),
             "memory_percent": mem.percent,
+            "swap_total_mb": round(swap.total / (1024 * 1024)),
+            "swap_used_mb": round(swap.used / (1024 * 1024)),
+            "swap_percent": swap.percent,
             "disk_total_gb": round(disk.total / (1024**3), 1),
             "disk_used_gb": round(disk.used / (1024**3), 1),
             "disk_percent": disk.percent,
@@ -120,7 +130,12 @@ async def get_system_resources():
             "cpu_count": None,
             "memory_total_mb": None,
             "memory_used_mb": None,
+            "memory_available_mb": None,
+            "memory_cache_mb": None,
             "memory_percent": None,
+            "swap_total_mb": None,
+            "swap_used_mb": None,
+            "swap_percent": None,
             "disk_total_gb": None,
             "disk_used_gb": None,
             "disk_percent": None,

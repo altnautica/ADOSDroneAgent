@@ -8,6 +8,9 @@ StartLimitInterval=60s
 StartLimitBurst=5
 
 [Service]
+# Join the shared accounting slice so MemoryCurrent/CPUUsage are
+# observable per unit (the slice sets MemoryAccounting=yes).
+Slice=ados.slice
 Type=simple
 User=root
 # Defence in depth against the Debian-default standalone dnsmasq.service.

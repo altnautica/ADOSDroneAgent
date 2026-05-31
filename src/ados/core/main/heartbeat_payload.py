@@ -166,6 +166,11 @@ def build_heartbeat_payload(app: AgentApp) -> dict:  # noqa: C901
     proc_rss_mb = 0.0
     mem_used_mb = 0
     mem_total_mb = 0
+    mem_available_mb = 0
+    mem_cache_mb = 0
+    swap_total_mb = 0
+    swap_used_mb = 0
+    swap_percent = 0.0
     disk_used_gb = 0.0
     disk_total_gb = 0.0
     cpu_cores = 0
@@ -179,6 +184,14 @@ def build_heartbeat_payload(app: AgentApp) -> dict:  # noqa: C901
         _vm = _psutil.virtual_memory()
         mem_used_mb = round(_vm.used / (1024 * 1024))
         mem_total_mb = round(_vm.total / (1024 * 1024))
+        mem_available_mb = round(_vm.available / (1024 * 1024))
+        # cached + buffers is Linux-only; guard so a dev host stays at 0.
+        _cache_bytes = getattr(_vm, "cached", 0) + getattr(_vm, "buffers", 0)
+        mem_cache_mb = round(_cache_bytes / (1024 * 1024))
+        _swap = _psutil.swap_memory()
+        swap_total_mb = round(_swap.total / (1024 * 1024))
+        swap_used_mb = round(_swap.used / (1024 * 1024))
+        swap_percent = _swap.percent
         _disk = _psutil.disk_usage("/")
         disk_used_gb = round(_disk.used / (1024**3), 1)
         disk_total_gb = round(_disk.total / (1024**3), 1)
@@ -200,6 +213,22 @@ def build_heartbeat_payload(app: AgentApp) -> dict:  # noqa: C901
     except Exception:
         video_restart_attempts = 0
 
+    # Per-service memory from cgroup accounting. Resolve each service's
+    # owning systemd unit and probe MemoryCurrent once per distinct unit
+    # so the GCS can show where the RAM goes per service, not just a
+    # single process total. Best-effort: a systemctl failure leaves every
+    # entry at 0.0 and never breaks the tick.
+    from ados.core.systemd_memory import services_memory_mb, unit_for_service
+
+    svc_units = {
+        name: unit_for_service(name) for name in all_services
+    }
+    distinct_units = sorted({u for u in svc_units.values() if u})
+    try:
+        svc_mem_by_unit = services_memory_mb(distinct_units) if distinct_units else {}
+    except Exception:
+        svc_mem_by_unit = {}
+
     # Per-service data with real uptime (no fake CPU/RAM distribution)
     now_mono = time.monotonic()
     for svc_name, svc_state in all_services.items():
@@ -212,10 +241,12 @@ def build_heartbeat_payload(app: AgentApp) -> dict:  # noqa: C901
                 if st == ServiceState.RUNNING:
                     svc_uptime = now_mono - ts
                     break
+        svc_unit = svc_units.get(svc_name)
         service_list.append({
             "name": svc_name,
             "status": real_state,
             "uptimeSeconds": round(svc_uptime),
+            "memoryMb": svc_mem_by_unit.get(svc_unit, 0.0) if svc_unit else 0.0,
         })
 
     # LAN-routable URL block. The GCS surfaces these as "manual
@@ -303,6 +334,11 @@ def build_heartbeat_payload(app: AgentApp) -> dict:  # noqa: C901
         # Absolute resource values
         "memoryUsedMb": mem_used_mb,
         "memoryTotalMb": mem_total_mb,
+        "memoryAvailableMb": mem_available_mb,
+        "memoryCacheMb": mem_cache_mb,
+        "swapTotalMb": swap_total_mb,
+        "swapUsedMb": swap_used_mb,
+        "swapPercent": swap_percent,
         "diskUsedGb": disk_used_gb,
         "diskTotalGb": disk_total_gb,
         "cpuCores": cpu_cores,

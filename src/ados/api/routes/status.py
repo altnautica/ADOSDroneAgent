@@ -155,7 +155,30 @@ def _build_services_list_sync(app) -> list[dict]:
     if not services:
         services = _systemd_services_fallback()
 
+    # Per-service memory from cgroup accounting. Probed once per distinct
+    # owning unit; entries with no unit or a stopped unit land at 0.0.
+    # Memoized along with the rest of this list by the 5s status cache.
+    _attach_service_memory(services)
+
     return services
+
+
+def _attach_service_memory(services: list[dict]) -> None:
+    """Add a ``memory_mb`` field to each service entry, in place.
+
+    Mirrors the ``/api/services`` route: resolve each entry's systemd
+    unit, read ``MemoryCurrent`` once per distinct unit, write the MiB
+    value back. Best-effort and never raises.
+    """
+    from ados.core.systemd_memory import services_memory_mb, unit_for_service
+
+    unit_by_entry: list[str | None] = [
+        unit_for_service(s.get("name", "")) for s in services
+    ]
+    distinct_units = sorted({u for u in unit_by_entry if u})
+    by_unit = services_memory_mb(distinct_units) if distinct_units else {}
+    for svc, unit in zip(services, unit_by_entry):
+        svc["memory_mb"] = by_unit.get(unit, 0.0) if unit else 0.0
 
 
 def _systemd_services_fallback() -> list[dict]:
@@ -328,11 +351,21 @@ async def get_full_status(request: Request):
         except (AttributeError, OSError):
             pass
 
+        swap = psutil.swap_memory()
+        # cached + buffers is Linux-only; absent on a dev host, so guard
+        # with getattr and fall back to 0 so the field is always present.
+        mem_cache_bytes = getattr(mem, "cached", 0) + getattr(mem, "buffers", 0)
+
         resources = {
             "cpu_percent": cpu_percent,
             "memory_percent": mem.percent,
             "memory_used_mb": round(mem.used / (1024 * 1024)),
             "memory_total_mb": round(mem.total / (1024 * 1024)),
+            "memory_available_mb": round(mem.available / (1024 * 1024)),
+            "memory_cache_mb": round(mem_cache_bytes / (1024 * 1024)),
+            "swap_total_mb": round(swap.total / (1024 * 1024)),
+            "swap_used_mb": round(swap.used / (1024 * 1024)),
+            "swap_percent": swap.percent,
             "disk_percent": disk.percent,
             "disk_used_gb": round(disk.used / (1024 * 1024 * 1024), 1),
             "disk_total_gb": round(disk.total / (1024 * 1024 * 1024), 1),

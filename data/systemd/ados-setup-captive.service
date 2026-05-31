@@ -8,6 +8,9 @@ PartOf=ados-supervisor.service
 ConditionPathExists=!/var/lib/ados/setup-complete
 
 [Service]
+# Join the shared accounting slice so MemoryCurrent/CPUUsage are
+# observable per unit (the slice sets MemoryAccounting=yes).
+Slice=ados.slice
 Type=simple
 User=root
 ExecStart=/opt/ados/venv/bin/python -m ados.services.setup_webapp.captive_dns

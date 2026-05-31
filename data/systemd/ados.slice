@@ -1,0 +1,12 @@
+[Unit]
+Description=ADOS agent service slice
+Before=slices.target
+
+[Slice]
+# Turn on cgroup CPU + memory accounting for every ados-*.service that
+# joins this slice (Slice=ados.slice in their [Service] block). With this
+# on, `systemctl show <unit> -p MemoryCurrent` reports each unit's live
+# cgroup memory, so per-service memory is observable. Accounting takes
+# effect on daemon-reload + restart, both of which the installer performs.
+CPUAccounting=yes
+MemoryAccounting=yes
