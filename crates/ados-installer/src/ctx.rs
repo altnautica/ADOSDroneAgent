@@ -25,7 +25,8 @@ pub struct Ctx {
     pub force: bool,
     /// Resolved agent profile (`drone` | `ground_station`).
     pub profile: String,
-    /// Release channel selector (default `stable`).
+    /// Release channel selector (default `edge` — clone + build from source,
+    /// matching the predecessor installer's default).
     pub channel: String,
     /// The cloned source repo the install ran from. `venv_agent` records the
     /// path it cloned (edge channel) so the downstream steps (`systemd`,
@@ -37,11 +38,12 @@ pub struct Ctx {
 
 impl Ctx {
     /// Build the run context from parsed arguments. The profile defaults to
-    /// `drone` and the channel to `stable` when the flags are absent.
+    /// `drone` and the channel to `edge` when the flags are absent (edge =
+    /// clone + build from source, the predecessor installer's default).
     pub fn from_args(args: Args, env: EnvInfo, checkpoint: Checkpoint) -> Self {
         let force = args.force;
         let profile = args.profile.clone().unwrap_or_else(|| "drone".to_string());
-        let channel = args.channel.clone().unwrap_or_else(|| "stable".to_string());
+        let channel = args.channel.clone().unwrap_or_else(|| "edge".to_string());
         Ctx {
             args,
             env,
@@ -70,7 +72,7 @@ mod tests {
     fn from_args_defaults_profile_and_channel() {
         let ctx = Ctx::from_args(Args::default(), EnvInfo::probe(), Checkpoint::new());
         assert_eq!(ctx.profile, "drone");
-        assert_eq!(ctx.channel, "stable");
+        assert_eq!(ctx.channel, "edge");
         assert!(!ctx.force);
     }
 

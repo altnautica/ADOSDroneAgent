@@ -11,7 +11,7 @@
 //!      `/etc/ados/profile.conf` (YAML `profile: X` or legacy `profile=X`),
 //!      else the `drone` default. The resolved value lands in `ctx.profile`.
 //!   4. **channel** — `--channel` wins, else `ctx.channel`'s existing default
-//!      (`stable`). The resolved value lands back in `ctx.channel`.
+//!      (`edge`). The resolved value lands back in `ctx.channel`.
 //!   5. a best-effort connectivity note (logged, never fatal — `fetch_binaries`
 //!      is the real network gate).
 
@@ -120,7 +120,7 @@ impl Step for Preflight {
         tracing::info!(profile = %profile, "resolved install profile");
         ctx.profile = profile;
 
-        // 4. channel: --channel wins, else the ctx default (stable). The ctx
+        // 4. channel: --channel wins, else the ctx default (edge). The ctx
         // already carries the flag-or-default value from `Ctx::from_args`; we
         // only re-affirm + log it here for the operator.
         if let Some(c) = ctx.args.channel.clone() {
