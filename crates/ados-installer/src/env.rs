@@ -21,6 +21,38 @@ pub const CHECKPOINT_DIR: &str = "/var/lib/ados/install-checkpoints";
 pub const RESULT_PATH: &str = "/var/lib/ados/install-result.json";
 /// The top-level systemd unit the install starts and health-gates on.
 pub const SERVICE_NAME: &str = "ados-supervisor";
+/// Persisted source-tree copy the bash installer leaves behind so an
+/// `--upgrade` invoked outside a fresh clone still finds the unit files,
+/// udev rules, and driver scripts. The Rust installer's downstream steps fall
+/// back to this (then `INSTALL_DIR/repo`) when `ctx.source_dir` is `None`.
+pub const PERSISTED_SOURCE_DIR: &str = "/opt/ados/source";
+/// The device-id file: a normalized 12-hex string (no dashes), never rewritten.
+pub const DEVICE_ID_FILE: &str = "/etc/ados/device-id";
+/// On-disk profile selector read by the agent + the bash `resolve_profile`.
+pub const PROFILE_CONF: &str = "/etc/ados/profile.conf";
+/// The operator config the agent reads on boot.
+pub const CONFIG_YAML: &str = "/etc/ados/config.yaml";
+/// Pairing material written by `--pair CODE`.
+pub const PAIRING_JSON: &str = "/etc/ados/pairing.json";
+/// Cloud-relay endpoint baked into the default config's `pairing.convex_url`.
+pub const CONVEX_URL: &str = "https://convex-site.altnautica.com";
+
+/// Resolve the source repo dir, mirroring the bash `SYSTEMD_SRC_DIR` /
+/// driver-script resolution: prefer the path the clone recorded (`recorded`,
+/// i.e. `ctx.source_dir`), then the persisted `/opt/ados/source`, then
+/// `INSTALL_DIR/repo`. Returns the first that exists, or `None`.
+pub fn resolve_source_dir(recorded: Option<&std::path::Path>) -> Option<std::path::PathBuf> {
+    use std::path::PathBuf;
+    let candidates: Vec<PathBuf> = [
+        recorded.map(PathBuf::from),
+        Some(PathBuf::from(PERSISTED_SOURCE_DIR)),
+        Some(PathBuf::from(format!("{INSTALL_DIR}/repo"))),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    candidates.into_iter().find(|p| p.is_dir())
+}
 
 /// Resolved host facts the steps gate on. Kept tiny; richer HAL detection is a
 /// later phase that runs the dedicated probe crate.
@@ -91,5 +123,25 @@ mod tests {
         assert_eq!(e.arch, arch());
         assert_eq!(e.supported_arch, is_supported_arch());
         assert_eq!(e.os, std::env::consts::OS);
+    }
+
+    #[test]
+    fn resolve_source_dir_prefers_recorded_then_falls_back() {
+        // A recorded path that exists wins.
+        let dir = tempfile::tempdir().unwrap();
+        let got = resolve_source_dir(Some(dir.path()));
+        assert_eq!(got.as_deref(), Some(dir.path()));
+
+        // A recorded path that does NOT exist falls through to the canonical
+        // fallbacks (neither of which exists on a dev host) → None.
+        let missing = dir.path().join("nope");
+        // On a real SBC `/opt/ados/source` may exist; this assertion only holds
+        // on a host where neither fallback dir is present (the CI/dev case).
+        if !std::path::Path::new(PERSISTED_SOURCE_DIR).is_dir()
+            && !std::path::Path::new(&format!("{INSTALL_DIR}/repo")).is_dir()
+        {
+            assert_eq!(resolve_source_dir(Some(&missing)), None);
+            assert_eq!(resolve_source_dir(None), None);
+        }
     }
 }

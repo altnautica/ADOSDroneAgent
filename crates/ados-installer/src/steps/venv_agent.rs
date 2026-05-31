@@ -115,17 +115,24 @@ fn ensure_venv_pip(python: &str) -> anyhow::Result<()> {
 }
 
 /// Install the agent package on the edge channel: clone the repo (honoring
-/// --branch) into a temp dir, then `pip install <repo>`.
-fn install_agent_edge(ctx: &Ctx) -> anyhow::Result<()> {
-    let tmp = clone_tmp_dir()?;
-    let repo = tmp.join("repo");
+/// --branch) into a PERSISTED dir, then `pip install <repo>`. Returns the
+/// cloned repo path so the caller can record it into `ctx.source_dir` — the
+/// downstream `systemd` / `config_identity` / `dkms` steps read `data/systemd`,
+/// `data/udev`, and `scripts/drivers/*` from it. We do NOT delete the clone
+/// (mirrors the bash installer persisting the tree to `/opt/ados/source`); a
+/// reinstall re-clones over it after wiping.
+fn install_agent_edge(ctx: &Ctx) -> anyhow::Result<PathBuf> {
+    let repo = clone_dest()?;
     let repo_s = repo.to_string_lossy().into_owned();
+
+    // A reinstall must start from a clean tree so `git clone` does not refuse
+    // a non-empty destination. Idempotent: a missing dir is a no-op.
+    let _ = std::fs::remove_dir_all(&repo);
 
     let clone = git_clone_args(&repo_s, ctx.args.branch.as_deref());
     let clone_argv: Vec<&str> = clone.iter().map(String::as_str).collect();
     let clone_res = exec::run("git", &clone_argv);
     if !clone_res.success() {
-        let _ = std::fs::remove_dir_all(&tmp);
         if !clone_res.spawned {
             anyhow::bail!("git is not installed");
         }
@@ -135,22 +142,29 @@ fn install_agent_edge(ctx: &Ctx) -> anyhow::Result<()> {
     let pip = pip_install_edge_args(&repo_s);
     let pip_argv: Vec<&str> = pip.iter().map(String::as_str).collect();
     let pip_res = exec::run(&venv_pip(), &pip_argv);
-    let _ = std::fs::remove_dir_all(&tmp);
     if pip_res.success() {
-        Ok(())
+        Ok(repo)
     } else {
         anyhow::bail!("pip install of the agent package failed: {}", pip_res.stderr.trim())
     }
 }
 
-/// Create a unique temp dir for the source clone.
-fn clone_tmp_dir() -> std::io::Result<PathBuf> {
+/// The persisted clone destination. On a real SBC this is
+/// `/opt/ados/source/repo` (so `data/` + `scripts/` survive for the downstream
+/// steps and a later `--upgrade`); when `/opt/ados` is not creatable (a dev
+/// host), fall back to a unique temp dir so the edge path still exercises end
+/// to end without root.
+fn clone_dest() -> std::io::Result<PathBuf> {
+    let persisted = PathBuf::from(format!("{}/source", env::INSTALL_DIR));
+    if std::fs::create_dir_all(&persisted).is_ok() {
+        return Ok(persisted.join("repo"));
+    }
     use std::sync::atomic::{AtomicU64, Ordering};
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
     let base = std::env::temp_dir().join(format!("ados-installer-src-{}-{n}", std::process::id()));
     std::fs::create_dir_all(&base)?;
-    Ok(base)
+    Ok(base.join("repo"))
 }
 
 /// Python venv creation + agent package install.
@@ -202,7 +216,12 @@ impl Step for VenvAgent {
         }
 
         match install_agent_edge(ctx) {
-            Ok(()) => StepOutcome::Ok,
+            Ok(repo) => {
+                // Record the cloned tree so the downstream OS steps find the
+                // unit files, udev rules, and driver scripts under it.
+                ctx.source_dir = Some(repo);
+                StepOutcome::Ok
+            }
             Err(e) => StepOutcome::Failed(e.to_string()),
         }
     }

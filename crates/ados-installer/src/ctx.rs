@@ -27,6 +27,12 @@ pub struct Ctx {
     pub profile: String,
     /// Release channel selector (default `stable`).
     pub channel: String,
+    /// The cloned source repo the install ran from. `venv_agent` records the
+    /// path it cloned (edge channel) so the downstream steps (`systemd`,
+    /// `config_identity`, `dkms`) can find `data/systemd`, `data/udev`, and
+    /// `scripts/drivers/*`. `None` until `venv_agent` populates it; the
+    /// downstream steps then fall back to `/opt/ados/source` / `INSTALL_DIR/repo`.
+    pub source_dir: Option<std::path::PathBuf>,
 }
 
 impl Ctx {
@@ -47,6 +53,7 @@ impl Ctx {
             force,
             profile,
             channel,
+            source_dir: None,
         }
     }
 

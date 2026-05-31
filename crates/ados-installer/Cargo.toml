@@ -26,6 +26,8 @@ sha2 = { workspace = true }
 hex = { workspace = true }
 # ISO-8601 second-precision UTC timestamps for the install-result contract.
 time = { version = "0.3", features = ["std", "formatting", "macros"] }
+# 12-hex device-id minting when /proc/sys/kernel/random/uuid is unavailable.
+getrandom = { workspace = true }
 
 # Linux-only edges (systemd notify + journald + setsid/killpg for sandboxed
 # OS probes + mode bits via nix). Confined to a target section so the

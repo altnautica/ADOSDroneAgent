@@ -11,14 +11,17 @@ use std::process::ExitCode;
 
 use anyhow::Result;
 
+use ados_installer::binaries;
 use ados_installer::checkpoint::Checkpoint;
 use ados_installer::cli::{Args, RunMode, USAGE};
 use ados_installer::ctx::Ctx;
-use ados_installer::env::{EnvInfo, RESULT_PATH};
+use ados_installer::env::{self, EnvInfo, RESULT_PATH};
+use ados_installer::exec;
 use ados_installer::graph::run_graph;
 use ados_installer::journal::init_logging;
 use ados_installer::result::{now_iso8601_utc, FailureAccumulator, InstallResult};
 use ados_installer::steps::full_install_chain;
+use ados_installer::uninstall;
 
 #[tokio::main]
 async fn main() -> Result<ExitCode> {
@@ -44,15 +47,23 @@ async fn main() -> Result<ExitCode> {
 
     match mode {
         RunMode::Status => {
-            // Stub: a later phase reads + prints the install-result contract.
-            print_status();
+            print_status(&args);
             Ok(ExitCode::SUCCESS)
         }
         RunMode::Uninstall => {
-            // Stub: a later phase performs the removal.
-            tracing::info!("uninstall is not yet implemented in this build");
-            println!("uninstall: not yet implemented");
-            Ok(ExitCode::SUCCESS)
+            // `--force` doubles as the purge flag here (remove /etc/ados too)
+            // so a `--uninstall --force` wipes identity for a from-clean reinstall.
+            let purge = args.force;
+            match uninstall::run_uninstall(purge) {
+                Ok(()) => {
+                    println!("uninstall: done{}", if purge { " (purged /etc/ados)" } else { "" });
+                    Ok(ExitCode::SUCCESS)
+                }
+                Err(e) => {
+                    eprintln!("uninstall: {e}");
+                    Ok(ExitCode::from(1))
+                }
+            }
         }
         RunMode::PairOnly => {
             // Stub: a later phase re-pairs against the running agent.
@@ -79,7 +90,6 @@ fn run_install(args: Args, mode: RunMode) -> Result<ExitCode> {
     }
 
     let mut ctx = Ctx::from_args(args, env, checkpoint);
-    let profile = ctx.profile.clone();
 
     let reports = run_graph(full_install_chain(), &mut ctx);
     let status = ctx.failures.derive_status();
@@ -92,8 +102,9 @@ fn run_install(args: Args, mode: RunMode) -> Result<ExitCode> {
     );
 
     // Build + write the result contract (best-effort: a dev host where
-    // /var/lib is not writable must not panic the binary).
-    write_result(&ctx.failures, status, &profile);
+    // /var/lib is not writable must not panic the binary). The profile was
+    // resolved into ctx by preflight, so read it back from there.
+    write_result(&ctx.failures, status, &ctx.profile);
 
     if status == "failed" {
         Ok(ExitCode::from(1))
@@ -102,18 +113,15 @@ fn run_install(args: Args, mode: RunMode) -> Result<ExitCode> {
     }
 }
 
-/// Assemble + write the install-result contract. The board / kernel /
-/// wfb-module-source fields are filled by later-phase probes; this scaffold
-/// reports `unknown` / empty so the contract still lands and the abort path
-/// always names the failed step(s).
+/// Assemble + write the install-result contract with the real probed fields.
 fn write_result(failures: &FailureAccumulator, status: &str, profile: &str) {
     let result = InstallResult {
         status: status.to_string(),
-        version: "unknown".to_string(),
+        version: installed_version(),
         profile: profile.to_string(),
-        board: "unknown".to_string(),
+        board: board_id(),
         kernel_release: kernel_release(),
-        wfb_module_source: String::new(),
+        wfb_module_source: wfb_module_source(),
         failed_steps: failures.failed.clone(),
         required_failures: failures.required.clone(),
         ts: now_iso8601_utc(),
@@ -129,10 +137,59 @@ fn write_result(failures: &FailureAccumulator, status: &str, profile: &str) {
     }
 }
 
-/// `uname -r`-equivalent. A later phase shells this out; the scaffold returns
-/// `unknown` so the contract field is always present.
-fn kernel_release() -> String {
+/// The installed agent version, read straight from the package's `__version__`
+/// (mirrors the bash `get_installed_version`). `unknown` when the venv is
+/// absent or cannot import the package.
+fn installed_version() -> String {
+    let py = format!("{}/bin/python", env::VENV_DIR);
+    let res = exec::run(&py, &["-c", "import ados; print(ados.__version__)"]);
+    if res.success() {
+        let v = res.stdout.trim();
+        if !v.is_empty() {
+            return v.to_string();
+        }
+    }
     "unknown".to_string()
+}
+
+/// The board id: the persisted override sentinel first, then the device-tree
+/// model, else `unknown` (mirrors the bash `write_install_result` board read).
+fn board_id() -> String {
+    if let Ok(s) = std::fs::read_to_string("/etc/ados/board_override") {
+        let v = s.trim().trim_matches('\0').trim();
+        if !v.is_empty() {
+            return v.to_string();
+        }
+    }
+    if let Ok(s) = std::fs::read_to_string("/proc/device-tree/model") {
+        // The device-tree model is NUL-terminated; strip NULs + trim.
+        let v = s.replace('\0', "");
+        let v = v.trim();
+        if !v.is_empty() {
+            return v.to_string();
+        }
+    }
+    "unknown".to_string()
+}
+
+/// `uname -r`. Shells out via the exec primitive; `unknown` on any failure.
+fn kernel_release() -> String {
+    let res = exec::run("uname", &["-r"]);
+    if res.success() {
+        let v = res.stdout.trim();
+        if !v.is_empty() {
+            return v.to_string();
+        }
+    }
+    "unknown".to_string()
+}
+
+/// The WFB module source sentinel the driver step / driver script wrote
+/// (`prebuilt` | `dkms`), or empty when no RTL adapter / driver is present.
+fn wfb_module_source() -> String {
+    std::fs::read_to_string("/run/ados/wfb-module-source")
+        .map(|s| s.trim().trim_matches('\0').trim().to_string())
+        .unwrap_or_default()
 }
 
 /// True when the result file's parent directory exists and is writable. Guards
@@ -159,7 +216,53 @@ fn is_writable(dir: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// Stub status print (a later phase reads the install-result contract).
-fn print_status() {
-    println!("status: not yet implemented (reads {RESULT_PATH})");
+/// Print install status: the install-result contract (if present), the
+/// completed checkpoints, and the per-binary presence for the resolved profile.
+fn print_status(args: &Args) {
+    // 1. The install-result contract.
+    match std::fs::read_to_string(RESULT_PATH) {
+        Ok(body) => {
+            println!("install-result ({RESULT_PATH}):");
+            print!("{body}");
+            if !body.ends_with('\n') {
+                println!();
+            }
+        }
+        Err(_) => {
+            println!("install-result: none at {RESULT_PATH} (no install recorded yet)");
+        }
+    }
+
+    // 2. Completed checkpoints.
+    let checkpoint = Checkpoint::new();
+    let done = checkpoint.list();
+    if done.is_empty() {
+        println!("\ncheckpoints: none");
+    } else {
+        println!("\ncheckpoints completed:");
+        for cp in &done {
+            println!("  [x] {cp}");
+        }
+    }
+
+    // 3. Per-binary presence for the profile. The profile flag wins; else the
+    // persisted profile.conf; else drone (matches preflight's resolution).
+    let profile = resolve_status_profile(args);
+    println!("\nprebuilt binaries ({profile}):");
+    for b in binaries::for_profile(&profile) {
+        let present = std::fs::metadata(b.dest).map(|m| m.is_file()).unwrap_or(false);
+        let mark = if present { "[x]" } else { "[ ]" };
+        let gate = match b.gate {
+            binaries::Gate::Hard => "hard",
+            binaries::Gate::BestEffort => "best-effort",
+        };
+        println!("  {mark} {} ({gate})", b.service);
+    }
+}
+
+/// Resolve the profile for `--status` reporting: `--profile` flag, else the
+/// persisted `profile.conf`, else `drone`. Reuses preflight's pure resolver.
+fn resolve_status_profile(args: &Args) -> String {
+    let conf_body = std::fs::read_to_string(env::PROFILE_CONF).ok();
+    ados_installer::steps::preflight::resolve_profile(args.profile.as_deref(), conf_body.as_deref())
 }
