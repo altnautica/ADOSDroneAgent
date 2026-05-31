@@ -172,7 +172,11 @@ impl Step for FetchBinaries {
         for b in binaries::for_profile(&ctx.profile) {
             let ok = match install_one(b, &tmp_dir, channel) {
                 Ok(()) => {
-                    tracing::info!(service = b.service, dest = b.dest, "installed prebuilt binary");
+                    tracing::info!(
+                        service = b.service,
+                        dest = b.dest,
+                        "installed prebuilt binary"
+                    );
                     true
                 }
                 Err(e) => {
@@ -205,10 +209,8 @@ fn tempdir() -> std::io::Result<PathBuf> {
     use std::sync::atomic::{AtomicU64, Ordering};
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let base = std::env::temp_dir().join(format!(
-        "ados-installer-fetch-{}-{n}",
-        std::process::id()
-    ));
+    let base =
+        std::env::temp_dir().join(format!("ados-installer-fetch-{}-{n}", std::process::id()));
     std::fs::create_dir_all(&base)?;
     Ok(base)
 }

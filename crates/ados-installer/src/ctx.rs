@@ -41,10 +41,7 @@ impl Ctx {
     pub fn from_args(args: Args, env: EnvInfo, checkpoint: Checkpoint) -> Self {
         let force = args.force;
         let profile = args.profile.clone().unwrap_or_else(|| "drone".to_string());
-        let channel = args
-            .channel
-            .clone()
-            .unwrap_or_else(|| "stable".to_string());
+        let channel = args.channel.clone().unwrap_or_else(|| "stable".to_string());
         Ctx {
             args,
             env,

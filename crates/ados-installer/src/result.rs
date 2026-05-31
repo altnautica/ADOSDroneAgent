@@ -129,9 +129,11 @@ pub fn now_iso8601_utc() -> String {
     const CFG: Iso8601<
         {
             time::format_description::well_known::iso8601::Config::DEFAULT
-                .set_time_precision(time::format_description::well_known::iso8601::TimePrecision::Second {
-                    decimal_digits: None,
-                })
+                .set_time_precision(
+                    time::format_description::well_known::iso8601::TimePrecision::Second {
+                        decimal_digits: None,
+                    },
+                )
                 .encode()
         },
     > = Iso8601;

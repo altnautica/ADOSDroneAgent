@@ -228,10 +228,19 @@ mod tests {
             "/etc/systemd/logind.conf.d/99-ados-nosleep.conf",
             "/etc/avahi/services/ados-gs-ap.service",
         ] {
-            assert!(dropins.contains(&expected), "dropin set must include {expected}");
+            assert!(
+                dropins.contains(&expected),
+                "dropin set must include {expected}"
+            );
         }
         // All udev rules are under rules.d.
-        assert!(dropins.iter().filter(|p| p.contains("/udev/rules.d/")).count() >= 6);
+        assert!(
+            dropins
+                .iter()
+                .filter(|p| p.contains("/udev/rules.d/"))
+                .count()
+                >= 6
+        );
     }
 
     #[test]

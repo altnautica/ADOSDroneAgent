@@ -78,11 +78,7 @@ pub fn run_checked(program: &str, args: &[&str]) -> anyhow::Result<CmdResult> {
     } else if !res.spawned {
         anyhow::bail!("`{program}` could not be spawned: {}", res.stderr.trim());
     } else {
-        anyhow::bail!(
-            "`{program}` exited {:?}: {}",
-            res.code,
-            res.stderr.trim()
-        );
+        anyhow::bail!("`{program}` exited {:?}: {}", res.code, res.stderr.trim());
     }
 }
 

@@ -99,7 +99,9 @@ fn is_executable(path: &Path) -> bool {
 
 #[cfg(not(unix))]
 fn is_executable(path: &Path) -> bool {
-    std::fs::metadata(path).map(|m| m.is_file() && m.len() > 0).unwrap_or(false)
+    std::fs::metadata(path)
+        .map(|m| m.is_file() && m.len() > 0)
+        .unwrap_or(false)
 }
 
 /// The names of the Hard-gated prebuilt binaries that are MISSING (not present
@@ -181,7 +183,10 @@ impl Step for Health {
             tracing::error!(misses = ?misses, "install health gate FAILED");
             // The step itself also fails so the graph reports it; the per-miss
             // records above give the granular failedSteps list.
-            StepOutcome::Failed(format!("required components missing: {}", misses.join(", ")))
+            StepOutcome::Failed(format!(
+                "required components missing: {}",
+                misses.join(", ")
+            ))
         }
     }
 }
@@ -218,13 +223,19 @@ mod tests {
 
         // A best-effort binary being absent must NOT be reported (e.g. ados-tui).
         let beste = missing_hard_binaries("drone", |dest| dest != "/opt/ados/bin/ados-tui");
-        assert!(beste.is_empty(), "best-effort miss must not flag the health gate");
+        assert!(
+            beste.is_empty(),
+            "best-effort miss must not flag the health gate"
+        );
 
         // All Hard gates absent → all of them reported (drone Hard set:
         // supervisor, video, cloud, vision).
         let all = missing_hard_binaries("drone", |_| false);
         for svc in ["ados-supervisor", "ados-video", "ados-cloud", "ados-vision"] {
-            assert!(all.contains(&svc), "{svc} (Hard) must be flagged when absent");
+            assert!(
+                all.contains(&svc),
+                "{svc} (Hard) must be flagged when absent"
+            );
         }
         // ados-radio is best-effort on drone → must not appear.
         assert!(!all.contains(&"ados-radio"));

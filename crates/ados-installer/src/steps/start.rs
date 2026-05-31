@@ -62,7 +62,9 @@ impl Step for Start {
         let res = exec::run("systemctl", &["restart", SERVICE_NAME]);
         if !res.success() {
             if !res.spawned {
-                return StepOutcome::Failed("systemctl not available to start the supervisor".to_string());
+                return StepOutcome::Failed(
+                    "systemctl not available to start the supervisor".to_string(),
+                );
             }
             return StepOutcome::Failed(format!(
                 "starting {SERVICE_NAME} failed: {}",

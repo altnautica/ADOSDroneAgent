@@ -176,7 +176,10 @@ fn deploy_udev_rules(udev_src: &Path) -> usize {
 /// survives reboot. Idempotent.
 fn install_run_dir_tmpfiles() {
     let _ = std::fs::create_dir_all("/run/ados");
-    let _ = std::fs::write("/etc/tmpfiles.d/ados.conf", "d /run/ados 0755 root root -\n");
+    let _ = std::fs::write(
+        "/etc/tmpfiles.d/ados.conf",
+        "d /run/ados 0755 root root -\n",
+    );
 }
 
 /// Write the `/etc/ados/env` file from the persisted device id.

@@ -215,10 +215,7 @@ mod tests {
     #[test]
     fn second_positional_errors() {
         let err = Args::parse(["CODE1", "CODE2"]).unwrap_err();
-        assert_eq!(
-            err,
-            ParseError::UnexpectedPositional("CODE2".to_string())
-        );
+        assert_eq!(err, ParseError::UnexpectedPositional("CODE2".to_string()));
     }
 
     #[test]

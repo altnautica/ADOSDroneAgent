@@ -250,7 +250,10 @@ mod tests {
                        max_framebuffers=2\n";
         let out = revert_lcd_config(fixture);
         // waveshare overlay gone.
-        assert!(!out.contains("waveshare35a"), "waveshare line must be removed:\n{out}");
+        assert!(
+            !out.contains("waveshare35a"),
+            "waveshare line must be removed:\n{out}"
+        );
         // KMS overlay restored, active, trailer stripped.
         assert!(
             out.contains("dtoverlay=vc4-kms-v3d"),
@@ -276,7 +279,8 @@ mod tests {
             "# dtoverlay=vc4-kms-v3d,cma-256  # disabled by ADOS LCD installer (claims fb0)\n";
         let out = revert_lcd_config(fixture);
         assert!(
-            out.lines().any(|l| l.trim() == "dtoverlay=vc4-kms-v3d,cma-256"),
+            out.lines()
+                .any(|l| l.trim() == "dtoverlay=vc4-kms-v3d,cma-256"),
             "overlay args must be preserved:\n{out}"
         );
     }

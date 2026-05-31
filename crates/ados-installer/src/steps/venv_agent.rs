@@ -48,7 +48,11 @@ pub fn venv_create_args(venv_dir: &str) -> Vec<String> {
 /// Build the `pip install` args for the edge (source) channel (pure). `source`
 /// is the local cloned repo path (preferred) or a `git+<url>` spec.
 pub fn pip_install_edge_args(source: &str) -> Vec<String> {
-    vec!["install".to_string(), source.to_string(), "--quiet".to_string()]
+    vec![
+        "install".to_string(),
+        source.to_string(),
+        "--quiet".to_string(),
+    ]
 }
 
 /// Build the `git clone` args for the edge channel (pure). Honors an optional
@@ -145,7 +149,10 @@ fn install_agent_edge(ctx: &Ctx) -> anyhow::Result<PathBuf> {
     if pip_res.success() {
         Ok(repo)
     } else {
-        anyhow::bail!("pip install of the agent package failed: {}", pip_res.stderr.trim())
+        anyhow::bail!(
+            "pip install of the agent package failed: {}",
+            pip_res.stderr.trim()
+        )
     }
 }
 

@@ -132,10 +132,7 @@ mod tests {
         // Same flags but not yet installed → a fresh install (pairs at the end).
         assert_eq!(RunMode::resolve(&a, false), RunMode::FreshInstall);
         // With --force the pair code does not short-circuit to PairOnly.
-        let forced = Args {
-            force: true,
-            ..a
-        };
+        let forced = Args { force: true, ..a };
         assert_eq!(RunMode::resolve(&forced, true), RunMode::ForceReinstall);
     }
 }

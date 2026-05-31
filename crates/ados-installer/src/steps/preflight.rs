@@ -175,7 +175,10 @@ mod tests {
 
     #[test]
     fn parse_yaml_form() {
-        assert_eq!(parse_profile_conf("profile: drone\n").as_deref(), Some("drone"));
+        assert_eq!(
+            parse_profile_conf("profile: drone\n").as_deref(),
+            Some("drone")
+        );
         assert_eq!(
             parse_profile_conf("profile: ground_station\n").as_deref(),
             Some("ground_station")
@@ -184,7 +187,10 @@ mod tests {
 
     #[test]
     fn parse_legacy_kv_form() {
-        assert_eq!(parse_profile_conf("profile=drone").as_deref(), Some("drone"));
+        assert_eq!(
+            parse_profile_conf("profile=drone").as_deref(),
+            Some("drone")
+        );
         assert_eq!(
             parse_profile_conf("profile=ground-station").as_deref(),
             Some("ground_station")

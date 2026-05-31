@@ -97,7 +97,10 @@ fn signature_policy(
 ) -> Result<(), String> {
     // allow_unsigned force-skips the signature on any channel.
     if allow_unsigned {
-        tracing::warn!(artifact = artifact_name, "allow-unsigned set; skipping signature check");
+        tracing::warn!(
+            artifact = artifact_name,
+            "allow-unsigned set; skipping signature check"
+        );
         return Ok(());
     }
 
@@ -164,7 +167,9 @@ fn verify_minisign(
 fn unverifiable(channel: Channel, artifact_name: &str, why: &str) -> anyhow::Result<()> {
     match channel {
         Channel::Stable => {
-            anyhow::bail!("{artifact_name} could not be signature-verified on stable channel ({why})")
+            anyhow::bail!(
+                "{artifact_name} could not be signature-verified on stable channel ({why})"
+            )
         }
         Channel::Edge => {
             tracing::warn!(
@@ -200,8 +205,9 @@ pub fn verify_artifact(
 
     // ── SHA256 is always mandatory, on every channel. ──
     let sha_path = sidecar(artifact, "sha256");
-    let sidecar_contents = std::fs::read_to_string(&sha_path)
-        .map_err(|_| anyhow::anyhow!("SHA256 verification failed for {name}: missing {name}.sha256"))?;
+    let sidecar_contents = std::fs::read_to_string(&sha_path).map_err(|_| {
+        anyhow::anyhow!("SHA256 verification failed for {name}: missing {name}.sha256")
+    })?;
     let declared = parse_sha256_sidecar(&sidecar_contents)
         .map_err(|e| anyhow::anyhow!("SHA256 verification failed for {name}: {e}"))?;
     let computed = sha256_hex(artifact)?;
@@ -232,7 +238,10 @@ mod tests {
     fn artifact_with_sha(bytes: &[u8], good: bool) -> (tempfile::TempDir, std::path::PathBuf) {
         let dir = tempfile::tempdir().unwrap();
         let art = dir.path().join("ados-video-aarch64");
-        std::fs::File::create(&art).unwrap().write_all(bytes).unwrap();
+        std::fs::File::create(&art)
+            .unwrap()
+            .write_all(bytes)
+            .unwrap();
 
         let digest = if good {
             sha256_hex(&art).unwrap()

@@ -112,7 +112,10 @@ fn apt_install(pkgs: &[&str], required: bool) -> anyhow::Result<()> {
         if !res.spawned {
             anyhow::bail!("apt-get is not available on this host");
         }
-        anyhow::bail!("apt-get install of required packages failed: {}", res.stderr.trim());
+        anyhow::bail!(
+            "apt-get install of required packages failed: {}",
+            res.stderr.trim()
+        );
     }
     tracing::warn!(
         code = ?res.code,
@@ -200,7 +203,9 @@ impl Step for Deps {
         // that fallback); we only fail loudly when nothing usable is on PATH so
         // the failure is attributed to deps rather than a cryptic venv error.
         if find_python().is_none() {
-            tracing::warn!("no Python 3.11+ found on PATH; the venv step will attempt to provision one");
+            tracing::warn!(
+                "no Python 3.11+ found on PATH; the venv step will attempt to provision one"
+            );
         }
 
         StepOutcome::Ok
@@ -255,7 +260,11 @@ mod tests {
         sorted.sort_unstable();
         let len_before = sorted.len();
         sorted.dedup();
-        assert_eq!(sorted.len(), len_before, "required package set must be unique");
+        assert_eq!(
+            sorted.len(),
+            len_before,
+            "required package set must be unique"
+        );
     }
 
     #[test]

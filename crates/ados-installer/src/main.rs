@@ -56,7 +56,10 @@ async fn main() -> Result<ExitCode> {
             let purge = args.force;
             match uninstall::run_uninstall(purge) {
                 Ok(()) => {
-                    println!("uninstall: done{}", if purge { " (purged /etc/ados)" } else { "" });
+                    println!(
+                        "uninstall: done{}",
+                        if purge { " (purged /etc/ados)" } else { "" }
+                    );
                     Ok(ExitCode::SUCCESS)
                 }
                 Err(e) => {
@@ -250,7 +253,9 @@ fn print_status(args: &Args) {
     let profile = resolve_status_profile(args);
     println!("\nprebuilt binaries ({profile}):");
     for b in binaries::for_profile(&profile) {
-        let present = std::fs::metadata(b.dest).map(|m| m.is_file()).unwrap_or(false);
+        let present = std::fs::metadata(b.dest)
+            .map(|m| m.is_file())
+            .unwrap_or(false);
         let mark = if present { "[x]" } else { "[ ]" };
         let gate = match b.gate {
             binaries::Gate::Hard => "hard",
