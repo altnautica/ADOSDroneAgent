@@ -1,0 +1,36 @@
+[package]
+name = "ados-installer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Rust installer for the ADOS Drone Agent: a step-graph orchestrator that turns a freshly-flashed SBC into a paired, running agent."
+
+[[bin]]
+name = "ados-installer"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_norway = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+# ISO-8601 second-precision UTC timestamps for the install-result contract.
+time = { version = "0.3", features = ["std", "formatting", "macros"] }
+
+# Linux-only edges (systemd notify + journald + setsid/killpg for sandboxed
+# OS probes + mode bits via nix). Confined to a target section so the
+# pure-logic core (step graph, result contract, arg parser, checkpoints) still
+# builds and `cargo test`s on a non-Linux dev host; the edge call sites are
+# cfg-gated with inert fallbacks.
+[target.'cfg(target_os = "linux")'.dependencies]
+sd-notify = { workspace = true }
+tracing-journald = { workspace = true }
+nix = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

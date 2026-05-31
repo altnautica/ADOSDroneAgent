@@ -126,6 +126,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "ados-installer"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "nix 0.29.0",
+ "sd-notify",
+ "serde",
+ "serde_json",
+ "serde_norway",
+ "tempfile",
+ "thiserror 2.0.18",
+ "time",
+ "tokio",
+ "tracing",
+ "tracing-journald",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "ados-mavlink-router"
 version = "0.1.0"
 dependencies = [
