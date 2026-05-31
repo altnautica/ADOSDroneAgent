@@ -343,6 +343,15 @@ impl WfbRxManager {
         self.adapter_injection_ok = injection_ok;
     }
 
+    /// Adopt the receive interface the run loop resolved (the auto-detected RTL
+    /// injection adapter, or the operator's `video.wfb.interface` override). The
+    /// receive chain and the sidecar both read `self.interface`, so the run loop
+    /// sets it here once an adapter is chosen instead of relying on a config
+    /// value that is empty when no external detector populated it.
+    pub fn set_interface(&mut self, iface: String) {
+        self.interface = iface;
+    }
+
     /// Bring `iface` to the receive-ready state BEFORE the wfb_rx spawn, in the
     /// order the kernel requires:
     ///
@@ -353,11 +362,11 @@ impl WfbRxManager {
     ///     startup domain's limits — zero injected frames, the -100 dBm "not
     ///     permitted" sentinel. This is a global per-phy call, so it needs no
     ///     interface; an empty/None config value falls back to the safe default.
-    ///  2. **Monitor mode** on the interface. The interface comes from config on
-    ///     this path (adapter auto-detect stays in the permanent-Python seam), so
-    ///     it is the override case the Python `run()` re-asserts monitor mode for;
-    ///     `set_monitor_mode_verified` also guards the operator's control path so
-    ///     it can never sever the management link.
+    ///  2. **Monitor mode** on the interface the run loop resolved (the
+    ///     auto-detected RTL injection adapter or the operator's config
+    ///     override). `set_monitor_mode_verified` re-asserts it with the 4×
+    ///     verify retry and guards the operator's control path so it can never
+    ///     sever the management link.
     ///  3. **TX power** on the monitor interface. Without it the dongle runs at
     ///     the driver default (~17-20 dBm) and risks brownout on a host-VBUS USB
     ///     topology — the same guard the air side applies.

@@ -209,7 +209,6 @@ async fn run_direct(
 /// (sans the Python-owned adapter-detect/pairing gate).
 async fn receive_loop(config: &WfbConfig, presence_cache: GsPresenceCache) {
     let mut manager = WfbRxManager::new(config.clone());
-    let interface = manager.interface().to_string();
     let clock: Arc<dyn ados_groundlink::watchdog::Clock> = Arc::new(SystemClock::default());
     let setter: Arc<dyn ados_groundlink::acquire::ChannelSetter> = Arc::new(IwChannelSetter);
     let hint = wfb_rx::default_hint();
@@ -223,14 +222,33 @@ async fn receive_loop(config: &WfbConfig, presence_cache: GsPresenceCache) {
             tokio::time::sleep(Duration::from_secs(5)).await;
             continue;
         }
-        if interface.is_empty() {
-            // No interface resolved (adapter-detect stays in Python). Idle and
-            // wait for config to carry one rather than spin.
-            tracing::warn!("ground_no_wfb_adapter_found");
-            tokio::time::sleep(Duration::from_secs(backoff as u64)).await;
-            backoff = (backoff * 2.0).min(30.0);
-            continue;
-        }
+        // Resolve the receive adapter. Honors an explicit `video.wfb.interface`
+        // override; otherwise auto-detects the RTL injection adapter (the
+        // management wifi and the operator's control path are excluded and
+        // monitor mode is proven) — symmetric with the drone-side selection, so
+        // the ground station resolves its own adapter instead of idling until an
+        // external detector supplies one.
+        let interface = match ados_radio::adapter::select_interface(&config.interface).await {
+            Some(sel) if sel.injection_ok => {
+                manager.set_adapter(Some(sel.chipset.clone()), true);
+                manager.set_interface(sel.ifname.clone());
+                sel.ifname
+            }
+            Some(sel) => {
+                manager.set_adapter(Some(sel.chipset.clone()), false);
+                tracing::warn!(interface = %sel.ifname, "ground_wfb_adapter_no_injection");
+                tokio::time::sleep(Duration::from_secs(backoff as u64)).await;
+                backoff = (backoff * 2.0).min(30.0);
+                continue;
+            }
+            None => {
+                manager.set_adapter(None, false);
+                tracing::warn!("ground_no_wfb_adapter_found");
+                tokio::time::sleep(Duration::from_secs(backoff as u64)).await;
+                backoff = (backoff * 2.0).min(30.0);
+                continue;
+            }
+        };
 
         // Bring the interface to receive-ready BEFORE the spawn, in the
         // kernel-required order: regulatory domain (global, before monitor-mode
