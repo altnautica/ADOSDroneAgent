@@ -18,10 +18,13 @@ def _fresh_app() -> AgentApp:
     return app
 
 
-def test_heartbeat_payload_omits_runtime_mode() -> None:
+def test_heartbeat_payload_includes_runtime_mode() -> None:
+    """The heartbeat carries the native-vs-packaged aggregate so the GCS
+    can light the per-node runtime badge. On the test box (no native
+    binaries installed) the aggregate resolves to 'packaged'."""
     app = _fresh_app()
     payload = app._build_heartbeat_payload()
-    assert "runtimeMode" not in payload
+    assert payload["runtimeMode"] in ("native", "hybrid", "packaged")
 
 
 def test_heartbeat_payload_video_restart_attempts_default() -> None:

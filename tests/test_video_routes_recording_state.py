@@ -191,6 +191,15 @@ def test_status_full_video_block_idle_when_recorder_idle(
     assert video_block.get("recording_started_at") is None
 
 
+def test_status_full_includes_runtime_mode(air_client: TestClient) -> None:
+    """``/api/status/full`` carries the native-vs-packaged aggregate so the
+    LAN-direct path can light the per-node runtime badge."""
+    resp = air_client.get("/api/status/full")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body.get("runtimeMode") in ("native", "hybrid", "packaged")
+
+
 def test_status_full_no_pipeline_video_block_idle() -> None:
     runtime = build_api_runtime(video_pipeline=None)
     client = TestClient(create_app(runtime))

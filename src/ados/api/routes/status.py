@@ -472,6 +472,16 @@ async def get_full_status(request: Request):
     from ados.core.profile import current_profile_and_role
     resolved_profile, resolved_role = current_profile_and_role(app.config)
 
+    # Native-vs-packaged runtime mode, scoped to the resolved profile, so
+    # the LAN-direct poll surfaces the same per-node badge the cloud
+    # heartbeat carries. Best-effort: a resolver failure leaves the field
+    # at the safe default.
+    try:
+        from ados.core.runtime_mode import compute_runtime_mode
+        runtime_mode = compute_runtime_mode(resolved_profile)
+    except Exception:
+        runtime_mode = "packaged"
+
     # --- Radio (WFB link block) — surfaced so the LAN-direct GCS path
     # populates the same radio snapshot the cloud heartbeat carries,
     # including the receive-side metrics (SNR, noise, loss, MCS,
@@ -502,6 +512,7 @@ async def get_full_status(request: Request):
         "radio": radio_block,
         "profile": resolved_profile,
         "role": resolved_role,
+        "runtimeMode": runtime_mode,
     }
 
     etag = _compute_etag(payload)

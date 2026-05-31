@@ -736,6 +736,29 @@ def build_display_type_enrichment(config: Any) -> dict:
     return {"displayType": "none"}
 
 
+def build_runtime_mode_enrichment(config: Any) -> dict:
+    """Resolve the node's native-vs-packaged runtime mode for the heartbeat.
+
+    Returns ``{"runtimeMode": "native" | "hybrid" | "packaged"}`` so the
+    GCS can show a per-node badge for how much of the long-running
+    service set runs the native binaries vs the packaged Python ones.
+    The aggregate is profile-aware: a drone is judged on the services it
+    actually starts, a ground station on its own set.
+
+    Best-effort and total: any failure resolving the profile falls back
+    to the drone set, and the underlying check never raises. The caller
+    does ``payload.update(...)``.
+    """
+    from ados.core.profile import current_profile_and_role
+    from ados.core.runtime_mode import compute_runtime_mode
+
+    try:
+        profile, _ = current_profile_and_role(config)
+    except Exception:
+        profile = "drone"
+    return {"runtimeMode": compute_runtime_mode(profile)}
+
+
 def get_local_ip() -> str:
     """Detect local IP via UDP socket probe."""
     try:

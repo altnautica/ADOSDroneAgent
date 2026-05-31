@@ -52,6 +52,11 @@ class PairingInfo(BaseModel):
     mdns_host: str
     profile: str
     role: str | None = None
+    # Native-vs-packaged aggregate for the node ("native" | "hybrid" |
+    # "packaged"), scoped to the profile above. Lets the LAN pairing
+    # probe carry the same per-node runtime badge the cloud heartbeat
+    # does. Defaults to "packaged" on a pre-cutover agent.
+    runtime_mode: str = "packaged"
     # Folded WFB bind-session snapshot read from the cross-process bind
     # sentinel. Null when no bind has run since boot. Lets Mission Control
     # render "binding…" / "bind failed: <error>" during/after a radio pair.
@@ -92,6 +97,16 @@ async def get_pairing_info():
         except Exception as exc:
             log.warning("pairing_info_profile_lookup_failed", error=str(exc))
             profile, role = "drone", None
+
+        # Native-vs-packaged aggregate, scoped to the resolved profile.
+        # Best-effort so a partially-configured agent never breaks the
+        # guaranteed-200 contract.
+        try:
+            from ados.core.runtime_mode import compute_runtime_mode
+            runtime_mode = compute_runtime_mode(profile)
+        except Exception as exc:
+            log.debug("pairing_info_runtime_mode_failed", error=str(exc))
+            runtime_mode = "packaged"
 
         discovery = app.discovery_service
         mdns_host = f"ados-{short_id}.local"
@@ -160,6 +175,7 @@ async def get_pairing_info():
             mdns_host=mdns_host,
             profile=profile,
             role=role,
+            runtime_mode=runtime_mode,
             bind_state=bind_state,
             radio=None,
         )

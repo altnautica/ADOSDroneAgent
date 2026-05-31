@@ -385,6 +385,18 @@ def build_heartbeat_payload(app: AgentApp) -> dict:  # noqa: C901
         "publicUrls": app.config.remote_access.public_urls,
     }
 
+    # Native-vs-packaged runtime mode for the per-node badge. Aggregates
+    # which long-running services run their native binaries vs the
+    # packaged Python implementations, scoped to this node's profile.
+    # Best-effort: a resolver failure leaves the field absent rather
+    # than breaking the tick.
+    try:
+        from ados.services.cloud.heartbeat import build_runtime_mode_enrichment
+
+        payload.update(build_runtime_mode_enrichment(app.config))
+    except Exception:
+        pass
+
     # Forward-compatible radio link block — sourced from
     # the in-process WfbManager directly when present.
     from ados.core.radio_block import build_radio_block
