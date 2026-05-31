@@ -72,18 +72,33 @@ fn supervisor_active() -> bool {
 /// True when the agent REST API answers on the unauthenticated pairing-info
 /// endpoint. A paired agent returns 401 on `/api/status` (which `curl -f`
 /// treats as failure), so we probe `/api/pairing/info` exactly like the bash.
+///
+/// The `start` step launched the supervisor moments ago; its `ados-api` child
+/// takes a few seconds to bind `:8080`, so a single immediate probe is a false
+/// miss. Poll with a grace window (returns the instant it answers), the same
+/// way the bash health gate waits for the API to come up.
 fn rest_reachable() -> bool {
-    exec::run_ok(
-        "curl",
-        &[
-            "-fsS",
-            "--max-time",
-            "5",
-            "http://127.0.0.1:8080/api/pairing/info",
-            "-o",
-            "/dev/null",
-        ],
-    )
+    const ATTEMPTS: u32 = 20;
+    const DELAY: std::time::Duration = std::time::Duration::from_secs(3);
+    for attempt in 0..ATTEMPTS {
+        if exec::run_ok(
+            "curl",
+            &[
+                "-fsS",
+                "--max-time",
+                "5",
+                "http://127.0.0.1:8080/api/pairing/info",
+                "-o",
+                "/dev/null",
+            ],
+        ) {
+            return true;
+        }
+        if attempt + 1 < ATTEMPTS {
+            std::thread::sleep(DELAY);
+        }
+    }
+    false
 }
 
 /// True when a path exists and is executable. On a non-Unix host the exec-bit
