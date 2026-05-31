@@ -1,140 +1,131 @@
-"""Tests for per-service memory readback (ados.core.systemd_memory)."""
+"""Tests for per-service memory readback (ados.core.systemd_memory).
+
+The implementation reads PSS from /proc grouped by each process's systemd
+cgroup (the kernel memory cgroup controller is off by default on Raspberry
+Pi, so systemd MemoryCurrent is unusable there). These tests cover the pure
+parsers and the batch/lookup surface with the /proc scan stubbed out.
+"""
 
 from __future__ import annotations
-
-import subprocess
 
 import pytest
 
 from ados.core import systemd_memory as sm
 
-# ── parse logic ─────────────────────────────────────────────────────────────
-
-@pytest.mark.parametrize(
-    ("raw", "expected"),
-    [
-        ("0", 0.0),
-        ("1048576", 1.0),               # exactly 1 MiB
-        ("173015040", 165.0),           # ados-video ballpark, ~165 MiB
-        ("82837504", 79.0),             # ados-api ballpark, ~79 MiB
-        ("1572864", 1.5),               # a Rust service, ~1.5 MiB
-        ("  2097152  ", 2.0),           # whitespace tolerated
-    ],
-)
-def test_parse_memory_current_bytes_to_mib(raw: str, expected: float) -> None:
-    assert sm._parse_memory_current(raw) == expected
+# ── unit_from_cgroup ─────────────────────────────────────────────────────────
 
 
 @pytest.mark.parametrize(
-    "raw",
+    ("body", "expected"),
     [
-        "",                              # empty
-        "[not set]",                     # unit not running
-        "18446744073709551615",          # u64 max sentinel (accounting off)
-        "garbage",                       # non-numeric
-        "-1",                            # negative is nonsense
+        ("0::/system.slice/ados.slice/ados-video.service", "ados-video.service"),
+        ("0::/system.slice/ados-api.service", "ados-api.service"),
+        ("0::/system.slice/ados.slice/ados-wfb-rx.service\n", "ados-wfb-rx.service"),
+        # v1-style multi-line cgroup file still matches the unit token.
+        ("12:pids:/system.slice/ados-cloud.service\n0::/system.slice/ados-cloud.service", "ados-cloud.service"),
+        ("0::/system.slice/sshd.service", None),
+        ("0::/user.slice/user-1000.slice", None),
+        ("", None),
     ],
 )
-def test_parse_memory_current_sentinels_and_errors_are_zero(raw: str) -> None:
-    assert sm._parse_memory_current(raw) == 0.0
+def test_unit_from_cgroup(body: str, expected: str | None) -> None:
+    assert sm.unit_from_cgroup(body) == expected
 
 
-# ── service_memory_mb (monkeypatched systemctl) ─────────────────────────────
-
-def _fake_run(stdout: str, returncode: int = 0):
-    def run(cmd, *args, **kwargs):  # type: ignore[no-untyped-def]
-        return subprocess.CompletedProcess(
-            args=cmd, returncode=returncode, stdout=stdout, stderr="",
-        )
-    return run
+# ── pss_kib_from_rollup ──────────────────────────────────────────────────────
 
 
-def test_service_memory_mb_parses_systemctl_bytes(monkeypatch) -> None:
-    monkeypatch.setattr(sm.subprocess, "run", _fake_run("173015040\n"))
-    assert sm.service_memory_mb("ados-video.service") == 165.0
-
-
-def test_service_memory_mb_not_set_is_zero(monkeypatch) -> None:
-    monkeypatch.setattr(sm.subprocess, "run", _fake_run("[not set]\n"))
-    assert sm.service_memory_mb("ados-wfb.service") == 0.0
-
-
-def test_service_memory_mb_max_sentinel_is_zero(monkeypatch) -> None:
-    monkeypatch.setattr(
-        sm.subprocess, "run", _fake_run("18446744073709551615\n")
+def test_pss_kib_from_rollup_parses_pss_line() -> None:
+    rollup = (
+        "55a0..-55a1.. ---p 00000000 00:00 0 [rollup]\n"
+        "Rss:              180000 kB\n"
+        "Pss:              165000 kB\n"
+        "Shared_Clean:      12000 kB\n"
     )
-    assert sm.service_memory_mb("ados-oled.service") == 0.0
+    assert sm.pss_kib_from_rollup(rollup) == 165000
 
 
-def test_service_memory_mb_nonzero_returncode_is_zero(monkeypatch) -> None:
-    monkeypatch.setattr(sm.subprocess, "run", _fake_run("123\n", returncode=1))
-    assert sm.service_memory_mb("ados-nope.service") == 0.0
+@pytest.mark.parametrize("body", ["", "Rss: 1000 kB\n", "Pss: not-a-number kB\n", "Pss:\n"])
+def test_pss_kib_from_rollup_zero_when_absent_or_malformed(body: str) -> None:
+    assert sm.pss_kib_from_rollup(body) == 0
 
 
-def test_service_memory_mb_subprocess_error_is_zero(monkeypatch) -> None:
-    def boom(cmd, *args, **kwargs):  # type: ignore[no-untyped-def]
-        raise OSError("systemctl not found")
-
-    monkeypatch.setattr(sm.subprocess, "run", boom)
-    assert sm.service_memory_mb("ados-api.service") == 0.0
+# ── services_memory_mb / service_memory_mb (scan stubbed) ────────────────────
 
 
-def test_service_memory_mb_timeout_is_zero(monkeypatch) -> None:
-    def slow(cmd, *args, **kwargs):  # type: ignore[no-untyped-def]
-        raise subprocess.TimeoutExpired(cmd=cmd, timeout=5.0)
-
-    monkeypatch.setattr(sm.subprocess, "run", slow)
-    assert sm.service_memory_mb("ados-api.service") == 0.0
-
-
-# ── batch helper ────────────────────────────────────────────────────────────
-
-def test_services_memory_mb_batches_each_unit(monkeypatch) -> None:
-    seen: list[str] = []
-
-    def run(cmd, *args, **kwargs):  # type: ignore[no-untyped-def]
-        unit = cmd[2]  # systemctl show <unit> -p MemoryCurrent --value
-        seen.append(unit)
-        # Return a distinct value keyed off the unit name length so we
-        # can confirm the mapping is per-unit, not a single value reused.
-        value = str(len(unit) * 1048576)
-        return subprocess.CompletedProcess(
-            args=cmd, returncode=0, stdout=value, stderr="",
-        )
-
-    monkeypatch.setattr(sm.subprocess, "run", run)
-    units = ["ados-api.service", "ados-video.service"]
-    result = sm.services_memory_mb(units)
-    assert set(result) == set(units)
-    assert result["ados-api.service"] == float(len("ados-api.service"))
-    assert result["ados-video.service"] == float(len("ados-video.service"))
-    assert seen == units  # one probe per unit, in order
+def test_services_memory_mb_maps_units_and_defaults_missing(monkeypatch) -> None:
+    monkeypatch.setattr(
+        sm, "_pss_map", lambda: {"ados-video.service": 165.0, "ados-api.service": 79.2}
+    )
+    out = sm.services_memory_mb(
+        ["ados-video.service", "ados-api.service", "ados-wfb.service"]
+    )
+    assert out == {
+        "ados-video.service": 165.0,
+        "ados-api.service": 79.2,
+        "ados-wfb.service": 0.0,  # not running / unknown -> 0, never dropped
+    }
 
 
-def test_services_memory_mb_empty_input(monkeypatch) -> None:
-    # No subprocess should be spawned for an empty unit list.
-    def boom(cmd, *args, **kwargs):  # type: ignore[no-untyped-def]
-        raise AssertionError("systemctl should not be called for empty input")
-
-    monkeypatch.setattr(sm.subprocess, "run", boom)
-    assert sm.services_memory_mb([]) == {}
+def test_service_memory_mb_lookup(monkeypatch) -> None:
+    monkeypatch.setattr(sm, "_pss_map", lambda: {"ados-cloud.service": 3.0})
+    assert sm.service_memory_mb("ados-cloud.service") == 3.0
+    assert sm.service_memory_mb("ados-missing.service") == 0.0
 
 
-# ── unit_for_service resolver ───────────────────────────────────────────────
-
-def test_unit_for_service_unit_basename_gets_service_suffix() -> None:
-    # systemd-fallback entries already carry the unit basename.
-    assert sm.unit_for_service("ados-video") == "ados-video.service"
-    # An already-suffixed name is returned unchanged.
-    assert sm.unit_for_service("ados-api.service") == "ados-api.service"
+# ── unit_for_service resolver ────────────────────────────────────────────────
 
 
-def test_unit_for_service_short_names_map_through_table() -> None:
-    assert sm.unit_for_service("fc-connection") == "ados-mavlink.service"
-    assert sm.unit_for_service("video-pipeline") == "ados-video.service"
-    assert sm.unit_for_service("rest-api") == "ados-api.service"
+@pytest.mark.parametrize(
+    ("name", "expected"),
+    [
+        ("ados-video", "ados-video.service"),
+        ("ados-api.service", "ados-api.service"),
+        ("video-pipeline", "ados-video.service"),
+        ("rest-api", "ados-api.service"),
+        ("mavlink-ws-proxy", None),
+        ("", None),
+    ],
+)
+def test_unit_for_service(name: str, expected: str | None) -> None:
+    assert sm.unit_for_service(name) == expected
 
 
-def test_unit_for_service_unknown_or_empty_is_none() -> None:
-    assert sm.unit_for_service("mavlink-ws-proxy") is None
-    assert sm.unit_for_service("") is None
+# ── _scan_pss_by_unit groups + sums children (real /proc-shaped fakes) ───────
+
+
+def test_scan_groups_and_sums_by_unit(monkeypatch, tmp_path) -> None:
+    """A unit with two PIDs (e.g. orchestrator + ffmpeg child) sums; PSS in MiB."""
+    fake = {
+        "100": ("0::/system.slice/ados.slice/ados-video.service", "Pss: 10240 kB\n"),
+        "101": ("0::/system.slice/ados.slice/ados-video.service", "Pss: 153600 kB\n"),
+        "200": ("0::/system.slice/ados-api.service", "Pss: 81100 kB\n"),
+        "300": ("0::/system.slice/sshd.service", "Pss: 9000 kB\n"),  # non-ados, skipped
+    }
+
+    class _Entry:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+    monkeypatch.setattr(sm.os, "scandir", lambda _p: [_Entry(p) for p in fake])
+
+    real_open = open
+
+    def fake_open(path, *a, **k):  # noqa: ANN001
+        s = str(path)
+        for pid, (cg, rollup) in fake.items():
+            if s == f"/proc/{pid}/cgroup":
+                import io
+
+                return io.StringIO(cg)
+            if s == f"/proc/{pid}/smaps_rollup":
+                import io
+
+                return io.StringIO(rollup)
+        return real_open(path, *a, **k)
+
+    monkeypatch.setattr("builtins.open", fake_open)
+    out = sm._scan_pss_by_unit()
+    assert out["ados-video.service"] == 160.0  # (10240+153600)/1024
+    assert out["ados-api.service"] == round(81100 / 1024, 1)
+    assert "sshd.service" not in out
