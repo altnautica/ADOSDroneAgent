@@ -11,7 +11,9 @@ use tokio::sync::mpsc;
 
 use std::sync::Arc;
 
-use ados_supervisor::{bind, config::AgentConfig, hotplug, lifecycle::Supervisor, sdnotify};
+use ados_supervisor::{
+    auto_pair, bind, config::AgentConfig, hotplug, lifecycle::Supervisor, sdnotify,
+};
 
 const MONITOR_INTERVAL: Duration = Duration::from_secs(5);
 
@@ -48,6 +50,11 @@ async fn main() -> Result<()> {
         "resolved agent profile"
     );
 
+    // Capture the bindable role before `config` is moved into the supervisor,
+    // and a shutdown signal for the background tasks (auto-pair).
+    let auto_pair_role = bind::BindRole::parse(&config.profile_wire);
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+
     // The bind orchestrator is shared between the monitor (which gates radio
     // auto-restart on a live bind) and the control socket task.
     let bind_orch = Arc::new(bind::orchestrator::BindOrchestrator::new());
@@ -70,6 +77,15 @@ async fn main() -> Result<()> {
                 tracing::error!(error = %e, "bind control socket exited");
             }
         });
+    }
+
+    // Local-radio auto-pair: drive the first-boot bind in-process (moved out of
+    // the cloud relay, which is idle in local-first mode). Bindable role only;
+    // the orchestrator is shared so a manual / FastAPI bind still mutexes.
+    if let Some(role) = auto_pair_role {
+        let orch = bind_orch.clone();
+        let shutdown = shutdown_rx.clone();
+        tokio::spawn(auto_pair::run(orch, role, shutdown));
     }
 
     // Hot-plug poller runs on its own task and only forwards device-class
@@ -102,6 +118,8 @@ async fn main() -> Result<()> {
         }
     }
 
+    // Stop the background tasks (auto-pair) before tearing down the services.
+    let _ = shutdown_tx.send(true);
     supervisor.stop().await;
     Ok(())
 }

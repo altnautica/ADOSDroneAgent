@@ -23,7 +23,7 @@ use ados_cloud::ground_station::{bridge as gs_bridge, CloudRelayBridge};
 use ados_cloud::loops::{beacon, command_poll, heartbeat};
 use ados_cloud::mqtt::transport::TransportConfig;
 use ados_cloud::mqtt::{MavlinkMqttRelay, WS_PATH};
-use ados_cloud::{auto_pair, dispatch, pairing::PairingState};
+use ados_cloud::{dispatch, pairing::PairingState};
 
 fn init_logging() {
     let filter = std::env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string());
@@ -123,8 +123,6 @@ async fn main() -> Result<()> {
             convex_url.clone(),
             shutdown_rx.clone(),
         ),
-        // ── WFB auto-pair supervisor ───────────────────────────
-        spawn_auto_pair(config.clone(), shutdown_rx.clone()),
     ];
 
     // Relay supervision. The MAVLink-over-MQTT relay runs a real
@@ -336,52 +334,6 @@ fn spawn_beacon(
                     let _ = http.post(&url).json(&beacon_body).send().await;
                     tracing::debug!("pairing beacon sent");
                 }
-            }
-        }
-    })
-}
-
-/// Spawn the auto-pair supervisor: after a settle delay, while unpaired and
-/// armed, forward `start_bind` over the supervisor control socket on a backoff.
-fn spawn_auto_pair(
-    config: Arc<CloudConfig>,
-    mut shutdown: watch::Receiver<bool>,
-) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
-        let role = auto_pair_role(&config);
-        let sock = auto_pair::default_sock_path();
-        // Settle delay before the first attempt.
-        tokio::select! {
-            _ = shutdown.changed() => return,
-            _ = tokio::time::sleep(auto_pair::START_DELAY) => {}
-        }
-        loop {
-            if *shutdown.borrow() {
-                break;
-            }
-            // Re-read the arm flag + pair state each tick (the config is
-            // re-read on disk so a runtime disarm via the GCS / captive portal /
-            // REST takes effect on the next iteration, and a successful pair
-            // disarms it). The bind is forwarded only while armed AND unpaired;
-            // the forwarder maps E_BIND_IN_PROGRESS to a defer.
-            let armed = CloudConfig::load().video.wfb.auto_pair_enabled;
-            let pairing = PairingState::load();
-            if auto_pair::should_attempt(&role, armed, pairing.is_paired()) {
-                match auto_pair::forward_start_bind(&sock, &role).await {
-                    auto_pair::BindOutcome::Ok(_) => {
-                        tracing::info!(role = %role, "auto-pair bind completed");
-                    }
-                    auto_pair::BindOutcome::Busy => {
-                        tracing::info!("auto-pair busy, will retry");
-                    }
-                    auto_pair::BindOutcome::Error(e) => {
-                        tracing::debug!(error = %e, "auto-pair forward failed");
-                    }
-                }
-            }
-            tokio::select! {
-                _ = shutdown.changed() => break,
-                _ = tokio::time::sleep(auto_pair::RETRY_BACKOFF) => {}
             }
         }
     })

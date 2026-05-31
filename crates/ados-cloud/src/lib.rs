@@ -13,7 +13,7 @@
 //! periodic loops (heartbeat / command-poll / pairing-beacon), the command
 //! dispatcher (idempotent, plugin lifecycle over the frozen supervisor), the
 //! ground-station relay bridge (uplink-aware MQTT supervision + data-cap
-//! downshift + GS status heartbeat), and the WFB auto-pair supervisor.
+//! downshift + GS status heartbeat).
 //!
 //! The software-update path stays in the Python agent (`/api/ota` +
 //! updater/downloader/rollback back the GCS and the `ados update` CLI): it is
@@ -31,12 +31,9 @@
 //! - [`ground_station`] — the uplink-aware cloud relay bridge: explicit MQTT
 //!   teardown/reconnect on uplink change, data-cap downshift, and the 30 s GS
 //!   `/agent/status` heartbeat.
-//! - [`auto_pair`] — the WFB auto-pair supervisor (hosted here for the
-//!   no-self-kill invariant; forwards bind over the supervisor control socket).
 //! - [`pairing`] — the pairing-state reader the loops gate on.
 //! - [`config`] — the slice of `/etc/ados/config.yaml` the relay reads.
 
-pub mod auto_pair;
 pub mod config;
 pub mod dispatch;
 pub mod ground_station;

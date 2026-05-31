@@ -5,6 +5,7 @@
 //! process manager (cgroups, restart, journald, watchdog); this binary issues
 //! `systemctl` and never spawns a service itself.
 
+pub mod auto_pair;
 pub mod bind;
 pub mod config;
 pub mod hardware;
