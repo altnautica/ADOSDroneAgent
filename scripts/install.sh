@@ -3,9 +3,8 @@
 # ADOS Drone Agent — Installer Bootstrap
 #
 # This thin POSIX-sh bootstrap fetches, verifies, and execs the prebuilt
-# `ados-installer` Rust binary. It replaces the monolithic shell installer;
-# the previous monolithic installer is kept verbatim as `install-legacy.sh`
-# for explicit rollback if the Rust path has issues.
+# `ados-installer` Rust binary, which orchestrates the full install. Rollback
+# is by git history (the prior tree, or a pinned older release asset).
 #
 # Operator one-liner (unchanged):
 #   curl -sSL .../scripts/install.sh | sudo bash -s -- --profile drone ...

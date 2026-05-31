@@ -265,7 +265,8 @@ def update(check_only: bool, yes: bool, as_json: bool) -> None:
 
 # Install orchestration contract paths. The installer writes a machine
 # readable result file and per-step checkpoint markers under /var/lib/ados;
-# these constants must stay aligned with scripts/install.d/14-orchestration.sh.
+# these constants must stay aligned with the installer's result + checkpoint
+# paths (crates/ados-installer/src/{result,checkpoint}.rs).
 INSTALL_RESULT_PATH = Path("/var/lib/ados/install-result.json")
 INSTALL_CHECKPOINT_DIR = Path("/var/lib/ados/install-checkpoints")
 # The REQUIRED steps the full-agent install records a checkpoint for, in
@@ -550,9 +551,9 @@ def _uninstall_linux(*, purge: bool, yes: bool) -> None:
     systemd_dir = Path("/etc/systemd/system")
 
     # Discover all ados-* systemd unit files at runtime rather than
-    # hardcoding a list. The shell-side do_uninstall in install.d/01-state.sh
-    # uses the same glob pattern; keep this Python path in lockstep so the
-    # two uninstall surfaces never drift.
+    # hardcoding a list. The installer's uninstall path
+    # (crates/ados-installer/src/uninstall.rs) uses the same glob pattern;
+    # keep this Python path in lockstep so the two uninstall surfaces never drift.
     unit_globs = ("ados-*.service", "ados-*.slice", "ados-*.target", "ados-*.timer")
     unit_files: list[Path] = []
     for pattern in unit_globs:

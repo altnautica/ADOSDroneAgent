@@ -268,33 +268,26 @@ class TestRebootRoute:
 # install.sh persistence — smoke check the source contains the new step
 # ---------------------------------------------------------------------------
 class TestInstallShellPersistence:
-    def test_install_sh_persists_repo_artifacts(self):
-        """install.sh must call persist_repo_artifacts before tmp-repo cleanup.
+    def test_installer_persists_repo_artifacts(self):
+        """The installer must keep the cloned source tree for the runtime steps.
 
-        The wizard's display step depends on
-        /opt/ados/source/scripts/drivers/install-display-overlay.sh being
-        present at runtime. Without the persistence step, the temp clone
-        gets rm -rf'd and the agent has no way to find the driver script.
+        The wizard's display step depends on the driver script
+        (install-display-overlay.sh) being present at runtime under
+        /opt/ados/source. The installer clones the repo there and does NOT
+        delete it, so the data/ + scripts/ trees survive for the downstream
+        overlay provisioning and a later --upgrade.
         """
         from pathlib import Path
 
         repo_root = Path(__file__).resolve().parents[1]
-        # install.sh is a thin dispatcher; the real logic lives in the
-        # install.d/*.sh modules (definition in 11-artifacts.sh, calls in
-        # 13-main.sh). Scan the whole module tree.
-        install_d = repo_root / "scripts" / "install.d"
-        assert install_d.is_dir(), f"install.d missing at {install_d}"
-        text = "\n".join(p.read_text() for p in sorted(install_d.glob("*.sh")))
-        # The function definition must exist...
-        assert "persist_repo_artifacts()" in text
-        # ...and it must be called from somewhere (both fresh-install and --upgrade paths).
-        # Two distinct call sites: one in the upgrade branch, one in the fresh-install branch.
-        assert text.count("persist_repo_artifacts") >= 3, (
-            "expected persist_repo_artifacts to be defined and called from at "
-            "least two places (upgrade + fresh-install branches)"
-        )
-        # And the function must reference the canonical persistence root.
-        assert "/opt/ados/source" in text
+        # The clone destination lives in the installer's venv_agent step.
+        venv_agent = (
+            repo_root / "crates" / "ados-installer" / "src" / "steps" / "venv_agent.rs"
+        ).read_text()
+        # The clone target is the canonical persistence root...
+        assert "/source" in venv_agent and "INSTALL_DIR" in venv_agent
+        # ...and the clone is explicitly kept (not deleted) so the tree survives.
+        assert "do NOT delete" in venv_agent or "not delete the clone" in venv_agent
 
     def test_display_install_resolver_prefers_persisted_path(self):
         """display_install._resolve_driver_script lists the persisted path first."""

@@ -20,7 +20,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::ctx::Ctx;
-use crate::env::{self, CONFIG_DIR, DEVICE_ID_FILE};
+use crate::env::{self, CONFIG_DIR, DEVICE_ID_FILE, INSTALL_DIR};
 use crate::exec;
 use crate::graph::{Step, StepKind, StepOutcome};
 
@@ -88,6 +88,94 @@ fn other_profile_units(profile: &str) -> &'static [&'static str] {
             "ados-mesh-pairing.service",
         ],
     }
+}
+
+// ─── Drop-in file paths (deployed outside /opt/ados; mirror uninstall.rs) ────
+
+/// Kernel UDP buffer ceiling for the video pipeline (`install_video_sysctl`).
+const VIDEO_SYSCTL_FILE: &str = "/etc/sysctl.d/99-ados-video.conf";
+/// NetworkManager WiFi power-save force-off drop-in (`install_power_hardening`).
+const NM_POWERSAVE_CONF: &str = "/etc/NetworkManager/conf.d/99-ados-wifi-powersave.conf";
+/// Fallback udev rule that disables WiFi power-save on every `wlan*` add.
+const WIFI_POWERSAVE_RULE: &str = "/etc/udev/rules.d/99-ados-wifi-powersave.rules";
+/// Broad udev rule that disables USB autosuspend on every USB device.
+const USB_NO_AUTOSUSPEND_RULE: &str = "/etc/udev/rules.d/99-ados-usb-no-autosuspend.rules";
+/// Stale per-interface Ethernet-EEE rule a prior install may have written; the
+/// boot oneshot owns EEE-off now, so any leftover rule is removed.
+const ETH_NO_EEE_RULE: &str = "/etc/udev/rules.d/99-ados-eth-no-eee.rules";
+/// logind drop-in that ignores idle/power-key/lid/suspend so the box never sleeps.
+const LOGIND_NOSLEEP_CONF: &str = "/etc/systemd/logind.conf.d/99-ados-nosleep.conf";
+/// The SSH login banner copied from `data/motd/30-ados`.
+const MOTD_FILE: &str = "/etc/update-motd.d/30-ados";
+
+/// Build the video-pipeline UDP-buffer sysctl drop-in body (pure). Mirrors
+/// 03-kernel.sh `install_video_sysctl`: bumps the kernel socket-buffer ceilings
+/// so the wfb_rx + fanout + mediamtx UDP sockets can actually allocate the 4 MiB
+/// SO_RCVBUF/SO_SNDBUF they request at bind time instead of being clamped to the
+/// stock ~208 KiB `net.core.rmem_max`.
+pub fn video_sysctl_body() -> String {
+    "# ADOS video pipeline UDP buffer ceiling. Allows the wfb_rx +\n\
+# video_fanout + mediamtx UDP sockets to actually allocate the\n\
+# 4 MiB SO_RCVBUF / SO_SNDBUF they request at bind time. Without\n\
+# this, the kernel silently clamps to net.core.rmem_max ~208 KiB\n\
+# and bursty FEC frame deliveries drop packets at the kernel.\n\
+net.core.rmem_max = 16777216\n\
+net.core.wmem_max = 16777216\n\
+net.core.rmem_default = 4194304\n\
+net.core.wmem_default = 4194304\n"
+        .to_string()
+}
+
+/// Build the NetworkManager WiFi power-save drop-in body (pure). `2` forces
+/// power-save OFF for every managed connection (`install_power_hardening` step 1).
+pub fn nm_powersave_body() -> String {
+    "# ADOS: force WiFi power-save OFF for every managed connection so the\n\
+# management link and any WiFi uplink never park the radio.\n\
+# 2 = disable power save.\n\
+[connection]\n\
+wifi.powersave = 2\n"
+        .to_string()
+}
+
+/// Build the fallback WiFi-power-save udev rule body (pure), prefixed with the
+/// resolved `iw` path when one is known (so the RUN+= line is absolute) and an
+/// inline `/bin/sh -c 'iw ...'` fallback otherwise. Mirrors
+/// `install_power_hardening` step 2.
+pub fn wifi_powersave_rule_body(iw_bin: Option<&str>) -> String {
+    let mut out =
+        String::from("# ADOS: disable WiFi power-save on every wlan* interface as it appears.\n");
+    match iw_bin {
+        Some(bin) => out.push_str(&format!(
+            "ACTION==\"add\", SUBSYSTEM==\"net\", KERNEL==\"wlan*\", RUN+=\"{bin} dev %k set power_save off\"\n"
+        )),
+        None => out.push_str(
+            "ACTION==\"add\", SUBSYSTEM==\"net\", KERNEL==\"wlan*\", RUN+=\"/bin/sh -c 'iw dev %k set power_save off'\"\n",
+        ),
+    }
+    out
+}
+
+/// Build the broad USB-no-autosuspend udev rule body (pure). Pins
+/// `power/control=on` for every USB device so the RTL8812EU WFB dongle, the
+/// management WiFi, and a USB modem do not park on the bus
+/// (`install_power_hardening` step 3).
+pub fn usb_no_autosuspend_rule_body() -> String {
+    "# ADOS: disable USB autosuspend on every USB device. Keeps the WFB radio,\n\
+# the management WiFi dongle, and a cellular modem from parking on the bus.\n\
+ACTION==\"add\", SUBSYSTEM==\"usb\", ATTR{power/control}=\"on\"\n"
+        .to_string()
+}
+
+/// Build the logind no-sleep drop-in body (pure). Ignores the idle timer, power
+/// key, lid switch, and suspend key so a console keypress or a closed lid cannot
+/// suspend the box (`install_power_hardening` step 5).
+pub fn logind_nosleep_body() -> String {
+    "[Login]\n\
+IdleAction=ignore\n\
+HandlePowerKey=ignore\n\
+HandleLidSwitch=ignore\n\
+HandleSuspendKey=ignore\n"
+        .to_string()
 }
 
 /// Build the `/etc/ados/env` file body (pure). Mirrors 07-systemd.sh:110-118,
@@ -318,6 +406,280 @@ fn reconcile_rust_cutover_units() {
     }
 }
 
+/// Drop the video-pipeline UDP sysctl tuning and apply it now so the running
+/// agent picks up the new ceiling on its next socket bind. Idempotent overwrite.
+/// Ports 03-kernel.sh `install_video_sysctl`.
+fn install_video_sysctl() {
+    if let Err(e) = std::fs::write(VIDEO_SYSCTL_FILE, video_sysctl_body()) {
+        tracing::warn!(error = %e, "writing video sysctl drop-in failed");
+        return;
+    }
+    set_mode(Path::new(VIDEO_SYSCTL_FILE), 0o644);
+    // Apply now (best-effort; absent on a stripped container build path).
+    let _ = exec::run("sysctl", &["-p", VIDEO_SYSCTL_FILE]);
+}
+
+/// Resolve the absolute `iw` path the way `_power_resolve_iw` does: prefer the
+/// standard sbin locations, then a PATH lookup.
+fn resolve_iw_path() -> Option<String> {
+    for candidate in ["/usr/sbin/iw", "/sbin/iw"] {
+        if Path::new(candidate).exists() {
+            return Some(candidate.to_string());
+        }
+    }
+    let which = exec::run("sh", &["-c", "command -v iw"]);
+    let trimmed = which.stdout.trim();
+    if which.success() && !trimmed.is_empty() {
+        Some(trimmed.to_string())
+    } else {
+        None
+    }
+}
+
+/// Board-agnostic power hardening: keep WiFi, the WFB radio, and the camera
+/// continuously powered. Ports 03b-power.sh `install_power_hardening`:
+///
+/// 1. NetworkManager WiFi power-save force-off drop-in (+ reload).
+/// 2. Fallback WiFi-power-save udev rule (for non-NM-managed `wlan*`).
+/// 3. Broad USB-no-autosuspend udev rule.
+/// 4. Remove any stale per-interface EEE rule (the boot oneshot owns EEE-off).
+/// 5. Mask the sleep targets + a logind no-sleep drop-in.
+/// 6. Deploy `ados-power-reassert.sh` to /opt/ados/bin + enable/start the
+///    `ados-power.service` oneshot (the unit file ships in data/systemd and is
+///    already deployed by `deploy_units`).
+///
+/// Idempotent; applies on the spot. CPU governor is intentionally left untouched.
+fn install_power_hardening(source: Option<&Path>) {
+    // ── 1. WiFi power-save off (NetworkManager) ──
+    let nm_present = Path::new("/etc/NetworkManager").is_dir()
+        || exec::run_ok("sh", &["-c", "command -v nmcli"]);
+    if nm_present {
+        if let Some(parent) = Path::new(NM_POWERSAVE_CONF).parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if std::fs::write(NM_POWERSAVE_CONF, nm_powersave_body()).is_ok() {
+            set_mode(Path::new(NM_POWERSAVE_CONF), 0o644);
+            // Reload NM so the drop-in takes effect without a reboot.
+            if !exec::run_ok("nmcli", &["general", "reload"]) {
+                let _ = exec::run("systemctl", &["reload", "NetworkManager"]);
+            }
+        }
+    } else {
+        tracing::info!("NetworkManager not present; skipping WiFi power-save drop-in");
+    }
+
+    // ── 2. WiFi power-save off (fallback udev) ──
+    let _ = std::fs::create_dir_all(UDEV_RULES_DIR);
+    let iw_bin = resolve_iw_path();
+    if std::fs::write(
+        WIFI_POWERSAVE_RULE,
+        wifi_powersave_rule_body(iw_bin.as_deref()),
+    )
+    .is_ok()
+    {
+        set_mode(Path::new(WIFI_POWERSAVE_RULE), 0o644);
+    }
+
+    // ── 3. USB autosuspend off (broad) ──
+    if std::fs::write(USB_NO_AUTOSUSPEND_RULE, usb_no_autosuspend_rule_body()).is_ok() {
+        set_mode(Path::new(USB_NO_AUTOSUSPEND_RULE), 0o644);
+    }
+
+    // ── 4. Drop any stale Ethernet-EEE udev rule (the boot oneshot owns it). ──
+    let _ = std::fs::remove_file(ETH_NO_EEE_RULE);
+
+    // Reload udev + re-fire on already-bound USB devices so an upgrade applies
+    // the new rules without a replug. Deliberately NOT the net subsystem — that
+    // would re-run interface-add rules and risk bouncing the wired mgmt link.
+    let _ = exec::run("udevadm", &["control", "--reload"]);
+    let _ = exec::run(
+        "udevadm",
+        &["trigger", "--subsystem-match=usb", "--action=change"],
+    );
+
+    // ── 5. Mask system sleep + logind no-sleep drop-in. ──
+    let _ = exec::run(
+        "systemctl",
+        &[
+            "mask",
+            "sleep.target",
+            "suspend.target",
+            "hibernate.target",
+            "hybrid-sleep.target",
+            "suspend-then-hibernate.target",
+        ],
+    );
+    if let Some(parent) = Path::new(LOGIND_NOSLEEP_CONF).parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if std::fs::write(LOGIND_NOSLEEP_CONF, logind_nosleep_body()).is_ok() {
+        set_mode(Path::new(LOGIND_NOSLEEP_CONF), 0o644);
+    }
+    let _ = exec::run("systemctl", &["daemon-reload"]);
+
+    // ── 6. Boot re-assert oneshot. ──
+    // The unit file (data/systemd/ados-power.service) is deployed by
+    // deploy_units; here we install the helper script it execs and enable+start
+    // the unit. The script lives at scripts/ados-power-reassert.sh in the source
+    // tree (kept; not part of the removed install.d set).
+    let bin_dir = format!("{INSTALL_DIR}/bin");
+    let _ = std::fs::create_dir_all(&bin_dir);
+    let reassert_dst = format!("{bin_dir}/ados-power-reassert.sh");
+    let reassert_src = source.map(|s| s.join("scripts/ados-power-reassert.sh"));
+    let copied = reassert_src
+        .as_deref()
+        .filter(|p| p.is_file())
+        .map(|p| std::fs::copy(p, &reassert_dst).is_ok())
+        .unwrap_or(false);
+    if !copied {
+        // Inline fallback so the oneshot still works on a tree missing the helper.
+        let _ = std::fs::write(&reassert_dst, REASSERT_INLINE_FALLBACK);
+    }
+    set_mode(Path::new(&reassert_dst), 0o755);
+    let _ = exec::run("systemctl", &["enable", "ados-power.service"]);
+    // Run it now so the knobs are asserted on the current boot too.
+    let _ = exec::run("systemctl", &["start", "ados-power.service"]);
+
+    tracing::info!("power hardening applied (WiFi/USB/EEE power-save off, sleep masked)");
+}
+
+/// Inline `ados-power-reassert.sh` body used only when the source tree does not
+/// ship the helper (it normally does). Mirrors the script at
+/// scripts/ados-power-reassert.sh; the def-route interface is skipped for EEE so
+/// the management link is never renegotiated.
+const REASSERT_INLINE_FALLBACK: &str = "#!/bin/sh\n\
+# ADOS: re-assert power knobs at boot. Forgiving by design.\n\
+for _ifdir in /sys/class/net/wlan*; do\n\
+    [ -e \"${_ifdir}\" ] || continue\n\
+    _if=\"$(basename \"${_ifdir}\")\"\n\
+    iw dev \"${_if}\" set power_save off 2>/dev/null || true\n\
+done\n\
+for _ctl in /sys/bus/usb/devices/*/power/control; do\n\
+    [ -w \"${_ctl}\" ] || continue\n\
+    echo on > \"${_ctl}\" 2>/dev/null || true\n\
+done\n\
+_def_if=\"$(ip route show default 2>/dev/null | awk '{print $5; exit}')\"\n\
+for _ed in /sys/class/net/eth* /sys/class/net/end* /sys/class/net/enP* /sys/class/net/enx*; do\n\
+    [ -e \"${_ed}\" ] || continue\n\
+    _eif=\"$(basename \"${_ed}\")\"\n\
+    [ \"${_eif}\" = \"${_def_if}\" ] && continue\n\
+    ethtool --set-eee \"${_eif}\" eee off 2>/dev/null || true\n\
+done\n\
+exit 0\n";
+
+/// Quiet the Rockchip BSP ISP 3A daemon (`rkaiq_3A.service`) on UVC-camera rigs.
+/// Self-gating: a no-op on non-Rockchip boards (unit absent) and on boards where
+/// rkaiq is doing real work (active). Ports `mask_unused_rockchip_isp_service`.
+fn mask_unused_rockchip_isp_service() {
+    // Unit absent → nothing to do (non-Rockchip board).
+    if !exec::run_ok("systemctl", &["list-unit-files", "rkaiq_3A.service"]) {
+        return;
+    }
+    // Active → a real MIPI camera is using it; leave it alone.
+    if exec::run_ok("systemctl", &["is-active", "--quiet", "rkaiq_3A.service"]) {
+        return;
+    }
+    let _ = exec::run("systemctl", &["reset-failed", "rkaiq_3A.service"]);
+    let _ = exec::run("systemctl", &["mask", "rkaiq_3A.service"]);
+}
+
+/// Install the SSH login banner from `data/motd/30-ados`. Linux-only (the bash
+/// gates on `uname -s = Linux`). Ports 12-output.sh `install_motd`.
+fn install_motd(source: Option<&Path>) {
+    if std::env::consts::OS != "linux" {
+        return;
+    }
+    let src = match source.map(|s| s.join("data/motd/30-ados")) {
+        Some(p) if p.is_file() => p,
+        _ => {
+            tracing::warn!("MOTD source not found; skipping login banner install");
+            return;
+        }
+    };
+    let _ = std::fs::create_dir_all("/etc/update-motd.d");
+    if std::fs::copy(&src, MOTD_FILE).is_ok() {
+        set_mode(Path::new(MOTD_FILE), 0o755);
+        tracing::info!(path = MOTD_FILE, "SSH login banner installed");
+    } else {
+        tracing::warn!("copying MOTD banner failed");
+    }
+}
+
+/// Install the env-gated libcomposite USB-gadget composer (GROUND-STATION only).
+/// Gated on `ADOS_ENABLE_USB_GADGET=1` (default off) until the gadget is bench
+/// validated. Ports the gated block at the head of `enable_ground_station_units`:
+/// copy the composer script, ensure `dwc2` is loaded, enable the setup oneshot.
+fn install_usb_gadget_composer(source: Option<&Path>) {
+    if std::env::var("ADOS_ENABLE_USB_GADGET").as_deref() != Ok("1") {
+        return;
+    }
+    let src = source.map(|s| s.join("data/usb-gadget/ados-cdc-ncm-rndis.sh"));
+    let src = match src.as_deref().filter(|p| p.is_file()) {
+        Some(p) => p,
+        None => {
+            tracing::warn!(
+                "USB gadget composer script not found; skipping (ADOS_ENABLE_USB_GADGET=1 was set)"
+            );
+            return;
+        }
+    };
+    let dst_dir = "/usr/local/lib/ados/usb-gadget";
+    let _ = std::fs::create_dir_all(dst_dir);
+    let dst = format!("{dst_dir}/ados-cdc-ncm-rndis.sh");
+    if std::fs::copy(src, &dst).is_err() {
+        tracing::warn!("copying USB gadget composer failed");
+        return;
+    }
+    set_mode(Path::new(&dst), 0o755);
+    tracing::info!("USB gadget composer script installed (ADOS_ENABLE_USB_GADGET=1)");
+
+    // Ensure dwc2 is loaded on OTG-capable boards so the gadget subsystem has a
+    // UDC to bind to. No-op on boards that lack OTG hardware.
+    let modules_has_dwc2 = std::fs::read_to_string("/etc/modules")
+        .map(|s| s.lines().any(|l| l.trim() == "dwc2"))
+        .unwrap_or(false);
+    if !modules_has_dwc2 {
+        if let Ok(mut existing) = std::fs::read_to_string("/etc/modules") {
+            if !existing.ends_with('\n') {
+                existing.push('\n');
+            }
+            existing.push_str("dwc2\n");
+            let _ = std::fs::write("/etc/modules", existing);
+        }
+    }
+    let _ = exec::run("modprobe", &["dwc2"]);
+    let _ = exec::run("modprobe", &["libcomposite"]);
+    enable_if_present("ados-usb-gadget-setup.service");
+}
+
+/// Add the `ados` and `pi` service users to the hardware-access groups the
+/// ground-station services need (GROUND-STATION only). Ports the
+/// `usermod -aG ...` bits of `enable_ground_station_units`:
+///
+/// - `gpio`    — button service drives /dev/gpiochip0 via libgpiod.
+/// - `input`   — input manager + PIC arbiter read /dev/input (gamepads/evdev).
+/// - `plugdev` — USB device access for hot-plugged peripherals.
+/// - `bluetooth` — D-Bus access for the PIC arbiter.
+/// - `i2c`     — userspace OLED + future I2C peripherals.
+///
+/// Every `usermod -aG` is an idempotent no-op when membership already exists.
+fn add_ground_station_group_memberships() {
+    for grp in ["gpio", "input", "plugdev", "bluetooth", "i2c"] {
+        if !exec::run_ok("getent", &["group", grp]) {
+            tracing::warn!(group = grp, "group not present; skipping usermod");
+            continue;
+        }
+        for user in ["ados", "pi"] {
+            if exec::run_ok("id", &[user]) {
+                let _ = exec::run("usermod", &["-aG", grp, user]);
+            }
+        }
+    }
+    // Trigger udev so i2c-dev nodes pick up the new group membership without a
+    // reboot (mirrors the bash `udevadm trigger --subsystem-match=i2c-dev`).
+    let _ = exec::run("udevadm", &["trigger", "--subsystem-match=i2c-dev"]);
+}
+
 /// systemd unit install + enable (NOT start).
 pub struct Systemd;
 
@@ -361,6 +723,15 @@ impl Step for Systemd {
         let udev_count = deploy_udev_rules(&udev_src);
         tracing::info!(count = udev_count, "deployed udev rules");
 
+        // 2b. Cross-profile kernel/power/observability hardening. Drone-relevant
+        //     (video sysctl keeps the receive chain from dropping bursts; power
+        //     hardening keeps the USB camera + RTL radio + mgmt WiFi from
+        //     suspending). All idempotent + self-gating; apply on every install.
+        install_video_sysctl();
+        install_power_hardening(Some(&source));
+        mask_unused_rockchip_isp_service();
+        install_motd(Some(&source));
+
         // 3. daemon-reload so the new units are visible.
         let _ = exec::run("systemctl", &["daemon-reload"]);
 
@@ -376,9 +747,14 @@ impl Step for Systemd {
 
         // 6. Profile-specific enable + teardown.
         if ctx.profile == "ground_station" {
+            // The env-gated USB-gadget composer (default off) and the
+            // hardware-access group memberships are GS-only — they belong to the
+            // tether + button/joystick/OLED service set.
+            install_usb_gadget_composer(Some(&source));
             for unit in GROUND_STATION_ENABLE_UNITS {
                 enable_if_present(unit);
             }
+            add_ground_station_group_memberships();
             mask_conflicting_standalone_services();
             reconcile_rust_cutover_units();
         }
@@ -488,6 +864,84 @@ mod tests {
             assert!(
                 drone_teardown.contains(unit),
                 "{unit} is GS-enabled but not torn down on a drone rig"
+            );
+        }
+    }
+
+    #[test]
+    fn video_sysctl_carries_the_16mib_ceiling() {
+        let body = video_sysctl_body();
+        // The load-bearing values the wfb_rx + fanout + mediamtx chain needs.
+        assert!(body.contains("net.core.rmem_max = 16777216"));
+        assert!(body.contains("net.core.wmem_max = 16777216"));
+        assert!(body.contains("net.core.rmem_default = 4194304"));
+        assert!(body.contains("net.core.wmem_default = 4194304"));
+    }
+
+    #[test]
+    fn nm_powersave_forces_off() {
+        let body = nm_powersave_body();
+        assert!(body.contains("[connection]"));
+        // 2 = power-save disabled.
+        assert!(body.contains("wifi.powersave = 2"));
+    }
+
+    #[test]
+    fn wifi_powersave_rule_uses_resolved_iw_when_known() {
+        let with = wifi_powersave_rule_body(Some("/usr/sbin/iw"));
+        assert!(with.contains("KERNEL==\"wlan*\""));
+        assert!(with.contains("/usr/sbin/iw dev %k set power_save off"));
+        // No inline /bin/sh wrapper when the path is known.
+        assert!(!with.contains("/bin/sh -c"));
+
+        let without = wifi_powersave_rule_body(None);
+        assert!(without.contains("/bin/sh -c"));
+        assert!(without.contains("iw dev %k set power_save off"));
+    }
+
+    #[test]
+    fn usb_rule_pins_power_control_on() {
+        let body = usb_no_autosuspend_rule_body();
+        assert!(body.contains("SUBSYSTEM==\"usb\""));
+        assert!(body.contains("ATTR{power/control}=\"on\""));
+    }
+
+    #[test]
+    fn logind_nosleep_ignores_every_sleep_path() {
+        let body = logind_nosleep_body();
+        assert!(body.contains("[Login]"));
+        assert!(body.contains("IdleAction=ignore"));
+        assert!(body.contains("HandlePowerKey=ignore"));
+        assert!(body.contains("HandleLidSwitch=ignore"));
+        assert!(body.contains("HandleSuspendKey=ignore"));
+    }
+
+    #[test]
+    fn reassert_inline_fallback_skips_default_route_iface() {
+        // The inline fallback must contain the def-route skip so it never
+        // renegotiates the management NIC's PHY (the wired-link-bounce hazard).
+        assert!(REASSERT_INLINE_FALLBACK.contains("ip route show default"));
+        assert!(REASSERT_INLINE_FALLBACK.contains("[ \"${_eif}\" = \"${_def_if}\" ] && continue"));
+        assert!(REASSERT_INLINE_FALLBACK.starts_with("#!/bin/sh"));
+        assert!(REASSERT_INLINE_FALLBACK.ends_with("exit 0\n"));
+    }
+
+    #[test]
+    fn dropin_paths_match_the_uninstall_removal_list() {
+        // Install/uninstall symmetry: every drop-in this step writes must be in
+        // the uninstall removal list so a purge leaves a clean box.
+        let removed = crate::uninstall::dropin_files();
+        for path in [
+            VIDEO_SYSCTL_FILE,
+            NM_POWERSAVE_CONF,
+            WIFI_POWERSAVE_RULE,
+            USB_NO_AUTOSUSPEND_RULE,
+            ETH_NO_EEE_RULE,
+            LOGIND_NOSLEEP_CONF,
+        ] {
+            assert!(
+                removed.contains(&path),
+                "{path} is written by install but not removed by uninstall"
             );
         }
     }

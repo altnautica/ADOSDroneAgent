@@ -2,9 +2,9 @@
 
 First-party publisher public keys live here. Drop the public-half PEM
 for any signer id named in the `FIRST_PARTY_SIGNERS` allowlist (see
-`src/ados/plugins/signing.py`). `install.sh` deploys these to
+`src/ados/plugins/signing.py`). The installer deploys these to
 `/etc/ados/plugin-keys/` on every fresh install and every `--upgrade`
-via the `provision_plugin_keys` helper in `install.d/09-config.sh`.
+(the config/identity step copies every `*.pem` from this directory).
 
 The agent loads every `*.pem` in `/etc/ados/plugin-keys/` at startup
 and uses the filename stem as the signer id. The mapping is exact —

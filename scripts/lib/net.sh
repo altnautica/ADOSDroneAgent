@@ -1,11 +1,10 @@
 # shellcheck shell=bash
 # =============================================================================
-# net.sh — network fetch helpers for the full agent install pipeline.
+# net.sh — network fetch helpers for the driver build path.
 #
 # Sourceable library. Side-effect-free at source time (defines functions
-# only). Used by the install.d modules, the prebuilt kernel-module driver
-# path, and the stable-channel installer to fetch release artifacts with
-# uniform retry/backoff plus a fast offline probe.
+# only). Used by the prebuilt kernel-module driver path to fetch release
+# artifacts with uniform retry/backoff plus a fast offline probe.
 #
 # Functions:
 #   ados_fetch URL [OUTFILE] [TIMEOUT_SECS]
@@ -16,7 +15,7 @@
 # =============================================================================
 
 # Define minimal loggers only when the caller has not already provided them.
-# install.d/lib.sh ships richer colored versions; standalone callers (the
+# A caller that sources a richer logger keeps it; standalone callers (the
 # driver path) get these plain fallbacks.
 command -v info >/dev/null 2>&1 || info() { printf '[INFO]  %s\n' "$*" >&2; }
 command -v warn >/dev/null 2>&1 || warn() { printf '[WARN]  %s\n' "$*" >&2; }

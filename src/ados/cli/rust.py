@@ -52,7 +52,8 @@ class _Service:
 
 
 # Keyed by the operator-facing service name. Mirrors the ExecStart guards
-# in data/systemd/*.service and the reconcile in scripts/install.d.
+# in data/systemd/*.service and the reconcile in the installer
+# (crates/ados-installer/src/steps/systemd.rs).
 _SERVICES: dict[str, _Service] = {
     "net": _Service(
         flag="net-rust-enabled",

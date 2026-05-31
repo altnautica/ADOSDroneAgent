@@ -377,7 +377,7 @@ check_supervisor_active() {
 }
 
 # expected_units — echo the systemd units that must be enabled for the
-# profile under test. Mirrors expected_profile_units() in install.d so the
+# profile under test. Mirrors the installer's per-profile enable list so the
 # e2e checks the same contract the installer's health gate writes.
 expected_units() {
     case "${PROFILE_FLAG}" in
