@@ -156,22 +156,28 @@ fn install_agent_edge(ctx: &Ctx) -> anyhow::Result<PathBuf> {
     }
 }
 
-/// The persisted clone destination. On a real SBC this is
-/// `/opt/ados/source/repo` (so `data/` + `scripts/` survive for the downstream
-/// steps and a later `--upgrade`); when `/opt/ados` is not creatable (a dev
-/// host), fall back to a unique temp dir so the edge path still exercises end
-/// to end without root.
+/// The persisted clone destination. On a real SBC this is `/opt/ados/source`
+/// itself (the repo CONTENTS land directly there, so `scripts/` resolves to
+/// `/opt/ados/source/scripts` — the layout the runtime agent expects:
+/// `display_install.py` looks for `/opt/ados/source/scripts/drivers/...` and
+/// the CLI for `/opt/ados/source/scripts/install.sh`. The predecessor bash
+/// `persist_repo_artifacts` flattened to the same place; cloning into a `repo/`
+/// subdir would have broken those runtime consumers). The downstream install
+/// steps read `data/` + `scripts/` from this same dir via `ctx.source_dir`, and
+/// a later `--upgrade` re-clones over it. When `/opt/ados` is not creatable (a
+/// dev host), fall back to a unique temp dir so the edge path still exercises
+/// end to end without root.
 fn clone_dest() -> std::io::Result<PathBuf> {
     let persisted = PathBuf::from(format!("{}/source", env::INSTALL_DIR));
     if std::fs::create_dir_all(&persisted).is_ok() {
-        return Ok(persisted.join("repo"));
+        return Ok(persisted);
     }
     use std::sync::atomic::{AtomicU64, Ordering};
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
     let base = std::env::temp_dir().join(format!("ados-installer-src-{}-{n}", std::process::id()));
     std::fs::create_dir_all(&base)?;
-    Ok(base.join("repo"))
+    Ok(base)
 }
 
 /// Python venv creation + agent package install.
