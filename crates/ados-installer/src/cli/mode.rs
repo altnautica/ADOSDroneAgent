@@ -63,8 +63,18 @@ impl RunMode {
     }
 
     /// True when checkpoints must be cleared before the run.
+    ///
+    /// Both a force reinstall and an upgrade clear them. An upgrade MUST: the
+    /// per-step checkpoints (`agent-package`, `systemd`, `global-symlinks`,
+    /// `radio-driver`, `deps`) exist to resume an interrupted FRESH install, so
+    /// if they survive into an upgrade the graph would skip the very steps that
+    /// refetch the new code, units, and prebuilt binaries — `--upgrade` would
+    /// silently do nothing. Clearing them makes the upgrade re-clone + reinstall
+    /// the agent package, redeploy the units, re-fetch the binaries, and top up
+    /// system packages (a new version may need new deps). The venv itself is
+    /// preserved on upgrade (only `--force` rebuilds it).
     pub fn clears_checkpoints(self) -> bool {
-        matches!(self, RunMode::ForceReinstall)
+        matches!(self, RunMode::ForceReinstall | RunMode::Upgrade)
     }
 }
 
@@ -119,7 +129,12 @@ mod tests {
             upgrade: true,
             ..Args::default()
         };
-        assert_eq!(RunMode::resolve(&a, true), RunMode::Upgrade);
+        let m = RunMode::resolve(&a, true);
+        assert_eq!(m, RunMode::Upgrade);
+        // An upgrade must clear checkpoints so the agent/units/binaries
+        // actually refetch — otherwise the resume checkpoints make it a no-op.
+        assert!(m.clears_checkpoints());
+        assert!(m.runs_install_chain());
     }
 
     #[test]
