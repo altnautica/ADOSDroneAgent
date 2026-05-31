@@ -19,6 +19,10 @@ pub const WFB_RX_KEY: &str = "/etc/ados/wfb/rx.key";
 /// The canonical drone key shared with the ground station after bind.
 pub const DRONE_KEY: &str = "/etc/drone.key";
 
+/// Cross-process bind-liveness sentinel written by the supervisor while a bind
+/// session owns the radio adapter. `{"active": <bool>}`.
+pub const BIND_STATE_SENTINEL: &str = "/run/ados/bind-state.json";
+
 /// Return the run directory, honouring the `ADOS_RUN_DIR` env override.
 pub fn run_dir() -> String {
     std::env::var("ADOS_RUN_DIR").unwrap_or_else(|_| "/run/ados".to_string())
@@ -39,4 +43,84 @@ pub fn write_sidecar(path: &str, value: &serde_json::Value) -> std::io::Result<(
     std::fs::write(&tmp, &body)?;
     std::fs::rename(&tmp, path)?;
     Ok(())
+}
+
+/// Read the cross-process bind-liveness sentinel. Synchronous and cheap enough
+/// to call from a hot loop without a socket round-trip.
+///
+/// Returns `obj["active"]` (coerced to bool) from `bind-state.json`, or `false`
+/// on any error: file missing, unreadable, not valid JSON, not an object, or the
+/// `active` key absent. The supervisor writes this file while a bind session
+/// owns the radio adapter; the hop loop reads it to suppress channel changes
+/// that would corrupt the bind key exchange.
+pub fn read_bind_sentinel_active() -> bool {
+    let path = run_path("bind-state.json");
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return false;
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return false;
+    };
+    value
+        .as_object()
+        .and_then(|obj| obj.get("active"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Serialize tests that mutate the `ADOS_RUN_DIR` process-global env var.
+    fn env_guard() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LOCK.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    #[test]
+    fn bind_sentinel_missing_file_is_false() {
+        let _g = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("ADOS_RUN_DIR", dir.path());
+        // No bind-state.json written → false.
+        assert!(!read_bind_sentinel_active());
+        std::env::remove_var("ADOS_RUN_DIR");
+    }
+
+    #[test]
+    fn bind_sentinel_active_true_reads_true() {
+        let _g = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("ADOS_RUN_DIR", dir.path());
+        std::fs::write(dir.path().join("bind-state.json"), r#"{"active": true}"#).unwrap();
+        assert!(read_bind_sentinel_active());
+        std::env::remove_var("ADOS_RUN_DIR");
+    }
+
+    #[test]
+    fn bind_sentinel_active_false_reads_false() {
+        let _g = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("ADOS_RUN_DIR", dir.path());
+        std::fs::write(dir.path().join("bind-state.json"), r#"{"active": false}"#).unwrap();
+        assert!(!read_bind_sentinel_active());
+        std::env::remove_var("ADOS_RUN_DIR");
+    }
+
+    #[test]
+    fn bind_sentinel_garbled_json_is_false() {
+        let _g = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("ADOS_RUN_DIR", dir.path());
+        std::fs::write(dir.path().join("bind-state.json"), "not json at all").unwrap();
+        assert!(!read_bind_sentinel_active());
+        // A non-object (a bare array) is also false.
+        std::fs::write(dir.path().join("bind-state.json"), "[1, 2, 3]").unwrap();
+        assert!(!read_bind_sentinel_active());
+        // An object missing the active key is false.
+        std::fs::write(dir.path().join("bind-state.json"), r#"{"other": 1}"#).unwrap();
+        assert!(!read_bind_sentinel_active());
+        std::env::remove_var("ADOS_RUN_DIR");
+    }
 }

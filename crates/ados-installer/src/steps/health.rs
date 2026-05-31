@@ -16,13 +16,19 @@
 //!      `fetch_binaries` ran but never re-verified the Hard binaries are still
 //!      on disk by health time; this closes that gap so a vanished/zero-length
 //!      Hard binary is caught here, not at first supervisor exec.
-//!   6. **NEW** — the radio stack is on disk, for BOTH the drone and the ground
+//!   6. **NEW** — the native WFB binary the profile's units exec by DEFAULT
+//!      (`ados-radio` on a drone, `ados-groundlink` on a ground station) is
+//!      present + executable. The WFB units run the native service on a clean
+//!      boot and keep Python only as a flag-guarded fallback, so a missing
+//!      native binary would crash-loop the unit; its on-disk presence is a
+//!      required precondition even though its prebuilt fetch gate is best-effort.
+//!   7. **NEW** — the radio stack is on disk, for BOTH the drone and the ground
 //!      station profile: the wfb-ng userspace binaries on PATH, the bind
 //!      artifacts (`/etc/bind.key` + `/etc/bind.yaml`), and the `wifibroadcast@`
 //!      service template. Without these a fresh rig cannot auto-pair, so their
 //!      absence must FAIL the gate rather than report a misleading `ok` (the
 //!      bash gate never asserted them here).
-//!   7. **NEW** — `mediamtx` (the video relay) is present. Best-effort: a miss
+//!   8. **NEW** — `mediamtx` (the video relay) is present. Best-effort: a miss
 //!      degrades streaming but does not fail the install (recorded non-required).
 //!
 //! Each miss is recorded into `ctx.failures` as Required, so the graph's
@@ -140,6 +146,32 @@ where
         .filter(|b| b.gate == Gate::Hard && !present(b.dest))
         .map(|b| b.service)
         .collect()
+}
+
+/// The native service binary each profile's WFB units now exec by DEFAULT (the
+/// Python service is kept on disk only as an emergency fallback behind a flag).
+/// Because the unit runs the native binary unconditionally on a clean boot, its
+/// absence would crash-loop the unit; so the install must verify it is present
+/// and executable here, even though the prebuilt catalog gate for these two is
+/// best-effort (a fetch miss degrades fetch but must not leave a unit pointed at
+/// a binary that is not there). `ados-radio` is the drone-side transmitter,
+/// `ados-groundlink` the ground-side receive plane.
+fn default_radio_binary(profile: &str) -> Option<&'static str> {
+    match profile {
+        "ground_station" => Some("/opt/ados/bin/ados-groundlink"),
+        "drone" => Some("/opt/ados/bin/ados-radio"),
+        _ => None,
+    }
+}
+
+/// The name of the default native WFB binary that is MISSING (absent or not
+/// executable) for the profile, if any. Pure given a `present` predicate so a
+/// unit test can exercise it without touching the filesystem.
+pub fn missing_default_radio_binary<F>(profile: &str, present: F) -> Option<&'static str>
+where
+    F: Fn(&str) -> bool,
+{
+    default_radio_binary(profile).filter(|dest| !present(dest))
 }
 
 /// The wfb-ng userspace binaries the bind protocol + radio services need on
@@ -261,12 +293,26 @@ impl Step for Health {
             misses.push(format!("binary-missing:{svc}"));
         }
 
-        // 6. The radio stack is on disk (both drone + ground station need it):
+        // 6. The native WFB binary the profile's units now exec by default must
+        // be present + executable, or the unit would crash-loop. Its catalog gate
+        // is best-effort for the fetch step, but the cutover makes its on-disk
+        // presence a required precondition for a working install.
+        if let Some(dest) =
+            missing_default_radio_binary(&ctx.profile, |d| is_executable(Path::new(d)))
+        {
+            let svc = Path::new(dest)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(dest);
+            misses.push(format!("binary-missing:{svc}"));
+        }
+
+        // 7. The radio stack is on disk (both drone + ground station need it):
         // without the wfb-ng binaries, the bind artifacts, or the service
         // template a fresh rig cannot auto-pair, so each is a required miss.
         misses.extend(missing_radio_stack());
 
-        // 7. mediamtx is best-effort (the video relay). A missing one degrades
+        // 8. mediamtx is best-effort (the video relay). A missing one degrades
         // streaming but must not abort an otherwise-working install, so record
         // it as a non-required failure rather than adding it to `misses`.
         if !mediamtx_present() {
@@ -342,6 +388,36 @@ mod tests {
         }
         // ados-radio is best-effort on drone → must not appear.
         assert!(!all.contains(&"ados-radio"));
+    }
+
+    #[test]
+    fn default_radio_binary_is_profile_specific_and_gated() {
+        // All present → no miss on either profile.
+        assert!(missing_default_radio_binary("drone", |_| true).is_none());
+        assert!(missing_default_radio_binary("ground_station", |_| true).is_none());
+
+        // Drone default unit binary missing → ados-radio reported.
+        let drone =
+            missing_default_radio_binary("drone", |dest| dest != "/opt/ados/bin/ados-radio");
+        assert_eq!(drone, Some("/opt/ados/bin/ados-radio"));
+
+        // Ground-station default unit binary missing → ados-groundlink reported.
+        let gs = missing_default_radio_binary("ground_station", |dest| {
+            dest != "/opt/ados/bin/ados-groundlink"
+        });
+        assert_eq!(gs, Some("/opt/ados/bin/ados-groundlink"));
+
+        // The drone never gates on the groundlink binary, and the ground station
+        // never gates on the radio binary (each profile checks only its own unit).
+        assert!(missing_default_radio_binary("drone", |dest| dest
+            != "/opt/ados/bin/ados-groundlink")
+        .is_none());
+        assert!(missing_default_radio_binary("ground_station", |dest| dest
+            != "/opt/ados/bin/ados-radio")
+        .is_none());
+
+        // An unknown profile has no default WFB unit binary to gate on.
+        assert!(missing_default_radio_binary("compute", |_| false).is_none());
     }
 
     #[test]

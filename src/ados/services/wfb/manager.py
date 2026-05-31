@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any
 from ados.core.logging import get_logger
 from ados.core.paths import WFB_KEY_DIR
 from ados.services.wfb.adapter import (
+    DEFAULT_REG_DOMAIN,
     detect_wfb_adapters,
     get_interface_mode,
     select_wfb_interface,
@@ -1461,6 +1462,20 @@ class WfbManager:
 
             self._state = LinkState.CONNECTING
 
+            # Step 0: Apply the regulatory domain FIRST, before any
+            # monitor-mode probe. The kernel maps the permitted channel
+            # set and the per-channel TX-power ceiling when the driver
+            # brings the interface up in monitor mode; a domain set after
+            # that is too late and leaves the home channel (149, 5745 MHz)
+            # capped to the startup domain's limits (the -100 dBm "not
+            # permitted" sentinel, zero injected frames). iw reg set is a
+            # global per-phy call, so it needs no interface. Both rigs in
+            # a pair run the same domain to share a channel set. A None or
+            # empty config value falls back to the safe default.
+            reg_domain = getattr(self._config, "reg_domain", None) or DEFAULT_REG_DOMAIN
+            if not set_regulatory_domain(reg_domain):
+                log.warning("wfb_reg_domain_not_applied", domain=reg_domain)
+
             # Step 1: Find a compatible adapter. The shared selector
             # honors the config override first, otherwise ranks the
             # RTL injection radios ahead of anything else and PROVES each
@@ -1508,21 +1523,9 @@ class WfbManager:
             self._selected_chipset = selected.chipset if selected else None
             self._adapter_injection_ok = True
 
-            # Step 1b: Apply the regulatory domain once before bringing
-            # the iface up, when the operator pinned one. Both rigs in a
-            # pair must enable the same channel set or they can never meet
-            # on a common frequency; forcing the same domain is the
-            # opt-in way to widen the shared set. Best-effort: a failure
-            # is logged and the home channel still works on whatever the
-            # kernel allows.
-            reg_domain = getattr(self._config, "reg_domain", None)
-            if reg_domain:
-                if not set_regulatory_domain(reg_domain):
-                    log.warning(
-                        "wfb_reg_domain_not_applied",
-                        interface=interface,
-                        domain=reg_domain,
-                    )
+            # (Regulatory domain was applied at Step 0, before the adapter
+            # probe, so the monitor-mode bring-up below sees the correct
+            # channel set and TX-power ceiling.)
 
             # Step 2: Set monitor mode and VERIFY it took. A managed iface
             # cannot inject; starting wfb_tx on it produces zero frames

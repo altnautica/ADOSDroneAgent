@@ -13,6 +13,13 @@
 /// wfb manager and read by the API layer and the on-box link-stats UI.
 pub const WFB_STATS_JSON: &str = "/run/ados/wfb-stats.json";
 
+/// Channel-hop supervisor snapshot (band, thresholds, last-hop time, the hop
+/// history ring). On a drone rig the transmit-side supervisor writes it; on a
+/// ground-station rig the receive-side control-plane listener writes it. A given
+/// rig runs only one of the two, so there is no write contention on the file.
+/// Read cross-process by the API layer and the on-box channel-hops UI page.
+pub const HOP_SUPERVISOR_JSON: &str = "/run/ados/hop-supervisor.json";
+
 /// Mesh state snapshot: role, neighbours, gateway election, partition status.
 pub const MESH_STATE_JSON: &str = "/run/ados/mesh-state.json";
 
@@ -93,6 +100,7 @@ mod tests {
     #[test]
     fn contract_constants_match_python_layout() {
         assert_eq!(WFB_STATS_JSON, "/run/ados/wfb-stats.json");
+        assert_eq!(HOP_SUPERVISOR_JSON, "/run/ados/hop-supervisor.json");
         assert_eq!(MESH_STATE_JSON, "/run/ados/mesh-state.json");
         assert_eq!(WFB_RELAY_JSON, "/run/ados/wfb-relay.json");
         assert_eq!(WFB_RECEIVER_JSON, "/run/ados/wfb-receiver.json");

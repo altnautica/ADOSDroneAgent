@@ -16,12 +16,24 @@
 //! - `kill()` calls `killpg(pgid, SIGKILL)` — the whole group dies atomically.
 //! - `Drop` also calls `killpg` so a process never outlives its Rust owner.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::config::WfbConfig;
 
 const TX_CONTROL_LOG: &str = "/run/ados/wfb-drone-tx-control.log";
 const RX_CONTROL_LOG: &str = "/run/ados/wfb-drone-rx-control.log";
+
+/// True when a Reed-Solomon `(k, n)` ratio is valid for `wfb_tx`: a positive
+/// data-shard count and at least one parity shard (`n > k`). Mirrors the Python
+/// `set_fec` guard `fec_k <= 0 or fec_n <= fec_k`.
+pub fn fec_ratio_valid(fec_k: u8, fec_n: u8) -> bool {
+    fec_k != 0 && fec_n > fec_k
+}
+
+/// True when an MCS index is in the accepted RTL8812EU VHT80 range (0..=7).
+pub fn mcs_index_valid(mcs: u8) -> bool {
+    mcs <= 7
+}
 
 fn key_str(key_path: &Path) -> String {
     key_path
@@ -280,6 +292,14 @@ pub struct RadioProcesses {
     stats_rx: Option<WfbProcess>,
     /// The task reading the stats RX stdout into the shared `LinkStats`.
     stats_reader: Option<tokio::task::JoinHandle<()>>,
+    /// The interface + key + current data-plane FEC/MCS, retained so a single
+    /// data-tx process can be respawned with new tunables without touching the
+    /// control planes (an adaptive FEC/MCS change restarts only the data plane).
+    iface: String,
+    tx_key_path: PathBuf,
+    data_fec_k: u8,
+    data_fec_n: u8,
+    data_mcs_index: u8,
 }
 
 impl RadioProcesses {
@@ -320,12 +340,109 @@ impl RadioProcesses {
             rx_control,
             stats_rx,
             stats_reader,
+            iface: iface.to_string(),
+            tx_key_path: key_path.to_path_buf(),
+            data_fec_k: cfg.fec_k,
+            data_fec_n: cfg.fec_n,
+            data_mcs_index: cfg.mcs_index,
         })
     }
 
     /// The data-plane PID, for the Rule-37 TX watchdog.
     pub fn data_tx_pid(&self) -> Option<u32> {
         self.data_tx.pid()
+    }
+
+    /// The data plane's currently-running Reed-Solomon `(k, n)` ratio.
+    pub fn data_fec(&self) -> (u8, u8) {
+        (self.data_fec_k, self.data_fec_n)
+    }
+
+    /// The data plane's currently-running MCS index.
+    pub fn data_mcs(&self) -> u8 {
+        self.data_mcs_index
+    }
+
+    /// Apply a new Reed-Solomon `(k, n)` ratio to the live data plane.
+    ///
+    /// `wfb_tx` has no runtime FEC knob, so the only correct application is to
+    /// kill the data-tx process and respawn it with the new `-k`/`-n` args. The
+    /// two control planes and the stats RX carry their own fixed FEC and are
+    /// left running, so an FEC change does not interrupt HopAnnounce/HopAck or
+    /// the link-quality stream. Returns `false` on an invalid ratio or a respawn
+    /// failure; on a respawn failure the previous data tunables are restored in
+    /// the retained state so a later respawn does not silently keep the rejected
+    /// values, and the data plane is left dead for the supervisor to restart the
+    /// whole group (the same fail-safe path the watchdog kills take). A no-op
+    /// when the ratio already matches the running data plane.
+    pub async fn set_fec(&mut self, fec_k: u8, fec_n: u8) -> bool {
+        if !fec_ratio_valid(fec_k, fec_n) {
+            tracing::warn!(k = fec_k, n = fec_n, "set_fec_invalid");
+            return false;
+        }
+        if fec_k == self.data_fec_k && fec_n == self.data_fec_n {
+            return true;
+        }
+        let old_k = self.data_fec_k;
+        let old_n = self.data_fec_n;
+        self.data_fec_k = fec_k;
+        self.data_fec_n = fec_n;
+        if self.respawn_data_tx().await {
+            tracing::info!(k = fec_k, n = fec_n, "set_fec_applied");
+            true
+        } else {
+            self.data_fec_k = old_k;
+            self.data_fec_n = old_n;
+            tracing::warn!(k = fec_k, n = fec_n, "set_fec_respawn_failed");
+            false
+        }
+    }
+
+    /// Apply a new MCS index to the live data plane (same restart-on-change path
+    /// as [`set_fec`](Self::set_fec)). The accepted range is 0..=7 (the
+    /// RTL8812EU VHT80 range); `wfb_tx` rejects anything wider. A no-op when the
+    /// index already matches the running data plane.
+    pub async fn set_mcs(&mut self, mcs: u8) -> bool {
+        if !mcs_index_valid(mcs) {
+            tracing::warn!(mcs, "set_mcs_out_of_range");
+            return false;
+        }
+        if mcs == self.data_mcs_index {
+            return true;
+        }
+        let old_mcs = self.data_mcs_index;
+        self.data_mcs_index = mcs;
+        if self.respawn_data_tx().await {
+            tracing::info!(mcs, "set_mcs_applied");
+            true
+        } else {
+            self.data_mcs_index = old_mcs;
+            tracing::warn!(mcs, "set_mcs_respawn_failed");
+            false
+        }
+    }
+
+    /// Kill ONLY the data-tx process and respawn it from the retained iface/key
+    /// and current data tunables. Leaves the control planes + stats RX running.
+    /// Returns `false` if the respawn fails (the data plane is then dead).
+    async fn respawn_data_tx(&mut self) -> bool {
+        let cfg = WfbConfig {
+            fec_k: self.data_fec_k,
+            fec_n: self.data_fec_n,
+            mcs_index: self.data_mcs_index,
+            ..WfbConfig::default()
+        };
+        self.data_tx.kill().await;
+        match WfbProcess::spawn_data_tx(&self.iface, &cfg, &self.tx_key_path).await {
+            Ok(p) => {
+                self.data_tx = p;
+                true
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "data_tx_respawn_failed");
+                false
+            }
+        }
     }
 
     /// Kill every process group + stop the stats reader.
@@ -444,6 +561,48 @@ mod tests {
                 "wlan1"
             ]
         );
+    }
+
+    #[test]
+    fn fec_ratio_guard_matches_python() {
+        // Valid: positive k with at least one parity shard.
+        assert!(fec_ratio_valid(8, 12));
+        assert!(fec_ratio_valid(8, 10));
+        assert!(fec_ratio_valid(1, 2));
+        // k = 0 is rejected (mirrors `fec_k <= 0`).
+        assert!(!fec_ratio_valid(0, 4));
+        // n <= k is rejected (no parity shards).
+        assert!(!fec_ratio_valid(8, 8));
+        assert!(!fec_ratio_valid(8, 4));
+    }
+
+    #[test]
+    fn mcs_guard_accepts_0_through_7() {
+        for mcs in 0..=7u8 {
+            assert!(mcs_index_valid(mcs), "mcs {mcs} should be valid");
+        }
+        assert!(!mcs_index_valid(8));
+        assert!(!mcs_index_valid(255));
+    }
+
+    #[test]
+    fn data_tx_args_track_set_fec_inputs() {
+        // The data-tx args must carry whatever (k, n, mcs) trio is asked for, so
+        // a respawn after set_fec/set_mcs injects the new tunables. This proves
+        // the arg wiring the respawn relies on, without spawning a process.
+        let cfg = WfbConfig {
+            fec_k: 8,
+            fec_n: 10,
+            mcs_index: 5,
+            ..WfbConfig::default()
+        };
+        let a = data_tx_args("wlan1", &cfg, Path::new("/etc/ados/wfb/tx.key"));
+        let k = a[a.iter().position(|x| x == "-k").unwrap() + 1].clone();
+        let n = a[a.iter().position(|x| x == "-n").unwrap() + 1].clone();
+        let m = a[a.iter().position(|x| x == "-M").unwrap() + 1].clone();
+        assert_eq!(k, "8");
+        assert_eq!(n, "10");
+        assert_eq!(m, "5");
     }
 
     #[test]

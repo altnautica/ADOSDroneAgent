@@ -84,10 +84,43 @@ fn read_device_id() -> String {
         .unwrap_or_default()
 }
 
+/// Cap on the hop-history ring (matches the Python listener's 32-entry trim).
+const HOP_HISTORY_CAP: usize = 32;
+
+/// One recorded GS-side channel-follow event for the hop-supervisor snapshot.
+/// Shape matches the Python `HopListener` history entry exactly: `at` (wall
+/// unix), `from`/`to` channel numbers, the `trigger` label, and the `ok` flag.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct HopFollowEntry {
+    pub at: f64,
+    pub from: u8,
+    pub to: u8,
+    pub trigger: String,
+    pub ok: bool,
+}
+
+/// The GS-side hop-supervisor snapshot, byte-shaped like the Python
+/// `HopListener.snapshot()` so a reader (REST + the on-box channel-hops page)
+/// sees the same JSON whichever language drove the receive plane. The drone-only
+/// threshold fields are `null` on the listener side; `source` is `"listener"`.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct HopSnapshot {
+    pub enabled: bool,
+    pub band: String,
+    pub hop_period_seconds: Option<f64>,
+    pub loss_threshold_percent: Option<f64>,
+    pub rssi_threshold_dbm: Option<f64>,
+    pub last_hop_at: f64,
+    pub history: Vec<HopFollowEntry>,
+    pub source: &'static str,
+}
+
 /// Decoded peer-presence cache, shared between the listener (writer) and the
 /// watchdog (reader). Mirrors the Python `HopListener.get_peer_presence`
 /// surface: `peer_channel` + `peer_last_seen_unix` are the two fields the
-/// watchdog consumes.
+/// watchdog consumes. The hop-follow history ring + `last_hop_at` mirror the
+/// Python listener's snapshot surface so the receive plane can export
+/// `hop-supervisor.json` from the same cache the listener already owns.
 #[derive(Debug, Default)]
 struct PeerState {
     peer_device_id: Option<String>,
@@ -95,6 +128,13 @@ struct PeerState {
     peer_channel: Option<u8>,
     peer_rssi_dbm: Option<i8>,
     peer_last_seen_unix: Option<f64>,
+    /// Channel-follow history: a new entry lands each time the peer announces a
+    /// channel that differs from where the receiver last followed it, mirroring
+    /// the Python listener's `hop_listener_followed_peer_channel`. Trimmed to the
+    /// last `HOP_HISTORY_CAP` entries.
+    hop_history: Vec<HopFollowEntry>,
+    /// Wall-clock unix of the last recorded follow (0.0 until the first).
+    last_hop_at: f64,
 }
 
 /// Thread-safe presence cache. Implements the watchdog's `PresenceCache` so it
@@ -110,13 +150,55 @@ impl GsPresenceCache {
     }
 
     /// Record a verified inbound beacon (writer side, from the listener).
+    ///
+    /// When the announced channel differs from where the receiver last followed
+    /// the peer, a channel-follow entry is appended to the hop history ring (the
+    /// GS-side equivalent of an actuated hop: the receiver tracks the channel the
+    /// transmitter advertises). The ring is trimmed to the last `HOP_HISTORY_CAP`
+    /// entries, matching the Python listener.
     fn record_peer(&self, device_id: String, role: String, channel: u8, rssi_dbm: i8) {
         let mut s = self.inner.lock().unwrap();
+        let prev_channel = s.peer_channel;
         s.peer_device_id = Some(device_id);
         s.peer_role = Some(role);
         s.peer_channel = Some(channel);
         s.peer_rssi_dbm = Some(rssi_dbm);
-        s.peer_last_seen_unix = Some(now_unix());
+        let now = now_unix();
+        s.peer_last_seen_unix = Some(now);
+        if prev_channel != Some(channel) {
+            s.hop_history.push(HopFollowEntry {
+                at: now,
+                // The first beacon has no prior channel; record 0 (the Python
+                // listener uses 0 for an unknown `from`).
+                from: prev_channel.unwrap_or(0),
+                to: channel,
+                trigger: "periodic".to_string(),
+                ok: true,
+            });
+            if s.hop_history.len() > HOP_HISTORY_CAP {
+                let trim = s.hop_history.len() - HOP_HISTORY_CAP;
+                s.hop_history.drain(0..trim);
+            }
+            s.last_hop_at = now;
+        }
+    }
+
+    /// The hop-supervisor snapshot in the Python `HopListener.snapshot()` shape.
+    /// `band` is the configured radio band the receive plane is sweeping; the
+    /// drone-only thresholds are `null` on the listener side and `source` is
+    /// `"listener"`.
+    pub fn hop_snapshot(&self, band: &str) -> HopSnapshot {
+        let s = self.inner.lock().unwrap();
+        HopSnapshot {
+            enabled: true,
+            band: band.to_string(),
+            hop_period_seconds: None,
+            loss_threshold_percent: None,
+            rssi_threshold_dbm: None,
+            last_hop_at: s.last_hop_at,
+            history: s.hop_history.clone(),
+            source: "listener",
+        }
     }
 
     /// The peer's last announced channel (the watchdog's beacon-guided hint).
@@ -215,6 +297,44 @@ pub async fn listen_loop(cache: GsPresenceCache) -> std::io::Result<()> {
     }
 }
 
+/// Hop-supervisor snapshot persist cadence (5 s, matching the Python listener:
+/// the GCS chart polls at 1 Hz but does not need sub-second hop-history
+/// freshness).
+pub const HOP_PERSIST_CADENCE: Duration = Duration::from_secs(5);
+
+/// Build the hop-supervisor JSON payload from a snapshot, stamping
+/// `wall_time_unix` so a cross-process reader can age the file. Pure so the
+/// shape is unit-testable without the filesystem; mirrors the Python
+/// `_persist_snapshot` payload (the snapshot dict plus `wall_time_unix`).
+pub fn hop_supervisor_payload(snap: &HopSnapshot) -> serde_json::Value {
+    let mut v = serde_json::to_value(snap).unwrap_or_else(|_| serde_json::json!({}));
+    if let Some(obj) = v.as_object_mut() {
+        obj.insert("wall_time_unix".to_string(), serde_json::json!(now_unix()));
+    }
+    v
+}
+
+/// Persist the GS-side hop-supervisor snapshot to `/run/ados/hop-supervisor.json`
+/// on the `HOP_PERSIST_CADENCE`, sourcing the hop-follow history from the shared
+/// presence cache. Writes one immediate snapshot on entry (so the on-box
+/// channel-hops page reads a valid file before the first beacon) and one every
+/// cadence tick thereafter. The drone supervisor and the GS listener both target
+/// this single file; a given rig runs only one of them so there is no
+/// contention. Best-effort: an I/O error is logged and the loop continues.
+/// Returns only on task cancellation.
+pub async fn hop_supervisor_persist_loop(cache: GsPresenceCache, band: String) {
+    use std::path::Path;
+    let path = Path::new(crate::paths::HOP_SUPERVISOR_JSON);
+    loop {
+        let snap = cache.hop_snapshot(&band);
+        let payload = hop_supervisor_payload(&snap);
+        if let Err(e) = crate::sidecars::write_json_atomic(path, &payload, 0o644) {
+            tracing::debug!(error = %e, "ground_hop_supervisor_persist_failed");
+        }
+        tokio::time::sleep(HOP_PERSIST_CADENCE).await;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -262,6 +382,76 @@ mod tests {
         assert!((0.0..5.0).contains(&age), "age {age} not fresh");
         // Fresh within the watchdog's 30 s window → peer_present() true.
         assert!(cache.peer_present());
+    }
+
+    #[test]
+    fn hop_snapshot_shape_matches_listener_keys() {
+        // An untouched cache snapshots an empty, valid listener shape: source
+        // "listener", thresholds null, history empty, last_hop_at 0.
+        let cache = GsPresenceCache::new();
+        let snap = cache.hop_snapshot("u-nii-3");
+        assert!(snap.enabled);
+        assert_eq!(snap.band, "u-nii-3");
+        assert!(snap.hop_period_seconds.is_none());
+        assert!(snap.loss_threshold_percent.is_none());
+        assert!(snap.rssi_threshold_dbm.is_none());
+        assert_eq!(snap.last_hop_at, 0.0);
+        assert!(snap.history.is_empty());
+        assert_eq!(snap.source, "listener");
+
+        // The serialized payload carries the wall_time_unix stamp + null
+        // thresholds (the JSON shape a cross-process reader sees).
+        let v = hop_supervisor_payload(&snap);
+        assert_eq!(v["source"], "listener");
+        assert_eq!(v["enabled"], true);
+        assert_eq!(v["band"], "u-nii-3");
+        assert!(v["hop_period_seconds"].is_null());
+        assert!(v["loss_threshold_percent"].is_null());
+        assert!(v["rssi_threshold_dbm"].is_null());
+        assert!(v["history"].as_array().unwrap().is_empty());
+        assert!(v["wall_time_unix"].as_f64().unwrap() > 0.0);
+    }
+
+    #[test]
+    fn record_peer_appends_a_follow_entry_only_on_channel_change() {
+        let cache = GsPresenceCache::new();
+        // First beacon: a follow from 0 (unknown prior) to 157.
+        cache.record_peer("drone-1".into(), "drone".into(), 157, -50);
+        let s = cache.hop_snapshot("u-nii-3");
+        assert_eq!(s.history.len(), 1);
+        assert_eq!(s.history[0].from, 0);
+        assert_eq!(s.history[0].to, 157);
+        assert_eq!(s.history[0].trigger, "periodic");
+        assert!(s.history[0].ok);
+        assert!(s.last_hop_at > 0.0);
+
+        // Same channel again: no new entry.
+        cache.record_peer("drone-1".into(), "drone".into(), 157, -47);
+        assert_eq!(cache.hop_snapshot("u-nii-3").history.len(), 1);
+
+        // New channel: a follow from 157 to 149.
+        cache.record_peer("drone-1".into(), "drone".into(), 149, -45);
+        let s = cache.hop_snapshot("u-nii-3");
+        assert_eq!(s.history.len(), 2);
+        assert_eq!(s.history[1].from, 157);
+        assert_eq!(s.history[1].to, 149);
+    }
+
+    #[test]
+    fn hop_history_is_capped_at_thirty_two() {
+        let cache = GsPresenceCache::new();
+        // Alternate between two channels so every beacon is a change; drive well
+        // past the 32-entry cap and confirm only the last 32 survive.
+        for i in 0..50u8 {
+            let ch = if i % 2 == 0 { 149 } else { 153 };
+            cache.record_peer("drone-1".into(), "drone".into(), ch, -50);
+        }
+        let s = cache.hop_snapshot("u-nii-3");
+        assert_eq!(s.history.len(), HOP_HISTORY_CAP);
+        // The last recorded channel is the most recent `to`.
+        let last = s.history.last().unwrap();
+        let expected_last = if 49 % 2 == 0 { 149 } else { 153 };
+        assert_eq!(last.to, expected_last);
     }
 
     #[tokio::test]

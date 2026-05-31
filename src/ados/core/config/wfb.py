@@ -15,13 +15,17 @@ class WfbConfig(BaseModel):
     # essentially every regulatory domain, unlike U-NII-1 (36-48) which
     # many domains disable for injection.
     channel: int = 149
-    # Optional regulatory domain applied via ``iw reg set`` on both rigs
-    # at WFB bring-up so the drone and ground enable the same channel
-    # set. None (default) leaves the kernel's current domain untouched;
-    # the home channel works without forcing it. Set a country code
-    # (e.g. "US") to unlock more channels for hopping where legal. The
-    # operator is responsible for setting a value legal in their region.
-    reg_domain: str | None = None
+    # Regulatory domain applied via ``iw reg set`` on both rigs BEFORE the
+    # radio comes up in monitor mode, so the drone and ground enable the
+    # same channel set at usable TX power. Defaults to a domain that
+    # permits the home channel (149, U-NII-3 / 5745 MHz, non-DFS) at full
+    # power; the kernel's startup domain (or a country IE pushed by an
+    # associated management WiFi) can otherwise forbid 5745 and cap TX to
+    # the -100 dBm "not permitted" sentinel. Operators in a region where
+    # this channel needs a different code set their own (e.g.
+    # ``video.wfb.reg_domain: 'DE'``); the kernel then maps whatever that
+    # domain allows. A None/empty value falls back to the same default.
+    reg_domain: str | None = "US"
     # TX power in dBm. RTL8812EU + USB host VBUS topology browns out
     # the dongle above ~18 dBm sustained. Default is the floor for
     # bench bring-up; raise via PUT /api/wfb/tx-power once the link is

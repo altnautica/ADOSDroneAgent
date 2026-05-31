@@ -45,6 +45,36 @@ def _read_install_result() -> dict | None:
     return data if isinstance(data, dict) else None
 
 
+# A radio stats sidecar older than this is treated as not-present: a
+# stopped radio service must never have its last snapshot reported as a
+# live link. Matches the staleness window the API surface applies.
+_WFB_STATS_FRESH_S = 10.0
+
+
+def _read_wfb_stats_sidecar() -> dict | None:
+    """Read the radio service's stats sidecar when it exists and is fresh.
+
+    The drone-side radio runs as its own unit, so the heartbeat reads the
+    link snapshot it mirrors to ``/run/ados/wfb-stats.json`` instead of an
+    in-process manager. The file carries the same key names as
+    ``WfbManager.get_status()`` so the radio block is identical whichever
+    process produced it. ``None`` on a missing, stale, or unreadable file.
+    """
+    from ados.core.paths import WFB_STATS_JSON
+
+    try:
+        age_s = time.time() - WFB_STATS_JSON.stat().st_mtime
+    except OSError:
+        return None
+    if age_s > _WFB_STATS_FRESH_S:
+        return None
+    try:
+        data = json.loads(WFB_STATS_JSON.read_text())
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
 def _wfb_module_source_from_modinfo() -> str | None:
     """Authoritative radio-module source from the loaded module's path.
 
@@ -433,8 +463,13 @@ def build_heartbeat_payload(app: AgentApp) -> dict:  # noqa: C901
     except Exception:
         pass
 
-    # Forward-compatible radio link block — sourced from
-    # the in-process WfbManager directly when present.
+    # Forward-compatible radio link block — sourced from the in-process
+    # WfbManager when present (demo path), otherwise from the radio
+    # service's cross-process stats sidecar. The radio runs as its own
+    # unit on the drone profile, so a missing in-process manager is the
+    # normal case there; the sidecar carries the same key names as
+    # get_status() so the block is identical either way. A stale sidecar
+    # (> 10 s) is dropped so a stopped radio never reads as live.
     from ados.core.radio_block import build_radio_block
     wfb = getattr(app, "_wfb_manager", None)
     wfb_status: dict | None = None
@@ -443,6 +478,8 @@ def build_heartbeat_payload(app: AgentApp) -> dict:  # noqa: C901
             wfb_status = wfb.get_status()
         except Exception:
             wfb_status = None
+    if wfb_status is None:
+        wfb_status = _read_wfb_stats_sidecar()
     payload["radio"] = build_radio_block(wfb_status)
 
     # Top-level radio-adapter selection verdict. Mirrors the same two

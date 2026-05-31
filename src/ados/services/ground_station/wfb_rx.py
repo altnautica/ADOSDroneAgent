@@ -34,6 +34,7 @@ from ados.core.config import load_config
 from ados.core.logging import configure_logging, get_logger
 from ados.core.paths import WFB_KEY_DIR
 from ados.services.wfb.adapter import (
+    DEFAULT_REG_DOMAIN,
     detect_wfb_adapters,
     enabled_channels,
     select_wfb_interface,
@@ -1306,6 +1307,19 @@ class WfbRxManager:
 
             self._state = LinkState.CONNECTING
 
+            # Apply the regulatory domain FIRST, before detect_adapter()
+            # probes monitor mode. The kernel maps the permitted channel
+            # set and per-channel TX-power ceiling at monitor-mode
+            # bring-up, so a domain set afterwards is too late and leaves
+            # the home channel (149, 5745 MHz) capped to the startup
+            # domain's limits. iw reg set is a global per-phy call, so it
+            # needs no interface; the receiver enables the same channel
+            # set as the drone. A None/empty config value falls back to
+            # the safe default.
+            reg_domain = getattr(self._config, "reg_domain", None) or DEFAULT_REG_DOMAIN
+            if not set_regulatory_domain(reg_domain):
+                log.warning("ground_wfb_reg_domain_not_applied", domain=reg_domain)
+
             interface = self.detect_adapter()
             if not interface:
                 log.warning("ground_no_wfb_adapter_found")
@@ -1322,20 +1336,9 @@ class WfbRxManager:
 
             self._interface = interface
 
-            # Apply the regulatory domain once when the operator pinned
-            # one, so the receiver enables the same channel set as the
-            # drone. Best-effort: a failure is logged and the home
-            # channel still works on whatever the kernel allows. iw reg
-            # set is a global (per-phy) call, applied here once the
-            # interface is known.
-            reg_domain = getattr(self._config, "reg_domain", None)
-            if reg_domain:
-                if not set_regulatory_domain(reg_domain):
-                    log.warning(
-                        "ground_wfb_reg_domain_not_applied",
-                        interface=interface,
-                        domain=reg_domain,
-                    )
+            # (Regulatory domain was applied above, before detect_adapter()
+            # probed monitor mode, so the receiver enables the same channel
+            # set the drone transmits on.)
 
             # Monitor mode was already set + proven by detect_adapter()
             # for the auto-selected path as part of candidate iteration.

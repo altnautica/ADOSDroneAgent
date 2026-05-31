@@ -284,6 +284,18 @@ impl HopState {
             .unwrap_or(false)
     }
 
+    /// True if a peer beacon was decoded within the last `secs` seconds.
+    ///
+    /// Used to skip the periodic `iw scan` while the link is healthy: the scan
+    /// locks the radio for several seconds and drops `wfb_tx` frames, so when the
+    /// control plane heard the peer recently the rescan is pure waste. `false`
+    /// when no peer has ever been seen.
+    pub fn peer_fresh_within(&self, secs: f64) -> bool {
+        self.peer_last_seen
+            .map(|t| t.elapsed().as_secs_f64() < secs)
+            .unwrap_or(false)
+    }
+
     /// True if a periodic hop is allowed (link established, peer fresh <60s,
     /// 30s reactive cooldown met).
     pub fn can_hop(&self) -> bool {
@@ -489,6 +501,19 @@ mod tests {
         state.peer_last_seen = Some(Instant::now() - Duration::from_secs(30));
         state.channel = 149; // already home
         assert!(!state.should_return_home());
+    }
+
+    #[test]
+    fn peer_fresh_within_window() {
+        let mut state = HopState::new(149);
+        // No peer ever seen → never fresh.
+        assert!(!state.peer_fresh_within(60.0));
+        // A peer seen just now is fresh within 60s.
+        state.on_peer_seen();
+        assert!(state.peer_fresh_within(60.0));
+        // A peer seen 90s ago is NOT fresh within 60s.
+        state.peer_last_seen = Some(Instant::now() - Duration::from_secs(90));
+        assert!(!state.peer_fresh_within(60.0));
     }
 
     #[test]

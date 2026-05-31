@@ -389,6 +389,48 @@ fn provision_overlays(ctx: &Ctx, source: Option<&Path>) {
     }
 }
 
+/// Operator-facing note explaining how to revert the radio services to the
+/// packaged Python implementations. Deployed at `/etc/ados/CUTOVER`.
+const CUTOVER_NOTE_PATH: &str = "/etc/ados/CUTOVER";
+
+/// The body of the CUTOVER note (pure). The WFB services now run the native
+/// binaries by default; the Python implementations stay installed only as an
+/// emergency fallback behind a flag file. The note tells an operator exactly how
+/// to flip back per service group.
+pub fn cutover_note_body() -> &'static str {
+    "ADOS radio services run the native binaries by default.\n\
+\n\
+The packaged Python implementations are still installed as an emergency\n\
+fallback. To revert a service group to Python, create its fallback flag and\n\
+restart the unit:\n\
+\n\
+  # Drone-side WFB transmitter\n\
+  touch /etc/ados/wfb-python-fallback\n\
+  systemctl restart ados-wfb\n\
+\n\
+  # Ground-station receive / relay / receiver plane\n\
+  touch /etc/ados/groundlink-python-fallback\n\
+  systemctl restart ados-wfb-rx ados-wfb-relay ados-wfb-receiver\n\
+\n\
+Remove the flag file and restart the unit to return to the native binary.\n"
+}
+
+/// Deploy the operator CUTOVER note at `/etc/ados/CUTOVER`. Idempotent overwrite
+/// — the text is stable across reinstalls. Best-effort: a write failure only
+/// loses the note, it never aborts the install.
+fn write_cutover_note() {
+    let path = Path::new(CUTOVER_NOTE_PATH);
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Err(e) = std::fs::write(path, cutover_note_body()) {
+        tracing::warn!(error = %e, "writing CUTOVER note failed");
+        return;
+    }
+    set_mode(path, 0o644);
+    tracing::info!("radio cutover note written");
+}
+
 /// Plugin trust keys dir under /etc/ados.
 const PLUGIN_KEYS_DIR: &str = "/etc/ados/plugin-keys";
 /// Peripheral seed manifests dir under /etc/ados.
@@ -555,6 +597,10 @@ impl Step for ConfigIdentity {
         provision_plugin_keys(source.as_deref());
         seed_default_peripherals(source.as_deref());
 
+        // 7. Deploy the operator note describing how to revert the radio
+        //    services to the packaged Python fallback.
+        write_cutover_note();
+
         StepOutcome::Ok
     }
 }
@@ -634,6 +680,24 @@ mod tests {
         let body = pairing_json("abcd-1234", 1700000000);
         assert!(body.contains("\"pairing_code\": \"ABCD-1234\""));
         assert!(body.contains("\"code_created_at\": 1700000000"));
+    }
+
+    #[test]
+    fn cutover_note_names_both_fallback_flags_and_their_units() {
+        let body = cutover_note_body();
+        // The drone-side flag + its unit.
+        assert!(body.contains("/etc/ados/wfb-python-fallback"));
+        assert!(body.contains("systemctl restart ados-wfb"));
+        // The ground-station flag + the three receive-plane units.
+        assert!(body.contains("/etc/ados/groundlink-python-fallback"));
+        assert!(body.contains("ados-wfb-rx"));
+        assert!(body.contains("ados-wfb-relay"));
+        assert!(body.contains("ados-wfb-receiver"));
+        // It must state the native binaries are the default.
+        assert!(body.to_lowercase().contains("native"));
+        assert!(body.to_lowercase().contains("default"));
+        // No stale rust-enabled opt-in flag should leak into the operator note.
+        assert!(!body.contains("rust-enabled"));
     }
 
     #[test]

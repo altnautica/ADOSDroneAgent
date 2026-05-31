@@ -141,85 +141,22 @@ async def register_services(app: AgentApp) -> None:  # noqa: C901
         app._video_pipeline = VideoPipeline(app.config.video)
         app._start_service("video-pipeline", app._video_pipeline.run())
 
-    # Start WFB-ng Link Manager
+    # WFB-ng radio link.
+    #
+    # The drone-side transmit chain — adapter selection + monitor mode,
+    # the wfb_tx/wfb_rx process group, the TX-health + video-recvq
+    # watchdogs, the frequency-hop loop, the adaptive bitrate/FEC
+    # controller — runs as its own systemd unit (a compiled binary), not
+    # an in-process asyncio task. So the agent process spawns nothing for
+    # the real radio here; the API + heartbeat read the link snapshot
+    # cross-process from /run/ados/wfb-stats.json instead.
+    #
+    # Demo mode is orthogonal: it has no real radio to own, so it keeps
+    # its in-process synthetic manager that writes the same stats sidecar.
     if app.demo:
         from ados.services.wfb.demo import DemoWfbManager
         app._wfb_manager = DemoWfbManager()
         app._start_service("wfb-link", app._wfb_manager.run())
-    else:
-        from ados.services.wfb.manager import WfbManager
-        app._wfb_manager = WfbManager(app.config.video.wfb)
-        app._start_service("wfb-link", app._wfb_manager.run())
-
-        # Closed-loop video bitrate + FEC controller. Reads link
-        # quality off the wfb manager's LinkQualityMonitor and
-        # drives the four-tier ladder via wfb.set_fec +
-        # video_pipeline.set_video_bitrate. Disabled by default
-        # (WfbConfig.adaptive_bitrate_enabled = False); the
-        # controller still runs so its diagnostics surface is
-        # populated for /api/video/config consumers.
-        try:
-            from ados.services.video.bitrate_controller import (
-                BitrateController,
-            )
-            pipeline = app._video_pipeline
-            wfb = app._wfb_manager
-            app._bitrate_controller = BitrateController(
-                link_quality_monitor=wfb.monitor,
-                set_fec=wfb.set_fec,
-                set_bitrate=pipeline.set_video_bitrate,
-                enabled=app.config.video.wfb.adaptive_bitrate_enabled,
-            )
-            app._start_service(
-                "bitrate-controller",
-                app._bitrate_controller.run(),
-            )
-        except AttributeError as exc:
-            # WfbManager.monitor or .set_fec missing on a demo
-            # build path. The controller is opt-in so we just
-            # log and skip; the rest of the agent comes up clean.
-            log.warning("bitrate_controller_wire_skipped", error=str(exc))
-
-        # Coordinated frequency-hopping supervisor (drone side).
-        # The GS-side listener spawns inside the wfb_rx service
-        # when the ground-station profile is active. Both are
-        # gated on auto_hop_enabled so a fixed-frequency
-        # deployment opts out by flipping a single flag.
-        agent_profile = getattr(
-            getattr(app.config, "agent", None), "profile", "auto"
-        )
-        wfb_cfg = app.config.video.wfb
-        if (
-            agent_profile != "ground_station"
-            and getattr(wfb_cfg, "auto_hop_enabled", True)
-        ):
-            try:
-                from ados.services.wfb.hop_supervisor import (
-                    HopSupervisor,
-                )
-                app._hop_supervisor = HopSupervisor(
-                    wfb_manager=app._wfb_manager,
-                    link_quality_monitor=app._wfb_manager.monitor,
-                    band=getattr(wfb_cfg, "band", "u-nii-1"),
-                    hop_period_seconds=int(
-                        getattr(wfb_cfg, "hop_period_seconds", 60)
-                    ),
-                    loss_threshold_percent=float(
-                        getattr(wfb_cfg, "hop_loss_threshold_percent", 10.0)
-                    ),
-                    rssi_threshold_dbm=float(
-                        getattr(wfb_cfg, "hop_rssi_threshold_dbm", -75.0)
-                    ),
-                    enabled=True,
-                )
-                app._start_service(
-                    "hop-supervisor",
-                    app._hop_supervisor.run(),
-                )
-            except Exception as exc:  # noqa: BLE001
-                log.warning(
-                    "hop_supervisor_wire_skipped", error=str(exc)
-                )
 
     # Start Scripting Engine
     if app.demo:

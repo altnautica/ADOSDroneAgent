@@ -14,9 +14,15 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from ados.api.deps import get_agent_app
-from ados.core.paths import CONFIG_YAML
-from ados.services.wfb.auto_pair import FAILOVER_STATE_PATH
+from ados.core.paths import CONFIG_YAML, WFB_FAILOVER_STATE_JSON
 from ados.services.wfb.channel import STANDARD_CHANNELS, get_channel
+
+# Local-bind to cloud-relay failover sidecar, written by the always-on
+# auto-pair supervisor in a sibling process and read by
+# GET /api/wfb/pair/failover-status below. The module-level alias keeps
+# the path patchable in tests and decouples this route from the
+# supervisor module's lifecycle.
+FAILOVER_STATE_PATH = WFB_FAILOVER_STATE_JSON
 
 # HTTP-level cap on the local-bind endpoint. The bind rendezvous itself
 # is unbounded; this just prevents browsers and reverse proxies from

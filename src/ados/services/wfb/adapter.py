@@ -253,14 +253,19 @@ def _get_usb_id_for_interface(interface: str) -> tuple[int, int]:
     return (0, 0)
 
 
-def detect_wfb_adapters() -> list[WifiAdapterInfo]:
-    """Detect WiFi adapters suitable for WFB-ng.
+def detect_wfb_adapters_iw() -> list[WifiAdapterInfo]:
+    """Detect WiFi adapters suitable for WFB-ng via an in-process ``iw`` scan.
 
     On Linux, parses `iw dev` and `iw phy` to find interfaces that support
     monitor mode. Cross-references with USB device list to identify known
     WFB-ng compatible chipsets (RTL8812AU family and RTL8812EU).
 
     On macOS or other platforms, returns an empty list with a warning.
+
+    This is the permanent local-scan fallback. The public
+    ``detect_wfb_adapters`` (re-exported from :mod:`ados.services.wfb.adapter_probe`)
+    prefers the radio service's sidecar / one-shot scan and only reaches
+    here when neither is available.
     """
     system = platform.system()
     if system != "Linux":
@@ -610,13 +615,17 @@ def set_monitor_mode(interface: str) -> bool:
     return True
 
 
-def get_interface_mode(interface: str) -> str | None:
+def get_interface_mode_iw(interface: str) -> str | None:
     """Return the interface operating mode ("monitor" | "managed" | ...).
 
     Reads `iw <iface> info`. Used to VERIFY that set_monitor_mode actually
     took effect: a managed-mode iface cannot inject, so wfb_tx on it produces
     zero frames even though every command "succeeded". Returns None when the
     mode cannot be read.
+
+    In-process local read; the public ``get_interface_mode`` re-exported
+    from :mod:`ados.services.wfb.adapter_probe` prefers the radio
+    service's recorded mode and reaches here as the fallback.
     """
     if platform.system() != "Linux":
         return None
@@ -639,7 +648,7 @@ def get_interface_mode(interface: str) -> str | None:
     return None
 
 
-def enabled_channels(interface: str) -> set[int]:
+def enabled_channels_iw(interface: str) -> set[int]:
     """5 GHz channel numbers this adapter can actually use for the link.
 
     Parses `iw phy <phyN> channels` and keeps only channels that are not
@@ -648,6 +657,10 @@ def enabled_channels(interface: str) -> set[int]:
     so the air channel must be in the intersection of both sides' enabled
     sets; this exposes the local half of that intersection. Empty set means
     "could not determine"; callers should treat that as "do not restrict".
+
+    In-process local read; the public ``enabled_channels`` re-exported
+    from :mod:`ados.services.wfb.adapter_probe` prefers the radio
+    service's computed set and reaches here as the fallback.
     """
     if platform.system() != "Linux":
         return set()
@@ -689,18 +702,55 @@ def enabled_channels(interface: str) -> set[int]:
     return out
 
 
-def set_regulatory_domain(domain: str) -> bool:
-    """Apply a wifi regulatory domain via `iw reg set <domain>`.
+# Regulatory domain applied when none is configured. Enables the home
+# channel (149 / 5745 MHz, U-NII-3, non-DFS) at usable TX power. The
+# kernel's startup domain, or a country IE pushed by an associated
+# management WiFi (e.g. the onboard AIC8800), can otherwise forbid 5745
+# and cap TX to the -100 dBm "not permitted" sentinel, so the radio
+# injects zero frames while looking healthy. A config value
+# (video.wfb.reg_domain) overrides this with any country code.
+DEFAULT_REG_DOMAIN = "US"
 
-    Optional, opt-in (config `video.wfb.reg_domain`). When the drone and
-    ground run the same domain they enable the same channel set, which lets
-    hopping use U-NII-1 where legal. Left unset by default; the home channel
-    (149, U-NII-3) works without it. Best-effort: a failure is logged and the
-    link still runs on whatever channels the kernel allows.
+
+def _active_global_reg_domain() -> str | None:
+    """Return the global regulatory country from `iw reg get`, or None.
+
+    The first ``country XX:`` line in the output is the global domain; the
+    per-phy blocks (self-managed adapters) come after it. The injection phy
+    follows the global domain, so that is the one that matters here.
+    """
+    try:
+        got = subprocess.run(
+            ["iw", "reg", "get"], capture_output=True, text=True, timeout=5
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return None
+    for line in got.stdout.splitlines():
+        s = line.strip()
+        if s.startswith("country ") and len(s) >= 10:
+            return s[8:10].upper()
+    return None
+
+
+def set_regulatory_domain(domain: str) -> bool:
+    """Apply a wifi regulatory domain via `iw reg set <domain>` and verify it.
+
+    Must run BEFORE the interface is brought up in monitor mode: the kernel
+    maps the permitted channel set and per-channel TX-power ceiling when the
+    driver initialises, so a domain set afterwards is too late and leaves the
+    home channel (149, U-NII-3 / 5745 MHz) capped. Drone and ground run the
+    same domain so they share a channel set. Best-effort: a failure is logged
+    and the link runs on whatever the kernel currently allows.
+
+    `iw reg set` is asynchronous (the regdb lookup lands a beat later); this
+    polls `iw reg get` until the global country reflects the request, so the
+    caller can rely on the domain being live before it sets monitor mode,
+    channel, and TX power.
     """
     if platform.system() != "Linux":
         return False
     import re as _re
+    import time as _time
 
     dom = (domain or "").strip().upper()
     if not _re.fullmatch(r"[A-Z0-9]{2}", dom):
@@ -716,7 +766,17 @@ def set_regulatory_domain(domain: str) -> bool:
     if result.returncode != 0:
         log.warning("reg_domain_set_failed", domain=dom, stderr=result.stderr.strip())
         return False
-    log.info("reg_domain_set", domain=dom)
+    # Poll until the global domain reflects the request so monitor-mode
+    # bring-up sees the new channel set. ~2 s ceiling; the change is usually
+    # live within ~100-300 ms.
+    applied = False
+    deadline = _time.monotonic() + 2.0
+    while _time.monotonic() < deadline:
+        if _active_global_reg_domain() == dom:
+            applied = True
+            break
+        _time.sleep(0.1)
+    log.info("reg_domain_set", domain=dom, applied=applied)
     return True
 
 
@@ -824,3 +884,41 @@ def set_managed_mode(interface: str) -> bool:
 
     log.info("managed_mode_set", interface=interface)
     return True
+
+
+# ---------------------------------------------------------------------------
+# Read-seam re-exports.
+#
+# The drone-side WFB transmit service owns the live adapter facts (scan,
+# per-iface mode, regulatory channel set) from its own process. The
+# public read functions resolve those facts through the sidecar / one-shot
+# scan the service exposes and fall back to the in-process ``iw`` parse
+# above (``*_iw``). Re-exporting the probe versions under the historical
+# names keeps every ``from ados.services.wfb.adapter import …`` importer
+# working unchanged while the radio runs as its own unit.
+#
+# The probe imports these ``*_iw`` fallbacks lazily, so importing it here
+# at module scope does not create a circular import.
+# ---------------------------------------------------------------------------
+from ados.services.wfb.adapter_probe import (  # noqa: E402
+    detect_wfb_adapters,
+    enabled_channels,
+    get_interface_mode,
+)
+
+__all__ = [
+    "DEFAULT_REG_DOMAIN",
+    "WifiAdapterInfo",
+    "control_interface",
+    "detect_wfb_adapters",
+    "detect_wfb_adapters_iw",
+    "enabled_channels",
+    "enabled_channels_iw",
+    "get_interface_mode",
+    "get_interface_mode_iw",
+    "select_wfb_interface",
+    "set_managed_mode",
+    "set_monitor_mode",
+    "set_regulatory_domain",
+    "set_tx_power",
+]

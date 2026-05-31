@@ -23,6 +23,7 @@
 //! and the acquirer, writes the ground `wfb-stats.json` sidecar, and runs the
 //! stdout-silence zombie watchdog.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicI64, AtomicU32, Ordering};
 use std::sync::Arc;
@@ -31,6 +32,13 @@ use tokio::sync::Mutex;
 
 use ados_radio::config::WfbConfig;
 use ados_radio::link_quality::{LinkQualityMonitor, LinkStats};
+
+/// The safe default regulatory domain applied before monitor-mode bring-up when
+/// the config carries none. Matches the air side's `WfbConfig` default and the
+/// Python `DEFAULT_REG_DOMAIN`: U-NII-3 / channel 149 is permitted at usable TX
+/// power, so the home rendezvous channel is not capped to the kernel's startup
+/// domain (the -100 dBm "not permitted" sentinel).
+pub const DEFAULT_REG_DOMAIN: &str = "US";
 
 use crate::acquire::{ChannelAcquirer, ChannelSetter, ValidPacketCounter};
 use crate::presence::GsPresenceCache;
@@ -291,6 +299,11 @@ pub struct WfbRxManager {
     channel: u8,
     selected_chipset: Option<String>,
     adapter_injection_ok: bool,
+    /// The regulatory-permitted channel set for the receive interface, resolved
+    /// once `prepare_interface` has applied the domain + read the wiphy back.
+    /// Empty until then (and on a board where the set cannot be determined); the
+    /// acquirer treats an empty set as "do not restrict".
+    enabled_channels: BTreeSet<u8>,
 }
 
 impl WfbRxManager {
@@ -303,6 +316,7 @@ impl WfbRxManager {
             channel,
             selected_chipset: None,
             adapter_injection_ok: false,
+            enabled_channels: BTreeSet::new(),
         }
     }
 
@@ -314,12 +328,102 @@ impl WfbRxManager {
         self.channel
     }
 
+    /// The regulatory-permitted channel set resolved by `prepare_interface`.
+    /// Empty until that runs, or on a board where the wiphy channel list could
+    /// not be read.
+    pub fn enabled_channels(&self) -> &BTreeSet<u8> {
+        &self.enabled_channels
+    }
+
     /// Set the selected-adapter identity (the HAL detect path stays in Python;
     /// the run loop sets these when an adapter is chosen so the sidecar carries
     /// the same stranded-link signal the manager holds).
     pub fn set_adapter(&mut self, chipset: Option<String>, injection_ok: bool) {
         self.selected_chipset = chipset;
         self.adapter_injection_ok = injection_ok;
+    }
+
+    /// Bring `iface` to the receive-ready state BEFORE the wfb_rx spawn, in the
+    /// order the kernel requires:
+    ///
+    ///  1. **Regulatory domain first** (`iw reg set`). The kernel maps the
+    ///     permitted channel set and the per-channel TX-power ceiling when the
+    ///     driver initialises, so a domain set after monitor-mode bring-up is too
+    ///     late and leaves the home channel (149 / 5745 MHz) capped to the
+    ///     startup domain's limits — zero injected frames, the -100 dBm "not
+    ///     permitted" sentinel. This is a global per-phy call, so it needs no
+    ///     interface; an empty/None config value falls back to the safe default.
+    ///  2. **Monitor mode** on the interface. The interface comes from config on
+    ///     this path (adapter auto-detect stays in the permanent-Python seam), so
+    ///     it is the override case the Python `run()` re-asserts monitor mode for;
+    ///     `set_monitor_mode_verified` also guards the operator's control path so
+    ///     it can never sever the management link.
+    ///  3. **TX power** on the monitor interface. Without it the dongle runs at
+    ///     the driver default (~17-20 dBm) and risks brownout on a host-VBUS USB
+    ///     topology — the same guard the air side applies.
+    ///  4. **Channel set** to the rendezvous home. wfb_rx receives on whatever
+    ///     channel the netdev is set to; it does not retune itself.
+    ///
+    /// As a side effect it reads the wiphy's enabled channel set back so the
+    /// acquirer can intersect its sweep candidates with what this domain permits.
+    /// Best-effort throughout: a failed sub-step is logged and the receive chain
+    /// still spawns (the link may still come up on a permissive driver).
+    pub async fn prepare_interface(&mut self, iface: &str) {
+        // 1. Regulatory domain, before anything touches monitor mode.
+        let reg_domain = self
+            .config
+            .reg_domain
+            .clone()
+            .filter(|d| !d.is_empty())
+            .unwrap_or_else(|| DEFAULT_REG_DOMAIN.to_string());
+        ados_radio::adapter::set_reg_domain(&reg_domain).await;
+
+        // 2. Monitor mode on the config-supplied interface (the Python override
+        // path). 4× verify retry + the control-iface guard live in the helper.
+        if !ados_radio::adapter::set_monitor_mode_verified(iface, 4).await {
+            tracing::warn!(interface = iface, "ground_wfb_monitor_not_verified");
+        }
+
+        // 3. TX power, before the wfb_rx spawn.
+        if ados_radio::adapter::set_tx_power(iface, self.config.tx_power_dbm)
+            .await
+            .is_none()
+        {
+            tracing::warn!(
+                interface = iface,
+                requested = self.config.tx_power_dbm,
+                "ground_wfb_txpower_not_applied"
+            );
+        }
+
+        // 4. Tune the netdev to the rendezvous home channel.
+        if IwChannelSetter.set_channel(iface, self.channel).await {
+            tracing::info!(
+                interface = iface,
+                channel = self.channel,
+                "ground_wfb_channel_set"
+            );
+        } else {
+            tracing::warn!(
+                interface = iface,
+                channel = self.channel,
+                "ground_wfb_channel_set_failed"
+            );
+        }
+
+        // Read back the regulatory-permitted channel set for the acquirer to
+        // intersect its sweep against (an empty result means "could not
+        // determine", which the acquirer reads as "do not restrict").
+        self.enabled_channels = ados_radio::adapter::enabled_channels(iface).await;
+        if self.enabled_channels.is_empty() {
+            tracing::info!(interface = iface, "ground_wfb_enabled_channels_unknown");
+        } else {
+            tracing::info!(
+                interface = iface,
+                channels = ?self.enabled_channels,
+                "ground_wfb_enabled_channels"
+            );
+        }
     }
 
     /// Spawn the receive subprocesses for `iface` and return their handles. The
@@ -370,6 +474,16 @@ impl WfbRxManager {
         setter: Arc<dyn ChannelSetter>,
         hint: Arc<dyn LockedChannelHint>,
     ) -> ValidPacketWatchdog {
+        // Feed the regulatory-permitted channel set resolved by
+        // `prepare_interface` so the sweep skips channels this domain forbids
+        // (those fail `iw set channel` with -22 and waste a dwell). An empty set
+        // (board where it could not be read) is passed through as "do not
+        // restrict" by the acquirer.
+        let enabled = if self.enabled_channels.is_empty() {
+            None
+        } else {
+            Some(self.enabled_channels.clone())
+        };
         let acquirer = ChannelAcquirer::new(
             &self.interface,
             &self.config.band,
@@ -377,7 +491,7 @@ impl WfbRxManager {
             setter,
             crate::acquire::DWELL_SECONDS,
             crate::acquire::MAX_SWEEP_ROUNDS,
-            None,
+            enabled,
         );
         ValidPacketWatchdog::new(
             &self.interface,
@@ -546,6 +660,22 @@ mod tests {
         assert_eq!(a[k + 1], "1"); // light FEC k=1
         let m = a.iter().position(|x| x == "-M").unwrap();
         assert_eq!(a[m + 1], "3"); // mcs passed through
+    }
+
+    #[test]
+    fn default_reg_domain_matches_air_side() {
+        // The GS default regulatory domain must equal the air side's so both
+        // rigs enable the same channel set (the home channel 149 is permitted).
+        assert_eq!(DEFAULT_REG_DOMAIN, "US");
+        assert_eq!(DEFAULT_REG_DOMAIN, WfbConfig::default().reg_domain.unwrap());
+    }
+
+    #[test]
+    fn manager_enabled_channels_default_empty() {
+        // Until prepare_interface runs, the permitted set is empty (the acquirer
+        // reads empty as "do not restrict").
+        let m = WfbRxManager::new(WfbConfig::default());
+        assert!(m.enabled_channels().is_empty());
     }
 
     #[test]

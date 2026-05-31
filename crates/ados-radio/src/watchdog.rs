@@ -13,7 +13,10 @@
 //!    from `/proc/net/udp` every 5s. If the queue exceeds 256 KiB continuously
 //!    for 15s, `wfb_tx` is wedged reading from the socket — kill it.
 
+use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+use tokio::sync::Mutex;
 
 const POLL_INTERVAL: Duration = Duration::from_secs(5);
 const TX_SILENCE_THRESHOLD: Duration = Duration::from_secs(30);
@@ -30,12 +33,36 @@ struct TxSnapshot {
     udp_rx_queue: u64,
 }
 
+/// Watchdog kill/stall counters surfaced on `wfb-stats.json`. The heartbeat
+/// reads a shared handle to these on its 2 s cadence, so the GCS panel sees the
+/// same churn numbers the Python `get_status` reports. Names map directly:
+/// `tx_zombie_kills` ← the TX-health stall kills, `tx_video_stall_kills` ← the
+/// video receive-queue backlog kills, `tx_video_stalled` ← the live "the video
+/// queue is currently backed up" flag, `tx_video_recvq_bytes` ← the last
+/// observed UDP 5600 receive-queue depth.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct WatchdogCounters {
+    pub tx_zombie_kills: u64,
+    pub tx_video_stall_kills: u64,
+    pub tx_video_stalled: bool,
+    pub tx_video_recvq_bytes: u64,
+}
+
+/// Shared handle to the watchdog counters (mirrors the `LinkStats` share).
+pub type CounterHandle = Arc<Mutex<WatchdogCounters>>;
+
+/// Construct a fresh, zeroed counter handle.
+pub fn new_counters() -> CounterHandle {
+    Arc::new(Mutex::new(WatchdogCounters::default()))
+}
+
 /// Watch `wfb_tx` TX liveness. Returns when `wfb_tx` should be killed (the
 /// caller then kills it via `WfbTxProcess::kill()` and respawns).
 /// Also returns when `cancel` is notified.
 pub async fn tx_health_watchdog(
     iface: &str,
     pid: u32,
+    counters: CounterHandle,
     cancel: std::sync::Arc<tokio::sync::Notify>,
 ) -> WatchdogFired {
     let mut last_progress = Instant::now();
@@ -65,6 +92,9 @@ pub async fn tx_health_watchdog(
                     elapsed_s = last_progress.elapsed().as_secs(),
                     "wfb_tx_stalled_kill"
                 );
+                // A real TX stall while ingress feeds: count it before the
+                // caller respawns the radio group.
+                counters.lock().await.tx_zombie_kills += 1;
                 return WatchdogFired::TxStalled;
             } else {
                 // Upstream (video encoder) is silent — don't kill; just log.
@@ -84,8 +114,13 @@ pub async fn tx_health_watchdog(
 }
 
 /// Watch the UDP 5600 kernel receive queue. Returns when the queue has been
-/// sustained over 256 KiB for 15s (wfb_tx is not draining its socket).
-pub async fn video_recvq_watchdog(cancel: std::sync::Arc<tokio::sync::Notify>) -> WatchdogFired {
+/// sustained over 256 KiB for 15s (wfb_tx is not draining its socket). Updates
+/// the shared counters with the live `tx_video_stalled` flag, the last observed
+/// queue depth, and the stall-kill count on fire.
+pub async fn video_recvq_watchdog(
+    counters: CounterHandle,
+    cancel: std::sync::Arc<tokio::sync::Notify>,
+) -> WatchdogFired {
     let mut high_since: Option<Instant> = None;
 
     loop {
@@ -94,10 +129,18 @@ pub async fn video_recvq_watchdog(cancel: std::sync::Arc<tokio::sync::Notify>) -
             _ = cancel.notified() => return WatchdogFired::Cancelled,
         }
         let q = read_udp_recvq(5600).await.unwrap_or(0);
+        {
+            let mut c = counters.lock().await;
+            c.tx_video_recvq_bytes = q;
+            // The live "video queue currently backed up" flag, mirroring the
+            // Python `_tx_video_stalled` heartbeat field.
+            c.tx_video_stalled = q > RECVQ_BACKLOG_THRESHOLD_BYTES;
+        }
         if q > RECVQ_BACKLOG_THRESHOLD_BYTES {
             let since = high_since.get_or_insert_with(Instant::now);
             if since.elapsed() >= RECVQ_SUSTAINED_THRESHOLD {
                 tracing::warn!(queue_bytes = q, "wfb_tx_video_recvq_kill");
+                counters.lock().await.tx_video_stall_kills += 1;
                 return WatchdogFired::RecvqBacklog;
             }
         } else {
@@ -178,5 +221,25 @@ mod tests {
     #[test]
     fn recvq_sustained_threshold_is_15s() {
         assert_eq!(RECVQ_SUSTAINED_THRESHOLD.as_secs(), 15);
+    }
+
+    #[test]
+    fn fresh_counters_are_zeroed() {
+        let c = WatchdogCounters::default();
+        assert_eq!(c.tx_zombie_kills, 0);
+        assert_eq!(c.tx_video_stall_kills, 0);
+        assert_eq!(c.tx_video_recvq_bytes, 0);
+        assert!(!c.tx_video_stalled);
+    }
+
+    #[tokio::test]
+    async fn counter_handle_is_shareable_and_mutable() {
+        let counters = new_counters();
+        let clone = counters.clone();
+        clone.lock().await.tx_zombie_kills += 1;
+        clone.lock().await.tx_video_stalled = true;
+        let c = *counters.lock().await;
+        assert_eq!(c.tx_zombie_kills, 1);
+        assert!(c.tx_video_stalled);
     }
 }

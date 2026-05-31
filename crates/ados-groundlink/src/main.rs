@@ -181,6 +181,15 @@ async fn run_direct(
         let beacon_channel = config.channel;
         tokio::spawn(presence::emit_loop(move || beacon_channel));
     }
+    // Export the GS-side hop-supervisor snapshot (band + hop-follow history) to
+    // /run/ados/hop-supervisor.json so the REST layer + the on-box channel-hops
+    // page read the same surface the Python listener produced. Service-wide, so
+    // the history survives receive-plane restarts.
+    {
+        let hop_cache = presence_cache.clone();
+        let band = config.band.clone();
+        tokio::spawn(presence::hop_supervisor_persist_loop(hop_cache, band));
+    }
 
     // Run the receive loop until a shutdown signal arrives.
     tokio::select! {
@@ -199,7 +208,7 @@ async fn run_direct(
 /// restart with bounded backoff. Mirrors the Python `WfbRxManager.run` structure
 /// (sans the Python-owned adapter-detect/pairing gate).
 async fn receive_loop(config: &WfbConfig, presence_cache: GsPresenceCache) {
-    let manager = WfbRxManager::new(config.clone());
+    let mut manager = WfbRxManager::new(config.clone());
     let interface = manager.interface().to_string();
     let clock: Arc<dyn ados_groundlink::watchdog::Clock> = Arc::new(SystemClock::default());
     let setter: Arc<dyn ados_groundlink::acquire::ChannelSetter> = Arc::new(IwChannelSetter);
@@ -222,6 +231,15 @@ async fn receive_loop(config: &WfbConfig, presence_cache: GsPresenceCache) {
             backoff = (backoff * 2.0).min(30.0);
             continue;
         }
+
+        // Bring the interface to receive-ready BEFORE the spawn, in the
+        // kernel-required order: regulatory domain (global, before monitor-mode
+        // bring-up so the home channel is not capped to the startup domain's
+        // limits), then monitor mode, TX power (brownout guard on marginal USB
+        // hosts), and the rendezvous-home channel. Also resolves the
+        // regulatory-permitted channel set the acquirer intersects its sweep
+        // against. Re-applied each generation, matching the Python restart cycle.
+        manager.prepare_interface(&interface).await;
 
         // Spawn the receive chain for this generation.
         let (mut data_rx, _rx_control, _tx_control) =

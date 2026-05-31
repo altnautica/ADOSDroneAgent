@@ -8,14 +8,15 @@
 //! cleanly on SIGTERM/SIGINT.
 
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::json;
 use tokio::sync::Notify;
 
-#[cfg(target_os = "linux")]
 use ados_radio::adapter;
+use ados_radio::bitrate::{new_snapshot, BitrateController, BitrateSnapshot, SnapshotHandle};
 use ados_radio::config::WfbConfig;
 use ados_radio::hop::{
     build_hop_announce, build_presence_beacon, derive_pair_key, hop_announce_interval,
@@ -23,17 +24,153 @@ use ados_radio::hop::{
     HOP_ACK_PORT, HOP_CONTROL_PORT, PRESENCE_INTERVAL,
 };
 use ados_radio::link_quality::LinkStats;
-use ados_radio::paths::{run_path, write_sidecar, DRONE_KEY, WFB_TX_KEY};
+use ados_radio::link_state::derive_link_state;
+use ados_radio::paths::{
+    read_bind_sentinel_active, run_path, write_sidecar, DRONE_KEY, WFB_TX_KEY,
+};
 use ados_radio::process::RadioProcesses;
-use ados_radio::watchdog::{tx_health_watchdog, video_recvq_watchdog, WatchdogFired};
+use ados_radio::watchdog::{
+    new_counters, tx_health_watchdog, video_recvq_watchdog, CounterHandle, WatchdogCounters,
+    WatchdogFired,
+};
 
 const CONFIG_YAML: &str = "/etc/ados/config.yaml";
 const PROFILE_CONF: &str = "/etc/ados/profile.conf";
 /// Poll interval while waiting for the WFB TX key (unpaired state).
 const KEY_WAIT_INTERVAL: Duration = Duration::from_secs(5);
+/// Peer-beacon freshness window: skip the periodic scan when the peer was heard
+/// within this many seconds (the scan locks the radio and drops TX frames).
+const PEER_FRESH_SKIP_SECS: f64 = 60.0;
+/// `tx_bytes` liveness window: the radio counts as actively injecting RF when
+/// its `tx_bytes` counter has moved within this many seconds.
+const TX_LIVE_WINDOW: Duration = Duration::from_secs(5);
+
+/// Transmit/uplink rate snapshot surfaced on the heartbeat. `tx_bytes_per_s` is
+/// the smoothed radio transmit rate; `valid_rx_packets_per_s` is the uplink
+/// valid-decode rate (0 on a drone-only rig with no rx.key, since the stats RX
+/// never runs and the drone is the video source, not a receiver).
+#[derive(Clone, Copy, Default)]
+struct TxRates {
+    tx_bytes_per_s: f64,
+    valid_rx_packets_per_s: f64,
+}
+
+/// Tracks `/sys/class/net/<iface>/statistics/tx_bytes` progress so the heartbeat
+/// can report whether RF is actually leaving the antenna AND the smoothed
+/// transmit rate. Polled in the 2 s heartbeat loop; `tx_live()` is the "active"
+/// signal the link-state derivation uses (the strongest "the radio is injecting"
+/// evidence), `tx_bytes_per_s()` is the rate the sidecar surfaces.
+struct TxLiveness {
+    last_value: u64,
+    last_change: Instant,
+    seen: bool,
+    /// Value + instant of the previous poll, for the rate delta.
+    prev_value: u64,
+    prev_at: Instant,
+    rate_bytes_per_s: f64,
+}
+
+impl TxLiveness {
+    fn new() -> Self {
+        let now = Instant::now();
+        Self {
+            last_value: 0,
+            last_change: now,
+            seen: false,
+            prev_value: 0,
+            prev_at: now,
+            rate_bytes_per_s: 0.0,
+        }
+    }
+
+    /// Feed the current `tx_bytes` counter; records a change instant when it
+    /// advances and updates the smoothed transmit rate from the inter-poll
+    /// delta. The first reading seeds the baseline without counting as a change.
+    fn observe(&mut self, value: u64) {
+        let now = Instant::now();
+        if !self.seen {
+            self.last_value = value;
+            self.prev_value = value;
+            self.prev_at = now;
+            self.seen = true;
+            return;
+        }
+        if value != self.last_value {
+            self.last_value = value;
+            self.last_change = now;
+        }
+        // Rate over the elapsed poll interval (counters never decrease, but a
+        // wrap/reset is clamped to 0 rather than producing a negative rate).
+        let elapsed = now.duration_since(self.prev_at).as_secs_f64();
+        if elapsed > 0.0 {
+            let delta = value.saturating_sub(self.prev_value) as f64;
+            self.rate_bytes_per_s = delta / elapsed;
+        }
+        self.prev_value = value;
+        self.prev_at = now;
+    }
+
+    /// True when the counter is non-zero and advanced within the live window.
+    fn tx_live(&self) -> bool {
+        self.last_value > 0 && self.last_change.elapsed() < TX_LIVE_WINDOW
+    }
+
+    /// The smoothed radio transmit rate in bytes/second.
+    fn tx_bytes_per_s(&self) -> f64 {
+        self.rate_bytes_per_s
+    }
+}
+
+/// Read `/sys/class/net/<iface>/statistics/tx_bytes`, or `None` when unreadable.
+async fn read_tx_bytes(iface: &str) -> Option<u64> {
+    let path = format!("/sys/class/net/{}/statistics/tx_bytes", iface);
+    tokio::fs::read_to_string(&path)
+        .await
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
+}
+
+/// Decide whether a reactive hop should fire from the live link stats.
+///
+/// `cooldown_allowed` is `HopState::reactive_allowed()` (link established + the
+/// 30 s reactive cooldown met). A reactive hop fires only on REAL data: the
+/// stats RX must have produced a non-empty timestamp AND a non-zero packet
+/// count, because the default `LinkStats` (rssi -100, 0 packets, empty
+/// timestamp) would otherwise trip the RSSI threshold and hop every cycle on a
+/// drone-only rig that never runs the stats RX (no rx.key). With real data, a
+/// hop fires when loss or RSSI crosses its configured threshold.
+fn reactive_should_fire(
+    cooldown_allowed: bool,
+    link: &LinkStats,
+    loss_threshold_percent: f64,
+    rssi_threshold_dbm: f64,
+) -> bool {
+    if !cooldown_allowed {
+        return false;
+    }
+    let has_real = !link.timestamp.is_empty() && link.packets_received > 0;
+    has_real && (link.loss_percent > loss_threshold_percent || link.rssi_dbm < rssi_threshold_dbm)
+}
 
 #[tokio::main]
 async fn main() {
+    // One-shot adapter-list mode: scan once, print the JSON list to stdout, and
+    // exit 0 WITHOUT entering the service loop. This is the seam a thin Python
+    // shim and any pre-service caller invokes when no radio service is running
+    // (e.g. the bind iface setup or the REST adapter endpoint on a fresh box).
+    // No tracing init here — stdout must carry ONLY the JSON document.
+    let args: Vec<String> = std::env::args().collect();
+    if args
+        .iter()
+        .skip(1)
+        .any(|a| a == "adapters" || a == "--list-adapters")
+    {
+        run_list_adapters().await;
+        return;
+    }
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
@@ -41,7 +178,12 @@ async fn main() {
         .init();
     tracing::info!("wfb_service_starting");
 
-    let cfg = WfbConfig::load_from(Path::new(CONFIG_YAML));
+    let mut cfg = WfbConfig::load_from(Path::new(CONFIG_YAML));
+    // Fold the operator-facing link preset onto the MCS/FEC trio before the
+    // radio comes up so the data plane spawns at the preset's tunables. The
+    // default `conservative` is a no-op (the explicit config stands).
+    cfg.apply_link_preset();
+    let cfg = cfg;
 
     // Profile gate: the WFB TX service is drone-only. On a ground station this
     // binary must idle (the GS runs ados-wfb-rx) so it doesn't clobber the GS's
@@ -70,18 +212,51 @@ async fn main() {
     tracing::info!("wfb_service_stopped");
 }
 
+/// One-shot adapter list: scan, print the JSON array to stdout, exit. The
+/// document is the same `WifiAdapterInfo` list the service writes to the
+/// adapters sidecar, so a caller gets identical data whether it reads the file
+/// or invokes this mode.
+async fn run_list_adapters() {
+    let adapters = adapter::detect_wfb_adapters().await;
+    match serde_json::to_string(&adapters) {
+        Ok(s) => println!("{s}"),
+        // Serialization of a Vec<WifiAdapterInfo> cannot fail in practice; emit
+        // an empty array rather than nothing so the caller always parses JSON.
+        Err(_) => println!("[]"),
+    }
+}
+
+/// Write the full detected-adapter list to `/run/ados/wfb-adapters.json`
+/// (Contract: the seam permanent-Python + the GCS panel read). Atomic
+/// tmp+rename via `write_sidecar`.
+fn write_adapters_sidecar(adapters: &[adapter::WifiAdapterInfo]) {
+    let v = serde_json::to_value(adapters).unwrap_or_else(|_| serde_json::Value::Array(vec![]));
+    let _ = write_sidecar(&run_path("wfb-adapters.json"), &v);
+}
+
 async fn run_service(cfg: &WfbConfig, cancel: Arc<Notify>) {
+    // Count of radio-group respawns since service start, shared with the
+    // heartbeat that surfaces it in the sidecar.
+    let restart_count = Arc::new(AtomicU64::new(0));
+    // Adaptive bitrate / FEC controller snapshot, shared across respawns so the
+    // heartbeat always surfaces the controller's intent (link preset, enable
+    // flag, recommended bitrate) even before / between radio bring-ups.
+    let bitrate_snapshot: SnapshotHandle = new_snapshot(cfg);
     loop {
         // ── Key guard — block while unpaired ─────────────────────────────
         if !Path::new(WFB_TX_KEY).exists() {
             tracing::info!(key = WFB_TX_KEY, "wfb_blocked_unpaired");
             write_stats_sidecar(
-                "disabled",
+                "unpaired",
                 cfg.channel,
                 cfg.tx_power_dbm,
                 None,
                 &LinkStats::default(),
                 cfg,
+                restart_count.load(Ordering::Relaxed),
+                &WatchdogCounters::default(),
+                &TxRates::default(),
+                &bitrate_snapshot.lock().await.clone(),
             );
             tokio::select! {
                 _ = tokio::time::sleep(KEY_WAIT_INTERVAL) => continue,
@@ -89,26 +264,48 @@ async fn run_service(cfg: &WfbConfig, cancel: Arc<Notify>) {
             }
         }
 
+        // ── Regulatory domain FIRST, before the adapter is brought up in
+        // monitor mode. The kernel maps the permitted channel set and the
+        // per-channel TX-power ceiling at monitor-mode bring-up, so a domain
+        // set afterwards is too late and leaves the home channel (149,
+        // 5745 MHz) capped. iw reg set is global, so it needs no interface.
+        // A None config value falls back to the safe default.
+        {
+            let domain = cfg.reg_domain.as_deref().unwrap_or("US");
+            ados_radio::adapter::set_reg_domain(domain).await;
+        }
+
         // ── Adapter selection ─────────────────────────────────────────────
-        let selected: Option<ados_radio::adapter::SelectedAdapter> = {
-            #[cfg(target_os = "linux")]
-            {
-                adapter::select_interface(&cfg.interface).await
-            }
-            #[cfg(not(target_os = "linux"))]
-            {
-                None
-            }
-        };
-        let Some(adapter) = selected else {
-            tracing::warn!("wfb_no_adapter_found");
+        // Detect every adapter (the full list feeds the adapters sidecar) and
+        // pick the verified injection radio. The outcome carries the scan
+        // counts for the loud no-injection diagnostic.
+        let outcome = adapter::detect_and_select(&cfg.interface).await;
+        // Publish the full detected list so the GCS panel + the permanent-Python
+        // seam see the scan verdict regardless of whether a radio was found.
+        write_adapters_sidecar(&outcome.adapters);
+        let Some(adapter) = outcome.selected.clone() else {
+            // No RTL injection-capable adapter could be proven. Fail LOUDLY with
+            // the diagnostic counts (total detected + compatible-and-monitor),
+            // and keep the sidecar's stranded-radio signal — adapter chipset
+            // null, adapter_injection_ok false — so the panel shows the warning
+            // rather than a false "connecting" with zero injected frames.
+            tracing::error!(
+                total_adapters = outcome.total(),
+                compatible = outcome.compatible_monitor(),
+                note = "no RTL injection-capable adapter verified; not starting TX",
+                "wfb_no_injection_adapter"
+            );
             write_stats_sidecar(
                 "no_adapter",
                 cfg.channel,
                 cfg.tx_power_dbm,
-                None,
+                None, // None adapter → chipset "" + adapter_injection_ok false
                 &LinkStats::default(),
                 cfg,
+                restart_count.load(Ordering::Relaxed),
+                &WatchdogCounters::default(),
+                &TxRates::default(),
+                &bitrate_snapshot.lock().await.clone(),
             );
             tokio::select! {
                 _ = tokio::time::sleep(Duration::from_secs(10)) => continue,
@@ -141,8 +338,21 @@ async fn run_service(cfg: &WfbConfig, cancel: Arc<Notify>) {
         let drone_key = tokio::fs::read(DRONE_KEY).await.ok();
         let pair_key = derive_pair_key(drone_key.as_deref());
 
+        // ── Regulatory-enabled channel set, for the hop target filter ─────
+        // Channels this adapter's reg domain forbids fail `iw set channel` with
+        // -22 and split the pair onto divergent frequencies; the hop loop
+        // intersects its candidates with this set. Empty = "could not
+        // determine" → do not restrict. Read once per adapter bring-up.
+        let enabled_channels: std::collections::BTreeSet<u8> =
+            adapter::enabled_channels(iface).await;
+        let enabled_channels = Arc::new(enabled_channels);
+
         // ── Shared live link stats (fed by the stats-RX reader task) ──────
         let link = Arc::new(tokio::sync::Mutex::new(LinkStats::default()));
+        // ── Shared watchdog counters (zombie/video-stall kills) — the same ─
+        // share pattern as the link stats; the heartbeat reads these onto the
+        // sidecar, the watchdogs update them on fire.
+        let counters: CounterHandle = new_counters();
 
         // ── Spawn the radio process group: data wfb_tx + tx/rx control + ──
         // stats rx (each in its own session — the orphan fix; control plane
@@ -171,6 +381,10 @@ async fn run_service(cfg: &WfbConfig, cancel: Arc<Notify>) {
             Some(&adapter_info),
             &LinkStats::default(),
             cfg,
+            restart_count.load(Ordering::Relaxed),
+            &WatchdogCounters::default(),
+            &TxRates::default(),
+            &bitrate_snapshot.lock().await.clone(),
         );
         tracing::info!(iface, channel = cfg.channel, pid, "wfb_service_ready");
 
@@ -178,27 +392,61 @@ async fn run_service(cfg: &WfbConfig, cancel: Arc<Notify>) {
         let task_cancel = cancel.clone();
         let iface_str = iface.clone();
 
-        // 2 s sidecar heartbeat — reads the live link stats, derives the
-        // connected/connecting state, and keeps wfb-stats.json fresh so the
-        // REST handler never marks it stale (mtime > 10 s).
+        // 2 s sidecar heartbeat — reads the live link stats + the tx_bytes
+        // liveness + the bind sentinel, derives the link state, and keeps
+        // wfb-stats.json fresh so the REST handler never marks it stale
+        // (mtime > 10 s).
         let hb_cancel = task_cancel.clone();
         let hb_cfg = cfg.clone();
         let hb_adapter = adapter_info.clone();
         let hb_channel = cfg.channel;
         let hb_link = link.clone();
+        let hb_iface = iface_str.clone();
+        let hb_restart = restart_count.clone();
+        let hb_counters = counters.clone();
+        let hb_bitrate = bitrate_snapshot.clone();
         let mut heartbeat = tokio::spawn(async move {
+            const HEARTBEAT_INTERVAL_S: f64 = 2.0;
             let mut tick = tokio::time::interval(Duration::from_secs(2));
+            let mut tx_live = TxLiveness::new();
+            let mut prev_packets: i64 = 0;
             loop {
                 tokio::select! {
                     _ = tick.tick() => {
+                        if let Some(v) = read_tx_bytes(&hb_iface).await {
+                            tx_live.observe(v);
+                        }
                         let stats = hb_link.lock().await.clone();
+                        let wd = *hb_counters.lock().await;
+                        // Uplink valid-decode rate over the heartbeat interval.
+                        // 0 on a drone-only rig (no rx.key → packets stay 0).
+                        let pkt_delta = (stats.packets_received - prev_packets).max(0) as f64;
+                        prev_packets = stats.packets_received;
+                        let rates = TxRates {
+                            tx_bytes_per_s: tx_live.tx_bytes_per_s(),
+                            valid_rx_packets_per_s: pkt_delta / HEARTBEAT_INTERVAL_S,
+                        };
+                        // The key can be removed (unpair) at runtime; re-check.
+                        let tx_key_present = Path::new(WFB_TX_KEY).exists();
+                        let bind_active = read_bind_sentinel_active();
+                        let state = derive_link_state(
+                            tx_key_present,
+                            bind_active,
+                            &stats,
+                            tx_live.tx_live(),
+                        );
+                        let bsnap = hb_bitrate.lock().await.clone();
                         write_stats_sidecar(
-                            derive_state(&stats),
+                            state.as_str(),
                             hb_channel,
                             effective_tx_dbm,
                             Some(&hb_adapter),
                             &stats,
                             &hb_cfg,
+                            hb_restart.load(Ordering::Relaxed),
+                            &wd,
+                            &rates,
+                            &bsnap,
                         );
                     }
                     _ = hb_cancel.notified() => break,
@@ -208,11 +456,31 @@ async fn run_service(cfg: &WfbConfig, cancel: Arc<Notify>) {
 
         let tx_cancel = task_cancel.clone();
         let tx_iface = iface_str.clone();
-        let mut watchdog1 =
-            tokio::spawn(async move { tx_health_watchdog(&tx_iface, pid, tx_cancel).await });
+        let tx_counters = counters.clone();
+        let mut watchdog1 = tokio::spawn(async move {
+            tx_health_watchdog(&tx_iface, pid, tx_counters, tx_cancel).await
+        });
 
         let recvq_cancel = task_cancel.clone();
-        let mut watchdog2 = tokio::spawn(async move { video_recvq_watchdog(recvq_cancel).await });
+        let recvq_counters = counters.clone();
+        let mut watchdog2 =
+            tokio::spawn(async move { video_recvq_watchdog(recvq_counters, recvq_cancel).await });
+
+        // Adaptive bitrate / FEC controller. Off by default (it only refreshes
+        // the snapshot when disabled); when enabled it restarts only the data
+        // plane to apply a new FEC on sustained link degradation. It never ends
+        // on its own, so it is not part of the respawn-trigger select arm —
+        // it's aborted alongside the other siblings on respawn/shutdown.
+        let bc_cancel = task_cancel.clone();
+        let bc_link = link.clone();
+        let bc_proc = proc.clone();
+        let bc_snapshot = bitrate_snapshot.clone();
+        let bc_cfg = cfg.clone();
+        let bitrate_ctrl = tokio::spawn(async move {
+            BitrateController::new(&bc_cfg)
+                .run(bc_link, bc_proc, bc_snapshot, bc_cancel)
+                .await;
+        });
 
         let hop_cancel = task_cancel.clone();
         let hop_iface = iface_str.clone();
@@ -234,10 +502,20 @@ async fn run_service(cfg: &WfbConfig, cancel: Arc<Notify>) {
         // Hop supervisor (enabled only when configured).
         let hop_enabled = hop_cfg.auto_hop_enabled;
         let hop_link = link.clone();
+        let hop_enabled_channels = enabled_channels.clone();
+        let hop_restart = restart_count.clone();
         let mut hop = tokio::spawn(async move {
             if hop_enabled {
                 run_hop_supervisor(
-                    &hop_iface, &hop_cfg, hop_proc, &hop_key, &device_id, hop_link, hop_cancel,
+                    &hop_iface,
+                    &hop_cfg,
+                    hop_proc,
+                    &hop_key,
+                    &device_id,
+                    hop_link,
+                    hop_enabled_channels,
+                    hop_restart,
+                    hop_cancel,
                 )
                 .await;
             } else {
@@ -269,6 +547,7 @@ async fn run_service(cfg: &WfbConfig, cancel: Arc<Notify>) {
                 heartbeat.abort();
                 watchdog1.abort();
                 watchdog2.abort();
+                bitrate_ctrl.abort();
                 hop.abort();
                 beacon.abort();
                 proc.lock().await.kill_all().await;
@@ -283,9 +562,13 @@ async fn run_service(cfg: &WfbConfig, cancel: Arc<Notify>) {
         heartbeat.abort();
         watchdog1.abort();
         watchdog2.abort();
+        bitrate_ctrl.abort();
         hop.abort();
         beacon.abort();
         proc.lock().await.kill_all().await;
+        // The radio group will respawn at the top of the loop — count it.
+        restart_count.fetch_add(1, Ordering::Relaxed);
+        let wd = *counters.lock().await;
         write_stats_sidecar(
             "connecting",
             cfg.channel,
@@ -293,6 +576,10 @@ async fn run_service(cfg: &WfbConfig, cancel: Arc<Notify>) {
             Some(&adapter_info),
             &LinkStats::default(),
             cfg,
+            restart_count.load(Ordering::Relaxed),
+            &wd,
+            &TxRates::default(),
+            &bitrate_snapshot.lock().await.clone(),
         );
         tokio::select! {
             _ = tokio::time::sleep(Duration::from_secs(1)) => {}
@@ -343,12 +630,18 @@ async fn run_hop_supervisor(
     cfg: &WfbConfig,
     proc: Arc<tokio::sync::Mutex<RadioProcesses>>,
     pair_key: &[u8; 32],
-    _device_id: &str,
+    device_id: &str,
     link: Arc<tokio::sync::Mutex<LinkStats>>,
+    enabled_channels: Arc<std::collections::BTreeSet<u8>>,
+    restart_count: Arc<AtomicU64>,
     cancel: Arc<Notify>,
 ) {
     let state = Arc::new(tokio::sync::Mutex::new(HopState::new(cfg.channel)));
     let pair_key = *pair_key; // [u8;32] is Copy — move into tasks freely.
+                              // None when the adapter's reg domain could not be read (do not restrict);
+                              // Some(&set) drives the hop-target intersection + the sidecar field.
+    let enabled_opt: Option<&std::collections::BTreeSet<u8>> =
+        (!enabled_channels.is_empty()).then(|| enabled_channels.as_ref());
 
     // ── Control-plane listener on 5810: HopAck vs PresenceBeacon ──────────
     let ack_sock = match tokio::net::UdpSocket::bind(format!("0.0.0.0:{HOP_ACK_PORT}")).await {
@@ -364,8 +657,15 @@ async fn run_hop_supervisor(
     let lst_state = state.clone();
     let lst_cancel = cancel.clone();
     let lst_sock = ack_sock.clone();
+    // Own device-id, read once for the self-beacon drop. The beacon carries a
+    // 16-byte device-id, so the loopback-delivered copy of this rig's own beacon
+    // is recognised by its first 16 bytes.
+    let own_device_id = device_id.to_string();
     let listener = tokio::spawn(async move {
         let mut buf = [0u8; 128];
+        // Tracks the last peer device-id back-filled so the cross-process write
+        // only fires on a CHANGE (matches the Python `previous != device_id`).
+        let mut last_backfilled: Option<String> = None;
         loop {
             tokio::select! {
                 r = lst_sock.recv_from(&mut buf) => {
@@ -374,8 +674,25 @@ async fn run_hop_supervisor(
                     if let Some(target) = parse_hop_ack(pkt, &pair_key) {
                         let _ = ack_tx.try_send(target);
                     } else if let Some(p) = parse_presence_beacon(pkt, &pair_key) {
+                        // Drop this rig's own beacon (a loopback race can deliver
+                        // it) so a self-beacon never registers as a peer.
+                        if is_self_beacon(&own_device_id, &p.device_id) {
+                            continue;
+                        }
+                        let peer_id = p.device_id.clone();
                         lst_state.lock().await.on_peer_beacon(p);
                         write_peer_presence_json(&lst_state).await;
+                        // On a NEW peer device-id, signal the back-fill so the
+                        // persisted pair state learns the peer over the radio
+                        // (the bind tunnel does not always carry it). The signal
+                        // is a small additive sidecar a Python REST consumer
+                        // reads to call update_peer_device_id — Rust does not
+                        // round-trip config.yaml itself, which would risk
+                        // clobbering unrelated keys.
+                        if last_backfilled.as_deref() != Some(peer_id.as_str()) {
+                            write_peer_backfill_json(&peer_id);
+                            last_backfilled = Some(peer_id);
+                        }
                     }
                 }
                 _ = lst_cancel.notified() => break,
@@ -387,11 +704,12 @@ async fn run_hop_supervisor(
     let hb_state = state.clone();
     let hb_cancel = cancel.clone();
     let hb_cfg = cfg.clone();
+    let hb_enabled = enabled_channels.clone();
     let hb_writer = tokio::spawn(async move {
         let mut t = tokio::time::interval(Duration::from_secs(5));
         loop {
             tokio::select! {
-                _ = t.tick() => write_hop_supervisor_json(&hb_state, &hb_cfg).await,
+                _ = t.tick() => write_hop_supervisor_json(&hb_state, &hb_cfg, &hb_enabled).await,
                 _ = hb_cancel.notified() => break,
             }
         }
@@ -413,47 +731,72 @@ async fn run_hop_supervisor(
     loop {
         tokio::select! {
             _ = hop_tick.tick() => {
+                // Never change channel while a bind owns the adapter: the bind
+                // stops the normal wfb unit so its bind profile can own the radio
+                // exclusively, and a racing iw-channel + wfb_tx restart would
+                // corrupt the bind key exchange. The sentinel is a cheap sync
+                // file read, so no socket round-trip on this hot tick.
+                if read_bind_sentinel_active() {
+                    continue;
+                }
                 if !state.lock().await.can_hop() {
                     continue;
                 }
+                // Skip the periodic scan while the peer is fresh (<60 s): the
+                // scan locks the radio for several seconds and drops wfb_tx
+                // frames, so on a healthy link the rescan is pure waste. A
+                // reactive scan (handled in the other arm) always runs.
+                if state.lock().await.peer_fresh_within(PEER_FRESH_SKIP_SECS) {
+                    continue;
+                }
                 let cur = state.lock().await.channel;
-                // Scan live for the quietest in-band channel (rotates if the
-                // scan is flat, e.g. monitor mode rejected it).
-                let target = ados_radio::channel::pick_hop_target(iface, cur, &cfg.band).await;
+                // Scan live for the quietest enabled in-band channel (rotates if
+                // the scan is flat, e.g. monitor mode rejected it).
+                let target =
+                    ados_radio::channel::pick_hop_target(iface, cur, &cfg.band, enabled_opt).await;
+                // The scan can strand the iface in managed mode on some drivers;
+                // re-assert monitor mode + retune regardless of whether a hop
+                // follows so wfb_tx keeps injecting.
+                ados_radio::adapter::restore_monitor_if_needed(iface, cur).await;
                 if target == cur {
                     continue;
                 }
                 try_execute_hop(
                     iface, cfg, &proc, &state, &announce_sock, &mut ack_rx, &pair_key,
-                    target, HopTrigger::Periodic, "periodic", &link,
+                    target, HopTrigger::Periodic, "periodic", &link, &restart_count,
                 )
                 .await;
             }
             // Reactive trigger + peer-stale return-to-home (every 5 s).
             _ = stale_tick.tick() => {
+                // Suppress all actuation during a bind, same as the periodic arm.
+                if read_bind_sentinel_active() {
+                    continue;
+                }
                 // Reactive: the live link crossed a loss/RSSI threshold. Gated on
                 // REAL data (timestamp + packets) so default stats never trip it.
                 let do_reactive = {
-                    let s = state.lock().await;
-                    if s.reactive_allowed() {
-                        let l = link.lock().await;
-                        let has_real = !l.timestamp.is_empty() && l.packets_received > 0;
-                        has_real
-                            && (l.loss_percent > cfg.hop_loss_threshold_percent as f64
-                                || l.rssi_dbm < cfg.hop_rssi_threshold_dbm as f64)
-                    } else {
-                        false
-                    }
+                    let cooldown_allowed = state.lock().await.reactive_allowed();
+                    let l = link.lock().await;
+                    reactive_should_fire(
+                        cooldown_allowed,
+                        &l,
+                        cfg.hop_loss_threshold_percent as f64,
+                        cfg.hop_rssi_threshold_dbm as f64,
+                    )
                 };
                 if do_reactive {
                     let cur = state.lock().await.channel;
-                    let target =
-                        ados_radio::channel::pick_hop_target(iface, cur, &cfg.band).await;
+                    let target = ados_radio::channel::pick_hop_target(
+                        iface, cur, &cfg.band, enabled_opt,
+                    )
+                    .await;
+                    ados_radio::adapter::restore_monitor_if_needed(iface, cur).await;
                     if target != cur {
                         tracing::info!(target, "hop_reactive_trigger");
                         try_execute_hop(
                             iface, cfg, &proc, &state, &announce_sock, &mut ack_rx, &pair_key,
-                            target, HopTrigger::Reactive, "reactive", &link,
+                            target, HopTrigger::Reactive, "reactive", &link, &restart_count,
                         )
                         .await;
                     }
@@ -470,6 +813,7 @@ async fn run_hop_supervisor(
                     let ok = match RadioProcesses::spawn(iface, cfg, Path::new(WFB_TX_KEY), link.clone()).await {
                         Ok(new_proc) => {
                             *proc.lock().await = new_proc;
+                            restart_count.fetch_add(1, Ordering::Relaxed);
                             true
                         }
                         Err(e) => {
@@ -506,6 +850,7 @@ async fn try_execute_hop(
     trigger: HopTrigger,
     label: &str,
     link: &Arc<tokio::sync::Mutex<LinkStats>>,
+    restart_count: &Arc<AtomicU64>,
 ) {
     let epoch = hop_epoch_ms();
     let pkt = build_hop_announce(epoch, target, trigger, pair_key);
@@ -534,6 +879,7 @@ async fn try_execute_hop(
     match RadioProcesses::spawn(iface, cfg, Path::new(WFB_TX_KEY), link.clone()).await {
         Ok(new_proc) => {
             *proc.lock().await = new_proc;
+            restart_count.fetch_add(1, Ordering::Relaxed);
             state.lock().await.record_hop(target, label, true);
             tracing::info!(iface, channel = target, trigger = label, "hop_executed");
         }
@@ -554,6 +900,31 @@ async fn sleep_to_epoch(epoch_ms: u64) {
     if delay > 0.0 {
         tokio::time::sleep(Duration::from_secs_f64(delay)).await;
     }
+}
+
+/// True when a decoded beacon is this rig's own (a loopback race can deliver the
+/// emitter's own PresenceBeacon to the listener). The beacon carries a 16-byte
+/// device-id, so the check compares the beacon id against the first 16 bytes of
+/// the own device-id (matching `manager.py`'s `own_device_id[:16]`). An empty
+/// own device-id never matches (a rig without an id cannot self-collide).
+fn is_self_beacon(own_device_id: &str, beacon_device_id: &str) -> bool {
+    if own_device_id.is_empty() {
+        return false;
+    }
+    let truncated: String = own_device_id.chars().take(16).collect();
+    beacon_device_id == truncated
+}
+
+/// Signal a freshly-learned peer device-id for back-fill into the persisted pair
+/// state. Writes `peer-backfill.json` = `{"peer_device_id": <id>}` atomically;
+/// the REST seam reads it and calls `update_peer_device_id("drone", id)`, which
+/// owns the config.yaml round-trip so the radio service never clobbers unrelated
+/// config keys (the persisted-pair write stays on the API side that already owns
+/// config persistence). The bind tunnel does not always carry the peer id, so
+/// the presence beacon is the canonical source.
+fn write_peer_backfill_json(peer_device_id: &str) {
+    let v = json!({ "peer_device_id": peer_device_id });
+    let _ = write_sidecar(&run_path("peer-backfill.json"), &v);
 }
 
 /// Write `peer-presence.json` (Contract E) from the shared hop state.
@@ -581,17 +952,25 @@ async fn write_peer_presence_json(state: &Arc<tokio::sync::Mutex<HopState>>) {
 }
 
 /// Write `hop-supervisor.json` (Contract E) from the shared hop state + config.
-async fn write_hop_supervisor_json(state: &Arc<tokio::sync::Mutex<HopState>>, cfg: &WfbConfig) {
+/// `enabled_channels` is the regulatory-permitted channel set used to intersect
+/// hop candidates; surfacing it lets the panel show why a hop was refused.
+async fn write_hop_supervisor_json(
+    state: &Arc<tokio::sync::Mutex<HopState>>,
+    cfg: &WfbConfig,
+    enabled_channels: &std::collections::BTreeSet<u8>,
+) {
     let v = {
         let s = state.lock().await;
         let history =
             serde_json::to_value(s.history()).unwrap_or_else(|_| serde_json::Value::Array(vec![]));
+        let enabled: Vec<u8> = enabled_channels.iter().copied().collect();
         json!({
             "enabled": cfg.auto_hop_enabled,
             "band": cfg.band,
             "hop_period_seconds": cfg.hop_period_seconds,
             "loss_threshold_percent": cfg.hop_loss_threshold_percent as f64,
             "rssi_threshold_dbm": cfg.hop_rssi_threshold_dbm as f64,
+            "enabled_channels": enabled,
             "last_hop_at": s.last_hop_at_unix(),
             "history": history,
             "wall_time_unix": ados_radio::hop::now_unix(),
@@ -621,6 +1000,29 @@ struct AdapterInfo {
     injection_ok: bool,
 }
 
+/// Compute the 16-hex-char public-key fingerprint of the drone TX key, or `None`
+/// when the key is absent or not exactly 64 bytes. The peer-public half is the
+/// second 32 bytes of the WFB key file; the fingerprint is `blake2b(pub,
+/// digest_size=8)` rendered as 16 lowercase hex chars. Both rigs of a pair
+/// compute the same value from their respective key files, so heartbeat
+/// cross-checks reduce to a string compare. Byte-identical to
+/// `key_mgr.read_public_fingerprint`.
+fn read_public_fingerprint(path: &Path) -> Option<String> {
+    use blake2::digest::{Update, VariableOutput};
+    use blake2::Blake2bVar;
+    const WFB_KEY_FILE_BYTES: usize = 64;
+    const WFB_PUBLIC_HALF_OFFSET: usize = 32;
+    let data = std::fs::read(path).ok()?;
+    if data.len() != WFB_KEY_FILE_BYTES {
+        return None;
+    }
+    let mut hasher = Blake2bVar::new(8).ok()?;
+    hasher.update(&data[WFB_PUBLIC_HALF_OFFSET..]);
+    let mut out = [0u8; 8];
+    hasher.finalize_variable(&mut out).ok()?;
+    Some(hex::encode(out))
+}
+
 /// Write the `wfb-stats.json` Contract E sidecar (full schema the REST handler
 /// at `api/routes/wfb.py` merges over its base, so the GCS/LCD/dashboard radio
 /// panel renders correctly). The link-quality fields (rssi/snr/packets/loss/
@@ -628,6 +1030,13 @@ struct AdapterInfo {
 /// lands; `adapter_chipset`/`adapter_injection_ok`/`tx_power_dbm` must be
 /// present here or the panel shows a false "stranded radio" warning. Re-written
 /// on a 2 s cadence so the handler's `mtime > 10 s → state="stale"` never trips.
+///
+/// Carries the pair block (`paired` + identity) read from the same on-disk
+/// sources the Python `get_status` reads — the TX key for `paired` +
+/// `public_key_fingerprint`, the `video.wfb` config for the peer id / paired-at
+/// / auto-pair flag — plus the watchdog kill/stall counters. All key names match
+/// `manager.get_status` exactly.
+#[allow(clippy::too_many_arguments)]
 fn write_stats_sidecar(
     state: &str,
     channel: u8,
@@ -635,11 +1044,19 @@ fn write_stats_sidecar(
     adapter: Option<&AdapterInfo>,
     link: &LinkStats,
     cfg: &WfbConfig,
+    restart_count: u64,
+    counters: &WatchdogCounters,
+    rates: &TxRates,
+    bitrate: &BitrateSnapshot,
 ) {
     let (interface, chipset, injection_ok) = match adapter {
         Some(a) => (a.interface.as_str(), a.chipset.as_str(), a.injection_ok),
         None => ("", "", false),
     };
+    // Pair identity: the fingerprint + paired flag come from the TX key on disk,
+    // the peer id / paired-at / auto-pair flag from the persisted config block.
+    let fingerprint = read_public_fingerprint(Path::new(WFB_TX_KEY));
+    let paired = fingerprint.is_some();
     let v = json!({
         "state": state,
         "interface": interface,
@@ -652,6 +1069,34 @@ fn write_stats_sidecar(
         "mcs_index": cfg.mcs_index,
         "channel_locked": true,
         "profile": "drone",
+        // Count of radio-group respawns since service start (watchdog kills,
+        // hop restarts, return-home restarts) — surfaces churn to the panel.
+        "restart_count": restart_count,
+        // Pair identity block (matches manager.get_status key-for-key) so the
+        // GCS radio panel renders pair identity without the cloud relay.
+        "paired": paired,
+        "paired_with_device_id": cfg.paired_with_device_id,
+        "paired_at": cfg.paired_at,
+        "public_key_fingerprint": fingerprint,
+        "auto_pair_enabled": cfg.auto_pair_enabled,
+        // Watchdog kill/stall counters (the watchdogs detect these; surfaced
+        // here so the panel sees the same churn the Python heartbeat reports).
+        "tx_zombie_kills": counters.tx_zombie_kills,
+        "tx_video_stalled": counters.tx_video_stalled,
+        "tx_video_stall_kills": counters.tx_video_stall_kills,
+        "tx_video_recvq_bytes": counters.tx_video_recvq_bytes,
+        // Smoothed radio transmit rate; valid_rx_packets_per_s is the uplink
+        // valid-decode rate (0 on a drone-only rig with no rx.key).
+        "tx_bytes_per_s": (rates.tx_bytes_per_s * 10.0).round() / 10.0,
+        "valid_rx_packets_per_s": (rates.valid_rx_packets_per_s * 100.0).round() / 100.0,
+        // Adaptive bitrate / FEC controller intent. `recommended_bitrate_kbps`
+        // is the controller's chosen rung bitrate; the actual encoder restart is
+        // a cross-process no-op here (the encoder lives in another service), so
+        // the panel shows controller intent regardless. `link_preset` is the
+        // operator-facing preset that seeded the MCS/FEC trio at bring-up.
+        "link_preset": bitrate.link_preset,
+        "adaptive_bitrate_enabled": bitrate.adaptive_bitrate_enabled,
+        "recommended_bitrate_kbps": bitrate.recommended_bitrate_kbps,
         // Link-quality block (from the stats wfb_rx; defaults until frames flow).
         "rssi_dbm": link.rssi_dbm,
         "rssi_min": link.rssi_min,
@@ -668,16 +1113,6 @@ fn write_stats_sidecar(
     });
     let path = run_path("wfb-stats.json");
     let _ = write_sidecar(&path, &v);
-}
-
-/// Derive the radio state for the sidecar: "connected" once the stats RX has
-/// decoded data packets, else "connecting".
-fn derive_state(link: &LinkStats) -> &'static str {
-    if link.packets_received > 0 {
-        "connected"
-    } else {
-        "connecting"
-    }
 }
 
 /// Read the device-id from the canonical agent location (`/etc/ados/device-id`,
@@ -704,5 +1139,178 @@ async fn wait_for_shutdown() {
     #[cfg(not(unix))]
     {
         let _ = tokio::signal::ctrl_c().await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ados_radio::hop::HopState;
+
+    fn tripping_link() -> LinkStats {
+        // Real data: non-empty timestamp + packets flowing, with loss/RSSI past
+        // the default thresholds (loss 20% > 10, rssi -80 < -75).
+        LinkStats {
+            timestamp: "2026-05-30T00:00:00+00:00".to_string(),
+            packets_received: 500,
+            loss_percent: 20.0,
+            rssi_dbm: -80.0,
+            ..LinkStats::default()
+        }
+    }
+
+    #[test]
+    fn default_link_stats_never_fires_reactive() {
+        // The default LinkStats has rssi -100 (< -75) but no real data (empty
+        // timestamp, 0 packets) so the gate must NOT fire. This is the
+        // drone-only-rig case that would otherwise hop every cycle forever.
+        let link = LinkStats::default();
+        assert!(!reactive_should_fire(true, &link, 10.0, -75.0));
+    }
+
+    #[test]
+    fn real_data_over_threshold_fires_once_then_cooldown_blocks() {
+        let link = tripping_link();
+        // First fire: cooldown allowed + real data over threshold.
+        assert!(reactive_should_fire(true, &link, 10.0, -75.0));
+        // Cooldown not yet met (a hop just happened) so blocked even though the
+        // link still trips the thresholds.
+        assert!(!reactive_should_fire(false, &link, 10.0, -75.0));
+    }
+
+    #[test]
+    fn real_data_under_threshold_does_not_fire() {
+        // Real data but a healthy link (low loss, strong RSSI) so no reactive hop.
+        let link = LinkStats {
+            timestamp: "2026-05-30T00:00:00+00:00".to_string(),
+            packets_received: 500,
+            loss_percent: 2.0,
+            rssi_dbm: -55.0,
+            ..LinkStats::default()
+        };
+        assert!(!reactive_should_fire(true, &link, 10.0, -75.0));
+    }
+
+    #[test]
+    fn reactive_cooldown_observed_through_hop_state() {
+        // A freshly recorded hop blocks the next reactive for 30 s. Pair the
+        // HopState cooldown (reactive_allowed) with the predicate to confirm the
+        // loop's actual gate respects the cooldown.
+        let mut s = HopState::new(149);
+        s.on_peer_seen();
+        // Before any hop the cooldown is met (None last_hop_at).
+        assert!(s.reactive_allowed());
+        assert!(reactive_should_fire(
+            s.reactive_allowed(),
+            &tripping_link(),
+            10.0,
+            -75.0
+        ));
+        // Record a hop so the 30 s cooldown starts and reactive is blocked.
+        s.record_hop(153, "reactive", true);
+        assert!(!s.reactive_allowed());
+        assert!(!reactive_should_fire(
+            s.reactive_allowed(),
+            &tripping_link(),
+            10.0,
+            -75.0
+        ));
+    }
+
+    #[test]
+    fn fresh_peer_periodic_skips_scan_unseen_does_not() {
+        // The periodic arm skips the scan when the peer is fresh (<60 s); a peer
+        // never seen lets the scan run. peer_fresh_within is the gate the arm
+        // reads (using only the public HopState surface).
+        let never = HopState::new(149);
+        assert!(!never.peer_fresh_within(PEER_FRESH_SKIP_SECS));
+
+        let mut seen = HopState::new(149);
+        seen.on_peer_seen();
+        // Just-seen peer is fresh so the periodic scan is skipped.
+        assert!(seen.peer_fresh_within(PEER_FRESH_SKIP_SECS));
+    }
+
+    #[test]
+    fn tx_liveness_tracks_counter_progress() {
+        let mut live = TxLiveness::new();
+        // No reading yet so not live.
+        assert!(!live.tx_live());
+        // First reading seeds the baseline (does not count as a change).
+        live.observe(1000);
+        assert!(live.tx_live()); // value > 0 and last_change is "now"
+                                 // A zero counter is never live even if it just changed.
+        let mut zero = TxLiveness::new();
+        zero.observe(0);
+        assert!(!zero.tx_live());
+    }
+
+    #[test]
+    fn tx_liveness_rate_zero_before_second_reading() {
+        let mut live = TxLiveness::new();
+        // The seeding read produces no rate yet.
+        live.observe(1000);
+        assert_eq!(live.tx_bytes_per_s(), 0.0);
+    }
+
+    #[test]
+    fn tx_liveness_rate_clamps_counter_reset() {
+        let mut live = TxLiveness::new();
+        live.observe(5000);
+        // A counter that goes BACKWARDS (iface reset / wrap) must not produce a
+        // negative rate — saturating_sub clamps the delta to 0.
+        live.observe(100);
+        assert_eq!(live.tx_bytes_per_s(), 0.0);
+    }
+
+    #[test]
+    fn self_beacon_matches_first_16_bytes() {
+        // A loopback copy of this rig's own beacon carries the first 16 bytes of
+        // its device-id; the listener must drop it.
+        let own = "0123456789abcdef0123"; // 20 chars
+        assert!(is_self_beacon(own, "0123456789abcdef"));
+        // A different device-id is a real peer, never dropped.
+        assert!(!is_self_beacon(own, "fedcba9876543210"));
+        // A short own id (≤16) matches itself verbatim.
+        assert!(is_self_beacon("abc123", "abc123"));
+        // An empty own id can never self-collide.
+        assert!(!is_self_beacon("", ""));
+        assert!(!is_self_beacon("", "anything"));
+    }
+
+    #[test]
+    fn fingerprint_none_when_key_absent_or_wrong_size() {
+        let dir = tempfile::tempdir().unwrap();
+        // Missing file → None.
+        assert!(read_public_fingerprint(&dir.path().join("nope.key")).is_none());
+        // Wrong size (not 64 bytes) → None.
+        let short = dir.path().join("short.key");
+        std::fs::write(&short, vec![0u8; 32]).unwrap();
+        assert!(read_public_fingerprint(&short).is_none());
+    }
+
+    #[test]
+    fn fingerprint_is_16_hex_of_blake2b_8_over_public_half() {
+        use blake2::digest::{Update, VariableOutput};
+        use blake2::Blake2bVar;
+        let dir = tempfile::tempdir().unwrap();
+        let key = dir.path().join("tx.key");
+        // 64-byte key: first 32 are the secret half, second 32 the public half.
+        let mut data = vec![0u8; 64];
+        for (i, b) in data.iter_mut().enumerate() {
+            *b = i as u8;
+        }
+        std::fs::write(&key, &data).unwrap();
+        let got = read_public_fingerprint(&key).unwrap();
+        // Recompute independently over the second 32 bytes.
+        let mut h = Blake2bVar::new(8).unwrap();
+        h.update(&data[32..]);
+        let mut out = [0u8; 8];
+        h.finalize_variable(&mut out).unwrap();
+        assert_eq!(got, hex::encode(out));
+        assert_eq!(got.len(), 16);
+        assert!(got
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
     }
 }

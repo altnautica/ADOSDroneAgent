@@ -7,31 +7,53 @@
 //! All OS calls (iw, nmcli, ip) are Linux-only. On non-Linux hosts this
 //! module compiles but `select_interface` always returns None.
 
-/// Well-known RTL chipset (VID, PID) → label mapping.
-/// PID 0xA81A is ambiguous: driver name disambiguates EU vs AU.
+use serde::Serialize;
+
+/// Known WFB-ng compatible chipsets by (VID, PID) → label. The RTL8812AU
+/// family (0x8812, 0x881A-C), RTL8812EU / RTL8822E (0xB812 / 0xA81A), and the
+/// TP-Link rebadges all share the same vendored DKMS driver and support
+/// monitor mode with frame injection. PID 0xA81A is ambiguous — it ships on
+/// both AU rebadges and EU dongles, so the bound kernel driver disambiguates
+/// (the `classify` path promotes it to the EU label when the driver is the EU
+/// module). This is the single canonical copy; it must match the Python
+/// `WFB_COMPATIBLE` table byte-for-byte.
 #[cfg(any(target_os = "linux", test))]
-const RTL_VID_PIDS: &[([u8; 2], [u8; 2], &str)] = &[
-    ([0x0B, 0xDA], [0x88, 0x12], "RTL8812EU"),
-    ([0x0B, 0xDA], [0x88, 0x11], "RTL8811AU"),
-    ([0x0B, 0xDA], [0xA8, 0x1A], "RTL8812EU (a81a)"), // driver confirms EU vs AU
+const WFB_COMPATIBLE: &[(u16, u16, &str)] = &[
+    (0x0BDA, 0x8812, "RTL8812AU"),
+    (0x0BDA, 0x881A, "RTL8812AU (alt)"),
+    (0x0BDA, 0x881B, "RTL8812AU (alt)"),
+    (0x0BDA, 0x881C, "RTL8812AU (alt)"),
+    (0x0BDA, 0xA81A, "RTL8812AU (a81a)"),
+    (0x0BDA, 0xB812, "RTL8812EU"),
+    (0x2357, 0x0120, "RTL8812AU (TP-Link)"),
+    (0x2357, 0x0101, "RTL8812AU (TP-Link alt)"),
 ];
 
-/// VID deny-set: AIC8800 management-only adapters must never be used.
+/// Driver-name fallback for boards whose VID:PID is not yet in the table
+/// above. The DKMS module exposes itself under one of these names; if any
+/// matches, the adapter is treated as WFB-ng compatible regardless of the USB
+/// ID lookup, so future Realtek rebadges work without a table edit.
+#[cfg(any(target_os = "linux", test))]
+const WFB_COMPATIBLE_DRIVERS: &[&str] = &[
+    "8812au",
+    "8812eu",
+    "rtl8812au",
+    "rtl8812eu",
+    "rtl88x2eu",
+    "rtl88xxau",
+];
+
+/// VID deny-set: AIC8800 management-only adapters must never be used. They
+/// advertise monitor mode but cannot inject 802.11 frames, so wfb_tx/wfb_rx on
+/// them produces zero link even when `iw set monitor` reports success.
 #[cfg(any(target_os = "linux", test))]
 const DENY_VID: &[u16] = &[0xA69C];
 
-/// Driver prefix deny-set.
+/// Driver prefix deny-set: AIC8800 (Rock 5C onboard management WiFi) and
+/// Broadcom FullMAC (Pi-family onboard). Denied first so neither the USB-ID
+/// match nor the driver-name fallback can flip them WFB-compatible.
 #[cfg(any(target_os = "linux", test))]
 const DENY_DRIVER_PREFIXES: &[&str] = &["aic8800", "brcmfmac"];
-
-/// An adapter candidate discovered by the scan.
-#[derive(Debug, Clone)]
-pub struct Adapter {
-    pub ifname: String,
-    pub chipset: String,
-    pub driver: String,
-    pub injection_rank: u8, // lower = preferred (EU=0, AU=1, other=2)
-}
 
 /// The result returned to the radio manager.
 #[derive(Debug, Clone)]
@@ -41,85 +63,304 @@ pub struct SelectedAdapter {
     pub injection_ok: bool,
 }
 
-/// Return the best available RTL injection adapter, or `None` if none found.
-/// Sets the adapter into monitor mode and verifies the readback before returning.
+/// Full per-adapter detection record. This is the one source of truth the
+/// permanent-Python seam (REST + bind iface setup) and pre-service callers read
+/// off `/run/ados/wfb-adapters.json` and the one-shot `adapters` CLI mode. Field
+/// names match the Python `WifiAdapterInfo` dataclass so the JSON is identical
+/// whether the Rust service or the Python module produced it.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct WifiAdapterInfo {
+    pub interface_name: String,
+    pub driver: String,
+    pub chipset: String,
+    pub supports_monitor: bool,
+    /// The interface's current operating mode ("monitor" | "managed" | …), or
+    /// `None` when it could not be read (serialized as JSON null).
+    pub current_mode: Option<String>,
+    pub phy: String,
+    /// USB vendor id, or `None` when the iface is not USB-backed.
+    pub usb_vid: Option<u16>,
+    /// USB product id, or `None` when the iface is not USB-backed.
+    pub usb_pid: Option<u16>,
+    pub is_wfb_compatible: bool,
+    /// Supported interface modes advertised by the wiphy (e.g. monitor, managed).
+    pub capabilities: Vec<String>,
+}
+
+/// Detect every WiFi adapter and classify each for WFB-ng injection. This is
+/// the public adapter contract: it returns the FULL list (compatible and not),
+/// never raises, and is what the one-shot CLI mode prints and what the service
+/// writes to `/run/ados/wfb-adapters.json`. The operator's control-path iface
+/// (default route) is excluded so monitor mode never severs the management link.
+///
+/// On non-Linux hosts this returns an empty list.
 #[cfg(target_os = "linux")]
-pub async fn select_interface(override_iface: &str) -> Option<SelectedAdapter> {
-    if !override_iface.is_empty() {
-        // Operator-specified interface: skip discovery, still validate.
-        let chipset = chipset_for_iface(override_iface);
-        let ok = set_monitor_mode_verified(override_iface, 4).await;
-        return Some(SelectedAdapter {
-            ifname: override_iface.to_string(),
-            chipset,
-            injection_ok: ok,
-        });
-    }
-    let mut candidates = scan_adapters().await;
-    // Sort: EU rank 0 first.
-    candidates.sort_by_key(|a| a.injection_rank);
-    for adapter in candidates {
-        tracing::info!(iface = %adapter.ifname, chipset = %adapter.chipset, "adapter_candidate");
-        let ok = set_monitor_mode_verified(&adapter.ifname, 4).await;
-        if ok {
-            return Some(SelectedAdapter {
-                ifname: adapter.ifname,
-                chipset: adapter.chipset,
-                injection_ok: true,
-            });
+pub async fn detect_wfb_adapters() -> Vec<WifiAdapterInfo> {
+    let mut out = Vec::new();
+    let Ok(mut ifaces) = tokio::fs::read_dir("/sys/class/net").await else {
+        return out;
+    };
+    let control_iface = control_interface().await;
+    while let Ok(Some(entry)) = ifaces.next_entry().await {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if !is_wireless(&name).await {
+            continue;
         }
-        tracing::warn!(iface = %adapter.ifname, "adapter_injection_failed");
+        if control_iface.as_deref() == Some(name.as_str()) {
+            tracing::info!(interface = %name, "wfb_adapter_excluded_control_iface");
+            continue;
+        }
+        let driver = driver_name(&name).await;
+        let driver = if driver.is_empty() {
+            "unknown".to_string()
+        } else {
+            driver
+        };
+        let vid_pid = usb_vid_pid(&name).await;
+        let phy = phy_for_iface(&name).await.unwrap_or_default();
+        let capabilities = supported_modes(&phy).await;
+        let supports_monitor = capabilities.iter().any(|m| m == "monitor");
+        let current_mode = get_interface_mode(&name).await;
+        out.push(build_adapter_info(
+            name,
+            driver,
+            vid_pid,
+            phy,
+            capabilities,
+            supports_monitor,
+            current_mode,
+        ));
     }
-    None
+    let compatible = out.iter().filter(|a| a.is_wfb_compatible).count();
+    let monitor_capable = out.iter().filter(|a| a.supports_monitor).count();
+    tracing::info!(
+        total = out.len(),
+        compatible,
+        monitor_capable,
+        "wfb_adapter_scan"
+    );
+    out
 }
 
 #[cfg(not(target_os = "linux"))]
-pub async fn select_interface(_override_iface: &str) -> Option<SelectedAdapter> {
-    None
+pub async fn detect_wfb_adapters() -> Vec<WifiAdapterInfo> {
+    Vec::new()
 }
 
-/// Scan all network interfaces and return RTL-compatible candidates that pass
-/// the deny filter.
-#[cfg(target_os = "linux")]
-async fn scan_adapters() -> Vec<Adapter> {
-    let mut out = Vec::new();
-    let Ok(ifaces) = tokio::fs::read_dir("/sys/class/net").await else {
-        return out;
+/// Build a `WifiAdapterInfo` from the raw probe facts, applying the deny gate
+/// (management WiFi can never be flagged compatible) then the VID:PID table and
+/// the driver-name fallback. Pure so the classification is unit-testable without
+/// touching sysfs. Mirrors the per-iface body of Python `detect_wfb_adapters`.
+#[cfg(any(target_os = "linux", test))]
+fn build_adapter_info(
+    interface_name: String,
+    driver: String,
+    vid_pid: Option<(u16, u16)>,
+    phy: String,
+    capabilities: Vec<String>,
+    supports_monitor: bool,
+    current_mode: Option<String>,
+) -> WifiAdapterInfo {
+    let (usb_vid, usb_pid) = match vid_pid {
+        Some((v, p)) => (Some(v), Some(p)),
+        None => (None, None),
     };
-    // The iface carrying the default route is the operator's control path; it
-    // must never be claimed as an injection radio.
-    let control_iface = control_interface().await;
-    let mut ifaces = ifaces;
-    while let Ok(Some(entry)) = ifaces.next_entry().await {
-        let ifname = entry.file_name().to_string_lossy().to_string();
-        // Only USB-backed (wireless) — skip lo, eth*, etc.
-        if !is_wireless(&ifname).await {
-            continue;
-        }
-        // Never claim the control interface, even if it is wireless.
-        if control_iface.as_deref() == Some(ifname.as_str()) {
-            tracing::info!(iface = %ifname, "adapter_excluded_control_iface");
-            continue;
-        }
-        let driver = driver_name(&ifname).await;
-        let vid_pid = usb_vid_pid(&ifname).await;
-        // Apply deny filters first.
-        if is_denied(&driver, vid_pid) {
-            tracing::debug!(iface = %ifname, driver = %driver, "adapter_denied");
-            continue;
-        }
-        let (chipset, rank) = classify(&driver, vid_pid);
-        if rank < 3 {
-            // Known RTL family.
-            out.push(Adapter {
-                ifname,
-                chipset,
-                driver,
-                injection_rank: rank,
-            });
+
+    // Hard deny known management-WiFi radios before any compat path runs.
+    if is_denied(&driver, vid_pid) {
+        let chipset = if driver.is_empty() {
+            "management-wifi".to_string()
+        } else {
+            driver.clone()
+        };
+        return WifiAdapterInfo {
+            interface_name,
+            driver,
+            chipset,
+            supports_monitor,
+            current_mode,
+            phy,
+            usb_vid,
+            usb_pid,
+            is_wfb_compatible: false,
+            capabilities,
+        };
+    }
+
+    let mut chipset = driver.clone();
+    let mut is_compat = false;
+    if let Some((vid, pid)) = vid_pid {
+        if let Some(label) = wfb_compatible_label(vid, pid) {
+            chipset = label.to_string();
+            // Disambiguate the (0BDA:A81A) PID: the bound EU kernel driver is
+            // the authoritative signal that this is the EU silicon.
+            if (vid, pid) == (0x0BDA, 0xA81A) && driver.eq_ignore_ascii_case("rtl88x2eu") {
+                chipset = "RTL8812EU (a81a)".to_string();
+            }
+            is_compat = true;
         }
     }
-    out
+    if !is_compat && driver_is_wfb_compatible(&driver) {
+        is_compat = true;
+        if chipset.is_empty() || chipset == driver {
+            chipset = driver.clone();
+        }
+    }
+
+    WifiAdapterInfo {
+        interface_name,
+        driver,
+        chipset,
+        supports_monitor,
+        current_mode,
+        phy,
+        usb_vid,
+        usb_pid,
+        is_wfb_compatible: is_compat,
+        capabilities,
+    }
+}
+
+/// The outcome of one adapter selection pass: the full detected list (for the
+/// `wfb-adapters.json` sidecar + the no-injection diagnostic counts) and the
+/// verified injection adapter if one could be proven.
+#[derive(Debug, Clone)]
+pub struct SelectionOutcome {
+    /// Every detected WiFi adapter, compatible or not — written verbatim to the
+    /// adapters sidecar so the GCS panel can render the full scan verdict.
+    pub adapters: Vec<WifiAdapterInfo>,
+    /// The verified injection adapter, or `None` when none could be proven.
+    pub selected: Option<SelectedAdapter>,
+}
+
+impl SelectionOutcome {
+    /// Total adapters detected (the loud no-injection log's `total_adapters`).
+    pub fn total(&self) -> usize {
+        self.adapters.len()
+    }
+
+    /// Adapters that are WFB-compatible AND advertise monitor mode (the loud
+    /// no-injection log's `compatible` — the real injection-candidate count).
+    pub fn compatible_monitor(&self) -> usize {
+        self.adapters
+            .iter()
+            .filter(|a| a.is_wfb_compatible && a.supports_monitor)
+            .count()
+    }
+}
+
+/// Detect adapters and return the best verified RTL injection adapter, plus the
+/// full detected list. The override iface (when set) is honoured verbatim. The
+/// candidate set is the compatible+monitor adapters, ranked RTL-family-first so
+/// bus order never decides, and each is proven by setting + reading back
+/// monitor mode; the first that verifies wins. This is the full contract the
+/// radio service uses (it needs the detected list for the adapters sidecar and
+/// the scan counts for the no-injection diagnostic). Callers that only need the
+/// selected iface use `select_interface`.
+#[cfg(target_os = "linux")]
+pub async fn detect_and_select(override_iface: &str) -> SelectionOutcome {
+    let adapters = detect_wfb_adapters().await;
+
+    if !override_iface.is_empty() {
+        // Operator-specified interface: skip discovery ranking, still validate.
+        let chipset = adapters
+            .iter()
+            .find(|a| a.interface_name == override_iface)
+            .map(|a| a.chipset.clone())
+            .unwrap_or_else(|| chipset_for_iface(override_iface));
+        let ok = set_monitor_mode_verified(override_iface, 4).await;
+        return SelectionOutcome {
+            adapters,
+            selected: Some(SelectedAdapter {
+                ifname: override_iface.to_string(),
+                chipset,
+                injection_ok: ok,
+            }),
+        };
+    }
+
+    // Candidates = compatible + monitor-capable, ranked RTL-family-first.
+    let mut candidates: Vec<&WifiAdapterInfo> = adapters
+        .iter()
+        .filter(|a| a.is_wfb_compatible && a.supports_monitor)
+        .collect();
+    candidates.sort_by_key(|a| injection_rank(a));
+
+    let mut selected = None;
+    for adapter in candidates {
+        tracing::info!(
+            interface = %adapter.interface_name,
+            chipset = %adapter.chipset,
+            rank = injection_rank(adapter),
+            "wfb_adapter_candidate"
+        );
+        if set_monitor_mode_verified(&adapter.interface_name, 4).await {
+            tracing::info!(
+                interface = %adapter.interface_name,
+                chipset = %adapter.chipset,
+                "wfb_adapter_selected"
+            );
+            selected = Some(SelectedAdapter {
+                ifname: adapter.interface_name.clone(),
+                chipset: adapter.chipset.clone(),
+                injection_ok: true,
+            });
+            break;
+        }
+        tracing::warn!(
+            interface = %adapter.interface_name,
+            chipset = %adapter.chipset,
+            "wfb_adapter_monitor_rejected"
+        );
+    }
+
+    SelectionOutcome { adapters, selected }
+}
+
+#[cfg(not(target_os = "linux"))]
+pub async fn detect_and_select(_override_iface: &str) -> SelectionOutcome {
+    SelectionOutcome {
+        adapters: Vec::new(),
+        selected: None,
+    }
+}
+
+/// Return the best verified RTL injection adapter, or `None` when none could be
+/// proven. The thin selected-only seam other crates (the GS relay + receiver)
+/// call; the radio service uses `detect_and_select` when it also needs the full
+/// scan list + counts.
+pub async fn select_interface(override_iface: &str) -> Option<SelectedAdapter> {
+    detect_and_select(override_iface).await.selected
+}
+
+/// Rank an adapter so the validated RTL injection radios float to the front
+/// (lower is better): RTL8812EU silicon first, RTL8812AU rebadges next, any
+/// other passing chip last. Makes selection independent of USB bus order so a
+/// management WiFi enumerated first can never win by accident. Mirrors the
+/// Python `_injection_rank`.
+#[cfg(any(target_os = "linux", test))]
+fn injection_rank(adapter: &WifiAdapterInfo) -> u8 {
+    let label = adapter.chipset.to_ascii_uppercase();
+    let driver = adapter.driver.to_ascii_lowercase();
+    let is_eu = label.contains("8812EU")
+        || label.contains("88X2EU")
+        || matches!(driver.as_str(), "8812eu" | "rtl8812eu" | "rtl88x2eu");
+    let is_au = label.contains("8812AU")
+        || label.contains("88XXAU")
+        || matches!(driver.as_str(), "8812au" | "rtl8812au" | "rtl88xxau");
+    let is_known = match (adapter.usb_vid, adapter.usb_pid) {
+        (Some(v), Some(p)) => wfb_compatible_label(v, p).is_some(),
+        _ => false,
+    } || driver_is_wfb_compatible(&adapter.driver);
+    if is_eu {
+        0
+    } else if is_au {
+        1
+    } else if is_known {
+        2
+    } else {
+        3
+    }
 }
 
 #[cfg(any(target_os = "linux", test))]
@@ -135,7 +376,10 @@ fn is_denied(driver: &str, vid_pid: Option<(u16, u16)>) -> bool {
     false
 }
 
-#[cfg(any(target_os = "linux", test))]
+/// Classify a (driver, VID:PID) into a chipset label + injection rank. Retained
+/// as the unit-test entry point for the driver-precedence + table-lookup logic
+/// that `build_adapter_info` exercises in the live path.
+#[cfg(test)]
 fn classify(driver: &str, vid_pid: Option<(u16, u16)>) -> (String, u8) {
     // Driver-name takes precedence for PID-ambiguous adapters.
     if driver.contains("rtl88x2eu") || driver.contains("8812eu") {
@@ -145,16 +389,31 @@ fn classify(driver: &str, vid_pid: Option<(u16, u16)>) -> (String, u8) {
         return ("RTL8812AU".to_string(), 1);
     }
     if let Some((vid, pid)) = vid_pid {
-        let vid_bytes = vid.to_be_bytes();
-        let pid_bytes = pid.to_be_bytes();
-        for (v, p, label) in RTL_VID_PIDS {
-            if vid_bytes == *v && pid_bytes == *p {
-                let rank = if label.contains("EU") { 0 } else { 1 };
-                return (label.to_string(), rank);
-            }
+        if let Some(label) = wfb_compatible_label(vid, pid) {
+            let rank = if label.contains("EU") { 0 } else { 1 };
+            return (label.to_string(), rank);
         }
     }
     (format!("unknown (driver={})", driver), 3)
+}
+
+/// Return the chipset label for a (VID, PID) in the known WFB-compatible table,
+/// or `None`. Single lookup against the canonical table.
+#[cfg(any(target_os = "linux", test))]
+fn wfb_compatible_label(vid: u16, pid: u16) -> Option<&'static str> {
+    WFB_COMPATIBLE
+        .iter()
+        .find(|(v, p, _)| *v == vid && *p == pid)
+        .map(|(_, _, label)| *label)
+}
+
+/// True when a driver name (lower-cased) is one of the known WFB-ng DKMS
+/// modules. Authoritative even when the USB ID walk missed the IDs (e.g. a USB
+/// hub layer hides the parent device).
+#[cfg(any(target_os = "linux", test))]
+fn driver_is_wfb_compatible(driver: &str) -> bool {
+    let d = driver.trim().to_ascii_lowercase();
+    WFB_COMPATIBLE_DRIVERS.contains(&d.as_str())
 }
 
 #[allow(dead_code)]
@@ -184,6 +443,32 @@ async fn driver_name(iface: &str) -> String {
         .ok()
         .and_then(|p| p.file_name().map(|f| f.to_string_lossy().to_string()))
         .unwrap_or_default()
+}
+
+/// Read the wiphy name (e.g. `"phy0"`) bound to an interface from
+/// `/sys/class/net/<if>/phy80211/name`, or `None` when absent.
+#[cfg(target_os = "linux")]
+async fn phy_for_iface(iface: &str) -> Option<String> {
+    let path = format!("/sys/class/net/{}/phy80211/name", iface);
+    tokio::fs::read_to_string(&path)
+        .await
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// The supported interface modes (e.g. `monitor`, `managed`) a wiphy advertises,
+/// parsed out of `iw phy <phy> info`. Empty when the phy is unknown or `iw`
+/// cannot be run.
+#[cfg(target_os = "linux")]
+async fn supported_modes(phy: &str) -> Vec<String> {
+    if phy.is_empty() {
+        return Vec::new();
+    }
+    match run_cmd_output("iw", &["phy", phy, "info"]).await {
+        Ok(out) => parse_supported_modes(&out),
+        Err(()) => Vec::new(),
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -295,23 +580,215 @@ async fn set_monitor_mode(iface: &str) -> bool {
 }
 
 async fn verify_monitor_mode(iface: &str) -> bool {
-    match run_cmd_output("iw", &[iface, "info"]).await {
-        Ok(out) => out.contains("type monitor"),
-        Err(_) => false,
+    get_interface_mode(iface).await.as_deref() == Some("monitor")
+}
+
+/// Parse the operating mode out of `iw <iface> info` output. Returns the value
+/// after the `type ` line ("monitor" | "managed" | …), or `None` when the mode
+/// cannot be determined. Pure helper, unit-tested independently of `iw`.
+fn parse_interface_mode(info: &str) -> Option<String> {
+    for line in info.lines() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix("type ") {
+            let mode = rest.trim();
+            if !mode.is_empty() {
+                return Some(mode.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Return the interface operating mode ("monitor" | "managed" | …) by reading
+/// `iw <iface> info`, or `None` when it cannot be read. Used to verify monitor
+/// mode took effect and to detect when a scan stranded the iface in managed
+/// mode (a managed-mode iface injects zero frames even though every command
+/// "succeeded").
+pub async fn get_interface_mode(iface: &str) -> Option<String> {
+    let out = run_cmd_output("iw", &[iface, "info"]).await.ok()?;
+    parse_interface_mode(&out)
+}
+
+/// Re-assert monitor mode and retune the current channel when a scan left the
+/// iface in a non-monitor state.
+///
+/// `iw scan` can leave some RTL drivers in managed mode, which silently stops
+/// `wfb_tx` injection while the link is still nominally up. After every scan the
+/// hop loop calls this: when the observed mode is not monitor (and is readable),
+/// it puts the iface back into monitor mode and retunes to `current_channel` so
+/// `wfb_tx` keeps injecting on the channel it expects. When the mode is already
+/// monitor (or unreadable) this is a cheap no-op.
+pub async fn restore_monitor_if_needed(iface: &str, current_channel: u8) {
+    match get_interface_mode(iface).await {
+        Some(mode) if mode == "monitor" => {}
+        None => {}
+        Some(observed) => {
+            tracing::warn!(iface, observed_mode = %observed, "monitor_restored_after_scan");
+            if set_monitor_mode(iface).await {
+                let _ = run_cmd(
+                    "iw",
+                    &[iface, "set", "channel", &current_channel.to_string()],
+                )
+                .await;
+            }
+        }
     }
 }
 
-/// Apply the regulatory domain via `iw reg set <domain>` (best-effort). Without
-/// it the driver may reject channels the domain doesn't allow (`-22`). Mirrors
-/// `adapter.py:643-671`. No-op when `domain` is empty.
+/// The 5 GHz channel numbers this adapter can actually use for the link.
+///
+/// Parses `iw <iface> info` to find the wiphy, then `iw phy <phyN> channels`,
+/// keeping only channels that are not `(disabled)` and not radar / `no IR` (DFS
+/// channels need a channel-availability check the link does not perform). The
+/// drone and ground frequently run different regulatory domains, so the air
+/// channel must be in the intersection of both sides' enabled sets; this exposes
+/// the local half. An empty set means "could not determine"; callers treat that
+/// as "do not restrict".
+#[cfg(target_os = "linux")]
+pub async fn enabled_channels(iface: &str) -> std::collections::BTreeSet<u8> {
+    let info = match run_cmd_output("iw", &[iface, "info"]).await {
+        Ok(out) => out,
+        Err(()) => return std::collections::BTreeSet::new(),
+    };
+    let Some(phy) = parse_wiphy(&info) else {
+        return std::collections::BTreeSet::new();
+    };
+    let chans = match run_cmd_output("iw", &["phy", &phy, "channels"]).await {
+        Ok(out) => out,
+        Err(()) => return std::collections::BTreeSet::new(),
+    };
+    parse_enabled_channels(&chans)
+}
+
+#[cfg(not(target_os = "linux"))]
+pub async fn enabled_channels(_iface: &str) -> std::collections::BTreeSet<u8> {
+    std::collections::BTreeSet::new()
+}
+
+/// Extract the `phyN` wiphy name from `iw <iface> info` output (the `wiphy <N>`
+/// line). Returns e.g. `"phy0"`, or `None` when absent.
+#[cfg(any(target_os = "linux", test))]
+fn parse_wiphy(info: &str) -> Option<String> {
+    for line in info.lines() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix("wiphy ") {
+            let n = rest.split_whitespace().next()?;
+            if n.chars().all(|c| c.is_ascii_digit()) && !n.is_empty() {
+                return Some(format!("phy{}", n));
+            }
+        }
+    }
+    None
+}
+
+/// Parse `iw phy <phy> channels` output into the set of usable channel numbers.
+/// A line carries a `[<channel>]` token; it is kept only when the line is not
+/// marked `disabled`, `no ir`, or `radar`.
+#[cfg(any(target_os = "linux", test))]
+fn parse_enabled_channels(text: &str) -> std::collections::BTreeSet<u8> {
+    let mut out = std::collections::BTreeSet::new();
+    for line in text.lines() {
+        // The channel number sits inside square brackets, e.g.
+        //   "* 5745 MHz [149]"                       (usable)
+        //   "* 5180 MHz [36] (disabled)"             (skip)
+        //   "* 5260 MHz [52] (no IR, radar detection)" (skip)
+        let Some(start) = line.find('[') else {
+            continue;
+        };
+        let Some(len) = line[start + 1..].find(']') else {
+            continue;
+        };
+        let token = &line[start + 1..start + 1 + len];
+        let Ok(ch) = token.parse::<u8>() else {
+            continue;
+        };
+        let low = line.to_lowercase();
+        if low.contains("disabled") || low.contains("no ir") || low.contains("radar") {
+            continue;
+        }
+        out.insert(ch);
+    }
+    out
+}
+
+/// Parse the `Supported interface modes:` block out of `iw phy <phy> info`.
+/// Each mode sits on its own `* <mode>` line under the header; the block ends at
+/// the next non-`*` line. Returns the mode names (e.g. `managed`, `monitor`) in
+/// listed order. Pure helper, unit-tested independently of `iw`.
+#[cfg(any(target_os = "linux", test))]
+fn parse_supported_modes(info: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut in_section = false;
+    for line in info.lines() {
+        let stripped = line.trim();
+        if stripped.contains("Supported interface modes:") {
+            in_section = true;
+            continue;
+        }
+        if in_section {
+            if let Some(rest) = stripped.strip_prefix("* ") {
+                let mode = rest.trim();
+                if !mode.is_empty() {
+                    out.push(mode.to_string());
+                }
+            } else if !stripped.is_empty() && !stripped.starts_with('*') {
+                // A non-bullet, non-blank line closes the modes section.
+                break;
+            }
+        }
+    }
+    out
+}
+
+/// Apply the regulatory domain via `iw reg set <domain>` and verify it took.
+///
+/// Must run BEFORE the interface is brought up in monitor mode: the kernel
+/// maps the permitted channel set and the per-channel TX-power ceiling when
+/// the driver initialises, so a domain set afterwards is too late and leaves
+/// the home channel (149, U-NII-3 / 5745 MHz) capped to the startup domain's
+/// limits (the -100 dBm "not permitted" sentinel, zero injected frames).
+/// `iw reg set` is asynchronous, so this polls `iw reg get` until the global
+/// country reflects the request (~2 s ceiling). Best-effort: a failure is
+/// logged and the link continues. No-op when `domain` is empty.
 pub async fn set_reg_domain(domain: &str) {
     if domain.is_empty() {
         return;
     }
-    match run_cmd("iw", &["reg", "set", domain]).await {
-        Ok(()) => tracing::info!(domain, "wfb_reg_domain_applied"),
-        Err(()) => tracing::warn!(domain, "wfb_reg_domain_failed"),
+    if run_cmd("iw", &["reg", "set", domain]).await.is_err() {
+        tracing::warn!(domain, "wfb_reg_domain_failed");
+        return;
     }
+    let want = domain.to_ascii_uppercase();
+    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(2);
+    loop {
+        if active_global_reg_domain().await.as_deref() == Some(want.as_str()) {
+            tracing::info!(domain, applied = true, "wfb_reg_domain_applied");
+            return;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            tracing::info!(domain, applied = false, "wfb_reg_domain_applied");
+            return;
+        }
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    }
+}
+
+/// Return the global regulatory country from `iw reg get`, or None. The first
+/// `country XX:` line is the global domain; per-phy self-managed blocks come
+/// after it. The injection phy follows the global domain, so that is the one
+/// that matters.
+async fn active_global_reg_domain() -> Option<String> {
+    let out = run_cmd_output("iw", &["reg", "get"]).await.ok()?;
+    for line in out.lines() {
+        let s = line.trim();
+        if let Some(rest) = s.strip_prefix("country ") {
+            let cc: String = rest.chars().take(2).collect();
+            if cc.len() == 2 {
+                return Some(cc.to_ascii_uppercase());
+            }
+        }
+    }
+    None
 }
 
 /// Restore an interface to managed mode (used on shutdown or profile switch).
@@ -471,5 +948,287 @@ mod tests {
         // No default-route line in the output → None.
         assert!(parse_default_route_iface("10.0.0.0/24 dev eth0 scope link").is_none());
         assert!(parse_default_route_iface("").is_none());
+    }
+
+    #[test]
+    fn parse_mode_reads_type_line() {
+        let info = "Interface wlan1\n\tifindex 5\n\twdev 0x1\n\ttype monitor\n\twiphy 0\n";
+        assert_eq!(parse_interface_mode(info).as_deref(), Some("monitor"));
+        let managed = "Interface wlan1\n\ttype managed\n";
+        assert_eq!(parse_interface_mode(managed).as_deref(), Some("managed"));
+    }
+
+    #[test]
+    fn parse_mode_missing_type_is_none() {
+        assert!(parse_interface_mode("Interface wlan1\n\tifindex 5\n").is_none());
+        assert!(parse_interface_mode("").is_none());
+    }
+
+    #[test]
+    fn parse_wiphy_extracts_phy_name() {
+        let info = "Interface wlan1\n\ttype monitor\n\twiphy 0\n";
+        assert_eq!(parse_wiphy(info).as_deref(), Some("phy0"));
+        let info2 = "Interface wlan1\n\twiphy 3\n";
+        assert_eq!(parse_wiphy(info2).as_deref(), Some("phy3"));
+    }
+
+    #[test]
+    fn parse_wiphy_missing_is_none() {
+        assert!(parse_wiphy("Interface wlan1\n\ttype monitor\n").is_none());
+    }
+
+    #[test]
+    fn parse_enabled_channels_keeps_usable_skips_disabled_and_dfs() {
+        let text = "\
+Band 2:
+	Frequencies:
+		* 5180 MHz [36] (disabled)
+		* 5200 MHz [40] (20.0 dBm)
+		* 5260 MHz [52] (no IR, radar detection)
+		* 5300 MHz [60] (radar detection)
+		* 5745 MHz [149] (30.0 dBm)
+		* 5765 MHz [153] (30.0 dBm)
+";
+        let got = parse_enabled_channels(text);
+        let want: std::collections::BTreeSet<u8> = [40, 149, 153].into_iter().collect();
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn parse_enabled_channels_empty_input_is_empty() {
+        assert!(parse_enabled_channels("").is_empty());
+        // A line with no bracket token contributes nothing.
+        assert!(parse_enabled_channels("Band 2:\n\tFrequencies:\n").is_empty());
+    }
+
+    #[test]
+    fn parse_supported_modes_extracts_bulleted_modes() {
+        let info = "\
+Wiphy phy0
+	Supported interface modes:
+		 * IBSS
+		 * managed
+		 * monitor
+	Band 1:
+		Frequencies:
+";
+        let modes = parse_supported_modes(info);
+        assert_eq!(modes, vec!["IBSS", "managed", "monitor"]);
+    }
+
+    #[test]
+    fn parse_supported_modes_absent_is_empty() {
+        assert!(parse_supported_modes("Wiphy phy0\n\tBand 1:\n").is_empty());
+        assert!(parse_supported_modes("").is_empty());
+    }
+
+    // ── VID:PID classification table ─────────────────────────────────────────
+
+    #[test]
+    fn vid_pid_table_matches_python_compatible_set() {
+        // Every (VID, PID) the Python WFB_COMPATIBLE table carries must classify
+        // as a known WFB adapter with the exact same label.
+        let cases: &[(u16, u16, &str)] = &[
+            (0x0BDA, 0x8812, "RTL8812AU"),
+            (0x0BDA, 0x881A, "RTL8812AU (alt)"),
+            (0x0BDA, 0x881B, "RTL8812AU (alt)"),
+            (0x0BDA, 0x881C, "RTL8812AU (alt)"),
+            (0x0BDA, 0xA81A, "RTL8812AU (a81a)"),
+            (0x0BDA, 0xB812, "RTL8812EU"),
+            (0x2357, 0x0120, "RTL8812AU (TP-Link)"),
+            (0x2357, 0x0101, "RTL8812AU (TP-Link alt)"),
+        ];
+        for (vid, pid, label) in cases {
+            assert_eq!(
+                wfb_compatible_label(*vid, *pid),
+                Some(*label),
+                "table miss for {vid:#06x}:{pid:#06x}"
+            );
+        }
+        // A PID outside the table is not known.
+        assert_eq!(wfb_compatible_label(0x0BDA, 0x0000), None);
+        // The old wrong 0x8812 EU label is gone — 0x8812 is the AU rebadge.
+        assert_eq!(wfb_compatible_label(0x0BDA, 0x8812), Some("RTL8812AU"));
+    }
+
+    #[test]
+    fn build_adapter_info_rtl_eu_driver_is_compatible() {
+        let a = build_adapter_info(
+            "wlan1".to_string(),
+            "rtl88x2eu".to_string(),
+            Some((0x0BDA, 0xB812)),
+            "phy0".to_string(),
+            vec!["managed".to_string(), "monitor".to_string()],
+            true,
+            Some("managed".to_string()),
+        );
+        assert!(a.is_wfb_compatible);
+        assert_eq!(a.chipset, "RTL8812EU");
+        assert_eq!(a.usb_vid, Some(0x0BDA));
+        assert_eq!(a.usb_pid, Some(0xB812));
+        assert!(a.supports_monitor);
+    }
+
+    #[test]
+    fn build_adapter_info_a81a_promoted_to_eu_by_driver() {
+        // The ambiguous A81A PID becomes the EU label when the EU driver bound.
+        let a = build_adapter_info(
+            "wlan1".to_string(),
+            "rtl88x2eu".to_string(),
+            Some((0x0BDA, 0xA81A)),
+            "phy0".to_string(),
+            vec!["monitor".to_string()],
+            true,
+            None,
+        );
+        assert!(a.is_wfb_compatible);
+        assert_eq!(a.chipset, "RTL8812EU (a81a)");
+        // With a non-EU driver it keeps the default AU rebadge label.
+        let b = build_adapter_info(
+            "wlan2".to_string(),
+            "88XXau".to_string(),
+            Some((0x0BDA, 0xA81A)),
+            "phy1".to_string(),
+            vec!["monitor".to_string()],
+            true,
+            None,
+        );
+        assert_eq!(b.chipset, "RTL8812AU (a81a)");
+    }
+
+    #[test]
+    fn build_adapter_info_denies_aic8800() {
+        // The management WiFi can never be flagged compatible, by VID or driver.
+        let a = build_adapter_info(
+            "wlan0".to_string(),
+            "aic8800_fdrv".to_string(),
+            Some((0xA69C, 0x8800)),
+            "phy0".to_string(),
+            vec!["managed".to_string(), "monitor".to_string()],
+            true,
+            Some("managed".to_string()),
+        );
+        assert!(!a.is_wfb_compatible);
+        // Driver-only deny (no USB ID resolved) still denies.
+        let b = build_adapter_info(
+            "wlan0".to_string(),
+            "brcmfmac".to_string(),
+            None,
+            String::new(),
+            vec![],
+            false,
+            None,
+        );
+        assert!(!b.is_wfb_compatible);
+    }
+
+    #[test]
+    fn build_adapter_info_driver_fallback_when_usb_id_missing() {
+        // A USB hub layout can hide the parent IDs; the known DKMS driver name
+        // is enough to flag compatibility.
+        let a = build_adapter_info(
+            "wlan1".to_string(),
+            "8812eu".to_string(),
+            None,
+            "phy0".to_string(),
+            vec!["monitor".to_string()],
+            true,
+            None,
+        );
+        assert!(a.is_wfb_compatible);
+        assert_eq!(a.usb_vid, None);
+        assert_eq!(a.usb_pid, None);
+    }
+
+    #[test]
+    fn build_adapter_info_unknown_is_not_compatible() {
+        let a = build_adapter_info(
+            "wlan3".to_string(),
+            "some_other_wifi".to_string(),
+            Some((0x1234, 0x5678)),
+            "phy0".to_string(),
+            vec!["managed".to_string()],
+            false,
+            Some("managed".to_string()),
+        );
+        assert!(!a.is_wfb_compatible);
+        assert_eq!(a.chipset, "some_other_wifi");
+    }
+
+    #[test]
+    fn injection_rank_orders_eu_before_au_before_known_before_other() {
+        let eu = build_adapter_info(
+            "wlan1".to_string(),
+            "rtl88x2eu".to_string(),
+            Some((0x0BDA, 0xB812)),
+            "phy0".to_string(),
+            vec!["monitor".to_string()],
+            true,
+            None,
+        );
+        let au = build_adapter_info(
+            "wlan2".to_string(),
+            "rtl8812au".to_string(),
+            Some((0x0BDA, 0x8812)),
+            "phy1".to_string(),
+            vec!["monitor".to_string()],
+            true,
+            None,
+        );
+        assert_eq!(injection_rank(&eu), 0);
+        assert_eq!(injection_rank(&au), 1);
+    }
+
+    // ── WifiAdapterInfo JSON serialization (the adapter contract wire shape) ──
+
+    #[test]
+    fn wifi_adapter_info_serializes_with_python_field_names() {
+        let info = WifiAdapterInfo {
+            interface_name: "wlan1".to_string(),
+            driver: "rtl88x2eu".to_string(),
+            chipset: "RTL8812EU".to_string(),
+            supports_monitor: true,
+            current_mode: Some("monitor".to_string()),
+            phy: "phy0".to_string(),
+            usb_vid: Some(0x0BDA),
+            usb_pid: Some(0xB812),
+            is_wfb_compatible: true,
+            capabilities: vec!["managed".to_string(), "monitor".to_string()],
+        };
+        let v = serde_json::to_value(&info).unwrap();
+        assert_eq!(v["interface_name"], "wlan1");
+        assert_eq!(v["driver"], "rtl88x2eu");
+        assert_eq!(v["chipset"], "RTL8812EU");
+        assert_eq!(v["supports_monitor"], true);
+        assert_eq!(v["current_mode"], "monitor");
+        assert_eq!(v["phy"], "phy0");
+        assert_eq!(v["usb_vid"], 0x0BDA);
+        assert_eq!(v["usb_pid"], 0xB812);
+        assert_eq!(v["is_wfb_compatible"], true);
+        assert_eq!(v["capabilities"], serde_json::json!(["managed", "monitor"]));
+        // The contract carries exactly the ten Python dataclass keys.
+        assert_eq!(v.as_object().unwrap().len(), 10);
+    }
+
+    #[test]
+    fn wifi_adapter_info_unbacked_iface_nulls_mode_and_usb() {
+        let info = WifiAdapterInfo {
+            interface_name: "wlan9".to_string(),
+            driver: "unknown".to_string(),
+            chipset: "unknown".to_string(),
+            supports_monitor: false,
+            current_mode: None,
+            phy: String::new(),
+            usb_vid: None,
+            usb_pid: None,
+            is_wfb_compatible: false,
+            capabilities: vec![],
+        };
+        let v = serde_json::to_value(&info).unwrap();
+        // Missing facts are JSON null, not omitted, so the panel can distinguish
+        // "not USB-backed" from "unread".
+        assert!(v["current_mode"].is_null());
+        assert!(v["usb_vid"].is_null());
+        assert!(v["usb_pid"].is_null());
     }
 }

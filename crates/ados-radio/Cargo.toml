@@ -20,6 +20,8 @@ tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
 hmac = { workspace = true }
 sha2 = { workspace = true }
+# blake2b-8 over the peer-public key half → the 16-hex pair fingerprint.
+blake2 = { workspace = true }
 hex = { workspace = true }
 time = { version = "0.3", features = ["std", "formatting"] }
 

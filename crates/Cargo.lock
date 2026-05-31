@@ -237,6 +237,7 @@ name = "ados-radio"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "blake2",
  "hex",
  "hmac",
  "nix 0.29.0",

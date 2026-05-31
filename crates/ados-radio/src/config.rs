@@ -10,6 +10,13 @@ fn default_channel() -> u8 {
 fn default_band() -> String {
     "u-nii-3".to_string()
 }
+// Regulatory domain applied (iw reg set) before monitor-mode bring-up.
+// Permits the home channel (149 / 5745 MHz, U-NII-3, non-DFS) at usable TX
+// power; the kernel's startup domain can otherwise forbid 5745 and cap TX
+// to the -100 dBm "not permitted" sentinel. Operators override per region.
+fn default_reg_domain() -> Option<String> {
+    Some("US".to_string())
+}
 fn default_hop_period() -> u32 {
     60
 }
@@ -39,6 +46,29 @@ fn default_topology() -> String {
 }
 fn default_true() -> bool {
     true
+}
+fn default_link_preset() -> String {
+    "conservative".to_string()
+}
+
+/// Operator-facing radio link presets, each mapping to the trio of wfb-ng
+/// tunables `(mcs_index, fec_k, fec_n)`. Tuned for RTL8812EU radios on a 20 MHz
+/// channel. Values are byte-identical to the Python `_LINK_PRESETS` table.
+///
+/// - `conservative` MCS 1, FEC 8/12 (50% redundancy). The default; robust under
+///   low SNR / host-vbus power budgets / a noisy bench.
+/// - `balanced` MCS 3, FEC 8/12 (50% redundancy). Headroom for outdoor links
+///   where SNR is reliably above ~10 dB.
+/// - `aggressive` MCS 5, FEC 8/10 (25% redundancy). Excellent SNR + close-in.
+///
+/// Returns `None` for an unknown preset name (caller keeps the current config).
+pub fn link_preset_trio(preset: &str) -> Option<(u8, u8, u8)> {
+    match preset {
+        "conservative" => Some((1, 8, 12)),
+        "balanced" => Some((3, 8, 12)),
+        "aggressive" => Some((5, 8, 10)),
+        _ => None,
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -71,12 +101,26 @@ pub struct WfbConfig {
     pub topology: String,
     #[serde(default)]
     pub adaptive_bitrate_enabled: bool,
-    #[serde(default)]
+    /// Operator-facing link preset; overrides `mcs_index`/`fec_k`/`fec_n` via
+    /// [`WfbConfig::apply_link_preset`]. `conservative` (the default) is a no-op
+    /// so a rig with explicitly-tuned values keeps them.
+    #[serde(default = "default_link_preset")]
+    pub wfb_link_preset: String,
+    #[serde(default = "default_reg_domain")]
     pub reg_domain: Option<String>,
     #[serde(default)]
     pub auto_channel_enabled: bool,
     #[serde(default = "default_true")]
     pub auto_pair_enabled: bool,
+    /// Persisted peer device-id from the last pair (the back-fill target). None
+    /// until a pair completes; surfaced in `wfb-stats.json` so the panel shows
+    /// pair identity from the drone side without the cloud relay.
+    #[serde(default)]
+    pub paired_with_device_id: Option<String>,
+    /// ISO timestamp of the last pair, persisted under `video.wfb`. None when
+    /// never paired.
+    #[serde(default)]
+    pub paired_at: Option<String>,
 }
 
 impl Default for WfbConfig {
@@ -96,9 +140,12 @@ impl Default for WfbConfig {
             tx_power_max_dbm: default_tx_power_max_dbm(),
             topology: default_topology(),
             adaptive_bitrate_enabled: false,
-            reg_domain: None,
+            wfb_link_preset: default_link_preset(),
+            reg_domain: default_reg_domain(),
             auto_channel_enabled: false,
             auto_pair_enabled: true,
+            paired_with_device_id: None,
+            paired_at: None,
         }
     }
 }
@@ -121,6 +168,38 @@ impl WfbConfig {
         };
         let raw: RawConfig = serde_norway::from_str(&text).unwrap_or_default();
         raw.video.wfb
+    }
+
+    /// Override `mcs_index`/`fec_k`/`fec_n` from `wfb_link_preset`.
+    ///
+    /// The default `conservative` leaves the explicit config values alone, which
+    /// lets a rig with hand-tuned values keep them untouched. Any other known
+    /// preset forces the trio so the operator can widen the link by changing one
+    /// field instead of three. An unknown preset is a no-op (the current values
+    /// stand). Byte-identical behaviour to the Python `_apply_link_preset`.
+    pub fn apply_link_preset(&mut self) {
+        if self.wfb_link_preset == "conservative" {
+            // Respect the explicit config; do not override.
+            return;
+        }
+        let Some((mcs, fec_k, fec_n)) = link_preset_trio(&self.wfb_link_preset) else {
+            tracing::warn!(
+                preset = %self.wfb_link_preset,
+                note = "unknown link preset; keeping current config values",
+                "wfb_link_preset_unknown"
+            );
+            return;
+        };
+        self.mcs_index = mcs;
+        self.fec_k = fec_k;
+        self.fec_n = fec_n;
+        tracing::info!(
+            preset = %self.wfb_link_preset,
+            mcs_index = mcs,
+            fec_k,
+            fec_n,
+            "wfb_link_preset_applied"
+        );
     }
 }
 
@@ -223,5 +302,101 @@ mod tests {
         assert!(!c.auto_hop_enabled);
         // Unset fields fall back to defaults.
         assert_eq!(c.mcs_index, 1);
+        // Pair fields absent → None.
+        assert!(c.paired_with_device_id.is_none());
+        assert!(c.paired_at.is_none());
+    }
+
+    #[test]
+    fn reads_pair_block_from_wfb_section() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("config.yaml");
+        std::fs::write(
+            &cfg,
+            "video:\n  wfb:\n    paired_with_device_id: ados-58c27faf\n    paired_at: '2026-05-31T10:06:00+00:00'\n    auto_pair_enabled: false\n",
+        )
+        .unwrap();
+        let c = WfbConfig::load_from(&cfg);
+        assert_eq!(c.paired_with_device_id.as_deref(), Some("ados-58c27faf"));
+        assert_eq!(c.paired_at.as_deref(), Some("2026-05-31T10:06:00+00:00"));
+        assert!(!c.auto_pair_enabled);
+    }
+
+    #[test]
+    fn link_preset_trio_maps_each_named_preset() {
+        // The trio must be byte-identical to the Python _LINK_PRESETS table.
+        assert_eq!(link_preset_trio("conservative"), Some((1, 8, 12)));
+        assert_eq!(link_preset_trio("balanced"), Some((3, 8, 12)));
+        assert_eq!(link_preset_trio("aggressive"), Some((5, 8, 10)));
+        // An unknown name yields None so the caller keeps the current config.
+        assert_eq!(link_preset_trio("turbo"), None);
+        assert_eq!(link_preset_trio(""), None);
+    }
+
+    #[test]
+    fn apply_preset_conservative_is_noop() {
+        // conservative respects whatever was explicitly configured, even when
+        // those values differ from the conservative trio.
+        let mut c = WfbConfig {
+            wfb_link_preset: "conservative".to_string(),
+            mcs_index: 4,
+            fec_k: 6,
+            fec_n: 9,
+            ..WfbConfig::default()
+        };
+        c.apply_link_preset();
+        assert_eq!(c.mcs_index, 4);
+        assert_eq!(c.fec_k, 6);
+        assert_eq!(c.fec_n, 9);
+    }
+
+    #[test]
+    fn apply_preset_balanced_forces_trio() {
+        let mut c = WfbConfig {
+            wfb_link_preset: "balanced".to_string(),
+            mcs_index: 1,
+            fec_k: 8,
+            fec_n: 12,
+            ..WfbConfig::default()
+        };
+        c.apply_link_preset();
+        assert_eq!(c.mcs_index, 3);
+        assert_eq!(c.fec_k, 8);
+        assert_eq!(c.fec_n, 12);
+    }
+
+    #[test]
+    fn apply_preset_aggressive_forces_trio() {
+        let mut c = WfbConfig {
+            wfb_link_preset: "aggressive".to_string(),
+            ..WfbConfig::default()
+        };
+        c.apply_link_preset();
+        assert_eq!(c.mcs_index, 5);
+        assert_eq!(c.fec_k, 8);
+        assert_eq!(c.fec_n, 10);
+    }
+
+    #[test]
+    fn apply_preset_unknown_keeps_current_values() {
+        let mut c = WfbConfig {
+            wfb_link_preset: "turbo".to_string(),
+            mcs_index: 2,
+            fec_k: 7,
+            fec_n: 11,
+            ..WfbConfig::default()
+        };
+        c.apply_link_preset();
+        // Unknown preset → no override; the configured values stand.
+        assert_eq!(c.mcs_index, 2);
+        assert_eq!(c.fec_k, 7);
+        assert_eq!(c.fec_n, 11);
+    }
+
+    #[test]
+    fn link_preset_defaults_to_conservative() {
+        let c = WfbConfig::default();
+        assert_eq!(c.wfb_link_preset, "conservative");
+        assert!(!c.adaptive_bitrate_enabled);
     }
 }

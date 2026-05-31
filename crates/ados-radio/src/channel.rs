@@ -8,6 +8,8 @@
 //! back to "all channels, zero interference" (same as Python), and the caller
 //! then rotates rather than blindly staying put.
 
+use std::collections::BTreeSet;
+
 /// Standard 5 GHz WFB channels: (channel number, centre freq MHz). 20 MHz BW.
 pub const STANDARD_CHANNELS: &[(u8, u32)] = &[
     (36, 5180),
@@ -100,14 +102,50 @@ pub async fn scan_channels(iface: &str) -> Vec<(u8, u32)> {
     }
 }
 
-/// Pick a hop target: the quietest in-band channel that is not `current`. Scans
-/// live; if the scan is flat/failed, rotates to the next in-band channel so a
-/// hop still moves off a bad channel. Returns `current` only if the band has a
-/// single channel.
-pub async fn pick_hop_target(iface: &str, current: u8, band: &str) -> u8 {
-    let allowed = band_channels(band);
+/// Apply the regulatory `enabled` filter to the in-band candidate list.
+///
+/// The drone and ground frequently run different regulatory domains, so a hop to
+/// a channel the local adapter forbids fails `iw set channel` with -22 and
+/// splits the pair onto divergent frequencies. The filter is only applied when
+/// `enabled` is `Some` and non-empty (an empty / unknown set means "could not
+/// determine" → do not restrict). Unlike the ground-side sweep, which sweeps the
+/// unfiltered list rather than refuse, the drone hop target returns an EMPTY
+/// candidate list when the band ∩ enabled intersection is empty: the caller then
+/// stays put (no hop) rather than announce a channel the link cannot share.
+fn apply_enabled_filter(allowed: Vec<u8>, enabled: Option<&BTreeSet<u8>>) -> Vec<u8> {
+    if let Some(enabled) = enabled {
+        if !enabled.is_empty() {
+            return allowed
+                .into_iter()
+                .filter(|c| enabled.contains(c))
+                .collect();
+        }
+    }
+    allowed
+}
+
+/// Pick a hop target: the quietest in-band, regulatory-enabled channel that is
+/// not `current`. Scans live; if the scan is flat/failed, rotates to the next
+/// candidate so a hop still moves off a bad channel.
+///
+/// `enabled` is the set of channels the local adapter's regulatory domain
+/// permits (from `adapter::enabled_channels`). When it is `Some` and non-empty
+/// the candidate set is intersected with it; if that intersection is empty the
+/// function returns `current` (no hop), so the drone never announces a channel
+/// the pair cannot share. Returns `current` when no other candidate exists.
+pub async fn pick_hop_target(
+    iface: &str,
+    current: u8,
+    band: &str,
+    enabled: Option<&BTreeSet<u8>>,
+) -> u8 {
+    let allowed = apply_enabled_filter(band_channels(band), enabled);
+    // No regulatory-enabled in-band channel → stay put (no hop).
+    if allowed.is_empty() {
+        return current;
+    }
     let ranked = scan_channels(iface).await;
-    // Quietest in-band channel != current, by ascending congestion.
+    // Quietest enabled in-band channel != current, by ascending congestion.
     if let Some((ch, _)) = ranked
         .iter()
         .filter(|(ch, _)| allowed.contains(ch) && *ch != current)
@@ -115,7 +153,7 @@ pub async fn pick_hop_target(iface: &str, current: u8, band: &str) -> u8 {
     {
         return *ch;
     }
-    // Fallback rotation: next in-band channel after current.
+    // Fallback rotation: next enabled in-band channel after current.
     allowed
         .iter()
         .copied()
@@ -169,5 +207,43 @@ mod tests {
         let ranked = rank_channels(&[]);
         assert_eq!(ranked.len(), 9);
         assert!(ranked.iter().all(|(_, c)| *c == 0));
+    }
+
+    #[test]
+    fn enabled_filter_intersects_band_with_regulatory_set() {
+        // u-nii-3 band ∩ {149, 153} → only those two candidates remain.
+        let enabled: BTreeSet<u8> = [149, 153].into_iter().collect();
+        let got = apply_enabled_filter(band_channels("u-nii-3"), Some(&enabled));
+        assert_eq!(got, vec![149, 153]);
+    }
+
+    #[test]
+    fn enabled_filter_empty_intersection_yields_no_candidates() {
+        // The adapter only permits channels outside the band → empty list → the
+        // caller stays put (no hop). This is the divergent-domain deadlock guard.
+        let enabled: BTreeSet<u8> = [36, 40].into_iter().collect();
+        let got = apply_enabled_filter(band_channels("u-nii-3"), Some(&enabled));
+        assert!(got.is_empty());
+    }
+
+    #[test]
+    fn enabled_filter_unknown_set_does_not_restrict() {
+        // None → unfiltered (full u-nii-3 set).
+        let got = apply_enabled_filter(band_channels("u-nii-3"), None);
+        assert_eq!(got, vec![149, 153, 157, 161, 165]);
+        // An empty set is treated as "could not determine" → unfiltered.
+        let empty: BTreeSet<u8> = BTreeSet::new();
+        let got = apply_enabled_filter(band_channels("u-nii-3"), Some(&empty));
+        assert_eq!(got, vec![149, 153, 157, 161, 165]);
+    }
+
+    #[tokio::test]
+    async fn pick_hop_target_empty_intersection_returns_current_no_hop() {
+        // band u-nii-3 but the adapter only enables u-nii-1 → no candidate →
+        // pick_hop_target returns `current` (no hop). No scan is reached because
+        // the candidate list is empty before the scan.
+        let enabled: BTreeSet<u8> = [36, 40, 44, 48].into_iter().collect();
+        let got = pick_hop_target("wlan-nonexistent", 149, "u-nii-3", Some(&enabled)).await;
+        assert_eq!(got, 149);
     }
 }

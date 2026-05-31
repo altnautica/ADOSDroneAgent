@@ -62,6 +62,13 @@ PEER_PRESENCE_JSON = ADOS_RUN_DIR / "peer-presence.json"
 CAMERA_STATE_JSON = ADOS_RUN_DIR / "camera-state.json"
 BITRATE_CONTROLLER_JSON = ADOS_RUN_DIR / "bitrate-controller.json"
 
+# Local-bind to cloud-relay failover state. Written by the always-on
+# auto-pair supervisor (a separate process from the API) when a fresh
+# rig keeps failing to bind locally and falls back to the cloud relay.
+# Read by GET /api/wfb/pair/failover-status. Single ``{"state": ...}``
+# JSON object, atomic write, mode 0o644; default ``local`` when absent.
+WFB_FAILOVER_STATE_JSON = ADOS_RUN_DIR / "wfb_failover.json"
+
 # Sentinel files
 UPLINK_ACTIVE_FLAG = ADOS_RUN_DIR / "uplink-active"
 AP_WAS_ENABLED_FLAG = ADOS_RUN_DIR / "ap-was-enabled"

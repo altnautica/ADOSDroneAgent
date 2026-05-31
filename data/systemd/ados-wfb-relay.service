@@ -14,14 +14,14 @@ StartLimitBurst=5
 Slice=ados.slice
 Type=simple
 User=root
-# Flag-gated cutover, mirroring ados-wfb-rx.service: the native relay loop runs
-# only when BOTH the operator enabled the flag file AND the binary is present;
-# otherwise the packaged Python relay is the default, so a routine upgrade never
-# changes behavior. The native binary takes the role on its `--role` argument.
-# To turn the native relay on for a bench:
-#   touch /etc/ados/groundlink-rust-enabled && systemctl restart ados-wfb-relay
+# The native relay loop is the DEFAULT, mirroring ados-wfb-rx.service. The
+# install verifies the binary is present before this unit starts. The packaged
+# Python relay stays on disk as an emergency fallback: create the fallback flag
+# and the unit reverts to Python on restart. The native binary takes the role
+# on its `--role` argument.
+#   touch /etc/ados/groundlink-python-fallback && systemctl restart ados-wfb-relay
 # `exec` replaces the shell image so the ambient caps below carry unchanged.
-ExecStart=/bin/sh -c 'if [ -e /etc/ados/groundlink-rust-enabled ] && [ -x /opt/ados/bin/ados-groundlink ]; then exec /opt/ados/bin/ados-groundlink --role relay; else exec /opt/ados/venv/bin/python -m ados.services.ground_station.wfb_relay; fi'
+ExecStart=/bin/sh -c 'if [ -e /etc/ados/groundlink-python-fallback ]; then exec /opt/ados/venv/bin/python -m ados.services.ground_station.wfb_relay; else exec /opt/ados/bin/ados-groundlink --role relay; fi'
 Restart=on-failure
 RestartSec=5
 Environment=ADOS_CONFIG=/etc/ados/config.yaml

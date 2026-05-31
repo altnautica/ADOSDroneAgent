@@ -373,6 +373,66 @@ def radio_test() -> None:
     click.echo("Done.")
 
 
+@radio_group.command(
+    "adapters",
+    help="List detected WiFi adapters and their WFB injection verdict.",
+)
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable output.")
+def radio_adapters(as_json: bool) -> None:
+    """List the detected WiFi adapters and which are WFB-injection capable.
+
+    Resolves the live adapter facts through the radio service's stats
+    sidecar / one-shot scan, falling back to a local ``iw`` scan when the
+    radio is not running. Reads facts directly (not over REST) so it
+    works before the agent API is up.
+    """
+    from ados.services.wfb.adapter_probe import detect_wfb_adapters
+
+    adapters = detect_wfb_adapters()
+
+    if as_json:
+        payload = [
+            {
+                "interface_name": a.interface_name,
+                "driver": a.driver,
+                "chipset": a.chipset,
+                "supports_monitor": a.supports_monitor,
+                "current_mode": a.current_mode,
+                "phy": a.phy,
+                "usb_vid": a.usb_vid,
+                "usb_pid": a.usb_pid,
+                "is_wfb_compatible": a.is_wfb_compatible,
+                "capabilities": a.capabilities,
+            }
+            for a in adapters
+        ]
+        click.echo(json.dumps(payload, indent=2, sort_keys=True))
+        return
+
+    if not adapters:
+        click.echo(
+            click.style(
+                "No WiFi adapters detected. Plug in an RTL8812EU and retry.",
+                fg="red",
+            )
+        )
+        raise click.exceptions.Exit(code=1)
+
+    for a in adapters:
+        if a.is_wfb_compatible:
+            verdict, colour = "WFB-capable", "green"
+        elif a.supports_monitor:
+            verdict, colour = "monitor only (not injection)", "yellow"
+        else:
+            verdict, colour = "not compatible", "red"
+        chipset = a.chipset or a.driver or "unknown"
+        line = (
+            f"  {a.interface_name:<18}  {chipset:<22}  "
+            f"mode={a.current_mode or '?':<8}  {verdict}"
+        )
+        click.echo(click.style(line, fg=colour))
+
+
 # ---------------------------------------------------------------------
 # Pair lifecycle: status, local bind, unpair, auto-pair toggle.
 # ---------------------------------------------------------------------
