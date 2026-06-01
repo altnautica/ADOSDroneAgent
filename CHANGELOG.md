@@ -4,6 +4,18 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.49.58] - 2026-06-01
+
+### Added
+
+- **The radio detects and reports a degraded USB adapter.** It reads the WFB
+  adapter's enumerated USB link speed and flags it when an adapter comes up on a
+  slow (full-speed, 12 Mbps) USB link instead of high-speed — a state where the
+  driver loads and the transmit counter advances but no usable RF leaves the
+  antenna. The selected adapter's speed and a degraded flag are logged loudly at
+  selection and carried on the heartbeat + the adapters sidecar so the ground
+  station can warn instead of showing a healthy link.
+
 ## [0.49.57] - 2026-06-01
 
 ### Fixed

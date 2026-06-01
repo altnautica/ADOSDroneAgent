@@ -61,6 +61,24 @@ pub struct SelectedAdapter {
     pub ifname: String,
     pub chipset: String,
     pub injection_ok: bool,
+    /// The selected adapter's enumerated USB link speed (Mbps), or `None` when
+    /// not USB-backed / unreadable. Surfaced so the operator sees "12 Mbps".
+    pub usb_speed_mbps: Option<u32>,
+    /// True when the adapter enumerated on a USB link slower than high-speed
+    /// (e.g. 12 Mbps full-speed on a flaky port / companion controller). Such an
+    /// adapter can pass monitor-mode setup and advance its tx_bytes counter yet
+    /// emit no usable RF — the agent must surface this rather than report a
+    /// healthy link.
+    pub usb_degraded: bool,
+}
+
+/// An RTL adapter needs high-speed (480 Mbps) USB to push WFB RF. A reading
+/// below that (12 Mbps full-speed) means the device fell back to a companion
+/// controller / a flaky port and cannot reliably radiate. `None` (not USB /
+/// unreadable) is treated as not-degraded so a non-USB or unknown adapter is
+/// never falsely flagged.
+pub fn usb_speed_degraded(speed_mbps: Option<u32>) -> bool {
+    matches!(speed_mbps, Some(s) if s < 480)
 }
 
 /// Full per-adapter detection record. This is the one source of truth the
@@ -82,6 +100,11 @@ pub struct WifiAdapterInfo {
     pub usb_vid: Option<u16>,
     /// USB product id, or `None` when the iface is not USB-backed.
     pub usb_pid: Option<u16>,
+    /// Enumerated USB link speed in Mbps (12 full-speed, 480 high-speed, 5000
+    /// SuperSpeed), or `None` when not USB-backed / unreadable. An RTL8812EU that
+    /// enumerates at 12 (a flaky port / companion-controller fallback) cannot
+    /// push real RF even though the driver loads and the tx_bytes counter moves.
+    pub usb_speed_mbps: Option<u32>,
     pub is_wfb_compatible: bool,
     /// Supported interface modes advertised by the wiphy (e.g. monitor, managed).
     pub capabilities: Vec<String>,
@@ -121,7 +144,8 @@ pub async fn detect_wfb_adapters() -> Vec<WifiAdapterInfo> {
         let capabilities = supported_modes(&phy).await;
         let supports_monitor = capabilities.iter().any(|m| m == "monitor");
         let current_mode = get_interface_mode(&name).await;
-        out.push(build_adapter_info(
+        let usb_speed = usb_speed_mbps(&name).await;
+        let mut info = build_adapter_info(
             name,
             driver,
             vid_pid,
@@ -129,7 +153,9 @@ pub async fn detect_wfb_adapters() -> Vec<WifiAdapterInfo> {
             capabilities,
             supports_monitor,
             current_mode,
-        ));
+        );
+        info.usb_speed_mbps = usb_speed;
+        out.push(info);
     }
     let compatible = out.iter().filter(|a| a.is_wfb_compatible).count();
     let monitor_capable = out.iter().filter(|a| a.supports_monitor).count();
@@ -182,6 +208,7 @@ fn build_adapter_info(
             phy,
             usb_vid,
             usb_pid,
+            usb_speed_mbps: None,
             is_wfb_compatible: false,
             capabilities,
         };
@@ -216,6 +243,9 @@ fn build_adapter_info(
         phy,
         usb_vid,
         usb_pid,
+        // The link speed is filled in by the detect loop (it needs an async
+        // sysfs read); the pure classifier leaves it None.
+        usb_speed_mbps: None,
         is_wfb_compatible: is_compat,
         capabilities,
     }
@@ -269,12 +299,26 @@ pub async fn detect_and_select(override_iface: &str) -> SelectionOutcome {
             .map(|a| a.chipset.clone())
             .unwrap_or_else(|| chipset_for_iface(override_iface));
         let ok = set_monitor_mode_verified(override_iface, 4).await;
+        let speed = adapters
+            .iter()
+            .find(|a| a.interface_name == override_iface)
+            .and_then(|a| a.usb_speed_mbps);
+        let usb_degraded = usb_speed_degraded(speed);
+        if usb_degraded {
+            tracing::warn!(
+                interface = %override_iface,
+                usb_speed_mbps = ?speed,
+                "wfb_adapter_usb_degraded: adapter on a slow USB link (needs 480 Mbps); RF may not transmit"
+            );
+        }
         return SelectionOutcome {
             adapters,
             selected: Some(SelectedAdapter {
                 ifname: override_iface.to_string(),
                 chipset,
                 injection_ok: ok,
+                usb_speed_mbps: speed,
+                usb_degraded,
             }),
         };
     }
@@ -295,15 +339,27 @@ pub async fn detect_and_select(override_iface: &str) -> SelectionOutcome {
             "wfb_adapter_candidate"
         );
         if set_monitor_mode_verified(&adapter.interface_name, 4).await {
-            tracing::info!(
-                interface = %adapter.interface_name,
-                chipset = %adapter.chipset,
-                "wfb_adapter_selected"
-            );
+            let usb_degraded = usb_speed_degraded(adapter.usb_speed_mbps);
+            if usb_degraded {
+                tracing::warn!(
+                    interface = %adapter.interface_name,
+                    chipset = %adapter.chipset,
+                    usb_speed_mbps = ?adapter.usb_speed_mbps,
+                    "wfb_adapter_usb_degraded: selected adapter on a slow USB link (needs 480 Mbps); RF may not transmit"
+                );
+            } else {
+                tracing::info!(
+                    interface = %adapter.interface_name,
+                    chipset = %adapter.chipset,
+                    "wfb_adapter_selected"
+                );
+            }
             selected = Some(SelectedAdapter {
                 ifname: adapter.interface_name.clone(),
                 chipset: adapter.chipset.clone(),
                 injection_ok: true,
+                usb_speed_mbps: adapter.usb_speed_mbps,
+                usb_degraded,
             });
             break;
         }
@@ -490,6 +546,41 @@ async fn usb_vid_pid(iface: &str) -> Option<(u16, u16)> {
     let link = format!("/sys/class/net/{}/device", iface);
     let start = tokio::fs::canonicalize(&link).await.ok()?;
     vid_pid_from_device_dir(&start)
+}
+
+/// Read the enumerated USB link speed (Mbps) for the USB device backing a
+/// netdev. The `speed` file lives on the same USB *device* node as `idVendor`
+/// (e.g. `…/1-1/speed` → "480"), one or more parents above the interface node
+/// the `device` symlink points at — so this mirrors [`usb_vid_pid`]'s
+/// parent-walk. `None` when the iface is not USB-backed or the file is
+/// unreadable. A value of 12 (full-speed) on an RTL8812EU is the degraded path.
+#[cfg(target_os = "linux")]
+async fn usb_speed_mbps(iface: &str) -> Option<u32> {
+    let link = format!("/sys/class/net/{}/device", iface);
+    let start = tokio::fs::canonicalize(&link).await.ok()?;
+    speed_from_device_dir(&start)
+}
+
+/// Walk UP from a resolved USB interface node to the parent USB *device* node
+/// carrying `speed`, and parse it as Mbps. Bounded to a few hops like
+/// [`vid_pid_from_device_dir`]; `None` when no ancestor within the bound holds
+/// the file. Pure so a fixture sysfs tree exercises it off a real SBC.
+#[cfg(any(target_os = "linux", test))]
+fn speed_from_device_dir(start: &std::path::Path) -> Option<u32> {
+    const MAX_PARENT_HOPS: usize = 4;
+    let mut dir = start.to_path_buf();
+    for _ in 0..=MAX_PARENT_HOPS {
+        if let Ok(raw) = std::fs::read_to_string(dir.join("speed")) {
+            if let Ok(mbps) = raw.trim().parse::<u32>() {
+                return Some(mbps);
+            }
+        }
+        match dir.parent() {
+            Some(parent) => dir = parent.to_path_buf(),
+            None => break,
+        }
+    }
+    None
 }
 
 /// Walk UP from a resolved USB interface node to the parent USB *device* node
@@ -1034,6 +1125,33 @@ mod tests {
     }
 
     #[test]
+    fn speed_parent_walk_reads_speed_off_the_device_node() {
+        // `speed` lives on the USB device node (same as the ids), one level up
+        // from the interface node the `device` symlink resolves to.
+        let dir = tempfile::tempdir().unwrap();
+        let device = dir.path().join("1-1");
+        let interface = device.join("1-1:1.0");
+        std::fs::create_dir_all(&interface).unwrap();
+        std::fs::write(device.join("speed"), "480\n").unwrap();
+        assert_eq!(speed_from_device_dir(&interface), Some(480));
+
+        // A full-speed enumeration (the degraded RTL path) reads back as 12.
+        let dir2 = tempfile::tempdir().unwrap();
+        let dev2 = dir2.path().join("8-1");
+        std::fs::create_dir_all(&dev2).unwrap();
+        std::fs::write(dev2.join("speed"), "12\n").unwrap();
+        assert_eq!(speed_from_device_dir(&dev2), Some(12));
+    }
+
+    #[test]
+    fn usb_speed_degraded_flags_full_speed_only() {
+        assert!(usb_speed_degraded(Some(12))); // full-speed RTL = degraded
+        assert!(!usb_speed_degraded(Some(480))); // high-speed = fine
+        assert!(!usb_speed_degraded(Some(5000))); // SuperSpeed = fine
+        assert!(!usb_speed_degraded(None)); // non-USB / unknown is not flagged
+    }
+
+    #[test]
     fn reg_domain_format_accepts_valid_rejects_malformed() {
         // Two uppercase letters or digits → accepted.
         assert!(is_valid_reg_domain("IN"));
@@ -1290,6 +1408,7 @@ Wiphy phy0
             phy: "phy0".to_string(),
             usb_vid: Some(0x0BDA),
             usb_pid: Some(0xB812),
+            usb_speed_mbps: Some(480),
             is_wfb_compatible: true,
             capabilities: vec!["managed".to_string(), "monitor".to_string()],
         };
@@ -1302,10 +1421,11 @@ Wiphy phy0
         assert_eq!(v["phy"], "phy0");
         assert_eq!(v["usb_vid"], 0x0BDA);
         assert_eq!(v["usb_pid"], 0xB812);
+        assert_eq!(v["usb_speed_mbps"], 480);
         assert_eq!(v["is_wfb_compatible"], true);
         assert_eq!(v["capabilities"], serde_json::json!(["managed", "monitor"]));
-        // The contract carries exactly the ten Python dataclass keys.
-        assert_eq!(v.as_object().unwrap().len(), 10);
+        // The contract carries the adapter facts the panel + REST read.
+        assert_eq!(v.as_object().unwrap().len(), 11);
     }
 
     #[test]
@@ -1319,6 +1439,7 @@ Wiphy phy0
             phy: String::new(),
             usb_vid: None,
             usb_pid: None,
+            usb_speed_mbps: None,
             is_wfb_compatible: false,
             capabilities: vec![],
         };

@@ -380,6 +380,8 @@ async fn run_service(cfg: &WfbConfig, cancel: Arc<Notify>) {
             interface: iface.clone(),
             chipset: adapter.chipset.clone(),
             injection_ok: adapter.injection_ok,
+            usb_speed_mbps: adapter.usb_speed_mbps,
+            usb_degraded: adapter.usb_degraded,
         };
         write_stats_sidecar(
             "connecting",
@@ -1155,6 +1157,11 @@ struct AdapterInfo {
     interface: String,
     chipset: String,
     injection_ok: bool,
+    /// Enumerated USB link speed (Mbps); None when not USB / unreadable.
+    usb_speed_mbps: Option<u32>,
+    /// True when the adapter is on a slow USB link (full-speed) and so may
+    /// advance tx_bytes while emitting no usable RF.
+    usb_degraded: bool,
 }
 
 /// Compute the 16-hex-char public-key fingerprint of the drone TX key, or `None`
@@ -1210,6 +1217,10 @@ fn write_stats_sidecar(
         Some(a) => (a.interface.as_str(), a.chipset.as_str(), a.injection_ok),
         None => ("", "", false),
     };
+    let (adapter_usb_speed_mbps, adapter_usb_degraded) = match adapter {
+        Some(a) => (a.usb_speed_mbps, a.usb_degraded),
+        None => (None, false),
+    };
     // Pair identity: the fingerprint + paired flag come from the TX key on disk,
     // the peer id / paired-at / auto-pair flag from the persisted config block.
     let fingerprint = read_public_fingerprint(Path::new(WFB_TX_KEY));
@@ -1220,6 +1231,11 @@ fn write_stats_sidecar(
         "channel": channel,
         "adapter_chipset": chipset,
         "adapter_injection_ok": injection_ok,
+        // USB link health of the selected adapter. A full-speed (12 Mbps)
+        // enumeration on an RTL adapter means it can advance tx_bytes yet emit
+        // no usable RF — surfaced so the GCS warns instead of showing "connected".
+        "adapter_usb_speed_mbps": adapter_usb_speed_mbps,
+        "adapter_usb_degraded": adapter_usb_degraded,
         "tx_power_dbm": effective_tx_dbm,
         "tx_power_max_dbm": cfg.tx_power_max_dbm,
         "topology": cfg.topology,
