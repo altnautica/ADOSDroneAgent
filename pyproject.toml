@@ -76,6 +76,13 @@ ground-station = [
 icon-tools = [
     "cairosvg>=2.7",
 ]
+# Vision inference extras. The RKNN and TensorRT inference sidecars
+# import numpy lazily on the real infer path; pulled only when a
+# vision-capable build needs on-device detection. Kept out of the base
+# and drone installs so the default footprint stays small.
+vision = [
+    "numpy>=1.24",
+]
 
 [project.urls]
 Homepage = "https://altnautica.com/drone-agent"

@@ -4,6 +4,55 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.49.54] - 2026-06-01
+
+### Changed
+
+- Re-locked the dependency set after the ground-station display moved to the
+  native renderer, so the imaging packages it no longer needs are dropped from
+  the lock file. Added a `vision` install extra that carries numpy for the
+  on-device inference sidecars, kept out of the default and drone installs.
+
+## [0.49.53] - 2026-06-01
+
+### Fixed
+
+- **Ground-station displays keep their overlay across installs.** A
+  ground-station install now provisions its SPI display overlay instead of
+  stripping it, so the panel keeps its framebuffer through an upgrade. Drone
+  installs still revert the overlay so the GPU keeps the framebuffer.
+
+## [0.49.52] - 2026-06-01
+
+### Fixed
+
+- **Cheap USB cameras stop wedging on boot.** The installer disables USB
+  autosuspend on the kernel command line, so a camera that mishandles the
+  autosuspend resume no longer drops off the bus before the video service comes
+  up. The video service also restarts without a start-limit cap if a camera
+  wedges repeatedly.
+
+## [0.49.51] - 2026-06-01
+
+### Fixed
+
+- **Video reaches the radio reliably.** The video relay's first start waits
+  until the camera stream is ready and respawns from the run loop if it exits,
+  so the transmitter always has video to send. Operator transmit-power changes
+  route to the native radio's command socket.
+
+## [0.49.50] - 2026-06-01
+
+### Added
+
+- Ground receive answers hop announcements and drives its self-heal watchdog
+  from live decodes, so a healthy link is not torn down during a quiet beacon
+  window.
+- Operator FEC, modulation, transmit-power, and tier controls reach the native
+  transmit plane directly.
+- The heartbeat reports the radio stack state, the failover state, and the
+  transmit-side restart counters.
+
 ## [0.49.49] - 2026-06-01
 
 ### Fixed
