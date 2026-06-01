@@ -67,13 +67,11 @@ impl AxisRange {
 /// `rotation` (0 / 90 / 180 / 270; any other value is treated as 0).
 ///
 /// The two raw axes are first normalized to `0.0..=1.0` over their published
-/// ranges, giving `(nx, ny)` in the panel's native portrait frame: `nx` along
-/// the short edge, `ny` along the long edge. The rotation then places that
-/// normalized point on the landscape 480x320 surface. At rotation 0 the panel's
-/// long axis (`ny`) is horizontal on screen and its short axis (`nx`) is
-/// vertical, so `x_lcd` is driven by `ny` and `y_lcd` by `nx`; each 90-degree
-/// step rotates and flips from there. The result is clamped to `[0, LCD_W)` x
-/// `[0, LCD_H)`.
+/// ranges, giving `(nx, ny)` (the raw short and long axes). The rotation then
+/// places that normalized point on the landscape 480x320 surface. The rotation-0
+/// mapping is calibrated against the Waveshare 3.5" ADS7846 panel: on-screen X
+/// comes from the long axis inverted (`1 - ny`) and on-screen Y from the short
+/// axis (`nx`). The result is clamped to `[0, LCD_W)` x `[0, LCD_H)`.
 pub fn map_to_lcd(
     x_raw: i32,
     y_raw: i32,
@@ -85,15 +83,18 @@ pub fn map_to_lcd(
     let ny = y_range.norm(y_raw); // long panel edge, 0..1
     let rotation = rotation.rem_euclid(360);
 
-    // Place the normalized portrait point onto the landscape surface. `fx`/`fy`
-    // are normalized landscape coordinates (0..1) before scaling to pixels.
+    // Place the normalized point onto the landscape surface. `fx`/`fy` are
+    // normalized landscape coordinates (0..1) before scaling to pixels. The
+    // rotation-0 case is hardware-calibrated against the Waveshare 3.5" ADS7846
+    // ground-station panel: on-screen X is the raw long axis inverted (1 - ny),
+    // on-screen Y is the raw short axis (nx). The other cardinal rotations are
+    // derived placeholders pending per-orientation hardware calibration.
     let (fx, fy) = match rotation {
-        // Long edge -> horizontal, short edge -> vertical.
         90 => (nx, 1.0 - ny),
         180 => (1.0 - ny, 1.0 - nx),
         270 => (1.0 - nx, ny),
-        // 0 (and any out-of-range value normalized above).
-        _ => (ny, nx),
+        // 0 (and any out-of-range value normalized above). Hardware-calibrated.
+        _ => (1.0 - ny, nx),
     };
 
     let x = (fx * LCD_W as f64) as i32;
@@ -315,18 +316,19 @@ mod tests {
     }
 
     #[test]
-    fn rotation_0_maps_long_edge_to_x_short_edge_to_y() {
-        // raw (0,0): nx=0, ny=0 -> fx=ny=0, fy=nx=0 -> top-left.
-        assert_eq!(corner(0, 0, 0), (0, 0));
-        // raw (max, 0): nx=1, ny=0 -> fx=0, fy=1 -> bottom-left.
-        assert_eq!(corner(4095, 0, 0), (0, LCD_H - 1));
-        // raw (0, max): nx=0, ny=1 -> fx=1, fy=0 -> top-right.
-        assert_eq!(corner(0, 4095, 0), (LCD_W - 1, 0));
-        // raw (max, max): nx=1, ny=1 -> bottom-right.
-        assert_eq!(corner(4095, 4095, 0), (LCD_W - 1, LCD_H - 1));
-        // centre: norm 2047/4095 = 0.49988 -> 0.49988*480 = 239.9 -> 239,
-        // 0.49988*320 = 159.9 -> 159 (floor on the cast).
-        assert_eq!(corner(2047, 2047, 0), (239, 159));
+    fn rotation_0_calibrated_x_inverts_long_axis_y_is_short_axis() {
+        // Hardware-calibrated rotation-0: fx = 1 - ny, fy = nx.
+        // raw (0,0): nx=0, ny=0 -> fx=1, fy=0 -> top-right.
+        assert_eq!(corner(0, 0, 0), (LCD_W - 1, 0));
+        // raw (max, 0): nx=1, ny=0 -> fx=1, fy=1 -> bottom-right.
+        assert_eq!(corner(4095, 0, 0), (LCD_W - 1, LCD_H - 1));
+        // raw (0, max): nx=0, ny=1 -> fx=0, fy=0 -> top-left.
+        assert_eq!(corner(0, 4095, 0), (0, 0));
+        // raw (max, max): nx=1, ny=1 -> fx=0, fy=1 -> bottom-left.
+        assert_eq!(corner(4095, 4095, 0), (0, LCD_H - 1));
+        // centre: fx=1-0.49988=0.50012 -> 0.50012*480=240.0 -> 240;
+        // fy=0.49988 -> 0.49988*320=159.9 -> 159.
+        assert_eq!(corner(2047, 2047, 0), (240, 159));
     }
 
     #[test]
@@ -420,7 +422,8 @@ mod tests {
             min: 150,
             max: 3950,
         };
-        assert_eq!(map_to_lcd(200, 150, xr, yr, 0), (0, 0));
-        assert_eq!(map_to_lcd(3900, 3950, xr, yr, 0), (LCD_W - 1, LCD_H - 1));
+        // Rotation-0 calibrated mapping: (min,min) -> top-right, (max,max) -> bottom-left.
+        assert_eq!(map_to_lcd(200, 150, xr, yr, 0), (LCD_W - 1, 0));
+        assert_eq!(map_to_lcd(3900, 3950, xr, yr, 0), (0, LCD_H - 1));
     }
 }
