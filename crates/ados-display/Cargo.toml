@@ -47,6 +47,10 @@ png = { workspace = true }
 nix = { workspace = true }
 tracing-journald = { workspace = true }
 sd-notify = { workspace = true }
+# Touchscreen evdev reader (ADS7846). The `tokio` feature unlocks the async
+# `EventStream` the touch reader drains in the daemon's select! loop. Only the
+# node-open + read path is Linux-gated; the coordinate transform stays pure.
+evdev = { version = "0.12", features = ["tokio"] }
 
 [dev-dependencies]
 tempfile = "3"

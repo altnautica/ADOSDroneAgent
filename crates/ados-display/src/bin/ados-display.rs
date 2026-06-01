@@ -137,7 +137,7 @@ async fn run_linux(
             bpp = geometry.bits_per_pixel,
             "native page UI mode engaged"
         );
-        return run_page_ui(writer, geometry.bits_per_pixel, conf_blob).await;
+        return run_page_ui(writer, geometry.bits_per_pixel, rotation, conf_blob).await;
     }
 
     // A bound SPI-LCD too small for the 480x320 page system is an unsupported
@@ -210,6 +210,7 @@ async fn run_linux(
 async fn run_page_ui(
     mut writer: ados_display::fb_writer::FbWriter,
     bpp: u32,
+    rotation: i32,
     conf_blob: &std::collections::BTreeMap<String, String>,
 ) -> Result<()> {
     use std::time::{Duration, Instant};
@@ -218,7 +219,7 @@ async fn run_page_ui(
 
     use ados_display::fb_writer::Frame;
     use ados_display::graphics::palette::{self, Palette};
-    use ados_display::navigator::PageNavigator;
+    use ados_display::navigator::{Dispatch, PageNavigator};
     use ados_display::render_loop::pack_frame;
     use ados_display::sidecar::{
         write_snapshot_png, LcdLatency, LCD_LATENCY_PATH, LCD_SNAPSHOT_PATH,
@@ -250,6 +251,19 @@ async fn run_page_ui(
     let mut source = StateSource::new();
     let mut ctx = source.build_context();
 
+    // The touch reader runs as its own task and posts each classified gesture
+    // here; the select! loop turns it into a navigator transition. A small
+    // bounded buffer is plenty — strokes arrive at human speed and each is
+    // applied within one tick. The reader maps raw ADC samples to LCD pixels
+    // for the configured rotation, so the navigator receives the same
+    // coordinate frame the pages lay out in.
+    let (touch_tx, mut touch_rx) = tokio::sync::mpsc::channel::<ados_hid::touch::TouchGesture>(16);
+    tokio::spawn(async move {
+        if let Err(e) = ados_display::touch_input::run_touch_reader(rotation, touch_tx).await {
+            tracing::warn!(error = %e, "touch reader exited");
+        }
+    });
+
     let mut sigterm = signal(SignalKind::terminate())?;
     let mut sigint = signal(SignalKind::interrupt())?;
     // SIGHUP is the in-place config-reload signal. The agent's REST handlers
@@ -271,6 +285,10 @@ async fn run_page_ui(
     let mut last_render: Option<Instant> = None;
     let mut last_latency_write = now;
     let mut last_snapshot: Option<Instant> = None;
+    // Monotonic millisecond clock for touch dispatch. The navigator stamps
+    // tap-feedback against this same base the chrome compares its linger window
+    // to, so the tapped tab flashes when a touch routes to it.
+    let touch_clock = now;
 
     loop {
         tokio::select! {
@@ -338,6 +356,32 @@ async fn run_page_ui(
                     }
                     last_latency_write = now;
                     sd_watchdog();
+                }
+            }
+            maybe_gesture = touch_rx.recv() => {
+                // A classified touch stroke arrived from the reader task. Route
+                // it through the navigator against the live context (some pages
+                // lay their hit zones out from state), then act on the dispatch.
+                // A tab switch or modal push/pop moves the active surface, so
+                // force a render next tick — the same path the SIGHUP theme
+                // reload and the remote page-request drain use. A `None` closes
+                // the channel only when the reader task is gone; keep looping so
+                // the rest of the UI (signals, render, latency mirror) survives.
+                if let Some(gesture) = maybe_gesture {
+                    let now_ms = touch_clock.elapsed().as_millis() as i64;
+                    let dispatch = navigator.on_touch(&ctx, &gesture, now_ms);
+                    match dispatch {
+                        Dispatch::RouteChanged(_) | Dispatch::ModalChanged(_) => {
+                            // Repaint immediately so the new page lands without
+                            // waiting out the previous page's refresh period.
+                            last_render = None;
+                        }
+                        // A page-defined custom key (slider drag, list row) has
+                        // no navigator-owned surface change; the page reads its
+                        // own state on the next scheduled render. Inert taps do
+                        // nothing.
+                        Dispatch::Custom(_) | Dispatch::None => {}
+                    }
                 }
             }
             _ = sighup.recv() => {

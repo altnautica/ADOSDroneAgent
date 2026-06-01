@@ -68,6 +68,7 @@ dependencies = [
  "ados-hid",
  "anyhow",
  "embedded-graphics",
+ "evdev",
  "image",
  "memmap2",
  "nix 0.29.0",
@@ -1069,9 +1070,11 @@ checksum = "ab6055a93a963297befb0f4f6e18f314aec9767a4bbe88b151126df2433610a7"
 dependencies = [
  "bitvec",
  "cfg-if",
+ "futures-core",
  "libc",
  "nix 0.23.2",
  "thiserror 1.0.69",
+ "tokio",
 ]
 
 [[package]]

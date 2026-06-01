@@ -24,6 +24,9 @@
 //! * [`navigator`] — the page-navigation state machine driven by buttons/touch.
 //! * [`render_loop`] — the tick loop that paints the active page and feeds the
 //!   off-thread framebuffer writer.
+//! * [`touch_input`] — the touchscreen evdev reader: raw ADS7846 ABS samples ->
+//!   rotated LCD pixels -> classified gestures posted to the render loop. The
+//!   coordinate transform is pure; only the node drain is Linux-gated.
 //!
 //! mDNS and the FastAPI display routes stay in Python; the byte-level write path
 //! and the page render both live here.
@@ -40,4 +43,5 @@ pub mod probe;
 pub mod render_loop;
 pub mod sidecar;
 pub mod state_source;
+pub mod touch_input;
 pub mod widgets;
