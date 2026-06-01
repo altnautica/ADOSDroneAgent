@@ -61,6 +61,21 @@ nix = { version = "0.29", default-features = false, features = ["process", "sign
 # /dev/shm frame-ring mapping for the vision engine. Operates on the byte
 # region the framebus contract defines; the contract itself stays OS-free.
 memmap2 = "0.9"
+# LCD page rendering — all pure Rust so the byte-level draw path cross-builds
+# for the musl SBC target with no C toolchain.
+#  * embedded-graphics: 2D draw primitives (rect/line/circle/polyline) onto an
+#    in-memory RGB888 buffer; the canvas the pages paint into.
+#  * ab_glyph: TrueType glyph rasterizer — renders the same DejaVu faces the
+#    prior renderer used, so text metrics match pixel-for-pixel.
+#  * image (png only): decode/encode PNG for off-rig snapshot fixtures; the
+#    png feature path is pure Rust (no libpng).
+#  * qrcode: pair-URL / short-code QR matrix generation.
+#  * png: low-level PNG codec used by the snapshot harness.
+embedded-graphics = "0.8"
+ab_glyph = "0.2"
+image = { version = "0.25", default-features = false, features = ["png"] }
+qrcode = "0.14"
+png = "0.17"
 
 [profile.release]
 strip = true

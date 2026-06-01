@@ -13,13 +13,31 @@
 //! * [`sidecar`] — `/run/ados` LCD sidecars (lcd-state read, page-request
 //!   read+unlink, latency snapshot write).
 //!
-//! The PIL page UI, mDNS, and the FastAPI display routes stay in Python; this
-//! crate is the byte-level write path the Python render sidecar feeds.
+//! The native-resolution page UI is being moved into this crate so the LCD
+//! render path is dependency-light pure Rust end to end:
+//!
+//! * [`graphics`] — the color palette, the embedded TrueType faces + glyph
+//!   rasterizer, the draw primitives, and the composite widgets (sparkline,
+//!   bar meter, status dot, QR) the pages paint with.
+//! * [`widgets`] — the shared page chrome (status bars, tiles, big numbers).
+//! * [`pages`] — the full-panel page composers.
+//! * [`navigator`] — the page-navigation state machine driven by buttons/touch.
+//! * [`render_loop`] — the tick loop that paints the active page and feeds the
+//!   off-thread framebuffer writer.
+//!
+//! mDNS and the FastAPI display routes stay in Python; the byte-level write path
+//! and the page render both live here.
 
 pub mod conf;
 pub mod fb_geometry;
 pub mod fb_writer;
+pub mod graphics;
+pub mod navigator;
 pub mod oled;
 pub mod pack;
+pub mod pages;
 pub mod probe;
+pub mod render_loop;
 pub mod sidecar;
+pub mod state_source;
+pub mod widgets;
