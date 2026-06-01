@@ -809,8 +809,12 @@ async fn run_hop_supervisor(
                 if return_home {
                     tracing::info!(home, "hop_return_home");
                     proc.lock().await.kill_all().await;
-                    set_channel(iface, home).await;
-                    let ok = match RadioProcesses::spawn(iface, cfg, Path::new(WFB_TX_KEY), link.clone()).await {
+                    // Always attempt the channel set AND the respawn (never leave
+                    // the radio group dead), but a silent `iw set channel` failure
+                    // makes the recorded outcome false: respawning the radio on
+                    // the wrong channel is not a successful return home.
+                    let channel_ok = set_channel(iface, home).await;
+                    let spawn_ok = match RadioProcesses::spawn(iface, cfg, Path::new(WFB_TX_KEY), link.clone()).await {
                         Ok(new_proc) => {
                             *proc.lock().await = new_proc;
                             restart_count.fetch_add(1, Ordering::Relaxed);
@@ -821,7 +825,7 @@ async fn run_hop_supervisor(
                             false
                         }
                     };
-                    state.lock().await.record_hop(home, "return_home", ok);
+                    state.lock().await.record_hop(home, "return_home", channel_ok && spawn_ok);
                 }
             }
             _ = cancel.notified() => {
@@ -875,13 +879,26 @@ async fn try_execute_hop(
     }
     sleep_to_epoch(epoch).await;
     proc.lock().await.kill_all().await;
-    set_channel(iface, target).await;
+    // A silent `iw set channel` failure makes the hop outcome false even when
+    // the radio respawns cleanly: a hop that landed on the old channel is not a
+    // successful hop. The radio is always respawned so the link is never left
+    // dead.
+    let channel_ok = set_channel(iface, target).await;
     match RadioProcesses::spawn(iface, cfg, Path::new(WFB_TX_KEY), link.clone()).await {
         Ok(new_proc) => {
             *proc.lock().await = new_proc;
             restart_count.fetch_add(1, Ordering::Relaxed);
-            state.lock().await.record_hop(target, label, true);
-            tracing::info!(iface, channel = target, trigger = label, "hop_executed");
+            state.lock().await.record_hop(target, label, channel_ok);
+            if channel_ok {
+                tracing::info!(iface, channel = target, trigger = label, "hop_executed");
+            } else {
+                tracing::warn!(
+                    iface,
+                    channel = target,
+                    trigger = label,
+                    "hop_channel_unverified"
+                );
+            }
         }
         Err(e) => {
             state.lock().await.record_hop(target, label, false);
@@ -979,17 +996,85 @@ async fn write_hop_supervisor_json(
     let _ = write_sidecar(&run_path("hop-supervisor.json"), &v);
 }
 
-/// `iw <iface> set channel <ch>` (best-effort; failures are logged).
-async fn set_channel(iface: &str, channel: u8) {
-    let result = tokio::process::Command::new("iw")
-        .args([iface, "set", "channel", &channel.to_string()])
-        .status()
-        .await;
-    match result {
-        Ok(s) if s.success() => {}
-        Ok(s) => tracing::warn!(iface, channel, exit = s.code(), "iw_set_channel_failed"),
-        Err(e) => tracing::warn!(iface, channel, error = %e, "iw_set_channel_error"),
+/// Per-call ceiling on the `iw set channel` + readback so a hung `iw` (driver
+/// wedged mid-retune) cannot stall the hop / return-home path.
+const SET_CHANNEL_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// `iw <iface> set channel <ch>`, VERIFIED. Returns `true` only when the
+/// command exits 0 AND a readback of `iw <iface> info` confirms the interface
+/// landed on `channel`. A silent driver no-op (exit 0 but the channel never
+/// changed) and a hung `iw` both record `false` instead of a false success, so
+/// the caller's hop / return-home outcome reflects reality.
+async fn set_channel(iface: &str, channel: u8) -> bool {
+    let status = tokio::time::timeout(
+        SET_CHANNEL_TIMEOUT,
+        tokio::process::Command::new("iw")
+            .args([iface, "set", "channel", &channel.to_string()])
+            .status(),
+    )
+    .await;
+    match status {
+        Ok(Ok(s)) if s.success() => {}
+        Ok(Ok(s)) => {
+            tracing::warn!(iface, channel, exit = s.code(), "iw_set_channel_failed");
+            return false;
+        }
+        Ok(Err(e)) => {
+            tracing::warn!(iface, channel, error = %e, "iw_set_channel_error");
+            return false;
+        }
+        Err(_) => {
+            tracing::warn!(iface, channel, "iw_set_channel_timeout");
+            return false;
+        }
     }
+    // Read back the live channel; a mismatch (or unreadable info) is a failure.
+    match channel_from_iface(iface).await {
+        Some(live) if live == channel => true,
+        Some(live) => {
+            tracing::warn!(iface, channel, live, "iw_set_channel_readback_mismatch");
+            false
+        }
+        None => {
+            tracing::warn!(iface, channel, "iw_set_channel_readback_unavailable");
+            false
+        }
+    }
+}
+
+/// Read the interface's current channel from `iw <iface> info`, or `None` when
+/// `iw` cannot be run or its output carries no channel. Split out so the
+/// readback parse is unit-testable independently of the subprocess.
+async fn channel_from_iface(iface: &str) -> Option<u8> {
+    let out = tokio::time::timeout(
+        SET_CHANNEL_TIMEOUT,
+        tokio::process::Command::new("iw")
+            .args([iface, "info"])
+            .output(),
+    )
+    .await
+    .ok()?
+    .ok()?;
+    parse_iface_channel(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// Parse the `channel <N>` token out of an `iw <iface> info` body. The line
+/// reads e.g. `\tchannel 149 (5745 MHz), width: 20 MHz, …`; the first integer
+/// after the `channel` keyword is the channel number. Pure helper.
+fn parse_iface_channel(info: &str) -> Option<u8> {
+    for line in info.lines() {
+        let mut toks = line.split_whitespace();
+        while let Some(tok) = toks.next() {
+            if tok == "channel" {
+                if let Some(n) = toks.next() {
+                    if let Ok(ch) = n.parse::<u8>() {
+                        return Some(ch);
+                    }
+                }
+            }
+        }
+    }
+    None
 }
 
 /// The adapter facts the sidecar surfaces (None until an adapter is selected).
@@ -1166,6 +1251,34 @@ mod tests {
         // drone-only-rig case that would otherwise hop every cycle forever.
         let link = LinkStats::default();
         assert!(!reactive_should_fire(true, &link, 10.0, -75.0));
+    }
+
+    #[test]
+    fn parse_iface_channel_reads_channel_token() {
+        // The readback seam set_channel uses to verify the live channel. The
+        // verified-bool is `set_ok && parse == target`; here we exercise the
+        // parse half so a silent driver no-op (info still shows the old channel)
+        // is distinguishable from a real retune.
+        let info = "Interface wlan1\n\tifindex 5\n\ttype monitor\n\
+                    \tchannel 149 (5745 MHz), width: 20 MHz, center1: 5745 MHz\n";
+        assert_eq!(parse_iface_channel(info), Some(149));
+        // A different live channel parses to its own value, so a mismatch
+        // against the requested target records ok=false.
+        let other = "Interface wlan1\n\tchannel 36 (5180 MHz), width: 20 MHz\n";
+        assert_eq!(parse_iface_channel(other), Some(36));
+    }
+
+    #[test]
+    fn parse_iface_channel_no_channel_is_none() {
+        // No `channel` line (radio not on a channel, or unreadable info) → None,
+        // which set_channel treats as an unverified failure (ok=false).
+        assert_eq!(
+            parse_iface_channel("Interface wlan1\n\ttype managed\n"),
+            None
+        );
+        assert_eq!(parse_iface_channel(""), None);
+        // A bare `channel` keyword with no number is also None, not a panic.
+        assert_eq!(parse_iface_channel("\tchannel\n"), None);
     }
 
     #[test]

@@ -50,6 +50,16 @@ pub fn should_attempt(armed: bool, already_paired: bool) -> bool {
     armed && !already_paired
 }
 
+/// Whether the loop should run a bind given the adapter presence. A dongle-less
+/// boot (no injection-capable WFB adapter) must NOT run a bind: the bind would
+/// fail and burn one of the limited local-bind attempts, eventually flipping the
+/// rig to the cloud-relay fallback even though the operator simply has not
+/// plugged the radio in yet. Skipping without counting lets the rig keep waiting
+/// for the adapter indefinitely and bind the moment it appears. Pure for testing.
+pub fn adapter_ready_to_bind(wfb_adapter_present: bool) -> bool {
+    wfb_adapter_present
+}
+
 /// Decide whether the attempt count has reached the cap that flips the rig from
 /// local-bind retries to the cloud-relay fallback. Pure for testing. Mirrors the
 /// `attempt >= MAX_LOCAL_BIND_ATTEMPTS` gate: it fires on the Nth consecutive
@@ -181,9 +191,22 @@ fn read_armed() -> bool {
     }
 }
 
-/// True when this role's key file already exists (the rig is paired).
+/// True when this role's key file is a real, complete WFB key (the rig is
+/// paired). A bare `Path::exists()` treated a half-written key file (a power
+/// loss mid-bind, a truncated copy) as paired, so the rig skipped its own
+/// auto-bind and never recovered. Reuse the key validator: it succeeds only
+/// when the file is exactly 64 bytes (the libsodium crypto_box size) and its
+/// peer-public half hashes, which is the same completeness check the bind path
+/// applies before it trusts a key.
 fn already_paired(role: BindRole) -> bool {
-    Path::new(role.key_path()).exists()
+    key_is_complete(Path::new(role.key_path()))
+}
+
+/// True when the key file at `path` passes the WFB key validator (64-byte
+/// length + fingerprintable peer-public half). Split out so the completeness
+/// check is unit-testable against a temp file without a real role key path.
+fn key_is_complete(path: &Path) -> bool {
+    crate::bind::keys::read_public_fingerprint(path).is_ok()
 }
 
 /// Run the auto-pair loop until `shutdown` flips. Drives the bind in-process via
@@ -219,7 +242,15 @@ async fn run_with_failover(
         }
         let armed = read_armed();
         let paired = already_paired(role);
-        if should_attempt(armed, paired) {
+        // A dongle-less boot must not run (and fail) a bind: that would burn the
+        // limited local-bind attempts and flip to cloud_relay when the operator
+        // has simply not plugged the radio in yet. Skip without counting so the
+        // rig keeps waiting and binds the moment the adapter appears.
+        let adapter_present = adapter_ready_to_bind(crate::hardware::has_wfb_adapter());
+        if should_attempt(armed, paired) && !adapter_present {
+            tracing::info!(role = role.as_str(), "auto_pair_waiting_for_wfb_adapter");
+        }
+        if should_attempt(armed, paired) && adapter_present {
             // Tear down an in-flight bind if the supervisor shuts down.
             let mut cancel_rx = shutdown.clone();
             let cancel = async move {
@@ -279,6 +310,54 @@ mod tests {
         assert!(should_attempt(true, false));
         assert!(!should_attempt(false, false)); // disarmed
         assert!(!should_attempt(true, true)); // already paired
+    }
+
+    #[test]
+    fn key_completeness_rejects_half_written_key() {
+        // A complete 64-byte key counts as paired; a short (half-written, e.g.
+        // power loss mid-bind) or absent key does NOT, so the rig re-runs its
+        // own auto-bind instead of skipping forever on a truncated file.
+        let dir = tempfile::tempdir().unwrap();
+        let good = dir.path().join("drone.key");
+        std::fs::write(&good, [7u8; 64]).unwrap();
+        assert!(key_is_complete(&good));
+
+        let half = dir.path().join("half.key");
+        std::fs::write(&half, [7u8; 32]).unwrap(); // truncated write
+        assert!(!key_is_complete(&half));
+
+        let empty = dir.path().join("empty.key");
+        std::fs::write(&empty, []).unwrap();
+        assert!(!key_is_complete(&empty));
+
+        // A path that does not exist is not paired.
+        assert!(!key_is_complete(&dir.path().join("missing.key")));
+    }
+
+    #[test]
+    fn adapter_gate_skips_bind_without_an_adapter() {
+        // With an injection adapter present, a bind may run; without one it must
+        // not (the gate is what keeps a dongle-less boot from burning attempts).
+        assert!(adapter_ready_to_bind(true));
+        assert!(!adapter_ready_to_bind(false));
+    }
+
+    #[test]
+    fn no_adapter_does_not_consume_a_failover_attempt() {
+        // Model the loop's decision: when armed + unpaired but no adapter is
+        // present, the bind is skipped and the attempt counter is untouched, so
+        // a dongle-less rig never flips to cloud_relay while it waits.
+        let armed = true;
+        let paired = false;
+        let mut attempt: u32 = 0;
+        for _ in 0..(MAX_LOCAL_BIND_ATTEMPTS + 5) {
+            let adapter_present = adapter_ready_to_bind(false); // never plugged in
+            if should_attempt(armed, paired) && adapter_present {
+                attempt += 1; // the only path that counts toward failover
+            }
+        }
+        assert_eq!(attempt, 0);
+        assert!(!failover_reached(attempt));
     }
 
     #[test]

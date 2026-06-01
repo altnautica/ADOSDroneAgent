@@ -471,19 +471,56 @@ async fn supported_modes(phy: &str) -> Vec<String> {
     }
 }
 
+/// Read `(idVendor, idProduct)` for the USB device backing a netdev.
+///
+/// `/sys/class/net/<if>/device` is a symlink to the USB *interface* node
+/// (e.g. `…/1-1:1.0`), which carries `bInterfaceClass` but NOT `idVendor` /
+/// `idProduct` — those live on the parent USB *device* node (`…/1-1`). The
+/// old read of `device/idVendor` therefore always missed on a USB adapter and
+/// returned `None`, so the VID:PID table never disambiguated the (0BDA:A81A)
+/// silicon and the driver-name fallback carried the whole classification.
+///
+/// Resolve the symlink to a real path, then walk UP at most a few parent dirs
+/// until one holds both id files, and read them there. Bounded so a malformed
+/// sysfs (or a non-USB iface) can never loop; `None` when not found.
 #[cfg(target_os = "linux")]
 async fn usb_vid_pid(iface: &str) -> Option<(u16, u16)> {
-    // /sys/class/net/<if>/device/idVendor + idProduct (USB device).
-    let base = format!("/sys/class/net/{}/device", iface);
-    let vid_raw = tokio::fs::read_to_string(format!("{}/idVendor", base))
-        .await
-        .ok()?;
-    let pid_raw = tokio::fs::read_to_string(format!("{}/idProduct", base))
-        .await
-        .ok()?;
-    let vid = u16::from_str_radix(vid_raw.trim(), 16).ok()?;
-    let pid = u16::from_str_radix(pid_raw.trim(), 16).ok()?;
-    Some((vid, pid))
+    // Resolve the `device` symlink to the USB interface node's real path, then
+    // walk up to the parent USB device node holding the id files.
+    let link = format!("/sys/class/net/{}/device", iface);
+    let start = tokio::fs::canonicalize(&link).await.ok()?;
+    vid_pid_from_device_dir(&start)
+}
+
+/// Walk UP from a resolved USB interface node to the parent USB *device* node
+/// that carries `idVendor` + `idProduct`, and read them there. The netdev's
+/// `device` symlink points at the interface node (e.g. `…:1.0`), which has no
+/// id files; the ids live one (sometimes more) levels up. Bounded to a few
+/// hops so a malformed tree (or a non-USB iface whose `device` resolves
+/// elsewhere) can never loop or climb out to the controller root. `None` when
+/// no ancestor within the bound holds both files. Pure (sync fs reads on a real
+/// path) so a fixture sysfs tree exercises the parent-walk off a real SBC.
+#[cfg(any(target_os = "linux", test))]
+fn vid_pid_from_device_dir(start: &std::path::Path) -> Option<(u16, u16)> {
+    // 4 hops covers interface → device (typically 1 hop, extra slack for hubs)
+    // without reaching the controller root.
+    const MAX_PARENT_HOPS: usize = 4;
+    let mut dir = start.to_path_buf();
+    for _ in 0..=MAX_PARENT_HOPS {
+        if let (Ok(vid_raw), Ok(pid_raw)) = (
+            std::fs::read_to_string(dir.join("idVendor")),
+            std::fs::read_to_string(dir.join("idProduct")),
+        ) {
+            let vid = u16::from_str_radix(vid_raw.trim(), 16).ok()?;
+            let pid = u16::from_str_radix(pid_raw.trim(), 16).ok()?;
+            return Some((vid, pid));
+        }
+        match dir.parent() {
+            Some(parent) => dir = parent.to_path_buf(),
+            None => break,
+        }
+    }
+    None
 }
 
 /// Parse the iface carrying the kernel default route out of `ip route` output.
@@ -740,6 +777,16 @@ fn parse_supported_modes(info: &str) -> Vec<String> {
     out
 }
 
+/// True when `domain` is a well-formed regulatory domain code: exactly two
+/// characters, each an uppercase ASCII letter or digit (`/^[A-Z0-9]{2}$/`).
+/// Pure so the format gate is unit-testable without `iw`.
+fn is_valid_reg_domain(domain: &str) -> bool {
+    domain.len() == 2
+        && domain
+            .bytes()
+            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
+}
+
 /// Apply the regulatory domain via `iw reg set <domain>` and verify it took.
 ///
 /// Must run BEFORE the interface is brought up in monitor mode: the kernel
@@ -752,6 +799,14 @@ fn parse_supported_modes(info: &str) -> Vec<String> {
 /// logged and the link continues. No-op when `domain` is empty.
 pub async fn set_reg_domain(domain: &str) {
     if domain.is_empty() {
+        return;
+    }
+    // An ISO 3166-1 alpha-2 country / `00` world domain is exactly two chars,
+    // each `A-Z` or `0-9`. Reject anything else before it reaches `iw reg set`
+    // so a malformed value (stray whitespace, a full name, an injected token)
+    // is never handed to the command.
+    if !is_valid_reg_domain(domain) {
+        tracing::warn!(domain, "wfb_reg_domain_rejected_format");
         return;
     }
     if run_cmd("iw", &["reg", "set", domain]).await.is_err() {
@@ -948,6 +1003,49 @@ mod tests {
         // No default-route line in the output → None.
         assert!(parse_default_route_iface("10.0.0.0/24 dev eth0 scope link").is_none());
         assert!(parse_default_route_iface("").is_none());
+    }
+
+    #[test]
+    fn vid_pid_parent_walk_finds_ids_on_parent_device() {
+        // Model the sysfs shape: the resolved `device` node is the USB
+        // *interface* (`…:1.0`), which has bInterfaceClass but no id files; the
+        // ids live on its parent USB *device* node. The walk must climb to it.
+        let dir = tempfile::tempdir().unwrap();
+        let device = dir.path().join("1-1");
+        let interface = device.join("1-1:1.0");
+        std::fs::create_dir_all(&interface).unwrap();
+        // Interface node: a class file but NO ids (the trap that returned None).
+        std::fs::write(interface.join("bInterfaceClass"), "ff\n").unwrap();
+        // Parent device node: the real ids.
+        std::fs::write(device.join("idVendor"), "0bda\n").unwrap();
+        std::fs::write(device.join("idProduct"), "a81a\n").unwrap();
+
+        assert_eq!(vid_pid_from_device_dir(&interface), Some((0x0BDA, 0xA81A)));
+    }
+
+    #[test]
+    fn vid_pid_walk_returns_none_when_no_ancestor_has_ids() {
+        // A tree with no id files anywhere within the bound yields None rather
+        // than climbing out to the filesystem root.
+        let dir = tempfile::tempdir().unwrap();
+        let leaf = dir.path().join("a").join("b").join("c");
+        std::fs::create_dir_all(&leaf).unwrap();
+        assert_eq!(vid_pid_from_device_dir(&leaf), None);
+    }
+
+    #[test]
+    fn reg_domain_format_accepts_valid_rejects_malformed() {
+        // Two uppercase letters or digits → accepted.
+        assert!(is_valid_reg_domain("IN"));
+        assert!(is_valid_reg_domain("US"));
+        assert!(is_valid_reg_domain("00")); // world domain
+                                            // Anything else → rejected before it reaches `iw reg set`.
+        assert!(!is_valid_reg_domain("in")); // lowercase
+        assert!(!is_valid_reg_domain("USA")); // too long
+        assert!(!is_valid_reg_domain("I")); // too short
+        assert!(!is_valid_reg_domain("")); // empty
+        assert!(!is_valid_reg_domain("I N")); // whitespace / wrong length
+        assert!(!is_valid_reg_domain("U;")); // injected punctuation
     }
 
     #[test]
