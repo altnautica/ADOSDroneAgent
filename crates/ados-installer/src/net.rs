@@ -20,9 +20,19 @@ use crate::exec;
 /// is inserted so curl skips a dead IPv6 default route instead of stalling on
 /// it. The destination is the caller's path verbatim (the atomic temp-then-
 /// rename dance is `fetch`'s job, not this builder's).
+///
+/// Cache-busting: rolling tags reuse one asset URL across rebuilds, so an
+/// intermediary CDN can hand back a stale binary paired with a stale sha. The
+/// `Cache-Control: no-cache` + `Pragma: no-cache` request headers force a
+/// revalidation so the binary and its sha256 are always the freshly published
+/// pair.
 pub fn curl_args(url: &str, dest: &Path, force_ipv4: bool) -> Vec<String> {
     let mut args: Vec<String> = vec![
         "-fsSL".to_string(),
+        "-H".to_string(),
+        "Cache-Control: no-cache".to_string(),
+        "-H".to_string(),
+        "Pragma: no-cache".to_string(),
         "--connect-timeout".to_string(),
         "10".to_string(),
         "--max-time".to_string(),
@@ -132,6 +142,9 @@ mod tests {
         let pos = args.iter().position(|a| a == "--max-time").unwrap();
         assert_eq!(args[pos + 1], "120");
         assert!(!args.contains(&"-4".to_string()));
+        // Cache-busting headers are present so a CDN cannot serve a stale pair.
+        assert!(args.contains(&"Cache-Control: no-cache".to_string()));
+        assert!(args.contains(&"Pragma: no-cache".to_string()));
         // -fsSL is first, URL precedes -o <dest>.
         assert_eq!(args[0], "-fsSL");
         let url_pos = args.iter().position(|a| a == "https://example/x").unwrap();

@@ -60,46 +60,90 @@ fn allow_unsigned_for(channel: Channel) -> bool {
     matches!(channel, Channel::Edge)
 }
 
-/// Fetch + verify one prebuilt binary into a temp dir, then install it 0755 at
-/// its destination. Returns `Ok(())` on success, `Err` on any fetch/verify/
-/// install miss (the caller maps that through the gate).
-fn install_one(b: &PrebuiltBinary, tmp_dir: &Path, channel: Channel) -> anyhow::Result<()> {
+/// Fetch + verify one prebuilt binary, then place it atomically at its
+/// destination. Returns `Ok(())` on success, `Err` on any fetch/verify/place
+/// miss (the caller maps that through the gate). `tmp_dir` holds nothing for the
+/// binary itself — the binary is fetched to a `.dl` sibling of the real dest so
+/// the final placement is a same-filesystem `rename` (see [`place_binary`]); the
+/// dir is retained for callers that want a scratch root and for symmetry.
+fn install_one(b: &PrebuiltBinary, _tmp_dir: &Path, channel: Channel) -> anyhow::Result<()> {
     let asset_url = format!("{RELEASE_BASE}/{}/{}", b.release_tag, b.asset);
-    let tmp_bin = tmp_dir.join(b.asset);
-    let tmp_sha = tmp_dir.join(format!("{}.sha256", b.asset));
-    let tmp_sig = tmp_dir.join(format!("{}.minisig", b.asset));
+    let dest = Path::new(b.dest);
 
-    // The binary + its sha256 are mandatory; the .minisig is best-effort so
-    // verification upgrades to signature-checked automatically once CI signs.
-    net::fetch(&asset_url, &tmp_bin)?;
-    net::fetch(&format!("{asset_url}.sha256"), &tmp_sha)?;
-    let _ = net::fetch(&format!("{asset_url}.minisig"), &tmp_sig);
-
-    verify::verify_artifact(&tmp_bin, None, channel, allow_unsigned_for(channel))?;
-
-    install_executable(&tmp_bin, Path::new(b.dest))?;
-    Ok(())
-}
-
-/// Install a fetched file as a 0755 executable at `dest`, creating the parent
-/// directory if needed. Uses the system `install -m 0755` when present (matches
-/// the bash installer) and falls back to a copy + permission set otherwise.
-fn install_executable(src: &Path, dest: &Path) -> anyhow::Result<()> {
+    // Ensure /opt/ados/bin exists so the `.dl` sibling and the final rename land
+    // on the same filesystem as the destination (atomic rename requires it).
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|e| anyhow::anyhow!("create {} failed: {e}", parent.display()))?;
     }
-    let src_s = src.to_string_lossy();
-    let dest_s = dest.to_string_lossy();
-    let res = crate::exec::run("install", &["-m", "0755", &src_s, &dest_s]);
-    if res.success() {
-        return Ok(());
+
+    // Fetch the binary + its sidecars to siblings of the real dest. The `.sha256`
+    // MUST sit next to the binary we verify because `verify_artifact` looks for
+    // `<artifact>.sha256` beside the artifact. The `.minisig` is best-effort so
+    // verification upgrades to signature-checked automatically once CI signs.
+    let dl_bin = dl_sibling(dest);
+    let dl_sha = sidecar_path(&dl_bin, "sha256");
+    let dl_sig = sidecar_path(&dl_bin, "minisig");
+
+    let outcome = (|| {
+        net::fetch(&asset_url, &dl_bin)?;
+        net::fetch(&format!("{asset_url}.sha256"), &dl_sha)?;
+        let _ = net::fetch(&format!("{asset_url}.minisig"), &dl_sig);
+
+        // Verify the downloaded temp BEFORE it is placed at the live path.
+        verify::verify_artifact(&dl_bin, None, channel, allow_unsigned_for(channel))?;
+
+        // chmod the temp, then atomically swap it over the (possibly running)
+        // destination. A live process keeps its old inode through the rename.
+        set_executable(&dl_bin)?;
+        place_binary(&dl_bin, dest)?;
+        Ok(())
+    })();
+
+    // Always clear the sidecars; clear the `.dl` binary too if we did not place
+    // it (a successful `place_binary` already renamed it away).
+    let _ = std::fs::remove_file(&dl_sha);
+    let _ = std::fs::remove_file(&dl_sig);
+    if outcome.is_err() {
+        let _ = std::fs::remove_file(&dl_bin);
     }
-    // Fallback: copy + chmod 0755 ourselves (e.g. `install` absent on the host).
-    std::fs::copy(src, dest)
-        .map_err(|e| anyhow::anyhow!("copy {} -> {} failed: {e}", src.display(), dest.display()))?;
-    set_executable(dest)?;
-    Ok(())
+    outcome
+}
+
+/// `<dest>.dl` sibling used as the verify-then-rename staging path. It lives in
+/// the same directory as `dest` so the final `rename` is atomic.
+fn dl_sibling(dest: &Path) -> PathBuf {
+    let mut s = dest.as_os_str().to_owned();
+    s.push(".dl");
+    PathBuf::from(s)
+}
+
+/// `<path>.<ext>` sidecar next to `path` (matches `verify_artifact`'s lookup).
+fn sidecar_path(path: &Path, ext: &str) -> PathBuf {
+    let mut s = path.as_os_str().to_owned();
+    s.push(".");
+    s.push(ext);
+    PathBuf::from(s)
+}
+
+/// Atomically place the verified, already-chmod'd `src` at `dest`. A same-dir
+/// `rename` swaps the inode in one step: it is never a half-written file, and a
+/// running service that has the old binary mmap'd keeps its old inode (no
+/// `ETXTBSY`, no `O_TRUNC` on a live executable). Falls back to a copy + chmod
+/// only if the rename fails (e.g. a cross-filesystem dest the caller forced).
+fn place_binary(src: &Path, dest: &Path) -> anyhow::Result<()> {
+    match std::fs::rename(src, dest) {
+        Ok(()) => Ok(()),
+        Err(_) => {
+            // Non-atomic fallback for a dest on a different filesystem.
+            std::fs::copy(src, dest).map_err(|e| {
+                anyhow::anyhow!("copy {} -> {} failed: {e}", src.display(), dest.display())
+            })?;
+            set_executable(dest)?;
+            let _ = std::fs::remove_file(src);
+            Ok(())
+        }
+    }
 }
 
 /// chmod 0755 (Unix); a no-op stub on non-Unix dev hosts.
@@ -116,16 +160,22 @@ fn set_executable(_dest: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Install the global `/usr/local/bin/{ados,ados-agent}` symlinks pointing into
-/// the venv's console scripts (the genuine "symlinks" part). Best-effort: a
-/// symlink failure does not abort the install (the binaries are already on
-/// disk), but it is logged.
+/// Install the global `/usr/local/bin/ados*` symlinks (the genuine "symlinks"
+/// part). `ados` + `ados-agent` point into the venv's console scripts;
+/// `ados-supervisor` points at the Rust binary under `/opt/ados/bin` so the
+/// operator command is on PATH. This set mirrors the uninstall removal list so
+/// the two surfaces never drift. Best-effort: a symlink failure does not abort
+/// the install (the binaries are already on disk), but it is logged.
 fn install_global_symlinks() {
     let pairs = [
         (format!("{}/bin/ados", env::VENV_DIR), "/usr/local/bin/ados"),
         (
             format!("{}/bin/ados-agent", env::VENV_DIR),
             "/usr/local/bin/ados-agent",
+        ),
+        (
+            format!("{}/ados-supervisor", env::BIN_DIR),
+            "/usr/local/bin/ados-supervisor",
         ),
     ];
     for (target, link) in pairs {
