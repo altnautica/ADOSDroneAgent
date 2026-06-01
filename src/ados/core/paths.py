@@ -30,6 +30,11 @@ MAVLINK_SOCK = ADOS_RUN_DIR / "mavlink.sock"
 STATE_SOCK = ADOS_RUN_DIR / "state.sock"
 MESH_SOCK = ADOS_RUN_DIR / "mesh.sock"
 PAIRING_SOCK = ADOS_RUN_DIR / "pairing.sock"
+# Operator radio-knob command socket served by the native transmit plane
+# (ados-radio). The REST layer forwards FEC/MCS/TX-power/link-tier changes
+# here when the native radio is the running implementation; the packaged
+# Python manager owns the same knobs in-process otherwise.
+WFB_CMD_SOCK = ADOS_RUN_DIR / "wfb-cmd.sock"
 
 # Live JSON state snapshots
 HEALTH_JSON = ADOS_RUN_DIR / "health.json"

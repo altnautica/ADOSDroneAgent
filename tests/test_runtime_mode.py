@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from ados.core.runtime_mode import compute_runtime_mode
+from ados.core.runtime_mode import compute_runtime_mode, is_service_native
 
 # Core binaries that run native whenever present (no flag gate).
 _CORE = ("ados-supervisor", "ados-video", "ados-cloud", "ados-mavlink-router")
@@ -205,6 +205,41 @@ def test_default_roots_do_not_raise() -> None:
     """Calling with the real default paths is total (the CI box has no
     /opt/ados/bin) and returns a valid label."""
     assert compute_runtime_mode("drone") in ("native", "hybrid", "packaged")
+
+
+def test_is_service_native_radio_opt_out(roots: tuple[Path, Path]) -> None:
+    """The per-service resolver mirrors the radio (opt-out) branch the REST
+    layer uses to route a knob to the native command socket."""
+    bin_dir, etc_dir = roots
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    etc_dir.mkdir(parents=True, exist_ok=True)
+    # No binary → not native (the packaged manager owns the knob).
+    assert not is_service_native("radio", bin_dir=bin_dir, etc_dir=etc_dir)
+    # Binary present, no fallback marker → native (opt-out default).
+    _make_bin(bin_dir, "ados-radio")
+    assert is_service_native("radio", bin_dir=bin_dir, etc_dir=etc_dir)
+    # The fallback marker pins the packaged path → not native.
+    _touch_flag(etc_dir, "wfb-python-fallback")
+    assert not is_service_native("radio", bin_dir=bin_dir, etc_dir=etc_dir)
+
+
+def test_is_service_native_opt_in(roots: tuple[Path, Path]) -> None:
+    """An opt-in service (net) is native only when BOTH the binary and the
+    enable flag are present."""
+    bin_dir, etc_dir = roots
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    etc_dir.mkdir(parents=True, exist_ok=True)
+    _make_bin(bin_dir, "ados-net")
+    # Binary present but no enable flag → not native (opt-in).
+    assert not is_service_native("net", bin_dir=bin_dir, etc_dir=etc_dir)
+    _touch_flag(etc_dir, "net-rust-enabled")
+    assert is_service_native("net", bin_dir=bin_dir, etc_dir=etc_dir)
+
+
+def test_is_service_native_unknown_is_false(roots: tuple[Path, Path]) -> None:
+    """An unknown service name resolves to False, never raises."""
+    bin_dir, etc_dir = roots
+    assert not is_service_native("nope", bin_dir=bin_dir, etc_dir=etc_dir)
 
 
 def test_runtime_mode_enrichment_shape() -> None:

@@ -12,6 +12,7 @@
 pub mod adapter;
 pub mod bitrate;
 pub mod channel;
+pub mod cmdsock;
 pub mod config;
 pub mod hop;
 pub mod link_quality;

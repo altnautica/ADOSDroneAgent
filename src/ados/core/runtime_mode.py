@@ -143,6 +143,42 @@ def _any_native_binary_present(bin_dir: Path) -> bool:
     return False
 
 
+def is_service_native(
+    service: str,
+    *,
+    bin_dir: Path | None = None,
+    etc_dir: Path | None = None,
+) -> bool:
+    """True when the named flag-gated service would run its native binary.
+
+    Resolves one service's native-vs-packaged branch with the SAME rule the
+    aggregate :func:`compute_runtime_mode` applies: an opt-out service is
+    native when its binaries are present and the operator has NOT pinned the
+    packaged fallback marker; an opt-in service is native only when both the
+    flag and the binaries are present. Unknown services resolve to ``False``.
+
+    The check is cheap (it only stats files) and total (it never raises), so
+    a REST handler can call it on the request path to decide whether to
+    forward an operator radio knob to the native command socket or to drive
+    the packaged manager in-process.
+    """
+    bdir = bin_dir if bin_dir is not None else _DEFAULT_BIN_DIR
+    edir = etc_dir if etc_dir is not None else _DEFAULT_ETC_DIR
+    svc = _FLAG_GATED.get(service)
+    if svc is None:
+        return False
+    binaries_present = all(_bin_present(bdir, b) for b in svc.binaries)
+    if not binaries_present:
+        return False
+    try:
+        flag_set = (edir / svc.flag).exists()
+    except OSError:
+        flag_set = False
+    # opt_out: native is the default; the fallback marker pins packaged.
+    # opt_in: native only when the flag is also present.
+    return not flag_set if svc.opt_out else flag_set
+
+
 def compute_runtime_mode(
     profile: str = "drone",
     *,
@@ -189,4 +225,4 @@ def compute_runtime_mode(
     return "native" if all(verdicts) else "hybrid"
 
 
-__all__ = ["compute_runtime_mode"]
+__all__ = ["compute_runtime_mode", "is_service_native"]

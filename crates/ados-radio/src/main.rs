@@ -16,7 +16,10 @@ use serde_json::json;
 use tokio::sync::Notify;
 
 use ados_radio::adapter;
-use ados_radio::bitrate::{new_snapshot, BitrateController, BitrateSnapshot, SnapshotHandle};
+use ados_radio::bitrate::{
+    new_enabled, new_snapshot, BitrateController, BitrateSnapshot, EnabledHandle, SnapshotHandle,
+};
+use ados_radio::cmdsock::{self, CmdState};
 use ados_radio::config::WfbConfig;
 use ados_radio::hop::{
     build_hop_announce, build_presence_beacon, derive_pair_key, hop_announce_interval,
@@ -242,6 +245,10 @@ async fn run_service(cfg: &WfbConfig, cancel: Arc<Notify>) {
     // heartbeat always surfaces the controller's intent (link preset, enable
     // flag, recommended bitrate) even before / between radio bring-ups.
     let bitrate_snapshot: SnapshotHandle = new_snapshot(cfg);
+    // Runtime-flippable adaptive-controller enable flag, shared across respawns
+    // and between the bitrate controller and the operator command socket so the
+    // auto/manual link-tier toggle survives a watchdog kill or a channel hop.
+    let adaptive_enabled: EnabledHandle = new_enabled(cfg);
     loop {
         // ── Key guard — block while unpaired ─────────────────────────────
         if !Path::new(WFB_TX_KEY).exists() {
@@ -466,6 +473,32 @@ async fn run_service(cfg: &WfbConfig, cancel: Arc<Notify>) {
         let mut watchdog2 =
             tokio::spawn(async move { video_recvq_watchdog(recvq_counters, recvq_cancel).await });
 
+        // Data-tx exit watch. The counter watchdog only fires after a 30 s flat
+        // window, so a `wfb_tx` that crashes on its own (segfault, OOM kill, a
+        // driver-rejected arg on respawn) would otherwise leave the link dead for
+        // up to 30 s. This arm polls the data-plane child's liveness on a 1 s
+        // cadence and completes the moment it has exited, tripping an immediate
+        // respawn of the whole radio group via the run-loop select. A brief lock
+        // per poll (a non-blocking `try_wait` reap) does not contend with the FEC/
+        // MCS setters in practice.
+        let exit_cancel = task_cancel.clone();
+        let exit_proc = proc.clone();
+        let mut data_tx_exit = tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_secs(1));
+            tick.tick().await; // consume the immediate first tick
+            loop {
+                tokio::select! {
+                    _ = tick.tick() => {
+                        if !exit_proc.lock().await.data_tx_running() {
+                            tracing::warn!("wfb_data_tx_exited_respawning");
+                            return;
+                        }
+                    }
+                    _ = exit_cancel.notified() => return,
+                }
+            }
+        });
+
         // Adaptive bitrate / FEC controller. Off by default (it only refreshes
         // the snapshot when disabled); when enabled it restarts only the data
         // plane to apply a new FEC on sustained link degradation. It never ends
@@ -475,11 +508,34 @@ async fn run_service(cfg: &WfbConfig, cancel: Arc<Notify>) {
         let bc_link = link.clone();
         let bc_proc = proc.clone();
         let bc_snapshot = bitrate_snapshot.clone();
-        let bc_cfg = cfg.clone();
+        let bc_enabled = adaptive_enabled.clone();
         let bitrate_ctrl = tokio::spawn(async move {
-            BitrateController::new(&bc_cfg)
+            BitrateController::new(bc_enabled)
                 .run(bc_link, bc_proc, bc_snapshot, bc_cancel)
                 .await;
+        });
+
+        // Operator command socket: serves the live FEC/MCS/TX-power/tier knobs to
+        // the REST layer when the native radio is the running transmit plane.
+        // Holds the SAME process handle + adaptive flag the controller uses, so a
+        // knob change reaches the live radio. Spawned per bring-up alongside the
+        // sibling tasks (it is aborted + re-served with the new process handle on
+        // every respawn, the same lifecycle as the heartbeat + watchdogs).
+        let cmd_state = CmdState {
+            proc: proc.clone(),
+            adaptive_enabled: adaptive_enabled.clone(),
+        };
+        let cmd_cancel = task_cancel.clone();
+        let cmd_sock_path = ados_radio::paths::run_path("wfb-cmd.sock");
+        let cmd_server = tokio::spawn(async move {
+            tokio::select! {
+                r = cmdsock::serve(cmd_state, Path::new(&cmd_sock_path)) => {
+                    if let Err(e) = r {
+                        tracing::warn!(error = %e, "wfb_command_socket_serve_ended");
+                    }
+                }
+                _ = cmd_cancel.notified() => {}
+            }
         });
 
         let hop_cancel = task_cancel.clone();
@@ -538,6 +594,10 @@ async fn run_service(cfg: &WfbConfig, cancel: Arc<Notify>) {
                     tracing::warn!("video_recvq_watchdog_fired");
                 }
             }
+            _ = &mut data_tx_exit => {
+                // The data-plane wfb_tx exited on its own — respawn the whole
+                // group immediately (the falls-through path below handles it).
+            }
             _ = &mut hop => {}
             _ = &mut beacon => {}
             _ = &mut heartbeat => {}
@@ -547,7 +607,9 @@ async fn run_service(cfg: &WfbConfig, cancel: Arc<Notify>) {
                 heartbeat.abort();
                 watchdog1.abort();
                 watchdog2.abort();
+                data_tx_exit.abort();
                 bitrate_ctrl.abort();
+                cmd_server.abort();
                 hop.abort();
                 beacon.abort();
                 proc.lock().await.kill_all().await;
@@ -557,12 +619,15 @@ async fn run_service(cfg: &WfbConfig, cancel: Arc<Notify>) {
             }
         }
 
-        // A task exited (watchdog fired / hop ended) — abort the siblings so they
-        // don't accumulate, kill the whole radio group, and respawn.
+        // A task exited (watchdog fired / hop ended / data-tx self-crashed) —
+        // abort the siblings so they don't accumulate, kill the whole radio
+        // group, and respawn.
         heartbeat.abort();
         watchdog1.abort();
         watchdog2.abort();
+        data_tx_exit.abort();
         bitrate_ctrl.abort();
+        cmd_server.abort();
         hop.abort();
         beacon.abort();
         proc.lock().await.kill_all().await;
@@ -725,7 +790,14 @@ async fn run_hop_supervisor(
         }
     };
 
-    let mut hop_tick = tokio::time::interval(Duration::from_secs(cfg.hop_period_seconds as u64));
+    // Floor the hop period at 15 s. A periodic hop runs a live channel scan that
+    // locks the radio for several seconds and drops wfb_tx frames, so an operator
+    // (or a bad config) asking for a very short period would starve the video
+    // link; a 0 would also panic `interval`. The floor caps the scan rate while
+    // leaving longer configured periods untouched.
+    const HOP_PERIOD_FLOOR_SECS: u64 = 15;
+    let hop_period_secs = (cfg.hop_period_seconds as u64).max(HOP_PERIOD_FLOOR_SECS);
+    let mut hop_tick = tokio::time::interval(Duration::from_secs(hop_period_secs));
     let mut stale_tick = tokio::time::interval(Duration::from_secs(5));
 
     loop {
@@ -1242,6 +1314,34 @@ mod tests {
             rssi_dbm: -80.0,
             ..LinkStats::default()
         }
+    }
+
+    /// The hop-period floor applied at the hop-supervisor tick build site. A
+    /// scan locks the radio for several seconds, so the period must never fall
+    /// below the floor (and a 0 would panic `interval`). Pure to mirror the
+    /// inline `.max(HOP_PERIOD_FLOOR_SECS)` without standing up the supervisor.
+    fn floored_hop_period(configured: u32) -> u64 {
+        const HOP_PERIOD_FLOOR_SECS: u64 = 15;
+        (configured as u64).max(HOP_PERIOD_FLOOR_SECS)
+    }
+
+    #[test]
+    fn hop_period_floor_clamps_low_values() {
+        // A zero (which would panic tokio::time::interval) and any sub-floor
+        // value clamp UP to the 15 s floor.
+        assert_eq!(floored_hop_period(0), 15);
+        assert_eq!(floored_hop_period(1), 15);
+        assert_eq!(floored_hop_period(14), 15);
+        // Exactly the floor stays the floor.
+        assert_eq!(floored_hop_period(15), 15);
+    }
+
+    #[test]
+    fn hop_period_floor_leaves_longer_periods_untouched() {
+        // The default (60 s) and any value above the floor pass through.
+        assert_eq!(floored_hop_period(16), 16);
+        assert_eq!(floored_hop_period(60), 60);
+        assert_eq!(floored_hop_period(300), 300);
     }
 
     #[test]

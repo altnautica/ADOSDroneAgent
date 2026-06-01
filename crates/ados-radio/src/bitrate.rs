@@ -24,6 +24,7 @@
 //! Numeric thresholds, streak lengths, cooldowns, and the rung ladder are
 //! byte-identical to the Python controller they replace.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -241,28 +242,52 @@ pub fn new_snapshot(cfg: &WfbConfig) -> SnapshotHandle {
     Arc::new(Mutex::new(BitrateSnapshot::initial(cfg, &DEFAULT_TIERS, 0)))
 }
 
+/// Shared, runtime-flippable adaptive-controller enable flag.
+///
+/// The controller reads this each tick instead of a fixed bool so the operator
+/// command socket's auto/manual tier toggle takes effect live: `auto` arms the
+/// flag (the controller resumes stepping FEC on link quality), `manual` clears
+/// it (the operator's pinned trio stands). One flag is shared across radio
+/// respawns so the choice survives a watchdog kill or a channel hop.
+pub type EnabledHandle = Arc<AtomicBool>;
+
+/// Construct the shared enable handle, seeded from config.
+pub fn new_enabled(cfg: &WfbConfig) -> EnabledHandle {
+    Arc::new(AtomicBool::new(cfg.adaptive_bitrate_enabled))
+}
+
 /// The closed-loop bitrate + FEC controller.
 pub struct BitrateController {
     tiers: Vec<BitrateTier>,
     tick_interval: Duration,
-    enabled: bool,
+    /// Runtime-flippable enable flag (shared with the command socket). Read each
+    /// tick so the auto/manual toggle takes effect without a respawn.
+    enabled: EnabledHandle,
     hysteresis: Hysteresis,
 }
 
 impl BitrateController {
     /// Build a controller over the default ladder, reading the enable flag from
-    /// config. Starts at rung 0 (the high-quality default).
-    pub fn new(cfg: &WfbConfig) -> Self {
-        Self::with_tiers(
-            DEFAULT_TIERS.to_vec(),
-            cfg.adaptive_bitrate_enabled,
-            DEFAULT_TICK_INTERVAL,
-        )
+    /// the shared handle. Starts at rung 0 (the high-quality default).
+    pub fn new(enabled: EnabledHandle) -> Self {
+        Self::with_tiers_shared(DEFAULT_TIERS.to_vec(), enabled, DEFAULT_TICK_INTERVAL)
     }
 
-    /// Build a controller over an explicit ladder + enable flag + tick cadence
-    /// (the seam the tests use to drive the loop fast).
+    /// Build a controller over an explicit ladder + a fixed enable bool + tick
+    /// cadence (the seam the tests use to drive the loop fast). The bool is
+    /// wrapped in a private handle so a test that never flips it behaves exactly
+    /// as before.
     pub fn with_tiers(tiers: Vec<BitrateTier>, enabled: bool, tick_interval: Duration) -> Self {
+        Self::with_tiers_shared(tiers, Arc::new(AtomicBool::new(enabled)), tick_interval)
+    }
+
+    /// Build a controller over an explicit ladder + a shared enable handle + tick
+    /// cadence.
+    pub fn with_tiers_shared(
+        tiers: Vec<BitrateTier>,
+        enabled: EnabledHandle,
+        tick_interval: Duration,
+    ) -> Self {
         let tier_count = tiers.len().max(1);
         Self {
             tiers,
@@ -286,7 +311,7 @@ impl BitrateController {
         cancel: Arc<Notify>,
     ) {
         tracing::info!(
-            enabled = self.enabled,
+            enabled = self.enabled.load(Ordering::Relaxed),
             tier = self.tiers[self.hysteresis.current_tier_idx()].name,
             "bitrate_controller_started"
         );
@@ -319,7 +344,8 @@ impl BitrateController {
             (s.loss_percent, s.rssi_dbm, has_sample)
         };
 
-        if self.enabled && has_sample {
+        let enabled = self.enabled.load(Ordering::Relaxed);
+        if enabled && has_sample {
             let action = self.hysteresis.decide(loss, rssi, Instant::now());
             if action != TierAction::Hold {
                 let tier = self.tiers[self.hysteresis.current_tier_idx()];
@@ -346,7 +372,7 @@ impl BitrateController {
         // current recommended rung + the live enable flag.
         let tier = self.tiers[self.hysteresis.current_tier_idx()];
         let mut snap = snapshot.lock().await;
-        snap.adaptive_bitrate_enabled = self.enabled;
+        snap.adaptive_bitrate_enabled = enabled;
         snap.recommended_bitrate_kbps = tier.bitrate_kbps;
         snap.tier_idx = self.hysteresis.current_tier_idx();
         snap.tier_name = tier.name;
@@ -573,6 +599,38 @@ mod tests {
         assert_eq!(snap.recommended_bitrate_kbps, 4000);
         assert_eq!(snap.tier_idx, 0);
         assert_eq!(snap.tier_name, "high");
+    }
+
+    #[test]
+    fn new_enabled_seeds_from_config() {
+        // The shared handle the command socket flips is seeded from config so a
+        // rig that boots with adaptive on stays on until an operator toggles it.
+        let on = WfbConfig {
+            adaptive_bitrate_enabled: true,
+            ..WfbConfig::default()
+        };
+        assert!(new_enabled(&on).load(Ordering::Relaxed));
+        let off = WfbConfig::default();
+        assert!(!new_enabled(&off).load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn shared_enable_handle_is_read_live_not_captured() {
+        // The controller must read the shared flag, not snapshot it at
+        // construction: flipping the handle AFTER the controller is built changes
+        // what the next tick would do. Constructing the controller over a shared
+        // handle and then flipping it proves the wiring without running a tick
+        // (which would fork wfb_tx).
+        let flag: EnabledHandle = Arc::new(AtomicBool::new(false));
+        let ctrl = BitrateController::with_tiers_shared(
+            DEFAULT_TIERS.to_vec(),
+            flag.clone(),
+            DEFAULT_TICK_INTERVAL,
+        );
+        // The controller and the command-socket side hold the SAME atomic.
+        assert!(!ctrl.enabled.load(Ordering::Relaxed));
+        flag.store(true, Ordering::Relaxed);
+        assert!(ctrl.enabled.load(Ordering::Relaxed));
     }
 
     #[test]

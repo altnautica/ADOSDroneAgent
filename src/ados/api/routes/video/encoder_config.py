@@ -241,6 +241,12 @@ async def set_video_config(body: VideoConfigBody) -> dict[str, Any]:
     ctrl_getter = getattr(app, "bitrate_controller", None)
     ctrl = ctrl_getter() if callable(ctrl_getter) else None
 
+    # When the native transmit plane owns the radio there is no in-process
+    # Python wfb manager / bitrate controller, so the FEC / MCS / link-tier
+    # knobs route to the radio command socket instead. The bitrate (encoder)
+    # knob always stays on the video pipeline, which is Python regardless.
+    native_radio = _native_radio_running()
+
     warnings: list[str] = []
 
     # Bitrate: pipeline-side restart. Skip if pipeline not in process.
@@ -252,28 +258,139 @@ async def set_video_config(body: VideoConfigBody) -> dict[str, Any]:
         else:
             warnings.append("video_pipeline_not_in_process")
 
-    # FEC: stop-then-start wfb_tx. Skip if wfb not in process.
+    # FEC: stop-then-start wfb_tx (native: over the command socket).
     if body.fec_k is not None or body.fec_n is not None:
-        if wfb_mgr is not None and hasattr(wfb_mgr, "set_fec"):
-            cfg = app.config.video.wfb
-            new_k = body.fec_k if body.fec_k is not None else cfg.fec_k
-            new_n = body.fec_n if body.fec_n is not None else cfg.fec_n
-            ok = await wfb_mgr.set_fec(new_k, new_n)
-            if not ok:
-                warnings.append("set_fec_failed")
-        else:
-            warnings.append("wfb_manager_not_in_process")
+        cfg = app.config.video.wfb
+        new_k = body.fec_k if body.fec_k is not None else cfg.fec_k
+        new_n = body.fec_n if body.fec_n is not None else cfg.fec_n
+        await _apply_fec(native_radio, wfb_mgr, new_k, new_n, warnings)
 
-    # MCS
+    # MCS (native: over the command socket).
     if body.mcs is not None:
-        if wfb_mgr is not None and hasattr(wfb_mgr, "set_mcs"):
-            ok = await wfb_mgr.set_mcs(body.mcs)
-            if not ok:
-                warnings.append("set_mcs_failed")
-        else:
-            warnings.append("wfb_manager_not_in_process")
+        await _apply_mcs(native_radio, wfb_mgr, body.mcs, warnings)
 
-    # Controller toggles
+    # Link-tier toggles (native: over the command socket; packaged: the
+    # in-process bitrate controller).
+    if body.auto is not None or body.tier_idx is not None:
+        await _apply_tier(native_radio, ctrl, app, body, warnings)
+
+    response = await get_video_config()
+    response["warnings"] = warnings
+    return response
+
+
+def _native_radio_running() -> bool:
+    """True when the native transmit plane (``ados-radio``) owns the radio,
+    so the FEC / MCS / tier knobs route to its command socket. Total + cheap
+    (it only stats files); safe to call on the request path."""
+    from ados.core.runtime_mode import is_service_native
+
+    return is_service_native("radio")
+
+
+async def _apply_fec(
+    native_radio: bool,
+    wfb_mgr: Any,
+    fec_k: int,
+    fec_n: int,
+    warnings: list[str],
+) -> None:
+    """Apply a Reed-Solomon ratio: command socket when native, else the
+    in-process packaged manager. An unreachable native socket falls back to
+    the manager (the native binary may not be up yet)."""
+    if native_radio:
+        from ados.services.wfb import cmd_client
+
+        try:
+            await cmd_client.set_fec(fec_k, fec_n)
+            return
+        except cmd_client.RadioCmdError:
+            warnings.append("set_fec_failed")
+            return
+        except cmd_client.RadioCmdUnavailableError:
+            pass  # fall through to the packaged manager
+    if wfb_mgr is not None and hasattr(wfb_mgr, "set_fec"):
+        if not await wfb_mgr.set_fec(fec_k, fec_n):
+            warnings.append("set_fec_failed")
+    else:
+        warnings.append("wfb_manager_not_in_process")
+
+
+async def _apply_mcs(
+    native_radio: bool,
+    wfb_mgr: Any,
+    mcs: int,
+    warnings: list[str],
+) -> None:
+    """Apply an MCS index: command socket when native, else the in-process
+    packaged manager."""
+    if native_radio:
+        from ados.services.wfb import cmd_client
+
+        try:
+            await cmd_client.set_mcs(mcs)
+            return
+        except cmd_client.RadioCmdError:
+            warnings.append("set_mcs_failed")
+            return
+        except cmd_client.RadioCmdUnavailableError:
+            pass
+    if wfb_mgr is not None and hasattr(wfb_mgr, "set_mcs"):
+        if not await wfb_mgr.set_mcs(mcs):
+            warnings.append("set_mcs_failed")
+    else:
+        warnings.append("wfb_manager_not_in_process")
+
+
+async def _apply_tier(
+    native_radio: bool,
+    ctrl: Any,
+    app: Any,
+    body: VideoConfigBody,
+    warnings: list[str],
+) -> None:
+    """Apply the auto/manual link-tier toggle.
+
+    Native: ``auto`` arms the controller over the command socket; a pinned
+    ``tier_idx`` (or an explicit ``auto=False``) maps the default FEC ladder
+    rung to a manual ``(mcs, fec_k, fec_n)`` trio (the rung sets the FEC, the
+    configured MCS stands, matching what the in-process controller pins).
+
+    Packaged: drives the in-process bitrate controller's ``set_auto`` /
+    ``set_manual_tier`` directly.
+    """
+    if native_radio:
+        from ados.services.video.bitrate_controller import DEFAULT_TIERS
+        from ados.services.wfb import cmd_client
+
+        try:
+            # A pinned tier (or an explicit manual request) takes precedence:
+            # the controller treats tier_idx as implicitly auto=False.
+            if body.tier_idx is not None:
+                if 0 <= body.tier_idx < len(DEFAULT_TIERS):
+                    rung = DEFAULT_TIERS[body.tier_idx]
+                    mcs = int(getattr(app.config.video.wfb, "mcs_index", 1) or 1)
+                    await cmd_client.set_tier_manual(mcs, rung.fec_k, rung.fec_n)
+                else:
+                    warnings.append("set_manual_tier_failed")
+            elif body.auto is True:
+                await cmd_client.set_tier_auto()
+            elif body.auto is False:
+                # auto=False with no pinned tier: hold the current rung by
+                # pinning the configured FEC/MCS so the controller stops
+                # stepping without forcing a different rung.
+                cfg = app.config.video.wfb
+                mcs = int(getattr(cfg, "mcs_index", 1) or 1)
+                k = int(getattr(cfg, "fec_k", 8) or 8)
+                n = int(getattr(cfg, "fec_n", 12) or 12)
+                await cmd_client.set_tier_manual(mcs, k, n)
+            return
+        except cmd_client.RadioCmdError as exc:
+            warnings.append(f"set_manual_tier_failed:{exc}")
+            return
+        except cmd_client.RadioCmdUnavailableError:
+            pass  # fall through to the in-process controller
+
     if ctrl is not None:
         if body.auto is not None:
             try:
@@ -282,17 +399,12 @@ async def set_video_config(body: VideoConfigBody) -> dict[str, Any]:
                 warnings.append(f"set_auto_failed:{exc}")
         if body.tier_idx is not None:
             try:
-                ok = await ctrl.set_manual_tier(body.tier_idx)
-                if not ok:
+                if not await ctrl.set_manual_tier(body.tier_idx):
                     warnings.append("set_manual_tier_failed")
             except Exception as exc:  # noqa: BLE001
                 warnings.append(f"set_manual_tier_failed:{exc}")
-    elif body.auto is not None or body.tier_idx is not None:
+    else:
         warnings.append("bitrate_controller_not_in_process")
-
-    response = await get_video_config()
-    response["warnings"] = warnings
-    return response
 
 
 __all__ = [

@@ -353,6 +353,14 @@ impl RadioProcesses {
         self.data_tx.pid()
     }
 
+    /// True while the data-plane `wfb_tx` has not exited. A cheap `try_wait`
+    /// reap (it never blocks), so an exit-watch task can poll it on a short
+    /// interval to catch a self-crashed transmitter immediately rather than
+    /// waiting out the 30 s counter watchdog.
+    pub fn data_tx_running(&mut self) -> bool {
+        self.data_tx.is_running()
+    }
+
     /// The data plane's currently-running Reed-Solomon `(k, n)` ratio.
     pub fn data_fec(&self) -> (u8, u8) {
         (self.data_fec_k, self.data_fec_n)
@@ -420,6 +428,56 @@ impl RadioProcesses {
             tracing::warn!(mcs, "set_mcs_respawn_failed");
             false
         }
+    }
+
+    /// Pin a full manual link tier — the `(mcs_index, fec_k, fec_n)` trio — onto
+    /// the live data plane in a single respawn.
+    ///
+    /// This is the manual half of the auto/manual tier control: the operator
+    /// fixes the radio rate + redundancy and the adaptive controller is held off
+    /// (the caller disables it). Applying the trio together means one data-plane
+    /// restart for all three knobs instead of three. Validates the FEC ratio and
+    /// the MCS range up front; on an invalid input it changes nothing and returns
+    /// `false`. A no-op (returns `true` without a restart) when the trio already
+    /// matches the running data plane. On a respawn failure the previous trio is
+    /// restored in the retained state and the data plane is left dead for the
+    /// supervisor to restart the whole group.
+    pub async fn set_manual_tier(&mut self, mcs: u8, fec_k: u8, fec_n: u8) -> bool {
+        if !mcs_index_valid(mcs) {
+            tracing::warn!(mcs, "set_manual_tier_mcs_out_of_range");
+            return false;
+        }
+        if !fec_ratio_valid(fec_k, fec_n) {
+            tracing::warn!(k = fec_k, n = fec_n, "set_manual_tier_fec_invalid");
+            return false;
+        }
+        if mcs == self.data_mcs_index && fec_k == self.data_fec_k && fec_n == self.data_fec_n {
+            return true;
+        }
+        let (old_mcs, old_k, old_n) = (self.data_mcs_index, self.data_fec_k, self.data_fec_n);
+        self.data_mcs_index = mcs;
+        self.data_fec_k = fec_k;
+        self.data_fec_n = fec_n;
+        if self.respawn_data_tx().await {
+            tracing::info!(mcs, k = fec_k, n = fec_n, "set_manual_tier_applied");
+            true
+        } else {
+            self.data_mcs_index = old_mcs;
+            self.data_fec_k = old_k;
+            self.data_fec_n = old_n;
+            tracing::warn!(mcs, k = fec_k, n = fec_n, "set_manual_tier_respawn_failed");
+            false
+        }
+    }
+
+    /// Apply a TX power (dBm) to the live adapter via the kernel without a
+    /// respawn — `iw dev <iface> set txpower` retunes the running radio in place.
+    /// Returns the effective dBm the driver accepted (it can ramp UP from a
+    /// rejected low request), or `None` when every ramp step was rejected. The
+    /// retained iface is the same one the control planes are injecting on, so the
+    /// power change reaches the whole radio group at once.
+    pub async fn apply_tx_power(&self, dbm: i8) -> Option<i8> {
+        crate::adapter::set_tx_power(&self.iface, dbm).await
     }
 
     /// Kill ONLY the data-tx process and respawn it from the retained iface/key
@@ -603,6 +661,18 @@ mod tests {
         assert_eq!(k, "8");
         assert_eq!(n, "10");
         assert_eq!(m, "5");
+    }
+
+    #[test]
+    fn manual_tier_validation_rejects_bad_inputs() {
+        // The manual-tier setter gates on the SAME guards as set_mcs + set_fec
+        // before it touches the data plane: an out-of-range MCS or an invalid FEC
+        // ratio must be rejected up front so a respawn never carries bad args.
+        // Exercise the two guard predicates the setter calls (no process spawn).
+        assert!(mcs_index_valid(5) && fec_ratio_valid(8, 10)); // a valid trio
+        assert!(!mcs_index_valid(9)); // MCS out of the 0..=7 range
+        assert!(!fec_ratio_valid(8, 8)); // no parity shard
+        assert!(!fec_ratio_valid(0, 4)); // zero data shards
     }
 
     #[test]

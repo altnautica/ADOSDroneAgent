@@ -23,6 +23,15 @@ pub const DRONE_KEY: &str = "/etc/drone.key";
 /// session owns the radio adapter. `{"active": <bool>}`.
 pub const BIND_STATE_SENTINEL: &str = "/run/ados/bind-state.json";
 
+/// Command socket this service listens on for the operator radio knobs
+/// (FEC ratio, MCS index, TX power, auto/manual link tier). One
+/// newline-JSON request → one newline-JSON response per connection. The
+/// REST layer connects here when the native radio is the running transmit
+/// plane (the packaged Python manager owns the same knobs otherwise).
+/// Sibling to mavlink.sock / supervisor.sock under the run dir; use
+/// `run_path("wfb-cmd.sock")` so the `ADOS_RUN_DIR` env override is honoured.
+pub const WFB_CMD_SOCK: &str = "/run/ados/wfb-cmd.sock";
+
 /// Return the run directory, honouring the `ADOS_RUN_DIR` env override.
 pub fn run_dir() -> String {
     std::env::var("ADOS_RUN_DIR").unwrap_or_else(|_| "/run/ados".to_string())
