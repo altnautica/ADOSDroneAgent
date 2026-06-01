@@ -4,6 +4,14 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.49.59] - 2026-06-01
+
+### Added
+
+- The degraded-USB-adapter signal now rides the cloud heartbeat and the drone
+  status block, so the ground station can warn about a radio adapter on a slow
+  USB link over the cloud relay, not only on the local link.
+
 ## [0.49.58] - 2026-06-01
 
 ### Added

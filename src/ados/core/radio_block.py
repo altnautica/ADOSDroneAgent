@@ -127,6 +127,8 @@ def build_radio_block(wfb_status: dict[str, Any] | None) -> dict[str, Any]:
             "valid_rx_packets_per_s": None,
             "adapter_chipset": None,
             "adapter_injection_ok": False,
+            "adapter_usb_speed_mbps": None,
+            "adapter_usb_degraded": False,
         }
 
     iface = wfb_status.get("interface") or None
@@ -198,6 +200,12 @@ def build_radio_block(wfb_status: dict[str, Any] | None) -> dict[str, Any]:
         # radio link signal Mission Control renders.
         "adapter_chipset": wfb_status.get("adapter_chipset"),
         "adapter_injection_ok": bool(wfb_status.get("adapter_injection_ok", False)),
+        # Selected adapter's USB link health. A full-speed (12 Mbps) RTL
+        # enumeration advances tx_bytes yet emits no usable RF; surface the
+        # speed + degraded flag so Mission Control warns instead of showing a
+        # healthy link. Null/false when an older sidecar omits them.
+        "adapter_usb_speed_mbps": wfb_status.get("adapter_usb_speed_mbps"),
+        "adapter_usb_degraded": bool(wfb_status.get("adapter_usb_degraded", False)),
         # Radio-data-plane churn + transmit-rate observability. The live
         # sidecar the radio service writes carries these counters; surface
         # them so Mission Control sees a thrashing or zombie transmitter

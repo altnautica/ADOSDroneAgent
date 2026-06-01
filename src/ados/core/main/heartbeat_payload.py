@@ -493,9 +493,17 @@ def build_heartbeat_payload(app: AgentApp) -> dict:  # noqa: C901
         payload["wfbAdapterInjectionOk"] = bool(
             wfb_status.get("adapter_injection_ok", False)
         )
+        # USB link health of the selected adapter — a full-speed (12 Mbps) RTL
+        # advances tx_bytes yet emits no RF; surface so the GCS warns.
+        payload["wfbAdapterUsbSpeedMbps"] = wfb_status.get("adapter_usb_speed_mbps")
+        payload["wfbAdapterUsbDegraded"] = bool(
+            wfb_status.get("adapter_usb_degraded", False)
+        )
     else:
         payload["wfbAdapterChipset"] = None
         payload["wfbAdapterInjectionOk"] = False
+        payload["wfbAdapterUsbSpeedMbps"] = None
+        payload["wfbAdapterUsbDegraded"] = False
 
     # Overall radio-stack health for the GCS diagnostic line, derived from
     # the live radio sidecar (adapter injection verdict + pair flag) and the
