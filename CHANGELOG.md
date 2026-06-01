@@ -4,6 +4,16 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.49.57] - 2026-06-01
+
+### Fixed
+
+- **Installs survive a flaky network.** Binary downloads now resume from where
+  they dropped instead of restarting from zero (`curl --continue-at -`), and
+  each binary is retried with exponential backoff, so a management link that
+  drops mid-download no longer aborts the whole install. The per-fetch ceiling
+  is raised to 180s.
+
 ## [0.49.56] - 2026-06-01
 
 ### Documentation

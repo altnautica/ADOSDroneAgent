@@ -110,6 +110,40 @@ fn install_one(b: &PrebuiltBinary, _tmp_dir: &Path, channel: Channel) -> anyhow:
     outcome
 }
 
+/// Fetch + verify + place one binary, retrying on failure with exponential
+/// backoff. A single attempt's curl `--retry` (with `--continue-at -` resume)
+/// already recovers a short drop mid-transfer; this outer loop adds spaced
+/// retries so a longer management-link outage during one binary does not doom
+/// the whole install (the field failure on a flaky USB WiFi where one of ~15
+/// binaries dropped and aborted the install). Bounded so a genuinely
+/// unreachable asset still fails instead of stalling forever.
+fn install_one_with_retry(
+    b: &PrebuiltBinary,
+    tmp_dir: &Path,
+    channel: Channel,
+) -> anyhow::Result<()> {
+    const MAX_ATTEMPTS: u32 = 3;
+    let mut backoff = std::time::Duration::from_secs(1);
+    for attempt in 1..=MAX_ATTEMPTS {
+        match install_one(b, tmp_dir, channel) {
+            Ok(()) => return Ok(()),
+            Err(e) if attempt < MAX_ATTEMPTS => {
+                tracing::warn!(
+                    service = b.service,
+                    attempt,
+                    backoff_s = backoff.as_secs(),
+                    error = %e,
+                    "prebuilt binary fetch/verify attempt failed; retrying after backoff"
+                );
+                std::thread::sleep(backoff);
+                backoff = std::cmp::min(backoff * 2, std::time::Duration::from_secs(30));
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    unreachable!("the loop returns Ok or Err on the final attempt")
+}
+
 /// `<dest>.dl` sibling used as the verify-then-rename staging path. It lives in
 /// the same directory as `dest` so the final `rename` is atomic.
 fn dl_sibling(dest: &Path) -> PathBuf {
@@ -220,7 +254,7 @@ impl Step for FetchBinaries {
         };
 
         for b in binaries::for_profile(&ctx.profile) {
-            let ok = match install_one(b, &tmp_dir, channel) {
+            let ok = match install_one_with_retry(b, &tmp_dir, channel) {
                 Ok(()) => {
                     tracing::info!(
                         service = b.service,
@@ -230,7 +264,7 @@ impl Step for FetchBinaries {
                     true
                 }
                 Err(e) => {
-                    tracing::warn!(service = b.service, error = %e, "prebuilt binary fetch/verify failed");
+                    tracing::warn!(service = b.service, error = %e, "prebuilt binary fetch/verify failed after retries");
                     false
                 }
             };

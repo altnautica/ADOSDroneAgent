@@ -45,11 +45,13 @@ fetch() {
     # Cache-Control/Pragma no-cache force a revalidation so a CDN cannot hand
     # back a stale bootstrap binary paired with a stale sha on this rolling tag.
     url="$1"; dest="$2"; force4="${3:-}"
+    # --continue-at - resumes a partial transfer so a mid-download drop on a
+    # flaky link continues from the last byte instead of restarting from zero.
     if command -v curl >/dev/null 2>&1; then
         if [ -n "$force4" ]; then
-            curl -fsSL -H 'Cache-Control: no-cache' -H 'Pragma: no-cache' --connect-timeout 10 --max-time 180 --retry 3 --retry-delay 2 -4 "$url" -o "$dest"
+            curl -fsSL -H 'Cache-Control: no-cache' -H 'Pragma: no-cache' --connect-timeout 10 --max-time 180 --retry 3 --retry-delay 2 --continue-at - -4 "$url" -o "$dest"
         else
-            curl -fsSL -H 'Cache-Control: no-cache' -H 'Pragma: no-cache' --connect-timeout 10 --max-time 180 --retry 3 --retry-delay 2 "$url" -o "$dest"
+            curl -fsSL -H 'Cache-Control: no-cache' -H 'Pragma: no-cache' --connect-timeout 10 --max-time 180 --retry 3 --retry-delay 2 --continue-at - "$url" -o "$dest"
         fi
     elif command -v wget >/dev/null 2>&1; then
         wget --inet4-only --header='Cache-Control: no-cache' --header='Pragma: no-cache' -q -O "$dest" "$url"

@@ -13,13 +13,16 @@ use crate::exec;
 
 /// Build the `curl` argument vector for a single fetch attempt.
 ///
-/// Pure (no I/O): the same flag set the predecessor bash `ados_fetch` used —
-/// silent + fail-on-error + follow-redirects (`-fsSL`), a 10 s connect timeout,
-/// a 120 s overall ceiling so a stalled transfer can never hang the install,
-/// and three bounded retries with a 2 s delay. When `force_ipv4` is set, `-4`
-/// is inserted so curl skips a dead IPv6 default route instead of stalling on
-/// it. The destination is the caller's path verbatim (the atomic temp-then-
-/// rename dance is `fetch`'s job, not this builder's).
+/// Pure (no I/O): silent + fail-on-error + follow-redirects (`-fsSL`), a 10 s
+/// connect timeout, a 180 s overall ceiling so a stalled transfer can never
+/// hang the install, and three bounded retries with a 2 s delay. `--continue-at
+/// -` resumes a partially-downloaded file: on a flaky link a multi-MB asset that
+/// drops mid-transfer continues from the last byte on the next of curl's
+/// `--retry` attempts (GitHub release assets support range requests) instead of
+/// restarting from zero. When `force_ipv4` is set, `-4` is inserted so curl
+/// skips a dead IPv6 default route instead of stalling on it. The destination is
+/// the caller's path verbatim (the atomic temp-then-rename dance is `fetch`'s
+/// job, not this builder's).
 ///
 /// Cache-busting: rolling tags reuse one asset URL across rebuilds, so an
 /// intermediary CDN can hand back a stale binary paired with a stale sha. The
@@ -36,11 +39,15 @@ pub fn curl_args(url: &str, dest: &Path, force_ipv4: bool) -> Vec<String> {
         "--connect-timeout".to_string(),
         "10".to_string(),
         "--max-time".to_string(),
-        "120".to_string(),
+        "180".to_string(),
         "--retry".to_string(),
         "3".to_string(),
         "--retry-delay".to_string(),
         "2".to_string(),
+        // Resume a partial transfer across curl's own --retry attempts so a
+        // mid-download drop on a flaky link continues instead of restarting.
+        "--continue-at".to_string(),
+        "-".to_string(),
     ];
     if force_ipv4 {
         args.push("-4".to_string());
@@ -138,10 +145,13 @@ mod tests {
     fn curl_args_has_max_time_and_no_v4_by_default() {
         let args = curl_args("https://example/x", Path::new("/tmp/x"), false);
         assert!(args.contains(&"--max-time".to_string()));
-        // The 120 s ceiling value follows --max-time.
+        // The 180 s ceiling value follows --max-time.
         let pos = args.iter().position(|a| a == "--max-time").unwrap();
-        assert_eq!(args[pos + 1], "120");
+        assert_eq!(args[pos + 1], "180");
         assert!(!args.contains(&"-4".to_string()));
+        // Resume is enabled so a dropped transfer continues from the last byte.
+        let cpos = args.iter().position(|a| a == "--continue-at").unwrap();
+        assert_eq!(args[cpos + 1], "-");
         // Cache-busting headers are present so a CDN cannot serve a stale pair.
         assert!(args.contains(&"Cache-Control: no-cache".to_string()));
         assert!(args.contains(&"Pragma: no-cache".to_string()));
