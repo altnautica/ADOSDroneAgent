@@ -513,8 +513,15 @@ impl VideoOrchestrator {
         self.last_start_error = StartError::None;
         tracing::info!(encoder = ?kind, "pipeline_started");
 
-        // Best-effort radio fan-out + optional SEI tap.
-        self.start_wfb_tee().await;
+        // Best-effort radio fan-out + optional SEI tap. Only spawn the tee once
+        // the encoder's RTSP publisher exists; otherwise the first DESCRIBE runs
+        // against a missing path and ffmpeg exits in ~1-2 s. The run-loop ladder
+        // brings the tee up once the path is ready.
+        if self.mediamtx.path_ready(MAIN_PATH).await {
+            self.start_wfb_tee().await;
+        } else {
+            tracing::debug!("wfb_tee_deferred: mediamtx path not ready at stream start");
+        }
         if self.sei_latency_on() {
             self.start_sei_tap().await;
         }
@@ -900,7 +907,9 @@ impl VideoOrchestrator {
         if !p.is_running() {
             tracing::warn!("wfb_tee_process_exited");
             self.wfb_tee = None;
-            return true; // the run loop will respawn via the wfb ladder
+            // Unhealthy: route into the run-loop wfb ladder so the tee gets
+            // respawned (the ladder defers when the RTSP source is down).
+            return false;
         }
         let last = self.wfb_tee_progress.last_progress_at().await;
         if wfb_tee_progress_is_stale(last, Instant::now()) {
