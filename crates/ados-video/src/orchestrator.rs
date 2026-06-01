@@ -902,7 +902,14 @@ impl VideoOrchestrator {
     /// started. Mirrors `_check_wfb_tee_health` (Rule 37: liveness ≠ work).
     async fn check_wfb_tee_health(&mut self) -> bool {
         let Some(p) = self.wfb_tee.as_mut() else {
-            return true;
+            // No tee yet: the first spawn is deferred until the RTSP source is
+            // ready, so report unhealthy WHILE THE PIPELINE IS RUNNING and let
+            // the run-loop ladder bring it up (the ladder itself defers on
+            // !path_ready). When the pipeline is not running the tee is
+            // correctly absent and this is healthy. Without this, a tee that
+            // was deferred at stream start stays None forever — healthy by the
+            // old rule — so the ladder never starts it and the radio is starved.
+            return self.state != PipelineState::Running;
         };
         if !p.is_running() {
             tracing::warn!("wfb_tee_process_exited");
