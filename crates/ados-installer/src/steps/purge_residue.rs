@@ -110,6 +110,51 @@ pub fn revert_lcd_config(cfg: &str) -> String {
     joined
 }
 
+/// Rewrite a `/boot/firmware/config.txt` body to PROVISION the SPI-LCD — the
+/// inverse of [`revert_lcd_config`], for a ground-station rig whose UI is the
+/// panel. Comments out an ACTIVE `dtoverlay=vc4-kms-v3d[,args]` (so the SPI
+/// panel claims fb0) and appends `dtoverlay=waveshare35a` when no active one is
+/// present. Pure + idempotent: a config that already carries the waveshare
+/// overlay and a disabled KMS overlay is returned unchanged.
+pub fn provision_lcd_config(cfg: &str) -> String {
+    let had_trailing_newline = cfg.ends_with('\n');
+    let mut out: Vec<String> = Vec::new();
+    let mut has_waveshare = false;
+
+    for raw in cfg.lines() {
+        let trimmed = raw.trim_start();
+        let is_comment = trimmed.starts_with('#');
+
+        // An already-active waveshare overlay means the LCD is provisioned.
+        if !is_comment && trimmed.starts_with("dtoverlay=waveshare35a") {
+            has_waveshare = true;
+            out.push(raw.to_string());
+            continue;
+        }
+
+        // Comment out an ACTIVE KMS overlay so the SPI panel can own fb0.
+        if !is_comment && is_kms_overlay(trimmed) {
+            let indent: String = raw.chars().take_while(|c| c.is_whitespace()).collect();
+            out.push(format!(
+                "{indent}# {trimmed}  # disabled by ADOS LCD installer (claims fb0)"
+            ));
+            continue;
+        }
+
+        out.push(raw.to_string());
+    }
+
+    if !has_waveshare {
+        out.push("dtoverlay=waveshare35a".to_string());
+    }
+
+    let mut joined = out.join("\n");
+    if had_trailing_newline {
+        joined.push('\n');
+    }
+    joined
+}
+
 /// True when the (hash-stripped) token is a VideoCore KMS/FKMS overlay line.
 fn is_kms_overlay(token: &str) -> bool {
     token.starts_with("dtoverlay=vc4-kms-v3d") || token.starts_with("dtoverlay=vc4-fkms-v3d")
@@ -140,8 +185,18 @@ impl Step for PurgeResidue {
     fn kind(&self) -> StepKind {
         StepKind::Optional
     }
-    fn run(&self, _ctx: &mut Ctx) -> StepOutcome {
-        revert_residue();
+    fn run(&self, ctx: &mut Ctx) -> StepOutcome {
+        purge_orphan_route();
+        // The SPI-LCD overlay is profile-specific: a ground-station rig MUST
+        // carry it (the panel is its UI), a drone rig must NOT (the KMS GPU
+        // overlay claims fb0). Provision on GS, revert otherwise — so an
+        // install never strips a ground-station rig's own LCD overlay (which
+        // would leave it with no framebuffer and a white screen).
+        if ctx.profile == "ground_station" {
+            provision_lcd_boot_config();
+        } else {
+            revert_lcd_boot_config();
+        }
         StepOutcome::Ok
     }
 }
@@ -197,6 +252,39 @@ fn revert_lcd_boot_config() {
             tracing::warn!(error = %e, "writing reverted boot config failed");
         } else {
             tracing::info!(cfg = cfg_path, "reverted SPI-LCD boot config residue");
+        }
+        return;
+    }
+}
+
+/// Provision the SPI-LCD in the Pi boot config (the ground-station inverse of
+/// [`revert_lcd_boot_config`]), snapshotting to `<cfg>.ados-bak` before writing.
+/// No-op when the config is absent or already provisioned (idempotent). Takes
+/// effect on the next reboot.
+fn provision_lcd_boot_config() {
+    for cfg_path in ["/boot/firmware/config.txt", "/boot/config.txt"] {
+        let path = Path::new(cfg_path);
+        let current = match std::fs::read_to_string(path) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        let provisioned = provision_lcd_config(&current);
+        if provisioned == current {
+            // Already provisioned — nothing to do (idempotent).
+            return;
+        }
+        let bak = format!("{cfg_path}.ados-bak");
+        if let Err(e) = std::fs::write(&bak, &current) {
+            tracing::warn!(error = %e, "could not snapshot boot config before LCD provision; skipping");
+            return;
+        }
+        if let Err(e) = std::fs::write(path, &provisioned) {
+            tracing::warn!(error = %e, "writing provisioned boot config failed");
+        } else {
+            tracing::info!(
+                cfg = cfg_path,
+                "provisioned SPI-LCD boot config (reboot to apply)"
+            );
         }
         return;
     }
@@ -300,5 +388,57 @@ mod tests {
         let out = revert_lcd_config(fixture);
         assert!(!out.contains("waveshare35a"));
         assert!(out.contains("dtparam=spi=on"));
+    }
+
+    #[test]
+    fn lcd_provision_comments_kms_and_adds_waveshare() {
+        // The exact broken ground-station state: active KMS overlay, no panel
+        // overlay → no framebuffer → white LCD.
+        let fixture = "dtparam=spi=on\ndtoverlay=vc4-kms-v3d\nmax_framebuffers=2\n";
+        let out = provision_lcd_config(fixture);
+        // KMS overlay commented out so the SPI panel can own fb0.
+        assert!(
+            out.lines()
+                .any(|l| l.trim_start().starts_with("# dtoverlay=vc4-kms-v3d")),
+            "KMS overlay must be commented out:\n{out}"
+        );
+        assert!(
+            !out.lines().any(|l| l.trim() == "dtoverlay=vc4-kms-v3d"),
+            "no active KMS overlay may remain:\n{out}"
+        );
+        // The SPI panel overlay is added.
+        assert!(
+            out.lines().any(|l| l.trim() == "dtoverlay=waveshare35a"),
+            "waveshare overlay must be provisioned:\n{out}"
+        );
+        // Untouched lines survive.
+        assert!(out.contains("dtparam=spi=on") && out.contains("max_framebuffers=2"));
+    }
+
+    #[test]
+    fn lcd_provision_is_idempotent() {
+        let provisioned = provision_lcd_config("dtparam=spi=on\ndtoverlay=vc4-kms-v3d\n");
+        assert_eq!(
+            provision_lcd_config(&provisioned),
+            provisioned,
+            "re-provisioning an already-provisioned config must be a no-op"
+        );
+        // Does not add a second waveshare line.
+        assert_eq!(
+            provisioned.matches("dtoverlay=waveshare35a").count(),
+            1,
+            "exactly one waveshare overlay line:\n{provisioned}"
+        );
+    }
+
+    #[test]
+    fn lcd_provision_then_revert_round_trips_to_clean() {
+        let clean = "dtparam=spi=on\ndtoverlay=vc4-kms-v3d\nmax_framebuffers=2\n";
+        let provisioned = provision_lcd_config(clean);
+        assert_eq!(
+            revert_lcd_config(&provisioned),
+            clean,
+            "revert(provision(clean)) must return the original clean config"
+        );
     }
 }
