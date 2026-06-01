@@ -11,10 +11,18 @@
 //!
 //! The panel's resistive overlay reports in a fixed portrait frame: ABS_X runs
 //! across the short physical edge and ABS_Y down the long edge. The on-screen
-//! UI is landscape (480 wide, 320 tall). [`map_to_lcd`] collapses both the
-//! portrait->landscape swap and the panel rotation into one normalize-then-place
-//! step so the navigator always receives coordinates in the same frame the
-//! pages lay their hit zones out in.
+//! UI is landscape (480 wide, 320 tall). [`map_to_lcd`] places a raw contact on
+//! the landscape surface through a 2x3 affine transform so the navigator always
+//! receives coordinates in the same frame the pages lay their hit zones out in.
+//!
+//! The affine comes from one of two sources, resolved once at reader start by
+//! [`load_transform`]:
+//!   * a per-rig calibration the operator captured with the touch wizard,
+//!     persisted to [`ados_hid::sidecar::TOUCH_CALIB_PATH`] and fit against the
+//!     panel's real raw ADC counts, or
+//!   * when no calibration file is present, the rotation-aware baseline from
+//!     [`ados_hid::affine::identity_for`], which maps the canonical 12-bit raw
+//!     range to the LCD bounds for the configured rotation.
 //!
 //! Only the node discovery + the async event drain are target-gated to Linux
 //! (they touch evdev). The coordinate transform and the raw-range normalizer are
@@ -25,10 +33,16 @@
 // at module scope would be an unused import on non-Linux hosts where the reader
 // is cfg'd out, so it is referenced by full path in the function below instead.
 
+use ados_hid::affine::{self, Affine};
+
 /// Landscape LCD width in pixels — the on-screen frame the navigator routes in.
 pub const LCD_W: i32 = crate::pages::PANEL_W as i32;
 /// Landscape LCD height in pixels.
 pub const LCD_H: i32 = crate::pages::PANEL_H as i32;
+
+/// On-disk touch-calibration path. Re-exported from the host-portable sidecar
+/// module so callers do not reach across crates for the constant.
+pub const TOUCH_CALIB_PATH: &str = ados_hid::sidecar::TOUCH_CALIB_PATH;
 
 /// The default touch node when discovery cannot name a better match. The
 /// ADS7846 binds first on the SPI-LCD ground stations, so `event0` is the
@@ -63,43 +77,82 @@ impl AxisRange {
     }
 }
 
-/// Map a raw `(x_raw, y_raw)` ADC contact to landscape LCD pixels for the panel
-/// `rotation` (0 / 90 / 180 / 270; any other value is treated as 0).
+/// The resolved touch coordinate transform: a 2x3 affine plus how to feed raw
+/// samples into it.
 ///
-/// The two raw axes are first normalized to `0.0..=1.0` over their published
-/// ranges, giving `(nx, ny)` (the raw short and long axes). The rotation then
-/// places that normalized point on the landscape 480x320 surface. The rotation-0
-/// mapping is calibrated against the Waveshare 3.5" ADS7846 panel: on-screen X
-/// comes from the long axis inverted (`1 - ny`) and on-screen Y from the short
-/// axis (`nx`). The result is clamped to `[0, LCD_W)` x `[0, LCD_H)`.
-pub fn map_to_lcd(
-    x_raw: i32,
-    y_raw: i32,
+/// A per-rig calibration ([`TouchTransform::calibrated`]) is fit against the
+/// panel's real raw ADC counts, so its matrix already absorbs the driver's true
+/// range and gets the raw point applied directly. The rotation-aware fallback
+/// ([`TouchTransform::fallback`]) assumes the canonical 12-bit range, so a raw
+/// point is first normalized over the driver's published ranges into that
+/// canonical span before the matrix places it — which keeps a driver that
+/// reports a non-default range (e.g. `200..3900`) mapping its full sweep to the
+/// LCD corners.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TouchTransform {
+    affine: Affine,
+    /// `Some((x_range, y_range))` for the fallback path, which renormalizes raw
+    /// counts into the canonical range first; `None` for a loaded calibration,
+    /// whose matrix was fit against raw counts directly.
+    renormalize: Option<(AxisRange, AxisRange)>,
+}
+
+impl TouchTransform {
+    /// A loaded per-rig calibration applied directly to raw ADC counts.
+    pub fn calibrated(affine: Affine) -> Self {
+        TouchTransform {
+            affine,
+            renormalize: None,
+        }
+    }
+
+    /// The rotation-aware identity fallback. Raw counts are renormalized over the
+    /// driver's published ranges into the canonical 12-bit span the
+    /// [`identity_for`](affine::identity_for) matrix expects.
+    pub fn fallback(rotation: i32, x_range: AxisRange, y_range: AxisRange) -> Self {
+        TouchTransform {
+            affine: affine::identity_for(rotation, (LCD_W, LCD_H)),
+            renormalize: Some((x_range, y_range)),
+        }
+    }
+
+    /// Map a raw `(x_raw, y_raw)` ADC contact to landscape LCD pixels, clamped
+    /// to `[0, LCD_W)` x `[0, LCD_H)`.
+    pub fn map_to_lcd(&self, x_raw: i32, y_raw: i32) -> (i32, i32) {
+        let (rx, ry) = match self.renormalize {
+            // Renormalize the driver range into the canonical 12-bit span the
+            // identity matrix is built against (0..RAW_MAX), so a non-default
+            // driver range still spans the full LCD.
+            Some((x_range, y_range)) => {
+                let nx = x_range.norm(x_raw);
+                let ny = y_range.norm(y_raw);
+                let span = (affine::RAW_MAX - affine::RAW_MIN) as f64;
+                (
+                    (affine::RAW_MIN as f64 + nx * span).round() as i32,
+                    (affine::RAW_MIN as f64 + ny * span).round() as i32,
+                )
+            }
+            // A loaded calibration was fit against raw counts directly.
+            None => (x_raw, y_raw),
+        };
+        let (x, y) = self.affine.apply(rx, ry);
+        (x.clamp(0, LCD_W - 1), y.clamp(0, LCD_H - 1))
+    }
+}
+
+/// Resolve the touch transform for `rotation`: a per-rig calibration from
+/// `calib_path` if one is present and valid, else the rotation-aware fallback
+/// built from [`identity_for`](affine::identity_for) and the driver's ranges.
+pub fn load_transform(
+    calib_path: &std::path::Path,
+    rotation: i32,
     x_range: AxisRange,
     y_range: AxisRange,
-    rotation: i32,
-) -> (i32, i32) {
-    let nx = x_range.norm(x_raw); // short panel edge, 0..1
-    let ny = y_range.norm(y_raw); // long panel edge, 0..1
-    let rotation = rotation.rem_euclid(360);
-
-    // Place the normalized point onto the landscape surface. `fx`/`fy` are
-    // normalized landscape coordinates (0..1) before scaling to pixels. The
-    // rotation-0 case is hardware-calibrated against the Waveshare 3.5" ADS7846
-    // ground-station panel: on-screen X is the raw long axis inverted (1 - ny),
-    // on-screen Y is the raw short axis (nx). The other cardinal rotations are
-    // derived placeholders pending per-orientation hardware calibration.
-    let (fx, fy) = match rotation {
-        90 => (nx, 1.0 - ny),
-        180 => (1.0 - ny, 1.0 - nx),
-        270 => (1.0 - nx, ny),
-        // 0 (and any out-of-range value normalized above). Hardware-calibrated.
-        _ => (1.0 - ny, nx),
-    };
-
-    let x = (fx * LCD_W as f64) as i32;
-    let y = (fy * LCD_H as f64) as i32;
-    (x.clamp(0, LCD_W - 1), y.clamp(0, LCD_H - 1))
+) -> TouchTransform {
+    match affine::load(calib_path) {
+        Some(a) => TouchTransform::calibrated(a),
+        None => TouchTransform::fallback(rotation, x_range, y_range),
+    }
 }
 
 /// Discover, open, and drain the touchscreen evdev node, classifying strokes and
@@ -110,8 +163,11 @@ pub fn map_to_lcd(
 /// then any device that advertises both ABS_X and ABS_Y and is not a gamepad,
 /// and finally falls back to [`DEFAULT_TOUCH_NODE`]. The chosen node's published
 /// ABS ranges seed the normalizer; a missing range falls back to the 12-bit ADC
-/// default. Every pen-up is logged at info level with the raw point, the mapped
-/// LCD point, and the gesture kind so the mapping can be calibrated on the rig.
+/// default. The coordinate transform is resolved once via [`load_transform`]:
+/// a per-rig calibration from [`TOUCH_CALIB_PATH`] if present, else the
+/// rotation-aware identity fallback. Every pen-up is logged at info level with
+/// the raw point, the mapped LCD point, and the gesture kind so the mapping can
+/// be checked on the rig.
 #[cfg(target_os = "linux")]
 pub async fn run_touch_reader(
     rotation: i32,
@@ -128,6 +184,13 @@ pub async fn run_touch_reader(
     };
 
     let (x_range, y_range) = abs_ranges(&device);
+    let transform = load_transform(
+        std::path::Path::new(TOUCH_CALIB_PATH),
+        rotation,
+        x_range,
+        y_range,
+    );
+    let calibrated = transform.renormalize.is_none();
     tracing::info!(
         path = %path,
         name = device.name().unwrap_or("unknown"),
@@ -136,6 +199,7 @@ pub async fn run_touch_reader(
         y_min = y_range.min,
         y_max = y_range.max,
         rotation,
+        calibrated,
         "touchscreen opened; reading"
     );
 
@@ -194,7 +258,7 @@ pub async fn run_touch_reader(
             }
             InputEventKind::Synchronization(_) if fsm.pen_down() => {
                 if let (Some(x), Some(y)) = (pending_x, pending_y) {
-                    let (x_lcd, y_lcd) = map_to_lcd(x, y, x_range, y_range, rotation);
+                    let (x_lcd, y_lcd) = transform.map_to_lcd(x, y);
                     last_raw = (x, y);
                     last_lcd = (x_lcd, y_lcd);
                     fsm.record_move(x_lcd, y_lcd, now_ms);
@@ -296,8 +360,11 @@ mod tests {
     const X: AxisRange = AxisRange { min: 0, max: 4095 };
     const Y: AxisRange = AxisRange { min: 0, max: 4095 };
 
+    // The rotation-aware fallback transform applied to a raw corner. Full-range
+    // ranges make the renormalization a no-op, so this exercises the bare
+    // `identity_for` matrix for each rotation.
     fn corner(x_raw: i32, y_raw: i32, rotation: i32) -> (i32, i32) {
-        map_to_lcd(x_raw, y_raw, X, Y, rotation)
+        TouchTransform::fallback(rotation, X, Y).map_to_lcd(x_raw, y_raw)
     }
 
     #[test]
@@ -316,70 +383,54 @@ mod tests {
     }
 
     #[test]
-    fn rotation_0_calibrated_x_inverts_long_axis_y_is_short_axis() {
-        // Hardware-calibrated rotation-0: fx = 1 - ny, fy = nx.
-        // raw (0,0): nx=0, ny=0 -> fx=1, fy=0 -> top-right.
-        assert_eq!(corner(0, 0, 0), (LCD_W - 1, 0));
-        // raw (max, 0): nx=1, ny=0 -> fx=1, fy=1 -> bottom-right.
-        assert_eq!(corner(4095, 0, 0), (LCD_W - 1, LCD_H - 1));
-        // raw (0, max): nx=0, ny=1 -> fx=0, fy=0 -> top-left.
-        assert_eq!(corner(0, 4095, 0), (0, 0));
-        // raw (max, max): nx=1, ny=1 -> fx=0, fy=1 -> bottom-left.
-        assert_eq!(corner(4095, 4095, 0), (0, LCD_H - 1));
-        // centre: fx=1-0.49988=0.50012 -> 0.50012*480=240.0 -> 240;
-        // fy=0.49988 -> 0.49988*320=159.9 -> 159.
-        assert_eq!(corner(2047, 2047, 0), (240, 159));
+    fn rotation_0_is_a_straight_scale() {
+        // identity_for(0): x = sx*x_raw, y = sy*y_raw. The far corners scale to
+        // exactly LCD_W / LCD_H, which the clamp pins to the last valid pixel.
+        assert_eq!(corner(0, 0, 0), (0, 0));
+        assert_eq!(corner(4095, 0, 0), (LCD_W - 1, 0));
+        assert_eq!(corner(0, 4095, 0), (0, LCD_H - 1));
+        assert_eq!(corner(4095, 4095, 0), (LCD_W - 1, LCD_H - 1));
+        // centre: sx*2047=239.88 -> 240; sy*2047=159.92 -> 160.
+        assert_eq!(corner(2047, 2047, 0), (240, 160));
     }
 
     #[test]
-    fn rotation_90_swaps_and_flips_y() {
-        // fx = nx, fy = 1 - ny.
-        // raw (0,0): nx=0, ny=0 -> fx=0, fy=1 -> bottom-left.
+    fn rotation_90_swaps_axes_and_flips_y() {
+        // identity_for(90): x = (LCD_W/span)*y_raw, y = LCD_H - (LCD_H/span)*x_raw.
         assert_eq!(corner(0, 0, 90), (0, LCD_H - 1));
-        // raw (max,0): nx=1, ny=0 -> fx=1, fy=1 -> bottom-right.
-        assert_eq!(corner(4095, 0, 90), (LCD_W - 1, LCD_H - 1));
-        // raw (0,max): nx=0, ny=1 -> fx=0, fy=0 -> top-left.
-        assert_eq!(corner(0, 4095, 90), (0, 0));
-        // raw (max,max): nx=1, ny=1 -> fx=1, fy=0 -> top-right.
+        assert_eq!(corner(4095, 0, 90), (0, 0));
+        assert_eq!(corner(0, 4095, 90), (LCD_W - 1, LCD_H - 1));
         assert_eq!(corner(4095, 4095, 90), (LCD_W - 1, 0));
-        // centre: fx=nx=0.49988 -> 239; fy=1-ny=0.50012 -> 0.50012*320=160.0 -> 160.
-        assert_eq!(corner(2047, 2047, 90), (239, 160));
+        // centre: x=(480/span)*2047=239.88 -> 240; y=320-159.92=160.08 -> 160.
+        assert_eq!(corner(2047, 2047, 90), (240, 160));
     }
 
     #[test]
-    fn rotation_180_inverts_rotation_0() {
-        // fx = 1 - ny, fy = 1 - nx.
-        // raw (0,0): nx=0, ny=0 -> fx=1, fy=1 -> bottom-right.
+    fn rotation_180_inverts_both_axes() {
+        // identity_for(180): x = LCD_W - sx*x_raw, y = LCD_H - sy*y_raw.
         assert_eq!(corner(0, 0, 180), (LCD_W - 1, LCD_H - 1));
-        // raw (max,0): nx=1, ny=0 -> fx=1, fy=0 -> top-right.
-        assert_eq!(corner(4095, 0, 180), (LCD_W - 1, 0));
-        // raw (0,max): nx=0, ny=1 -> fx=0, fy=1 -> bottom-left.
-        assert_eq!(corner(0, 4095, 180), (0, LCD_H - 1));
-        // raw (max,max): nx=1, ny=1 -> fx=0, fy=0 -> top-left.
+        assert_eq!(corner(4095, 0, 180), (0, LCD_H - 1));
+        assert_eq!(corner(0, 4095, 180), (LCD_W - 1, 0));
         assert_eq!(corner(4095, 4095, 180), (0, 0));
-        // centre: both axes flipped -> 1-0.49988=0.50012 -> 240, 160.
+        // centre: both axes flipped -> 480-239.88=240.12 -> 240, 320-159.92=160.08 -> 160.
         assert_eq!(corner(2047, 2047, 180), (240, 160));
     }
 
     #[test]
-    fn rotation_270_swaps_and_flips_x() {
-        // fx = 1 - nx, fy = ny.
-        // raw (0,0): nx=0, ny=0 -> fx=1, fy=0 -> top-right.
+    fn rotation_270_swaps_axes_and_flips_x() {
+        // identity_for(270): x = LCD_W - (LCD_W/span)*y_raw, y = (LCD_H/span)*x_raw.
         assert_eq!(corner(0, 0, 270), (LCD_W - 1, 0));
-        // raw (max,0): nx=1, ny=0 -> fx=0, fy=0 -> top-left.
-        assert_eq!(corner(4095, 0, 270), (0, 0));
-        // raw (0,max): nx=0, ny=1 -> fx=1, fy=1 -> bottom-right.
-        assert_eq!(corner(0, 4095, 270), (LCD_W - 1, LCD_H - 1));
-        // raw (max,max): nx=1, ny=1 -> fx=0, fy=1 -> bottom-left.
+        assert_eq!(corner(4095, 0, 270), (LCD_W - 1, LCD_H - 1));
+        assert_eq!(corner(0, 4095, 270), (0, 0));
         assert_eq!(corner(4095, 4095, 270), (0, LCD_H - 1));
-        // centre: fx=1-nx=0.50012 -> 240; fy=ny=0.49988 -> 159.
-        assert_eq!(corner(2047, 2047, 270), (240, 159));
+        // centre: x=480-239.88=240.12 -> 240; y=159.92 -> 160.
+        assert_eq!(corner(2047, 2047, 270), (240, 160));
     }
 
     #[test]
     fn out_of_range_rotation_falls_back_to_zero() {
-        // Values that are not a multiple of 90 after rem_euclid(360) take the
-        // `_` arm, which is the rotation-0 mapping. (360 -> 0; 1000 -> 280;
+        // identity_for() collapses any rotation that is not a cardinal multiple
+        // of 90 (after rem_euclid(360)) to rotation 0. (360 -> 0; 1000 -> 280;
         // -315 -> 45; 137 stays 137 — all non-cardinal -> rotation 0.)
         for bad in [45, 137, 280, 360, 1000, -315] {
             assert_eq!(corner(0, 0, bad), corner(0, 0, 0));
@@ -400,9 +451,10 @@ mod tests {
         // the landscape surface, including the max corner (which the clamp pins
         // to W-1 / H-1 rather than W / H).
         for rot in [0, 90, 180, 270] {
+            let t = TouchTransform::fallback(rot, X, Y);
             for &xr in &[0, 1, 2047, 4094, 4095, 5000] {
                 for &yr in &[0, 1, 2047, 4094, 4095, 5000] {
-                    let (x, y) = map_to_lcd(xr, yr, X, Y, rot);
+                    let (x, y) = t.map_to_lcd(xr, yr);
                     assert!((0..LCD_W).contains(&x), "x={x} rot={rot}");
                     assert!((0..LCD_H).contains(&y), "y={y} rot={rot}");
                 }
@@ -413,7 +465,8 @@ mod tests {
     #[test]
     fn non_full_ranges_normalize_before_placing() {
         // A driver that reports 200..3900 still maps its own min/max to the LCD
-        // corners (the normalizer cancels the offset+span before the rotation).
+        // corners: the fallback renormalizes the driver span into the canonical
+        // range before the identity matrix places it.
         let xr = AxisRange {
             min: 200,
             max: 3900,
@@ -422,8 +475,30 @@ mod tests {
             min: 150,
             max: 3950,
         };
-        // Rotation-0 calibrated mapping: (min,min) -> top-right, (max,max) -> bottom-left.
-        assert_eq!(map_to_lcd(200, 150, xr, yr, 0), (LCD_W - 1, 0));
-        assert_eq!(map_to_lcd(3900, 3950, xr, yr, 0), (0, LCD_H - 1));
+        let t = TouchTransform::fallback(0, xr, yr);
+        // Rotation-0 straight scale: (min,min) -> origin, (max,max) -> far corner.
+        assert_eq!(t.map_to_lcd(200, 150), (0, 0));
+        assert_eq!(t.map_to_lcd(3900, 3950), (LCD_W - 1, LCD_H - 1));
+    }
+
+    #[test]
+    fn calibrated_transform_applies_matrix_to_raw_directly() {
+        // A loaded calibration is applied to raw counts without renormalizing.
+        // A simple scale-only affine (a=sx, e=sy) maps the raw corners to the
+        // LCD bounds, which the clamp pins to the last valid pixel.
+        let m = affine::identity_for(0, (LCD_W, LCD_H));
+        let t = TouchTransform::calibrated(m);
+        assert_eq!(t.map_to_lcd(0, 0), (0, 0));
+        assert_eq!(t.map_to_lcd(4095, 4095), (LCD_W - 1, LCD_H - 1));
+        // The driver ranges are ignored on this path: the same raw point lands
+        // in the same place regardless of what the panel published.
+        assert_eq!(t.map_to_lcd(2047, 2047), (240, 160));
+    }
+
+    #[test]
+    fn load_transform_falls_back_when_no_calib_file() {
+        // No file at the path -> the rotation-aware identity fallback.
+        let t = load_transform(std::path::Path::new("/nonexistent/touch.calib"), 0, X, Y);
+        assert_eq!(t, TouchTransform::fallback(0, X, Y));
     }
 }
