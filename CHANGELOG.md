@@ -4,6 +4,50 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.49.49] - 2026-06-01
+
+### Fixed
+
+- **Ground video reaches the radio again.** The drone-side video relay now
+  respawns when its feed process exits, and the first relay start waits until the
+  camera stream is ready, so the radio always has video to transmit.
+
+### Changed
+
+- **Radio adapter selection reads the USB vendor and product IDs reliably.** The
+  selector resolves the adapter's USB device node up the device tree, so the
+  vendor/product table and the management-interface exclusions apply on real
+  hardware. A malformed regulatory domain is rejected before it reaches the radio.
+- **Channel changes are verified.** A channel set is confirmed against the live
+  interface before the link is reported as moved, and a stuck command times out
+  rather than stalling the link.
+- **Auto-pair is more careful.** It validates the stored key before treating the
+  link as paired, and skips a bind attempt (without spending a retry) when no
+  radio adapter is present.
+- **Touchscreen calibration uses the shared transform.** The ground-station LCD
+  touch input loads a saved calibration when present and otherwise falls back to
+  an orientation-correct default.
+
+## [0.49.48] - 2026-06-01
+
+### Added
+
+- **Runtime-mode native reporting.** The radio and ground-station link services
+  report whether they are running the native binary or the packaged fallback, so
+  the active runtime mode is visible end to end rather than inferred.
+
+### Fixed
+
+- **Installer binary placement is atomic and cache-resistant.** Prebuilt service
+  binaries are fetched fresh (the fetch defeats stale intermediary caches) and
+  written by rename rather than in place, so a partial download can never replace
+  a working binary. The global command symlinks match the on-disk binaries.
+- **Cloud status maps the radio adapter and pairing fields correctly.** The
+  ground control station reads the radio adapter and pairing state from the
+  cloud status payload using the current field layout, so the radio panel shows
+  the real link state.
+- A lint finding in the service layer was corrected.
+
 ## [0.49.26] - 2026-05-29
 
 ### Changed
