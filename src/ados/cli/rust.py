@@ -61,7 +61,9 @@ class _Service:
 
 # Keyed by the operator-facing service name. Mirrors the ExecStart guards
 # in data/systemd/*.service and the reconcile in the installer
-# (crates/ados-installer/src/steps/systemd.rs).
+# (crates/ados-installer/src/steps/systemd.rs). The WFB transmit and
+# ground-receive planes are native-only (their packaged predecessor was
+# deleted) and so are not listed here — there is nothing to fall back to.
 _SERVICES: dict[str, _Service] = {
     "net": _Service(
         flag="net-rust-enabled",
@@ -73,13 +75,6 @@ _SERVICES: dict[str, _Service] = {
             "ados-usb-gadget",
         ),
         note="native uplink matrix; absorbs ethernet/wifi-client/usb-gadget",
-    ),
-    "groundlink": _Service(
-        flag="groundlink-python-fallback",
-        binaries=("/opt/ados/bin/ados-groundlink",),
-        swap_units=("ados-wfb-rx",),
-        note="native ground receive (default); the fallback marker pins the packaged receive plane",
-        opt_out=True,
     ),
     "plugin-host": _Service(
         flag="plugin-host-rust-enabled",
@@ -93,13 +88,6 @@ _SERVICES: dict[str, _Service] = {
         extra_units=("ados-pic", "ados-input"),
         subsumes=("ados-buttons",),
         note="native input arbiter; absorbs the button service",
-    ),
-    "radio": _Service(
-        flag="wfb-python-fallback",
-        binaries=("/opt/ados/bin/ados-radio",),
-        swap_units=("ados-wfb",),
-        note="native WFB transmit (default); the fallback marker pins the packaged transmit plane",
-        opt_out=True,
     ),
     "display": _Service(
         flag="display-python-fallback",

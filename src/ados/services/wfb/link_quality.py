@@ -26,11 +26,24 @@ import time
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from enum import StrEnum
 from pathlib import Path
 
 from ados.core.logging import get_logger
 
 log = get_logger("wfb.link_quality")
+
+
+class LinkState(StrEnum):
+    """WFB-ng link connection state."""
+
+    DISCONNECTED = "disconnected"
+    UNPAIRED = "unpaired"
+    AUTO_PAIRING = "auto_pairing"
+    BINDING = "binding"
+    CONNECTING = "connecting"
+    CONNECTED = "connected"
+    DEGRADED = "degraded"
 
 # `\d+\tRX_ANT\t<freq>:<mcs>:<bw>\t<ant_id_hex>\t<count>:<rmin>:<ravg>:<rmax>:<smin>:<savg>:<smax>`
 #

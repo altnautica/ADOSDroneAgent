@@ -3,9 +3,10 @@
 The long-running services ship in two implementations behind a frozen
 wire contract: a native compiled binary under ``/opt/ados/bin/ados-<svc>``
 and the packaged Python service. Each service picks its branch at unit
-start. A few core services run the native binary whenever it is present;
-the rest are flag-gated and run native only when both a sentinel file
-under ``/etc/ados`` is present and the binary is installed.
+start. Core services (and those whose packaged predecessor has been
+deleted) run the native binary whenever it is present; the rest are
+flag-gated and run native only when both a sentinel file under
+``/etc/ados`` is present and the binary is installed.
 
 :func:`compute_runtime_mode` rolls those per-service branches up into one
 of three labels the GCS surfaces as a node badge:
@@ -49,11 +50,16 @@ _CORE_BINARIES: tuple[str, ...] = (
 
 
 class _FlagGated:
-    """A flagged service whose native-vs-packaged branch turns on a
-    sentinel file under ``/etc/ados``.
+    """A service whose native-vs-packaged branch turns on a sentinel file
+    under ``/etc/ados`` — or, once the packaged predecessor is deleted, a
+    native-only service with no fallback to gate.
 
-    Two senses, set by ``opt_out``:
+    Senses, set by ``flag`` and ``opt_out``:
 
+    * ``flag=None`` — native-ONLY: the packaged implementation was deleted,
+      so the service runs its native binary whenever the binary is present
+      (any stray ``*-fallback`` marker is ignored). The unit ExecStart runs
+      the binary directly.
     * ``opt_out=False`` (default) — opt-IN: native only when BOTH the flag
       file and the binaries are present (the routine, pre-cutover posture).
     * ``opt_out=True`` — opt-OUT: native is the DEFAULT when the binaries
@@ -68,7 +74,7 @@ class _FlagGated:
 
     def __init__(
         self,
-        flag: str,
+        flag: str | None,
         binaries: tuple[str, ...],
         profiles: tuple[str, ...],
         opt_out: bool = False,
@@ -91,10 +97,12 @@ _FLAG_GATED: dict[str, _FlagGated] = {
         profiles=("drone", "ground-station"),
     ),
     "groundlink": _FlagGated(
-        flag="groundlink-python-fallback",
+        # Native-only: the packaged direct-role receive plane was deleted.
+        # The mesh relay/receiver roles keep a packaged module behind the
+        # groundlink-python-fallback marker, but that is not toggled here.
+        flag=None,
         binaries=("ados-groundlink",),
         profiles=("ground-station",),
-        opt_out=True,
     ),
     "plugin-host": _FlagGated(
         flag="plugin-host-rust-enabled",
@@ -107,10 +115,10 @@ _FLAG_GATED: dict[str, _FlagGated] = {
         profiles=("ground-station",),
     ),
     "radio": _FlagGated(
-        flag="wfb-python-fallback",
+        # Native-only: the packaged transmit plane was deleted.
+        flag=None,
         binaries=("ados-radio",),
         profiles=("drone",),
-        opt_out=True,
     ),
     "display": _FlagGated(
         flag="display-python-fallback",
@@ -170,6 +178,10 @@ def is_service_native(
     binaries_present = all(_bin_present(bdir, b) for b in svc.binaries)
     if not binaries_present:
         return False
+    if svc.flag is None:
+        # Native-only: no packaged predecessor to fall back to, so the
+        # binary being present is sufficient (any stray marker is ignored).
+        return True
     try:
         flag_set = (edir / svc.flag).exists()
     except OSError:
@@ -209,11 +221,15 @@ def compute_runtime_mode(
     for svc in _FLAG_GATED.values():
         if profile not in svc.profiles:
             continue
+        binaries_present = all(_bin_present(bdir, b) for b in svc.binaries)
+        if svc.flag is None:
+            # Native-only service: native iff the binary is present.
+            verdicts.append(binaries_present)
+            continue
         try:
             flag_set = (edir / svc.flag).exists()
         except OSError:
             flag_set = False
-        binaries_present = all(_bin_present(bdir, b) for b in svc.binaries)
         if svc.opt_out:
             # Default-native: native when the binaries are present and the
             # operator has NOT pinned the packaged fallback marker.

@@ -20,14 +20,13 @@ StartLimitBurst=5
 Slice=ados.slice
 Type=simple
 User=root
-# The native ground-station data-plane is the DEFAULT. The install verifies the
-# binary is present before this unit starts, so a normal boot runs the native
-# receive plane. The packaged Python service stays on disk as an emergency
-# fallback: create the fallback flag and the unit reverts to Python on restart.
-#   touch /etc/ados/groundlink-python-fallback && systemctl restart ados-wfb-rx
-# `exec` replaces the shell image so the CAP_NET_RAW/CAP_NET_ADMIN ambient caps
-# below carry to the chosen binary unchanged.
-ExecStart=/bin/sh -c 'if [ -e /etc/ados/groundlink-python-fallback ]; then exec /opt/ados/venv/bin/python -m ados.services.ground_station.wfb_rx; else exec /opt/ados/bin/ados-groundlink; fi'
+# The native ground-station receive plane (direct role). The install verifies
+# the binary is present before this unit starts, so a normal boot runs it
+# directly. There is no packaged fallback — the Python direct-role receive
+# plane was removed; a missing or broken binary fails loud. (The mesh
+# relay/receiver roles keep a packaged module behind
+# /etc/ados/groundlink-python-fallback; this direct unit does not.)
+ExecStart=/opt/ados/bin/ados-groundlink
 Restart=on-failure
 RestartSec=5
 Environment=ADOS_CONFIG=/etc/ados/config.yaml

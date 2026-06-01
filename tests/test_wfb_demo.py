@@ -7,7 +7,7 @@ import asyncio
 import pytest
 
 from ados.services.wfb.demo import DemoWfbManager
-from ados.services.wfb.manager import LinkState
+from ados.services.wfb.link_quality import LinkState
 
 
 def test_demo_initial_state():

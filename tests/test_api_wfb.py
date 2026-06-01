@@ -7,8 +7,7 @@ from fastapi.testclient import TestClient
 
 from ados.api.server import create_app
 from ados.services.wfb.demo import DemoWfbManager
-from ados.services.wfb.link_quality import LinkStats
-from ados.services.wfb.manager import LinkState
+from ados.services.wfb.link_quality import LinkState, LinkStats
 from tests.api_runtime_utils import build_api_runtime
 
 

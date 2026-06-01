@@ -10,14 +10,11 @@ StartLimitBurst=5
 # observable per unit (the slice sets MemoryAccounting=yes).
 Slice=ados.slice
 Type=simple
-# The native radio manager is the DEFAULT. The install verifies the binary is
-# present before this unit starts, so a normal boot runs the native service.
-# The packaged Python service is kept on disk as an emergency fallback: create
-# the fallback flag and the unit reverts to Python on its next restart.
-#   touch /etc/ados/wfb-python-fallback && systemctl restart ados-wfb
-# `exec` replaces the shell image in place so the CAP_NET_RAW/CAP_NET_ADMIN
-# ambient caps below carry to the chosen binary unchanged.
-ExecStart=/bin/sh -c 'if [ -e /etc/ados/wfb-python-fallback ]; then exec /opt/ados/venv/bin/python -m ados.services.wfb; else exec /opt/ados/bin/ados-radio; fi'
+# The native radio transmit plane. The install verifies the binary is present
+# before this unit starts (a missing binary fails the install health gate), so
+# a normal boot runs it directly. There is no packaged fallback — the Python
+# transmit plane was removed; a missing or broken binary fails loud.
+ExecStart=/opt/ados/bin/ados-radio
 Restart=on-failure
 RestartSec=5
 Environment=ADOS_CONFIG=/etc/ados/config.yaml

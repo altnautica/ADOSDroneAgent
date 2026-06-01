@@ -4,6 +4,18 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.49.55] - 2026-06-01
+
+### Removed
+
+- **The packaged Python WFB transmit and ground direct-receive planes.** With
+  the native radio link proven over the air, the drone transmit plane and the
+  ground direct-role receive plane now run their native binaries only — there is
+  no Python fallback, and a missing or broken binary fails loud. `ados rust
+  status` no longer lists the radio or ground-receive services (there is nothing
+  to switch), and the operator radio knobs always route to the native command
+  socket. The mesh relay and receiver roles keep their packaged module for now.
+
 ## [0.49.54] - 2026-06-01
 
 ### Changed

@@ -393,24 +393,23 @@ fn provision_overlays(ctx: &Ctx, source: Option<&Path>) {
 /// packaged Python implementations. Deployed at `/etc/ados/CUTOVER`.
 const CUTOVER_NOTE_PATH: &str = "/etc/ados/CUTOVER";
 
-/// The body of the CUTOVER note (pure). The WFB services now run the native
-/// binaries by default; the Python implementations stay installed only as an
-/// emergency fallback behind a flag file. The note tells an operator exactly how
-/// to flip back per service group.
+/// The body of the CUTOVER note (pure). The WFB transmit plane and the
+/// ground direct-role receive plane are native-only (their packaged
+/// predecessor was deleted). Only the mesh relay and receiver roles keep a
+/// packaged fallback behind a flag file; the note tells an operator how to
+/// flip those back.
 pub fn cutover_note_body() -> &'static str {
-    "ADOS radio services run the native binaries by default.\n\
+    "ADOS radio services run native binaries.\n\
 \n\
-The packaged Python implementations are still installed as an emergency\n\
-fallback. To revert a service group to Python, create its fallback flag and\n\
-restart the unit:\n\
+The drone transmit plane and the ground direct-role receive plane are\n\
+native-only — there is no Python fallback for them.\n\
 \n\
-  # Drone-side WFB transmitter\n\
-  touch /etc/ados/wfb-python-fallback\n\
-  systemctl restart ados-wfb\n\
+The mesh relay and receiver roles keep a packaged Python implementation as\n\
+an emergency fallback. To revert a mesh role to Python, create the fallback\n\
+flag and restart its unit:\n\
 \n\
-  # Ground-station receive / relay / receiver plane\n\
   touch /etc/ados/groundlink-python-fallback\n\
-  systemctl restart ados-wfb-rx ados-wfb-relay ados-wfb-receiver\n\
+  systemctl restart ados-wfb-relay ados-wfb-receiver\n\
 \n\
 Remove the flag file and restart the unit to return to the native binary.\n"
 }
@@ -683,19 +682,18 @@ mod tests {
     }
 
     #[test]
-    fn cutover_note_names_both_fallback_flags_and_their_units() {
+    fn cutover_note_documents_only_the_mesh_fallback() {
         let body = cutover_note_body();
-        // The drone-side flag + its unit.
-        assert!(body.contains("/etc/ados/wfb-python-fallback"));
-        assert!(body.contains("systemctl restart ados-wfb"));
-        // The ground-station flag + the three receive-plane units.
+        // The drone transmit plane and the ground direct-role receive plane
+        // are native-only: their fallback flag and unit must NOT appear.
+        assert!(!body.contains("/etc/ados/wfb-python-fallback"));
+        assert!(!body.contains("ados-wfb-rx"));
+        // The mesh relay/receiver roles keep their packaged fallback.
         assert!(body.contains("/etc/ados/groundlink-python-fallback"));
-        assert!(body.contains("ados-wfb-rx"));
         assert!(body.contains("ados-wfb-relay"));
         assert!(body.contains("ados-wfb-receiver"));
-        // It must state the native binaries are the default.
+        // It must state the services run native binaries.
         assert!(body.to_lowercase().contains("native"));
-        assert!(body.to_lowercase().contains("default"));
         // No stale rust-enabled opt-in flag should leak into the operator note.
         assert!(!body.contains("rust-enabled"));
     }

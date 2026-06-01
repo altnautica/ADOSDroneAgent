@@ -14,11 +14,12 @@ StartLimitBurst=5
 Slice=ados.slice
 Type=simple
 User=root
-# The native receiver loop is the DEFAULT, mirroring ados-wfb-rx.service. The
-# install verifies the binary is present before this unit starts. The packaged
-# Python receiver stays on disk as an emergency fallback: create the fallback
-# flag and the unit reverts to Python on restart. The native binary takes the
-# role on its `--role` argument.
+# The native receiver loop is the DEFAULT. The install verifies the binary is
+# present before this unit starts. The packaged Python receiver stays on disk
+# as an emergency fallback for this mesh role: create the fallback flag and the
+# unit reverts to Python on restart. The native binary takes the role on its
+# `--role` argument. (The direct-role receive plane is native-only; this marker
+# governs only the mesh relay/receiver roles and is not toggled by `ados rust`.)
 #   touch /etc/ados/groundlink-python-fallback && systemctl restart ados-wfb-receiver
 # `exec` replaces the shell image so the ambient caps below carry unchanged.
 ExecStart=/bin/sh -c 'if [ -e /etc/ados/groundlink-python-fallback ]; then exec /opt/ados/venv/bin/python -m ados.services.ground_station.wfb_receiver; else exec /opt/ados/bin/ados-groundlink --role receiver; fi'

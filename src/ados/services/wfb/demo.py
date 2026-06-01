@@ -9,8 +9,7 @@ import time
 from datetime import datetime, timezone
 
 from ados.core.logging import get_logger
-from ados.services.wfb.link_quality import LinkQualityMonitor, LinkStats
-from ados.services.wfb.manager import LinkState
+from ados.services.wfb.link_quality import LinkQualityMonitor, LinkState, LinkStats
 
 log = get_logger("wfb.demo")
 
