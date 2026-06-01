@@ -101,6 +101,12 @@ const NM_POWERSAVE_CONF: &str = "/etc/NetworkManager/conf.d/99-ados-wifi-powersa
 const WIFI_POWERSAVE_RULE: &str = "/etc/udev/rules.d/99-ados-wifi-powersave.rules";
 /// Broad udev rule that disables USB autosuspend on every USB device.
 const USB_NO_AUTOSUSPEND_RULE: &str = "/etc/udev/rules.d/99-ados-usb-no-autosuspend.rules";
+/// tmpfiles drop-in that flips the global USB autosuspend default to "never"
+/// early in userspace (belt-and-suspenders to the kernel cmdline).
+const USB_AUTOSUSPEND_TMPFILES: &str = "/etc/tmpfiles.d/99-ados-usb-autosuspend.conf";
+/// The kernel cmdline argument that disables USB autosuspend from the first
+/// device enumeration (before the rootfs udev rules can apply).
+const USB_AUTOSUSPEND_ARG: &str = "usbcore.autosuspend=-1";
 /// Stale per-interface Ethernet-EEE rule a prior install may have written; the
 /// boot oneshot owns EEE-off now, so any leftover rule is removed.
 const ETH_NO_EEE_RULE: &str = "/etc/udev/rules.d/99-ados-eth-no-eee.rules";
@@ -167,6 +173,151 @@ pub fn usb_no_autosuspend_rule_body() -> String {
 # the management WiFi dongle, and a cellular modem from parking on the bus.\n\
 ACTION==\"add\", SUBSYSTEM==\"usb\", ATTR{power/control}=\"on\"\n"
         .to_string()
+}
+
+/// Build the USB-autosuspend tmpfiles drop-in body (pure). Flips the global
+/// usbcore autosuspend default to never (-1) early in userspace, so any device
+/// that enumerates after the rootfs comes up cannot autosuspend. The kernel
+/// cmdline ([`disable_usb_autosuspend_cmdline`]) covers the earlier initramfs
+/// window this rule cannot reach.
+pub fn usb_autosuspend_tmpfiles_body() -> String {
+    "# ADOS: flip the global USB autosuspend default to never (-1) early in\n\
+# userspace. Belt-and-suspenders to the usbcore.autosuspend=-1 kernel cmdline,\n\
+# which covers the initramfs enumeration window this rule cannot reach.\n\
+w /sys/module/usbcore/parameters/autosuspend - - - - -1\n"
+        .to_string()
+}
+
+/// Add `arg` to an Armbian `armbianEnv.txt` body via the `extraargs=` line.
+/// Returns the rewritten body, or `None` when `arg` is already present (the
+/// file is left untouched). Pure + unit-testable.
+pub fn armbian_extraargs_with(content: &str, arg: &str) -> Option<String> {
+    if content.split_whitespace().any(|t| t == arg) {
+        return None;
+    }
+    let mut out = String::new();
+    let mut had = false;
+    for line in content.lines() {
+        if let Some(rest) = line.strip_prefix("extraargs=") {
+            had = true;
+            let rest = rest.trim();
+            if rest.is_empty() {
+                out.push_str(&format!("extraargs={arg}\n"));
+            } else {
+                out.push_str(&format!("extraargs={rest} {arg}\n"));
+            }
+        } else {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    if !had {
+        out.push_str(&format!("extraargs={arg}\n"));
+    }
+    Some(out)
+}
+
+/// Add `arg` to a single-line Raspberry-Pi `cmdline.txt` body. Returns the
+/// rewritten body, or `None` when `arg` is already present. Pure.
+pub fn cmdline_txt_with(content: &str, arg: &str) -> Option<String> {
+    if content.split_whitespace().any(|t| t == arg) {
+        return None;
+    }
+    Some(format!("{} {arg}\n", content.trim_end()))
+}
+
+/// Add `arg` to the first `APPEND`/`append` line of an extlinux config body.
+/// Returns the rewritten body, or `None` when `arg` is already present or no
+/// APPEND line exists. Pure.
+pub fn extlinux_append_with(content: &str, arg: &str) -> Option<String> {
+    if content.split_whitespace().any(|t| t == arg) {
+        return None;
+    }
+    let mut out = String::new();
+    let mut patched = false;
+    for line in content.lines() {
+        let t = line.trim_start();
+        if !patched && (t.starts_with("append ") || t.starts_with("APPEND ")) {
+            out.push_str(line);
+            out.push(' ');
+            out.push_str(arg);
+            out.push('\n');
+            patched = true;
+        } else {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    if patched {
+        Some(out)
+    } else {
+        None
+    }
+}
+
+/// Append `usbcore.autosuspend=-1` to the board's kernel cmdline so USB
+/// autosuspend is disabled from the very first device enumeration — before the
+/// rootfs udev `power/control=on` rules can apply. Cheap UVC cameras wedge on
+/// the kernel-default 2 s autosuspend during the boot-race window the udev rule
+/// cannot win; only a cmdline setting is active that early. Board-aware +
+/// idempotent. Takes effect on the next reboot.
+fn disable_usb_autosuspend_cmdline() {
+    let arg = USB_AUTOSUSPEND_ARG;
+
+    // Armbian / many Rockchip boards: the extraargs= line in armbianEnv.txt.
+    let armbian = Path::new("/boot/armbianEnv.txt");
+    if armbian.is_file() {
+        if let Ok(content) = std::fs::read_to_string(armbian) {
+            if let Some(new) = armbian_extraargs_with(&content, arg) {
+                if std::fs::write(armbian, new).is_ok() {
+                    tracing::info!(
+                        file = "/boot/armbianEnv.txt",
+                        arg,
+                        "usb autosuspend disabled on kernel cmdline (reboot to apply)"
+                    );
+                }
+            }
+        }
+        return;
+    }
+
+    // Raspberry Pi: a single-line cmdline.txt (firmware path first).
+    for cmd in ["/boot/firmware/cmdline.txt", "/boot/cmdline.txt"] {
+        let p = Path::new(cmd);
+        if p.is_file() {
+            if let Ok(content) = std::fs::read_to_string(p) {
+                if let Some(new) = cmdline_txt_with(&content, arg) {
+                    if std::fs::write(p, new).is_ok() {
+                        tracing::info!(
+                            file = cmd,
+                            arg,
+                            "usb autosuspend disabled on kernel cmdline (reboot to apply)"
+                        );
+                    }
+                }
+            }
+            return;
+        }
+    }
+
+    // Generic extlinux: the APPEND line.
+    let extlinux = Path::new("/boot/extlinux/extlinux.conf");
+    if extlinux.is_file() {
+        if let Ok(content) = std::fs::read_to_string(extlinux) {
+            if let Some(new) = extlinux_append_with(&content, arg) {
+                if std::fs::write(extlinux, new).is_ok() {
+                    tracing::info!(
+                        file = "/boot/extlinux/extlinux.conf",
+                        arg,
+                        "usb autosuspend disabled on kernel cmdline (reboot to apply)"
+                    );
+                }
+            }
+        }
+        return;
+    }
+
+    tracing::info!("no known boot cmdline file found; relying on the udev rule + tmpfiles default for USB autosuspend");
 }
 
 /// Build the logind no-sleep drop-in body (pure). Ignores the idle timer, power
@@ -486,6 +637,19 @@ fn install_power_hardening(source: Option<&Path>) {
     // ── 3. USB autosuspend off (broad) ──
     if std::fs::write(USB_NO_AUTOSUSPEND_RULE, usb_no_autosuspend_rule_body()).is_ok() {
         set_mode(Path::new(USB_NO_AUTOSUSPEND_RULE), 0o644);
+    }
+
+    // ── 3b. USB autosuspend off at the kernel level (the boot-race fix). ──
+    // The udev rule above pins power/control=on per device, but it cannot win
+    // the boot race: a cheap UVC camera enumerates before the rootfs udev is up,
+    // inherits the kernel-default 2 s autosuspend, mishandles the resume, and
+    // wedges off the bus. Disable autosuspend globally — on the kernel cmdline
+    // (active from the first enumeration; takes effect next reboot) and via a
+    // tmpfiles default flip (this boot, post-rootfs devices).
+    disable_usb_autosuspend_cmdline();
+    if std::fs::write(USB_AUTOSUSPEND_TMPFILES, usb_autosuspend_tmpfiles_body()).is_ok() {
+        set_mode(Path::new(USB_AUTOSUSPEND_TMPFILES), 0o644);
+        let _ = exec::run("systemd-tmpfiles", &["--create", USB_AUTOSUSPEND_TMPFILES]);
     }
 
     // ── 4. Drop any stale Ethernet-EEE udev rule (the boot oneshot owns it). ──
@@ -937,6 +1101,62 @@ mod tests {
     }
 
     #[test]
+    fn usb_autosuspend_tmpfiles_writes_minus_one() {
+        let body = usb_autosuspend_tmpfiles_body();
+        assert!(body.contains("w /sys/module/usbcore/parameters/autosuspend - - - - -1"));
+    }
+
+    #[test]
+    fn armbian_extraargs_appends_and_is_idempotent() {
+        // Append to an existing extraargs line, preserving the prior args.
+        let got = armbian_extraargs_with(
+            "verbosity=1\nextraargs=cma=256M\nrootdev=UUID=x\n",
+            USB_AUTOSUSPEND_ARG,
+        )
+        .expect("should rewrite");
+        assert!(got.contains("extraargs=cma=256M usbcore.autosuspend=-1\n"));
+        assert!(got.contains("verbosity=1\n") && got.contains("rootdev=UUID=x\n"));
+        // Already present → no rewrite (idempotent).
+        assert!(armbian_extraargs_with(&got, USB_AUTOSUSPEND_ARG).is_none());
+        // No extraargs line at all → one is added.
+        let added = armbian_extraargs_with("verbosity=1\n", USB_AUTOSUSPEND_ARG).unwrap();
+        assert!(added.contains("extraargs=usbcore.autosuspend=-1\n"));
+        // Empty extraargs value → no stray leading space.
+        let empty = armbian_extraargs_with("extraargs=\n", USB_AUTOSUSPEND_ARG).unwrap();
+        assert!(empty.contains("extraargs=usbcore.autosuspend=-1\n"));
+    }
+
+    #[test]
+    fn cmdline_txt_appends_to_the_single_line_and_is_idempotent() {
+        let got = cmdline_txt_with(
+            "console=serial0 root=/dev/mmcblk0p2 rootwait\n",
+            USB_AUTOSUSPEND_ARG,
+        )
+        .expect("should rewrite");
+        assert_eq!(
+            got,
+            "console=serial0 root=/dev/mmcblk0p2 rootwait usbcore.autosuspend=-1\n"
+        );
+        assert!(cmdline_txt_with(&got, USB_AUTOSUSPEND_ARG).is_none());
+    }
+
+    #[test]
+    fn extlinux_appends_to_append_line_only() {
+        let got = extlinux_append_with(
+            "LABEL ados\n  KERNEL /boot/Image\n  APPEND root=UUID=x rootwait\n",
+            USB_AUTOSUSPEND_ARG,
+        )
+        .expect("should rewrite");
+        assert!(got.contains("APPEND root=UUID=x rootwait usbcore.autosuspend=-1\n"));
+        assert!(got.contains("KERNEL /boot/Image\n"));
+        // Idempotent + no-APPEND returns None.
+        assert!(extlinux_append_with(&got, USB_AUTOSUSPEND_ARG).is_none());
+        assert!(
+            extlinux_append_with("LABEL x\n  KERNEL /boot/Image\n", USB_AUTOSUSPEND_ARG).is_none()
+        );
+    }
+
+    #[test]
     fn logind_nosleep_ignores_every_sleep_path() {
         let body = logind_nosleep_body();
         assert!(body.contains("[Login]"));
@@ -966,6 +1186,7 @@ mod tests {
             NM_POWERSAVE_CONF,
             WIFI_POWERSAVE_RULE,
             USB_NO_AUTOSUSPEND_RULE,
+            USB_AUTOSUSPEND_TMPFILES,
             ETH_NO_EEE_RULE,
             LOGIND_NOSLEEP_CONF,
         ] {

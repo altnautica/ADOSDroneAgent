@@ -2,8 +2,11 @@
 Description=ADOS Video Pipeline
 After=ados-mavlink.service
 PartOf=ados-supervisor.service
-StartLimitInterval=60s
-StartLimitBurst=5
+# No start-limit: a USB camera that wedges off the bus (cheap UVC modules
+# mishandle resume) must never make systemd give up and leave the pipeline
+# inactive. The native orchestrator already backs off internally and the
+# supervisor watches the unit, so an unbounded restart never hammers.
+StartLimitIntervalSec=0
 
 [Service]
 # Join the shared accounting slice so MemoryCurrent/CPUUsage are
@@ -18,7 +21,7 @@ Type=simple
 # modules (pipeline, encoder, mediamtx, camera_mgr, local_tap, sei_*) stay in
 # Python for the in-process demo pipeline and the ground-station consumers.
 ExecStart=/bin/sh -c 'if [ -x /opt/ados/bin/ados-video ]; then exec /opt/ados/bin/ados-video; else echo "ados-video binary missing; reinstall to fetch it" >&2; exit 1; fi'
-Restart=on-failure
+Restart=always
 RestartSec=3
 Environment=ADOS_CONFIG=/etc/ados/config.yaml
 EnvironmentFile=-/etc/ados/env
