@@ -4,6 +4,14 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.49.56] - 2026-06-01
+
+### Documentation
+
+- Add a release runbook describing how the rolling native binaries and the
+  versioned wheel + bundle are published, and why the release tag is created
+  by hand.
+
 ## [0.49.55] - 2026-06-01
 
 ### Removed
