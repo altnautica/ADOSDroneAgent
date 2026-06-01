@@ -91,9 +91,10 @@ _FLAG_GATED: dict[str, _FlagGated] = {
         profiles=("drone", "ground-station"),
     ),
     "groundlink": _FlagGated(
-        flag="groundlink-rust-enabled",
+        flag="groundlink-python-fallback",
         binaries=("ados-groundlink",),
         profiles=("ground-station",),
+        opt_out=True,
     ),
     "plugin-host": _FlagGated(
         flag="plugin-host-rust-enabled",
@@ -106,9 +107,10 @@ _FLAG_GATED: dict[str, _FlagGated] = {
         profiles=("ground-station",),
     ),
     "radio": _FlagGated(
-        flag="wfb-rust-enabled",
+        flag="wfb-python-fallback",
         binaries=("ados-radio",),
         profiles=("drone",),
+        opt_out=True,
     ),
     "display": _FlagGated(
         flag="display-python-fallback",

@@ -75,10 +75,11 @@ _SERVICES: dict[str, _Service] = {
         note="native uplink matrix; absorbs ethernet/wifi-client/usb-gadget",
     ),
     "groundlink": _Service(
-        flag="groundlink-rust-enabled",
+        flag="groundlink-python-fallback",
         binaries=("/opt/ados/bin/ados-groundlink",),
         swap_units=("ados-wfb-rx",),
-        note="native ground receive (direct role)",
+        note="native ground receive (default); the fallback marker pins the packaged receive plane",
+        opt_out=True,
     ),
     "plugin-host": _Service(
         flag="plugin-host-rust-enabled",
@@ -94,10 +95,11 @@ _SERVICES: dict[str, _Service] = {
         note="native input arbiter; absorbs the button service",
     ),
     "radio": _Service(
-        flag="wfb-rust-enabled",
+        flag="wfb-python-fallback",
         binaries=("/opt/ados/bin/ados-radio",),
         swap_units=("ados-wfb",),
-        note="native WFB transmit (drone profile)",
+        note="native WFB transmit (default); the fallback marker pins the packaged transmit plane",
+        opt_out=True,
     ),
     "display": _Service(
         flag="display-python-fallback",
