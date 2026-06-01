@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
+import json
+
+import ados.core.radio_block as radio_block
 from ados.core.radio_block import (
     _channel_to_freq,
     build_radio_block,
+    compute_radio_stack_state,
+    read_wfb_failover_state,
 )
 
 
@@ -138,3 +143,193 @@ def test_channel_to_freq_known_and_unknown():
     assert _channel_to_freq(999) is None
     assert _channel_to_freq(None) is None
     assert _channel_to_freq("abc") is None
+
+
+def test_radio_block_carries_live_sidecar_churn_fields():
+    """tx_zombie_kills / tx_bytes_per_s / restart_count ride the block."""
+    status = {
+        "state": "connected",
+        "interface": "wlan1",
+        "channel": 149,
+        "tx_zombie_kills": 2,
+        "tx_bytes_per_s": 412345.6,
+        "restart_count": 5,
+    }
+    block = build_radio_block(status)
+    assert block["tx_zombie_kills"] == 2
+    assert block["tx_bytes_per_s"] == 412345.6
+    assert block["restart_count"] == 5
+
+
+def test_radio_block_churn_fields_null_on_older_sidecar():
+    """An older sidecar that omits the churn fields reads as null, not 0."""
+    status = {
+        "state": "connected",
+        "interface": "wlan1",
+        "channel": 149,
+    }
+    block = build_radio_block(status)
+    assert block["tx_zombie_kills"] is None
+    assert block["tx_bytes_per_s"] is None
+    assert block["restart_count"] is None
+
+
+def test_radio_block_absent_omits_churn_fields():
+    """The absent block keeps its existing key set (churn fields are
+    sidecar-only and only appear when a live status dict is present)."""
+    block = build_radio_block(None)
+    assert "tx_zombie_kills" not in block
+    assert "tx_bytes_per_s" not in block
+    assert "restart_count" not in block
+
+
+# --- compute_radio_stack_state ------------------------------------------
+
+
+def _point_stack_paths(monkeypatch, *, bins=(), bind=()):
+    """Redirect the radio-stack artifact lookups at a controlled set.
+
+    `bins` is the set of binary names that resolve; `bind` is the set of
+    bind-artifact paths that exist. Anything not listed reads as absent.
+    """
+    bin_set = set(bins)
+    bind_set = set(bind)
+
+    real_is_file = radio_block.Path.is_file
+
+    def fake_is_file(self):
+        s = str(self)
+        if s in bind_set:
+            return True
+        # Binary lookup: <dir>/<name> for the known bin dirs.
+        for d in radio_block._RADIO_BIN_DIRS:
+            for name in radio_block._RADIO_BIN_NAMES:
+                if s == f"{d}/{name}" and name in bin_set:
+                    return True
+        if s in radio_block._BIND_ARTIFACT_PATHS:
+            return False
+        for d in radio_block._RADIO_BIN_DIRS:
+            for name in radio_block._RADIO_BIN_NAMES:
+                if s == f"{d}/{name}":
+                    return False
+        return real_is_file(self)
+
+    monkeypatch.setattr(radio_block.Path, "is_file", fake_is_file)
+
+
+def test_radio_stack_state_stack_incomplete_when_bins_missing(monkeypatch):
+    _point_stack_paths(monkeypatch, bins=(), bind=radio_block._BIND_ARTIFACT_PATHS)
+    state = compute_radio_stack_state({"adapter_injection_ok": True, "paired": True})
+    assert state == "stack_incomplete"
+
+
+def test_radio_stack_state_no_bind_artifacts(monkeypatch):
+    _point_stack_paths(
+        monkeypatch,
+        bins=radio_block._RADIO_BIN_NAMES,
+        bind=(),
+    )
+    state = compute_radio_stack_state({"adapter_injection_ok": True, "paired": True})
+    assert state == "no_bind_artifacts"
+
+
+def test_radio_stack_state_no_injection(monkeypatch):
+    _point_stack_paths(
+        monkeypatch,
+        bins=radio_block._RADIO_BIN_NAMES,
+        bind=radio_block._BIND_ARTIFACT_PATHS,
+    )
+    state = compute_radio_stack_state({"adapter_injection_ok": False, "paired": False})
+    assert state == "no_injection"
+
+
+def test_radio_stack_state_unpaired(monkeypatch):
+    _point_stack_paths(
+        monkeypatch,
+        bins=radio_block._RADIO_BIN_NAMES,
+        bind=radio_block._BIND_ARTIFACT_PATHS,
+    )
+    state = compute_radio_stack_state({"adapter_injection_ok": True, "paired": False})
+    assert state == "unpaired"
+
+
+def test_radio_stack_state_ok(monkeypatch):
+    _point_stack_paths(
+        monkeypatch,
+        bins=radio_block._RADIO_BIN_NAMES,
+        bind=radio_block._BIND_ARTIFACT_PATHS,
+    )
+    state = compute_radio_stack_state({"adapter_injection_ok": True, "paired": True})
+    assert state == "ok"
+
+
+def test_radio_stack_state_handles_none_status(monkeypatch):
+    """A None status (no sidecar) with a complete stack reads no_injection."""
+    _point_stack_paths(
+        monkeypatch,
+        bins=radio_block._RADIO_BIN_NAMES,
+        bind=radio_block._BIND_ARTIFACT_PATHS,
+    )
+    assert compute_radio_stack_state(None) == "no_injection"
+
+
+def test_radio_stack_state_is_one_of_the_known_set(monkeypatch):
+    """The verdict is always within the GCS-clamped string set."""
+    allowed = {
+        "ok",
+        "no_injection",
+        "unpaired",
+        "no_bind_artifacts",
+        "stack_incomplete",
+    }
+    _point_stack_paths(
+        monkeypatch,
+        bins=radio_block._RADIO_BIN_NAMES,
+        bind=radio_block._BIND_ARTIFACT_PATHS,
+    )
+    for status in (None, {}, {"adapter_injection_ok": True, "paired": True}):
+        assert compute_radio_stack_state(status) in allowed
+
+
+# --- read_wfb_failover_state --------------------------------------------
+
+
+def test_read_wfb_failover_state_defaults_local_when_absent(tmp_path, monkeypatch):
+    missing = tmp_path / "nope.json"
+    monkeypatch.setattr(radio_block, "_FAILOVER_STATE_PATH", str(missing))
+    assert read_wfb_failover_state() == "local"
+
+
+def test_read_wfb_failover_state_reads_cloud_relay(tmp_path, monkeypatch):
+    f = tmp_path / "wfb_failover.json"
+    f.write_text(json.dumps({"state": "cloud_relay"}), encoding="utf-8")
+    monkeypatch.setattr(radio_block, "_FAILOVER_STATE_PATH", str(f))
+    assert read_wfb_failover_state() == "cloud_relay"
+
+
+def test_read_wfb_failover_state_reads_failed(tmp_path, monkeypatch):
+    f = tmp_path / "wfb_failover.json"
+    f.write_text(json.dumps({"state": "failed"}), encoding="utf-8")
+    monkeypatch.setattr(radio_block, "_FAILOVER_STATE_PATH", str(f))
+    assert read_wfb_failover_state() == "failed"
+
+
+def test_read_wfb_failover_state_clamps_unknown_to_local(tmp_path, monkeypatch):
+    f = tmp_path / "wfb_failover.json"
+    f.write_text(json.dumps({"state": "warp_drive"}), encoding="utf-8")
+    monkeypatch.setattr(radio_block, "_FAILOVER_STATE_PATH", str(f))
+    assert read_wfb_failover_state() == "local"
+
+
+def test_read_wfb_failover_state_handles_garbage_file(tmp_path, monkeypatch):
+    f = tmp_path / "wfb_failover.json"
+    f.write_text("{not json", encoding="utf-8")
+    monkeypatch.setattr(radio_block, "_FAILOVER_STATE_PATH", str(f))
+    assert read_wfb_failover_state() == "local"
+
+
+def test_read_wfb_failover_state_handles_non_object(tmp_path, monkeypatch):
+    f = tmp_path / "wfb_failover.json"
+    f.write_text(json.dumps(["local"]), encoding="utf-8")
+    monkeypatch.setattr(radio_block, "_FAILOVER_STATE_PATH", str(f))
+    assert read_wfb_failover_state() == "local"

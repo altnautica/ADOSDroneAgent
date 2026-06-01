@@ -127,3 +127,54 @@ def test_heartbeat_payload_wfb_no_injection_adapter_is_loud() -> None:
     payload = app._build_heartbeat_payload()
     assert payload["wfbAdapterChipset"] is None
     assert payload["wfbAdapterInjectionOk"] is False
+
+
+def test_heartbeat_payload_radio_stack_state_present() -> None:
+    """The heartbeat carries a radio-stack verdict from the known set."""
+    app = _fresh_app()
+    payload = app._build_heartbeat_payload()
+    assert payload["radioStackState"] in (
+        "ok",
+        "no_injection",
+        "unpaired",
+        "no_bind_artifacts",
+        "stack_incomplete",
+    )
+
+
+def test_heartbeat_payload_wfb_failover_state_default_local() -> None:
+    """No failover sidecar on the test box → the heartbeat reads 'local'."""
+    app = _fresh_app()
+    payload = app._build_heartbeat_payload()
+    assert payload["wfbFailoverState"] == "local"
+
+
+def test_heartbeat_payload_wfb_failover_state_reflects_sidecar(monkeypatch) -> None:
+    """A cloud_relay failover sidecar surfaces on the cloud heartbeat."""
+    import ados.core.radio_block as radio_block
+
+    monkeypatch.setattr(
+        radio_block, "read_wfb_failover_state", lambda: "cloud_relay"
+    )
+    app = _fresh_app()
+    payload = app._build_heartbeat_payload()
+    assert payload["wfbFailoverState"] == "cloud_relay"
+
+
+def test_heartbeat_payload_radio_churn_fields_ride_block() -> None:
+    """tx_zombie_kills / tx_bytes_per_s / restart_count from the live status
+    reach the radio block on the assembled payload."""
+    app = _fresh_app()
+    app._wfb_manager = _FakeWfb(
+        {
+            "state": "connected",
+            "interface": "wlan1",
+            "tx_zombie_kills": 4,
+            "tx_bytes_per_s": 512000.0,
+            "restart_count": 1,
+        }
+    )
+    payload = app._build_heartbeat_payload()
+    assert payload["radio"]["tx_zombie_kills"] == 4
+    assert payload["radio"]["tx_bytes_per_s"] == 512000.0
+    assert payload["radio"]["restart_count"] == 1

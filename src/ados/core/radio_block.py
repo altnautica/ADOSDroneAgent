@@ -9,7 +9,33 @@ it directly.
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from typing import Any
+
+# Bind artifacts the radio stack needs before the auto-bind can run. These
+# are the on-disk files the supervisor's bind state machine requires; their
+# absence means a fresh rig never provisioned the radio stack and the link
+# cannot come up. Literal paths kept in lockstep with the install pipeline +
+# the supervisor bind module that own them.
+_BIND_ARTIFACT_PATHS: tuple[str, ...] = ("/etc/bind.key", "/etc/bind.yaml")
+
+# wfb-ng userspace binaries the radio data plane forks. A rig missing any of
+# these has an incomplete radio stack even when the bind artifacts exist.
+_RADIO_BIN_NAMES: tuple[str, ...] = ("wfb_tx", "wfb_rx")
+
+# Directories the radio binaries land in (PATH lookup plus the two install
+# destinations). Mirrors the install pipeline's resolution so the heartbeat
+# verdict agrees with what the build actually deployed.
+_RADIO_BIN_DIRS: tuple[str, ...] = ("/usr/bin", "/usr/local/bin")
+
+# Local-bind to cloud-relay failover state sidecar. Single ``{"state": ...}``
+# object written by the auto-pair supervisor; default ``local`` when absent.
+_FAILOVER_STATE_PATH = "/run/ados/wfb_failover.json"
+
+# Recognised failover states. Anything else clamps to ``local`` so a future
+# variant never pins a bad badge on the GCS.
+_FAILOVER_STATES: frozenset[str] = frozenset({"local", "cloud_relay", "failed"})
 
 # 5 GHz channel → centre-frequency map. Covers the WFB-ng channel set
 # the agent advertises today; values outside this map yield None and the
@@ -172,7 +198,80 @@ def build_radio_block(wfb_status: dict[str, Any] | None) -> dict[str, Any]:
         # radio link signal Mission Control renders.
         "adapter_chipset": wfb_status.get("adapter_chipset"),
         "adapter_injection_ok": bool(wfb_status.get("adapter_injection_ok", False)),
+        # Radio-data-plane churn + transmit-rate observability. The live
+        # sidecar the radio service writes carries these counters; surface
+        # them so Mission Control sees a thrashing or zombie transmitter
+        # remotely. Null when an older sidecar omits the field so the UI can
+        # tell "no reading" from a real zero.
+        "tx_zombie_kills": wfb_status.get("tx_zombie_kills"),
+        "tx_bytes_per_s": wfb_status.get("tx_bytes_per_s"),
+        "restart_count": wfb_status.get("restart_count"),
     }
+
+
+def compute_radio_stack_state(wfb_status: dict[str, Any] | None) -> str:
+    """Overall radio-stack health, clamped to the GCS-known string set.
+
+    Returns EXACTLY one of the five strings the GCS normaliser accepts:
+    ``"ok"``, ``"no_injection"``, ``"unpaired"``, ``"no_bind_artifacts"``,
+    ``"stack_incomplete"``. The verdict is derived purely from the live
+    radio sidecar (the adapter injection verdict + pair flag) and the
+    on-disk radio-stack artifacts, so it needs no in-process manager.
+
+    Precedence reflects what blocks the link first:
+
+    * ``stack_incomplete`` — the radio binaries / bind key are missing, so
+      nothing downstream can run. Checked first.
+    * ``no_bind_artifacts`` — the binaries are present but a bind artifact
+      is absent, so the auto-bind cannot bootstrap.
+    * ``no_injection`` — the stack is provisioned but no injection-capable
+      adapter was found/verified; the agent refuses to transmit.
+    * ``unpaired`` — injection works but no pair has completed yet.
+    * ``ok`` — injection works and the link is paired.
+    """
+    try:
+        bins_present = all(
+            any((Path(d) / bin_name).is_file() for d in _RADIO_BIN_DIRS)
+            for bin_name in _RADIO_BIN_NAMES
+        )
+        bind_present = all(
+            Path(artifact).is_file() for artifact in _BIND_ARTIFACT_PATHS
+        )
+    except OSError:
+        # Treat an unreadable filesystem as an incomplete stack rather than
+        # letting the heartbeat tick fail.
+        return "stack_incomplete"
+    if not bins_present:
+        return "stack_incomplete"
+    if not bind_present:
+        return "no_bind_artifacts"
+    if not (wfb_status or {}).get("adapter_injection_ok", False):
+        return "no_injection"
+    if not (wfb_status or {}).get("paired", False):
+        return "unpaired"
+    return "ok"
+
+
+def read_wfb_failover_state() -> str:
+    """Current local-bind to cloud-relay failover state from the sidecar.
+
+    Reads ``/run/ados/wfb_failover.json`` (a single ``{"state": ...}``
+    object written by the always-on auto-pair supervisor) and returns one
+    of ``"local"``, ``"cloud_relay"``, ``"failed"``. Defaults to
+    ``"local"`` when the sidecar is missing, unreadable, or carries an
+    unknown value, matching the supervisor's startup state. Best-effort:
+    never raises.
+    """
+    try:
+        data = json.loads(Path(_FAILOVER_STATE_PATH).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return "local"
+    if not isinstance(data, dict):
+        return "local"
+    state = data.get("state", "local")
+    if isinstance(state, str) and state in _FAILOVER_STATES:
+        return state
+    return "local"
 
 
 def fetch_wfb_status_via_http(

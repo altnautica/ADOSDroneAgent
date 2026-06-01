@@ -497,6 +497,31 @@ def build_heartbeat_payload(app: AgentApp) -> dict:  # noqa: C901
         payload["wfbAdapterChipset"] = None
         payload["wfbAdapterInjectionOk"] = False
 
+    # Overall radio-stack health for the GCS diagnostic line, derived from
+    # the live radio sidecar (adapter injection verdict + pair flag) and the
+    # on-disk radio-stack artifacts. One of the known states; the GCS
+    # normaliser clamps anything else to absent. Best-effort: a resolver
+    # failure leaves the field off rather than breaking the tick.
+    try:
+        from ados.core.radio_block import compute_radio_stack_state
+
+        payload["radioStackState"] = compute_radio_stack_state(
+            wfb_status if isinstance(wfb_status, dict) else None
+        )
+    except Exception:
+        pass
+
+    # Local-bind to cloud-relay failover state. Today this only surfaces over
+    # the LAN status surface; carry it on the cloud heartbeat too so the GCS
+    # field reflects a real cloud-relay fallback instead of pinning "local".
+    # Best-effort: a missing or unreadable sidecar reads as "local".
+    try:
+        from ados.core.radio_block import read_wfb_failover_state
+
+        payload["wfbFailoverState"] = read_wfb_failover_state()
+    except Exception:
+        pass
+
     # Inter-rig peer presence — sourced cross-process from
     # /run/ados/peer-presence.json, written by the HopListener every
     # time a WFB-radio PresenceBeacon decodes successfully. Fields
