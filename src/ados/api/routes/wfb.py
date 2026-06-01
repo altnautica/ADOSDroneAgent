@@ -230,6 +230,21 @@ def _build_status_from_stats_file(wfb_cfg: object) -> dict:
         return base
 
 
+def _native_radio_running() -> bool:
+    """True when the native transmit plane (``ados-radio``) is the running
+    radio implementation.
+
+    Resolves the radio service's native-vs-packaged branch with the same
+    rule the runtime-mode aggregate uses, so the knob routes to the command
+    socket only when the native binary actually owns the radio (and the
+    packaged Python manager is therefore absent). Total + cheap (it only
+    stats files), safe to call on the request path.
+    """
+    from ados.core.runtime_mode import is_service_native
+
+    return is_service_native("radio")
+
+
 def _persist_tx_power(dbm: int) -> bool:
     """Atomically write `video.wfb.tx_power_dbm` to the on-disk config.
 
@@ -441,20 +456,26 @@ async def set_wfb_tx_power(request: TxPowerRequest):
             detail={"error": "above_ceiling", "max": ceiling},
         )
 
-    wfb = app.wfb_manager()
-    if wfb is None:
-        raise HTTPException(status_code=503, detail="WFB-ng service not running")
-
-    apply = getattr(wfb, "apply_tx_power", None)
     effective: int | None = None
-    if callable(apply):
+    if _native_radio_running():
+        # Native transmit plane: there is no in-process Python manager to
+        # call, so forward the knob to the radio's command socket. An
+        # unreachable socket falls through to the packaged-manager branch
+        # (the native binary may not have come up yet on a fresh boot),
+        # which then 503s if that manager is also absent.
+        from ados.services.wfb import cmd_client
+
         try:
-            effective = apply(requested)
-        except Exception as exc:
+            effective = await cmd_client.set_tx_power(requested)
+        except cmd_client.RadioCmdError as exc:
             raise HTTPException(
                 status_code=500,
                 detail={"error": "apply_failed", "message": str(exc)},
             ) from exc
+        except cmd_client.RadioCmdUnavailableError:
+            effective = _apply_tx_power_via_manager(app, requested)
+    else:
+        effective = _apply_tx_power_via_manager(app, requested)
 
     # Persist regardless of driver outcome; on a fresh boot the manager
     # may not have an interface up yet but the operator's preference
@@ -468,6 +489,29 @@ async def set_wfb_tx_power(request: TxPowerRequest):
         "effective_dbm": effective,
         "tx_power_max_dbm": ceiling,
     }
+
+
+def _apply_tx_power_via_manager(app, requested: int) -> int | None:
+    """Apply the TX power through the in-process packaged WFB manager.
+
+    The fallback path for when the native radio is not the running
+    implementation (or its command socket is unreachable). Raises a 503
+    when no manager is present and a 500 when the manager's apply fails,
+    matching the prior behaviour of this route.
+    """
+    wfb = app.wfb_manager()
+    if wfb is None:
+        raise HTTPException(status_code=503, detail="WFB-ng service not running")
+    apply = getattr(wfb, "apply_tx_power", None)
+    if not callable(apply):
+        return None
+    try:
+        return apply(requested)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail={"error": "apply_failed", "message": str(exc)},
+        ) from exc
 
 
 # ---------------------------------------------------------------------
