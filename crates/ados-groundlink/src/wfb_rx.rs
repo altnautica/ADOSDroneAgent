@@ -47,6 +47,9 @@ use crate::watchdog::{
     Clock, FileLockedChannelHint, LockedChannelHint, RxProcess, ValidPacketWatchdog,
     RX_HEALTH_SILENCE_THRESHOLD_S,
 };
+// Re-exported so the run loop can build the shared receive-health seam through
+// the same module that owns the stats reader.
+pub use crate::watchdog::SharedRxHealth;
 
 /// Internal data-RX egress port (the fan-out reads here). Differs from the
 /// drone side's 5601 stats port.
@@ -236,6 +239,13 @@ impl RxProcess for DataRxHandle {
     }
 }
 
+/// The receive plane's top-level lifecycle string for the sidecar `state`
+/// field. The drone side writes a sibling top-level `state`; the GS heartbeat
+/// reads the sidecar raw, so without this key the GS link block reports a null
+/// state. "active" once the data RX is up; "searching" while it is not.
+pub const STATE_ACTIVE: &str = "active";
+pub const STATE_SEARCHING: &str = "searching";
+
 /// Build the ground `wfb-stats.json` sidecar payload (the GS-extras the
 /// cross-process API + heartbeat read). `profile` is always "ground_station".
 #[allow(clippy::too_many_arguments)]
@@ -246,6 +256,7 @@ pub fn build_gs_stats(
     adapter_injection_ok: bool,
     channel: u8,
     cfg: &WfbConfig,
+    state: &str,
     acquire_state: &str,
     channel_locked: bool,
     valid_rx_packets_per_s: f64,
@@ -255,11 +266,17 @@ pub fn build_gs_stats(
     video_inbound_bytes_per_s: f64,
 ) -> serde_json::Value {
     serde_json::json!({
+        // Top-level lifecycle string, mirroring the drone-side sidecar so the GS
+        // heartbeat reads a real state instead of null.
+        "state": state,
         "interface": interface,
         "adapter_chipset": adapter_chipset,
         "adapter_injection_ok": adapter_injection_ok,
         "channel": channel,
         "tx_power_dbm": cfg.tx_power_dbm,
+        // The TX-power ceiling, mirroring the drone-side sidecar key so the panel
+        // renders the headroom from either rig's stats.
+        "tx_power_max_dbm": cfg.tx_power_max_dbm,
         "topology": cfg.topology,
         "mcs_index": cfg.mcs_index,
         "profile": "ground_station",
@@ -272,6 +289,8 @@ pub fn build_gs_stats(
         "video_inbound_bytes_per_s": (video_inbound_bytes_per_s * 10.0).round() / 10.0,
         // Link-quality block (parity with the air side).
         "rssi_dbm": snap.rssi_dbm,
+        // Noise floor, mirroring the drone-side sidecar key.
+        "noise_dbm": snap.noise_dbm,
         "snr_db": snap.snr_db,
         "packets_received": snap.packets_received,
         "packets_lost": snap.packets_lost,
@@ -536,6 +555,8 @@ pub async fn stats_reader_loop(
     cfg: WfbConfig,
     chipset: Option<String>,
     injection_ok: bool,
+    health: Option<SharedRxHealth>,
+    zombie_kills: Arc<AtomicU32>,
 ) {
     use tokio::io::AsyncBufReadExt;
     let mut lines = tokio::io::BufReader::new(stdout).lines();
@@ -560,6 +581,18 @@ pub async fn stats_reader_loop(
             } else {
                 (false, "searching")
             };
+            // Top-level lifecycle: the data RX is up and producing stats lines, so
+            // the plane is active; the per-channel lock state is the finer-grained
+            // `acquire_state` above.
+            let state = STATE_ACTIVE;
+            // Pull the live receive-health counters the watchdogs produce so the
+            // sidecar carries real values rather than the previous hardcoded
+            // zeros. Absent in tests, where the kills/silence default to zero.
+            let (reacquire_kills, rx_silent_seconds) = match &health {
+                Some(h) => (h.reacquire_kills(), h.silent_seconds().await),
+                None => (0, None),
+            };
+            let rx_zombie_kills = zombie_kills.load(Ordering::SeqCst);
             *link.lock().await = snap.clone();
             let payload = build_gs_stats(
                 &snap,
@@ -568,12 +601,13 @@ pub async fn stats_reader_loop(
                 injection_ok,
                 channel,
                 &cfg,
+                state,
                 acquire_state,
                 channel_locked,
                 valid_pps,
-                0, // reacquire_kills surfaced by the watchdog generation
-                0, // rx_zombie_kills surfaced by the zombie watchdog
-                Some(0.0),
+                reacquire_kills,
+                rx_zombie_kills,
+                rx_silent_seconds,
                 video_bps,
             );
             let path = Path::new(crate::paths::WFB_STATS_JSON);
@@ -717,6 +751,7 @@ mod tests {
             true,
             149,
             &cfg,
+            STATE_ACTIVE,
             "locked",
             true,
             12.5,
@@ -739,5 +774,45 @@ mod tests {
         // mcs/topology/tx_power mirrored from config.
         assert_eq!(v["mcs_index"], cfg.mcs_index);
         assert_eq!(v["topology"], cfg.topology);
+    }
+
+    #[test]
+    fn gs_stats_carries_top_level_state_noise_and_tx_power_ceiling() {
+        // The drone-side sidecar writes a top-level `state`, a `noise_dbm`, and a
+        // `tx_power_max_dbm`; the GS heartbeat reads the sidecar raw, so these
+        // must be present on the ground sidecar too or the link block reports
+        // null for them.
+        let cfg = WfbConfig {
+            tx_power_max_dbm: 30,
+            ..WfbConfig::default()
+        };
+        let snap = LinkStats {
+            noise_dbm: -91.0,
+            ..LinkStats::default()
+        };
+        let v = build_gs_stats(
+            &snap,
+            "wlan1",
+            Some("rtl88x2eu"),
+            true,
+            149,
+            &cfg,
+            STATE_ACTIVE,
+            "searching",
+            false,
+            0.0,
+            0,
+            0,
+            Some(7.5),
+            0.0,
+        );
+        assert_eq!(v["state"], "active");
+        assert_eq!(v["noise_dbm"], -91.0);
+        assert_eq!(v["tx_power_max_dbm"], 30);
+        assert_eq!(v["rx_silent_seconds"], 7.5);
+        // The new keys must never be null on the ground sidecar.
+        assert!(!v["state"].is_null());
+        assert!(!v["noise_dbm"].is_null());
+        assert!(!v["tx_power_max_dbm"].is_null());
     }
 }

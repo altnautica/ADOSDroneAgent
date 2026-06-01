@@ -23,10 +23,52 @@
 //! first; the home channel where both sides deterministically meet is never
 //! auto-overwritten.
 
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use tokio::sync::Mutex;
+
 use crate::acquire::ChannelAcquirer;
+
+/// Live receive-health counters the valid-packet watchdog produces and the
+/// stats reader publishes on the sidecar. Shared so the stats loop reports the
+/// real `reacquire_kills` + `rx_silent_seconds` instead of hardcoded zeros.
+/// The watchdog is the sole writer; the stats reader only reads.
+#[derive(Debug, Clone, Default)]
+pub struct SharedRxHealth {
+    reacquire_kills: Arc<AtomicU32>,
+    /// Seconds the valid-decode stream has been silent at the last poll. `None`
+    /// until the watchdog has run one poll. Stored behind a mutex because the
+    /// value is a float and the cadence is slow (one write per poll interval).
+    silent_seconds: Arc<Mutex<Option<f64>>>,
+}
+
+impl SharedRxHealth {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// The cumulative reacquire-failure kill count.
+    pub fn reacquire_kills(&self) -> u32 {
+        self.reacquire_kills.load(Ordering::SeqCst)
+    }
+
+    /// The valid-decode silence at the last watchdog poll, if one has run.
+    pub async fn silent_seconds(&self) -> Option<f64> {
+        *self.silent_seconds.lock().await
+    }
+
+    /// Writer seam (watchdog side): record the kill total.
+    fn set_reacquire_kills(&self, n: u32) {
+        self.reacquire_kills.store(n, Ordering::SeqCst);
+    }
+
+    /// Writer seam (watchdog side): record the current valid-decode silence.
+    async fn set_silent_seconds(&self, secs: f64) {
+        *self.silent_seconds.lock().await = Some(secs);
+    }
+}
 
 /// Valid-packet watchdog tunables. The valid-decode counter is the trustworthy
 /// receive signal; a flat delta while the process is alive means we are tuned to
@@ -114,12 +156,21 @@ pub struct ValidPacketWatchdog {
     pub cold_sweep_done: bool,
     pub cold_start_at: f64,
     pub last_valid_rx_change_at: f64,
+    /// The cumulative valid-decode count observed at the previous poll. The
+    /// per-poll delta against the live counter drives `update_rx_rates`, so a
+    /// healthy video stream refreshes `last_valid_rx_change_at` even when no peer
+    /// beacon is heard. Seeded at run start; never written by another task.
+    last_valid_count: i64,
 
     clock: Arc<dyn Clock>,
     rx: Arc<dyn RxProcess>,
     presence: Arc<dyn PresenceCache>,
     hint: Arc<dyn LockedChannelHint>,
     acquirer: ChannelAcquirer,
+    /// Live receive-health publish seam. The watchdog mirrors its
+    /// `reacquire_kills` + valid-decode silence here each poll so the stats
+    /// reader can carry the real values on the sidecar. `None` in unit tests.
+    health: Option<SharedRxHealth>,
 
     // Overridable thresholds so tests can drive a branch on the first poll
     // (the Python tests `patch` the module constants for the same purpose).
@@ -152,15 +203,24 @@ impl ValidPacketWatchdog {
             cold_sweep_done: false,
             cold_start_at: now,
             last_valid_rx_change_at: 0.0,
+            last_valid_count: 0,
             clock,
             rx,
             presence,
             hint,
             acquirer,
+            health: None,
             poll_interval_s: VALID_RX_POLL_INTERVAL_S,
             silence_threshold_s: VALID_RX_SILENCE_THRESHOLD_S,
             cold_home_hold_s: COLD_START_HOME_HOLD_S,
         }
+    }
+
+    /// Attach the live receive-health publish seam so the stats reader can carry
+    /// the real `reacquire_kills` + valid-decode silence on the sidecar.
+    pub fn with_health(mut self, health: SharedRxHealth) -> Self {
+        self.health = Some(health);
+        self
     }
 
     /// Override the poll interval (test seam; the production loop uses the
@@ -209,6 +269,9 @@ impl ValidPacketWatchdog {
         // Seed the change stamp so the first poll window is full rather than
         // carrying over silence accumulated while the receive process spawned.
         self.last_valid_rx_change_at = self.clock.monotonic();
+        // Baseline the valid-decode counter so the first poll's delta measures
+        // only decodes that arrive after the receive process is up.
+        self.last_valid_count = self.acquirer.valid_packets();
         // Restart the cold-start hold budget for this receive generation. If the
         // link was never established the receiver gets a fresh bounded hold on
         // the home channel before the one self-heal sweep.
@@ -219,7 +282,27 @@ impl ValidPacketWatchdog {
         while self.running && self.rx.is_running() {
             tokio::time::sleep(Duration::from_secs_f64(self.poll_interval_s)).await;
 
+            // Observe live video off the SAME shared valid-decode counter the
+            // acquirer reads: a positive delta since the last poll means the
+            // video plane decoded valid packets this interval, which refreshes
+            // the silence timer (and marks the link locked) exactly as a peer
+            // beacon would. Without this, a healthy stream the operator can see
+            // (but whose peer-presence beacon is being dropped) would trip the
+            // genuine-loss teardown. Read-only against the counter; the stats
+            // reader remains its sole writer.
+            let current = self.acquirer.valid_packets();
+            let delta = current - self.last_valid_count;
+            self.last_valid_count = current;
+            if delta > 0 {
+                self.update_rx_rates(delta);
+            }
+
             let silent_for = self.clock.monotonic() - self.last_valid_rx_change_at;
+            // Publish the live valid-decode silence for the sidecar before any
+            // continue/return path so the GS heartbeat reports a real number.
+            if let Some(h) = &self.health {
+                h.set_silent_seconds(silent_for).await;
+            }
             if silent_for < self.silence_threshold_s {
                 continue;
             }
@@ -350,6 +433,9 @@ impl ValidPacketWatchdog {
             // loop respawns the receive process (the subprocess itself may be
             // wedged, not just the channel).
             self.reacquire_kills += 1;
+            if let Some(h) = &self.health {
+                h.set_reacquire_kills(self.reacquire_kills);
+            }
             tracing::warn!(
                 interface = %self.interface,
                 reacquire_kills_total = self.reacquire_kills,
@@ -880,6 +966,119 @@ mod tests {
         wd.update_rx_rates(0);
         assert!(!wd.ever_linked);
         assert_eq!(wd.last_valid_rx_change_at, before);
+    }
+
+    // ---- F1: live-video observation off the shared counter -----------------
+
+    /// A counter that advances on every read, modelling a healthy video stream
+    /// decoding valid packets regardless of the channel. The watchdog reads this
+    /// through its acquirer once at seed time and once per poll, so a positive
+    /// per-poll delta drives `update_rx_rates` and keeps the silence timer fresh.
+    struct FlowingCounter {
+        value: AtomicU32,
+    }
+    impl FlowingCounter {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                value: AtomicU32::new(0),
+            })
+        }
+    }
+    impl ValidPacketCounter for FlowingCounter {
+        fn valid_packets(&self) -> i64 {
+            self.value.fetch_add(1, Ordering::SeqCst) as i64 + 1
+        }
+    }
+
+    /// Build a watchdog over an injected counter (here a flowing stream) with a
+    /// no-op setter, so the test exercises the run-loop's live-video observation
+    /// rather than the sweep machinery.
+    fn make_with_counter(
+        counter: Arc<dyn ValidPacketCounter>,
+        rx: Arc<FakeRx>,
+        presence: Arc<FakePresence>,
+        hint: Arc<RecordingHint>,
+        channel: u8,
+        home: u8,
+    ) -> ValidPacketWatchdog {
+        // A setter that always succeeds but the flowing counter ignores: the
+        // sweep is never expected to run on the live-video path.
+        let dummy = ScriptCounter::new(&[]);
+        let setter = Arc::new(ScriptSetter { counter: dummy });
+        let acquirer = ChannelAcquirer::new("wlan0", "u-nii-3", counter, setter, 0.0, 3, None);
+        let clock = FakeClock::at(1000.0);
+        let mut wd =
+            ValidPacketWatchdog::new("wlan0", channel, home, clock, rx, presence, hint, acquirer);
+        wd.set_poll_interval_s(0.0);
+        // A real silence threshold so a fresh stamp keeps silent_for below it.
+        wd.set_silence_threshold_s(12.0);
+        wd
+    }
+
+    // Healthy video, no peer beacon, fixed clock: the per-poll counter delta
+    // refreshes the silence timer via update_rx_rates, so the watchdog neither
+    // sweeps nor terminates. This is the GS self-heal teardown regression the
+    // wiring fixes: without the live-counter observation a healthy stream whose
+    // presence beacon is being dropped would trip the genuine-loss kill.
+    #[tokio::test]
+    async fn test_healthy_video_no_beacon_does_not_tear_down() {
+        let counter = FlowingCounter::new();
+        let rx = FakeRx::new();
+        let presence = FakePresence::new(None, None); // no peer beacon at all
+        let hint = RecordingHint::new();
+        let mut wd = make_with_counter(counter, rx.clone(), presence, hint.clone(), 149, 149);
+        run_one(&mut wd).await;
+
+        // No teardown, no sweep, no channel change: the link is plainly healthy.
+        assert_eq!(rx.terminate_count(), 0);
+        assert_eq!(wd.reacquire_kills, 0);
+        assert_eq!(hint.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(wd.channel, 149);
+        // Live decodes mark the link as established.
+        assert!(wd.ever_linked);
+    }
+
+    // ---- F4: the live receive-health publish seam --------------------------
+
+    #[tokio::test]
+    async fn health_seam_mirrors_reacquire_kills_on_genuine_loss() {
+        let health = SharedRxHealth::new();
+        // No peer, nothing decodes → the genuine-loss path runs and the band
+        // sweep fails, so the watchdog terminates and bumps reacquire_kills. The
+        // health seam must carry that real count for the sidecar.
+        let rx = FakeRx::new();
+        let presence = FakePresence::new(None, None);
+        let hint = RecordingHint::new();
+        let (mut wd, _clk) = make(&[], "u-nii-3", rx.clone(), presence, hint, 149, 149, true);
+        wd = wd.with_health(health.clone());
+        run_one(&mut wd).await;
+
+        assert_eq!(rx.terminate_count(), 1);
+        assert_eq!(wd.reacquire_kills, 1);
+        assert_eq!(health.reacquire_kills(), 1);
+    }
+
+    #[tokio::test]
+    async fn health_seam_publishes_silence_each_poll() {
+        // Even on a no-action poll (silent below threshold) the seam records the
+        // current valid-decode silence so the sidecar reports a real number.
+        let counter = FlowingCounter::new();
+        let rx = FakeRx::new();
+        let presence = FakePresence::new(None, None);
+        let hint = RecordingHint::new();
+        let health = SharedRxHealth::new();
+        let mut wd = make_with_counter(counter, rx.clone(), presence, hint, 149, 149)
+            .with_health(health.clone());
+        run_one(&mut wd).await;
+
+        // The seam was written at least once with a concrete (non-None) value.
+        assert!(health.silent_seconds().await.is_some());
+    }
+
+    #[test]
+    fn shared_rx_health_defaults_to_zero_and_none() {
+        let h = SharedRxHealth::new();
+        assert_eq!(h.reacquire_kills(), 0);
     }
 
     // ---- the invariant: hint write is a single int + newline ---------------

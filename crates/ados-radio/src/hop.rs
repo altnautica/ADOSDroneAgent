@@ -198,6 +198,23 @@ pub fn parse_hop_ack(pkt: &[u8], pair_key: &[u8; 32]) -> Option<u8> {
     }
 }
 
+/// Verify a 51-byte HopAnnounce and return its target channel (byte 17) +
+/// trigger label, so the receiver can ACK the announce and record the follow
+/// with the real trigger instead of a hardcoded label. `None` on bad
+/// length/magic/HMAC. The wire layout matches [`build_hop_announce`]; an
+/// unknown trigger byte is reported as "periodic" (the conservative default).
+pub fn parse_hop_announce(pkt: &[u8], pair_key: &[u8; 32]) -> Option<(u8, &'static str)> {
+    if !verify_hop_packet(pkt, pair_key) {
+        return None;
+    }
+    let channel = pkt[17];
+    let trigger = match pkt[18] {
+        x if x == HopTrigger::Reactive as u8 => "reactive",
+        _ => "periodic",
+    };
+    Some((channel, trigger))
+}
+
 /// One entry in the hop history ring (the `hop-supervisor.json` `history` list).
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct HopHistoryEntry {
@@ -548,6 +565,23 @@ mod tests {
         assert_eq!(parse_hop_ack(&pkt, &key), Some(157));
         let other = derive_pair_key(Some(&[1u8; 64]));
         assert_eq!(parse_hop_ack(&pkt, &other), None);
+    }
+
+    #[test]
+    fn hop_announce_parse_returns_channel_and_trigger() {
+        let key = test_key();
+        // Periodic trigger byte → "periodic" label.
+        let periodic = build_hop_announce(0, 153, HopTrigger::Periodic, &key);
+        assert_eq!(parse_hop_announce(&periodic, &key), Some((153, "periodic")));
+        // Reactive trigger byte → "reactive" label.
+        let reactive = build_hop_announce(0, 161, HopTrigger::Reactive, &key);
+        assert_eq!(parse_hop_announce(&reactive, &key), Some((161, "reactive")));
+        // Wrong key → no parse.
+        let other = derive_pair_key(Some(&[2u8; 64]));
+        assert_eq!(parse_hop_announce(&periodic, &other), None);
+        // A 68-byte PresenceBeacon must not parse as a HopAnnounce (length gate).
+        let presence = build_presence_beacon("d1", true, 149, -50, 0, &key);
+        assert_eq!(parse_hop_announce(&presence, &key), None);
     }
 
     #[test]

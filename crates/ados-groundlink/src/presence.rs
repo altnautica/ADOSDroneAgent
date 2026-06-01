@@ -24,7 +24,9 @@ use std::time::Duration;
 
 use tokio::net::UdpSocket;
 
-use ados_radio::hop::{build_presence_beacon, derive_pair_key, now_unix, parse_presence_beacon};
+use ados_radio::hop::{
+    build_presence_beacon, derive_pair_key, now_unix, parse_hop_announce, parse_presence_beacon,
+};
 
 use crate::watchdog::PresenceCache;
 
@@ -39,6 +41,20 @@ pub const PRESENCE_EMIT_PORT: u16 = 5810;
 /// The control-plane port the listener binds for inbound beacons (the same port
 /// `wfb_rx_control` re-emits decoded HopAnnounce/Presence frames on).
 pub const PRESENCE_LISTEN_PORT: u16 = 5803;
+
+/// HopAck echo destination: `wfb_tx_control`'s loopback ingress (the same port
+/// the presence emit uses). The drone broadcasts a HopAnnounce and waits for a
+/// HopAck echo before executing its epoch-synced channel flip; sending the
+/// verbatim 51 bytes here makes `wfb_tx_control` transmit the ACK back over RF,
+/// so the drone's "acked" gate goes true and coordinated hopping fires.
+pub const HOP_ACK_ECHO_PORT: u16 = 5810;
+
+/// HopAnnounce/HopAck wire length (the 51-byte control frame). A frame of this
+/// length on the control port is a hop frame; a 68-byte frame is a
+/// PresenceBeacon. The length gate is checked before the magic/HMAC verify.
+const HOP_FRAME_LEN: usize = 51;
+/// PresenceBeacon wire length (68 bytes).
+const PRESENCE_FRAME_LEN: usize = 68;
 
 /// Canonical shared-key file delivered byte-for-byte to both rigs by the bind
 /// protocol. AFTER a successful bind both sides have a `/etc/drone.key` with the
@@ -155,7 +171,8 @@ impl GsPresenceCache {
     /// the peer, a channel-follow entry is appended to the hop history ring (the
     /// GS-side equivalent of an actuated hop: the receiver tracks the channel the
     /// transmitter advertises). The ring is trimmed to the last `HOP_HISTORY_CAP`
-    /// entries, matching the Python listener.
+    /// entries, matching the Python listener. A PresenceBeacon carries no hop
+    /// trigger, so its follow entries are labelled "periodic".
     fn record_peer(&self, device_id: String, role: String, channel: u8, rssi_dbm: i8) {
         let mut s = self.inner.lock().unwrap();
         let prev_channel = s.peer_channel;
@@ -166,21 +183,48 @@ impl GsPresenceCache {
         let now = now_unix();
         s.peer_last_seen_unix = Some(now);
         if prev_channel != Some(channel) {
-            s.hop_history.push(HopFollowEntry {
-                at: now,
-                // The first beacon has no prior channel; record 0 (the Python
-                // listener uses 0 for an unknown `from`).
-                from: prev_channel.unwrap_or(0),
-                to: channel,
-                trigger: "periodic".to_string(),
-                ok: true,
-            });
-            if s.hop_history.len() > HOP_HISTORY_CAP {
-                let trim = s.hop_history.len() - HOP_HISTORY_CAP;
-                s.hop_history.drain(0..trim);
-            }
-            s.last_hop_at = now;
+            Self::push_follow(&mut s, prev_channel, channel, "periodic");
         }
+    }
+
+    /// Record a verified HopAnnounce (writer side, from the listener).
+    ///
+    /// A HopAnnounce is the drone telling the receiver which channel to follow
+    /// to and why (its `trigger`). Unlike a PresenceBeacon it carries no device
+    /// identity, RSSI, or liveness signal, so it must NOT reset
+    /// `peer_last_seen_unix` (the watchdog's presence-age gate is beacon-driven)
+    /// and must NOT clobber the peer identity learned from a prior beacon. It
+    /// only updates the channel to follow and appends a follow entry with the
+    /// announce's real trigger. This is the back-fill: existing identity is
+    /// preserved, the channel-follow is recorded with the correct trigger label.
+    fn record_hop_announce(&self, channel: u8, trigger: &str) {
+        let mut s = self.inner.lock().unwrap();
+        let prev_channel = s.peer_channel;
+        if prev_channel != Some(channel) {
+            s.peer_channel = Some(channel);
+            Self::push_follow(&mut s, prev_channel, channel, trigger);
+        }
+    }
+
+    /// Append a channel-follow entry to the bounded hop-history ring (shared by
+    /// the beacon and HopAnnounce writers). `from` is the prior channel (0 when
+    /// unknown, matching the Python listener) and `trigger` is the follow label.
+    fn push_follow(s: &mut PeerState, prev_channel: Option<u8>, channel: u8, trigger: &str) {
+        let now = now_unix();
+        s.hop_history.push(HopFollowEntry {
+            at: now,
+            // The first beacon has no prior channel; record 0 (the Python
+            // listener uses 0 for an unknown `from`).
+            from: prev_channel.unwrap_or(0),
+            to: channel,
+            trigger: trigger.to_string(),
+            ok: true,
+        });
+        if s.hop_history.len() > HOP_HISTORY_CAP {
+            let trim = s.hop_history.len() - HOP_HISTORY_CAP;
+            s.hop_history.drain(0..trim);
+        }
+        s.last_hop_at = now;
     }
 
     /// The hop-supervisor snapshot in the Python `HopListener.snapshot()` shape.
@@ -264,13 +308,25 @@ where
     }
 }
 
-/// Listen for inbound PresenceBeacons on the control port, verify the HMAC, and
-/// update `cache`. A frame whose device-id is our own is dropped (the self-pair
-/// guard the Python listener applies). Returns only on a fatal bind error or
-/// cancellation.
+/// Listen for inbound control frames on the control port, verify the HMAC, and
+/// update `cache`. Two frame classes share this port (`wfb_rx_control` re-emits
+/// both): a 51-byte HopAnnounce and a 68-byte PresenceBeacon. The listener
+/// length-gates first, then dispatches:
+///
+/// * **HopAnnounce (51 B):** verify the HMAC, then echo the verbatim frame back
+///   as a HopAck to `wfb_tx_control`'s loopback ingress so the drone's "acked"
+///   gate goes true and its epoch-synced channel flip fires (without the echo
+///   the drone never coordinates a hop). The announce's channel + real trigger
+///   are recorded as a channel-follow, leaving the beacon-driven presence
+///   identity/liveness untouched.
+/// * **PresenceBeacon (68 B):** verify the HMAC, drop a frame carrying our own
+///   device-id (the self-pair guard), then record the peer.
+///
+/// Returns only on a fatal bind error or cancellation.
 pub async fn listen_loop(cache: GsPresenceCache) -> std::io::Result<()> {
     let own_device_id = read_device_id();
     let sock = UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, PRESENCE_LISTEN_PORT)).await?;
+    let ack_target = (std::net::Ipv4Addr::LOCALHOST, HOP_ACK_ECHO_PORT);
     tracing::info!(
         port = PRESENCE_LISTEN_PORT,
         "ground_presence_listen_started"
@@ -280,20 +336,65 @@ pub async fn listen_loop(cache: GsPresenceCache) -> std::io::Result<()> {
     loop {
         let (len, _addr) = sock.recv_from(&mut buf).await?;
         let pair_key = resolve_pair_key();
-        let Some(peer) = parse_presence_beacon(&buf[..len], &pair_key) else {
-            continue;
-        };
-        // Self-pair guard: skip a beacon that carries our own device-id (the
-        // emit loop's frame can loop back via wfb_rx_control's re-emit). The
-        // Python listener compares against the first 16 chars (the beacon
-        // device-id field is 16 bytes).
-        if !own_device_id.is_empty() {
-            let own_trunc: String = own_device_id.chars().take(16).collect();
-            if peer.device_id == own_trunc {
-                continue;
+        handle_control_frame(
+            &sock,
+            &buf[..len],
+            &pair_key,
+            &cache,
+            &own_device_id,
+            ack_target,
+        )
+        .await;
+    }
+}
+
+/// Dispatch one inbound control frame: length-gate, verify, then either echo a
+/// HopAck (51-byte HopAnnounce) or record the peer (68-byte PresenceBeacon).
+/// Extracted from `listen_loop` so the dispatch is unit-testable over real
+/// loopback sockets. `sock` is the listener socket the HopAck echo is sent
+/// from; `ack_target` is `wfb_tx_control`'s loopback ingress.
+async fn handle_control_frame(
+    sock: &UdpSocket,
+    frame: &[u8],
+    pair_key: &[u8; 32],
+    cache: &GsPresenceCache,
+    own_device_id: &str,
+    ack_target: (std::net::Ipv4Addr, u16),
+) {
+    // Length gate first: a 51-byte frame is a HopAnnounce/HopAck, a 68-byte
+    // frame is a PresenceBeacon. The magic + HMAC verify inside each parser is
+    // the second gate, so a 51-byte non-hop frame (or a forged one) is dropped
+    // rather than mis-routed.
+    match frame.len() {
+        HOP_FRAME_LEN => {
+            if let Some((channel, trigger)) = parse_hop_announce(frame, pair_key) {
+                // ACK first so the drone's hop is not delayed by the cache
+                // update; the echo is the verbatim verified frame.
+                if let Err(e) = sock.send_to(frame, ack_target).await {
+                    tracing::debug!(error = %e, "ground_hop_ack_send_failed");
+                } else {
+                    tracing::info!(channel, trigger, "ground_hop_ack_echoed");
+                }
+                cache.record_hop_announce(channel, trigger);
             }
         }
-        cache.record_peer(peer.device_id, peer.role, peer.channel, peer.rssi_dbm);
+        PRESENCE_FRAME_LEN => {
+            let Some(peer) = parse_presence_beacon(frame, pair_key) else {
+                return;
+            };
+            // Self-pair guard: skip a beacon that carries our own device-id (the
+            // emit loop's frame can loop back via wfb_rx_control's re-emit). The
+            // Python listener compares against the first 16 chars (the beacon
+            // device-id field is 16 bytes).
+            if !own_device_id.is_empty() {
+                let own_trunc: String = own_device_id.chars().take(16).collect();
+                if peer.device_id == own_trunc {
+                    return;
+                }
+            }
+            cache.record_peer(peer.device_id, peer.role, peer.channel, peer.rssi_dbm);
+        }
+        _ => {}
     }
 }
 
@@ -490,5 +591,138 @@ mod tests {
 
         assert_eq!(cache.announced_channel(), Some(161));
         assert_eq!(cache.peer_channel(), Some(161));
+    }
+
+    // ---- ports + frame-length constants -----------------------------------
+
+    #[test]
+    fn hop_ack_echo_targets_tx_control_ingress() {
+        // The ACK must go to wfb_tx_control's loopback ingress (5810), the same
+        // port the presence emit uses, so the ACK is transmitted over RF.
+        assert_eq!(HOP_ACK_ECHO_PORT, 5810);
+        assert_eq!(HOP_ACK_ECHO_PORT, PRESENCE_EMIT_PORT);
+        // The two frame classes that share the control port have distinct lengths
+        // so the length gate is unambiguous.
+        assert_eq!(HOP_FRAME_LEN, 51);
+        assert_eq!(PRESENCE_FRAME_LEN, 68);
+        assert_ne!(HOP_FRAME_LEN, PRESENCE_FRAME_LEN);
+    }
+
+    // ---- HopAnnounce → follow with real trigger ---------------------------
+
+    #[test]
+    fn record_hop_announce_uses_real_trigger_and_preserves_presence_identity() {
+        let cache = GsPresenceCache::new();
+        // Seed a prior verified beacon: identity + liveness are now set.
+        cache.record_peer("drone-1".into(), "drone".into(), 149, -50);
+        let seeded_age = cache.peer_last_seen_unix();
+        assert!(seeded_age.is_some());
+
+        // A reactive HopAnnounce to a new channel: the follow is recorded with
+        // the REAL trigger, the channel updates, but the beacon-driven liveness
+        // stamp and identity are untouched (an announce is not a presence beacon).
+        cache.record_hop_announce(157, "reactive");
+        assert_eq!(cache.peer_channel(), Some(157));
+        let s = cache.hop_snapshot("u-nii-3");
+        // First entry from the beacon (0 → 149, periodic), second from the
+        // announce (149 → 157, reactive).
+        assert_eq!(s.history.len(), 2);
+        assert_eq!(s.history[1].from, 149);
+        assert_eq!(s.history[1].to, 157);
+        assert_eq!(s.history[1].trigger, "reactive");
+        // Presence liveness stamp is unchanged by the announce (still the beacon's).
+        assert_eq!(cache.peer_last_seen_unix(), seeded_age);
+    }
+
+    #[test]
+    fn record_hop_announce_same_channel_is_a_noop() {
+        let cache = GsPresenceCache::new();
+        cache.record_hop_announce(149, "periodic");
+        // First announce records a follow from unknown (0) → 149.
+        assert_eq!(cache.hop_snapshot("u-nii-3").history.len(), 1);
+        // Re-announcing the same channel adds no new follow entry.
+        cache.record_hop_announce(149, "reactive");
+        assert_eq!(cache.hop_snapshot("u-nii-3").history.len(), 1);
+        assert_eq!(cache.peer_channel(), Some(149));
+    }
+
+    // ---- HopAnnounce decode → HopAck echo over loopback -------------------
+
+    #[tokio::test]
+    async fn hop_announce_decodes_and_echoes_verbatim_hop_ack() {
+        use ados_radio::hop::{build_hop_announce, HopTrigger};
+
+        let cache = GsPresenceCache::new();
+        let pair_key = resolve_pair_key();
+
+        // The listener's socket (sends the echo from here) + a stand-in for
+        // wfb_tx_control's loopback ingress (receives the ACK).
+        let listen_sock = UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let ack_recv = UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let ack_addr = ack_recv.local_addr().unwrap();
+        let ack_target = match ack_addr {
+            std::net::SocketAddr::V4(a) => (*a.ip(), a.port()),
+            _ => unreachable!("ipv4 loopback"),
+        };
+
+        let announce = build_hop_announce(123_456, 157, HopTrigger::Reactive, &pair_key);
+        handle_control_frame(
+            &listen_sock,
+            &announce,
+            &pair_key,
+            &cache,
+            "", // own device id irrelevant to the hop path
+            ack_target,
+        )
+        .await;
+
+        // The ACK that landed at the tx-control ingress is the verbatim announce.
+        let mut buf = [0u8; 256];
+        let (len, _) = tokio::time::timeout(Duration::from_secs(2), ack_recv.recv_from(&mut buf))
+            .await
+            .expect("hop ack not echoed")
+            .unwrap();
+        assert_eq!(&buf[..len], &announce[..], "echoed ack must be verbatim");
+        // The follow was recorded with the announce's real trigger + channel.
+        assert_eq!(cache.peer_channel(), Some(157));
+        let s = cache.hop_snapshot("u-nii-3");
+        assert_eq!(s.history.last().unwrap().trigger, "reactive");
+        assert_eq!(s.history.last().unwrap().to, 157);
+    }
+
+    #[tokio::test]
+    async fn presence_beacon_is_not_misrouted_to_the_hop_path() {
+        // A 68-byte PresenceBeacon must NOT be echoed as a HopAck (no ACK lands)
+        // and MUST be recorded as a peer via the presence path.
+        let cache = GsPresenceCache::new();
+        let pair_key = resolve_pair_key();
+
+        let listen_sock = UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let ack_recv = UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let ack_addr = ack_recv.local_addr().unwrap();
+        let ack_target = match ack_addr {
+            std::net::SocketAddr::V4(a) => (*a.ip(), a.port()),
+            _ => unreachable!("ipv4 loopback"),
+        };
+
+        let beacon = build_presence_beacon("drone-xyz", true, 161, -55, 9, &pair_key);
+        handle_control_frame(&listen_sock, &beacon, &pair_key, &cache, "", ack_target).await;
+
+        // The presence path ran: the peer is recorded.
+        assert_eq!(cache.peer_channel(), Some(161));
+        assert!(cache.peer_present());
+        // No HopAck was emitted onto the ACK ingress.
+        let mut buf = [0u8; 256];
+        let echoed =
+            tokio::time::timeout(Duration::from_millis(200), ack_recv.recv_from(&mut buf)).await;
+        assert!(echoed.is_err(), "a presence beacon must not echo a hop ack");
     }
 }

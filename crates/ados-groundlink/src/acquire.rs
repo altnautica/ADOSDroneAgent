@@ -206,6 +206,16 @@ impl ChannelAcquirer {
         self.locked_channel
     }
 
+    /// Read the current cumulative valid-decode counter through the injected
+    /// counter. The receive-liveness watchdog (which owns this acquirer) uses
+    /// the per-poll delta of this value to drive its silence timer off the SAME
+    /// shared counter the sweep reads, so a healthy video stream with no peer
+    /// beacon refreshes the watchdog instead of tripping its teardown. Read-only:
+    /// the stats reader is the sole writer to the underlying counter.
+    pub fn valid_packets(&self) -> i64 {
+        self.counter.valid_packets()
+    }
+
     pub fn channel_locked(&self) -> bool {
         self.state == AcquireState::Locked
     }

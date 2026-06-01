@@ -280,6 +280,11 @@ async fn receive_loop(config: &WfbConfig, presence_cache: GsPresenceCache) {
         let link = Arc::new(Mutex::new(LinkStats::default()));
         let last_stdout_at = Arc::new(Mutex::new(clock.monotonic()));
         let zombie_kills = Arc::new(AtomicU32::new(0));
+        // Live receive-health publish seam: the valid-packet watchdog writes its
+        // reacquire-kill total + the valid-decode silence here, and the stats
+        // reader pulls them onto the sidecar so the GS heartbeat carries the real
+        // values instead of hardcoded zeros.
+        let rx_health = wfb_rx::SharedRxHealth::new();
 
         // Fan-out as a sub-service (5599 → 5600 mediamtx + 5605 LCD), aborted
         // with the generation.
@@ -298,6 +303,8 @@ async fn receive_loop(config: &WfbConfig, presence_cache: GsPresenceCache) {
                 config.clone(),
                 None,
                 true,
+                Some(rx_health.clone()),
+                zombie_kills.clone(),
             ))
         });
 
@@ -310,15 +317,20 @@ async fn receive_loop(config: &WfbConfig, presence_cache: GsPresenceCache) {
         ));
 
         // Valid-packet watchdog: owns a fresh acquirer, reads the shared counter
-        // + presence cache, terminates the data RX on a genuine loss.
-        let mut watchdog = manager.build_watchdog(
-            counter.clone(),
-            presence_cache.clone(),
-            rx_handle.clone(),
-            clock.clone(),
-            setter.clone(),
-            hint.clone(),
-        );
+        // + presence cache, terminates the data RX on a genuine loss. It also
+        // observes live video off the shared counter each poll (so a healthy
+        // stream with a dropped peer beacon does not trip the teardown) and
+        // mirrors its receive-health counters to the stats reader's sidecar.
+        let mut watchdog = manager
+            .build_watchdog(
+                counter.clone(),
+                presence_cache.clone(),
+                rx_handle.clone(),
+                clock.clone(),
+                setter.clone(),
+                hint.clone(),
+            )
+            .with_health(rx_health.clone());
         let watchdog_task = tokio::spawn(async move {
             watchdog.run().await;
         });
