@@ -1,7 +1,7 @@
 #!/bin/bash
 # ADOS Drone Agent libcomposite USB gadget (CDC-NCM + RNDIS).
 #
-# MSN-029 Cellos Wave 1 H2. Runs as a systemd oneshot on the
+# Runs as a systemd oneshot on the
 # ground-station profile when ADOS_ENABLE_USB_GADGET=1 was set at
 # install time. Creates a composite gadget so macOS/Linux hosts bind
 # CDC-NCM and Windows hosts bind RNDIS, both presenting the ground

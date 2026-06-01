@@ -15,12 +15,14 @@ Implementation notes:
   the on-LCD wizard mutate the same singleton — a remote ``/start``
   arms the wizard on the panel; a tap on the panel mirrors into the
   shared step counter so the GCS poll sees live progress.
-* The snapshot endpoint reads the framebuffer device directly. The
-  cloud service and the OLED service are separate processes; the API
-  process cannot reach the OLED's PIL canvas in memory, but it can
-  open and ``mmap`` the same kernel framebuffer at ``/dev/fb1``. We
-  cache the resulting PNG for ~800 ms so a half-second of concurrent
-  polls collapses into a single read.
+* The snapshot endpoint serves the PNG the native display writer
+  (``ados-display``) drops at ``/run/ados/lcd-snapshot.png`` after each
+  render — the exact frame on the panel. When that file is missing or
+  stale (the writer has not rendered yet, or the legacy fallback UI is
+  running) the endpoint reads the kernel framebuffer directly and
+  encodes a PNG with the standard library only (``zlib`` + ``struct``),
+  so the API process never depends on Pillow. The result is cached for
+  ~800 ms so a half-second of concurrent polls collapses into one read.
 * ``POST /page`` writes the requested page id to a JSON request file
   the OLED service watches. The handshake is one-way and idempotent:
   the OLED service unlinks the file after applying the request so a
@@ -33,7 +35,6 @@ beyond the usual API key middleware.
 
 from __future__ import annotations
 
-import io
 import json
 import threading
 import time
@@ -44,11 +45,13 @@ from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
+from ados.api.routes._lcd_png import render_framebuffer_png
 from ados.core.atomic import atomic_write_json
 from ados.core.logging import get_logger
 from ados.core.paths import (
     DISPLAY_CONF_PATH,
     LCD_PAGE_REQUEST_PATH,
+    LCD_SNAPSHOT_PATH,
     LCD_STATE_PATH,
     TOUCH_CALIB_PATH,
 )
@@ -189,87 +192,52 @@ def _read_lcd_state() -> dict[str, Any]:
     return {"active_page": "dashboard", "modal_stack": []}
 
 
-def _read_framebuffer_image(conf: dict[str, str]) -> Any | None:
-    """Decode the kernel framebuffer into a PIL image.
+# The Rust writer refreshes the snapshot PNG at ~1 Hz. Accept a file up
+# to this old as live; past it the writer has likely stopped (the legacy
+# fallback UI is running, or the daemon is down) and we read the
+# framebuffer directly instead so the preview never goes stale.
+_RUST_SNAPSHOT_MAX_AGE_S = 5.0
 
-    Returns ``None`` when the framebuffer is missing, the geometry
-    cannot be read, or PIL cannot be imported. Supports the three
-    pixel formats fbtft / DRM expose for the SPI panel: RGB565 (16
-    bpp), RGB24 (24 bpp), and xRGB32 (32 bpp). Other depths are
-    rejected because the byte ordering would need to be guessed.
+
+def _read_rust_snapshot() -> bytes | None:
+    """Return the native writer's snapshot PNG when it is fresh.
+
+    ``ados-display`` rewrites ``/run/ados/lcd-snapshot.png`` after each
+    render. This is the exact frame on the panel, so it is the preferred
+    source. Returns ``None`` when the file is absent, stale, or empty so
+    the caller can fall back to a direct framebuffer read.
     """
     try:
-        from PIL import Image
-    except ImportError:
-        return None
-
-    fb_path = _resolve_fb_path(conf)
-    if fb_path is None:
-        return None
-
-    fb_name = Path(fb_path).name
-    sysfs = Path(f"/sys/class/graphics/{fb_name}")
-    try:
-        virtual = (sysfs / "virtual_size").read_text().strip()
-        bpp_str = (sysfs / "bits_per_pixel").read_text().strip()
-        xres_s, yres_s = virtual.split(",", 1)
-        xres = int(xres_s)
-        yres = int(yres_s)
-        bpp = int(bpp_str)
-    except (OSError, ValueError):
-        return None
-    if xres <= 0 or yres <= 0 or bpp not in (16, 24, 32):
-        return None
-
-    try:
-        with open(fb_path, "rb") as fh:
-            buf = fh.read(xres * yres * (bpp // 8))
+        st = LCD_SNAPSHOT_PATH.stat()
     except OSError:
         return None
-    if len(buf) < xres * yres * (bpp // 8):
+    if (time.time() - st.st_mtime) > _RUST_SNAPSHOT_MAX_AGE_S:
         return None
-
-    if bpp == 16:
-        # RGB565 little-endian — unpack to RGB888.
-        out = bytearray(xres * yres * 3)
-        for i in range(xres * yres):
-            lo = buf[2 * i]
-            hi = buf[2 * i + 1]
-            pix = lo | (hi << 8)
-            r = (pix >> 11) & 0x1F
-            g = (pix >> 5) & 0x3F
-            b = pix & 0x1F
-            out[3 * i + 0] = (r << 3) | (r >> 2)
-            out[3 * i + 1] = (g << 2) | (g >> 4)
-            out[3 * i + 2] = (b << 3) | (b >> 2)
-        img = Image.frombytes("RGB", (xres, yres), bytes(out))
-    elif bpp == 24:
-        img = Image.frombytes("RGB", (xres, yres), buf)
-    else:  # 32 bpp xRGB; bytes are B,G,R,X
-        out = bytearray(xres * yres * 3)
-        for i in range(xres * yres):
-            out[3 * i + 0] = buf[4 * i + 2]  # R
-            out[3 * i + 1] = buf[4 * i + 1]  # G
-            out[3 * i + 2] = buf[4 * i + 0]  # B
-        img = Image.frombytes("RGB", (xres, yres), bytes(out))
-    return img
+    try:
+        data = LCD_SNAPSHOT_PATH.read_bytes()
+    except OSError:
+        return None
+    return data or None
 
 
 def _render_snapshot_png(width: int, height: int) -> bytes | None:
-    """Read fb1, downsample, encode PNG. Returns ``None`` when no LCD."""
-    conf = _read_display_conf()
-    img = _read_framebuffer_image(conf)
-    if img is None:
+    """Return a PNG of the live LCD, or ``None`` when no panel is bound.
+
+    Prefers the native writer's fresh snapshot (the exact panel frame).
+    Falls back to reading the kernel framebuffer and encoding a PNG with
+    the standard library (no Pillow) when the writer has not produced a
+    recent frame. ``width`` / ``height`` are advisory — the panel is small
+    and the GCS scales the image client-side, so the full-resolution PNG
+    is returned without a resize dependency.
+    """
+    rust = _read_rust_snapshot()
+    if rust is not None:
+        return rust
+
+    fb_path = _resolve_fb_path(_read_display_conf())
+    if fb_path is None:
         return None
-    if (img.width, img.height) != (width, height):
-        try:
-            from PIL import Image as _PILImage  # noqa: F401
-        except ImportError:
-            return None
-        img = img.resize((width, height))
-    buf = io.BytesIO()
-    img.save(buf, format="PNG")
-    return buf.getvalue()
+    return render_framebuffer_png(fb_path)
 
 
 def _cached_snapshot(width: int, height: int) -> bytes | None:

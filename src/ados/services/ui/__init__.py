@@ -1,12 +1,14 @@
-"""Ground-station UI services.
+"""Ground-station UI input services and helpers.
 
-This package hosts the physical UI surfaces on the ground station
-companion board: front-panel buttons, OLED status display, and
-related input handling. Each module is independently runnable via
-`python -m` for systemd supervision, matching the pattern used by
-sibling services in `ados.services.ground_station`.
+The panel is rendered by the native display service; this package keeps
+the Python-side input and configuration helpers it relies on:
 
-The button service and its event bus are the input surface. The OLED
-service and screen renderers consume the bus contract defined in
-`events.py`.
+* ``button_service`` reads the front-panel GPIO buttons and publishes
+  ``ButtonEvent`` on the bus defined in ``events``. It runs under
+  systemd via ``python -m ados.services.ui.button_service``.
+* ``display_conf`` reads and writes the SPI LCD rotation config.
+* ``reload_signal`` SIGHUPs the panel services when the GCS edits the
+  display or button settings.
+* ``touch`` holds the touch-calibration session, affine transform, and
+  recent-event ring that the display REST routes share with the panel.
 """

@@ -114,7 +114,15 @@ LCD_PAGE_REQUEST_PATH = ADOS_RUN_DIR / "lcd-page-request.json"
 # OLED service's private state directly.
 LCD_VIDEO_TAP_PATH = ADOS_RUN_DIR / "lcd-video-tap.json"
 
-# Phase 13: in-process GStreamer air-side pipeline publishes its stats
+# PNG of the most recently rendered panel frame. The native display
+# writer (``ados-display``) writes it after each render at ~1 Hz, so the
+# REST snapshot endpoint (``GET /api/v1/display/snapshot``) can serve
+# exactly what the LCD shows without re-reading the framebuffer or
+# depending on PIL. Absent until the native writer has rendered a frame;
+# the endpoint falls back to a direct framebuffer read in that window.
+LCD_SNAPSHOT_PATH = ADOS_RUN_DIR / "lcd-snapshot.png"
+
+# The in-process GStreamer air-side pipeline publishes its stats
 # snapshot to this path at 1 Hz. Consumed by the REST surface (``GET
 # /api/v1/video/air-pipeline``) and the cloud heartbeat enricher so the
 # GCS can render encoder + pipeline-flavor pills without IPC into the

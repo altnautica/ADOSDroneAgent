@@ -138,7 +138,7 @@ def build_pipeline_string(
     ``source_url`` selects the front end:
     - If it starts with ``rtsp://`` (legacy / tests), we use rtspsrc.
     - Otherwise we treat it as an integer UDP port and use udpsrc with
-      RTP H.264 caps. This is the Phase 11 default — it bypasses the
+      RTP H.264 caps. This is the default — it bypasses the
       mediamtx-gs RTSP indirection and the rtspsrc 100 ms jitter buffer
       that was the source of the freeze cascade.
     """
@@ -152,7 +152,7 @@ def build_pipeline_string(
             "! rtph264depay "
         )
     else:
-        # Phase 11 default: udpsrc directly from the LCD-side fanout
+        # Default: udpsrc directly from the LCD-side fanout
         # port. No mediamtx-gs round-trip, no rtspsrc TCP handshake,
         # no 404 race when mediamtx-gs goes briefly not-ready.
         #

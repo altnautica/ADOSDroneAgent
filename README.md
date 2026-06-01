@@ -6,10 +6,11 @@
 
 ADOS Drone Agent is the onboard intelligence layer for software-defined drones. It runs on your companion computer, proxies MAVLink from the flight controller to WebSocket and TCP, handles the 50km data link, streams HD video, and gives you full remote control from ADOS Mission Control or any HTTP client.
 
-> **Part of the ADOS ecosystem.** Pairs with [ADOS Mission Control](https://github.com/altnautica/ADOSMissionControl) (the browser GCS) for AI PID tuning, mission planning, 3D simulation, live ADS-B, and gamepad flight control at 50Hz. The agent runs on the drone; Mission Control runs in your browser.
+> **Part of the ADOS ecosystem.** Pairs with [ADOS Mission Control](https://github.com/altnautica/ADOSMissionControl) (the browser GCS) for AI PID tuning, mission planning, 3D simulation, live ADS-B, and gamepad flight control at 50Hz. The agent runs on the drone; Mission Control runs in your browser. Extend either side with [ADOS Extensions](https://github.com/altnautica/ADOSExtensions), the first-party plugin repo.
 
 <p align="center">
   <strong><a href="https://github.com/altnautica/ADOSMissionControl">ADOS Mission Control</a></strong> |
+  <strong><a href="https://github.com/altnautica/ADOSExtensions">ADOS Extensions</a></strong> |
   <strong><a href="https://docs.altnautica.com">Docs</a></strong> |
   <strong><a href="https://altnautica.com">Website</a></strong> |
   <strong><a href="https://discord.gg/uxbvuD4d5q">Discord</a></strong> |
@@ -44,23 +45,23 @@ ADOS Drone Agent is the onboard intelligence layer for software-defined drones. 
 
 ---
 
+## Architecture at a glance
+
+ADOS Drone Agent is a hybrid. The long-running and safety-critical services are native **Rust**: the process supervisor that drives systemd, the MAVLink router, the video pipeline, the cloud relay, the WFB-ng radio control, on-device vision, and the ground-station receive and uplink paths. **Python** runs the layers that change fast or lean on the ML and web ecosystems: the FastAPI REST server and setup webapp, AI and vision inference, hardware detection, the scripting engine and SDK, and the plugin runtime. A few mature **C** programs are supervised rather than reimplemented (the RTL8812EU driver, `wfb_tx` / `wfb_rx`, `ffmpeg`, and `mediamtx`).
+
+systemd is the process manager. The Rust supervisor orchestrates the units, it does not replace systemd. On a device the agent installs as a set of systemd services plus a Python virtualenv, both placed by a prebuilt Rust installer.
+
+---
+
 ## Quick Start
 
-```bash
-git clone https://github.com/altnautica/ADOSDroneAgent.git
-cd ADOSDroneAgent
-pip install -e ".[dev]"
-ados --help
-```
-
-Deploy to a companion computer (Raspberry Pi, Jetson, etc.):
+Deploy to a companion computer (Raspberry Pi, Radxa, Jetson, and similar ARM64 Linux boards):
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/altnautica/ADOSDroneAgent/main/scripts/install.sh | bash
+curl -sSL https://raw.githubusercontent.com/altnautica/ADOSDroneAgent/main/scripts/install.sh | sudo bash
 ```
 
-The script detects your OS, installs Python 3.11, configures systemd services,
-and serves the local setup webapp from the agent.
+Root is required. The one-line bootstrap fetches and verifies a prebuilt Rust installer, which provisions a Python virtualenv, places the native Rust service binaries, configures the systemd units, and starts the local setup webapp on the device.
 
 After install, SSH into the node and run:
 
@@ -75,13 +76,13 @@ state, video state, services, and remote access state.
 
 | Requirement | Minimum | Recommended |
 |-------------|---------|-------------|
+| OS | Linux with systemd (ARM64 or x86_64) | Raspberry Pi OS, Debian, Ubuntu, Armbian |
+| RAM | 1 GB | 2 GB+ |
+| Storage | 500 MB | 2 GB+ |
 | Python | 3.11+ | 3.12 |
-| OS | Any Linux with systemd | Raspberry Pi OS, Ubuntu, Debian |
-| RAM | 64MB (Tier 1 basic) | 512MB+ (Tier 2+) |
-| Storage | 100MB | 500MB |
 | FC connection | Serial (UART or USB) | UART at 921600 baud |
 
-Also runs on macOS for local development and testing.
+Also runs on macOS for local development (the installer points you to `cargo` there). Boards with less than 1 GB of RAM are not supported.
 
 ## What It Does
 
@@ -117,14 +118,15 @@ remote access, services, and telemetry at a glance.
 
 ## Hardware Support
 
-| Tier | Hardware | RAM | Capabilities |
-|------|----------|-----|-------------|
-| Tier 1 (Basic) | RPi Zero 2W | 128MB+ | MAVLink proxy, MQTT gateway |
-| Tier 2 (Smart) | RPi 4 / CM4 | 512MB+ | + Python scripting, sensor monitoring |
-| Tier 3 (Autonomous) | CM5 / Jetson Nano | 2GB+ | + Plugin sandbox, vision, SLAM |
-| Tier 4 (Swarm) | CM5 + radios | 2.5GB+ | + Mesh networking, formation flight |
+The agent auto-detects the board on boot and scales features to available resources. Board profiles ship in `src/ados/hal/boards/`.
 
-Any Linux ARM64 or x86_64 board with a serial port should work. The tier system scales features to available resources automatically.
+| Class | Example boards | Capabilities |
+|-------|----------------|--------------|
+| Entry | Raspberry Pi 3, Radxa CM3 (RK3566) | MAVLink proxy, cloud relay, telemetry |
+| Standard | Raspberry Pi 4 / 5, CM4, Orange Pi 5 | + HD video pipeline, WFB-ng radio, scripting |
+| Accelerated | CM5, Rock 5C, Cubie A7Z, RK3576 / RK3588S2, Jetson Nano / Orin Nano | + on-device vision, NPU-backed inference, plugin sandbox |
+
+Any ARM64 or x86_64 Linux board with a serial port and systemd should work through the `generic-arm64` profile. The same codebase also runs the ground-station profile (no flight controller, an OLED or SPI LCD with buttons and an RTL8812EU adapter); a hardware fingerprint at boot picks the profile.
 
 **Mesh role hardware.** A single ground node (`direct` role) needs one RTL8812EU USB WiFi adapter for WFB-ng. Relay and receiver nodes add a second USB WiFi dongle that carries batman-adv mesh traffic between nodes. Any adapter with a Linux driver that supports 802.11s or IBSS mode works for the mesh carrier.
 
@@ -203,49 +205,42 @@ The agent connects to ADOS Mission Control over a three-layer relay.
 |---|---|---|
 | `server.mode` | `disabled` | `disabled`, `cloud`, or `self_hosted` |
 | `server.mqtt_transport` | `tcp` | `tcp` or `websockets` |
-| `server.mqtt_username` | — | MQTT broker username |
-| `video.cloud_relay_url` | — | RTSP relay server URL |
+| `server.mqtt_username` | - | MQTT broker username |
+| `video.cloud_relay_url` | - | RTSP relay server URL |
 
 ---
 
 ## Architecture
 
 ```
-┌──────────┐  ┌──────────┐
-│   CLI    │  │ Webapp   │   User interfaces
-└────┬─────┘  └────┬─────┘
-     │              │
-     ▼              ▼
-┌──────────────────────────┐
-│       REST API           │   FastAPI :8080 (domain route modules)
-└────────────┬─────────────┘
-             │
-             ▼
-┌──────────────────────────┐
-│   ApiRuntimeFacade       │   API-facing runtime boundary
-└──┬───────┬───────┬───────┘
-   │       │       │
-   ▼       ▼       ▼
-┌──────────┐ ┌──────────┐ ┌──────────┐
-│ Main     │ │Standalone│ │State IPC │
-│ runtime  │ │API svc   │ │snapshots │
-└────┬─────┘ └────┬─────┘ └────┬─────┘
-     │            │            │
-     ▼            ▼            ▼
-┌──────┐ ┌──────┐ ┌──────┐
-│ MAV  │ │ MQTT │ │Video │
-│Proxy │ │ GW   │ │Pipe  │
-└──────┘ └──────┘ └──────┘
-   │
-   ▼
-┌──────────┐
-│   FC     │   Flight controller
-└──────────┘   (serial/USB)
+              ┌───────────────────────────────┐
+   CLI  ────▶ │   REST API  ·  setup webapp   │ ◀──── Mission Control / HTTP clients
+              │   Python (FastAPI) on :8080   │
+              └───────────────┬───────────────┘
+                              │ Unix-socket IPC + shared state
+   ┌──────────────────────────┴────────────────────────────────┐
+   │              Rust core services (systemd units)             │
+   │   supervisor · MAVLink router · video · cloud relay ·       │
+   │   WFB-ng radio · vision · ground-station receive / uplink   │
+   └────┬───────────────────┬────────────────────┬──────────────┘
+        ▼                   ▼                    ▼
+  flight controller    RTL8812EU + wfb (C)    camera / NPU
+  (serial / USB)       ffmpeg · mediamtx      (Python + C)
 ```
 
-The API facade keeps route modules independent from runtime internals. Routes read
-FC status, telemetry, video, WFB, scripts, and parameter state through named
-accessors instead of reaching into private process fields.
+The Rust supervisor owns process lifecycle and orchestrates systemd. Python keeps the REST surface, AI and vision inference, hardware detection, scripting, and the plugin runtime. Routes read FC status, telemetry, video, radio, and parameter state through named accessors, so the API stays independent of service internals.
+
+### Directory Structure
+
+| Path | Contents |
+|------|----------|
+| `crates/` | Native Rust services (one crate per service) plus the shared protocol and SDK crates |
+| `src/ados/` | Python runtime: REST API, HAL detection, scripting, plugins, SDK, ground-station managers |
+| `data/` | systemd units, udev rules, overlays, and other deploy-time assets |
+| `scripts/` | Installer bootstrap and helper scripts |
+| `dashboard/` | Local web dashboard assets |
+| `docs/` | Deployment, ground-station, and OEM documentation |
+| `tests/` | Test suite |
 
 ---
 
@@ -253,26 +248,31 @@ accessors instead of reaching into private process fields.
 
 | Feature | Status |
 |---------|--------|
-| MAVLink proxy (serial to WS/TCP/UDP) | Working |
-| REST API (FastAPI domain route modules) | Working |
-| Universal setup facade and webapp | Working |
+| Rust process supervisor (systemd orchestration) | Working |
+| MAVLink router (serial to WS/TCP/UDP) | Working |
+| REST API and universal setup webapp (Python FastAPI) | Working |
+| Prebuilt Rust installer (fetch, verify, provision, configure) | Working |
 | Minimal public CLI | Working |
 | Demo mode (simulated telemetry) | Working |
-| Hardware detection (board tier profiles) | Working |
+| Hardware auto-detection (board profiles) | Working |
 | Config system (Pydantic + YAML) | Working |
 | Health monitoring (CPU, RAM, disk, temp) | Working |
-| MQTT gateway | Working |
 | Cloud relay (Convex HTTP + MQTT) | Working |
-| GCS pairing (Mission Control link) | Working |
+| GCS pairing (local-first over LAN, cloud relay optional) | Working |
 | OTA updates (upgrade + rollback) | Working |
-| Video pipeline (RTSP + cloud relay) | Working |
-| WFB-ng long-range video link (5.8GHz, FEC, WebRTC) | Working |
+| Video pipeline (RTSP, WebRTC/WHEP, WFB-ng) | Working |
+| WFB-ng long-range link (5.8 GHz, FEC) | Working |
+| On-device vision host (frame bus, detectors) | Working |
 | Script executor (text commands + Python SDK) | Working |
-| Swarm coordination (mesh, formation) | Planned |
+| Plugin system (Python and Rust plugins) | Working |
+| Ground-station distributed receive and local mesh | Working |
+| Swarm formation flight | Planned |
 
 ---
 
 ## Development
+
+The Python runtime:
 
 ```bash
 git clone https://github.com/altnautica/ADOSDroneAgent.git
@@ -282,15 +282,19 @@ pip install -e ".[dev]"
 
 pytest          # run tests
 ruff check src/ # lint
-ados --help     # inspect public CLI
-ados status     # query a running local agent
+ados --help     # inspect the public CLI
 ```
 
-API route changes should go through the runtime facade in `ados.api.runtime`.
-Tests that need runtime doubles should use `tests/api_runtime_utils.py` instead
-of constructing private process fields directly.
+The native services live under `crates/` (a Cargo workspace):
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for code style and PR guidelines.
+```bash
+cargo build     # build the Rust service crates
+cargo test
+```
+
+On a device the installer fetches prebuilt Rust binaries, so deploying needs no Rust toolchain. You only need one to build the services from source.
+
+API route changes go through the runtime facade in `ados.api.runtime`. Tests that need runtime doubles use `tests/api_runtime_utils.py`. See [AGENTS.md](AGENTS.md) for architecture notes and [CONTRIBUTING.md](CONTRIBUTING.md) for code style and PR guidelines.
 
 ---
 
@@ -306,17 +310,18 @@ Building and testing ADOS Drone Agent on real companion computers and flight har
 
 ## Community
 
-- **[Discord](https://discord.gg/uxbvuD4d5q)** — Ask questions, share builds
-- **[LinkedIn](https://www.linkedin.com/company/altnautica/)** — Follow company updates
-- **[Email](mailto:team@altnautica.com)** — team@altnautica.com
-- **[Issues](https://github.com/altnautica/ADOSDroneAgent/issues)** — Bug reports and discussions
-- **[Website](https://altnautica.com)** — Company and product info
+- **[Discord](https://discord.gg/uxbvuD4d5q)** - Ask questions, share builds
+- **[LinkedIn](https://www.linkedin.com/company/altnautica/)** - Follow company updates
+- **[Email](mailto:team@altnautica.com)** - team@altnautica.com
+- **[Issues](https://github.com/altnautica/ADOSDroneAgent/issues)** - Bug reports and discussions
+- **[Website](https://altnautica.com)** - Company and product info
 
 ---
 
 ## Related
 
-- [ADOS Mission Control](https://github.com/altnautica/ADOSMissionControl) — browser GCS (the control side of this pair)
+- [ADOS Mission Control](https://github.com/altnautica/ADOSMissionControl) - browser GCS (the control side of this pair)
+- [ADOS Extensions](https://github.com/altnautica/ADOSExtensions) - first-party plugins for the agent and the GCS
 
 ---
 

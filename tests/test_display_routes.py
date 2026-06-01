@@ -236,6 +236,43 @@ def test_snapshot_caches_repeated_requests(client: TestClient) -> None:
     assert mock_render.call_count == 1
 
 
+def test_render_prefers_fresh_rust_snapshot(tmp_path: Path) -> None:
+    """When the native writer's PNG is fresh, it is served verbatim and the
+    framebuffer is never read."""
+    snap = tmp_path / "lcd-snapshot.png"
+    rust_png = b"\x89PNG\r\n\x1a\nrust-frame"
+    snap.write_bytes(rust_png)
+    display_routes._snap_cache.clear()
+    with patch.object(display_routes, "LCD_SNAPSHOT_PATH", snap), \
+         patch.object(
+             display_routes, "render_framebuffer_png",
+         ) as mock_fb:
+        out = display_routes._render_snapshot_png(240, 160)
+    assert out == rust_png
+    # The framebuffer fallback must not run when the sidecar is fresh.
+    mock_fb.assert_not_called()
+
+
+def test_render_falls_back_to_framebuffer_when_snapshot_stale(
+    tmp_path: Path,
+) -> None:
+    """A stale (or absent) sidecar PNG drops to a direct framebuffer read,
+    which the standard-library encoder turns into a PNG without PIL."""
+    snap = tmp_path / "lcd-snapshot.png"  # never created → absent
+    display_routes._snap_cache.clear()
+    fb_png = b"\x89PNG\r\n\x1a\nfb-frame"
+    with patch.object(display_routes, "LCD_SNAPSHOT_PATH", snap), \
+         patch.object(
+             display_routes, "_resolve_fb_path", return_value="/dev/fb0",
+         ), \
+         patch.object(
+             display_routes, "render_framebuffer_png", return_value=fb_png,
+         ) as mock_fb:
+        out = display_routes._render_snapshot_png(240, 160)
+    assert out == fb_png
+    mock_fb.assert_called_once_with("/dev/fb0")
+
+
 # ── page ------------------------------------------------------------
 
 

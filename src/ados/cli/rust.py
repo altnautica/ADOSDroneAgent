@@ -41,6 +41,13 @@ class _Service:
     exist only for the native path (they are off by default) and are
     enabled on and disabled off. ``subsumes`` are packaged units the
     native daemon absorbs in-process and that must be masked while it runs.
+
+    ``opt_out`` flips the sense of ``flag``. With ``opt_out=False`` (the
+    default), the flag is an opt-IN: the unit runs native only when the
+    flag is present. With ``opt_out=True`` the service has already cut over
+    — native is the DEFAULT when the binaries are present, and the flag is
+    a ``*-fallback`` marker that pins the packaged path. ``enable`` then
+    removes the marker and ``disable`` writes it.
     """
 
     flag: str
@@ -49,6 +56,7 @@ class _Service:
     extra_units: tuple[str, ...] = ()
     subsumes: tuple[str, ...] = ()
     note: str = ""
+    opt_out: bool = False
 
 
 # Keyed by the operator-facing service name. Mirrors the ExecStart guards
@@ -92,13 +100,14 @@ _SERVICES: dict[str, _Service] = {
         note="native WFB transmit (drone profile)",
     ),
     "display": _Service(
-        flag="display-rust-enabled",
+        flag="display-python-fallback",
         binaries=(
             "/opt/ados/bin/ados-display",
             "/opt/ados/bin/ados-display-probe",
         ),
         swap_units=("ados-oled", "ados-display-probe"),
-        note="native display; the flag also swaps the render daemon",
+        note="native display (default); the fallback marker pins the packaged UI",
+        opt_out=True,
     ),
 }
 
@@ -161,10 +170,19 @@ def _unit_active(unit: str) -> bool:
     return _systemctl("is-active", "--quiet", unit) == 0
 
 
+def _flag_active(svc: _Service) -> bool:
+    """True when the native branch is selected by the flag, accounting for
+    the flag's sense. Opt-in services need the flag present; opt-out
+    services (already cut over) need the fallback marker absent."""
+    present = _flag_path(svc).exists()
+    return (not present) if svc.opt_out else present
+
+
 def _mode(svc: _Service) -> str:
-    """The branch the unit's ExecStart would take right now: the native
-    binary runs only when the flag is set AND the binaries are installed."""
-    if not _flag_path(svc).exists():
+    """The branch the unit's ExecStart would take right now. The native
+    binary runs only when the flag selects it (opt-in: flag present;
+    opt-out: fallback marker absent) AND the binaries are installed."""
+    if not _flag_active(svc):
         return "python"
     return "rust" if _binaries_present(svc) else "python (binary missing)"
 
@@ -183,7 +201,14 @@ def rust_status() -> None:
     for name in _SVC_NAMES:
         svc = _SERVICES[name]
         mode = _mode(svc)
-        flag = "set" if _flag_path(svc).exists() else "—"
+        # For opt-in services the flag presence == native-selected; for
+        # opt-out services the marker presence == packaged-pinned. Show the
+        # marker state in both cases (a present opt-out marker reads as
+        # "fallback").
+        if _flag_path(svc).exists():
+            flag = "fallback" if svc.opt_out else "set"
+        else:
+            flag = "—"
         binp = "present" if _binaries_present(svc) else "absent"
         watched = svc.swap_units + svc.extra_units
         active = [u for u in watched if _unit_active(u)]
@@ -193,11 +218,26 @@ def rust_status() -> None:
         click.echo(click.style(line, fg=colour) if colour else line)
 
 
-def _apply(svc: _Service, *, enable: bool) -> None:
+def _set_marker(svc: _Service, *, native: bool) -> None:
+    """Write or remove the sentinel so the next ExecStart picks ``native``.
+
+    For an opt-in service the marker selects native, so native => write,
+    packaged => remove. For an opt-out service (already cut over) the
+    marker is the packaged-fallback pin, so the sense is inverted: native
+    => remove the marker, packaged => write it.
+    """
     path = _flag_path(svc)
-    if enable:
+    want_marker = (not native) if svc.opt_out else native
+    if want_marker:
         ADOS_ETC_DIR.mkdir(parents=True, exist_ok=True)
         path.touch()
+    elif path.exists():
+        path.unlink()
+
+
+def _apply(svc: _Service, *, enable: bool) -> None:
+    if enable:
+        _set_marker(svc, native=True)
         # Mask the packaged units the native daemon absorbs so they do not
         # fight it for the same device or socket.
         for unit in svc.subsumes:
@@ -210,8 +250,7 @@ def _apply(svc: _Service, *, enable: bool) -> None:
             _systemctl("enable", unit)
             _systemctl("restart", unit)
     else:
-        if path.exists():
-            path.unlink()
+        _set_marker(svc, native=False)
         # Retire the native-only units, then bring the packaged ones back.
         for unit in svc.extra_units:
             _mask_unit(unit)

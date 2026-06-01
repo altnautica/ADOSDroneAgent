@@ -601,7 +601,7 @@ def build_display_enrichment(
     recording = read_video_recording_state(api_key=api_key)
     if recording is not None:
         enrich["videoRecording"] = bool(recording)
-    # Phase 13: air-side pipeline flavor + encoder identity so the GCS
+    # Air-side pipeline flavor + encoder identity so the GCS
     # can render a "GST" pill on the drone card and surface the chosen
     # encoder (HW vs SW) on the Configure tab. Absent when the legacy
     # bash air pipeline owns the stream.

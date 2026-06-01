@@ -119,13 +119,13 @@ def test_pipeline_string_honors_fps_cap() -> None:
 
 
 def test_pipeline_string_udpsrc_default_when_source_is_port() -> None:
-    """Phase 11: default LCD path is udpsrc directly from the fanout
+    """Default LCD path is udpsrc directly from the fanout
     port, NOT rtspsrc. udpsrc bypasses mediamtx-gs RTSP indirection,
     eliminating the 404 race + caps re-negotiation cascades that were
     the root cause of the freeze.
     """
     s = lt.build_pipeline_string(
-        source_url="5601",  # Phase 11 default — UDP port, not URL
+        source_url="5601",  # default — UDP port, not URL
         decoder="avdec_h264",
         width=480,
         height=176,
@@ -145,7 +145,7 @@ def test_pipeline_string_udpsrc_default_when_source_is_port() -> None:
 
 def test_pipeline_string_rtsp_legacy_path_still_works() -> None:
     """Tests + bench debug can pass an rtsp:// URL to fall back to the
-    rtspsrc front end (the v0.20.24 path). Phase 11 keeps it for
+    rtspsrc front end (the v0.20.24 path). Kept for
     backward compat."""
     s = lt.build_pipeline_string(
         source_url="rtsp://localhost:8554/main",

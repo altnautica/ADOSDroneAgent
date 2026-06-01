@@ -22,7 +22,7 @@ class GroundStationUiConfig(BaseModel):
 
     Pulled out of the legacy `/etc/ados/ground-station-ui.json` side-file
     into the Pydantic model so it round-trips through save cycles and is
-    consumed live by oled_service and button_service. The legacy file is
+    consumed live by the display service and button_service. The legacy file is
     migrated once at load time and preserved on disk for rollback.
 
     Field shapes are intentionally loose (`dict`) because the OLED, button

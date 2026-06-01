@@ -271,10 +271,9 @@ def apply_ui(
 ) -> SetupActionResult:
     """Persist a UI section update onto ``runtime.config.ui``.
 
-    The LCD dashboards read the active palette through
-    ``ados.services.ui.theme.current_palette()`` on every render tick,
-    so a theme flip takes effect on the next paint without a service
-    restart.
+    The native display service reads the active palette on every render
+    tick, so a theme flip takes effect on the next paint without a
+    service restart.
 
     Returns ``ok=True`` even when the request is empty so the batch
     apply route can iterate sections without special-casing absent

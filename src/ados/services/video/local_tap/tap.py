@@ -48,7 +48,7 @@ _EWMA_ALPHA = 0.2
 # converted into instantaneous fps on every sample, then EWMA-smoothed.
 _FPS_TICK_SECONDS = 1.0
 
-# Phase 11 default video source for the LCD tap: the UDP port the
+# Default video source for the LCD tap: the UDP port the
 # WfbRxManager's fan-out emits to (alongside mediamtx-gs's existing
 # UDP 5600 ingest port). udpsrc reads directly from this port, skipping
 # the mediamtx-gs RTSP server that was the source of the freeze

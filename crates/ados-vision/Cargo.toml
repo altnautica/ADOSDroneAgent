@@ -16,7 +16,7 @@ path = "src/bin/ados-vision.rs"
 
 [features]
 # The default build carries no native inference runtime so it compiles fast
-# everywhere; the MockBackend and the RKNN sidecar IPC client cover Phase 1.
+# everywhere; the MockBackend and the RKNN sidecar IPC client cover the baseline.
 default = []
 # Opt-in ONNX Runtime backend. Pulls a heavy native runtime, so it is never on
 # by default.

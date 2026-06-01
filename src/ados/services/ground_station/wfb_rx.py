@@ -96,13 +96,13 @@ _COLD_START_HOME_HOLD_S = 75.0
 # lost and the reacquisition sweep allowed to run.
 _PEER_PRESENCE_LOST_S = 120.0
 
-# Phase 11 video pipeline ports.
+# Video pipeline ports.
 # wfb_rx outputs FEC-decoded RTP H.264 to UDP _WFB_RX_INTERNAL_UDP_PORT
 # (5599). The video fanout reads from there and emits to:
 #   - _WFB_RX_MEDIAMTX_UDP_PORT (5600) for the mediamtx-gs ffmpeg
 #     ingest sidecar (browser WHEP path, unchanged contract)
 #   - _WFB_RX_LCD_UDP_PORT     (5605) for the LCD's udpsrc front end
-#     (Phase 11 NEW direct path, bypasses mediamtx-gs RTSP indirection).
+#     (direct path, bypasses mediamtx-gs RTSP indirection).
 #     Moved from 5601 because ffmpeg's -f sdp ingest opens RTCP on
 #     RTP+1 by default (RTP=5600, RTCP=5601) and a=rtcp in the SDP
 #     is silently ignored by the ffmpeg 5.x build we ship. Putting
@@ -152,7 +152,7 @@ class WfbRxManager:
         _apply_link_preset(self._config, log)
         self._state = LinkState.DISCONNECTED
         self._rx_proc: asyncio.subprocess.Process | None = None
-        # Phase 11: UDP fan-out subprocess that reads wfb_rx output on
+        # UDP fan-out subprocess that reads wfb_rx output on
         # the internal port and emits to mediamtx-gs ingest + LCD udpsrc.
         # Spawned alongside wfb_rx and torn down with it.
         self._fanout_proc: asyncio.subprocess.Process | None = None
@@ -392,7 +392,7 @@ class WfbRxManager:
         # blocks on readline() forever, LinkQualityMonitor stays empty,
         # and /api/wfb permanently reports state=disabled / rssi=-100 /
         # packets_received=0 even when 802.11 frames are flowing through.
-        # `-u 5599`: internal-only port. Phase 11 changed this from the
+        # `-u 5599`: internal-only port. Changed from the
         # historical 5600 to free that port for the new fan-out's egress.
         # wfb_rx → 5599 → ados-video-fanout → 5600 (mediamtx-gs ingest,
         # unchanged) AND 5601 (LCD udpsrc, NEW direct path that bypasses
@@ -1418,7 +1418,7 @@ class WfbRxManager:
                 enabled_channels=enabled_channels(interface),
             )
 
-            # Phase 11: spawn the UDP fan-out as soon as wfb_rx is up.
+            # Spawn the UDP fan-out as soon as wfb_rx is up.
             # The fanout reads wfb_rx output and forwards to both
             # mediamtx-gs and the LCD. Start failure is non-fatal — the
             # browser WHEP path may still come up via mediamtx-gs's

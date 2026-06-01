@@ -224,7 +224,7 @@ async fn resolve_cameras(config: &VisionConfig) -> Vec<ResolvedCamera> {
 }
 
 /// Run one camera's capture loop: open its source, pull frames, downscale-stamp
-/// is left to the source (Phase 1 publishes the source's native format), and
+/// is left to the source (which publishes its native format), and
 /// publish each into the engine ring. A source error backs off and re-opens.
 async fn run_camera(
     engine: Arc<VisionEngine>,

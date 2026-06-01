@@ -17,6 +17,48 @@ use crate::fb_writer::WriterStats;
 pub const LCD_STATE_PATH: &str = "/run/ados/lcd-state.json";
 pub const LCD_PAGE_REQUEST_PATH: &str = "/run/ados/lcd-page-request.json";
 pub const LCD_LATENCY_PATH: &str = "/run/ados/lcd-latency.json";
+/// PNG of the most recently rendered panel frame. The native page UI writes it
+/// after each render so the REST snapshot endpoint can serve exactly what the
+/// LCD shows without re-reading the framebuffer or depending on PIL.
+pub const LCD_SNAPSHOT_PATH: &str = "/run/ados/lcd-snapshot.png";
+
+/// Encode an RGB888 panel frame to PNG and atomically write it to `path`.
+///
+/// `rgb888` is tightly packed `width * height * 3` bytes (the canvas's native
+/// layout, exactly what `Canvas::as_rgb888` returns). The PNG is full panel
+/// resolution; the GCS preview scales it client-side. Best-effort: an encode or
+/// I/O error is returned for the caller to log and discard, the same contract as
+/// the other sidecars.
+pub fn write_snapshot_png(
+    path: &Path,
+    rgb888: &[u8],
+    width: u32,
+    height: u32,
+) -> std::io::Result<()> {
+    let expected = width as usize * height as usize * 3;
+    if rgb888.len() != expected {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "snapshot frame {} bytes != expected {expected} for {width}x{height}",
+                rgb888.len()
+            ),
+        ));
+    }
+    let mut buf: Vec<u8> = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut buf, width, height);
+        encoder.set_color(png::ColorType::Rgb);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder
+            .write_header()
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
+        writer
+            .write_image_data(rgb888)
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
+    }
+    atomic_write(path, &buf)
+}
 
 /// `lcd-state.json` payload. `active_page_id` is the page to restore.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -220,6 +262,48 @@ mod tests {
             .filter_map(|e| e.ok())
             .any(|e| e.file_name().to_string_lossy().ends_with(".tmp"));
         assert!(!stray);
+    }
+
+    #[test]
+    fn snapshot_png_round_trips_to_a_decodable_image() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("lcd-snapshot.png");
+        // 2x2 RGB888: red, green, blue, white.
+        let rgb: Vec<u8> = vec![
+            255, 0, 0, // (0,0) red
+            0, 255, 0, // (1,0) green
+            0, 0, 255, // (0,1) blue
+            255, 255, 255, // (1,1) white
+        ];
+        write_snapshot_png(&path, &rgb, 2, 2).unwrap();
+
+        // Decode it back with the png crate and confirm the geometry + pixels.
+        let decoder = png::Decoder::new(std::fs::File::open(&path).unwrap());
+        let mut reader = decoder.read_info().unwrap();
+        let info = reader.info();
+        assert_eq!(info.width, 2);
+        assert_eq!(info.height, 2);
+        assert_eq!(info.color_type, png::ColorType::Rgb);
+        let mut out = vec![0u8; reader.output_buffer_size()];
+        let frame = reader.next_frame(&mut out).unwrap();
+        assert_eq!(&out[..frame.buffer_size()], rgb.as_slice());
+
+        // No stray tmp left behind.
+        let stray = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .any(|e| e.file_name().to_string_lossy().ends_with(".tmp"));
+        assert!(!stray);
+    }
+
+    #[test]
+    fn snapshot_png_rejects_a_size_mismatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("lcd-snapshot.png");
+        // 3 bytes is not 2x2x3, so the encode is refused and nothing is written.
+        let err = write_snapshot_png(&path, &[1, 2, 3], 2, 2).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(!path.exists());
     }
 
     #[test]

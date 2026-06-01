@@ -156,7 +156,7 @@ def choose_camera_source(
     if camera_kind == "usb" and device_path:
         # USB UVC. ``YUY2`` is the most universal capture format; some
         # cheap UVC cameras only emit MJPEG, which we ignore here for
-        # v1 — software encode from MJPEG-decoded raw is the Phase 14
+        # v1 — software encode from MJPEG-decoded raw is a future
         # consideration.
         return (
             f"v4l2src device={device_path} "

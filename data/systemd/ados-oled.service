@@ -21,12 +21,11 @@ StartLimitBurst=5
 Slice=ados.slice
 Type=simple
 User=root
-# Flag-gated cutover: the native display writer runs only when BOTH the operator
-# enabled the flag file AND the binary is present; otherwise the packaged Python
-# service is the default, so a routine upgrade never changes behavior. To turn
-# the native display writer on for a bench:
-#   touch /etc/ados/display-rust-enabled && systemctl restart ados-oled
-ExecStart=/bin/sh -c 'if [ -e /etc/ados/display-rust-enabled ] && [ -x /opt/ados/bin/ados-display ]; then exec /opt/ados/bin/ados-display; else exec /opt/ados/venv/bin/python -m ados.services.ui.oled_service; fi'
+# The native display writer renders the panel. ConditionPathExists gates the
+# unit on a recognized display surface, and the binary is provisioned by the
+# installer before the unit is enabled, so a direct exec is correct: when the
+# binary is somehow absent the unit fails loudly rather than silently degrading.
+ExecStart=/opt/ados/bin/ados-display
 Restart=on-failure
 RestartSec=5
 Environment=ADOS_CONFIG=/etc/ados/config.yaml

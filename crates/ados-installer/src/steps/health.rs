@@ -22,13 +22,21 @@
 //!      boot and keep Python only as a flag-guarded fallback, so a missing
 //!      native binary would crash-loop the unit; its on-disk presence is a
 //!      required precondition even though its prebuilt fetch gate is best-effort.
-//!   7. **NEW** — the radio stack is on disk, for BOTH the drone and the ground
+//!   7. **NEW** — the native display binaries (`ados-display` +
+//!      `ados-display-probe`) the display units exec by DEFAULT are present +
+//!      executable, but ONLY when a panel was recognized (`display.enabled`
+//!      marker). On a display-less rig the display units skip clean, so the
+//!      binaries are not required there; once a panel is bound the unit runs the
+//!      native binary on a clean boot, so a missing one would crash-loop the
+//!      display and must FAIL the gate. Their prebuilt fetch gate stays
+//!      best-effort so the install never aborts on a board with no display.
+//!   8. **NEW** — the radio stack is on disk, for BOTH the drone and the ground
 //!      station profile: the wfb-ng userspace binaries on PATH, the bind
 //!      artifacts (`/etc/bind.key` + `/etc/bind.yaml`), and the `wifibroadcast@`
 //!      service template. Without these a fresh rig cannot auto-pair, so their
 //!      absence must FAIL the gate rather than report a misleading `ok` (the
 //!      bash gate never asserted them here).
-//!   8. **NEW** — `mediamtx` (the video relay) is present. Best-effort: a miss
+//!   9. **NEW** — `mediamtx` (the video relay) is present. Best-effort: a miss
 //!      degrades streaming but does not fail the install (recorded non-required).
 //!
 //! Each miss is recorded into `ctx.failures` as Required, so the graph's
@@ -174,6 +182,45 @@ where
     default_radio_binary(profile).filter(|dest| !present(dest))
 }
 
+/// Marker the display install writes once an SPI-LCD / HDMI / OLED panel is
+/// recognized. When it is absent the display services skip clean (their unit
+/// `ConditionPathExists` is unmet), so the display binaries are not needed and
+/// must not gate the install on a panel-less rig.
+const DISPLAY_ENABLED_MARKER: &str = "/etc/ados/display.enabled";
+
+/// The native display binaries the `ados-oled` / `ados-display-probe` units now
+/// exec by DEFAULT. Both profiles can host a panel, so the set is
+/// profile-independent. The Python render service stays on disk only as the
+/// flag-pinned fallback; on a clean boot the unit runs the native binary, so a
+/// missing one would crash-loop the display. Their prebuilt fetch gate is
+/// best-effort (a display-less rig must still install), so the cutover makes
+/// their on-disk presence a required precondition ONLY when a panel was
+/// recognized.
+const DEFAULT_DISPLAY_BINARIES: &[&str] = &[
+    "/opt/ados/bin/ados-display",
+    "/opt/ados/bin/ados-display-probe",
+];
+
+/// The default native display binaries that are MISSING (absent or not
+/// executable) when a display is enabled. Pure given a `display_enabled`
+/// predicate and a `present` predicate so a unit test can exercise the
+/// gap-detection without touching the filesystem. Returns an empty vec when no
+/// panel is bound (the units are a clean no-op there).
+pub fn missing_default_display_binaries<G, F>(display_enabled: G, present: F) -> Vec<&'static str>
+where
+    G: Fn() -> bool,
+    F: Fn(&str) -> bool,
+{
+    if !display_enabled() {
+        return Vec::new();
+    }
+    DEFAULT_DISPLAY_BINARIES
+        .iter()
+        .copied()
+        .filter(|dest| !present(dest))
+        .collect()
+}
+
 /// The wfb-ng userspace binaries the bind protocol + radio services need on
 /// PATH. Mirrors the set the radio step provisions; checked here so a fresh rig
 /// that lost the radio stack fails the gate instead of reporting a hollow `ok`.
@@ -307,12 +354,29 @@ impl Step for Health {
             misses.push(format!("binary-missing:{svc}"));
         }
 
-        // 7. The radio stack is on disk (both drone + ground station need it):
+        // 7. The native display binaries the display units now exec by DEFAULT
+        // must be present + executable WHEN a panel was recognized. Their
+        // prebuilt fetch gate is best-effort so a display-less rig still
+        // installs, but once `display.enabled` is written the unit runs the
+        // native binary on a clean boot, so a missing one would crash-loop the
+        // panel — a required miss, gated on the panel marker.
+        for dest in missing_default_display_binaries(
+            || Path::new(DISPLAY_ENABLED_MARKER).exists(),
+            |d| is_executable(Path::new(d)),
+        ) {
+            let svc = Path::new(dest)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(dest);
+            misses.push(format!("binary-missing:{svc}"));
+        }
+
+        // 8. The radio stack is on disk (both drone + ground station need it):
         // without the wfb-ng binaries, the bind artifacts, or the service
         // template a fresh rig cannot auto-pair, so each is a required miss.
         misses.extend(missing_radio_stack());
 
-        // 8. mediamtx is best-effort (the video relay). A missing one degrades
+        // 9. mediamtx is best-effort (the video relay). A missing one degrades
         // streaming but must not abort an otherwise-working install, so record
         // it as a non-required failure rather than adding it to `misses`.
         if !mediamtx_present() {
@@ -418,6 +482,31 @@ mod tests {
 
         // An unknown profile has no default WFB unit binary to gate on.
         assert!(missing_default_radio_binary("compute", |_| false).is_none());
+    }
+
+    #[test]
+    fn display_binaries_gated_on_the_panel_marker() {
+        // No panel bound → the display binaries never gate the install, even
+        // when both are absent (the units are a clean no-op there).
+        assert!(missing_default_display_binaries(|| false, |_| false).is_empty());
+
+        // Panel bound + both present → no miss.
+        assert!(missing_default_display_binaries(|| true, |_| true).is_empty());
+
+        // Panel bound + the render daemon missing → exactly that one reported.
+        let one =
+            missing_default_display_binaries(|| true, |dest| dest != "/opt/ados/bin/ados-display");
+        assert_eq!(one, vec!["/opt/ados/bin/ados-display"]);
+
+        // Panel bound + both missing → both reported.
+        let both = missing_default_display_binaries(|| true, |_| false);
+        assert_eq!(
+            both,
+            vec![
+                "/opt/ados/bin/ados-display",
+                "/opt/ados/bin/ados-display-probe"
+            ]
+        );
     }
 
     #[test]

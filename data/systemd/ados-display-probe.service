@@ -17,12 +17,10 @@ Before=ados-oled.service ados-fbcon-detach.service ados-supervisor.service
 
 [Service]
 Type=oneshot
-# Flag-gated cutover: the native boot probe runs only when BOTH the operator
-# enabled the flag file AND the binary is present; otherwise the packaged Python
-# service is the default, so a routine upgrade never changes behavior. To turn
-# the native probe on for a bench:
-#   touch /etc/ados/display-rust-enabled && systemctl restart ados-display-probe
-ExecStart=/bin/sh -c 'if [ -e /etc/ados/display-rust-enabled ] && [ -x /opt/ados/bin/ados-display-probe ]; then exec /opt/ados/bin/ados-display-probe; else exec /opt/ados/venv/bin/python -m ados.services.display_probe; fi'
+# The native boot probe applies the apply-verify-auto-revert logic. The binary
+# is provisioned by the installer before the unit is enabled; a direct exec
+# means a missing binary fails loudly instead of silently skipping the revert.
+ExecStart=/opt/ados/bin/ados-display-probe
 RemainAfterExit=yes
 StandardOutput=journal
 StandardError=journal

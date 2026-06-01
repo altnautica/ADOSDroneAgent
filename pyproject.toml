@@ -59,21 +59,14 @@ dev = [
 # the ground_station profile or when a developer runs
 # `pip install -e ".[ground-station]"`. The drone profile never needs these.
 ground-station = [
-    "luma.oled>=3.13.0",
     "gpiozero>=2.0",
     "dbus-next>=0.2.3",
     "smbus2>=0.4.3",
     "evdev>=1.6.1",
-    # Pillow is a transitive dependency of luma.oled but the agent now
-    # imports it directly for the SPI LCD framebuffer renderer, so we
-    # pin it explicitly here to keep the dependency graph stable.
+    # Pillow is used by the video local-tap, which decodes the keyframe
+    # JPEG snapshot the GCS preview reads. Pinned explicitly so the
+    # dependency graph stays stable across the ground-station extra.
     "Pillow>=10.0.0",
-    # qrcode renders the pair-code QR on the dashboard's PAIR DRONE
-    # tile so an operator can scan from their phone instead of typing
-    # the 6-char code by hand. Tiny pure-Python lib (~30 KB), no C
-    # build deps. The dashboard falls back to text-only when this is
-    # absent so the install isn't strictly blocking.
-    "qrcode>=7.4",
 ]
 # Tooling extras for refreshing build-time generated assets such as the
 # rasterized LCD tab-bar icons. Not required at runtime; only needed
@@ -116,7 +109,6 @@ include = ["ados*"]
 "ados.core" = ["defaults.yaml"]
 "ados.dashboard" = ["static/**/*"]
 "ados.data" = ["*.json"]
-"ados.services.ui.chrome._icons" = ["*.png"]
 
 
 [tool.ruff]

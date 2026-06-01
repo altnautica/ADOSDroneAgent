@@ -9,7 +9,6 @@ install. Also asserts the heartbeat + full-status payloads carry the
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 import pytest
@@ -67,13 +66,19 @@ def test_hybrid_core_only(roots: tuple[Path, Path]) -> None:
 
 
 def test_hybrid_when_flag_set_but_binary_missing(roots: tuple[Path, Path]) -> None:
-    """A flag with no binary stays packaged for that service → hybrid."""
+    """A flag with no binary stays packaged for that service → hybrid.
+
+    Display is opt-out (native by default): with no display binaries it is
+    still not native, so the aggregate is hybrid regardless of any marker.
+    """
     bin_dir, etc_dir = roots
     for b in _CORE:
         _make_bin(bin_dir, b)
-    # All drone flag-gated flags set, but their binaries are absent.
+    # All drone opt-in flags set, but their binaries are absent. Display
+    # needs no opt-in marker; its binaries being absent already keeps it
+    # non-native.
     for flag in ("wfb-rust-enabled", "plugin-host-rust-enabled",
-                 "display-rust-enabled", "net-rust-enabled"):
+                 "net-rust-enabled"):
         _touch_flag(etc_dir, flag)
     assert compute_runtime_mode("drone", bin_dir=bin_dir, etc_dir=etc_dir) == "hybrid"
 
@@ -90,8 +95,10 @@ def test_native_drone_all_applicable(roots: tuple[Path, Path]) -> None:
     for b in ("ados-radio", "ados-net", "ados-plugin-host",
               "ados-display", "ados-display-probe"):
         _make_bin(bin_dir, b)
+    # Display is opt-out: native by default once its binaries are present,
+    # so it needs no marker — only the opt-in services do.
     for flag in ("wfb-rust-enabled", "net-rust-enabled",
-                 "plugin-host-rust-enabled", "display-rust-enabled"):
+                 "plugin-host-rust-enabled"):
         _touch_flag(etc_dir, flag)
     # groundlink + hid binaries deliberately absent — they are not in the
     # drone applicable set, so the drone is still native.
@@ -106,8 +113,9 @@ def test_gs_needs_groundlink_and_hid(roots: tuple[Path, Path]) -> None:
         _make_bin(bin_dir, b)
     for b in ("ados-net", "ados-plugin-host", "ados-display", "ados-display-probe"):
         _make_bin(bin_dir, b)
-    for flag in ("net-rust-enabled", "plugin-host-rust-enabled",
-                 "display-rust-enabled"):
+    # Display is opt-out (native once its binaries are present); only the
+    # opt-in services need a marker.
+    for flag in ("net-rust-enabled", "plugin-host-rust-enabled"):
         _touch_flag(etc_dir, flag)
     # groundlink + hid not present → GS is hybrid.
     assert (
@@ -124,6 +132,29 @@ def test_gs_needs_groundlink_and_hid(roots: tuple[Path, Path]) -> None:
         compute_runtime_mode("ground-station", bin_dir=bin_dir, etc_dir=etc_dir)
         == "native"
     )
+
+
+def test_display_opt_out_native_by_default_fallback_marker_forces_hybrid(
+    roots: tuple[Path, Path],
+) -> None:
+    """Display is cut over: native once its binaries are present, with no
+    marker. The ``display-python-fallback`` marker pins the packaged path,
+    which drops the aggregate to hybrid."""
+    bin_dir, etc_dir = roots
+    for b in _CORE:
+        _make_bin(bin_dir, b)
+    for b in ("ados-radio", "ados-net", "ados-plugin-host",
+              "ados-display", "ados-display-probe"):
+        _make_bin(bin_dir, b)
+    for flag in ("wfb-rust-enabled", "net-rust-enabled", "plugin-host-rust-enabled"):
+        _touch_flag(etc_dir, flag)
+
+    # Default: no fallback marker → display native → drone native.
+    assert compute_runtime_mode("drone", bin_dir=bin_dir, etc_dir=etc_dir) == "native"
+
+    # Pin the packaged fallback → display non-native → hybrid.
+    _touch_flag(etc_dir, "display-python-fallback")
+    assert compute_runtime_mode("drone", bin_dir=bin_dir, etc_dir=etc_dir) == "hybrid"
 
 
 def test_radio_only_present_is_not_packaged(roots: tuple[Path, Path]) -> None:

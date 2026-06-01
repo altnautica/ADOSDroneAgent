@@ -86,10 +86,9 @@ class SwarmConfig(BaseModel):
 class UiConfig(BaseModel):
     """UI presentation settings persisted on disk.
 
-    `theme` drives the SPI LCD dashboard palette. Reads happen on every
-    render tick via `ados.services.ui.theme.current_palette()`, so a
-    flip from `dark` to `light` takes effect immediately without a
-    service restart.
+    `theme` drives the SPI LCD dashboard palette. The native display
+    service reads it on every render tick, so a flip from `dark` to
+    `light` takes effect immediately without a service restart.
     """
 
     theme: Literal["dark", "light"] = "dark"

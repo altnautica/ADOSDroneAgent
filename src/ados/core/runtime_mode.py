@@ -49,21 +49,34 @@ _CORE_BINARIES: tuple[str, ...] = (
 
 
 class _FlagGated:
-    """A flag-gated service: native only when both the flag and the
-    binaries are present. ``profiles`` is the set of node profiles the
-    service applies to (hyphen-form, matching the wire contract)."""
+    """A flagged service whose native-vs-packaged branch turns on a
+    sentinel file under ``/etc/ados``.
 
-    __slots__ = ("flag", "binaries", "profiles")
+    Two senses, set by ``opt_out``:
+
+    * ``opt_out=False`` (default) — opt-IN: native only when BOTH the flag
+      file and the binaries are present (the routine, pre-cutover posture).
+    * ``opt_out=True`` — opt-OUT: native is the DEFAULT when the binaries
+      are present; the flag file (a ``*-fallback`` marker) pins the
+      packaged path instead. This mirrors a unit whose ExecStart has
+      already cut over to the native binary by default.
+
+    ``profiles`` is the set of node profiles the service applies to
+    (hyphen-form, matching the wire contract)."""
+
+    __slots__ = ("flag", "binaries", "profiles", "opt_out")
 
     def __init__(
         self,
         flag: str,
         binaries: tuple[str, ...],
         profiles: tuple[str, ...],
+        opt_out: bool = False,
     ) -> None:
         self.flag = flag
         self.binaries = binaries
         self.profiles = profiles
+        self.opt_out = opt_out
 
 
 # Keyed by service. Flag names + binaries mirror the cutover table in
@@ -98,9 +111,10 @@ _FLAG_GATED: dict[str, _FlagGated] = {
         profiles=("drone",),
     ),
     "display": _FlagGated(
-        flag="display-rust-enabled",
+        flag="display-python-fallback",
         binaries=("ados-display", "ados-display-probe"),
         profiles=("drone", "ground-station"),
+        opt_out=True,
     ),
 }
 
@@ -162,7 +176,13 @@ def compute_runtime_mode(
         except OSError:
             flag_set = False
         binaries_present = all(_bin_present(bdir, b) for b in svc.binaries)
-        verdicts.append(flag_set and binaries_present)
+        if svc.opt_out:
+            # Default-native: native when the binaries are present and the
+            # operator has NOT pinned the packaged fallback marker.
+            verdicts.append(binaries_present and not flag_set)
+        else:
+            # Opt-in: native only when both the flag and the binaries are set.
+            verdicts.append(flag_set and binaries_present)
 
     return "native" if all(verdicts) else "hybrid"
 

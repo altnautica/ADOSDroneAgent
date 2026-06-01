@@ -51,8 +51,8 @@ class PairRequest(BaseModel):
 class OledUpdate(BaseModel):
     """PUT body for OLED UI settings.
 
-    Server and OLED both use the 0-255 native scale. This matches
-    luma.oled device.contrast() directly and the GCS slider range.
+    Server and OLED both use the 0-255 native contrast scale, which
+    matches the display hardware register range and the GCS slider range.
     """
 
     brightness: int | None = Field(default=None, ge=0, le=255)

@@ -3,22 +3,14 @@
 //! Owns the LCD framebuffer write path. It probes the bound SPI-LCD
 //! framebuffer, opens the mmap sink, and runs the off-thread writer.
 //!
-//! Two render modes share that write path:
-//!
-//! * **Sidecar reader (default).** Composed RGB888 frames come from a thin
-//!   Python page-render sidecar: the daemon reads length-prefixed frames from
-//!   its stdout, packs each to the panel's bit depth, and hands it to the
-//!   writer. A remote page switch is forwarded to the render sidecar via
-//!   `lcd-page-request.json`.
-//! * **Native page UI (opt-in).** The full-resolution page UI in
-//!   [`ados_display::pages`] renders in-process: a [`StateSource`] reads the
-//!   live agent state, the [`PageNavigator`] resolves the active page, the page
-//!   composer paints a 480x320 canvas, the frame is packed and presented
-//!   through the same writer. This is selected by the marker file
-//!   `/etc/ados/display-rust-ui` or the env var `ADOS_RUST_UI=1`, so the
-//!   existing sidecar path stays the default until the cutover flip.
-//!
-//! The writer's stats are mirrored to `lcd-latency.json` at 1 Hz in both modes.
+//! The full-resolution page UI in [`ados_display::pages`] renders in-process: a
+//! [`StateSource`] reads the live agent state, the [`PageNavigator`] resolves
+//! the active page, the page composer paints a 480x320 canvas, the frame is
+//! packed and presented through the writer. It also writes a PNG of each
+//! rendered frame to `lcd-snapshot.png` so the REST snapshot endpoint can serve
+//! the live panel without re-reading the framebuffer. The writer's stats are
+//! mirrored to `lcd-latency.json` at 1 Hz, and a remote page switch arrives via
+//! `lcd-page-request.json`.
 //!
 //! On a board with no bound SPI-LCD framebuffer the daemon logs and exits 0 — a
 //! ground station with no LCD is a supported configuration, not a failure.
@@ -29,30 +21,6 @@ use std::path::Path;
 use anyhow::Result;
 
 use ados_display::conf;
-
-/// Marker file that selects the native in-process page UI render mode over the
-/// default Python-sidecar reader. Its presence (any content) flips the mode;
-/// the env var `ADOS_RUST_UI` does the same for ad-hoc / test runs. Only the
-/// Linux framebuffer path consults it.
-#[cfg(target_os = "linux")]
-const RUST_UI_MARKER_PATH: &str = "/etc/ados/display-rust-ui";
-
-/// True when the native page UI mode is selected, via either the marker file or
-/// `ADOS_RUST_UI` set to a truthy value (`1`/`true`/`yes`/`on`,
-/// case-insensitive). An explicit `ADOS_RUST_UI=0`/`false`/`no`/`off` forces the
-/// sidecar path even when the marker file is present, so a bad marker can be
-/// overridden without deleting the file.
-#[cfg(target_os = "linux")]
-fn rust_ui_selected() -> bool {
-    if let Ok(raw) = std::env::var("ADOS_RUST_UI") {
-        match raw.trim().to_ascii_lowercase().as_str() {
-            "1" | "true" | "yes" | "on" => return true,
-            "0" | "false" | "no" | "off" | "" => return false,
-            _ => {}
-        }
-    }
-    Path::new(RUST_UI_MARKER_PATH).exists()
-}
 
 fn init_logging() {
     let filter = std::env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string());
@@ -113,9 +81,8 @@ async fn main() -> Result<()> {
     }
 }
 
-/// The Linux service body: probe, open the sink, run the writer, then drive
-/// either the native page UI (opt-in) or the Python-sidecar reader (default)
-/// until a stop signal.
+/// The Linux service body: probe, open the sink, run the writer, then drive the
+/// native page UI until a stop signal.
 #[cfg(target_os = "linux")]
 async fn run_linux(
     expected: &str,
@@ -159,38 +126,37 @@ async fn run_linux(
 
     sd_ready();
 
-    // Native in-process page UI is opt-in (marker file or env). When selected,
-    // and the panel geometry can host the 480x320 page system, drive the page
-    // render loop instead of the Python-sidecar reader.
-    if rust_ui_selected() {
-        let page_geom_ok = geometry.xres >= ados_display::pages::PANEL_W
-            && geometry.yres >= ados_display::pages::PANEL_H;
-        if page_geom_ok {
-            tracing::info!(
-                width = geometry.xres,
-                height = geometry.yres,
-                bpp = geometry.bits_per_pixel,
-                "native page UI mode engaged"
-            );
-            return run_page_ui(writer, geometry.bits_per_pixel, conf_blob).await;
-        }
-        tracing::warn!(
+    // The native in-process page UI is the only render mode. When the panel can
+    // host the 480x320 page system, drive the page render loop.
+    let page_geom_ok = geometry.xres >= ados_display::pages::PANEL_W
+        && geometry.yres >= ados_display::pages::PANEL_H;
+    if page_geom_ok {
+        tracing::info!(
             width = geometry.xres,
             height = geometry.yres,
-            "native page UI requested but panel geometry cannot host 480x320; \
-             falling back to the sidecar reader"
+            bpp = geometry.bits_per_pixel,
+            "native page UI mode engaged"
         );
+        return run_page_ui(writer, geometry.bits_per_pixel, conf_blob).await;
     }
 
-    // The page-render sidecar (Python PIL UI) is launched by the daemon's
-    // systemd unit / env; here we run the latency mirror + page-request watcher.
-    // The actual RGB frame ingestion wires to the sidecar's framed stdout in the
-    // deployment plumbing; this loop owns the cross-process sidecars.
+    // A bound SPI-LCD too small for the 480x320 page system is an unsupported
+    // panel: there is nothing to render, but the framebuffer is still owned, so
+    // keep the writer alive and run the latency mirror + page-request drain so
+    // the diagnostics surface stays honest rather than reporting a dead service.
+    tracing::warn!(
+        width = geometry.xres,
+        height = geometry.yres,
+        "bound panel cannot host the 480x320 page system; idling the write path"
+    );
     let mut tick = tokio::time::interval(Duration::from_secs(1));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     let mut sigterm = signal(SignalKind::terminate())?;
     let mut sigint = signal(SignalKind::interrupt())?;
+    // Absorb SIGHUP so a UI-config reload signal does not terminate the idle
+    // write path (there is no page system to reload, but the unit must survive).
+    let mut sighup = signal(SignalKind::hangup())?;
 
     loop {
         tokio::select! {
@@ -200,15 +166,17 @@ async fn run_linux(
                 if let Err(e) = lat.write_to(Path::new(LCD_LATENCY_PATH)) {
                     tracing::debug!(error = %e, "lcd-latency write failed");
                 }
-                // Drain a remote page switch (the render sidecar applies it).
+                // Drain (and discard) a remote page switch so a stale request
+                // can never accumulate while no page system is running.
                 if let Some(page) = ados_display::sidecar::take_page_request(
                     Path::new(LCD_PAGE_REQUEST_PATH),
                 ) {
-                    tracing::info!(page = %page, "lcd page request received");
-                    // The render sidecar reads the resolved page; the request
-                    // file is already unlinked by take_page_request.
+                    tracing::info!(page = %page, "lcd page request dropped (no page system)");
                 }
                 sd_watchdog();
+            }
+            _ = sighup.recv() => {
+                tracing::debug!("received SIGHUP (idle write path; nothing to reload)");
             }
             _ = sigterm.recv() => {
                 tracing::info!("received SIGTERM");
@@ -231,10 +199,10 @@ async fn run_linux(
 /// then on each tick rebuild the page context, render the active page, pack the
 /// frame, and present it through the already-running off-thread writer.
 ///
-/// Two cadences run on one timer. The agent state is re-polled at the same
-/// 5 s period the Python LCD service used (the status pages tolerate a few
-/// seconds of staleness and a faster poll burns a core on an SBC that is also
-/// serving the video chain); the panel re-renders at the active page's
+/// Two cadences run on one timer. The agent state is re-polled every 5 s (the
+/// status pages tolerate a few seconds of staleness and a faster poll burns a
+/// core on an SBC that is also serving the video chain); the panel re-renders
+/// at the active page's
 /// `refresh_hz`, floored to 0.5 Hz when idle so the dashboard's clock-second
 /// paint does not waste a core. `lcd-latency.json` is mirrored at 1 Hz, and a
 /// remote `POST /api/v1/display/page` request is drained each render tick.
@@ -252,7 +220,9 @@ async fn run_page_ui(
     use ados_display::graphics::palette::{self, Palette};
     use ados_display::navigator::PageNavigator;
     use ados_display::render_loop::pack_frame;
-    use ados_display::sidecar::{LcdLatency, LCD_LATENCY_PATH};
+    use ados_display::sidecar::{
+        write_snapshot_png, LcdLatency, LCD_LATENCY_PATH, LCD_SNAPSHOT_PATH,
+    };
     use ados_display::state_source::StateSource;
 
     // State poll cadence — matches the Python service's POLL_PERIOD_SECONDS.
@@ -264,13 +234,17 @@ async fn run_page_ui(
     // re-evaluate whether a render or a state poll is due.
     const TICK_GRANULARITY: Duration = Duration::from_millis(100);
 
-    let palette: Palette = palette::get_palette(
-        conf_blob
-            .get("theme")
-            .map(|s| s.trim())
-            .filter(|s| !s.is_empty())
-            .unwrap_or("dark"),
-    );
+    // The theme drives the palette. It is re-read on SIGHUP so a GCS or captive
+    // portal config edit (`PUT /ui/oled`) takes effect without a unit restart.
+    fn palette_from_conf(conf: &std::collections::BTreeMap<String, String>) -> Palette {
+        palette::get_palette(
+            conf.get("theme")
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .unwrap_or("dark"),
+        )
+    }
+    let mut palette: Palette = palette_from_conf(conf_blob);
 
     let mut navigator = PageNavigator::new(all_pages());
     let mut source = StateSource::new();
@@ -278,14 +252,25 @@ async fn run_page_ui(
 
     let mut sigterm = signal(SignalKind::terminate())?;
     let mut sigint = signal(SignalKind::interrupt())?;
+    // SIGHUP is the in-place config-reload signal. The agent's REST handlers
+    // SIGHUP this unit after persisting a UI config change; without a handler
+    // the default disposition would terminate the daemon, so the handler must
+    // exist even though the only live-reloadable surface today is the theme.
+    let mut sighup = signal(SignalKind::hangup())?;
 
     let mut tick = tokio::time::interval(TICK_GRANULARITY);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+    // The snapshot PNG is encoded at most this often. The GCS preview polls at
+    // 1 Hz, so a faster snapshot cadence would burn a core re-encoding frames no
+    // remote ever fetches; the panel itself still re-renders at the page cadence.
+    const SNAPSHOT_PERIOD: Duration = Duration::from_secs(1);
 
     let now = Instant::now();
     let mut last_state_poll = now;
     let mut last_render: Option<Instant> = None;
     let mut last_latency_write = now;
+    let mut last_snapshot: Option<Instant> = None;
 
     loop {
         tokio::select! {
@@ -318,6 +303,25 @@ async fn run_page_ui(
                 if render_due {
                     let canvas = navigator.current_page().render(&ctx, &palette);
                     let raw = canvas.as_rgb888();
+
+                    // Mirror the freshly rendered frame to the snapshot PNG so the
+                    // REST snapshot endpoint serves the live panel without PIL.
+                    // Throttled to ~1 Hz independent of the render cadence.
+                    let snapshot_due = last_snapshot
+                        .map(|t| now.duration_since(t) >= SNAPSHOT_PERIOD)
+                        .unwrap_or(true);
+                    if snapshot_due {
+                        if let Err(e) = write_snapshot_png(
+                            Path::new(LCD_SNAPSHOT_PATH),
+                            raw,
+                            canvas.width(),
+                            canvas.height(),
+                        ) {
+                            tracing::debug!(error = %e, "lcd-snapshot write failed");
+                        }
+                        last_snapshot = Some(now);
+                    }
+
                     if let Some(packed) = pack_frame(&canvas, bpp) {
                         writer.present(Frame::new(packed, raw));
                     } else {
@@ -335,6 +339,14 @@ async fn run_page_ui(
                     last_latency_write = now;
                     sd_watchdog();
                 }
+            }
+            _ = sighup.recv() => {
+                // Re-read the display config and rebuild the palette in place.
+                // Force a render next tick so the new theme paints immediately.
+                let fresh = conf::parse(Path::new(conf::DISPLAY_CONF_PATH));
+                palette = palette_from_conf(&fresh);
+                last_render = None;
+                tracing::info!("received SIGHUP; reloaded display config");
             }
             _ = sigterm.recv() => {
                 tracing::info!("received SIGTERM");

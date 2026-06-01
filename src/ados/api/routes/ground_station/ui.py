@@ -61,7 +61,7 @@ async def get_ground_station_ui() -> dict[str, Any]:
 
 @router.put("/ui/oled")
 async def put_ground_station_ui_oled(update: OledUpdate) -> dict[str, Any]:
-    """Update OLED settings, persist to config.yaml, signal oled_service."""
+    """Update OLED settings, persist to config.yaml, signal the display service."""
     app = _gs._require_ground_profile()
 
     data = _gs._load_ui_config()
@@ -117,7 +117,7 @@ async def put_ground_station_ui_buttons(update: ButtonsUpdate) -> dict[str, Any]
 
 @router.put("/ui/screens")
 async def put_ground_station_ui_screens(update: ScreensUpdate) -> dict[str, Any]:
-    """Update screen order and/or enabled set. SIGHUPs oled_service live."""
+    """Update screen order and/or enabled set. SIGHUPs the display service live."""
     app = _gs._require_ground_profile()
 
     data = _gs._load_ui_config()

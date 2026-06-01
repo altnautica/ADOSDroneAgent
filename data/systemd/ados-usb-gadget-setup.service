@@ -1,7 +1,7 @@
 [Unit]
 Description=ADOS USB Gadget Setup (libcomposite CDC-NCM + RNDIS)
 Documentation=https://github.com/altnautica/ADOSDroneAgent
-# MSN-029 Cellos Wave 1 H2. Composes the configfs gadget BEFORE
+# Composes the configfs gadget BEFORE
 # the Python usb_gadget manager or the supervisor touch it, so
 # that the kernel-side tree is already up when user-space asks.
 After=sys-kernel-config.mount
