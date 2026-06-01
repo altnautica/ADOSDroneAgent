@@ -138,5 +138,5 @@ async def _sleep_or_stop(stop: asyncio.Event | None) -> None:
         return
     try:
         await asyncio.wait_for(stop.wait(), timeout=_POLL_INTERVAL_S)
-    except (TimeoutError, asyncio.TimeoutError):
+    except TimeoutError:
         pass

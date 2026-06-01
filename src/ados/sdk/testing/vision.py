@@ -32,7 +32,6 @@ from __future__ import annotations
 import tempfile
 from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import Any
 
 from ados.sdk.testing.stubs import FakeIpcClient
 from ados.sdk.vision import (
