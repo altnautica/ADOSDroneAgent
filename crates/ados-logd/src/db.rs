@@ -71,7 +71,7 @@ const MIGRATIONS: &[&str] = &[
         target    TEXT,
         msg       TEXT    NOT NULL,
         fields    BLOB,                          -- msgpack open map
-        redacted  INTEGER NOT NULL DEFAULT 1,    -- 1 once redaction has run
+        redacted  INTEGER NOT NULL DEFAULT 0,    -- 1 if redaction changed a value
         synced    INTEGER NOT NULL DEFAULT 0
     );
     CREATE INDEX idx_logs_ts ON logs (ts_us);

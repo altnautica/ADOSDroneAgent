@@ -181,6 +181,7 @@ dependencies = [
  "axum",
  "nix 0.29.0",
  "rmp-serde",
+ "rmpv",
  "rusqlite",
  "sd-notify",
  "serde",

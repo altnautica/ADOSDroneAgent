@@ -5,11 +5,16 @@
 //! reboots and is reachable when the network is down. This daemon is the sole
 //! writer to that store; every other reader connects read-only.
 //!
-//! This crate carries the storage layer ([`db`]) and re-exports the shared wire
-//! contracts. The ingestion socket, the hardware collector, and the query API
-//! land in later chunks; the binary ships dark until they do.
+//! This crate carries the storage layer ([`db`]), the ingest socket
+//! ([`ingest`]), the single-writer store loop ([`writer`]), and the daemon
+//! lifecycle ([`daemon`]), plus a re-export of the shared wire contracts. The
+//! hardware collector and the query API land in later chunks; the binary is
+//! functional but ships dark (no systemd unit) until the install layer wires it.
 
+pub mod daemon;
 pub mod db;
+pub mod ingest;
+pub mod writer;
 
 /// The shared wire contracts: versioned ingest frames, the read-API envelope,
 /// and the secret-field redaction applied at ingest.

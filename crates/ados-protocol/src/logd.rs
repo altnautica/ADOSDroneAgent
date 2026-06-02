@@ -150,9 +150,10 @@ impl LogFrame {
         }
     }
 
-    /// Redact every secret-bearing field in place (idempotent).
-    pub fn redact_fields(&mut self) {
-        redact_map(&mut self.fields);
+    /// Redact every secret-bearing field in place (idempotent). Returns `true`
+    /// if any field value was changed.
+    pub fn redact_fields(&mut self) -> bool {
+        redact_map(&mut self.fields)
     }
 }
 
@@ -232,9 +233,10 @@ impl EventFrame {
         }
     }
 
-    /// Redact every secret-bearing field in the detail map (idempotent).
-    pub fn redact_detail(&mut self) {
-        redact_map(&mut self.detail);
+    /// Redact every secret-bearing field in the detail map (idempotent). Returns
+    /// `true` if any field value was changed.
+    pub fn redact_detail(&mut self) -> bool {
+        redact_map(&mut self.detail)
     }
 }
 
@@ -312,14 +314,16 @@ impl IngestFrame {
         }
     }
 
-    /// Redact secret-bearing fields on the inner frame in place.
-    pub fn redact(&mut self) {
+    /// Redact secret-bearing fields on the inner frame in place. Returns `true`
+    /// if any field value was actually changed, so a writer can record on the row
+    /// whether redaction touched it.
+    pub fn redact(&mut self) -> bool {
         match self {
             IngestFrame::Log(f) => f.redact_fields(),
             IngestFrame::Event(f) => f.redact_detail(),
             // Telemetry tags and hardware signals carry no secret material; the
             // metric/signal keys are fixed dotted names, not free-form fields.
-            IngestFrame::Telemetry(_) | IngestFrame::Hw(_) => {}
+            IngestFrame::Telemetry(_) | IngestFrame::Hw(_) => false,
         }
     }
 }
@@ -463,17 +467,21 @@ pub fn redact(key: &str, value: &str) -> String {
 
 /// Redact every secret-bearing string field of an open map in place. Non-string
 /// values, empty strings, and already-redacted values are left untouched.
-pub fn redact_map(fields: &mut Fields) {
+/// Returns `true` if at least one field value was changed.
+pub fn redact_map(fields: &mut Fields) -> bool {
+    let mut changed = false;
     for (k, v) in fields.iter_mut() {
         if let rmpv::Value::String(s) = v {
             if let Some(text) = s.as_str() {
                 let redacted = redact(k, text);
                 if redacted != text {
                     *v = rmpv::Value::from(redacted);
+                    changed = true;
                 }
             }
         }
     }
+    changed
 }
 
 #[cfg(test)]
@@ -633,7 +641,8 @@ mod tests {
     fn redact_map_redacts_only_secret_string_fields() {
         let mut fields = mk_fields(&[("api_key", "ABCDEFGHIJ1234567890"), ("device_id", "abc123")]);
         fields.insert("attempt".to_string(), MpVal::from(7u64)); // non-string, skipped
-        redact_map(&mut fields);
+        let changed = redact_map(&mut fields);
+        assert!(changed, "redaction changed the secret field");
         assert_eq!(
             fields.get("api_key").and_then(|v| v.as_str()),
             Some("redacted:ABCD...bb2a0cee")
@@ -643,6 +652,22 @@ mod tests {
             Some("abc123")
         );
         assert_eq!(fields.get("attempt").and_then(|v| v.as_u64()), Some(7));
+    }
+
+    #[test]
+    fn redact_map_reports_no_change_when_nothing_is_secret() {
+        // A map with only non-secret and already-redacted values reports no
+        // change, so a caller can record an accurate redaction flag on the row.
+        let mut fields = mk_fields(&[
+            ("device_id", "abc123"),
+            ("api_key", "redacted:ABCD...bb2a0cee"),
+        ]);
+        let changed = redact_map(&mut fields);
+        assert!(!changed, "no value should change");
+        assert_eq!(
+            fields.get("api_key").and_then(|v| v.as_str()),
+            Some("redacted:ABCD...bb2a0cee")
+        );
     }
 
     #[test]

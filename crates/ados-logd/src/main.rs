@@ -1,12 +1,16 @@
 //! `ados-logd` daemon — the durable local logging and telemetry store.
 //!
-//! This binary is a skeleton: it initializes logging the same way the sibling
-//! daemons do and exits. It binds no socket, opens no store, and installs no
-//! systemd unit yet, so it ships dark and has no runtime effect until the
-//! ingestion, hardware-collector, and query-API chunks land.
+//! The runnable daemon. Opens the WAL-mode SQLite store (the sole read-write
+//! handle), spawns the single-writer thread, binds the ingest socket, serves the
+//! accept loop, and shuts down cleanly on `SIGTERM`/`SIGINT`, draining and
+//! committing the final batch before exit. The synchronous SQLite work runs on a
+//! dedicated OS thread; the async accept loop bridges to it over a bounded
+//! channel.
 //!
-//! Modeled on the `ados-net` binary shape: journald logging on Linux with an
-//! fmt fallback off Linux or outside a journald unit.
+//! Modeled on the sibling daemons: journald logging on Linux with an fmt
+//! fallback off Linux or outside a journald unit, and systemd readiness notify.
+//! The binary is functional but ships dark — no systemd unit enables it yet, so
+//! it has no effect at the install layer until that unit lands.
 
 use anyhow::Result;
 
@@ -31,11 +35,22 @@ fn init_logging() {
         .try_init();
 }
 
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
     init_logging();
     tracing::info!(
         db = ados_logd::paths::DB_PATH,
-        "logging store skeleton: no socket bound, no behavior yet"
+        ingest = ados_logd::paths::INGEST_SOCKET,
+        "logging store starting"
     );
-    Ok(())
+    match ados_logd::daemon::run_daemon().await {
+        Ok(()) => {
+            tracing::info!("logging store exited cleanly");
+            Ok(())
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "logging store fatal error");
+            Err(e)
+        }
+    }
 }
