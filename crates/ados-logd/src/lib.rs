@@ -13,6 +13,7 @@
 
 pub mod daemon;
 pub mod db;
+pub mod hw;
 pub mod ingest;
 pub mod writer;
 

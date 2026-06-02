@@ -44,10 +44,15 @@ async fn send_frames(socket_path: &Path, frames: &[IngestFrame]) {
 #[tokio::test]
 async fn ingest_socket_accepts_frames_and_writer_inserts_them() {
     let dir = tempfile::tempdir().unwrap();
+    // Point the hardware collector at an empty subtree so this integration test
+    // exercises the socket + writer path without reading the host's `/sys`.
+    let hw_root = dir.path().join("hwroot");
+    std::fs::create_dir_all(&hw_root).unwrap();
     let paths = DaemonPaths {
         db: dir.path().join("logs.db"),
         ingest_socket: dir.path().join("logd.sock"),
         query_socket: dir.path().join("logd-query.sock"),
+        hw_root,
     };
     let socket_path = paths.ingest_socket.clone();
     let db_path = paths.db.clone();

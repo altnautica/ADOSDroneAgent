@@ -35,7 +35,8 @@ pub const INGEST_QUEUE_CAPACITY: usize = 4096;
 /// shutdown before the daemon stops waiting and exits anyway.
 pub const WRITER_JOIN_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Resolved paths a daemon run needs: the store and the two sockets it owns.
+/// Resolved paths a daemon run needs: the store and the two sockets it owns,
+/// plus the filesystem root the hardware collector samples under.
 #[derive(Debug, Clone)]
 pub struct DaemonPaths {
     /// The read-write store.
@@ -45,6 +46,10 @@ pub struct DaemonPaths {
     /// The query socket (bound by the query API in a later chunk; unlinked here
     /// on shutdown so a stale path never confuses a probing reader).
     pub query_socket: PathBuf,
+    /// The filesystem root the hardware collector reads sysfs/proc under. `/` in
+    /// production; a fixture tree in a test so the collector never touches the
+    /// host's real `/sys` or `/proc`.
+    pub hw_root: PathBuf,
 }
 
 impl Default for DaemonPaths {
@@ -53,6 +58,7 @@ impl Default for DaemonPaths {
             db: PathBuf::from(crate::paths::DB_PATH),
             ingest_socket: PathBuf::from(crate::paths::INGEST_SOCKET),
             query_socket: PathBuf::from(crate::paths::QUERY_SOCKET),
+            hw_root: PathBuf::from(crate::hw::DEFAULT_ROOT),
         }
     }
 }
@@ -159,6 +165,18 @@ where
         },
     ));
 
+    // Spawn the in-process hardware collector. It owns a clone of the ingest
+    // sender and samples sysfs/proc at per-class cadences, pushing one snapshot
+    // plus the key metrics per tick onto the same channel the socket producers
+    // feed. It stops when its own shutdown signal fires (before the sender is
+    // dropped) so it never sends into a closing channel.
+    let (collector_stop_tx, collector_stop_rx) = oneshot::channel::<()>();
+    let collector_task = tokio::spawn(crate::hw::run_collector(
+        paths.hw_root.clone(),
+        ingest_tx.clone(),
+        collector_stop_rx,
+    ));
+
     sd_ready();
     tracing::info!(
         boot_session,
@@ -175,6 +193,11 @@ where
     // Stop accepting new clients, then wait for the accept loop to finish.
     let _ = accept_stop_tx.send(());
     let _ = accept_task.await;
+
+    // Stop the hardware collector before the channel closes, then join it, so it
+    // never tries to send into a closing channel.
+    let _ = collector_stop_tx.send(());
+    let _ = collector_task.await;
 
     // Drop every sender so the writer sees the channel close, drains the queue,
     // commits the final batch, closes the session, and truncates the WAL.
@@ -265,10 +288,15 @@ mod tests {
     use tokio::net::UnixStream;
 
     fn temp_paths(dir: &Path) -> DaemonPaths {
+        // Point the hardware collector at an empty subtree so the daemon test
+        // exercises its lifecycle wiring without reading the host's `/sys`.
+        let hw_root = dir.join("hwroot");
+        std::fs::create_dir_all(&hw_root).unwrap();
         DaemonPaths {
             db: dir.join("logs.db"),
             ingest_socket: dir.join("logd.sock"),
             query_socket: dir.join("logd-query.sock"),
+            hw_root,
         }
     }
 
