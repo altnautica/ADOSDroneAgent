@@ -496,6 +496,21 @@ IOAccounting=yes\n";
     let _ = std::fs::write("/etc/systemd/system/ados-plugins.slice", slice);
 }
 
+/// Provision the persistent store directory for the local logging and
+/// telemetry daemon so it can create its database on first start without
+/// needing a writable parent it does not own. The daemon runs as root (like the
+/// sibling service daemons), so the dir is root-owned; 0750 keeps it off-limits
+/// to other users. Idempotent. The store ships dark — the unit is deployed but
+/// not enabled — so this only prepares the ground for an explicit turn-on.
+fn install_logd_store_dir() {
+    const DIR: &str = "/var/ados/logd";
+    if let Err(e) = std::fs::create_dir_all(DIR) {
+        tracing::warn!(error = %e, dir = DIR, "creating logging store dir failed");
+        return;
+    }
+    set_mode(Path::new(DIR), 0o750);
+}
+
 /// Enable a unit only when its file is deployed; tolerate the not-found case.
 fn enable_if_present(unit: &str) {
     let path = Path::new(SYSTEMD_DIR).join(unit);
@@ -912,6 +927,7 @@ impl Step for Systemd {
         write_env_file();
         install_plugin_slice(Some(&source));
         install_plugin_tmpfiles(Some(&source));
+        install_logd_store_dir();
         let udev_src = source.join("data/udev");
         let udev_count = deploy_udev_rules(&udev_src);
         tracing::info!(count = udev_count, "deployed udev rules");

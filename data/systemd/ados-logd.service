@@ -1,0 +1,48 @@
+[Unit]
+Description=ADOS Logging and Telemetry Store
+After=ados-supervisor.service
+PartOf=ados-supervisor.service
+StartLimitInterval=60s
+StartLimitBurst=5
+
+[Service]
+# Join the shared accounting slice so MemoryCurrent/CPUUsage are
+# observable per unit (the slice sets MemoryAccounting=yes).
+Slice=ados.slice
+# The daemon notifies READY after the store opens and the ingest socket is
+# bound, and STOPPING on a clean shutdown, so systemd tracks its real
+# lifecycle rather than assuming readiness at fork.
+Type=notify
+ExecStart=/opt/ados/bin/ados-logd
+Restart=on-failure
+RestartSec=5
+Environment=RUST_LOG=info
+EnvironmentFile=-/etc/ados/env
+
+# The store reads sysfs/proc for the hardware collector and writes only its
+# own database and sockets. It needs no elevated capabilities and must never
+# be able to touch the rest of the box.
+NoNewPrivileges=yes
+ProtectSystem=strict
+PrivateTmp=yes
+CapabilityBoundingSet=
+# The single-writer store lives under /var/ados/logd; the ingest and query
+# sockets live under /run/ados. Both are the only writable paths.
+ReadWritePaths=/var/ados /run/ados
+
+# The store is a history cache, not flight state. Cap it so a producer flood
+# or a runaway query can never starve the box of memory.
+MemoryMax=256M
+
+# The daemon pings the watchdog from its run loop; a hung writer or accept
+# loop trips this and systemd restarts the unit. Matches the daemon's
+# sd_notify cadence.
+WatchdogSec=30s
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ados-logd
+
+# No [Install] section: the unit is deployed but not auto-enabled. The store
+# is turned on through the agent's own cutover tooling once a box is ready to
+# carry it, so a fresh install ships it dark.

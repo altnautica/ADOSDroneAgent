@@ -162,6 +162,19 @@ pub const PREBUILT: &[PrebuiltBinary] = &[
         gate: Gate::Hard,
         profiles: DRONE,
     },
+    // The local logging and telemetry store. Best-effort: a missing store
+    // degrades recordkeeping (the agent falls back to journald) without
+    // aborting the install. The unit ships deployed-but-not-enabled, so the
+    // store stays off until it is explicitly turned on through the cutover
+    // tooling — a controlled rollout rather than an unconditional default.
+    PrebuiltBinary {
+        service: "ados-logd",
+        asset: "ados-logd-aarch64",
+        release_tag: "prebuilt-logd",
+        dest: "/opt/ados/bin/ados-logd",
+        gate: Gate::BestEffort,
+        profiles: BOTH,
+    },
     // The video relay the pipeline streams through. It is a mirrored
     // third-party binary rather than an `ados-*` service, so it lands in the
     // system bin dir. Best-effort: a missing relay degrades video without
@@ -189,8 +202,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn catalog_has_fifteen_entries() {
-        assert_eq!(PREBUILT.len(), 15);
+    fn catalog_has_sixteen_entries() {
+        assert_eq!(PREBUILT.len(), 16);
     }
 
     #[test]
@@ -204,6 +217,25 @@ mod tests {
         for svc in ["ados-supervisor", "ados-video", "ados-cloud", "ados-vision"] {
             assert!(hard.contains(&svc), "{svc} must be a Hard gate");
         }
+    }
+
+    #[test]
+    fn logd_is_best_effort_on_both_profiles() {
+        let logd = PREBUILT
+            .iter()
+            .find(|b| b.service == "ados-logd")
+            .expect("ados-logd must be in the catalog");
+        // A missing store degrades recordkeeping; it must never abort a fresh
+        // install, so its gate is best-effort.
+        assert_eq!(logd.gate, Gate::BestEffort);
+        // The store captures from both the drone and ground-station service
+        // sets, so it ships on both profiles.
+        assert!(for_profile("drone")
+            .iter()
+            .any(|b| b.service == "ados-logd"));
+        assert!(for_profile("ground_station")
+            .iter()
+            .any(|b| b.service == "ados-logd"));
     }
 
     #[test]

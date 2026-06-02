@@ -99,6 +99,15 @@ _SERVICES: dict[str, _Service] = {
         note="native display (default); the fallback marker pins the packaged UI",
         opt_out=True,
     ),
+    "logd": _Service(
+        flag="logd-rust-enabled",
+        binaries=("/opt/ados/bin/ados-logd",),
+        # Native-only with no packaged counterpart: the unit ships deployed but
+        # disabled, so enable turns it on and disable stops it. There is
+        # nothing to fall back to, so it is an extra unit, not a swap.
+        extra_units=("ados-logd",),
+        note="local logging and telemetry store (opt-in)",
+    ),
 }
 
 _SVC_NAMES = tuple(_SERVICES)
