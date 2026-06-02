@@ -20,10 +20,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{broadcast, mpsc, oneshot};
 
 use crate::db;
 use crate::ingest::{run_accept_loop, IngestSocket, IngestStats};
+use crate::taps::{spawn_all_taps, TapPaths};
 use crate::writer::{now_us, Writer, WriterConfig};
 
 /// Capacity of the bounded channel from the async accept loop to the blocking
@@ -34,6 +35,11 @@ pub const INGEST_QUEUE_CAPACITY: usize = 4096;
 /// How long the writer thread is given to drain and commit its final batch on
 /// shutdown before the daemon stops waiting and exits anyway.
 pub const WRITER_JOIN_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Default raw-frame sampling rate for the frame tap, in frames per second. The
+/// frame trail is a low-rate diagnostic record, not the full firehose; the
+/// config surface overrides this.
+pub const DEFAULT_MAVLINK_SAMPLE_HZ: f64 = 1.0;
 
 /// Resolved paths a daemon run needs: the store and the two sockets it owns,
 /// plus the filesystem root the hardware collector samples under.
@@ -50,6 +56,9 @@ pub struct DaemonPaths {
     /// production; a fixture tree in a test so the collector never touches the
     /// host's real `/sys` or `/proc`.
     pub hw_root: PathBuf,
+    /// The seams the taps read: the state and frame sockets and the sidecar
+    /// directory. Injectable so a test points them at a tempdir.
+    pub taps: TapPaths,
 }
 
 impl Default for DaemonPaths {
@@ -59,6 +68,7 @@ impl Default for DaemonPaths {
             ingest_socket: PathBuf::from(crate::paths::INGEST_SOCKET),
             query_socket: PathBuf::from(crate::paths::QUERY_SOCKET),
             hw_root: PathBuf::from(crate::hw::DEFAULT_ROOT),
+            taps: TapPaths::default(),
         }
     }
 }
@@ -177,6 +187,19 @@ where
         collector_stop_rx,
     ));
 
+    // Spawn the three seam taps, each with a clone of the ingest sender and a
+    // subscription to one broadcast shutdown so a single fire stops them all,
+    // symmetric with the collector and the accept loop. The taps read the frozen
+    // state/frame sockets and the runtime sidecars; an absent seam is normal and
+    // each tap retries on a backoff rather than failing.
+    let (taps_stop_tx, _taps_keep) = broadcast::channel::<()>(1);
+    let tap_tasks = spawn_all_taps(
+        &paths.taps,
+        ingest_tx.clone(),
+        &taps_stop_tx,
+        DEFAULT_MAVLINK_SAMPLE_HZ,
+    );
+
     sd_ready();
     tracing::info!(
         boot_session,
@@ -198,6 +221,13 @@ where
     // never tries to send into a closing channel.
     let _ = collector_stop_tx.send(());
     let _ = collector_task.await;
+
+    // Stop the seam taps the same way: fire the broadcast, then join each, so
+    // none tries to send into a closing channel.
+    let _ = taps_stop_tx.send(());
+    for task in tap_tasks {
+        let _ = task.await;
+    }
 
     // Drop every sender so the writer sees the channel close, drains the queue,
     // commits the final batch, closes the session, and truncates the WAL.
@@ -292,11 +322,19 @@ mod tests {
         // exercises its lifecycle wiring without reading the host's `/sys`.
         let hw_root = dir.join("hwroot");
         std::fs::create_dir_all(&hw_root).unwrap();
+        // Point the taps at the tempdir with no sockets or sidecars present, so
+        // the daemon test exercises their spawn + absent-seam backoff + shutdown
+        // wiring without touching the host's runtime directory.
         DaemonPaths {
             db: dir.join("logs.db"),
             ingest_socket: dir.join("logd.sock"),
             query_socket: dir.join("logd-query.sock"),
             hw_root,
+            taps: TapPaths {
+                state_socket: dir.join("state.sock"),
+                mavlink_socket: dir.join("mavlink.sock"),
+                sidecar_root: dir.to_path_buf(),
+            },
         }
     }
 

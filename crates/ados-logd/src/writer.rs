@@ -21,9 +21,10 @@ use std::time::{Duration, Instant};
 use rusqlite::{params, Connection};
 use tokio::sync::{broadcast, mpsc};
 
-use ados_protocol::logd::IngestFrame;
+use ados_protocol::logd::{EventFrame, IngestFrame, Level};
 
 use crate::db::{self, DbError};
+use crate::retention::{self, MaintenanceReport, RetentionConfig};
 
 /// How many rows accumulate before a batch is committed.
 pub const DEFAULT_BATCH_MAX_ROWS: usize = 500;
@@ -46,8 +47,17 @@ const DRAIN_POLL: Duration = Duration::from_millis(2);
 /// loses the oldest buffered frames (lagged), never the writer.
 pub const BROADCAST_CAPACITY: usize = 1024;
 
-/// Knobs for the batch boundaries and the checkpoint cadence. Defaults are tuned
-/// for SD-card-backed boards; the config layer overrides them at start.
+/// The longest the run loop waits for a frame before it wakes to check the
+/// maintenance deadline. This keeps the writer reactive to its own retention
+/// timer even when no frames are flowing, while staying idle-cheap: an idle
+/// writer wakes a handful of times a second to glance at the clock and goes back
+/// to waiting. It is well under any maintenance interval, so the maintenance
+/// cadence is honoured closely.
+const IDLE_WAKE: Duration = Duration::from_millis(250);
+
+/// Knobs for the batch boundaries, the checkpoint cadence, and the retention
+/// maintenance the writer folds into its loop. Defaults are tuned for
+/// SD-card-backed boards; the config layer overrides them at start.
 #[derive(Debug, Clone)]
 pub struct WriterConfig {
     /// Commit once this many rows have accumulated.
@@ -56,6 +66,10 @@ pub struct WriterConfig {
     pub batch_max: Duration,
     /// Truncate the WAL after this many persisted frames.
     pub checkpoint_interval_frames: u64,
+    /// Retention windows, size cap, and maintenance/vacuum cadences. The writer
+    /// runs retention on its own thread against its own connection — there is
+    /// never a second read-write connection.
+    pub retention: RetentionConfig,
 }
 
 impl Default for WriterConfig {
@@ -64,6 +78,7 @@ impl Default for WriterConfig {
             batch_max_rows: DEFAULT_BATCH_MAX_ROWS,
             batch_max: DEFAULT_BATCH_MAX,
             checkpoint_interval_frames: DEFAULT_CHECKPOINT_INTERVAL_FRAMES,
+            retention: RetentionConfig::default(),
         }
     }
 }
@@ -93,6 +108,13 @@ pub struct Writer {
     flight_session: Option<i64>,
     /// Frames persisted since the last WAL truncate.
     frames_since_checkpoint: u64,
+    /// When the next retention maintenance pass is due. Advanced by the
+    /// maintenance interval after each pass.
+    next_maintenance: Instant,
+    /// When the next periodic `VACUUM` is due. Advanced by the vacuum interval
+    /// after each vacuum (a maintenance pass that vacuums for any reason resets
+    /// this).
+    next_vacuum: Instant,
 }
 
 impl Writer {
@@ -103,13 +125,21 @@ impl Writer {
     pub fn new(
         db_path: impl AsRef<Path>,
         rx: mpsc::Receiver<IngestFrame>,
-        config: WriterConfig,
+        mut config: WriterConfig,
     ) -> Result<Self, WriterError> {
         let db_path = db_path.as_ref().to_path_buf();
         let conn = db::open(&db_path)?;
         let (broadcast_tx, _) = broadcast::channel(BROADCAST_CAPACITY);
         let boot_session = open_session(&conn, now_us(), "boot", Some("start"))?;
         tracing::info!(session = boot_session, "boot session opened");
+        // Clamp the retention knobs once at start so the maintenance step can
+        // trust the cap floor and the bounded low-water ratio.
+        config.retention = config.retention.clamped();
+        // Stagger the first maintenance/vacuum from start: the first pass runs one
+        // interval in, not at t=0, so a fresh boot is not spent vacuuming.
+        let now = Instant::now();
+        let next_maintenance = now + config.retention.maintenance_interval;
+        let next_vacuum = now + config.retention.vacuum_interval;
         Ok(Self {
             conn,
             rx,
@@ -119,6 +149,8 @@ impl Writer {
             boot_session,
             flight_session: None,
             frames_since_checkpoint: 0,
+            next_maintenance,
+            next_vacuum,
         })
     }
 
@@ -139,44 +171,177 @@ impl Writer {
         &self.db_path
     }
 
-    /// The blocking run loop. Drains the ingest channel in batches until the
-    /// channel closes (every sender dropped), commits the final partial batch,
-    /// closes the boot session, and truncates the WAL. Intended to be the body
-    /// of a dedicated `std::thread`; it must not run inside an async task because
-    /// every `rusqlite` call here blocks.
+    /// The blocking run loop. Drains the ingest channel in batches and folds the
+    /// retention maintenance pass in on its own timer, until the channel closes
+    /// (every sender dropped) and is drained, then commits the final partial
+    /// batch, closes the boot session, and truncates the WAL. Intended to be the
+    /// body of a dedicated `std::thread`; it must not run inside an async task
+    /// because every `rusqlite` call here blocks.
+    ///
+    /// The loop waits for the next frame with a bounded wake (`IDLE_WAKE`) rather
+    /// than an unbounded block, so the maintenance deadline is checked even when
+    /// no frames are flowing. An idle writer wakes a few times a second, glances
+    /// at the clock, and goes back to waiting — cheap, and reactive to its own
+    /// retention timer. Maintenance runs on the same connection the inserts use;
+    /// there is never a second read-write connection.
     pub fn run(mut self) -> Result<(), WriterError> {
         let mut batch: Vec<IngestFrame> = Vec::with_capacity(self.config.batch_max_rows);
-        // Block for the first frame of each otherwise-empty batch. A dedicated
-        // thread blocking here is correct and idle-cheap. When every sender has
-        // dropped, `blocking_recv` returns `None` and the loop ends; any frames
-        // pulled into `batch` before that are committed below.
-        while let Some(frame) = self.rx.blocking_recv() {
-            batch.push(frame);
-
-            // Fill the batch until the size or time boundary, without blocking.
-            let deadline = Instant::now() + self.config.batch_max;
-            while batch.len() < self.config.batch_max_rows {
-                match self.rx.try_recv() {
-                    Ok(frame) => batch.push(frame),
-                    Err(mpsc::error::TryRecvError::Empty) => {
-                        if Instant::now() >= deadline {
-                            break;
+        loop {
+            // Wait for the first frame of an otherwise-empty batch, but no longer
+            // than the next maintenance deadline (capped by IDLE_WAKE so a long
+            // interval still wakes regularly). `recv_with_deadline` returns the
+            // frame, or signals a timeout (run maintenance, loop) or a closed
+            // channel (drain and exit).
+            let wait = self.maintenance_wait();
+            match self.recv_with_deadline(wait) {
+                RecvOutcome::Frame(frame) => {
+                    batch.push(frame);
+                    // Fill the batch until the size or time boundary, without
+                    // blocking. A channel close mid-fill commits what we have and
+                    // is detected again on the next outer wait.
+                    let deadline = Instant::now() + self.config.batch_max;
+                    while batch.len() < self.config.batch_max_rows {
+                        match self.rx.try_recv() {
+                            Ok(frame) => batch.push(frame),
+                            Err(mpsc::error::TryRecvError::Empty) => {
+                                if Instant::now() >= deadline {
+                                    break;
+                                }
+                                std::thread::sleep(DRAIN_POLL);
+                            }
+                            Err(mpsc::error::TryRecvError::Disconnected) => break,
                         }
-                        std::thread::sleep(DRAIN_POLL);
                     }
-                    // Channel closed mid-fill: commit what we have, then the
-                    // outer `blocking_recv` returns `None` and the loop ends.
-                    Err(mpsc::error::TryRecvError::Disconnected) => break,
+                    self.commit_batch(&mut batch)?;
                 }
+                RecvOutcome::Idle => {
+                    // The wait elapsed with no frame: run maintenance if due, then
+                    // loop back to waiting.
+                    self.maybe_run_maintenance()?;
+                }
+                RecvOutcome::Closed => break,
             }
 
-            self.commit_batch(&mut batch)?;
+            // Maintenance is also checked after committing a batch, so a busy
+            // writer (which never hits the idle path) still runs retention.
+            self.maybe_run_maintenance()?;
         }
 
         // Clean shutdown: close the session and truncate the WAL. Any final
         // partial batch was already committed inside the loop.
         self.shutdown()?;
         Ok(())
+    }
+
+    /// How long to wait for the next frame: the time until the next maintenance
+    /// deadline, capped at [`IDLE_WAKE`] so an idle writer still wakes regularly
+    /// even with a long maintenance interval, and floored at zero so an overdue
+    /// maintenance pass is not delayed.
+    fn maintenance_wait(&self) -> Duration {
+        let until = self
+            .next_maintenance
+            .saturating_duration_since(Instant::now());
+        until.min(IDLE_WAKE)
+    }
+
+    /// Wait up to `wait` for one frame on the ingest channel. Polls with the
+    /// short [`DRAIN_POLL`] sleep so the thread stays idle-cheap and the
+    /// maintenance deadline is honoured closely.
+    fn recv_with_deadline(&mut self, wait: Duration) -> RecvOutcome {
+        let deadline = Instant::now() + wait;
+        loop {
+            match self.rx.try_recv() {
+                Ok(frame) => return RecvOutcome::Frame(frame),
+                Err(mpsc::error::TryRecvError::Disconnected) => return RecvOutcome::Closed,
+                Err(mpsc::error::TryRecvError::Empty) => {
+                    if Instant::now() >= deadline {
+                        return RecvOutcome::Idle;
+                    }
+                    std::thread::sleep(DRAIN_POLL);
+                }
+            }
+        }
+    }
+
+    /// Run a retention maintenance pass if its deadline has arrived, then advance
+    /// the next-maintenance deadline. A pass rolls up closed metric windows,
+    /// TTL-deletes aged raw and rollup rows, evicts oldest-first if the store is
+    /// over its size cap, and vacuums on the vacuum cadence (or after an
+    /// eviction). When the pass evicts rows it records a `retention.evicted`
+    /// event so the operator and the read API see that history was pruned.
+    fn maybe_run_maintenance(&mut self) -> Result<(), WriterError> {
+        let now = Instant::now();
+        if now < self.next_maintenance {
+            return Ok(());
+        }
+        self.next_maintenance = now + self.config.retention.maintenance_interval;
+
+        let do_vacuum = now >= self.next_vacuum;
+        let report = retention::run_maintenance(
+            &self.conn,
+            &self.config.retention,
+            now_us(),
+            &self.db_path,
+            do_vacuum,
+        )?;
+        // A pass that vacuumed for any reason (the cadence, or post-eviction)
+        // resets the vacuum cadence so the next periodic vacuum is a full
+        // interval away.
+        if report.vacuumed {
+            self.next_vacuum = now + self.config.retention.vacuum_interval;
+        }
+        self.record_maintenance(&report)?;
+        Ok(())
+    }
+
+    /// Record the outcome of a maintenance pass: log a one-line summary when it
+    /// did anything, and on an eviction write a `retention.evicted` event into
+    /// the store and fan it out to any live-tail subscriber, so the pruning is
+    /// visible both in the durable store and on the live stream.
+    fn record_maintenance(&mut self, report: &MaintenanceReport) -> Result<(), WriterError> {
+        if report.rolled_up_rows > 0
+            || report.ttl_deleted_rows > 0
+            || report.rollup_ttl_deleted_rows > 0
+            || report.had_eviction()
+        {
+            tracing::info!(
+                rolled_up = report.rolled_up_rows,
+                ttl_deleted = report.ttl_deleted_rows,
+                rollup_ttl_deleted = report.rollup_ttl_deleted_rows,
+                evicted = report.evicted_rows,
+                vacuumed = report.vacuumed,
+                "retention maintenance pass"
+            );
+        }
+        if report.had_eviction() {
+            let event = self.eviction_event(report);
+            // The writer owns the connection, so the event row goes in directly
+            // under the current session, with no second connection. A bad insert
+            // is logged and skipped rather than aborting the writer.
+            let session = self.flight_session.unwrap_or(self.boot_session);
+            if let Err(e) = insert_frame(&self.conn, &event, session, false) {
+                tracing::warn!(error = %e, "failed to record the retention eviction event");
+            }
+            // Fan the same event out to any live-tail subscriber.
+            let _ = self.broadcast_tx.send(event);
+        }
+        Ok(())
+    }
+
+    /// Build the `retention.evicted` event describing what the size cap freed:
+    /// the row count and the timestamp span of the evicted rows.
+    fn eviction_event(&self, report: &MaintenanceReport) -> IngestFrame {
+        let mut ev = EventFrame::new(now_us(), "retention.evicted", "ados-logd", Level::Warn);
+        ev.detail
+            .insert("rows".to_string(), rmpv::Value::from(report.evicted_rows));
+        if let Some(from) = report.evicted_from_us {
+            ev.detail
+                .insert("from_us".to_string(), rmpv::Value::from(from));
+        }
+        if let Some(to) = report.evicted_to_us {
+            ev.detail.insert("to_us".to_string(), rmpv::Value::from(to));
+        }
+        IngestFrame::Event(ev)
     }
 
     /// Persist one batch inside a single transaction, redacting every frame
@@ -272,6 +437,17 @@ impl Writer {
         tracing::info!(path = %self.db_path.display(), "store checkpointed and closed");
         Ok(())
     }
+}
+
+/// The outcome of one bounded wait for the next ingest frame.
+enum RecvOutcome {
+    /// A frame arrived.
+    Frame(IngestFrame),
+    /// The wait elapsed with no frame; the writer should check its maintenance
+    /// deadline and loop.
+    Idle,
+    /// Every sender dropped; the writer should drain (nothing left) and exit.
+    Closed,
 }
 
 /// A session-boundary transition derived from a frame.
@@ -533,6 +709,7 @@ mod tests {
             batch_max_rows: 5,
             batch_max: Duration::from_secs(3600),
             checkpoint_interval_frames: 1_000_000,
+            ..WriterConfig::default()
         };
         let frames: Vec<IngestFrame> = (0..10)
             .map(|i| IngestFrame::Telemetry(TelemetryFrame::new(i, "cpu.load", i as f64)))
@@ -555,6 +732,7 @@ mod tests {
             batch_max_rows: 10_000,
             batch_max: Duration::from_millis(20),
             checkpoint_interval_frames: 1_000_000,
+            ..WriterConfig::default()
         };
         run_writer_to_completion(
             &path,
@@ -636,6 +814,7 @@ mod tests {
             batch_max_rows: 1,
             batch_max: Duration::from_secs(3600),
             checkpoint_interval_frames: 1,
+            ..WriterConfig::default()
         };
         let frames: Vec<IngestFrame> = (0..20)
             .map(|i| IngestFrame::Telemetry(TelemetryFrame::new(i, "cpu.load", i as f64)))
@@ -646,6 +825,102 @@ mod tests {
             .query_row("SELECT count(*) FROM metrics", [], |r| r.get(0))
             .unwrap();
         assert_eq!(n, 20);
+        db::integrity_check(&ro).unwrap();
+    }
+
+    /// Drive the writer through its real run loop with a near-immediate
+    /// maintenance interval and a forced size cap, holding the channel open long
+    /// enough for at least one maintenance pass to fire while the writer is idle.
+    /// The pass must run on the writer's own connection (no second connection
+    /// exists), evict the oldest rows down toward the cap, and write a
+    /// `retention.evicted` event row into the store. Proves the retention path is
+    /// wired through the writer loop, not only callable as a free function.
+    #[test]
+    fn maintenance_runs_on_the_writer_thread_and_records_an_eviction_event() {
+        let (_dir, path) = temp_db();
+        // Maintenance fires almost immediately and then every 50 ms; the size cap
+        // is floored, and the low-water target is half the cap so eviction frees
+        // a real chunk. The vacuum interval is long so the only vacuum is the
+        // post-eviction one.
+        let retention = RetentionConfig {
+            maintenance_interval: Duration::from_millis(20),
+            vacuum_interval: Duration::from_secs(3600),
+            max_bytes: crate::retention::MIN_MAX_BYTES,
+            low_water_ratio: 0.5,
+            ..RetentionConfig::default()
+        };
+        let config = WriterConfig {
+            batch_max_rows: 4096,
+            batch_max: Duration::from_millis(20),
+            retention,
+            ..WriterConfig::default()
+        };
+
+        // A bounded channel small enough that the writer must be draining for the
+        // sends to make progress (proving the loop runs), large enough not to
+        // deadlock the feed.
+        let (tx, rx) = mpsc::channel::<IngestFrame>(4096);
+        let writer = Writer::new(&path, rx, config).unwrap();
+        let handle = std::thread::spawn(move || writer.run().unwrap());
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let total: i64 = 70_000;
+        rt.block_on(async {
+            // Push enough fat log rows that the store crosses the floored cap, so
+            // the idle maintenance pass has something to evict.
+            let base = now_us();
+            for i in 0..total {
+                let mut log = LogFrame::new(base + i * 1_000, "bulk", Level::Info, "x".repeat(512));
+                log.target = Some("t".to_string());
+                tx.send(IngestFrame::Log(log)).await.unwrap();
+            }
+            // Hold the channel open while the idle maintenance timer fires, then
+            // close it so the writer drains and exits.
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            drop(tx);
+        });
+        handle.join().unwrap();
+
+        let ro = db::open_readonly(&path).unwrap();
+        // The seed is sized to exceed the floored cap, so the writer's own
+        // maintenance pass must have evicted and recorded the event.
+        let evictions: i64 = ro
+            .query_row(
+                "SELECT count(*) FROM events WHERE kind='retention.evicted'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            evictions >= 1,
+            "the writer recorded a retention.evicted event on its own thread"
+        );
+        // The event carries a positive row count and the freed span in its blob.
+        let detail_blob: Vec<u8> = ro
+            .query_row(
+                "SELECT detail FROM events WHERE kind='retention.evicted' \
+                 ORDER BY id LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let detail: ados_protocol::logd::Fields = rmp_serde::from_slice(&detail_blob).unwrap();
+        let rows = detail.get("rows").and_then(|v| v.as_u64()).unwrap();
+        assert!(rows > 0, "the eviction event reports the rows it freed");
+        assert!(
+            detail.contains_key("from_us") && detail.contains_key("to_us"),
+            "the eviction event reports the freed span"
+        );
+        // Bulk rows were removed.
+        let remaining: i64 = ro
+            .query_row("SELECT count(*) FROM logs WHERE source='bulk'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert!(remaining < total, "the size cap removed rows");
         db::integrity_check(&ro).unwrap();
     }
 }

@@ -27,6 +27,9 @@ rmp-serde = { workspace = true }
 # The open fields/tags/detail maps in the shared wire contracts are keyed
 # `rmpv::Value`; the writer encodes them to msgpack blobs for the store.
 rmpv = { workspace = true }
+# Compact, fixed-width encoding for the truncated raw-frame head captured by the
+# frame-stream tap (a few bytes of payload for diagnosis, not the full frame).
+base64 = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }

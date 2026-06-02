@@ -20,7 +20,7 @@ use thiserror::Error;
 
 /// The current schema version. Bump this and append a migration string whenever
 /// the schema changes; never edit a migration that has shipped.
-pub const SCHEMA_VERSION: i64 = 1;
+pub const SCHEMA_VERSION: i64 = 2;
 
 /// Default on-disk path for the store.
 pub const DEFAULT_DB_PATH: &str = "/var/ados/logd/logs.db";
@@ -119,6 +119,45 @@ const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX idx_hw_ts ON hw (ts_us);
     CREATE INDEX idx_hw_unsynced ON hw (synced) WHERE synced = 0;
+    "#,
+    // v1 -> v2: downsample rollup tables. Long-range charts must not scan raw
+    // rows, and the raw rows age out well before the long-horizon shape should.
+    // The maintenance step folds closed raw windows into these tables before the
+    // raw rows are deleted, so a year-scale trend survives a thirty-day raw
+    // window. Each row aggregates one metric+tags grouping inside one time
+    // bucket; `avg` is derived at read time from `sum`/`count` so coarser grains
+    // compose from finer ones. `WITHOUT ROWID` with the composite primary key
+    // keeps the tables compact and makes the per-bucket upsert a key lookup.
+    r#"
+    CREATE TABLE metrics_1m (
+        bucket_us INTEGER NOT NULL,   -- floor(ts_us / 60_000_000) * 60_000_000
+        metric    TEXT    NOT NULL,
+        tags_key  TEXT    NOT NULL DEFAULT '',
+        count     INTEGER NOT NULL,
+        sum       REAL    NOT NULL,
+        min       REAL    NOT NULL,
+        max       REAL    NOT NULL,
+        last      REAL    NOT NULL,
+        last_us   INTEGER NOT NULL,
+        PRIMARY KEY (metric, tags_key, bucket_us)
+    ) WITHOUT ROWID;
+
+    CREATE TABLE metrics_1h (
+        bucket_us INTEGER NOT NULL,   -- floor to the hour
+        metric    TEXT    NOT NULL,
+        tags_key  TEXT    NOT NULL DEFAULT '',
+        count     INTEGER NOT NULL,
+        sum       REAL    NOT NULL,
+        min       REAL    NOT NULL,
+        max       REAL    NOT NULL,
+        last      REAL    NOT NULL,
+        last_us   INTEGER NOT NULL,
+        PRIMARY KEY (metric, tags_key, bucket_us)
+    ) WITHOUT ROWID;
+
+    -- Range queries over a grain scan by bucket time.
+    CREATE INDEX idx_metrics_1m_bucket ON metrics_1m (bucket_us);
+    CREATE INDEX idx_metrics_1h_bucket ON metrics_1h (bucket_us);
     "#,
 ];
 
@@ -224,7 +263,15 @@ mod tests {
         let path = dir.path().join("logs.db");
         let conn = open(&path).unwrap();
 
-        for table in ["sessions", "logs", "metrics", "events", "hw"] {
+        for table in [
+            "sessions",
+            "logs",
+            "metrics",
+            "events",
+            "hw",
+            "metrics_1m",
+            "metrics_1h",
+        ] {
             let count: i64 = conn
                 .query_row(
                     "SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?1",

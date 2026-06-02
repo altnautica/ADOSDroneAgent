@@ -6,15 +6,20 @@
 //! writer to that store; every other reader connects read-only.
 //!
 //! This crate carries the storage layer ([`db`]), the ingest socket
-//! ([`ingest`]), the single-writer store loop ([`writer`]), and the daemon
-//! lifecycle ([`daemon`]), plus a re-export of the shared wire contracts. The
-//! hardware collector and the query API land in later chunks; the binary is
-//! functional but ships dark (no systemd unit) until the install layer wires it.
+//! ([`ingest`]), the single-writer store loop ([`writer`]), the daemon
+//! lifecycle ([`daemon`]), the hardware collector ([`hw`]), the seam taps
+//! ([`taps`]) that consume the agent's frozen IPC seams, and the retention
+//! maintenance ([`retention`]) the writer runs to keep the store bounded, plus a
+//! re-export of the shared wire contracts. The query API lands in a later chunk;
+//! the binary is functional but ships dark (no systemd unit) until the install
+//! layer wires it.
 
 pub mod daemon;
 pub mod db;
 pub mod hw;
 pub mod ingest;
+pub mod retention;
+pub mod taps;
 pub mod writer;
 
 /// The shared wire contracts: versioned ingest frames, the read-API envelope,

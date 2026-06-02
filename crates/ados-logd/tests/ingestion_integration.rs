@@ -17,6 +17,7 @@ use tokio::sync::oneshot;
 
 use ados_logd::daemon::{run_with_paths, DaemonPaths};
 use ados_logd::db;
+use ados_logd::taps::TapPaths;
 use ados_logd::writer::now_us;
 use ados_protocol::logd::{EventFrame, HwSnapshot, IngestFrame, Level, LogFrame, TelemetryFrame};
 
@@ -48,11 +49,19 @@ async fn ingest_socket_accepts_frames_and_writer_inserts_them() {
     // exercises the socket + writer path without reading the host's `/sys`.
     let hw_root = dir.path().join("hwroot");
     std::fs::create_dir_all(&hw_root).unwrap();
+    // Point the taps at the tempdir too (no sockets or sidecars present), so the
+    // integration test never reaches for the host's real runtime directory and
+    // the daemon's tap wiring is exercised on the absent-seam path.
     let paths = DaemonPaths {
         db: dir.path().join("logs.db"),
         ingest_socket: dir.path().join("logd.sock"),
         query_socket: dir.path().join("logd-query.sock"),
         hw_root,
+        taps: TapPaths {
+            state_socket: dir.path().join("state.sock"),
+            mavlink_socket: dir.path().join("mavlink.sock"),
+            sidecar_root: dir.path().to_path_buf(),
+        },
     };
     let socket_path = paths.ingest_socket.clone();
     let db_path = paths.db.clone();
