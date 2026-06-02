@@ -23,7 +23,7 @@ default = []
 onnx = ["dep:ort"]
 
 [dependencies]
-ados-protocol = { path = "../ados-protocol", features = ["mavlink"] }
+ados-protocol = { path = "../ados-protocol", features = ["mavlink", "tracing-layer"] }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

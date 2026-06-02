@@ -174,11 +174,23 @@ async fn main() {
         return;
     }
 
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
-        )
-        .init();
+    {
+        use ados_protocol::logd::layer::LogdLayer;
+        use tracing_subscriber::prelude::*;
+
+        // fmt as the primary sink (this binary has no journald layer) plus the
+        // logd layer that ships records to the logging daemon's ingest socket;
+        // the logd layer is best-effort and never blocks the service. This runs
+        // only on the service path, after the one-shot adapter-list mode has
+        // already returned (that mode must keep stdout pure JSON).
+        let filter =
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into());
+        let _ = tracing_subscriber::registry()
+            .with(filter)
+            .with(tracing_subscriber::fmt::layer())
+            .with(LogdLayer::new("ados-radio"))
+            .try_init();
+    }
     tracing::info!("wfb_service_starting");
 
     let mut cfg = WfbConfig::load_from(Path::new(CONFIG_YAML));

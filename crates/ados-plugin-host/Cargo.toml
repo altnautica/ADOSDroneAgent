@@ -16,7 +16,7 @@ path = "src/bin/ados-plugin-host.rs"
 # The wire (frame + envelope + capability token) lives in ados-protocol and is
 # byte-parity tested against the Python supervisor. This crate speaks it
 # unchanged; it never re-implements the framing or the token.
-ados-protocol = { path = "../ados-protocol" }
+ados-protocol = { path = "../ados-protocol", features = ["tracing-layer"] }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

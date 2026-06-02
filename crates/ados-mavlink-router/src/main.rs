@@ -38,11 +38,19 @@ fn use_msgpack() -> bool {
 
 #[tokio::main]
 async fn main() {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
-        )
-        .init();
+    use ados_protocol::logd::layer::LogdLayer;
+    use tracing_subscriber::prelude::*;
+
+    // fmt as the primary sink (this binary has no journald layer) plus the logd
+    // layer that ships records to the logging daemon's ingest socket; the logd
+    // layer is best-effort and never blocks the service.
+    let filter =
+        tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into());
+    let _ = tracing_subscriber::registry()
+        .with(filter)
+        .with(tracing_subscriber::fmt::layer())
+        .with(LogdLayer::new("ados-mavlink-router"))
+        .try_init();
     tracing::info!("mavlink_router_starting");
 
     let cfg = MavlinkConfig::load();

@@ -15,6 +15,9 @@ name = "ados-net"
 path = "src/main.rs"
 
 [dependencies]
+# The producer-side log-shipping layer (feature-gated in ados-protocol) feeds
+# the logging daemon's ingest socket alongside journald; never on the hot path.
+ados-protocol = { path = "../ados-protocol", features = ["tracing-layer"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 # YAML config reader (/etc/ados/config.yaml) for the share_uplink reconcile.

@@ -22,6 +22,9 @@ path = "src/bin/ados-display-probe.rs"
 # The button + touch gesture FSMs (pure, host-portable) the navigator drives
 # the physical input from: front-panel press classification + touch strokes.
 ados-hid = { path = "../ados-hid" }
+# The producer-side log-shipping layer (feature-gated in ados-protocol) feeds
+# the logging daemon's ingest socket alongside journald; never on the hot path.
+ados-protocol = { path = "../ados-protocol", features = ["tracing-layer"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }

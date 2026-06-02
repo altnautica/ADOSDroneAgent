@@ -7,7 +7,7 @@ repository.workspace = true
 description = "Owns the flight-controller serial link, fans MAVLink frames to the IPC socket, and produces the vehicle-state snapshot on the state socket."
 
 [dependencies]
-ados-protocol = { path = "../ados-protocol", features = ["mavlink"] }
+ados-protocol = { path = "../ados-protocol", features = ["mavlink", "tracing-layer"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_norway = { workspace = true }

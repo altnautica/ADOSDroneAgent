@@ -66,6 +66,7 @@ version = "0.1.0"
 dependencies = [
  "ab_glyph",
  "ados-hid",
+ "ados-protocol",
  "anyhow",
  "embedded-graphics",
  "evdev",
@@ -131,6 +132,7 @@ dependencies = [
 name = "ados-hid"
 version = "0.1.0"
 dependencies = [
+ "ados-protocol",
  "anyhow",
  "evdev",
  "getrandom 0.2.17",
@@ -233,6 +235,7 @@ dependencies = [
 name = "ados-net"
 version = "0.1.0"
 dependencies = [
+ "ados-protocol",
  "anyhow",
  "async-trait",
  "nix 0.29.0",
@@ -292,6 +295,8 @@ dependencies = [
  "sha2",
  "thiserror 2.0.18",
  "tokio",
+ "tracing",
+ "tracing-subscriber",
  "ureq 2.12.1",
 ]
 
@@ -299,6 +304,7 @@ dependencies = [
 name = "ados-radio"
 version = "0.1.0"
 dependencies = [
+ "ados-protocol",
  "anyhow",
  "blake2",
  "hex",
@@ -340,6 +346,7 @@ name = "ados-supervisor"
 version = "0.1.0"
 dependencies = [
  "ados-macpin",
+ "ados-protocol",
  "anyhow",
  "blake2",
  "getrandom 0.2.17",

@@ -19,7 +19,7 @@ path = "src/main.rs"
 # the shared wire-contract types. Pulled in by path within the workspace.
 ados-radio = { path = "../ados-radio" }
 ados-supervisor = { path = "../ados-supervisor" }
-ados-protocol = { path = "../ados-protocol" }
+ados-protocol = { path = "../ados-protocol", features = ["tracing-layer"] }
 
 tokio = { workspace = true }
 serde = { workspace = true }

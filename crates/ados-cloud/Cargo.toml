@@ -18,7 +18,7 @@ path = "src/bin/ados-cloud.rs"
 # Wire primitives + the frozen plugin-supervisor contract the command
 # dispatcher will drive (path deps; the supervisor consumer wiring lands with
 # the command-dispatcher task).
-ados-protocol = { path = "../ados-protocol" }
+ados-protocol = { path = "../ados-protocol", features = ["tracing-layer"] }
 ados-plugin-host = { path = "../ados-plugin-host" }
 serde = { workspace = true }
 serde_json = { workspace = true }

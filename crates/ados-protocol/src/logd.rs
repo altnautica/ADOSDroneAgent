@@ -26,6 +26,13 @@ use thiserror::Error;
 
 use crate::frame;
 
+/// The producer-side `tracing` layer that ships log events to the logging
+/// daemon's ingest socket. Behind the `tracing-layer` feature so consumers that
+/// do not need it (the daemon itself, build tools, the interactive client) stay
+/// lean.
+#[cfg(feature = "tracing-layer")]
+pub mod layer;
+
 /// Maximum ingest frame payload. Log records and hardware snapshots are small;
 /// the cap is generous headroom and guards against a runaway producer.
 pub const LOGD_MAX_FRAME: usize = 1024 * 1024;

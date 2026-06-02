@@ -22,8 +22,17 @@ ureq = { workspace = true }
 # consumers (e.g. the TUI) do not need it, so it is behind the `mavlink`
 # feature. Renamed to avoid clashing with this crate's own `mavlink` module.
 rust_mavlink = { package = "mavlink", version = "0.13", default-features = false, features = ["ardupilotmega", "std"], optional = true }
+# Producer-side log shipping. Only the service binaries that ship logs to the
+# daemon pull these in (via the `tracing-layer` feature); the daemon and the
+# build tools stay lean without them.
+tracing = { workspace = true, optional = true }
+tracing-subscriber = { workspace = true, optional = true }
 
 [features]
 default = []
 # Enable the MAVLink codec module (ardupilotmega dialect).
 mavlink = ["dep:rust_mavlink"]
+# Enable the producer-side `tracing` layer that ships log events to the logging
+# daemon's ingest socket. Pulls in tracing + tracing-subscriber; the socket I/O
+# and bounded channel reuse the tokio dependency already present.
+tracing-layer = ["dep:tracing", "dep:tracing-subscriber"]
