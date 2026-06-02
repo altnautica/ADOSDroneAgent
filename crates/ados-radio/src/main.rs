@@ -1,3 +1,6 @@
+// The wfb-stats sidecar `json!` literal has many keys; the macro expansion
+// needs more headroom than the default recursion limit.
+#![recursion_limit = "256"]
 //! `ados-radio` binary — the WFB TX service for the drone profile.
 //!
 //! Mirrors `python -m ados.services.wfb` (drone profile path):
@@ -249,6 +252,51 @@ fn write_adapters_sidecar(adapters: &[adapter::WifiAdapterInfo]) {
     let _ = write_sidecar(&run_path("wfb-adapters.json"), &v);
 }
 
+/// The wfb-stats `state` string surfaced while the regulatory gate is blocking.
+/// The radio is up but refuses to bring up monitor mode / set a channel until the
+/// wanted domain verifies, so it parks here with bounded retry rather than
+/// radiating on a band the active domain forbids. Distinct from `no_adapter` /
+/// `unpaired` so the panel shows the regulatory conflict in one glance.
+const STATE_REG_BLOCKED: &str = "reg_blocked";
+
+/// Backoff (seconds) between regulatory-gate retries while blocked. Bounded and
+/// short so a transient domain glitch self-heals quickly, but slow enough not to
+/// spin `iw reg set` in a tight loop.
+const REG_BLOCKED_RETRY_SECS: u64 = 10;
+
+/// A pure decision over a regulatory-gate `Result` plus the strict-mode flag.
+/// Extracted so the gate's branching (proceed / block / proceed-anyway under the
+/// escape hatch) is unit-testable without standing up `iw`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RegGateDecision {
+    /// The gate passed; continue the bring-up.
+    Proceed,
+    /// The gate failed and strict mode is on; park in `reg_blocked` and retry.
+    /// Carries the bland reason code for the log + sidecar.
+    Block { reason: &'static str },
+    /// The gate failed but strict mode is off (the lab escape hatch); proceed on
+    /// a best-effort basis. Carries the reason for the warning log.
+    ProceedBestEffort { reason: &'static str },
+}
+
+/// Map a gate `Result` + the strict flag to a [`RegGateDecision`]. Pure.
+fn decide_reg_gate(result: &Result<(), adapter::RegError>, strict: bool) -> RegGateDecision {
+    match result {
+        Ok(()) => RegGateDecision::Proceed,
+        Err(e) => {
+            if strict {
+                RegGateDecision::Block {
+                    reason: e.reason_code(),
+                }
+            } else {
+                RegGateDecision::ProceedBestEffort {
+                    reason: e.reason_code(),
+                }
+            }
+        }
+    }
+}
+
 async fn run_service(cfg: &WfbConfig, cancel: Arc<Notify>) {
     // Count of radio-group respawns since service start, shared with the
     // heartbeat that surfaces it in the sidecar.
@@ -267,7 +315,8 @@ async fn run_service(cfg: &WfbConfig, cancel: Arc<Notify>) {
             tracing::info!(key = WFB_TX_KEY, "wfb_blocked_unpaired");
             write_stats_sidecar(
                 "unpaired",
-                cfg.channel,
+                &ChannelTruth::configured(cfg.rendezvous_channel()),
+                &RegSnapshot::default(),
                 cfg.tx_power_dbm,
                 None,
                 &LinkStats::default(),
@@ -283,15 +332,54 @@ async fn run_service(cfg: &WfbConfig, cancel: Arc<Notify>) {
             }
         }
 
-        // ── Regulatory domain FIRST, before the adapter is brought up in
-        // monitor mode. The kernel maps the permitted channel set and the
-        // per-channel TX-power ceiling at monitor-mode bring-up, so a domain
-        // set afterwards is too late and leaves the home channel (149,
-        // 5745 MHz) capped. iw reg set is global, so it needs no interface.
+        // ── Regulatory gate, stage 1: set + VERIFY the domain BEFORE the
+        // adapter is brought up in monitor mode. The kernel maps the permitted
+        // channel set and the per-channel TX-power ceiling at monitor-mode
+        // bring-up, so a domain set afterwards is too late and leaves the home
+        // channel (149, 5745 MHz) capped. This is a global per-phy call, so it
+        // needs no interface and cannot disturb the operator's management link.
+        // On verify failure under the strict (default) gate the radio parks in
+        // `reg_blocked` and retries rather than radiating on a forbidden band;
+        // the lab escape hatch (`reg_gate_strict: false`) proceeds best-effort.
         // A None config value falls back to the safe default.
+        let rendezvous_ch = cfg.rendezvous_channel();
         {
             let domain = cfg.reg_domain.as_deref().unwrap_or("US");
-            ados_radio::adapter::set_reg_domain(domain).await;
+            let reg_result = ados_radio::adapter::set_reg_domain(domain).await;
+            match decide_reg_gate(&reg_result, cfg.reg_gate_strict) {
+                RegGateDecision::Proceed => {}
+                RegGateDecision::ProceedBestEffort { reason } => {
+                    tracing::warn!(domain, reason, "wfb_reg_gate_proceeding_best_effort");
+                }
+                RegGateDecision::Block { reason } => {
+                    tracing::error!(domain, reason, "wfb_reg_gate_blocked");
+                    // Surface the live domain vs the wanted one so the panel shows
+                    // the actual conflict (e.g. a baked country the global set
+                    // could not displace), not a configured-and-locked lie.
+                    let status = ados_radio::adapter::read_reg_status(domain).await;
+                    write_stats_sidecar(
+                        STATE_REG_BLOCKED,
+                        &ChannelTruth::configured(rendezvous_ch),
+                        &RegSnapshot {
+                            domain: status.domain,
+                            verified: status.verified,
+                            enabled_channels: Vec::new(),
+                        },
+                        cfg.tx_power_dbm,
+                        None,
+                        &LinkStats::default(),
+                        cfg,
+                        restart_count.load(Ordering::Relaxed),
+                        &WatchdogCounters::default(),
+                        &TxRates::default(),
+                        &bitrate_snapshot.lock().await.clone(),
+                    );
+                    tokio::select! {
+                        _ = tokio::time::sleep(Duration::from_secs(REG_BLOCKED_RETRY_SECS)) => continue,
+                        _ = cancel.notified() => return,
+                    }
+                }
+            }
         }
 
         // ── Adapter selection ─────────────────────────────────────────────
@@ -316,7 +404,8 @@ async fn run_service(cfg: &WfbConfig, cancel: Arc<Notify>) {
             );
             write_stats_sidecar(
                 "no_adapter",
-                cfg.channel,
+                &ChannelTruth::configured(rendezvous_ch),
+                &RegSnapshot::default(),
                 cfg.tx_power_dbm,
                 None, // None adapter → chipset "" + adapter_injection_ok false
                 &LinkStats::default(),
@@ -339,10 +428,64 @@ async fn run_service(cfg: &WfbConfig, cancel: Arc<Notify>) {
             "adapter_selected"
         );
 
-        // ── Regulatory domain (best-effort) then channel ─────────────────
+        // ── Regulatory gate, stage 2: assert the rendezvous channel is in the
+        // domain's enabled set and is non-DFS, NOW that the interface (and its
+        // wiphy) exist, BEFORE setting the channel / TX power / spawning wfb_tx.
+        // This catches a domain/channel mismatch at preflight instead of as a
+        // silent power-cap on a fallback frequency. An empty enabled set means
+        // the wiphy list was unreadable, which the assertion treats as "could
+        // not determine" and passes, so a board with an unreadable channel list
+        // still comes up. On a strict-mode failure the radio parks in
+        // `reg_blocked` and retries; no wfb_tx is ever spawned on a bad channel.
         let iface = &adapter.ifname;
-        if let Some(domain) = &cfg.reg_domain {
-            ados_radio::adapter::set_reg_domain(domain).await;
+        let gate_enabled: std::collections::BTreeSet<u8> = adapter::enabled_channels(iface).await;
+        let gate_dfs: std::collections::BTreeSet<u8> = adapter::dfs_channels(iface).await;
+        {
+            let ready =
+                adapter::assert_reg_ready(rendezvous_ch, &gate_enabled, &gate_dfs, cfg.dfs_allowed);
+            match decide_reg_gate(&ready, cfg.reg_gate_strict) {
+                RegGateDecision::Proceed => {}
+                RegGateDecision::ProceedBestEffort { reason } => {
+                    tracing::warn!(
+                        channel = rendezvous_ch,
+                        reason,
+                        "wfb_reg_gate_channel_proceeding_best_effort"
+                    );
+                }
+                RegGateDecision::Block { reason } => {
+                    tracing::error!(
+                        channel = rendezvous_ch,
+                        reason,
+                        "wfb_reg_gate_channel_blocked"
+                    );
+                    // The wiphy exists now, so surface the live domain + the
+                    // permitted set: the panel can show that the rendezvous home
+                    // is not in the enabled set under this domain.
+                    let domain = cfg.reg_domain.as_deref().unwrap_or("US");
+                    let status = ados_radio::adapter::read_reg_status(domain).await;
+                    write_stats_sidecar(
+                        STATE_REG_BLOCKED,
+                        &ChannelTruth::configured(rendezvous_ch),
+                        &RegSnapshot {
+                            domain: status.domain,
+                            verified: status.verified,
+                            enabled_channels: gate_enabled.iter().copied().collect(),
+                        },
+                        cfg.tx_power_dbm,
+                        None,
+                        &LinkStats::default(),
+                        cfg,
+                        restart_count.load(Ordering::Relaxed),
+                        &WatchdogCounters::default(),
+                        &TxRates::default(),
+                        &bitrate_snapshot.lock().await.clone(),
+                    );
+                    tokio::select! {
+                        _ = tokio::time::sleep(Duration::from_secs(REG_BLOCKED_RETRY_SECS)) => continue,
+                        _ = cancel.notified() => return,
+                    }
+                }
+            }
         }
         set_channel(iface, cfg.channel).await;
 
@@ -361,10 +504,29 @@ async fn run_service(cfg: &WfbConfig, cancel: Arc<Notify>) {
         // Channels this adapter's reg domain forbids fail `iw set channel` with
         // -22 and split the pair onto divergent frequencies; the hop loop
         // intersects its candidates with this set. Empty = "could not
-        // determine" → do not restrict. Read once per adapter bring-up.
-        let enabled_channels: std::collections::BTreeSet<u8> =
-            adapter::enabled_channels(iface).await;
-        let enabled_channels = Arc::new(enabled_channels);
+        // determine" → do not restrict. Reuse the set the regulatory gate
+        // already read for this adapter bring-up (no second `iw` call).
+        let enabled_channels = Arc::new(gate_enabled);
+        // The permitted-set Vec the heartbeat surfaces in every sidecar (the
+        // ordered enabled channels). Cloned once here, reused each tick.
+        let enabled_channels_vec: Vec<u8> = enabled_channels.iter().copied().collect();
+
+        // ── Received-side link proof (the drone's received-side signal) ───
+        // A transmit-only end has no decode stats of its own, so `channel_locked`
+        // and `rf_unverified` are derived from whether a verified return signal
+        // (a control-plane ack or a peer beacon) was heard recently. The control-
+        // plane listener records proof; the heartbeat reads it. The monotonic
+        // `reference` is the shared origin all observations are measured against.
+        let rx_proof = ados_radio::link_proof::RxProof::new();
+        let proof_reference = Instant::now();
+        // Runtime operating channel (tmpfs concept): equals the rendezvous home
+        // until a coordinated channel move commits. The hop supervisor updates it
+        // on a successful channel change; the heartbeat reads it for the
+        // `operating_channel` field. Seeded with the rendezvous home.
+        let operating_channel = Arc::new(AtomicU64::new(rendezvous_ch as u64));
+        // The wanted regulatory domain, resolved once (constant for this bring-up)
+        // so the heartbeat's cheap live read can report verified vs unverified.
+        let wanted_domain = cfg.reg_domain.clone().unwrap_or_else(|| "US".to_string());
 
         // ── Shared live link stats (fed by the stats-RX reader task) ──────
         let link = Arc::new(tokio::sync::Mutex::new(LinkStats::default()));
@@ -395,9 +557,20 @@ async fn run_service(cfg: &WfbConfig, cancel: Arc<Notify>) {
             usb_speed_mbps: adapter.usb_speed_mbps,
             usb_degraded: adapter.usb_degraded,
         };
+        // Live regulatory status for the sidecar (the wanted domain is constant
+        // for this bring-up; the live read is a cheap `iw reg get`). Re-read by
+        // the heartbeat each tick so a domain that changes under the radio
+        // surfaces, but seeded here so the first `connecting` sidecar is truthful.
+        let reg_status = ados_radio::adapter::read_reg_status(&wanted_domain).await;
+        let reg_snapshot = RegSnapshot {
+            domain: reg_status.domain,
+            verified: reg_status.verified,
+            enabled_channels: enabled_channels_vec.clone(),
+        };
         write_stats_sidecar(
             "connecting",
-            cfg.channel,
+            &ChannelTruth::configured(rendezvous_ch),
+            &reg_snapshot,
             effective_tx_dbm,
             Some(&adapter_info),
             &LinkStats::default(),
@@ -420,17 +593,26 @@ async fn run_service(cfg: &WfbConfig, cancel: Arc<Notify>) {
         let hb_cancel = task_cancel.clone();
         let hb_cfg = cfg.clone();
         let hb_adapter = adapter_info.clone();
-        let hb_channel = cfg.channel;
+        let hb_rendezvous = rendezvous_ch;
         let hb_link = link.clone();
         let hb_iface = iface_str.clone();
         let hb_restart = restart_count.clone();
         let hb_counters = counters.clone();
         let hb_bitrate = bitrate_snapshot.clone();
+        let hb_proof = rx_proof.clone();
+        let hb_proof_reference = proof_reference;
+        let hb_operating = operating_channel.clone();
+        let hb_wanted_domain = wanted_domain.clone();
+        let hb_enabled = enabled_channels_vec.clone();
         let mut heartbeat = tokio::spawn(async move {
             const HEARTBEAT_INTERVAL_S: f64 = 2.0;
             let mut tick = tokio::time::interval(Duration::from_secs(2));
             let mut tx_live = TxLiveness::new();
             let mut prev_packets: i64 = 0;
+            // Last successfully-read live channel; if `iw info` momentarily fails
+            // we keep reporting the last-known live value rather than the
+            // configured one (a transient read error is not a channel change).
+            let mut last_live_channel = hb_rendezvous;
             loop {
                 tokio::select! {
                     _ = tick.tick() => {
@@ -457,9 +639,47 @@ async fn run_service(cfg: &WfbConfig, cancel: Arc<Notify>) {
                             tx_live.tx_live(),
                         );
                         let bsnap = hb_bitrate.lock().await.clone();
+
+                        // Truthful channel: read the LIVE interface channel, not
+                        // the configured value. A momentary read failure keeps the
+                        // last-known live value.
+                        if let Some(live) = channel_from_iface(&hb_iface).await {
+                            last_live_channel = live;
+                        }
+                        // Received-side proof: the drone is locked only when a
+                        // verified return signal was heard within the grace window;
+                        // it is `rf_unverified` when injecting RF with no such
+                        // signal (the transmitting-zero-reception case).
+                        let now = Instant::now();
+                        let rx_proven = hb_proof.proven_within(
+                            ados_radio::link_proof::RX_PROOF_GRACE,
+                            now,
+                            hb_proof_reference,
+                        );
+                        let channels = ChannelTruth {
+                            actual: last_live_channel,
+                            rendezvous: hb_rendezvous,
+                            operating: hb_operating.load(Ordering::Relaxed) as u8,
+                            locked: rx_proven,
+                            rf_unverified: ados_radio::link_proof::is_rf_unverified(
+                                tx_live.tx_live(),
+                                rx_proven,
+                            ),
+                        };
+                        // Live regulatory status (cheap `iw reg get`), so a domain
+                        // that changes under the radio surfaces remotely too.
+                        let reg_status =
+                            ados_radio::adapter::read_reg_status(&hb_wanted_domain).await;
+                        let reg = RegSnapshot {
+                            domain: reg_status.domain,
+                            verified: reg_status.verified,
+                            enabled_channels: hb_enabled.clone(),
+                        };
+
                         write_stats_sidecar(
                             state.as_str(),
-                            hb_channel,
+                            &channels,
+                            &reg,
                             effective_tx_dbm,
                             Some(&hb_adapter),
                             &stats,
@@ -560,20 +780,38 @@ async fn run_service(cfg: &WfbConfig, cancel: Arc<Notify>) {
         let presence_cancel = task_cancel.clone();
         let device_id = read_device_id();
 
-        // Presence beacon emitter (10s interval).
+        // Presence beacon emitter (10s interval). It advertises the LIVE channel
+        // (read from the interface each tick), not the configured value, so a GS
+        // that hears the beacon jumps to where the drone ACTUALLY is. A beacon
+        // that lies about its channel is the loop that hides a fallback-frequency
+        // landing; feeding the live value turns it into a true rendezvous pointer.
         let beacon_cancel = presence_cancel.clone();
         let beacon_key = hop_key;
-        let beacon_channel = cfg.channel;
+        let beacon_iface = iface_str.clone();
+        let beacon_fallback = rendezvous_ch;
         let beacon_device = device_id.clone();
         let mut beacon = tokio::spawn(async move {
-            emit_presence_beacons(&beacon_device, beacon_channel, &beacon_key, beacon_cancel).await
+            emit_presence_beacons(
+                &beacon_device,
+                &beacon_iface,
+                beacon_fallback,
+                &beacon_key,
+                beacon_cancel,
+            )
+            .await
         });
 
-        // Hop supervisor (enabled only when configured).
+        // Hop supervisor (enabled only when configured). When hop is disabled the
+        // else branch still runs an always-on control-plane proof listener so the
+        // drone's received-side proof (`channel_locked` / `rf_unverified`) works
+        // regardless of hop config — both paths feed the same shared `RxProof`.
         let hop_enabled = hop_cfg.auto_hop_enabled;
         let hop_link = link.clone();
         let hop_enabled_channels = enabled_channels.clone();
         let hop_restart = restart_count.clone();
+        let hop_proof = rx_proof.clone();
+        let hop_proof_reference = proof_reference;
+        let hop_operating = operating_channel.clone();
         let mut hop = tokio::spawn(async move {
             if hop_enabled {
                 run_hop_supervisor(
@@ -585,11 +823,21 @@ async fn run_service(cfg: &WfbConfig, cancel: Arc<Notify>) {
                     hop_link,
                     hop_enabled_channels,
                     hop_restart,
+                    hop_proof,
+                    hop_proof_reference,
+                    hop_operating,
                     hop_cancel,
                 )
                 .await;
             } else {
-                hop_cancel.notified().await;
+                proof_only_listener(
+                    &hop_key,
+                    &device_id,
+                    hop_proof,
+                    hop_proof_reference,
+                    hop_cancel,
+                )
+                .await;
             }
         });
 
@@ -648,9 +896,17 @@ async fn run_service(cfg: &WfbConfig, cancel: Arc<Notify>) {
         // The radio group will respawn at the top of the loop — count it.
         restart_count.fetch_add(1, Ordering::Relaxed);
         let wd = *counters.lock().await;
+        // Re-read the live regulatory status for the respawn-transient sidecar so
+        // it carries the truth (domain + verified) rather than a stale snapshot.
+        let respawn_reg_status = ados_radio::adapter::read_reg_status(&wanted_domain).await;
         write_stats_sidecar(
             "connecting",
-            cfg.channel,
+            &ChannelTruth::configured(rendezvous_ch),
+            &RegSnapshot {
+                domain: respawn_reg_status.domain,
+                verified: respawn_reg_status.verified,
+                enabled_channels: enabled_channels_vec.clone(),
+            },
             effective_tx_dbm,
             Some(&adapter_info),
             &LinkStats::default(),
@@ -667,10 +923,15 @@ async fn run_service(cfg: &WfbConfig, cancel: Arc<Notify>) {
     }
 }
 
-/// Emit PresenceBeacons on UDP 127.0.0.1:5803 every 10s.
+/// Emit PresenceBeacons on UDP 127.0.0.1:5803 every 10s, advertising the LIVE
+/// interface channel so the beacon points the peer at where this rig actually
+/// is. `fallback_channel` is used only when the live channel cannot be read this
+/// tick (a transient `iw info` failure), so the beacon never advertises a stale
+/// or configured value when the live one is available.
 async fn emit_presence_beacons(
     device_id: &str,
-    channel: u8,
+    iface: &str,
+    fallback_channel: u8,
     pair_key: &[u8; 32],
     cancel: Arc<Notify>,
 ) {
@@ -678,14 +939,18 @@ async fn emit_presence_beacons(
         return;
     };
     let mut tick = tokio::time::interval(PRESENCE_INTERVAL);
+    let mut last_live = fallback_channel;
     loop {
         tokio::select! {
             _ = tick.tick() => {
+                if let Some(live) = channel_from_iface(iface).await {
+                    last_live = live;
+                }
                 let epoch = hop_epoch_ms();
                 let pkt = build_presence_beacon(
                     device_id,
                     true, // drone role
-                    channel,
+                    last_live,
                     0,    // rssi not known at drone-side TX
                     epoch,
                     pair_key,
@@ -693,6 +958,52 @@ async fn emit_presence_beacons(
                 let _ = sock
                     .send_to(&pkt, format!("127.0.0.1:{HOP_CONTROL_PORT}"))
                     .await;
+            }
+            _ = cancel.notified() => return,
+        }
+    }
+}
+
+/// An always-on control-plane proof listener for when the hop supervisor is
+/// disabled (`auto_hop_enabled: false`). The hop supervisor owns the 5810
+/// listener when enabled; when it is not, this minimal listener binds the same
+/// port and records a verified return signal (a HopAck or a peer PresenceBeacon)
+/// into the shared `RxProof`, so the drone's received-side lock proof and the
+/// `rf_unverified` flag work regardless of hop config. It only updates the proof
+/// — it never moves a channel. The own-device-id check drops a loopback copy of
+/// this rig's own beacon so a self-beacon never counts as a return signal.
+async fn proof_only_listener(
+    pair_key: &[u8; 32],
+    device_id: &str,
+    rx_proof: ados_radio::link_proof::RxProof,
+    reference: Instant,
+    cancel: Arc<Notify>,
+) {
+    let sock = match tokio::net::UdpSocket::bind(format!("0.0.0.0:{HOP_ACK_PORT}")).await {
+        Ok(s) => s,
+        Err(e) => {
+            // The port is taken or unbindable: fall back to a plain wait so the
+            // task still ends cleanly on cancel rather than spinning.
+            tracing::warn!(error = %e, "proof_listener_bind_failed");
+            cancel.notified().await;
+            return;
+        }
+    };
+    let pair_key = *pair_key;
+    let own_device_id = device_id.to_string();
+    let mut buf = [0u8; 128];
+    loop {
+        tokio::select! {
+            r = sock.recv_from(&mut buf) => {
+                let Ok((n, _)) = r else { continue };
+                let pkt = &buf[..n];
+                if parse_hop_ack(pkt, &pair_key).is_some() {
+                    rx_proof.observe(Instant::now(), reference);
+                } else if let Some(p) = parse_presence_beacon(pkt, &pair_key) {
+                    if !is_self_beacon(&own_device_id, &p.device_id) {
+                        rx_proof.observe(Instant::now(), reference);
+                    }
+                }
             }
             _ = cancel.notified() => return,
         }
@@ -713,6 +1024,9 @@ async fn run_hop_supervisor(
     link: Arc<tokio::sync::Mutex<LinkStats>>,
     enabled_channels: Arc<std::collections::BTreeSet<u8>>,
     restart_count: Arc<AtomicU64>,
+    rx_proof: ados_radio::link_proof::RxProof,
+    proof_reference: Instant,
+    operating_channel: Arc<AtomicU64>,
     cancel: Arc<Notify>,
 ) {
     let state = Arc::new(tokio::sync::Mutex::new(HopState::new(cfg.channel)));
@@ -740,6 +1054,10 @@ async fn run_hop_supervisor(
     // 16-byte device-id, so the loopback-delivered copy of this rig's own beacon
     // is recognised by its first 16 bytes.
     let own_device_id = device_id.to_string();
+    // The shared received-side proof: a verified HopAck or a peer PresenceBeacon
+    // is the drone's evidence that its energy reached a receiver. The heartbeat
+    // reads this to compute `channel_locked` / `rf_unverified`.
+    let lst_proof = rx_proof.clone();
     let listener = tokio::spawn(async move {
         let mut buf = [0u8; 128];
         // Tracks the last peer device-id back-filled so the cross-process write
@@ -751,6 +1069,8 @@ async fn run_hop_supervisor(
                     let Ok((n, _)) = r else { continue };
                     let pkt = &buf[..n];
                     if let Some(target) = parse_hop_ack(pkt, &pair_key) {
+                        // A verified ack from the peer is received-side proof.
+                        lst_proof.observe(Instant::now(), proof_reference);
                         let _ = ack_tx.try_send(target);
                     } else if let Some(p) = parse_presence_beacon(pkt, &pair_key) {
                         // Drop this rig's own beacon (a loopback race can deliver
@@ -758,6 +1078,8 @@ async fn run_hop_supervisor(
                         if is_self_beacon(&own_device_id, &p.device_id) {
                             continue;
                         }
+                        // A verified peer beacon is received-side proof too.
+                        lst_proof.observe(Instant::now(), proof_reference);
                         let peer_id = p.device_id.clone();
                         lst_state.lock().await.on_peer_beacon(p);
                         write_peer_presence_json(&lst_state).await;
@@ -913,6 +1235,12 @@ async fn run_hop_supervisor(
                     };
                     state.lock().await.record_hop(home, "return_home", channel_ok && spawn_ok);
                 }
+
+                // Keep the shared operating channel in sync with the hop state's
+                // current channel, so the heartbeat's `operating_channel` field
+                // reflects a committed move. It equals the rendezvous home until a
+                // hop changes it (and returns to home on the return-home path).
+                operating_channel.store(state.lock().await.channel as u64, Ordering::Relaxed);
             }
             _ = cancel.notified() => {
                 listener.abort();
@@ -1176,6 +1504,61 @@ struct AdapterInfo {
     usb_degraded: bool,
 }
 
+/// The truthful channel picture the sidecar surfaces, so the operator and the
+/// GCS see where the radio ACTUALLY is, not where it was configured to be.
+///
+/// - `actual` is the LIVE channel read from `iw dev` this tick. Under a
+///   forbidden domain the driver can land the interface on an in-band fallback
+///   frequency; reporting the live value surfaces that instead of masking it
+///   behind the configured channel.
+/// - `rendezvous` is the operator's home / meeting channel (the immutable
+///   `video.wfb.channel`, or the optional rendezvous pin). Both rigs derive it
+///   identically, so it is the guaranteed meeting point.
+/// - `operating` is the runtime channel (tmpfs); it equals `rendezvous` unless a
+///   coordinated channel move committed.
+/// - `locked` is the received-side lock proof — true only when a verified return
+///   signal was heard, never hardcoded.
+/// - `rf_unverified` is raised when the transmit counter is advancing yet no
+///   return signal has been heard within the grace window (the
+///   transmitting-zero-reception case).
+#[derive(Clone, Copy, Default)]
+struct ChannelTruth {
+    actual: u8,
+    rendezvous: u8,
+    operating: u8,
+    locked: bool,
+    rf_unverified: bool,
+}
+
+impl ChannelTruth {
+    /// Pre-bring-up truth, before the interface exists to read a live channel
+    /// from: all three channels report the rendezvous home, the link is not yet
+    /// proven, and the transmit counter is not advancing. Used for the
+    /// unpaired / reg-blocked / no-adapter / connecting states the heartbeat has
+    /// not yet refined with a live read.
+    fn configured(rendezvous: u8) -> Self {
+        Self {
+            actual: rendezvous,
+            rendezvous,
+            operating: rendezvous,
+            locked: false,
+            rf_unverified: false,
+        }
+    }
+}
+
+/// The regulatory picture the sidecar surfaces, so a domain the global set could
+/// not displace (the forbidden-band case) is visible in one glance instead of
+/// masked. `domain` is the LIVE global country (`None` when unreadable);
+/// `verified` is true only when it matched the wanted domain; `enabled_channels`
+/// is the domain's permitted channel set (empty = could not determine).
+#[derive(Clone, Default)]
+struct RegSnapshot {
+    domain: Option<String>,
+    verified: bool,
+    enabled_channels: Vec<u8>,
+}
+
 /// Compute the 16-hex-char public-key fingerprint of the drone TX key, or `None`
 /// when the key is absent or not exactly 64 bytes. The peer-public half is the
 /// second 32 bytes of the WFB key file; the fingerprint is `blake2b(pub,
@@ -1215,7 +1598,8 @@ fn read_public_fingerprint(path: &Path) -> Option<String> {
 #[allow(clippy::too_many_arguments)]
 fn write_stats_sidecar(
     state: &str,
-    channel: u8,
+    channels: &ChannelTruth,
+    reg: &RegSnapshot,
     effective_tx_dbm: i8,
     adapter: Option<&AdapterInfo>,
     link: &LinkStats,
@@ -1239,8 +1623,31 @@ fn write_stats_sidecar(
     let paired = fingerprint.is_some();
     let v = json!({
         "state": state,
+        // The state-machine state, surfaced under its own key so the panel can
+        // show the recovery state directly. Mirrors `state` (the same wire
+        // vocabulary, including `reg_blocked`); kept distinct so a future
+        // state-machine value never collides with the legacy `state` consumers.
+        "link_state": state,
         "interface": interface,
-        "channel": channel,
+        // Back-compat alias: `channel` now reflects the LIVE interface channel
+        // (was the configured value). Readers that only know the old key still
+        // get reality. The split-out actual/rendezvous/operating fields below
+        // carry the full truth.
+        "channel": channels.actual,
+        "actual_channel": channels.actual,
+        "rendezvous_channel": channels.rendezvous,
+        "operating_channel": channels.operating,
+        // Live regulatory picture: the domain actually in force, whether it
+        // matched the wanted domain, and the permitted channel set. A forbidden
+        // domain the global set could not displace shows here instead of being
+        // masked by a configured-channel-and-locked report.
+        "reg_domain": reg.domain,
+        "reg_verified": reg.verified,
+        "enabled_channels": reg.enabled_channels,
+        // Transmitting yet no confirmed reception within the grace window — the
+        // loose-antenna / forbidden-band-cap / dead-peer case. False while the
+        // link is proven OR while the transmit counter is flat (idle).
+        "rf_unverified": channels.rf_unverified,
         "adapter_chipset": chipset,
         "adapter_injection_ok": injection_ok,
         // USB link health of the selected adapter. A full-speed (12 Mbps)
@@ -1252,7 +1659,10 @@ fn write_stats_sidecar(
         "tx_power_max_dbm": cfg.tx_power_max_dbm,
         "topology": cfg.topology,
         "mcs_index": cfg.mcs_index,
-        "channel_locked": true,
+        // Received-side lock proof, never hardcoded: a transmit-only end has no
+        // decode stats of its own, so this is true only when a verified return
+        // signal (a control-plane ack or a peer beacon) was heard recently.
+        "channel_locked": channels.locked,
         "profile": "drone",
         // Count of radio-group respawns since service start (watchdog kills,
         // hop restarts, return-home restarts) — surfaces churn to the panel.
@@ -1379,6 +1789,61 @@ mod tests {
         // drone-only-rig case that would otherwise hop every cycle forever.
         let link = LinkStats::default();
         assert!(!reactive_should_fire(true, &link, 10.0, -75.0));
+    }
+
+    #[test]
+    fn reg_gate_ok_proceeds() {
+        let ok: Result<(), adapter::RegError> = Ok(());
+        assert_eq!(decide_reg_gate(&ok, true), RegGateDecision::Proceed);
+        assert_eq!(decide_reg_gate(&ok, false), RegGateDecision::Proceed);
+    }
+
+    #[test]
+    fn reg_gate_strict_failure_blocks_with_reason() {
+        let err: Result<(), adapter::RegError> =
+            Err(adapter::RegError::ChannelNotEnabled { channel: 165 });
+        assert_eq!(
+            decide_reg_gate(&err, true),
+            RegGateDecision::Block {
+                reason: "channel_not_enabled"
+            }
+        );
+    }
+
+    #[test]
+    fn reg_gate_eeprom_override_blocks_under_strict() {
+        // The live override case: phy bakes a different country than wanted.
+        let err: Result<(), adapter::RegError> = Err(adapter::RegError::EepromOverride {
+            want: "US".into(),
+            got: "BO".into(),
+        });
+        assert_eq!(
+            decide_reg_gate(&err, true),
+            RegGateDecision::Block {
+                reason: "phy_override"
+            }
+        );
+    }
+
+    #[test]
+    fn reg_gate_failure_proceeds_best_effort_when_not_strict() {
+        // The lab escape hatch (reg_gate_strict: false) proceeds anyway.
+        let err: Result<(), adapter::RegError> = Err(adapter::RegError::VerifyTimeout {
+            want: "US".into(),
+            got: Some("BO".into()),
+        });
+        assert_eq!(
+            decide_reg_gate(&err, false),
+            RegGateDecision::ProceedBestEffort {
+                reason: "verify_timeout"
+            }
+        );
+    }
+
+    #[test]
+    fn reg_blocked_state_string_is_bland_and_stable() {
+        // The sidecar surfaces this verbatim; keep it stable and tag-free.
+        assert_eq!(STATE_REG_BLOCKED, "reg_blocked");
     }
 
     #[test]
@@ -1553,5 +2018,126 @@ mod tests {
         assert!(got
             .chars()
             .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+    }
+
+    #[test]
+    fn channel_truth_configured_reports_rendezvous_for_all_channels() {
+        // Before the interface exists, the truth reports the rendezvous home for
+        // actual/rendezvous/operating, with the link not proven and no tx.
+        let t = ChannelTruth::configured(149);
+        assert_eq!(t.actual, 149);
+        assert_eq!(t.rendezvous, 149);
+        assert_eq!(t.operating, 149);
+        assert!(!t.locked);
+        assert!(!t.rf_unverified);
+    }
+
+    /// Serialize tests that mutate the process-global `ADOS_RUN_DIR` env var.
+    static SIDECAR_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn read_sidecar(dir: &std::path::Path) -> serde_json::Value {
+        let body = std::fs::read(dir.join("wfb-stats.json")).unwrap();
+        serde_json::from_slice(&body).unwrap()
+    }
+
+    #[test]
+    fn sidecar_carries_truthful_channel_and_reg_fields() {
+        let _guard = SIDECAR_ENV_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("ADOS_RUN_DIR", dir.path());
+
+        // A locked link on a live fallback channel under a verified domain: the
+        // actual channel differs from the rendezvous home (the fallback-frequency
+        // case), the link is proven, and rf_unverified is clear.
+        let channels = ChannelTruth {
+            actual: 161,
+            rendezvous: 149,
+            operating: 157,
+            locked: true,
+            rf_unverified: false,
+        };
+        let reg = RegSnapshot {
+            domain: Some("US".to_string()),
+            verified: true,
+            enabled_channels: vec![149, 153, 157, 161, 165],
+        };
+        write_stats_sidecar(
+            "connected",
+            &channels,
+            &reg,
+            5,
+            None,
+            &LinkStats::default(),
+            &WfbConfig::default(),
+            0,
+            &WatchdogCounters::default(),
+            &TxRates::default(),
+            &BitrateSnapshot::default(),
+        );
+        let v = read_sidecar(dir.path());
+
+        // The back-compat `channel` alias now equals the LIVE actual channel.
+        assert_eq!(v["channel"], 161);
+        assert_eq!(v["actual_channel"], 161);
+        assert_eq!(v["rendezvous_channel"], 149);
+        assert_eq!(v["operating_channel"], 157);
+        assert_eq!(v["reg_domain"], "US");
+        assert_eq!(v["reg_verified"], true);
+        assert_eq!(
+            v["enabled_channels"],
+            serde_json::json!([149, 153, 157, 161, 165])
+        );
+        // channel_locked is the proof-derived value, not hardcoded true.
+        assert_eq!(v["channel_locked"], true);
+        assert_eq!(v["rf_unverified"], false);
+        // link_state mirrors the lifecycle state string.
+        assert_eq!(v["link_state"], "connected");
+
+        std::env::remove_var("ADOS_RUN_DIR");
+    }
+
+    #[test]
+    fn sidecar_reports_rf_unverified_and_unlocked_when_transmitting_blind() {
+        let _guard = SIDECAR_ENV_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("ADOS_RUN_DIR", dir.path());
+
+        // Transmitting (tx advancing) but no confirmed reception: locked false,
+        // rf_unverified true — the exact transmitting-zero-reception case.
+        let channels = ChannelTruth {
+            actual: 149,
+            rendezvous: 149,
+            operating: 149,
+            locked: false,
+            rf_unverified: true,
+        };
+        let reg = RegSnapshot {
+            domain: Some("BO".to_string()),
+            verified: false,
+            enabled_channels: vec![],
+        };
+        write_stats_sidecar(
+            STATE_REG_BLOCKED,
+            &channels,
+            &reg,
+            5,
+            None,
+            &LinkStats::default(),
+            &WfbConfig::default(),
+            0,
+            &WatchdogCounters::default(),
+            &TxRates::default(),
+            &BitrateSnapshot::default(),
+        );
+        let v = read_sidecar(dir.path());
+        assert_eq!(v["channel_locked"], false);
+        assert_eq!(v["rf_unverified"], true);
+        // The forbidden domain the global set could not displace is visible.
+        assert_eq!(v["reg_domain"], "BO");
+        assert_eq!(v["reg_verified"], false);
+        assert_eq!(v["enabled_channels"], serde_json::json!([]));
+        assert_eq!(v["state"], "reg_blocked");
+
+        std::env::remove_var("ADOS_RUN_DIR");
     }
 }

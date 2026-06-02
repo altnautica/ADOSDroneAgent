@@ -210,7 +210,7 @@ impl Hysteresis {
 /// The diagnostic snapshot the heartbeat reads onto `wfb-stats.json`. Carries
 /// the controller's intent so the GCS panel renders it even with the encoder
 /// restart deferred. Shared via [`SnapshotHandle`].
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct BitrateSnapshot {
     pub link_preset: String,
     pub adaptive_bitrate_enabled: bool,

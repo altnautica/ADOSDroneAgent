@@ -15,6 +15,7 @@ pub mod channel;
 pub mod cmdsock;
 pub mod config;
 pub mod hop;
+pub mod link_proof;
 pub mod link_quality;
 pub mod link_state;
 pub mod paths;

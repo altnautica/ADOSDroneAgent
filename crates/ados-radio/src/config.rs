@@ -50,6 +50,14 @@ fn default_true() -> bool {
 fn default_link_preset() -> String {
     "conservative".to_string()
 }
+// Fail-closed regulatory gate: when the wanted domain cannot be verified the
+// radio refuses to bring up monitor mode / set a channel rather than running on
+// a band the active domain forbids (the silent power-cap class). An operator
+// with an EEPROM-locked dongle in a lab can set this false to revert to the old
+// best-effort behaviour.
+fn default_reg_gate_strict() -> bool {
+    true
+}
 
 /// Operator-facing radio link presets, each mapping to the trio of wfb-ng
 /// tunables `(mcs_index, fec_k, fec_n)`. Tuned for RTL8812EU radios on a 20 MHz
@@ -108,6 +116,22 @@ pub struct WfbConfig {
     pub wfb_link_preset: String,
     #[serde(default = "default_reg_domain")]
     pub reg_domain: Option<String>,
+    /// Fail-closed regulatory gate. When true (the default) the radio refuses to
+    /// bring up monitor mode / set a channel until the wanted domain verifies; on
+    /// failure it parks in the `reg_blocked` state with bounded retry. False
+    /// reverts to legacy best-effort (an EEPROM-locked lab dongle escape hatch).
+    #[serde(default = "default_reg_gate_strict")]
+    pub reg_gate_strict: bool,
+    /// Permit DFS / radar channels as the rendezvous home. Off by default — a DFS
+    /// home needs a channel-availability check the link does not perform, so the
+    /// gate refuses a DFS rendezvous channel unless this is set.
+    #[serde(default)]
+    pub dfs_allowed: bool,
+    /// Optional rendezvous channel pin, distinct from the operator's home
+    /// `channel`. `None` falls back to `channel`. Lets an operator meet on a
+    /// channel other than the home when ever needed; never auto-written.
+    #[serde(default)]
+    pub rendezvous_channel: Option<u8>,
     #[serde(default)]
     pub auto_channel_enabled: bool,
     #[serde(default = "default_true")]
@@ -142,6 +166,9 @@ impl Default for WfbConfig {
             adaptive_bitrate_enabled: false,
             wfb_link_preset: default_link_preset(),
             reg_domain: default_reg_domain(),
+            reg_gate_strict: default_reg_gate_strict(),
+            dfs_allowed: false,
+            rendezvous_channel: None,
             auto_channel_enabled: false,
             auto_pair_enabled: true,
             paired_with_device_id: None,
@@ -168,6 +195,14 @@ impl WfbConfig {
         };
         let raw: RawConfig = serde_norway::from_str(&text).unwrap_or_default();
         raw.video.wfb
+    }
+
+    /// The rendezvous (meeting) channel: the optional `rendezvous_channel` pin
+    /// when set, else the operator's home `channel`. Both rigs derive it the same
+    /// way from the same config, so a fresh drone and a fresh ground station meet
+    /// with zero search.
+    pub fn rendezvous_channel(&self) -> u8 {
+        self.rendezvous_channel.unwrap_or(self.channel)
     }
 
     /// Override `mcs_index`/`fec_k`/`fec_n` from `wfb_link_preset`.
@@ -398,5 +433,46 @@ mod tests {
         let c = WfbConfig::default();
         assert_eq!(c.wfb_link_preset, "conservative");
         assert!(!c.adaptive_bitrate_enabled);
+    }
+
+    #[test]
+    fn reg_gate_defaults_are_fail_closed() {
+        let c = WfbConfig::default();
+        // Ships fail-closed: the gate refuses to radiate on an unverified domain.
+        assert!(c.reg_gate_strict);
+        // DFS home is off unless explicitly opted in.
+        assert!(!c.dfs_allowed);
+        // No rendezvous pin → rendezvous == home channel.
+        assert!(c.rendezvous_channel.is_none());
+        assert_eq!(c.rendezvous_channel(), c.channel);
+    }
+
+    #[test]
+    fn reg_gate_keys_read_from_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("config.yaml");
+        std::fs::write(
+            &cfg,
+            "video:\n  wfb:\n    channel: 149\n    reg_gate_strict: false\n    dfs_allowed: true\n    rendezvous_channel: 153\n",
+        )
+        .unwrap();
+        let c = WfbConfig::load_from(&cfg);
+        assert!(!c.reg_gate_strict);
+        assert!(c.dfs_allowed);
+        assert_eq!(c.rendezvous_channel, Some(153));
+        // The pin overrides the home channel for rendezvous.
+        assert_eq!(c.rendezvous_channel(), 153);
+    }
+
+    #[test]
+    fn reg_gate_keys_absent_fall_back_to_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("config.yaml");
+        // A config that sets only the home channel: the new keys take defaults.
+        std::fs::write(&cfg, "video:\n  wfb:\n    channel: 149\n").unwrap();
+        let c = WfbConfig::load_from(&cfg);
+        assert!(c.reg_gate_strict);
+        assert!(!c.dfs_allowed);
+        assert_eq!(c.rendezvous_channel(), 149);
     }
 }

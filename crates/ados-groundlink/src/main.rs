@@ -235,36 +235,65 @@ async fn receive_loop(config: &WfbConfig, presence_cache: GsPresenceCache) {
         // monitor mode is proven) — symmetric with the drone-side selection, so
         // the ground station resolves its own adapter instead of idling until an
         // external detector supplies one.
-        let interface = match ados_radio::adapter::select_interface(&config.interface).await {
-            Some(sel) if sel.injection_ok => {
-                manager.set_adapter(Some(sel.chipset.clone()), true);
-                manager.set_interface(sel.ifname.clone());
-                sel.ifname
-            }
-            Some(sel) => {
-                manager.set_adapter(Some(sel.chipset.clone()), false);
-                tracing::warn!(interface = %sel.ifname, "ground_wfb_adapter_no_injection");
-                tokio::time::sleep(Duration::from_secs(backoff as u64)).await;
-                backoff = (backoff * 2.0).min(30.0);
-                continue;
-            }
-            None => {
-                manager.set_adapter(None, false);
-                tracing::warn!("ground_no_wfb_adapter_found");
-                tokio::time::sleep(Duration::from_secs(backoff as u64)).await;
-                backoff = (backoff * 2.0).min(30.0);
-                continue;
-            }
-        };
+        let (interface, chipset) =
+            match ados_radio::adapter::select_interface(&config.interface).await {
+                Some(sel) if sel.injection_ok => {
+                    manager.set_adapter(Some(sel.chipset.clone()), true);
+                    manager.set_interface(sel.ifname.clone());
+                    (sel.ifname, Some(sel.chipset))
+                }
+                Some(sel) => {
+                    manager.set_adapter(Some(sel.chipset.clone()), false);
+                    tracing::warn!(interface = %sel.ifname, "ground_wfb_adapter_no_injection");
+                    tokio::time::sleep(Duration::from_secs(backoff as u64)).await;
+                    backoff = (backoff * 2.0).min(30.0);
+                    continue;
+                }
+                None => {
+                    manager.set_adapter(None, false);
+                    tracing::warn!("ground_no_wfb_adapter_found");
+                    tokio::time::sleep(Duration::from_secs(backoff as u64)).await;
+                    backoff = (backoff * 2.0).min(30.0);
+                    continue;
+                }
+            };
 
         // Bring the interface to receive-ready BEFORE the spawn, in the
-        // kernel-required order: regulatory domain (global, before monitor-mode
-        // bring-up so the home channel is not capped to the startup domain's
-        // limits), then monitor mode, TX power (brownout guard on marginal USB
-        // hosts), and the rendezvous-home channel. Also resolves the
-        // regulatory-permitted channel set the acquirer intersects its sweep
-        // against. Re-applied each generation, matching the Python restart cycle.
-        manager.prepare_interface(&interface).await;
+        // kernel-required order: the regulatory gate (set + verify the domain,
+        // then assert the rendezvous channel is permitted and non-DFS, both
+        // before monitor-mode bring-up so the home channel is never capped to the
+        // startup domain's limits), then monitor mode, TX power (brownout guard
+        // on marginal USB hosts), and the rendezvous-home channel. Re-applied
+        // each generation. On a strict-gate failure the receive chain is NOT
+        // spawned on a capped radio: park in `reg_blocked`, surface it, and
+        // retry with bounded backoff.
+        if let Err(e) = manager.prepare_interface(&interface).await {
+            // Surface the live domain vs the wanted one (the manager's snapshot
+            // may be partial when the gate failed before reading it), so the panel
+            // shows the actual regulatory conflict, not a configured-channel lie.
+            let wanted = config
+                .reg_domain
+                .clone()
+                .filter(|d| !d.is_empty())
+                .unwrap_or_else(|| wfb_rx::DEFAULT_REG_DOMAIN.to_string());
+            let status = ados_radio::adapter::read_reg_status(&wanted).await;
+            let reg = wfb_rx::GsRegSnapshot {
+                domain: status.domain,
+                verified: status.verified,
+                enabled_channels: manager.enabled_channels().iter().copied().collect(),
+            };
+            wfb_rx::write_reg_blocked_sidecar(
+                &interface,
+                chipset.as_deref(),
+                config.rendezvous_channel(),
+                config,
+                &reg,
+                e.reason_code(),
+            );
+            tokio::time::sleep(Duration::from_secs(backoff as u64)).await;
+            backoff = (backoff * 2.0).min(30.0);
+            continue;
+        }
 
         // Spawn the receive chain for this generation.
         let (mut data_rx, _rx_control, _tx_control) =
@@ -297,7 +326,10 @@ async fn receive_loop(config: &WfbConfig, presence_cache: GsPresenceCache) {
         // with the generation.
         let fanout_task = tokio::spawn(fanout::run_default_fanout());
 
-        // Stats reader: feeds the counter + LinkStats + the sidecar.
+        // Stats reader: feeds the counter + LinkStats + the sidecar. Carries the
+        // rendezvous home + the regulatory snapshot the gate resolved so the
+        // sidecar surfaces the truthful channel + reg picture, symmetric with the
+        // drone side.
         let stats_task = stdout.map(|out| {
             tokio::spawn(wfb_rx::stats_reader_loop(
                 out,
@@ -307,6 +339,8 @@ async fn receive_loop(config: &WfbConfig, presence_cache: GsPresenceCache) {
                 clock.clone(),
                 interface.clone(),
                 manager.channel(),
+                manager.rendezvous_channel(),
+                manager.reg_snapshot().clone(),
                 config.clone(),
                 None,
                 true,

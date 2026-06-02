@@ -51,6 +51,19 @@ use crate::watchdog::{
 // the same module that owns the stats reader.
 pub use crate::watchdog::SharedRxHealth;
 
+/// The regulatory picture the receive sidecar surfaces, symmetric with the
+/// drone side. `domain` is the LIVE global country (`None` when unreadable);
+/// `verified` is true only when it matched the wanted domain; `enabled_channels`
+/// is the domain's permitted set (empty = could not determine). Resolved by
+/// `prepare_interface` and stored on the manager so every sidecar write carries
+/// the same regulatory truth instead of nothing.
+#[derive(Debug, Clone, Default)]
+pub struct GsRegSnapshot {
+    pub domain: Option<String>,
+    pub verified: bool,
+    pub enabled_channels: Vec<u8>,
+}
+
 /// Internal data-RX egress port (the fan-out reads here). Differs from the
 /// drone side's 5601 stats port.
 pub const DATA_RX_PORT: u16 = 5599;
@@ -184,6 +197,47 @@ impl ChannelSetter for IwChannelSetter {
     }
 }
 
+/// Per-call ceiling on the live-channel `iw info` read so a hung `iw` (driver
+/// wedged) cannot stall the stats loop.
+const LIVE_CHANNEL_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Read the interface's LIVE channel from `iw <iface> info`, or `None` when `iw`
+/// cannot be run or its output carries no channel. The acquirer sweep can land
+/// the netdev on a different channel than the configured/operating one, so the
+/// sidecar reads the live value rather than reporting the configured channel.
+async fn live_channel(iface: &str) -> Option<u8> {
+    let out = tokio::time::timeout(
+        LIVE_CHANNEL_READ_TIMEOUT,
+        tokio::process::Command::new("iw")
+            .args([iface, "info"])
+            .output(),
+    )
+    .await
+    .ok()?
+    .ok()?;
+    parse_iface_channel(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// Parse the `channel <N>` token out of an `iw <iface> info` body. The line
+/// reads e.g. `\tchannel 149 (5745 MHz), width: 20 MHz, …`; the first integer
+/// after the `channel` keyword is the channel number. Pure helper, symmetric
+/// with the drone-side parser.
+fn parse_iface_channel(info: &str) -> Option<u8> {
+    for line in info.lines() {
+        let mut toks = line.split_whitespace();
+        while let Some(tok) = toks.next() {
+            if tok == "channel" {
+                if let Some(n) = toks.next() {
+                    if let Ok(ch) = n.parse::<u8>() {
+                        return Some(ch);
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Monotonic system clock (the production `Clock` seam).
 #[derive(Debug, Default)]
 pub struct SystemClock {
@@ -245,6 +299,73 @@ impl RxProcess for DataRxHandle {
 /// state. "active" once the data RX is up; "searching" while it is not.
 pub const STATE_ACTIVE: &str = "active";
 pub const STATE_SEARCHING: &str = "searching";
+/// The receive plane refuses to bring up monitor mode / spawn the receive chain
+/// until the wanted regulatory domain verifies and the rendezvous channel is
+/// permitted. Mirrors the drone-side `reg_blocked` state so the panel shows the
+/// regulatory conflict on either rig in one glance.
+pub const STATE_REG_BLOCKED: &str = "reg_blocked";
+
+/// Write a minimal `reg_blocked` ground sidecar so the heartbeat + panel show the
+/// regulatory conflict while the run loop retries the gate. Carries the reason
+/// code and the rendezvous channel under inspection; no receive chain is running,
+/// so the link-quality block defaults. Atomic via the Contract E writer.
+pub fn write_reg_blocked_sidecar(
+    interface: &str,
+    chipset: Option<&str>,
+    channel: u8,
+    cfg: &WfbConfig,
+    reg: &GsRegSnapshot,
+    reason: &str,
+) {
+    let snap = LinkStats::default();
+    // The chain is not running, so the live channel cannot be read; report the
+    // rendezvous home for actual/rendezvous/operating.
+    let channels = GsChannelTruth {
+        actual: channel,
+        rendezvous: channel,
+        operating: channel,
+    };
+    let mut v = build_gs_stats(
+        &snap,
+        interface,
+        chipset,
+        false, // no injection while blocked
+        channels,
+        reg,
+        cfg,
+        STATE_REG_BLOCKED,
+        crate::acquire::AcquireState::Searching.as_str(),
+        false, // not channel-locked
+        0.0,   // no valid decodes
+        0,     // no reacquire kills
+        0,     // no zombie kills
+        None,  // no silence window (the chain is not running)
+        0.0,   // no inbound video
+    );
+    if let Some(obj) = v.as_object_mut() {
+        obj.insert(
+            "reg_block_reason".to_string(),
+            serde_json::Value::String(reason.to_string()),
+        );
+    }
+    let _ = crate::sidecars::write_json_atomic(
+        std::path::Path::new(crate::paths::WFB_STATS_JSON),
+        &v,
+        0o644,
+    );
+}
+
+/// The truthful channel picture the receive sidecar surfaces, symmetric with the
+/// drone side. `actual` is the LIVE interface channel; `rendezvous` is the
+/// operator's home; `operating` is the runtime channel (== rendezvous unless a
+/// coordinated move committed). The GS proves the link by its own valid-decode
+/// count, so it has no `rf_unverified` of its own (always false here).
+#[derive(Debug, Clone, Copy)]
+pub struct GsChannelTruth {
+    pub actual: u8,
+    pub rendezvous: u8,
+    pub operating: u8,
+}
 
 /// Build the ground `wfb-stats.json` sidecar payload (the GS-extras the
 /// cross-process API + heartbeat read). `profile` is always "ground_station".
@@ -254,7 +375,8 @@ pub fn build_gs_stats(
     interface: &str,
     adapter_chipset: Option<&str>,
     adapter_injection_ok: bool,
-    channel: u8,
+    channels: GsChannelTruth,
+    reg: &GsRegSnapshot,
     cfg: &WfbConfig,
     state: &str,
     acquire_state: &str,
@@ -269,10 +391,25 @@ pub fn build_gs_stats(
         // Top-level lifecycle string, mirroring the drone-side sidecar so the GS
         // heartbeat reads a real state instead of null.
         "state": state,
+        // The state-machine state under its own key, mirroring the drone side.
+        "link_state": state,
         "interface": interface,
         "adapter_chipset": adapter_chipset,
         "adapter_injection_ok": adapter_injection_ok,
-        "channel": channel,
+        // Back-compat alias: `channel` now reflects the LIVE interface channel.
+        "channel": channels.actual,
+        "actual_channel": channels.actual,
+        "rendezvous_channel": channels.rendezvous,
+        "operating_channel": channels.operating,
+        // Live regulatory picture, symmetric with the drone side.
+        "reg_domain": reg.domain,
+        "reg_verified": reg.verified,
+        "enabled_channels": reg.enabled_channels,
+        // The GS proves the link by its own valid-decode count, not by a TX
+        // counter, so it is never `rf_unverified` (the transmitting-zero-
+        // reception flag is a transmit-side concept). Surfaced for schema
+        // symmetry so the panel reads one shape from either rig.
+        "rf_unverified": false,
         "tx_power_dbm": cfg.tx_power_dbm,
         // The TX-power ceiling, mirroring the drone-side sidecar key so the panel
         // renders the headroom from either rig's stats.
@@ -323,6 +460,10 @@ pub struct WfbRxManager {
     /// Empty until then (and on a board where the set cannot be determined); the
     /// acquirer treats an empty set as "do not restrict".
     enabled_channels: BTreeSet<u8>,
+    /// The regulatory picture (live domain + verified + permitted set) resolved
+    /// by `prepare_interface`, surfaced on every sidecar write so the panel sees
+    /// the same regulatory truth as the drone. Default (unknown) until prepared.
+    reg_snapshot: GsRegSnapshot,
 }
 
 impl WfbRxManager {
@@ -336,7 +477,20 @@ impl WfbRxManager {
             selected_chipset: None,
             adapter_injection_ok: false,
             enabled_channels: BTreeSet::new(),
+            reg_snapshot: GsRegSnapshot::default(),
         }
+    }
+
+    /// The regulatory picture resolved by `prepare_interface`. Default (unknown)
+    /// until that runs.
+    pub fn reg_snapshot(&self) -> &GsRegSnapshot {
+        &self.reg_snapshot
+    }
+
+    /// The rendezvous (meeting) channel for this receive plane — the operator's
+    /// home, or the optional rendezvous pin. Both rigs derive it identically.
+    pub fn rendezvous_channel(&self) -> u8 {
+        self.config.rendezvous_channel()
     }
 
     pub fn interface(&self) -> &str {
@@ -374,45 +528,127 @@ impl WfbRxManager {
     /// Bring `iface` to the receive-ready state BEFORE the wfb_rx spawn, in the
     /// order the kernel requires:
     ///
-    ///  1. **Regulatory domain first** (`iw reg set`). The kernel maps the
+    ///  1. **Regulatory gate first** (`iw reg set` + verify). The kernel maps the
     ///     permitted channel set and the per-channel TX-power ceiling when the
     ///     driver initialises, so a domain set after monitor-mode bring-up is too
     ///     late and leaves the home channel (149 / 5745 MHz) capped to the
     ///     startup domain's limits — zero injected frames, the -100 dBm "not
     ///     permitted" sentinel. This is a global per-phy call, so it needs no
     ///     interface; an empty/None config value falls back to the safe default.
-    ///  2. **Monitor mode** on the interface the run loop resolved (the
+    ///     Under the strict (default) gate a verify failure returns `Err` and the
+    ///     run loop parks in `reg_blocked` rather than spawning the receive chain
+    ///     on a capped radio; the lab escape hatch proceeds best-effort.
+    ///  2. **Channel readiness assertion**: once the wiphy is known, assert the
+    ///     rendezvous channel is in the enabled set and is non-DFS. A mismatch
+    ///     returns `Err` under the strict gate.
+    ///  3. **Monitor mode** on the interface the run loop resolved (the
     ///     auto-detected RTL injection adapter or the operator's config
     ///     override). `set_monitor_mode_verified` re-asserts it with the 4×
     ///     verify retry and guards the operator's control path so it can never
     ///     sever the management link.
-    ///  3. **TX power** on the monitor interface. Without it the dongle runs at
+    ///  4. **TX power** on the monitor interface. Without it the dongle runs at
     ///     the driver default (~17-20 dBm) and risks brownout on a host-VBUS USB
     ///     topology — the same guard the air side applies.
-    ///  4. **Channel set** to the rendezvous home. wfb_rx receives on whatever
+    ///  5. **Channel set** to the rendezvous home. wfb_rx receives on whatever
     ///     channel the netdev is set to; it does not retune itself.
     ///
     /// As a side effect it reads the wiphy's enabled channel set back so the
     /// acquirer can intersect its sweep candidates with what this domain permits.
-    /// Best-effort throughout: a failed sub-step is logged and the receive chain
-    /// still spawns (the link may still come up on a permissive driver).
-    pub async fn prepare_interface(&mut self, iface: &str) {
-        // 1. Regulatory domain, before anything touches monitor mode.
+    /// Returns `Err(RegError)` only when the regulatory gate fails under the
+    /// strict gate; the monitor / TX-power / channel sub-steps remain best-effort
+    /// (a failed sub-step is logged and the chain still spawns).
+    pub async fn prepare_interface(
+        &mut self,
+        iface: &str,
+    ) -> Result<(), ados_radio::adapter::RegError> {
+        // 1. Regulatory domain set + verify, before anything touches monitor
+        // mode. A global per-phy call; needs no interface.
         let reg_domain = self
             .config
             .reg_domain
             .clone()
             .filter(|d| !d.is_empty())
             .unwrap_or_else(|| DEFAULT_REG_DOMAIN.to_string());
-        ados_radio::adapter::set_reg_domain(&reg_domain).await;
+        let strict = self.config.reg_gate_strict;
+        if let Err(e) = ados_radio::adapter::set_reg_domain(&reg_domain).await {
+            if strict {
+                tracing::error!(
+                    interface = iface,
+                    domain = %reg_domain,
+                    reason = e.reason_code(),
+                    "ground_wfb_reg_gate_blocked"
+                );
+                return Err(e);
+            }
+            tracing::warn!(
+                interface = iface,
+                domain = %reg_domain,
+                reason = e.reason_code(),
+                "ground_wfb_reg_gate_proceeding_best_effort"
+            );
+        }
 
-        // 2. Monitor mode on the config-supplied interface (the Python override
+        // Read back the regulatory-permitted channel set + the DFS set so the
+        // acquirer can intersect its sweep and the gate can assert the home
+        // channel. An empty enabled set means "could not determine".
+        self.enabled_channels = ados_radio::adapter::enabled_channels(iface).await;
+        let dfs = ados_radio::adapter::dfs_channels(iface).await;
+
+        // 2. Assert the rendezvous channel is enabled + non-DFS now the wiphy is
+        // known, before any monitor / channel operation. Both rigs derive the
+        // rendezvous channel identically from the operator config.
+        let rendezvous_ch = self.config.rendezvous_channel();
+        if let Err(e) = ados_radio::adapter::assert_reg_ready(
+            rendezvous_ch,
+            &self.enabled_channels,
+            &dfs,
+            self.config.dfs_allowed,
+        ) {
+            if strict {
+                tracing::error!(
+                    interface = iface,
+                    channel = rendezvous_ch,
+                    reason = e.reason_code(),
+                    "ground_wfb_reg_gate_channel_blocked"
+                );
+                return Err(e);
+            }
+            tracing::warn!(
+                interface = iface,
+                channel = rendezvous_ch,
+                reason = e.reason_code(),
+                "ground_wfb_reg_gate_channel_proceeding_best_effort"
+            );
+        }
+
+        if self.enabled_channels.is_empty() {
+            tracing::info!(interface = iface, "ground_wfb_enabled_channels_unknown");
+        } else {
+            tracing::info!(
+                interface = iface,
+                channels = ?self.enabled_channels,
+                "ground_wfb_enabled_channels"
+            );
+        }
+
+        // Capture the regulatory picture (live domain + verified + permitted set)
+        // so every sidecar write surfaces the same truth as the drone side. The
+        // live read is a cheap `iw reg get`; the wanted domain is the resolved
+        // `reg_domain` the gate just applied.
+        let reg_status = ados_radio::adapter::read_reg_status(&reg_domain).await;
+        self.reg_snapshot = GsRegSnapshot {
+            domain: reg_status.domain,
+            verified: reg_status.verified,
+            enabled_channels: self.enabled_channels.iter().copied().collect(),
+        };
+
+        // 3. Monitor mode on the config-supplied interface (the Python override
         // path). 4× verify retry + the control-iface guard live in the helper.
         if !ados_radio::adapter::set_monitor_mode_verified(iface, 4).await {
             tracing::warn!(interface = iface, "ground_wfb_monitor_not_verified");
         }
 
-        // 3. TX power, before the wfb_rx spawn.
+        // 4. TX power, before the wfb_rx spawn.
         if ados_radio::adapter::set_tx_power(iface, self.config.tx_power_dbm)
             .await
             .is_none()
@@ -424,7 +660,7 @@ impl WfbRxManager {
             );
         }
 
-        // 4. Tune the netdev to the rendezvous home channel.
+        // 5. Tune the netdev to the rendezvous home channel.
         if IwChannelSetter.set_channel(iface, self.channel).await {
             tracing::info!(
                 interface = iface,
@@ -439,19 +675,7 @@ impl WfbRxManager {
             );
         }
 
-        // Read back the regulatory-permitted channel set for the acquirer to
-        // intersect its sweep against (an empty result means "could not
-        // determine", which the acquirer reads as "do not restrict").
-        self.enabled_channels = ados_radio::adapter::enabled_channels(iface).await;
-        if self.enabled_channels.is_empty() {
-            tracing::info!(interface = iface, "ground_wfb_enabled_channels_unknown");
-        } else {
-            tracing::info!(
-                interface = iface,
-                channels = ?self.enabled_channels,
-                "ground_wfb_enabled_channels"
-            );
-        }
+        Ok(())
     }
 
     /// Spawn the receive subprocesses for `iface` and return their handles. The
@@ -552,6 +776,8 @@ pub async fn stats_reader_loop(
     clock: Arc<dyn Clock>,
     interface: String,
     channel: u8,
+    rendezvous: u8,
+    reg: GsRegSnapshot,
     cfg: WfbConfig,
     chipset: Option<String>,
     injection_ok: bool,
@@ -561,6 +787,9 @@ pub async fn stats_reader_loop(
     use tokio::io::AsyncBufReadExt;
     let mut lines = tokio::io::BufReader::new(stdout).lines();
     let mut mon = LinkQualityMonitor::new();
+    // Last successfully-read live channel; seeded to the operating channel so a
+    // momentary `iw info` failure keeps reporting the last-known live value.
+    let mut last_live_channel = channel;
     while let Ok(Some(line)) = lines.next_line().await {
         *last_stdout_at.lock().await = clock.monotonic();
         let line = line.trim();
@@ -575,7 +804,7 @@ pub async fn stats_reader_loop(
             let valid_pps = snap.packets_received as f64; // stats interval = 1 s
             let video_bps = snap.bitrate_kbps as f64 * 1000.0 / 8.0;
             // Lock-state surface: decoding valid video on the current channel ==
-            // locked even when no sweep ran.
+            // locked even when no sweep ran. This is the GS received-side proof.
             let (channel_locked, acquire_state) = if snap.packets_received > 0 {
                 (true, "locked")
             } else {
@@ -594,12 +823,24 @@ pub async fn stats_reader_loop(
             };
             let rx_zombie_kills = zombie_kills.load(Ordering::SeqCst);
             *link.lock().await = snap.clone();
+            // Truthful channel: read the LIVE interface channel (the acquirer
+            // sweep can land it away from the configured/operating channel), with
+            // the last-known value held through a transient read failure.
+            if let Some(live) = live_channel(&interface).await {
+                last_live_channel = live;
+            }
+            let channels = GsChannelTruth {
+                actual: last_live_channel,
+                rendezvous,
+                operating: channel,
+            };
             let payload = build_gs_stats(
                 &snap,
                 &interface,
                 chipset.as_deref(),
                 injection_ok,
-                channel,
+                channels,
+                &reg,
                 &cfg,
                 state,
                 acquire_state,
@@ -744,12 +985,25 @@ mod tests {
     fn gs_stats_carries_ground_station_profile_and_extras() {
         let cfg = WfbConfig::default();
         let snap = LinkStats::default();
+        // A locked link on a live channel that drifted from the configured home
+        // (the acquirer swept to 157), under a verified domain.
+        let channels = GsChannelTruth {
+            actual: 157,
+            rendezvous: 149,
+            operating: 149,
+        };
+        let reg = GsRegSnapshot {
+            domain: Some("US".to_string()),
+            verified: true,
+            enabled_channels: vec![149, 153, 157, 161, 165],
+        };
         let v = build_gs_stats(
             &snap,
             "wlan1",
             Some("rtl88x2eu"),
             true,
-            149,
+            channels,
+            &reg,
             &cfg,
             STATE_ACTIVE,
             "locked",
@@ -764,7 +1018,20 @@ mod tests {
         assert_eq!(v["interface"], "wlan1");
         assert_eq!(v["adapter_chipset"], "rtl88x2eu");
         assert_eq!(v["adapter_injection_ok"], true);
-        assert_eq!(v["channel"], 149);
+        // `channel` is the back-compat alias for the LIVE actual channel.
+        assert_eq!(v["channel"], 157);
+        assert_eq!(v["actual_channel"], 157);
+        assert_eq!(v["rendezvous_channel"], 149);
+        assert_eq!(v["operating_channel"], 149);
+        assert_eq!(v["reg_domain"], "US");
+        assert_eq!(v["reg_verified"], true);
+        assert_eq!(
+            v["enabled_channels"],
+            serde_json::json!([149, 153, 157, 161, 165])
+        );
+        // The GS proves the link by valid decodes, so rf_unverified is never set.
+        assert_eq!(v["rf_unverified"], false);
+        assert_eq!(v["link_state"], "active");
         assert_eq!(v["acquire_state"], "locked");
         assert_eq!(v["channel_locked"], true);
         assert_eq!(v["reacquire_kills"], 2);
@@ -790,12 +1057,18 @@ mod tests {
             noise_dbm: -91.0,
             ..LinkStats::default()
         };
+        let channels = GsChannelTruth {
+            actual: 149,
+            rendezvous: 149,
+            operating: 149,
+        };
         let v = build_gs_stats(
             &snap,
             "wlan1",
             Some("rtl88x2eu"),
             true,
-            149,
+            channels,
+            &GsRegSnapshot::default(),
             &cfg,
             STATE_ACTIVE,
             "searching",
@@ -814,5 +1087,89 @@ mod tests {
         assert!(!v["state"].is_null());
         assert!(!v["noise_dbm"].is_null());
         assert!(!v["tx_power_max_dbm"].is_null());
+        // An unknown regulatory snapshot reports a JSON null domain (not absent)
+        // + an empty enabled set, never a fabricated value.
+        assert!(v["reg_domain"].is_null());
+        assert_eq!(v["reg_verified"], false);
+        assert_eq!(v["enabled_channels"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn reg_blocked_state_string_is_bland_and_stable() {
+        // The sidecar surfaces this verbatim; keep it stable and tag-free.
+        assert_eq!(STATE_REG_BLOCKED, "reg_blocked");
+    }
+
+    #[test]
+    fn reg_blocked_sidecar_carries_state_reason_and_no_injection() {
+        // The reg-blocked sidecar is written from the run loop when the gate
+        // fails; it must surface the bland reason + the blocked state and never
+        // claim injection while no receive chain is running. Write to a tmp dir
+        // to verify the JSON shape without touching /run.
+        let cfg = WfbConfig::default();
+        let snap = LinkStats::default();
+        let channels = GsChannelTruth {
+            actual: 149,
+            rendezvous: 149,
+            operating: 149,
+        };
+        // The forbidden domain the global set could not displace, surfaced.
+        let reg = GsRegSnapshot {
+            domain: Some("BO".to_string()),
+            verified: false,
+            enabled_channels: vec![],
+        };
+        let mut v = build_gs_stats(
+            &snap,
+            "wlan1",
+            Some("rtl88x2eu"),
+            false,
+            channels,
+            &reg,
+            &cfg,
+            STATE_REG_BLOCKED,
+            crate::acquire::AcquireState::Searching.as_str(),
+            false,
+            0.0,
+            0,
+            0,
+            None,
+            0.0,
+        );
+        if let Some(obj) = v.as_object_mut() {
+            obj.insert(
+                "reg_block_reason".to_string(),
+                serde_json::Value::String("phy_override".to_string()),
+            );
+        }
+        assert_eq!(v["state"], "reg_blocked");
+        assert_eq!(v["reg_block_reason"], "phy_override");
+        assert_eq!(v["adapter_injection_ok"], false);
+        assert_eq!(v["channel_locked"], false);
+        assert_eq!(v["valid_rx_packets_per_s"], 0.0);
+        assert_eq!(v["profile"], "ground_station");
+        // The live conflict is visible in the reg block sidecar.
+        assert_eq!(v["reg_domain"], "BO");
+        assert_eq!(v["reg_verified"], false);
+    }
+
+    #[test]
+    fn parse_iface_channel_reads_channel_token() {
+        // The live-channel readback the stats loop uses for `actual_channel`.
+        let info = "Interface wlan0\n\tifindex 5\n\ttype monitor\n\
+                    \tchannel 149 (5745 MHz), width: 20 MHz, center1: 5745 MHz\n";
+        assert_eq!(parse_iface_channel(info), Some(149));
+        let other = "Interface wlan0\n\tchannel 44 (5220 MHz), width: 20 MHz\n";
+        assert_eq!(parse_iface_channel(other), Some(44));
+    }
+
+    #[test]
+    fn parse_iface_channel_no_channel_is_none() {
+        assert_eq!(
+            parse_iface_channel("Interface wlan0\n\ttype managed\n"),
+            None
+        );
+        assert_eq!(parse_iface_channel(""), None);
+        assert_eq!(parse_iface_channel("\tchannel\n"), None);
     }
 }
