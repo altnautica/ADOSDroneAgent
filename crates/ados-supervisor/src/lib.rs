@@ -16,3 +16,4 @@ pub mod registry;
 pub mod role;
 pub mod sdnotify;
 pub mod systemctl;
+pub mod wifi_selfheal;

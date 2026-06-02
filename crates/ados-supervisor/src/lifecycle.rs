@@ -57,6 +57,12 @@ pub struct Supervisor {
     /// Debounces + coalesces hot-plug-driven restarts so a re-enumerating
     /// device does not thrash `systemctl`.
     hotplug_coord: crate::hotplug::HotplugCoordinator,
+    /// Reactive self-heal for the onboard management-WiFi data path. The radio
+    /// bring-up can leave the onboard WiFi associated-but-dead (a strong link +
+    /// valid IP yet zero traffic); this re-associates it so the box keeps a
+    /// working failover when the wired link is unplugged. Runs on both profiles
+    /// from the monitor tick; inert when there is no onboard managed WiFi.
+    wifi_selfheal: crate::wifi_selfheal::WifiSelfHeal,
 }
 
 impl Supervisor {
@@ -66,6 +72,9 @@ impl Supervisor {
             config,
             bind,
             hotplug_coord: crate::hotplug::HotplugCoordinator::new(),
+            wifi_selfheal: crate::wifi_selfheal::WifiSelfHeal::new(
+                ados_protocol::logd::emitter::EventEmitter::new("ados-supervisor"),
+            ),
         }
     }
 
@@ -352,6 +361,12 @@ impl Supervisor {
             tracing::info!(service = name, "parked retry");
             self.start_service(name).await;
         }
+
+        // Reactive network self-heal: detect + rebuild an onboard managed-WiFi
+        // link whose data path died under the radio bring-up, so the box keeps a
+        // working failover. Independent of service state; a no-op when there is
+        // no onboard managed WiFi or the WiFi is healthy.
+        self.wifi_selfheal.tick().await;
     }
 }
 

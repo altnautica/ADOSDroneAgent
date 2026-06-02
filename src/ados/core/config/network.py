@@ -49,8 +49,26 @@ class MacPinConfig(BaseModel):
     overrides: dict[str, str] = {}
 
 
+class WifiSelfHealConfig(BaseModel):
+    # Reactive self-heal for the onboard management-WiFi data path. The radio
+    # bring-up (global regulatory set + the injection adapter going into monitor
+    # mode) can leave the onboard WiFi associated-but-dead: a strong link and a
+    # valid IP yet no traffic (the gateway ARP never resolves). The supervisor
+    # watchdog detects this and re-associates the connection so the box keeps a
+    # working failover when its wired link is unplugged. On by default. It only
+    # ever touches onboard managed WiFi, never the radio adapter or wired.
+    enabled: bool = True
+    # Consecutive failing checks before a re-association fires (a single failing
+    # check can be a momentarily-busy gateway).
+    fail_threshold: int = 2
+    # Quiet period after a heal, per connection, so a re-association in progress
+    # is never re-fired on (anti-flap).
+    cooldown_s: int = 60
+
+
 class NetworkConfig(BaseModel):
     wifi_client: WifiClientConfig = WifiClientConfig()
     cellular: CellularConfig = CellularConfig()
     hotspot: HotspotConfig = HotspotConfig()
     mac_pin: MacPinConfig = MacPinConfig()
+    wifi_selfheal: WifiSelfHealConfig = WifiSelfHealConfig()
