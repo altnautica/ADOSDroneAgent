@@ -13,10 +13,15 @@
 use std::future::Future;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Instant;
 
+use ados_protocol::logd::{emitter::EventEmitter, Level};
 use serde_json::{json, Value};
 use tokio::sync::Mutex;
 
+use super::bind_event::{
+    bind_failed_detail, bind_started_detail, BindFailReason, BIND_FAILED_KIND, BIND_STARTED_KIND,
+};
 use super::fsm::{now_monotonic, BindSession, BindState};
 use super::{
     iface, keys, socat, BindRole, KEY_TRANSFER_TIMEOUT, RESTART_TIMEOUT, TUNNEL_POLL_INTERVAL,
@@ -83,6 +88,10 @@ pub struct BindOrchestrator {
     /// on a different connection than the blocked `start_bind`) notifies this so
     /// the in-flight session aborts. `start_local_bind` races it in its select.
     cancel: Arc<tokio::sync::Notify>,
+    /// Ships the bind-session lifecycle events to the logging daemon. Best-effort
+    /// and non-blocking; an absent daemon socket is dropped quietly. The log
+    /// lines remain the always-on fallback.
+    events: EventEmitter,
 }
 
 impl Default for BindOrchestrator {
@@ -92,11 +101,15 @@ impl Default for BindOrchestrator {
 }
 
 impl BindOrchestrator {
+    /// Construct the orchestrator. Spawns the event emitter's background shipper
+    /// on the current tokio runtime, so call this from within a runtime context
+    /// (every call site — the supervisor main and the tests — already is).
     pub fn new() -> Self {
         Self {
             lock: Mutex::new(()),
             session: Arc::new(Mutex::new(None)),
             cancel: Arc::new(tokio::sync::Notify::new()),
+            events: EventEmitter::new("ados-supervisor"),
         }
     }
 
@@ -137,9 +150,24 @@ impl BindOrchestrator {
 
         // Sweep stragglers before touching the radio (cheap + idempotent).
         socat::kill_stale_bind_socats().await;
-        *self.session.lock().await = Some(BindSession::new(role, source, peer_device_id.clone()));
+        let new_session = BindSession::new(role, source, peer_device_id.clone());
+        // Capture the identifiers + a monotonic origin for the lifecycle events
+        // before the session is moved behind the lock.
+        let session_id = new_session.session_id.clone();
+        let started_at = Instant::now();
+        *self.session.lock().await = Some(new_session);
         self.write_sentinel().await;
         tracing::info!(role = role.as_str(), source, "bind_session_started");
+        self.events.emit(
+            BIND_STARTED_KIND,
+            Level::Info,
+            bind_started_detail(
+                role.as_str(),
+                source,
+                &session_id,
+                peer_device_id.as_deref(),
+            ),
+        );
 
         let run = self.run_session(role, peer_device_id);
         tokio::pin!(cancel);
@@ -166,21 +194,41 @@ impl BindOrchestrator {
             _ = tokio::time::sleep(WAITING_PEER_WATCHDOG) => Outcome::Watchdog,
         };
 
+        let elapsed_s = started_at.elapsed().as_secs();
         match outcome {
             Outcome::Cancelled => {
                 self.set_state(BindState::Aborted).await;
                 self.set_error("cancelled by caller").await;
                 tracing::info!("bind_session_aborted");
+                self.emit_failed(
+                    role,
+                    BindFailReason::Interrupted,
+                    None,
+                    "cancelled by caller",
+                    &session_id,
+                    elapsed_s,
+                );
                 self.cleanup(role).await;
             }
             Outcome::Watchdog => {
-                self.set_state(BindState::Failed).await;
-                self.set_error(format!(
+                let msg = format!(
                     "watchdog fired after {}s with no progress",
                     WAITING_PEER_WATCHDOG.as_secs()
-                ))
-                .await;
+                );
+                // Capture the phase the session was parked in (typically
+                // `waiting_peer`) BEFORE transitioning to FAILED.
+                let phase = self.current_state().await.map(|s| s.as_str());
+                self.set_state(BindState::Failed).await;
+                self.set_error(msg.clone()).await;
                 tracing::warn!("bind_session_watchdog_fired");
+                self.emit_failed(
+                    role,
+                    BindFailReason::Timeout,
+                    phase,
+                    &msg,
+                    &session_id,
+                    elapsed_s,
+                );
                 self.cleanup(role).await;
             }
             Outcome::Done(Ok(())) => {
@@ -190,6 +238,15 @@ impl BindOrchestrator {
                 self.set_error(e.message.clone()).await;
                 self.set_state(BindState::Failed).await;
                 tracing::warn!(error = %e.message, phase = ?e.phase, "bind_session_failed");
+                let reason = BindFailReason::classify_error(&e.message, e.phase.as_deref());
+                self.emit_failed(
+                    role,
+                    reason,
+                    e.phase.as_deref(),
+                    &e.message,
+                    &session_id,
+                    elapsed_s,
+                );
                 self.cleanup(role).await;
             }
         }
@@ -442,6 +499,24 @@ impl BindOrchestrator {
         socat::kill_stale_bind_socats().await;
         crate::systemctl::stop(role.bind_unit()).await;
         crate::systemctl::start(role.normal_unit()).await;
+    }
+
+    /// Ship a `radio.bind_failed` lifecycle event. A thin wrapper so each
+    /// failure branch reads as one call. Best-effort + non-blocking.
+    fn emit_failed(
+        &self,
+        role: BindRole,
+        reason: BindFailReason,
+        phase: Option<&str>,
+        message: &str,
+        session_id: &str,
+        elapsed_s: u64,
+    ) {
+        self.events.emit(
+            BIND_FAILED_KIND,
+            Level::Warn,
+            bind_failed_detail(role.as_str(), reason, phase, message, session_id, elapsed_s),
+        );
     }
 
     // ── session mutators (each locks briefly, never across an await) ────────

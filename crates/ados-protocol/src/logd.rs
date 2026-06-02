@@ -33,6 +33,12 @@ use crate::frame;
 #[cfg(feature = "tracing-layer")]
 pub mod layer;
 
+/// The reusable event emitter that ships discrete [`EventFrame`] records from a
+/// service to the ingest socket. Unlike the log [`layer`], events are a
+/// first-class capture path, so this module is always available (not gated on
+/// `tracing-layer`).
+pub mod emitter;
+
 /// Maximum ingest frame payload. Log records and hardware snapshots are small;
 /// the cap is generous headroom and guards against a runaway producer.
 pub const LOGD_MAX_FRAME: usize = 1024 * 1024;
@@ -105,6 +111,11 @@ pub enum LogdError {
     #[error("unsupported wire version {got} (this build speaks {ours})")]
     Version { got: u8, ours: u8 },
 }
+
+/// The msgpack value type carried in the open field/detail/tag maps. Re-exported
+/// so a downstream producer can build an [`EventFrame`] detail without taking a
+/// direct dependency on `rmpv`.
+pub use rmpv::Value;
 
 /// An open msgpack map of extra fields. Values are arbitrary so new telemetry
 /// round-trips without a schema change (mirrors the open-state pattern).

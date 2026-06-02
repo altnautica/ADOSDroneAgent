@@ -41,7 +41,9 @@ use tracing_subscriber::registry::LookupSpan;
 use crate::logd::{Fields, IngestFrame, Level, LogFrame};
 
 /// Default ingest socket path. Producers connect here to write framed records.
-pub const DEFAULT_INGEST_SOCK: &str = "/run/ados/logd.sock";
+/// Re-exported from [`crate::logd::emitter`] so the path has one source of truth
+/// shared by the log layer and the event emitter.
+pub use crate::logd::emitter::DEFAULT_INGEST_SOCK;
 
 /// Channel capacity between the layer and the background shipper. Sized so a
 /// burst of records rides through a brief writer stall without dropping, while

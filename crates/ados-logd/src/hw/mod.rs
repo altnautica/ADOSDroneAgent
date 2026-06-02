@@ -32,6 +32,7 @@ pub mod memory;
 pub mod net;
 pub mod power;
 pub mod reader;
+pub mod regdomain;
 pub mod sched;
 pub mod soc;
 pub mod thermal;
@@ -84,6 +85,9 @@ pub const USB_CADENCE: Duration = Duration::from_secs(10);
 /// Pi throttle bitfield. The subprocess is cheap; the throttle bit must be
 /// caught promptly.
 pub const THROTTLE_CADENCE: Duration = Duration::from_secs(1);
+/// Regulatory domain per phy (`iw reg get`). Changes only on a reg-set; a slow
+/// cadence matched to the USB pass keeps the subprocess cost negligible.
+pub const REGDOMAIN_CADENCE: Duration = Duration::from_secs(10);
 
 /// The scheduler base tick: the greatest common cadence that lets every class
 /// fire close to its own period. The fast classes (thermal, freq/util) fire on
@@ -118,6 +122,7 @@ pub struct Collector {
     next_disk_sched: Instant,
     next_usb: Instant,
     next_throttle: Instant,
+    next_regdomain: Instant,
     /// Count of signal classes that yielded no readings on the most recent tick
     /// (a board without hwmon, a kernel without PSI, a non-Pi board, ...). Lets
     /// the absence be observed without turning a graceful skip into an error.
@@ -142,6 +147,7 @@ impl Collector {
             next_disk_sched: now,
             next_usb: now,
             next_throttle: now,
+            next_regdomain: now,
             unavailable_classes: 0,
         }
     }
@@ -421,6 +427,7 @@ impl Collector {
             snapshot: snap,
             metrics,
             throttle_due: now >= self.next_throttle,
+            regdomain_due: now >= self.next_regdomain,
         }
     }
 
@@ -428,6 +435,13 @@ impl Collector {
     /// async loop after it reads the (subprocess-backed) throttle flags.
     fn mark_throttle_fired(&mut self, now: Instant) {
         self.next_throttle = now + THROTTLE_CADENCE;
+    }
+
+    /// Mark the regulatory-domain class as fired and set its next deadline.
+    /// Called by the async loop after it reads the (subprocess-backed) `iw reg
+    /// get` domain, which mirrors the throttle subprocess pattern.
+    fn mark_regdomain_fired(&mut self, now: Instant) {
+        self.next_regdomain = now + REGDOMAIN_CADENCE;
     }
 
     /// Fold per-core and aggregate utilization into the snapshot + metrics, using
@@ -472,11 +486,12 @@ impl Collector {
 }
 
 /// What one [`Collector::tick`] produced: the snapshot, its metric frames, and
-/// whether the (separately-read) throttle class is due this tick.
+/// whether the (separately-read) subprocess-backed classes are due this tick.
 struct TickOutput {
     snapshot: HwSnapshot,
     metrics: Vec<TelemetryFrame>,
     throttle_due: bool,
+    regdomain_due: bool,
 }
 
 /// Used memory in MiB, derived from total minus available. Zero when either is
@@ -619,6 +634,17 @@ pub async fn run_collector(
                         let mut throttle_metrics = Vec::new();
                         fold_throttle(t, ts, &mut output.snapshot, &mut throttle_metrics);
                         output.metrics.extend(throttle_metrics);
+                    }
+                }
+
+                // Read the regulatory domain on the async side when due (`iw reg
+                // get` is a subprocess, like the throttle read) and fold the
+                // per-phy country / DFS-region signals into the same snapshot.
+                if output.regdomain_due {
+                    moved.mark_regdomain_fired(now);
+                    let reg = self::regdomain::read_regdomain().await;
+                    for (key, value) in reg {
+                        output.snapshot.signals.insert(key, value);
                     }
                 }
                 collector = moved;

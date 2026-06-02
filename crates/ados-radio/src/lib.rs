@@ -20,4 +20,6 @@ pub mod link_quality;
 pub mod link_state;
 pub mod paths;
 pub mod process;
+pub mod reg_event;
+pub mod rf_unverified;
 pub mod watchdog;

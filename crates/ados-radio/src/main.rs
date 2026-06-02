@@ -298,6 +298,11 @@ fn decide_reg_gate(result: &Result<(), adapter::RegError>, strict: bool) -> RegG
 }
 
 async fn run_service(cfg: &WfbConfig, cancel: Arc<Notify>) {
+    // Event emitter for discrete, queryable verdicts shipped to the logging
+    // daemon (the regulatory-gate decision, the received-side rf-unverified
+    // state change). Best-effort and non-blocking: an absent daemon socket is
+    // dropped quietly, never stalling the radio. The log lines + sidecar stay.
+    let events = ados_protocol::logd::emitter::EventEmitter::new("ados-radio");
     // Count of radio-group respawns since service start, shared with the
     // heartbeat that surfaces it in the sidecar.
     let restart_count = Arc::new(AtomicU64::new(0));
@@ -344,12 +349,49 @@ async fn run_service(cfg: &WfbConfig, cancel: Arc<Notify>) {
         // A None config value falls back to the safe default.
         let rendezvous_ch = cfg.rendezvous_channel();
         {
+            use ados_radio::reg_event::{
+                is_eeprom_override, reg_gate_detail, RegGateResult, RegGateStage, REG_GATE_KIND,
+            };
             let domain = cfg.reg_domain.as_deref().unwrap_or("US");
             let reg_result = ados_radio::adapter::set_reg_domain(domain).await;
+            let eeprom_override = reg_result
+                .as_ref()
+                .err()
+                .map(is_eeprom_override)
+                .unwrap_or(false);
             match decide_reg_gate(&reg_result, cfg.reg_gate_strict) {
-                RegGateDecision::Proceed => {}
+                RegGateDecision::Proceed => {
+                    events.emit(
+                        REG_GATE_KIND,
+                        RegGateResult::Ok.severity(),
+                        reg_gate_detail(
+                            RegGateStage::Domain,
+                            &cfg.band,
+                            rendezvous_ch,
+                            domain,
+                            Some(domain),
+                            false,
+                            RegGateResult::Ok,
+                            None,
+                        ),
+                    );
+                }
                 RegGateDecision::ProceedBestEffort { reason } => {
                     tracing::warn!(domain, reason, "wfb_reg_gate_proceeding_best_effort");
+                    events.emit(
+                        REG_GATE_KIND,
+                        RegGateResult::Failed.severity(),
+                        reg_gate_detail(
+                            RegGateStage::Domain,
+                            &cfg.band,
+                            rendezvous_ch,
+                            domain,
+                            None,
+                            eeprom_override,
+                            RegGateResult::Failed,
+                            Some(reason),
+                        ),
+                    );
                 }
                 RegGateDecision::Block { reason } => {
                     tracing::error!(domain, reason, "wfb_reg_gate_blocked");
@@ -357,6 +399,20 @@ async fn run_service(cfg: &WfbConfig, cancel: Arc<Notify>) {
                     // the actual conflict (e.g. a baked country the global set
                     // could not displace), not a configured-and-locked lie.
                     let status = ados_radio::adapter::read_reg_status(domain).await;
+                    events.emit(
+                        REG_GATE_KIND,
+                        RegGateResult::Blocked.severity(),
+                        reg_gate_detail(
+                            RegGateStage::Domain,
+                            &cfg.band,
+                            rendezvous_ch,
+                            domain,
+                            status.domain.as_deref(),
+                            eeprom_override,
+                            RegGateResult::Blocked,
+                            Some(reason),
+                        ),
+                    );
                     write_stats_sidecar(
                         STATE_REG_BLOCKED,
                         &ChannelTruth::configured(rendezvous_ch),
@@ -441,15 +497,49 @@ async fn run_service(cfg: &WfbConfig, cancel: Arc<Notify>) {
         let gate_enabled: std::collections::BTreeSet<u8> = adapter::enabled_channels(iface).await;
         let gate_dfs: std::collections::BTreeSet<u8> = adapter::dfs_channels(iface).await;
         {
+            use ados_radio::reg_event::{
+                reg_gate_detail, RegGateResult, RegGateStage, REG_GATE_KIND,
+            };
+            let domain = cfg.reg_domain.as_deref().unwrap_or("US");
             let ready =
                 adapter::assert_reg_ready(rendezvous_ch, &gate_enabled, &gate_dfs, cfg.dfs_allowed);
             match decide_reg_gate(&ready, cfg.reg_gate_strict) {
-                RegGateDecision::Proceed => {}
+                RegGateDecision::Proceed => {
+                    events.emit(
+                        REG_GATE_KIND,
+                        RegGateResult::Ok.severity(),
+                        reg_gate_detail(
+                            RegGateStage::Channel,
+                            &cfg.band,
+                            rendezvous_ch,
+                            domain,
+                            None,
+                            false,
+                            RegGateResult::Ok,
+                            None,
+                        ),
+                    );
+                }
                 RegGateDecision::ProceedBestEffort { reason } => {
                     tracing::warn!(
                         channel = rendezvous_ch,
                         reason,
                         "wfb_reg_gate_channel_proceeding_best_effort"
+                    );
+                    let status = ados_radio::adapter::read_reg_status(domain).await;
+                    events.emit(
+                        REG_GATE_KIND,
+                        RegGateResult::Failed.severity(),
+                        reg_gate_detail(
+                            RegGateStage::Channel,
+                            &cfg.band,
+                            rendezvous_ch,
+                            domain,
+                            status.domain.as_deref(),
+                            false,
+                            RegGateResult::Failed,
+                            Some(reason),
+                        ),
                     );
                 }
                 RegGateDecision::Block { reason } => {
@@ -461,8 +551,21 @@ async fn run_service(cfg: &WfbConfig, cancel: Arc<Notify>) {
                     // The wiphy exists now, so surface the live domain + the
                     // permitted set: the panel can show that the rendezvous home
                     // is not in the enabled set under this domain.
-                    let domain = cfg.reg_domain.as_deref().unwrap_or("US");
                     let status = ados_radio::adapter::read_reg_status(domain).await;
+                    events.emit(
+                        REG_GATE_KIND,
+                        RegGateResult::Blocked.severity(),
+                        reg_gate_detail(
+                            RegGateStage::Channel,
+                            &cfg.band,
+                            rendezvous_ch,
+                            domain,
+                            status.domain.as_deref(),
+                            false,
+                            RegGateResult::Blocked,
+                            Some(reason),
+                        ),
+                    );
                     write_stats_sidecar(
                         STATE_REG_BLOCKED,
                         &ChannelTruth::configured(rendezvous_ch),
@@ -604,11 +707,18 @@ async fn run_service(cfg: &WfbConfig, cancel: Arc<Notify>) {
         let hb_operating = operating_channel.clone();
         let hb_wanted_domain = wanted_domain.clone();
         let hb_enabled = enabled_channels_vec.clone();
+        let hb_events = events.clone();
+        let hb_usb_speed = adapter_info.usb_speed_mbps;
         let mut heartbeat = tokio::spawn(async move {
             const HEARTBEAT_INTERVAL_S: f64 = 2.0;
             let mut tick = tokio::time::interval(Duration::from_secs(2));
             let mut tx_live = TxLiveness::new();
             let mut prev_packets: i64 = 0;
+            // Debounced detector for the "transmitting, zero confirmed reception"
+            // episode. Emits a discrete entry/clear event pair so an RCA can query
+            // the episode boundaries; the instantaneous flag still rides the
+            // sidecar each tick. Bounded + self-clearing, no event while healthy.
+            let mut rf_detector = ados_radio::rf_unverified::RfUnverifiedDetector::new();
             // Last successfully-read live channel; if `iw info` momentarily fails
             // we keep reporting the last-known live value rather than the
             // configured one (a transient read error is not a channel change).
@@ -656,16 +766,54 @@ async fn run_service(cfg: &WfbConfig, cancel: Arc<Notify>) {
                             now,
                             hb_proof_reference,
                         );
+                        let rf_unverified = ados_radio::link_proof::is_rf_unverified(
+                            tx_live.tx_live(),
+                            rx_proven,
+                        );
                         let channels = ChannelTruth {
                             actual: last_live_channel,
                             rendezvous: hb_rendezvous,
                             operating: hb_operating.load(Ordering::Relaxed) as u8,
                             locked: rx_proven,
-                            rf_unverified: ados_radio::link_proof::is_rf_unverified(
-                                tx_live.tx_live(),
-                                rx_proven,
-                            ),
+                            rf_unverified,
                         };
+                        // Discrete entry/clear event for a sustained unverified
+                        // episode (the instantaneous flag already rides the
+                        // sidecar above). The detector debounces a brief gap, so
+                        // an event fires only on a real onset and its clear.
+                        match rf_detector.observe(rf_unverified, now) {
+                            ados_radio::rf_unverified::RfUnverifiedEdge::Entry => {
+                                hb_events.emit(
+                                    ados_radio::rf_unverified::RF_UNVERIFIED_KIND,
+                                    ados_protocol::logd::Level::Warn,
+                                    ados_radio::rf_unverified::rf_unverified_detail(
+                                        "entry",
+                                        &hb_iface,
+                                        rates.tx_bytes_per_s,
+                                        rates.valid_rx_packets_per_s,
+                                        hb_usb_speed,
+                                        ados_radio::link_proof::RX_PROOF_GRACE.as_secs(),
+                                        None,
+                                    ),
+                                );
+                            }
+                            ados_radio::rf_unverified::RfUnverifiedEdge::Clear { episode_s } => {
+                                hb_events.emit(
+                                    ados_radio::rf_unverified::RF_UNVERIFIED_KIND,
+                                    ados_protocol::logd::Level::Info,
+                                    ados_radio::rf_unverified::rf_unverified_detail(
+                                        "clear",
+                                        &hb_iface,
+                                        rates.tx_bytes_per_s,
+                                        rates.valid_rx_packets_per_s,
+                                        hb_usb_speed,
+                                        ados_radio::link_proof::RX_PROOF_GRACE.as_secs(),
+                                        Some(episode_s),
+                                    ),
+                                );
+                            }
+                            ados_radio::rf_unverified::RfUnverifiedEdge::None => {}
+                        }
                         // Live regulatory status (cheap `iw reg get`), so a domain
                         // that changes under the radio surfaces remotely too.
                         let reg_status =
