@@ -463,6 +463,16 @@ def build_heartbeat_payload(app: AgentApp) -> dict:  # noqa: C901
     except Exception:
         pass
 
+    # Stable-MAC pin verdicts for the Network panel. Surfaces an onboard
+    # adapter that randomizes its MAC each boot (no efuse) and whether the
+    # agent pinned a stable one. Absent on boards with no such adapter.
+    try:
+        from ados.services.cloud.heartbeat import build_mac_stability_enrichment
+
+        payload.update(build_mac_stability_enrichment())
+    except Exception:
+        pass
+
     # Forward-compatible radio link block — sourced from the in-process
     # WfbManager when present (demo path), otherwise from the radio
     # service's cross-process stats sidecar. The radio runs as its own

@@ -34,7 +34,23 @@ class HotspotConfig(BaseModel):
     channel: int = 6
 
 
+class MacPinConfig(BaseModel):
+    # Auto-pin a stable MAC on an onboard adapter that has no efuse MAC and so
+    # randomizes its address every boot (which churns the DHCP lease and the
+    # box's IP). On by default: the auto path only writes a next-boot
+    # systemd-networkd .link and never touches the live interface, so it cannot
+    # drop a management link. The Rust installer step + supervisor reconciler
+    # read this same field -- keep the default (true) in sync with them.
+    enabled: bool = True
+    # Re-tagging the LIVE interface (fixes the IP this session without a reboot)
+    # drops any connection over that interface, so it stays opt-in.
+    apply_live_allowed: bool = False
+    # Operator overrides keyed by "vvvv:pppp" USB id or interface name -> MAC.
+    overrides: dict[str, str] = {}
+
+
 class NetworkConfig(BaseModel):
     wifi_client: WifiClientConfig = WifiClientConfig()
     cellular: CellularConfig = CellularConfig()
     hotspot: HotspotConfig = HotspotConfig()
+    mac_pin: MacPinConfig = MacPinConfig()

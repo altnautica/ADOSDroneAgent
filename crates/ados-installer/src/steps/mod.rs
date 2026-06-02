@@ -30,6 +30,7 @@ pub mod deps;
 pub mod dkms;
 pub mod fetch_binaries;
 pub mod health;
+pub mod network_mac_pin;
 pub mod preflight;
 pub mod purge_residue;
 pub mod start;
@@ -50,6 +51,7 @@ pub fn full_install_chain() -> Vec<Box<dyn Step>> {
         Box::new(fetch_binaries::FetchBinaries),
         Box::new(dkms::Dkms),
         Box::new(config_identity::ConfigIdentity),
+        Box::new(network_mac_pin::NetworkMacPin),
         Box::new(systemd::Systemd),
         Box::new(start::Start),
         Box::new(health::Health),
@@ -65,11 +67,13 @@ mod tests {
     fn full_chain_orders_cleanly() {
         let steps = full_install_chain();
         let order = topo_order(&steps).expect("the install chain must be a valid DAG");
-        assert_eq!(order.len(), 11);
+        assert_eq!(order.len(), 12);
 
         let pos = |id: &str| order.iter().position(|x| x == id).unwrap();
         // Spot-check the load-bearing edges.
         assert!(pos("preflight") < pos("deps"));
+        // The MAC pin runs after config (machine-id + /etc/ados exist).
+        assert!(pos("config_identity") < pos("network_mac_pin"));
         assert!(pos("deps") < pos("venv_agent"));
         assert!(pos("deps") < pos("fetch_binaries"));
         assert!(pos("deps") < pos("dkms"));

@@ -12,7 +12,7 @@ use tokio::sync::mpsc;
 use std::sync::Arc;
 
 use ados_supervisor::{
-    auto_pair, bind, config::AgentConfig, hotplug, lifecycle::Supervisor, sdnotify,
+    auto_pair, bind, config::AgentConfig, hotplug, lifecycle::Supervisor, mac_pin, sdnotify,
 };
 
 const MONITOR_INTERVAL: Duration = Duration::from_secs(5);
@@ -87,6 +87,12 @@ async fn main() -> Result<()> {
         let shutdown = shutdown_rx.clone();
         tokio::spawn(auto_pair::run(orch, role, shutdown));
     }
+
+    // Stable-MAC reconciler: pin a deterministic MAC on any onboard adapter
+    // that randomizes its address each boot (no efuse MAC), so the box stops
+    // churning its IP. Runs on every profile; inert when no such adapter exists.
+    // Writes a next-boot .link only — never touches the live interface.
+    tokio::spawn(mac_pin::run(shutdown_rx.clone()));
 
     // Hot-plug poller runs on its own task and only forwards device-class
     // transitions; the supervisor state stays owned by this loop.

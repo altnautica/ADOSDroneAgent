@@ -11,6 +11,7 @@ pub mod config;
 pub mod hardware;
 pub mod hotplug;
 pub mod lifecycle;
+pub mod mac_pin;
 pub mod registry;
 pub mod role;
 pub mod sdnotify;

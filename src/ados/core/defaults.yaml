@@ -26,6 +26,14 @@ network:
     # in sync.
     enabled: false
     password: "altnautica"
+  mac_pin:
+    # Auto-pin a stable MAC on an onboard adapter with no efuse MAC (it would
+    # otherwise randomize each boot and churn the DHCP lease / IP). On by
+    # default -- the auto path only writes a next-boot networkd .link and never
+    # touches the live interface. The Rust installer + supervisor read this too;
+    # keep in sync with the Pydantic default in src/ados/core/config/network.py.
+    enabled: true
+    apply_live_allowed: false
 
 server:
   mode: "local"

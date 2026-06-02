@@ -1,0 +1,17 @@
+[package]
+name = "ados-macpin"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Stable-MAC pinning for network adapters with no efuse MAC that randomize their address each boot: a chipset quirk table, deterministic per-board MAC derivation, and a systemd-networkd .link provisioner. Shared by the installer step and the supervisor reconciler."
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
