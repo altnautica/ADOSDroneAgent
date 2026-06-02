@@ -63,6 +63,14 @@ pub struct Supervisor {
     /// working failover when the wired link is unplugged. Runs on both profiles
     /// from the monitor tick; inert when there is no onboard managed WiFi.
     wifi_selfheal: crate::wifi_selfheal::WifiSelfHeal,
+    /// Periodic regulatory-domain reconciler. A self-managed injection PHY can
+    /// leave its EEPROM-baked country as the global regulatory domain after a
+    /// monitor/bind re-churn, which breaks the onboard WiFi's data path. This
+    /// re-asserts the configured wanted domain (channel-safety-validated, never
+    /// capping the radio) so the break is PREVENTED, not just reacted to. Runs on
+    /// both profiles from the monitor tick; a cheap no-op when the domain is in
+    /// sync. The reactive WiFi self-heal above stays as the backstop.
+    reg_reconciler: crate::reg_reconciler::RegReconciler,
 }
 
 impl Supervisor {
@@ -73,6 +81,9 @@ impl Supervisor {
             bind,
             hotplug_coord: crate::hotplug::HotplugCoordinator::new(),
             wifi_selfheal: crate::wifi_selfheal::WifiSelfHeal::new(
+                ados_protocol::logd::emitter::EventEmitter::new("ados-supervisor"),
+            ),
+            reg_reconciler: crate::reg_reconciler::RegReconciler::new(
                 ados_protocol::logd::emitter::EventEmitter::new("ados-supervisor"),
             ),
         }
@@ -362,10 +373,20 @@ impl Supervisor {
             self.start_service(name).await;
         }
 
+        // Regulatory-domain reconcile (PREVENTION): re-assert the configured
+        // wanted domain when a self-managed injection PHY has left a foreign
+        // baked country as the global domain (which breaks the onboard WiFi's
+        // data path). Channel-safety-validated so it never caps the WFB radio;
+        // a cheap no-op when the domain is already in sync. Runs before the
+        // reactive self-heal so a freshly-reconciled domain heads off the break
+        // the self-heal would otherwise have to repair.
+        self.reg_reconciler.tick().await;
+
         // Reactive network self-heal: detect + rebuild an onboard managed-WiFi
         // link whose data path died under the radio bring-up, so the box keeps a
         // working failover. Independent of service state; a no-op when there is
-        // no onboard managed WiFi or the WiFi is healthy.
+        // no onboard managed WiFi or the WiFi is healthy. Kept as the backstop
+        // for a link that still needs an explicit rebuild after a domain drift.
         self.wifi_selfheal.tick().await;
     }
 }

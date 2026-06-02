@@ -592,6 +592,46 @@ async fn run_service(cfg: &WfbConfig, cancel: Arc<Notify>) {
         }
         set_channel(iface, cfg.channel).await;
 
+        // ── Regulatory re-assert (prevention layer) ──────────────────────
+        // A self-managed injection PHY (the RTL family) can leave its
+        // EEPROM-baked country as the GLOBAL regulatory domain after the
+        // monitor-mode bring-up churn above. A normal onboard FullMAC adapter
+        // then obeys that domain and can keep its association yet lose its data
+        // path (the management-WiFi break with no failover). Re-assert the
+        // configured wanted domain now, right after the churn, so the baked
+        // country never lingers as the effective global. SAFETY: only force a
+        // domain that permits the rendezvous channel — reuse the same channel
+        // gate the bring-up just passed so this can never cap the radio. The
+        // reactive WiFi self-heal (in the supervisor) stays as the backstop.
+        {
+            use ados_radio::adapter::ReassertOutcome;
+            use ados_radio::reg_reassert::{
+                reg_reassert_detail, REG_REASSERT_KIND, REG_REASSERT_SEVERITY,
+            };
+            let wanted = cfg.reg_domain.as_deref().unwrap_or("US");
+            // The wanted domain must permit the rendezvous channel before we
+            // force it. The bring-up gate read this set for THIS adapter already;
+            // reuse it (no second `iw phy channels` call).
+            let channel_ok =
+                adapter::assert_reg_ready(rendezvous_ch, &gate_enabled, &gate_dfs, cfg.dfs_allowed)
+                    .is_ok();
+            match ados_radio::adapter::reconcile_reg_domain(wanted, rendezvous_ch, channel_ok).await
+            {
+                ReassertOutcome::Reasserted { from, to, .. } => {
+                    events.emit(
+                        REG_REASSERT_KIND,
+                        REG_REASSERT_SEVERITY,
+                        reg_reassert_detail(iface, from.as_deref(), &to, rendezvous_ch, true),
+                    );
+                }
+                // In-sync / no-wanted / channel-unsafe: no durable event. The
+                // skip path already logged a warning inside reconcile_reg_domain.
+                ReassertOutcome::InSync
+                | ReassertOutcome::NoWanted
+                | ReassertOutcome::SkippedChannelUnsafe => {}
+            }
+        }
+
         // ── Clamp TX power BEFORE wfb_tx starts injecting ─────────────────
         // Critical on host-VBUS rigs: the driver default (~17-20 dBm) browns
         // out the adapter. Ramps up from the configured floor on rejection.
@@ -818,6 +858,47 @@ async fn run_service(cfg: &WfbConfig, cancel: Arc<Notify>) {
                         // that changes under the radio surfaces remotely too.
                         let reg_status =
                             ados_radio::adapter::read_reg_status(&hb_wanted_domain).await;
+
+                        // ── Periodic regulatory reconcile (prevention) ────────
+                        // The injection PHY can re-assert its baked country as the
+                        // global domain on a later monitor/bind re-entry, long
+                        // after the bring-up reconcile. When the live domain drifts
+                        // off the wanted value, re-assert it so the onboard WiFi is
+                        // never left under a foreign domain. SAFETY: only re-assert
+                        // when the wanted domain permits the rendezvous channel —
+                        // the enabled set already excludes DFS / disabled channels,
+                        // so membership (or an empty/unknown set) is the same gate
+                        // the bring-up used; this can never cap the radio. Skipped
+                        // entirely while the live domain already matches (the cheap
+                        // common case), so the steady-state cost is one comparison.
+                        if !reg_status.verified {
+                            let channel_ok = hb_enabled.is_empty()
+                                || hb_enabled.contains(&hb_rendezvous);
+                            if let ados_radio::adapter::ReassertOutcome::Reasserted {
+                                from,
+                                to,
+                                ..
+                            } = ados_radio::adapter::reconcile_reg_domain(
+                                &hb_wanted_domain,
+                                hb_rendezvous,
+                                channel_ok,
+                            )
+                            .await
+                            {
+                                hb_events.emit(
+                                    ados_radio::reg_reassert::REG_REASSERT_KIND,
+                                    ados_radio::reg_reassert::REG_REASSERT_SEVERITY,
+                                    ados_radio::reg_reassert::reg_reassert_detail(
+                                        &hb_iface,
+                                        from.as_deref(),
+                                        &to,
+                                        hb_rendezvous,
+                                        true,
+                                    ),
+                                );
+                            }
+                        }
+
                         let reg = RegSnapshot {
                             domain: reg_status.domain,
                             verified: reg_status.verified,
