@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
 import sys
 
 import structlog
@@ -75,6 +76,22 @@ def configure_logging(
         structlog.contextvars.bind_contextvars(drone_name=drone_name)
     if device_id:
         structlog.contextvars.bind_contextvars(device_id=device_id)
+
+    # Additively mirror records to the local logging-and-telemetry store.
+    # The shipper is non-blocking and tolerates an absent socket (the usual
+    # state on a box where the store is not installed), so installing it is
+    # always safe and never disrupts the agent. The stderr/journald sink above
+    # stays the always-on primary. Opt out with ADOS_LOGD_SHIP=0 if needed.
+    if os.environ.get("ADOS_LOGD_SHIP", "1") != "0":
+        try:
+            from ados.core.logd_ship import install_logd_handler
+
+            install_logd_handler()
+        except Exception:
+            # The shipper must never break logging setup. If it cannot install
+            # (an unexpected import or thread-start failure), the primary sink
+            # is unaffected and the agent runs normally.
+            pass
 
 
 def get_logger(name: str) -> structlog.stdlib.BoundLogger:

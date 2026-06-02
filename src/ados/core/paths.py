@@ -36,6 +36,14 @@ PAIRING_SOCK = ADOS_RUN_DIR / "pairing.sock"
 # Python manager owns the same knobs in-process otherwise.
 WFB_CMD_SOCK = ADOS_RUN_DIR / "wfb-cmd.sock"
 
+# Ingest socket for the local logging and telemetry store. The store's
+# writer process binds this; every producer (the native services and this
+# Python agent) connects and ships length-prefixed msgpack frames. The
+# socket is absent when the store is not installed or not yet started,
+# which is the normal state on a fresh box: producers degrade to their
+# secondary sink (stderr/journald) and retry the connection on a backoff.
+LOGD_INGEST_SOCK = ADOS_RUN_DIR / "logd.sock"
+
 # Live JSON state snapshots
 HEALTH_JSON = ADOS_RUN_DIR / "health.json"
 MESH_STATE_JSON = ADOS_RUN_DIR / "mesh-state.json"
