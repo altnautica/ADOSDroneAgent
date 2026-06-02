@@ -141,11 +141,18 @@ pub fn classify_adapter(
     with_learner: bool,
 ) -> Decision {
     // 1. Operator override wins (by vidpid or by interface name).
-    if let Some(raw) = config.overrides.get(vidpid).or_else(|| config.overrides.get(iface)) {
+    if let Some(raw) = config
+        .overrides
+        .get(vidpid)
+        .or_else(|| config.overrides.get(iface))
+    {
         return match (config.enabled, networkd, MacAddr::parse(raw)) {
             (false, _, _) => Decision::Disabled,
             (true, false, _) => Decision::Deferred("networkd not active".into()),
-            (true, true, Some(mac)) => Decision::Pin { mac, source: AdapterSource::Override },
+            (true, true, Some(mac)) => Decision::Pin {
+                mac,
+                source: AdapterSource::Override,
+            },
             (true, true, None) => Decision::Deferred("override MAC is malformed".into()),
         };
     }
@@ -164,7 +171,10 @@ pub fn classify_adapter(
             return Decision::Deferred("networkd not active".into());
         }
         return match machine_id.and_then(|m| derive_pinned_mac(m, salt)) {
-            Some(mac) => Decision::Pin { mac, source: AdapterSource::Quirk },
+            Some(mac) => Decision::Pin {
+                mac,
+                source: AdapterSource::Quirk,
+            },
             None => Decision::Deferred("no machine-id to derive a stable MAC".into()),
         };
     }
@@ -291,7 +301,12 @@ mod linux {
             let mac = std::fs::read_to_string(base.join("address"))
                 .ok()
                 .and_then(|s| MacAddr::parse(s.trim()));
-            out.push(NetAdapter { name, usb_id, usb_path, mac });
+            out.push(NetAdapter {
+                name,
+                usb_id,
+                usb_path,
+                mac,
+            });
         }
         out
     }
@@ -416,7 +431,9 @@ mod linux {
     }
 
     fn reload_udev() {
-        let _ = Command::new("udevadm").args(["control", "--reload"]).status();
+        let _ = Command::new("udevadm")
+            .args(["control", "--reload"])
+            .status();
         let _ = Command::new("udevadm")
             .args(["trigger", "--subsystem-match=net"])
             .status();
@@ -435,7 +452,11 @@ mod linux {
 
         let quirk_count = adapters
             .iter()
-            .filter(|a| a.usb_id.map(|id| is_quirk_randomizer(id).is_some()).unwrap_or(false))
+            .filter(|a| {
+                a.usb_id
+                    .map(|id| is_quirk_randomizer(id).is_some())
+                    .unwrap_or(false)
+            })
             .count();
 
         let mut verdicts = Vec::new();
@@ -445,13 +466,17 @@ mod linux {
                 None => continue, // skip non-USB
             };
             let vidpid = format!("{:04x}:{:04x}", usb_id.vid, usb_id.pid);
-            let salt = if quirk_count > 1 { a.usb_path.as_str() } else { "" };
+            let salt = if quirk_count > 1 {
+                a.usb_path.as_str()
+            } else {
+                ""
+            };
 
             // Fold this boot into the learner memory for unknown adapters (not
             // quirk, not known-efuse, not override). The record is keyed by the
             // stable identity so a churning MAC + name still resolves to it.
-            let is_unknown = config.overrides.get(&vidpid).is_none()
-                && config.overrides.get(&a.name).is_none()
+            let is_unknown = !config.overrides.contains_key(&vidpid)
+                && !config.overrides.contains_key(&a.name)
                 && !is_known_stable_efuse(usb_id)
                 && is_quirk_randomizer(usb_id).is_none();
             if is_unknown {
@@ -591,7 +616,11 @@ mod tests {
     use super::*;
 
     fn cfg(enabled: bool) -> ReconcileConfig {
-        ReconcileConfig { enabled, apply_live_allowed: false, overrides: HashMap::new() }
+        ReconcileConfig {
+            enabled,
+            apply_live_allowed: false,
+            overrides: HashMap::new(),
+        }
     }
 
     #[test]
@@ -611,7 +640,8 @@ mod tests {
 
     #[test]
     fn parse_match_block_extracts_only_match_lines() {
-        let body = "# comment\n[Match]\nOriginalName=wlan*\nDriver=usb\n\n[Link]\nNamePolicy=kernel\n";
+        let body =
+            "# comment\n[Match]\nOriginalName=wlan*\nDriver=usb\n\n[Link]\nNamePolicy=kernel\n";
         assert_eq!(
             parse_match_block(body).as_deref(),
             Some("OriginalName=wlan*\nDriver=usb")
@@ -619,13 +649,19 @@ mod tests {
         // A round trip: render then re-parse yields the same match.
         let mac = MacAddr::parse("02:00:00:00:00:01").unwrap();
         let rendered = render_link_file("OriginalName=wlan0", &mac);
-        assert_eq!(parse_match_block(&rendered).as_deref(), Some("OriginalName=wlan0"));
+        assert_eq!(
+            parse_match_block(&rendered).as_deref(),
+            Some("OriginalName=wlan0")
+        );
     }
 
     #[test]
     fn quirk_adapter_pins_when_armed() {
         let d = classify_adapter(
-            UsbId { vid: 0xa69c, pid: 0x8d81 },
+            UsbId {
+                vid: 0xa69c,
+                pid: 0x8d81,
+            },
             "wlan0",
             "a69c:8d81",
             Some("03851cd61fc642d781d3f93a00e624cd"),
@@ -648,56 +684,168 @@ mod tests {
     fn quirk_adapter_deferred_or_disabled_when_blocked() {
         // disabled
         assert_eq!(
-            classify_adapter(UsbId { vid: 0xa69c, pid: 1 }, "wlan0", "a69c:0001", Some("m"), "", &cfg(false), true, None, false),
+            classify_adapter(
+                UsbId {
+                    vid: 0xa69c,
+                    pid: 1
+                },
+                "wlan0",
+                "a69c:0001",
+                Some("m"),
+                "",
+                &cfg(false),
+                true,
+                None,
+                false
+            ),
             Decision::Disabled
         );
         // no networkd
         assert!(matches!(
-            classify_adapter(UsbId { vid: 0xa69c, pid: 1 }, "wlan0", "a69c:0001", Some("m"), "", &cfg(true), false, None, false),
+            classify_adapter(
+                UsbId {
+                    vid: 0xa69c,
+                    pid: 1
+                },
+                "wlan0",
+                "a69c:0001",
+                Some("m"),
+                "",
+                &cfg(true),
+                false,
+                None,
+                false
+            ),
             Decision::Deferred(_)
         ));
         // no machine-id
         assert!(matches!(
-            classify_adapter(UsbId { vid: 0xa69c, pid: 1 }, "wlan0", "a69c:0001", None, "", &cfg(true), true, None, false),
+            classify_adapter(
+                UsbId {
+                    vid: 0xa69c,
+                    pid: 1
+                },
+                "wlan0",
+                "a69c:0001",
+                None,
+                "",
+                &cfg(true),
+                true,
+                None,
+                false
+            ),
             Decision::Deferred(_)
         ));
     }
 
     #[test]
     fn efuse_radio_is_left_stable() {
-        let d = classify_adapter(UsbId { vid: 0x0bda, pid: 0xa81a }, "wlxabc", "0bda:a81a", Some("m"), "", &cfg(true), true, None, true);
+        let d = classify_adapter(
+            UsbId {
+                vid: 0x0bda,
+                pid: 0xa81a,
+            },
+            "wlxabc",
+            "0bda:a81a",
+            Some("m"),
+            "",
+            &cfg(true),
+            true,
+            None,
+            true,
+        );
         assert_eq!(d, Decision::Stable);
     }
 
     #[test]
     fn override_pins_an_unknown_adapter() {
         let mut c = cfg(true);
-        c.overrides.insert("1234:5678".into(), "02:11:22:33:44:55".into());
-        let d = classify_adapter(UsbId { vid: 0x1234, pid: 0x5678 }, "wlan1", "1234:5678", Some("m"), "", &c, true, None, true);
+        c.overrides
+            .insert("1234:5678".into(), "02:11:22:33:44:55".into());
+        let d = classify_adapter(
+            UsbId {
+                vid: 0x1234,
+                pid: 0x5678,
+            },
+            "wlan1",
+            "1234:5678",
+            Some("m"),
+            "",
+            &c,
+            true,
+            None,
+            true,
+        );
         assert_eq!(
             d,
-            Decision::Pin { mac: MacAddr::parse("02:11:22:33:44:55").unwrap(), source: AdapterSource::Override }
+            Decision::Pin {
+                mac: MacAddr::parse("02:11:22:33:44:55").unwrap(),
+                source: AdapterSource::Override
+            }
         );
     }
 
     #[test]
     fn unknown_adapter_only_candidate_after_threshold() {
-        let id = UsbId { vid: 0x1234, pid: 0x5678 };
+        let id = UsbId {
+            vid: 0x1234,
+            pid: 0x5678,
+        };
         // below threshold -> observe
-        let rec = LearnerRecord { vidpid: "1234:5678".into(), usb_path: "1-1".into(), last_mac: MacAddr([0;6]), first_seen: 0, boot_count: 3, mac_change_count: 1 };
+        let rec = LearnerRecord {
+            vidpid: "1234:5678".into(),
+            usb_path: "1-1".into(),
+            last_mac: MacAddr([0; 6]),
+            first_seen: 0,
+            boot_count: 3,
+            mac_change_count: 1,
+        };
         assert_eq!(
-            classify_adapter(id, "wlan1", "1234:5678", Some("m"), "", &cfg(true), true, Some(&rec), true),
+            classify_adapter(
+                id,
+                "wlan1",
+                "1234:5678",
+                Some("m"),
+                "",
+                &cfg(true),
+                true,
+                Some(&rec),
+                true
+            ),
             Decision::Observe
         );
         // at threshold -> candidate with a proposed MAC
-        let rec2 = LearnerRecord { mac_change_count: LEARN_THRESHOLD, ..rec.clone() };
+        let rec2 = LearnerRecord {
+            mac_change_count: LEARN_THRESHOLD,
+            ..rec.clone()
+        };
         assert!(matches!(
-            classify_adapter(id, "wlan1", "1234:5678", Some("m"), "", &cfg(true), true, Some(&rec2), true),
+            classify_adapter(
+                id,
+                "wlan1",
+                "1234:5678",
+                Some("m"),
+                "",
+                &cfg(true),
+                true,
+                Some(&rec2),
+                true
+            ),
             Decision::Candidate { proposed: Some(_) }
         ));
         // learner disabled -> observe regardless
         assert_eq!(
-            classify_adapter(id, "wlan1", "1234:5678", Some("m"), "", &cfg(true), true, Some(&rec2), false),
+            classify_adapter(
+                id,
+                "wlan1",
+                "1234:5678",
+                Some("m"),
+                "",
+                &cfg(true),
+                true,
+                Some(&rec2),
+                false
+            ),
             Decision::Observe
         );
     }
@@ -723,10 +871,20 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("mac-pins.state");
         let mut st = MacPinsState::default();
-        st.learner.push(LearnerRecord { vidpid: "a:b".into(), usb_path: "1-1".into(), last_mac: MacAddr([0;6]), first_seen: 1, boot_count: 1, mac_change_count: 0 });
+        st.learner.push(LearnerRecord {
+            vidpid: "a:b".into(),
+            usb_path: "1-1".into(),
+            last_mac: MacAddr([0; 6]),
+            first_seen: 1,
+            boot_count: 1,
+            mac_change_count: 0,
+        });
         save_state_to(&path, &st).unwrap();
         assert_eq!(load_state_from(&path), st);
         // missing file -> default
-        assert_eq!(load_state_from(&dir.path().join("nope")), MacPinsState::default());
+        assert_eq!(
+            load_state_from(&dir.path().join("nope")),
+            MacPinsState::default()
+        );
     }
 }

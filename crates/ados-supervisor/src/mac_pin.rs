@@ -48,7 +48,10 @@ pub fn read_config_from(text: &str) -> ReconcileConfig {
     fn default_true() -> bool {
         true
     }
-    let enabled_default = ReconcileConfig { enabled: true, ..Default::default() };
+    let enabled_default = ReconcileConfig {
+        enabled: true,
+        ..Default::default()
+    };
     match serde_norway::from_str::<Raw>(text) {
         Ok(raw) => match raw.network.mac_pin {
             Some(mp) => ReconcileConfig {
@@ -65,7 +68,10 @@ pub fn read_config_from(text: &str) -> ReconcileConfig {
 fn read_config() -> ReconcileConfig {
     match std::fs::read_to_string(CONFIG_YAML) {
         Ok(t) => read_config_from(&t),
-        Err(_) => ReconcileConfig { enabled: true, ..Default::default() },
+        Err(_) => ReconcileConfig {
+            enabled: true,
+            ..Default::default()
+        },
     }
 }
 
@@ -129,7 +135,10 @@ mod tests {
         let cfg = read_config_from(body);
         assert!(cfg.enabled);
         assert!(cfg.apply_live_allowed);
-        assert_eq!(cfg.overrides.get("1234:5678").map(String::as_str), Some("02:11:22:33:44:55"));
+        assert_eq!(
+            cfg.overrides.get("1234:5678").map(String::as_str),
+            Some("02:11:22:33:44:55")
+        );
     }
 
     #[test]

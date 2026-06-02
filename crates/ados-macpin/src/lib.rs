@@ -291,17 +291,42 @@ mod tests {
 
     #[test]
     fn quirk_table_matches_aic_vendor_family() {
-        assert!(is_quirk_randomizer(UsbId { vid: 0xa69c, pid: 0x8d81 }).is_some());
-        assert!(is_quirk_randomizer(UsbId { vid: 0xa69c, pid: 0x0001 }).is_some());
-        assert!(is_quirk_randomizer(UsbId { vid: 0x0bda, pid: 0xa81a }).is_none());
-        assert!(is_quirk_randomizer(UsbId { vid: 0x1234, pid: 0x5678 }).is_none());
+        assert!(is_quirk_randomizer(UsbId {
+            vid: 0xa69c,
+            pid: 0x8d81
+        })
+        .is_some());
+        assert!(is_quirk_randomizer(UsbId {
+            vid: 0xa69c,
+            pid: 0x0001
+        })
+        .is_some());
+        assert!(is_quirk_randomizer(UsbId {
+            vid: 0x0bda,
+            pid: 0xa81a
+        })
+        .is_none());
+        assert!(is_quirk_randomizer(UsbId {
+            vid: 0x1234,
+            pid: 0x5678
+        })
+        .is_none());
     }
 
     #[test]
     fn efuse_allowlist_protects_the_rtl_radio() {
-        assert!(is_known_stable_efuse(UsbId { vid: 0x0bda, pid: 0xa81a }));
-        assert!(is_known_stable_efuse(UsbId { vid: 0x0bda, pid: 0x8812 }));
-        assert!(!is_known_stable_efuse(UsbId { vid: 0xa69c, pid: 0x8d81 }));
+        assert!(is_known_stable_efuse(UsbId {
+            vid: 0x0bda,
+            pid: 0xa81a
+        }));
+        assert!(is_known_stable_efuse(UsbId {
+            vid: 0x0bda,
+            pid: 0x8812
+        }));
+        assert!(!is_known_stable_efuse(UsbId {
+            vid: 0xa69c,
+            pid: 0x8d81
+        }));
     }
 
     #[test]
