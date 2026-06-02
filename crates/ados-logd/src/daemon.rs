@@ -36,6 +36,12 @@ pub const INGEST_QUEUE_CAPACITY: usize = 4096;
 /// shutdown before the daemon stops waiting and exits anyway.
 pub const WRITER_JOIN_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// How often the daemon pings the systemd watchdog while running. Comfortably
+/// under the unit's `WatchdogSec` (a ~3x margin) so a single missed tick from a
+/// brief scheduler stall does not trip a restart, but a genuinely wedged async
+/// runtime does.
+pub const WATCHDOG_PING_INTERVAL: Duration = Duration::from_secs(10);
+
 /// Default raw-frame sampling rate for the frame tap, in frames per second. The
 /// frame trail is a low-rate diagnostic record, not the full firehose; the
 /// config surface overrides this.
@@ -49,9 +55,13 @@ pub struct DaemonPaths {
     pub db: PathBuf,
     /// The ingest socket producers write framed msgpack to.
     pub ingest_socket: PathBuf,
-    /// The query socket (bound by the query API in a later chunk; unlinked here
-    /// on shutdown so a stale path never confuses a probing reader).
+    /// The query socket the read API binds (the trusted local read plane).
     pub query_socket: PathBuf,
+    /// The TCP port the read API binds (the LAN read plane).
+    pub query_tcp_port: u16,
+    /// The agent pairing-state file the LAN-edge auth reads. Injectable so a
+    /// test points it at a tempdir.
+    pub pairing_path: PathBuf,
     /// The filesystem root the hardware collector reads sysfs/proc under. `/` in
     /// production; a fixture tree in a test so the collector never touches the
     /// host's real `/sys` or `/proc`.
@@ -67,6 +77,8 @@ impl Default for DaemonPaths {
             db: PathBuf::from(crate::paths::DB_PATH),
             ingest_socket: PathBuf::from(crate::paths::INGEST_SOCKET),
             query_socket: PathBuf::from(crate::paths::QUERY_SOCKET),
+            query_tcp_port: crate::paths::QUERY_TCP_PORT,
+            pairing_path: PathBuf::from(crate::query::auth::DEFAULT_PAIRING_PATH),
             hw_root: PathBuf::from(crate::hw::DEFAULT_ROOT),
             taps: TapPaths::default(),
         }
@@ -95,6 +107,16 @@ fn sd_stopping() {
 
 #[cfg(not(target_os = "linux"))]
 fn sd_stopping() {}
+
+/// systemd watchdog keep-alive ping. No-op off Linux and when not run under a
+/// `WatchdogSec`-armed `Type=notify` unit (`WATCHDOG_USEC` unset).
+#[cfg(target_os = "linux")]
+fn sd_watchdog() {
+    let _ = sd_notify::notify(false, &[sd_notify::NotifyState::Watchdog]);
+}
+
+#[cfg(not(target_os = "linux"))]
+fn sd_watchdog() {}
 
 /// Open the store and verify it. On a failed integrity check the file is
 /// quarantined (renamed with a timestamp suffix) and a fresh store is created
@@ -148,9 +170,10 @@ where
     let writer = Writer::new(&paths.db, ingest_rx, WriterConfig::default())
         .context("open writer connection")?;
     let boot_session = writer.boot_session();
-    // The broadcast handle is the seam the future live tail subscribes to; held
-    // so the channel stays open for the daemon's lifetime even with no consumer.
-    let _broadcast = writer.broadcast_handle();
+    // The broadcast handle is the seam the live tail subscribes to; held so the
+    // channel stays open for the daemon's lifetime, and cloned into the query
+    // server so `/v1/tail` is fed by the writer fan-out rather than a DB poll.
+    let broadcast = writer.broadcast_handle();
     let (writer_result_tx, writer_result_rx) = oneshot::channel();
     let writer_thread = std::thread::Builder::new()
         .name("ados-logd-writer".to_string())
@@ -200,6 +223,24 @@ where
         DEFAULT_MAVLINK_SAMPLE_HZ,
     );
 
+    // Spawn the read surface: the same axum `/v1` Router on the trusted Unix
+    // query socket and the LAN TCP port. It opens the store read-only per
+    // request (never the writer's connection) and is fed live by the writer's
+    // broadcast clone. Its own shutdown signal stops both listeners before the
+    // writer is torn down.
+    let (query_stop_tx, query_stop_rx) = oneshot::channel::<()>();
+    let query_task = tokio::spawn(crate::query::spawn_query_server(
+        paths.db.clone(),
+        paths.query_socket.clone(),
+        paths.query_tcp_port,
+        broadcast,
+        Arc::clone(&stats),
+        paths.pairing_path.clone(),
+        async move {
+            let _ = query_stop_rx.await;
+        },
+    ));
+
     sd_ready();
     tracing::info!(
         boot_session,
@@ -208,10 +249,30 @@ where
         "logging store ready"
     );
 
-    // Run until the stop trigger fires.
-    shutdown.await;
+    // Run until the stop trigger fires, pinging the systemd watchdog on a fixed
+    // cadence in between. A wedged async runtime stops pinging and systemd
+    // restarts the unit; a healthy daemon keeps the timer fed. Both arms are
+    // cheap, so the select never blocks shutdown.
+    let mut watchdog = tokio::time::interval(WATCHDOG_PING_INTERVAL);
+    watchdog.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    // The first immediate tick fires right after READY; skip pinging on it so
+    // the cadence stays a steady WATCHDOG_PING_INTERVAL.
+    watchdog.tick().await;
+    tokio::pin!(shutdown);
+    loop {
+        tokio::select! {
+            _ = &mut shutdown => break,
+            _ = watchdog.tick() => sd_watchdog(),
+        }
+    }
     tracing::info!("logging store stopping");
     sd_stopping();
+
+    // Stop the read surface first: it holds no ingest sender, so stopping it
+    // early just closes the listeners and unlinks the query socket; any
+    // in-flight tail streams end when the broadcast sender is dropped below.
+    let _ = query_stop_tx.send(());
+    let _ = query_task.await;
 
     // Stop accepting new clients, then wait for the accept loop to finish.
     let _ = accept_stop_tx.send(());
@@ -238,8 +299,8 @@ where
     join_writer(writer_thread, writer_result_rx).await;
 
     // tmpfs cleanup: a stale socket path confuses a producer probing for the
-    // socket on the next start. The query socket is bound elsewhere later; unlink
-    // it defensively too.
+    // socket on the next start. The query server unlinks its own socket on the
+    // way out; unlink it here too as a belt-and-suspenders guard.
     let _ = std::fs::remove_file(&paths.ingest_socket);
     let _ = std::fs::remove_file(&paths.query_socket);
 
@@ -329,6 +390,10 @@ mod tests {
             db: dir.join("logs.db"),
             ingest_socket: dir.join("logd.sock"),
             query_socket: dir.join("logd-query.sock"),
+            // Port 0 asks the OS for an ephemeral free port so the daemon test
+            // never collides with a real listener on the bench TCP port.
+            query_tcp_port: 0,
+            pairing_path: dir.join("pairing.json"),
             hw_root,
             taps: TapPaths {
                 state_socket: dir.join("state.sock"),

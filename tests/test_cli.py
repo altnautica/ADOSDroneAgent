@@ -34,26 +34,50 @@ def _setup_payload() -> dict:
     }
 
 
+def _help_command_names(output: str) -> set[str]:
+    """Extract the command names from the `Commands:` block of click --help.
+
+    Each command line is ``  <name>  <description>``; the names are the first
+    whitespace-delimited token on each line after the `Commands:` header. This
+    matches against actual command entries instead of a bare substring scan, so
+    a description word like "logs" never trips an absence check.
+    """
+    names: set[str] = set()
+    in_commands = False
+    for line in output.splitlines():
+        if line.strip() == "Commands:":
+            in_commands = True
+            continue
+        if in_commands:
+            if not line.startswith(" "):
+                break
+            token = line.strip().split(None, 1)
+            if token:
+                names.add(token[0])
+    return names
+
+
 def test_help_shows_only_public_commands() -> None:
     result = runner.invoke(cli, ["--help"])
     assert result.exit_code == 0
+    names = _help_command_names(result.output)
     # The full public operator surface: every command listed in `ados --help`.
-    for command in (
+    expected = {
         "hardware",
         "install",
+        "logs",
+        "network",
         "plugin",
         "profile",
         "radio",
         "status",
         "uninstall",
         "update",
-    ):
-        assert command in result.output
+    }
+    assert expected <= names, f"missing public commands: {expected - names}"
     # demo is the only hidden command; legacy names never existed publicly.
-    assert "demo" not in result.output
-    assert "tui" not in result.output
-    assert "config" not in result.output
-    assert "gs" not in result.output
+    for hidden in ("demo", "tui", "config", "gs"):
+        assert hidden not in names
 
 
 def test_status_prints_setup_summary() -> None:

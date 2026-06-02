@@ -35,11 +35,20 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
-# HTTP framework + compression for the query API and export path. Declared now
-# so the dependency set is fixed; the server itself is wired in a later chunk.
+# HTTP framework + compression for the query API and export path. The same
+# axum Router is served on the trusted unix socket and the LAN TCP port; hyper
+# and the tokio glue carry the per-connection serving, http/http-body-util the
+# request/response and chunked streaming bodies, zstd the compressed export.
 axum = { workspace = true }
 tower = { workspace = true }
 tower-http = { workspace = true }
+hyper = { workspace = true }
+hyper-util = { workspace = true }
+http = { workspace = true }
+http-body-util = { workspace = true }
+bytes = { workspace = true }
+futures = { workspace = true }
+async-stream = { workspace = true }
 zstd = { workspace = true }
 
 [dev-dependencies]

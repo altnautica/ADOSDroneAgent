@@ -8,16 +8,18 @@
 //! This crate carries the storage layer ([`db`]), the ingest socket
 //! ([`ingest`]), the single-writer store loop ([`writer`]), the daemon
 //! lifecycle ([`daemon`]), the hardware collector ([`hw`]), the seam taps
-//! ([`taps`]) that consume the agent's frozen IPC seams, and the retention
-//! maintenance ([`retention`]) the writer runs to keep the store bounded, plus a
-//! re-export of the shared wire contracts. The query API lands in a later chunk;
-//! the binary is functional but ships dark (no systemd unit) until the install
-//! layer wires it.
+//! ([`taps`]) that consume the agent's frozen IPC seams, the retention
+//! maintenance ([`retention`]) the writer runs to keep the store bounded, and
+//! the read surface ([`query`]) — one axum `/v1` Router served on the trusted
+//! Unix query socket and the LAN TCP port — plus a re-export of the shared wire
+//! contracts. The binary is functional but ships dark (no systemd unit enabled)
+//! until the install layer wires it.
 
 pub mod daemon;
 pub mod db;
 pub mod hw;
 pub mod ingest;
+pub mod query;
 pub mod retention;
 pub mod taps;
 pub mod writer;

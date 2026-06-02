@@ -742,6 +742,7 @@ def demo(port: int) -> None:
 # Wire subcommand groups. Done at import time so the entry point in
 # pyproject.toml (ados = ados.cli.main:cli) sees the full command tree.
 from ados.cli.hardware import hardware_group  # noqa: E402
+from ados.cli.logs import logs_group  # noqa: E402
 from ados.cli.network import network_group  # noqa: E402
 from ados.cli.plugin import plugin_group  # noqa: E402
 from ados.cli.profile import profile_group  # noqa: E402
@@ -749,6 +750,7 @@ from ados.cli.radio import radio_group  # noqa: E402
 from ados.cli.rust import rust_group  # noqa: E402
 
 cli.add_command(hardware_group)
+cli.add_command(logs_group)
 cli.add_command(network_group)
 cli.add_command(plugin_group)
 cli.add_command(profile_group)

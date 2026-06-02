@@ -56,6 +56,10 @@ async fn ingest_socket_accepts_frames_and_writer_inserts_them() {
         db: dir.path().join("logs.db"),
         ingest_socket: dir.path().join("logd.sock"),
         query_socket: dir.path().join("logd-query.sock"),
+        // Port 0 asks the OS for an ephemeral free port so this test never
+        // collides with a real listener on the bench TCP port.
+        query_tcp_port: 0,
+        pairing_path: dir.path().join("pairing.json"),
         hw_root,
         taps: TapPaths {
             state_socket: dir.path().join("state.sock"),
