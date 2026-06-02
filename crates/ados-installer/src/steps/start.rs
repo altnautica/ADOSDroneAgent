@@ -10,8 +10,10 @@
 //! guaranteed present; splitting the restart into this separately-gated step is
 //! the fix. This is the ONLY place the supervisor is started.
 
+use std::path::Path;
+
 use crate::ctx::Ctx;
-use crate::env::SERVICE_NAME;
+use crate::env::{CONFIG_DIR, SERVICE_NAME};
 use crate::exec;
 use crate::graph::{Step, StepKind, StepOutcome};
 
@@ -72,6 +74,18 @@ impl Step for Start {
             ));
         }
         tracing::info!(unit = SERVICE_NAME, "supervisor started");
+
+        // The logging and telemetry store is PartOf the supervisor, so the
+        // restart above stopped it; bring it back unless the fallback marker
+        // pins it off. The log-view endpoints read it, so a fresh box must come
+        // up with it running and zero manual steps. Cross-profile.
+        if !Path::new(CONFIG_DIR).join("logd-python-fallback").exists() {
+            let _ = exec::run("systemctl", &["start", "--no-block", "ados-logd.service"]);
+            tracing::info!(
+                unit = "ados-logd.service",
+                "logging store started (--no-block)"
+            );
+        }
 
         // On a ground station, kick the GS unit set with --no-block. The
         // supervisor's PartOf= chain stops these on its restart above with

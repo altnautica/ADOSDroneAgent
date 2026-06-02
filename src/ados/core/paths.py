@@ -44,6 +44,14 @@ WFB_CMD_SOCK = ADOS_RUN_DIR / "wfb-cmd.sock"
 # secondary sink (stderr/journald) and retry the connection on a backoff.
 LOGD_INGEST_SOCK = ADOS_RUN_DIR / "logd.sock"
 
+# Query socket for the local logging and telemetry store. The store binds
+# this trusted local plane (0o660, tmpfs) and serves the read API on it with
+# no auth — anything on-box that can open the socket is already inside the
+# trust boundary. The `ados logs` CLI and the FastAPI reverse-proxy bridge
+# both prefer it because it answers even when the FastAPI surface on :8080 is
+# down. Absent until the store is installed and started.
+LOGD_QUERY_SOCK = ADOS_RUN_DIR / "logd-query.sock"
+
 # Live JSON state snapshots
 HEALTH_JSON = ADOS_RUN_DIR / "health.json"
 MESH_STATE_JSON = ADOS_RUN_DIR / "mesh-state.json"

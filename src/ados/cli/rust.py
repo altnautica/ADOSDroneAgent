@@ -100,13 +100,16 @@ _SERVICES: dict[str, _Service] = {
         opt_out=True,
     ),
     "logd": _Service(
-        flag="logd-rust-enabled",
+        flag="logd-python-fallback",
         binaries=("/opt/ados/bin/ados-logd",),
-        # Native-only with no packaged counterpart: the unit ships deployed but
-        # disabled, so enable turns it on and disable stops it. There is
-        # nothing to fall back to, so it is an extra unit, not a swap.
+        # The store is on by default: the log-view endpoints read it, so a fresh
+        # install brings it up. It is native-only with no packaged counterpart,
+        # so it is an extra unit (enabled + started on), not a swap. The
+        # fallback marker pins it OFF — ``disable`` writes the marker and stops
+        # the unit, ``enable`` removes it and starts the unit again.
         extra_units=("ados-logd",),
-        note="local logging and telemetry store (opt-in)",
+        note="local logging and telemetry store (default; fallback marker pins it off)",
+        opt_out=True,
     ),
 }
 

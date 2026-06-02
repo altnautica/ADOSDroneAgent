@@ -1,214 +1,214 @@
-"""Log viewing routes."""
+"""Log viewing routes, sourced from the local logging and telemetry store.
+
+These two endpoints keep the legacy response shape that older Mission Control
+clients expect, but they no longer hold their own copy of the logs. The agent's
+log records flow to the durable on-disk store over the structlog socket handler
+(``core/logd_ship.py``); these endpoints read them back from the store's query
+API over its trusted local Unix socket.
+
+* ``GET /api/logs`` — recent entries, mapped from the store's ``/v1/query`` rows
+  to the legacy ``{ timestamp, level, logger, message }`` tuple. If the store is
+  not reachable the endpoint degrades to an empty list with a warning rather
+  than a 500: losing history degrades debugging, not flight.
+* ``GET /api/logs/stream`` — a Server-Sent-Events stream proxied from the
+  store's ``/v1/tail`` and re-mapped to the legacy SSE frame shape.
+
+The store survives reboots and is reachable when the network is down, which is
+exactly when an in-memory buffer was least useful. The stderr/journald sink
+remains the always-on primary; the store is the durable secondary that these
+endpoints read.
+"""
 
 from __future__ import annotations
 
-import asyncio
 import json
-import logging
-import os
-from collections import deque
 from datetime import datetime, timezone
-from itertools import count
+from typing import Any
 
-from fastapi import APIRouter, HTTPException, Query
-from fastapi.responses import StreamingResponse
+import httpx
+from fastapi import APIRouter, Query
+from fastapi.responses import JSONResponse, StreamingResponse
+
+from ados.core.logging import get_logger
+from ados.core.paths import LOGD_QUERY_SOCK
+
+log = get_logger("api.logs")
 
 router = APIRouter()
 
-# In-memory log buffer. Capacity caps memory usage; on busy boards the
-# buffer wraps every few minutes so the dashboard surfaces the most
-# recent activity and a "since restart" hint exposes the wrap.
-_LOG_BUFFER_CAP = 5000
-_log_buffer: deque[dict] = deque(maxlen=_LOG_BUFFER_CAP)
-_log_event = asyncio.Event()
-_log_seq = count(1)
-_main_loop: asyncio.AbstractEventLoop | None = None
+# The store's query-API base over the trusted Unix socket. The host portion is a
+# placeholder httpx requires; the UDS transport routes to the socket regardless.
+_UPSTREAM_BASE = "http://logd"
 
-# Per-subscriber fanout. Replaces the previous "every SSE client re-reads
-# the entire deque on every wake" pattern with a bounded
-# ``asyncio.Queue`` per connection. A single fanout task drains
-# ``_log_buffer`` on wake and pushes new entries onto every registered
-# queue with ``put_nowait``; slow consumers drop on QueueFull instead of
-# back-pressuring the producer. Mirrors the MavlinkIPCServer pattern.
-_SUBSCRIBER_QUEUE_DEPTH = 256
-_SSE_MAX_CLIENTS = int(os.environ.get("ADOS_SSE_MAX_CLIENTS", "16"))
-_SSE_KEEPALIVE_S = 15.0
-_subscribers: list[asyncio.Queue[object]] = []
-_subscribers_lock = asyncio.Lock()
-_fanout_task: asyncio.Task | None = None
-# Sentinel pushed onto a subscriber's queue when the subscriber must
-# disconnect (slow-client drop). Distinct identity, never collides with
-# ordinary dict entries.
-_DROP_SENTINEL: object = object()
-# Sentinel for periodic keep-alive ticks so an idle stream emits a
-# comment frame to defeat proxy idle timeouts.
-_KEEPALIVE_SENTINEL: object = object()
+# Hard ceiling on the page size the legacy surface will request from the store.
+# The legacy clients ask for tens of entries; this caps a pathological request.
+_MAX_LIMIT = 1000
+
+# Connect fast so a missing store degrades the endpoint at once; the read leg is
+# bounded because the legacy query is a single bounded page.
+_QUERY_TIMEOUT = httpx.Timeout(connect=2.0, read=10.0, write=5.0, pool=2.0)
+
+# The live tail has no read-idle ceiling (the store sends keep-alive comment
+# frames); the connect leg still fails fast on a missing store.
+_TAIL_TIMEOUT = httpx.Timeout(connect=2.0, read=None, write=5.0, pool=2.0)
+
+# Module-level singletons over the UDS, created on first use. Separate clients so
+# the unbounded-read tail timeout never leaks onto the bounded query. Tests can
+# override either by assignment (e.g. an ``httpx.MockTransport``-backed client).
+_query_client: httpx.AsyncClient | None = None
+_tail_client: httpx.AsyncClient | None = None
 
 
-def bind_loop(loop: asyncio.AbstractEventLoop) -> None:
-    """Capture the main event loop so logging-thread wakeups are safe.
+def _get_query_client() -> httpx.AsyncClient:
+    global _query_client
+    if _query_client is None:
+        transport = httpx.AsyncHTTPTransport(uds=str(LOGD_QUERY_SOCK))
+        _query_client = httpx.AsyncClient(
+            base_url=_UPSTREAM_BASE, transport=transport, timeout=_QUERY_TIMEOUT
+        )
+    return _query_client
 
-    ``logging.Handler.emit`` runs under the logging lock and can be
-    called from any thread. ``asyncio.Event.set()`` is not thread-safe,
-    so the handler routes the wake-up through
-    ``loop.call_soon_threadsafe`` against the loop captured here.
+
+def _get_tail_client() -> httpx.AsyncClient:
+    global _tail_client
+    if _tail_client is None:
+        transport = httpx.AsyncHTTPTransport(uds=str(LOGD_QUERY_SOCK))
+        _tail_client = httpx.AsyncClient(
+            base_url=_UPSTREAM_BASE, transport=transport, timeout=_TAIL_TIMEOUT
+        )
+    return _tail_client
+
+
+async def aclose_clients() -> None:
+    """Close the shared upstream clients. Called on app shutdown."""
+    global _query_client, _tail_client
+    if _query_client is not None:
+        await _query_client.aclose()
+        _query_client = None
+    if _tail_client is not None:
+        await _tail_client.aclose()
+        _tail_client = None
+
+
+def _legacy_entry(row: dict[str, Any]) -> dict[str, Any]:
+    """Map one store log row onto the legacy ``/api/logs`` entry shape.
+
+    The store row is ``{ id, ts_us, session, source, level, target, msg,
+    fields }``; the legacy consumer expects ``{ seq, timestamp, level, logger,
+    message }`` with an ISO-8601 timestamp and an upper-case level name.
     """
-    global _main_loop
-    _main_loop = loop
-
-
-def _wake_subscribers() -> None:
-    loop = _main_loop
-    if loop is None:
-        # No loop bound yet (test harness, early boot). The next
-        # fanout tick picks up via the keep-alive fallback.
-        return
-    try:
-        loop.call_soon_threadsafe(_log_event.set)
-    except RuntimeError:
-        # Loop closed during shutdown — best-effort silent drop.
-        pass
-
-
-class BufferHandler(logging.Handler):
-    """Captures log records into an in-memory ring buffer."""
-
-    def emit(self, record: logging.LogRecord) -> None:
-        _log_buffer.append({
-            "seq": next(_log_seq),
-            # ISO-8601 string so consumers can slice/parse it directly.
-            # record.created is a float epoch; emit a stable string.
-            "timestamp": datetime.fromtimestamp(
-                record.created, tz=timezone.utc
-            ).isoformat(),
-            "level": record.levelname,
-            "logger": record.name,
-            "message": record.getMessage(),
-        })
-        # Wake any SSE subscribers from whichever thread emitted this
-        # record. Routed through call_soon_threadsafe because the
-        # handler is reachable from non-asyncio worker threads.
-        _wake_subscribers()
-
-
-def install_log_buffer() -> None:
-    """Install the buffer handler on the root logger."""
-    handler = BufferHandler()
-    handler.setLevel(logging.DEBUG)
-    logging.getLogger().addHandler(handler)
-
-
-async def _fanout_loop() -> None:
-    """Single producer task: drain new entries, push to each subscriber.
-
-    Spawned once per process on the first SSE open and runs forever.
-    Keeping the task alive even when no subscribers are registered
-    avoids a lifecycle race: an alternative design that exited on
-    empty-subscribers can drop wake-ups during the window between
-    "subscriber appends queue" and "subscriber calls
-    ``_ensure_fanout_running``" where the old task is still
-    transitioning to done. The cost of an idle ``await`` on
-    ``_log_event`` is negligible compared to that correctness hole.
-
-    On wake: drain every entry past the last-seen sequence number and
-    push to every subscriber queue with ``put_nowait``. A subscriber
-    whose queue is full gets a single ``_DROP_SENTINEL`` (its
-    generator closes cleanly and unregisters itself). Filtering by
-    ``level`` / ``service`` happens subscriber-side so the producer
-    stays cheap and shared across all clients.
-    """
-    last_seen_seq = 0
-    dropped_in_pass: set[int] = set()
-    while True:
-        try:
-            await asyncio.wait_for(_log_event.wait(), timeout=_SSE_KEEPALIVE_S)
-            had_event = True
-        except TimeoutError:
-            had_event = False
-        if had_event:
-            _log_event.clear()
-
-        async with _subscribers_lock:
-            queues = list(_subscribers)
-        if not queues:
-            # No subscribers — nothing to do this tick. Stay parked on
-            # the next ``_log_event.wait()`` / keepalive cycle.
-            if had_event:
-                tail = list(_log_buffer)
-                if tail:
-                    last_seen_seq = tail[-1]["seq"]
-            continue
-
-        if not had_event:
-            # Keepalive tick. Push the keepalive sentinel to every
-            # subscriber so idle streams emit a comment frame.
-            for q in queues:
-                try:
-                    q.put_nowait(_KEEPALIVE_SENTINEL)
-                except asyncio.QueueFull:
-                    pass
-            continue
-
-        tail = list(_log_buffer)
-        new_entries = [e for e in tail if e["seq"] > last_seen_seq]
-        if tail:
-            last_seen_seq = tail[-1]["seq"]
-        dropped_in_pass.clear()
-        for entry in new_entries:
-            for idx, q in enumerate(queues):
-                if idx in dropped_in_pass:
-                    continue
-                try:
-                    q.put_nowait(entry)
-                except asyncio.QueueFull:
-                    # Slow client. Push the drop sentinel ONCE; the
-                    # subscriber's generator closes itself and the
-                    # ``finally`` block unregisters it from
-                    # ``_subscribers`` so the next pass skips it
-                    # entirely. Mark it dropped here so the rest of
-                    # this pass also skips it.
-                    try:
-                        q.put_nowait(_DROP_SENTINEL)
-                    except asyncio.QueueFull:
-                        pass
-                    dropped_in_pass.add(idx)
-
-
-async def _ensure_fanout_running() -> None:
-    """Spawn the fanout task once per process. Idempotent."""
-    global _fanout_task
-    if _fanout_task is None:
-        _fanout_task = asyncio.create_task(_fanout_loop())
+    ts_us = row.get("ts_us")
+    timestamp: str
+    if isinstance(ts_us, (int, float)):
+        timestamp = datetime.fromtimestamp(
+            ts_us / 1_000_000, tz=timezone.utc
+        ).isoformat()
+    else:
+        timestamp = datetime.now(tz=timezone.utc).isoformat()
+    return {
+        "seq": row.get("id"),
+        "timestamp": timestamp,
+        "level": str(row.get("level", "")).upper(),
+        "logger": row.get("target") or row.get("source") or "",
+        "message": row.get("msg", ""),
+    }
 
 
 @router.get("/logs")
 async def get_logs(
     level: str | None = Query(None),
     service: str | None = Query(None),
-    limit: int = Query(50, ge=1, le=_LOG_BUFFER_CAP),
+    limit: int = Query(50, ge=1, le=_MAX_LIMIT),
     offset: int = Query(0, ge=0),
 ):
-    """Recent log entries with optional filtering."""
-    entries = list(_log_buffer)
-    buffer_size = len(entries)
+    """Recent log entries, sourced from the durable store.
 
+    Maps the store's rows to the legacy response shape so existing clients keep
+    working. If the store is unreachable the endpoint returns an empty list with
+    a ``warning`` field instead of a 500 — history is observability, not flight.
+    """
+    # Ask the store for enough rows to satisfy the offset window, then page in
+    # Python so the legacy offset/limit contract is honored without leaking the
+    # store's keyset-cursor model to the legacy caller.
+    want = min(offset + limit, _MAX_LIMIT)
+    params: dict[str, Any] = {"kind": "logs", "limit": want}
+    if level:
+        params["level"] = level.lower()
+    if service:
+        params["source"] = service
+
+    client = _get_query_client()
+    try:
+        resp = await client.get("/v1/query", params=params)
+    except (httpx.ConnectError, httpx.ConnectTimeout, FileNotFoundError, OSError):
+        log.warning("logs_store_unreachable")
+        return JSONResponse(
+            content={
+                "entries": [],
+                "total": 0,
+                "limit": limit,
+                "offset": offset,
+                "warning": "logging store unavailable",
+            }
+        )
+    except httpx.HTTPError as exc:
+        log.warning("logs_store_error", error=str(exc))
+        return JSONResponse(
+            content={
+                "entries": [],
+                "total": 0,
+                "limit": limit,
+                "offset": offset,
+                "warning": "logging store query failed",
+            }
+        )
+
+    if resp.status_code >= 400:
+        log.warning("logs_store_status", status=resp.status_code)
+        return JSONResponse(
+            content={
+                "entries": [],
+                "total": 0,
+                "limit": limit,
+                "offset": offset,
+                "warning": f"logging store returned {resp.status_code}",
+            }
+        )
+
+    try:
+        body = resp.json()
+    except ValueError:
+        return JSONResponse(
+            content={
+                "entries": [],
+                "total": 0,
+                "limit": limit,
+                "offset": offset,
+                "warning": "logging store response was not JSON",
+            }
+        )
+
+    rows = body.get("data") if isinstance(body, dict) else None
+    if not isinstance(rows, list):
+        rows = []
+
+    # The store returns newest-first; the service filter is already applied
+    # store-side via ``source``, but it matches a source prefix loosely there,
+    # so re-apply the legacy substring semantics here for parity.
+    mapped = [_legacy_entry(r) for r in rows if isinstance(r, dict)]
+    if service:
+        mapped = [e for e in mapped if service in e.get("logger", "")]
     if level:
         level_upper = level.upper()
-        entries = [e for e in entries if e["level"] == level_upper]
+        mapped = [e for e in mapped if e["level"] == level_upper]
 
-    if service:
-        entries = [e for e in entries if service in e.get("logger", "")]
-
-    total = len(entries)
-    entries = entries[offset: offset + limit]
-
+    total = len(mapped)
+    window = mapped[offset : offset + limit]
     return {
-        "entries": entries,
+        "entries": window,
         "total": total,
         "limit": limit,
         "offset": offset,
-        "buffer_size": buffer_size,
-        "buffer_cap": _LOG_BUFFER_CAP,
     }
 
 
@@ -217,76 +217,70 @@ async def stream_logs(
     level: str | None = Query(None),
     service: str | None = Query(None),
 ):
-    """Server-Sent Events stream of new log entries.
+    """Server-Sent Events stream proxied from the store's live tail.
 
-    Each entry produces one ``data: <json>\\n\\n`` frame. The stream
-    sends an initial snapshot of the last 100 buffered entries, then
-    appends each new entry as it arrives. Clients reconnect with the
-    EventSource API; backpressure is best-effort — a slow client is
-    dropped rather than blocking the producer.
-
-    Concurrent client cap (``_SSE_MAX_CLIENTS``) prevents a LAN
-    attacker pre-pairing from pinning the board by opening hundreds
-    of connections. Configurable via the ``ADOS_SSE_MAX_CLIENTS``
-    environment variable.
+    Each store tail row is re-mapped to the legacy ``data: <json>`` frame so
+    existing EventSource clients keep working. A replay of the most recent
+    entries is requested so a fresh stream shows recent context, matching the
+    old snapshot behavior. Keep-alive comment frames pass through. If the store
+    is unreachable the stream closes cleanly so the client reconnects.
     """
-    # Bind the loop lazily on the first stream open so worker-thread
-    # log writes can wake subscribers thread-safely.
-    if _main_loop is None:
-        bind_loop(asyncio.get_running_loop())
+    params: dict[str, Any] = {"kind": "logs", "replay": 100}
+    if level:
+        params["level"] = level.lower()
+    if service:
+        params["source"] = service
 
-    async with _subscribers_lock:
-        if len(_subscribers) >= _SSE_MAX_CLIENTS:
-            raise HTTPException(
-                status_code=503,
-                detail=(
-                    f"Too many SSE subscribers ({len(_subscribers)}/"
-                    f"{_SSE_MAX_CLIENTS}). Try again later."
-                ),
-                headers={"Retry-After": "30"},
-            )
-        queue: asyncio.Queue[dict | None] = asyncio.Queue(
-            maxsize=_SUBSCRIBER_QUEUE_DEPTH
-        )
-        _subscribers.append(queue)
-
-    await _ensure_fanout_running()
-
-    level_upper = level.upper() if level else None
-
-    def _filter(entry: dict) -> bool:
-        if level_upper and entry.get("level") != level_upper:
-            return False
-        if service and service not in entry.get("logger", ""):
-            return False
-        return True
+    client = _get_tail_client()
 
     async def gen():
+        upstream_req = client.build_request("GET", "/v1/tail", params=params)
         try:
-            # Initial snapshot of the most-recent 100 entries.
-            snapshot = list(_log_buffer)[-100:]
-            for e in snapshot:
-                if _filter(e):
-                    yield f"data: {json.dumps(e)}\n\n"
-            while True:
-                entry = await queue.get()
-                if entry is _DROP_SENTINEL:
-                    # Producer dropped us for being slow. Close cleanly
-                    # so the client reconnects via EventSource auto-retry.
-                    yield ": dropped slow client\n\n"
-                    return
-                if entry is _KEEPALIVE_SENTINEL:
-                    yield ": keep-alive\n\n"
-                    continue
-                if isinstance(entry, dict) and _filter(entry):
-                    yield f"data: {json.dumps(entry)}\n\n"
-        except asyncio.CancelledError:
+            upstream = await client.send(upstream_req, stream=True)
+        except (httpx.ConnectError, httpx.ConnectTimeout, FileNotFoundError, OSError):
+            log.warning("logs_stream_store_unreachable")
+            yield ": logging store unavailable\n\n"
             return
-        finally:
-            async with _subscribers_lock:
+        except httpx.HTTPError as exc:
+            log.warning("logs_stream_store_error", error=str(exc))
+            yield ": logging store stream failed\n\n"
+            return
+
+        try:
+            if upstream.status_code >= 400:
+                yield ": logging store stream error\n\n"
+                return
+            async for line in upstream.aiter_lines():
+                if not line:
+                    continue
+                if line.startswith(":"):
+                    # Pass keep-alive / notice comment frames straight through.
+                    yield f"{line}\n\n"
+                    continue
+                if not line.startswith("data:"):
+                    continue
+                payload = line[len("data:") :].strip()
+                if not payload:
+                    continue
                 try:
-                    _subscribers.remove(queue)
-                except ValueError:
-                    pass
+                    row = json.loads(payload)
+                except json.JSONDecodeError:
+                    continue
+                # The store may publish a "lagged" notice frame on the tail;
+                # forward it as a comment so the legacy client does not try to
+                # render it as a log entry.
+                if isinstance(row, dict) and row.get("kind") == "lagged":
+                    yield ": tail lagged\n\n"
+                    continue
+                if not isinstance(row, dict):
+                    continue
+                yield f"data: {json.dumps(_legacy_entry(row))}\n\n"
+        finally:
+            # Releases the upstream connection on completion AND on a client
+            # disconnect (Starlette cancels the generator).
+            await upstream.aclose()
 
     return StreamingResponse(gen(), media_type="text/event-stream")
+
+
+__all__ = ["router", "aclose_clients"]

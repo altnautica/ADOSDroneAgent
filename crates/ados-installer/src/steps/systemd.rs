@@ -575,6 +575,25 @@ fn reconcile_rust_cutover_units() {
     }
 }
 
+/// Reconcile the local logging and telemetry store unit against its
+/// fallback marker. The store is on by default (the log-view endpoints read
+/// it), so a fresh box with no marker enables it; the `logd-python-fallback`
+/// marker — written by `ados rust disable logd` — pins it off, so the
+/// installer tears it down instead. Idempotent and runs on every install so a
+/// re-run from a partial state self-heals. The START half is the `start`
+/// step's job (the unit is PartOf the supervisor).
+fn reconcile_logd_unit() {
+    const UNIT: &str = "ados-logd.service";
+    let pinned_off = Path::new(CONFIG_DIR).join("logd-python-fallback").exists();
+    if pinned_off {
+        let _ = exec::run("systemctl", &["stop", UNIT]);
+        let _ = exec::run("systemctl", &["disable", UNIT]);
+        let _ = exec::run("systemctl", &["reset-failed", UNIT]);
+    } else {
+        enable_if_present(UNIT);
+    }
+}
+
 /// Drop the video-pipeline UDP sysctl tuning and apply it now so the running
 /// agent picks up the new ceiling on its next socket bind. Idempotent overwrite.
 /// Ports 03-kernel.sh `install_video_sysctl`.
@@ -953,6 +972,11 @@ impl Step for Systemd {
             enable_if_present(unit);
         }
         let _ = std::fs::create_dir_all("/etc/ados/peripherals");
+
+        // 5b. The logging and telemetry store is on by default (the log-view
+        //     endpoints read it). Enable it unless the fallback marker pins it
+        //     off; the start step brings it up after the supervisor.
+        reconcile_logd_unit();
 
         // 6. Profile-specific enable + teardown.
         if ctx.profile == "ground_station" {

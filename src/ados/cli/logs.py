@@ -29,10 +29,11 @@ from typing import Any
 import click
 
 from ados.cli.logs_transport import LogsClient, LogsTransportError
+from ados.core.paths import LOGD_QUERY_SOCK
 
 # The query-API port and unix socket the logging daemon binds. Kept in step
 # with the daemon's runtime paths (crates/ados-logd/src/lib.rs).
-QUERY_SOCKET = "/run/ados/logd-query.sock"
+QUERY_SOCKET = str(LOGD_QUERY_SOCK)
 QUERY_TCP_PORT = 8090
 
 

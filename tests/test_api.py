@@ -111,40 +111,43 @@ def test_update_config(client):
     assert data["status"] == "ok"
 
 
-def test_get_logs(client):
+def test_get_logs_degrades_when_store_unreachable(client):
+    """With no logging store socket present (the test environment), the legacy
+    /api/logs endpoint degrades to an empty list with a warning rather than a
+    500: losing history degrades debugging, not flight."""
     resp = client.get("/api/logs")
     assert resp.status_code == 200
     data = resp.json()
-    assert "entries" in data
-    assert "total" in data
+    assert data["entries"] == []
+    assert data["total"] == 0
+    assert "warning" in data
 
 
-def test_log_buffer_timestamp_is_iso_string():
-    """BufferHandler must emit an ISO-8601 string timestamp, not a float.
-
-    A numeric timestamp breaks consumers that slice/parse the field as a
-    string (the live dashboard log view does exactly that).
-    """
-    import logging
+def test_legacy_entry_timestamp_is_iso_string():
+    """The legacy entry mapping must emit an ISO-8601 string timestamp, not a
+    float. A numeric timestamp breaks consumers that slice/parse the field as a
+    string (the live dashboard log view does exactly that)."""
     from datetime import datetime
 
-    from ados.api.routes.logs import BufferHandler, _log_buffer
+    from ados.api.routes.logs import _legacy_entry
 
-    handler = BufferHandler()
-    record = logging.LogRecord(
-        name="ados.test",
-        level=logging.INFO,
-        pathname=__file__,
-        lineno=1,
-        msg="hello",
-        args=(),
-        exc_info=None,
+    entry = _legacy_entry(
+        {
+            "id": 7,
+            "ts_us": 1_700_000_000_000_000,
+            "source": "python-agent",
+            "level": "info",
+            "target": "ados.test",
+            "msg": "hello",
+        }
     )
-    handler.emit(record)
-    entry = _log_buffer[-1]
     assert isinstance(entry["timestamp"], str)
     # Round-trips through the ISO parser without raising.
     datetime.fromisoformat(entry["timestamp"])
+    # The legacy consumer expects an upper-case level and the logger name.
+    assert entry["level"] == "INFO"
+    assert entry["logger"] == "ados.test"
+    assert entry["message"] == "hello"
 
 
 def test_list_commands(client):

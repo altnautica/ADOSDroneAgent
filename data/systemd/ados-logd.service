@@ -43,6 +43,9 @@ StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=ados-logd
 
-# No [Install] section: the unit is deployed but not auto-enabled. The store
-# is turned on through the agent's own cutover tooling once a box is ready to
-# carry it, so a fresh install ships it dark.
+[Install]
+# The log-view endpoints read the store, so it is on by default: the installer
+# enables it unless the fallback marker pins it off, and `ados rust enable logd`
+# re-enables it. Wanted by the supervisor (which it is PartOf) so the supervisor
+# pulls it up and a supervisor restart cycles it with the rest of the set.
+WantedBy=ados-supervisor.service

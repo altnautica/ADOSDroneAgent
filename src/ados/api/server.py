@@ -24,6 +24,7 @@ from ados.api.routes import (
     ground_station,
     logs,
     network,
+    observability,
     ota,
     pairing,
     params,
@@ -88,19 +89,14 @@ def create_app(agent: Any) -> FastAPI:
     from ados.security.rate_limit import RateLimitMiddleware
     app.add_middleware(RateLimitMiddleware, rate=10.0, burst=20)
 
-    # Install the in-memory log buffer + bind the running event loop so
-    # the /api/logs and /api/logs/stream surfaces actually have content
-    # to serve. Without this the buffer handler is dead code and every
-    # log endpoint returns empty.
-    from ados.api.routes.logs import bind_loop, install_log_buffer
-
-    install_log_buffer()
-
-    @app.on_event("startup")
-    async def _bind_log_loop() -> None:
-        import asyncio as _asyncio
-
-        bind_loop(_asyncio.get_running_loop())
+    # Close the logging-store proxy clients on shutdown so the shared
+    # connections do not leak across an app teardown. The /api/logs surface and
+    # the /api/v2/observability proxy both read the store's query API over its
+    # trusted local socket; there is no in-process buffer to install.
+    @app.on_event("shutdown")
+    async def _close_observability_clients() -> None:
+        await logs.aclose_clients()
+        await observability.aclose_client()
 
     # Health check. Moved off `/` so the ground-station static mount
     # can own the root path (`/` -> `static-ground/index.html`).
@@ -116,6 +112,10 @@ def create_app(agent: Any) -> FastAPI:
     app.include_router(commands.router, prefix="/api")
     app.include_router(config.router, prefix="/api")
     app.include_router(logs.router, prefix="/api")
+    # Reverse-proxy bridge to the local logging and telemetry store's query
+    # API. Lets a client that can only reach :8080 still read the store, over
+    # the store's trusted local socket. Inherits the agent's own auth.
+    app.include_router(observability.router, prefix="/api")
     app.include_router(video.router, prefix="/api")
     app.include_router(wfb.router, prefix="/api")
     app.include_router(scripts.router, prefix="/api")
