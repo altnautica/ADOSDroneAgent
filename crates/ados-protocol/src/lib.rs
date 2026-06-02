@@ -15,6 +15,9 @@
 //!   pipe-delimited HMAC-SHA256 capability token.
 //! - [`state`] — the vehicle-state codec: a v1 newline-JSON reader for the
 //!   migration window and a v2 length-prefixed msgpack codec.
+//! - [`logd`] — the logging/telemetry wire contracts: versioned ingest frames
+//!   (logs, telemetry, events, hardware snapshots), the read-API request and
+//!   response envelope, and the secret-field redaction shared at ingest.
 //! - [`capabilities`] — the generated agent capability catalog (the single
 //!   source of truth is `capabilities.toml`; do not edit the generated file).
 
@@ -23,6 +26,7 @@ pub mod frame;
 pub mod framebus;
 pub mod hwcaps;
 pub mod ipc;
+pub mod logd;
 #[cfg(feature = "mavlink")]
 pub mod mavlink;
 pub mod plugin;

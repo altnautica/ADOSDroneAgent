@@ -1,0 +1,48 @@
+[package]
+name = "ados-logd"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Durable local logging and telemetry store: a single-writer SQLite database fed by every process, queryable over the LAN, the CLI, and the local socket."
+
+# lib + a daemon binary skeleton. The lib carries the storage layer (schema,
+# migrations, PRAGMA setup) and re-exports the shared wire contracts; the
+# ingestion socket, the hardware collector, and the query API land in later
+# chunks. The binary ships dark: it inits logging and exits, with no socket
+# bound and no systemd unit installed, until those chunks land.
+[[bin]]
+name = "ados-logd"
+path = "src/main.rs"
+
+[dependencies]
+# Shared wire contracts: the versioned ingest frames, the read-API envelope,
+# and the secret-field redaction applied at ingest.
+ados-protocol = { path = "../ados-protocol" }
+# Embedded single-writer SQLite. Only this daemon opens the store read-write.
+rusqlite = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+rmp-serde = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+# HTTP framework + compression for the query API and export path. Declared now
+# so the dependency set is fixed; the server itself is wired in a later chunk.
+axum = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+zstd = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
+
+# Linux-only edge: systemd readiness/watchdog notify + journald log layer for
+# the daemon. Confined to a target section so the pure storage core still builds
+# and tests on a non-Linux dev host.
+[target.'cfg(target_os = "linux")'.dependencies]
+sd-notify = { workspace = true }
+tracing-journald = { workspace = true }
+nix = { workspace = true }

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["ados-protocol", "ados-capabilities-codegen", "ados-tui", "ados-supervisor", "ados-mavlink-router", "ados-radio", "ados-video", "ados-plugin-host", "ados-sdk", "ados-cloud", "ados-groundlink", "ados-net", "ados-hid", "ados-display", "ados-vision", "ados-hal-probe", "ados-macpin", "ados-installer"]
+members = ["ados-protocol", "ados-capabilities-codegen", "ados-tui", "ados-supervisor", "ados-mavlink-router", "ados-radio", "ados-video", "ados-plugin-host", "ados-sdk", "ados-cloud", "ados-groundlink", "ados-net", "ados-hid", "ados-display", "ados-vision", "ados-hal-probe", "ados-macpin", "ados-installer", "ados-logd"]
 
 [workspace.package]
 version = "0.1.0"
@@ -76,6 +76,19 @@ ab_glyph = "0.2"
 image = { version = "0.25", default-features = false, features = ["png"] }
 qrcode = "0.14"
 png = "0.17"
+# Embedded single-writer SQLite for the durable local log/telemetry store. The
+# `bundled` feature compiles SQLite from source (no system libsqlite3), so the
+# binary cross-builds for the musl SBC target as a self-contained file. This is
+# the first database dependency in the workspace; only the logging daemon opens
+# it read-write, every other reader connects read-only.
+rusqlite = { version = "0.31", features = ["bundled"] }
+# Native HTTP framework for the local query API. Pure Rust over tokio/hyper;
+# the same listener Router is served on a unix socket and a TCP port.
+axum = "0.7"
+tower = "0.4"
+tower-http = { version = "0.5", features = ["trace"] }
+# Streaming compression for the export endpoint and explicit cloud-push windows.
+zstd = "0.13"
 
 [profile.release]
 strip = true
