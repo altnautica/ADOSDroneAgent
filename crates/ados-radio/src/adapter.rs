@@ -1359,7 +1359,28 @@ async fn read_tx_power(iface: &str) -> Option<f32> {
     None
 }
 
+/// Apply TX power with the region-mode muted-readback policy (region: abort on a
+/// muted PHY by returning None). Thin wrapper over [`set_tx_power_modal`] so
+/// existing region-mode callers stay unchanged.
 pub async fn set_tx_power(iface: &str, dbm: i8) -> Option<i8> {
+    set_tx_power_modal(iface, dbm, false).await
+}
+
+/// Apply TX power, threading the unrestricted operating posture.
+///
+/// `unrestricted` controls only the muted-readback handling. A muted readback
+/// (<= the not-permitted floor) is ALWAYS logged + surfaces as `rf_unverified`
+/// downstream (the received-side dual-check stays armed in both postures). The
+/// difference is the return value:
+/// - region mode (`unrestricted == false`): return `None` — the muted PHY is a
+///   dead radio under an enforced region, so the caller does not promote it.
+/// - unrestricted mode (`unrestricted == true`): return `Some(candidate)` — under
+///   the operator-responsible posture we surface the muted state rather than
+///   aborting bring-up, because a self-managed PHY can read back muted on the
+///   not-permitted floor before the driver-region layer settles, yet still need
+///   the rest of the bring-up to proceed. The honest `rf_unverified` signal is
+///   what tells the operator the radio is not yet radiating.
+pub async fn set_tx_power_modal(iface: &str, dbm: i8, unrestricted: bool) -> Option<i8> {
     for candidate in tx_power_ramp(dbm) {
         let mbm = (candidate as i32) * 100;
         if run_cmd(
@@ -1374,8 +1395,9 @@ pub async fn set_tx_power(iface: &str, dbm: i8) -> Option<i8> {
             // monitor) can leave the interface pinned at the "-100 dBm" not-permitted
             // floor while the set command still returns success. That muted PHY
             // injects frames into the TX ring (the counter advances) but radiates
-            // nothing. Read the value back and refuse to report a healthy apply when
-            // the PHY is muted, so the caller does not promote a dead radio to ready.
+            // nothing. Read the value back: in region mode this is a fatal "dead
+            // radio" verdict; under the unrestricted posture we log + surface it
+            // (rf_unverified) but let bring-up continue.
             if let Some(live) = read_tx_power(iface).await {
                 if live <= MUTED_TX_POWER_DBM {
                     tracing::error!(
@@ -1383,9 +1405,17 @@ pub async fn set_tx_power(iface: &str, dbm: i8) -> Option<i8> {
                         requested = dbm,
                         applied = candidate,
                         readback_dbm = live,
+                        unrestricted,
                         "wfb_txpower_muted_readback"
                     );
-                    return None;
+                    if !unrestricted {
+                        return None;
+                    }
+                    // Unrestricted: surface, do not abort. The muted readback is
+                    // still honestly reported; return the candidate so the rest of
+                    // bring-up proceeds and the rf_unverified detector carries the
+                    // truth that no RF is leaving the antenna.
+                    return Some(candidate);
                 }
             }
             if candidate != dbm {

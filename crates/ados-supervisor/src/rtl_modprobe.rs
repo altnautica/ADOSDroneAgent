@@ -1,0 +1,360 @@
+//! RTL8812EU driver module-parameter generator for the operating-region posture.
+//!
+//! A self-managed-regulatory USB injection PHY (the RTL family) obeys its OWN
+//! EEPROM-baked country regardless of the OS `iw reg set`, so relaxing the
+//! software gate alone does not make a dongle baked with a restrictive country
+//! radiate on the home channel. The PHY-level lever is the driver's module
+//! parameters: with `rtw_regd_src=0` the driver uses its own private regdb and
+//! ignores both the OS core domain and (with country `00`) the efuse country,
+//! registering a worldwide channel plan that permits the home channel; the two
+//! power-limit tables are switched off so the home channel runs at full driver
+//! power.
+//!
+//! This module renders the `options 8812eu ...` line for the active posture and
+//! writes it to `/etc/modprobe.d/ados-rtl8812eu.conf`. Pinning a region instead
+//! sets the driver's own regdb to that country with the power-limit table back on
+//! for legal compliance in that jurisdiction.
+//!
+//! The generator is pure (unit-tested on every host); the file write + module
+//! reload are Linux-only OS edges. The reload (`modprobe -r 8812eu` then
+//! `modprobe 8812eu`) must NOT race the auto-pair/bind orchestrator — the caller
+//! defers it while a bind window is open.
+//!
+//! NOTE: this is the agent-generated file. The vendored `realtek_88x2eu.conf`
+//! must NOT be wired in — it uses `rtw_regd_src=1` (OS source), which still
+//! applies the efuse country hint and so cannot lift a restrictive baked country.
+
+/// The operating-region posture the driver options encode.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ModprobeMode {
+    /// Worldwide plan, power-limit tables off (the fresh-box default).
+    Unrestricted,
+    /// The driver's own regdb honours the pinned country, power-limit table on.
+    /// Carries the uppercase ISO 3166-1 alpha-2 region code.
+    Region(String),
+}
+
+/// The canonical modprobe config path the generator writes.
+pub const MODPROBE_CONF_PATH: &str = "/etc/modprobe.d/ados-rtl8812eu.conf";
+
+/// The RTL8812EU module name (the `options <module> ...` key + the reload target).
+const MODULE_NAME: &str = "8812eu";
+
+/// Render the `options 8812eu ...` line for the active posture. Pure.
+///
+/// - Unrestricted: `rtw_regd_src=0` (driver private regdb, efuse ignored) +
+///   `rtw_country_code=00` (worldwide plan) + both per-region power-limit tables
+///   off so the home channel runs at full driver power.
+/// - Region(R): `rtw_regd_src=0` + `rtw_country_code=R` (the driver regdb honours
+///   R) + the power-limit table back on for legal compliance in R.
+///
+/// The region code is emitted verbatim (the caller validates/uppercases it).
+pub fn render_modprobe_options(mode: &ModprobeMode) -> String {
+    match mode {
+        ModprobeMode::Unrestricted => format!(
+            "options {MODULE_NAME} rtw_regd_src=0 rtw_country_code=00 rtw_tx_pwr_lmt_enable=0 rtw_tx_pwr_by_rate=0"
+        ),
+        ModprobeMode::Region(code) => format!(
+            "options {MODULE_NAME} rtw_regd_src=0 rtw_country_code={code} rtw_tx_pwr_lmt_enable=1"
+        ),
+    }
+}
+
+/// Resolve the [`ModprobeMode`] from a `network.regulatory` config body. The
+/// default (absent block, or `region` with no valid code) is unrestricted — the
+/// permissive fresh-box posture. A `region` mode with a valid 2-char A-Z/0-9 code
+/// pins that region. Pure so the resolution is unit-tested without the filesystem.
+pub fn mode_from_config(text: &str) -> ModprobeMode {
+    #[derive(serde::Deserialize, Default)]
+    struct Raw {
+        #[serde(default)]
+        network: Net,
+    }
+    #[derive(serde::Deserialize, Default)]
+    struct Net {
+        #[serde(default)]
+        regulatory: Option<Reg>,
+    }
+    #[derive(serde::Deserialize, Default)]
+    struct Reg {
+        #[serde(default)]
+        mode: Option<String>,
+        #[serde(default)]
+        region: Option<String>,
+    }
+    let reg = serde_norway::from_str::<Raw>(text)
+        .map(|r| r.network.regulatory)
+        .unwrap_or_default();
+    let Some(reg) = reg else {
+        return ModprobeMode::Unrestricted;
+    };
+    let is_region = reg
+        .mode
+        .as_deref()
+        .map(|m| m.trim().eq_ignore_ascii_case("region"))
+        .unwrap_or(false);
+    if !is_region {
+        return ModprobeMode::Unrestricted;
+    }
+    match reg.region.map(|r| r.trim().to_ascii_uppercase()) {
+        Some(code) if is_valid_region_code(&code) => ModprobeMode::Region(code),
+        // region mode without a valid code → unrestricted (permissive direction).
+        _ => ModprobeMode::Unrestricted,
+    }
+}
+
+/// True when `code` is a valid ISO 3166-1 alpha-2 / `00` world code: exactly two
+/// ASCII uppercase-or-digit chars (checked against an already-uppercased input).
+fn is_valid_region_code(code: &str) -> bool {
+    code.len() == 2
+        && code
+            .bytes()
+            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
+}
+
+/// Render the full file body (a header comment + the options line + trailing
+/// newline). The header is bland and reader-facing — it describes what the file
+/// does, not any internal planning artifact.
+pub fn render_modprobe_file(mode: &ModprobeMode) -> String {
+    format!(
+        "# ADOS Drone Agent — RTL8812EU operating-region driver options.\n\
+         # Generated by the agent from the network.regulatory config; do not edit\n\
+         # by hand (changes are overwritten on the next reconcile).\n\
+         {}\n",
+        render_modprobe_options(mode)
+    )
+}
+
+#[cfg(target_os = "linux")]
+pub use linux::{apply, reconcile_from_config, reload_module};
+
+/// Non-Linux build: no OS edges to drive, so the reconcile is an inert no-op.
+/// Keeps the call site portable across the dev host and CI.
+#[cfg(not(target_os = "linux"))]
+pub fn reconcile_from_config(_reload_allowed: bool) {}
+
+#[cfg(target_os = "linux")]
+mod linux {
+    use super::*;
+    use std::io::Write;
+    use std::path::Path;
+
+    /// The canonical agent config path the operating-region posture is read from.
+    const CONFIG_YAML: &str = "/etc/ados/config.yaml";
+
+    /// Read `network.regulatory` from the canonical config and write/reconcile the
+    /// driver options file for the resolved posture. Best-effort: a missing config
+    /// reads as unrestricted (the permissive default), and any write/reload failure
+    /// is logged but never aborts the supervisor. `reload_allowed` is forwarded to
+    /// [`apply`] so the caller can defer the live reload during a bind window.
+    pub fn reconcile_from_config(reload_allowed: bool) {
+        let mode = std::fs::read_to_string(CONFIG_YAML)
+            .map(|t| super::mode_from_config(&t))
+            .unwrap_or(ModprobeMode::Unrestricted);
+        match apply(&mode, reload_allowed) {
+            Ok(true) => tracing::info!(?mode, "rtl_modprobe_options_updated"),
+            Ok(false) => tracing::debug!(?mode, "rtl_modprobe_options_already_current"),
+            Err(e) => tracing::warn!(error = %e, "rtl_modprobe_apply_failed"),
+        }
+    }
+
+    /// Write the modprobe config for `mode` idempotently and reload the module so
+    /// the new parameters take effect. Returns `Ok(true)` when the file content
+    /// changed (and a reload was attempted), `Ok(false)` when it was already
+    /// current (no reload). A write/reload failure is surfaced as an error so the
+    /// caller can log it, but it is never fatal to the agent.
+    ///
+    /// `reload_allowed` gates the live `modprobe -r/modprobe` reload: the caller
+    /// passes `false` while a bind window is open (the reload would race the bind
+    /// orchestrator), so the new file is written but the reload is deferred to the
+    /// next idle reconcile or a reboot. The on-disk file always wins on the next
+    /// fresh module load regardless.
+    pub fn apply(mode: &ModprobeMode, reload_allowed: bool) -> std::io::Result<bool> {
+        let body = render_modprobe_file(mode);
+        let path = Path::new(MODPROBE_CONF_PATH);
+        let unchanged = std::fs::read_to_string(path)
+            .map(|cur| cur == body)
+            .unwrap_or(false);
+        if unchanged {
+            return Ok(false);
+        }
+        atomic_write(path, body.as_bytes())?;
+        if reload_allowed {
+            reload_module();
+        } else {
+            tracing::info!(
+                note = "operating-region driver options written; reload deferred (bind active)",
+                "rtl_modprobe_reload_deferred"
+            );
+        }
+        Ok(true)
+    }
+
+    /// Reload the RTL8812EU module so a changed options file takes effect:
+    /// `modprobe -r 8812eu` then `modprobe 8812eu`. Sequenced as two calls (not a
+    /// single `modprobe -r` that auto-reprobes) so the unload completes before the
+    /// reload, which avoids a half-applied parameter set. Best-effort: the RTL is
+    /// never the management interface (the radio crate excludes the default-route
+    /// iface), so a failed unload/reload degrades rather than severing a link.
+    pub fn reload_module() {
+        let unload = std::process::Command::new("modprobe")
+            .args(["-r", MODULE_NAME])
+            .status();
+        match unload {
+            Ok(s) if s.success() => {}
+            Ok(s) => tracing::warn!(code = ?s.code(), "rtl_modprobe_unload_failed"),
+            Err(e) => tracing::warn!(error = %e, "rtl_modprobe_unload_error"),
+        }
+        let reload = std::process::Command::new("modprobe")
+            .arg(MODULE_NAME)
+            .status();
+        match reload {
+            Ok(s) if s.success() => {
+                tracing::info!("rtl_modprobe_reloaded");
+            }
+            Ok(s) => tracing::warn!(code = ?s.code(), "rtl_modprobe_reload_failed"),
+            Err(e) => tracing::warn!(error = %e, "rtl_modprobe_reload_error"),
+        }
+    }
+
+    /// Write `bytes` to `path` atomically (tmp + rename) with 0644 perms.
+    fn atomic_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let tmp = path.with_extension("conf.tmp");
+        {
+            let mut f = std::fs::File::create(&tmp)?;
+            f.write_all(bytes)?;
+            f.flush()?;
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o644));
+        }
+        std::fs::rename(&tmp, path)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unrestricted_options_line_is_exact() {
+        let line = render_modprobe_options(&ModprobeMode::Unrestricted);
+        assert_eq!(
+            line,
+            "options 8812eu rtw_regd_src=0 rtw_country_code=00 rtw_tx_pwr_lmt_enable=0 rtw_tx_pwr_by_rate=0"
+        );
+    }
+
+    #[test]
+    fn region_options_line_is_exact_and_carries_the_code() {
+        let line = render_modprobe_options(&ModprobeMode::Region("IN".to_string()));
+        assert_eq!(
+            line,
+            "options 8812eu rtw_regd_src=0 rtw_country_code=IN rtw_tx_pwr_lmt_enable=1"
+        );
+        // A different region substitutes verbatim.
+        let de = render_modprobe_options(&ModprobeMode::Region("DE".to_string()));
+        assert_eq!(
+            de,
+            "options 8812eu rtw_regd_src=0 rtw_country_code=DE rtw_tx_pwr_lmt_enable=1"
+        );
+    }
+
+    #[test]
+    fn unrestricted_disables_both_power_limit_tables() {
+        // The two per-region power-limit tables MUST be off under unrestricted so
+        // the home channel runs at full driver power. (The host-VBUS power-budget
+        // clamp is enforced separately by the radio crate's tx-power ramp.)
+        let line = render_modprobe_options(&ModprobeMode::Unrestricted);
+        assert!(line.contains("rtw_tx_pwr_lmt_enable=0"));
+        assert!(line.contains("rtw_tx_pwr_by_rate=0"));
+        // And the regdb source is the driver's private regdb (efuse ignored).
+        assert!(line.contains("rtw_regd_src=0"));
+        assert!(line.contains("rtw_country_code=00"));
+    }
+
+    #[test]
+    fn region_re_enables_the_power_limit_table() {
+        // A pinned region turns the legal power-limit table back ON.
+        let line = render_modprobe_options(&ModprobeMode::Region("US".to_string()));
+        assert!(line.contains("rtw_tx_pwr_lmt_enable=1"));
+        // The driver still uses its own regdb (regd_src=0), never the OS source.
+        assert!(line.contains("rtw_regd_src=0"));
+    }
+
+    #[test]
+    fn region_never_emits_regd_src_1() {
+        // regd_src=1 (OS source) still applies the efuse country hint, which
+        // cannot lift a restrictive baked country. The generator must NEVER emit
+        // it — that is the bug in the vendored template this module replaces.
+        for mode in [
+            ModprobeMode::Unrestricted,
+            ModprobeMode::Region("US".to_string()),
+            ModprobeMode::Region("IN".to_string()),
+        ] {
+            assert!(!render_modprobe_options(&mode).contains("rtw_regd_src=1"));
+        }
+    }
+
+    #[test]
+    fn file_body_has_a_bland_header_and_the_options_line() {
+        let body = render_modprobe_file(&ModprobeMode::Unrestricted);
+        // The header describes the file, not any internal planning artifact.
+        assert!(body.starts_with("# ADOS Drone Agent"));
+        assert!(body.contains(&render_modprobe_options(&ModprobeMode::Unrestricted)));
+        assert!(body.ends_with('\n'));
+    }
+
+    #[test]
+    fn mode_from_config_defaults_to_unrestricted() {
+        // No block at all → unrestricted.
+        assert_eq!(
+            mode_from_config("agent:\n  name: x\n"),
+            ModprobeMode::Unrestricted
+        );
+        // Explicit unrestricted (region present but irrelevant) → unrestricted.
+        assert_eq!(
+            mode_from_config("network:\n  regulatory:\n    mode: unrestricted\n    region: US\n"),
+            ModprobeMode::Unrestricted
+        );
+        // Malformed config → unrestricted (permissive).
+        assert_eq!(mode_from_config(": : not yaml"), ModprobeMode::Unrestricted);
+    }
+
+    #[test]
+    fn mode_from_config_reads_a_pinned_region() {
+        assert_eq!(
+            mode_from_config("network:\n  regulatory:\n    mode: region\n    region: in\n"),
+            ModprobeMode::Region("IN".to_string())
+        );
+        // Case-insensitive mode token.
+        assert_eq!(
+            mode_from_config("network:\n  regulatory:\n    mode: REGION\n    region: DE\n"),
+            ModprobeMode::Region("DE".to_string())
+        );
+    }
+
+    #[test]
+    fn mode_from_config_region_without_valid_code_is_unrestricted() {
+        // region mode with no code → unrestricted.
+        assert_eq!(
+            mode_from_config("network:\n  regulatory:\n    mode: region\n"),
+            ModprobeMode::Unrestricted
+        );
+        // region mode with a malformed code → unrestricted (permissive).
+        assert_eq!(
+            mode_from_config("network:\n  regulatory:\n    mode: region\n    region: USA\n"),
+            ModprobeMode::Unrestricted
+        );
+    }
+
+    #[test]
+    fn config_region_predicate_matches_iso_alpha2() {
+        assert!(is_valid_region_code("US"));
+        assert!(is_valid_region_code("00"));
+        assert!(!is_valid_region_code("USA"));
+        assert!(!is_valid_region_code(""));
+    }
+}

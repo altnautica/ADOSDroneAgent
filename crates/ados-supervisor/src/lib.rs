@@ -15,6 +15,7 @@ pub mod mac_pin;
 pub mod reg_reconciler;
 pub mod registry;
 pub mod role;
+pub mod rtl_modprobe;
 pub mod sdnotify;
 pub mod systemctl;
 pub mod wifi_selfheal;

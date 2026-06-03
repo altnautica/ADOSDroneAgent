@@ -23,10 +23,22 @@
 //!     -> {"ok":true,"mode":"auto","adaptive_bitrate_enabled":true}
 //! {"op":"set_tier","mode":"manual","mcs_index":3,"fec_k":8,"fec_n":10}
 //!     -> {"ok":true,"mode":"manual","mcs_index":3,"fec_k":8,"fec_n":10}
+//! {"op":"set_region","mode":"region","region":"IN"}
+//!     -> {"ok":true,"regMode":"region","region":"IN","restart_required":true}
+//! {"op":"set_region","mode":"unrestricted"}
+//!     -> {"ok":true,"regMode":"unrestricted","region":null,
+//!         "restart_required":true}
 //! {"op":"status"}
 //!     -> {"ok":true,"fec_k":..,"fec_n":..,"mcs_index":..,
 //!         "adaptive_bitrate_enabled":..}
 //! ```
+//!
+//! The operating-region change is the one knob the radio re-reads only at
+//! (re)start (the gate + the driver-region layer bind at bring-up), so
+//! `set_region` writes a small signal sidecar the persistence seam reads to
+//! round-trip `network.regulatory.*` into config.yaml and restart the service.
+//! The socket never round-trips config.yaml itself (the REST layer owns that),
+//! identical to the peer-backfill signal pattern.
 //!
 //! A failed apply (an invalid ratio/index, or a respawn failure) replies
 //! `{"ok":false,"error":"..."}` and leaves the running tunables unchanged, so the
@@ -74,6 +86,8 @@ struct Request {
     tx_power_dbm: Option<i8>,
     #[serde(default)]
     mode: Option<String>,
+    #[serde(default)]
+    region: Option<String>,
 }
 
 /// Bind the command socket and serve requests until the listener errors. Run as
@@ -165,7 +179,41 @@ enum Command {
         fec_k: u8,
         fec_n: u8,
     },
+    /// Set the operating-region posture. `region` is the uppercase ISO 3166-1
+    /// alpha-2 code when `mode == Region`, else None (unrestricted). Signals the
+    /// persistence seam to round-trip config + restart so the radio re-reads it.
+    SetRegion {
+        mode: RegMode,
+        region: Option<String>,
+    },
     Status,
+}
+
+/// The operating-region posture a `set_region` request carries.
+#[derive(Debug, PartialEq, Eq)]
+enum RegMode {
+    Unrestricted,
+    Region,
+}
+
+impl RegMode {
+    fn as_wire(&self) -> &'static str {
+        match self {
+            RegMode::Unrestricted => "unrestricted",
+            RegMode::Region => "region",
+        }
+    }
+}
+
+/// True when `code` is a valid ISO 3166-1 alpha-2 country / `00` world code:
+/// exactly two ASCII uppercase-or-digit chars. Pure (no I/O), so the validation
+/// rejects a malformed region before any signal is written. The case is checked
+/// against the already-uppercased input.
+fn is_valid_region_code(code: &str) -> bool {
+    code.len() == 2
+        && code
+            .bytes()
+            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
 }
 
 /// The outcome of parsing a request line: an apply-ready [`Command`], or a
@@ -215,6 +263,30 @@ fn parse_command(line: &[u8]) -> Parsed {
                 Parsed::Reply(json!({"ok": false, "error": format!("E_BAD_TIER_MODE: {other}")}))
             }
             None => Parsed::Reply(json!({"ok": false, "error": "E_MISSING_TIER_MODE"})),
+        },
+        "set_region" => match req.mode.as_deref() {
+            Some("unrestricted") => Parsed::Cmd(Command::SetRegion {
+                mode: RegMode::Unrestricted,
+                region: None,
+            }),
+            Some("region") => match req.region.as_deref() {
+                Some(r) => {
+                    let code = r.trim().to_ascii_uppercase();
+                    if is_valid_region_code(&code) {
+                        Parsed::Cmd(Command::SetRegion {
+                            mode: RegMode::Region,
+                            region: Some(code),
+                        })
+                    } else {
+                        Parsed::Reply(json!({"ok": false, "error": "E_BAD_REGION_CODE"}))
+                    }
+                }
+                None => Parsed::Reply(json!({"ok": false, "error": "E_MISSING_REGION"})),
+            },
+            Some(other) => {
+                Parsed::Reply(json!({"ok": false, "error": format!("E_BAD_REG_MODE: {other}")}))
+            }
+            None => Parsed::Reply(json!({"ok": false, "error": "E_MISSING_REG_MODE"})),
         },
         "status" => Parsed::Cmd(Command::Status),
         other => Parsed::Reply(json!({"ok": false, "error": format!("E_UNKNOWN_OP: {other}")})),
@@ -284,6 +356,19 @@ async fn apply(cmd: Command, state: &CmdState) -> Value {
                 json!({"ok": false, "error": "E_SET_MANUAL_TIER_FAILED"})
             }
         }
+        Command::SetRegion { mode, region } => {
+            // The radio binds the gate + driver-region layer only at (re)start, so
+            // signal the persistence seam to round-trip network.regulatory.* into
+            // config.yaml and restart the service (the socket never writes config
+            // itself). Identical to the peer-backfill signal pattern.
+            write_region_change_signal(mode.as_wire(), region.as_deref());
+            json!({
+                "ok": true,
+                "regMode": mode.as_wire(),
+                "region": region,
+                "restart_required": true,
+            })
+        }
         Command::Status => {
             let (fec_k, fec_n, mcs) = {
                 let p = state.proc.lock().await;
@@ -299,6 +384,17 @@ async fn apply(cmd: Command, state: &CmdState) -> Value {
             })
         }
     }
+}
+
+/// Signal an operating-region change for the persistence seam. Writes
+/// `region-change.json` = `{"mode": <mode>, "region": <code-or-null>}` atomically
+/// to the run dir; the REST seam reads it, round-trips `network.regulatory.*`
+/// into config.yaml, and restarts the radio service so the gate + driver-region
+/// layer re-read the new posture. The socket owns no config persistence, matching
+/// the peer-backfill signal contract.
+fn write_region_change_signal(mode: &str, region: Option<&str>) {
+    let v = json!({ "mode": mode, "region": region });
+    let _ = crate::paths::write_sidecar(&crate::paths::run_path("region-change.json"), &v);
 }
 
 #[cfg(test)]
@@ -434,6 +530,66 @@ mod tests {
     #[test]
     fn status_parses_to_the_status_command() {
         assert_eq!(cmd(br#"{"op":"status"}"#), Command::Status);
+    }
+
+    #[test]
+    fn set_region_unrestricted_needs_no_code() {
+        assert_eq!(
+            cmd(br#"{"op":"set_region","mode":"unrestricted"}"#),
+            Command::SetRegion {
+                mode: RegMode::Unrestricted,
+                region: None,
+            }
+        );
+    }
+
+    #[test]
+    fn set_region_region_uppercases_and_validates_the_code() {
+        // A lowercase code is normalised to uppercase before the apply.
+        assert_eq!(
+            cmd(br#"{"op":"set_region","mode":"region","region":"in"}"#),
+            Command::SetRegion {
+                mode: RegMode::Region,
+                region: Some("IN".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn set_region_rejects_a_bad_code_and_a_missing_code() {
+        assert_eq!(
+            reply(br#"{"op":"set_region","mode":"region","region":"USA"}"#)["error"],
+            "E_BAD_REGION_CODE"
+        );
+        assert_eq!(
+            reply(br#"{"op":"set_region","mode":"region"}"#)["error"],
+            "E_MISSING_REGION"
+        );
+    }
+
+    #[test]
+    fn set_region_rejects_a_bad_mode_or_missing_mode() {
+        assert!(reply(br#"{"op":"set_region","mode":"loose"}"#)["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("E_BAD_REG_MODE"));
+        assert_eq!(
+            reply(br#"{"op":"set_region"}"#)["error"],
+            "E_MISSING_REG_MODE"
+        );
+    }
+
+    #[test]
+    fn valid_region_code_predicate() {
+        assert!(is_valid_region_code("US"));
+        assert!(is_valid_region_code("IN"));
+        assert!(is_valid_region_code("00"));
+        assert!(!is_valid_region_code("USA"));
+        assert!(!is_valid_region_code("u"));
+        assert!(!is_valid_region_code(""));
+        // The predicate is checked post-uppercasing; a lowercase value is not a
+        // valid code as-is (the caller uppercases first).
+        assert!(!is_valid_region_code("us"));
     }
 
     #[test]

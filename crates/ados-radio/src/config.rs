@@ -59,6 +59,138 @@ fn default_reg_gate_strict() -> bool {
     true
 }
 
+/// Operator-facing regulatory posture, read from the `network.regulatory:` block
+/// of `/etc/ados/config.yaml`. The DEFAULT is unrestricted: a fresh box with no
+/// block radiates on the operator's configured channel at hardware-bounded power
+/// without requiring a verified operating region. The operator opts INTO a region
+/// to re-enable the strict regulatory gate (channel/domain enforcement for that
+/// jurisdiction). This is a separate, higher-level switch over the underlying
+/// `video.wfb.{reg_gate_strict,reg_domain,dfs_allowed}` knobs — the mode gates
+/// them, it does not change their raw defaults.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RegulatoryMode {
+    /// Radio brings up + TX-enables on the home channel with no verified region.
+    /// The operator is responsible for legal RF operation in their location.
+    #[default]
+    Unrestricted,
+    /// An operating region is pinned; the strict regulatory gate is enforced for
+    /// that jurisdiction (today's fail-closed behaviour for the pinned region).
+    Region,
+}
+
+impl RegulatoryMode {
+    /// Parse the wire string. Anything other than the explicit `region` token
+    /// (case-insensitive) reads as unrestricted, so a fresh / malformed value is
+    /// permissive rather than fail-closed (the policy default).
+    pub fn from_wire(s: &str) -> Self {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "region" => RegulatoryMode::Region,
+            _ => RegulatoryMode::Unrestricted,
+        }
+    }
+
+    /// The wire string persisted in config + surfaced on the heartbeat.
+    pub fn as_wire(self) -> &'static str {
+        match self {
+            RegulatoryMode::Unrestricted => "unrestricted",
+            RegulatoryMode::Region => "region",
+        }
+    }
+
+    /// True when the strict regulatory gate / region enforcement is OFF.
+    pub fn is_unrestricted(self) -> bool {
+        matches!(self, RegulatoryMode::Unrestricted)
+    }
+}
+
+/// The operating-region knob the three operator surfaces write. Defaults to
+/// unrestricted with no pinned region. `region` is an ISO 3166-1 alpha-2 country
+/// code (uppercase) when `mode == Region`, else `None`. `ack_operator` / `ack_at`
+/// record who chose the posture and when (audit), and never affect behaviour.
+#[derive(Debug, Clone, Default)]
+pub struct RegulatoryConfig {
+    pub mode: RegulatoryMode,
+    pub region: Option<String>,
+    pub ack_operator: Option<String>,
+    pub ack_at: Option<String>,
+}
+
+impl RegulatoryConfig {
+    /// Load the `network.regulatory:` block from the agent config file. An absent
+    /// file or block reads as the unrestricted default (the fresh-box posture).
+    pub fn load_from(path: &std::path::Path) -> Self {
+        #[derive(Debug, Default, Deserialize)]
+        struct RawConfig {
+            #[serde(default)]
+            network: NetworkSection,
+        }
+        #[derive(Debug, Default, Deserialize)]
+        struct NetworkSection {
+            #[serde(default)]
+            regulatory: Option<RawRegulatory>,
+        }
+        let Ok(text) = std::fs::read_to_string(path) else {
+            return RegulatoryConfig::default();
+        };
+        let raw: RawConfig = serde_norway::from_str(&text).unwrap_or_default();
+        raw.network
+            .regulatory
+            .map(RawRegulatory::resolve)
+            .unwrap_or_default()
+    }
+
+    /// The wanted regulatory domain this posture resolves to, given the configured
+    /// `reg_domain` fallback (the `video.wfb.reg_domain` default, "US"). Region →
+    /// the pinned region code; Unrestricted → the configured fallback (so the
+    /// onboard-WiFi global reconciler still has a sane domain to keep, never `00`).
+    pub fn wanted_domain<'a>(&'a self, unrestricted_fallback: &'a str) -> &'a str {
+        match self.mode {
+            RegulatoryMode::Region => self.region.as_deref().unwrap_or(unrestricted_fallback),
+            RegulatoryMode::Unrestricted => unrestricted_fallback,
+        }
+    }
+}
+
+/// The raw `network.regulatory` shape as it appears on disk. Resolved into a
+/// [`RegulatoryConfig`] so the mode string and region casing are normalised in
+/// one place. A `region` mode with no region code degrades to unrestricted (there
+/// is no jurisdiction to enforce), which is the safe-permissive direction.
+#[derive(Debug, Default, Deserialize)]
+struct RawRegulatory {
+    #[serde(default)]
+    mode: Option<String>,
+    #[serde(default)]
+    region: Option<String>,
+    #[serde(default)]
+    ack_operator: Option<String>,
+    #[serde(default)]
+    ack_at: Option<String>,
+}
+
+impl RawRegulatory {
+    fn resolve(self) -> RegulatoryConfig {
+        let region = self
+            .region
+            .map(|r| r.trim().to_ascii_uppercase())
+            .filter(|r| !r.is_empty());
+        let mode = match self.mode.as_deref().map(RegulatoryMode::from_wire) {
+            Some(RegulatoryMode::Region) if region.is_some() => RegulatoryMode::Region,
+            // region mode with no code, or an absent/unrestricted mode → permissive
+            _ => RegulatoryMode::Unrestricted,
+        };
+        RegulatoryConfig {
+            mode,
+            region: if mode == RegulatoryMode::Region {
+                region
+            } else {
+                None
+            },
+            ack_operator: self.ack_operator,
+            ack_at: self.ack_at,
+        }
+    }
+}
+
 /// Operator-facing radio link presets, each mapping to the trio of wfb-ng
 /// tunables `(mcs_index, fec_k, fec_n)`. Tuned for RTL8812EU radios on a 20 MHz
 /// channel. Values are byte-identical to the Python `_LINK_PRESETS` table.
@@ -436,15 +568,121 @@ mod tests {
     }
 
     #[test]
-    fn reg_gate_defaults_are_fail_closed() {
+    fn reg_gate_raw_flag_default_is_retained_for_region_pin() {
+        // The raw `reg_gate_strict` flag default stays `true` so a pinned region
+        // is byte-identical to the legacy fail-closed behaviour. The operating
+        // mode (RegulatoryConfig) is what gates whether that flag is in force, not
+        // a change to this default.
         let c = WfbConfig::default();
-        // Ships fail-closed: the gate refuses to radiate on an unverified domain.
         assert!(c.reg_gate_strict);
         // DFS home is off unless explicitly opted in.
         assert!(!c.dfs_allowed);
         // No rendezvous pin → rendezvous == home channel.
         assert!(c.rendezvous_channel.is_none());
         assert_eq!(c.rendezvous_channel(), c.channel);
+    }
+
+    #[test]
+    fn regulatory_default_is_unrestricted_with_no_region() {
+        // The fresh-box operating posture: a default RegulatoryConfig is
+        // unrestricted with no pinned region. This is what makes the EFFECTIVE
+        // gate permissive even though the raw `reg_gate_strict` flag stays true.
+        let r = RegulatoryConfig::default();
+        assert_eq!(r.mode, RegulatoryMode::Unrestricted);
+        assert!(r.mode.is_unrestricted());
+        assert!(r.region.is_none());
+        assert_eq!(r.mode.as_wire(), "unrestricted");
+    }
+
+    #[test]
+    fn regulatory_missing_file_or_block_reads_unrestricted() {
+        let dir = tempfile::tempdir().unwrap();
+        // No file at all.
+        let r = RegulatoryConfig::load_from(&dir.path().join("nope.yaml"));
+        assert_eq!(r.mode, RegulatoryMode::Unrestricted);
+        assert!(r.region.is_none());
+        // A config with no network.regulatory block.
+        let cfg = dir.path().join("config.yaml");
+        std::fs::write(&cfg, "video:\n  wfb:\n    channel: 149\n").unwrap();
+        let r = RegulatoryConfig::load_from(&cfg);
+        assert_eq!(r.mode, RegulatoryMode::Unrestricted);
+        assert!(r.region.is_none());
+    }
+
+    #[test]
+    fn regulatory_region_mode_reads_and_uppercases_region() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("config.yaml");
+        std::fs::write(
+            &cfg,
+            "network:\n  regulatory:\n    mode: region\n    region: in\n    ack_operator: ada\n    ack_at: '2026-06-03T00:00:00+05:30'\n",
+        )
+        .unwrap();
+        let r = RegulatoryConfig::load_from(&cfg);
+        assert_eq!(r.mode, RegulatoryMode::Region);
+        assert_eq!(r.region.as_deref(), Some("IN"));
+        assert_eq!(r.ack_operator.as_deref(), Some("ada"));
+        assert_eq!(r.ack_at.as_deref(), Some("2026-06-03T00:00:00+05:30"));
+    }
+
+    #[test]
+    fn regulatory_region_mode_without_code_degrades_to_unrestricted() {
+        // A `region` mode with no region code has no jurisdiction to enforce, so
+        // it degrades to unrestricted (the safe-permissive direction), never
+        // fail-closed.
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("config.yaml");
+        std::fs::write(&cfg, "network:\n  regulatory:\n    mode: region\n").unwrap();
+        let r = RegulatoryConfig::load_from(&cfg);
+        assert_eq!(r.mode, RegulatoryMode::Unrestricted);
+        assert!(r.region.is_none());
+    }
+
+    #[test]
+    fn regulatory_explicit_unrestricted_clears_any_region() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("config.yaml");
+        std::fs::write(
+            &cfg,
+            "network:\n  regulatory:\n    mode: unrestricted\n    region: US\n",
+        )
+        .unwrap();
+        let r = RegulatoryConfig::load_from(&cfg);
+        assert_eq!(r.mode, RegulatoryMode::Unrestricted);
+        // The region is irrelevant under unrestricted; it is dropped.
+        assert!(r.region.is_none());
+    }
+
+    #[test]
+    fn regulatory_wanted_domain_resolution() {
+        // Region → the pinned region code.
+        let region = RegulatoryConfig {
+            mode: RegulatoryMode::Region,
+            region: Some("DE".to_string()),
+            ..RegulatoryConfig::default()
+        };
+        assert_eq!(region.wanted_domain("US"), "DE");
+        // Unrestricted → the configured fallback (so the global reconciler keeps a
+        // sane domain, never the world default).
+        let unrestricted = RegulatoryConfig::default();
+        assert_eq!(unrestricted.wanted_domain("US"), "US");
+        assert_eq!(unrestricted.wanted_domain("GB"), "GB");
+    }
+
+    #[test]
+    fn regulatory_mode_from_wire_is_permissive() {
+        assert_eq!(RegulatoryMode::from_wire("region"), RegulatoryMode::Region);
+        assert_eq!(RegulatoryMode::from_wire("REGION"), RegulatoryMode::Region);
+        assert_eq!(
+            RegulatoryMode::from_wire("unrestricted"),
+            RegulatoryMode::Unrestricted
+        );
+        // Anything unrecognised reads as unrestricted (permissive default).
+        assert_eq!(RegulatoryMode::from_wire(""), RegulatoryMode::Unrestricted);
+        assert_eq!(
+            RegulatoryMode::from_wire("garbage"),
+            RegulatoryMode::Unrestricted
+        );
     }
 
     #[test]

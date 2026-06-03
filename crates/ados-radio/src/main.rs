@@ -298,6 +298,33 @@ fn decide_reg_gate(result: &Result<(), adapter::RegError>, strict: bool) -> RegG
 }
 
 async fn run_service(cfg: &WfbConfig, cancel: Arc<Notify>) {
+    // Operating-region posture, read once at service start. The default is
+    // unrestricted: the radio brings up + TX-enables on the home channel without
+    // a verified operating region, and the operator is responsible for local RF
+    // compliance. Pinning a region re-enables the strict regulatory gate for that
+    // jurisdiction. This is the higher-level switch that gates the underlying
+    // `reg_gate_strict` / `reg_domain` knobs; it never lifts the power-budget /
+    // brownout clamp (tx_power_dbm / the muted-readback rf_unverified detector
+    // stay armed in both postures).
+    let reg_cfg = ados_radio::config::RegulatoryConfig::load_from(Path::new(CONFIG_YAML));
+    let unrestricted = reg_cfg.mode.is_unrestricted();
+    // The wanted domain the bring-up + global reconciler target. Region → the
+    // pinned region code; unrestricted → the configured `reg_domain` fallback so
+    // the global cfg80211 reconciler still keeps a sane domain (never `00`).
+    let reg_fallback = cfg.reg_domain.clone().unwrap_or_else(|| "US".to_string());
+    let region_domain = reg_cfg.wanted_domain(&reg_fallback).to_string();
+    // The posture surfaced on every sidecar (even unpaired / no-adapter), so the
+    // GCS / OLED / webapp always show the honest operating-region state.
+    let reg_posture = RegPosture::new(unrestricted, &region_domain);
+    if unrestricted {
+        tracing::info!(
+            note = "operating region not pinned; radiating at hardware-bounded power; operator responsible for local RF compliance",
+            "wfb_unrestricted_posture"
+        );
+    } else {
+        tracing::info!(region = %region_domain, "wfb_region_pinned");
+    }
+
     // Event emitter for discrete, queryable verdicts shipped to the logging
     // daemon (the regulatory-gate decision, the received-side rf-unverified
     // state change). Best-effort and non-blocking: an absent daemon socket is
@@ -321,7 +348,10 @@ async fn run_service(cfg: &WfbConfig, cancel: Arc<Notify>) {
             write_stats_sidecar(
                 "unpaired",
                 &ChannelTruth::configured(cfg.rendezvous_channel()),
-                &RegSnapshot::default(),
+                &RegSnapshot {
+                    posture: reg_posture.clone(),
+                    ..RegSnapshot::default()
+                },
                 cfg.tx_power_dbm,
                 None,
                 &LinkStats::default(),
@@ -352,14 +382,24 @@ async fn run_service(cfg: &WfbConfig, cancel: Arc<Notify>) {
             use ados_radio::reg_event::{
                 is_eeprom_override, reg_gate_detail, RegGateResult, RegGateStage, REG_GATE_KIND,
             };
-            let domain = cfg.reg_domain.as_deref().unwrap_or("US");
+            // Unrestricted → set an EMPTY domain (set_reg_domain no-ops on ""), so
+            // the bring-up does not force a country onto the injection PHY; the
+            // global cfg80211 reconciler in the supervisor keeps the GLOBAL domain
+            // sane independently. Region → the pinned region code.
+            let domain = if unrestricted {
+                ""
+            } else {
+                region_domain.as_str()
+            };
             let reg_result = ados_radio::adapter::set_reg_domain(domain).await;
             let eeprom_override = reg_result
                 .as_ref()
                 .err()
                 .map(is_eeprom_override)
                 .unwrap_or(false);
-            match decide_reg_gate(&reg_result, cfg.reg_gate_strict) {
+            // Under the unrestricted posture the gate never blocks: strictness is
+            // off regardless of the raw `reg_gate_strict` flag (the mode gates it).
+            match decide_reg_gate(&reg_result, !unrestricted && cfg.reg_gate_strict) {
                 RegGateDecision::Proceed => {
                     events.emit(
                         REG_GATE_KIND,
@@ -420,6 +460,7 @@ async fn run_service(cfg: &WfbConfig, cancel: Arc<Notify>) {
                             domain: status.domain,
                             verified: status.verified,
                             enabled_channels: Vec::new(),
+                            posture: reg_posture.clone(),
                         },
                         cfg.tx_power_dbm,
                         None,
@@ -461,7 +502,10 @@ async fn run_service(cfg: &WfbConfig, cancel: Arc<Notify>) {
             write_stats_sidecar(
                 "no_adapter",
                 &ChannelTruth::configured(rendezvous_ch),
-                &RegSnapshot::default(),
+                &RegSnapshot {
+                    posture: reg_posture.clone(),
+                    ..RegSnapshot::default()
+                },
                 cfg.tx_power_dbm,
                 None, // None adapter → chipset "" + adapter_injection_ok false
                 &LinkStats::default(),
@@ -500,10 +544,20 @@ async fn run_service(cfg: &WfbConfig, cancel: Arc<Notify>) {
             use ados_radio::reg_event::{
                 reg_gate_detail, RegGateResult, RegGateStage, REG_GATE_KIND,
             };
-            let domain = cfg.reg_domain.as_deref().unwrap_or("US");
-            let ready =
-                adapter::assert_reg_ready(rendezvous_ch, &gate_enabled, &gate_dfs, cfg.dfs_allowed);
-            match decide_reg_gate(&ready, cfg.reg_gate_strict) {
+            let domain = if unrestricted {
+                ""
+            } else {
+                region_domain.as_str()
+            };
+            // Unrestricted → skip the channel-enabled / non-DFS assertion entirely
+            // (the operator owns local compliance); the rendezvous channel is used
+            // as-is. Region → today's strict channel readiness check.
+            let ready = if unrestricted {
+                Ok(())
+            } else {
+                adapter::assert_reg_ready(rendezvous_ch, &gate_enabled, &gate_dfs, cfg.dfs_allowed)
+            };
+            match decide_reg_gate(&ready, !unrestricted && cfg.reg_gate_strict) {
                 RegGateDecision::Proceed => {
                     events.emit(
                         REG_GATE_KIND,
@@ -573,6 +627,7 @@ async fn run_service(cfg: &WfbConfig, cancel: Arc<Notify>) {
                             domain: status.domain,
                             verified: status.verified,
                             enabled_channels: gate_enabled.iter().copied().collect(),
+                            posture: reg_posture.clone(),
                         },
                         cfg.tx_power_dbm,
                         None,
@@ -608,7 +663,12 @@ async fn run_service(cfg: &WfbConfig, cancel: Arc<Notify>) {
             use ados_radio::reg_reassert::{
                 reg_reassert_detail, REG_REASSERT_KIND, REG_REASSERT_SEVERITY,
             };
-            let wanted = cfg.reg_domain.as_deref().unwrap_or("US");
+            // Keep the GLOBAL domain sane to protect the onboard management WiFi
+            // (this is the prevention layer, orthogonal to the WFB-TX gate above).
+            // Under the unrestricted posture this still re-asserts the configured
+            // fallback domain (never `00`), so a self-managed baked country can
+            // never linger as the effective global and strand the onboard WiFi.
+            let wanted = region_domain.as_str();
             // The wanted domain must permit the rendezvous channel before we
             // force it. The bring-up gate read this set for THIS adapter already;
             // reuse it (no second `iw phy channels` call).
@@ -634,10 +694,15 @@ async fn run_service(cfg: &WfbConfig, cancel: Arc<Notify>) {
 
         // ── Clamp TX power BEFORE wfb_tx starts injecting ─────────────────
         // Critical on host-VBUS rigs: the driver default (~17-20 dBm) browns
-        // out the adapter. Ramps up from the configured floor on rejection.
-        let effective_tx_dbm = ados_radio::adapter::set_tx_power(iface, cfg.tx_power_dbm)
-            .await
-            .unwrap_or(cfg.tx_power_dbm);
+        // out the adapter. Ramps up from the configured floor on rejection. The
+        // power-budget clamp is NEVER lifted by the unrestricted posture — only
+        // the muted-readback handling differs (surface vs abort, see
+        // set_tx_power_modal): under unrestricted a muted PHY surfaces as
+        // rf_unverified rather than aborting bring-up.
+        let effective_tx_dbm =
+            ados_radio::adapter::set_tx_power_modal(iface, cfg.tx_power_dbm, unrestricted)
+                .await
+                .unwrap_or(cfg.tx_power_dbm);
 
         // ── Load pair key for HMAC derivation ────────────────────────────
         let drone_key = tokio::fs::read(DRONE_KEY).await.ok();
@@ -648,8 +713,14 @@ async fn run_service(cfg: &WfbConfig, cancel: Arc<Notify>) {
         // -22 and split the pair onto divergent frequencies; the hop loop
         // intersects its candidates with this set. Empty = "could not
         // determine" → do not restrict. Reuse the set the regulatory gate
-        // already read for this adapter bring-up (no second `iw` call).
-        let enabled_channels = Arc::new(gate_enabled);
+        // already read for this adapter bring-up (no second `iw` call). Under the
+        // unrestricted posture the hop filter is disabled (empty set) so the hop
+        // loop may target any in-band channel — the operator owns compliance.
+        let enabled_channels = Arc::new(if unrestricted {
+            std::collections::BTreeSet::new()
+        } else {
+            gate_enabled
+        });
         // The permitted-set Vec the heartbeat surfaces in every sidecar (the
         // ordered enabled channels). Cloned once here, reused each tick.
         let enabled_channels_vec: Vec<u8> = enabled_channels.iter().copied().collect();
@@ -669,7 +740,9 @@ async fn run_service(cfg: &WfbConfig, cancel: Arc<Notify>) {
         let operating_channel = Arc::new(AtomicU64::new(rendezvous_ch as u64));
         // The wanted regulatory domain, resolved once (constant for this bring-up)
         // so the heartbeat's cheap live read can report verified vs unverified.
-        let wanted_domain = cfg.reg_domain.clone().unwrap_or_else(|| "US".to_string());
+        // Region → the pinned region; unrestricted → the configured fallback (the
+        // global reconciler keeps that sane, so `verified` still means something).
+        let wanted_domain = region_domain.clone();
 
         // ── Shared live link stats (fed by the stats-RX reader task) ──────
         let link = Arc::new(tokio::sync::Mutex::new(LinkStats::default()));
@@ -709,6 +782,7 @@ async fn run_service(cfg: &WfbConfig, cancel: Arc<Notify>) {
             domain: reg_status.domain,
             verified: reg_status.verified,
             enabled_channels: enabled_channels_vec.clone(),
+            posture: reg_posture.clone(),
         };
         write_stats_sidecar(
             "connecting",
@@ -747,6 +821,7 @@ async fn run_service(cfg: &WfbConfig, cancel: Arc<Notify>) {
         let hb_operating = operating_channel.clone();
         let hb_wanted_domain = wanted_domain.clone();
         let hb_enabled = enabled_channels_vec.clone();
+        let hb_reg_posture = reg_posture.clone();
         let hb_events = events.clone();
         let hb_usb_speed = adapter_info.usb_speed_mbps;
         let mut heartbeat = tokio::spawn(async move {
@@ -903,6 +978,7 @@ async fn run_service(cfg: &WfbConfig, cancel: Arc<Notify>) {
                             domain: reg_status.domain,
                             verified: reg_status.verified,
                             enabled_channels: hb_enabled.clone(),
+                            posture: hb_reg_posture.clone(),
                         };
 
                         write_stats_sidecar(
@@ -1135,6 +1211,7 @@ async fn run_service(cfg: &WfbConfig, cancel: Arc<Notify>) {
                 domain: respawn_reg_status.domain,
                 verified: respawn_reg_status.verified,
                 enabled_channels: enabled_channels_vec.clone(),
+                posture: reg_posture.clone(),
             },
             effective_tx_dbm,
             Some(&adapter_info),
@@ -1781,11 +1858,56 @@ impl ChannelTruth {
 /// masked. `domain` is the LIVE global country (`None` when unreadable);
 /// `verified` is true only when it matched the wanted domain; `enabled_channels`
 /// is the domain's permitted channel set (empty = could not determine).
+///
+/// `posture` is the operator-facing operating-region posture ("unrestricted" |
+/// "region") and `pinned_region` the pinned country when in region mode (None
+/// under unrestricted). These additive fields drive the honest "unrestricted —
+/// operator responsible for local RF compliance" surfacing on the GCS / OLED /
+/// webapp; the rest of the snapshot is unchanged.
 #[derive(Clone, Default)]
 struct RegSnapshot {
     domain: Option<String>,
     verified: bool,
     enabled_channels: Vec<u8>,
+    posture: RegPosture,
+}
+
+/// The operator-facing operating-region posture, surfaced on every sidecar so the
+/// GCS / OLED / webapp can show the amber unrestricted badge. Default unrestricted
+/// with no pinned region (the fresh-box posture).
+#[derive(Clone)]
+struct RegPosture {
+    /// "unrestricted" (default) | "region".
+    mode: &'static str,
+    /// The pinned ISO 3166-1 alpha-2 country, or None under unrestricted.
+    pinned_region: Option<String>,
+}
+
+impl Default for RegPosture {
+    fn default() -> Self {
+        // The fresh-box posture: unrestricted, no pinned region.
+        RegPosture {
+            mode: "unrestricted",
+            pinned_region: None,
+        }
+    }
+}
+
+impl RegPosture {
+    /// Build from the resolved operating mode + the wanted region domain.
+    fn new(unrestricted: bool, region_domain: &str) -> Self {
+        if unrestricted {
+            RegPosture {
+                mode: "unrestricted",
+                pinned_region: None,
+            }
+        } else {
+            RegPosture {
+                mode: "region",
+                pinned_region: Some(region_domain.to_string()),
+            }
+        }
+    }
 }
 
 /// Compute the 16-hex-char public-key fingerprint of the drone TX key, or `None`
@@ -1873,6 +1995,15 @@ fn write_stats_sidecar(
         "reg_domain": reg.domain,
         "reg_verified": reg.verified,
         "enabled_channels": reg.enabled_channels,
+        // Operating-region posture (additive): "unrestricted" (radio radiates on
+        // the home channel with no pinned region; operator owns local compliance)
+        // or "region" (the strict gate is enforced for the pinned country). The
+        // GCS / OLED / webapp surface the amber unrestricted badge from these. The
+        // camelCase keys match the cross-surface heartbeat contract; `regVerified`
+        // mirrors `reg_verified` for the same readers.
+        "regPosture": reg.posture.mode,
+        "pinnedRegion": reg.posture.pinned_region,
+        "regVerified": reg.verified,
         // Transmitting yet no confirmed reception within the grace window — the
         // loose-antenna / forbidden-band-cap / dead-peer case. False while the
         // link is proven OR while the transmit counter is flat (idle).
@@ -2073,6 +2204,89 @@ mod tests {
     fn reg_blocked_state_string_is_bland_and_stable() {
         // The sidecar surfaces this verbatim; keep it stable and tag-free.
         assert_eq!(STATE_REG_BLOCKED, "reg_blocked");
+    }
+
+    /// The effective strict flag passed to `decide_reg_gate` from the bring-up,
+    /// mirroring the call sites' `!unrestricted && cfg.reg_gate_strict`. Under the
+    /// unrestricted posture this is always false regardless of the raw flag.
+    fn effective_strict(unrestricted: bool, reg_gate_strict: bool) -> bool {
+        !unrestricted && reg_gate_strict
+    }
+
+    #[test]
+    fn unrestricted_posture_never_blocks_regardless_of_raw_flag() {
+        // Under the unrestricted operating posture the gate never blocks, even
+        // with the raw `reg_gate_strict` flag at its default `true`. Exercise all
+        // three failure variants the strict gate would otherwise park on.
+        let unrestricted = true;
+        let raw_strict = true; // the retained default
+        let strict = effective_strict(unrestricted, raw_strict);
+        assert!(!strict);
+
+        let channel_err: Result<(), adapter::RegError> =
+            Err(adapter::RegError::ChannelNotEnabled { channel: 149 });
+        assert_eq!(
+            decide_reg_gate(&channel_err, strict),
+            RegGateDecision::ProceedBestEffort {
+                reason: "channel_not_enabled"
+            }
+        );
+
+        let eeprom_err: Result<(), adapter::RegError> = Err(adapter::RegError::EepromOverride {
+            want: "US".into(),
+            got: "BO".into(),
+        });
+        assert_eq!(
+            decide_reg_gate(&eeprom_err, strict),
+            RegGateDecision::ProceedBestEffort {
+                reason: "phy_override"
+            }
+        );
+
+        let verify_err: Result<(), adapter::RegError> = Err(adapter::RegError::VerifyTimeout {
+            want: "US".into(),
+            got: Some("BO".into()),
+        });
+        assert_eq!(
+            decide_reg_gate(&verify_err, strict),
+            RegGateDecision::ProceedBestEffort {
+                reason: "verify_timeout"
+            }
+        );
+    }
+
+    #[test]
+    fn region_posture_keeps_the_strict_gate() {
+        // Pinning a region restores the strict gate: the same failure that
+        // proceeds best-effort under unrestricted blocks under a pinned region.
+        let strict = effective_strict(false, true);
+        assert!(strict);
+        let channel_err: Result<(), adapter::RegError> =
+            Err(adapter::RegError::ChannelNotEnabled { channel: 149 });
+        assert_eq!(
+            decide_reg_gate(&channel_err, strict),
+            RegGateDecision::Block {
+                reason: "channel_not_enabled"
+            }
+        );
+    }
+
+    #[test]
+    fn reg_posture_default_is_unrestricted() {
+        let p = RegPosture::default();
+        assert_eq!(p.mode, "unrestricted");
+        assert!(p.pinned_region.is_none());
+    }
+
+    #[test]
+    fn reg_posture_new_reflects_mode() {
+        let unrestricted = RegPosture::new(true, "US");
+        assert_eq!(unrestricted.mode, "unrestricted");
+        assert!(unrestricted.pinned_region.is_none());
+
+        let region = RegPosture::new(false, "DE");
+        assert_eq!(region.mode, "region");
+        assert_eq!(region.pinned_region.as_deref(), Some("DE"));
     }
 
     #[test]
@@ -2289,6 +2503,7 @@ mod tests {
             domain: Some("US".to_string()),
             verified: true,
             enabled_channels: vec![149, 153, 157, 161, 165],
+            ..RegSnapshot::default()
         };
         write_stats_sidecar(
             "connected",
@@ -2321,6 +2536,44 @@ mod tests {
         assert_eq!(v["rf_unverified"], false);
         // link_state mirrors the lifecycle state string.
         assert_eq!(v["link_state"], "connected");
+        // Default RegSnapshot posture: unrestricted with no pinned region. The
+        // cross-surface contract keys carry the honest operating-region state.
+        assert_eq!(v["regPosture"], "unrestricted");
+        assert!(v["pinnedRegion"].is_null());
+        assert_eq!(v["regVerified"], true);
+
+        std::env::remove_var("ADOS_RUN_DIR");
+    }
+
+    #[test]
+    fn sidecar_surfaces_pinned_region_posture() {
+        let _guard = SIDECAR_ENV_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("ADOS_RUN_DIR", dir.path());
+
+        let reg = RegSnapshot {
+            domain: Some("DE".to_string()),
+            verified: true,
+            enabled_channels: vec![149],
+            posture: RegPosture::new(false, "DE"),
+        };
+        write_stats_sidecar(
+            "connected",
+            &ChannelTruth::configured(149),
+            &reg,
+            5,
+            None,
+            &LinkStats::default(),
+            &WfbConfig::default(),
+            0,
+            &WatchdogCounters::default(),
+            &TxRates::default(),
+            &BitrateSnapshot::default(),
+        );
+        let v = read_sidecar(dir.path());
+        assert_eq!(v["regPosture"], "region");
+        assert_eq!(v["pinnedRegion"], "DE");
+        assert_eq!(v["regVerified"], true);
 
         std::env::remove_var("ADOS_RUN_DIR");
     }
@@ -2344,6 +2597,7 @@ mod tests {
             domain: Some("BO".to_string()),
             verified: false,
             enabled_channels: vec![],
+            ..RegSnapshot::default()
         };
         write_stats_sidecar(
             STATE_REG_BLOCKED,

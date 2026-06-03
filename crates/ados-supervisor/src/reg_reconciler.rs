@@ -193,15 +193,28 @@ pub struct WantedReg {
     pub channel: u8,
 }
 
-/// Parse the wanted regulatory domain + rendezvous channel out of a config body.
-/// Reads `video.wfb.reg_domain` (default `US`) and the rendezvous channel
-/// (`video.wfb.rendezvous_channel` when pinned, else `video.wfb.channel`,
-/// default 149). Byte-identical resolution to the radio's `WfbConfig`.
+/// Parse the wanted GLOBAL regulatory domain + rendezvous channel out of a config
+/// body.
+///
+/// The wanted GLOBAL domain (the one the reconciler keeps so the onboard WiFi is
+/// never stranded under a foreign baked country) resolves from the operating-
+/// region posture:
+/// - `network.regulatory.mode == region` (with a region code) → the pinned region
+///   (so the global pin follows the operator's jurisdiction).
+/// - otherwise (unrestricted) → `network.reg_reconciler.domain` if set, else the
+///   legacy `video.wfb.reg_domain`, else the safe default `US`. The reconciler
+///   never forces the world default `00`; an empty / malformed value falls back to
+///   `US`.
+///
+/// The rendezvous channel resolution is unchanged (`video.wfb.rendezvous_channel`
+/// when pinned, else `video.wfb.channel`, default 149).
 pub fn read_wanted_from(text: &str) -> WantedReg {
     #[derive(serde::Deserialize, Default)]
     struct Raw {
         #[serde(default)]
         video: Video,
+        #[serde(default)]
+        network: Net,
     }
     #[derive(serde::Deserialize, Default)]
     struct Video {
@@ -217,17 +230,62 @@ pub fn read_wanted_from(text: &str) -> WantedReg {
         #[serde(default)]
         rendezvous_channel: Option<u8>,
     }
-    let wfb = serde_norway::from_str::<Raw>(text)
-        .map(|r| r.video.wfb)
-        .unwrap_or_default();
-    let domain = wfb
-        .reg_domain
-        .map(|d| d.trim().to_ascii_uppercase())
-        .filter(|d| !d.is_empty())
+    #[derive(serde::Deserialize, Default)]
+    struct Net {
+        #[serde(default)]
+        regulatory: Option<Regulatory>,
+        #[serde(default)]
+        reg_reconciler: Option<Reconciler>,
+    }
+    #[derive(serde::Deserialize, Default)]
+    struct Regulatory {
+        #[serde(default)]
+        mode: Option<String>,
+        #[serde(default)]
+        region: Option<String>,
+    }
+    #[derive(serde::Deserialize, Default)]
+    struct Reconciler {
+        // The operator-overridable global domain the reconciler keeps under the
+        // unrestricted posture. Optional; absent falls through to the legacy keys.
+        #[serde(default)]
+        domain: Option<String>,
+    }
+    let raw = serde_norway::from_str::<Raw>(text).unwrap_or_default();
+
+    // A normalised, non-empty uppercase domain from an Option<String>, or None.
+    let norm = |d: Option<String>| -> Option<String> {
+        d.map(|s| s.trim().to_ascii_uppercase())
+            .filter(|s| !s.is_empty())
+    };
+
+    // Region mode (with a valid region) pins the global domain to that region.
+    let region_pin = raw.network.regulatory.as_ref().and_then(|r| {
+        let is_region = r
+            .mode
+            .as_deref()
+            .map(|m| m.trim().eq_ignore_ascii_case("region"))
+            .unwrap_or(false);
+        if is_region {
+            norm(r.region.clone()).filter(|d| is_forceable_domain(d))
+        } else {
+            None
+        }
+    });
+
+    let domain = region_pin
+        // Unrestricted: prefer the reconciler's own override, then the legacy
+        // video.wfb.reg_domain, then the safe default — never the world default.
+        .or_else(|| norm(raw.network.reg_reconciler.and_then(|r| r.domain)))
+        .or_else(|| norm(raw.video.wfb.reg_domain))
+        .filter(|d| is_forceable_domain(d))
         .unwrap_or_else(|| DEFAULT_REG_DOMAIN.to_string());
-    let channel = wfb
+
+    let channel = raw
+        .video
+        .wfb
         .rendezvous_channel
-        .or(wfb.channel)
+        .or(raw.video.wfb.channel)
         .unwrap_or(DEFAULT_CHANNEL);
     WantedReg { domain, channel }
 }
@@ -804,6 +862,55 @@ mod tests {
     #[test]
     fn wanted_empty_reg_domain_falls_back_to_default() {
         let w = read_wanted_from("video:\n  wfb:\n    reg_domain: ''\n    channel: 149\n");
+        assert_eq!(w.domain, "US");
+    }
+
+    #[test]
+    fn wanted_region_pin_drives_the_global_domain() {
+        // A pinned operating region makes the global wanted domain follow it, so
+        // the onboard-WiFi global pin tracks the operator's jurisdiction.
+        let w = read_wanted_from(
+            "network:\n  regulatory:\n    mode: region\n    region: de\n\nvideo:\n  wfb:\n    channel: 149\n",
+        );
+        assert_eq!(w.domain, "DE");
+        assert_eq!(w.channel, 149);
+    }
+
+    #[test]
+    fn wanted_unrestricted_uses_reconciler_override_then_legacy_then_default() {
+        // Unrestricted + an explicit reconciler domain override wins.
+        let w = read_wanted_from(
+            "network:\n  regulatory:\n    mode: unrestricted\n  reg_reconciler:\n    domain: gb\n",
+        );
+        assert_eq!(w.domain, "GB");
+        // Unrestricted + no override → the legacy video.wfb.reg_domain.
+        let w = read_wanted_from(
+            "network:\n  regulatory:\n    mode: unrestricted\n\nvideo:\n  wfb:\n    reg_domain: us\n",
+        );
+        assert_eq!(w.domain, "US");
+        // Unrestricted + nothing set anywhere → the safe default US.
+        let w = read_wanted_from("network:\n  regulatory:\n    mode: unrestricted\n");
+        assert_eq!(w.domain, "US");
+    }
+
+    #[test]
+    fn wanted_region_pin_without_code_falls_back_to_unrestricted_resolution() {
+        // A region mode with no code is not a forceable pin; the resolution falls
+        // through to the unrestricted path (legacy reg_domain / default), never a
+        // malformed global domain.
+        let w = read_wanted_from(
+            "network:\n  regulatory:\n    mode: region\n\nvideo:\n  wfb:\n    reg_domain: in\n",
+        );
+        assert_eq!(w.domain, "IN");
+    }
+
+    #[test]
+    fn wanted_never_forces_world_default_from_a_region_pin() {
+        // A `region: '00'` pin is not forceable (the reconciler never forces the
+        // world default), so it falls through rather than capping the radio.
+        let w = read_wanted_from(
+            "network:\n  regulatory:\n    mode: region\n    region: '00'\n\nvideo:\n  wfb:\n    reg_domain: us\n",
+        );
         assert_eq!(w.domain, "US");
     }
 

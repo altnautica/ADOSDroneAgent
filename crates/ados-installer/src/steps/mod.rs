@@ -33,6 +33,7 @@ pub mod health;
 pub mod network_mac_pin;
 pub mod preflight;
 pub mod purge_residue;
+pub mod rtl_regulatory;
 pub mod start;
 pub mod systemd;
 pub mod venv_agent;
@@ -52,6 +53,7 @@ pub fn full_install_chain() -> Vec<Box<dyn Step>> {
         Box::new(dkms::Dkms),
         Box::new(config_identity::ConfigIdentity),
         Box::new(network_mac_pin::NetworkMacPin),
+        Box::new(rtl_regulatory::RtlRegulatory),
         Box::new(systemd::Systemd),
         Box::new(start::Start),
         Box::new(health::Health),
@@ -67,7 +69,7 @@ mod tests {
     fn full_chain_orders_cleanly() {
         let steps = full_install_chain();
         let order = topo_order(&steps).expect("the install chain must be a valid DAG");
-        assert_eq!(order.len(), 12);
+        assert_eq!(order.len(), 13);
 
         let pos = |id: &str| order.iter().position(|x| x == id).unwrap();
         // Spot-check the load-bearing edges.
@@ -82,6 +84,11 @@ mod tests {
         assert!(pos("venv_agent") < pos("config_identity"));
         assert!(pos("fetch_binaries") < pos("systemd"));
         assert!(pos("config_identity") < pos("systemd"));
+        // The operating-region driver options seed runs after config + the driver
+        // build, before systemd brings the radio up.
+        assert!(pos("config_identity") < pos("rtl_regulatory"));
+        assert!(pos("dkms") < pos("rtl_regulatory"));
+        assert!(pos("rtl_regulatory") < pos("systemd"));
         assert!(pos("systemd") < pos("start"));
         assert!(pos("fetch_binaries") < pos("start"));
         assert!(pos("start") < pos("health"));

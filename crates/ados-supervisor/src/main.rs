@@ -69,6 +69,13 @@ async fn main() -> Result<()> {
     let mut supervisor = Supervisor::new(config, bind_orch.clone());
     supervisor.start().await;
 
+    // Reconcile the RTL8812EU operating-region driver options from the configured
+    // posture (unrestricted by default). Idempotent: writes the modprobe options
+    // file only when the resolved posture changed it. The reload is deferred at
+    // start (a fresh module load picks up the on-disk options regardless), so this
+    // never races the auto-pair/bind that follows.
+    ados_supervisor::rtl_modprobe::reconcile_from_config(false);
+
     // Tell systemd we are up (no-op off Linux / outside a notify unit).
     sdnotify::ready();
 
