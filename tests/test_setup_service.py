@@ -628,8 +628,10 @@ def test_setup_steps_emits_profile_step_after_welcome() -> None:
     )
     ids = [s.id for s in steps]
     assert ids[:2] == ["welcome", "profile"]
+    assert "region" in ids
+    assert ids.index("region") == ids.index("profile") + 1
     assert "hardware_check" in ids
-    assert ids.index("hardware_check") == ids.index("profile") + 1
+    assert ids.index("hardware_check") == ids.index("region") + 1
 
 
 def test_setup_steps_drone_includes_mavlink_and_skips_ground_receiver() -> None:

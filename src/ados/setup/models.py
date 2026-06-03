@@ -176,6 +176,23 @@ class WfbApplyRequest(BaseModel):
     topology: Literal["host_vbus", "powered_hub", "external_5v"] | None = None
 
 
+class RegulatoryApplyRequest(BaseModel):
+    """Operating-region section of the batch-apply payload.
+
+    All fields optional so the caller sends only the slice they changed.
+    ``mode`` is the posture: ``unrestricted`` (the default; radiate out
+    of the box, operator responsible for local RF compliance) or
+    ``region`` (pin an operating region and apply its channel/power
+    limits). ``region`` is the ISO 3166-1 alpha-2 country code that
+    applies when ``mode`` is ``region``; it is validated and uppercased
+    by the setter. A region flip is reboot-required (the radio re-reads
+    the posture on restart).
+    """
+
+    mode: Literal["unrestricted", "region"] | None = None
+    region: str | None = None
+
+
 class AdvancedApplyRequest(BaseModel):
     """Advanced section of the batch-apply payload.
 

@@ -88,6 +88,8 @@ def _setup_steps(
     profile_suggestion: ProfileSuggestion,
     hardware_check: HardwareCheckStatus,
     mission_control_url: str,
+    regulatory_mode: str = "unrestricted",
+    regulatory_region: str | None = None,
 ) -> list[SetupStep]:
     """Emit the canonical onboarding steps in spec-39 order.
 
@@ -132,6 +134,27 @@ def _setup_steps(
             ),
             action_label="Choose profile",
             href="/setup?step=profile",
+        )
+    )
+
+    # Operating-region step. Always optional so it never blocks the
+    # wizard's finish: the default posture is unrestricted, which is a
+    # valid state with no operator action. An operator who wants their
+    # jurisdiction's channel/power limits enforced pins a region here.
+    pinned_region = (regulatory_region or "").strip().upper()
+    region_pinned = regulatory_mode == "region" and bool(pinned_region)
+    steps.append(
+        SetupStep(
+            id="region",
+            label="Operating region",
+            state="complete" if region_pinned else "optional",
+            detail=(
+                f"Pinned to {pinned_region}"
+                if region_pinned
+                else "Unrestricted (default). You are responsible for local RF compliance."
+            ),
+            action_label="Set operating region",
+            href="/setup?step=region",
         )
     )
 

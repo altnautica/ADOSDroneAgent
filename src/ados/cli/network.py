@@ -16,11 +16,13 @@ from __future__ import annotations
 
 import json
 import subprocess
+from datetime import datetime, timezone
 from pathlib import Path
 
 import click
 
 from ados.cli.radio import _request
+from ados.core.paths import CONFIG_YAML
 
 _STATE_PATH = Path("/etc/ados/mac-pins.state")
 
@@ -118,6 +120,131 @@ def mac_verify(iface: str) -> None:
             shown = True
     if not shown:
         click.echo(f"no .link verdict found for {iface}")
+
+
+# --- Operating region (regulatory posture) -----------------------------------
+#
+# The radio ships unrestricted by default: it brings up and transmits on the
+# configured home channel without first verifying a regional domain (the
+# operator is responsible for legal RF operation in their jurisdiction). An
+# operator who wants their jurisdiction's channel set and per-channel power
+# limit enforced pins a region (an ISO 3166-1 alpha-2 country code). These
+# commands write ``network.regulatory.*`` straight to config.yaml so the
+# choice is durable and reproducible from the repo; the radio re-reads the
+# posture on its next restart.
+
+
+def _read_config_yaml() -> dict:
+    path = Path(CONFIG_YAML)
+    if not path.exists():
+        return {}
+    try:
+        import yaml
+
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except (OSError, ValueError):
+        return {}
+    except ImportError as exc:
+        raise click.ClickException("pyyaml is required to read config.yaml") from exc
+    return data if isinstance(data, dict) else {}
+
+
+def _write_regulatory(mode: str, region: str | None) -> None:
+    """Persist ``network.regulatory.*`` to config.yaml without touching unrelated keys."""
+    try:
+        import yaml
+    except ImportError as exc:
+        raise click.ClickException("pyyaml is required to update config.yaml") from exc
+
+    path = Path(CONFIG_YAML)
+    data = _read_config_yaml()
+    network = data.setdefault("network", {})
+    if not isinstance(network, dict):
+        network = {}
+        data["network"] = network
+    reg = network.setdefault("regulatory", {})
+    if not isinstance(reg, dict):
+        reg = {}
+        network["regulatory"] = reg
+
+    reg["mode"] = mode
+    reg["region"] = region
+    reg["ack_operator"] = reg.get("ack_operator") or "cli"
+    reg["ack_at"] = (
+        datetime.now(timezone.utc).astimezone().replace(microsecond=0).isoformat()
+    )
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(
+        yaml.safe_dump(data, sort_keys=False, default_flow_style=False),
+        encoding="utf-8",
+    )
+    tmp.replace(path)
+
+
+@network_group.group(
+    "regulatory",
+    help="Operating-region posture for the radio (unrestricted by default).",
+)
+def regulatory_group() -> None:
+    pass
+
+
+@regulatory_group.command("status", help="Show the current operating-region posture.")
+@click.option("--json", "as_json", is_flag=True, help="Emit raw JSON.")
+def regulatory_status(as_json: bool) -> None:
+    data = _read_config_yaml()
+    reg = ((data.get("network") or {}).get("regulatory") or {}) if isinstance(data, dict) else {}
+    if not isinstance(reg, dict):
+        reg = {}
+    mode = str(reg.get("mode") or "unrestricted")
+    region = reg.get("region")
+    if as_json:
+        click.echo(
+            json.dumps(
+                {
+                    "mode": mode,
+                    "region": region if isinstance(region, str) else None,
+                    "ack_operator": reg.get("ack_operator"),
+                    "ack_at": reg.get("ack_at"),
+                },
+                indent=2,
+            )
+        )
+        return
+    if mode == "region" and isinstance(region, str) and region:
+        click.echo(f"Operating region: pinned to {region.upper()}")
+        click.echo("The radio enforces this region's channel set and power limits.")
+    else:
+        click.echo("Operating region: unrestricted (default)")
+        click.echo("You are responsible for legal RF operation in your jurisdiction.")
+
+
+@regulatory_group.command(
+    "unrestricted",
+    help="Clear any pinned region; radiate on the configured channel out of the box.",
+)
+def regulatory_unrestricted() -> None:
+    _write_regulatory("unrestricted", None)
+    click.echo("Operating region set to unrestricted.")
+    click.echo("Restart the agent (or reboot) to apply.")
+
+
+@regulatory_group.command(
+    "region",
+    help="Pin an operating region (ISO 3166-1 alpha-2 country code, e.g. US, DE).",
+)
+@click.argument("code")
+def regulatory_region(code: str) -> None:
+    region = (code or "").strip().upper()
+    if not (len(region) == 2 and region.isalpha()):
+        raise click.ClickException(
+            f"region must be a 2-letter country code (e.g. US, DE, GB), got '{code}'"
+        )
+    _write_regulatory("region", region)
+    click.echo(f"Operating region pinned to {region}.")
+    click.echo("Restart the agent (or reboot) to apply.")
 
 
 __all__ = ["network_group"]

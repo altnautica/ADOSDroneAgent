@@ -1,4 +1,4 @@
-import { ChevronRight, CloudOff, RefreshCw } from "lucide-react";
+import { ChevronRight, CloudOff, Globe, RefreshCw } from "lucide-react";
 import { Link } from "react-router-dom";
 
 import { CloudPanel } from "@/components/panels/cloud-panel";
@@ -17,6 +17,9 @@ import { Button } from "@/components/ui/button";
 import { useCloudPostureNudge } from "@/hooks/use-cloud-posture-nudge";
 import { useHeartbeat } from "@/hooks/use-heartbeat";
 import { useStatus } from "@/hooks/use-status";
+import { cn } from "@/lib/utils";
+import { modeFromStatus, regionFromStatus } from "@/lib/region";
+import type { SetupStatus } from "@/lib/types";
 
 export function HomeRoute() {
   const status = useStatus();
@@ -100,14 +103,48 @@ function OfflineHome({ onRetry }: { onRetry: () => void }) {
   );
 }
 
+// Compact chip showing the operating-region RF posture. Amber when the
+// radio is unrestricted (operator-responsibility framing), neutral when
+// a region is pinned. Links to the Region settings page.
+function RegionChip() {
+  const status = useStatus();
+  const reg = status.data?.regulatory as SetupStatus["regulatory"];
+  const mode = modeFromStatus(reg);
+  const region = regionFromStatus(reg);
+  const unrestricted = mode !== "region" || !region;
+
+  return (
+    <Link
+      to="/settings/region"
+      title={
+        unrestricted
+          ? "Unrestricted RF posture — operator responsible for local RF compliance. Click to pin a region."
+          : `Operating region pinned to ${region}. Click to change.`
+      }
+      className={cn(
+        "inline-flex items-center gap-1.5 rounded-md border px-2 py-1 text-xs font-medium transition-colors",
+        unrestricted
+          ? "border-amber-500/40 bg-amber-500/5 text-amber-200 hover:bg-amber-500/10"
+          : "border-border bg-card text-muted-foreground hover:bg-accent/30",
+      )}
+    >
+      <Globe className="h-3.5 w-3.5" />
+      {unrestricted ? "Region: Unrestricted" : `Region: Pinned to ${region}`}
+    </Link>
+  );
+}
+
 function DroneHome() {
   return (
     <div className="space-y-4 max-w-[1400px]">
-      <header>
-        <h1 className="text-xl font-semibold tracking-tight">Home</h1>
-        <p className="text-sm text-muted-foreground">
-          Live status, video, flight controller, and 60s telemetry.
-        </p>
+      <header className="flex items-start justify-between gap-4">
+        <div>
+          <h1 className="text-xl font-semibold tracking-tight">Home</h1>
+          <p className="text-sm text-muted-foreground">
+            Live status, video, flight controller, and 60s telemetry.
+          </p>
+        </div>
+        <RegionChip />
       </header>
 
       <StatusTiles />
@@ -146,9 +183,12 @@ function GroundHome({ role }: { role: "direct" | "relay" | "receiver" }) {
 
   return (
     <div className="space-y-4 max-w-[1400px]">
-      <header>
-        <h1 className="text-xl font-semibold tracking-tight">Home</h1>
-        <p className="text-sm text-muted-foreground">{subtitle}</p>
+      <header className="flex items-start justify-between gap-4">
+        <div>
+          <h1 className="text-xl font-semibold tracking-tight">Home</h1>
+          <p className="text-sm text-muted-foreground">{subtitle}</p>
+        </div>
+        <RegionChip />
       </header>
 
       <StatusTiles />

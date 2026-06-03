@@ -10,6 +10,7 @@ from ados.setup.models import (
     AdvancedApplyRequest,
     DisplayInstallRequest,
     NetworkApplyRequest,
+    RegulatoryApplyRequest,
     UiApplyRequest,
     WfbApplyRequest,
 )
@@ -57,6 +58,7 @@ class ApplyRequest(BaseModel):
     network: NetworkApplyRequest | None = None
     ui: UiApplyRequest | None = None
     wfb: WfbApplyRequest | None = None
+    regulatory: RegulatoryApplyRequest | None = None
     display: DisplayInstallRequest | None = None
     advanced: AdvancedApplyRequest | None = None
 

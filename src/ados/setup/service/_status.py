@@ -130,6 +130,9 @@ async def build_setup_status(  # noqa: C901
         config=config,
         mission_control_url=mission_control_url,
     )
+    reg_cfg = getattr(getattr(config, "network", None), "regulatory", None)
+    reg_mode = str(getattr(reg_cfg, "mode", "unrestricted") or "unrestricted")
+    reg_region = getattr(reg_cfg, "region", None)
     steps = _setup_steps(
         profile=str(config.agent.profile),
         mavlink=mavlink,
@@ -140,6 +143,8 @@ async def build_setup_status(  # noqa: C901
         profile_suggestion=profile_suggestion,
         hardware_check=hardware_check,
         mission_control_url=mission_control_url,
+        regulatory_mode=reg_mode,
+        regulatory_region=reg_region,
     )
 
     # Apply persisted skip flags. Steps the operator chose to defer move

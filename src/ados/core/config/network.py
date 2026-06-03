@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel
 
 
@@ -66,9 +68,42 @@ class WifiSelfHealConfig(BaseModel):
     cooldown_s: int = 60
 
 
+class RegulatoryConfig(BaseModel):
+    # Operating-region posture for the radio (WFB) and any long-range
+    # link. This is the single operator knob that decides whether the
+    # agent radiates out of the box or first verifies an operating region.
+    #
+    #   unrestricted (default): the radio brings up and transmits on the
+    #     configured home channel at the hardware-bounded power budget
+    #     without first verifying a regional domain. The operator is
+    #     responsible for legal RF operation in their jurisdiction. The
+    #     state is surfaced honestly (an "unrestricted" badge) on every
+    #     status surface; it is never silent.
+    #   region: the operator has pinned an operating region (an
+    #     ISO 3166-1 alpha-2 country code in ``region``). The radio
+    #     applies that region's channel set and per-channel power limit
+    #     before transmitting, and refuses to radiate on a channel the
+    #     region forbids.
+    #
+    # This setting governs only the LEGAL/regulatory cap. The power-budget
+    # and brownout clamps (video.wfb.tx_power_dbm / tx_power_max_dbm and
+    # the TX-power ramp) and the link-liveness checks are always in force
+    # regardless of mode.
+    mode: Literal["unrestricted", "region"] = "unrestricted"
+    # ISO 3166-1 alpha-2 country code (uppercase, e.g. "US", "DE", "GB")
+    # when ``mode`` is "region". None when unrestricted.
+    region: str | None = None
+    # Operator id recorded when the region/posture was chosen (audit).
+    ack_operator: str | None = None
+    # ISO-8601 timestamp recorded when the region/posture was chosen
+    # (audit). Stored as a plain string.
+    ack_at: str | None = None
+
+
 class NetworkConfig(BaseModel):
     wifi_client: WifiClientConfig = WifiClientConfig()
     cellular: CellularConfig = CellularConfig()
     hotspot: HotspotConfig = HotspotConfig()
     mac_pin: MacPinConfig = MacPinConfig()
     wifi_selfheal: WifiSelfHealConfig = WifiSelfHealConfig()
+    regulatory: RegulatoryConfig = RegulatoryConfig()

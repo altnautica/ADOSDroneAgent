@@ -14,6 +14,7 @@ VALID_STEP_IDS: frozenset[str] = frozenset(
     {
         "welcome",
         "profile",
+        "region",
         "hardware_check",
         "cloud_choice",
         "pair",

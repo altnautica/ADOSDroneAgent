@@ -57,6 +57,7 @@ def test_drone_profile_paired_with_cloud() -> None:
     assert shape == [
         ("welcome", "complete"),
         ("profile", "complete"),
+        ("region", "optional"),
         ("hardware_check", "complete"),
         ("cloud_choice", "complete"),
         ("pair", "complete"),
@@ -117,6 +118,7 @@ def test_ground_station_profile_includes_ground_receiver_and_display() -> None:
     assert shape == [
         ("welcome", "complete"),
         ("profile", "complete"),
+        ("region", "optional"),
         ("hardware_check", "complete"),
         ("cloud_choice", "complete"),
         ("pair", "complete"),

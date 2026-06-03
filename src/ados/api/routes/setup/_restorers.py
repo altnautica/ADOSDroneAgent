@@ -71,6 +71,27 @@ def restore_advanced(runtime, snap: dict[str, object]) -> None:
         agent.log_level = str(snap.get("log_level") or "")
 
 
+def restore_regulatory(runtime, snap: dict[str, object]) -> None:
+    config = runtime.config
+    net = getattr(config, "network", None)
+    reg = getattr(net, "regulatory", None) if net is not None else None
+    if reg is None:
+        return
+    if "mode" in snap:
+        prior = str(snap.get("mode") or "")
+        if prior in ("unrestricted", "region"):
+            reg.mode = prior  # type: ignore[assignment]
+    if "region" in snap:
+        prior_region = snap.get("region")
+        reg.region = str(prior_region) if isinstance(prior_region, str) else None
+    if "ack_operator" in snap:
+        prior_op = snap.get("ack_operator")
+        reg.ack_operator = str(prior_op) if isinstance(prior_op, str) else None
+    if "ack_at" in snap:
+        prior_at = snap.get("ack_at")
+        reg.ack_at = str(prior_at) if isinstance(prior_at, str) else None
+
+
 def restore_wfb(runtime, snap: dict[str, object]) -> None:
     config = runtime.config
     video = getattr(config, "video", None)

@@ -28,6 +28,7 @@ import { CloudSettings } from "@/routes/settings/cloud-settings";
 import { DisplaySettings } from "@/routes/settings/display-settings";
 import { NetworkSettings } from "@/routes/settings/network-settings";
 import { ProfileSettings } from "@/routes/settings/profile-settings";
+import { RegionSettings } from "@/routes/settings/region-settings";
 import { VideoRoute } from "@/routes/video-route";
 
 // Code-split heavy routes. The wizard (4 steps + form state) is only
@@ -140,6 +141,7 @@ export function App() {
                 <Route path="/settings" element={<SettingsLayout />}>
                   <Route index element={<Navigate to="profile" replace />} />
                   <Route path="profile" element={<ProfileSettings />} />
+                  <Route path="region" element={<RegionSettings />} />
                   <Route path="network" element={<NetworkSettings />} />
                   <Route path="cloud" element={<CloudSettings />} />
                   <Route path="display" element={<DisplaySettings />} />

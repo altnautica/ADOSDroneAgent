@@ -8,6 +8,23 @@ export type Profile = "drone" | "ground_station" | "auto" | "unknown";
 export type GroundRole = "direct" | "relay" | "receiver";
 export type Severity = "ok" | "warn" | "err" | "info" | "idle";
 
+// Operating-region / RF regulatory posture.
+//   "unrestricted" — the radio brings up and transmits on the
+//     configured channel without enforcing a jurisdiction. The
+//     operator is responsible for local RF compliance.
+//   "region" — pin a single operating region (ISO 3166-1 alpha-2)
+//     and re-enable the strict regulatory gate + power clamp.
+export type RegulatoryMode = "unrestricted" | "region";
+
+// /api/v1/setup/status -> network.regulatory (additive; absent on
+// older agents -> treat as unrestricted).
+export interface RegulatoryInfo {
+  mode?: RegulatoryMode;
+  region?: string | null;
+  ack_operator?: string | null;
+  ack_at?: string | null;
+}
+
 // /api/v1/setup/status
 export interface SetupStatus {
   version: string;
@@ -32,6 +49,7 @@ export interface SetupStatus {
   hardware_check?: HardwareCheck;
   remote_access?: RemoteAccess;
   access_urls?: AccessUrls;
+  regulatory?: RegulatoryInfo;
 }
 
 export interface ProfileSuggestion {

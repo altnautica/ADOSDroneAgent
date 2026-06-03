@@ -65,6 +65,55 @@ def test_config_extra_ignored():
     assert cfg.agent.name == "test"
 
 
+def test_regulatory_defaults_unrestricted():
+    """A fresh config defaults the operating-region posture to unrestricted."""
+    cfg = ADOSConfig()
+    assert cfg.network.regulatory.mode == "unrestricted"
+    assert cfg.network.regulatory.region is None
+    assert cfg.network.regulatory.ack_operator is None
+    assert cfg.network.regulatory.ack_at is None
+
+
+def test_regulatory_no_block_reads_unrestricted():
+    """A config file with no network.regulatory block reads as unrestricted."""
+    data = {"agent": {"name": "x"}, "network": {"hotspot": {"enabled": True}}}
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+        yaml.dump(data, f)
+        f.flush()
+        cfg = load_config(f.name)
+    assert cfg.network.regulatory.mode == "unrestricted"
+    assert cfg.network.regulatory.region is None
+
+
+def test_regulatory_region_round_trips():
+    """A pinned operating region round-trips through the YAML loader unchanged."""
+    data = {
+        "network": {
+            "regulatory": {
+                "mode": "region",
+                "region": "IN",
+                "ack_operator": "op1",
+                "ack_at": "2026-06-03T10:00:00+05:30",
+            }
+        }
+    }
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+        yaml.dump(data, f)
+        f.flush()
+        cfg = load_config(f.name)
+    reg = cfg.network.regulatory
+    assert reg.mode == "region"
+    assert reg.region == "IN"
+    assert reg.ack_operator == "op1"
+    assert reg.ack_at == "2026-06-03T10:00:00+05:30"
+    # model_dump is byte-stable through a YAML round-trip.
+    from ados.core.config import RegulatoryConfig
+
+    dumped = reg.model_dump()
+    reloaded = RegulatoryConfig(**yaml.safe_load(yaml.safe_dump(dumped)))
+    assert reloaded == reg
+
+
 def test_load_config_tolerates_unquoted_timestamp():
     """An unquoted ISO-8601 timestamp (as the native config writers emit for
     video.wfb.paired_at) must load as a string, not a datetime that would fail

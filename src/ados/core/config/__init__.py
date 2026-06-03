@@ -59,6 +59,7 @@ from .network import (
     CellularConfig,
     HotspotConfig,
     NetworkConfig,
+    RegulatoryConfig,
     WifiClientConfig,
 )
 from .root import ADOSConfig
@@ -108,6 +109,7 @@ __all__ = [
     "CellularConfig",
     "HotspotConfig",
     "NetworkConfig",
+    "RegulatoryConfig",
     "WifiClientConfig",
     # cloud
     "CloudServerConfig",

@@ -12,6 +12,7 @@ import {
   installCloudflared,
   postCloudChoice,
   postProfile,
+  postRegion,
   skipSetup,
 } from "@/lib/setup-actions";
 import type { GroundRole, Profile } from "@/lib/types";
@@ -20,6 +21,7 @@ import { CloudPairStep } from "./setup/cloud-pair-step";
 import { ConnectivityStep } from "./setup/connectivity-step";
 import { FinishStep } from "./setup/finish-step";
 import { ProfileStep } from "./setup/profile-step";
+import { RegionStep, type RegionStepState } from "./setup/region-step";
 
 const STEPS: ReadonlyArray<WizardStep> = [
   {
@@ -27,6 +29,12 @@ const STEPS: ReadonlyArray<WizardStep> = [
     label: "Profile",
     description:
       "Pick what this device is. Detected hardware is shown so you can confirm or override the auto-detect.",
+  },
+  {
+    id: "region",
+    label: "Region",
+    description:
+      "Choose an operating-region posture. Unrestricted works anywhere; pin a region to enforce a jurisdiction's RF rules.",
   },
   {
     id: "connectivity",
@@ -80,6 +88,11 @@ export function SetupRoute() {
     profile: "drone",
     isValid: false,
   });
+  const [regionState, setRegionState] = useState<RegionStepState>({
+    mode: "unrestricted",
+    region: null,
+    isValid: true,
+  });
   const [cloudState, setCloudState] = useState<CloudState>({
     mode: "local",
     isValid: true,
@@ -99,6 +112,15 @@ export function SetupRoute() {
         profile: profileState.profile,
         ground_role: profileState.ground_role,
         source: "user",
+      }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["setup-status"] }),
+  });
+
+  const regionMut = useMutation({
+    mutationFn: () =>
+      postRegion({
+        mode: regionState.mode,
+        region: regionState.mode === "region" ? regionState.region : null,
       }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["setup-status"] }),
   });
@@ -134,12 +156,19 @@ export function SetupRoute() {
     (next: ProfileState) => setProfileState(next),
     [],
   );
+  const onRegionChange = useCallback(
+    (next: RegionStepState) => setRegionState(next),
+    [],
+  );
 
   const goNext = async () => {
     setErrorMsg(null);
     try {
       if (stepId === "profile") {
         await profileMut.mutateAsync();
+        setStepId("region");
+      } else if (stepId === "region") {
+        await regionMut.mutateAsync();
         setStepId("connectivity");
       } else if (stepId === "connectivity") {
         setStepId("cloud-pair");
@@ -177,10 +206,12 @@ export function SetupRoute() {
 
   const nextDisabled =
     (stepId === "profile" && !profileState.isValid) ||
+    (stepId === "region" && !regionState.isValid) ||
     (stepId === "cloud-pair" && !cloudState.isValid);
 
   const nextLoading =
     profileMut.isPending ||
+    regionMut.isPending ||
     cloudMut.isPending ||
     cloudflaredMut.isPending ||
     finishMut.isPending;
@@ -226,6 +257,7 @@ export function SetupRoute() {
       }
     >
       {stepId === "profile" && <ProfileStep onChange={onProfileChange} />}
+      {stepId === "region" && <RegionStep onChange={onRegionChange} />}
       {stepId === "connectivity" && <ConnectivityStep />}
       {stepId === "cloud-pair" && <CloudPairStep onChange={onCloudChange} />}
       {stepId === "finish" && <FinishStep onChange={onFinishChange} />}

@@ -60,6 +60,50 @@ def test_apply_profile_and_cloud_both_apply(client, agent_app) -> None:
     assert agent_app.config.server.mode == "local"
 
 
+def test_apply_regulatory_pins_region(client, agent_app) -> None:
+    resp = client.post(
+        "/api/v1/setup/apply",
+        json={"regulatory": {"mode": "region", "region": "de"}},
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["overall"] is True
+    assert data["sections"]["regulatory"]["ok"] is True
+    assert data["sections"]["regulatory"]["data"]["restart_required"] is True
+    assert agent_app.config.network.regulatory.mode == "region"
+    # Region code is uppercased on apply.
+    assert agent_app.config.network.regulatory.region == "DE"
+    assert agent_app.config.network.regulatory.ack_at is not None
+
+
+def test_apply_regulatory_unrestricted_clears_region(client, agent_app) -> None:
+    agent_app.config.network.regulatory.mode = "region"
+    agent_app.config.network.regulatory.region = "DE"
+    resp = client.post(
+        "/api/v1/setup/apply",
+        json={"regulatory": {"mode": "unrestricted"}},
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["overall"] is True
+    assert data["sections"]["regulatory"]["ok"] is True
+    assert agent_app.config.network.regulatory.mode == "unrestricted"
+    assert agent_app.config.network.regulatory.region is None
+
+
+def test_apply_regulatory_bad_region_rejected(client, agent_app) -> None:
+    resp = client.post(
+        "/api/v1/setup/apply",
+        json={"regulatory": {"mode": "region", "region": "USA"}},
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["overall"] is False
+    assert data["sections"]["regulatory"]["ok"] is False
+    # Posture stays at the default; nothing was persisted.
+    assert agent_app.config.network.regulatory.mode == "unrestricted"
+
+
 def test_apply_advanced_bad_log_level_rolls_back_profile(client, agent_app) -> None:
     # Capture pre-state so we can assert rollback restored it.
     prior_profile = agent_app.config.agent.profile

@@ -9,7 +9,7 @@ from ados.setup import display_install
 from ados.setup.advanced import apply_advanced
 from ados.setup.models import SetupActionResult
 from ados.setup.network import apply_network
-from ados.setup.profile import apply_profile, apply_ui, apply_wfb
+from ados.setup.profile import apply_profile, apply_regulatory, apply_ui, apply_wfb
 from ados.setup.service import apply_cloud_choice
 
 from ._common import log
@@ -19,6 +19,7 @@ from ._restorers import (
     restore_cloud,
     restore_network,
     restore_profile,
+    restore_regulatory,
     restore_ui,
     restore_wfb,
 )
@@ -48,6 +49,7 @@ async def batch_apply_settings(request: ApplyRequest) -> ApplyResponse:
         ("cloud", request.cloud),
         ("ui", request.ui),
         ("wfb", request.wfb),
+        ("regulatory", request.regulatory),
         ("display", request.display),
         ("advanced", request.advanced),
     ]
@@ -109,6 +111,8 @@ async def _apply_single_section(
         return apply_ui(runtime, payload)
     if name == "wfb":
         return apply_wfb(runtime, payload)
+    if name == "regulatory":
+        return apply_regulatory(runtime, payload)
     if name == "display":
         if not payload.display_id:
             return SetupActionResult(
@@ -198,6 +202,14 @@ def _capture_section_snapshot(runtime, name: str) -> dict[str, object]:
                 snap["tx_power_dbm"] = int(getattr(wfb, "tx_power_dbm", 0) or 0)
                 snap["mcs_index"] = int(getattr(wfb, "mcs_index", 0) or 0)
                 snap["topology"] = str(getattr(wfb, "topology", "") or "")
+        elif name == "regulatory":
+            net = getattr(config, "network", None)
+            reg = getattr(net, "regulatory", None) if net is not None else None
+            if reg is not None:
+                snap["mode"] = str(getattr(reg, "mode", "") or "")
+                snap["region"] = getattr(reg, "region", None)
+                snap["ack_operator"] = getattr(reg, "ack_operator", None)
+                snap["ack_at"] = getattr(reg, "ack_at", None)
         elif name == "advanced":
             agent = getattr(config, "agent", None)
             snap["log_level"] = str(getattr(agent, "log_level", "") or "")
@@ -229,6 +241,8 @@ def _rollback_completed(
                 restore_ui(runtime, snap)
             elif name == "wfb":
                 restore_wfb(runtime, snap)
+            elif name == "regulatory":
+                restore_regulatory(runtime, snap)
             elif name == "advanced":
                 restore_advanced(runtime, snap)
             else:

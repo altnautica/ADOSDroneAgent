@@ -1,6 +1,7 @@
 import {
   Cloud,
   Cpu,
+  Globe,
   Monitor,
   ShieldAlert,
   UserCog,
@@ -24,6 +25,12 @@ const SECTIONS: SectionLink[] = [
     label: "Profile",
     icon: UserCog,
     blurb: "Drone or ground station, role, restart on apply.",
+  },
+  {
+    to: "/settings/region",
+    label: "Region",
+    icon: Globe,
+    blurb: "Operating-region RF posture: unrestricted or pinned.",
   },
   {
     to: "/settings/network",
