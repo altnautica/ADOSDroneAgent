@@ -129,6 +129,7 @@ def build_radio_block(wfb_status: dict[str, Any] | None) -> dict[str, Any]:
             "adapter_injection_ok": False,
             "adapter_usb_speed_mbps": None,
             "adapter_usb_degraded": False,
+            "phy_muted": False,
         }
 
     iface = wfb_status.get("interface") or None
@@ -206,6 +207,11 @@ def build_radio_block(wfb_status: dict[str, Any] | None) -> dict[str, Any]:
         # healthy link. Null/false when an older sidecar omits them.
         "adapter_usb_speed_mbps": wfb_status.get("adapter_usb_speed_mbps"),
         "adapter_usb_degraded": bool(wfb_status.get("adapter_usb_degraded", False)),
+        # TX PHY pinned at the muted not-permitted floor: it injects frames but
+        # radiates nothing. Surface it so Mission Control flags a silent dead
+        # link instead of a healthy-looking radio. False on the receive side and
+        # on older sidecars that omit the field.
+        "phy_muted": bool(wfb_status.get("phy_muted", False)),
         # Radio-data-plane churn + transmit-rate observability. The live
         # sidecar the radio service writes carries these counters; surface
         # them so Mission Control sees a thrashing or zombie transmitter

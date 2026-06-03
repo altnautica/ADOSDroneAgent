@@ -46,6 +46,11 @@ pub struct WatchdogCounters {
     pub tx_video_stall_kills: u64,
     pub tx_video_stalled: bool,
     pub tx_video_recvq_bytes: u64,
+    /// Live PHY-mute flag (the heartbeat sets it each tick): the TX PHY reads
+    /// back at the muted not-permitted floor, so wfb_tx injects but radiates
+    /// nothing. Surfaced on the radio sidecar/heartbeat so Mission Control shows
+    /// a "PHY muted" badge instead of a silent dead link.
+    pub phy_muted: bool,
 }
 
 /// Shared handle to the watchdog counters (mirrors the `LinkStats` share).
@@ -86,6 +91,26 @@ pub async fn tx_health_watchdog(
             last_progress = Instant::now();
         } else if last_progress.elapsed() >= TX_SILENCE_THRESHOLD {
             if ingress_advancing {
+                // A flat TX while ingress feeds is a stall — but if the PHY
+                // itself is muted (txpower pinned at the not-permitted floor; the
+                // RTL8812EU `set type monitor` mute), killing + respawning wfb_tx
+                // can NEVER un-mute it: the fault is in the driver/PHY, not the
+                // process, so the kill-respawn loops forever with zero effect.
+                // Signal PhyMuted so the caller runs a PHY-recovery (re-cycle
+                // monitor + channel + txpower) instead of another pointless kill.
+                let muted = crate::adapter::read_tx_power(iface)
+                    .await
+                    .map(|dbm| dbm <= crate::adapter::MUTED_TX_POWER_DBM)
+                    .unwrap_or(false);
+                if muted {
+                    tracing::warn!(
+                        iface,
+                        pid,
+                        elapsed_s = last_progress.elapsed().as_secs(),
+                        "wfb_tx_stalled_phy_muted: routing to PHY-recovery, not a kill"
+                    );
+                    return WatchdogFired::PhyMuted;
+                }
                 tracing::warn!(
                     iface,
                     pid,
@@ -153,6 +178,10 @@ pub async fn video_recvq_watchdog(
 pub enum WatchdogFired {
     TxStalled,
     RecvqBacklog,
+    /// TX is flat while ingress feeds AND the PHY reads back muted (txpower at
+    /// the not-permitted floor). The caller must run a PHY-recovery, not kill
+    /// wfb_tx — respawning the process cannot un-mute a driver/PHY-level mute.
+    PhyMuted,
     Cancelled,
 }
 

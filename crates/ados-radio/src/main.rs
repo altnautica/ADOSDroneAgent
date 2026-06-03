@@ -887,8 +887,21 @@ async fn run_service(cfg: &WfbConfig, cancel: Arc<Notify>) {
                         if let Some(v) = read_tx_bytes(&hb_iface).await {
                             tx_live.observe(v);
                         }
+                        // Live PHY-mute readback: the TX PHY pinned at the muted
+                        // not-permitted floor injects frames but radiates nothing
+                        // (the RTL8812EU `set type monitor` mute). Surfaced on the
+                        // sidecar so Mission Control shows a "PHY muted" badge
+                        // instead of a silent dead link (Rule 28).
+                        let phy_muted = ados_radio::adapter::read_tx_power(&hb_iface)
+                            .await
+                            .map(|dbm| dbm <= ados_radio::adapter::MUTED_TX_POWER_DBM)
+                            .unwrap_or(false);
                         let stats = hb_link.lock().await.clone();
-                        let wd = *hb_counters.lock().await;
+                        let wd = {
+                            let mut c = hb_counters.lock().await;
+                            c.phy_muted = phy_muted;
+                            *c
+                        };
                         // Uplink valid-decode rate over the heartbeat interval.
                         // 0 on a drone-only rig (no rx.key → packets stay 0).
                         let pkt_delta = (stats.packets_received - prev_packets).max(0) as f64;
@@ -1193,40 +1206,69 @@ async fn run_service(cfg: &WfbConfig, cancel: Arc<Notify>) {
         // `&mut` the handles so the un-selected ones are NOT dropped-and-detached
         // here — we abort them explicitly below so tasks don't pile up across
         // respawns.
-        tokio::select! {
-            result = &mut watchdog1 => {
-                if let Ok(WatchdogFired::TxStalled | WatchdogFired::RecvqBacklog) = result {
-                    tracing::warn!("watchdog_fired_killing_wfb_tx");
+        // Inner select loop: most fires fall through (break) to the full kill +
+        // respawn below, but a runtime PHY-mute is recovered IN PLACE (re-cycle
+        // monitor + channel + txpower) without killing wfb_tx — respawning the
+        // process can never un-mute a driver/PHY-level mute, so the old kill path
+        // looped forever. On a successful in-place recovery we re-arm the TX
+        // watchdog and `continue` to keep watching the live radio group.
+        loop {
+            tokio::select! {
+                result = &mut watchdog1 => {
+                    match result {
+                        Ok(WatchdogFired::PhyMuted) => {
+                            tracing::warn!(iface, "watchdog_phy_muted: attempting in-place PHY recovery");
+                            if ensure_radiating(iface, cfg.channel, cfg.tx_power_dbm, unrestricted)
+                                .await
+                                .is_some()
+                            {
+                                tracing::info!(iface, "watchdog_phy_recovered_in_place");
+                                let tx_cancel = task_cancel.clone();
+                                let tx_iface = iface_str.clone();
+                                let tx_counters = counters.clone();
+                                watchdog1 = tokio::spawn(async move {
+                                    tx_health_watchdog(&tx_iface, pid, tx_counters, tx_cancel).await
+                                });
+                                continue;
+                            }
+                            tracing::warn!(iface, "watchdog_phy_recovery_failed: killing wfb_tx");
+                        }
+                        Ok(WatchdogFired::TxStalled | WatchdogFired::RecvqBacklog) => {
+                            tracing::warn!("watchdog_fired_killing_wfb_tx");
+                        }
+                        _ => {}
+                    }
+                }
+                result = &mut watchdog2 => {
+                    if let Ok(WatchdogFired::RecvqBacklog) = result {
+                        tracing::warn!("video_recvq_watchdog_fired");
+                    }
+                }
+                _ = &mut data_tx_exit => {
+                    // The data-plane wfb_tx exited on its own — respawn the whole
+                    // group immediately (the falls-through path below handles it).
+                }
+                _ = &mut hop => {}
+                _ = &mut beacon => {}
+                _ = &mut heartbeat => {}
+                _ = cancel.notified() => {
+                    // Clean shutdown: stop the tasks, the radio group, then restore
+                    // the adapter to managed mode so it isn't left stuck in monitor.
+                    heartbeat.abort();
+                    watchdog1.abort();
+                    watchdog2.abort();
+                    data_tx_exit.abort();
+                    bitrate_ctrl.abort();
+                    cmd_server.abort();
+                    hop.abort();
+                    beacon.abort();
+                    proc.lock().await.kill_all().await;
+                    ados_radio::adapter::set_managed_mode(iface).await;
+                    tracing::info!("wfb_service_stopping");
+                    return;
                 }
             }
-            result = &mut watchdog2 => {
-                if let Ok(WatchdogFired::RecvqBacklog) = result {
-                    tracing::warn!("video_recvq_watchdog_fired");
-                }
-            }
-            _ = &mut data_tx_exit => {
-                // The data-plane wfb_tx exited on its own — respawn the whole
-                // group immediately (the falls-through path below handles it).
-            }
-            _ = &mut hop => {}
-            _ = &mut beacon => {}
-            _ = &mut heartbeat => {}
-            _ = cancel.notified() => {
-                // Clean shutdown: stop the tasks, the radio group, then restore
-                // the adapter to managed mode so it isn't left stuck in monitor.
-                heartbeat.abort();
-                watchdog1.abort();
-                watchdog2.abort();
-                data_tx_exit.abort();
-                bitrate_ctrl.abort();
-                cmd_server.abort();
-                hop.abort();
-                beacon.abort();
-                proc.lock().await.kill_all().await;
-                ados_radio::adapter::set_managed_mode(iface).await;
-                tracing::info!("wfb_service_stopping");
-                return;
-            }
+            break;
         }
 
         // A task exited (watchdog fired / hop ended / data-tx self-crashed) —
@@ -2177,6 +2219,10 @@ fn write_stats_sidecar(
         "tx_video_stalled": counters.tx_video_stalled,
         "tx_video_stall_kills": counters.tx_video_stall_kills,
         "tx_video_recvq_bytes": counters.tx_video_recvq_bytes,
+        // The TX PHY reads back at the muted not-permitted floor: it injects
+        // frames but radiates nothing. Mission Control renders a "PHY muted"
+        // badge so a silent dead link is a one-glance signal (Rule 28).
+        "phy_muted": counters.phy_muted,
         // Smoothed radio transmit rate; valid_rx_packets_per_s is the uplink
         // valid-decode rate (0 on a drone-only rig with no rx.key).
         "tx_bytes_per_s": (rates.tx_bytes_per_s * 10.0).round() / 10.0,
