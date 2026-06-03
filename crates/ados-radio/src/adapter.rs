@@ -1345,11 +1345,11 @@ pub fn tx_power_ramp(dbm: i8) -> Vec<i8> {
 /// the regulatory "not permitted" floor (reported as `-100.00 dBm`), i.e. a muted
 /// PHY that accepts injected frames but radiates nothing. Any genuine setting is
 /// >= 0 dBm, so a readback at or below this is unambiguously the muted floor.
-const MUTED_TX_POWER_DBM: f32 = -10.0;
+pub const MUTED_TX_POWER_DBM: f32 = -10.0;
 
 /// Read the live TX power (dBm) from `iw dev <iface> info`, or `None` when it
 /// cannot be read or parsed. Used to verify a `set txpower` actually took.
-async fn read_tx_power(iface: &str) -> Option<f32> {
+pub async fn read_tx_power(iface: &str) -> Option<f32> {
     let out = run_cmd_output("iw", &["dev", iface, "info"]).await.ok()?;
     for line in out.lines() {
         if let Some(rest) = line.trim().strip_prefix("txpower ") {

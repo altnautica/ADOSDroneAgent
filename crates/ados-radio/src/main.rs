@@ -719,10 +719,33 @@ async fn run_service(cfg: &WfbConfig, cancel: Arc<Notify>) {
         // the muted-readback handling differs (surface vs abort, see
         // set_tx_power_modal): under unrestricted a muted PHY surfaces as
         // rf_unverified rather than aborting bring-up.
-        let effective_tx_dbm =
-            ados_radio::adapter::set_tx_power_modal(iface, cfg.tx_power_dbm, unrestricted)
-                .await
-                .unwrap_or(cfg.tx_power_dbm);
+        let effective_tx_dbm = match ensure_radiating(
+            iface,
+            cfg.channel,
+            cfg.tx_power_dbm,
+            unrestricted,
+        )
+        .await
+        {
+            Some(dbm) => dbm,
+            None => {
+                // The PHY stayed pinned at the muted not-permitted floor through
+                // every recovery attempt. Starting wfb_tx now injects into a dead
+                // PHY (every sendmsg returns ENOBUFS, tx_bytes frozen) and the
+                // liveness watchdog kill-loops it forever with no effect. Park and
+                // re-enter bring-up instead of starting a TX that cannot radiate.
+                tracing::error!(
+                    iface,
+                    channel = cfg.channel,
+                    note = "PHY muted at txpower floor after recovery; not starting TX, retrying bring-up",
+                    "wfb_phy_muted_unrecovered"
+                );
+                tokio::select! {
+                    _ = tokio::time::sleep(Duration::from_secs(REG_BLOCKED_RETRY_SECS)) => continue,
+                    _ = cancel.notified() => return,
+                }
+            }
+        };
 
         // ── Load pair key for HMAC derivation ────────────────────────────
         let drone_key = tokio::fs::read(DRONE_KEY).await.ok();
@@ -1779,6 +1802,59 @@ async fn ensure_monitor_and_channel(iface: &str, channel: u8) -> bool {
         );
     }
     false
+}
+
+/// Attempts at coaxing the PHY off the muted "-100 dBm" not-permitted floor
+/// during bring-up. A self-managed RTL PHY can wedge at the floor after the
+/// monitor/channel/reg bring-up churn; a fresh down -> monitor -> up -> channel
+/// cycle immediately before the txpower set un-sticks it (bench-proven: the
+/// configured floor un-mutes once the interface cycle precedes the set).
+const PHY_RADIATE_MAX_ATTEMPTS: u32 = 4;
+
+/// Apply TX power AND confirm the PHY is actually radiating — i.e. the txpower
+/// readback is off the muted not-permitted floor. Under the unrestricted posture
+/// `set_tx_power_modal` returns `Some` even on a muted readback (it surfaces the
+/// honest rf_unverified signal and lets bring-up continue), so a bare call
+/// cannot distinguish a radiating PHY from a muted one. wfb_tx injecting into a
+/// muted PHY fails every `sendmsg` with ENOBUFS (tx_bytes frozen) and the
+/// liveness watchdog then kills + respawns wfb_tx forever with no effect. Each
+/// attempt re-runs the proven down -> monitor -> up -> channel cycle right before
+/// the txpower set, then verifies the readback. Returns the effective dBm once
+/// the readback is non-muted, or `None` if it stays muted after every attempt —
+/// the caller must NOT start wfb_tx on a `None` (park and retry bring-up).
+async fn ensure_radiating(iface: &str, channel: u8, dbm: i8, unrestricted: bool) -> Option<i8> {
+    for attempt in 0..PHY_RADIATE_MAX_ATTEMPTS {
+        if attempt > 0 {
+            tokio::time::sleep(Duration::from_millis(300 + 300 * attempt as u64)).await;
+        }
+        // The un-stick: a fresh interface cycle (down -> monitor -> up) + channel
+        // right before the txpower set. set_monitor_mode_verified refuses the
+        // operator's control interface, so this can never sever management.
+        ados_radio::adapter::set_monitor_mode_verified(iface, 2).await;
+        set_channel(iface, channel).await;
+        let applied = ados_radio::adapter::set_tx_power_modal(iface, dbm, unrestricted).await;
+        let live = ados_radio::adapter::read_tx_power(iface).await;
+        if let Some(dbm_live) = live {
+            if dbm_live > ados_radio::adapter::MUTED_TX_POWER_DBM {
+                tracing::info!(
+                    iface,
+                    channel,
+                    attempt,
+                    readback_dbm = dbm_live,
+                    "wfb_phy_radiating"
+                );
+                return applied.or(Some(dbm));
+            }
+        }
+        tracing::warn!(
+            iface,
+            channel,
+            attempt,
+            readback_dbm = ?live,
+            "wfb_phy_muted_retry: re-cycling interface before re-setting txpower"
+        );
+    }
+    None
 }
 
 /// `iw <iface> set channel <ch>`, VERIFIED. Returns `true` only when the
