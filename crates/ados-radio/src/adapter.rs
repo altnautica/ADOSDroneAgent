@@ -1341,6 +1341,24 @@ pub fn tx_power_ramp(dbm: i8) -> Vec<i8> {
 /// **Why this matters:** without it the dongle runs at the driver default
 /// (~17-20 dBm), which browns out a host-VBUS-powered RTL adapter — the exact
 /// failure `video.wfb.tx_power_dbm = 5` guards against (`adapter.py:674-732`).
+/// Readback floor below which a `txpower` value means the interface is pinned at
+/// the regulatory "not permitted" floor (reported as `-100.00 dBm`), i.e. a muted
+/// PHY that accepts injected frames but radiates nothing. Any genuine setting is
+/// >= 0 dBm, so a readback at or below this is unambiguously the muted floor.
+const MUTED_TX_POWER_DBM: f32 = -10.0;
+
+/// Read the live TX power (dBm) from `iw dev <iface> info`, or `None` when it
+/// cannot be read or parsed. Used to verify a `set txpower` actually took.
+async fn read_tx_power(iface: &str) -> Option<f32> {
+    let out = run_cmd_output("iw", &["dev", iface, "info"]).await.ok()?;
+    for line in out.lines() {
+        if let Some(rest) = line.trim().strip_prefix("txpower ") {
+            return rest.split_whitespace().next()?.parse::<f32>().ok();
+        }
+    }
+    None
+}
+
 pub async fn set_tx_power(iface: &str, dbm: i8) -> Option<i8> {
     for candidate in tx_power_ramp(dbm) {
         let mbm = (candidate as i32) * 100;
@@ -1351,6 +1369,25 @@ pub async fn set_tx_power(iface: &str, dbm: i8) -> Option<i8> {
         .await
         .is_ok()
         {
+            // A zero exit from `iw set txpower` is necessary but NOT sufficient:
+            // a regulatory/PHY perturbation (e.g. an `iw reg set` churn re-entering
+            // monitor) can leave the interface pinned at the "-100 dBm" not-permitted
+            // floor while the set command still returns success. That muted PHY
+            // injects frames into the TX ring (the counter advances) but radiates
+            // nothing. Read the value back and refuse to report a healthy apply when
+            // the PHY is muted, so the caller does not promote a dead radio to ready.
+            if let Some(live) = read_tx_power(iface).await {
+                if live <= MUTED_TX_POWER_DBM {
+                    tracing::error!(
+                        iface,
+                        requested = dbm,
+                        applied = candidate,
+                        readback_dbm = live,
+                        "wfb_txpower_muted_readback"
+                    );
+                    return None;
+                }
+            }
             if candidate != dbm {
                 tracing::warn!(
                     iface,
