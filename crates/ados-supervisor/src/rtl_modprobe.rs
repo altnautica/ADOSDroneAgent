@@ -112,6 +112,23 @@ fn is_valid_region_code(code: &str) -> bool {
             .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
 }
 
+/// True when the LIVE driver's parameters match what `mode` expects: the regd
+/// source is always the driver's private regdb (`0`); the country is `00` for
+/// unrestricted or the pinned region code. Pure so it is unit-tested on every
+/// host. Used to detect a driver that loaded with its efuse country BEFORE the
+/// options file was written (the file is current, but the loaded params are
+/// stale — file-content equality alone misses this).
+pub fn live_matches(live_country: &str, live_regd_src: &str, mode: &ModprobeMode) -> bool {
+    if live_regd_src.trim() != "0" {
+        return false;
+    }
+    let want = match mode {
+        ModprobeMode::Unrestricted => "00",
+        ModprobeMode::Region(code) => code.as_str(),
+    };
+    live_country.trim().eq_ignore_ascii_case(want)
+}
+
 /// Render the full file body (a header comment + the options line + trailing
 /// newline). The header is bland and reader-facing — it describes what the file
 /// does, not any internal planning artifact.
@@ -126,12 +143,18 @@ pub fn render_modprobe_file(mode: &ModprobeMode) -> String {
 }
 
 #[cfg(target_os = "linux")]
-pub use linux::{apply, reconcile_from_config, reload_module};
+pub use linux::{apply, reconcile_from_config, reconcile_live_driver, reload_module};
 
 /// Non-Linux build: no OS edges to drive, so the reconcile is an inert no-op.
 /// Keeps the call site portable across the dev host and CI.
 #[cfg(not(target_os = "linux"))]
 pub fn reconcile_from_config(_reload_allowed: bool) {}
+
+/// Non-Linux stub: nothing live to reconcile.
+#[cfg(not(target_os = "linux"))]
+pub fn reconcile_live_driver(_reload_allowed: bool) -> bool {
+    true
+}
 
 #[cfg(target_os = "linux")]
 mod linux {
@@ -215,6 +238,64 @@ mod linux {
             Ok(s) => tracing::warn!(code = ?s.code(), "rtl_modprobe_reload_failed"),
             Err(e) => tracing::warn!(error = %e, "rtl_modprobe_reload_error"),
         }
+    }
+
+    /// Live RTL8812EU module parameters in sysfs.
+    const PARAM_COUNTRY: &str = "/sys/module/8812eu/parameters/rtw_country_code";
+    const PARAM_REGD_SRC: &str = "/sys/module/8812eu/parameters/rtw_regd_src";
+
+    /// Read a live module parameter, trimmed of whitespace and NULs. None when the
+    /// module is not loaded or the parameter is absent.
+    fn read_live_param(path: &str) -> Option<String> {
+        std::fs::read_to_string(path).ok().map(|s| {
+            s.trim_matches(|c: char| c.is_whitespace() || c == '\0')
+                .to_string()
+        })
+    }
+
+    /// Reconcile the LIVE driver against the configured posture. If the loaded
+    /// module is on a different country / regd-source than the config wants — e.g.
+    /// it loaded with its efuse country BEFORE the options file was written, so the
+    /// file is current but the live parameters are stale (which `apply`'s
+    /// file-content check misses) — reload the module so it re-reads the file.
+    ///
+    /// SAFETY: the reload removes + re-adds the module, so the caller MUST invoke
+    /// this only when the RTL is NOT in use by a service — at the pre-bind point,
+    /// right after the normal wfb unit is stopped (the radio crate excludes the
+    /// management iface, so this is never the operator's link). A no-op in the
+    /// common case (the live driver already matches → no reload), so the reload
+    /// fires only when there is a real stale-driver problem. `reload_allowed=false`
+    /// is a check-only. Returns whether the live driver matches the config after
+    /// any reload.
+    pub fn reconcile_live_driver(reload_allowed: bool) -> bool {
+        let mode = std::fs::read_to_string(CONFIG_YAML)
+            .map(|t| super::mode_from_config(&t))
+            .unwrap_or(ModprobeMode::Unrestricted);
+        // Module not loaded → nothing live to reconcile; a fresh load picks up the
+        // on-disk options.
+        let (Some(country), Some(regd)) = (
+            read_live_param(PARAM_COUNTRY),
+            read_live_param(PARAM_REGD_SRC),
+        ) else {
+            return true;
+        };
+        if super::live_matches(&country, &regd, &mode) {
+            return true;
+        }
+        tracing::warn!(live_country = %country, live_regd_src = %regd, ?mode, "rtl_live_driver_stale");
+        if !reload_allowed {
+            return false;
+        }
+        reload_module();
+        let nc = read_live_param(PARAM_COUNTRY).unwrap_or_default();
+        let nr = read_live_param(PARAM_REGD_SRC).unwrap_or_default();
+        let ok = super::live_matches(&nc, &nr, &mode);
+        if ok {
+            tracing::info!("rtl_live_driver_reconciled");
+        } else {
+            tracing::warn!(live_country = %nc, live_regd_src = %nr, "rtl_live_driver_still_stale_after_reload");
+        }
+        ok
     }
 
     /// Write `bytes` to `path` atomically (tmp + rename) with 0644 perms.
@@ -356,5 +437,40 @@ mod tests {
         assert!(is_valid_region_code("00"));
         assert!(!is_valid_region_code("USA"));
         assert!(!is_valid_region_code(""));
+    }
+
+    #[test]
+    fn live_matches_unrestricted_wants_country_00_and_private_regdb() {
+        assert!(live_matches("00", "0", &ModprobeMode::Unrestricted));
+        // A foreign baked country under unrestricted is the stale-driver case.
+        assert!(!live_matches("BO", "0", &ModprobeMode::Unrestricted));
+        // The OS regdb source is never a match (it applies the efuse hint).
+        assert!(!live_matches("00", "1", &ModprobeMode::Unrestricted));
+        // Whitespace / case tolerant (sysfs values often carry trailing newlines).
+        assert!(live_matches(" 00 ", " 0 ", &ModprobeMode::Unrestricted));
+    }
+
+    #[test]
+    fn live_matches_region_wants_that_country() {
+        assert!(live_matches(
+            "US",
+            "0",
+            &ModprobeMode::Region("US".to_string())
+        ));
+        assert!(live_matches(
+            "us",
+            "0",
+            &ModprobeMode::Region("US".to_string())
+        ));
+        assert!(!live_matches(
+            "00",
+            "0",
+            &ModprobeMode::Region("US".to_string())
+        ));
+        assert!(!live_matches(
+            "DE",
+            "0",
+            &ModprobeMode::Region("US".to_string())
+        ));
     }
 }

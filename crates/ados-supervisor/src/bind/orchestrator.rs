@@ -321,6 +321,18 @@ impl BindOrchestrator {
         // Stop the normal unit so it releases the radio for the bind profile.
         // Past this point any failure MUST restart it (cleanup() does).
         crate::systemctl::stop(role.normal_unit()).await;
+
+        // The RTL is now free (the normal unit is stopped): if the LIVE injection
+        // driver is on a stale efuse country rather than the configured private-
+        // regdb options, reload it now so the bind unit's monitor mode comes up on
+        // a country-00 driver and never asserts a foreign country as the global
+        // domain — poisoning the onboard WiFi at the source. A no-op when already
+        // current; off the async runtime (blocking modprobe). Layer of prevention
+        // beneath the bind-window reg guard, which remains the backstop.
+        tokio::task::spawn_blocking(|| crate::rtl_modprobe::reconcile_live_driver(true))
+            .await
+            .ok();
+
         self.set_state(BindState::OpeningTunnel).await;
 
         // Start the bind profile (brings up the L3 tunnel).
