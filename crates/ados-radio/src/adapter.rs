@@ -684,14 +684,20 @@ async fn set_monitor_mode(iface: &str) -> bool {
     {
         return false;
     }
-    // Set monitor — primary form, fallback to legacy form on error.
-    let set_ok = if run_cmd("iw", &[iface, "set", "type", "monitor"])
+    // Monitor-form order is load-bearing on the RTL8812EU: `iw <if> set type
+    // monitor` returns success on this chipset yet leaves the PHY pinned at the
+    // muted txpower floor (readback -100 dBm, carrier down, every injection
+    // sendmsg fails ENOBUFS), whereas `iw dev <if> set monitor none` fully
+    // initialises the monitor PHY so it radiates. So the monitor-flags form is
+    // primary (it is also the EIO workaround seen on other 8812eu builds); the
+    // type form is the fallback for any adapter that rejects the flags form.
+    let set_ok = if run_cmd("iw", &["dev", iface, "set", "monitor", "none"])
         .await
         .is_ok()
     {
         true
     } else {
-        run_cmd("iw", &[iface, "set", "monitor", "none"])
+        run_cmd("iw", &[iface, "set", "type", "monitor"])
             .await
             .is_ok()
     };
