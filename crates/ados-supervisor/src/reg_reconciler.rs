@@ -55,6 +55,23 @@ pub const REG_REASSERT_KIND: &str = "radio.reg_reasserted";
 /// which a drifted domain would otherwise sit broken.
 const DEFAULT_TICK_INTERVAL_S: u64 = 30;
 
+/// Default duration after process start during which the reconcile runs at the
+/// faster `fast_initial_tick_interval` instead of the steady cadence. The boot
+/// sequence is when a foreign baked country is most likely to be (re-)asserted:
+/// the radio bring-up and the first-boot bind both re-enter monitor mode and
+/// re-churn the injection PHY in the first minute. Converging fast here keeps
+/// the global domain from sitting at a foreign country between the bind
+/// re-entry and the next steady tick; after the window it settles to the steady
+/// cadence (the proven steady-state behavior is unchanged). Measured against the
+/// process uptime so a supervisor restart re-arms the fast window.
+const DEFAULT_FAST_INITIAL_WINDOW_S: u64 = 60;
+
+/// Default reconcile cadence during the fast-initial window. Short enough that a
+/// foreign domain asserted by a monitor/bind re-entry is corrected within a few
+/// seconds (so the onboard WiFi does not blip), but still a throttle (not a busy
+/// loop) so the boot path is not flooded with `iw reg get` shells.
+const DEFAULT_FAST_INITIAL_TICK_INTERVAL_S: u64 = 5;
+
 /// The default wanted regulatory domain, byte-identical to the radio config's
 /// `default_reg_domain`. Permits the home channel (149 / 5745 MHz, U-NII-3,
 /// non-DFS) at usable power. Operators override per region in config.
@@ -73,8 +90,15 @@ const DEFAULT_CHANNEL: u8 = 149;
 pub struct RegReconcilerConfig {
     /// Whether the reconciler runs at all. Default true.
     pub enabled: bool,
-    /// Minimum spacing between reconcile attempts.
+    /// Minimum spacing between reconcile attempts in steady state.
     pub tick_interval: Duration,
+    /// How long after process start the reconcile runs at the faster
+    /// `fast_initial_tick` cadence. Default 60 s. A zero disables the fast
+    /// window (the reconcile uses the steady cadence from boot).
+    pub fast_initial_window: Duration,
+    /// The reconcile cadence during the fast-initial window. Default 5 s,
+    /// floored at 1 s. Only used while uptime is below `fast_initial_window`.
+    pub fast_initial_tick: Duration,
 }
 
 impl Default for RegReconcilerConfig {
@@ -82,6 +106,24 @@ impl Default for RegReconcilerConfig {
         RegReconcilerConfig {
             enabled: true,
             tick_interval: Duration::from_secs(DEFAULT_TICK_INTERVAL_S),
+            fast_initial_window: Duration::from_secs(DEFAULT_FAST_INITIAL_WINDOW_S),
+            fast_initial_tick: Duration::from_secs(DEFAULT_FAST_INITIAL_TICK_INTERVAL_S),
+        }
+    }
+}
+
+impl RegReconcilerConfig {
+    /// The effective reconcile cadence given the current process uptime. Inside
+    /// the fast-initial window (and when that window is enabled) the faster
+    /// cadence applies so a foreign domain asserted by the boot-time monitor /
+    /// bind re-entry is corrected within a few seconds; after the window it
+    /// settles to the steady cadence (the proven steady-state behavior). Pure so
+    /// the schedule is unit-tested without a clock.
+    pub fn effective_interval(&self, uptime: Duration) -> Duration {
+        if !self.fast_initial_window.is_zero() && uptime < self.fast_initial_window {
+            self.fast_initial_tick
+        } else {
+            self.tick_interval
         }
     }
 }
@@ -107,6 +149,10 @@ pub fn read_config_from(text: &str) -> RegReconcilerConfig {
         enabled: bool,
         #[serde(default)]
         tick_interval_s: Option<u64>,
+        #[serde(default)]
+        fast_initial_window_s: Option<u64>,
+        #[serde(default)]
+        fast_initial_tick_interval_s: Option<u64>,
     }
     fn default_true() -> bool {
         true
@@ -118,6 +164,18 @@ pub fn read_config_from(text: &str) -> RegReconcilerConfig {
                 // Floor at 1 s so a zero in config cannot spin the reconcile.
                 tick_interval: Duration::from_secs(
                     r.tick_interval_s.unwrap_or(DEFAULT_TICK_INTERVAL_S).max(1),
+                ),
+                // A zero window is honored (disables the fast convergence); any
+                // positive value is taken as-is.
+                fast_initial_window: Duration::from_secs(
+                    r.fast_initial_window_s
+                        .unwrap_or(DEFAULT_FAST_INITIAL_WINDOW_S),
+                ),
+                // Floor at 1 s so a zero cannot spin the reconcile during boot.
+                fast_initial_tick: Duration::from_secs(
+                    r.fast_initial_tick_interval_s
+                        .unwrap_or(DEFAULT_FAST_INITIAL_TICK_INTERVAL_S)
+                        .max(1),
                 ),
             },
             None => RegReconcilerConfig::default(),
@@ -233,10 +291,15 @@ pub fn reconcile_decision(
 
 /// The periodic regulatory reconciler. Holds the last-attempt timestamp so the
 /// reconcile is throttled to the configured interval regardless of how fast the
-/// monitor pass runs. The `events` shipper is only driven on a real re-assert.
+/// monitor pass runs, plus the construction instant so the fast-initial window
+/// is measured against this process's uptime (a supervisor restart re-arms the
+/// fast window). The `events` shipper is only driven on a real re-assert.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub struct RegReconciler {
     last_tick: Option<Instant>,
+    /// When this reconciler was constructed (≈ process start). The fast-initial
+    /// window is `now - started_at < cfg.fast_initial_window`.
+    started_at: Instant,
     events: EventEmitter,
 }
 
@@ -245,6 +308,7 @@ impl RegReconciler {
     pub fn new(events: EventEmitter) -> Self {
         RegReconciler {
             last_tick: None,
+            started_at: Instant::now(),
             events,
         }
     }
@@ -259,10 +323,10 @@ impl RegReconciler {
         }
     }
 
-    /// One reconcile tick: throttle to the interval, read the wanted domain +
-    /// the live global domain, and re-assert the wanted domain when the live one
-    /// has drifted and the wanted one permits the rendezvous channel. Re-reads
-    /// config each tick so an edit takes effect without a restart. A no-op when
+    /// One reconcile tick: throttle to the effective interval (the faster
+    /// fast-initial cadence while uptime is inside the window, else the steady
+    /// cadence), then run the channel-safety-gated reconcile. Re-reads config
+    /// each tick so an edit takes effect without a restart. A no-op when
     /// disabled, when not due, when `iw` is absent, or when the domain is already
     /// in sync.
     #[cfg(target_os = "linux")]
@@ -272,61 +336,86 @@ impl RegReconciler {
             return;
         }
         let now = Instant::now();
-        if !self.due(cfg.tick_interval, now) {
+        let interval = cfg.effective_interval(now.duration_since(self.started_at));
+        if !self.due(interval, now) {
             return;
         }
         self.last_tick = Some(now);
-
-        if !iw_available().await {
-            return;
-        }
-        let wanted = read_wanted();
-        let live = active_global_reg_domain().await;
-
-        // Cheap common path: already correct, no `iw phy channels` read needed.
-        if let ReconcileDecision::InSync = reconcile_decision(live.as_deref(), &wanted.domain, true)
-        {
-            return;
-        }
-        // Out of sync (or unreadable live): determine whether the wanted domain
-        // permits the rendezvous channel before forcing it, so we can never cap
-        // the radio onto a forbidden frequency.
-        let channel_ok = channel_permitted(wanted.channel).await;
-        match reconcile_decision(live.as_deref(), &wanted.domain, channel_ok) {
-            ReconcileDecision::InSync | ReconcileDecision::NoWanted => {}
-            ReconcileDecision::SkipChannelUnsafe => {
-                tracing::warn!(
-                    wanted = %wanted.domain,
-                    channel = wanted.channel,
-                    live = ?live,
-                    note = "wanted domain would not permit the rendezvous channel; not re-asserting",
-                    "reg_reconciler_skipped_channel_unsafe"
-                );
-            }
-            ReconcileDecision::Reassert { from, to } => {
-                let verified = set_reg_domain(&to).await;
-                if verified {
-                    tracing::info!(from = ?from, to = %to, "reg_reconciler_reasserted");
-                } else {
-                    tracing::warn!(
-                        from = ?from,
-                        to = %to,
-                        note = "re-assert issued but readback did not confirm (possible phy override)",
-                        "reg_reconciler_reassert_unconfirmed"
-                    );
-                }
-                self.events.emit(
-                    REG_REASSERT_KIND,
-                    ados_protocol::logd::Level::Info,
-                    reg_reassert_detail(from.as_deref(), &to, wanted.channel, true),
-                );
-            }
-        }
+        reconcile_global_domain(&self.events).await;
     }
 
     #[cfg(not(target_os = "linux"))]
     pub async fn tick(&mut self) {}
 }
+
+/// Run one channel-safety-gated reconcile of the GLOBAL regulatory domain back
+/// to the configured wanted value, emitting `radio.reg_reasserted` through
+/// `events` when a re-assert actually fires. This is the unthrottled body shared
+/// by the periodic reconciler tick AND the post-bind immediate re-assert: the
+/// bind orchestrator calls it the instant the bind tunnel comes up, so the
+/// foreign baked country the bind re-entry just re-asserted is corrected within
+/// a couple of seconds (before the onboard WiFi can blip), without waiting for
+/// the next throttled supervisor tick.
+///
+/// SAFETY (identical to the periodic path): re-asserts ONLY a forceable operator
+/// country (never the world default / a malformed code) and ONLY when that
+/// domain permits the configured rendezvous channel (`channel_permitted` reads
+/// the live enabled set), so it can never cap the WFB radio onto a forbidden
+/// frequency, and never moves toward the injection PHY's baked country.
+/// Idempotent: a cheap no-op (one `iw reg get` + a compare) when already in sync.
+#[cfg(target_os = "linux")]
+pub async fn reconcile_global_domain(events: &EventEmitter) {
+    if !iw_available().await {
+        return;
+    }
+    let wanted = read_wanted();
+    let live = active_global_reg_domain().await;
+
+    // Cheap common path: already correct, no `iw phy channels` read needed.
+    if let ReconcileDecision::InSync = reconcile_decision(live.as_deref(), &wanted.domain, true) {
+        return;
+    }
+    // Out of sync (or unreadable live): determine whether the wanted domain
+    // permits the rendezvous channel before forcing it, so we can never cap
+    // the radio onto a forbidden frequency.
+    let channel_ok = channel_permitted(wanted.channel).await;
+    match reconcile_decision(live.as_deref(), &wanted.domain, channel_ok) {
+        ReconcileDecision::InSync | ReconcileDecision::NoWanted => {}
+        ReconcileDecision::SkipChannelUnsafe => {
+            tracing::warn!(
+                wanted = %wanted.domain,
+                channel = wanted.channel,
+                live = ?live,
+                note = "wanted domain would not permit the rendezvous channel; not re-asserting",
+                "reg_reconciler_skipped_channel_unsafe"
+            );
+        }
+        ReconcileDecision::Reassert { from, to } => {
+            let verified = set_reg_domain(&to).await;
+            if verified {
+                tracing::info!(from = ?from, to = %to, "reg_reconciler_reasserted");
+            } else {
+                tracing::warn!(
+                    from = ?from,
+                    to = %to,
+                    note = "re-assert issued but readback did not confirm (possible phy override)",
+                    "reg_reconciler_reassert_unconfirmed"
+                );
+            }
+            events.emit(
+                REG_REASSERT_KIND,
+                ados_protocol::logd::Level::Info,
+                reg_reassert_detail(from.as_deref(), &to, wanted.channel, true),
+            );
+        }
+    }
+}
+
+/// Non-Linux build: the reconcile has no OS edges to drive, so it is an inert
+/// no-op. Keeps the call site in the bind orchestrator portable across the dev
+/// host and CI.
+#[cfg(not(target_os = "linux"))]
+pub async fn reconcile_global_domain(_events: &EventEmitter) {}
 
 /// Build the `radio.reg_reasserted` detail map. All fields are bland and
 /// reader-facing. Mirrors the radio-side detail shape so the two halves write
@@ -598,6 +687,15 @@ mod tests {
             cfg.tick_interval,
             Duration::from_secs(DEFAULT_TICK_INTERVAL_S)
         );
+        // The fast-initial window is ON by default so a fresh boot converges fast.
+        assert_eq!(
+            cfg.fast_initial_window,
+            Duration::from_secs(DEFAULT_FAST_INITIAL_WINDOW_S)
+        );
+        assert_eq!(
+            cfg.fast_initial_tick,
+            Duration::from_secs(DEFAULT_FAST_INITIAL_TICK_INTERVAL_S)
+        );
     }
 
     #[test]
@@ -618,12 +716,62 @@ mod tests {
     }
 
     #[test]
+    fn fast_initial_fields_parse_and_floor_the_tick() {
+        let cfg = read_config_from(
+            "network:\n  reg_reconciler:\n    fast_initial_window_s: 90\n    fast_initial_tick_interval_s: 3\n",
+        );
+        assert_eq!(cfg.fast_initial_window, Duration::from_secs(90));
+        assert_eq!(cfg.fast_initial_tick, Duration::from_secs(3));
+        // The fast tick floors at 1 s so a zero cannot spin the reconcile.
+        let floored =
+            read_config_from("network:\n  reg_reconciler:\n    fast_initial_tick_interval_s: 0\n");
+        assert_eq!(floored.fast_initial_tick, Duration::from_secs(1));
+    }
+
+    #[test]
+    fn fast_initial_window_zero_disables_the_fast_path() {
+        // A zero window is honored verbatim (no floor): it disables the fast
+        // convergence so the reconcile uses the steady cadence from boot.
+        let cfg = read_config_from("network:\n  reg_reconciler:\n    fast_initial_window_s: 0\n");
+        assert_eq!(cfg.fast_initial_window, Duration::ZERO);
+        // With the window off, even uptime 0 yields the steady interval.
+        assert_eq!(cfg.effective_interval(Duration::ZERO), cfg.tick_interval);
+    }
+
+    #[test]
+    fn effective_interval_is_fast_inside_the_window_then_steady() {
+        let cfg = RegReconcilerConfig::default();
+        // Inside the window (uptime < 60 s): the fast cadence.
+        assert_eq!(
+            cfg.effective_interval(Duration::from_secs(0)),
+            cfg.fast_initial_tick
+        );
+        assert_eq!(
+            cfg.effective_interval(Duration::from_secs(59)),
+            cfg.fast_initial_tick
+        );
+        // At/after the window boundary: the steady cadence (proven steady-state).
+        assert_eq!(
+            cfg.effective_interval(Duration::from_secs(60)),
+            cfg.tick_interval
+        );
+        assert_eq!(
+            cfg.effective_interval(Duration::from_secs(600)),
+            cfg.tick_interval
+        );
+    }
+
+    #[test]
     fn malformed_config_defaults_enabled() {
         let cfg = read_config_from(": : : not yaml");
         assert!(cfg.enabled);
         assert_eq!(
             cfg.tick_interval,
             Duration::from_secs(DEFAULT_TICK_INTERVAL_S)
+        );
+        assert_eq!(
+            cfg.fast_initial_window,
+            Duration::from_secs(DEFAULT_FAST_INITIAL_WINDOW_S)
         );
     }
 
@@ -759,6 +907,31 @@ mod tests {
         assert!(!r2.due(Duration::from_secs(30), now + Duration::from_secs(10)));
         // Due once the interval elapses.
         assert!(r2.due(Duration::from_secs(30), now + Duration::from_secs(31)));
+    }
+
+    #[tokio::test]
+    async fn reconcile_global_domain_runs_without_a_logd_socket() {
+        // The shared reconcile (used by both the periodic tick and the post-bind
+        // immediate re-assert) must never panic when the logd socket is absent.
+        // On a non-Linux dev host it is an inert no-op; on Linux CI it shells
+        // `iw` read-only and falls through safely when the wanted domain is
+        // already in sync or the tools are unavailable. Either way: no panic.
+        let events = EventEmitter::with_socket("ados-test", "/nonexistent/ados/logd.sock");
+        reconcile_global_domain(&events).await;
+    }
+
+    #[tokio::test]
+    async fn tick_is_inert_without_a_real_radio_environment() {
+        // A first tick on a freshly-constructed reconciler is "due" (fast window
+        // open, never ticked) but must complete without panic on any host: off
+        // Linux it is a no-op; on Linux CI `iw` is read-only and the wanted
+        // domain resolves to the safe default. This exercises the started_at /
+        // effective_interval wiring end to end.
+        let mut r = RegReconciler::new(EventEmitter::with_socket(
+            "ados-test",
+            "/nonexistent/ados/logd.sock",
+        ));
+        r.tick().await;
     }
 
     // ----- iw parsers -----

@@ -333,6 +333,20 @@ impl BindOrchestrator {
                 "opening_tunnel",
             ));
         }
+
+        // Re-assert the configured regulatory domain right now. Starting the
+        // bind profile re-entered monitor mode and re-set the channel on the
+        // self-managed injection PHY, which can leave its EEPROM-baked country as
+        // the GLOBAL domain again (the same break the radio bring-up guards
+        // against). The radio service is stopped during a bind, so its own
+        // immediate re-assert cannot run here; this is the prompt heal, the
+        // instant the bind tunnel is up, so the foreign domain never lingers
+        // long enough to blip the onboard WiFi. SAFETY: the shared reconcile only
+        // ever forces a domain that permits the configured channel and never the
+        // baked country / world default; idempotent when already in sync. The
+        // supervisor's periodic reconciler stays the backstop.
+        crate::reg_reconciler::reconcile_global_domain(&self.events).await;
+
         self.set_state(BindState::WaitingPeer).await;
 
         // Background poller: stamps last_frame_at when the bind TUN RX counter
