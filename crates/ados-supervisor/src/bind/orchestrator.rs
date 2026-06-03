@@ -25,9 +25,9 @@ use super::bind_event::{
 use super::fsm::{now_monotonic, BindSession, BindState};
 use super::{
     iface, keys, socat, BindRole, BIND_REG_RECONCILE_INTERVAL, KEY_TRANSFER_TIMEOUT,
-    RESTART_TIMEOUT, TUNNEL_POLL_INTERVAL, TUNNEL_WAIT_TIMEOUT, UPSTREAM_BIND_KEY,
-    UPSTREAM_BIND_YAML, UPSTREAM_DRONE_KEY, UPSTREAM_GS_KEY, WAITING_PEER_WATCHDOG,
-    WFB_BIND_CLIENT_SH, WFB_BIND_SERVER_SH,
+    LOCK_RECLAIM_TIMEOUT, RESTART_TIMEOUT, TUNNEL_POLL_INTERVAL, TUNNEL_WAIT_TIMEOUT,
+    UPSTREAM_BIND_KEY, UPSTREAM_BIND_YAML, UPSTREAM_DRONE_KEY, UPSTREAM_GS_KEY,
+    WAITING_PEER_WATCHDOG, WFB_BIND_CLIENT_SH, WFB_BIND_SERVER_SH,
 };
 
 /// A recoverable bind failure. `phase` names the [`BindState`] the failure
@@ -165,7 +165,41 @@ impl BindOrchestrator {
     where
         F: Future<Output = ()>,
     {
-        let _guard = self.lock.try_lock().map_err(|_| BindStartError::Busy)?;
+        // Single-flight gate with stale-session self-heal. A genuinely active,
+        // progressing session keeps a new bind out (`Busy`). But a prior session
+        // that wedged — its `start_local_bind` still holding the guard while
+        // parked past the watchdog — or left a terminal/orphaned record must not
+        // lock the operator (and the auto-pair retry loop) out for the whole
+        // watchdog window: ask it to cancel and reclaim the guard within a bounded
+        // grace. Intra-rig only (reconciles the in-process guard against the
+        // in-process session record); it is not a cross-host lock.
+        let _guard = match self.lock.try_lock() {
+            Ok(g) => g,
+            Err(_) => {
+                let reclaimable = match self.session.lock().await.as_ref() {
+                    // Guard held but no session record — orphaned; reclaim.
+                    None => true,
+                    Some(s) => {
+                        s.state.is_terminal()
+                            || s.phase_entered_at.is_none_or(|t| {
+                                now_monotonic() - t > WAITING_PEER_WATCHDOG.as_secs_f64()
+                            })
+                    }
+                };
+                if !reclaimable {
+                    return Err(BindStartError::Busy);
+                }
+                tracing::warn!(
+                    source,
+                    "bind_lock_reclaimed_stale: cancelling a wedged/terminal prior session"
+                );
+                self.cancel_current();
+                match tokio::time::timeout(LOCK_RECLAIM_TIMEOUT, self.lock.lock()).await {
+                    Ok(g) => g,
+                    Err(_) => return Err(BindStartError::Busy),
+                }
+            }
+        };
 
         // Sweep stragglers before touching the radio (cheap + idempotent).
         socat::kill_stale_bind_socats().await;
@@ -710,10 +744,46 @@ mod tests {
         // fires AND artifacts that DO let it past preflight is hard on a dev
         // host; instead assert the lock directly: take it, then a start fails.
         let _held = orch.lock.try_lock().expect("free at start");
+        // An active, freshly-progressing session must keep a concurrent bind out
+        // immediately. The stale-session self-heal only reclaims a terminal or
+        // watchdog-stale record, never a live one.
+        {
+            let mut s = BindSession::new(BindRole::Gs, "operator", None);
+            s.transition(BindState::WaitingPeer);
+            *orch.session.lock().await = Some(s);
+        }
         let busy = orch
             .start_local_bind(BindRole::Gs, None, "operator", std::future::pending::<()>())
             .await;
         assert_eq!(busy, Err(BindStartError::Busy));
+    }
+
+    #[tokio::test]
+    async fn reclaims_the_lock_from_a_terminal_orphan_session() {
+        // A guard held while the session record is terminal (e.g. a prior bind
+        // that finished but whose guard-holder has not yet dropped) must be
+        // reclaimable, not a permanent Busy. We assert the decision the self-heal
+        // makes on the session record, not the full reclaim (which needs a live
+        // wedged holder that releases on cancel).
+        let orch = BindOrchestrator::new();
+        let mut s = BindSession::new(BindRole::Gs, "operator", None);
+        s.transition(BindState::Failed); // terminal
+        let terminal_reclaimable = s.state.is_terminal();
+        assert!(terminal_reclaimable);
+        // A stale (watchdog-aged) phase clock is also reclaimable.
+        s.transition(BindState::WaitingPeer);
+        s.phase_entered_at = Some(now_monotonic() - WAITING_PEER_WATCHDOG.as_secs_f64() - 30.0);
+        let stale_reclaimable = s
+            .phase_entered_at
+            .is_none_or(|t| now_monotonic() - t > WAITING_PEER_WATCHDOG.as_secs_f64());
+        assert!(stale_reclaimable);
+        // A fresh active session is NOT reclaimable.
+        s.transition(BindState::WaitingPeer);
+        let fresh_reclaimable = s.state.is_terminal()
+            || s.phase_entered_at
+                .is_none_or(|t| now_monotonic() - t > WAITING_PEER_WATCHDOG.as_secs_f64());
+        assert!(!fresh_reclaimable);
+        let _ = &orch;
     }
 
     #[test]

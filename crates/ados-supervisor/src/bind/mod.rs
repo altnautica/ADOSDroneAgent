@@ -84,13 +84,24 @@ pub const BIND_STATE_SENTINEL: &str = "/run/ados/bind-state.json";
 pub const TUNNEL_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
 /// Iface poll cadence while waiting for the tunnel.
 pub const TUNNEL_POLL_INTERVAL: Duration = Duration::from_secs(1);
-/// Global wedge watchdog — a session that neither progresses nor errors.
-pub const WAITING_PEER_WATCHDOG: Duration = Duration::from_secs(1800);
+/// Global wedge watchdog — a session that neither progresses nor errors. Kept
+/// deliberately short so a wedged bind surfaces (and releases the single-flight
+/// guard) in ~2 min instead of ~30, keeping the auto-pair retry cycle tight. A
+/// peer that genuinely connects completes the handshake in seconds, so this only
+/// bounds how long an unanswered rendezvous holds the radio.
+pub const WAITING_PEER_WATCHDOG: Duration = Duration::from_secs(120);
 /// Combined `TRANSFERRING_KEYS` + `APPLYING_KEYS` budget (one timer, by design:
-/// splitting it would change which phase the GCS badge reports on timeout).
-pub const KEY_TRANSFER_TIMEOUT: Duration = Duration::from_secs(1500);
+/// splitting it would change which phase the GCS badge reports on timeout). Once
+/// a peer rendezvous occurs the key exchange completes in seconds; a longer
+/// budget only delays surfacing a peer that connected but then stalled.
+pub const KEY_TRANSFER_TIMEOUT: Duration = Duration::from_secs(90);
 /// Service-restart budget (`RESTARTING_SERVICES`).
 pub const RESTART_TIMEOUT: Duration = Duration::from_secs(60);
+/// Bounded wait for a wedged prior session to release the single-flight guard
+/// after it is asked to cancel, before a new bind gives up with `Busy`. Only
+/// reached when the held session is terminal or its phase clock is stale past the
+/// watchdog — a genuinely active, progressing session returns `Busy` immediately.
+pub const LOCK_RECLAIM_TIMEOUT: Duration = Duration::from_secs(8);
 /// Cadence of the fast regulatory-domain reconcile that runs for the whole bind
 /// window. Starting the bind unit re-enters monitor mode on the self-managed
 /// injection PHY, which can re-assert its EEPROM-baked country as the GLOBAL
@@ -202,10 +213,15 @@ mod tests {
     }
 
     #[test]
-    fn timeouts_match_python_constants() {
+    fn bind_timeouts_surface_a_wedge_fast() {
         assert_eq!(TUNNEL_WAIT_TIMEOUT.as_secs(), 30);
-        assert_eq!(WAITING_PEER_WATCHDOG.as_secs(), 1800);
-        assert_eq!(KEY_TRANSFER_TIMEOUT.as_secs(), 1500);
+        // Short windows: a wedged bind frees the single-flight guard in ~2 min,
+        // not ~30, so a stuck rendezvous self-clears and auto-pair retries tightly.
+        assert_eq!(WAITING_PEER_WATCHDOG.as_secs(), 120);
+        assert_eq!(KEY_TRANSFER_TIMEOUT.as_secs(), 90);
+        // The reclaim wait must be shorter than the watchdog, or a stale guard
+        // could never be reclaimed before the wedged session frees it anyway.
+        assert!(LOCK_RECLAIM_TIMEOUT < WAITING_PEER_WATCHDOG);
         assert_eq!(RESTART_TIMEOUT.as_secs(), 60);
         assert_eq!(BIND_TCP_PORT, 5555);
     }
