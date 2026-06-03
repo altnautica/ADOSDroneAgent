@@ -389,10 +389,17 @@ impl ValidPacketWatchdog {
                 // rendezvous attempt happens where the drone homes, and resume
                 // holding (the one-shot flag prevents another sweep until a link
                 // is established or the manager restarts).
-                if home != self.channel {
-                    self.acquirer.try_channel(home).await;
-                    self.channel = home;
-                }
+                //
+                // Always retune home, unconditionally. The sweep just drove the
+                // radio across every candidate and left it tuned to the LAST one;
+                // `self.channel` was never updated to track that, so it still
+                // reads the home value and cannot gate the retune. The old
+                // `if home != self.channel` guard was therefore dead whenever the
+                // sweep started from home (the common cold-start case) and left
+                // the netdev stranded on the last swept channel while the heartbeat
+                // reported home.
+                self.acquirer.try_channel(home).await;
+                self.channel = home;
                 self.last_valid_rx_change_at = self.clock.monotonic();
                 tracing::info!(
                     interface = %self.interface,
@@ -429,9 +436,14 @@ impl ValidPacketWatchdog {
                 self.last_valid_rx_change_at = self.clock.monotonic();
                 continue;
             }
-            // Reacquisition failed across the whole band. Terminate so the run
-            // loop respawns the receive process (the subprocess itself may be
-            // wedged, not just the channel).
+            // Reacquisition failed across the whole band. The sweep left the
+            // radio tuned to the last swept candidate; return it to the
+            // rendezvous home before respawning so the new receiver starts where
+            // the transmitter homes, not on a stray swept channel.
+            self.acquirer.try_channel(self.home_channel).await;
+            self.channel = self.home_channel;
+            // Terminate so the run loop respawns the receive process (the
+            // subprocess itself may be wedged, not just the channel).
             self.reacquire_kills += 1;
             if let Some(h) = &self.health {
                 h.set_reacquire_kills(self.reacquire_kills);
