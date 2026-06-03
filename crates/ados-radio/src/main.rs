@@ -645,7 +645,27 @@ async fn run_service(cfg: &WfbConfig, cancel: Arc<Notify>) {
                 }
             }
         }
-        set_channel(iface, cfg.channel).await;
+        // Re-assert monitor mode and land on the channel before bring-up
+        // proceeds. A self-managed injection PHY (the RTL family) — or a
+        // concurrent regulatory-domain set on the same wiphy — can revert the
+        // vif to managed between adapter selection and here; a managed interface
+        // rejects `iw set channel` with EBUSY. Spawning wfb_tx on a managed /
+        // mis-tuned interface advances tx_bytes while radiating nothing a ground
+        // station can decode (advancing tx_bytes with zero usable RF), so the
+        // channel must land — verified — before TX starts. On total failure,
+        // re-enter the selection loop rather than start a dead TX.
+        if !ensure_monitor_and_channel(iface, cfg.channel).await {
+            tracing::error!(
+                iface,
+                channel = cfg.channel,
+                note = "monitor mode + channel never landed (EBUSY); not starting TX, retrying bring-up",
+                "wfb_channel_set_unrecovered"
+            );
+            tokio::select! {
+                _ = tokio::time::sleep(Duration::from_secs(REG_BLOCKED_RETRY_SECS)) => continue,
+                _ = cancel.notified() => return,
+            }
+        }
 
         // ── Regulatory re-assert (prevention layer) ──────────────────────
         // A self-managed injection PHY (the RTL family) can leave its
@@ -1719,6 +1739,47 @@ async fn write_hop_supervisor_json(
 /// Per-call ceiling on the `iw set channel` + readback so a hung `iw` (driver
 /// wedged mid-retune) cannot stall the hop / return-home path.
 const SET_CHANNEL_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Bring-up attempts at landing monitor mode + the channel before the service
+/// re-enters its selection loop. A self-managed injection PHY (the RTL family)
+/// or a concurrent regulatory-domain set on the same wiphy can revert the vif
+/// to managed between adapter selection and the channel set, which makes
+/// `iw set channel` fail EBUSY; re-asserting monitor mode (down → monitor → up)
+/// before each channel attempt reclaims a reverted vif.
+const CHANNEL_SET_MAX_ATTEMPTS: u32 = 4;
+
+/// Land the interface in monitor mode AND on `channel`, verified, with bounded
+/// retries. Each attempt re-asserts monitor mode (the full down → monitor → up
+/// sequence — idempotent when already monitor, but it reclaims a vif that
+/// silently reverted to managed after selection) and then sets + verifies the
+/// channel. Returns `true` only on a verified channel readback. The caller must
+/// not start `wfb_tx` on a `false`, or it injects on a managed / mis-tuned
+/// interface that advances `tx_bytes` while radiating nothing a ground station
+/// can decode (an advancing TX counter with zero usable RF).
+async fn ensure_monitor_and_channel(iface: &str, channel: u8) -> bool {
+    for attempt in 0..CHANNEL_SET_MAX_ATTEMPTS {
+        if attempt > 0 {
+            tokio::time::sleep(Duration::from_millis(400 * attempt as u64)).await;
+        }
+        // Force monitor mode (corrects a vif that reverted to managed). The
+        // helper refuses the operator's control interface, so this can never
+        // sever the management link.
+        ados_radio::adapter::set_monitor_mode_verified(iface, 2).await;
+        if set_channel(iface, channel).await {
+            if attempt > 0 {
+                tracing::info!(iface, channel, attempt, "wfb_channel_set_recovered");
+            }
+            return true;
+        }
+        tracing::warn!(
+            iface,
+            channel,
+            attempt,
+            "wfb_channel_set_retry: re-asserting monitor mode before retry"
+        );
+    }
+    false
+}
 
 /// `iw <iface> set channel <ch>`, VERIFIED. Returns `true` only when the
 /// command exits 0 AND a readback of `iw <iface> info` confirms the interface
