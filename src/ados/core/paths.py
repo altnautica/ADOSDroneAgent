@@ -52,6 +52,16 @@ LOGD_INGEST_SOCK = ADOS_RUN_DIR / "logd.sock"
 # down. Absent until the store is installed and started.
 LOGD_QUERY_SOCK = ADOS_RUN_DIR / "logd-query.sock"
 
+# Trigger seam for an explicit, operator-initiated cloud export of a chosen log
+# window. The thin Python front door (the `ados logs push` CLI and the
+# `/api/logs/push` endpoint) writes the request file; the long-running cloud
+# service watches for it, performs the export-and-mark, then deletes the request
+# and writes the result file for the front door to read back. The window export,
+# upload, and mark-synced steps all live in the cloud service, not here: the
+# Python side only signals intent and reports the outcome.
+LOGD_PUSH_REQUEST_PATH = ADOS_RUN_DIR / "logd-push-request.json"
+LOGD_PUSH_RESULT_PATH = ADOS_RUN_DIR / "logd-push-result.json"
+
 # Live JSON state snapshots
 HEALTH_JSON = ADOS_RUN_DIR / "health.json"
 MESH_STATE_JSON = ADOS_RUN_DIR / "mesh-state.json"

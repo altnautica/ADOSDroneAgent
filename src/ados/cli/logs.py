@@ -219,6 +219,69 @@ def export_cmd(since, from_, to_, kind, source, metric, session, fmt, output, ho
         click.echo(f"Wrote {written} bytes to {output}", err=True)
 
 
+@logs_group.command("push")
+@click.option("--session", default=None, type=int, help="Restrict the window to one session id.")
+@click.option("--since", default=None, help="Lower bound: a relative -5m/-2h/-1d, an epoch-us integer, or an ISO timestamp.")
+@click.option(
+    "--kinds",
+    default=None,
+    help="Comma-separated subset of logs,metrics,events,hw. Default: all four.",
+)
+@click.option("--no-wait", is_flag=True, help="Return as soon as the push is requested, without waiting for the result.")
+@click.option("--json", "as_json", is_flag=True, help="Print the raw result envelope.")
+def push_cmd(session, since, kinds, no_wait, as_json) -> None:
+    """Export a window of the store to the paired cloud account.
+
+    This is a thin front door: it records the request and lets the cloud service
+    do the export, upload, and mark. The cloud service refuses the push when the
+    agent is in local mode, is not cloud-paired, or has cloud log push disabled,
+    which is the correct state for an agent that has nothing to sync. By default
+    the command waits a few seconds for the result and prints what was pushed;
+    ``--no-wait`` returns as soon as the request is recorded.
+    """
+    from ados.services.cloud.log_push_trigger import (
+        LogPushTriggerError,
+        build_request,
+        trigger_push,
+    )
+
+    kind_list = [k.strip() for k in kinds.split(",") if k.strip()] if kinds else None
+    try:
+        request = build_request(session=session, since=since, kinds=kind_list)
+        result = trigger_push(request, wait=not no_wait)
+    except LogPushTriggerError as exc:
+        raise click.ClickException(f"{exc.code}: {exc.message}") from exc
+
+    if as_json:
+        click.echo(json.dumps(result, indent=2))
+        return
+    _render_push(result)
+
+
+def _render_push(result: dict[str, Any]) -> None:
+    """Render the push outcome as a one-line human summary."""
+    if result.get("error"):
+        click.echo(click.style(f"push failed: {result['error']}", fg="red"))
+        return
+    if result.get("pending"):
+        click.echo(
+            click.style("push requested", fg="cyan")
+            + " — the cloud service will export the window shortly."
+        )
+        return
+    if result.get("deduped"):
+        click.echo(
+            click.style("already pushed", fg="green")
+            + f" — {result.get('rows', 0)} rows, {result.get('bytes', 0)} bytes (no new upload)."
+        )
+        return
+    synced = "synced" if result.get("synced") else "uploaded (mark pending)"
+    click.echo(
+        click.style("pushed", fg="green")
+        + f" — {result.get('rows', 0)} rows, {result.get('bytes', 0)} bytes, {synced}."
+    )
+
+
 @logs_group.command("tail")
 @click.option("--replay", default=0, type=int, help="Replay this many recent rows before the live tail.")
 @click.option("--kind", default=None, type=click.Choice(["logs", "events", "metrics", "hw"]))

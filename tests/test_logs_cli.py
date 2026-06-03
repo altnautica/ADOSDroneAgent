@@ -63,10 +63,10 @@ def _stats_envelope() -> dict:
     }
 
 
-def test_group_registers_all_six_subcommands() -> None:
+def test_group_registers_all_subcommands() -> None:
     result = runner.invoke(logs_group, ["--help"])
     assert result.exit_code == 0
-    for sub in ("query", "tail", "aggregate", "export", "sessions", "status"):
+    for sub in ("query", "tail", "aggregate", "export", "sessions", "status", "push"):
         assert sub in result.output
 
 
@@ -156,6 +156,72 @@ def test_status_openapi_fetches_the_schema_doc() -> None:
     assert result.exit_code == 0, result.output
     assert json.loads(result.output)["openapi"] == "3.0.3"
     assert gj.call_args.args[0] == "/v1/openapi.json"
+
+
+# --- push (thin trigger front door) ------------------------------------
+
+
+def test_push_help_lists_options() -> None:
+    result = runner.invoke(logs_group, ["push", "--help"])
+    assert result.exit_code == 0
+    for opt in ("--session", "--since", "--kinds", "--no-wait", "--json"):
+        assert opt in result.output
+
+
+def test_push_writes_request_and_renders_pushed(tmp_path, monkeypatch) -> None:
+    from ados.services.cloud import log_push_trigger as trig
+
+    req = tmp_path / "logd-push-request.json"
+    res = tmp_path / "logd-push-result.json"
+    monkeypatch.setattr(trig, "ADOS_RUN_DIR", tmp_path)
+    monkeypatch.setattr(trig, "LOGD_PUSH_REQUEST_PATH", req)
+    monkeypatch.setattr(trig, "LOGD_PUSH_RESULT_PATH", res)
+
+    # The cloud service "answers" by writing the result under the same id the
+    # trigger picks. Pin the id so the harness can pre-stage the answer.
+    monkeypatch.setattr(trig.uuid, "uuid4", lambda: _FakeUUID("rid-push"))
+
+    real_write = trig.write_request
+
+    def write_then_answer(request):
+        rid = real_write(request)
+        res.write_text(
+            json.dumps({"request_id": rid, "pushed": True, "bytes": 4096, "rows": 12, "synced": True})
+        )
+        return rid
+
+    monkeypatch.setattr(trig, "write_request", write_then_answer)
+
+    result = runner.invoke(logs_group, ["push", "--session", "5", "--kinds", "logs"])
+    assert result.exit_code == 0, result.output
+    assert "pushed" in result.output
+    on_disk = json.loads(req.read_text())
+    assert on_disk["session"] == 5
+    assert on_disk["kinds"] == ["logs"]
+
+
+def test_push_no_wait_reports_requested(tmp_path, monkeypatch) -> None:
+    from ados.services.cloud import log_push_trigger as trig
+
+    monkeypatch.setattr(trig, "ADOS_RUN_DIR", tmp_path)
+    monkeypatch.setattr(trig, "LOGD_PUSH_REQUEST_PATH", tmp_path / "req.json")
+    monkeypatch.setattr(trig, "LOGD_PUSH_RESULT_PATH", tmp_path / "res.json")
+    result = runner.invoke(logs_group, ["push", "--no-wait", "--json"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["pending"] is True
+    assert payload["accepted"] is True
+
+
+def test_push_rejects_bad_since() -> None:
+    result = runner.invoke(logs_group, ["push", "--since", "yesterday"])
+    assert result.exit_code != 0
+    assert "bad_since" in result.output
+
+
+class _FakeUUID:
+    def __init__(self, hexval: str) -> None:
+        self.hex = hexval
 
 
 # --- transport resolution ----------------------------------------------

@@ -26,7 +26,8 @@ from datetime import datetime, timezone
 from typing import Any
 
 import httpx
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Body, Query
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from ados.core.logging import get_logger
@@ -281,6 +282,89 @@ async def stream_logs(
             await upstream.aclose()
 
     return StreamingResponse(gen(), media_type="text/event-stream")
+
+
+@router.post("/logs/push")
+async def push_logs(
+    body: dict[str, Any] = Body(default_factory=dict),  # noqa: B008 - FastAPI body marker
+):
+    """Request an explicit cloud export of a chosen log window.
+
+    This is a thin trigger. It records the operator's window selector and lets
+    the cloud service do the export, upload, and mark-synced — that service owns
+    the trusted store socket and the cloud client. This endpoint never reads the
+    store, uploads bytes, or marks rows itself.
+
+    The agent's existing ``X-ADOS-Key`` auth middleware gates this route, so a
+    paired agent requires the key (and a same-origin browser is trusted) before
+    the request reaches here. The cloud service is what refuses the actual push
+    when the agent is in local mode, is not cloud-paired, or has cloud log push
+    disabled; an agent with nothing to sync logging fully to disk is correct.
+
+    Request body (all optional): ``{ session?: int, since?: str,
+    kinds?: [str] }``. ``kinds`` is any subset of ``logs``, ``metrics``,
+    ``events``, ``hw``; empty or absent means all four. ``since`` accepts a
+    relative ``-5m``/``-2h``/``-1d``, an epoch-microsecond integer, or an ISO
+    timestamp. ``wait`` (default true) controls whether the call blocks briefly
+    for the result; set it false to get a 202 as soon as the request is
+    recorded.
+
+    Responses:
+
+    * ``200`` with ``{ accepted, request_id, pushed, deduped, bytes, rows,
+      synced, error, pending, ... }`` when the result lands (or the brief poll
+      window closes with the push still pending);
+    * ``202`` with the same shape (``pending: true``) when ``wait`` is false;
+    * ``400`` ``{ error: { code, message } }`` on a malformed selector.
+    """
+    from ados.services.cloud.log_push_trigger import (
+        LogPushTriggerError,
+        build_request,
+        trigger_push,
+    )
+
+    session = body.get("session")
+    since = body.get("since")
+    raw_kinds = body.get("kinds")
+    wait = body.get("wait", True)
+
+    kinds: list[str] | None
+    if raw_kinds is None:
+        kinds = None
+    elif isinstance(raw_kinds, str):
+        kinds = [k.strip() for k in raw_kinds.split(",") if k.strip()]
+    elif isinstance(raw_kinds, list):
+        kinds = [str(k) for k in raw_kinds]
+    else:
+        return JSONResponse(
+            status_code=400,
+            content={"error": {"code": "bad_kinds", "message": "kinds must be a list or comma string"}},
+        )
+
+    if session is not None and not isinstance(session, int):
+        return JSONResponse(
+            status_code=400,
+            content={"error": {"code": "bad_session", "message": "session must be an integer"}},
+        )
+
+    try:
+        request = build_request(
+            session=session,
+            since=str(since) if since is not None else None,
+            kinds=kinds,
+        )
+        # The trigger does blocking file I/O and a short polling sleep; run it
+        # off the event loop so a slow result poll does not stall the server.
+        result = await run_in_threadpool(trigger_push, request, wait=bool(wait))
+    except LogPushTriggerError as exc:
+        log.warning("logs_push_rejected", code=exc.code)
+        return JSONResponse(
+            status_code=400,
+            content={"error": {"code": exc.code, "message": exc.message}},
+        )
+
+    status = 202 if result.get("pending") else 200
+    return JSONResponse(status_code=status, content=result)
 
 
 __all__ = ["router", "aclose_clients"]

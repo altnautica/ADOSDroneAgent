@@ -96,6 +96,13 @@ pub struct ServerSection {
     pub mqtt_transport: String,
     #[serde(default = "default_telemetry_rate")]
     pub telemetry_rate: u32,
+    /// The operator opt-in for explicit log-window cloud export. Default OFF:
+    /// the durable on-device store is the source of truth and nothing is exported
+    /// to the cloud account unless the operator turns this on. Even when on, an
+    /// export only runs on an explicit operator-triggered request — there is no
+    /// continuous firehose. Mirrors the Python `server.cloud_logs_enabled`.
+    #[serde(default)]
+    pub cloud_logs_enabled: bool,
 }
 
 impl Default for ServerSection {
@@ -105,6 +112,7 @@ impl Default for ServerSection {
             cloud: CloudSection::default(),
             mqtt_transport: default_mqtt_transport(),
             telemetry_rate: default_telemetry_rate(),
+            cloud_logs_enabled: false,
         }
     }
 }
@@ -210,6 +218,13 @@ impl CloudConfig {
             self.pairing.convex_url.clone()
         }
     }
+
+    /// Whether the operator has opted in to explicit log-window cloud export.
+    /// Default-off; combined with the cloud-paired check and an explicit
+    /// operator-triggered request, this is the full gate on any export.
+    pub fn cloud_logs_enabled(&self) -> bool {
+        self.server.cloud_logs_enabled
+    }
 }
 
 impl CloudConfig {
@@ -281,6 +296,24 @@ video:
         assert_eq!(cfg.server.cloud.url, "https://relay.example/convex");
         // Default arm flag is off when no wfb section is present.
         assert!(!cfg.video.wfb.auto_pair_enabled);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn cloud_logs_enabled_defaults_off_and_reads_the_opt_in() {
+        // Absent → off.
+        let cfg = CloudConfig::default();
+        assert!(!cfg.cloud_logs_enabled());
+
+        // Present and true → on.
+        let yaml = "\
+server:
+  mode: cloud
+  cloud_logs_enabled: true
+";
+        let path = temp_yaml("cloudlogs", yaml);
+        let cfg = CloudConfig::load_from(&path);
+        assert!(cfg.cloud_logs_enabled());
         let _ = std::fs::remove_file(&path);
     }
 

@@ -130,6 +130,17 @@ async fn main() -> Result<()> {
             convex_url.clone(),
             shutdown_rx.clone(),
         ),
+        // ── Log-window push watcher ────────────────────────────
+        // Watches for an operator-triggered request to export a chosen log
+        // window to the paired cloud account. Default-off, account-gated, and
+        // re-checks the pair state + the operator opt-in per request, so an
+        // unpaired / local-only agent never exports anything.
+        ados_cloud::spawn_log_push_watcher(
+            config.clone(),
+            http.clone(),
+            convex_url.clone(),
+            shutdown_rx.clone(),
+        ),
     ];
 
     // Relay supervision. The MAVLink-over-MQTT relay runs a real

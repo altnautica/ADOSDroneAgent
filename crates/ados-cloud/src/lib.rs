@@ -33,11 +33,15 @@
 //!   `/agent/status` heartbeat.
 //! - [`pairing`] — the pairing-state reader the loops gate on.
 //! - [`config`] — the slice of `/etc/ados/config.yaml` the relay reads.
+//! - [`log_push`] — the explicit, account-gated cloud export of a chosen log
+//!   window from the durable on-device store, driven by an operator-triggered
+//!   request file and default-off.
 
 pub mod config;
 pub mod dispatch;
 pub mod ground_station;
 pub mod heartbeat;
+pub mod log_push;
 pub mod loops;
 pub mod mqtt;
 pub mod pairing;
@@ -47,6 +51,7 @@ pub use config::CloudConfig;
 pub use dispatch::{CommandResult, CommandStatus};
 pub use ground_station::{CloudRelayBridge, GsHeartbeat, ThrottleState, UplinkSnapshot};
 pub use heartbeat::{HeartbeatPayload, RadioBlock, RemoteAccess, ServiceEntry};
+pub use log_push::{spawn_log_push_watcher, PushRequest, PushResult};
 pub use mqtt::{
     BoundedPublishQueue, MavlinkMqttRelay, MqttGateway, MqttQos, MqttTransport, RumqttcTransport,
     WebrtcSignalingRelay,
