@@ -307,6 +307,15 @@ pub async fn apply_keypair(
         );
     }
 
+    // The radio re-brings-up with the new key, but the drone's video pipeline
+    // (camera → mediamtx → tee → UDP 5600 → wfb_tx) does not re-attach to the
+    // freshly restarted wfb_tx on its own — it recovers only via its slow
+    // backoff FSM, so video can be silent for many seconds after a bind. Restart
+    // it too so the feed re-establishes promptly without a drone reboot (Rule 26).
+    if role == BindRole::Drone && !crate::systemctl::restart("ados-video.service").await {
+        tracing::info!("ados_video_restart_skipped (not active / no video pipeline)");
+    }
+
     Ok(PairResult {
         paired: true,
         peer_device_id: peer_device_id.map(|s| s.to_string()),

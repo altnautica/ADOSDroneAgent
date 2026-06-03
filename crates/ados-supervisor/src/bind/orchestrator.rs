@@ -591,6 +591,12 @@ impl BindOrchestrator {
         socat::kill_stale_bind_socats().await;
         crate::systemctl::stop(role.bind_unit()).await;
         crate::systemctl::start(role.normal_unit()).await;
+        // Same recovery as the success path: the drone's video pipeline does not
+        // re-attach to the restarted wfb_tx on its own, so restart it too — video
+        // resumes without a drone reboot after a failed/aborted bind (Rule 26).
+        if role == BindRole::Drone {
+            crate::systemctl::restart("ados-video.service").await;
+        }
         // Heal the global reg domain on the way out: a failed/cancelled/watchdog
         // retry cycled the bind unit's monitor mode and may have left the baked
         // country as the global domain. Without this, a retrying bind re-poisons
