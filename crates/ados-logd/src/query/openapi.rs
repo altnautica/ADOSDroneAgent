@@ -34,7 +34,8 @@ pub fn document() -> Value {
                 "text":    param("text", "query", "substring match against the message or target", "string"),
                 "session": param("session", "query", "restrict to one session id", "integer"),
                 "limit":   param("limit", "query", "page size (default 200, capped)", "integer"),
-                "cursor":  param("cursor", "query", "opaque keyset cursor from a prior page", "string")
+                "cursor":  param("cursor", "query", "opaque keyset cursor from a prior page", "string"),
+                "unsynced": param("unsynced", "query", "with 1|true, restrict to rows not yet marked synced", "string")
             },
             "schemas": {
                 "Envelope": {
@@ -70,17 +71,34 @@ pub fn document() -> Value {
                             }
                         }
                     }
+                },
+                "SyncRequest": {
+                    "type": "object",
+                    "description": "the window to mark synced; an empty body marks every unsynced row",
+                    "properties": {
+                        "session": { "type": "integer", "nullable": true },
+                        "from_us": { "type": "integer", "nullable": true, "description": "inclusive lower bound, microsecond epoch" },
+                        "to_us": { "type": "integer", "nullable": true, "description": "exclusive upper bound, microsecond epoch" },
+                        "tables": { "type": "array", "items": { "type": "string", "enum": ["logs", "metrics", "events", "hw"] }, "description": "tables to mark; empty means all four" }
+                    }
+                },
+                "SyncResponse": {
+                    "type": "object",
+                    "properties": {
+                        "marked": { "type": "object", "additionalProperties": { "type": "integer" }, "description": "rows flipped to synced, by table" },
+                        "unsynced_after": { "type": "object", "additionalProperties": { "type": "integer" }, "description": "rows still unsynced after the flip, by table (all four)" }
+                    }
                 }
             }
         },
         "paths": {
             "/v1/query": op(
                 "Keyset-paginated rows across the logs, events, metrics, or hardware tables.",
-                &["from", "to", "since", "kind", "source", "metric", "event_kind", "level", "text", "session", "limit", "cursor"]
+                &["from", "to", "since", "kind", "source", "metric", "event_kind", "level", "text", "session", "limit", "cursor", "unsynced"]
             ),
             "/v1/tail": op(
                 "Live Server-Sent-Events stream of newly-ingested rows matching the filters; replay=N sends recent context first.",
-                &["kind", "source", "metric", "event_kind", "level", "text"]
+                &["kind", "source", "metric", "event_kind", "level", "text", "unsynced"]
             ),
             "/v1/aggregate": op(
                 "Downsampled metric series for charts (bucket=auto|1s|1m|1h, agg=avg|min|max|p50|p95|last|count).",
@@ -88,7 +106,7 @@ pub fn document() -> Value {
             ),
             "/v1/export": op(
                 "Streamed bulk export of a window as jsonl or jsonl.zst.",
-                &["from", "to", "since", "kind", "source", "metric", "event_kind", "level", "text", "session"]
+                &["from", "to", "since", "kind", "source", "metric", "event_kind", "level", "text", "session", "unsynced"]
             ),
             "/v1/sessions": op(
                 "List boot, flight, and manual sessions with per-session counts.",
@@ -98,6 +116,7 @@ pub fn document() -> Value {
                 "Store health, ingest and drop rates, and the explicit-push watermark.",
                 &[]
             ),
+            "/v1/synced": synced_op(),
             "/v1/healthz": op_public("Liveness and readiness of the daemon and store."),
             "/v1/openapi.json": op_public("This document.")
         }
@@ -176,6 +195,43 @@ fn op_public(summary: &str) -> Value {
     })
 }
 
+/// The POST operation that marks an exported window synced. Reachable ONLY on
+/// the local trusted socket; the LAN port answers it with 403 local_only.
+fn synced_op() -> Value {
+    json!({
+        "post": {
+            "summary": "Mark an exported window as synced. Local trusted socket only; the LAN port returns 403 local_only.",
+            "requestBody": {
+                "required": false,
+                "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SyncRequest" } } }
+            },
+            "responses": {
+                "200": {
+                    "description": "the per-table marked and remaining-unsynced counts",
+                    "content": { "application/json": { "schema": {
+                        "allOf": [
+                            { "$ref": "#/components/schemas/Envelope" },
+                            { "type": "object", "properties": { "data": { "$ref": "#/components/schemas/SyncResponse" } } }
+                        ]
+                    } } }
+                },
+                "400": {
+                    "description": "bad_range (from_us after to_us)",
+                    "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+                },
+                "403": {
+                    "description": "local_only (the request reached the LAN port)",
+                    "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+                },
+                "503": {
+                    "description": "writer_unavailable or mark_timeout",
+                    "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+                }
+            }
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -191,12 +247,28 @@ mod tests {
             "/v1/export",
             "/v1/sessions",
             "/v1/stats",
+            "/v1/synced",
             "/v1/healthz",
             "/v1/openapi.json",
         ] {
             assert!(paths.contains_key(p), "missing path {p}");
         }
         assert_eq!(doc["openapi"], "3.0.3");
+    }
+
+    #[test]
+    fn synced_is_a_post_and_export_advertises_the_unsynced_filter() {
+        let doc = document();
+        // The mark endpoint is a POST with the request/response schemas.
+        assert!(doc["paths"]["/v1/synced"]["post"].is_object());
+        assert!(doc["components"]["schemas"]["SyncRequest"].is_object());
+        assert!(doc["components"]["schemas"]["SyncResponse"].is_object());
+        // The export operation advertises the unsynced filter the push uses.
+        let params = doc["paths"]["/v1/export"]["get"]["parameters"]
+            .as_array()
+            .unwrap();
+        let refs: Vec<&str> = params.iter().filter_map(|p| p["$ref"].as_str()).collect();
+        assert!(refs.iter().any(|r| r.ends_with("/unsynced")));
     }
 
     #[test]

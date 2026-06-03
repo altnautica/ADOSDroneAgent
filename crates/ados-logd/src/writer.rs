@@ -15,13 +15,14 @@
 //! On a clean shutdown the channel closes, the final partial batch is committed,
 //! the open session is closed, and the WAL is truncated.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use rusqlite::{params, Connection};
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, oneshot};
 
-use ados_protocol::logd::{EventFrame, IngestFrame, Level};
+use ados_protocol::logd::{EventFrame, IngestFrame, Level, SyncRequest, SyncTable};
 
 use crate::db::{self, DbError};
 use crate::retention::{self, MaintenanceReport, RetentionConfig};
@@ -46,6 +47,39 @@ const DRAIN_POLL: Duration = Duration::from_millis(2);
 /// Capacity of the live-tail broadcast channel. A subscriber that falls behind
 /// loses the oldest buffered frames (lagged), never the writer.
 pub const BROADCAST_CAPACITY: usize = 1024;
+
+/// Capacity of the control channel from the read surface to the writer. Small:
+/// mark-synced requests are explicit and infrequent, and each caller awaits its
+/// reply, so a full channel backpressures the caller, never the writer.
+pub const CONTROL_QUEUE_CAPACITY: usize = 32;
+
+/// An out-of-band control message the writer services between ingest batches.
+///
+/// The single-writer invariant lives here: this thread owns the only read-write
+/// connection, so the one place a row flips from unsynced to synced is on this
+/// thread, on this connection, reached through this channel. The read surface
+/// opens the store read-only and never mutates it; it enqueues a [`ControlMsg`]
+/// and awaits the [`oneshot`] reply rather than writing the store itself.
+pub enum ControlMsg {
+    /// Flip the rows in the request's window from unsynced to synced, reply with
+    /// the per-table flipped count and the remaining unsynced count.
+    MarkSynced {
+        /// The window selector to mark.
+        req: SyncRequest,
+        /// The reply channel; dropping it without a send signals the caller to
+        /// surface a service-unavailable error.
+        ack: oneshot::Sender<MarkResult>,
+    },
+}
+
+/// The outcome of a [`ControlMsg::MarkSynced`]: rows flipped per requested table
+/// and rows still unsynced per table (all four) after the flip.
+pub struct MarkResult {
+    /// Rows flipped to synced, keyed by table name.
+    pub marked: BTreeMap<String, i64>,
+    /// Rows still unsynced after the flip, keyed by table name (all four).
+    pub unsynced_after: BTreeMap<String, i64>,
+}
 
 /// The longest the run loop waits for a frame before it wakes to check the
 /// maintenance deadline. This keeps the writer reactive to its own retention
@@ -97,6 +131,13 @@ pub enum WriterError {
 pub struct Writer {
     conn: Connection,
     rx: mpsc::Receiver<IngestFrame>,
+    /// The control channel the read surface enqueues mark-synced requests on.
+    /// Drained between ingest batches so a mark never starves ingest.
+    control_rx: mpsc::Receiver<ControlMsg>,
+    /// A clone of the control sender, so the daemon can wire the read surface
+    /// to the writer via [`Writer::control_handle`], symmetric with the
+    /// broadcast handle.
+    control_tx: mpsc::Sender<ControlMsg>,
     broadcast_tx: broadcast::Sender<IngestFrame>,
     config: WriterConfig,
     db_path: PathBuf,
@@ -130,6 +171,11 @@ impl Writer {
         let db_path = db_path.as_ref().to_path_buf();
         let conn = db::open(&db_path)?;
         let (broadcast_tx, _) = broadcast::channel(BROADCAST_CAPACITY);
+        // The control channel is owned by the writer; the read surface gets a
+        // sender clone via `control_handle()`. Bounding it caps the number of
+        // queued mark requests; the read handler awaits its reply, so a full
+        // channel backpressures the caller rather than the writer.
+        let (control_tx, control_rx) = mpsc::channel(CONTROL_QUEUE_CAPACITY);
         let boot_session = open_session(&conn, now_us(), "boot", Some("start"))?;
         tracing::info!(session = boot_session, "boot session opened");
         // Clamp the retention knobs once at start so the maintenance step can
@@ -143,6 +189,8 @@ impl Writer {
         Ok(Self {
             conn,
             rx,
+            control_rx,
+            control_tx,
             broadcast_tx,
             config,
             db_path,
@@ -159,6 +207,15 @@ impl Writer {
     /// closes.
     pub fn broadcast_handle(&self) -> broadcast::Sender<IngestFrame> {
         self.broadcast_tx.clone()
+    }
+
+    /// A handle the daemon clones into the read surface so a query handler can
+    /// enqueue a mark-synced request on the writer's control channel. Holding it
+    /// keeps the control channel open for the read surface's lifetime; the writer
+    /// also holds its own clone, so its `try_recv` never sees a closed channel
+    /// while the daemon is up.
+    pub fn control_handle(&self) -> mpsc::Sender<ControlMsg> {
+        self.control_tx.clone()
     }
 
     /// The boot session id opened at start.
@@ -213,11 +270,15 @@ impl Writer {
                         }
                     }
                     self.commit_batch(&mut batch)?;
+                    // Service any pending mark-synced requests after the batch is
+                    // durable, so a busy writer still answers the control channel.
+                    self.drain_control();
                 }
                 RecvOutcome::Idle => {
                     // The wait elapsed with no frame: run maintenance if due, then
-                    // loop back to waiting.
+                    // service the control channel, then loop back to waiting.
                     self.maybe_run_maintenance()?;
+                    self.drain_control();
                 }
                 RecvOutcome::Closed => break,
             }
@@ -225,6 +286,10 @@ impl Writer {
             // Maintenance is also checked after committing a batch, so a busy
             // writer (which never hits the idle path) still runs retention.
             self.maybe_run_maintenance()?;
+            // Drain the control channel once more at the bottom of the loop so a
+            // mark-synced request is serviced whether or not frames are flowing,
+            // without ever blocking ingest (the drain is `try_recv`, never awaited).
+            self.drain_control();
         }
 
         // Clean shutdown: close the session and truncate the WAL. Any final
@@ -341,6 +406,75 @@ impl Writer {
         if let Some(to) = report.evicted_to_us {
             ev.detail.insert("to_us".to_string(), rmpv::Value::from(to));
         }
+        IngestFrame::Event(ev)
+    }
+
+    /// Drain every pending control message without blocking, servicing each on
+    /// the writer's own connection between ingest batches. Uses `try_recv` so it
+    /// never starves ingest: an empty or disconnected channel returns at once.
+    ///
+    /// On a mark-synced request it flips the window in one transaction, records a
+    /// durable event row describing the marked window (itself unsynced, so it is
+    /// a candidate for the next push), fans that event out to any live tail, and
+    /// acknowledges with the per-table counts. A failed flip is logged and the
+    /// ack is dropped, which the read handler maps to a service-unavailable error.
+    fn drain_control(&mut self) {
+        loop {
+            match self.control_rx.try_recv() {
+                Ok(ControlMsg::MarkSynced { req, ack }) => {
+                    match apply_mark_synced(&self.conn, &req) {
+                        Ok(res) => {
+                            let total: i64 = res.marked.values().sum();
+                            let event = self.pushed_window_event(&req, total);
+                            let session = self.flight_session.unwrap_or(self.boot_session);
+                            // The event is written unsynced so it is a candidate for
+                            // the next push; a bad insert is logged, never fatal.
+                            if let Err(e) = insert_frame(&self.conn, &event, session, false) {
+                                tracing::warn!(error = %e, "failed to record the pushed-window event");
+                            }
+                            let _ = self.broadcast_tx.send(event);
+                            // A dropped ack means the caller already gave up; the
+                            // mark itself is durable regardless.
+                            let _ = ack.send(res);
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = %e, "mark-synced failed");
+                            // Dropping `ack` without a send signals the read handler
+                            // to surface a service-unavailable error.
+                        }
+                    }
+                }
+                Err(mpsc::error::TryRecvError::Empty) => break,
+                Err(mpsc::error::TryRecvError::Disconnected) => break,
+            }
+        }
+    }
+
+    /// Build the durable event describing a marked-synced window: the row count
+    /// flipped, the session/window selector, and the tables touched. Recorded so
+    /// an operator (and a later push) can see what was exported and when.
+    fn pushed_window_event(&self, req: &SyncRequest, rows: i64) -> IngestFrame {
+        let mut ev = EventFrame::new(now_us(), "blackbox.pushed_window", "ados-logd", Level::Info);
+        ev.detail
+            .insert("rows".to_string(), rmpv::Value::from(rows));
+        if let Some(s) = req.session {
+            ev.detail
+                .insert("session".to_string(), rmpv::Value::from(s));
+        }
+        if let Some(f) = req.from_us {
+            ev.detail
+                .insert("from_us".to_string(), rmpv::Value::from(f));
+        }
+        if let Some(t) = req.to_us {
+            ev.detail.insert("to_us".to_string(), rmpv::Value::from(t));
+        }
+        let tables: Vec<rmpv::Value> = req
+            .tables_or_all()
+            .iter()
+            .map(|t| rmpv::Value::from(t.as_str()))
+            .collect();
+        ev.detail
+            .insert("tables".to_string(), rmpv::Value::Array(tables));
         IngestFrame::Event(ev)
     }
 
@@ -538,6 +672,60 @@ fn insert_frame(
         }
     }
     Ok(())
+}
+
+/// Flip the rows in the request's window from unsynced to synced on the one
+/// read-write connection, in one transaction, returning the per-table flipped
+/// count and the per-table remaining-unsynced count (all four tables).
+///
+/// Kept private to the writer: this is the single place a `synced` flag changes,
+/// and it runs only on the writer thread, on the writer's exclusively-owned
+/// connection, so `unchecked_transaction()` is safe — the writer is never inside
+/// another transaction at the drain point. The `WHERE` is built with boxed
+/// `ToSql` params (mirroring the read path's builder) so the slow-port cross
+/// target stays free of borrow/needless-ref lints.
+fn apply_mark_synced(conn: &Connection, req: &SyncRequest) -> rusqlite::Result<MarkResult> {
+    let tx = conn.unchecked_transaction()?;
+    let mut marked = BTreeMap::new();
+    for table in req.tables_or_all() {
+        let name = table.as_str();
+        let mut clauses = vec!["synced = 0".to_string()];
+        let mut bound: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+        if let Some(session) = req.session {
+            clauses.push("session = ?".to_string());
+            bound.push(Box::new(session));
+        }
+        if let Some(lo) = req.from_us {
+            clauses.push("ts_us >= ?".to_string());
+            bound.push(Box::new(lo));
+        }
+        if let Some(hi) = req.to_us {
+            clauses.push("ts_us < ?".to_string());
+            bound.push(Box::new(hi));
+        }
+        let sql = format!(
+            "UPDATE {name} SET synced = 1 WHERE {}",
+            clauses.join(" AND ")
+        );
+        let params: Vec<&dyn rusqlite::types::ToSql> = bound.iter().map(|b| b.as_ref()).collect();
+        let n = tx.execute(&sql, params.as_slice())?;
+        marked.insert(name.to_string(), n as i64);
+    }
+    let mut unsynced_after = BTreeMap::new();
+    for table in SyncTable::ALL {
+        let name = table.as_str();
+        let n: i64 = tx.query_row(
+            &format!("SELECT count(*) FROM {name} WHERE synced = 0"),
+            [],
+            |r| r.get(0),
+        )?;
+        unsynced_after.insert(name.to_string(), n);
+    }
+    tx.commit()?;
+    Ok(MarkResult {
+        marked,
+        unsynced_after,
+    })
 }
 
 /// Encode an open fields/tags/detail map to a msgpack blob, or `NULL` when empty
@@ -921,6 +1109,237 @@ mod tests {
             })
             .unwrap();
         assert!(remaining < total, "the size cap removed rows");
+        db::integrity_check(&ro).unwrap();
+    }
+
+    /// Seed a store directly with a mix of synced/unsynced rows across all four
+    /// tables, then call `apply_mark_synced` against it and return the result so
+    /// the flip can be asserted without spinning up the whole writer loop.
+    fn seed_unsynced(path: &Path) {
+        let conn = db::open(path).unwrap();
+        conn.execute(
+            "INSERT INTO sessions (started_us, kind) VALUES (1000, 'boot')",
+            [],
+        )
+        .unwrap();
+        let session = conn.last_insert_rowid();
+        // logs at ts 2000..2005, all unsynced.
+        for i in 0..6i64 {
+            conn.execute(
+                "INSERT INTO logs (ts_us, session, source, level, msg, synced) \
+                 VALUES (?1, ?2, 'api', 2, ?3, 0)",
+                rusqlite::params![2000 + i, session, format!("m{i}")],
+            )
+            .unwrap();
+        }
+        // a couple of metrics, events, and one hw row, all unsynced.
+        for i in 0..3i64 {
+            conn.execute(
+                "INSERT INTO metrics (ts_us, session, metric, value, synced) \
+                 VALUES (?1, ?2, 'cpu.load', 0.5, 0)",
+                rusqlite::params![2100 + i, session],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO events (ts_us, session, kind, source, severity, synced) \
+                 VALUES (?1, ?2, 'radio.lock', 'ados-radio', 2, 0)",
+                rusqlite::params![2200 + i, session],
+            )
+            .unwrap();
+        }
+        conn.execute(
+            "INSERT INTO hw (ts_us, session, signals, synced) VALUES (2300, ?1, ?2, 0)",
+            rusqlite::params![
+                session,
+                rmp_serde::to_vec_named(&ados_protocol::logd::Fields::new()).unwrap()
+            ],
+        )
+        .unwrap();
+    }
+
+    fn unsynced_count(conn: &Connection, table: &str) -> i64 {
+        conn.query_row(
+            &format!("SELECT count(*) FROM {table} WHERE synced = 0"),
+            [],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn mark_synced_flips_exactly_the_window() {
+        let (_dir, path) = temp_db();
+        seed_unsynced(&path);
+        let conn = db::open(&path).unwrap();
+        // Mark only the logs in [2000, 2003): rows at 2000, 2001, 2002 (three).
+        let req = SyncRequest {
+            session: None,
+            from_us: Some(2000),
+            to_us: Some(2003),
+            tables: vec![SyncTable::Logs],
+        };
+        let res = apply_mark_synced(&conn, &req).unwrap();
+        assert_eq!(res.marked.get("logs"), Some(&3));
+        // The remaining logs (2003, 2004, 2005) are still unsynced; the other
+        // tables are untouched.
+        assert_eq!(res.unsynced_after.get("logs"), Some(&3));
+        assert_eq!(unsynced_count(&conn, "logs"), 3);
+        assert_eq!(unsynced_count(&conn, "metrics"), 3);
+        assert_eq!(unsynced_count(&conn, "events"), 3);
+        assert_eq!(unsynced_count(&conn, "hw"), 1);
+        db::integrity_check(&conn).unwrap();
+    }
+
+    #[test]
+    fn mark_synced_empty_tables_marks_all_four() {
+        let (_dir, path) = temp_db();
+        seed_unsynced(&path);
+        let conn = db::open(&path).unwrap();
+        // An empty selector marks every unsynced row in all four tables.
+        let res = apply_mark_synced(&conn, &SyncRequest::default()).unwrap();
+        assert_eq!(res.marked.get("logs"), Some(&6));
+        assert_eq!(res.marked.get("metrics"), Some(&3));
+        assert_eq!(res.marked.get("events"), Some(&3));
+        assert_eq!(res.marked.get("hw"), Some(&1));
+        for t in ["logs", "metrics", "events", "hw"] {
+            assert_eq!(res.unsynced_after.get(t), Some(&0));
+            assert_eq!(unsynced_count(&conn, t), 0);
+        }
+    }
+
+    #[test]
+    fn mark_synced_writes_a_pushed_window_event() {
+        // Drive the real run loop: open the channels, mark a window over the
+        // control channel, await the ack, and confirm a durable
+        // `blackbox.pushed_window` event landed (proving the write went through
+        // the writer's own connection) while the store stays consistent.
+        let (_dir, path) = temp_db();
+        let (tx, rx) = mpsc::channel::<IngestFrame>(64);
+        let writer = Writer::new(&path, rx, WriterConfig::default()).unwrap();
+        let control = writer.control_handle();
+        let handle = std::thread::spawn(move || writer.run().unwrap());
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            // Ingest a few rows first so there is something to mark.
+            for i in 0..4i64 {
+                tx.send(IngestFrame::Telemetry(TelemetryFrame::new(
+                    1000 + i,
+                    "cpu.load",
+                    i as f64,
+                )))
+                .await
+                .unwrap();
+            }
+            // Give the writer a moment to commit them, then mark all metrics.
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let (ack_tx, ack_rx) = oneshot::channel::<MarkResult>();
+            control
+                .send(ControlMsg::MarkSynced {
+                    req: SyncRequest {
+                        tables: vec![SyncTable::Metrics],
+                        ..SyncRequest::default()
+                    },
+                    ack: ack_tx,
+                })
+                .await
+                .unwrap();
+            let res = tokio::time::timeout(Duration::from_secs(5), ack_rx)
+                .await
+                .expect("the writer acknowledged in time")
+                .expect("the writer did not drop the ack");
+            assert!(res.marked.get("metrics").copied().unwrap_or(0) >= 1);
+            drop(tx);
+        });
+        handle.join().unwrap();
+
+        let ro = db::open_readonly(&path).unwrap();
+        let count: i64 = ro
+            .query_row(
+                "SELECT count(*) FROM events WHERE kind='blackbox.pushed_window'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1, "exactly one pushed-window event was recorded");
+        // The event detail records a positive marked-row count.
+        let detail_blob: Vec<u8> = ro
+            .query_row(
+                "SELECT detail FROM events WHERE kind='blackbox.pushed_window'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let detail: ados_protocol::logd::Fields = rmp_serde::from_slice(&detail_blob).unwrap();
+        assert!(
+            detail.get("rows").and_then(|v| v.as_i64()).unwrap_or(0) >= 1,
+            "the pushed-window event reports the rows it marked"
+        );
+        assert!(
+            detail.contains_key("tables"),
+            "it records the tables marked"
+        );
+        db::integrity_check(&ro).unwrap();
+    }
+
+    #[test]
+    fn mark_synced_ack_returns_while_ingest_flows() {
+        // Drive the run loop with a steady ingest stream and a concurrent
+        // mark-synced. The ack must come back (the control channel is not starved
+        // by ingest) and the ingested frames must still land (the mark does not
+        // stall ingest).
+        let (_dir, path) = temp_db();
+        let (tx, rx) = mpsc::channel::<IngestFrame>(64);
+        let writer = Writer::new(&path, rx, WriterConfig::default()).unwrap();
+        let control = writer.control_handle();
+        let handle = std::thread::spawn(move || writer.run().unwrap());
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let total: i64 = 200;
+        rt.block_on(async {
+            let base = now_us();
+            for i in 0..total {
+                tx.send(IngestFrame::Telemetry(TelemetryFrame::new(
+                    base + i,
+                    "cpu.load",
+                    i as f64,
+                )))
+                .await
+                .unwrap();
+                // Halfway through the stream, fire a mark and await the ack while
+                // ingest is still flowing.
+                if i == total / 2 {
+                    let (ack_tx, ack_rx) = oneshot::channel::<MarkResult>();
+                    control
+                        .send(ControlMsg::MarkSynced {
+                            req: SyncRequest::default(),
+                            ack: ack_tx,
+                        })
+                        .await
+                        .unwrap();
+                    let res = tokio::time::timeout(Duration::from_secs(5), ack_rx)
+                        .await
+                        .expect("the ack returned while ingest was flowing")
+                        .expect("the writer did not drop the ack");
+                    // The mark covered whatever had been committed by then.
+                    assert!(res.unsynced_after.contains_key("metrics"));
+                }
+            }
+            drop(tx);
+        });
+        handle.join().unwrap();
+
+        let ro = db::open_readonly(&path).unwrap();
+        let n: i64 = ro
+            .query_row("SELECT count(*) FROM metrics", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, total, "every ingested frame still landed");
         db::integrity_check(&ro).unwrap();
     }
 }

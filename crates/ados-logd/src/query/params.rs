@@ -108,6 +108,10 @@ pub struct QueryFilters {
     pub limit: u32,
     /// The opaque cursor token, if a follow-on page was requested.
     pub cursor: Option<String>,
+    /// Restrict to rows not yet marked synced (`?unsynced=1`). Used by the
+    /// explicit window export so the exported bytes are exactly the rows the
+    /// matching mark-synced flip will flip, keeping the export deterministic.
+    pub unsynced_only: bool,
 }
 
 impl QueryFilters {
@@ -161,6 +165,7 @@ impl QueryFilters {
             session,
             limit,
             cursor: params.get("cursor").map(str::to_string),
+            unsynced_only: matches!(params.get("unsynced"), Some("1") | Some("true")),
         })
     }
 
@@ -180,6 +185,9 @@ impl QueryFilters {
         fp.add_str_list(&sorted(&self.sources))
             .add_str_list(&sorted(&self.metrics))
             .add_str_list(&sorted(&self.event_kinds));
+        // The unsynced restriction changes the result set, so an unsynced-only
+        // cursor must not be replayable against a full export and vice versa.
+        fp.add_i64(self.unsynced_only as i64);
         fp.finish()
     }
 }
@@ -529,5 +537,22 @@ mod tests {
     fn reversed_range_is_rejected() {
         let p = QueryParams::parse("from=200&to=100");
         assert!(QueryFilters::parse(&p, 0).is_err());
+    }
+
+    #[test]
+    fn unsynced_flag_parses_and_changes_the_fingerprint() {
+        let plain = QueryFilters::parse(&QueryParams::parse("kind=logs"), 0).unwrap();
+        assert!(!plain.unsynced_only);
+        let one = QueryFilters::parse(&QueryParams::parse("kind=logs&unsynced=1"), 0).unwrap();
+        assert!(one.unsynced_only);
+        let truthy =
+            QueryFilters::parse(&QueryParams::parse("kind=logs&unsynced=true"), 0).unwrap();
+        assert!(truthy.unsynced_only);
+        // A non-true value leaves the flag off.
+        let off = QueryFilters::parse(&QueryParams::parse("kind=logs&unsynced=0"), 0).unwrap();
+        assert!(!off.unsynced_only);
+        // The flag folds into the fingerprint so a cursor cannot cross between an
+        // unsynced-only export and a full one.
+        assert_ne!(plain.fingerprint(), one.fingerprint());
     }
 }

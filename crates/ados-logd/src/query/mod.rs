@@ -41,21 +41,27 @@ use axum::extract::{Request, State};
 use axum::http::StatusCode;
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use hyper::body::Incoming;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use hyper_util::server::conn::auto::Builder as ConnBuilder;
 use tokio::net::{TcpListener, UnixListener};
-use tokio::sync::{broadcast, oneshot};
+use tokio::sync::{broadcast, mpsc, oneshot};
 use tower::Service;
 
 use ados_protocol::logd::IngestFrame;
+
+use crate::writer::ControlMsg;
 
 use self::auth::{PairingState, RateLimiter};
 use self::routes::AppState;
 use self::sse::{ExportSlots, TailSlots};
 use crate::ingest::IngestStats;
+
+/// The mark-synced path. A single const shared by the router registration and
+/// the TCP-edge gate that forbids it off the trusted socket.
+pub const SYNCED_PATH: &str = "/v1/synced";
 
 /// Per-edge auth state attached to the TCP layer. The Unix listener does not
 /// install the layer at all, so on-box callers are never gated.
@@ -75,6 +81,7 @@ fn build_router(state: AppState) -> Router {
         .route("/v1/export", get(routes::export))
         .route("/v1/sessions", get(routes::sessions))
         .route("/v1/stats", get(routes::stats))
+        .route(SYNCED_PATH, post(routes::synced))
         .route("/v1/healthz", get(routes::healthz))
         .route("/v1/openapi.json", get(routes::openapi))
         .fallback(not_found)
@@ -93,6 +100,19 @@ async fn not_found() -> Response {
 /// Unix edge does not mount this, so trusted on-box callers bypass all three.
 async fn tcp_edge(State(edge): State<EdgeAuth>, request: Request, next: Next) -> Response {
     let path = request.uri().path().to_string();
+    // The mark-synced write is reachable ONLY on the trusted local socket: the
+    // LAN edge can never mutate the store. Reject it here before the public-path
+    // bypass and the rate limiter, regardless of pairing, so a key never unlocks
+    // a write over TCP.
+    if request.method() == axum::http::Method::POST && path == SYNCED_PATH {
+        let body = serde_json::json!({
+            "error": {
+                "code": "local_only",
+                "message": "this endpoint is reachable only on the local trusted socket"
+            }
+        });
+        return (StatusCode::FORBIDDEN, Json(body)).into_response();
+    }
     // Liveness and discovery are public and must always answer: a watchdog or
     // reachability probe must never be starved by a query flood, so the public
     // paths skip both the rate limiter and the auth check.
@@ -126,7 +146,12 @@ async fn tcp_edge(State(edge): State<EdgeAuth>, request: Request, next: Next) ->
 ///
 /// `db_path` is opened read-only per request, never read-write. `broadcast` is
 /// the writer's sender clone; `ingest` are the live counters; `pairing_path`
-/// points at the agent's `pairing.json` for the TCP-edge auth.
+/// points at the agent's `pairing.json` for the TCP-edge auth; `mark_synced` is
+/// the writer's control sender the on-socket mark path enqueues on.
+// This is a wiring seam: each argument is an independently-owned resource handed
+// in by the daemon, so bundling them into a struct adds indirection without
+// buying clarity. Matches the `query_sessions` precedent in `rows.rs`.
+#[allow(clippy::too_many_arguments)]
 pub async fn spawn_query_server<F>(
     db_path: PathBuf,
     query_socket: PathBuf,
@@ -134,6 +159,7 @@ pub async fn spawn_query_server<F>(
     broadcast: broadcast::Sender<IngestFrame>,
     ingest: Arc<IngestStats>,
     pairing_path: PathBuf,
+    mark_synced: mpsc::Sender<ControlMsg>,
     shutdown: F,
 ) -> Result<()>
 where
@@ -147,6 +173,7 @@ where
         tail_slots: Arc::new(TailSlots::default()),
         export_slots: Arc::new(ExportSlots::default()),
         pairing: Arc::clone(&pairing),
+        mark_synced,
     };
 
     // The Unix edge: the bare Router, no auth.
@@ -324,11 +351,55 @@ mod tests {
         broadcast: broadcast::Sender<IngestFrame>,
         stop: Option<oneshot::Sender<()>>,
         join: tokio::task::JoinHandle<Result<()>>,
+        // Held alive so the writer side of the control channel never closes
+        // while the read tests run; the real writer (mark tests) replaces this
+        // by keeping its own thread alive.
+        _writer: Option<std::thread::JoinHandle<()>>,
     }
 
+    /// The read-only harness: seed the store directly and serve it with a control
+    /// sender whose receiver is held alive but never drained (the read tests do
+    /// not POST `/v1/synced`).
     async fn start(dir: &Path, pairing_body: Option<&str>) -> Harness {
         let db_path = dir.join("logs.db");
         seed(&db_path);
+        // A control channel whose receiver is parked alive for the test, so the
+        // sender handed to the server never sees a closed channel.
+        let (mark_tx, mark_rx) = mpsc::channel::<ControlMsg>(8);
+        let parked = std::thread::spawn(move || {
+            // Hold the receiver until the channel closes (all senders dropped).
+            let mut rx = mark_rx;
+            while rx.blocking_recv().is_some() {}
+        });
+        start_with_control(dir, pairing_body, db_path, mark_tx, Some(parked)).await
+    }
+
+    /// The writer-backed harness: spawn a real writer thread over the same store
+    /// so the mark-synced control path is serviced end-to-end, and hand the
+    /// server the writer's control handle. Returns the harness plus an ingest
+    /// sender the caller uses to seed rows through the writer.
+    async fn start_with_writer(
+        dir: &Path,
+        pairing_body: Option<&str>,
+    ) -> (Harness, mpsc::Sender<IngestFrame>) {
+        let db_path = dir.join("logs.db");
+        let (ingest_tx, ingest_rx) = mpsc::channel::<IngestFrame>(256);
+        let writer =
+            crate::writer::Writer::new(&db_path, ingest_rx, crate::writer::WriterConfig::default())
+                .unwrap();
+        let mark_tx = writer.control_handle();
+        let writer_thread = std::thread::spawn(move || writer.run().unwrap());
+        let h = start_with_control(dir, pairing_body, db_path, mark_tx, Some(writer_thread)).await;
+        (h, ingest_tx)
+    }
+
+    async fn start_with_control(
+        dir: &Path,
+        pairing_body: Option<&str>,
+        db_path: PathBuf,
+        mark_tx: mpsc::Sender<ControlMsg>,
+        writer: Option<std::thread::JoinHandle<()>>,
+    ) -> Harness {
         let socket = dir.join("logd-query.sock");
         let pairing_path = dir.join("pairing.json");
         if let Some(body) = pairing_body {
@@ -353,6 +424,7 @@ mod tests {
                 bcast,
                 ingest,
                 pairing_path,
+                mark_tx,
                 async move {
                     let _ = stop_rx.await;
                 },
@@ -372,6 +444,7 @@ mod tests {
             broadcast,
             stop: Some(stop_tx),
             join,
+            _writer: writer,
         }
     }
 
@@ -437,6 +510,47 @@ mod tests {
             req.push_str(&format!("{k}: {v}\r\n"));
         }
         req.push_str("\r\n");
+        stream.write_all(req.as_bytes()).await.unwrap();
+        stream.flush().await.unwrap();
+        let mut buf = Vec::new();
+        stream.read_to_end(&mut buf).await.unwrap();
+        split_http(&buf)
+    }
+
+    /// Minimal HTTP/1.1 POST of a JSON body over the unix socket.
+    async fn unix_post(socket: &Path, path: &str, body: &str) -> (String, String) {
+        let mut stream = connect_unix(socket).await;
+        let req = format!(
+            "POST {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\
+             Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        stream.write_all(req.as_bytes()).await.unwrap();
+        stream.flush().await.unwrap();
+        let mut buf = Vec::new();
+        stream.read_to_end(&mut buf).await.unwrap();
+        split_http(&buf)
+    }
+
+    /// Same minimal POST over a TCP connection to 127.0.0.1:port.
+    async fn tcp_post(
+        port: u16,
+        path: &str,
+        body: &str,
+        header: Option<(&str, &str)>,
+    ) -> (String, String) {
+        let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .unwrap();
+        let mut req = format!(
+            "POST {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\
+             Content-Type: application/json\r\nContent-Length: {}\r\n",
+            body.len()
+        );
+        if let Some((k, v)) = header {
+            req.push_str(&format!("{k}: {v}\r\n"));
+        }
+        req.push_str(&format!("\r\n{body}"));
         stream.write_all(req.as_bytes()).await.unwrap();
         stream.flush().await.unwrap();
         let mut buf = Vec::new();
@@ -770,6 +884,99 @@ mod tests {
         assert!(status.contains("404"), "status {status}");
         let json: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(json["error"]["code"], "not_found");
+        h.stop().await;
+    }
+
+    #[tokio::test]
+    async fn synced_over_unix_socket_marks_and_returns_200() {
+        let dir = tempfile::tempdir().unwrap();
+        // A real writer thread services the mark; seed rows through ingest.
+        let (h, ingest) = start_with_writer(dir.path(), None).await;
+        for i in 0..5i64 {
+            ingest
+                .send(IngestFrame::Telemetry(TelemetryFrame::new(
+                    crate::writer::now_us() + i,
+                    "cpu.load",
+                    i as f64,
+                )))
+                .await
+                .unwrap();
+        }
+        // Wait for the writer to commit them and confirm they are unsynced.
+        let mut before = 0i64;
+        for _ in 0..200 {
+            let (_s, b) = unix_get(&h.socket, "/v1/stats", None).await;
+            let j: serde_json::Value = serde_json::from_str(&b).unwrap();
+            before = j["data"]["unsynced"]["metrics"].as_i64().unwrap_or(0);
+            if before >= 5 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(before >= 5, "metrics should be unsynced before the mark");
+
+        // Mark the metrics table over the trusted socket.
+        let (status, body) = unix_post(&h.socket, "/v1/synced", r#"{"tables":["metrics"]}"#).await;
+        assert!(status.contains("200"), "status {status}: {body}");
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert!(json["data"]["marked"]["metrics"].as_i64().unwrap() >= 5);
+        assert_eq!(json["data"]["unsynced_after"]["metrics"], 0);
+        assert_eq!(json["meta"]["source"], "logd");
+
+        // The stats watermark for metrics has dropped to zero.
+        let (_s, sb) = unix_get(&h.socket, "/v1/stats", None).await;
+        let sj: serde_json::Value = serde_json::from_str(&sb).unwrap();
+        assert_eq!(sj["data"]["unsynced"]["metrics"], 0);
+        drop(ingest);
+        h.stop().await;
+    }
+
+    #[tokio::test]
+    async fn synced_is_forbidden_on_tcp_paired_and_unpaired() {
+        // Unpaired: still forbidden on TCP.
+        {
+            let dir = tempfile::tempdir().unwrap();
+            let h = start(dir.path(), None).await;
+            let (status, body) =
+                tcp_post(h.port, "/v1/synced", r#"{"tables":["logs"]}"#, None).await;
+            assert!(status.contains("403"), "unpaired tcp status {status}");
+            let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+            assert_eq!(json["error"]["code"], "local_only");
+            h.stop().await;
+        }
+        // Paired, with the right key: still forbidden — being on the LAN never
+        // unlocks the write, key or no key.
+        {
+            let dir = tempfile::tempdir().unwrap();
+            let h = start(
+                dir.path(),
+                Some(r#"{"paired": true, "api_key": "ados_secret"}"#),
+            )
+            .await;
+            let (status, body) = tcp_post(
+                h.port,
+                "/v1/synced",
+                r#"{"tables":["logs"]}"#,
+                Some(("X-ADOS-Key", "ados_secret")),
+            )
+            .await;
+            assert!(status.contains("403"), "paired tcp status {status}");
+            let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+            assert_eq!(json["error"]["code"], "local_only");
+            h.stop().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn synced_bad_range_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let (h, ingest) = start_with_writer(dir.path(), None).await;
+        let (status, body) =
+            unix_post(&h.socket, "/v1/synced", r#"{"from_us":200,"to_us":100}"#).await;
+        assert!(status.contains("400"), "status {status}: {body}");
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(json["error"]["code"], "bad_range");
+        drop(ingest);
         h.stop().await;
     }
 }

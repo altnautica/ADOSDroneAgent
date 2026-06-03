@@ -225,6 +225,11 @@ fn where_for(filters: &QueryFilters, after: Option<&Cursor>) -> WhereBuilder {
         wb.params.push(Box::new(c.ts_us));
         wb.params.push(Box::new(c.id));
     }
+    // Restrict to not-yet-synced rows. A literal clause over the constant 0 (no
+    // bound param) composes with every table and uses the partial unsynced index.
+    if filters.unsynced_only {
+        wb.clauses.push("synced = 0".to_string());
+    }
     match filters.table {
         Table::Logs => {
             wb.push_in("source", &filters.sources);
@@ -676,6 +681,43 @@ mod tests {
         let hw = query_hw(&ro, &filters("kind=hw&limit=10"), None).unwrap();
         assert_eq!(hw.rows.len(), 1);
         assert!(hw.rows[0].signals.get("thermal.soc_c").is_some());
+    }
+
+    #[test]
+    fn unsynced_only_filter_returns_only_synced_zero() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("logs.db");
+        let conn = db::open(&path).unwrap();
+        conn.execute(
+            "INSERT INTO sessions (started_us, kind) VALUES (1, 'boot')",
+            [],
+        )
+        .unwrap();
+        let s = conn.last_insert_rowid();
+        // Six logs: the even-indexed ones marked synced, the odd ones not.
+        for i in 0..6i64 {
+            conn.execute(
+                "INSERT INTO logs (ts_us, session, source, level, msg, synced) \
+                 VALUES (?1, ?2, 'api', 2, ?3, ?4)",
+                rusqlite::params![100 + i, s, format!("m{i}"), i % 2],
+            )
+            .unwrap();
+        }
+        drop(conn);
+        let ro = db::open_readonly(&path).unwrap();
+        // Three rows carry synced=0 (i = 0, 2, 4 → 0; i = 1,3,5 → 1, so the
+        // unsynced ones are i=0,2,4).
+        let all = query_logs(&ro, &filters("kind=logs&limit=10"), None).unwrap();
+        assert_eq!(all.rows.len(), 6);
+        let unsynced = query_logs(&ro, &filters("kind=logs&limit=10&unsynced=1"), None).unwrap();
+        assert_eq!(unsynced.rows.len(), 3, "only the synced=0 rows come back");
+        // The count matches the stats watermark for the same table.
+        let stat_unsynced: i64 = ro
+            .query_row("SELECT count(*) FROM logs WHERE synced = 0", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(unsynced.rows.len() as i64, stat_unsynced);
     }
 
     #[test]

@@ -22,9 +22,13 @@ use axum::Json;
 use futures::stream::Stream;
 use serde::Serialize;
 use serde_json::Value as JsonValue;
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, oneshot};
 
-use ados_protocol::logd::{IngestFrame, Meta, Page, QueryResponse, ENVELOPE_VERSION};
+use ados_protocol::logd::{
+    IngestFrame, Meta, Page, QueryResponse, SyncRequest, SyncResponse, ENVELOPE_VERSION,
+};
+
+use crate::writer::{ControlMsg, MarkResult};
 
 use super::aggregate::{self, AggregateParams};
 use super::auth::PairingState;
@@ -56,6 +60,9 @@ pub struct AppState {
     pub export_slots: Arc<ExportSlots>,
     /// The pairing reader used by the TCP edge auth layer.
     pub pairing: Arc<PairingState>,
+    /// The control sender to the single writer. The mark-synced handler enqueues
+    /// a request here and awaits the reply; it never writes the store itself.
+    pub mark_synced: mpsc::Sender<crate::writer::ControlMsg>,
 }
 
 impl AppState {
@@ -311,6 +318,68 @@ pub async fn stats(State(state): State<AppState>) -> Result<Response, ApiErr> {
     })
     .await??;
     Ok(resp)
+}
+
+// --- POST /v1/synced (trusted socket only) ------------------------------
+
+/// Mark the rows in the request's window as synced. Reachable ONLY on the
+/// trusted local socket; the TCP edge rejects this method+path before this
+/// handler is ever reached (see the edge gate in `mod.rs`). The handler does NO
+/// DB write of its own: it enqueues a control message on the single writer's
+/// channel and awaits the reply, so the only place a `synced` flag flips stays
+/// the writer thread.
+pub async fn synced(
+    State(state): State<AppState>,
+    Json(req): Json<SyncRequest>,
+) -> Result<Response, ApiErr> {
+    // Validate the window before enqueuing: a backwards range is a client error,
+    // not a writer task.
+    if let (Some(lo), Some(hi)) = (req.from_us, req.to_us) {
+        if lo > hi {
+            return Err(ApiErr::bad_request("bad_range", "from_us is after to_us"));
+        }
+    }
+    let (ack_tx, ack_rx) = oneshot::channel::<MarkResult>();
+    state
+        .mark_synced
+        .send(ControlMsg::MarkSynced { req, ack: ack_tx })
+        .await
+        .map_err(|_| {
+            ApiErr::status(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "writer_unavailable",
+                "the writer is not accepting control messages",
+            )
+        })?;
+    // Bound the wait so a wedged writer cannot hang the request. A timeout and a
+    // dropped sender both map to a service-unavailable error; the timeout uses a
+    // distinct code so the caller can tell a slow writer from a closed channel.
+    let res = tokio::time::timeout(std::time::Duration::from_secs(5), ack_rx)
+        .await
+        .map_err(|_| {
+            ApiErr::status(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "mark_timeout",
+                "the writer did not acknowledge in time",
+            )
+        })?
+        .map_err(|_| {
+            ApiErr::status(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "writer_unavailable",
+                "the writer dropped the request",
+            )
+        })?;
+    Ok(envelope(
+        SyncResponse {
+            marked: res.marked,
+            unsynced_after: res.unsynced_after,
+        },
+        1,
+        None,
+        None,
+    )
+    .into_response())
 }
 
 // --- GET /v1/healthz (public) -------------------------------------------
@@ -581,6 +650,34 @@ mod tests {
     #[test]
     fn api_error_renders_the_error_envelope() {
         let resp = ApiErr::bad_request("bad_cursor", "nope").into_response();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn synced_rejects_a_backwards_range_before_touching_the_writer() {
+        // A control sender whose receiver is dropped: if the handler tried to
+        // enqueue, the send would fail. The backwards-range check must short out
+        // first with a 400, so the channel is never touched.
+        let (tx, rx) = mpsc::channel::<crate::writer::ControlMsg>(1);
+        drop(rx);
+        let state = AppState {
+            db_path: std::path::PathBuf::from("/nonexistent/logs.db"),
+            broadcast: broadcast::channel(1).0,
+            ingest: Arc::new(crate::ingest::IngestStats::default()),
+            tail_slots: Arc::new(super::super::sse::TailSlots::default()),
+            export_slots: Arc::new(super::super::sse::ExportSlots::default()),
+            pairing: Arc::new(super::super::auth::PairingState::with_path(
+                std::path::PathBuf::from("/nonexistent/pairing.json"),
+            )),
+            mark_synced: tx,
+        };
+        let req = SyncRequest {
+            from_us: Some(200),
+            to_us: Some(100),
+            ..SyncRequest::default()
+        };
+        let err = synced(State(state), Json(req)).await.unwrap_err();
+        let resp = err.into_response();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 }

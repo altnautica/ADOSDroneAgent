@@ -174,6 +174,11 @@ where
     // channel stays open for the daemon's lifetime, and cloned into the query
     // server so `/v1/tail` is fed by the writer fan-out rather than a DB poll.
     let broadcast = writer.broadcast_handle();
+    // The control handle is the seam the read surface enqueues mark-synced
+    // requests on. Cloned into the query server so the on-socket mark path can
+    // reach the single writer; held open for the daemon's lifetime so the
+    // writer's control channel never sees a closed sender while serving.
+    let mark_synced = writer.control_handle();
     let (writer_result_tx, writer_result_rx) = oneshot::channel();
     let writer_thread = std::thread::Builder::new()
         .name("ados-logd-writer".to_string())
@@ -236,6 +241,7 @@ where
         broadcast,
         Arc::clone(&stats),
         paths.pairing_path.clone(),
+        mark_synced,
         async move {
             let _ = query_stop_rx.await;
         },
