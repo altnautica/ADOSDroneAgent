@@ -91,6 +91,13 @@ pub const WAITING_PEER_WATCHDOG: Duration = Duration::from_secs(1800);
 pub const KEY_TRANSFER_TIMEOUT: Duration = Duration::from_secs(1500);
 /// Service-restart budget (`RESTARTING_SERVICES`).
 pub const RESTART_TIMEOUT: Duration = Duration::from_secs(60);
+/// Cadence of the fast regulatory-domain reconcile that runs for the whole bind
+/// window. Starting the bind unit re-enters monitor mode on the self-managed
+/// injection PHY, which can re-assert its EEPROM-baked country as the GLOBAL
+/// cfg80211 domain on every retry; reconciling at this cadence keeps the
+/// configured domain pinned so the foreign domain never lingers long enough to
+/// blip the onboard management WiFi.
+pub const BIND_REG_RECONCILE_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Which side of the radio pair this bind runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]

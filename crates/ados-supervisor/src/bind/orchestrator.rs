@@ -24,9 +24,10 @@ use super::bind_event::{
 };
 use super::fsm::{now_monotonic, BindSession, BindState};
 use super::{
-    iface, keys, socat, BindRole, KEY_TRANSFER_TIMEOUT, RESTART_TIMEOUT, TUNNEL_POLL_INTERVAL,
-    TUNNEL_WAIT_TIMEOUT, UPSTREAM_BIND_KEY, UPSTREAM_BIND_YAML, UPSTREAM_DRONE_KEY,
-    UPSTREAM_GS_KEY, WAITING_PEER_WATCHDOG, WFB_BIND_CLIENT_SH, WFB_BIND_SERVER_SH,
+    iface, keys, socat, BindRole, BIND_REG_RECONCILE_INTERVAL, KEY_TRANSFER_TIMEOUT,
+    RESTART_TIMEOUT, TUNNEL_POLL_INTERVAL, TUNNEL_WAIT_TIMEOUT, UPSTREAM_BIND_KEY,
+    UPSTREAM_BIND_YAML, UPSTREAM_DRONE_KEY, UPSTREAM_GS_KEY, WAITING_PEER_WATCHDOG,
+    WFB_BIND_CLIENT_SH, WFB_BIND_SERVER_SH,
 };
 
 /// A recoverable bind failure. `phase` names the [`BindState`] the failure
@@ -75,6 +76,24 @@ struct AbortOnDrop(tokio::task::JoinHandle<()>);
 impl Drop for AbortOnDrop {
     fn drop(&mut self) {
         self.0.abort();
+    }
+}
+
+/// Re-assert the configured global regulatory domain at a fast cadence for the
+/// life of a bind window. Spawned at the top of
+/// [`BindOrchestrator::start_local_bind`] and aborted via an [`AbortOnDrop`]
+/// guard when the session ends, so the self-managed injection PHY's baked
+/// country can never linger as the global cfg80211 domain long enough to blip
+/// the onboard management WiFi — on EVERY retry, not only on tunnel-up or
+/// success (the failing-bind path never reaches the post-tunnel heal, and the
+/// radio service that would normally re-assert is stopped during a bind). The
+/// shared reconcile is idempotent (a no-op when already in sync) and only ever
+/// forces a domain that permits the configured channel, never the baked country
+/// or the world default.
+async fn bind_window_reg_guard(events: EventEmitter) {
+    loop {
+        crate::reg_reconciler::reconcile_global_domain(&events).await;
+        tokio::time::sleep(BIND_REG_RECONCILE_INTERVAL).await;
     }
 }
 
@@ -168,6 +187,11 @@ impl BindOrchestrator {
                 peer_device_id.as_deref(),
             ),
         );
+
+        // Pin the global regulatory domain at 1 Hz for the whole window. Dropped
+        // (aborting the loop) when this function returns, so it covers the bind
+        // unit's monitor-mode churn through every retry AND the cleanup restart.
+        let _reg_guard = AbortOnDrop(tokio::spawn(bind_window_reg_guard(self.events.clone())));
 
         let run = self.run_session(role, peer_device_id);
         tokio::pin!(cancel);
@@ -306,6 +330,14 @@ impl BindOrchestrator {
                 "opening_tunnel",
             ));
         }
+
+        // Heal the global reg domain IMMEDIATELY: starting the bind unit just
+        // re-entered monitor mode on the self-managed PHY, which can re-assert
+        // its baked country as the GLOBAL domain right now — before wait_for_iface
+        // (which can time out on a failing bind and never reach the post-tunnel
+        // heal at tunnel_and_transfer). The 1 Hz bind-window guard keeps it pinned
+        // thereafter; this is the prompt first heal.
+        crate::reg_reconciler::reconcile_global_domain(&self.events).await;
 
         // try { … } finally { stop bind_unit }: the bind unit is stopped on
         // BOTH success and failure once it has been started.
@@ -513,6 +545,13 @@ impl BindOrchestrator {
         socat::kill_stale_bind_socats().await;
         crate::systemctl::stop(role.bind_unit()).await;
         crate::systemctl::start(role.normal_unit()).await;
+        // Heal the global reg domain on the way out: a failed/cancelled/watchdog
+        // retry cycled the bind unit's monitor mode and may have left the baked
+        // country as the global domain. Without this, a retrying bind re-poisons
+        // every loop and nothing restores the onboard WiFi's data path. The 1 Hz
+        // window guard covers the steady churn; this is the final restore after
+        // the normal unit is back. Idempotent + channel-safety-gated.
+        crate::reg_reconciler::reconcile_global_domain(&self.events).await;
     }
 
     /// Ship a `radio.bind_failed` lifecycle event. A thin wrapper so each
