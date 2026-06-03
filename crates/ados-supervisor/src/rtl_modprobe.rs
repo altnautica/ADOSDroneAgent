@@ -6,9 +6,12 @@
 //! radiate on the home channel. The PHY-level lever is the driver's module
 //! parameters: with `rtw_regd_src=0` the driver uses its own private regdb and
 //! ignores both the OS core domain and (with country `00`) the efuse country,
-//! registering a worldwide channel plan that permits the home channel; the two
-//! power-limit tables are switched off so the home channel runs at full driver
-//! power.
+//! registering a worldwide channel plan that permits the home channel; the
+//! regulatory power-LIMIT table (`rtw_tx_pwr_lmt_enable=0`) is switched off so the
+//! legal per-region cap cannot clamp the home channel. The per-rate power
+//! CALIBRATION (`rtw_tx_pwr_by_rate=1`) stays ON: it is the efuse PA linearization,
+//! not a regulatory limit, and disabling it mis-biases the amp so it overheats and
+//! emits a distorted signal no receiver can decode.
 //!
 //! This module renders the `options 8812eu ...` line for the active posture and
 //! writes it to `/etc/modprobe.d/ados-rtl8812eu.conf`. Pinning a region instead
@@ -27,7 +30,8 @@
 /// The operating-region posture the driver options encode.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ModprobeMode {
-    /// Worldwide plan, power-limit tables off (the fresh-box default).
+    /// Worldwide plan, regulatory power-LIMIT table off; per-rate PA calibration
+    /// stays on (the fresh-box default).
     Unrestricted,
     /// The driver's own regdb honours the pinned country, power-limit table on.
     /// Carries the uppercase ISO 3166-1 alpha-2 region code.
@@ -43,8 +47,10 @@ const MODULE_NAME: &str = "8812eu";
 /// Render the `options 8812eu ...` line for the active posture. Pure.
 ///
 /// - Unrestricted: `rtw_regd_src=0` (driver private regdb, efuse ignored) +
-///   `rtw_country_code=00` (worldwide plan) + both per-region power-limit tables
-///   off so the home channel runs at full driver power.
+///   `rtw_country_code=00` (worldwide plan) + the regulatory power-LIMIT table off
+///   (`rtw_tx_pwr_lmt_enable=0`, no legal cap) while the per-rate power CALIBRATION
+///   stays on (`rtw_tx_pwr_by_rate=1`, the PA linearization — disabling it overheats
+///   the amp and distorts the signal).
 /// - Region(R): `rtw_regd_src=0` + `rtw_country_code=R` (the driver regdb honours
 ///   R) + the power-limit table back on for legal compliance in R.
 ///
@@ -52,7 +58,7 @@ const MODULE_NAME: &str = "8812eu";
 pub fn render_modprobe_options(mode: &ModprobeMode) -> String {
     match mode {
         ModprobeMode::Unrestricted => format!(
-            "options {MODULE_NAME} rtw_regd_src=0 rtw_country_code=00 rtw_tx_pwr_lmt_enable=0 rtw_tx_pwr_by_rate=0"
+            "options {MODULE_NAME} rtw_regd_src=0 rtw_country_code=00 rtw_tx_pwr_lmt_enable=0 rtw_tx_pwr_by_rate=1"
         ),
         ModprobeMode::Region(code) => format!(
             "options {MODULE_NAME} rtw_regd_src=0 rtw_country_code={code} rtw_tx_pwr_lmt_enable=1"
@@ -324,7 +330,7 @@ mod tests {
         let line = render_modprobe_options(&ModprobeMode::Unrestricted);
         assert_eq!(
             line,
-            "options 8812eu rtw_regd_src=0 rtw_country_code=00 rtw_tx_pwr_lmt_enable=0 rtw_tx_pwr_by_rate=0"
+            "options 8812eu rtw_regd_src=0 rtw_country_code=00 rtw_tx_pwr_lmt_enable=0 rtw_tx_pwr_by_rate=1"
         );
     }
 
@@ -344,13 +350,16 @@ mod tests {
     }
 
     #[test]
-    fn unrestricted_disables_both_power_limit_tables() {
-        // The two per-region power-limit tables MUST be off under unrestricted so
-        // the home channel runs at full driver power. (The host-VBUS power-budget
-        // clamp is enforced separately by the radio crate's tx-power ramp.)
+    fn unrestricted_lifts_the_legal_cap_but_keeps_the_pa_calibration() {
+        // Only the regulatory power-LIMIT table is off under unrestricted (no legal
+        // per-region cap on the home channel). The per-rate power CALIBRATION must
+        // stay ON: it is the efuse PA linearization, not a regulatory limit, and
+        // disabling it mis-biases the amp so it overheats and emits a distorted
+        // signal no receiver can decode. (The host-VBUS power-budget clamp is
+        // enforced separately by the radio crate's tx-power ramp.)
         let line = render_modprobe_options(&ModprobeMode::Unrestricted);
         assert!(line.contains("rtw_tx_pwr_lmt_enable=0"));
-        assert!(line.contains("rtw_tx_pwr_by_rate=0"));
+        assert!(line.contains("rtw_tx_pwr_by_rate=1"));
         // And the regdb source is the driver's private regdb (efuse ignored).
         assert!(line.contains("rtw_regd_src=0"));
         assert!(line.contains("rtw_country_code=00"));

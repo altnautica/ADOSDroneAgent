@@ -10,9 +10,12 @@
 //! The options line is the PHY-level lever: with `rtw_regd_src=0` the driver uses
 //! its own private regdb and ignores both the OS core domain and (with country
 //! `00`) the efuse country, registering a worldwide plan that permits the home
-//! channel; the two per-region power-limit tables are off so the channel runs at
-//! full driver power. Pinning a region instead sets the driver regdb to that
-//! country with the power-limit table back on.
+//! channel; the regulatory power-LIMIT table (`rtw_tx_pwr_lmt_enable=0`) is off so
+//! the legal per-region cap cannot clamp the home channel. The per-rate power
+//! CALIBRATION (`rtw_tx_pwr_by_rate=1`) stays ON: it is the efuse-derived PA
+//! linearization, not a regulatory limit, and disabling it mis-biases the power
+//! amplifier so it overheats and radiates a distorted signal no receiver can
+//! decode. Pinning a region instead turns the regulatory limit table back on.
 //!
 //! The vendored `realtek_88x2eu.conf` template is deliberately NOT wired in: it
 //! uses `rtw_regd_src=1` (OS source), which still applies the efuse country hint
@@ -99,7 +102,7 @@ fn is_valid_region_code(code: &str) -> bool {
 /// reconcile exactly.
 fn render_options(posture: &Posture) -> String {
     match posture {
-        Posture::Unrestricted => "options 8812eu rtw_regd_src=0 rtw_country_code=00 rtw_tx_pwr_lmt_enable=0 rtw_tx_pwr_by_rate=0".to_string(),
+        Posture::Unrestricted => "options 8812eu rtw_regd_src=0 rtw_country_code=00 rtw_tx_pwr_lmt_enable=0 rtw_tx_pwr_by_rate=1".to_string(),
         Posture::Region(code) => format!(
             "options 8812eu rtw_regd_src=0 rtw_country_code={code} rtw_tx_pwr_lmt_enable=1"
         ),
@@ -215,7 +218,7 @@ mod tests {
     fn unrestricted_options_line_is_exact() {
         assert_eq!(
             render_options(&Posture::Unrestricted),
-            "options 8812eu rtw_regd_src=0 rtw_country_code=00 rtw_tx_pwr_lmt_enable=0 rtw_tx_pwr_by_rate=0"
+            "options 8812eu rtw_regd_src=0 rtw_country_code=00 rtw_tx_pwr_lmt_enable=0 rtw_tx_pwr_by_rate=1"
         );
     }
 
