@@ -158,9 +158,25 @@ impl Page for RadioLinkDetailPage {
 
         // Sparkline footer line: rssi value + peak/floor summary.
         let summary_font = LoadedFont::new(FontFace::MonoRegular, 11);
+        // Live link mode suffix: "auto:<rung>" / "auto" when the adaptive FEC
+        // controller is armed, "manual" when pinned. Empty when the side does
+        // not report it (e.g. a receive-only ground station).
+        let mode_suffix = match link.adaptive_bitrate_enabled {
+            Some(true) => match link.recommended_tier_name.as_deref() {
+                Some(rung) => format!("  ·  auto:{rung}"),
+                None => "  ·  auto".to_string(),
+            },
+            Some(false) => "  ·  manual".to_string(),
+            None => String::new(),
+        };
         let summary = match link.rssi_dbm {
-            Some(rssi) => format!("rssi {} dBm  (peak {peak} / floor {floor})", rssi as i64),
-            None => "rssi -- dBm".to_string(),
+            Some(rssi) => {
+                format!(
+                    "rssi {} dBm  (peak {peak} / floor {floor}){mode_suffix}",
+                    rssi as i64
+                )
+            }
+            None => format!("rssi -- dBm{mode_suffix}"),
         };
         text(
             &mut canvas,
@@ -201,9 +217,18 @@ impl Page for RadioLinkDetailPage {
             Some(b) => format!("{b:.1} Mbps"),
             None => "-- Mbps".to_string(),
         };
-        let fec_text = match (link.fec_recovered, link.fec_lost) {
-            (Some(rec), Some(lost)) => format!("FEC R {rec} L {lost}"),
-            _ => "FEC -- / --".to_string(),
+        // Prefer the live transmit config (Reed-Solomon ratio + MCS rate) when
+        // the side reports it; fall back to the decode counters otherwise (a
+        // receive-only ground station carries the counters, not the TX trio).
+        let fec_text = match (link.fec_k, link.fec_n) {
+            (Some(k), Some(n)) => {
+                let mcs = link.mcs_index.map(|m| format!(" M{m}")).unwrap_or_default();
+                format!("FEC {k}/{n}{mcs}")
+            }
+            _ => match (link.fec_recovered, link.fec_lost) {
+                (Some(rec), Some(lost)) => format!("FEC R {rec} L {lost}"),
+                _ => "FEC -- / --".to_string(),
+            },
         };
         draw_column(
             &mut canvas,
@@ -434,6 +459,11 @@ mod tests {
         ctx.link.bitrate_kbps = Some(18000.0);
         ctx.link.fec_recovered = Some(7);
         ctx.link.fec_lost = Some(0);
+        ctx.link.fec_k = Some(8);
+        ctx.link.fec_n = Some(12);
+        ctx.link.mcs_index = Some(3);
+        ctx.link.adaptive_bitrate_enabled = Some(true);
+        ctx.link.recommended_tier_name = Some("high".to_string());
         ctx.link.channel = Some(149);
         ctx.link.frequency_mhz = Some(5745);
         ctx.link.bandwidth_mhz = Some(20);

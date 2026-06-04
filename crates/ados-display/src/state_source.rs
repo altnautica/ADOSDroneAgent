@@ -324,6 +324,12 @@ fn link_ctx(v: Option<&Value>) -> LinkCtx {
         bandwidth_mhz: i64_field(v, "bandwidth_mhz"),
         tx_power_dbm: i64_field(v, "tx_power_dbm"),
         mcs_index: i64_field(v, "mcs_index"),
+        fec_k: i64_field(v, "fec_k"),
+        fec_n: i64_field(v, "fec_n"),
+        // Option<bool> (not the defaulted bool_field) so the page can tell a
+        // reported `false` from an older agent that omits the field.
+        adaptive_bitrate_enabled: v.get("adaptive_bitrate_enabled").and_then(Value::as_bool),
+        recommended_tier_name: string_field(v, "recommended_tier_name"),
         packets_received: i64_field(v, "packets_received"),
         packets_lost: i64_field(v, "packets_lost"),
         rssi_history: Vec::new(),

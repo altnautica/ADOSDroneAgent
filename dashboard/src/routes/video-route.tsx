@@ -110,6 +110,11 @@ export function VideoRoute() {
 
   const enc = config.data?.encoder;
   const radio = config.data?.radio;
+  const adaptive = config.data?.adaptive;
+  const fecRatio =
+    radio?.fec_k != null && radio?.fec_n != null
+      ? `${radio.fec_k} / ${radio.fec_n} (${radio.fec_k > 0 ? Math.round(((radio.fec_n - radio.fec_k) / radio.fec_k) * 100) : 0}%)`
+      : "—";
   const camList = cameras.data?.cameras ?? [];
   const latencyMs = latency.data?.latency_ms;
   const ewma = latency.data?.ewma_ms;
@@ -167,6 +172,16 @@ export function VideoRoute() {
               <div className="font-mono">{radio?.band ?? "—"}</div>
               <div className="text-xs text-muted-foreground">MCS index</div>
               <div className="font-mono">{radio?.mcs_index ?? "—"}</div>
+              <div className="text-xs text-muted-foreground">FEC ratio</div>
+              <div className="font-mono">{fecRatio}</div>
+              <div className="text-xs text-muted-foreground">adaptive FEC</div>
+              <div className="font-mono">
+                {adaptive?.adaptive_bitrate_enabled == null
+                  ? "—"
+                  : adaptive.adaptive_bitrate_enabled
+                    ? "on"
+                    : "off"}
+              </div>
               <div className="text-xs text-muted-foreground">tx power</div>
               <div className="font-mono">
                 {radio?.tx_power_dbm != null ? `${radio.tx_power_dbm} dBm` : "—"}

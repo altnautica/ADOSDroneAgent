@@ -179,6 +179,12 @@ pub struct LinkCtx {
     pub bandwidth_mhz: Option<i64>,
     pub tx_power_dbm: Option<i64>,
     pub mcs_index: Option<i64>,
+    /// Live Reed-Solomon ratio (data shards / total) of the transmit plane.
+    pub fec_k: Option<i64>,
+    pub fec_n: Option<i64>,
+    /// Closed-loop FEC controller armed flag + its current ladder rung name.
+    pub adaptive_bitrate_enabled: Option<bool>,
+    pub recommended_tier_name: Option<String>,
     pub packets_received: Option<i64>,
     pub packets_lost: Option<i64>,
     /// 60-sample RSSI trend for the sparkline surfaces (`None` marks a gap).
