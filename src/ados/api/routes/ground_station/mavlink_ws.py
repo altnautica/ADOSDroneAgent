@@ -27,7 +27,7 @@ import structlog
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from ados.api.deps import get_agent_app
-from ados.core.ipc import MAX_FRAME_SIZE, MAVLINK_SOCK, MavlinkIPCClient
+from ados.core.ipc import MAVLINK_SOCK, MAX_FRAME_SIZE, MavlinkIPCClient
 
 log = structlog.get_logger("api.ground_station.mavlink_ws")
 
