@@ -248,6 +248,10 @@ async def set_video_config(body: VideoConfigBody) -> dict[str, Any]:
     native_radio = _native_radio_running()
 
     warnings: list[str] = []
+    # Operator tuning is persisted to /etc/ados/config.yaml so it survives a
+    # service restart (the live apply is best-effort; persistence captures
+    # intent, mirroring the tx-power route). Only valid values are persisted.
+    persist: dict[str, Any] = {}
 
     # Bitrate: pipeline-side restart. Skip if pipeline not in process.
     if body.bitrate_kbps is not None:
@@ -264,15 +268,48 @@ async def set_video_config(body: VideoConfigBody) -> dict[str, Any]:
         new_k = body.fec_k if body.fec_k is not None else cfg.fec_k
         new_n = body.fec_n if body.fec_n is not None else cfg.fec_n
         await _apply_fec(native_radio, wfb_mgr, new_k, new_n, warnings)
+        # Persist only a valid ratio (n > k >= 1), the same invariant the
+        # radio setter enforces, so a rejected ratio never reaches config.
+        if new_k >= 1 and new_n > new_k:
+            persist["fec_k"] = int(new_k)
+            persist["fec_n"] = int(new_n)
 
     # MCS (native: over the command socket).
     if body.mcs is not None:
         await _apply_mcs(native_radio, wfb_mgr, body.mcs, warnings)
+        persist["mcs_index"] = int(body.mcs)
+
+    # Link preset: resolve + pin the trio (adaptive left as-is).
+    if body.preset is not None:
+        trio = await _apply_preset(native_radio, wfb_mgr, body.preset, warnings)
+        persist["wfb_link_preset"] = body.preset
+        if trio is not None:
+            # Persist the resolved trio too, so a runtime preset survives a
+            # restart even for "conservative" (whose boot apply is a no-op).
+            persist["mcs_index"], persist["fec_k"], persist["fec_n"] = trio
 
     # Link-tier toggles (native: over the command socket; packaged: the
     # in-process bitrate controller).
     if body.auto is not None or body.tier_idx is not None:
         await _apply_tier(native_radio, ctrl, app, body, warnings)
+        if body.tier_idx is not None:
+            # A pinned rung implies adaptive off; persist the rung's FEC too.
+            persist["adaptive_bitrate_enabled"] = False
+            from ados.services.video.bitrate_controller import DEFAULT_TIERS
+
+            if 0 <= body.tier_idx < len(DEFAULT_TIERS):
+                rung = DEFAULT_TIERS[body.tier_idx]
+                persist["fec_k"] = int(rung.fec_k)
+                persist["fec_n"] = int(rung.fec_n)
+        elif body.auto is not None:
+            persist["adaptive_bitrate_enabled"] = bool(body.auto)
+
+    if persist:
+        from ados.api.routes.wfb import _persist_wfb_fields
+
+        if not _persist_wfb_fields(persist):
+            warnings.append("persist_failed")
+        _mirror_wfb_config(app, persist)
 
     response = await get_video_config()
     response["warnings"] = warnings
@@ -340,6 +377,76 @@ async def _apply_mcs(
             warnings.append("set_mcs_failed")
     else:
         warnings.append("wfb_manager_not_in_process")
+
+
+# Link preset -> (mcs, fec_k, fec_n). Mirrors the Rust link_preset_trio table
+# (crates/ados-radio/src/config.rs). Used for the packaged fallback path and to
+# persist the resolved trio when the native radio echo omits it.
+_PRESET_TRIOS: dict[str, tuple[int, int, int]] = {
+    "conservative": (1, 8, 12),
+    "balanced": (3, 8, 12),
+    "aggressive": (5, 8, 10),
+}
+
+
+async def _apply_preset(
+    native_radio: bool,
+    wfb_mgr: Any,
+    preset: str,
+    warnings: list[str],
+) -> tuple[int, int, int] | None:
+    """Apply a named link preset's (mcs, fec_k, fec_n) trio to the data plane.
+
+    Native: the radio resolves + pins the trio over the command socket and
+    echoes it back (the adaptive controller is left armed). Packaged: resolve
+    the trio locally and set MCS + FEC on the in-process manager. Returns the
+    applied trio (for persistence), or None when the apply failed.
+    """
+    trio = _PRESET_TRIOS.get(preset)
+    if trio is None:
+        warnings.append("set_preset_failed")
+        return None
+    if native_radio:
+        from ados.services.wfb import cmd_client
+
+        try:
+            resp = await cmd_client.set_preset(preset)
+            mcs, k, n = resp.get("mcs_index"), resp.get("fec_k"), resp.get("fec_n")
+            if all(isinstance(v, int) for v in (mcs, k, n)):
+                return (int(mcs), int(k), int(n))
+            return trio
+        except cmd_client.RadioCmdError:
+            warnings.append("set_preset_failed")
+            return None
+        except cmd_client.RadioCmdUnavailableError:
+            pass  # fall through to the packaged manager
+    if wfb_mgr is None or not hasattr(wfb_mgr, "set_fec"):
+        warnings.append("wfb_manager_not_in_process")
+        return None
+    mcs, k, n = trio
+    ok_mcs = await wfb_mgr.set_mcs(mcs) if hasattr(wfb_mgr, "set_mcs") else True
+    ok_fec = await wfb_mgr.set_fec(k, n)
+    if not (ok_mcs and ok_fec):
+        warnings.append("set_preset_failed")
+        return None
+    return trio
+
+
+def _mirror_wfb_config(app: Any, updates: dict[str, Any]) -> None:
+    """Mirror persisted wfb fields onto the live config object so an in-process
+    reader sees the new values without a reload race (same pattern as the
+    auto-pair toggle)."""
+    cfg = getattr(app, "config", None)
+    video = getattr(cfg, "video", None) if cfg is not None else None
+    wfb_cfg = getattr(video, "wfb", None) if video is not None else None
+    if wfb_cfg is None:
+        return
+    for key, value in updates.items():
+        if hasattr(wfb_cfg, key):
+            try:
+                setattr(wfb_cfg, key, value)
+            except Exception:  # noqa: BLE001 — assignment validation may reject
+                pass
 
 
 async def _apply_tier(

@@ -74,6 +74,11 @@ class VideoConfigBody(BaseModel):
         description="Pin a specific tier on the bitrate/FEC ladder. "
                     "Implicitly sets auto=False.",
     )
+    preset: Literal["conservative", "balanced", "aggressive"] | None = Field(
+        default=None,
+        description="Apply a named link preset's (mcs, fec_k, fec_n) trio. "
+                    "Leaves adaptive control as-is.",
+    )
 
 
 def _get_video_pipeline():

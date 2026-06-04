@@ -23,6 +23,8 @@ connection, then the server closes.
     {"op": "set_tier", "mode": "manual",
      "mcs_index": 3, "fec_k": 8, "fec_n": 10}
         -> {"ok": true, "mode": "manual", ...}
+    {"op": "set_preset", "preset": "balanced"}
+        -> {"ok": true, "preset": "balanced", "mcs_index": 3, ...}
 
 A reply with ``ok: false`` carries an ``error`` code; the helpers raise
 ``RadioCmdError`` so the REST layer surfaces it. An unreachable socket
@@ -138,3 +140,14 @@ async def set_tier_manual(mcs_index: int, fec_k: int, fec_n: int) -> None:
             "fec_n": int(fec_n),
         }
     )
+
+
+async def set_preset(preset: str) -> dict:
+    """Apply a named link preset to the native data plane.
+
+    The radio resolves the preset to its ``(mcs, fec_k, fec_n)`` trio and
+    pins it on the data plane. Unlike the manual tier this leaves the
+    adaptive controller armed, so an enabled controller keeps stepping FEC
+    from the preset baseline. Returns the applied trio the radio echoes back.
+    """
+    return await _roundtrip({"op": "set_preset", "preset": str(preset)})

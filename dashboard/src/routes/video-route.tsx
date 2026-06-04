@@ -2,6 +2,7 @@ import { Camera, RefreshCw } from "lucide-react";
 import { useState } from "react";
 
 import { PageShell } from "@/components/page-shell";
+import { LinkTuningCard } from "@/components/panels/link-tuning-card";
 import { VideoPanel } from "@/components/panels/video-panel";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -25,6 +26,8 @@ interface VideoConfigResponse {
     channel?: number;
     band?: string;
     mcs_index?: number;
+    fec_k?: number;
+    fec_n?: number;
     tx_power_dbm?: number;
     preset?: string;
   };
@@ -34,6 +37,10 @@ interface VideoConfigResponse {
     height?: number;
     fps?: number;
     codec?: string;
+  };
+  adaptive?: {
+    available?: boolean;
+    adaptive_bitrate_enabled?: boolean;
   };
 }
 
@@ -169,6 +176,15 @@ export function VideoRoute() {
             </div>
           </CardContent>
         </Card>
+
+        <LinkTuningCard
+          mcsIndex={radio?.mcs_index}
+          fecK={radio?.fec_k}
+          fecN={radio?.fec_n}
+          preset={radio?.preset}
+          adaptiveEnabled={config.data?.adaptive?.adaptive_bitrate_enabled}
+          onChanged={() => void config.refetch()}
+        />
 
         <Card>
           <CardHeader>

@@ -110,8 +110,10 @@ class WfbConfig(BaseModel):
     # up or down based on packet loss + RSSI hysteresis. Each tier
     # change costs ~1-2 s of pipeline blackout; the controller
     # paces itself so the link can settle before the next decision.
-    # Default off until field-validated; flip via REST or GCS.
-    adaptive_bitrate_enabled: bool = False
+    # Default on: a drone-only rig with no received-side stats holds
+    # the rung (cold-start guard), so it is inert until a ground
+    # station is present. Pin a manual tier via REST or GCS to disable.
+    adaptive_bitrate_enabled: bool = True
     # Periodic + reactive coordinated frequency hopping. Operator
     # picks a band (the existing `band` field above) and the agent
     # autonomously moves the WFB-ng link to the quietest channel

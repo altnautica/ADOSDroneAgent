@@ -23,6 +23,8 @@
 //!     -> {"ok":true,"mode":"auto","adaptive_bitrate_enabled":true}
 //! {"op":"set_tier","mode":"manual","mcs_index":3,"fec_k":8,"fec_n":10}
 //!     -> {"ok":true,"mode":"manual","mcs_index":3,"fec_k":8,"fec_n":10}
+//! {"op":"set_preset","preset":"balanced"}
+//!     -> {"ok":true,"preset":"balanced","mcs_index":3,"fec_k":8,"fec_n":12}
 //! {"op":"set_region","mode":"region","region":"IN"}
 //!     -> {"ok":true,"regMode":"region","region":"IN","restart_required":true}
 //! {"op":"set_region","mode":"unrestricted"}
@@ -88,6 +90,8 @@ struct Request {
     mode: Option<String>,
     #[serde(default)]
     region: Option<String>,
+    #[serde(default)]
+    preset: Option<String>,
 }
 
 /// Bind the command socket and serve requests until the listener errors. Run as
@@ -179,6 +183,13 @@ enum Command {
         fec_k: u8,
         fec_n: u8,
     },
+    /// Apply a named link preset's `(mcs, fec_k, fec_n)` trio to the live data
+    /// plane. Unlike [`Command::TierManual`] it does NOT disable the adaptive
+    /// controller: the preset sets the base trio and an armed controller keeps
+    /// stepping FEC from there. The preset name is validated at parse time.
+    SetPreset {
+        preset: String,
+    },
     /// Set the operating-region posture. `region` is the uppercase ISO 3166-1
     /// alpha-2 code when `mode == Region`, else None (unrestricted). Signals the
     /// persistence seam to round-trip config + restart so the radio re-reads it.
@@ -263,6 +274,17 @@ fn parse_command(line: &[u8]) -> Parsed {
                 Parsed::Reply(json!({"ok": false, "error": format!("E_BAD_TIER_MODE: {other}")}))
             }
             None => Parsed::Reply(json!({"ok": false, "error": "E_MISSING_TIER_MODE"})),
+        },
+        "set_preset" => match req.preset.as_deref() {
+            // The preset name is validated here against the pure preset table so
+            // an unknown name is rejected before the radio is ever locked.
+            Some(p) if crate::config::link_preset_trio(p).is_some() => {
+                Parsed::Cmd(Command::SetPreset {
+                    preset: p.to_string(),
+                })
+            }
+            Some(_) => Parsed::Reply(json!({"ok": false, "error": "E_BAD_PRESET"})),
+            None => Parsed::Reply(json!({"ok": false, "error": "E_MISSING_PRESET"})),
         },
         "set_region" => match req.mode.as_deref() {
             Some("unrestricted") => Parsed::Cmd(Command::SetRegion {
@@ -354,6 +376,28 @@ async fn apply(cmd: Command, state: &CmdState) -> Value {
                 json!({"ok": true, "mode": "manual", "mcs_index": mcs_index, "fec_k": fec_k, "fec_n": fec_n})
             } else {
                 json!({"ok": false, "error": "E_SET_MANUAL_TIER_FAILED"})
+            }
+        }
+        Command::SetPreset { preset } => {
+            // Resolve the named preset to its trio and pin it on the data plane in
+            // one respawn. The adaptive flag is left untouched (the preset is the
+            // base trio an armed controller steps from). The name is parse-time
+            // validated, so the None arm is unreachable but stays defensive.
+            match crate::config::link_preset_trio(&preset) {
+                Some((mcs, fec_k, fec_n)) => {
+                    if state
+                        .proc
+                        .lock()
+                        .await
+                        .set_manual_tier(mcs, fec_k, fec_n)
+                        .await
+                    {
+                        json!({"ok": true, "preset": preset, "mcs_index": mcs, "fec_k": fec_k, "fec_n": fec_n})
+                    } else {
+                        json!({"ok": false, "error": "E_SET_PRESET_FAILED"})
+                    }
+                }
+                None => json!({"ok": false, "error": "E_BAD_PRESET"}),
             }
         }
         Command::SetRegion { mode, region } => {
@@ -530,6 +574,32 @@ mod tests {
     #[test]
     fn status_parses_to_the_status_command() {
         assert_eq!(cmd(br#"{"op":"status"}"#), Command::Status);
+    }
+
+    #[test]
+    fn set_preset_accepts_each_known_preset() {
+        for name in ["conservative", "balanced", "aggressive"] {
+            let line = format!(r#"{{"op":"set_preset","preset":"{name}"}}"#);
+            assert_eq!(
+                cmd(line.as_bytes()),
+                Command::SetPreset {
+                    preset: name.to_string()
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn set_preset_rejects_unknown_and_missing_before_radio_access() {
+        // An unknown preset name is rejected at parse time (no radio lock).
+        assert_eq!(
+            reply(br#"{"op":"set_preset","preset":"turbo"}"#)["error"],
+            "E_BAD_PRESET"
+        );
+        assert_eq!(
+            reply(br#"{"op":"set_preset"}"#)["error"],
+            "E_MISSING_PRESET"
+        );
     }
 
     #[test]

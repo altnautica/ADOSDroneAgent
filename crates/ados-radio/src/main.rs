@@ -2197,7 +2197,13 @@ fn write_stats_sidecar(
         "tx_power_dbm": effective_tx_dbm,
         "tx_power_max_dbm": cfg.tx_power_max_dbm,
         "topology": cfg.topology,
-        "mcs_index": cfg.mcs_index,
+        // LIVE radio rate + redundancy from the controller snapshot (seeded from
+        // config, refreshed each tick from the running data plane). Reports what
+        // wfb_tx is actually transmitting after a runtime MCS/FEC/preset change,
+        // not the boot-time config value.
+        "mcs_index": bitrate.mcs_index,
+        "fec_k": bitrate.fec_k,
+        "fec_n": bitrate.fec_n,
         // Received-side lock proof, never hardcoded: a transmit-only end has no
         // decode stats of its own, so this is true only when a verified return
         // signal (a control-plane ack or a peer beacon) was heard recently.
@@ -2235,6 +2241,10 @@ fn write_stats_sidecar(
         "link_preset": bitrate.link_preset,
         "adaptive_bitrate_enabled": bitrate.adaptive_bitrate_enabled,
         "recommended_bitrate_kbps": bitrate.recommended_bitrate_kbps,
+        // The rung the controller currently recommends (the GCS shows the ladder
+        // position alongside the live FEC so an adaptive step is legible).
+        "recommended_tier_idx": bitrate.tier_idx,
+        "recommended_tier_name": bitrate.tier_name,
         // Link-quality block (from the stats wfb_rx; defaults until frames flow).
         "rssi_dbm": link.rssi_dbm,
         "rssi_min": link.rssi_min,

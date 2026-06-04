@@ -4,6 +4,30 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.51.0] - 2026-06-04
+
+### Changed
+
+- The closed-loop FEC controller is now armed by default. On a link with
+  received-side statistics it raises the Reed-Solomon ratio under packet loss
+  or weak signal and lowers it again on a sustained clean window. A drone with
+  no peer statistics yet holds its current rung (the cold-start guard), so the
+  default is inert until a ground station is in range. Pin a manual rate and
+  redundancy from Mission Control or the agent webapp to turn it off.
+- The radio status now reports the data plane's live FEC ratio and MCS index
+  (what the transmitter is actually sending after a tuning change or an
+  automatic step), rather than the values from the configuration file.
+
+### Added
+
+- A link preset (conservative / balanced / aggressive) can now be applied at
+  runtime over the radio command socket, not only at boot. The preset sets the
+  base rate and redundancy; an armed adaptive controller keeps adjusting from
+  there.
+- Radio tuning changes (FEC ratio, MCS index, link preset, adaptive on/off) are
+  now written back to the configuration file so they survive a service restart,
+  matching how transmit power was already persisted.
+
 ## [0.50.34] - 2026-06-04
 
 ### Fixed

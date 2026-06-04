@@ -9,3 +9,26 @@ import type { WfbStatus } from "./types";
 export function getWfbStatus() {
   return apiFetch<WfbStatus>("/api/wfb");
 }
+
+/** Radio link-tuning knobs the agent applies to the live data plane and
+ *  persists to config. Every field is optional; the agent applies the ones
+ *  present and returns a snapshot plus a `warnings` array for partial applies. */
+export interface VideoConfigPatch {
+  fec_k?: number;
+  fec_n?: number;
+  mcs?: number;
+  preset?: "conservative" | "balanced" | "aggressive";
+  auto?: boolean;
+}
+
+export interface VideoConfigResult {
+  warnings?: string[];
+  [key: string]: unknown;
+}
+
+export function setVideoConfig(patch: VideoConfigPatch) {
+  return apiFetch<VideoConfigResult>("/api/video/config", {
+    method: "POST",
+    body: patch,
+  });
+}

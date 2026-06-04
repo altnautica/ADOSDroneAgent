@@ -239,7 +239,12 @@ pub struct WfbConfig {
     pub tx_power_max_dbm: i8,
     #[serde(default = "default_topology")]
     pub topology: String,
-    #[serde(default)]
+    /// Closed-loop FEC controller. Default ON: on a link with received-side
+    /// stats it steps the Reed-Solomon ratio up under loss / weak RSSI and back
+    /// down on a clean window. A drone-only rig with no peer stats holds the
+    /// rung (the cold-start guard), so the default is safe before a ground
+    /// station is present. Operators pin a manual trio to disable it.
+    #[serde(default = "default_true")]
     pub adaptive_bitrate_enabled: bool,
     /// Operator-facing link preset; overrides `mcs_index`/`fec_k`/`fec_n` via
     /// [`WfbConfig::apply_link_preset`]. `conservative` (the default) is a no-op
@@ -295,7 +300,7 @@ impl Default for WfbConfig {
             tx_power_dbm: default_tx_power_dbm(),
             tx_power_max_dbm: default_tx_power_max_dbm(),
             topology: default_topology(),
-            adaptive_bitrate_enabled: false,
+            adaptive_bitrate_enabled: true,
             wfb_link_preset: default_link_preset(),
             reg_domain: default_reg_domain(),
             reg_gate_strict: default_reg_gate_strict(),
@@ -564,7 +569,8 @@ mod tests {
     fn link_preset_defaults_to_conservative() {
         let c = WfbConfig::default();
         assert_eq!(c.wfb_link_preset, "conservative");
-        assert!(!c.adaptive_bitrate_enabled);
+        // The adaptive FEC controller is armed by default.
+        assert!(c.adaptive_bitrate_enabled);
     }
 
     #[test]

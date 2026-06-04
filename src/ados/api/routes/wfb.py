@@ -245,12 +245,15 @@ def _native_radio_running() -> bool:
     return is_service_native("radio")
 
 
-def _persist_tx_power(dbm: int) -> bool:
-    """Atomically write `video.wfb.tx_power_dbm` to the on-disk config.
+def _persist_wfb_fields(updates: dict[str, Any]) -> bool:
+    """Atomically merge `updates` into the `video.wfb` block of the on-disk
+    config so operator tuning survives a service restart.
 
     Mirrors the tmp-write + os.replace idiom used elsewhere in the agent.
     Returns True on success, False if the file is unreadable or unwritable.
     """
+    if not updates:
+        return True
     path = Path(str(CONFIG_YAML))
     try:
         data: dict[str, Any] = {}
@@ -265,7 +268,7 @@ def _persist_tx_power(dbm: int) -> bool:
         wfb_section = video.get("wfb")
         if not isinstance(wfb_section, dict):
             wfb_section = {}
-        wfb_section["tx_power_dbm"] = int(dbm)
+        wfb_section.update(updates)
         video["wfb"] = wfb_section
         data["video"] = video
 
@@ -277,6 +280,14 @@ def _persist_tx_power(dbm: int) -> bool:
         return True
     except (OSError, yaml.YAMLError):
         return False
+
+
+def _persist_tx_power(dbm: int) -> bool:
+    """Atomically write `video.wfb.tx_power_dbm` to the on-disk config.
+
+    Thin wrapper over `_persist_wfb_fields`, kept for the tx-power route.
+    """
+    return _persist_wfb_fields({"tx_power_dbm": int(dbm)})
 
 
 @router.get("/wfb")

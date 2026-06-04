@@ -217,10 +217,19 @@ pub struct BitrateSnapshot {
     pub recommended_bitrate_kbps: u32,
     pub tier_idx: usize,
     pub tier_name: &'static str,
+    /// The data plane's LIVE Reed-Solomon ratio + MCS index, refreshed from the
+    /// running process group each tick. Distinct from the configured values:
+    /// after a runtime FEC/MCS/preset change (or an adaptive step) these reflect
+    /// what `wfb_tx` is actually transmitting, so the heartbeat surfaces reality
+    /// rather than the boot-time config.
+    pub fec_k: u8,
+    pub fec_n: u8,
+    pub mcs_index: u8,
 }
 
 impl BitrateSnapshot {
-    /// The initial snapshot before the controller has acted: rung 0's bitrate.
+    /// The initial snapshot before the controller has acted: rung 0's bitrate
+    /// and the configured trio (the data plane comes up on the config values).
     fn initial(cfg: &WfbConfig, tiers: &[BitrateTier], starting_idx: usize) -> Self {
         let idx = starting_idx.min(tiers.len().saturating_sub(1));
         let tier = &tiers[idx];
@@ -230,6 +239,9 @@ impl BitrateSnapshot {
             recommended_bitrate_kbps: tier.bitrate_kbps,
             tier_idx: idx,
             tier_name: tier.name,
+            fec_k: cfg.fec_k,
+            fec_n: cfg.fec_n,
+            mcs_index: cfg.mcs_index,
         }
     }
 }
@@ -368,14 +380,26 @@ impl BitrateController {
             }
         }
 
+        // Read the data plane's live trio so the snapshot reflects what wfb_tx is
+        // actually transmitting (after an adaptive step, a manual set, or a preset
+        // switch), not the boot-time config. proc is locked before snapshot, the
+        // same order the actuate branch above uses.
+        let ((fec_k, fec_n), mcs_index) = {
+            let p = proc.lock().await;
+            (p.data_fec(), p.data_mcs())
+        };
+
         // Refresh the snapshot every tick (even disabled) so the panel sees the
-        // current recommended rung + the live enable flag.
+        // current recommended rung + the live enable flag + the live trio.
         let tier = self.tiers[self.hysteresis.current_tier_idx()];
         let mut snap = snapshot.lock().await;
         snap.adaptive_bitrate_enabled = enabled;
         snap.recommended_bitrate_kbps = tier.bitrate_kbps;
         snap.tier_idx = self.hysteresis.current_tier_idx();
         snap.tier_name = tier.name;
+        snap.fec_k = fec_k;
+        snap.fec_n = fec_n;
+        snap.mcs_index = mcs_index;
     }
 }
 
@@ -599,6 +623,10 @@ mod tests {
         assert_eq!(snap.recommended_bitrate_kbps, 4000);
         assert_eq!(snap.tier_idx, 0);
         assert_eq!(snap.tier_name, "high");
+        // The live trio seeds from the configured values until the first tick.
+        assert_eq!(snap.fec_k, 8);
+        assert_eq!(snap.fec_n, 12);
+        assert_eq!(snap.mcs_index, 1);
     }
 
     #[test]
@@ -610,7 +638,10 @@ mod tests {
             ..WfbConfig::default()
         };
         assert!(new_enabled(&on).load(Ordering::Relaxed));
-        let off = WfbConfig::default();
+        let off = WfbConfig {
+            adaptive_bitrate_enabled: false,
+            ..WfbConfig::default()
+        };
         assert!(!new_enabled(&off).load(Ordering::Relaxed));
     }
 
