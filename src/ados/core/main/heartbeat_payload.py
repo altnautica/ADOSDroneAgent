@@ -589,6 +589,40 @@ def build_heartbeat_payload(app: AgentApp) -> dict:  # noqa: C901
             if isinstance(state, str) and state in ("ready", "missing", "error"):
                 payload["cameraState"] = state
 
+    # Management-link health — sourced cross-process from
+    # /run/ados/mgmt-link.json, written by the supervisor's management-link
+    # guardian each tick. Surfaces whether the operator can still reach the box
+    # (carrier / lease / gateway) and whether the guardian is repairing it, so a
+    # degraded-but-up link (gateway unreachable) renders distinctly from healthy
+    # on the GCS. Stale snapshots (> 60 s) are dropped.
+    from ados.core.paths import MGMT_LINK_JSON
+    _MGMT_LINK_STALE_AFTER_S = 60.0
+    try:
+        mgmt = _json.loads(MGMT_LINK_JSON.read_text())
+    except (OSError, ValueError):
+        mgmt = None
+    if isinstance(mgmt, dict):
+        ml_updated = mgmt.get("updated_at_unix")
+        ml_fresh = (
+            isinstance(ml_updated, (int, float))
+            and (time.time() - float(ml_updated)) <= _MGMT_LINK_STALE_AFTER_S
+        )
+        ml_state = mgmt.get("state")
+        if ml_fresh and ml_state in ("healthy", "degraded", "down"):
+            payload["managementLink"] = {
+                "state": ml_state,
+                "iface": mgmt.get("iface"),
+                "transport": mgmt.get("transport"),
+                "backend": mgmt.get("backend"),
+                "carrier": bool(mgmt.get("carrier", False)),
+                "hasLease": bool(mgmt.get("has_lease", False)),
+                "gatewayReachable": bool(mgmt.get("gateway_reachable", False)),
+                "repairing": bool(mgmt.get("repairing", False)),
+                "lastRung": mgmt.get("last_rung"),
+                "lastRepairAt": mgmt.get("last_repair_at_unix"),
+                "repairsInWindow": mgmt.get("repairs_in_window", 0),
+            }
+
     # Plugin inventory — webapp-side installs are not visible to the GCS
     # otherwise. Best-effort: a missing or partially-initialised
     # supervisor leaves the field absent rather than failing the tick.

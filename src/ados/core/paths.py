@@ -91,6 +91,9 @@ WFB_STATS_JSON = ADOS_RUN_DIR / "wfb-stats.json"
 HOP_SUPERVISOR_JSON = ADOS_RUN_DIR / "hop-supervisor.json"
 PEER_PRESENCE_JSON = ADOS_RUN_DIR / "peer-presence.json"
 CAMERA_STATE_JSON = ADOS_RUN_DIR / "camera-state.json"
+# Management-link health, written by the supervisor's management-link guardian
+# each tick: the operator's management link state + repair-ladder progress.
+MGMT_LINK_JSON = ADOS_RUN_DIR / "mgmt-link.json"
 BITRATE_CONTROLLER_JSON = ADOS_RUN_DIR / "bitrate-controller.json"
 
 # Local-bind to cloud-relay failover state. Written by the always-on

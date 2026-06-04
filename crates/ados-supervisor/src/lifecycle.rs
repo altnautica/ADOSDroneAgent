@@ -71,6 +71,14 @@ pub struct Supervisor {
     /// both profiles from the monitor tick; a cheap no-op when the domain is in
     /// sync. The reactive WiFi self-heal above stays as the backstop.
     reg_reconciler: crate::reg_reconciler::RegReconciler,
+    /// Management-link guardian: the stack-agnostic backstop for the operator's
+    /// whole management link (the default-route interface, never the WFB
+    /// injection adapter). Detects a dead data path (no carrier / no lease /
+    /// unreachable gateway) and walks a bounded, self-restoring software repair
+    /// ladder without a reboot, across both NetworkManager and systemd-networkd.
+    /// A cheap health check each tick; the ladder runs only on a sustained
+    /// break, one rung per tick. Mirrors the state to /run/ados/mgmt-link.json.
+    mgmt_guardian: crate::mgmt_link_guardian::MgmtLinkGuardian,
 }
 
 impl Supervisor {
@@ -84,6 +92,9 @@ impl Supervisor {
                 ados_protocol::logd::emitter::EventEmitter::new("ados-supervisor"),
             ),
             reg_reconciler: crate::reg_reconciler::RegReconciler::new(
+                ados_protocol::logd::emitter::EventEmitter::new("ados-supervisor"),
+            ),
+            mgmt_guardian: crate::mgmt_link_guardian::MgmtLinkGuardian::new(
                 ados_protocol::logd::emitter::EventEmitter::new("ados-supervisor"),
             ),
         }
@@ -388,6 +399,14 @@ impl Supervisor {
         // no onboard managed WiFi or the WiFi is healthy. Kept as the backstop
         // for a link that still needs an explicit rebuild after a domain drift.
         self.wifi_selfheal.tick().await;
+
+        // Management-link guardian (REACTIVE backstop for the WHOLE link): detect
+        // a dead operator management link (no carrier / no lease / unreachable
+        // gateway) and walk a bounded, self-restoring software repair ladder
+        // without a reboot, across NetworkManager and systemd-networkd. Runs
+        // after the per-connection WiFi self-heal so the cheaper fix gets first
+        // crack; cheap when the link is healthy, one repair rung per tick.
+        self.mgmt_guardian.tick().await;
     }
 }
 

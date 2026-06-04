@@ -4,6 +4,22 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.50.31] - 2026-06-04
+
+### Added
+
+- Management-link guardian: the supervisor now watches the operator's
+  management link (the default-route interface, never the radio injection
+  adapter) for a dead data path — no carrier, no routable lease, or an
+  unreachable gateway — and walks a bounded, self-restoring software repair
+  ladder without a reboot: re-assert the regulatory domain, renew DHCP,
+  reconnect Wi-Fi, bounce the interface, restart the network backend. Works
+  across NetworkManager and systemd-networkd, climbing one rung per check so a
+  bounce of the operator's own link self-restores. The link state and repair
+  progress ride the heartbeat (`managementLink`) so Mission Control shows a
+  degraded-but-up link distinctly from a healthy one. Default-on under
+  `network.management_link_guardian`.
+
 ## [0.50.30] - 2026-06-04
 
 ### Fixed
