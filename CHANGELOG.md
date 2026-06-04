@@ -4,6 +4,14 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.50.29] - 2026-06-04
+
+### Changed
+
+- Trimmed a companion-computer chip-comparison note from the published `docs/`
+  tree. It was hardware-selection R&D planning material (market price estimates,
+  per-chip viability calls) rather than operator or developer documentation.
+
 ## [0.50.28] - 2026-06-04
 
 ### Changed
