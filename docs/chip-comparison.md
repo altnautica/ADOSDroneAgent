@@ -47,8 +47,6 @@
 
 **Recommended Use:** MAVLink-to-MQTT bridge only (no video). A "telemetry puck" that sends position and status to the cloud. Not a full ADOS Drone Agent deployment.
 
-**Memory Budget:** See `memory-profiling.md` for detailed breakdown.
-
 ---
 
 ### RV1106 (Luckfox Pico Pro / Pico Max)
