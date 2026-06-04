@@ -4,6 +4,18 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.50.30] - 2026-06-04
+
+### Fixed
+
+- The installer now provisions the `ados` system user and group during the
+  systemd step. Previously the plugin runtime directory and plugin service
+  units referenced `ados:ados` and the ground-station hardware-group setup ran
+  `usermod -aG <grp> ados`, but nothing created the account — so the runtime
+  directory could not be owned correctly and the group membership step quietly
+  did nothing. Provisioning is idempotent and the account is a no-login system
+  user.
+
 ## [0.50.29] - 2026-06-04
 
 ### Changed

@@ -879,6 +879,37 @@ fn install_usb_gadget_composer(source: Option<&Path>) {
     enable_if_present("ados-usb-gadget-setup.service");
 }
 
+/// Provision the `ados` system user and group (idempotent). Several downstream
+/// steps assume this identity already exists: the plugin runtime dir is created
+/// `0750 ados ados` (`install_plugin_tmpfiles`), every plugin subprocess unit
+/// runs `User=ados`/`Group=ados`, and the ground-station hardware-group
+/// memberships run `usermod -aG <grp> ados`. Without it the tmpfiles chown
+/// cannot resolve the owner and the GS usermod is gated behind `id ados` and
+/// silently no-ops.
+///
+/// A system account: no login shell, no home directory, allocated below the
+/// regular-uid range. The group and the user are each created only when absent,
+/// mirroring the getent/id idempotency the rest of this module uses.
+fn provision_ados_identity() {
+    if !exec::run_ok("getent", &["group", "ados"]) {
+        let _ = exec::run("groupadd", &["--system", "ados"]);
+    }
+    if !exec::run_ok("id", &["ados"]) {
+        let _ = exec::run(
+            "useradd",
+            &[
+                "--system",
+                "--gid",
+                "ados",
+                "--no-create-home",
+                "--shell",
+                "/usr/sbin/nologin",
+                "ados",
+            ],
+        );
+    }
+}
+
 /// Add the `ados` and `pi` service users to the hardware-access groups the
 /// ground-station services need (GROUND-STATION only). Ports the
 /// `usermod -aG ...` bits of `enable_ground_station_units`:
@@ -932,6 +963,14 @@ impl Step for Systemd {
                 )
             }
         };
+
+        // System identity: provision the `ados` user + group (idempotent)
+        // before anything that consumes it. The plugin runtime dir
+        // (/run/ados/plugins, 0750 ados ados), every plugin subprocess unit
+        // (User=ados/Group=ados), and the ground-station hardware-group
+        // memberships all reference `ados:ados`; create it first so the
+        // tmpfiles chown and the usermod resolve instead of silently no-opping.
+        provision_ados_identity();
 
         // 1. Deploy the unit files (Required — no units, no agent).
         let systemd_src = source.join("data/systemd");
