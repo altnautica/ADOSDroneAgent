@@ -43,16 +43,17 @@ def _gs_video_delivering(wfb_status: dict | None) -> bool:
     mediamtx ground profile serves WHEP whether or not any frames are
     arriving over the radio, so probing WHEP alone reports "running" with
     zero inbound bytes. The trustworthy signal is the receive link state:
-    the stats writer marks ``state == "connected"`` only once valid
-    packets have decoded, and ``valid_rx_packets_per_s`` / packet counters
-    confirm frames are still flowing right now. Require both — link
-    connected AND a positive valid-decode rate — so a paired-but-silent or
-    dead receiver is reported as not-delivering. (Operating rule 37:
-    endpoint-reachable is never proof of data flowing.)
+    the stats writer (ados-groundlink wfb_rx) marks ``state == "active"``
+    once it is locked and decoding (it does not emit ``"connected"``), and
+    ``valid_rx_packets_per_s`` / packet counters confirm frames are still
+    flowing right now. Require both — a live link state AND a positive
+    valid-decode rate — so a searching / reg-blocked / silent receiver is
+    reported as not-delivering. (Operating rule 37: endpoint-reachable is
+    never proof of data flowing.)
     """
     if not isinstance(wfb_status, dict):
         return False
-    if wfb_status.get("state") != "connected":
+    if wfb_status.get("state") not in ("active", "connected"):
         return False
     for key in ("valid_rx_packets_per_s", "packets_received"):
         val = wfb_status.get(key)
