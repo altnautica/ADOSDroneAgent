@@ -4,6 +4,17 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.50.26] - 2026-06-04
+
+### Fixed
+
+- `ados logs push` now works without `sudo`. The push request is recorded under
+  the root-owned runtime directory, so a non-root operator hands the write to
+  the running agent over its local API (loopback, same-origin) instead of
+  failing with a permission error. Root still records the request directly, and
+  a clear message is shown when the agent is unreachable and the caller is not
+  root. No new system groups or directory permissions are introduced.
+
 ## [0.49.59] - 2026-06-01
 
 ### Added

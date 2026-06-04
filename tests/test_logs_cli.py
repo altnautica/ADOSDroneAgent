@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import json
+import os
 from unittest.mock import patch
 
 from click.testing import CliRunner
 
+import ados.cli.logs as logs_mod
 from ados.cli.logs import logs_group
 from ados.cli.logs_transport import LogsClient
 
@@ -171,6 +173,9 @@ def test_push_help_lists_options() -> None:
 def test_push_writes_request_and_renders_pushed(tmp_path, monkeypatch) -> None:
     from ados.services.cloud import log_push_trigger as trig
 
+    # Root takes the direct file seam (no loopback delegation).
+    monkeypatch.setattr(os, "geteuid", lambda: 0)
+
     req = tmp_path / "logd-push-request.json"
     res = tmp_path / "logd-push-result.json"
     monkeypatch.setattr(trig, "ADOS_RUN_DIR", tmp_path)
@@ -203,6 +208,7 @@ def test_push_writes_request_and_renders_pushed(tmp_path, monkeypatch) -> None:
 def test_push_no_wait_reports_requested(tmp_path, monkeypatch) -> None:
     from ados.services.cloud import log_push_trigger as trig
 
+    monkeypatch.setattr(os, "geteuid", lambda: 0)
     monkeypatch.setattr(trig, "ADOS_RUN_DIR", tmp_path)
     monkeypatch.setattr(trig, "LOGD_PUSH_REQUEST_PATH", tmp_path / "req.json")
     monkeypatch.setattr(trig, "LOGD_PUSH_RESULT_PATH", tmp_path / "res.json")
@@ -211,6 +217,117 @@ def test_push_no_wait_reports_requested(tmp_path, monkeypatch) -> None:
     payload = json.loads(result.output)
     assert payload["pending"] is True
     assert payload["accepted"] is True
+
+
+# --- push delegation (non-root → root agent over loopback) -------------
+
+
+class _FakeResp:
+    def __init__(self, status_code: int, payload: dict, text: str = "") -> None:
+        self.status_code = status_code
+        self._payload = payload
+        self.text = text
+
+    def json(self) -> dict:
+        return self._payload
+
+
+class _FakeClient:
+    """Stand-in for httpx.Client as a context manager, capturing the POST."""
+
+    def __init__(self, captured: dict, resp, raise_exc: Exception | None = None) -> None:
+        self._captured = captured
+        self._resp = resp
+        self._raise = raise_exc
+
+    def __enter__(self) -> _FakeClient:
+        return self
+
+    def __exit__(self, *_a) -> bool:
+        return False
+
+    def post(self, url, json=None, headers=None):  # noqa: A002 - httpx kw name
+        self._captured["url"] = url
+        self._captured["json"] = json
+        self._captured["headers"] = headers
+        if self._raise is not None:
+            raise self._raise
+        return self._resp
+
+
+def test_push_non_root_delegates_to_loopback_api(monkeypatch) -> None:
+    monkeypatch.setattr(os, "geteuid", lambda: 1000)
+    monkeypatch.setattr(logs_mod, "_load_api_key", lambda: None)
+    captured: dict = {}
+    resp = _FakeResp(200, {"pushed": True, "bytes": 4096, "rows": 12, "synced": True, "pending": False})
+    monkeypatch.setattr(logs_mod.httpx, "Client", lambda *a, **k: _FakeClient(captured, resp))
+
+    result = runner.invoke(logs_group, ["push", "--session", "7", "--kinds", "logs"])
+    assert result.exit_code == 0, result.output
+    assert "pushed" in result.output
+    assert captured["url"].endswith("/api/logs/push")
+    # Same-origin loopback header is the trust gate for a non-root caller.
+    assert captured["headers"]["Origin"] == "http://localhost:8080"
+    assert "X-ADOS-Key" not in captured["headers"]
+    assert captured["json"]["session"] == 7
+    assert captured["json"]["kinds"] == ["logs"]
+    assert captured["json"]["wait"] is True
+
+
+def test_push_non_root_falls_back_to_seam_when_api_down(tmp_path, monkeypatch) -> None:
+    from ados.services.cloud import log_push_trigger as trig
+
+    monkeypatch.setattr(os, "geteuid", lambda: 1000)
+    monkeypatch.setattr(logs_mod, "_load_api_key", lambda: None)
+    monkeypatch.setattr(
+        logs_mod.httpx,
+        "Client",
+        lambda *a, **k: _FakeClient({}, None, raise_exc=logs_mod.httpx.ConnectError("down")),
+    )
+
+    req = tmp_path / "req.json"
+    res = tmp_path / "res.json"
+    monkeypatch.setattr(trig, "ADOS_RUN_DIR", tmp_path)
+    monkeypatch.setattr(trig, "LOGD_PUSH_REQUEST_PATH", req)
+    monkeypatch.setattr(trig, "LOGD_PUSH_RESULT_PATH", res)
+    monkeypatch.setattr(trig.uuid, "uuid4", lambda: _FakeUUID("rid-fb"))
+
+    real_write = trig.write_request
+
+    def write_then_answer(request):
+        rid = real_write(request)
+        res.write_text(json.dumps({"request_id": rid, "pushed": True, "bytes": 1, "rows": 1, "synced": True}))
+        return rid
+
+    monkeypatch.setattr(trig, "write_request", write_then_answer)
+
+    result = runner.invoke(logs_group, ["push", "--kinds", "logs"])
+    assert result.exit_code == 0, result.output
+    assert "pushed" in result.output
+    assert json.loads(req.read_text())["kinds"] == ["logs"]
+
+
+def test_push_non_root_api_down_and_seam_denied_hints_sudo(monkeypatch) -> None:
+    from ados.services.cloud import log_push_trigger as trig
+
+    monkeypatch.setattr(os, "geteuid", lambda: 1000)
+    monkeypatch.setattr(logs_mod, "_load_api_key", lambda: None)
+    monkeypatch.setattr(
+        logs_mod.httpx,
+        "Client",
+        lambda *a, **k: _FakeClient({}, None, raise_exc=logs_mod.httpx.ConnectError("down")),
+    )
+
+    def deny(_request, *, wait):
+        raise trig.LogPushTriggerError(
+            "trigger_unavailable", "could not write the push request: [Errno 13] Permission denied"
+        )
+
+    monkeypatch.setattr(trig, "trigger_push", deny)
+
+    result = runner.invoke(logs_group, ["push", "--no-wait"])
+    assert result.exit_code != 0
+    assert "run with sudo" in result.output
 
 
 def test_push_rejects_bad_since() -> None:
