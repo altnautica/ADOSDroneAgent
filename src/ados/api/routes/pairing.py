@@ -65,6 +65,13 @@ class PairingInfo(BaseModel):
     # from this process today (the radio manager lives in ados-wfb); reserved
     # for a future in-process reader. The GCS falls back to radio_paired.
     radio: dict | None = None
+    # Whether a flight controller is connected and talking to this agent. Lets
+    # Mission Control tie the agent node to its FC and show FC presence on the
+    # single canonical fleet card. Best-effort; False on a partially-configured
+    # agent. fc_port/fc_baud are the live serial link parameters.
+    fc_connected: bool = False
+    fc_port: str | None = None
+    fc_baud: int | None = None
 
 
 @router.get("/pairing/info", response_model=PairingInfo)
@@ -161,6 +168,18 @@ async def get_pairing_info():
         except Exception as exc:
             log.debug("pairing_info_bind_state_failed", error=str(exc))
 
+        # FC presence (best-effort; never breaks the guaranteed-200 contract).
+        fc_connected = False
+        fc_port: str | None = None
+        fc_baud: int | None = None
+        try:
+            fc = app.fc_status()
+            fc_connected = bool(fc.connected)
+            fc_port = str(fc.port) if fc.port else None
+            fc_baud = int(fc.baud) if fc.baud else None
+        except Exception as exc:
+            log.debug("pairing_info_fc_status_failed", error=str(exc))
+
         return PairingInfo(
             device_id=device_id,
             name=name,
@@ -178,6 +197,9 @@ async def get_pairing_info():
             runtime_mode=runtime_mode,
             bind_state=bind_state,
             radio=None,
+            fc_connected=fc_connected,
+            fc_port=fc_port,
+            fc_baud=fc_baud,
         )
     except HTTPException:
         raise
