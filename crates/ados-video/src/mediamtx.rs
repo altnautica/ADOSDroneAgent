@@ -155,15 +155,20 @@ pub struct ConfigParams<'a> {
 /// Render the `mediamtx.yml` document for the given parameters.
 ///
 /// Byte-identical to PyYAML is not required (mediamtx parses the YAML); field +
-/// value parity is. The WebRTC ICE host UDP/TCP addresses bind to the first LAN
-/// IP at port 8189 so Pion advertises exactly that reachable candidate (without
-/// the bind, auto-discovery emitted only 127.0.0.1 and browsers could not
-/// reach it); when no LAN IP is known they fall back to `:8189`.
+/// value parity is. The WebRTC media sockets bind to all interfaces (`:8189`)
+/// and ICE host candidates are gathered from the real physical interfaces
+/// (re-read by Pion per session), so the media path follows an interface/IP
+/// change (ethernet->WiFi failover, DHCP) instead of being pinned to one
+/// boot-time IP. `webrtcAdditionalHosts` still advertises the detected outbound
+/// IP as a hint.
 pub fn mediamtx_config_yaml(params: &ConfigParams) -> String {
-    let local_addr = match params.lan_ips.first() {
-        Some(ip) => format!("{ip}:{WEBRTC_LOCAL_ICE_PORT}"),
-        None => format!(":{WEBRTC_LOCAL_ICE_PORT}"),
-    };
+    // Bind the WebRTC media sockets to ALL interfaces (":8189") so the media
+    // path is never pinned to a single IP that can disappear (ethernet->WiFi
+    // failover, DHCP change, multi-homing). ICE host candidates are gathered
+    // from the real physical interfaces, re-read by Pion per session, so
+    // whatever interface is up at connect time is advertised.
+    let local_addr = format!(":{WEBRTC_LOCAL_ICE_PORT}");
+    let phys_ifaces = physical_lan_interfaces();
 
     let mut paths = std::collections::BTreeMap::new();
     for (name, source) in params.streams {
@@ -190,8 +195,8 @@ pub fn mediamtx_config_yaml(params: &ConfigParams) -> String {
         webrtc: true,
         webrtc_address: format!(":{}", params.webrtc_port),
         webrtc_allow_origin: "*".into(),
-        webrtc_ips_from_interfaces: false,
-        webrtc_ips_from_interfaces_list: Vec::new(),
+        webrtc_ips_from_interfaces: true,
+        webrtc_ips_from_interfaces_list: phys_ifaces,
         webrtc_handshake_timeout: "15s".into(),
         webrtc_local_udp_address: local_addr.clone(),
         webrtc_local_tcp_address: local_addr,
@@ -238,6 +243,36 @@ pub fn detect_lan_ips() -> Vec<String> {
         }
     }
     ips
+}
+
+/// Names of physical wired/WiFi interfaces (`e*`/`en*`/`eth*`/`end*`, `w*`/
+/// `wl*`/`wlan*`), excluding loopback, virtual, container, and mesh interfaces,
+/// read from `/sys/class/net`. Used to scope WebRTC ICE host-candidate
+/// gathering to real reachable networks so the offer never carries loopback /
+/// IPv6 link-local / docker / mesh candidates that just fail their checks.
+/// mediamtx (Pion) re-reads the addresses of these interfaces per WebRTC
+/// session, so a node that moves from ethernet to WiFi advertises whichever
+/// interface is up. Best-effort: returns empty when `/sys/class/net` is
+/// unreadable (mediamtx then falls back to all interfaces).
+pub fn physical_lan_interfaces() -> Vec<String> {
+    const SKIP: &[&str] = &[
+        "lo", "docker", "veth", "br-", "bat", "tap", "tun", "wg", "virbr", "vmnet",
+    ];
+    let mut names = Vec::new();
+    if let Ok(entries) = std::fs::read_dir("/sys/class/net") {
+        for entry in entries.flatten() {
+            if let Some(name) = entry.file_name().to_str() {
+                if SKIP.iter().any(|p| name.starts_with(p)) {
+                    continue;
+                }
+                if name.starts_with('e') || name.starts_with('w') {
+                    names.push(name.to_string());
+                }
+            }
+        }
+    }
+    names.sort();
+    names
 }
 
 /// Async TCP-connect probe: poll `(host, port)` at [`RTSP_BIND_PROBE_INTERVAL`]
@@ -517,14 +552,15 @@ mod tests {
         assert_eq!(v["webrtcAllowOrigin"], "*");
         assert_eq!(v["webrtcHandshakeTimeout"], "15s");
 
-        // WebRTC ICE binding to the LAN IP at 8189.
-        assert_eq!(v["webrtcIPsFromInterfaces"], false);
-        assert!(v["webrtcIPsFromInterfacesList"]
-            .as_array()
-            .unwrap()
-            .is_empty());
-        assert_eq!(v["webrtcLocalUDPAddress"], "192.168.200.115:8189");
-        assert_eq!(v["webrtcLocalTCPAddress"], "192.168.200.115:8189");
+        // WebRTC media binds all interfaces (:8189); ICE host candidates are
+        // gathered from the physical interfaces per session so the media path
+        // follows an interface/IP change. The interface list is read from
+        // /sys/class/net at runtime, so assert only that it is a sequence (its
+        // contents depend on the host running the test).
+        assert_eq!(v["webrtcIPsFromInterfaces"], true);
+        assert!(v["webrtcIPsFromInterfacesList"].as_array().is_some());
+        assert_eq!(v["webrtcLocalUDPAddress"], ":8189");
+        assert_eq!(v["webrtcLocalTCPAddress"], ":8189");
         assert_eq!(
             v["webrtcAdditionalHosts"],
             Value::from(vec!["192.168.200.115"])
