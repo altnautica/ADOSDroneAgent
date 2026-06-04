@@ -65,6 +65,32 @@ pub fn hash_bytes(bytes: &[u8]) -> u64 {
     h.finish()
 }
 
+/// Inclusive `(first, last)` byte offsets that differ between two equal-length
+/// frames, or `None` when they are byte-identical.
+///
+/// The framebuffer sink writes only this span into the mmap and flushes only
+/// this span, so the fbtft deferred-IO marks only the touched pages dirty and
+/// pushes only the changed scanline band over SPI. A localized UI change (a
+/// ticking number, a tab highlight) becomes a few-row push instead of the whole
+/// 480x320 panel; a full repaint (page switch) widens the span back to the whole
+/// frame, the same cost as before — never a regression.
+pub fn changed_span(prev: &[u8], next: &[u8]) -> Option<(usize, usize)> {
+    debug_assert_eq!(prev.len(), next.len(), "changed_span needs equal lengths");
+    let len = prev.len().min(next.len());
+    let mut first = 0;
+    while first < len && prev[first] == next[first] {
+        first += 1;
+    }
+    if first == len {
+        return None;
+    }
+    let mut last = len - 1;
+    while last > first && prev[last] == next[last] {
+        last -= 1;
+    }
+    Some((first, last))
+}
+
 /// Where packed frames go. The real implementation mmaps `/dev/fbN`; the test
 /// fake captures the bytes in a Vec.
 pub trait FrameSink: Send {
@@ -273,14 +299,18 @@ fn round2(v: f64) -> f64 {
     (v * 100.0).round() / 100.0
 }
 
-/// Real `/dev/fbN` mmap sink. Each write seeks to 0 and copies the frame into
-/// the mapping, then flushes. Linux-only (the mmap + flush use the unix mapping
-/// API). Construct via [`MmapSink::open`].
+/// Real `/dev/fbN` mmap sink. Each write copies only the bytes that changed
+/// since the last frame into the mapping and flushes only that span, so the
+/// fbtft driver pushes just the changed scanline band over SPI. Linux-only (the
+/// mmap + flush use the unix mapping API). Construct via [`MmapSink::open`].
 #[cfg(target_os = "linux")]
 pub struct MmapSink {
     _file: std::fs::File,
     map: memmap2::MmapMut,
     frame_bytes: usize,
+    /// The last frame written to the device, for the per-frame diff. Empty
+    /// until the first write (which always blits the full frame).
+    last: Vec<u8>,
 }
 
 #[cfg(target_os = "linux")]
@@ -304,6 +334,7 @@ impl MmapSink {
             _file: file,
             map,
             frame_bytes,
+            last: Vec::new(),
         })
     }
 }
@@ -312,9 +343,28 @@ impl MmapSink {
 impl FrameSink for MmapSink {
     fn write_frame(&mut self, buf: &[u8]) -> std::io::Result<()> {
         let len = buf.len().min(self.frame_bytes);
-        self.map[..len].copy_from_slice(&buf[..len]);
-        self.map.flush()?;
-        Ok(())
+        let src = &buf[..len];
+        // First frame (or a geometry change that resized the buffer): the diff
+        // baseline is missing, so blit the whole frame and seed `last`.
+        if self.last.len() != len {
+            self.map[..len].copy_from_slice(src);
+            self.map.flush()?;
+            self.last.clear();
+            self.last.extend_from_slice(src);
+            return Ok(());
+        }
+        // Push only the changed span. fbtft's deferred-IO faults the touched
+        // pages dirty and sends just that scanline band, so an unchanged frame
+        // costs nothing and a localized change costs a few rows, not 480x320.
+        match changed_span(&self.last, src) {
+            None => Ok(()),
+            Some((first, last)) => {
+                self.map[first..=last].copy_from_slice(&src[first..=last]);
+                self.map.flush_range(first, last - first + 1)?;
+                self.last[first..=last].copy_from_slice(&src[first..=last]);
+                Ok(())
+            }
+        }
     }
 }
 
@@ -503,5 +553,42 @@ mod tests {
     fn hash_is_stable_and_distinguishes_input() {
         assert_eq!(hash_bytes(b"abc"), hash_bytes(b"abc"));
         assert_ne!(hash_bytes(b"abc"), hash_bytes(b"abd"));
+    }
+
+    #[test]
+    fn changed_span_is_none_for_identical_frames() {
+        let a = vec![0u8; 64];
+        let b = vec![0u8; 64];
+        assert_eq!(changed_span(&a, &b), None);
+    }
+
+    #[test]
+    fn changed_span_brackets_a_localized_change() {
+        let prev = vec![0u8; 64];
+        let mut next = prev.clone();
+        // A localized change at bytes 20..=23 (a small UI update) reports a
+        // tight span, not the whole buffer — only those rows reach the panel.
+        next[20] = 1;
+        next[21] = 2;
+        next[23] = 4;
+        assert_eq!(changed_span(&prev, &next), Some((20, 23)));
+    }
+
+    #[test]
+    fn changed_span_covers_first_and_last_byte() {
+        let prev = vec![0u8; 8];
+        let mut next = prev.clone();
+        next[0] = 9;
+        next[7] = 9;
+        // First and last bytes differ -> the span is the whole buffer.
+        assert_eq!(changed_span(&prev, &next), Some((0, 7)));
+    }
+
+    #[test]
+    fn changed_span_single_byte() {
+        let prev = vec![5u8; 16];
+        let mut next = prev.clone();
+        next[9] = 6;
+        assert_eq!(changed_span(&prev, &next), Some((9, 9)));
     }
 }
