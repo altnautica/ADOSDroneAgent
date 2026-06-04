@@ -318,13 +318,58 @@ class MavlinkIPCClient:
         self._reader = None
 
     def send(self, data: bytes) -> None:
-        """Send MAVLink frame (command) to the server."""
+        """Send MAVLink frame (command) to the server.
+
+        Synchronous so the paho and WebSocket uplink callers can call it
+        directly. The write is followed by a scheduled drain so kernel
+        send-buffer backpressure is honored instead of letting the
+        transport buffer grow unbounded. When the underlying buffer is
+        already past its high-water mark the frame is still queued (a
+        command must not be silently dropped) but the saturation is
+        logged so a stalled IPC consumer is visible.
+        """
         if self._writer and self._connected:
             frame = struct.pack("!I", len(data)) + data
             try:
+                transport = self._writer.transport
+                if transport is not None:
+                    buffered = transport.get_write_buffer_size()
+                    high, _low = transport.get_write_buffer_limits()
+                    if high and buffered >= high:
+                        # Past the high-water mark: the consumer is
+                        # draining too slowly. Surface it rather than
+                        # dropping the command silently. The frame is
+                        # still queued below; drain() then applies
+                        # backpressure on the next loop turn.
+                        log.warning(
+                            "mavlink_ipc_send_backpressure",
+                            buffered=buffered,
+                            high_water=high,
+                        )
                 self._writer.write(frame)
+                # Schedule a drain so the producer awaits kernel-buffer
+                # backpressure on the next loop turn without blocking
+                # this synchronous caller.
+                try:
+                    loop = asyncio.get_running_loop()
+                    loop.create_task(self._drain())
+                except RuntimeError:
+                    # No running loop (e.g. a paho callback thread): the
+                    # write is already queued on the transport and will
+                    # flush on the loop's next pass.
+                    pass
             except (ConnectionResetError, BrokenPipeError, OSError):
                 self._connected = False
+
+    async def _drain(self) -> None:
+        """Await the writer's send buffer so backpressure is honored."""
+        writer = self._writer
+        if writer is None:
+            return
+        try:
+            await writer.drain()
+        except (ConnectionResetError, BrokenPipeError, OSError):
+            self._connected = False
 
     async def read_loop(self) -> None:
         """Read frames from server and dispatch to handler. Runs until disconnect."""

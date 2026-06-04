@@ -49,6 +49,41 @@ log = structlog.get_logger("cloud.mavlink_relay")
 # paho's inflight limit below in the Client constructor.
 _QUEUE_MAXSIZE = 2000  # ~66s at 30 msg/s before drops start
 _METRIC_LOG_INTERVAL = 10.0  # seconds
+
+# Command messages must never be evicted on overflow: dropping an
+# enqueued arm/disarm or parameter write under a telemetry backlog
+# loses an operator action while the sender waits for an ACK. The
+# overflow policy below drops only telemetry; a command frame is kept
+# even when that means dropping the next telemetry frame instead.
+# Message ids: PARAM_SET=23, COMMAND_INT=75, COMMAND_LONG=76.
+_COMMAND_MSG_IDS = frozenset({23, 75, 76})
+
+# MAVLink magic bytes: v2 ``0xFD`` (24-bit msgid at bytes 7-9), v1
+# ``0xFE`` (8-bit msgid at byte 5).
+_MAVLINK_V2_MAGIC = 0xFD
+_MAVLINK_V1_MAGIC = 0xFE
+
+
+def _is_command_frame(data: bytes) -> bool:
+    """Read just enough of a raw MAVLink frame to flag a command message.
+
+    Decodes the message id from the frame header without parsing the
+    payload. Unknown or truncated frames are treated as non-command
+    (telemetry), so a malformed frame can still be dropped on overflow.
+    """
+    if not data:
+        return False
+    magic = data[0]
+    if magic == _MAVLINK_V2_MAGIC:
+        if len(data) < 10:
+            return False
+        msgid = data[7] | (data[8] << 8) | (data[9] << 16)
+        return msgid in _COMMAND_MSG_IDS
+    if magic == _MAVLINK_V1_MAGIC:
+        if len(data) < 6:
+            return False
+        return data[5] in _COMMAND_MSG_IDS
+    return False
 # paho's default max_inflight is 20, way too low for the SpeedyBee
 # F405's ~30 msg/s rate over a Cloudflare WSS tunnel. Bump to 1000 so
 # the actual MQTT publish path is the limit, not paho's internal
@@ -181,7 +216,10 @@ class MavlinkMqttRelay:
             return
 
         # FC->MQTT: enqueue frames for the publisher coroutine.
-        # Drop-oldest on QueueFull preserves recency.
+        # On overflow, evict only a telemetry frame so an enqueued
+        # command (arm/disarm, parameter write) is never lost under a
+        # telemetry backlog. Telemetry favors recency; commands favor
+        # delivery.
         def on_ipc_data(data: bytes) -> None:
             self._metrics["frames_in"] += 1
             if self._queue is None:
@@ -189,12 +227,16 @@ class MavlinkMqttRelay:
             try:
                 self._queue.put_nowait(data)
             except asyncio.QueueFull:
-                try:
-                    _ = self._queue.get_nowait()
+                if self._evict_one_telemetry():
+                    try:
+                        self._queue.put_nowait(data)
+                    except asyncio.QueueFull:
+                        pass
+                elif not _is_command_frame(data):
+                    # Queue is all commands and the incoming frame is
+                    # telemetry: drop the incoming frame rather than an
+                    # enqueued command.
                     self._metrics["frames_dropped_queue_full"] += 1
-                    self._queue.put_nowait(data)
-                except (asyncio.QueueEmpty, asyncio.QueueFull):
-                    pass
 
         self._ipc.set_data_handler(on_ipc_data)
         log.info(
@@ -262,6 +304,35 @@ class MavlinkMqttRelay:
                 await asyncio.sleep(0.1)
 
         log.info("mavlink_relay_publish_loop_stopped", **self._metrics)
+
+    def _evict_one_telemetry(self) -> bool:
+        """Remove the oldest telemetry frame from a full queue.
+
+        Drains and rebuilds the queue, dropping the first telemetry
+        frame encountered so command frames keep their place. Returns
+        ``True`` when a telemetry frame was evicted (room is now free),
+        ``False`` when every queued frame is a command.
+        """
+        if self._queue is None:
+            return False
+        frames: list[bytes] = []
+        evicted = False
+        while True:
+            try:
+                frame = self._queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            if not evicted and not _is_command_frame(frame):
+                evicted = True
+                self._metrics["frames_dropped_queue_full"] += 1
+                continue
+            frames.append(frame)
+        for frame in frames:
+            try:
+                self._queue.put_nowait(frame)
+            except asyncio.QueueFull:
+                break
+        return evicted
 
     def _maybe_log_metrics(self, now: float) -> None:
         """Log throughput metrics periodically."""

@@ -27,7 +27,7 @@ import structlog
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from ados.api.deps import get_agent_app
-from ados.core.ipc import MAVLINK_SOCK, MavlinkIPCClient
+from ados.core.ipc import MAX_FRAME_SIZE, MAVLINK_SOCK, MavlinkIPCClient
 
 log = structlog.get_logger("api.ground_station.mavlink_ws")
 
@@ -39,6 +39,40 @@ router = APIRouter(prefix="/v1/ground-station", tags=["ground-station"])
 # frames. At ~50 Hz aggregate from the FC, 256 frames is roughly five
 # seconds of buffering, matching the IPC layer's own headroom.
 _WS_DOWNLINK_QUEUE_DEPTH = 256
+
+# Smallest legal MAVLink frame: a v1 header (6 bytes) + 2-byte CRC. An
+# uplink frame shorter than this is malformed and is refused before it
+# reaches the FC.
+_MIN_MAVLINK_FRAME = 8
+
+# Command messages must survive a downlink backlog: an arm/disarm or
+# parameter write echoed back to the GCS should not be evicted under a
+# telemetry flood. Ids: PARAM_SET=23, COMMAND_INT=75, COMMAND_LONG=76.
+_COMMAND_MSG_IDS = frozenset({23, 75, 76})
+_MAVLINK_V2_MAGIC = 0xFD
+_MAVLINK_V1_MAGIC = 0xFE
+
+
+def _is_command_frame(data: bytes) -> bool:
+    """Flag a raw MAVLink frame as a command by reading its message id.
+
+    Reads only the frame header; the payload is left untouched. Unknown
+    or truncated frames count as telemetry so they can be dropped on
+    overflow.
+    """
+    if not data:
+        return False
+    magic = data[0]
+    if magic == _MAVLINK_V2_MAGIC:
+        if len(data) < 10:
+            return False
+        msgid = data[7] | (data[8] << 8) | (data[9] << 16)
+        return msgid in _COMMAND_MSG_IDS
+    if magic == _MAVLINK_V1_MAGIC:
+        if len(data) < 6:
+            return False
+        return data[5] in _COMMAND_MSG_IDS
+    return False
 
 
 @router.websocket("/ws/mavlink")
@@ -98,17 +132,43 @@ async def ws_mavlink_bridge(websocket: WebSocket) -> None:
     # cannot stall the IPC reader.
     downlink: asyncio.Queue[bytes] = asyncio.Queue(maxsize=_WS_DOWNLINK_QUEUE_DEPTH)
 
+    def _evict_one_telemetry() -> bool:
+        """Drop the oldest telemetry frame from a full downlink queue.
+
+        Rebuilds the queue, removing the first telemetry frame so any
+        queued command (arm/disarm, parameter write) keeps its slot.
+        Returns ``True`` when a telemetry frame was evicted.
+        """
+        frames: list[bytes] = []
+        evicted = False
+        while True:
+            try:
+                frame = downlink.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            if not evicted and not _is_command_frame(frame):
+                evicted = True
+                continue
+            frames.append(frame)
+        for frame in frames:
+            try:
+                downlink.put_nowait(frame)
+            except asyncio.QueueFull:
+                break
+        return evicted
+
     def _on_ipc_frame(data: bytes) -> None:
         try:
             downlink.put_nowait(data)
         except asyncio.QueueFull:
-            # Drop oldest to keep recency. Telemetry is more useful fresh
-            # than complete; the same policy the cloud relay uses.
-            try:
-                _ = downlink.get_nowait()
-                downlink.put_nowait(data)
-            except (asyncio.QueueEmpty, asyncio.QueueFull):
-                pass
+            # On overflow, evict only a telemetry frame so a command is
+            # never dropped under a telemetry backlog. Telemetry is more
+            # useful fresh than complete; a command must be delivered.
+            if _evict_one_telemetry():
+                try:
+                    downlink.put_nowait(data)
+                except asyncio.QueueFull:
+                    pass
 
     ipc.set_data_handler(_on_ipc_frame)
 
@@ -138,6 +198,22 @@ async def ws_mavlink_bridge(websocket: WebSocket) -> None:
             while True:
                 data = await websocket.receive_bytes()
                 if not data:
+                    continue
+                # Refuse frames that cannot be a valid MAVLink packet
+                # before they reach the FC: wrong magic byte, shorter
+                # than the minimum header+CRC, or larger than the IPC
+                # frame cap. This keeps a malformed command write from
+                # being injected on the FC link.
+                if (
+                    data[0] not in (_MAVLINK_V1_MAGIC, _MAVLINK_V2_MAGIC)
+                    or len(data) < _MIN_MAVLINK_FRAME
+                    or len(data) > MAX_FRAME_SIZE
+                ):
+                    log.warning(
+                        "mavlink_ws_uplink_frame_rejected",
+                        length=len(data),
+                        magic=data[0],
+                    )
                     continue
                 try:
                     ipc.send(data)

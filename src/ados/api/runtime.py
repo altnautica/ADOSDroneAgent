@@ -151,8 +151,15 @@ class ApiRuntimeFacade:
         baud = state.get("fc_baud")
         uptime = state.get("service_uptime")
 
+        # Prefer the live connection's truth when a handle is present.
+        # The IPC snapshot can lag a physical FC unplug (it only changes
+        # on the next state write), so a cached `fc_connected: True`
+        # would otherwise keep reporting the FC as connected after it is
+        # gone. The live handle reflects the actual link state now. When
+        # no live handle exists (the standalone API service) the IPC
+        # snapshot remains the only source.
         fc = self.fc_connection()
-        if connected is None and fc is not None:
+        if fc is not None:
             connected = getattr(fc, "connected", False)
             port = getattr(fc, "port", None)
             baud = getattr(fc, "baud", None)
