@@ -66,7 +66,12 @@ const GROUND_STATION_ENABLE_UNITS: &[&str] = &[
 /// on a drone rig every GS-only unit gets disabled.
 fn other_profile_units(profile: &str) -> &'static [&'static str] {
     match profile {
-        "ground_station" => &["ados-wfb.service"],
+        // The drone TX manager + the camera encode pipeline are air-side only;
+        // a ground station receives video through ados-mediamtx-gs. ados-video's
+        // binary is fetched on the drone profile only, so a GS that was ever a
+        // drone keeps a stale ados-video enable whose binary is now absent —
+        // tear it down so it cannot restart-loop.
+        "ground_station" => &["ados-wfb.service", "ados-video.service"],
         _ => &[
             "ados-wfb-rx.service",
             "ados-mediamtx-gs.service",
@@ -1074,9 +1079,9 @@ mod tests {
 
     #[test]
     fn other_profile_units_branch_by_profile() {
-        // A GS rig tears down the drone TX unit only.
+        // A GS rig tears down the drone-side TX + camera-encode units.
         let gs = other_profile_units("ground_station");
-        assert_eq!(gs, &["ados-wfb.service"]);
+        assert_eq!(gs, &["ados-wfb.service", "ados-video.service"]);
         // A drone rig tears down the GS RX + AP set.
         let drone = other_profile_units("drone");
         assert!(drone.contains(&"ados-wfb-rx.service"));

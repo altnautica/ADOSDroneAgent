@@ -4,6 +4,24 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.50.34] - 2026-06-04
+
+### Fixed
+
+- Ground stations no longer restart-loop the camera-encode pipeline. The
+  encode pipeline is air-side only (a ground station receives video through its
+  own media relay) and its binary is fetched on the drone profile only, but the
+  supervisor was not profile-gating it, so a ground station that had previously
+  run as a drone kept starting a unit whose binary was correctly absent. The
+  unit is now drone-gated and torn down on a ground-station install.
+- The logging and telemetry store no longer wedges in a restart loop on a large
+  store. Its startup readiness was gated behind a full structural check whose
+  cost scales with the store size; on a multi-hundred-megabyte store that ran
+  past the unit's start timeout before the daemon could signal readiness. The
+  boot path now uses a fast structural check, with added start-timeout headroom,
+  so a large store starts cleanly; the full deep check remains for deliberate
+  audits.
+
 ## [0.50.33] - 2026-06-04
 
 ### Added

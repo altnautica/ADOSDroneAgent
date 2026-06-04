@@ -7,8 +7,9 @@
 //! runtime. A bounded channel is the only bridge between the two worlds, so the
 //! synchronous SQLite work never runs inside an async task.
 //!
-//! Startup order: open + verify the store (quarantine and recreate on a failed
-//! integrity check, since the store is a cache of history, not flight state),
+//! Startup order: open + verify the store (a fast `quick_check`, quarantining
+//! and recreating on failure, since the store is a cache of history not flight
+//! state — the boot path must not run the size-scaling full integrity check),
 //! spawn the writer thread, bind the ingest socket, spawn the accept loop, then
 //! notify systemd `READY`. Shutdown order on `SIGTERM`/`SIGINT`: notify
 //! `STOPPING`, stop accepting, drop the ingest sender so the writer drains and
@@ -118,14 +119,21 @@ fn sd_watchdog() {
 #[cfg(not(target_os = "linux"))]
 fn sd_watchdog() {}
 
-/// Open the store and verify it. On a failed integrity check the file is
-/// quarantined (renamed with a timestamp suffix) and a fresh store is created
-/// from the embedded schema, so a corrupt history cache never wedges the daemon.
-/// Returns once a healthy store exists at `path`.
+/// Open the store and verify it. On a failed check the file is quarantined
+/// (renamed with a timestamp suffix) and a fresh store is created from the
+/// embedded schema, so a corrupt history cache never wedges the daemon. Returns
+/// once a healthy store exists at `path`.
+///
+/// The boot-path guard is `quick_check`, NOT the full `integrity_check`: the
+/// full check's per-index cross-validation scales with the store size, so on a
+/// multi-hundred-MB store (the retention cap is gigabytes) it can run past the
+/// unit's start timeout and wedge the daemon in a restart loop before it ever
+/// signals readiness. `quick_check` still catches the gross structural
+/// corruption that warrants a recreate, fast enough to keep startup bounded.
 fn open_and_verify(path: &Path) -> Result<()> {
     // A first open also runs migrations and creates the file + parent dir.
     let conn = db::open(path).with_context(|| format!("open store at {}", path.display()))?;
-    match db::integrity_check(&conn) {
+    match db::quick_check(&conn) {
         Ok(()) => {
             tracing::info!(path = %path.display(), "store integrity check passed");
             Ok(())
@@ -136,7 +144,7 @@ fn open_and_verify(path: &Path) -> Result<()> {
             tracing::error!(
                 error = %e,
                 quarantine = %quarantine.display(),
-                "store failed integrity check; quarantining and recreating"
+                "store failed structure check; quarantining and recreating"
             );
             std::fs::rename(path, &quarantine)
                 .with_context(|| format!("quarantine {}", path.display()))?;

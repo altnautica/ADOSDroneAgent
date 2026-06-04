@@ -72,8 +72,13 @@ pub const SERVICE_REGISTRY: &[ServiceDef] = &[
     def("ados-api", Core, None, None),
     def("ados-cloud", Core, None, None),
     def("ados-health", Core, None, None),
-    // Hardware-dependent (started on detection).
-    def("ados-video", Hardware, None, None),
+    // Hardware-dependent (started on detection). Drone-only: the camera encode
+    // pipeline runs on the air side; a ground station receives video through
+    // ados-mediamtx-gs, never ados-video. The prebuilt catalog fetches the
+    // ados-video binary on the drone profile only, so leaving this ungated made
+    // a ground station start a unit whose binary is (correctly) absent — an
+    // endless restart loop. Gate it to drone to match the catalog.
+    def("ados-video", Hardware, Some("drone"), None),
     // Drone-side WFB-ng TX manager. Profile-gated to drone so a ground station
     // does not bring up wfb_tx and fight the GS wfb_rx for the same adapter.
     def("ados-wfb", Hardware, Some("drone"), None),

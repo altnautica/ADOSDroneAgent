@@ -16,6 +16,10 @@ Type=notify
 ExecStart=/opt/ados/bin/ados-logd
 Restart=on-failure
 RestartSec=5
+# Headroom for the boot-path store check on a large store (the retention cap is
+# gigabytes). The daemon gates READY on a fast quick_check, but give ample slack
+# over the 90s default so a slow open on aged flash never trips a restart loop.
+TimeoutStartSec=300s
 Environment=RUST_LOG=info
 EnvironmentFile=-/etc/ados/env
 

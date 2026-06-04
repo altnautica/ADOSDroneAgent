@@ -220,9 +220,26 @@ pub fn user_version(conn: &Connection) -> Result<i64, DbError> {
 }
 
 /// Run `PRAGMA integrity_check`, returning `Ok(())` only when it reports `ok`.
-/// Called at start and during install-verify; a failure quarantines the store.
+/// The full check cross-validates every index against its table, so its cost
+/// scales with the database size — appropriate for a deliberate deep check, not
+/// the boot-critical path.
 pub fn integrity_check(conn: &Connection) -> Result<(), DbError> {
     let result: String = conn.query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
+    if result == "ok" {
+        Ok(())
+    } else {
+        Err(DbError::Integrity(result))
+    }
+}
+
+/// Run `PRAGMA quick_check`, returning `Ok(())` only when it reports `ok`. This
+/// is the boot-path corruption guard: it catches gross structural corruption
+/// (bad page headers, broken b-tree links) without the full check's per-index
+/// cross-validation, so it stays fast on a large store. The store is a recreate-
+/// on-corruption history cache, so the cheaper guard is the right one to gate
+/// startup on; the full `integrity_check` remains for a deliberate deep audit.
+pub fn quick_check(conn: &Connection) -> Result<(), DbError> {
+    let result: String = conn.query_row("PRAGMA quick_check", [], |row| row.get(0))?;
     if result == "ok" {
         Ok(())
     } else {
@@ -242,8 +259,10 @@ mod tests {
 
         // Migrations ran: user_version is at the current schema version.
         assert_eq!(user_version(&conn).unwrap(), SCHEMA_VERSION);
-        // The store is structurally sound.
+        // The store is structurally sound by both the deep and the boot-path
+        // (quick) checks.
         integrity_check(&conn).unwrap();
+        quick_check(&conn).unwrap();
     }
 
     #[test]
