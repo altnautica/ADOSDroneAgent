@@ -224,14 +224,22 @@ async fn run_page_ui(
 
     use tokio::signal::unix::{signal, SignalKind};
 
-    use ados_display::fb_writer::Frame;
+    use ados_display::calibration::{
+        take_recalibrate_flag, CalibrationController, CalibrationOutcome, RECALIBRATE_FLAG_PATH,
+    };
+    use ados_display::fb_writer::{FbWriter, Frame};
     use ados_display::graphics::palette::{self, Palette};
+    use ados_display::graphics::primitives::Canvas;
     use ados_display::navigator::{Dispatch, PageNavigator};
+    use ados_display::pages::calibration::render_calibration;
+    use ados_display::pages::PageContext;
     use ados_display::render_loop::pack_frame;
     use ados_display::sidecar::{
         write_snapshot_png, LcdLatency, LCD_LATENCY_PATH, LCD_SNAPSHOT_PATH,
     };
     use ados_display::state_source::StateSource;
+    use ados_display::touch_input::{TouchTransformHandle, TOUCH_CALIB_PATH};
+    use ados_hid::touch::GestureKind;
 
     // State poll cadence — matches the Python service's POLL_PERIOD_SECONDS.
     const STATE_POLL_PERIOD: Duration = Duration::from_secs(5);
@@ -241,6 +249,40 @@ async fn run_page_ui(
     // page's refresh_hz; this is the polling resolution the loop wakes at to
     // re-evaluate whether a render or a state poll is due.
     const TICK_GRANULARITY: Duration = Duration::from_millis(100);
+    // After any touch the panel repaints at this rate for BOOST_WINDOW so a drag
+    // or tab switch tracks the finger, then settles back to the page cadence so
+    // a quiet panel does not pin a core.
+    const BOOST_HZ: f32 = 20.0;
+    const BOOST_WINDOW: Duration = Duration::from_millis(500);
+    // The calibration screen is static between taps (the tap path repaints it
+    // immediately), so a modest base cadence keeps it lively without spinning.
+    const CALIB_REFRESH_HZ: f32 = 5.0;
+
+    // Build the frame for the active surface: the calibration wizard when one is
+    // running (it owns the whole panel, no navigator chrome), else the
+    // navigator's current page.
+    fn build_canvas(
+        calibration: &Option<CalibrationController>,
+        navigator: &PageNavigator,
+        ctx: &PageContext,
+        palette: &Palette,
+    ) -> Canvas {
+        match calibration {
+            Some(ctrl) => render_calibration(ctrl, palette),
+            None => navigator.current_page().render(ctx, palette),
+        }
+    }
+
+    // Pack + present a finished canvas through the off-thread writer. The blit
+    // is off-thread, so this returns immediately.
+    fn present_frame(writer: &FbWriter, bpp: u32, canvas: &Canvas) {
+        let raw = canvas.as_rgb888();
+        if let Some(packed) = pack_frame(canvas, bpp) {
+            writer.present(Frame::new(packed, raw));
+        } else {
+            tracing::warn!(bpp, "unsupported panel bit depth; frame dropped");
+        }
+    }
 
     // The theme drives the palette. It is re-read on SIGHUP so a GCS or captive
     // portal config edit (`PUT /ui/oled`) takes effect without a unit restart.
@@ -264,12 +306,19 @@ async fn run_page_ui(
     // applied within one tick. The reader maps raw ADC samples to LCD pixels
     // for the configured rotation, so the navigator receives the same
     // coordinate frame the pages lay out in.
-    let (touch_tx, mut touch_rx) = tokio::sync::mpsc::channel::<ados_hid::touch::TouchGesture>(16);
-    tokio::spawn(async move {
-        if let Err(e) = ados_display::touch_input::run_touch_reader(rotation, touch_tx).await {
-            tracing::warn!(error = %e, "touch reader exited");
-        }
-    });
+    // The touch transform is shared with the reader so a fresh calibration
+    // reloads in place; the render loop also reads it to gate the auto-prompt.
+    let touch_transform = TouchTransformHandle::new(rotation);
+    let (touch_tx, mut touch_rx) =
+        tokio::sync::mpsc::channel::<ados_display::touch_input::TouchEvent>(16);
+    {
+        let handle = touch_transform.clone();
+        tokio::spawn(async move {
+            if let Err(e) = ados_display::touch_input::run_touch_reader(handle, touch_tx).await {
+                tracing::warn!(error = %e, "touch reader exited");
+            }
+        });
+    }
 
     let mut sigterm = signal(SignalKind::terminate())?;
     let mut sigint = signal(SignalKind::interrupt())?;
@@ -292,6 +341,12 @@ async fn run_page_ui(
     let mut last_render: Option<Instant> = None;
     let mut last_latency_write = now;
     let mut last_snapshot: Option<Instant> = None;
+    // The active calibration wizard, if any. While `Some`, the loop paints the
+    // calibration screen and routes every tap to it instead of the navigator.
+    let mut calibration: Option<CalibrationController> = None;
+    // When the operator last touched the panel, for the post-interaction render
+    // boost.
+    let mut last_interaction: Option<Instant> = None;
     // Monotonic millisecond clock for touch dispatch. The navigator stamps
     // tap-feedback against this same base the chrome compares its linger window
     // to, so the tapped tab flashes when a touch routes to it.
@@ -302,21 +357,48 @@ async fn run_page_ui(
             _ = tick.tick() => {
                 let now = Instant::now();
 
-                // Re-poll the agent state on the slow cadence.
-                if now.duration_since(last_state_poll) >= STATE_POLL_PERIOD {
+                // Engage the calibration wizard when a touch panel is present
+                // but has no saved calibration: the rotation-identity fallback
+                // is visibly off, so force a fit before the UI is usable. Stays
+                // engaged until a fit is saved (no skip).
+                if calibration.is_none()
+                    && touch_transform.touch_present()
+                    && !touch_transform.is_calibrated()
+                {
+                    tracing::info!("uncalibrated touch panel; launching calibration wizard");
+                    calibration = Some(CalibrationController::new(rotation));
+                    last_render = None;
+                }
+
+                // Re-poll the agent state on the slow cadence (the wizard reads
+                // no agent state, so skip it while calibrating).
+                if calibration.is_none()
+                    && now.duration_since(last_state_poll) >= STATE_POLL_PERIOD
+                {
                     ctx = source.build_context();
                     last_state_poll = now;
                 }
 
-                // Apply a remote page switch (mirrors the sidecar watcher).
-                let route_changed = navigator.drain_page_request().is_some();
+                // Apply a remote page switch (mirrors the sidecar watcher), but
+                // never let one interrupt an in-progress calibration.
+                let route_changed =
+                    calibration.is_none() && navigator.drain_page_request().is_some();
 
-                // The render period follows the active page's cadence. A page
-                // that declares no cadence (hz <= 0) falls to the idle floor so
-                // it never pins a core repainting the same frame.
-                let hz = navigator.active_refresh_hz();
-                let render_period = if hz > 0.0 {
-                    Duration::from_secs_f32(1.0 / hz)
+                // The render period follows the active surface's cadence, lifted
+                // to the boost rate for a short window after any touch so drags
+                // and tab switches track the finger. A page that declares no
+                // cadence (hz <= 0) falls to the idle floor.
+                let base_hz = if calibration.is_some() {
+                    CALIB_REFRESH_HZ
+                } else {
+                    navigator.active_refresh_hz()
+                };
+                let boosting = last_interaction
+                    .map(|t| now.duration_since(t) < BOOST_WINDOW)
+                    .unwrap_or(false);
+                let effective_hz = if boosting { base_hz.max(BOOST_HZ) } else { base_hz };
+                let render_period = if effective_hz > 0.0 {
+                    Duration::from_secs_f32(1.0 / effective_hz)
                 } else {
                     IDLE_RENDER_PERIOD
                 };
@@ -326,8 +408,7 @@ async fn run_page_ui(
                         .unwrap_or(true);
 
                 if render_due {
-                    let canvas = navigator.current_page().render(&ctx, &palette);
-                    let raw = canvas.as_rgb888();
+                    let canvas = build_canvas(&calibration, &navigator, &ctx, &palette);
 
                     // Mirror the freshly rendered frame to the snapshot PNG so the
                     // REST snapshot endpoint serves the live panel without PIL.
@@ -338,7 +419,7 @@ async fn run_page_ui(
                     if snapshot_due {
                         if let Err(e) = write_snapshot_png(
                             Path::new(LCD_SNAPSHOT_PATH),
-                            raw,
+                            canvas.as_rgb888(),
                             canvas.width(),
                             canvas.height(),
                         ) {
@@ -347,47 +428,81 @@ async fn run_page_ui(
                         last_snapshot = Some(now);
                     }
 
-                    if let Some(packed) = pack_frame(&canvas, bpp) {
-                        writer.present(Frame::new(packed, raw));
-                    } else {
-                        tracing::warn!(bpp, "unsupported panel bit depth; frame dropped");
-                    }
+                    present_frame(&writer, bpp, &canvas);
                     last_render = Some(now);
                 }
 
-                // Mirror writer stats to lcd-latency.json at ~1 Hz.
+                // Mirror writer stats + consume a recalibration request at ~1 Hz.
                 if now.duration_since(last_latency_write) >= Duration::from_secs(1) {
                     let lat: LcdLatency = writer.stats().into();
                     if let Err(e) = lat.write_to(Path::new(LCD_LATENCY_PATH)) {
                         tracing::debug!(error = %e, "lcd-latency write failed");
                     }
+                    // A GCS / bench "Recalibrate" drops the flag; relaunch the
+                    // wizard in place (no reboot) and consume the request.
+                    if calibration.is_none()
+                        && take_recalibrate_flag(Path::new(RECALIBRATE_FLAG_PATH))
+                    {
+                        tracing::info!("recalibration requested; launching calibration wizard");
+                        calibration = Some(CalibrationController::new(rotation));
+                        last_render = None;
+                    }
                     last_latency_write = now;
                     sd_watchdog();
                 }
             }
-            maybe_gesture = touch_rx.recv() => {
-                // A classified touch stroke arrived from the reader task. Route
-                // it through the navigator against the live context (some pages
-                // lay their hit zones out from state), then act on the dispatch.
-                // A tab switch or modal push/pop moves the active surface, so
-                // force a render next tick — the same path the SIGHUP theme
-                // reload and the remote page-request drain use. A `None` closes
-                // the channel only when the reader task is gone; keep looping so
-                // the rest of the UI (signals, render, latency mirror) survives.
-                if let Some(gesture) = maybe_gesture {
-                    let now_ms = touch_clock.elapsed().as_millis() as i64;
-                    let dispatch = navigator.on_touch(&ctx, &gesture, now_ms);
-                    match dispatch {
-                        Dispatch::RouteChanged(_) | Dispatch::ModalChanged(_) => {
-                            // Repaint immediately so the new page lands without
-                            // waiting out the previous page's refresh period.
-                            last_render = None;
+            maybe_event = touch_rx.recv() => {
+                // A completed stroke arrived from the reader task. A `None`
+                // closes the channel only when the reader is gone; keep looping
+                // so the rest of the UI (signals, render, latency) survives.
+                if let Some(event) = maybe_event {
+                    let now = Instant::now();
+                    last_interaction = Some(now);
+
+                    if calibration.is_some() {
+                        // Calibration mode: a tap places a sample on the current
+                        // target. On the final accepted tap the fit is saved,
+                        // the live transform reloads, and the normal UI resumes.
+                        if event.gesture.kind == GestureKind::Tap {
+                            let outcome = calibration
+                                .as_mut()
+                                .expect("calibration active")
+                                .on_tap_raw(event.raw, Path::new(TOUCH_CALIB_PATH));
+                            if outcome == CalibrationOutcome::Saved {
+                                touch_transform.reload();
+                                calibration = None;
+                                // Re-poll so the resumed UI shows fresh state.
+                                ctx = source.build_context();
+                                last_state_poll = now;
+                                tracing::info!("touch calibration saved; resuming UI");
+                            }
                         }
-                        // A page-defined custom key (slider drag, list row) has
-                        // no navigator-owned surface change; the page reads its
-                        // own state on the next scheduled render. Inert taps do
-                        // nothing.
-                        Dispatch::Custom(_) | Dispatch::None => {}
+                        // Repaint immediately: the next target, or the resumed
+                        // UI when the fit just landed.
+                        let canvas = build_canvas(&calibration, &navigator, &ctx, &palette);
+                        present_frame(&writer, bpp, &canvas);
+                        last_render = Some(now);
+                    } else {
+                        // Normal UI: route the gesture through the navigator
+                        // against the live context (some pages lay their hit
+                        // zones out from state), then act on the dispatch.
+                        let now_ms = touch_clock.elapsed().as_millis() as i64;
+                        let dispatch = navigator.on_touch(&ctx, &event.gesture, now_ms);
+                        if matches!(dispatch, Dispatch::RouteChanged(_) | Dispatch::ModalChanged(_))
+                        {
+                            // A tab switch or modal push/pop moves the active
+                            // surface: pull fresh state for the new page, then
+                            // repaint immediately instead of waiting out the
+                            // previous page's refresh period.
+                            ctx = source.build_context();
+                            last_state_poll = now;
+                            let canvas = build_canvas(&calibration, &navigator, &ctx, &palette);
+                            present_frame(&writer, bpp, &canvas);
+                            last_render = Some(now);
+                        }
+                        // A page-defined custom key (slider drag, list row) or an
+                        // inert tap has no navigator-owned surface change; the
+                        // interaction boost already quickened the next render.
                     }
                 }
             }

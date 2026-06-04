@@ -31,6 +31,7 @@
 //! mDNS and the FastAPI display routes stay in Python; the byte-level write path
 //! and the page render both live here.
 
+pub mod calibration;
 pub mod conf;
 pub mod fb_geometry;
 pub mod fb_writer;

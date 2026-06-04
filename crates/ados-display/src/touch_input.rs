@@ -33,6 +33,9 @@
 // at module scope would be an unused import on non-Linux hosts where the reader
 // is cfg'd out, so it is referenced by full path in the function below instead.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+
 use ados_hid::affine::{self, Affine};
 
 /// Landscape LCD width in pixels — the on-screen frame the navigator routes in.
@@ -116,6 +119,14 @@ impl TouchTransform {
         }
     }
 
+    /// True when this transform is a per-rig calibration (fit against raw ADC
+    /// counts), false when it is the rotation-aware identity fallback. The
+    /// render loop reads this to decide whether to auto-launch the calibration
+    /// wizard on a panel that has a touch chip but no saved calibration.
+    pub fn is_calibrated(&self) -> bool {
+        self.renormalize.is_none()
+    }
+
     /// Map a raw `(x_raw, y_raw)` ADC contact to landscape LCD pixels, clamped
     /// to `[0, LCD_W)` x `[0, LCD_H)`.
     pub fn map_to_lcd(&self, x_raw: i32, y_raw: i32) -> (i32, i32) {
@@ -155,23 +166,149 @@ pub fn load_transform(
     }
 }
 
+/// A completed touch stroke handed to the render loop: the classified gesture
+/// (which the navigator routes) plus the raw ADC contact point at pen-up (which
+/// the calibration wizard records against the on-screen target). The raw point
+/// is carried alongside the gesture so the same channel serves both the normal
+/// UI and calibration without a second reader.
+#[derive(Debug, Clone)]
+pub struct TouchEvent {
+    pub gesture: ados_hid::touch::TouchGesture,
+    /// The raw, pre-transform `(x, y)` ADC sample at pen-up.
+    pub raw: (i32, i32),
+}
+
+/// Per-handle transform state behind the mutex: the resolved transform plus the
+/// inputs needed to rebuild it after a calibration save.
+struct TransformState {
+    transform: TouchTransform,
+    rotation: i32,
+    x_range: AxisRange,
+    y_range: AxisRange,
+}
+
+struct HandleInner {
+    state: Mutex<TransformState>,
+    /// Set once the reader discovers a touch node, so the render loop can tell a
+    /// panel with a touch chip (auto-prompt eligible) from a panel with none.
+    present: AtomicBool,
+}
+
+/// A shared, reloadable touch transform.
+///
+/// The reader maps every contact through this handle, so swapping the inner
+/// transform after a calibration save takes effect on the very next touch
+/// without restarting the reader. The render loop holds a clone to call
+/// [`TouchTransformHandle::reload`] when the wizard writes a new calibration and
+/// to read [`TouchTransformHandle::touch_present`] /
+/// [`TouchTransformHandle::is_calibrated`] for the auto-prompt gate.
+#[derive(Clone)]
+pub struct TouchTransformHandle {
+    inner: Arc<HandleInner>,
+}
+
+impl TouchTransformHandle {
+    /// Build a handle for `rotation`, seeded from any persisted calibration (or
+    /// the rotation-aware fallback over the 12-bit ADC default until the reader
+    /// learns the panel's real ranges via [`TouchTransformHandle::set_ranges`]).
+    pub fn new(rotation: i32) -> Self {
+        let x_range = AxisRange::adc_12bit();
+        let y_range = AxisRange::adc_12bit();
+        let transform = load_transform(
+            std::path::Path::new(TOUCH_CALIB_PATH),
+            rotation,
+            x_range,
+            y_range,
+        );
+        Self {
+            inner: Arc::new(HandleInner {
+                state: Mutex::new(TransformState {
+                    transform,
+                    rotation,
+                    x_range,
+                    y_range,
+                }),
+                present: AtomicBool::new(false),
+            }),
+        }
+    }
+
+    /// Mark a touch node present (the reader found a panel).
+    pub fn mark_present(&self) {
+        self.inner.present.store(true, Ordering::Relaxed);
+    }
+
+    /// Whether a touch node was discovered. False on a panel with no touch chip.
+    pub fn touch_present(&self) -> bool {
+        self.inner.present.load(Ordering::Relaxed)
+    }
+
+    /// Adopt the driver's real ABS ranges and re-resolve the transform against
+    /// them. Called once by the reader after node discovery.
+    pub fn set_ranges(&self, x_range: AxisRange, y_range: AxisRange) {
+        let mut s = self.inner.state.lock().expect("touch transform mutex");
+        s.x_range = x_range;
+        s.y_range = y_range;
+        s.transform = load_transform(
+            std::path::Path::new(TOUCH_CALIB_PATH),
+            s.rotation,
+            x_range,
+            y_range,
+        );
+    }
+
+    /// Re-read the calibration file and swap the transform in place. Called by
+    /// the render loop after the wizard saves a new calibration.
+    pub fn reload(&self) {
+        let mut s = self.inner.state.lock().expect("touch transform mutex");
+        let (rotation, x_range, y_range) = (s.rotation, s.x_range, s.y_range);
+        s.transform = load_transform(
+            std::path::Path::new(TOUCH_CALIB_PATH),
+            rotation,
+            x_range,
+            y_range,
+        );
+    }
+
+    /// Map a raw ADC contact to LCD pixels through the current transform.
+    pub fn map_to_lcd(&self, x_raw: i32, y_raw: i32) -> (i32, i32) {
+        self.inner
+            .state
+            .lock()
+            .expect("touch transform mutex")
+            .transform
+            .map_to_lcd(x_raw, y_raw)
+    }
+
+    /// Whether the current transform is a saved calibration (not the fallback).
+    pub fn is_calibrated(&self) -> bool {
+        self.inner
+            .state
+            .lock()
+            .expect("touch transform mutex")
+            .transform
+            .is_calibrated()
+    }
+}
+
 /// Discover, open, and drain the touchscreen evdev node, classifying strokes and
-/// sending each completed [`TouchGesture`] on `tx`. Runs until the device errors
+/// sending each completed [`TouchEvent`] on `tx`. Runs until the device errors
 /// or the channel closes (the render loop dropped its receiver on shutdown).
 ///
 /// Discovery prefers a device whose name contains "ADS7846" or "Touchscreen",
 /// then any device that advertises both ABS_X and ABS_Y and is not a gamepad,
 /// and finally falls back to [`DEFAULT_TOUCH_NODE`]. The chosen node's published
 /// ABS ranges seed the normalizer; a missing range falls back to the 12-bit ADC
-/// default. The coordinate transform is resolved once via [`load_transform`]:
-/// a per-rig calibration from [`TOUCH_CALIB_PATH`] if present, else the
-/// rotation-aware identity fallback. Every pen-up is logged at info level with
-/// the raw point, the mapped LCD point, and the gesture kind so the mapping can
-/// be checked on the rig.
+/// default. The coordinate transform is owned by `handle` (shared with the
+/// render loop so a fresh calibration reloads without restarting the reader):
+/// the reader feeds the discovered ranges in via
+/// [`TouchTransformHandle::set_ranges`] and maps every sample through it. Every
+/// pen-up is logged at info level with the raw point, the mapped LCD point, and
+/// the gesture kind so the mapping can be checked on the rig.
 #[cfg(target_os = "linux")]
 pub async fn run_touch_reader(
-    rotation: i32,
-    tx: tokio::sync::mpsc::Sender<ados_hid::touch::TouchGesture>,
+    handle: TouchTransformHandle,
+    tx: tokio::sync::mpsc::Sender<TouchEvent>,
 ) -> std::io::Result<()> {
     use std::time::Instant;
 
@@ -184,13 +321,11 @@ pub async fn run_touch_reader(
     };
 
     let (x_range, y_range) = abs_ranges(&device);
-    let transform = load_transform(
-        std::path::Path::new(TOUCH_CALIB_PATH),
-        rotation,
-        x_range,
-        y_range,
-    );
-    let calibrated = transform.renormalize.is_none();
+    // Adopt the panel's real ABS ranges and mark the chip present so the render
+    // loop's auto-prompt gate fires for an uncalibrated touch panel.
+    handle.set_ranges(x_range, y_range);
+    handle.mark_present();
+    let calibrated = handle.is_calibrated();
     tracing::info!(
         path = %path,
         name = device.name().unwrap_or("unknown"),
@@ -198,7 +333,6 @@ pub async fn run_touch_reader(
         x_max = x_range.max,
         y_min = y_range.min,
         y_max = y_range.max,
-        rotation,
         calibrated,
         "touchscreen opened; reading"
     );
@@ -239,8 +373,14 @@ pub async fn run_touch_reader(
                             gesture = gesture.kind.as_str(),
                             "touch pen-up"
                         );
-                        // A closed channel means the render loop is gone; stop.
-                        if tx.send(gesture).await.is_err() {
+                        // Carry the raw pen-up point so the calibration wizard
+                        // can fit it against the on-screen target. A closed
+                        // channel means the render loop is gone; stop.
+                        let event = TouchEvent {
+                            gesture,
+                            raw: last_raw,
+                        };
+                        if tx.send(event).await.is_err() {
                             tracing::info!("touch gesture channel closed; stopping reader");
                             return Ok(());
                         }
@@ -258,7 +398,7 @@ pub async fn run_touch_reader(
             }
             InputEventKind::Synchronization(_) if fsm.pen_down() => {
                 if let (Some(x), Some(y)) = (pending_x, pending_y) {
-                    let (x_lcd, y_lcd) = transform.map_to_lcd(x, y);
+                    let (x_lcd, y_lcd) = handle.map_to_lcd(x, y);
                     last_raw = (x, y);
                     last_lcd = (x_lcd, y_lcd);
                     fsm.record_move(x_lcd, y_lcd, now_ms);

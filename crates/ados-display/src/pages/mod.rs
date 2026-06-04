@@ -24,6 +24,7 @@ use crate::graphics::palette::Palette;
 use crate::graphics::primitives::Canvas;
 
 pub mod about;
+pub mod calibration;
 pub mod channel_hops;
 pub mod dashboard;
 pub mod diagnostics;
