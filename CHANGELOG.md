@@ -4,6 +4,19 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.50.27] - 2026-06-04
+
+### Removed
+
+- Repository cleanup of stale trees that no installer, package, CI, or runtime
+  path referenced: the `buildroot/` documentation stub (its backend is not
+  built), the `configs/` example YAMLs (the authoritative defaults live in
+  `src/ados/core/defaults.yaml`), the `mockups/lcd-ui/` design mockups and
+  `assets/lcd-icons/` SVGs (the LCD UI is native and draws its icons
+  procedurally), the `scripts/render-lcd-icons.py` SVG-to-PNG helper, and its
+  `icon-tools` packaging extra. Trimmed the obsolete Blockly section from the
+  samples README. No functional change.
+
 ## [0.50.26] - 2026-06-04
 
 ### Fixed

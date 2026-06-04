@@ -8,7 +8,6 @@ simple to advanced. Use these as a starting point for your own work.
 ```
 samples/
 ├── python/    # Python SDK samples (ados package)
-├── blockly/   # Blockly workspace JSON (open in Mission Control)
 ├── yaml/      # YAML mission files
 └── text/      # Tello-style text command files
 ```
@@ -31,19 +30,6 @@ removed.
 | `02_takeoff_land.py` | Arm, takeoff, hover, land. | Simple |
 | `03_square_mission.py` | Flies a 20 m square using move + rotate. | Intermediate |
 | `04_battery_aware_survey.py` | Lawn-mower survey with battery-aware abort. | Advanced |
-
-## Blockly
-
-The JSON files under `blockly/` are Blockly workspace serialized state.
-Open Mission Control → Command → Scripts → Blockly tab, then load one
-via the Scripts library (built-in Samples group) or import via the
-Duplicate action.
-
-| File | What it does |
-|---|---|
-| `01_takeoff_land.blockly.json` | Takeoff → wait → land. |
-| `02_square_pattern.blockly.json` | Repeat 4× (forward 20 m + rotate 90°) + RTL. |
-| `03_low_battery_rtl.blockly.json` | Low-battery event → return home. |
 
 ## YAML missions
 

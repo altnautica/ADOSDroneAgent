@@ -68,14 +68,6 @@ ground-station = [
     # dependency graph stays stable across the ground-station extra.
     "Pillow>=10.0.0",
 ]
-# Tooling extras for refreshing build-time generated assets such as the
-# rasterized LCD tab-bar icons. Not required at runtime; only needed
-# when an editor wants to re-run `scripts/render-lcd-icons.py` after an
-# SVG edit. CairoSVG ships its own libcairo build via pycairo, so this
-# stays out of the base install footprint.
-icon-tools = [
-    "cairosvg>=2.7",
-]
 # Vision inference extras. The RKNN and TensorRT inference sidecars
 # import numpy lazily on the real infer path; pulled only when a
 # vision-capable build needs on-device detection. Kept out of the base
