@@ -8,9 +8,26 @@ process lifecycle, restart logic, and graceful shutdown.
 
 from __future__ import annotations
 
+import socket
 from pathlib import Path
 
 from .rtsp_config import GROUND_RTSP_PATH, GROUND_WHEP_PATH
+
+
+def _physical_lan_interfaces() -> list[str]:
+    """Physical wired/WiFi interface names for WebRTC ICE host-candidate
+    gathering, excluding loopback, virtual, container, and mesh interfaces, so
+    the offer carries only real reachable networks (not loopback / IPv6
+    link-local / docker / mesh candidates that just fail their checks)."""
+    skip = ("lo", "docker", "veth", "br-", "bat", "tap", "tun", "wg", "virbr", "vmnet")
+    names: list[str] = []
+    try:
+        for _idx, name in socket.if_nameindex():
+            if not name.startswith(skip) and name.startswith(("e", "w")):
+                names.append(name)
+    except OSError:
+        pass
+    return names
 
 
 def build_mediamtx_yaml(
@@ -60,15 +77,15 @@ def build_mediamtx_yaml(
         "webrtc": True,
         "webrtcAddress": f":{webrtc_port}",
         "webrtcAllowOrigin": "*",
-        "webrtcIPsFromInterfaces": False,
-        "webrtcIPsFromInterfacesList": [],
+        # Bind WebRTC media to ALL interfaces (":8189") and gather ICE host
+        # candidates from the real physical interfaces per session, so video
+        # follows an interface/IP change (ethernet->WiFi failover, DHCP)
+        # instead of being pinned to the single IP captured at config-gen time.
+        "webrtcIPsFromInterfaces": True,
+        "webrtcIPsFromInterfacesList": _physical_lan_interfaces(),
         "webrtcHandshakeTimeout": "15s",
-        "webrtcLocalUDPAddress": (
-            f"{lan_ips[0]}:8189" if lan_ips else ":8189"
-        ),
-        "webrtcLocalTCPAddress": (
-            f"{lan_ips[0]}:8189" if lan_ips else ":8189"
-        ),
+        "webrtcLocalUDPAddress": ":8189",
+        "webrtcLocalTCPAddress": ":8189",
         "webrtcICEServers2": [
             {"url": "stun:stun.l.google.com:19302"},
             {"url": "stun:stun1.l.google.com:19302"},

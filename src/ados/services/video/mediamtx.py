@@ -104,6 +104,30 @@ def _detect_lan_ips() -> list[str]:
     return ips
 
 
+def _physical_lan_interfaces() -> list[str]:
+    """Names of physical wired/WiFi interfaces (eth*/en*/em*/end*, wl*/wlan*),
+    excluding loopback, virtual, container, and mesh interfaces.
+
+    Used to scope WebRTC ICE host-candidate gathering to real, reachable
+    networks so the browser is never offered loopback / IPv6 link-local /
+    docker / mesh candidates that just fail their connectivity checks. The
+    list is read fresh on every config generation; mediamtx (Pion) re-reads
+    the addresses of these interfaces per WebRTC session, so a node that moves
+    from ethernet to WiFi advertises the interface that is actually up.
+    """
+    skip = ("lo", "docker", "veth", "br-", "bat", "tap", "tun", "wg", "virbr", "vmnet")
+    names: list[str] = []
+    try:
+        for _idx, name in socket.if_nameindex():
+            if name.startswith(skip):
+                continue
+            if name.startswith(("e", "w")):
+                names.append(name)
+    except Exception as exc:
+        log.warning("phys_iface_detect_failed", error=str(exc))
+    return names
+
+
 class MediamtxManager:
     """Manages a mediamtx subprocess for WebRTC/RTSP/HLS streaming.
 
@@ -165,17 +189,21 @@ class MediamtxManager:
             "webrtc": True,
             "webrtcAddress": f":{self._webrtc_port}",
             "webrtcAllowOrigin": "*",
-            # Disable interface IP auto-discovery AND bind UDP/TCP to the
-            # specific IPv4 LAN address. Without this, Pion's ICE agent
-            # enumerates all socket-bound addresses (127.0.0.1, IPv6 ULA,
-            # link-local) and the browser selects unstable candidates that
-            # drop after 30-60s. Binding to the LAN IP forces ONLY that
-            # address as an ICE host candidate.
-            "webrtcIPsFromInterfaces": False,
-            "webrtcIPsFromInterfacesList": [],
+            # Bind the WebRTC media sockets to ALL interfaces (":8189") so the
+            # media path is never pinned to a single IP that can disappear
+            # (ethernet->WiFi failover, DHCP change, multi-homing). Gather ICE
+            # host candidates only from the real physical interfaces, RE-READ
+            # by Pion per session, so whatever interface is up at connect time
+            # is advertised. This also fixes the original "WiFi came up after
+            # mediamtx started, only 127.0.0.1 advertised" race because the
+            # gather happens at connect time, not at process start. Restricting
+            # to physical interfaces keeps loopback / IPv6 link-local / docker /
+            # mesh junk candidates (the ones that drop after 30-60s) out.
+            "webrtcIPsFromInterfaces": True,
+            "webrtcIPsFromInterfacesList": _physical_lan_interfaces(),
             "webrtcHandshakeTimeout": "15s",
-            "webrtcLocalUDPAddress": f"{lan_ips[0]}:8189" if lan_ips else ":8189",
-            "webrtcLocalTCPAddress": f"{lan_ips[0]}:8189" if lan_ips else ":8189",
+            "webrtcLocalUDPAddress": ":8189",
+            "webrtcLocalTCPAddress": ":8189",
             "webrtcICEServers2": [
                 {"url": stun_url} for stun_url in _DEFAULT_STUN_SERVERS
             ],
