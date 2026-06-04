@@ -648,6 +648,34 @@ def build_heartbeat_payload(app: AgentApp) -> dict:  # noqa: C901
             payload["mgmtFailoverIface"] = failover.get("mgmt_failover_iface")
             payload["mgmtFailoverReason"] = failover.get("mgmt_failover_reason")
 
+    # USB-rehome state — sourced cross-process from /run/ados/usb-rehome.json,
+    # written by the supervisor's USB-rehome reconciler. Surfaces whether a WFB
+    # adapter on a slow USB port (and not radiating) is being unbind/rebind
+    # recovered, exhausted, or held back by the control-interface guard. Stale
+    # snapshots (> 60 s) are dropped.
+    from ados.core.paths import USB_REHOME_JSON
+    _USB_REHOME_STALE_AFTER_S = 60.0
+    try:
+        rehome = _json.loads(USB_REHOME_JSON.read_text())
+    except (OSError, ValueError):
+        rehome = None
+    if isinstance(rehome, dict):
+        rh_updated = rehome.get("updated_at_unix")
+        rh_fresh = (
+            isinstance(rh_updated, (int, float))
+            and (time.time() - float(rh_updated)) <= _USB_REHOME_STALE_AFTER_S
+        )
+        rh_state = rehome.get("usb_rehome_state")
+        if rh_fresh and rh_state in (
+            "idle",
+            "rehoming",
+            "exhausted",
+            "guard_blocked",
+        ):
+            payload["usbRehomeState"] = rh_state
+            payload["usbRehomeAttempts"] = rehome.get("usb_rehome_attempts", 0)
+            payload["usbRehomeLastResult"] = rehome.get("usb_rehome_last_result")
+
     # Plugin inventory — webapp-side installs are not visible to the GCS
     # otherwise. Best-effort: a missing or partially-initialised
     # supervisor leaves the field absent rather than failing the tick.

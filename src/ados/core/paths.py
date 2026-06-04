@@ -97,6 +97,9 @@ MGMT_LINK_JSON = ADOS_RUN_DIR / "mgmt-link.json"
 # Management-link reach-back mode, written by the supervisor's heartbeat-failover
 # reconciler: primary / wifi_heartbeat / none when the wired primary is down.
 MGMT_FAILOVER_JSON = ADOS_RUN_DIR / "mgmt-failover.json"
+# USB-rehome self-heal state, written by the supervisor's USB-rehome reconciler:
+# the recovery state + attempt count for a slow-port, not-radiating WFB adapter.
+USB_REHOME_JSON = ADOS_RUN_DIR / "usb-rehome.json"
 BITRATE_CONTROLLER_JSON = ADOS_RUN_DIR / "bitrate-controller.json"
 
 # Local-bind to cloud-relay failover state. Written by the always-on

@@ -85,6 +85,12 @@ pub struct Supervisor {
     /// plane). Composes with the guardian (which repairs the link while it
     /// exists). Mirrors the mode to /run/ados/mgmt-failover.json.
     mgmt_failover: crate::mgmt_failover::MgmtFailover,
+    /// USB-rehome self-heal: when the WFB adapter is on a slow USB port AND its
+    /// RF is unverified, unbind/rebind the USB device for a clean
+    /// re-enumeration that can land it on a faster lane. Bounded budget +
+    /// fail-closed control-interface guard. The supervisor drives the stop →
+    /// rebind → start sequence; the reconciler decides + records.
+    usb_rehome: crate::usb_rehome::UsbRehome,
 }
 
 impl Supervisor {
@@ -104,6 +110,9 @@ impl Supervisor {
                 ados_protocol::logd::emitter::EventEmitter::new("ados-supervisor"),
             ),
             mgmt_failover: crate::mgmt_failover::MgmtFailover::new(
+                ados_protocol::logd::emitter::EventEmitter::new("ados-supervisor"),
+            ),
+            usb_rehome: crate::usb_rehome::UsbRehome::new(
                 ados_protocol::logd::emitter::EventEmitter::new("ados-supervisor"),
             ),
         }
@@ -423,6 +432,19 @@ impl Supervisor {
         // after the guardian (which repairs the link while it physically
         // exists); cheap when the wired primary is up.
         self.mgmt_failover.tick().await;
+
+        // USB-rehome self-heal (LAST resort for a slow-port, not-radiating
+        // adapter): the reconciler decides; if it authorizes an attempt, the
+        // supervisor quiesces the radio unit, rebinds the USB device, and brings
+        // the unit back (its startup re-probes the adapter). The next decide()
+        // re-checks the fresh stats to confirm. Cheap when the adapter is fine.
+        if let Some(plan) = self.usb_rehome.decide().await {
+            let unit = plan.unit;
+            self.stop_service(unit).await;
+            self.wait_for_stop(&[unit], Duration::from_secs(5)).await;
+            crate::usb_rehome::execute_rebind(&plan).await;
+            self.start_service(unit).await;
+        }
     }
 }
 

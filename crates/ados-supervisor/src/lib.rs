@@ -20,4 +20,5 @@ pub mod role;
 pub mod rtl_modprobe;
 pub mod sdnotify;
 pub mod systemctl;
+pub mod usb_rehome;
 pub mod wifi_selfheal;

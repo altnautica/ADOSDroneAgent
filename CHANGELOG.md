@@ -4,6 +4,20 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.50.33] - 2026-06-04
+
+### Added
+
+- USB-rehome self-heal: when a radio adapter is on a slow USB port AND its RF
+  is unverified (transmitting but no confirmed reception), both held across a
+  confirm window, the agent unbinds and rebinds the USB device for a clean
+  re-enumeration that can land it on a faster lane, then re-checks. Bounded to a
+  small attempt budget with an escalating cooldown and a terminal exhausted
+  state (never a reset loop). A fail-closed guard refuses any rehome that could
+  touch the operator's management link. The state rides the heartbeat
+  (`usbRehomeState`) so Mission Control shows the recovery. Default-on under
+  `network.usb_rehome`.
+
 ## [0.50.32] - 2026-06-04
 
 ### Added
