@@ -12,6 +12,7 @@ pub mod hardware;
 pub mod hotplug;
 pub mod lifecycle;
 pub mod mac_pin;
+pub mod mgmt_failover;
 pub mod mgmt_link_guardian;
 pub mod reg_reconciler;
 pub mod registry;

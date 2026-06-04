@@ -4,6 +4,19 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.50.32] - 2026-06-04
+
+### Added
+
+- Onboard-WiFi heartbeat reach-back: when the wired primary management link is
+  physically down for a sustained window and an onboard WiFi has a usable path,
+  the agent declares a heartbeat-only fallback so the box stays visible to
+  Mission Control (status push and command receive only — video and full
+  telemetry stay on the primary and resume when it returns). Hysteresis on both
+  edges so a brief cable blip never triggers it. The mode rides the heartbeat
+  (`mgmtLinkMode`) and Mission Control renders the degraded reach-back posture
+  distinctly. Default-on under `network.mgmt_failover`.
+
 ## [0.50.31] - 2026-06-04
 
 ### Added

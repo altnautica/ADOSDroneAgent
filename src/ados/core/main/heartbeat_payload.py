@@ -623,6 +623,31 @@ def build_heartbeat_payload(app: AgentApp) -> dict:  # noqa: C901
                 "repairsInWindow": mgmt.get("repairs_in_window", 0),
             }
 
+    # Management-link reach-back mode — sourced cross-process from
+    # /run/ados/mgmt-failover.json, written by the supervisor's heartbeat
+    # failover reconciler. "wifi_heartbeat" means the wired primary is down and
+    # the box is reachable only over the onboard WiFi as a status-only beacon
+    # (video + full telemetry do not flow); "none" means no reach-back at all.
+    # Surfaced so the GCS shows the degraded posture instead of a healthy link.
+    # Stale snapshots (> 60 s) are dropped (the default "primary" is implied).
+    from ados.core.paths import MGMT_FAILOVER_JSON
+    _MGMT_FAILOVER_STALE_AFTER_S = 60.0
+    try:
+        failover = _json.loads(MGMT_FAILOVER_JSON.read_text())
+    except (OSError, ValueError):
+        failover = None
+    if isinstance(failover, dict):
+        fo_updated = failover.get("updated_at_unix")
+        fo_fresh = (
+            isinstance(fo_updated, (int, float))
+            and (time.time() - float(fo_updated)) <= _MGMT_FAILOVER_STALE_AFTER_S
+        )
+        fo_mode = failover.get("mgmt_link_mode")
+        if fo_fresh and fo_mode in ("primary", "wifi_heartbeat", "none"):
+            payload["mgmtLinkMode"] = fo_mode
+            payload["mgmtFailoverIface"] = failover.get("mgmt_failover_iface")
+            payload["mgmtFailoverReason"] = failover.get("mgmt_failover_reason")
+
     # Plugin inventory — webapp-side installs are not visible to the GCS
     # otherwise. Best-effort: a missing or partially-initialised
     # supervisor leaves the field absent rather than failing the tick.

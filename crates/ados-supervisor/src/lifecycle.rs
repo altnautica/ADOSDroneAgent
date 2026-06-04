@@ -79,6 +79,12 @@ pub struct Supervisor {
     /// A cheap health check each tick; the ladder runs only on a sustained
     /// break, one rung per tick. Mirrors the state to /run/ados/mgmt-link.json.
     mgmt_guardian: crate::mgmt_link_guardian::MgmtLinkGuardian,
+    /// Onboard-WiFi heartbeat reach-back: when the wired primary is physically
+    /// down for a sustained window, declares a heartbeat-only fallback over the
+    /// onboard WiFi so the box stays visible to the GCS (degraded, no data
+    /// plane). Composes with the guardian (which repairs the link while it
+    /// exists). Mirrors the mode to /run/ados/mgmt-failover.json.
+    mgmt_failover: crate::mgmt_failover::MgmtFailover,
 }
 
 impl Supervisor {
@@ -95,6 +101,9 @@ impl Supervisor {
                 ados_protocol::logd::emitter::EventEmitter::new("ados-supervisor"),
             ),
             mgmt_guardian: crate::mgmt_link_guardian::MgmtLinkGuardian::new(
+                ados_protocol::logd::emitter::EventEmitter::new("ados-supervisor"),
+            ),
+            mgmt_failover: crate::mgmt_failover::MgmtFailover::new(
                 ados_protocol::logd::emitter::EventEmitter::new("ados-supervisor"),
             ),
         }
@@ -407,6 +416,13 @@ impl Supervisor {
         // after the per-connection WiFi self-heal so the cheaper fix gets first
         // crack; cheap when the link is healthy, one repair rung per tick.
         self.mgmt_guardian.tick().await;
+
+        // Onboard-WiFi heartbeat reach-back (LAST resort): when the wired
+        // primary is physically down for a sustained window, declare a
+        // heartbeat-only fallback so the box stays visible to the GCS. Runs
+        // after the guardian (which repairs the link while it physically
+        // exists); cheap when the wired primary is up.
+        self.mgmt_failover.tick().await;
     }
 }
 

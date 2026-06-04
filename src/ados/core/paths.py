@@ -94,6 +94,9 @@ CAMERA_STATE_JSON = ADOS_RUN_DIR / "camera-state.json"
 # Management-link health, written by the supervisor's management-link guardian
 # each tick: the operator's management link state + repair-ladder progress.
 MGMT_LINK_JSON = ADOS_RUN_DIR / "mgmt-link.json"
+# Management-link reach-back mode, written by the supervisor's heartbeat-failover
+# reconciler: primary / wifi_heartbeat / none when the wired primary is down.
+MGMT_FAILOVER_JSON = ADOS_RUN_DIR / "mgmt-failover.json"
 BITRATE_CONTROLLER_JSON = ADOS_RUN_DIR / "bitrate-controller.json"
 
 # Local-bind to cloud-relay failover state. Written by the always-on
