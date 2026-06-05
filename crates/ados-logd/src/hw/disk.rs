@@ -105,6 +105,31 @@ pub fn read_fs_used_pct(_path: &Path) -> Option<f64> {
     None
 }
 
+/// Filesystem total and used bytes of the mount containing `path`, via `statvfs`.
+/// Block counts are in fragment-size units, so bytes is `blocks * f_frsize`. Used
+/// matches the `df`/`psutil` definition (`total - free`, so reserved blocks count
+/// as used). Returns `(total_bytes, used_bytes)`, or `None` when the syscall fails
+/// or the filesystem reports zero total blocks. Live mount, not a fixture tree.
+#[cfg(target_os = "linux")]
+pub fn read_fs_usage(path: &Path) -> Option<(u64, u64)> {
+    let st = nix::sys::statvfs::statvfs(path).ok()?;
+    let frsize = st.fragment_size() as u64;
+    let total_blocks = st.blocks() as u64;
+    if total_blocks == 0 || frsize == 0 {
+        return None;
+    }
+    let free = st.blocks_free() as u64;
+    let total_bytes = total_blocks.saturating_mul(frsize);
+    let used_bytes = total_blocks.saturating_sub(free).saturating_mul(frsize);
+    Some((total_bytes, used_bytes))
+}
+
+/// Non-Linux stub: see [`read_fs_used_pct`].
+#[cfg(not(target_os = "linux"))]
+pub fn read_fs_usage(_path: &Path) -> Option<(u64, u64)> {
+    None
+}
+
 /// Keep whole backing devices; drop partitions and pseudo-devices.
 ///
 /// Partitions end in a digit on top of a name that ends in a non-digit

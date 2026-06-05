@@ -228,6 +228,43 @@ def _hw_summary_route() -> RouteSpec:
     )
 
 
+def _hw_snapshot_route() -> RouteSpec:
+    """Hardware-snapshot signals the resource routes read back (store-only).
+
+    The diagnostics/status/system routes derive their CPU/memory/disk/temperature
+    /load readouts from the most-recent hw snapshots, so the store must serve each
+    backing signal in the ``hw`` row's open ``signals`` map. These are the
+    net-new fields the collector grew to fully cover those routes (memory cache,
+    swap total, filesystem bytes, load average) plus the spine it already carried.
+    """
+    names = [
+        "mem.total_bytes",
+        "mem.avail_bytes",
+        "mem.cache_bytes",
+        "mem.swap_total_bytes",
+        "disk.fs_total_bytes",
+        "disk.fs_used_bytes",
+        "sched.loadavg_1",
+        "thermal.primary_c",
+        "cpu.util.all",
+    ]
+    return RouteSpec(
+        name="hw-snapshot",
+        kind="hw",
+        logd_params={"kind": "hw", "limit": 200},
+        observability_path="/api/v2/observability/hw",
+        fields=[
+            FieldSpec(
+                field=name,
+                locator=Locator.SIGNAL,
+                classification="live",
+                producer="ados-logd",
+            )
+            for name in names
+        ],
+    )
+
+
 def _service_events_route() -> RouteSpec:
     """Supervisor service-transition events (live events, store-only)."""
     return RouteSpec(
@@ -266,6 +303,7 @@ def initial_routes() -> list[RouteSpec]:
         _link_metrics_route(),
         _video_metrics_route(),
         _hw_summary_route(),
+        _hw_snapshot_route(),
         _service_events_route(),
     ]
 

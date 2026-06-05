@@ -337,43 +337,67 @@ async def get_full_status(request: Request):
     )
 
     # --- System resources (same logic as /api/system) ---
+    # Primary source is the logging store's hardware snapshots (one sampler, the
+    # Rust collector); fall back to a live psutil read when the store is
+    # unreachable or has not yet captured the essential fields.
     resources = {}
-    try:
-        import psutil
+    from ados.api.telemetry_source import derive_resources, latest_hw_signals
 
-        cpu_percent = psutil.cpu_percent(interval=0)
-        mem = psutil.virtual_memory()
-        disk = psutil.disk_usage("/")
-        temps = {}
-        try:
-            for tname, entries in psutil.sensors_temperatures().items():
-                if entries:
-                    temps[tname] = entries[0].current
-        except (AttributeError, OSError):
-            pass
-
-        swap = psutil.swap_memory()
-        # cached + buffers is Linux-only; absent on a dev host, so guard
-        # with getattr and fall back to 0 so the field is always present.
-        mem_cache_bytes = getattr(mem, "cached", 0) + getattr(mem, "buffers", 0)
-
+    _signals = await latest_hw_signals()
+    _res = derive_resources(_signals) if _signals is not None else None
+    if _res is not None:
         resources = {
-            "cpu_percent": cpu_percent,
-            "memory_percent": mem.percent,
-            "memory_used_mb": round(mem.used / (1024 * 1024)),
-            "memory_total_mb": round(mem.total / (1024 * 1024)),
-            "memory_available_mb": round(mem.available / (1024 * 1024)),
-            "memory_cache_mb": round(mem_cache_bytes / (1024 * 1024)),
-            "swap_total_mb": round(swap.total / (1024 * 1024)),
-            "swap_used_mb": round(swap.used / (1024 * 1024)),
-            "swap_percent": swap.percent,
-            "disk_percent": disk.percent,
-            "disk_used_gb": round(disk.used / (1024 * 1024 * 1024), 1),
-            "disk_total_gb": round(disk.total / (1024 * 1024 * 1024), 1),
-            "temperature": next(iter(temps.values()), None),
+            "cpu_percent": _res["cpu_percent"],
+            "memory_percent": _res["memory_percent"],
+            "memory_used_mb": _res["memory_used_mb"],
+            "memory_total_mb": _res["memory_total_mb"],
+            "memory_available_mb": _res["memory_available_mb"],
+            "memory_cache_mb": _res["memory_cache_mb"],
+            "swap_total_mb": _res["swap_total_mb"],
+            "swap_used_mb": _res["swap_used_mb"],
+            "swap_percent": _res["swap_percent"],
+            "disk_percent": _res["disk_percent"],
+            "disk_used_gb": _res["disk_used_gb"],
+            "disk_total_gb": _res["disk_total_gb"],
+            "temperature": _res["temperature"],
         }
-    except ImportError:
-        pass
+    else:
+        try:
+            import psutil
+
+            cpu_percent = psutil.cpu_percent(interval=0)
+            mem = psutil.virtual_memory()
+            disk = psutil.disk_usage("/")
+            temps = {}
+            try:
+                for tname, entries in psutil.sensors_temperatures().items():
+                    if entries:
+                        temps[tname] = entries[0].current
+            except (AttributeError, OSError):
+                pass
+
+            swap = psutil.swap_memory()
+            # cached + buffers is Linux-only; absent on a dev host, so guard
+            # with getattr and fall back to 0 so the field is always present.
+            mem_cache_bytes = getattr(mem, "cached", 0) + getattr(mem, "buffers", 0)
+
+            resources = {
+                "cpu_percent": cpu_percent,
+                "memory_percent": mem.percent,
+                "memory_used_mb": round(mem.used / (1024 * 1024)),
+                "memory_total_mb": round(mem.total / (1024 * 1024)),
+                "memory_available_mb": round(mem.available / (1024 * 1024)),
+                "memory_cache_mb": round(mem_cache_bytes / (1024 * 1024)),
+                "swap_total_mb": round(swap.total / (1024 * 1024)),
+                "swap_used_mb": round(swap.used / (1024 * 1024)),
+                "swap_percent": swap.percent,
+                "disk_percent": disk.percent,
+                "disk_used_gb": round(disk.used / (1024 * 1024 * 1024), 1),
+                "disk_total_gb": round(disk.total / (1024 * 1024 * 1024), 1),
+                "temperature": next(iter(temps.values()), None),
+            }
+        except ImportError:
+            pass
 
     # --- WFB radio snapshot, read once and reused below ---
     # Build the wfb status dict here (once) so both the ground-station

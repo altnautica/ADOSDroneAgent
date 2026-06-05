@@ -21,6 +21,10 @@ pub struct MemInfo {
     pub available: Option<u64>,
     /// `SwapFree` in bytes, when present.
     pub swap_free: Option<u64>,
+    /// `Buffers` + `Cached` in bytes (the reclaimable page cache), when present.
+    pub cache: Option<u64>,
+    /// `SwapTotal` in bytes, when present.
+    pub swap_total: Option<u64>,
 }
 
 /// Read and parse `/proc/meminfo`. Returns a default (all-`None`) [`MemInfo`]
@@ -37,6 +41,9 @@ pub fn read_meminfo(root: &Path) -> MemInfo {
 /// is in kibibytes and is converted to bytes. Unknown keys are ignored.
 pub fn parse_meminfo(text: &str) -> MemInfo {
     let mut info = MemInfo::default();
+    // `Buffers` and `Cached` together are the reclaimable page cache the operator
+    // sees as "cache"; accumulate both into the one `cache` field.
+    let (mut buffers, mut cached) = (None, None);
     for line in text.lines() {
         let Some((key, rest)) = line.split_once(':') else {
             continue;
@@ -53,8 +60,14 @@ pub fn parse_meminfo(text: &str) -> MemInfo {
             "MemTotal" => info.total = Some(bytes),
             "MemAvailable" => info.available = Some(bytes),
             "SwapFree" => info.swap_free = Some(bytes),
+            "SwapTotal" => info.swap_total = Some(bytes),
+            "Buffers" => buffers = Some(bytes),
+            "Cached" => cached = Some(bytes),
             _ => {}
         }
+    }
+    if buffers.is_some() || cached.is_some() {
+        info.cache = Some(buffers.unwrap_or(0).saturating_add(cached.unwrap_or(0)));
     }
     info
 }
@@ -134,6 +147,7 @@ MemTotal:        8123456 kB
 MemFree:          512000 kB
 MemAvailable:    6543210 kB
 Buffers:           12345 kB
+Cached:           54321 kB
 SwapTotal:       1000000 kB
 SwapFree:         999000 kB
 ";
@@ -141,6 +155,9 @@ SwapFree:         999000 kB
         assert_eq!(info.total, Some(8_123_456 * 1024));
         assert_eq!(info.available, Some(6_543_210 * 1024));
         assert_eq!(info.swap_free, Some(999_000 * 1024));
+        assert_eq!(info.swap_total, Some(1_000_000 * 1024));
+        // cache = Buffers + Cached.
+        assert_eq!(info.cache, Some((12_345 + 54_321) * 1024));
     }
 
     #[test]

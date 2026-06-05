@@ -48,10 +48,58 @@ pub fn parse_vmstat(text: &str) -> VmStat {
     out
 }
 
+/// The 1/5/15-minute load averages from `/proc/loadavg`.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct LoadAvg {
+    /// 1-minute load average.
+    pub one: f64,
+    /// 5-minute load average.
+    pub five: f64,
+    /// 15-minute load average.
+    pub fifteen: f64,
+}
+
+/// Read and parse `/proc/loadavg`. `None` when the file is absent or malformed.
+pub fn read_loadavg(root: &Path) -> Option<LoadAvg> {
+    let path = under(root, "/proc/loadavg");
+    let text = std::fs::read_to_string(&path).ok()?;
+    parse_loadavg(&text)
+}
+
+/// Parse `/proc/loadavg`: `<1m> <5m> <15m> <running>/<total> <lastpid>`. Returns
+/// `None` unless the first three whitespace-separated fields parse as floats.
+pub fn parse_loadavg(text: &str) -> Option<LoadAvg> {
+    let mut f = text.split_whitespace();
+    let one = f.next()?.parse::<f64>().ok()?;
+    let five = f.next()?.parse::<f64>().ok()?;
+    let fifteen = f.next()?.parse::<f64>().ok()?;
+    Some(LoadAvg { one, five, fifteen })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn parses_loadavg_three_fields() {
+        let la = parse_loadavg("0.52 0.40 0.31 2/512 12345\n").unwrap();
+        assert!((la.one - 0.52).abs() < 1e-9);
+        assert!((la.five - 0.40).abs() < 1e-9);
+        assert!((la.fifteen - 0.31).abs() < 1e-9);
+    }
+
+    #[test]
+    fn loadavg_none_on_garbage() {
+        assert!(parse_loadavg("").is_none());
+        assert!(parse_loadavg("x y z\n").is_none());
+    }
+
+    #[test]
+    fn read_loadavg_is_none_for_a_missing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(read_loadavg(dir.path()).is_none());
+    }
 
     #[test]
     fn parses_page_fault_counters() {

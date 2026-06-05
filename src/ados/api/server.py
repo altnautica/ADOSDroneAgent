@@ -94,8 +94,11 @@ def create_app(agent: Any) -> FastAPI:
     # trusted local socket; there is no in-process buffer to install.
     @app.on_event("shutdown")
     async def _close_observability_clients() -> None:
+        from ados.api import telemetry_source
+
         await logs.aclose_clients()
         await observability.aclose_client()
+        await telemetry_source.aclose()
 
     # Health check. Moved off `/` so the ground-station static mount
     # can own the root path (`/` -> `static-ground/index.html`).

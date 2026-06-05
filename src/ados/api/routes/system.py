@@ -83,7 +83,38 @@ async def get_time() -> dict[str, Any]:
 
 @router.get("/system")
 async def get_system_resources():
-    """Return CPU, memory, disk, and temperature info."""
+    """Return CPU, memory, disk, and temperature info.
+
+    Primary source is the durable logging store's hardware snapshots (one
+    sampler, the Rust collector). If the store is unreachable or has not yet
+    captured the essential fields, this falls back to a live ``psutil`` read so
+    the route degrades to its old behavior, never to a 500.
+    """
+    import os
+
+    from ados.api.telemetry_source import derive_resources, latest_hw_signals
+
+    signals = await latest_hw_signals()
+    if signals is not None:
+        r = derive_resources(signals)
+        if r is not None:
+            return {
+                "cpu_percent": r["cpu_percent"],
+                "cpu_count": os.cpu_count(),
+                "memory_total_mb": r["memory_total_mb"],
+                "memory_used_mb": r["memory_used_mb"],
+                "memory_available_mb": r["memory_available_mb"],
+                "memory_cache_mb": r["memory_cache_mb"],
+                "memory_percent": r["memory_percent"],
+                "swap_total_mb": r["swap_total_mb"],
+                "swap_used_mb": r["swap_used_mb"],
+                "swap_percent": r["swap_percent"],
+                "disk_total_gb": r["disk_total_gb"],
+                "disk_used_gb": r["disk_used_gb"],
+                "disk_percent": r["disk_percent"],
+                "temperatures": r["temperatures"],
+            }
+
     try:
         import psutil
 

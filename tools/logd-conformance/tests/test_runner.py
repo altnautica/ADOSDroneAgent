@@ -61,6 +61,24 @@ _FULL_LOGS = [
     {"id": 1, "ts_us": 123, "level": "INFO", "source": "ados-radio", "msg": "hi"}
 ]
 
+_FULL_HW = [
+    {
+        "id": 1,
+        "ts_us": 123,
+        "signals": {
+            "mem.total_bytes": 4_000_000_000,
+            "mem.avail_bytes": 1_000_000_000,
+            "mem.cache_bytes": 500_000_000,
+            "mem.swap_total_bytes": 1_000_000_000,
+            "disk.fs_total_bytes": 32_000_000_000,
+            "disk.fs_used_bytes": 8_000_000_000,
+            "sched.loadavg_1": 0.5,
+            "thermal.primary_c": 48.0,
+            "cpu.util.all": 12.0,
+        },
+    }
+]
+
 _SERVICE_EVENT = {
     "id": 1,
     "ts_us": 1,
@@ -87,7 +105,12 @@ _LEGACY_LOGS = [
 
 
 def test_full_superset_passes_every_field():
-    rows = {"logs": _FULL_LOGS, "metrics": _FULL_METRICS, "events": [_SERVICE_EVENT]}
+    rows = {
+        "logs": _FULL_LOGS,
+        "metrics": _FULL_METRICS,
+        "events": [_SERVICE_EVENT],
+        "hw": _FULL_HW,
+    }
     fetcher = Fetcher([_logd_client(rows)], _legacy_client(_LEGACY_LOGS))
     report = run_conformance(fetcher, initial_routes())
     assert report.ok

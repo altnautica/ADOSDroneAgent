@@ -10,8 +10,16 @@ def test_initial_set_has_the_expected_routes():
         "link-metrics",
         "video-metrics",
         "hw-summary",
+        "hw-snapshot",
         "service-events",
     ]
+
+
+def test_hw_snapshot_route_uses_the_signal_locator():
+    route = route_by_name("hw-snapshot")
+    assert route is not None
+    assert route.kind == "hw"
+    assert all(f.locator == Locator.SIGNAL for f in route.fields)
 
 
 def test_log_route_maps_every_legacy_entry_field():

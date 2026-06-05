@@ -65,7 +65,7 @@ async def _build_snapshot() -> dict[str, Any]:
     return {
         "agent": _collect_agent(),
         "board": _collect_board(),
-        "system": _collect_system(),
+        "system": await _collect_system(),
         "network": _collect_network(),
         "device": _collect_device(),
         "logs": {"agent": await _collect_logs("ados-agent", count=10)},
@@ -128,8 +128,37 @@ def _collect_board() -> dict[str, Any]:
         return {"name": "--", "soc": "unknown", "arch": "unknown", "ram_total_mb": 0}
 
 
-def _collect_system() -> dict[str, Any]:
-    """System metrics (CPU / RAM / disk / temp / load avg)."""
+async def _collect_system() -> dict[str, Any]:
+    """System metrics (CPU / RAM / disk / temp / load avg).
+
+    Primary source is the logging store's hardware snapshots (the Rust collector
+    is the single sampler); falls back to a live ``psutil`` read when the store is
+    unreachable or has not yet captured the essential fields.
+    """
+    from ados.api.telemetry_source import derive_resources, latest_hw_signals
+
+    signals = await latest_hw_signals()
+    if signals is not None:
+        r = derive_resources(signals)
+        if r is not None:
+            load = r["load_avg"]
+            if len(load) != 3:
+                try:
+                    load = list(os.getloadavg())
+                except (AttributeError, OSError):
+                    load = [0.0, 0.0, 0.0]
+            return {
+                "cpu_percent": r["cpu_percent"],
+                "memory_used_mb": int(r["memory_used_mb"]),
+                "memory_total_mb": int(r["memory_total_mb"]),
+                "disk_used_gb": r["disk_used_gb"],
+                "disk_total_gb": r["disk_total_gb"],
+                "temp_c": r["temperature"]
+                if r["temperature"] is not None
+                else _read_cpu_temp(),
+                "load_avg": [round(float(v), 2) for v in load],
+            }
+
     try:
         import psutil
 

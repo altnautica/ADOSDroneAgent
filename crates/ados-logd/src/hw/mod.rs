@@ -50,11 +50,11 @@ use ados_protocol::logd::{HwSnapshot, IngestFrame, TelemetryFrame};
 use crate::writer::now_us;
 
 use self::cpu::{read_cpufreq, read_proc_stat, util_pct, ProcStat};
-use self::disk::read_diskstats;
+use self::disk::{read_diskstats, read_fs_usage};
 use self::memory::{read_meminfo, read_pressure};
 use self::net::read_iface_stats;
 use self::power::{read_power_rails, RailKind};
-use self::sched::read_vmstat;
+use self::sched::{read_loadavg, read_vmstat};
 use self::soc::{detect_soc, SocFamily, SocInfo};
 use self::thermal::{read_hwmon_temps, read_thermal_zones};
 use self::throttle::{read_throttle, Throttle};
@@ -328,6 +328,16 @@ impl Collector {
                 snap.signals
                     .insert("mem.swap_free_bytes".to_string(), MpVal::from(swap_free));
             }
+            if let Some(swap_total) = mem.swap_total {
+                any = true;
+                snap.signals
+                    .insert("mem.swap_total_bytes".to_string(), MpVal::from(swap_total));
+            }
+            if let Some(cache) = mem.cache {
+                any = true;
+                snap.signals
+                    .insert("mem.cache_bytes".to_string(), MpVal::from(cache));
+            }
             // PSI: one `some` line per resource, avg10 is the chart-friendly value.
             let mut psi_any = false;
             for resource in ["cpu", "memory", "io"] {
@@ -413,6 +423,26 @@ impl Collector {
                 any = true;
                 snap.signals
                     .insert("sched.pgmajfault".to_string(), MpVal::from(pmf));
+            }
+            // Filesystem capacity of the root mount, via statvfs on the live FS
+            // (like the summary `disk.used_pct`, not a fixture read). Total + used
+            // bytes back the operator disk-usage readouts.
+            if let Some((total, used)) = read_fs_usage(&self.root) {
+                any = true;
+                snap.signals
+                    .insert("disk.fs_total_bytes".to_string(), MpVal::from(total));
+                snap.signals
+                    .insert("disk.fs_used_bytes".to_string(), MpVal::from(used));
+            }
+            // Load averages from `/proc/loadavg`.
+            if let Some(la) = read_loadavg(&self.root) {
+                any = true;
+                snap.signals
+                    .insert("sched.loadavg_1".to_string(), MpVal::from(la.one));
+                snap.signals
+                    .insert("sched.loadavg_5".to_string(), MpVal::from(la.five));
+                snap.signals
+                    .insert("sched.loadavg_15".to_string(), MpVal::from(la.fifteen));
             }
             if !any {
                 unavailable += 1;
@@ -764,8 +794,9 @@ mod tests {
         // meminfo + PSI.
         w(
             "proc/meminfo",
-            "MemTotal: 4000000 kB\nMemAvailable: 3000000 kB\nSwapFree: 0 kB\n",
+            "MemTotal: 4000000 kB\nMemAvailable: 3000000 kB\nBuffers: 100000 kB\nCached: 300000 kB\nSwapTotal: 1000000 kB\nSwapFree: 800000 kB\n",
         );
+        w("proc/loadavg", "0.50 0.40 0.30 1/200 9999\n");
         w(
             "proc/pressure/cpu",
             "some avg10=1.50 avg60=0.50 avg300=0.10 total=42\n",
@@ -817,6 +848,9 @@ mod tests {
         );
         assert!(has("mem.total_bytes"), "mem total");
         assert!(has("mem.avail_bytes"), "mem avail");
+        assert!(has("mem.cache_bytes"), "mem cache (buffers + cached)");
+        assert!(has("mem.swap_total_bytes"), "swap total");
+        assert!(has("sched.loadavg_1"), "load average");
         assert!(has("mem.psi.cpu.some.avg10"), "psi cpu avg10");
         assert!(has("net.eth0.rx_bytes"), "net rx bytes");
         assert!(has("disk.mmcblk0.rd_sectors"), "disk read sectors");
