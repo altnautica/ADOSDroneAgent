@@ -251,16 +251,16 @@ def update(check_only: bool, yes: bool, as_json: bool) -> None:
     if not yes:
         click.confirm(f"Install {new_version} now?", abort=True)
 
-    click.echo("Downloading and installing...")
-    result = _request("POST", "/api/ota/install", timeout=300.0)
-    if result.get("status") == "error":
-        raise click.ClickException(str(result.get("message", "Update failed")))
-    click.echo("Restarting agent service...")
-    try:
-        restart = _request("POST", "/api/ota/restart", timeout=30.0)
-        click.echo(str(restart.get("message", "Restart requested.")))
-    except click.ClickException:
-        click.echo("Restart requested. The service may already be restarting.")
+    from ados.cli import update_ui
+
+    # Interactive (a live phase checklist + download bar + closing card) when
+    # stderr is a terminal; plain line output when piped / `--json`.
+    update_ui.run(
+        _request,
+        current_version=str(version),
+        new_version=str(new_version),
+        interactive=sys.stderr.isatty() and not as_json,
+    )
 
 
 # Install orchestration contract paths. The installer writes a machine
