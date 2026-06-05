@@ -424,16 +424,6 @@ impl Collector {
                 snap.signals
                     .insert("sched.pgmajfault".to_string(), MpVal::from(pmf));
             }
-            // Filesystem capacity of the root mount, via statvfs on the live FS
-            // (like the summary `disk.used_pct`, not a fixture read). Total + used
-            // bytes back the operator disk-usage readouts.
-            if let Some((total, used)) = read_fs_usage(&self.root) {
-                any = true;
-                snap.signals
-                    .insert("disk.fs_total_bytes".to_string(), MpVal::from(total));
-                snap.signals
-                    .insert("disk.fs_used_bytes".to_string(), MpVal::from(used));
-            }
             // Load averages from `/proc/loadavg`.
             if let Some(la) = read_loadavg(&self.root) {
                 any = true;
@@ -500,6 +490,17 @@ impl Collector {
                 }
                 if let Some(used_pct) = self::disk::read_fs_used_pct(&self.root) {
                     push_metric(&mut metrics, ts, "disk.used_pct", used_pct, &[]);
+                }
+                // Filesystem total + used bytes (statvfs on the live root mount).
+                // Gated with the rest of the summary on a non-empty snapshot so a
+                // board that read nothing else emits no row — statvfs ignores the
+                // collector's injected root, so this must not run for an empty
+                // fixture tree that has no other signals.
+                if let Some((total, used)) = read_fs_usage(&self.root) {
+                    snap.signals
+                        .insert("disk.fs_total_bytes".to_string(), MpVal::from(total));
+                    snap.signals
+                        .insert("disk.fs_used_bytes".to_string(), MpVal::from(used));
                 }
             }
         }
