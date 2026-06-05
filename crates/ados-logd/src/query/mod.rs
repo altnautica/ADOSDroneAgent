@@ -231,6 +231,9 @@ fn bind_unix(path: &Path) -> std::io::Result<UnixListener> {
     #[cfg(target_os = "linux")]
     {
         use std::os::unix::fs::PermissionsExt;
+        // Group-own to `ados` first, then set the mode: the 0o660 grant only
+        // reaches a non-root operator once the group owns the socket.
+        crate::set_ados_group(path);
         let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o660));
     }
     Ok(listener)
@@ -384,9 +387,13 @@ mod tests {
     ) -> (Harness, mpsc::Sender<IngestFrame>) {
         let db_path = dir.join("logs.db");
         let (ingest_tx, ingest_rx) = mpsc::channel::<IngestFrame>(256);
-        let writer =
-            crate::writer::Writer::new(&db_path, ingest_rx, crate::writer::WriterConfig::default())
-                .unwrap();
+        let writer = crate::writer::Writer::new(
+            &db_path,
+            ingest_rx,
+            crate::writer::WriterConfig::default(),
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        )
+        .unwrap();
         let mark_tx = writer.control_handle();
         let writer_thread = std::thread::spawn(move || writer.run().unwrap());
         let h = start_with_control(dir, pairing_body, db_path, mark_tx, Some(writer_thread)).await;

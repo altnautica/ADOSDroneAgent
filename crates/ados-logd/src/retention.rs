@@ -33,6 +33,7 @@
 //! Every window, cap, batch size, and cadence is a constant in this one place.
 
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use rusqlite::{params, Connection};
@@ -47,8 +48,10 @@ pub const DEFAULT_RAW_RETENTION: Duration = Duration::from_secs(30 * 24 * 60 * 6
 pub const DEFAULT_ROLLUP_RETENTION: Duration = Duration::from_secs(365 * 24 * 60 * 60);
 
 /// Default high-water size cap for the store (file plus WAL). Above this the
-/// oldest raw rows are evicted down to the low-water mark.
-pub const DEFAULT_MAX_BYTES: u64 = 4_000_000_000;
+/// oldest raw rows are evicted down to the low-water mark. Sized for SBC SD/eMMC
+/// flash: a 1 GB store evicts to ~850 MB at the default low-water ratio, keeping
+/// the post-eviction `VACUUM` fast enough to finish inside the shutdown bound.
+pub const DEFAULT_MAX_BYTES: u64 = 1_000_000_000;
 
 /// Default low-water ratio: eviction runs until the store is at or below this
 /// fraction of the cap, so it does not run on every single pass once near the
@@ -185,12 +188,19 @@ const RAW_TABLES: [&str; 4] = ["logs", "metrics", "events", "hw"];
 ///
 /// Order is rollup → raw TTL → rollup TTL → size-cap eviction → optional vacuum.
 /// Rollup runs first so no metric row is deleted before it is downsampled.
+///
+/// `stop` is the daemon's shutdown-pending flag: the cheap deletes always run, but
+/// the one long, uninterruptible step (`VACUUM`) is skipped when a stop is in
+/// flight so it can never overrun the writer-join bound and get torn mid-rewrite
+/// (which would leave the WAL needing recovery on the next start). The file simply
+/// stays above the low-water mark until the next pass after a clean start vacuums.
 pub fn run_maintenance(
     conn: &Connection,
     cfg: &RetentionConfig,
     now_us: i64,
     db_path: &Path,
     do_vacuum: bool,
+    stop: &AtomicBool,
 ) -> Result<MaintenanceReport, rusqlite::Error> {
     // Step 1: roll up closed metric windows before any raw row can age out.
     let rolled_up_rows = roll_up(conn, now_us)?;
@@ -212,7 +222,7 @@ pub fn run_maintenance(
     // flushes those frames back into the (now compact) main file and shrinks the
     // `-wal` sidecar — without it the on-disk footprint (main + WAL) would stay
     // above the cap even though the logical data is small.
-    let vacuumed = if do_vacuum || eviction.rows > 0 {
+    let vacuumed = if (do_vacuum || eviction.rows > 0) && !stop.load(Ordering::Relaxed) {
         conn.execute_batch("VACUUM")?;
         conn.pragma_update(None, "wal_checkpoint", "TRUNCATE")?;
         true
@@ -740,7 +750,8 @@ mod tests {
         seed_metric(&conn, recent, "cpu.util.all", 2.0);
         seed_log(&conn, recent);
 
-        let report = run_maintenance(&conn, &cfg, now, &path, false).unwrap();
+        let report =
+            run_maintenance(&conn, &cfg, now, &path, false, &AtomicBool::new(false)).unwrap();
         assert!(report.ttl_deleted_rows >= 2, "old rows were TTL-deleted");
         // The old metric was rolled up before deletion, so its long-horizon shape
         // survives even though the raw row is gone.
@@ -787,7 +798,8 @@ mod tests {
         )
         .unwrap();
 
-        let report = run_maintenance(&conn, &cfg, now, &path, false).unwrap();
+        let report =
+            run_maintenance(&conn, &cfg, now, &path, false, &AtomicBool::new(false)).unwrap();
         assert!(
             report.rollup_ttl_deleted_rows >= 1,
             "the two-year-old rollup bucket was reaped"
@@ -858,7 +870,8 @@ mod tests {
             cfg.max_bytes
         );
 
-        let report = run_maintenance(&conn, &cfg, now, &path, false).unwrap();
+        let report =
+            run_maintenance(&conn, &cfg, now, &path, false, &AtomicBool::new(false)).unwrap();
         assert!(report.had_eviction(), "eviction ran when over the cap");
         assert!(report.evicted_rows > 0);
         // Oldest-first: the freed span starts at the very oldest row.
@@ -890,9 +903,10 @@ mod tests {
         let (_dir, path, conn) = temp_store();
         let now = BASE_US;
         seed_metric(&conn, now - 1_000, "cpu.util.all", 1.0);
-        // The default 4 GB cap is far above a tiny store: no eviction.
+        // The default 1 GB cap is far above a tiny store: no eviction.
         let cfg = RetentionConfig::default();
-        let report = run_maintenance(&conn, &cfg, now, &path, false).unwrap();
+        let report =
+            run_maintenance(&conn, &cfg, now, &path, false, &AtomicBool::new(false)).unwrap();
         assert!(!report.had_eviction());
         assert_eq!(report.evicted_rows, 0);
         assert_eq!(report.evicted_from_us, None);
@@ -904,10 +918,57 @@ mod tests {
         let now = BASE_US;
         seed_metric(&conn, now - 1_000, "cpu.util.all", 1.0);
         let cfg = RetentionConfig::default();
-        let report = run_maintenance(&conn, &cfg, now, &path, true).unwrap();
+        let report =
+            run_maintenance(&conn, &cfg, now, &path, true, &AtomicBool::new(false)).unwrap();
         assert!(report.vacuumed, "vacuum runs on the periodic cadence");
         // The store still passes its integrity check after a vacuum.
         db::integrity_check(&conn).unwrap();
+    }
+
+    #[test]
+    fn periodic_vacuum_skipped_when_stopping() {
+        let (_dir, path, conn) = temp_store();
+        let now = BASE_US;
+        seed_metric(&conn, now - 1_000, "cpu.util.all", 1.0);
+        let cfg = RetentionConfig::default();
+        // Even with the periodic cadence due (`do_vacuum = true`), a stop in flight
+        // must skip the rewrite so it cannot overrun the shutdown join.
+        let report =
+            run_maintenance(&conn, &cfg, now, &path, true, &AtomicBool::new(true)).unwrap();
+        assert!(
+            !report.vacuumed,
+            "the periodic vacuum is skipped while stopping"
+        );
+    }
+
+    #[test]
+    fn eviction_runs_but_vacuum_is_skipped_when_stopping() {
+        let (_dir, path, conn) = temp_store();
+        let now = BASE_US;
+        // Same over-cap seed as the eviction test, so eviction must trigger.
+        seed_bulk_logs(&conn, now, 70_000, 512);
+        conn.pragma_update(None, "wal_checkpoint", "TRUNCATE")
+            .unwrap();
+        let cfg = RetentionConfig {
+            max_bytes: MIN_MAX_BYTES,
+            low_water_ratio: 0.5,
+            ..RetentionConfig::default()
+        }
+        .clamped();
+        assert!(
+            store_size_bytes(&path) > cfg.max_bytes,
+            "the bulk seed must exceed the cap to exercise eviction"
+        );
+        // The cheap deletes still run; only the trailing VACUUM is withheld, so the
+        // file stays above the low-water mark until the next pass after a clean start.
+        let report =
+            run_maintenance(&conn, &cfg, now, &path, false, &AtomicBool::new(true)).unwrap();
+        assert!(report.had_eviction(), "eviction still runs while stopping");
+        assert!(report.evicted_rows > 0);
+        assert!(
+            !report.vacuumed,
+            "the post-eviction vacuum is skipped while stopping"
+        );
     }
 
     #[test]
@@ -934,7 +995,8 @@ mod tests {
     fn maintenance_on_an_empty_store_is_a_clean_no_op() {
         let (_dir, path, conn) = temp_store();
         let cfg = RetentionConfig::default();
-        let report = run_maintenance(&conn, &cfg, BASE_US, &path, false).unwrap();
+        let report =
+            run_maintenance(&conn, &cfg, BASE_US, &path, false, &AtomicBool::new(false)).unwrap();
         assert_eq!(report, MaintenanceReport::default());
     }
 

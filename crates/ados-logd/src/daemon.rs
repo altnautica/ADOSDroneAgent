@@ -17,6 +17,7 @@
 //! and unlink the sockets.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -173,10 +174,20 @@ where
     // The bridge from the async accept loop to the blocking writer thread.
     let (ingest_tx, ingest_rx) = mpsc::channel(INGEST_QUEUE_CAPACITY);
 
+    // The shutdown-pending flag, shared with the writer thread. Set the instant a
+    // stop begins so the writer never starts a maintenance pass (and its `VACUUM`)
+    // during the drain window, which could overrun the bounded writer join.
+    let stop = Arc::new(AtomicBool::new(false));
+
     // Build the writer on the daemon thread (so an open error surfaces here),
     // then move it onto its own dedicated OS thread to run the blocking loop.
-    let writer = Writer::new(&paths.db, ingest_rx, WriterConfig::default())
-        .context("open writer connection")?;
+    let writer = Writer::new(
+        &paths.db,
+        ingest_rx,
+        WriterConfig::default(),
+        Arc::clone(&stop),
+    )
+    .context("open writer connection")?;
     let boot_session = writer.boot_session();
     // The broadcast handle is the seam the live tail subscribes to; held so the
     // channel stays open for the daemon's lifetime, and cloned into the query
@@ -280,6 +291,9 @@ where
         }
     }
     tracing::info!("logging store stopping");
+    // Signal the writer before any teardown await so it cannot start a new
+    // maintenance pass while the channel is draining toward the bounded join.
+    stop.store(true, Ordering::SeqCst);
     sd_stopping();
 
     // Stop the read surface first: it holds no ingest sender, so stopping it

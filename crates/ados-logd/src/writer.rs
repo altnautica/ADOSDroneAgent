@@ -17,6 +17,8 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use rusqlite::{params, Connection};
@@ -156,6 +158,10 @@ pub struct Writer {
     /// after each vacuum (a maintenance pass that vacuums for any reason resets
     /// this).
     next_vacuum: Instant,
+    /// The daemon's shutdown-pending flag. While set, the writer starts no new
+    /// maintenance pass and skips the `VACUUM` inside one already mid-flight, so a
+    /// long rewrite can never overrun the shutdown bound and be torn mid-write.
+    stop: Arc<AtomicBool>,
 }
 
 impl Writer {
@@ -167,6 +173,7 @@ impl Writer {
         db_path: impl AsRef<Path>,
         rx: mpsc::Receiver<IngestFrame>,
         mut config: WriterConfig,
+        stop: Arc<AtomicBool>,
     ) -> Result<Self, WriterError> {
         let db_path = db_path.as_ref().to_path_buf();
         let conn = db::open(&db_path)?;
@@ -199,6 +206,7 @@ impl Writer {
             frames_since_checkpoint: 0,
             next_maintenance,
             next_vacuum,
+            stop,
         })
     }
 
@@ -335,6 +343,12 @@ impl Writer {
     /// eviction). When the pass evicts rows it records a `retention.evicted`
     /// event so the operator and the read API see that history was pruned.
     fn maybe_run_maintenance(&mut self) -> Result<(), WriterError> {
+        // Do not start a pass once shutdown is in flight: the daemon is draining
+        // the channel toward a bounded join, and the pass's `VACUUM` could overrun
+        // it. The next pass after a clean start reclaims any deferred space.
+        if self.stop.load(Ordering::Relaxed) {
+            return Ok(());
+        }
         let now = Instant::now();
         if now < self.next_maintenance {
             return Ok(());
@@ -348,6 +362,7 @@ impl Writer {
             now_us(),
             &self.db_path,
             do_vacuum,
+            &self.stop,
         )?;
         // A pass that vacuumed for any reason (the cadence, or post-eviction)
         // resets the vacuum cadence so the next periodic vacuum is a full
@@ -793,7 +808,7 @@ mod tests {
     /// thread has committed and exited so the DB is safe to read.
     fn run_writer_to_completion(path: &Path, config: WriterConfig, frames: Vec<IngestFrame>) {
         let (tx, rx) = mpsc::channel::<IngestFrame>(64);
-        let writer = Writer::new(path, rx, config).unwrap();
+        let writer = Writer::new(path, rx, config, Arc::new(AtomicBool::new(false))).unwrap();
         let handle = std::thread::spawn(move || writer.run().unwrap());
         // A small blocking runtime feeds the async-side sender from this test
         // thread; the writer itself is the blocking thread above.
@@ -1048,7 +1063,7 @@ mod tests {
         // sends to make progress (proving the loop runs), large enough not to
         // deadlock the feed.
         let (tx, rx) = mpsc::channel::<IngestFrame>(4096);
-        let writer = Writer::new(&path, rx, config).unwrap();
+        let writer = Writer::new(&path, rx, config, Arc::new(AtomicBool::new(false))).unwrap();
         let handle = std::thread::spawn(move || writer.run().unwrap());
 
         let rt = tokio::runtime::Builder::new_current_thread()
@@ -1215,7 +1230,13 @@ mod tests {
         // the writer's own connection) while the store stays consistent.
         let (_dir, path) = temp_db();
         let (tx, rx) = mpsc::channel::<IngestFrame>(64);
-        let writer = Writer::new(&path, rx, WriterConfig::default()).unwrap();
+        let writer = Writer::new(
+            &path,
+            rx,
+            WriterConfig::default(),
+            Arc::new(AtomicBool::new(false)),
+        )
+        .unwrap();
         let control = writer.control_handle();
         let handle = std::thread::spawn(move || writer.run().unwrap());
 
@@ -1293,7 +1314,13 @@ mod tests {
         // stall ingest).
         let (_dir, path) = temp_db();
         let (tx, rx) = mpsc::channel::<IngestFrame>(64);
-        let writer = Writer::new(&path, rx, WriterConfig::default()).unwrap();
+        let writer = Writer::new(
+            &path,
+            rx,
+            WriterConfig::default(),
+            Arc::new(AtomicBool::new(false)),
+        )
+        .unwrap();
         let control = writer.control_handle();
         let handle = std::thread::spawn(move || writer.run().unwrap());
 

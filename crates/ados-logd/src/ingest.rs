@@ -153,6 +153,9 @@ impl IngestSocket {
         #[cfg(target_os = "linux")]
         {
             use std::os::unix::fs::PermissionsExt;
+            // Group-own to `ados` first, then set the mode: the 0o660 grant only
+            // reaches a non-root group member once the group owns the socket.
+            crate::set_ados_group(&path);
             let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o660));
         }
         Ok(Self { listener, path })

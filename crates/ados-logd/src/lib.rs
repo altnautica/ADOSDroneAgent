@@ -40,3 +40,56 @@ pub mod paths {
     /// TCP port for the LAN read plane (authenticated, rate-limited).
     pub const QUERY_TCP_PORT: u16 = 8090;
 }
+
+/// Hand a freshly-bound socket to the `ados` group so a non-root operator in that
+/// group can reach the trusted local plane. The bind sets the mode to `0o660`,
+/// which only grants the group once the group actually owns the file — without
+/// this the socket stays owned by the daemon's group (root) and a group member
+/// falls in "other" with no access. Best-effort: the installer creates the group,
+/// and when it is absent (a dev host) this is a quiet no-op so bring-up stays
+/// automatic. Linux-only; a stub elsewhere.
+#[cfg(target_os = "linux")]
+pub(crate) fn set_ados_group(path: &std::path::Path) {
+    set_socket_group(path, "ados");
+}
+
+/// The testable core of [`set_ados_group`], parameterized over the group name so
+/// a test can drive the absent-group path deterministically.
+#[cfg(target_os = "linux")]
+fn set_socket_group(path: &std::path::Path, group: &str) {
+    match nix::unistd::Group::from_name(group) {
+        Ok(Some(g)) => {
+            if let Err(err) = nix::unistd::chown(path, None, Some(g.gid)) {
+                tracing::debug!(error = %err, path = %path.display(), group, "chgrp socket failed");
+            }
+        }
+        Ok(None) => {
+            tracing::debug!(group, "group not present; leaving socket group as-is");
+        }
+        Err(err) => {
+            tracing::debug!(error = %err, group, "resolving group failed");
+        }
+    }
+}
+
+/// Non-Linux stub: socket group ownership is a Linux-only concern. Unused on a
+/// dev host (the call sites are themselves Linux-gated), hence the allow.
+#[cfg(not(target_os = "linux"))]
+#[allow(dead_code)]
+pub(crate) fn set_ados_group(_path: &std::path::Path) {}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::set_socket_group;
+    use std::io::Write;
+
+    #[test]
+    fn set_socket_group_is_a_noop_for_an_absent_group() {
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        f.write_all(b"x").unwrap();
+        let path = f.path().to_path_buf();
+        // A group that cannot exist must not panic and must leave the file intact.
+        set_socket_group(&path, "definitely-not-a-real-group-xyzzy");
+        assert!(path.exists());
+    }
+}
