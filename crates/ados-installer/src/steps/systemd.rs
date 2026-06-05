@@ -61,6 +61,17 @@ const GROUND_STATION_ENABLE_UNITS: &[&str] = &[
     "ados-cloud-relay.service",
 ];
 
+/// Units the agent shipped in a prior release but has since deleted. The
+/// installer prunes these on every run so an `--upgrade` from an older version
+/// leaves no orphaned unit lingering in `/etc/systemd/system` — a unit whose
+/// code is gone would otherwise sit there inactive forever (and could surface in
+/// `systemctl --failed`). Append a name here the moment a unit is removed from
+/// `data/systemd`. Deliberately an explicit list, NOT a "remove anything not in
+/// the source set" sweep: the runtime-written plugin slice (`ados-plugins.slice`)
+/// and the per-plugin subprocess units legitimately live outside `data/systemd`
+/// and must never be pruned.
+const RETIRED_UNITS: &[&str] = &["ados-scripting.service"];
+
 /// The other-profile teardown list, keyed by the profile being installed
 /// (`disable_other_profile_units`). On a GS rig the drone TX unit must not run;
 /// on a drone rig every GS-only unit gets disabled.
@@ -526,6 +537,27 @@ fn enable_if_present(unit: &str) {
     }
 }
 
+/// Prune units retired in a prior release: stop, disable (while the file still
+/// exists so systemd can read its `[Install]` section and drop the `.wants`
+/// symlinks), reset any failed state, then delete the unit file and any drop-in
+/// dir. Idempotent — a unit already gone is a clean no-op. Must run before the
+/// `daemon-reload` so the removal is visible to systemd in the same install.
+fn prune_retired_units() {
+    for unit in RETIRED_UNITS {
+        let path = Path::new(SYSTEMD_DIR).join(unit);
+        let dropin = Path::new(SYSTEMD_DIR).join(format!("{unit}.d"));
+        let present = path.exists() || dropin.exists();
+        let _ = exec::run("systemctl", &["stop", unit]);
+        let _ = exec::run("systemctl", &["disable", unit]);
+        let _ = exec::run("systemctl", &["reset-failed", unit]);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir_all(&dropin);
+        if present {
+            tracing::info!(unit, "pruned retired systemd unit");
+        }
+    }
+}
+
 /// Tear down (stop + disable) units belonging to the other profile.
 fn disable_other_profile_units(profile: &str) {
     for unit in other_profile_units(profile) {
@@ -985,6 +1017,12 @@ impl Step for Systemd {
         };
         tracing::info!(count, "deployed systemd unit files");
 
+        // 1b. Prune units retired in a prior release so an `--upgrade` from an
+        //     older version leaves no orphaned unit file behind (e.g. a removed
+        //     service whose code is gone). Before the daemon-reload below so the
+        //     removal is visible to systemd in this same install.
+        prune_retired_units();
+
         // 2. /run/ados + tmpfiles, env file, plugin slice, udev rules.
         install_run_dir_tmpfiles();
         write_env_file();
@@ -1122,6 +1160,31 @@ mod tests {
         std::fs::write(src.path().join("unrelated.service"), "x").unwrap();
         let err = deploy_units(src.path()).unwrap_err();
         assert!(err.to_string().contains("no ados unit files"));
+    }
+
+    #[test]
+    fn retired_units_are_not_in_the_live_source_set() {
+        // A retired unit must NOT also ship in data/systemd, or the installer
+        // would deploy it and immediately prune it on every run. Guarded so the
+        // test is a clean no-op when the source tree is not resolvable.
+        let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/systemd");
+        if let Ok(read) = std::fs::read_dir(&src) {
+            let live: std::collections::HashSet<String> = read
+                .flatten()
+                .filter_map(|e| e.file_name().into_string().ok())
+                .collect();
+            for unit in RETIRED_UNITS {
+                assert!(
+                    !live.contains(*unit),
+                    "{unit} is in RETIRED_UNITS but still ships in data/systemd"
+                );
+            }
+        }
+        // The retired set names the deliberately-removed unit, and never the
+        // runtime-written plugin slice or a core unit.
+        assert!(RETIRED_UNITS.contains(&"ados-scripting.service"));
+        assert!(!RETIRED_UNITS.contains(&"ados-plugins.slice"));
+        assert!(!RETIRED_UNITS.contains(&"ados-supervisor.service"));
     }
 
     #[test]
