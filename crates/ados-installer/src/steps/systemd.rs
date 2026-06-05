@@ -988,6 +988,26 @@ fn provision_ados_identity() {
     }
 }
 
+/// Add the human operator (the user who ran the install under sudo) to the `ados`
+/// group, so on-box non-root RCA works without sudo: the logging store's query
+/// socket is group-owned by `ados` at mode 0o660, so a group member can run
+/// `ados logs query` directly. Idempotent; a no-op when there is no sudo operator
+/// (the install ran directly as root) or the operator is root. The membership
+/// takes effect on the operator's next login; a current session still uses sudo
+/// until it reconnects.
+fn add_operator_to_ados_group() {
+    let operator = match std::env::var("SUDO_USER") {
+        Ok(user) if !user.is_empty() && user != "root" => user,
+        _ => return,
+    };
+    if !exec::run_ok("getent", &["group", "ados"]) {
+        return;
+    }
+    if exec::run_ok("id", &[operator.as_str()]) {
+        let _ = exec::run("usermod", &["-aG", "ados", operator.as_str()]);
+    }
+}
+
 /// Add the `ados` and `pi` service users to the hardware-access groups the
 /// ground-station services need (GROUND-STATION only). Ports the
 /// `usermod -aG ...` bits of `enable_ground_station_units`:
@@ -1049,6 +1069,11 @@ impl Step for Systemd {
         // memberships all reference `ados:ados`; create it first so the
         // tmpfiles chown and the usermod resolve instead of silently no-opping.
         provision_ados_identity();
+
+        // Let the human operator read the logging store's query socket without
+        // sudo: the socket is group-owned by `ados` at 0o660, so add the sudo
+        // operator to the group. Idempotent; effective on their next login.
+        add_operator_to_ados_group();
 
         // 1. Deploy the unit files (Required — no units, no agent).
         let systemd_src = source.join("data/systemd");
