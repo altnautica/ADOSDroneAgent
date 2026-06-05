@@ -304,7 +304,6 @@ async def restart_service(name: str):
         "ados-ota",
         "ados-peripherals",
         "ados-pic",
-        "ados-scripting",
         "ados-uplink-router",
         "ados-video",
         "ados-wfb",

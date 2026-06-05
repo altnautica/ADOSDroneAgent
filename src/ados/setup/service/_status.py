@@ -43,7 +43,7 @@ async def build_setup_status(  # noqa: C901
 ) -> SetupStatus:
     """Build a complete setup status document from the API runtime facade."""
     config = runtime.config
-    port = int(getattr(config.scripting.rest_api, "port", 8080))
+    port = int(getattr(config.api.rest, "port", 8080))
     local_ips = _local_ips()
     mdns_host = "ados.local"
     if config.agent.device_id:

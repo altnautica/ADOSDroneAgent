@@ -176,7 +176,6 @@ profiles:
     - captive_portal
     - config_webapp
     - npu_vision
-    - scripting
     - ota_updater
     - sensor_manager
     - modem_manager

@@ -7,11 +7,11 @@ from typing import Any
 from pydantic import BaseModel, Field, model_validator
 
 from .agent import AgentConfig
+from .api import ApiConfig
 from .cloud import RemoteAccessConfig, ServerConfig
 from .ground_station import GroundStationConfig
 from .mavlink import MavlinkConfig
 from .network import NetworkConfig
-from .scripting import ScriptingConfig
 from .security import SecurityConfig
 from .system import (
     DiscoveryConfig,
@@ -33,7 +33,7 @@ class ADOSConfig(BaseModel):
     server: ServerConfig = ServerConfig()
     remote_access: RemoteAccessConfig = RemoteAccessConfig()
     security: SecurityConfig = SecurityConfig()
-    scripting: ScriptingConfig = ScriptingConfig()
+    api: ApiConfig = ApiConfig()
     ota: OtaConfig = OtaConfig()
     logging: LoggingConfig = LoggingConfig()
     pairing: PairingConfig = PairingConfig()

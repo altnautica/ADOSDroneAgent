@@ -167,7 +167,7 @@ class _ClientChannel:
 class MavlinkIPCServer:
     """Unix socket server that broadcasts MAVLink frames to all connected clients.
 
-    The MAVLink service writes FC data here. Other services (API, cloud, scripting)
+    The MAVLink service writes FC data here. Other services (API, cloud)
     connect and receive a copy of every frame. Clients can also send frames back
     (commands to FC).
     """

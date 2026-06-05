@@ -128,7 +128,7 @@ async def main() -> None:
         name="profile-seed",
     )
 
-    api_config = config.scripting.rest_api
+    api_config = config.api.rest
     # Bind explicit AF_INET + AF_INET6 sockets so both IPv4 and IPv6
     # clients reach the agent regardless of which family the browser's
     # mDNS resolver returns first. uvicorn alone with `host="::"` did

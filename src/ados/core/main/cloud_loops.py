@@ -124,22 +124,6 @@ async def cloud_command_poll_loop(app: AgentApp) -> None:  # noqa: C901
                                 svc_name = args.get("name", "") if args else ""
                                 msg = f"Service '{svc_name}' restart requested"
                                 result = {"success": True, "message": msg}
-                            elif command == "send_command":
-                                cmd_text = args.get("cmd", "") if args else ""
-                                if app._command_executor:
-                                    exec_result = await asyncio.wait_for(
-                                        app._command_executor.execute(cmd_text),
-                                        timeout=10.0,
-                                    )
-                                    result = {
-                                        "success": True,
-                                        "message": str(exec_result),
-                                    }
-                                else:
-                                    result = {
-                                        "success": False,
-                                        "message": "Command executor not available",
-                                    }
                             elif command == "scan_peripherals":
                                 result = {
                                     "success": True,

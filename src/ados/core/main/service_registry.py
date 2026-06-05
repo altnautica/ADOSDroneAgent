@@ -158,31 +158,6 @@ async def register_services(app: AgentApp) -> None:  # noqa: C901
         app._wfb_manager = DemoWfbManager()
         app._start_service("wfb-link", app._wfb_manager.run())
 
-    # Start Scripting Engine
-    if app.demo:
-        from ados.services.scripting.demo import DemoScriptingEngine
-        app._demo_scripting = DemoScriptingEngine()
-        app._start_service("scripting", app._demo_scripting.run())
-        log.info("scripting_demo_mode", msg="Demo scripting engine active")
-    else:
-        from ados.services.scripting.executor import CommandExecutor
-        from ados.services.scripting.safety import SafetyLimits, SafetyValidator
-        from ados.services.scripting.script_runner import ScriptRunner
-        from ados.services.scripting.text_listener import TextCommandListener
-
-        safety = SafetyValidator(SafetyLimits(), app._vehicle_state)
-        app._command_executor = CommandExecutor(
-            app._fc_connection, app._vehicle_state, safety,
-        )
-        listener = TextCommandListener(
-            app.config.scripting.text_commands, app._command_executor,
-        )
-        app._start_service("text-commands", listener.run())
-
-        app._script_runner = ScriptRunner(
-            app.config.scripting.scripts, app._command_executor,
-        )
-
     # Start OTA Updater
     if app.demo:
         from ados.services.ota.demo import DemoOtaUpdater
@@ -210,7 +185,7 @@ async def register_services(app: AgentApp) -> None:  # noqa: C901
     if app.config.discovery.mdns_enabled:
         from ados.core.profile import current_profile_and_role
         from ados.services.discovery import DiscoveryService
-        api_port = app.config.scripting.rest_api.port
+        api_port = app.config.api.rest.port
         app.discovery_service = DiscoveryService(
             device_id=app.config.agent.device_id,
             port=api_port,

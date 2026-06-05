@@ -15,7 +15,7 @@ per-domain files alongside this barrel:
   friends
 * ``security.py`` — :class:`SecurityConfig` and friends, plus
   :data:`DEFAULT_CORS_ORIGINS`
-* ``scripting.py`` — :class:`ScriptingConfig` and friends (suite framework retired)
+* ``api.py`` — :class:`ApiConfig`, :class:`RestApiConfig`
 * ``system.py`` — :class:`OtaConfig`, :class:`VisionConfig`,
   :class:`LoggingConfig`, :class:`PairingConfig`, :class:`DiscoveryConfig`,
   :class:`SwarmConfig`, :class:`LoraConfig`,
@@ -36,10 +36,12 @@ from ados.core.paths import CONFIG_YAML
 
 from ._migrators import (
     _deep_merge,
+    _migrate_api_from_scripting,
     _migrate_gs_ui_from_legacy_json,
     _migrate_share_uplink_from_legacy_json,
 )
 from .agent import AgentConfig
+from .api import ApiConfig, RestApiConfig
 from .cloud import (
     CloudflareTunnelConfig,
     CloudServerConfig,
@@ -63,12 +65,6 @@ from .network import (
     WifiClientConfig,
 )
 from .root import ADOSConfig
-from .scripting import (
-    RestApiConfig,
-    ScriptingConfig,
-    ScriptsConfig,
-    TextCommandsConfig,
-)
 from .security import (
     DEFAULT_CORS_ORIGINS,
     ApiSecurityConfig,
@@ -96,6 +92,9 @@ __all__ = [
     "load_config",
     # agent
     "AgentConfig",
+    # api
+    "ApiConfig",
+    "RestApiConfig",
     # mavlink
     "EndpointConfig",
     "MavlinkConfig",
@@ -123,11 +122,6 @@ __all__ = [
     "SecurityConfig",
     "TlsConfig",
     "WireguardConfig",
-    # scripting
-    "RestApiConfig",
-    "ScriptingConfig",
-    "ScriptsConfig",
-    "TextCommandsConfig",
     # system
     "DiscoveryConfig",
     "LoggingConfig",
@@ -201,6 +195,9 @@ def load_config(path: str | Path | None = None) -> ADOSConfig:
     # runs at most once per process.
     raw = _migrate_share_uplink_from_legacy_json(raw, picked_path)
     raw = _migrate_gs_ui_from_legacy_json(raw, picked_path)
+    # Relocate the REST-API surface config out of the legacy `scripting`
+    # block into the dedicated `api` section. Idempotent, one-shot.
+    raw = _migrate_api_from_scripting(raw, picked_path)
 
     # Load defaults.yaml from package data
     import importlib.resources

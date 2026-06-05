@@ -73,13 +73,13 @@ def _mission_control_url(*, host_name: str, config: Any) -> str:
     """Choose a Mission Control URL to advertise.
 
     Priority:
-    1. ``config.scripting.mission_control_url`` if the operator set one.
+    1. ``config.api.mission_control_url`` if the operator set one.
     2. ``http://localhost:4000`` only when the request itself came from
        localhost / 127.0.0.1 (operator on the same machine).
     3. Empty string. The setup webapp will then say "Open Mission Control
        on your computer" rather than show a useless link.
     """
-    explicit = str(getattr(config.scripting, "mission_control_url", "") or "")
+    explicit = str(getattr(config.api, "mission_control_url", "") or "")
     if explicit:
         return explicit
     if host_name in {"localhost", "127.0.0.1"}:

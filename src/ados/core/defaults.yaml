@@ -74,8 +74,8 @@ security:
     cors_enabled: true
   setup_token_required: false
 
-scripting:
-  rest_api:
+api:
+  rest:
     enabled: true
     # IPv4 wildcard. The actual listener is dual-stack — a helper at
     # service startup binds both AF_INET (this address) and AF_INET6

@@ -38,7 +38,10 @@ CAPABILITIES: list[str] = [
     "video.pipeline",
     # /api/wfb/* WFB-ng radio link control + telemetry.
     "wfb.link",
-    # /api/scripts/* user-defined script runtime.
+    # Retired capability. The endpoint it gated no longer ships, but the
+    # flag stays in the list because this surface contract is append-only:
+    # an older GCS may key a fallback path on its presence or absence, so
+    # the token is never renamed or removed once shipped.
     "scripts.runtime",
     # /api/ota/* over-the-air updater.
     "ota.updater",

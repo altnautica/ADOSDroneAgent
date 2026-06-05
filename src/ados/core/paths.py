@@ -272,9 +272,6 @@ RECORDINGS_DIR = ADOS_VAR_DIR / "recordings"
 # Flight logs
 FLIGHT_LOGS_DIR = ADOS_VAR_DIR / "logs/flights"
 
-# Scripts (user-loaded scripting payloads)
-SCRIPTS_DIR = ADOS_VAR_DIR / "scripts"
-
 # OTA
 DOWNLOADS_DIR = ADOS_VAR_DIR / "downloads"
 OTA_STATE_PATH = ADOS_VAR_DIR / "ota-state.json"

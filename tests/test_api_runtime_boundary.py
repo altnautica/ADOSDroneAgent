@@ -24,9 +24,6 @@ def test_standalone_api_service_uses_public_runtime_handles() -> None:
         "_param_cache",
         "_video_pipeline",
         "_wfb_manager",
-        "_command_executor",
-        "_script_runner",
-        "_demo_scripting",
         "_signing_observer",
     )
     offenders = [handle for handle in private_handles if handle in source]
@@ -67,9 +64,6 @@ def test_api_route_tests_use_runtime_helper_for_internal_handles() -> None:
         "_param_cache",
         "_video_pipeline",
         "_wfb_manager",
-        "_command_executor",
-        "_script_runner",
-        "_demo_scripting",
         "_signing_observer",
     )
     offenders = []

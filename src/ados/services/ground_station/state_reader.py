@@ -8,7 +8,6 @@ publish fresh telemetry instead of a stub.
 Pattern mirrors the existing StateIPC consumers:
 - `services/cloud/__main__.py:204-227` (state_handler + read_loop with
   reconnect)
-- `services/scripting/__main__.py:85-92` (poll-based state copy)
 
 We use the cloud-service style (event-driven `set_state_handler` plus a
 self-healing reconnect loop) because the bridge already runs an asyncio

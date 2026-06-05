@@ -28,15 +28,6 @@ class ApiRuntime(Protocol):
 
 
 @dataclass(frozen=True)
-class ScriptingHandles:
-    """Runtime handles for scripting routes."""
-
-    runner: Any
-    executor: Any
-    demo: Any
-
-
-@dataclass(frozen=True)
 class FcStatus:
     """Flight-controller status assembled from IPC or in-process state."""
 
@@ -213,13 +204,6 @@ class ApiRuntimeFacade:
             "bitrate_controller_handle", "_bitrate_controller"
         )
 
-    def scripting_handles(self) -> ScriptingHandles:
-        return ScriptingHandles(
-            runner=self._runtime_attr("script_runner", "_script_runner"),
-            executor=self._runtime_attr("command_executor", "_command_executor"),
-            demo=self._runtime_attr("demo_scripting", "_demo_scripting"),
-        )
-
     def signing_observer(self) -> Any:
         return self._runtime_attr("signing_observer", "_signing_observer")
 
@@ -241,9 +225,6 @@ class StandaloneApiRuntime:
         self.param_cache_handle = None
         self.video_pipeline_handle = None
         self.wfb_manager_handle = None
-        self.command_executor = None
-        self.script_runner = None
-        self.demo_scripting = None
         self.signing_observer = None
         self.ota_updater = None
         self.discovery_service = None

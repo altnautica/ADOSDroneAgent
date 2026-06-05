@@ -35,7 +35,7 @@ router = APIRouter(prefix="/v1/ground-station", tags=["ground-station"])
 
 
 # Target system / component used when injecting commands toward the FC.
-# Matches the values the scripting translator uses for COMMAND_LONG.
+# Standard COMMAND_LONG target for the primary autopilot.
 _TARGET_SYS = 1
 _TARGET_COMP = 1
 

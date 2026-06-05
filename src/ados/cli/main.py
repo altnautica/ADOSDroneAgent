@@ -720,7 +720,7 @@ def demo(port: int) -> None:
     config.server.mode = "disabled"
     config.pairing.state_path = str(Path.home() / ".ados" / "demo-pairing.json")
     config.pairing.convex_url = ""
-    config.scripting.rest_api.port = port
+    config.api.rest.port = port
     configure_logging(
         level=config.logging.level,
         drone_name=config.agent.name,

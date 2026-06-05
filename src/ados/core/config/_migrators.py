@@ -14,6 +14,7 @@ from ados.core.paths import GS_UI_JSON
 # though the migrator is cheap and idempotent after the first run.
 _SHARE_UPLINK_MIGRATED: bool = False
 _GS_UI_MIGRATED: bool = False
+_API_FROM_SCRIPTING_MIGRATED: bool = False
 
 _LEGACY_GS_UI_PATH = GS_UI_JSON
 _GS_UI_KEYS = ("oled", "buttons", "screens")
@@ -212,6 +213,113 @@ def _migrate_gs_ui_from_legacy_json(
         )
     finally:
         _GS_UI_MIGRATED = True
+
+    return raw
+
+
+def _migrate_api_from_scripting(
+    raw: dict[str, Any],
+    yaml_path: Path | None,
+) -> dict[str, Any]:
+    """Relocate the REST-API surface config out of the legacy ``scripting`` block.
+
+    The host/port for the agent's main HTTP server and the optional
+    Mission Control URL used to live under ``scripting.rest_api`` and
+    ``scripting.mission_control_url``. They now live under the dedicated
+    ``api`` section (``api.rest`` and ``api.mission_control_url``).
+
+    Runs at most once per process (guarded by
+    ``_API_FROM_SCRIPTING_MIGRATED``). Per-field check: a value already
+    present under ``api`` wins and is never overwritten. On a live
+    migration the resolved values are written into ``raw`` in-memory AND
+    flushed back to the on-disk YAML so an operator who customized the
+    REST port keeps it after the legacy block is dropped on load.
+    """
+    global _API_FROM_SCRIPTING_MIGRATED
+    if _API_FROM_SCRIPTING_MIGRATED:
+        return raw
+
+    try:
+        legacy = raw.get("scripting")
+        if not isinstance(legacy, dict):
+            _API_FROM_SCRIPTING_MIGRATED = True
+            return raw
+
+        legacy_rest = legacy.get("rest_api")
+        legacy_mc_url = legacy.get("mission_control_url")
+        if not isinstance(legacy_rest, dict) and legacy_mc_url is None:
+            _API_FROM_SCRIPTING_MIGRATED = True
+            return raw
+
+        api_section = raw.get("api")
+        if not isinstance(api_section, dict):
+            api_section = {}
+
+        merged_any = False
+
+        if isinstance(legacy_rest, dict):
+            rest_section = api_section.get("rest")
+            if not isinstance(rest_section, dict):
+                rest_section = {}
+            for key in ("enabled", "host", "port"):
+                if key in legacy_rest and key not in rest_section:
+                    rest_section[key] = legacy_rest[key]
+                    merged_any = True
+            if rest_section:
+                api_section["rest"] = rest_section
+
+        if legacy_mc_url is not None and "mission_control_url" not in api_section:
+            api_section["mission_control_url"] = legacy_mc_url
+            merged_any = True
+
+        if not merged_any:
+            _API_FROM_SCRIPTING_MIGRATED = True
+            return raw
+
+        raw["api"] = api_section
+
+        if yaml_path is not None:
+            try:
+                to_write: dict[str, Any] = {}
+                if yaml_path.is_file():
+                    with open(yaml_path, encoding="utf-8") as fh:
+                        loaded = yaml.safe_load(fh)
+                    if isinstance(loaded, dict):
+                        to_write = loaded
+                disk_api = to_write.get("api")
+                if not isinstance(disk_api, dict):
+                    disk_api = {}
+                if "rest" in api_section and "rest" not in disk_api:
+                    disk_api["rest"] = api_section["rest"]
+                if (
+                    "mission_control_url" in api_section
+                    and "mission_control_url" not in disk_api
+                ):
+                    disk_api["mission_control_url"] = api_section[
+                        "mission_control_url"
+                    ]
+                to_write["api"] = disk_api
+
+                body = yaml.safe_dump(
+                    to_write,
+                    sort_keys=False,
+                    default_flow_style=False,
+                )
+                yaml_path.parent.mkdir(parents=True, exist_ok=True)
+                tmp_path = yaml_path.with_suffix(yaml_path.suffix + ".tmp")
+                tmp_path.write_text(body, encoding="utf-8")
+                _os.replace(str(tmp_path), str(yaml_path))
+            except (OSError, yaml.YAMLError):
+                pass
+
+        import logging as _logging
+
+        _logging.getLogger("ados.core.config").info(
+            "migrated rest_api + mission_control_url into the api section "
+            "(legacy scripting block ignored on load)"
+        )
+    finally:
+        _API_FROM_SCRIPTING_MIGRATED = True
 
     return raw
 

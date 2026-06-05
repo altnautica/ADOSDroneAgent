@@ -74,12 +74,12 @@ def test_safe_host_for_first_value_wins_in_chain() -> None:
 # --- Mission Control URL omission --------------------------------------------
 
 
-class _Scripting:
+class _Api:
     mission_control_url = ""
 
 
 class _MCCfg:
-    scripting = _Scripting()
+    api = _Api()
 
 
 def test_mission_control_url_returns_localhost_when_caller_is_localhost() -> None:
@@ -95,7 +95,7 @@ def test_mission_control_url_is_empty_for_remote_callers() -> None:
 
 def test_mission_control_url_honours_explicit_config() -> None:
     cfg = _MCCfg()
-    cfg.scripting.mission_control_url = "https://command.altnautica.com"
+    cfg.api.mission_control_url = "https://command.altnautica.com"
     assert (
         _mission_control_url(host_name="10.0.0.5", config=cfg)
         == "https://command.altnautica.com"

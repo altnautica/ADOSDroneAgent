@@ -24,9 +24,6 @@ class ApiRuntimeTestDouble:
         param_cache: Any | None = None,
         video_pipeline: Any | None = None,
         wfb_manager: Any | None = None,
-        demo_scripting: Any | None = None,
-        script_runner: Any | None = None,
-        command_executor: Any | None = None,
         ota_updater: Any | None = None,
     ) -> None:
         self.config = config or ADOSConfig()
@@ -40,9 +37,6 @@ class ApiRuntimeTestDouble:
         self.param_cache_handle = param_cache
         self.video_pipeline_handle = video_pipeline
         self.wfb_manager_handle = wfb_manager
-        self.demo_scripting = demo_scripting
-        self.script_runner = script_runner
-        self.command_executor = command_executor
         self.signing_observer = None
         self.ota_updater = ota_updater
         self.discovery_service = None

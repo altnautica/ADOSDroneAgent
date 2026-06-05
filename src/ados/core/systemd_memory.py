@@ -55,7 +55,6 @@ _SHORT_NAME_TO_UNIT: dict[str, str] = {
     "video-pipeline": "ados-video.service",
     "wfb-link": "ados-wfb.service",
     "rest-api": "ados-api.service",
-    "scripting": "ados-scripting.service",
     "health-monitor": "ados-health.service",
     "cloud-command-poll": "ados-cloud.service",
     "agent-heartbeat": "ados-cloud.service",

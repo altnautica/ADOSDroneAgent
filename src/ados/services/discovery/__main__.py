@@ -35,7 +35,7 @@ async def main() -> None:
     from ados.services.discovery import DiscoveryService
 
     pairing = PairingManager(state_path=config.pairing.state_path)
-    api_port = config.scripting.rest_api.port
+    api_port = config.api.rest.port
 
     discovery = DiscoveryService(
         device_id=config.agent.device_id,

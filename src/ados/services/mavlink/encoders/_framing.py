@@ -1,7 +1,7 @@
 """MAVLink v2 frame assembly primitives shared by every encoder.
 
 Pure functions only. The encoder layer is intentionally decoupled from
-the runtime so any caller (plugin host, scripting tier, test harness) can
+the runtime so any caller (plugin host, test harness) can
 build a frame without instantiating a MAVLink connection object.
 
 Wire format (MAVLink v2, unsigned):

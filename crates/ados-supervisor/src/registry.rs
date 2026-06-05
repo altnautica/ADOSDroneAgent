@@ -82,8 +82,6 @@ pub const SERVICE_REGISTRY: &[ServiceDef] = &[
     // Drone-side WFB-ng TX manager. Profile-gated to drone so a ground station
     // does not bring up wfb_tx and fight the GS wfb_rx for the same adapter.
     def("ados-wfb", Hardware, Some("drone"), None),
-    // Scripting tier, on-demand by default.
-    def("ados-scripting", OnDemand, None, None),
     // On-demand.
     def("ados-ota", OnDemand, None, None),
     def("ados-discovery", OnDemand, None, None),

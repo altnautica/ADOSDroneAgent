@@ -31,7 +31,6 @@ from ados.api.routes import (
     peripherals,
     peripherals_v1,
     plugins,
-    scripts,
     services,
     setup,
     signing,
@@ -118,7 +117,6 @@ def create_app(agent: Any) -> FastAPI:
     app.include_router(observability.router, prefix="/api")
     app.include_router(video.router, prefix="/api")
     app.include_router(wfb.router, prefix="/api")
-    app.include_router(scripts.router, prefix="/api")
     app.include_router(ota.router, prefix="/api")
     app.include_router(pairing.router, prefix="/api")
     app.include_router(system.router, prefix="/api")
@@ -237,7 +235,7 @@ async def create_api_task(agent: Any) -> None:
     """Create and run the API server as an asyncio task."""
     api_runtime = ensure_api_runtime(agent)
     app = create_app(api_runtime)
-    api_config = api_runtime.config.scripting.rest_api
+    api_config = api_runtime.config.api.rest
 
     from ados.api.dual_bind import make_dual_stack_sockets
     sockets = make_dual_stack_sockets(api_config.host, api_config.port)

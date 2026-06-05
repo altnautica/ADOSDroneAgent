@@ -27,19 +27,16 @@ ADOS Drone Agent is the onboard intelligence layer for software-defined drones. 
       <sub>Overview tab, showing running services, system resources, and live logs in Mission Control</sub>
     </td>
     <td width="50%">
-      <img src="docs/screenshots/scripts.png" alt="Python script editor with syntax highlighting for drone automation" height="220" width="100%"><br>
-      <sub>Script editor with syntax highlighting for Python drone automation</sub>
+      <img src="docs/screenshots/fleet-network.png" alt="Fleet network enrollment, MQTT gateway, mesh radio peers" height="220" width="100%"><br>
+      <sub>Fleet network enrollment, MQTT gateway status, and mesh radio peers</sub>
     </td>
   </tr>
   <tr>
     <td width="50%">
-      <img src="docs/screenshots/fleet-network.png" alt="Fleet network enrollment, MQTT gateway, mesh radio peers" height="220" width="100%"><br>
-      <sub>Fleet network enrollment, MQTT gateway status, and mesh radio peers</sub>
-    </td>
-    <td width="50%">
       <img src="docs/screenshots/peripherals.png" alt="Connected peripherals with live sensor readings" height="220" width="100%"><br>
       <sub>Connected peripherals with live sensor readings; drivers extend through the plugin system</sub>
     </td>
+    <td width="50%"></td>
   </tr>
 </table>
 
@@ -47,7 +44,7 @@ ADOS Drone Agent is the onboard intelligence layer for software-defined drones. 
 
 ## Architecture at a glance
 
-ADOS Drone Agent is a hybrid. The long-running and safety-critical services are native **Rust**: the process supervisor that drives systemd, the MAVLink router, the video pipeline, the cloud relay, the WFB-ng radio control, on-device vision, and the ground-station receive and uplink paths. **Python** runs the layers that change fast or lean on the ML and web ecosystems: the FastAPI REST server and setup webapp, AI and vision inference, hardware detection, the scripting engine and SDK, and the plugin runtime. A few mature **C** programs are supervised rather than reimplemented (the RTL8812EU driver, `wfb_tx` / `wfb_rx`, `ffmpeg`, and `mediamtx`).
+ADOS Drone Agent is a hybrid. The long-running and safety-critical services are native **Rust**: the process supervisor that drives systemd, the MAVLink router, the video pipeline, the cloud relay, the WFB-ng radio control, on-device vision, and the ground-station receive and uplink paths. **Python** runs the layers that change fast or lean on the ML and web ecosystems: the FastAPI REST server and setup webapp, AI and vision inference, hardware detection, and the plugin runtime. A few mature **C** programs are supervised rather than reimplemented (the RTL8812EU driver, `wfb_tx` / `wfb_rx`, `ffmpeg`, and `mediamtx`).
 
 systemd is the process manager. The Rust supervisor orchestrates the units, it does not replace systemd. On a device the agent installs as a set of systemd services plus a Python virtualenv, both placed by a prebuilt Rust installer.
 
@@ -123,7 +120,7 @@ The agent auto-detects the board on boot and scales features to available resour
 | Class | Example boards | Capabilities |
 |-------|----------------|--------------|
 | Entry | Raspberry Pi 3, Radxa CM3 (RK3566) | MAVLink proxy, cloud relay, telemetry |
-| Standard | Raspberry Pi 4 / 5, CM4, Orange Pi 5 | + HD video pipeline, WFB-ng radio, scripting |
+| Standard | Raspberry Pi 4 / 5, CM4, Orange Pi 5 | + HD video pipeline, WFB-ng radio |
 | Accelerated | CM5, Rock 5C, Cubie A7Z, RK3576 / RK3588S2, Jetson Nano / Orin Nano | + on-device vision, NPU-backed inference, plugin sandbox |
 
 Any ARM64 or x86_64 Linux board with a serial port and systemd should work through the `generic-arm64` profile. The same codebase also runs the ground-station profile (no flight controller, an OLED or SPI LCD with buttons and an RTL8812EU adapter); a hardware fingerprint at boot picks the profile.
@@ -170,7 +167,6 @@ FastAPI server at `:8080`. Full OpenAPI docs at `/docs`. Domain route modules co
 | `/api/logs` | GET | Recent log entries |
 | `/api/services` | GET | Running services and status |
 | `/api/video` | GET / POST | Video pipeline status and control |
-| `/api/scripts` | GET / POST | List and execute automation scripts |
 | `/api/plugins` | GET / POST / DELETE | Plugin install, list, enable, disable, remove, info |
 | `/api/fleet/*` | GET | Fleet enrollment and peer status |
 | `/api/peripherals` | GET | Connected sensors and hardware |
@@ -228,14 +224,14 @@ The agent connects to ADOS Mission Control over a three-layer relay.
   (serial / USB)       ffmpeg · mediamtx      (Python + C)
 ```
 
-The Rust supervisor owns process lifecycle and orchestrates systemd. Python keeps the REST surface, AI and vision inference, hardware detection, scripting, and the plugin runtime. Routes read FC status, telemetry, video, radio, and parameter state through named accessors, so the API stays independent of service internals.
+The Rust supervisor owns process lifecycle and orchestrates systemd. Python keeps the REST surface, AI and vision inference, hardware detection, and the plugin runtime. Routes read FC status, telemetry, video, radio, and parameter state through named accessors, so the API stays independent of service internals.
 
 ### Directory Structure
 
 | Path | Contents |
 |------|----------|
 | `crates/` | Native Rust services (one crate per service) plus the shared protocol and SDK crates |
-| `src/ados/` | Python runtime: REST API, HAL detection, scripting, plugins, SDK, ground-station managers |
+| `src/ados/` | Python runtime: REST API, HAL detection, plugins, SDK, ground-station managers |
 | `data/` | systemd units, udev rules, overlays, and other deploy-time assets |
 | `scripts/` | Installer bootstrap and helper scripts |
 | `dashboard/` | Local web dashboard assets |

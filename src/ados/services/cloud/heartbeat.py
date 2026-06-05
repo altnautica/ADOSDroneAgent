@@ -164,14 +164,14 @@ def get_services_status() -> list[dict]:
 
     svc_names = [
         "ados-supervisor", "ados-mavlink", "ados-api", "ados-cloud",
-        "ados-health", "ados-video", "ados-wfb", "ados-scripting",
+        "ados-health", "ados-video", "ados-wfb",
         "ados-ota", "ados-discovery",
     ]
     categories = {
         "ados-supervisor": "core", "ados-mavlink": "core",
         "ados-api": "core", "ados-cloud": "core", "ados-health": "core",
         "ados-video": "hardware", "ados-wfb": "hardware",
-        "ados-scripting": "ondemand", "ados-ota": "ondemand",
+        "ados-ota": "ondemand",
         "ados-discovery": "ondemand",
     }
     services = []
@@ -240,7 +240,6 @@ def get_services_status() -> list[dict]:
             "ados.services.health": "ados-health",
             "ados.services.video": "ados-video",
             "ados.services.network": "ados-wfb",
-            "ados.services.scripting": "ados-scripting",
             "ados.services.ota": "ados-ota",
             "ados-supervisor": "ados-supervisor",
         }
