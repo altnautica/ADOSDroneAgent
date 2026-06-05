@@ -37,6 +37,12 @@ const UNIVERSAL_UNITS: &[&str] = &[
     "ados-fbcon-detach.service",
     "ados-display-probe.service",
     "ados-usb-otg-host.service",
+    // mDNS advertiser: registers the `_ados._tcp` service (with the live pair
+    // code in the TXT) so Mission Control can find the agent on the LAN and
+    // pair by 6-char code, not just by hostname. Enabled here so systemd's
+    // `WantedBy=ados-supervisor.service` auto-starts it with the supervisor
+    // (the ados-peripherals pattern); the supervisor only monitors it.
+    "ados-discovery.service",
 ];
 
 /// Ground-station units enable-linked here (the START half is the `start`
@@ -1191,6 +1197,9 @@ mod tests {
     fn universal_units_are_profile_agnostic() {
         assert!(UNIVERSAL_UNITS.contains(&"ados-peripherals.service"));
         assert!(UNIVERSAL_UNITS.contains(&"ados-display-probe.service"));
+        // The mDNS advertiser is cross-profile so every agent is discoverable
+        // for local pair-by-code, not just the ground station's static file.
+        assert!(UNIVERSAL_UNITS.contains(&"ados-discovery.service"));
         // The supervisor is enabled separately, not in the universal list.
         assert!(!UNIVERSAL_UNITS.contains(&"ados-supervisor.service"));
     }
