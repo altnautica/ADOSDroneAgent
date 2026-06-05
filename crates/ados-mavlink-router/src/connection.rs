@@ -513,6 +513,66 @@ impl FcConnection {
         }
     }
 
+    /// Hardware-free demo loop. Instead of opening a serial link, a synthetic
+    /// source ([`crate::demo`]) generates the circular-flight telemetry at 10 Hz
+    /// and pushes it through the SAME paths a real FC drives: every frame is
+    /// fanned out to the MAVLink socket and the GCS proxies, and every message
+    /// updates the shared [`VehicleState`] so the state snapshot the service
+    /// publishes is shape- and value-compatible with the Python demo's. The
+    /// link reports as connected (port `demo`, baud 0) for the run's lifetime.
+    /// Returns only on shutdown via `cancel`.
+    pub async fn run_demo(&self, cancel: std::sync::Arc<tokio::sync::Notify>) {
+        *self.port.lock().await = "demo".to_string();
+        self.baud.store(0, Ordering::Relaxed);
+        self.connected.store(true, Ordering::Relaxed);
+        *self.last_msg_at.lock().await = Instant::now();
+        tracing::info!("fc_demo_started");
+
+        let start = Instant::now();
+        let mut tick = tokio::time::interval(Duration::from_millis(100));
+        let mut since_save = Instant::now();
+        loop {
+            tokio::select! {
+                _ = tick.tick() => {
+                    let t = start.elapsed().as_secs_f64();
+                    let now = now_iso();
+                    for msg in crate::demo::demo_messages(t) {
+                        // Fan the frame out exactly as a received FC frame would
+                        // be: serialised once with a vehicle source identity and
+                        // broadcast to every consumer (drop if no consumers).
+                        let header = MavHeader {
+                            system_id: crate::demo::DEMO_SYSTEM_ID,
+                            component_id: crate::demo::DEMO_COMPONENT_ID,
+                            sequence: self.next_seq(),
+                        };
+                        if let Ok(bytes) = mavlink::serialize_v2(header, &msg) {
+                            let _ = self.frame_tx.send(bytes);
+                        }
+                        // Drive the shared state through the normal aggregator.
+                        let persist = {
+                            let mut st = self.state.lock().await;
+                            st.update_from_message(&msg, &now)
+                        };
+                        if let Some((name, value, ptype)) = persist {
+                            let mut pc = self.params.lock().await;
+                            pc.set(&name, value as f64, ptype);
+                            if since_save.elapsed() >= Duration::from_secs(2) {
+                                let _ = pc.save();
+                                since_save = Instant::now();
+                            }
+                        }
+                    }
+                    *self.last_msg_at.lock().await = Instant::now();
+                }
+                _ = cancel.notified() => {
+                    self.connected.store(false, Ordering::Relaxed);
+                    tracing::info!("fc_demo_stopped");
+                    return;
+                }
+            }
+        }
+    }
+
     async fn read_loop(&self, mut reader: BoxedReadHalf) {
         let mut buf: Vec<u8> = Vec::with_capacity(4096);
         let mut chunk = [0u8; 2048];

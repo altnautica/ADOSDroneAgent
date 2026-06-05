@@ -9,6 +9,7 @@ Run: python -m ados.services.mavlink
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import signal
 import sys
@@ -19,12 +20,72 @@ from ados.core.config import load_config
 from ados.core.ipc import MavlinkIPCServer, StateIPCServer
 from ados.core.logging import configure_logging
 
+# Default direct-GCS proxy ports. Overridable on the command line so a second
+# instance (the parity harness) can run alongside the first without a clash.
+_DEFAULT_TCP_PORT = 5760
+_DEFAULT_UDP_PORTS = [14550, 14551]
+
+
+def _parse_cli_args(argv: list[str] | None = None) -> argparse.Namespace:
+    """Parse the optional CLI overrides.
+
+    All options are optional with defaults that reproduce the production
+    behaviour, so the systemd unit (which passes no arguments) is unaffected.
+    """
+    parser = argparse.ArgumentParser(
+        prog="ados.services.mavlink",
+        description="ADOS MAVLink proxy service (FC link + IPC + GCS proxies).",
+    )
+    parser.add_argument(
+        "--demo",
+        action="store_true",
+        help="run a synthetic FC (no serial) for hardware-free testing",
+    )
+    parser.add_argument(
+        "--fc",
+        default=None,
+        help="override the FC connection string (e.g. tcp:127.0.0.1:5760)",
+    )
+    parser.add_argument(
+        "--ws-port",
+        type=int,
+        default=None,
+        help="override the WebSocket proxy port",
+    )
+    parser.add_argument(
+        "--tcp-port",
+        type=int,
+        default=None,
+        help="override the TCP proxy port",
+    )
+    parser.add_argument(
+        "--udp-ports",
+        default=None,
+        help="override the UDP proxy ports (comma-separated)",
+    )
+    return parser.parse_args(argv)
+
 
 async def main() -> None:
+    args = _parse_cli_args()
     config = load_config()
     configure_logging(config.logging.level)
     log = structlog.get_logger()
     log.info("mavlink_service_starting")
+
+    # Apply optional overrides. With no arguments these are all no-ops, so the
+    # production service behaves exactly as before.
+    if args.fc is not None:
+        config.mavlink.serial_port = args.fc
+    if args.ws_port is not None:
+        _set_ws_port(config, args.ws_port)
+    tcp_port = args.tcp_port if args.tcp_port is not None else _DEFAULT_TCP_PORT
+    if args.udp_ports is not None:
+        udp_ports = [
+            int(p) for p in args.udp_ports.split(",") if p.strip()
+        ] or list(_DEFAULT_UDP_PORTS)
+    else:
+        udp_ports = list(_DEFAULT_UDP_PORTS)
 
     shutdown = asyncio.Event()
     loop = asyncio.get_event_loop()
@@ -37,12 +98,21 @@ async def main() -> None:
     await mavlink_ipc.start()
     await state_ipc.start()
 
-    # Start FC connection
-    from ados.services.mavlink.connection import FCConnection
+    # Start FC connection. In demo mode a synthetic source feeds the same IPC,
+    # state, and proxy paths a serial FC would; the serial path is untouched
+    # when demo mode is off (the default).
     from ados.services.mavlink.state import VehicleState
 
     vehicle_state = VehicleState()
-    fc = FCConnection(config.mavlink, vehicle_state)
+    if args.demo:
+        from ados.services.mavlink._parity_demo import ParityDemoFC
+
+        fc = ParityDemoFC(vehicle_state)
+        log.info("mavlink_service_demo_mode")
+    else:
+        from ados.services.mavlink.connection import FCConnection
+
+        fc = FCConnection(config.mavlink, vehicle_state)
 
     # Subscribe to FC data and broadcast to IPC clients
     fc_queue = fc.subscribe()
@@ -138,11 +208,8 @@ async def main() -> None:
     from ados.services.mavlink.udp_proxy import UdpProxy
 
     ws_proxy = MavlinkProxy(config.mavlink, fc)
-    tcp_proxy = TcpProxy(fc, port=5760)
-    udp_proxies = [
-        UdpProxy(fc, port=14550),
-        UdpProxy(fc, port=14551),
-    ]
+    tcp_proxy = TcpProxy(fc, port=tcp_port)
+    udp_proxies = [UdpProxy(fc, port=p) for p in udp_ports]
 
     tasks = [
         asyncio.create_task(fc.run(), name="fc-connection"),
@@ -168,6 +235,19 @@ async def main() -> None:
     await mavlink_ipc.stop()
     await state_ipc.stop()
     log.info("mavlink_service_stopped")
+
+
+def _set_ws_port(config, port: int) -> None:
+    """Point the WebSocket endpoint at ``port``, adding one if none is present."""
+    for ep in config.mavlink.endpoints:
+        if ep.type == "websocket":
+            ep.port = port
+            return
+    from ados.core.config.mavlink import EndpointConfig
+
+    config.mavlink.endpoints.append(
+        EndpointConfig(type="websocket", port=port, enabled=True)
+    )
 
 
 if __name__ == "__main__":

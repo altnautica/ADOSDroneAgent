@@ -13,6 +13,7 @@
 
 pub mod config;
 pub mod connection;
+pub mod demo;
 pub mod param_cache;
 pub mod proxies;
 pub mod state;

@@ -36,6 +36,53 @@ fn use_msgpack() -> bool {
     std::env::var("ADOS_STATE_IPC_MSGPACK").ok().as_deref() == Some("1")
 }
 
+/// Demo mode: drive synthetic telemetry instead of opening a serial FC. Enabled
+/// by the `--demo` argument or `ADOS_MAVLINK_DEMO=1`. Off by default, so the
+/// production unit (no argument, no env) keeps the serial path.
+fn demo_enabled() -> bool {
+    std::env::args().any(|a| a == "--demo")
+        || std::env::var("ADOS_MAVLINK_DEMO").ok().as_deref() == Some("1")
+}
+
+/// TCP proxy bind port. Overridable via `ADOS_MAVLINK_TCP_PORT` (the parity
+/// harness uses this to run a second instance without a port clash); defaults to
+/// the standard port.
+fn tcp_proxy_port() -> u16 {
+    std::env::var("ADOS_MAVLINK_TCP_PORT")
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(TCP_PROXY_PORT)
+}
+
+/// UDP proxy bind ports (comma-separated). Overridable via
+/// `ADOS_MAVLINK_UDP_PORTS`; defaults to the standard ports. An empty or
+/// unparseable override falls back to the defaults.
+fn udp_proxy_ports() -> Vec<u16> {
+    let parsed: Vec<u16> = std::env::var("ADOS_MAVLINK_UDP_PORTS")
+        .ok()
+        .map(|v| {
+            v.split(',')
+                .filter_map(|p| p.trim().parse::<u16>().ok())
+                .collect()
+        })
+        .unwrap_or_default();
+    if parsed.is_empty() {
+        UDP_PROXY_PORTS.to_vec()
+    } else {
+        parsed
+    }
+}
+
+/// WebSocket proxy bind port. `ADOS_MAVLINK_WS_PORT` overrides the configured
+/// endpoint port when set (used by the parity harness); otherwise the first
+/// enabled WebSocket endpoint from the config selects it.
+fn ws_proxy_port(cfg: &MavlinkConfig) -> Option<u16> {
+    if let Ok(v) = std::env::var("ADOS_MAVLINK_WS_PORT") {
+        return v.trim().parse().ok();
+    }
+    cfg.websocket_port()
+}
+
 #[tokio::main]
 async fn main() {
     use ados_protocol::logd::layer::LogdLayer;
@@ -101,11 +148,19 @@ async fn main() {
     let started = Instant::now();
     let mut tasks = Vec::new();
 
-    // FC connect + read loop.
+    // FC connect + read loop. In demo mode a synthetic source feeds the same
+    // fan-out, state, and proxy paths a serial FC would; the serial path is
+    // untouched when demo mode is off (the default).
+    let demo = demo_enabled();
     {
         let fc = fc.clone();
         let cancel = cancel.clone();
-        tasks.push(tokio::spawn(async move { fc.run(cancel).await }));
+        if demo {
+            tracing::info!("mavlink_router_demo_mode");
+            tasks.push(tokio::spawn(async move { fc.run_demo(cancel).await }));
+        } else {
+            tasks.push(tokio::spawn(async move { fc.run(cancel).await }));
+        }
     }
 
     // 1 Hz companion heartbeat.
@@ -210,22 +265,25 @@ async fn main() {
         }));
     }
 
-    // Direct-GCS proxies.
+    // Direct-GCS proxies. Bind ports default to the standard values and are
+    // overridable via env so a second instance (the parity harness) can run
+    // alongside the first without a port clash.
     {
         let fc = fc.clone();
         let cancel = cancel.clone();
+        let port = tcp_proxy_port();
         tasks.push(tokio::spawn(async move {
-            run_tcp_proxy(fc, TCP_PROXY_PORT, cancel).await
+            run_tcp_proxy(fc, port, cancel).await
         }));
     }
-    for &port in UDP_PROXY_PORTS {
+    for port in udp_proxy_ports() {
         let fc = fc.clone();
         let cancel = cancel.clone();
         tasks.push(tokio::spawn(async move {
             run_udp_proxy(fc, port, cancel).await
         }));
     }
-    if let Some(ws_port) = cfg.websocket_port() {
+    if let Some(ws_port) = ws_proxy_port(&cfg) {
         let fc = fc.clone();
         let cancel = cancel.clone();
         tasks.push(tokio::spawn(async move {
