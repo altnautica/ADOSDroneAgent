@@ -115,9 +115,7 @@ def test_can_buses_uses_default_path_when_unspecified(monkeypatch, tmp_path: Pat
         "CAN_P1_BITRATE": 500_000.0,
         "CAN_D1_PROTOCOL": 1.0,
     })
-    import ados.services.mavlink.param_cache as pc_module
-
-    monkeypatch.setattr(pc_module, "DEFAULT_CACHE_PATH", str(cache))
+    monkeypatch.setattr(heartbeat, "DEFAULT_PARAM_CACHE_PATH", str(cache))
     out = heartbeat.build_can_buses_enrichment()
     assert out == {
         "canBuses": [

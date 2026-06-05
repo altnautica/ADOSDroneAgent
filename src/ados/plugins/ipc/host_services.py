@@ -51,9 +51,9 @@ VIO_COMPONENT_IDS: frozenset[int] = frozenset({197, 198})
 class MAVLinkRouter(Protocol):
     """Slice of the host's MAVLink connection the IPC handlers need.
 
-    The production implementation wraps
-    ``ados.services.mavlink.connection.FCConnection.send_bytes`` plus
-    a subscribe queue. Tests provide an in-memory fake.
+    The production implementation wraps the native router's command socket
+    (a ``send_bytes`` writer plus a subscribe queue). Tests provide an
+    in-memory fake.
     """
 
     def send_bytes(self, data: bytes) -> None: ...

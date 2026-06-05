@@ -18,13 +18,12 @@ _HOTSPOT_URL = f"http://{_HOTSPOT_IP}"
 _USB_URL_TEMPLATE = "http://{ip}:{port}"
 _TOKEN_RE = re.compile(r"(?:--token|service\s+install)\s+['\"]?([^'\"\s]+)")
 
-# Default port for the always-on MAVLink TCP proxy. The proxy is started
-# unconditionally by ``ados.core.main.AgentApp`` with this hardcoded port
-# (search ``TcpProxy(self._fc_connection, port=5760)``) and is NOT
-# registered in ``config.mavlink.endpoints``. The helpers below fall back
-# to this constant when the endpoints walk finds no TCP entry so the
-# CLI and heartbeat surfaces always advertise the live listener.
-# Keep this value locked with the TcpProxy instantiation.
+# Default port for the always-on MAVLink TCP proxy. The native router binds
+# this hardcoded port unconditionally and it is NOT registered in
+# ``config.mavlink.endpoints``. The helpers below fall back to this constant
+# when the endpoints walk finds no TCP entry so the CLI and heartbeat
+# surfaces always advertise the live listener. Keep this value locked with
+# the router's TCP proxy bind port.
 DEFAULT_MAVLINK_TCP_PORT = 5760
 
 

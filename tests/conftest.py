@@ -7,7 +7,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from ados.core.config import ADOSConfig
-from ados.services.mavlink.state import VehicleState
+from ados.services.mavlink.ipc_state import IpcVehicleState
 
 
 @pytest.fixture
@@ -17,9 +17,9 @@ def default_config() -> ADOSConfig:
 
 
 @pytest.fixture
-def vehicle_state() -> VehicleState:
-    """A fresh VehicleState instance."""
-    return VehicleState()
+def vehicle_state() -> IpcVehicleState:
+    """A fresh vehicle-state view backed by the router's state IPC snapshot."""
+    return IpcVehicleState()
 
 
 @pytest.fixture

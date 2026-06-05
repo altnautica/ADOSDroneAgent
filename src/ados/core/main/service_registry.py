@@ -13,6 +13,7 @@ The actual readiness-wait + shutdown wiring stay on the AgentApp.
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING
 
 from ados import __version__
@@ -22,6 +23,45 @@ if TYPE_CHECKING:
     from .app import AgentApp
 
 log = get_logger("main")
+
+# State IPC reconnect cadence. The native router publishes the snapshot; this
+# process subscribes and keeps the connection live across router restarts.
+_STATE_IPC_CONNECT_RETRIES = 5
+_STATE_IPC_CONNECT_DELAY_S = 1.0
+_STATE_IPC_RECONNECT_BACKOFF_S = 2.0
+
+
+async def _state_ipc_reader(app: AgentApp) -> None:
+    """Keep the state IPC snapshot fresh, reconnecting across router restarts.
+
+    Feeds the held :class:`IpcVehicleState` (which the param-cache and FC-
+    handle shims read from) via the client's state handler. Falls back to an
+    empty snapshot while the router is down rather than raising.
+    """
+    client = app._state_client
+    while not app._shutdown.is_set():
+        try:
+            if not client.connected:
+                await client.connect(
+                    retries=_STATE_IPC_CONNECT_RETRIES,
+                    delay=_STATE_IPC_CONNECT_DELAY_S,
+                )
+            await client.read_loop()
+        except ConnectionError as exc:
+            log.debug("state_ipc_connect_failed", error=str(exc))
+        except asyncio.CancelledError:
+            break
+        except Exception as exc:  # noqa: BLE001 — a read error must not kill the reader
+            log.warning("state_ipc_read_failed", error=str(exc))
+        if app._shutdown.is_set():
+            break
+        try:
+            await asyncio.wait_for(
+                app._shutdown.wait(), timeout=_STATE_IPC_RECONNECT_BACKOFF_S
+            )
+            break
+        except TimeoutError:
+            pass
 
 
 async def register_services(app: AgentApp) -> None:  # noqa: C901
@@ -74,48 +114,26 @@ async def register_services(app: AgentApp) -> None:  # noqa: C901
     npu_tops = board_profile_dict.get("compute", {}).get("npu_tops", 0)
     app.model_manager = ModelManager(app.config.vision, npu_tops=npu_tops)
 
-    # Initialize MAVLink connection
-    from ados.services.mavlink.state import VehicleState
-    app._vehicle_state = VehicleState()
-
-    # Initialize parameter cache and wire into VehicleState
-    from ados.services.mavlink.param_cache import ParamCache
-    app._param_cache = ParamCache()
-    app._param_cache.load()
-    app._vehicle_state.param_cache = app._param_cache
-
-    if app.demo:
-        log.info("demo_mode", msg="DEMO MODE — simulated telemetry, no real FC")
-        from ados.services.mavlink.demo import DemoFCConnection
-        app._fc_connection = DemoFCConnection(app._vehicle_state)
-    else:
-        from ados.services.mavlink.connection import FCConnection
-        app._fc_connection = FCConnection(
-            app.config.mavlink,
-            app._vehicle_state,
-        )
-
-    # Start FC connection task
-    app._start_service("fc-connection", app._fc_connection.run())
-
-    # Start MAVLink WebSocket proxy
-    from ados.services.mavlink.proxy import MavlinkProxy
-    app._mavlink_proxy = MavlinkProxy(
-        app.config.mavlink,
-        app._fc_connection,
+    # The native MAVLink router owns the FC link, the direct-GCS proxies
+    # (WebSocket / TCP / UDP), and the parameter sweep. It runs as its own
+    # systemd unit (or, under `ados demo`, as a subprocess) and publishes
+    # the live vehicle snapshot to `/run/ados/state.sock` at ~10 Hz. This
+    # process reads that snapshot through read-only shims that present the
+    # same attribute surface the API layer expects (`.connected`, `.params`,
+    # `.get_all()`, `.to_dict()`).
+    from ados.core.ipc import StateIPCClient
+    from ados.services.mavlink.ipc_state import (
+        IpcFcConnection,
+        IpcParamCache,
+        IpcVehicleState,
     )
-    app._start_service("mavlink-ws-proxy", app._mavlink_proxy.run())
 
-    # Start TCP proxy
-    from ados.services.mavlink.tcp_proxy import TcpProxy
-    tcp_proxy = TcpProxy(app._fc_connection, port=5760)
-    app._start_service("mavlink-tcp-proxy", tcp_proxy.run())
-
-    # Start UDP proxy
-    from ados.services.mavlink.udp_proxy import UdpProxy
-    for udp_port in (14550, 14551):
-        udp_proxy = UdpProxy(app._fc_connection, port=udp_port)
-        app._start_service(f"mavlink-udp-{udp_port}", udp_proxy.run())
+    app._vehicle_state = IpcVehicleState()
+    app._param_cache = IpcParamCache(app._vehicle_state)
+    app._fc_connection = IpcFcConnection(app._vehicle_state)
+    app._state_client = StateIPCClient()
+    app._state_client.set_state_handler(app._vehicle_state.update_from_dict)
+    app._start_service("state-ipc-reader", _state_ipc_reader(app))
 
     # Start REST API
     from ados.api.server import create_api_task
@@ -178,8 +196,8 @@ async def register_services(app: AgentApp) -> None:  # noqa: C901
     # Health monitor loop
     app._start_service("health-monitor", app._health_loop())
 
-    # Agent heartbeat to FC
-    app._start_service("agent-heartbeat", app._heartbeat_loop())
+    # The 1 Hz companion heartbeat to the FC is emitted by the native
+    # router that owns the FC link, so this process no longer sends one.
 
     # mDNS discovery registration
     if app.config.discovery.mdns_enabled:

@@ -16,17 +16,20 @@ import asyncio
 import binascii
 import hashlib
 import time
+from collections.abc import Callable
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from pymavlink import mavutil
+from pymavlink.dialects.v20 import common as mavlink2
 
 from ados.core.logging import get_logger
 
-if TYPE_CHECKING:
-    from ados.services.mavlink.connection import FCConnection
-    from ados.services.mavlink.param_cache import ParamCache
-    from ados.services.mavlink.state import VehicleState
+# A frame writer that hands a fully-packed MAVLink v2 frame to the router's
+# command socket (``/run/ados/mavlink.sock``). The router forwards it to the
+# FC. The agent holds no signing key, so it only ever sends SETUP_SIGNING and
+# the SIGNING_REQUIRE param write through this seam.
+SendBytes = Callable[[bytes], None]
 
 log = get_logger("mavlink.signing")
 
@@ -41,22 +44,41 @@ _MIN_ARDUPILOT_MINOR = 0
 _PARAM_TYPE_UINT8 = 1
 
 
+def _make_encoder() -> mavlink2.MAVLink:
+    """A standalone v2 encoder for packing frames sent over the IPC socket.
+
+    No file/connection is attached; frames are produced with ``encode`` +
+    ``pack`` and written to the router's command socket by the caller. A
+    GCS-style source id keeps the FC's routing happy; SETUP_SIGNING and
+    PARAM_SET route by target system/component regardless.
+    """
+    encoder = mavlink2.MAVLink(
+        None,
+        srcSystem=255,
+        srcComponent=mavutil.mavlink.MAV_COMP_ID_MISSIONPLANNER,
+    )
+    encoder.robust_parsing = True
+    return encoder
+
+
 # ──────────────────────────────────────────────────────────────
 # Capability detection
 # ──────────────────────────────────────────────────────────────
 
 def detect_capability(
-    fc: FCConnection | None,
-    vehicle_state: VehicleState | None,
-    param_cache: ParamCache | None,
+    connected: bool,
+    autopilot: int,
+    params: dict[str, float] | None,
 ) -> dict[str, Any]:
     """Return whether the connected FC supports MAVLink signing.
 
     The check is strict on purpose: ArduPilot + version >= 4.0 + at least
     one SIGNING_* param in the cached param tree. Custom builds that
-    stripped signing will correctly report unsupported.
+    stripped signing will correctly report unsupported. Inputs come from
+    the router's state IPC snapshot: ``connected`` / ``autopilot`` from the
+    FC status, ``params`` from the cached param blob.
     """
-    if fc is None or not fc.connected:
+    if not connected:
         return {
             "supported": False,
             "reason": "fc_not_connected",
@@ -66,7 +88,7 @@ def detect_capability(
         }
 
     # MAV_AUTOPILOT enum — 3 = ArduPilot, 12 = PX4
-    autopilot = vehicle_state.autopilot if vehicle_state else 0
+    autopilot = int(autopilot or 0)
     firmware_name = _autopilot_name(autopilot)
 
     if autopilot != mavutil.mavlink.MAV_AUTOPILOT_ARDUPILOTMEGA:
@@ -90,11 +112,10 @@ def detect_capability(
     # Look for any SIGNING_* param in the cache. Presence is the strictest
     # gate because builds that stripped signing won't expose these params.
     signing_params_present = False
-    if param_cache is not None:
-        for name in param_cache.get_all().keys():
-            if name.startswith("SIGNING_"):
-                signing_params_present = True
-                break
+    for name in (params or {}):
+        if name.startswith("SIGNING_"):
+            signing_params_present = True
+            break
 
     # We can't derive major/minor from VehicleState.autopilot alone. The agent
     # doesn't currently cache AUTOPILOT_VERSION major/minor. If the SIGNING_*
@@ -146,7 +167,7 @@ def _fingerprint(key_bytes: bytes) -> str:
 
 
 async def enroll_fc(
-    fc: FCConnection,
+    send_bytes: SendBytes,
     key_bytes: bytearray,
     target_system: int = 1,
     target_component: int = 1,
@@ -155,6 +176,7 @@ async def enroll_fc(
 
     key_bytes MUST be a mutable bytearray so we can overwrite it in place.
     The caller must not reuse key_bytes after this function returns.
+    ``send_bytes`` writes a packed frame to the router's command socket.
 
     Returns {success, key_id, enrolled_at}. key_id is the first 8 hex chars
     of sha256(key); the raw key never appears in the return value.
@@ -162,30 +184,24 @@ async def enroll_fc(
     if len(key_bytes) != 32:
         raise ValueError(f"signing key must be 32 bytes, got {len(key_bytes)}")
 
-    if not fc.connected or fc.connection is None:
-        raise RuntimeError("FC not connected")
-
-    conn = fc.connection
     initial_ts = _initial_timestamp_10us()
     key_id = _fingerprint(bytes(key_bytes))
 
     try:
-        # pymavlink's setup_signing_send takes target_system, target_component,
-        # secret_key (bytes), initial_timestamp. Sent twice 200ms apart to
-        # survive a single-frame radio hiccup during enrollment.
-        conn.mav.setup_signing_send(
+        # SETUP_SIGNING carries target_system, target_component, secret_key
+        # (bytes), initial_timestamp. Sent twice 200ms apart to survive a
+        # single-frame radio hiccup during enrollment. Encode once (same
+        # bytes both sends) so the key buffer is read exactly twice.
+        encoder = _make_encoder()
+        frame = encoder.setup_signing_encode(
             target_system,
             target_component,
             bytes(key_bytes),
             initial_ts,
-        )
+        ).pack(encoder)
+        send_bytes(frame)
         await asyncio.sleep(0.2)
-        conn.mav.setup_signing_send(
-            target_system,
-            target_component,
-            bytes(key_bytes),
-            initial_ts,
-        )
+        send_bytes(frame)
     finally:
         # Zeroize the caller's buffer. Python memory is GC'd eventually, but
         # the bytearray is our caller's authoritative copy, so we overwrite
@@ -204,7 +220,7 @@ async def enroll_fc(
 
 
 def disable_on_fc(
-    fc: FCConnection,
+    send_bytes: SendBytes,
     target_system: int = 1,
     target_component: int = 1,
 ) -> dict[str, Any]:
@@ -212,47 +228,42 @@ def disable_on_fc(
 
     ArduPilot recognises this as 'disable signing'.
     """
-    if not fc.connected or fc.connection is None:
-        raise RuntimeError("FC not connected")
-
-    conn = fc.connection
-    zero_key = bytes(32)
-    conn.mav.setup_signing_send(target_system, target_component, zero_key, 0)
+    encoder = _make_encoder()
+    frame = encoder.setup_signing_encode(
+        target_system, target_component, bytes(32), 0
+    ).pack(encoder)
+    send_bytes(frame)
     log.info("signing_disabled_on_fc", target_system=target_system)
     return {"success": True}
 
 
 def set_require(
-    fc: FCConnection,
+    send_bytes: SendBytes,
     require: bool,
     target_system: int = 1,
     target_component: int = 1,
 ) -> dict[str, Any]:
     """Write SIGNING_REQUIRE param (1 or 0) on the FC."""
-    if not fc.connected or fc.connection is None:
-        raise RuntimeError("FC not connected")
-
-    conn = fc.connection
-    conn.mav.param_set_send(
+    encoder = _make_encoder()
+    frame = encoder.param_set_encode(
         target_system,
         target_component,
         b"SIGNING_REQUIRE",
         1.0 if require else 0.0,
         _PARAM_TYPE_UINT8,
-    )
+    ).pack(encoder)
+    send_bytes(frame)
     log.info("signing_require_set", require=require)
     return {"success": True, "require": require}
 
 
-def get_require(param_cache: ParamCache | None) -> dict[str, Any]:
-    """Read SIGNING_REQUIRE from the param cache.
+def get_require(params: dict[str, float] | None) -> dict[str, Any]:
+    """Read SIGNING_REQUIRE from the cached param blob.
 
     Returns {require: bool | None}. None means the param hasn't been seen
     yet in the current session.
     """
-    if param_cache is None:
-        return {"require": None}
-    value = param_cache.get("SIGNING_REQUIRE")
+    value = (params or {}).get("SIGNING_REQUIRE")
     if value is None:
         return {"require": None}
     return {"require": bool(int(value))}

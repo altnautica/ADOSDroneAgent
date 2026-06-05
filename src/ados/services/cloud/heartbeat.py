@@ -35,6 +35,9 @@ from ados.core.paths import (
     TOUCH_CALIB_PATH,
 )
 
+# On-disk parameter cache the native router persists.
+DEFAULT_PARAM_CACHE_PATH = "/var/lib/ados/params.json"
+
 # PID → psutil.Process cache for CPU baseline. psutil's
 # ``cpu_percent(interval=0)`` reports the delta since the previous
 # call on the same Process instance, so we hold the instance alive
@@ -650,8 +653,7 @@ def build_can_buses_enrichment(
     builder folds nothing in.
     """
     if param_cache_path is None:
-        from ados.services.mavlink.param_cache import DEFAULT_CACHE_PATH
-        param_cache_path = DEFAULT_CACHE_PATH
+        param_cache_path = DEFAULT_PARAM_CACHE_PATH
     path = Path(param_cache_path)
     if not path.is_file():
         return {}

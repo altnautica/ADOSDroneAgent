@@ -444,7 +444,7 @@ def _build_default_bridge() -> CloudRelayBridge:
         from ados.services.cloud.mavlink_relay import MavlinkMqttRelay
         from ados.services.ground_station.pair_manager import get_pair_manager
         from ados.services.ground_station.uplink_router import get_uplink_router
-        from ados.services.mavlink.state import VehicleState
+        from ados.services.mavlink.ipc_state import IpcVehicleState
         from ados.services.mqtt.gateway import MqttGateway
     except Exception as exc:
         log.warning("cloud_relay.dependency_import_failed", error=str(exc))
@@ -511,10 +511,10 @@ def _build_default_bridge() -> CloudRelayBridge:
             except Exception as exc:
                 log.warning("cloud_relay.state_reader_init_failed", error=str(exc))
                 state_reader = None
-                state = VehicleState()
+                state = IpcVehicleState()
         else:
             log.info("cloud_relay.state_ipc_disabled_by_config")
-            state = VehicleState()
+            state = IpcVehicleState()
         api_key = getattr(config.security.api, "api_key", None) or None
         mqtt_gw = MqttGateway(config, state, api_key=api_key)
 

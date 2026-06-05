@@ -8,7 +8,7 @@ from unittest.mock import MagicMock
 from ados.core.config import ADOSConfig
 from ados.core.health import HealthMonitor
 from ados.core.service_tracker import ServiceTracker
-from ados.services.mavlink.state import VehicleState
+from ados.services.mavlink.ipc_state import IpcVehicleState as VehicleState
 
 
 class ApiRuntimeTestDouble:

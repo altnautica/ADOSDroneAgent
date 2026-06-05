@@ -53,11 +53,14 @@ class AgentApp:
         self._cpu_history: deque[float] = deque(maxlen=60)
         self._memory_history: deque[float] = deque(maxlen=60)
 
-        # Lazily-initialized service references (private — internal only)
+        # Lazily-initialized service references (private — internal only).
+        # The FC/vehicle/param handles are read-only shims over the native
+        # router's state IPC snapshot, set up in register_services; the
+        # state client owns the subscription to /run/ados/state.sock.
         self._fc_connection = None
-        self._mavlink_proxy: Any = None
         self._vehicle_state = None
         self._param_cache = None
+        self._state_client: Any = None
         self._video_pipeline: Any = None
         self._wfb_manager: Any = None
         # Tracks the last `mavlinkWsUrl` we emitted on a heartbeat so we
@@ -121,16 +124,6 @@ class AgentApp:
             self.health.sd_notify_watchdog()
             await asyncio.sleep(5)
 
-    async def _heartbeat_loop(self) -> None:
-        """Send HEARTBEAT as MAV_TYPE_ONBOARD_CONTROLLER at 1Hz."""
-        while not self._shutdown.is_set():
-            if self._fc_connection and self._fc_connection.connected:
-                try:
-                    self._fc_connection.send_heartbeat()
-                except Exception:
-                    log.debug("heartbeat_send_failed")
-            await asyncio.sleep(1)
-
     async def _cloud_beacon_loop(self) -> None:
         """Forwards to :func:`cloud_loops.cloud_beacon_loop`."""
         await cloud_beacon_loop(self)
@@ -149,10 +142,9 @@ class AgentApp:
         Mirrors :func:`ados.setup.service._first_mavlink_tcp_port`.
         Walks ``config.mavlink.endpoints`` first so an explicit
         override wins, then falls back to ``DEFAULT_MAVLINK_TCP_PORT``
-        (the hardcoded port the in-process ``TcpProxy`` is
-        instantiated with elsewhere in this module). Returns None
-        only when the operator explicitly disabled the TCP entry in
-        config.
+        (the hardcoded port the native router binds its TCP proxy on).
+        Returns None only when the operator explicitly disabled the TCP
+        entry in config.
         """
         from ados.setup.service import DEFAULT_MAVLINK_TCP_PORT
 

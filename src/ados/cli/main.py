@@ -706,6 +706,21 @@ def _uninstall_linux(*, purge: bool, yes: bool) -> None:
     click.echo("ADOS Drone Agent uninstalled.")
 
 
+def _resolve_router_bin() -> str | None:
+    """Locate the native MAVLink router binary for demo mode.
+
+    Order: ``ADOS_MAVLINK_ROUTER_BIN`` override, the installed path, then
+    ``PATH``. Returns None when no binary is found.
+    """
+    override = os.environ.get("ADOS_MAVLINK_ROUTER_BIN")
+    if override and Path(override).exists():
+        return override
+    installed = Path("/opt/ados/bin/ados-mavlink-router")
+    if installed.exists():
+        return str(installed)
+    return shutil.which("ados-mavlink-router")
+
+
 @cli.command(hidden=True)
 @click.option("--port", default=8080, help="REST API port")
 def demo(port: int) -> None:
@@ -726,6 +741,25 @@ def demo(port: int) -> None:
         drone_name=config.agent.name,
         device_id=config.agent.device_id,
     )
+
+    # The native router owns the simulated FC + the state/command IPC sockets
+    # that the agent reads. Spawn it in demo mode so telemetry flows; the
+    # agent's state shims subscribe to /run/ados/state.sock it publishes.
+    router_bin = _resolve_router_bin()
+    router_proc: subprocess.Popen | None = None
+    if router_bin is None:
+        click.echo(
+            "warn: ados-mavlink-router not found; demo telemetry will be empty. "
+            "Set ADOS_MAVLINK_ROUTER_BIN or install the agent.",
+            err=True,
+        )
+    else:
+        router_proc = subprocess.Popen(
+            [router_bin, "--demo"],
+            env=os.environ.copy(),
+        )
+        click.echo(f"demo: started {router_bin} --demo (pid {router_proc.pid})")
+
     app = AgentApp(config, demo=True)
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
@@ -737,6 +771,12 @@ def demo(port: int) -> None:
         app.request_shutdown()
     finally:
         loop.close()
+        if router_proc is not None and router_proc.poll() is None:
+            router_proc.terminate()
+            try:
+                router_proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                router_proc.kill()
 
 
 # Wire subcommand groups. Done at import time so the entry point in

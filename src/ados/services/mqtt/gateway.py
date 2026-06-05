@@ -12,7 +12,7 @@ from ados.core.logging import get_logger
 
 if TYPE_CHECKING:
     from ados.core.config import ADOSConfig
-    from ados.services.mavlink.state import VehicleState
+    from ados.services.mavlink.ipc_state import IpcVehicleState as VehicleState
 
 log = get_logger("mqtt")
 

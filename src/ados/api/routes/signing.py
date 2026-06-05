@@ -15,12 +15,14 @@ strips any 64-char hex token from request bodies before they are logged.
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from ados.api.deps import get_agent_app
+from ados.core.ipc import MAVLINK_SOCK, MavlinkIPCClient
 from ados.core.logging import get_logger
 from ados.services.mavlink.signing import (
     detect_capability,
@@ -34,6 +36,37 @@ from ados.services.mavlink.signing import (
 log = get_logger("api.signing")
 
 router = APIRouter()
+
+
+def _fc_connected(app: Any) -> bool:
+    """True when the router's state IPC snapshot reports a live FC link."""
+    return bool(app.fc_status().connected)
+
+
+def _cached_params(app: Any) -> dict[str, float]:
+    """The cached param blob from the router's state IPC snapshot."""
+    try:
+        ipc = app.state_ipc_state() or {}
+    except Exception:
+        ipc = {}
+    blob = ipc.get("params")
+    return blob if isinstance(blob, dict) else {}
+
+
+def _autopilot(app: Any) -> int:
+    """MAV_AUTOPILOT id from the router's state IPC snapshot."""
+    try:
+        ipc = app.state_ipc_state() or {}
+    except Exception:
+        ipc = {}
+    return int(ipc.get("autopilot", 0) or 0)
+
+
+async def _connect_mavlink_ipc() -> MavlinkIPCClient:
+    """Open a short-lived command-socket client. Raises on link absence."""
+    ipc = MavlinkIPCClient(sock_path=MAVLINK_SOCK)
+    await ipc.connect(retries=3, delay=0.25)
+    return ipc
 
 
 # ──────────────────────────────────────────────────────────────
@@ -70,9 +103,9 @@ async def capability() -> dict[str, Any]:
     """
     app = get_agent_app()
     return detect_capability(
-        app.fc_connection(),
-        app.vehicle_state(),
-        app.param_cache(),
+        _fc_connected(app),
+        _autopilot(app),
+        _cached_params(app),
     )
 
 
@@ -85,8 +118,7 @@ async def enroll_fc_route(req: EnrollRequest) -> dict[str, Any]:
     is a short fingerprint (first 8 hex chars of sha256), not the key.
     """
     app = get_agent_app()
-    fc = app.fc_connection()
-    if fc is None or not fc.connected:
+    if not _fc_connected(app):
         raise HTTPException(status_code=503, detail="FC not connected")
 
     # Parse and validate hex. key_bytes is a bytearray so enroll_fc() can
@@ -97,18 +129,34 @@ async def enroll_fc_route(req: EnrollRequest) -> dict[str, Any]:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     try:
+        ipc = await _connect_mavlink_ipc()
+    except ConnectionError as exc:
+        for i in range(len(key_bytes)):
+            key_bytes[i] = 0
+        raise HTTPException(
+            status_code=503, detail="MAVLink command link unavailable"
+        ) from exc
+
+    try:
         result = await enroll_fc(
-            fc,
+            ipc.send,
             key_bytes,
             target_system=req.target_system,
             target_component=req.target_component,
         )
+        # Yield so the scheduled drains flush the frames before disconnect.
+        await asyncio.sleep(0)
     except Exception as exc:
         # Defensive zeroize even if enroll_fc's own finally already ran.
         for i in range(len(key_bytes)):
             key_bytes[i] = 0
         log.error("signing_enroll_failed", error=str(exc), error_type=type(exc).__name__)
         raise HTTPException(status_code=500, detail="enrollment failed") from exc
+    finally:
+        try:
+            await ipc.disconnect()
+        except Exception:
+            pass
 
     # Log with key_id fingerprint only; never the hex key.
     log.info(
@@ -125,35 +173,59 @@ async def enroll_fc_route(req: EnrollRequest) -> dict[str, Any]:
 async def disable_on_fc_route() -> dict[str, Any]:
     """Clear the FC's signing store (SETUP_SIGNING with all-zero key)."""
     app = get_agent_app()
-    fc = app.fc_connection()
-    if fc is None or not fc.connected:
+    if not _fc_connected(app):
         raise HTTPException(status_code=503, detail="FC not connected")
     try:
-        return disable_on_fc(fc)
+        ipc = await _connect_mavlink_ipc()
+    except ConnectionError as exc:
+        raise HTTPException(
+            status_code=503, detail="MAVLink command link unavailable"
+        ) from exc
+    try:
+        result = disable_on_fc(ipc.send)
+        await asyncio.sleep(0)
+        return result
     except Exception as exc:
         log.error("signing_disable_failed", error=str(exc), error_type=type(exc).__name__)
         raise HTTPException(status_code=500, detail="disable failed") from exc
+    finally:
+        try:
+            await ipc.disconnect()
+        except Exception:
+            pass
 
 
 @router.get("/mavlink/signing/require")
 async def require_get() -> dict[str, Any]:
-    """Current SIGNING_REQUIRE param value as cached by ParamCache."""
+    """Current SIGNING_REQUIRE param value from the cached param blob."""
     app = get_agent_app()
-    return get_require(app.param_cache())
+    return get_require(_cached_params(app))
 
 
 @router.put("/mavlink/signing/require")
 async def require_put(req: RequireRequest) -> dict[str, Any]:
     """Set SIGNING_REQUIRE on the FC."""
     app = get_agent_app()
-    fc = app.fc_connection()
-    if fc is None or not fc.connected:
+    if not _fc_connected(app):
         raise HTTPException(status_code=503, detail="FC not connected")
     try:
-        return set_require(fc, req.require)
+        ipc = await _connect_mavlink_ipc()
+    except ConnectionError as exc:
+        raise HTTPException(
+            status_code=503, detail="MAVLink command link unavailable"
+        ) from exc
+    try:
+        result = set_require(ipc.send, req.require)
+        await asyncio.sleep(0)
+        return result
     except Exception as exc:
         log.error("signing_set_require_failed", error=str(exc), error_type=type(exc).__name__)
         raise HTTPException(status_code=500, detail="set require failed") from exc
+    finally:
+        try:
+            await ipc.disconnect()
+        except Exception:
+            pass
 
 
 @router.get("/mavlink/signing/counters")

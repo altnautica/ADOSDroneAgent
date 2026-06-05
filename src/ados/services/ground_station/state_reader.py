@@ -21,7 +21,7 @@ import asyncio
 import structlog
 
 from ados.core.ipc import StateIPCClient
-from ados.services.mavlink.state import VehicleState
+from ados.services.mavlink.ipc_state import IpcVehicleState
 
 log = structlog.get_logger("ground_station.state_reader")
 
@@ -43,10 +43,10 @@ class StateReader:
 
     def __init__(
         self,
-        vehicle_state: VehicleState | None = None,
+        vehicle_state: IpcVehicleState | None = None,
         sock_client: StateIPCClient | None = None,
     ) -> None:
-        self.vehicle_state: VehicleState = vehicle_state or VehicleState()
+        self.vehicle_state: IpcVehicleState = vehicle_state or IpcVehicleState()
         self._client: StateIPCClient = sock_client or StateIPCClient()
         self._task: asyncio.Task | None = None
         self._stop_event: asyncio.Event | None = None
@@ -107,8 +107,8 @@ class StateReader:
     # ------------------------------------------------------------------
     # Snapshot accessor
     # ------------------------------------------------------------------
-    def get_latest(self) -> VehicleState:
-        """Return the live VehicleState. Same object every call so
+    def get_latest(self) -> IpcVehicleState:
+        """Return the live vehicle-state view. Same object every call so
         downstream consumers (MqttGateway) can hold a long-lived
         reference.
         """
