@@ -203,6 +203,7 @@ pub fn run_graph(steps: Vec<Box<dyn Step>>, ctx: &mut Ctx) -> Vec<StepReport> {
         let deps_ok = step.requires().iter().all(|r| succeeded.contains(*r));
         if !deps_ok {
             tracing::warn!(step = %id, "skipped: a required dependency did not succeed");
+            ctx.progress.step_result(id, &StepOutcome::Skipped);
             reports.push(StepReport {
                 id: id.clone(),
                 outcome: StepOutcome::Skipped,
@@ -213,6 +214,7 @@ pub fn run_graph(steps: Vec<Box<dyn Step>>, ctx: &mut Ctx) -> Vec<StepReport> {
         // (2) Blocked because a Required step already failed.
         if aborting {
             tracing::warn!(step = %id, "skipped: install aborting after a required failure");
+            ctx.progress.step_result(id, &StepOutcome::Skipped);
             reports.push(StepReport {
                 id: id.clone(),
                 outcome: StepOutcome::Skipped,
@@ -225,6 +227,7 @@ pub fn run_graph(steps: Vec<Box<dyn Step>>, ctx: &mut Ctx) -> Vec<StepReport> {
             if !ctx.force && ctx.checkpoint.is_done(cp) {
                 tracing::info!(step = %id, checkpoint = %cp, "skipped: checkpoint already done");
                 succeeded.insert(id.clone());
+                ctx.progress.step_result(id, &StepOutcome::Skipped);
                 reports.push(StepReport {
                     id: id.clone(),
                     outcome: StepOutcome::Skipped,
@@ -234,6 +237,7 @@ pub fn run_graph(steps: Vec<Box<dyn Step>>, ctx: &mut Ctx) -> Vec<StepReport> {
         }
 
         // (4) Run.
+        ctx.progress.step_started(id);
         let outcome = step.run(ctx);
         match &outcome {
             StepOutcome::Ok | StepOutcome::Skipped => {
@@ -253,6 +257,7 @@ pub fn run_graph(steps: Vec<Box<dyn Step>>, ctx: &mut Ctx) -> Vec<StepReport> {
                 }
             }
         }
+        ctx.progress.step_result(id, &outcome);
         reports.push(StepReport {
             id: id.clone(),
             outcome,

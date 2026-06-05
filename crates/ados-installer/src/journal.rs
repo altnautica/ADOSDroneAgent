@@ -14,9 +14,13 @@ pub fn init_logging() {
         use tracing_subscriber::prelude::*;
         use tracing_subscriber::EnvFilter;
         if let Ok(journald) = tracing_journald::layer() {
+            // The journal keeps the durable record; the channel layer additively
+            // forwards log lines to the live progress UI (a no-op until a
+            // log-forwarding renderer attaches).
             let _ = tracing_subscriber::registry()
                 .with(EnvFilter::new(&filter))
                 .with(journald)
+                .with(crate::ui::ChannelLayer)
                 .try_init();
             return;
         }

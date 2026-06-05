@@ -9,6 +9,7 @@ use crate::checkpoint::Checkpoint;
 use crate::cli::Args;
 use crate::env::EnvInfo;
 use crate::result::FailureAccumulator;
+use crate::ui::ProgressSink;
 
 /// Per-run state shared (by `&mut`) across the step graph.
 #[derive(Debug)]
@@ -34,6 +35,9 @@ pub struct Ctx {
     /// `scripts/drivers/*`. `None` until `venv_agent` populates it; the
     /// downstream steps then fall back to `/opt/ados/source` / `INSTALL_DIR/repo`.
     pub source_dir: Option<std::path::PathBuf>,
+    /// Live-progress sink. Defaults to a no-op; the binary swaps in a real sink
+    /// after starting the renderer. Steps and the graph emit progress through it.
+    pub progress: ProgressSink,
 }
 
 impl Ctx {
@@ -53,6 +57,7 @@ impl Ctx {
             profile,
             channel,
             source_dir: None,
+            progress: ProgressSink::default(),
         }
     }
 

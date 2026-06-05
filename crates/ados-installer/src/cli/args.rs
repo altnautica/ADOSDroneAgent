@@ -33,6 +33,16 @@ pub struct Args {
     pub uninstall: bool,
     /// `--status` — print install status and exit.
     pub status: bool,
+    /// `--plain` — force the escape-free line renderer (no animation/color).
+    pub plain: bool,
+    /// `--quiet` — print only the final summary (and errors).
+    pub quiet: bool,
+    /// `--json` — machine output on stdout; no progress UI.
+    pub json: bool,
+    /// `--no-color` — disable color in the rich renderer.
+    pub no_color: bool,
+    /// `--ascii` — ASCII glyph fallback (no Unicode box/spinner).
+    pub ascii: bool,
     /// `--help` — print usage and exit.
     pub help: bool,
 }
@@ -71,6 +81,11 @@ impl Args {
                 "--force" => args.force = true,
                 "--uninstall" => args.uninstall = true,
                 "--status" => args.status = true,
+                "--plain" => args.plain = true,
+                "--quiet" => args.quiet = true,
+                "--json" => args.json = true,
+                "--no-color" => args.no_color = true,
+                "--ascii" => args.ascii = true,
                 "--help" | "-h" => args.help = true,
                 "--profile" => args.profile = Some(take_value(&tokens, &mut i, "--profile")?),
                 "--name" => args.name = Some(take_value(&tokens, &mut i, "--name")?),

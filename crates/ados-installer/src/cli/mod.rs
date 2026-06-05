@@ -26,5 +26,10 @@ OPTIONS:
     --camera <hint>                    Camera hardware hint
     --uninstall                        Remove the agent
     --status                           Print install status and exit
+    --plain                            Plain line output (no animation/color)
+    --quiet                            Print only the final summary
+    --json                             Machine output on stdout; no progress UI
+    --no-color                         Disable color in the progress UI
+    --ascii                            ASCII glyph fallback
     -h, --help                         Print this help and exit
 ";

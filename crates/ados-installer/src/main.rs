@@ -21,6 +21,7 @@ use ados_installer::graph::run_graph;
 use ados_installer::journal::init_logging;
 use ados_installer::result::{now_iso8601_utc, FailureAccumulator, InstallResult};
 use ados_installer::steps::full_install_chain;
+use ados_installer::ui;
 use ados_installer::uninstall;
 
 #[tokio::main]
@@ -82,6 +83,14 @@ async fn main() -> Result<ExitCode> {
 
 /// Drive the install step chain and write the result contract.
 fn run_install(args: Args, mode: RunMode) -> Result<ExitCode> {
+    // Start the live progress UI before any work so the operator sees feedback
+    // immediately. The mode is chosen from stderr + the environment.
+    let render_mode = ui::detect_mode(&args);
+    let theme = ui::Theme::detect(args.no_color, args.ascii);
+    let profile_hint = args.profile.clone().unwrap_or_else(|| "drone".to_string());
+    let header = format!("Installing the ADOS Drone Agent ({profile_hint})…");
+    let (sink, render) = ui::start(render_mode, header, theme);
+
     let env = EnvInfo::probe();
     let checkpoint = Checkpoint::new();
 
@@ -93,6 +102,7 @@ fn run_install(args: Args, mode: RunMode) -> Result<ExitCode> {
     }
 
     let mut ctx = Ctx::from_args(args, env, checkpoint);
+    ctx.progress = sink.clone();
 
     let reports = run_graph(full_install_chain(), &mut ctx);
     let status = ctx.failures.derive_status();
@@ -109,10 +119,79 @@ fn run_install(args: Args, mode: RunMode) -> Result<ExitCode> {
     // resolved into ctx by preflight, so read it back from there.
     write_result(&ctx.failures, status, &ctx.profile);
 
+    // Hand the renderer the closing summary, then wait for it to draw the
+    // success card / failure panel and restore the terminal.
+    if render_mode == ui::RenderMode::Json {
+        print_result_json();
+    }
+    sink.summary(build_summary(status, &ctx));
+    sink.finish();
+    render.finish();
+
     if status == "failed" {
         Ok(ExitCode::from(1))
     } else {
         Ok(ExitCode::SUCCESS)
+    }
+}
+
+/// Assemble the renderer's closing-summary payload from the resolved context.
+fn build_summary(status: &str, ctx: &Ctx) -> ui::SummaryData {
+    let hostname = read_hostname();
+    let setup_url = format!("http://{hostname}.local:8080/setup");
+    ui::SummaryData {
+        status: status.to_string(),
+        version: installed_version(),
+        profile: ctx.profile.clone(),
+        board: board_id(),
+        device_id: read_device_id(),
+        hostname,
+        setup_url,
+        paired: pairing_present(),
+        failed_steps: ctx.failures.failed.clone(),
+        required_failures: ctx.failures.required.clone(),
+    }
+}
+
+/// Hostname for the `<host>.local` hint + setup URL: `/etc/hostname`, then
+/// `uname -n`, else `ados`.
+fn read_hostname() -> String {
+    if let Ok(s) = std::fs::read_to_string("/etc/hostname") {
+        let v = s.trim();
+        if !v.is_empty() {
+            return v.to_string();
+        }
+    }
+    let res = exec::run("uname", &["-n"]);
+    if res.success() {
+        let v = res.stdout.trim();
+        if !v.is_empty() {
+            return v.to_string();
+        }
+    }
+    "ados".to_string()
+}
+
+/// The 12-hex device id, or `unknown`.
+fn read_device_id() -> String {
+    std::fs::read_to_string(env::DEVICE_ID_FILE)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+/// Whether pairing material is present on disk.
+fn pairing_present() -> bool {
+    std::fs::metadata(env::PAIRING_JSON)
+        .map(|m| m.len() > 0)
+        .unwrap_or(false)
+}
+
+/// Print the install-result contract to stdout (for `--json`).
+fn print_result_json() {
+    if let Ok(body) = std::fs::read_to_string(RESULT_PATH) {
+        print!("{body}");
     }
 }
 

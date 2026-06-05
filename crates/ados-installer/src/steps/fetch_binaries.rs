@@ -253,7 +253,11 @@ impl Step for FetchBinaries {
             Err(e) => return StepOutcome::Failed(format!("could not create temp dir: {e}")),
         };
 
-        for b in binaries::for_profile(&ctx.profile) {
+        // Drive the determinate "Downloading components" bar: k of N binaries.
+        let bins = binaries::for_profile(&ctx.profile);
+        let total = bins.len() as u64;
+        ctx.progress.sub_progress(self.id(), 0, total);
+        for (i, b) in bins.into_iter().enumerate() {
             let ok = match install_one_with_retry(b, &tmp_dir, channel) {
                 Ok(()) => {
                     tracing::info!(
@@ -276,6 +280,7 @@ impl Step for FetchBinaries {
                     b.service
                 ));
             }
+            ctx.progress.sub_progress(self.id(), (i as u64) + 1, total);
         }
 
         let _ = std::fs::remove_dir_all(&tmp_dir);

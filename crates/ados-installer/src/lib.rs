@@ -22,5 +22,6 @@ pub mod journal;
 pub mod net;
 pub mod result;
 pub mod steps;
+pub mod ui;
 pub mod uninstall;
 pub mod verify;

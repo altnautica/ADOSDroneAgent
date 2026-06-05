@@ -1,0 +1,125 @@
+//! Progress events + the step→friendly-group map.
+//!
+//! The install engine emits [`ProgressEvent`]s onto a channel; a renderer thread
+//! consumes them and draws the live progress (rich) or prints line transitions
+//! (plain). The 14 technical install steps are collapsed into ~10 human-readable
+//! groups so the checklist reads at a glance; a group lights up when any of its
+//! member steps starts and finalizes when all of them have a result.
+
+use crate::graph::StepOutcome;
+
+/// The friendly checklist groups, in display order. Each maps to one or more of
+/// the technical step ids in the install chain. Every step in the chain appears
+/// in exactly one group.
+pub const GROUPS: &[(&str, &[&str])] = &[
+    ("Checking system", &["preflight", "purge_residue"]),
+    ("Installing dependencies", &["deps"]),
+    ("Agent runtime", &["venv_agent"]),
+    ("Building radio stack", &["wfb_ng"]),
+    ("Downloading components", &["fetch_binaries"]),
+    ("Building drivers", &["dkms"]),
+    (
+        "Configuring",
+        &["config_identity", "network_mac_pin", "rtl_regulatory"],
+    ),
+    ("Registering services", &["watchdog", "systemd"]),
+    ("Starting agent", &["start"]),
+    ("Verifying", &["health"]),
+];
+
+/// The display group index a step belongs to, if any.
+pub fn group_index_for_step(step_id: &str) -> Option<usize> {
+    GROUPS
+        .iter()
+        .position(|(_, steps)| steps.contains(&step_id))
+}
+
+/// An event emitted from the install engine to the renderer thread.
+#[derive(Debug)]
+pub enum ProgressEvent {
+    /// A step's `run()` is about to execute (lights up its group's spinner).
+    StepStarted { id: String },
+    /// A step finished (ran or was skipped) with the given outcome.
+    StepResult { id: String, outcome: StepOutcome },
+    /// Incremental sub-progress for a step that reports a fraction (the
+    /// component download). `done`/`total` are in the step's own units.
+    SubProgress { id: String, done: u64, total: u64 },
+    /// A forwarded log line (from the tracing layer) to scroll above the block.
+    Log { level: tracing::Level, line: String },
+    /// The terminal summary: render the success card / failure panel.
+    Summary(Box<SummaryData>),
+    /// Stop the renderer loop and restore the terminal.
+    Finished,
+}
+
+/// The data the renderer needs to draw the final success card or failure panel.
+/// Assembled by the installer after the graph run; the renderer combines it with
+/// its own buffered log lines for the failure panel.
+#[derive(Debug, Clone)]
+pub struct SummaryData {
+    /// `ok` | `degraded` | `failed`.
+    pub status: String,
+    /// Installed agent version, or `unknown`.
+    pub version: String,
+    /// `drone` | `ground_station`.
+    pub profile: String,
+    /// Detected board model.
+    pub board: String,
+    /// The 12-hex device id.
+    pub device_id: String,
+    /// Hostname (drives the `<host>.local` mDNS hint + setup URL).
+    pub hostname: String,
+    /// The on-box setup URL.
+    pub setup_url: String,
+    /// Whether the agent has pairing material on disk.
+    pub paired: bool,
+    /// Every step that did not succeed.
+    pub failed_steps: Vec<String>,
+    /// The subset that were Required (hard failures).
+    pub required_failures: Vec<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_chain_step_maps_to_exactly_one_group() {
+        let chain = [
+            "preflight",
+            "purge_residue",
+            "deps",
+            "venv_agent",
+            "wfb_ng",
+            "fetch_binaries",
+            "dkms",
+            "config_identity",
+            "network_mac_pin",
+            "rtl_regulatory",
+            "watchdog",
+            "systemd",
+            "start",
+            "health",
+        ];
+        for step in chain {
+            let hits = GROUPS
+                .iter()
+                .filter(|(_, steps)| steps.contains(&step))
+                .count();
+            assert_eq!(hits, 1, "step {step} must map to exactly one group");
+        }
+        // And no group references a step outside the chain.
+        for (_, steps) in GROUPS {
+            for s in *steps {
+                assert!(chain.contains(s), "group references unknown step {s}");
+            }
+        }
+    }
+
+    #[test]
+    fn group_lookup_resolves() {
+        assert_eq!(group_index_for_step("deps"), Some(1));
+        assert_eq!(group_index_for_step("health"), Some(GROUPS.len() - 1));
+        assert_eq!(group_index_for_step("nope"), None);
+    }
+}

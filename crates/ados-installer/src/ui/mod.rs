@@ -1,0 +1,256 @@
+//! The installer's live progress UI.
+//!
+//! The install engine emits [`ProgressEvent`]s through a [`ProgressSink`] (cheap
+//! to clone, a no-op when no renderer is attached). A renderer thread consumes
+//! them and either draws a live dashboard (rich) or prints clean line
+//! transitions (plain). The durable per-process log keeps flowing to the journal
+//! independently; this UI is purely additive operator feedback.
+//!
+//! Mode is chosen from **stderr** (where the UI renders) plus the environment,
+//! so it behaves correctly under `curl … | sudo bash` (stdin is a pipe, but
+//! stderr is the operator's terminal) and degrades to plain text in CI / piped
+//! / `TERM=dumb` contexts.
+
+pub mod events;
+pub mod model;
+pub mod plain;
+pub mod rich;
+pub mod summary;
+pub mod theme;
+
+use std::io::{IsTerminal, Write};
+use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::OnceLock;
+use std::thread::JoinHandle;
+
+use tracing::field::{Field, Visit};
+use tracing::{Event, Subscriber};
+use tracing_subscriber::layer::{Context, Layer};
+
+use crate::graph::StepOutcome;
+pub use events::{ProgressEvent, SummaryData};
+pub use theme::Theme;
+
+/// Set once a log-forwarding renderer (rich) is running. The tracing
+/// [`ChannelLayer`] forwards log lines here; until it is set, forwarding is a
+/// no-op and logs go only to the journal.
+static LOG_TX: OnceLock<Sender<ProgressEvent>> = OnceLock::new();
+
+/// Which renderer to drive, decided once at startup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RenderMode {
+    /// Live dashboard with color + spinner (stderr is an interactive terminal).
+    Rich,
+    /// Clean escape-free line transitions (non-tty / CI / `--plain`).
+    Plain,
+    /// Only the final summary (and errors); `--quiet`.
+    Quiet,
+    /// No UI; machine output on stdout. `--json`.
+    Json,
+}
+
+/// Decide the render mode from the flags + environment. Gates on **stderr**
+/// because that is where the UI draws.
+pub fn detect_mode(args: &crate::cli::Args) -> RenderMode {
+    if args.json {
+        return RenderMode::Json;
+    }
+    if args.quiet {
+        return RenderMode::Quiet;
+    }
+    let is_tty = std::io::stderr().is_terminal();
+    let ci = std::env::var_os("CI").is_some();
+    let dumb = std::env::var("TERM").map(|t| t == "dumb").unwrap_or(false);
+    if args.plain || !is_tty || ci || dumb {
+        return RenderMode::Plain;
+    }
+    RenderMode::Rich
+}
+
+/// A cheap, clonable handle the install engine emits events through. A sink with
+/// no channel (the default, or `--json`) silently drops events.
+#[derive(Debug, Clone, Default)]
+pub struct ProgressSink {
+    tx: Option<Sender<ProgressEvent>>,
+}
+
+impl ProgressSink {
+    fn send(&self, ev: ProgressEvent) {
+        if let Some(tx) = &self.tx {
+            let _ = tx.send(ev);
+        }
+    }
+
+    /// A step's `run()` is about to execute.
+    pub fn step_started(&self, id: &str) {
+        self.send(ProgressEvent::StepStarted { id: id.to_string() });
+    }
+
+    /// A step finished (ran or skipped) with this outcome.
+    pub fn step_result(&self, id: &str, outcome: &StepOutcome) {
+        self.send(ProgressEvent::StepResult {
+            id: id.to_string(),
+            outcome: outcome.clone(),
+        });
+    }
+
+    /// Incremental sub-progress for a step that reports a fraction.
+    pub fn sub_progress(&self, id: &str, done: u64, total: u64) {
+        self.send(ProgressEvent::SubProgress {
+            id: id.to_string(),
+            done,
+            total,
+        });
+    }
+
+    /// The terminal summary (success card / failure panel).
+    pub fn summary(&self, s: SummaryData) {
+        self.send(ProgressEvent::Summary(Box::new(s)));
+    }
+
+    /// Stop the renderer and restore the terminal.
+    pub fn finish(&self) {
+        self.send(ProgressEvent::Finished);
+    }
+}
+
+/// Owns the renderer thread; [`RenderHandle::finish`] joins it (call after
+/// sending [`ProgressSink::summary`] + [`ProgressSink::finish`]).
+pub struct RenderHandle {
+    join: Option<JoinHandle<()>>,
+}
+
+impl RenderHandle {
+    fn none() -> Self {
+        RenderHandle { join: None }
+    }
+
+    /// Wait for the renderer to draw the final summary and restore the terminal.
+    pub fn finish(self) {
+        if let Some(j) = self.join {
+            let _ = j.join();
+        }
+    }
+}
+
+/// Create the progress sink + spawn the renderer thread for `mode`. `header` is
+/// the one-line banner the renderer prints first.
+pub fn start(mode: RenderMode, header: String, theme: Theme) -> (ProgressSink, RenderHandle) {
+    if mode == RenderMode::Json {
+        return (ProgressSink::default(), RenderHandle::none());
+    }
+    let (tx, rx) = mpsc::channel::<ProgressEvent>();
+    let sink = ProgressSink {
+        tx: Some(tx.clone()),
+    };
+    let join = match mode {
+        RenderMode::Rich => {
+            // The renderer hides the cursor; a panic (release builds abort) must
+            // still restore it, so install the hook before drawing.
+            install_panic_hook();
+            // Forward log lines into the live block (rich renderer only).
+            let _ = LOG_TX.set(tx);
+            std::thread::Builder::new()
+                .name("ados-installer-ui".to_string())
+                .spawn(move || rich::run(rx, theme, header))
+                .ok()
+        }
+        RenderMode::Quiet => spawn_plain(rx, true, header),
+        // Plain (and any future fallback) → the escape-free line renderer.
+        _ => spawn_plain(rx, false, header),
+    };
+    (sink, RenderHandle { join })
+}
+
+/// Spawn the plain renderer thread.
+fn spawn_plain(rx: Receiver<ProgressEvent>, quiet: bool, header: String) -> Option<JoinHandle<()>> {
+    std::thread::Builder::new()
+        .name("ados-installer-ui".to_string())
+        .spawn(move || plain::run(rx, quiet, header))
+        .ok()
+}
+
+/// Restore the cursor on panic. Release builds abort on panic, so the hook is
+/// the only chance to undo `cursor::Hide`. Installed at most once.
+fn install_panic_hook() {
+    static ONCE: OnceLock<()> = OnceLock::new();
+    if ONCE.set(()).is_err() {
+        return;
+    }
+    let prev = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let mut err = std::io::stderr();
+        let _ = ratatui::crossterm::execute!(err, ratatui::crossterm::cursor::Show);
+        let _ = writeln!(err);
+        prev(info);
+    }));
+}
+
+/// A tracing layer that forwards each log line to the renderer (when a
+/// log-forwarding renderer is attached). Added alongside the journald layer so
+/// the journal keeps the full record regardless.
+pub struct ChannelLayer;
+
+#[derive(Default)]
+struct MsgVisitor {
+    message: Option<String>,
+}
+
+impl Visit for MsgVisitor {
+    fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+        if field.name() == "message" {
+            self.message = Some(format!("{value:?}"));
+        }
+    }
+}
+
+impl<S: Subscriber> Layer<S> for ChannelLayer {
+    fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
+        let Some(tx) = LOG_TX.get() else {
+            return;
+        };
+        let mut v = MsgVisitor::default();
+        event.record(&mut v);
+        if let Some(msg) = v.message {
+            let _ = tx.send(ProgressEvent::Log {
+                level: *event.metadata().level(),
+                line: msg,
+            });
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cli::Args;
+
+    #[test]
+    fn json_and_quiet_flags_win() {
+        let mut a = Args {
+            json: true,
+            ..Args::default()
+        };
+        assert_eq!(detect_mode(&a), RenderMode::Json);
+        a.json = false;
+        a.quiet = true;
+        assert_eq!(detect_mode(&a), RenderMode::Quiet);
+    }
+
+    #[test]
+    fn plain_flag_forces_plain() {
+        let a = Args {
+            plain: true,
+            ..Args::default()
+        };
+        assert_eq!(detect_mode(&a), RenderMode::Plain);
+    }
+
+    #[test]
+    fn noop_sink_does_not_panic() {
+        let sink = ProgressSink::default();
+        sink.step_started("deps");
+        sink.step_result("deps", &StepOutcome::Ok);
+        sink.finish();
+    }
+}

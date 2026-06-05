@@ -20,6 +20,10 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
+# Live install progress UI. Only `ratatui::crossterm` is used (cursor + clear +
+# styled writes) for a render-only "sticky block"; no alternate screen, no raw
+# mode, no cursor-position query, so it is safe under `curl … | sudo bash`.
+ratatui = { workspace = true }
 # In-process SHA256 of fetched artifacts (the mandatory check; the optional
 # Ed25519 signature is verified by shelling out to `minisign -V` like the
 # predecessor installer, so no signature crate is pulled in here).
