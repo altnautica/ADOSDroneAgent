@@ -75,10 +75,18 @@ get() {
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp" 2>/dev/null || true' EXIT
 
+# A line of feedback for the short pre-binary window; the installer renders its
+# own live progress once it execs below.
+echo "Fetching ADOS installer…" >&2
 get "${REL_BASE}/${asset}" "${tmp}/${asset}"
 get "${REL_BASE}/${asset}.sha256" "${tmp}/${asset}.sha256"
-# minisig is best-effort — failure to fetch must not abort.
-get "${REL_BASE}/${asset}.minisig" "${tmp}/${asset}.minisig" || true
+# minisig is opt-in: only fetch when verification can actually run (a pubkey is
+# provided and minisign is installed). On the default path it is an unused
+# download that would surface a misleading 404, so skip it; silence stderr since
+# a missing signature is non-fatal by design.
+if [ -n "${ADOS_INSTALLER_PUBKEY:-}" ] && command -v minisign >/dev/null 2>&1; then
+    get "${REL_BASE}/${asset}.minisig" "${tmp}/${asset}.minisig" 2>/dev/null || true
+fi
 
 # 5. Verify. sha256 is mandatory; abort loudly on mismatch.
 ( cd "$tmp" && sha256sum -c "${asset}.sha256" ) || {
