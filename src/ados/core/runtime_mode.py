@@ -105,9 +105,15 @@ _FLAG_GATED: dict[str, _FlagGated] = {
         profiles=("ground-station",),
     ),
     "plugin-host": _FlagGated(
-        flag="plugin-host-rust-enabled",
+        # Cut over: native is the default. The host runs its native binary
+        # whenever the binary is present; the plugin-host-python-fallback
+        # marker pins the packaged host server instead. The two are mutually
+        # exclusive (both bind /run/ados/plugins/<id>.sock), so exactly one
+        # owns the per-plugin sockets at a time.
+        flag="plugin-host-python-fallback",
         binaries=("ados-plugin-host",),
         profiles=("drone", "ground-station"),
+        opt_out=True,
     ),
     "hid": _FlagGated(
         flag="hid-rust-enabled",

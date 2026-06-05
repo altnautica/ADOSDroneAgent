@@ -10,16 +10,17 @@ StartLimitBurst=5
 # observable per unit (the slice sets MemoryAccounting=yes).
 Slice=ados.slice
 Type=simple
-# The native plugin host is a NEW, opt-in service. It runs only when BOTH the
-# binary is present AND the operator enabled the flag file; there is no Python
-# host-server fallback, so the off path is /bin/true and the unit stays
-# inactive. A routine upgrade never starts it, and there is no [Install] section
-# so it is not pulled in until explicitly enabled. To turn it on for a bench:
-#   touch /etc/ados/plugin-host-rust-enabled && systemctl enable --now ados-plugin-host
-# Resolved at cutover (deliberately NOT wired here): per-runner capability-token
-# delivery, per-plugin socket ownership for the runner user, and whether the
-# host runs standalone (as here) or embedded in another service.
-ExecStart=/bin/sh -c 'if [ -e /etc/ados/plugin-host-rust-enabled ] && [ -x /opt/ados/bin/ados-plugin-host ]; then exec /opt/ados/bin/ados-plugin-host; else exec /bin/true; fi'
+# The native plugin host owns the per-plugin sockets by default: it runs its
+# native binary whenever the binary is present, UNLESS the operator pins the
+# packaged path with the fallback marker. When the marker is present (or the
+# binary is absent) the ExecStart is /bin/true and the packaged host server,
+# started on the supervisor's loop, serves the sockets instead. The native host
+# and the packaged server both bind /run/ados/plugins/<id>.sock, so they are
+# mutually exclusive and exactly one is the active owner. A routine install
+# enables this unit and the supervisor pulls it up (see [Install] below) with
+# zero manual steps. To pin the packaged path on a bench:
+#   ados rust disable plugin-host
+ExecStart=/bin/sh -c 'if [ -e /etc/ados/plugin-host-python-fallback ] || [ ! -x /opt/ados/bin/ados-plugin-host ]; then exec /bin/true; else exec /opt/ados/bin/ados-plugin-host; fi'
 Restart=on-failure
 RestartSec=3
 Environment=ADOS_CONFIG=/etc/ados/config.yaml
@@ -39,3 +40,11 @@ LimitNOFILE=8192
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=ados-plugin-host
+
+[Install]
+# The native host owns the per-plugin sockets by default, so a routine install
+# enables this unit. Wanted by the supervisor (which it is PartOf) so the
+# supervisor pulls it up and a supervisor restart cycles it with the rest of the
+# set. Pinning the packaged path (the fallback marker) leaves the unit enabled
+# but its ExecStart resolves to /bin/true, so the packaged server serves instead.
+WantedBy=ados-supervisor.service

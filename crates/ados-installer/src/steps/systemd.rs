@@ -29,9 +29,10 @@ const SYSTEMD_DIR: &str = "/etc/systemd/system";
 /// The udev rules dir.
 const UDEV_RULES_DIR: &str = "/etc/udev/rules.d";
 
-/// Cross-profile units that get enable-linked on every install. Each has its
-/// own `ConditionPathExists` gate so enabling them on a board without the
-/// hardware is a clean no-op (`enable_universal_units`).
+/// Cross-profile units that get enable-linked on every install. Each is
+/// self-gating — a `ConditionPathExists` gate, or an `ExecStart` guard that
+/// resolves to `/bin/true` — so enabling them on a board without the hardware
+/// (or without the native binary) is a clean no-op (`enable_universal_units`).
 const UNIVERSAL_UNITS: &[&str] = &[
     "ados-peripherals.service",
     "ados-fbcon-detach.service",
@@ -43,6 +44,13 @@ const UNIVERSAL_UNITS: &[&str] = &[
     // `WantedBy=ados-supervisor.service` auto-starts it with the supervisor
     // (the ados-peripherals pattern); the supervisor only monitors it.
     "ados-discovery.service",
+    // The native plugin host owns the per-plugin sockets by default. It is a
+    // swap unit whose ExecStart runs the native binary unless the operator
+    // pins the packaged path with the fallback marker (then `/bin/true`, and
+    // the packaged host server on the supervisor's loop serves instead). Both
+    // profiles fetch the binary, so it is enabled cross-profile here and the
+    // supervisor pulls it up via `WantedBy=ados-supervisor.service`.
+    "ados-plugin-host.service",
 ];
 
 /// Ground-station units enable-linked here (the START half is the `start`
@@ -77,6 +85,15 @@ const GROUND_STATION_ENABLE_UNITS: &[&str] = &[
 /// and the per-plugin subprocess units legitimately live outside `data/systemd`
 /// and must never be pruned.
 const RETIRED_UNITS: &[&str] = &["ados-scripting.service"];
+
+/// Cutover marker files retired by a default sense flip. The plugin host moved
+/// from an opt-IN marker (`plugin-host-rust-enabled`, native only when present)
+/// to an opt-OUT marker (`plugin-host-python-fallback`, native by default), so
+/// the old opt-in marker carries no meaning — the installer deletes it on every
+/// run (`prune_legacy_cutover_flags`). This list must never name an active
+/// marker (e.g. the fallback marker), or the installer would erase an operator's
+/// pinned choice on each upgrade.
+const RETIRED_CUTOVER_FLAGS: &[&str] = &["plugin-host-rust-enabled"];
 
 /// The other-profile teardown list, keyed by the profile being installed
 /// (`disable_other_profile_units`). On a GS rig the drone TX unit must not run;
@@ -637,6 +654,24 @@ fn reconcile_logd_unit() {
     }
 }
 
+/// Remove cutover marker files retired by a default sense flip so an
+/// `--upgrade` from an older release leaves no stale marker behind. The plugin
+/// host moved from an opt-IN marker (native only when the marker was present) to
+/// an opt-OUT marker (native by default; a fallback marker pins the packaged
+/// path), so the old opt-in marker no longer means anything — delete it. A fresh
+/// install writes NO marker (absent == native default), and this never writes
+/// the fallback marker, so the default stays native. Idempotent: a marker
+/// already gone is a clean no-op.
+fn prune_legacy_cutover_flags() {
+    for flag in RETIRED_CUTOVER_FLAGS {
+        let path = Path::new(CONFIG_DIR).join(flag);
+        if path.exists() {
+            let _ = std::fs::remove_file(&path);
+            tracing::info!(flag, "pruned retired cutover marker");
+        }
+    }
+}
+
 /// Drop the video-pipeline UDP sysctl tuning and apply it now so the running
 /// agent picks up the new ceiling on its next socket bind. Idempotent overwrite.
 /// Ports 03-kernel.sh `install_video_sysctl`.
@@ -1066,6 +1101,12 @@ impl Step for Systemd {
         //     off; the start step brings it up after the supervisor.
         reconcile_logd_unit();
 
+        // 5c. Drop marker files retired by a default sense flip (the plugin
+        //     host moved from an opt-in to an opt-out marker). A fresh install
+        //     writes no marker, so the default stays native; this only deletes
+        //     the obsolete opt-in marker on an upgrade.
+        prune_legacy_cutover_flags();
+
         // 6. Profile-specific enable + teardown.
         if ctx.profile == "ground_station" {
             // The env-gated USB-gadget composer (default off) and the
@@ -1200,8 +1241,40 @@ mod tests {
         // The mDNS advertiser is cross-profile so every agent is discoverable
         // for local pair-by-code, not just the ground station's static file.
         assert!(UNIVERSAL_UNITS.contains(&"ados-discovery.service"));
+        // The native plugin host owns the per-plugin sockets by default, so it
+        // is enabled cross-profile (both profiles fetch the binary). Its
+        // ExecStart self-gates to /bin/true when the fallback marker is set, so
+        // enabling it never forces the native path.
+        assert!(UNIVERSAL_UNITS.contains(&"ados-plugin-host.service"));
         // The supervisor is enabled separately, not in the universal list.
         assert!(!UNIVERSAL_UNITS.contains(&"ados-supervisor.service"));
+    }
+
+    #[test]
+    fn retired_cutover_flags_name_the_opt_in_marker_not_an_active_one() {
+        // The legacy opt-in marker is pruned on upgrade.
+        assert!(RETIRED_CUTOVER_FLAGS.contains(&"plugin-host-rust-enabled"));
+        // An active marker must never be in the retired set, or the installer
+        // would erase an operator's pinned choice on each run.
+        assert!(!RETIRED_CUTOVER_FLAGS.contains(&"plugin-host-python-fallback"));
+        assert!(!RETIRED_CUTOVER_FLAGS.contains(&"display-python-fallback"));
+        assert!(!RETIRED_CUTOVER_FLAGS.contains(&"net-rust-enabled"));
+    }
+
+    #[test]
+    fn plugin_host_unit_self_gates_to_the_fallback_marker() {
+        // The shipped unit must run the native binary by default and resolve to
+        // /bin/true only when the fallback marker pins the packaged path, and it
+        // must carry an [Install] section so the supervisor pulls it up.
+        let unit = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../data/systemd/ados-plugin-host.service");
+        if let Ok(body) = std::fs::read_to_string(&unit) {
+            assert!(body.contains("plugin-host-python-fallback"), "{body}");
+            assert!(body.contains("/opt/ados/bin/ados-plugin-host"), "{body}");
+            assert!(body.contains("WantedBy=ados-supervisor.service"), "{body}");
+            // The retired opt-in marker must no longer appear in the unit.
+            assert!(!body.contains("plugin-host-rust-enabled"), "{body}");
+        }
     }
 
     #[test]

@@ -77,10 +77,16 @@ _SERVICES: dict[str, _Service] = {
         note="native uplink matrix; absorbs ethernet/wifi-client/usb-gadget",
     ),
     "plugin-host": _Service(
-        flag="plugin-host-rust-enabled",
+        # Cut over: native is the default. The unit's ExecStart runs the
+        # native binary unless the fallback marker pins the packaged host
+        # server (served by the supervisor). `enable` removes the marker,
+        # `disable` writes it. The two share the per-plugin sockets, so
+        # exactly one is the active owner.
+        flag="plugin-host-python-fallback",
         binaries=("/opt/ados/bin/ados-plugin-host",),
         swap_units=("ados-plugin-host",),
-        note="native plugin host",
+        note="native plugin host (default); the fallback marker pins the packaged path",
+        opt_out=True,
     ),
     "hid": _Service(
         flag="hid-rust-enabled",

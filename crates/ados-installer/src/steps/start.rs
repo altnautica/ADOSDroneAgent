@@ -87,6 +87,25 @@ impl Step for Start {
             );
         }
 
+        // The native plugin host owns the per-plugin sockets by default and is
+        // PartOf the supervisor, so the restart above stopped it; bring it back
+        // unless the fallback marker pins the packaged path. A fresh box must
+        // come up with the native host serving the plugin sockets and zero
+        // manual steps. Cross-profile (both profiles fetch the binary).
+        if !Path::new(CONFIG_DIR)
+            .join("plugin-host-python-fallback")
+            .exists()
+        {
+            let _ = exec::run(
+                "systemctl",
+                &["start", "--no-block", "ados-plugin-host.service"],
+            );
+            tracing::info!(
+                unit = "ados-plugin-host.service",
+                "native plugin host started (--no-block)"
+            );
+        }
+
         // On a ground station, kick the GS unit set with --no-block. The
         // supervisor's PartOf= chain stops these on its restart above with
         // nothing subsequently re-starting them; this brings them back.

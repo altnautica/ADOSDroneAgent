@@ -325,3 +325,76 @@ async def test_plugin_context_events_publish(harness) -> None:
     await asyncio.wait_for(task, timeout=1.0)
     assert delivered == 1
     assert received[0].payload == {"status": "ok"}
+
+
+# ---------------------------------------------------------------------
+# Mutual exclusion with the native plugin host
+# ---------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_yields_to_native_host_does_not_bind(short_sock_dir: Path) -> None:
+    """When the native host is the active socket owner, the packaged server
+    yields: start_for_plugin returns the path but binds nothing, so no socket
+    is created and a connect attempt fails."""
+    server = PluginIpcServer(
+        bus=EventBus(),
+        token_issuer=TokenIssuer(),
+        socket_dir=short_sock_dir,
+        native_owner_check=lambda: True,
+    )
+    sock_path = await server.start_for_plugin(PLUGIN_ID)
+    # The path is returned but nothing is bound.
+    assert not sock_path.exists()
+    with pytest.raises((ConnectionRefusedError, FileNotFoundError, OSError)):
+        _, writer = await asyncio.open_unix_connection(str(sock_path))
+        writer.close()
+        await writer.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_yield_then_stop_does_not_unlink_foreign_socket(
+    short_sock_dir: Path,
+) -> None:
+    """A yielded server must not remove the socket file the native host owns.
+
+    Simulate the native host's live socket as a plain file at the path, yield,
+    then stop. The foreign file must survive (we never bound it)."""
+    foreign = short_sock_dir / f"{PLUGIN_ID}.sock"
+    foreign.write_text("native-host-socket-placeholder")
+    server = PluginIpcServer(
+        bus=EventBus(),
+        token_issuer=TokenIssuer(),
+        socket_dir=short_sock_dir,
+        native_owner_check=lambda: True,
+    )
+    await server.start_for_plugin(PLUGIN_ID)
+    assert foreign.exists()
+    await server.stop_for_plugin(PLUGIN_ID)
+    assert foreign.exists()
+
+
+@pytest.mark.asyncio
+async def test_binds_when_native_host_pinned_off(short_sock_dir: Path) -> None:
+    """With the native host pinned off (the check returns False), the packaged
+    server binds and serves the socket as before."""
+    issuer = TokenIssuer()
+    server = PluginIpcServer(
+        bus=EventBus(),
+        token_issuer=issuer,
+        socket_dir=short_sock_dir,
+        native_owner_check=lambda: False,
+    )
+    sock_path = await server.start_for_plugin(PLUGIN_ID)
+    try:
+        assert sock_path.exists()
+        token = issuer.mint(plugin_id=PLUGIN_ID, granted_caps={"event.publish"})
+        client = PluginIpcClient(
+            plugin_id=PLUGIN_ID,
+            token=token.to_string(),
+            socket_path=sock_path,
+        )
+        await client.connect()
+        await client.close()
+    finally:
+        await server.stop_for_plugin(PLUGIN_ID)

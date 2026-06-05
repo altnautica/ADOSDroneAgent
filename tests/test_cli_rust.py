@@ -58,6 +58,40 @@ def test_display_is_opt_out_native_by_default(tmp_path, monkeypatch):
     assert rust_mod._mode(svc) == "rust"
 
 
+def test_plugin_host_is_opt_out_native_by_default(tmp_path, monkeypatch):
+    """The plugin host is cut over: with the binary present and no fallback
+    marker `status` reports the native (rust) branch, `disable` writes the
+    fallback marker (and restarts the swap unit), and `enable` removes it."""
+    monkeypatch.setattr(rust_mod, "ADOS_ETC_DIR", tmp_path)
+    monkeypatch.setattr(rust_mod.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(
+        rust_mod, "_binaries_present", lambda svc: svc is _SERVICES["plugin-host"]
+    )
+    monkeypatch.setattr(rust_mod, "_unit_active", lambda unit: True)
+    calls: list[tuple[str, ...]] = []
+    monkeypatch.setattr(rust_mod, "_systemctl", lambda *a, **k: calls.append(a) or 0)
+
+    svc = _SERVICES["plugin-host"]
+    marker = tmp_path / svc.flag
+    assert svc.flag == "plugin-host-python-fallback"
+
+    # Default: binary present, marker absent → native.
+    assert rust_mod._mode(svc) == "rust"
+
+    # disable → writes the fallback marker and restarts the swap unit.
+    result = CliRunner().invoke(rust_group, ["disable", "plugin-host"])
+    assert result.exit_code == 0, result.output
+    assert marker.exists()
+    assert rust_mod._mode(svc) == "python"
+    assert ("restart", "ados-plugin-host") in calls
+
+    # enable → removes the fallback marker and returns to native.
+    result = CliRunner().invoke(rust_group, ["enable", "plugin-host"])
+    assert result.exit_code == 0, result.output
+    assert not marker.exists()
+    assert rust_mod._mode(svc) == "rust"
+
+
 def test_status_reports_python_when_no_flags(tmp_path, monkeypatch):
     """With no flag files and no installed binaries, every service reports
     the packaged (python) branch and the command exits clean for any user."""

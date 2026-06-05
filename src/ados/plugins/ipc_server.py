@@ -33,6 +33,7 @@ from pathlib import Path
 
 from ados.core.asyncio_util import log_task_exceptions
 from ados.core.logging import get_logger
+from ados.core.runtime_mode import is_service_native
 from ados.plugins.errors import CapabilityDenied as _CapabilityDenied
 from ados.plugins.events import (
     Event,
@@ -56,6 +57,22 @@ from ados.plugins.rpc import (
 log = get_logger("plugins.ipc_server")
 
 SOCKET_DIR = Path("/run/ados/plugins")
+
+
+def _native_host_is_active() -> bool:
+    """True when the native plugin host owns the per-plugin sockets.
+
+    The native host and this packaged server are mutually exclusive: both
+    bind ``/run/ados/plugins/<id>.sock``. When the native binary is present
+    and the operator has not pinned the packaged fallback marker, the native
+    host is the active owner and this server must not bind. Cheap (it only
+    stats files) and total (it never raises), so it is safe to call on the
+    socket-bring-up path.
+    """
+    try:
+        return is_service_native("plugin-host")
+    except Exception:  # noqa: BLE001
+        return False
 
 
 @dataclass
@@ -83,6 +100,7 @@ class PluginIpcServer:
         token_issuer: TokenIssuer,
         socket_dir: Path = SOCKET_DIR,
         host: HostServices | None = None,
+        native_owner_check: Callable[[], bool] | None = None,
     ) -> None:
         self._bus = bus
         self._token_issuer = token_issuer
@@ -90,6 +108,15 @@ class PluginIpcServer:
         self._host = host if host is not None else default_host_services()
         self._servers: dict[str, asyncio.AbstractServer] = {}
         self._sessions: dict[str, PluginSession] = {}
+        # When the native plugin host is the active socket owner this server
+        # yields instead of binding (they would otherwise contend for the same
+        # <id>.sock). Injectable for tests; defaults to the on-disk cutover
+        # state.
+        self._native_owner_check = (
+            native_owner_check
+            if native_owner_check is not None
+            else _native_host_is_active
+        )
 
     @property
     def host(self) -> HostServices:
@@ -101,9 +128,26 @@ class PluginIpcServer:
         return self._bus
 
     async def start_for_plugin(self, plugin_id: str) -> Path:
-        """Start a UDS server for one plugin. Returns the socket path."""
-        self._socket_dir.mkdir(parents=True, exist_ok=True)
+        """Start a UDS server for one plugin. Returns the socket path.
+
+        When the native plugin host is the active socket owner this packaged
+        server YIELDS: it returns the socket path without binding, so the two
+        implementations never contend for the same ``<id>.sock``. The packaged
+        server binds only when the native host is pinned off (the fallback
+        marker) or its binary is absent.
+        """
         sock_path = self._socket_dir / f"{plugin_id}.sock"
+        if self._native_owner_check():
+            # The native host owns this socket; do not bind (and do not touch
+            # any existing socket file — it may be the native host's live one).
+            log.info(
+                "plugin_ipc_server_yielding_to_native",
+                plugin_id=plugin_id,
+                socket=str(sock_path),
+            )
+            return sock_path
+
+        self._socket_dir.mkdir(parents=True, exist_ok=True)
         # Replace any stale socket from a previous run.
         if sock_path.exists():
             sock_path.unlink()
@@ -123,9 +167,14 @@ class PluginIpcServer:
 
     async def stop_for_plugin(self, plugin_id: str) -> None:
         server = self._servers.pop(plugin_id, None)
-        if server is not None:
-            server.close()
-            await server.wait_closed()
+        if server is None:
+            # We never bound this socket (the native host owns it, or it was
+            # never started). Do not unlink — the socket file on disk may be
+            # the native host's live one.
+            self._sessions.pop(plugin_id, None)
+            return
+        server.close()
+        await server.wait_closed()
         sock_path = self._socket_dir / f"{plugin_id}.sock"
         if sock_path.exists():
             sock_path.unlink()
