@@ -38,6 +38,13 @@ pub const INGEST_QUEUE_CAPACITY: usize = 4096;
 /// shutdown before the daemon stops waiting and exits anyway.
 pub const WRITER_JOIN_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// How long the orderly stop of the async components (read surface, accept loop,
+/// hardware collector, seam taps) is given before they are abandoned and shutdown
+/// presses on to close the ingest channel. Bounds a tap that blocks on a seam
+/// whose provider is dying in the same control-group SIGTERM, so a `systemctl
+/// stop` can never sit in `deactivating` until the unit's stop timeout.
+pub const TEARDOWN_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// How often the daemon pings the systemd watchdog while running. Comfortably
 /// under the unit's `WatchdogSec` (a ~3x margin) so a single missed tick from a
 /// brief scheduler stall does not trip a restart, but a genuinely wedged async
@@ -296,26 +303,36 @@ where
     stop.store(true, Ordering::SeqCst);
     sd_stopping();
 
-    // Stop the read surface first: it holds no ingest sender, so stopping it
-    // early just closes the listeners and unlinks the query socket; any
-    // in-flight tail streams end when the broadcast sender is dropped below.
+    // Signal every async component to stop up front (the sends are non-blocking),
+    // then await their exit under one bound. The read surface holds no ingest
+    // sender; the collector and taps must stop before the channel closes so they
+    // never send into it. The bound matters because `systemd stop` kills the whole
+    // control group at once: a seam tap reading a socket whose provider is dying
+    // in the same SIGTERM can block its `await`, and an unbounded wait here would
+    // hold shutdown open until the unit's stop timeout fires a SIGKILL (which also
+    // tears the writer mid-write). If the orderly join overruns, abandon the
+    // remaining tasks and press on — dropping the ingest sender next closes the
+    // channel so the writer drains and exits cleanly regardless.
     let _ = query_stop_tx.send(());
-    let _ = query_task.await;
-
-    // Stop accepting new clients, then wait for the accept loop to finish.
     let _ = accept_stop_tx.send(());
-    let _ = accept_task.await;
-
-    // Stop the hardware collector before the channel closes, then join it, so it
-    // never tries to send into a closing channel.
     let _ = collector_stop_tx.send(());
-    let _ = collector_task.await;
-
-    // Stop the seam taps the same way: fire the broadcast, then join each, so
-    // none tries to send into a closing channel.
     let _ = taps_stop_tx.send(());
-    for task in tap_tasks {
-        let _ = task.await;
+    let orderly = async {
+        let _ = query_task.await;
+        let _ = accept_task.await;
+        let _ = collector_task.await;
+        for task in tap_tasks {
+            let _ = task.await;
+        }
+    };
+    if tokio::time::timeout(TEARDOWN_TIMEOUT, orderly)
+        .await
+        .is_err()
+    {
+        tracing::warn!(
+            timeout_s = TEARDOWN_TIMEOUT.as_secs(),
+            "async teardown overran its bound; abandoning the remaining tasks"
+        );
     }
 
     // Drop every sender so the writer sees the channel close, drains the queue,

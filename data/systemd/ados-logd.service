@@ -20,6 +20,11 @@ RestartSec=5
 # gigabytes). The daemon gates READY on a fast quick_check, but give ample slack
 # over the 90s default so a slow open on aged flash never trips a restart loop.
 TimeoutStartSec=300s
+# The daemon self-bounds its shutdown (a ~5s teardown join + a ~10s writer join),
+# so a clean stop lands well inside this. The explicit ceiling replaces the 90s
+# default so a wedged component can never sit in `deactivating` that long before
+# systemd SIGKILLs it.
+TimeoutStopSec=30s
 Environment=RUST_LOG=info
 EnvironmentFile=-/etc/ados/env
 
