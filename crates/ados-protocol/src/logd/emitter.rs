@@ -26,6 +26,7 @@
 //! layer. Redaction happens before a frame ever leaves the process, so a secret
 //! is never written to the socket or to disk.
 
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -56,8 +57,13 @@ pub const INGEST_CHANNEL_CAPACITY: usize = 512;
 /// Maximum frames coalesced into one socket write.
 const BATCH_MAX_FRAMES: usize = 64;
 
-/// How long the shipper waits to accumulate a batch before flushing what it has.
-const BATCH_LINGER: Duration = Duration::from_millis(100);
+/// Upper bound on the frames the shipper holds across a disconnected window. The
+/// shipper carries its pending batch over a failed connect (so an early producer's
+/// frames survive the daemon coming up late) instead of dropping it; this caps the
+/// pinned memory of that buffer. At a few hundred bytes per frame this is well
+/// under a megabyte. When full, the oldest frame is dropped (and counted) so the
+/// freshest state — the one an RCA wants — is the one retained.
+const SHIPPER_BUFFER_MAX_FRAMES: usize = 1024;
 
 /// Reconnect backoff schedule (milliseconds). The writer steps through these on
 /// repeated connect failures and holds at the last value, so an absent socket
@@ -121,7 +127,7 @@ impl EventEmitter {
         let (tx, rx) = mpsc::channel::<EventFrame>(EVENT_CHANNEL_CAPACITY);
         let stats = Arc::new(EmitterStats::default());
         let path = socket.as_ref().to_path_buf();
-        tokio::spawn(shipper_task(rx, path));
+        tokio::spawn(shipper_task(rx, path, Arc::clone(&stats)));
         Self {
             source: source.into().into(),
             tx,
@@ -191,7 +197,7 @@ impl IngestEmitter {
         let (tx, rx) = mpsc::channel::<IngestFrame>(INGEST_CHANNEL_CAPACITY);
         let stats = Arc::new(EmitterStats::default());
         let path = socket.as_ref().to_path_buf();
-        tokio::spawn(ingest_shipper_task(rx, path));
+        tokio::spawn(ingest_shipper_task(rx, path, Arc::clone(&stats)));
         Self {
             source: source.into().into(),
             tx,
@@ -249,46 +255,115 @@ fn encode_ingest_batch(batch: &[IngestFrame]) -> Vec<u8> {
     buf
 }
 
-/// Drain the ingest channel, batch frames, and ship them to the ingest socket.
-/// Runs until the channel closes (every emitter handle dropped), then flushes
-/// and exits. Mirrors [`shipper_task`] but over the [`IngestFrame`] channel so
-/// the one shipper carries both telemetry and events. Its hot path never emits a
-/// `tracing` event, so shipping can never recurse into another shipped log.
-async fn ingest_shipper_task(mut rx: mpsc::Receiver<IngestFrame>, path: PathBuf) {
+/// Drain the ingest channel and ship over the shared transport. Mirrors
+/// [`shipper_task`] but over the [`IngestFrame`] channel so the one shipper
+/// carries both telemetry and events.
+async fn ingest_shipper_task(
+    rx: mpsc::Receiver<IngestFrame>,
+    path: PathBuf,
+    stats: Arc<EmitterStats>,
+) {
+    run_shipper(rx, path, stats, encode_ingest_batch).await;
+}
+
+/// Push a frame onto the pending buffer, bounded at [`SHIPPER_BUFFER_MAX_FRAMES`].
+/// When full, the oldest frame is evicted (and counted as a drop) so the freshest
+/// frames win — the state an RCA cares about. Memory stays pinned at the cap.
+fn push_bounded<T>(pending: &mut VecDeque<T>, frame: T, stats: &EmitterStats) {
+    if pending.len() >= SHIPPER_BUFFER_MAX_FRAMES {
+        pending.pop_front();
+        stats.record_dropped();
+    }
+    pending.push_back(frame);
+}
+
+/// Ship one front batch (up to [`BATCH_MAX_FRAMES`]) and, on a confirmed write,
+/// remove those frames from the buffer. A batch whose every frame failed to encode
+/// is consumed too, so a single bad record can never wedge the buffer. Returns
+/// whether the buffer advanced (false on a write failure, which also drops the
+/// connection so the next attempt reconnects).
+async fn ship_front<T>(
+    writer: &mut SocketWriter,
+    pending: &mut VecDeque<T>,
+    encode: fn(&[T]) -> Vec<u8>,
+) -> bool {
+    let take = pending.len().min(BATCH_MAX_FRAMES);
+    if take == 0 {
+        return false;
+    }
+    let buf = encode(&pending.make_contiguous()[..take]);
+    if buf.is_empty() || writer.write_all(&buf).await {
+        for _ in 0..take {
+            pending.pop_front();
+        }
+        true
+    } else {
+        false
+    }
+}
+
+/// Drain a frame channel, hold the pending frames in a bounded buffer across a
+/// disconnected window, and ship them once the ingest socket is reachable. Runs
+/// until the channel closes and the buffer drains (or the channel is closed and
+/// the socket is unreachable, so nothing more can be delivered), then exits.
+///
+/// The key property over a per-iteration throwaway batch: a failed connect does
+/// NOT drop the held frames. An emitter that records before the daemon's socket
+/// exists (e.g. a service's startup-time state transitions, emitted before the
+/// logging unit is listening) keeps those frames buffered and flushes them the
+/// instant the socket appears, instead of losing the first batch. Wait-free for
+/// `emit()` callers is unchanged: the bounded channel + `try_send` drop-on-full is
+/// still the producer-side overflow valve; this buffer is the shipper-side one.
+/// The hot path never emits a `tracing` event, so shipping can never recurse.
+async fn run_shipper<T>(
+    mut rx: mpsc::Receiver<T>,
+    path: PathBuf,
+    stats: Arc<EmitterStats>,
+    encode: fn(&[T]) -> Vec<u8>,
+) {
     let mut writer = SocketWriter::new(path);
-    let mut batch: Vec<IngestFrame> = Vec::with_capacity(BATCH_MAX_FRAMES);
+    let mut pending: VecDeque<T> = VecDeque::with_capacity(BATCH_MAX_FRAMES);
+    let mut closed = false;
 
     loop {
-        let Some(first) = rx.recv().await else {
-            break;
-        };
-        batch.clear();
-        batch.push(first);
-
-        let deadline = tokio::time::Instant::now() + BATCH_LINGER;
-        while batch.len() < BATCH_MAX_FRAMES {
-            match tokio::time::timeout_at(deadline, rx.recv()).await {
-                Ok(Some(frame)) => batch.push(frame),
-                Ok(None) => break,
-                Err(_) => break,
+        // Idle cheaply when nothing is buffered: block for the next frame. A
+        // closed channel with an empty buffer means there is no more work.
+        if pending.is_empty() {
+            if closed {
+                break;
+            }
+            match rx.recv().await {
+                Some(frame) => push_bounded(&mut pending, frame, &stats),
+                None => break,
             }
         }
 
+        // Pull everything already queued into the bounded buffer without blocking.
+        loop {
+            match rx.try_recv() {
+                Ok(frame) => push_bounded(&mut pending, frame, &stats),
+                Err(mpsc::error::TryRecvError::Empty) => break,
+                Err(mpsc::error::TryRecvError::Disconnected) => {
+                    closed = true;
+                    break;
+                }
+            }
+        }
+
+        // Connect (with backoff) and ship a front batch; a failed connect holds
+        // the buffer and retries on the next pass. If the channel is also closed
+        // and the socket is unreachable, nothing more can arrive or be delivered,
+        // so stop rather than spin.
         if writer.ensure_connected().await {
-            let buf = encode_ingest_batch(&batch);
-            if !buf.is_empty() {
-                let _ = writer.write_all(&buf).await;
-            }
+            ship_front(&mut writer, &mut pending, encode).await;
+        } else if closed {
+            break;
         }
     }
 
-    // Final flush on shutdown: best-effort, one connect attempt, no backoff loop.
-    if !batch.is_empty() && writer.stream.is_some() {
-        let buf = encode_ingest_batch(&batch);
-        if !buf.is_empty() {
-            let _ = writer.write_all(&buf).await;
-        }
-    }
+    // Bounded final flush: drain whatever remains while a live connection holds,
+    // never opening a new one (no backoff), so shutdown stays prompt.
+    while writer.stream.is_some() && ship_front(&mut writer, &mut pending, encode).await {}
 }
 
 /// Microsecond epoch timestamp for the current instant.
@@ -374,50 +449,10 @@ fn encode_batch(batch: &[EventFrame]) -> Vec<u8> {
     buf
 }
 
-/// Drain the channel, batch frames, and ship them to the ingest socket. Runs
-/// until the channel closes (every emitter handle dropped), then exits. Its hot
-/// path never emits a `tracing` event, so shipping an event can never recurse.
-async fn shipper_task(mut rx: mpsc::Receiver<EventFrame>, path: PathBuf) {
-    let mut writer = SocketWriter::new(path);
-    let mut batch: Vec<EventFrame> = Vec::with_capacity(BATCH_MAX_FRAMES);
-
-    loop {
-        // Block for the first frame of a batch so the task idles cheaply when no
-        // events flow. `None` means every sender dropped: flush and exit.
-        let Some(first) = rx.recv().await else {
-            break;
-        };
-        batch.clear();
-        batch.push(first);
-
-        // Coalesce additional frames already queued, up to the batch cap or the
-        // linger window, without blocking past the deadline.
-        let deadline = tokio::time::Instant::now() + BATCH_LINGER;
-        while batch.len() < BATCH_MAX_FRAMES {
-            match tokio::time::timeout_at(deadline, rx.recv()).await {
-                Ok(Some(frame)) => batch.push(frame),
-                Ok(None) => break,
-                Err(_) => break,
-            }
-        }
-
-        // Connect (with backoff) and ship. If the socket is unreachable, the
-        // batch is dropped; the service's own log line is the always-on fallback.
-        if writer.ensure_connected().await {
-            let buf = encode_batch(&batch);
-            if !buf.is_empty() {
-                let _ = writer.write_all(&buf).await;
-            }
-        }
-    }
-
-    // Final flush on shutdown: best-effort, one connect attempt, no backoff loop.
-    if !batch.is_empty() && writer.stream.is_some() {
-        let buf = encode_batch(&batch);
-        if !buf.is_empty() {
-            let _ = writer.write_all(&buf).await;
-        }
-    }
+/// Drain the event channel and ship over the shared transport. A thin wrapper
+/// over [`run_shipper`] specialised to [`EventFrame`].
+async fn shipper_task(rx: mpsc::Receiver<EventFrame>, path: PathBuf, stats: Arc<EmitterStats>) {
+    run_shipper(rx, path, stats, encode_batch).await;
 }
 
 #[cfg(test)]
@@ -682,6 +717,104 @@ mod tests {
         let drp = emitter.stats().dropped();
         assert_eq!(enq + drp, total as u64, "every sample accounted for");
         assert!(drp >= 1, "overflow past capacity was dropped and counted");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // --- shipper buffering (the early-producer fix) ----------------------
+
+    #[test]
+    fn push_bounded_caps_the_buffer_and_drops_oldest() {
+        let stats = EmitterStats::default();
+        let mut pending: VecDeque<u64> = VecDeque::new();
+        // Push ten past the cap: the buffer holds exactly the cap, the ten oldest
+        // are dropped and counted, and the newest survive.
+        let total = SHIPPER_BUFFER_MAX_FRAMES as u64 + 10;
+        for i in 0..total {
+            push_bounded(&mut pending, i, &stats);
+        }
+        assert_eq!(pending.len(), SHIPPER_BUFFER_MAX_FRAMES);
+        assert_eq!(
+            stats.dropped(),
+            10,
+            "the ten oldest were dropped and counted"
+        );
+        assert_eq!(*pending.front().unwrap(), 10, "oldest survivor is frame 10");
+        assert_eq!(*pending.back().unwrap(), total - 1, "newest frame retained");
+    }
+
+    #[tokio::test]
+    async fn buffered_events_survive_a_late_socket() {
+        // Emit before any listener exists. The old shipper dropped the batch on
+        // its first failed connect; the buffered shipper must hold the frames and
+        // flush them once the socket appears.
+        let path = tmp_sock(); // not bound yet
+        let emitter = EventEmitter::with_socket("ados-test", &path);
+        for i in 0..3u64 {
+            emitter.emit("radio.bind", Level::Info, detail(&[("n", MpVal::from(i))]));
+        }
+        // Yield so the shipper attempts a connect, fails, and parks in backoff
+        // while holding the three frames.
+        tokio::time::sleep(Duration::from_millis(60)).await;
+
+        // Bring the socket up; the held frames must arrive, in order.
+        let listener = UnixListener::bind(&path).unwrap();
+        let got = tokio::time::timeout(Duration::from_secs(5), async {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut ns = Vec::new();
+            for _ in 0..3 {
+                match read_one(&mut stream).await {
+                    IngestFrame::Event(e) => {
+                        ns.push(e.detail.get("n").and_then(|v| v.as_u64()).unwrap());
+                    }
+                    other => panic!("expected an event frame, got {other:?}"),
+                }
+            }
+            ns
+        })
+        .await
+        .expect("the held events were delivered after the socket appeared");
+        assert_eq!(
+            got,
+            vec![0, 1, 2],
+            "all three early events arrived in order"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn ingest_buffered_metrics_survive_a_late_socket() {
+        // The IngestEmitter shares the one shipper, so the late-socket hold applies
+        // to telemetry too.
+        let path = tmp_sock(); // not bound yet
+        let emitter = IngestEmitter::with_socket("ados-test", &path);
+        for i in 0..3u64 {
+            let mut tags = Fields::new();
+            tags.insert("n".to_string(), MpVal::from(i));
+            emitter.emit_metric("cpu.utilization_pct", i as f64, tags);
+        }
+        tokio::time::sleep(Duration::from_millis(60)).await;
+
+        let listener = UnixListener::bind(&path).unwrap();
+        let got = tokio::time::timeout(Duration::from_secs(5), async {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut ns = Vec::new();
+            for _ in 0..3 {
+                match read_one(&mut stream).await {
+                    IngestFrame::Telemetry(t) => {
+                        ns.push(t.tags.get("n").and_then(|v| v.as_u64()).unwrap());
+                    }
+                    other => panic!("expected a telemetry frame, got {other:?}"),
+                }
+            }
+            ns
+        })
+        .await
+        .expect("the held metrics were delivered after the socket appeared");
+        assert_eq!(
+            got,
+            vec![0, 1, 2],
+            "all three early metrics arrived in order"
+        );
         let _ = std::fs::remove_file(&path);
     }
 }
