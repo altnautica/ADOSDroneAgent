@@ -67,6 +67,44 @@ pub fn parse_diskstats(text: &str) -> Vec<DiskStats> {
     out
 }
 
+/// Filesystem used-capacity percentage of the mount containing `path`.
+///
+/// Unlike the per-device I/O counters above (which come from `/proc/diskstats`),
+/// filesystem capacity is not exposed as a sysfs/proc text file, so this queries
+/// the live mount via `statvfs`. It therefore reflects the real filesystem at
+/// `path` (`/` in production), not a fixture tree. Returns `None` when the
+/// syscall fails or the filesystem reports zero total blocks.
+///
+/// The percentage uses the `df`-style definition: `used / (used + available)`
+/// where `used = total - free`, so reserved (root-only) blocks are excluded from
+/// the denominator and a near-full unprivileged filesystem reads close to 100%.
+#[cfg(target_os = "linux")]
+pub fn read_fs_used_pct(path: &Path) -> Option<f64> {
+    let st = nix::sys::statvfs::statvfs(path).ok()?;
+    // Block counts stay in their native `fsblkcnt_t` type (no intermediate cast)
+    // and only cross to f64 for the final ratio, so the width is portable across
+    // 32- and 64-bit targets.
+    let total = st.blocks();
+    if total == 0 {
+        return None;
+    }
+    let free = st.blocks_free();
+    let avail = st.blocks_available();
+    let used = total.saturating_sub(free);
+    let denom = used.saturating_add(avail);
+    if denom == 0 {
+        return None;
+    }
+    Some(used as f64 / denom as f64 * 100.0)
+}
+
+/// Non-Linux stub: filesystem capacity is read via `statvfs` (a Linux-only
+/// dependency for this crate), so the metric is gracefully absent off Linux.
+#[cfg(not(target_os = "linux"))]
+pub fn read_fs_used_pct(_path: &Path) -> Option<f64> {
+    None
+}
+
 /// Keep whole backing devices; drop partitions and pseudo-devices.
 ///
 /// Partitions end in a digit on top of a name that ends in a non-digit

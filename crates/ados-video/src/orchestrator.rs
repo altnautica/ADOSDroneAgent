@@ -961,6 +961,13 @@ impl VideoOrchestrator {
         let mut tick = tokio::time::interval(HEALTH_CHECK_INTERVAL);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
+        // 1 Hz telemetry: aggregate the pipeline's encoder metrics once a second
+        // (NOT per encoder tick) and ship them to the logging daemon. Best-effort
+        // and non-blocking; an absent daemon drops the low-severity samples.
+        let telemetry = ados_protocol::logd::emitter::IngestEmitter::new("ados-video");
+        let mut telemetry_tick = tokio::time::interval(Duration::from_secs(1));
+        telemetry_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
         loop {
             tokio::select! {
                 _ = shutdown.wait() => {
@@ -969,6 +976,9 @@ impl VideoOrchestrator {
                 }
                 _ = tick.tick() => {
                     self.tick_once(&shutdown).await;
+                }
+                _ = telemetry_tick.tick() => {
+                    self.emit_telemetry(&telemetry);
                 }
             }
         }
@@ -988,6 +998,43 @@ impl VideoOrchestrator {
         }
         self.mediamtx.stop().await;
         tracing::info!("video_pipeline_service_stopped");
+    }
+
+    /// Ship the once-a-second encoder telemetry to the logging daemon.
+    ///
+    /// Emitted only while the pipeline is `Running` (an idle / errored pipeline
+    /// has no encoder, so reporting a bitrate / frame rate would be a lie).
+    /// `encoder_bitrate_kbps` and `framerate_hz` are the active encoder's
+    /// configured output values; `queue_depth_frames` and
+    /// `dropped_frames_cumulative` do not yet have a live source in the
+    /// streaming-copy path, so they are emitted as a floor the metric series can
+    /// later be backed by a real measurement. Tagged with the agent `profile`
+    /// and the `main` stream name.
+    fn emit_telemetry(&self, emitter: &ados_protocol::logd::emitter::IngestEmitter) {
+        use ados_protocol::logd::{Fields, Value};
+        if self.state != PipelineState::Running {
+            return;
+        }
+        let profile = self
+            .config
+            .profile
+            .clone()
+            .unwrap_or_else(|| "drone".to_string());
+        let mut tags = Fields::new();
+        tags.insert("profile".to_string(), Value::from(profile));
+        tags.insert("stream".to_string(), Value::from("main"));
+        emitter.emit_metric(
+            "video.encoder_bitrate_kbps",
+            self.camera_cfg.bitrate_kbps as f64,
+            tags.clone(),
+        );
+        emitter.emit_metric(
+            "video.framerate_hz",
+            self.camera_cfg.fps as f64,
+            tags.clone(),
+        );
+        emitter.emit_metric("video.queue_depth_frames", 0.0, tags.clone());
+        emitter.emit_metric("video.dropped_frames_cumulative", 0.0, tags);
     }
 
     /// One iteration of the run loop's body, factored out so the `select!`

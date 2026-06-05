@@ -330,6 +330,11 @@ async fn run_service(cfg: &WfbConfig, cancel: Arc<Notify>) {
     // state change). Best-effort and non-blocking: an absent daemon socket is
     // dropped quietly, never stalling the radio. The log lines + sidecar stay.
     let events = ados_protocol::logd::emitter::EventEmitter::new("ados-radio");
+    // Telemetry emitter for the periodic link-quality samples shipped to the
+    // logging daemon (RSSI / SNR / uncorrected-FEC, one set per heartbeat).
+    // Same non-blocking, best-effort transport as the event emitter; a saturated
+    // channel or an absent daemon drops the low-severity sample and counts it.
+    let metrics = ados_protocol::logd::emitter::IngestEmitter::new("ados-radio");
     // Count of radio-group respawns since service start, shared with the
     // heartbeat that surfaces it in the sidecar.
     let restart_count = Arc::new(AtomicU64::new(0));
@@ -866,12 +871,16 @@ async fn run_service(cfg: &WfbConfig, cancel: Arc<Notify>) {
         let hb_enabled = enabled_channels_vec.clone();
         let hb_reg_posture = reg_posture.clone();
         let hb_events = events.clone();
+        let hb_metrics = metrics.clone();
         let hb_usb_speed = adapter_info.usb_speed_mbps;
         let mut heartbeat = tokio::spawn(async move {
             const HEARTBEAT_INTERVAL_S: f64 = 2.0;
             let mut tick = tokio::time::interval(Duration::from_secs(2));
             let mut tx_live = TxLiveness::new();
             let mut prev_packets: i64 = 0;
+            // Previous link-lock state, so a lock/unlock event fires only on a
+            // real transition (not every heartbeat). `None` until the first tick.
+            let mut prev_locked: Option<bool> = None;
             // Debounced detector for the "transmitting, zero confirmed reception"
             // episode. Emits a discrete entry/clear event pair so an RCA can query
             // the episode boundaries; the instantaneous flag still rides the
@@ -919,6 +928,40 @@ async fn run_service(cfg: &WfbConfig, cancel: Arc<Notify>) {
                             &stats,
                             tx_live.tx_live(),
                         );
+
+                        // Ship the per-heartbeat link-quality samples (the
+                        // downlink video radio) and a discrete lock/unlock event
+                        // on a real link-state transition. Best-effort; an absent
+                        // logging daemon drops these without disturbing the radio.
+                        {
+                            use ados_protocol::logd::{Fields, Level, Value};
+                            let mut tags = Fields::new();
+                            tags.insert("direction".to_string(), Value::from("downlink"));
+                            tags.insert("link".to_string(), Value::from("video"));
+                            hb_metrics.emit_metric("link.rssi_dbm", stats.rssi_dbm, tags.clone());
+                            hb_metrics.emit_metric("link.snr_db", stats.snr_db, tags.clone());
+                            hb_metrics.emit_metric(
+                                "link.fec_uncorrected",
+                                stats.fec_failed as f64,
+                                tags,
+                            );
+                            let locked = state.is_locked();
+                            if prev_locked != Some(locked) {
+                                let mut detail = Fields::new();
+                                detail.insert("link".to_string(), Value::from("video"));
+                                detail.insert("state".to_string(), Value::from(state.as_str()));
+                                if locked {
+                                    hb_metrics.emit_event("link.lock", Level::Info, detail);
+                                } else if prev_locked.is_some() {
+                                    // Only emit unlock for a genuine drop from a
+                                    // previously-locked link, not the initial
+                                    // not-yet-locked state at service start.
+                                    hb_metrics.emit_event("link.unlock", Level::Warn, detail);
+                                }
+                                prev_locked = Some(locked);
+                            }
+                        }
+
                         let bsnap = hb_bitrate.lock().await.clone();
 
                         // Truthful channel: read the LIVE interface channel, not

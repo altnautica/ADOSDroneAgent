@@ -88,6 +88,11 @@ pub const THROTTLE_CADENCE: Duration = Duration::from_secs(1);
 /// Regulatory domain per phy (`iw reg get`). Changes only on a reg-set; a slow
 /// cadence matched to the USB pass keeps the subprocess cost negligible.
 pub const REGDOMAIN_CADENCE: Duration = Duration::from_secs(10);
+/// Headline summary metrics (CPU utilization, available memory, disk used,
+/// primary temperature). One per second is the at-a-glance health cadence; the
+/// underlying per-class reads run faster, this just derives the canonical
+/// summary keys from their most recent values.
+pub const SUMMARY_CADENCE: Duration = Duration::from_secs(1);
 
 /// The scheduler base tick: the greatest common cadence that lets every class
 /// fire close to its own period. The fast classes (thermal, freq/util) fire on
@@ -123,6 +128,14 @@ pub struct Collector {
     next_usb: Instant,
     next_throttle: Instant,
     next_regdomain: Instant,
+    next_summary: Instant,
+    /// Latest aggregate CPU utilization percentage, cached from the freq/util
+    /// class so the 1 Hz summary can emit `cpu.utilization_pct` without a second
+    /// `/proc/stat` read. `None` until the first delta is available.
+    last_cpu_util_all: Option<f64>,
+    /// Latest `(total, available)` memory bytes, cached from the memory class so
+    /// the 1 Hz summary can derive `mem.available_pct`. `None` until read.
+    last_mem: Option<(u64, u64)>,
     /// Count of signal classes that yielded no readings on the most recent tick
     /// (a board without hwmon, a kernel without PSI, a non-Pi board, ...). Lets
     /// the absence be observed without turning a graceful skip into an error.
@@ -148,6 +161,9 @@ impl Collector {
             next_usb: now,
             next_throttle: now,
             next_regdomain: now,
+            next_summary: now,
+            last_cpu_util_all: None,
+            last_mem: None,
             unavailable_classes: 0,
         }
     }
@@ -248,7 +264,10 @@ impl Collector {
                 }
             }
             // Utilization is a rate: compute it against the previous /proc/stat.
-            self.fold_utilization(&stat, ts, &mut snap, &mut metrics);
+            // The returned aggregate feeds the 1 Hz `cpu.utilization_pct` summary.
+            if let Some(util) = self.fold_utilization(&stat, ts, &mut snap, &mut metrics) {
+                self.last_cpu_util_all = Some(util);
+            }
             self.baselines.proc_stat = Some(stat);
         }
 
@@ -299,6 +318,10 @@ impl Collector {
                     .insert("mem.avail_bytes".to_string(), MpVal::from(avail));
                 push_metric(&mut metrics, ts, "mem.used_mb", used_mb(&mem) as f64, &[]);
                 push_metric(&mut metrics, ts, "mem.avail_mb", mb as f64, &[]);
+            }
+            // Cache total + available for the 1 Hz `mem.available_pct` summary.
+            if let (Some(total), Some(avail)) = (mem.total, mem.available) {
+                self.last_mem = Some((total, avail));
             }
             if let Some(swap_free) = mem.swap_free {
                 any = true;
@@ -422,6 +445,35 @@ impl Collector {
             }
         }
 
+        // --- 1 Hz headline summary metrics ------------------------------
+        //
+        // A small canonical set emitted once a second for the at-a-glance health
+        // series, derived from the values the per-class reads above already
+        // produced (no extra sysfs/proc reads beyond the live filesystem
+        // statvfs). `thermal.primary_c` is the fourth canonical summary metric and
+        // is already emitted by the thermal class at its own faster cadence, so it
+        // is intentionally not duplicated here. The block is skipped on a tick
+        // that produced no signals at all (an unreadable root), mirroring the
+        // empty-snapshot drop in `emit`, so a board with nothing to read emits no
+        // summary either.
+        if now >= self.next_summary {
+            self.next_summary = now + SUMMARY_CADENCE;
+            if !snap.signals.is_empty() {
+                if let Some(util) = self.last_cpu_util_all {
+                    push_metric(&mut metrics, ts, "cpu.utilization_pct", util, &[]);
+                }
+                if let Some((total, avail)) = self.last_mem {
+                    if total > 0 {
+                        let pct = avail as f64 / total as f64 * 100.0;
+                        push_metric(&mut metrics, ts, "mem.available_pct", pct, &[]);
+                    }
+                }
+                if let Some(used_pct) = self::disk::read_fs_used_pct(&self.root) {
+                    push_metric(&mut metrics, ts, "disk.used_pct", used_pct, &[]);
+                }
+            }
+        }
+
         self.unavailable_classes = unavailable;
         TickOutput {
             snapshot: snap,
@@ -447,22 +499,24 @@ impl Collector {
     /// Fold per-core and aggregate utilization into the snapshot + metrics, using
     /// the previous `/proc/stat` baseline. A first sample (no baseline yet) emits
     /// nothing for utilization; it appears from the next tick once a delta exists.
+    /// Returns the aggregate utilization percentage when one was computed, so the
+    /// caller can cache it for the 1 Hz summary.
     fn fold_utilization(
         &self,
         stat: &ProcStat,
         ts: i64,
         snap: &mut HwSnapshot,
         metrics: &mut Vec<TelemetryFrame>,
-    ) {
-        let Some(prev) = &self.baselines.proc_stat else {
-            return;
-        };
+    ) -> Option<f64> {
+        let prev = self.baselines.proc_stat.as_ref()?;
+        let mut aggregate_pct = None;
         // Aggregate utilization, the quick-glance `cpu.util.all` metric.
         if let (Some(p), Some(n)) = (prev.aggregate, stat.aggregate) {
             if let Some(pct) = util_pct(p, n) {
                 snap.signals
                     .insert("cpu.util.all".to_string(), MpVal::from(pct));
                 push_metric(metrics, ts, "cpu.util.all", pct as f64, &[]);
+                aggregate_pct = Some(pct as f64);
             }
         }
         // Per-core utilization, matched by core index across the two samples.
@@ -482,6 +536,7 @@ impl Collector {
                 );
             }
         }
+        aggregate_pct
     }
 }
 
@@ -813,6 +868,81 @@ mod tests {
         assert!((util - 50.0).abs() < 0.5, "got {util}");
         // The per-core utilization metric was emitted too.
         assert!(second.metrics.iter().any(|m| m.metric == "cpu.util.0"));
+    }
+
+    #[test]
+    fn summary_metrics_emit_at_one_hz_from_cached_class_values() {
+        // A fixture with memory + thermal + two distinct /proc/stat samples so
+        // the 1 Hz summary can derive cpu.utilization_pct, mem.available_pct and
+        // (on Linux) disk.used_pct. thermal.primary_c is emitted by the thermal
+        // class itself, so it appears in the metric stream too.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let w = |rel: &str, body: &str| {
+            let p = root.join(rel);
+            fs::create_dir_all(p.parent().unwrap()).unwrap();
+            fs::write(p, body).unwrap();
+        };
+        w("sys/class/thermal/thermal_zone0/type", "cpu-thermal\n");
+        w("sys/class/thermal/thermal_zone0/temp", "48000\n");
+        // 75% available (3/4 of total).
+        w(
+            "proc/meminfo",
+            "MemTotal: 4000000 kB\nMemAvailable: 3000000 kB\n",
+        );
+        w(
+            "proc/stat",
+            "cpu  100 0 50 1000 0 0 0 0 0 0\ncpu0 100 0 50 1000 0 0 0 0 0 0\n",
+        );
+
+        let mut c = Collector::new(root);
+        // First tick: summary fires (mem cached → mem.available_pct), but cpu
+        // utilization has no baseline yet so cpu.utilization_pct is absent.
+        let first = c.tick(Instant::now());
+        let mem_pct = first
+            .metrics
+            .iter()
+            .find(|m| m.metric == "mem.available_pct")
+            .map(|m| m.value)
+            .expect("mem.available_pct present on the first summary");
+        assert!((mem_pct - 75.0).abs() < 0.5, "got {mem_pct}");
+        assert!(
+            !first
+                .metrics
+                .iter()
+                .any(|m| m.metric == "cpu.utilization_pct"),
+            "no cpu summary on the first sample (no baseline yet)"
+        );
+
+        // Advance /proc/stat by 100 busy of 200 total → 50% utilization, and tick
+        // past both the summary cadence and the freq/util cadence.
+        w(
+            "proc/stat",
+            "cpu  200 0 50 1100 0 0 0 0 0 0\ncpu0 200 0 50 1100 0 0 0 0 0 0\n",
+        );
+        let later = Instant::now() + SUMMARY_CADENCE + Duration::from_millis(1);
+        let second = c.tick(later);
+        let util = second
+            .metrics
+            .iter()
+            .find(|m| m.metric == "cpu.utilization_pct")
+            .map(|m| m.value)
+            .expect("cpu.utilization_pct present once a baseline exists");
+        assert!((util - 50.0).abs() < 0.5, "got {util}");
+        assert!(
+            second
+                .metrics
+                .iter()
+                .any(|m| m.metric == "mem.available_pct"),
+            "mem summary re-emits each second"
+        );
+        // disk.used_pct reads the live filesystem via statvfs (Linux only); on
+        // other dev hosts it is gracefully absent.
+        #[cfg(target_os = "linux")]
+        assert!(
+            second.metrics.iter().any(|m| m.metric == "disk.used_pct"),
+            "disk.used_pct present on Linux"
+        );
     }
 
     #[test]

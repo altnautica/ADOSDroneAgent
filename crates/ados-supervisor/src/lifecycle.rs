@@ -91,6 +91,11 @@ pub struct Supervisor {
     /// fail-closed control-interface guard. The supervisor drives the stop →
     /// rebind → start sequence; the reconciler decides + records.
     usb_rehome: crate::usb_rehome::UsbRehome,
+    /// Discrete service-transition events shipped to the logging daemon so an
+    /// RCA can query the lifecycle of every managed unit (a death + auto-restart,
+    /// a circuit-breaker open, a stop) off-box and across reboots. Best-effort
+    /// and non-blocking, like the other emitters above.
+    events: ados_protocol::logd::emitter::EventEmitter,
 }
 
 impl Supervisor {
@@ -100,6 +105,7 @@ impl Supervisor {
             config,
             bind,
             hotplug_coord: crate::hotplug::HotplugCoordinator::new(),
+            events: ados_protocol::logd::emitter::EventEmitter::new("ados-supervisor"),
             wifi_selfheal: crate::wifi_selfheal::WifiSelfHeal::new(
                 ados_protocol::logd::emitter::EventEmitter::new("ados-supervisor"),
             ),
@@ -126,6 +132,48 @@ impl Supervisor {
         self.services.iter().position(|s| s.name == name)
     }
 
+    /// Ship one `service.transition` event with the from/to states and a reason.
+    /// Non-blocking and best-effort; an absent logging daemon drops it.
+    fn emit_transition(&self, name: &str, from: ServiceState, to: ServiceState, reason: &str) {
+        use ados_protocol::logd::{Fields, Level, Value};
+        let mut detail = Fields::new();
+        detail.insert("service".to_string(), Value::from(name));
+        detail.insert("from_state".to_string(), Value::from(from.as_str()));
+        detail.insert("to_state".to_string(), Value::from(to.as_str()));
+        detail.insert("reason".to_string(), Value::from(reason));
+        self.events.emit("service.transition", Level::Info, detail);
+    }
+
+    /// Set a service's state and emit a transition event when it actually
+    /// changes. The single seam every direct state write goes through so the
+    /// event stream mirrors the in-memory lifecycle exactly.
+    fn set_state(&mut self, i: usize, to: ServiceState, reason: &str) {
+        let from = self.services[i].state;
+        self.services[i].state = to;
+        if from != to {
+            self.emit_transition(self.services[i].name, from, to, reason);
+        }
+    }
+
+    /// Record a failure (which may open the breaker) and emit the resulting
+    /// transition. Mirrors the prior inline `record_failure` + conditional
+    /// `Failed` assignment, plus the event. Returns whether the breaker opened.
+    fn record_failure_and_emit(&mut self, i: usize, now: Instant, reason: &str) -> bool {
+        let from = self.services[i].state;
+        let opened = self.services[i].record_failure(now);
+        let to = if opened {
+            // record_failure already set the state to CircuitOpen.
+            ServiceState::CircuitOpen
+        } else {
+            self.services[i].state = ServiceState::Failed;
+            ServiceState::Failed
+        };
+        if from != to {
+            self.emit_transition(self.services[i].name, from, to, reason);
+        }
+        opened
+    }
+
     /// Start a unit, honoring profile/role gates and the circuit breaker.
     /// Returns true only when the unit reached `active`.
     pub async fn start_service(&mut self, name: &str) -> bool {
@@ -146,23 +194,20 @@ impl Supervisor {
         }
         // Breaker has cooled: clear the open state so the start can take.
         if self.services[i].state == ServiceState::CircuitOpen {
-            self.services[i].state = ServiceState::Stopped;
+            self.set_state(i, ServiceState::Stopped, "breaker_cooldown");
         }
 
-        self.services[i].state = ServiceState::Starting;
+        self.set_state(i, ServiceState::Starting, "start_requested");
         // Clear any prior failed / start-limit-hit state so `start` is not a
         // no-op on a unit that crash-looped past systemd's StartLimitBurst.
         systemctl::reset_failed(name).await;
 
         if systemctl::start(name).await {
-            self.services[i].state = ServiceState::Running;
+            self.set_state(i, ServiceState::Running, "start_ok");
             tracing::info!(service = name, "service started");
             true
         } else {
-            let opened = self.services[i].record_failure(Instant::now());
-            if !opened {
-                self.services[i].state = ServiceState::Failed;
-            }
+            let _ = self.record_failure_and_emit(i, Instant::now(), "start_failed");
             tracing::error!(service = name, "service start failed");
             false
         }
@@ -174,7 +219,7 @@ impl Supervisor {
             return false;
         };
         let ok = systemctl::stop(name).await;
-        self.services[i].state = ServiceState::Stopped;
+        self.set_state(i, ServiceState::Stopped, "stopped");
         tracing::info!(service = name, "service stopped");
         ok
     }
@@ -378,10 +423,7 @@ impl Supervisor {
             };
             if !active && self.services[i].state == ServiceState::Running {
                 tracing::warn!(service = name, "service died");
-                let opened = self.services[i].record_failure(Instant::now());
-                if !opened {
-                    self.services[i].state = ServiceState::Failed;
-                }
+                let _ = self.record_failure_and_emit(i, Instant::now(), "died");
                 let blocked = self.restart_blocked_by_bind(name).await;
                 if self.services[i].state != ServiceState::CircuitOpen && !blocked {
                     tracing::info!(service = name, "auto-restart");

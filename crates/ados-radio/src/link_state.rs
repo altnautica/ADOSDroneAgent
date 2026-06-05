@@ -37,6 +37,13 @@ impl LinkState {
             LinkState::Degraded => "degraded",
         }
     }
+
+    /// Whether the link is locked: a usable, connected link. The single source of
+    /// truth for the lock/unlock transition the telemetry producers emit, so the
+    /// "is the link up" question has one answer derived from this enum.
+    pub fn is_locked(self) -> bool {
+        matches!(self, LinkState::Connected)
+    }
 }
 
 /// Derive the radio link state for the sidecar.
@@ -92,6 +99,21 @@ mod tests {
         assert_eq!(LinkState::Connecting.as_str(), "connecting");
         assert_eq!(LinkState::Connected.as_str(), "connected");
         assert_eq!(LinkState::Degraded.as_str(), "degraded");
+    }
+
+    #[test]
+    fn only_connected_is_locked() {
+        assert!(LinkState::Connected.is_locked());
+        for s in [
+            LinkState::Disconnected,
+            LinkState::Unpaired,
+            LinkState::AutoPairing,
+            LinkState::Binding,
+            LinkState::Connecting,
+            LinkState::Degraded,
+        ] {
+            assert!(!s.is_locked(), "{} must not be locked", s.as_str());
+        }
     }
 
     #[test]

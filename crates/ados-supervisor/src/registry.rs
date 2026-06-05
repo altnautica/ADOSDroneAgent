@@ -37,6 +37,19 @@ pub enum ServiceState {
     CircuitOpen,
 }
 
+impl ServiceState {
+    /// The lowercase wire string used in the service-transition event detail.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ServiceState::Stopped => "stopped",
+            ServiceState::Starting => "starting",
+            ServiceState::Running => "running",
+            ServiceState::Failed => "failed",
+            ServiceState::CircuitOpen => "circuit_open",
+        }
+    }
+}
+
 /// A static registry entry. `profile_gate` scopes the unit to one agent
 /// profile (`None` = any). `role_gate` is a pipe-separated set of ground
 /// station roles the unit runs under (`None` = any role); only consulted when

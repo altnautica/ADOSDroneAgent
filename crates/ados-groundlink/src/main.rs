@@ -219,6 +219,11 @@ async fn receive_loop(config: &WfbConfig, presence_cache: GsPresenceCache) {
     let clock: Arc<dyn ados_groundlink::watchdog::Clock> = Arc::new(SystemClock::default());
     let setter: Arc<dyn ados_groundlink::acquire::ChannelSetter> = Arc::new(IwChannelSetter);
     let hint = wfb_rx::default_hint();
+    // Telemetry emitter for the per-generation receive-link samples shipped to
+    // the logging daemon. Constructed once for the service lifetime; each
+    // generation spawns a 1 Hz task that clones it. Best-effort and
+    // non-blocking, like the drone-side radio emitter.
+    let ingest = ados_protocol::logd::emitter::IngestEmitter::new("ados-groundlink");
 
     let mut backoff = 1.0_f64;
     loop {
@@ -326,6 +331,50 @@ async fn receive_loop(config: &WfbConfig, presence_cache: GsPresenceCache) {
         // with the generation.
         let fanout_task = tokio::spawn(fanout::run_default_fanout());
 
+        // 1 Hz receive-link telemetry for this generation: ship the link's
+        // RSSI / SNR / uncorrected-FEC (the uplink command radio, mirroring the
+        // drone-side downlink video radio) and a lock/unlock event on a real
+        // link-state transition. Aborted with the generation. Best-effort; an
+        // absent logging daemon drops the samples without disturbing receive.
+        let telemetry_task = {
+            let emitter = ingest.clone();
+            let link = link.clone();
+            tokio::spawn(async move {
+                use ados_protocol::logd::{Fields, Level, Value};
+                let mut tick = tokio::time::interval(Duration::from_secs(1));
+                let mut prev_locked: Option<bool> = None;
+                loop {
+                    tick.tick().await;
+                    let stats = link.lock().await.clone();
+                    let rx_key_present = std::path::Path::new(RX_KEY).exists();
+                    let state = ados_radio::link_state::derive_link_state(
+                        rx_key_present,
+                        false,
+                        &stats,
+                        false,
+                    );
+                    let mut tags = Fields::new();
+                    tags.insert("direction".to_string(), Value::from("uplink"));
+                    tags.insert("link".to_string(), Value::from("command"));
+                    emitter.emit_metric("link.rssi_dbm", stats.rssi_dbm, tags.clone());
+                    emitter.emit_metric("link.snr_db", stats.snr_db, tags.clone());
+                    emitter.emit_metric("link.fec_uncorrected", stats.fec_failed as f64, tags);
+                    let locked = state.is_locked();
+                    if prev_locked != Some(locked) {
+                        let mut detail = Fields::new();
+                        detail.insert("link".to_string(), Value::from("command"));
+                        detail.insert("state".to_string(), Value::from(state.as_str()));
+                        if locked {
+                            emitter.emit_event("link.lock", Level::Info, detail);
+                        } else if prev_locked.is_some() {
+                            emitter.emit_event("link.unlock", Level::Warn, detail);
+                        }
+                        prev_locked = Some(locked);
+                    }
+                }
+            })
+        };
+
         // Stats reader: feeds the counter + LinkStats + the sidecar. Carries the
         // rendezvous home + the regulatory snapshot the gate resolved so the
         // sidecar surfaces the truthful channel + reg picture, symmetric with the
@@ -388,6 +437,7 @@ async fn receive_loop(config: &WfbConfig, presence_cache: GsPresenceCache) {
 
         // Tear down the generation's sub-tasks before respawning.
         fanout_task.abort();
+        telemetry_task.abort();
         if let Some(t) = stats_task {
             t.abort();
         }
