@@ -24,12 +24,15 @@ Environment=RUST_LOG=info
 EnvironmentFile=-/etc/ados/env
 
 # The store reads sysfs/proc for the hardware collector and writes only its
-# own database and sockets. It needs no elevated capabilities and must never
-# be able to touch the rest of the box.
+# own database and sockets, and must never be able to touch the rest of the box.
+# The single capability it keeps is CAP_CHOWN, used once at bind to group-own the
+# query and ingest sockets to `ados` so a non-root operator in that group can
+# reach the trusted local plane; without it the in-process chgrp fails with EPERM
+# even as root and the sockets stay root-only.
 NoNewPrivileges=yes
 ProtectSystem=strict
 PrivateTmp=yes
-CapabilityBoundingSet=
+CapabilityBoundingSet=CAP_CHOWN
 # The single-writer store lives under /var/ados/logd; the ingest and query
 # sockets live under /run/ados. Both are the only writable paths.
 ReadWritePaths=/var/ados /run/ados
