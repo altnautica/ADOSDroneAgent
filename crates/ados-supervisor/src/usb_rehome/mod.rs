@@ -16,6 +16,7 @@
 //! Default-ON, configurable under `network.usb_rehome`. The pure logic and
 //! config parsing are unit-tested on every host; the sysfs ops are Linux-only.
 
+pub mod camera;
 pub mod machine;
 pub mod topo;
 

@@ -91,6 +91,15 @@ pub struct Supervisor {
     /// fail-closed control-interface guard. The supervisor drives the stop →
     /// rebind → start sequence; the reconciler decides + records.
     usb_rehome: crate::usb_rehome::UsbRehome,
+    /// Camera USB-recovery self-heal: when an expected primary camera is missing
+    /// (a cold-boot port-enable failure the kernel tries once and abandons), force
+    /// a USB re-enumeration so it comes back without a human reseating the cable.
+    /// Leaf rebind when the device is wedged, a clean per-port re-enable on a hub
+    /// that exposes it, else detect + alert (an opt-in boot-time hub reset only
+    /// when the guard proves no radio/FC/control device shares the hub). Mirrors
+    /// state to /run/ados/camera-usb-recovery.json. Drone-only (gated on a fresh
+    /// camera-state); the video pipeline owns pipeline recovery via udev.
+    camera_usb_recovery: crate::usb_rehome::camera::CameraUsbRecovery,
     /// Discrete service-transition events shipped to the logging daemon so an
     /// RCA can query the lifecycle of every managed unit (a death + auto-restart,
     /// a circuit-breaker open, a stop) off-box and across reboots. Best-effort
@@ -119,6 +128,9 @@ impl Supervisor {
                 ados_protocol::logd::emitter::EventEmitter::new("ados-supervisor"),
             ),
             usb_rehome: crate::usb_rehome::UsbRehome::new(
+                ados_protocol::logd::emitter::EventEmitter::new("ados-supervisor"),
+            ),
+            camera_usb_recovery: crate::usb_rehome::camera::CameraUsbRecovery::new(
                 ados_protocol::logd::emitter::EventEmitter::new("ados-supervisor"),
             ),
         }
@@ -486,6 +498,14 @@ impl Supervisor {
             self.wait_for_stop(&[unit], Duration::from_secs(5)).await;
             crate::usb_rehome::execute_rebind(&plan).await;
             self.start_service(unit).await;
+        }
+
+        // Camera USB-recovery (force re-enumeration of an absent/wedged camera
+        // that failed its cold-boot port-enable). No unit stop: the video
+        // pipeline re-discovers via udev once the device re-enumerates. Cheap
+        // when the camera is present; drone-only (gated on a fresh camera-state).
+        if let Some(plan) = self.camera_usb_recovery.decide().await {
+            crate::usb_rehome::camera::execute_camera_recovery(&plan).await;
         }
     }
 }

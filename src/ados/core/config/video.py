@@ -82,6 +82,12 @@ class CameraConfig(BaseModel):
     # Linux support. Default stays h264 until the full dual-codec
     # WHEP negotiation lands.
     codec_preference: Literal["h264", "h265", "auto"] = "auto"
+    # Whether a primary camera is expected on this rig, for the supervisor's
+    # camera USB-recovery reconciler. "auto" (default) treats a camera as
+    # expected once one has enumerated successfully at least once (a persisted
+    # last-known-good record exists), so a camera-less drone never triggers a
+    # spurious recovery while a cold-boot enumeration failure still does.
+    expected: Literal["auto", "true", "false"] = "auto"
 
 
 class RecordingConfig(BaseModel):
@@ -90,11 +96,36 @@ class RecordingConfig(BaseModel):
     max_duration_minutes: int = 30
 
 
+class UsbRecoveryConfig(BaseModel):
+    """Camera USB-recovery tunables, consumed by the Rust supervisor's
+    camera-recovery reconciler (it reads config.yaml directly; this model keeps
+    Python from dropping the keys and documents the schema). Default-ON for
+    detect + alert; destructive actions stay gated."""
+
+    enabled: bool = True
+    debounce_s: int = Field(default=20, ge=1)
+    max_attempts: int = Field(default=3, ge=1)
+    cooldown_schedule_s: list[int] = Field(default_factory=lambda: [10, 30, 60])
+    healthy_reset_s: int = Field(default=120, ge=1)
+    tick_interval_s: int = Field(default=5, ge=1)
+    # Opt-in: allow a shared-hub reset (boot-time-only, guard-gated) to recover a
+    # camera that failed to enumerate on a hub it shares with the radio/FC.
+    allow_hub_reset: bool = False
+    boot_reset_window_s: int = Field(default=180, ge=1)
+    # Allow a clean per-port re-enable on an external hub that exposes per-port
+    # power switching.
+    allow_ppps: bool = True
+    # Append usbcore.old_scheme_first=1 to the Pi boot cmdline (installer-applied)
+    # as a reversible cold-boot enumeration aid. Default off (experiment).
+    cold_boot_enum_aid: bool = False
+
+
 class VideoConfig(BaseModel):
     mode: str = "wfb"
     wfb: WfbConfig = WfbConfig()
     camera: CameraConfig = CameraConfig()
     recording: RecordingConfig = RecordingConfig()
+    usb_recovery: UsbRecoveryConfig = UsbRecoveryConfig()
     cloud_relay_url: str = ""  # e.g. rtsp://video.altnautica.com:8554
     # Decoded-frame cap fed into the LCD GStreamer pipeline (videorate
     # decimation target). Higher = smoother LCD video at the cost of

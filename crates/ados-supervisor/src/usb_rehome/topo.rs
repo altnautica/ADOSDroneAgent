@@ -103,6 +103,96 @@ pub fn guard_verdict(target: &UsbTopo, control: &ControlPath) -> GuardVerdict {
     }
 }
 
+/// Evaluate the guard against a SET of protected paths (the management link AND
+/// the radio AND the FC), returning the first non-`Allow` verdict. Fail-closed:
+/// an empty set is `BlockUnprovable` (nothing proven safe). Used for the camera
+/// hub-reset path, where re-enumerating a shared hub must not disturb any of the
+/// protected devices. Pure.
+pub fn guard_verdict_multi(target: &UsbTopo, protected: &[ControlPath]) -> GuardVerdict {
+    if protected.is_empty() {
+        return GuardVerdict::BlockUnprovable;
+    }
+    for c in protected {
+        let v = guard_verdict(target, c);
+        if v != GuardVerdict::Allow {
+            return v;
+        }
+    }
+    GuardVerdict::Allow
+}
+
+/// True when unbinding `target` (a leaf device, e.g. the camera) provably cannot
+/// disturb any protected USB device: the target is none of them and none of them
+/// descends from it. A soft unbind re-enumerates only the target + its
+/// descendants, so a true leaf is always safe regardless of the management link
+/// (unlike a hub reset, this does not fail-closed on an unknown control path).
+/// Pure.
+pub fn target_safe_as_leaf(target: &UsbTopo, protected_usb: &[UsbTopo]) -> bool {
+    !protected_usb
+        .iter()
+        .any(|p| p.bind_id == target.bind_id || p.ancestors.contains(&target.bind_id))
+}
+
+/// Split a USB device-node bind id into its parent hub node + downstream port
+/// number. `"1-1.1" -> ("1-1", 1)`, `"2-1.4.3" -> ("2-1.4", 3)`, and a root-port
+/// device `"1-1" -> ("usb1", 1)`. Drives the per-port reset + the `disable`
+/// attribute path. Pure.
+pub fn hub_and_port(bind_id: &str) -> Option<(String, u32)> {
+    if let Some(idx) = bind_id.rfind('.') {
+        let hub = bind_id[..idx].to_string();
+        let port = bind_id[idx + 1..].parse::<u32>().ok()?;
+        if hub.is_empty() {
+            return None;
+        }
+        return Some((hub, port));
+    }
+    // Root-port device: "<bus>-<port>" hangs directly off root hub "usb<bus>".
+    let (bus, port) = bind_id.split_once('-')?;
+    let busn = bus.parse::<u32>().ok()?;
+    let portn = port.parse::<u32>().ok()?;
+    Some((format!("usb{}", busn), portn))
+}
+
+/// The sysfs `disable` attribute for a hub's downstream port, e.g.
+/// `1-1-port1/disable`. Toggling it (1 then 0) re-enables just that one port,
+/// re-enumerating only the device on it. Pure (path only).
+pub fn port_disable_rel(hub: &str, port: u32) -> String {
+    format!("{}-port{}/disable", hub, port)
+}
+
+/// Resolve a video device's USB topology, or `None` when it is not USB-backed.
+/// `/dev/video0` (or `video0`) → `/sys/class/video4linux/video0/device` → the
+/// USB device node above it. Symmetric to `resolve_usb_topo` for netdevs.
+#[cfg(target_os = "linux")]
+pub async fn resolve_usb_topo_for_video(dev_path: &str) -> Option<UsbTopo> {
+    let name = Path::new(dev_path)
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| dev_path.to_string());
+    let link = format!("/sys/class/video4linux/{}/device", name);
+    let start = tokio::fs::canonicalize(&link).await.ok()?;
+    topo_from_device_dir(&start)
+}
+
+/// Resolve a tty device's USB topology (the FC, e.g. `ttyACM0`), or `None` when
+/// it is not USB-backed. Used to add the FC to the protected set.
+#[cfg(target_os = "linux")]
+pub async fn resolve_usb_topo_for_tty(tty: &str) -> Option<UsbTopo> {
+    let link = format!("/sys/class/tty/{}/device", tty);
+    let start = tokio::fs::canonicalize(&link).await.ok()?;
+    topo_from_device_dir(&start)
+}
+
+/// True when a hub's downstream port exposes the per-port `disable` attribute,
+/// so the camera's port can be cleanly re-enabled without touching its siblings.
+/// The Pi 4B internal hub does NOT expose this; an external hub may.
+#[cfg(target_os = "linux")]
+pub fn ppps_capable(hub: &str, port: u32) -> bool {
+    Path::new("/sys/bus/usb/devices")
+        .join(port_disable_rel(hub, port))
+        .is_file()
+}
+
 /// Walk a resolved `/sys` device path up to the USB device node holding the id
 /// files, then collect its USB-node ancestors. Pure (sync fs reads on a real
 /// path) so a fixture sysfs tree exercises it off a real SBC. `None` when the
@@ -261,5 +351,78 @@ mod tests {
         let node = dir.path().join("platform").join("eth0-node");
         fs::create_dir_all(&node).unwrap();
         assert!(topo_from_device_dir(&node).is_none());
+    }
+
+    #[test]
+    fn hub_and_port_splits_device_nodes() {
+        assert_eq!(hub_and_port("1-1.1"), Some(("1-1".to_string(), 1)));
+        assert_eq!(hub_and_port("2-1.4.3"), Some(("2-1.4".to_string(), 3)));
+        // A root-port device hangs off the root hub "usb<bus>".
+        assert_eq!(hub_and_port("1-1"), Some(("usb1".to_string(), 1)));
+        assert_eq!(hub_and_port("usb1"), None);
+        assert_eq!(hub_and_port(""), None);
+    }
+
+    #[test]
+    fn port_disable_rel_path() {
+        assert_eq!(port_disable_rel("1-1", 1), "1-1-port1/disable");
+        assert_eq!(port_disable_rel("2-1.4", 3), "2-1.4-port3/disable");
+    }
+
+    #[test]
+    fn leaf_safe_when_disjoint_from_protected() {
+        // Camera leaf 1-1.1, with RTL 1-1.2 + FC 1-1.4 protected: a leaf unbind
+        // of 1-1.1 cannot touch either → safe.
+        let cam = topo("1-1.1", &["1-1", "usb1"]);
+        let protected = vec![
+            topo("1-1.2", &["1-1", "usb1"]),
+            topo("1-1.4", &["1-1", "usb1"]),
+        ];
+        assert!(target_safe_as_leaf(&cam, &protected));
+        // But the hub 1-1 is NOT leaf-safe: RTL + FC descend from it.
+        let hub = topo("1-1", &["usb1"]);
+        assert!(!target_safe_as_leaf(&hub, &protected));
+        // Nor is the camera if it somehow IS a protected device.
+        assert!(!target_safe_as_leaf(
+            &cam,
+            &[topo("1-1.1", &["1-1", "usb1"])]
+        ));
+    }
+
+    #[test]
+    fn multi_guard_blocks_hub_reset_that_carries_a_protected_device() {
+        // Pi 4B reality: camera + RTL + FC share internal hub 1-1. Resetting the
+        // hub would re-enumerate the RTL (1-1.2) → BlockSharesBranch.
+        let hub = topo("1-1", &["usb1"]);
+        let protected = vec![
+            ControlPath::NonUsb,                               // onboard-WiFi mgmt
+            ControlPath::Usb(topo("1-1.2", &["1-1", "usb1"])), // RTL
+            ControlPath::Usb(topo("1-1.4", &["1-1", "usb1"])), // FC
+        ];
+        assert_eq!(
+            guard_verdict_multi(&hub, &protected),
+            GuardVerdict::BlockSharesBranch
+        );
+    }
+
+    #[test]
+    fn multi_guard_allows_isolated_hub_and_failcloses_on_empty() {
+        // A camera-only hub 3-1 with no protected device beneath it → allowed.
+        let hub = topo("3-1", &["usb3"]);
+        let protected = vec![
+            ControlPath::NonUsb,
+            ControlPath::Usb(topo("1-1.2", &["1-1", "usb1"])),
+        ];
+        assert_eq!(guard_verdict_multi(&hub, &protected), GuardVerdict::Allow);
+        // Empty protected set is fail-closed.
+        assert_eq!(
+            guard_verdict_multi(&hub, &[]),
+            GuardVerdict::BlockUnprovable
+        );
+        // A NoRoute in the set fails closed.
+        assert_eq!(
+            guard_verdict_multi(&hub, &[ControlPath::NoRoute]),
+            GuardVerdict::BlockUnprovable
+        );
     }
 }

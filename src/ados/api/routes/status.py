@@ -249,6 +249,62 @@ def _compute_etag(payload: dict) -> str:
     return hashlib.sha256(raw).hexdigest()[:16]
 
 
+def _read_camera_status() -> dict[str, object]:
+    """Camera presence + USB-recovery state for the LOCAL status surface.
+
+    The cloud heartbeat carries ``cameraState``; the LAN-direct status did not,
+    so a locally-paired operator got no camera-missing signal. Reads the same two
+    sidecars the video pipeline + supervisor write, staleness-gated, and returns
+    only the keys that are fresh and valid (absent otherwise).
+    """
+    from ados.core.paths import CAMERA_STATE_JSON, CAMERA_USB_RECOVERY_JSON
+
+    out: dict[str, object] = {}
+    try:
+        camera = json.loads(CAMERA_STATE_JSON.read_text())
+    except (OSError, ValueError):
+        camera = None
+    if isinstance(camera, dict):
+        updated = camera.get("updated_at_unix")
+        fresh = isinstance(updated, (int, float)) and (
+            time.time() - float(updated)
+        ) <= 300.0
+        state = camera.get("state")
+        if fresh and isinstance(state, str) and state in ("ready", "missing", "error"):
+            out["cameraState"] = state
+
+    try:
+        rec = json.loads(CAMERA_USB_RECOVERY_JSON.read_text())
+    except (OSError, ValueError):
+        rec = None
+    if isinstance(rec, dict):
+        updated = rec.get("updated_at_unix")
+        fresh = isinstance(updated, (int, float)) and (
+            time.time() - float(updated)
+        ) <= 60.0
+        state = rec.get("camera_usb_recovery_state")
+        if fresh and state in (
+            "idle",
+            "monitoring",
+            "rebinding",
+            "port_cycling",
+            "hub_resetting",
+            "needs_hub_reset",
+            "guard_blocked",
+            "exhausted",
+        ):
+            out["cameraUsbRecovery"] = {
+                "state": state,
+                "case": rec.get("case"),
+                "attempts": rec.get("attempts", 0),
+                "maxAttempts": rec.get("max_attempts", 0),
+                "cameraPresent": bool(rec.get("camera_present", False)),
+                "expected": bool(rec.get("expected", False)),
+                "pppsCapable": bool(rec.get("ppps_capable", False)),
+            }
+    return out
+
+
 @router.get("/status")
 async def get_status():
     """Agent status: version, uptime, board, FC connection state.
@@ -292,6 +348,7 @@ async def get_status():
         "fc_port": fc_status.port,
         "fc_baud": fc_status.baud,
         "dependencies": deps_map,
+        **_read_camera_status(),
     }
 
 
@@ -571,6 +628,7 @@ async def get_full_status(request: Request):
         "profile": resolved_profile,
         "role": resolved_role,
         "runtimeMode": runtime_mode,
+        **_read_camera_status(),
     }
 
     etag = _compute_etag(payload)

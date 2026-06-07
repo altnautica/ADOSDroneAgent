@@ -676,6 +676,46 @@ def build_heartbeat_payload(app: AgentApp) -> dict:  # noqa: C901
             payload["usbRehomeAttempts"] = rehome.get("usb_rehome_attempts", 0)
             payload["usbRehomeLastResult"] = rehome.get("usb_rehome_last_result")
 
+    # Camera USB-recovery state — sourced cross-process from
+    # /run/ados/camera-usb-recovery.json, written by the supervisor's
+    # camera-recovery reconciler. Surfaces whether an expected camera that failed
+    # to enumerate (a cold-boot port-enable failure) is being re-enumerated,
+    # exhausted, or held back needing a manual reseat / hub reset. Stale snapshots
+    # (> 60 s) are dropped.
+    from ados.core.paths import CAMERA_USB_RECOVERY_JSON
+
+    _CAMERA_RECOVERY_STALE_AFTER_S = 60.0
+    try:
+        cam_rec = _json.loads(CAMERA_USB_RECOVERY_JSON.read_text())
+    except (OSError, ValueError):
+        cam_rec = None
+    if isinstance(cam_rec, dict):
+        cr_updated = cam_rec.get("updated_at_unix")
+        cr_fresh = (
+            isinstance(cr_updated, (int, float))
+            and (time.time() - float(cr_updated)) <= _CAMERA_RECOVERY_STALE_AFTER_S
+        )
+        cr_state = cam_rec.get("camera_usb_recovery_state")
+        if cr_fresh and cr_state in (
+            "idle",
+            "monitoring",
+            "rebinding",
+            "port_cycling",
+            "hub_resetting",
+            "needs_hub_reset",
+            "guard_blocked",
+            "exhausted",
+        ):
+            payload["cameraUsbRecovery"] = {
+                "state": cr_state,
+                "case": cam_rec.get("case"),
+                "attempts": cam_rec.get("attempts", 0),
+                "maxAttempts": cam_rec.get("max_attempts", 0),
+                "cameraPresent": bool(cam_rec.get("camera_present", False)),
+                "expected": bool(cam_rec.get("expected", False)),
+                "pppsCapable": bool(cam_rec.get("ppps_capable", False)),
+            }
+
     # Plugin inventory — webapp-side installs are not visible to the GCS
     # otherwise. Best-effort: a missing or partially-initialised
     # supervisor leaves the field absent rather than failing the tick.

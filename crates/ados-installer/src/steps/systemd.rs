@@ -294,30 +294,27 @@ pub fn extlinux_append_with(content: &str, arg: &str) -> Option<String> {
     }
 }
 
-/// Append `usbcore.autosuspend=-1` to the board's kernel cmdline so USB
-/// autosuspend is disabled from the very first device enumeration — before the
-/// rootfs udev `power/control=on` rules can apply. Cheap UVC cameras wedge on
-/// the kernel-default 2 s autosuspend during the boot-race window the udev rule
-/// cannot win; only a cmdline setting is active that early. Board-aware +
-/// idempotent. Takes effect on the next reboot.
-fn disable_usb_autosuspend_cmdline() {
-    let arg = USB_AUTOSUSPEND_ARG;
+/// The kernel cmdline arg that makes USB enumeration retry the legacy address
+/// scheme first. A reversible, opt-in cold-boot aid for a marginal device (e.g.
+/// a camera whose port-enable handshake fails once at cold boot and the kernel
+/// abandons). Off by default; gated on `video.usb_recovery.cold_boot_enum_aid`.
+const USB_OLD_SCHEME_ARG: &str = "usbcore.old_scheme_first=1";
 
+/// Append `arg` to the board's kernel cmdline (Armbian `extraargs=`, Pi
+/// single-line `cmdline.txt`, or extlinux `APPEND`), board-aware via the same
+/// probe order + the pure writers. Idempotent (a no-op when already present).
+/// Returns the boot file matched, or `None` when no known cmdline file exists.
+/// Takes effect on the next reboot.
+fn apply_cmdline_arg(arg: &str) -> Option<&'static str> {
     // Armbian / many Rockchip boards: the extraargs= line in armbianEnv.txt.
     let armbian = Path::new("/boot/armbianEnv.txt");
     if armbian.is_file() {
         if let Ok(content) = std::fs::read_to_string(armbian) {
             if let Some(new) = armbian_extraargs_with(&content, arg) {
-                if std::fs::write(armbian, new).is_ok() {
-                    tracing::info!(
-                        file = "/boot/armbianEnv.txt",
-                        arg,
-                        "usb autosuspend disabled on kernel cmdline (reboot to apply)"
-                    );
-                }
+                let _ = std::fs::write(armbian, new);
             }
         }
-        return;
+        return Some("/boot/armbianEnv.txt");
     }
 
     // Raspberry Pi: a single-line cmdline.txt (firmware path first).
@@ -326,16 +323,10 @@ fn disable_usb_autosuspend_cmdline() {
         if p.is_file() {
             if let Ok(content) = std::fs::read_to_string(p) {
                 if let Some(new) = cmdline_txt_with(&content, arg) {
-                    if std::fs::write(p, new).is_ok() {
-                        tracing::info!(
-                            file = cmd,
-                            arg,
-                            "usb autosuspend disabled on kernel cmdline (reboot to apply)"
-                        );
-                    }
+                    let _ = std::fs::write(p, new);
                 }
             }
-            return;
+            return Some(cmd);
         }
     }
 
@@ -344,19 +335,83 @@ fn disable_usb_autosuspend_cmdline() {
     if extlinux.is_file() {
         if let Ok(content) = std::fs::read_to_string(extlinux) {
             if let Some(new) = extlinux_append_with(&content, arg) {
-                if std::fs::write(extlinux, new).is_ok() {
-                    tracing::info!(
-                        file = "/boot/extlinux/extlinux.conf",
-                        arg,
-                        "usb autosuspend disabled on kernel cmdline (reboot to apply)"
-                    );
-                }
+                let _ = std::fs::write(extlinux, new);
             }
         }
-        return;
+        return Some("/boot/extlinux/extlinux.conf");
     }
 
-    tracing::info!("no known boot cmdline file found; relying on the udev rule + tmpfiles default for USB autosuspend");
+    None
+}
+
+/// Append `usbcore.autosuspend=-1` to the board's kernel cmdline so USB
+/// autosuspend is disabled from the very first device enumeration — before the
+/// rootfs udev `power/control=on` rules can apply. Cheap UVC cameras wedge on
+/// the kernel-default 2 s autosuspend during the boot-race window the udev rule
+/// cannot win; only a cmdline setting is active that early. Board-aware +
+/// idempotent. Takes effect on the next reboot.
+fn disable_usb_autosuspend_cmdline() {
+    match apply_cmdline_arg(USB_AUTOSUSPEND_ARG) {
+        Some(file) => tracing::info!(
+            file,
+            arg = USB_AUTOSUSPEND_ARG,
+            "usb autosuspend disabled on kernel cmdline (reboot to apply)"
+        ),
+        None => tracing::info!(
+            "no known boot cmdline file found; relying on the udev rule + tmpfiles default for USB autosuspend"
+        ),
+    }
+}
+
+/// Parse `video.usb_recovery.cold_boot_enum_aid` from config.yaml text. Absent /
+/// malformed / not-present → false (the aid is an experiment, off by default).
+/// Pure.
+pub fn parse_cold_boot_enum_aid(text: &str) -> bool {
+    #[derive(serde::Deserialize, Default)]
+    struct Raw {
+        #[serde(default)]
+        video: Video,
+    }
+    #[derive(serde::Deserialize, Default)]
+    struct Video {
+        #[serde(default)]
+        usb_recovery: Option<Rec>,
+    }
+    #[derive(serde::Deserialize, Default)]
+    struct Rec {
+        #[serde(default)]
+        cold_boot_enum_aid: bool,
+    }
+    serde_norway::from_str::<Raw>(text)
+        .ok()
+        .and_then(|r| r.video.usb_recovery)
+        .map(|r| r.cold_boot_enum_aid)
+        .unwrap_or(false)
+}
+
+/// Read the cold-boot-enum-aid opt-in from config.yaml on disk.
+fn cold_boot_enum_aid_enabled() -> bool {
+    match std::fs::read_to_string(crate::env::CONFIG_YAML) {
+        Ok(text) => parse_cold_boot_enum_aid(&text),
+        Err(_) => false,
+    }
+}
+
+/// Apply the opt-in cold-boot enumeration aid (`usbcore.old_scheme_first=1`) to
+/// the kernel cmdline when the operator has enabled it. Reversible: remove the
+/// token from the boot cmdline + reboot. A no-op when the opt-in is off (the
+/// default).
+fn apply_cold_boot_enum_aid_cmdline() {
+    if !cold_boot_enum_aid_enabled() {
+        return;
+    }
+    if let Some(file) = apply_cmdline_arg(USB_OLD_SCHEME_ARG) {
+        tracing::info!(
+            file,
+            arg = USB_OLD_SCHEME_ARG,
+            "cold-boot usb enumeration aid enabled on kernel cmdline (reboot to apply)"
+        );
+    }
 }
 
 /// Build the logind no-sleep drop-in body (pure). Ignores the idle timer, power
@@ -759,6 +814,9 @@ fn install_power_hardening(source: Option<&Path>) {
     // (active from the first enumeration; takes effect next reboot) and via a
     // tmpfiles default flip (this boot, post-rootfs devices).
     disable_usb_autosuspend_cmdline();
+    // Opt-in cold-boot enumeration aid for a marginal device that fails its
+    // port-enable once at cold boot (off by default).
+    apply_cold_boot_enum_aid_cmdline();
     if std::fs::write(USB_AUTOSUSPEND_TMPFILES, usb_autosuspend_tmpfiles_body()).is_ok() {
         set_mode(Path::new(USB_AUTOSUSPEND_TMPFILES), 0o644);
         let _ = exec::run("systemd-tmpfiles", &["--create", USB_AUTOSUSPEND_TMPFILES]);
@@ -1392,6 +1450,34 @@ mod tests {
             "console=serial0 root=/dev/mmcblk0p2 rootwait usbcore.autosuspend=-1\n"
         );
         assert!(cmdline_txt_with(&got, USB_AUTOSUSPEND_ARG).is_none());
+    }
+
+    #[test]
+    fn cold_boot_enum_aid_arg_appends_once_and_is_idempotent() {
+        let got = cmdline_txt_with("console=serial0 rootwait\n", USB_OLD_SCHEME_ARG)
+            .expect("should rewrite");
+        assert_eq!(got, "console=serial0 rootwait usbcore.old_scheme_first=1\n");
+        // Idempotent: already present → no rewrite.
+        assert!(cmdline_txt_with(&got, USB_OLD_SCHEME_ARG).is_none());
+        // Composes with the autosuspend arg on the same line.
+        let both = armbian_extraargs_with(&got, USB_AUTOSUSPEND_ARG);
+        assert!(both.is_none() || got.contains("usbcore.old_scheme_first=1"));
+    }
+
+    #[test]
+    fn parse_cold_boot_enum_aid_gate() {
+        assert!(parse_cold_boot_enum_aid(
+            "video:\n  usb_recovery:\n    cold_boot_enum_aid: true\n"
+        ));
+        // Off by default: absent block, explicit false, malformed → false.
+        assert!(!parse_cold_boot_enum_aid(
+            "video:\n  usb_recovery:\n    enabled: true\n"
+        ));
+        assert!(!parse_cold_boot_enum_aid(
+            "video:\n  usb_recovery:\n    cold_boot_enum_aid: false\n"
+        ));
+        assert!(!parse_cold_boot_enum_aid("agent:\n  name: x\n"));
+        assert!(!parse_cold_boot_enum_aid(": : not yaml"));
     }
 
     #[test]

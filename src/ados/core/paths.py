@@ -100,6 +100,10 @@ MGMT_FAILOVER_JSON = ADOS_RUN_DIR / "mgmt-failover.json"
 # USB-rehome self-heal state, written by the supervisor's USB-rehome reconciler:
 # the recovery state + attempt count for a slow-port, not-radiating WFB adapter.
 USB_REHOME_JSON = ADOS_RUN_DIR / "usb-rehome.json"
+# Camera USB-recovery state, written by the supervisor's camera-recovery
+# reconciler: the recovery state + attempt count + topology for an expected
+# camera that failed to enumerate (a cold-boot port-enable failure).
+CAMERA_USB_RECOVERY_JSON = ADOS_RUN_DIR / "camera-usb-recovery.json"
 BITRATE_CONTROLLER_JSON = ADOS_RUN_DIR / "bitrate-controller.json"
 
 # Local-bind to cloud-relay failover state. Written by the always-on
@@ -296,6 +300,12 @@ PLUGINS_INSTALL_DIR = ADOS_VAR_DIR / "plugins"
 PLUGIN_DATA_DIR = ADOS_VAR_DIR / "plugin-data"
 PLUGIN_LOG_DIR = Path("/var/log/ados/plugins")
 PLUGIN_STATE_PATH = STATE_DIR / "plugin-state.json"
+
+# Camera last-known-good record. Written by the supervisor's camera-recovery
+# reconciler whenever a camera enumerates healthy; persists the bind id + hub +
+# port so the absent (cold-boot) case can target the right port and `auto`
+# camera-expectation arms across reboots.
+CAMERA_LAST_GOOD_JSON = ADOS_VAR_DIR / "camera-last-good.json"
 
 # Install-result record. Written atomically by the install pipeline at
 # /var/lib/ados/install-result.json with the outcome of the last
