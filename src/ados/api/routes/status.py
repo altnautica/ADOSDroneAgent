@@ -483,6 +483,14 @@ async def get_full_status(request: Request):
         _recording_block,
     )
 
+    # Resolve the profile up front: the video block needs it to tell a drone
+    # (whose local mediamtx serves its own camera regardless of the WFB link)
+    # apart from a ground-station (whose video only exists when the receive
+    # link delivers). Reused below for the payload's profile/role fields.
+    from ados.core.profile import current_profile_and_role
+
+    resolved_profile, resolved_role = current_profile_and_role(app.config)
+
     video: dict = {"state": "not_initialized", "whep_url": None, **_empty_recording_block()}
     pipeline = app.video_pipeline()
     if pipeline is not None:
@@ -505,22 +513,43 @@ async def get_full_status(request: Request):
                 **_recording_block(pipeline),
             }
     else:
-        # Ground-station path: there is no in-process pipeline. mediamtx
-        # serves WHEP whether or not frames are arriving over the radio,
-        # so a reachable WHEP endpoint is NOT proof of a live downlink.
-        # Gate "running" on the WFB receive link actually delivering
-        # video (connected + valid decodes), not WHEP reachability. When
-        # the link is not delivering, report a non-running state with a
-        # null whep_url so the GCS does not show "Video: Live" over a
-        # dead radio. (Operating rule 37.)
-        if _gs_video_delivering(wfb_status):
+        # No in-process pipeline (the normal multi-process case — the API
+        # process does not own the encoder). Branch on the resolved profile,
+        # NOT on pipeline presence: a drone here is a drone, not a GS.
+        host = request.headers.get("host", "localhost").split(":")[0]
+        if resolved_profile == "drone":
+            # Multi-process drone: the drone's local mediamtx still serves its
+            # own camera on /main, available regardless of the WFB downlink
+            # (a drone transmits, it does not receive video). Probe readiness
+            # for the truth — the same signal the setup CLI's _video_access
+            # uses — NOT the WFB receive link. (Without this, a drone fell into
+            # the GS branch below, whose receive-link gate is always false on a
+            # transmit-only node, so it reported stopped/null and the GCS
+            # showed "No video" over a perfectly good stream.)
+            mtx = await _probe_mediamtx()
+            if mtx is None or not mtx.get("ready"):
+                mtx = await _probe_mediamtx_via_whep() or mtx
+            if mtx and mtx.get("ready"):
+                video = {
+                    "state": "running",
+                    "whep_url": f"http://{host}:8889/main/whep",
+                    **_empty_recording_block(),
+                }
+            # else: leave the default not_initialized (camera not streaming).
+        # Ground-station path: mediamtx serves WHEP whether or not frames are
+        # arriving over the radio, so a reachable WHEP endpoint is NOT proof of
+        # a live downlink. Gate "running" on the WFB receive link actually
+        # delivering video (connected + valid decodes), not WHEP reachability.
+        # When the link is not delivering, report a non-running state with a
+        # null whep_url so the GCS does not show "Video: Live" over a dead
+        # radio. (Operating rule 37.)
+        elif _gs_video_delivering(wfb_status):
             mtx = await _probe_mediamtx()
             if mtx is None or not mtx.get("ready"):
                 # mediamtx-gs puts auth on the management API; the WHEP
                 # probe doesn't. Confirm WHEP is serving the live stream.
                 mtx = await _probe_mediamtx_via_whep() or mtx
             if mtx and mtx.get("ready"):
-                host = request.headers.get("host", "localhost").split(":")[0]
                 video = {
                     "state": "running",
                     "whep_url": f"http://{host}:8889/main/whep",
@@ -579,13 +608,12 @@ async def get_full_status(request: Request):
     except Exception:
         pass
 
-    # Resolved profile + role using the same helper that drives the
+    # resolved_profile / resolved_role were resolved up front (above the video
+    # block) via current_profile_and_role — the same helper that drives the
     # cloud heartbeat in services/cloud/__main__.py. Hyphen-form
-    # (`"ground-station"`) so the GCS receives the canonical wire shape
-    # from both the cloud relay and the direct LAN poll, instead of
-    # having to infer profile from `fc_connected`.
-    from ados.core.profile import current_profile_and_role
-    resolved_profile, resolved_role = current_profile_and_role(app.config)
+    # (`"ground-station"`) so the GCS receives the canonical wire shape from
+    # both the cloud relay and the direct LAN poll, instead of having to infer
+    # profile from `fc_connected`.
 
     # Native-vs-packaged runtime mode, scoped to the resolved profile, so
     # the LAN-direct poll surfaces the same per-node badge the cloud
