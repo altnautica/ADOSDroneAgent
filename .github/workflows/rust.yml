@@ -61,11 +61,11 @@ jobs:
       # which has no aarch64-musl prebuilt, so --all-features cannot target
       # musl; the host clippy above already covers the onnx path.
       - name: Clippy (aarch64-musl target, default features)
-        # ados-logd carries bundled C (SQLite, zstd) and is excluded here: the
-        # host clippy above already lint-covers it, and clippy compiles build
-        # scripts which would need the C cross-compiler. Its musl cross-build is
-        # proven by the zig step below.
-        run: cargo clippy --all-targets --target aarch64-unknown-linux-musl --workspace --exclude ados-logd -- -D warnings
+        # ados-logd and ados-cloud carry bundled C (SQLite, zstd) and are
+        # excluded here: the host clippy above already lint-covers them, and
+        # clippy compiles build scripts which would need the C cross-compiler.
+        # Their musl cross-builds are proven by the zig steps below.
+        run: cargo clippy --all-targets --target aarch64-unknown-linux-musl --workspace --exclude ados-logd --exclude ados-cloud -- -D warnings
 
       - name: Test (default features)
         run: cargo test
@@ -398,11 +398,16 @@ jobs:
         with:
           targets: aarch64-unknown-linux-musl
 
-      - name: Install musl tools
-        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - name: Install zig
+        uses: mlugg/setup-zig@v2
 
-      - name: Build static ados-cloud
-        run: cargo build --release --target aarch64-unknown-linux-musl -p ados-cloud
+      - name: Install cargo-zigbuild
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-zigbuild
+
+      - name: Build static ados-cloud (bundled zstd via zig)
+        run: cargo zigbuild --release --target aarch64-unknown-linux-musl -p ados-cloud
 
       - name: Stage artifacts + checksums
         run: |
