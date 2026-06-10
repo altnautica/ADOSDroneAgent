@@ -9,6 +9,7 @@
 
 pub mod download;
 pub mod install;
+pub mod loopback;
 pub mod plugin_commands;
 pub mod seen_jobs;
 

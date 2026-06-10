@@ -76,9 +76,11 @@ impl InstallCommand {
     }
 }
 
-/// The archive-download seam. Production downloads over HTTPS with the allowlist
-/// + size cap; tests inject the bytes directly.
-pub trait DownloadSource {
+/// The archive-download seam. Production downloads over HTTPS with the
+/// allowlist and size cap; tests inject the bytes directly. `Send + Sync` so
+/// the source can be shared into the blocking install task spawned off the
+/// async reactor.
+pub trait DownloadSource: Send + Sync {
     /// Fetch the archive bytes for a validated signed URL. Returns the raw
     /// `.adosplug` bytes, or a [`DownloadError`].
     fn fetch(&self, signed_url: &str) -> Result<Vec<u8>, DownloadError>;
