@@ -214,11 +214,6 @@ pub struct AgentVideoConfig {
     /// on (`video.cloud_rtp_port`).
     #[serde(default = "default_cloud_rtp_port")]
     pub cloud_rtp_port: u16,
-    /// Opt into the in-process GStreamer air pipeline
-    /// (`video.use_gst_air_pipeline`). Deferred in this build: the orchestrator
-    /// logs and uses the legacy bash path even when set.
-    #[serde(default)]
-    pub use_gst_air_pipeline: bool,
     /// The `video.wfb:` sub-block (only `sei_latency` is read here).
     #[serde(default)]
     pub wfb: WfbVideoConfig,
@@ -234,7 +229,6 @@ impl Default for AgentVideoConfig {
             profile: None,
             cloud_relay_url: None,
             cloud_rtp_port: default_cloud_rtp_port(),
-            use_gst_air_pipeline: false,
             wfb: WfbVideoConfig::default(),
             vision: VisionTapConfig::default(),
         }
@@ -271,8 +265,6 @@ impl AgentVideoConfig {
             #[serde(default = "default_cloud_rtp_port")]
             cloud_rtp_port: u16,
             #[serde(default)]
-            use_gst_air_pipeline: bool,
-            #[serde(default)]
             wfb: WfbVideoConfig,
             #[serde(default)]
             vision: VisionTapConfig,
@@ -284,7 +276,6 @@ impl AgentVideoConfig {
                     profile: None,
                     cloud_relay_url: None,
                     cloud_rtp_port: default_cloud_rtp_port(),
-                    use_gst_air_pipeline: false,
                     wfb: WfbVideoConfig::default(),
                     vision: VisionTapConfig::default(),
                 }
@@ -302,7 +293,6 @@ impl AgentVideoConfig {
             profile,
             cloud_relay_url: raw.video.cloud_relay_url,
             cloud_rtp_port: raw.video.cloud_rtp_port,
-            use_gst_air_pipeline: raw.video.use_gst_air_pipeline,
             wfb: raw.video.wfb,
             vision: raw.video.vision,
         }
@@ -391,7 +381,6 @@ mod tests {
         assert!(c.profile.is_none());
         assert!(c.cloud_relay_url.is_none());
         assert_eq!(c.cloud_rtp_port, 8000);
-        assert!(!c.use_gst_air_pipeline);
         assert!(!c.wfb.sei_latency);
         assert!(!c.is_ground_station());
         assert!(!c.is_disabled());
@@ -465,7 +454,6 @@ video:
   mode: cloud
   cloud_relay_url: rtsp://relay.example.com:8554
   cloud_rtp_port: 8100
-  use_gst_air_pipeline: true
   wfb:
     sei_latency: true
 ";
@@ -478,7 +466,6 @@ video:
             Some("rtsp://relay.example.com:8554")
         );
         assert_eq!(c.cloud_rtp_port, 8100);
-        assert!(c.use_gst_air_pipeline);
         assert!(c.wfb.sei_latency);
         assert!(c.cloud_enabled());
         assert!(!c.is_disabled());
@@ -494,7 +481,6 @@ video:
         assert_eq!(c.mode, "disabled");
         assert!(c.is_disabled());
         assert_eq!(c.cloud_rtp_port, 8000);
-        assert!(!c.use_gst_air_pipeline);
         assert!(c.profile.is_none());
     }
 

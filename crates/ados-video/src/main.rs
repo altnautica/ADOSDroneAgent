@@ -55,7 +55,6 @@ async fn main() {
         mode = %config.mode,
         profile = ?config.profile,
         cloud = config.cloud_enabled(),
-        gst_air = config.use_gst_air_pipeline,
         sei_latency = config.wfb.sei_latency,
         "ados-video resolved config"
     );

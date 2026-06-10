@@ -19,6 +19,8 @@ pub mod camera_state;
 pub mod config;
 pub mod discover;
 pub mod encoder;
+pub mod health;
+pub mod lifecycle;
 pub mod mediamtx;
 pub mod orchestrator;
 pub mod process;

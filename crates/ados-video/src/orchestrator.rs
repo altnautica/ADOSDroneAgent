@@ -29,236 +29,94 @@ use tokio::sync::{Mutex, Notify};
 
 use crate::config::{AgentVideoConfig, CameraConfig};
 use crate::discover::{self, DiscoveryResult};
-use crate::encoder::{
-    augment_encoder_with_raw_tap, binary_present, build_encoder_command, detect_encoder_for_camera,
-    wrap_with_sei_inject, EncoderEnv, EncoderKind, EncoderParams,
-};
+use crate::encoder::{EncoderEnv, EncoderKind};
 use crate::mediamtx::{MediamtxManager, MAIN_PATH};
-use crate::process::{kill_orphans, ManagedProcess};
+use crate::process::ManagedProcess;
 use crate::shutdown::Shutdown;
-use crate::tap::{self, spawn_vision_tap};
-use crate::wfb_tee::{
-    drain_wfb_tee_stderr, orphan_pattern, spawn_wfb_tee, wfb_tee_progress_is_stale,
-    ProgressTracker, WFB_TEE_PROGRESS_TIMEOUT,
+use crate::wfb_tee::{wfb_tee_progress_is_stale, ProgressTracker, WFB_TEE_PROGRESS_TIMEOUT};
+
+// The pipeline's pure health-decision logic (constants, FSM states, the
+// backoff / circuit-breaker / grace / inbound-flow decisions) lives in
+// [`crate::health`]. Re-exported at this module path so the original
+// `orchestrator::HEALTH_CHECK_INTERVAL`, `orchestrator::PipelineState`,
+// `orchestrator::backoff_delay`, etc. callers keep resolving unchanged.
+pub use crate::health::{
+    backoff_delay, circuit_breaker_tripped, grace_decision, healthy_window_elapsed,
+    inbound_decision, retry_cap, GraceDecision, InboundDecision, PipelineState, StartError,
+    BASE_RESTART_DELAY, CIRCUIT_BREAKER_ATTEMPTS, HEALTHY_RESET_WINDOW, HEALTH_CHECK_INTERVAL,
+    INBOUND_FLOW_STALL, MAX_RESTART_DELAY, MAX_RESTART_DELAY_NO_CAMERA, STARTUP_GRACE_MAX,
+    WFB_TEE_RESTART_CEILING,
 };
-
-// --- tunables (mirror constants.py + pipeline.py) ----------------------------
-
-/// Health-tick cadence (`_HEALTH_CHECK_INTERVAL`).
-pub const HEALTH_CHECK_INTERVAL: Duration = Duration::from_secs(5);
-/// Max startup grace before a publisher-less pipeline is declared dead
-/// (`_STARTUP_GRACE_MAX_SECS`).
-pub const STARTUP_GRACE_MAX: Duration = Duration::from_secs(30);
-/// Inbound-byte stall window (`_INBOUND_FLOW_STALL_SECONDS`).
-pub const INBOUND_FLOW_STALL: Duration = Duration::from_secs(12);
-/// Base restart delay (`_base_restart_delay`).
-pub const BASE_RESTART_DELAY: Duration = Duration::from_secs(5);
-/// Cap on the exponential restart backoff for a real wedge (`_max_restart_delay`).
-pub const MAX_RESTART_DELAY: Duration = Duration::from_secs(300);
-/// Tighter cap when the failure is "no primary camera" — a USB hotplug
-/// condition that resolves in seconds (`_max_restart_delay_no_camera`).
-pub const MAX_RESTART_DELAY_NO_CAMERA: Duration = Duration::from_secs(30);
-/// Consecutive-healthy window that clears the restart counter
-/// (`_healthy_reset_window_secs`).
-pub const HEALTHY_RESET_WINDOW: Duration = Duration::from_secs(60);
-/// Ceiling on the wfb-tee restart backoff (the Python `min(..., 5.0)`).
-pub const WFB_TEE_RESTART_CEILING: Duration = Duration::from_secs(5);
-/// Consecutive-failure count that trips the 5-minute circuit-breaker park.
-pub const CIRCUIT_BREAKER_ATTEMPTS: u32 = 10;
-
-/// Pipeline lifecycle state (`PipelineState`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PipelineState {
-    Stopped,
-    Starting,
-    Running,
-    Error,
-}
-
-/// The tagged cause of the most recent `start_stream` failure, so the retry
-/// loop can pick the right backoff cap (`_last_start_error`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StartError {
-    /// No camera won the auto-assign — transient USB hotplug; 30 s cap.
-    NoPrimaryCamera,
-    /// No encoder backend available for the camera.
-    NoEncoder,
-    /// The encoder subprocess failed to spawn.
-    EncoderSpawnFailed,
-    /// mediamtx failed to start.
-    MediamtxFailed,
-    /// The last start succeeded or the cause is unknown — 5-minute cap.
-    None,
-}
-
-// --- pure health-decision functions (testable without subprocesses) ----------
-
-/// Exponential backoff with a cap, in the Python `min(base * 2^(n-1), cap)`
-/// shape. `attempt` is 1-based.
-pub fn backoff_delay(attempt: u32, base: Duration, cap: Duration) -> Duration {
-    if attempt == 0 {
-        return Duration::ZERO;
-    }
-    // 2^(attempt-1), saturating so a large attempt count cannot overflow.
-    let shift = attempt - 1;
-    let factor: u64 = 1u64.checked_shl(shift.min(63)).unwrap_or(u64::MAX);
-    let scaled = base
-        .as_secs_f64()
-        .mul_add(factor as f64, 0.0)
-        .min(cap.as_secs_f64());
-    Duration::from_secs_f64(scaled)
-}
-
-/// Pick the backoff cap for the error-state retry: the no-camera cap when the
-/// last failure was a missing primary, otherwise the full 5-minute cap.
-pub fn retry_cap(last_error: StartError) -> Duration {
-    match last_error {
-        StartError::NoPrimaryCamera => MAX_RESTART_DELAY_NO_CAMERA,
-        _ => MAX_RESTART_DELAY,
-    }
-}
-
-/// Should the circuit breaker trip (park for 5 minutes and reset the counter)?
-pub fn circuit_breaker_tripped(restart_count: u32) -> bool {
-    restart_count >= CIRCUIT_BREAKER_ATTEMPTS
-}
-
-/// Should a sustained-healthy run clear the restart counter? True once the
-/// pipeline has been continuously healthy for strictly longer than
-/// [`HEALTHY_RESET_WINDOW`] (the Python `> window` comparison).
-pub fn healthy_window_elapsed(healthy_since: Instant, now: Instant) -> bool {
-    now.saturating_duration_since(healthy_since) > HEALTHY_RESET_WINDOW
-}
-
-/// The decision the startup-grace branch of the health check makes, given the
-/// mediamtx publisher probe + elapsed time. Pure so it is unit-testable.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GraceDecision {
-    /// A publisher appeared — latch first-packet and report healthy.
-    FirstPacket,
-    /// Still inside the grace window with no publisher yet — report healthy.
-    StillWaiting,
-    /// Grace expired with no publisher — report unhealthy (restart).
-    Expired,
-}
-
-/// Grace-window decision (`_check_health` pre-first-packet block).
-pub fn grace_decision(path_ready: bool, elapsed: Duration) -> GraceDecision {
-    if path_ready {
-        GraceDecision::FirstPacket
-    } else if elapsed < STARTUP_GRACE_MAX {
-        GraceDecision::StillWaiting
-    } else {
-        GraceDecision::Expired
-    }
-}
-
-/// The inbound-byte watchdog decision (`_check_inbound_flow_healthy`), as a
-/// pure transition over the prior counter sample.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum InboundDecision {
-    /// First sample — seed the counter, report healthy.
-    Seed,
-    /// Counter advanced — report healthy, record the new bytes/s.
-    Advanced { bytes_per_s: f64 },
-    /// Counter flat but still within the stall window — report healthy.
-    WithinStall,
-    /// Counter flat past the stall window — report unhealthy (restart publish).
-    Stalled,
-}
-
-/// Inbound-flow decision over a new `current` byte sample.
-///
-/// `prev` is the previously recorded counter (`< 0` ⇒ no sample yet).
-/// `since_change` is how long the counter has sat flat. `interval` floors the
-/// elapsed used for the bytes/s rate so a zero-elapsed sample cannot divide by
-/// zero (mirrors the Python `max(now - changed_at, interval)`).
-pub fn inbound_decision(
-    prev: i64,
-    current: i64,
-    since_change: Duration,
-    interval: Duration,
-) -> InboundDecision {
-    if prev < 0 {
-        return InboundDecision::Seed;
-    }
-    if current > prev {
-        let delta = (current - prev) as f64;
-        let elapsed = since_change.max(interval).as_secs_f64();
-        return InboundDecision::Advanced {
-            bytes_per_s: delta / elapsed,
-        };
-    }
-    if since_change < INBOUND_FLOW_STALL {
-        InboundDecision::WithinStall
-    } else {
-        InboundDecision::Stalled
-    }
-}
 
 // --- orchestrator ------------------------------------------------------------
 
 /// Owns and supervises the air-side video pipeline subprocess tree.
+///
+/// The fields are `pub(crate)` so the subprocess start/stop lifecycle (defined
+/// in [`crate::lifecycle`]) and the supervision FSM (defined here) can share
+/// the same state across the two modules; nothing here is part of the crate's
+/// public API.
 pub struct VideoOrchestrator {
-    config: AgentVideoConfig,
-    camera_cfg: CameraConfig,
+    pub(crate) config: AgentVideoConfig,
+    pub(crate) camera_cfg: CameraConfig,
 
-    mediamtx: MediamtxManager,
-    encoder: Option<ManagedProcess>,
-    wfb_tee: Option<ManagedProcess>,
-    cloud_push: Option<ManagedProcess>,
-    sei_tap: Option<ManagedProcess>,
+    pub(crate) mediamtx: MediamtxManager,
+    pub(crate) encoder: Option<ManagedProcess>,
+    pub(crate) wfb_tee: Option<ManagedProcess>,
+    pub(crate) cloud_push: Option<ManagedProcess>,
+    pub(crate) sei_tap: Option<ManagedProcess>,
     /// The decoupled vision frame tap (a third ffmpeg → rawvideo → sink).
     /// Spawned only when `video.vision.enabled` and `raw_tap` is off. Additive:
     /// a crash here never touches the encode or wfb path.
-    vision_tap: Option<ManagedProcess>,
-    /// The GStreamer air pipeline (deferred — kept as a supervised Python
-    /// subprocess slot for the future GST branch; never spawned on the legacy
-    /// path).
-    gst_air: Option<ManagedProcess>,
+    pub(crate) vision_tap: Option<ManagedProcess>,
+    /// Supervised-subprocess slot held for a future GStreamer air branch. It
+    /// is never populated on the current bash path, so the teardown paths reap
+    /// it for free if that branch is ever wired; there is no operator toggle
+    /// that selects it.
+    pub(crate) gst_air: Option<ManagedProcess>,
 
-    wfb_tee_progress: ProgressTracker,
+    pub(crate) wfb_tee_progress: ProgressTracker,
     /// Output-progress clock for the decoupled vision tap (Rule 37: liveness
     /// alone is never proof of work; the tap can hold the sink open while
     /// pushing nothing).
-    vision_tap_progress: ProgressTracker,
+    pub(crate) vision_tap_progress: ProgressTracker,
 
-    last_cameras: DiscoveryResult,
-    encoder_type: Option<EncoderKind>,
+    pub(crate) last_cameras: DiscoveryResult,
+    pub(crate) encoder_type: Option<EncoderKind>,
 
-    state: PipelineState,
-    started_at: Instant,
-    first_packet_seen: bool,
+    pub(crate) state: PipelineState,
+    pub(crate) started_at: Instant,
+    pub(crate) first_packet_seen: bool,
 
     /// mediamtx inbound-byte counter (`-1` ⇒ no sample yet).
-    inbound_bytes_value: i64,
-    inbound_bytes_changed_at: Instant,
-    video_inbound_bytes_per_s: f64,
+    pub(crate) inbound_bytes_value: i64,
+    pub(crate) inbound_bytes_changed_at: Instant,
+    pub(crate) video_inbound_bytes_per_s: f64,
 
     /// The instant a healthy run began, or `None` (the armed sentinel,
     /// Python's `0.0`) when the next healthy tick should re-stamp it. A failed
     /// probe re-arms it to `None`.
-    last_healthy_at: Option<Instant>,
+    pub(crate) last_healthy_at: Option<Instant>,
 
-    restart_count: u32,
-    cloud_restart_count: u32,
-    wfb_tee_restart_count: u32,
-    vision_tap_restart_count: u32,
-    last_start_error: StartError,
+    pub(crate) restart_count: u32,
+    pub(crate) cloud_restart_count: u32,
+    pub(crate) wfb_tee_restart_count: u32,
+    pub(crate) vision_tap_restart_count: u32,
+    pub(crate) last_start_error: StartError,
 
-    /// Serializes teardown+respawn across the cold start, the health-check
-    /// restart, and any camera switch (held only around the bounded region,
-    /// never across a backoff sleep).
-    restart_lock: Arc<Mutex<()>>,
-    /// Serializes camera-switch operations (reserved for the switch API).
-    #[allow(dead_code)]
-    switch_lock: Arc<Mutex<()>>,
+    /// Serializes teardown+respawn across the cold start and the health-check
+    /// restart (held only around the bounded region, never across a backoff
+    /// sleep). A runtime camera change is not a distinct operation: a fresh
+    /// `/dev/video*` node fires SIGUSR1 → `camera_plugged` → the retry path,
+    /// which re-runs the same locked teardown+respawn, so there is no separate
+    /// switch lock.
+    pub(crate) restart_lock: Arc<Mutex<()>>,
     /// Fired by SIGUSR1 (a fresh `/dev/video*` node) to short-circuit the
     /// no-primary backoff sleep.
-    camera_plugged: Arc<Notify>,
+    pub(crate) camera_plugged: Arc<Notify>,
 
-    python_executable: String,
-    env: EncoderEnv,
+    pub(crate) python_executable: String,
+    pub(crate) env: EncoderEnv,
 }
 
 impl VideoOrchestrator {
@@ -297,7 +155,6 @@ impl VideoOrchestrator {
             vision_tap_restart_count: 0,
             last_start_error: StartError::None,
             restart_lock: Arc::new(Mutex::new(())),
-            switch_lock: Arc::new(Mutex::new(())),
             camera_plugged: Arc::new(Notify::new()),
             python_executable: discover::python_executable(),
             env: EncoderEnv::detect(),
@@ -319,452 +176,20 @@ impl VideoOrchestrator {
         (self.video_inbound_bytes_per_s * 10.0).round() / 10.0
     }
 
-    fn pipe_uri(&self) -> String {
+    pub(crate) fn pipe_uri(&self) -> String {
         format!("rtsp://localhost:{}/main", self.mediamtx.rtsp_port())
     }
 
-    fn sei_latency_on(&self) -> bool {
+    pub(crate) fn sei_latency_on(&self) -> bool {
         self.config.wfb.sei_latency
-    }
-
-    /// Start the encoding + streaming pipeline. Returns `true` on success.
-    ///
-    /// Exact order mirrors `pipeline.py::start_stream`: reap stale encoder →
-    /// discover + persist camera-state → bail on no-primary → orphan sweeps →
-    /// (GST branch deferred) → detect encoder → build command → optional SEI
-    /// wrap → mediamtx config+start → spawn encoder + plain stderr drain →
-    /// latch Running → best-effort wfb-tee → optional SEI tap. cloud_push is
-    /// NOT started here.
-    pub async fn start_stream(&mut self) -> bool {
-        if self.state == PipelineState::Running {
-            tracing::warn!("pipeline_already_running");
-            return true;
-        }
-
-        // Reap any stale encoder from a prior cycle by process group.
-        if let Some(mut enc) = self.encoder.take() {
-            if enc.is_running() {
-                tracing::info!(pid = enc.pid(), "killing_stale_encoder");
-                enc.terminate(Duration::from_secs(5)).await;
-            }
-        }
-
-        self.state = PipelineState::Starting;
-
-        // Discover cameras and persist the camera-state sidecar.
-        let discovery =
-            discover::discover(&self.python_executable, discover::DISCOVERY_TIMEOUT).await;
-        discover::persist_camera_state(&discovery);
-        self.last_cameras = discovery;
-
-        let Some(primary) = self.last_cameras.primary_camera_info() else {
-            tracing::error!("no_primary_camera");
-            self.last_start_error = StartError::NoPrimaryCamera;
-            self.state = PipelineState::Error;
-            return false;
-        };
-        let device_path = primary.device_path.clone();
-
-        // Orphan sweeps in the exact Python order: encoder holding the camera
-        // node, rpicam-vid, then the bridge publisher to /main.
-        kill_orphans(&format!("-i {device_path}")).await;
-        kill_orphans("rpicam-vid").await;
-        let pipe_uri = self.pipe_uri();
-        kill_orphans(&pipe_uri).await;
-
-        // GST air pipeline branch is deferred: the GStreamer AirPipeline stays
-        // a supervised Python subprocess in a later gated step. On the legacy
-        // path we never take it; if the flag is set we log and fall through to
-        // the bash path (which is exactly the Python fallback behaviour).
-        if self.config.use_gst_air_pipeline {
-            tracing::warn!("gst_air_pipeline_requested_but_deferred; using legacy bash air path");
-        }
-
-        // Detect the encoder backend for the primary camera.
-        let kind = detect_encoder_for_camera(
-            primary.camera_type,
-            binary_present("rpicam-vid"),
-            binary_present("ffmpeg"),
-            binary_present("gst-launch-1.0"),
-        );
-        let Some(kind) = kind else {
-            tracing::error!("no_encoder_available");
-            self.encoder_type = None;
-            self.last_start_error = StartError::NoEncoder;
-            self.state = PipelineState::Error;
-            return false;
-        };
-        self.encoder_type = Some(kind);
-
-        // Build the encoder command.
-        let params = EncoderParams::from_camera_config(kind, &self.camera_cfg);
-        let cmd = match build_encoder_command(
-            &params,
-            &device_path,
-            &pipe_uri,
-            Some(&primary),
-            &self.env,
-        ) {
-            Ok(c) if !c.is_empty() => c,
-            Ok(_) => {
-                tracing::error!("encoder_command_empty");
-                self.state = PipelineState::Error;
-                return false;
-            }
-            Err(e) => {
-                tracing::error!(error = %e, "encoder_command_build_failed");
-                self.state = PipelineState::Error;
-                return false;
-            }
-        };
-
-        // Optional SEI wrap upstream of mediamtx so every consumer sees the
-        // same wall-clock marker on the same frame.
-        let cmd = if self.sei_latency_on() {
-            tracing::info!(encoder = ?kind, "sei_inject_upstream_of_mediamtx");
-            wrap_with_sei_inject(&cmd, &pipe_uri, &self.env)
-        } else {
-            cmd
-        };
-
-        // Opt-in pre-encode vision tap: augment the encoder command with a
-        // strictly-appended second rawvideo output to the vision sink, WITHOUT
-        // changing the existing encode/RTSP output bytes. No-op (returns the
-        // command unchanged) unless the command is a raw ffmpeg invocation
-        // ending in the RTSP output — bash-pipeline / gstreamer / SEI-wrapped
-        // commands fall back to the decoupled third-ffmpeg tap below, which
-        // never touches the encoder. Off by default.
-        let cmd = if self.vision_enabled() && self.config.vision.raw_tap {
-            let v = &self.config.vision;
-            let augmented = augment_encoder_with_raw_tap(
-                &cmd,
-                &pipe_uri,
-                v.fps,
-                v.width,
-                v.height,
-                v.pixel_format(),
-                &v.sink,
-            );
-            if augmented.len() != cmd.len() {
-                tracing::info!(
-                    sink = %v.sink,
-                    "vision_raw_tap_spliced_into_encoder"
-                );
-            } else {
-                tracing::info!(
-                    "vision_raw_tap_requested_but_command_not_eligible; using decoupled tap"
-                );
-            }
-            augmented
-        } else {
-            cmd
-        };
-
-        // Configure + start mediamtx (gates on the RTSP port internally).
-        if let Err(e) = self
-            .mediamtx
-            .write_config(&[(MAIN_PATH.to_string(), "publisher".to_string())])
-        {
-            tracing::error!(error = %e, "mediamtx_config_write_failed");
-            self.last_start_error = StartError::MediamtxFailed;
-            self.state = PipelineState::Error;
-            return false;
-        }
-        match self.mediamtx.start().await {
-            Ok(true) => {}
-            _ => {
-                tracing::error!("mediamtx_start_failed; cannot stream without mediamtx");
-                self.last_start_error = StartError::MediamtxFailed;
-                self.state = PipelineState::Error;
-                return false;
-            }
-        }
-
-        // Spawn the encoder. A PLAIN rate-limited stderr drain (no progress
-        // tracker — the encoder is the source, not the wfb tap).
-        let program = cmd[0].clone();
-        let args: Vec<String> = cmd[1..].to_vec();
-        let mut enc = match ManagedProcess::spawn("encoder", &program, &args) {
-            Ok(p) => p,
-            Err(e) => {
-                tracing::error!(error = %e, encoder = ?kind, "encoder_spawn_failed");
-                self.last_start_error = StartError::EncoderSpawnFailed;
-                self.teardown_after_partial_start().await;
-                return false;
-            }
-        };
-        if let Some(stderr) = enc.take_stderr() {
-            tokio::spawn(crate::stderr_drain::drain_plain(stderr, "encoder"));
-        }
-        self.encoder = Some(enc);
-
-        // Latch Running + reset all health counters for a clean cold-start
-        // window.
-        self.state = PipelineState::Running;
-        let now = Instant::now();
-        self.started_at = now;
-        self.first_packet_seen = false;
-        self.inbound_bytes_value = -1;
-        self.inbound_bytes_changed_at = now;
-        self.video_inbound_bytes_per_s = 0.0;
-        // Arm the healthy-window sentinel: the first healthy tick stamps it,
-        // matching the Python pipeline (start_stream does not touch it).
-        self.last_healthy_at = None;
-        self.last_start_error = StartError::None;
-        tracing::info!(encoder = ?kind, "pipeline_started");
-
-        // Best-effort radio fan-out + optional SEI tap. Only spawn the tee once
-        // the encoder's RTSP publisher exists; otherwise the first DESCRIBE runs
-        // against a missing path and ffmpeg exits in ~1-2 s. The run-loop ladder
-        // brings the tee up once the path is ready.
-        if self.mediamtx.path_ready(MAIN_PATH).await {
-            self.start_wfb_tee().await;
-        } else {
-            tracing::debug!("wfb_tee_deferred: mediamtx path not ready at stream start");
-        }
-        if self.sei_latency_on() {
-            self.start_sei_tap().await;
-        }
-        // Optional additive vision frame tap. When raw_tap is on the frames are
-        // already produced by the spliced encoder output, so no separate
-        // process is spawned; otherwise spawn the decoupled third ffmpeg.
-        if self.vision_enabled() && !self.config.vision.raw_tap {
-            self.start_vision_tap().await;
-        }
-        true
     }
 
     /// True when the additive vision frame tap is configured to run on this
     /// node: enabled in config AND this is not a ground-station profile (the
     /// air-side pipeline never runs on a ground station, so neither does the
     /// tap). This is the single gate the tap consults.
-    fn vision_enabled(&self) -> bool {
+    pub(crate) fn vision_enabled(&self) -> bool {
         self.config.vision.enabled && !self.config.is_ground_station()
-    }
-
-    /// Spawn the wfb radio tap (idempotent). Best-effort: a failure leaves the
-    /// rest of the pipeline up. Mirrors `start_wfb_tee`.
-    pub async fn start_wfb_tee(&mut self) {
-        if self.state != PipelineState::Running {
-            tracing::warn!("wfb_tee_skipped: pipeline not running");
-            return;
-        }
-        if let Some(p) = self.wfb_tee.as_mut() {
-            if p.is_running() {
-                return;
-            }
-        }
-        // Sweep stale ffmpegs fighting for UDP 5600 before respawn.
-        kill_orphans(&orphan_pattern()).await;
-        let mut tee = match spawn_wfb_tee(self.mediamtx.rtsp_port()) {
-            Ok(p) => p,
-            Err(e) => {
-                tracing::error!(error = %e, "wfb_tee_start_failed");
-                return;
-            }
-        };
-        // Fresh tracker so the just-spawned tap gets the full progress window.
-        let tracker = ProgressTracker::new();
-        if let Some(stderr) = tee.take_stderr() {
-            tokio::spawn(drain_wfb_tee_stderr(stderr, tracker.clone()));
-        }
-        self.wfb_tee_progress = tracker;
-        self.wfb_tee = Some(tee);
-        tracing::info!(sei_latency = self.sei_latency_on(), "wfb_tee_started");
-    }
-
-    /// Stop the wfb radio tap. Mirrors `stop_wfb_tee`.
-    pub async fn stop_wfb_tee(&mut self) {
-        if let Some(mut p) = self.wfb_tee.take() {
-            p.terminate(Duration::from_secs(5)).await;
-        }
-        // Belt-and-suspenders orphan sweep.
-        kill_orphans(&orphan_pattern()).await;
-    }
-
-    /// Spawn the decoupled vision frame tap (idempotent). Best-effort and
-    /// strictly additive: a failure leaves the encode + radio path fully up.
-    /// Mirrors [`start_wfb_tee`](Self::start_wfb_tee) — same setsid/killpg
-    /// ownership, same orphan sweep, same output-progress watchdog.
-    pub async fn start_vision_tap(&mut self) {
-        if !self.vision_enabled() || self.config.vision.raw_tap {
-            return;
-        }
-        if self.state != PipelineState::Running {
-            tracing::warn!("vision_tap_skipped: pipeline not running");
-            return;
-        }
-        if let Some(p) = self.vision_tap.as_mut() {
-            if p.is_running() {
-                return;
-            }
-        }
-        let v = &self.config.vision;
-        // Sweep any stale reader holding the sink before respawn.
-        kill_orphans(&tap::orphan_pattern(&v.sink)).await;
-        let mut t = match spawn_vision_tap(
-            self.mediamtx.rtsp_port(),
-            v.fps,
-            v.width,
-            v.height,
-            v.pixel_format(),
-            &v.sink,
-        ) {
-            Ok(p) => p,
-            Err(e) => {
-                tracing::error!(error = %e, "vision_tap_start_failed");
-                return;
-            }
-        };
-        // Fresh tracker so the just-spawned tap gets the full progress window.
-        let tracker = ProgressTracker::new();
-        if let Some(stderr) = t.take_stderr() {
-            tokio::spawn(drain_wfb_tee_stderr(stderr, tracker.clone()));
-        }
-        self.vision_tap_progress = tracker;
-        self.vision_tap = Some(t);
-        tracing::info!(
-            sink = %v.sink,
-            fps = v.fps,
-            width = v.width,
-            height = v.height,
-            format = %v.pixel_format(),
-            "vision_tap_started"
-        );
-    }
-
-    /// Stop the decoupled vision frame tap. Mirrors
-    /// [`stop_wfb_tee`](Self::stop_wfb_tee).
-    pub async fn stop_vision_tap(&mut self) {
-        if let Some(mut p) = self.vision_tap.take() {
-            p.terminate(Duration::from_secs(5)).await;
-        }
-        // Belt-and-suspenders orphan sweep for the sink.
-        kill_orphans(&tap::orphan_pattern(&self.config.vision.sink)).await;
-    }
-
-    /// Spawn the headless SEI latency tap as a one-shot Python subprocess,
-    /// gated on the mediamtx path being ready. Mirrors the SEI-tap spawn but
-    /// runs `--once` so the Rust orchestrator owns the restart cadence (no
-    /// 2 s Python hot-loop — that was the deferred-respawn bug).
-    pub async fn start_sei_tap(&mut self) {
-        if let Some(p) = self.sei_tap.as_mut() {
-            if p.is_running() {
-                return;
-            }
-        }
-        // Only spawn once a publisher exists; otherwise defer to the health
-        // tick (no hot-loop against a dead source).
-        if !self.mediamtx.path_ready(MAIN_PATH).await {
-            tracing::debug!("sei_tap_deferred: mediamtx path not ready");
-            return;
-        }
-        let pipe_uri = self.pipe_uri();
-        let args: Vec<String> = vec![
-            "-m".into(),
-            "ados.services.video.sei_tap".into(),
-            "--once".into(),
-            "--rtsp".into(),
-            pipe_uri,
-        ];
-        let mut tap = match ManagedProcess::spawn("sei_tap", &self.python_executable, &args) {
-            Ok(p) => p,
-            Err(e) => {
-                tracing::warn!(error = %e, "headless_sei_tap_spawn_failed");
-                return;
-            }
-        };
-        if let Some(stderr) = tap.take_stderr() {
-            tokio::spawn(crate::stderr_drain::drain_plain(stderr, "sei_tap"));
-        }
-        self.sei_tap = Some(tap);
-        tracing::info!("headless_sei_tap_started");
-    }
-
-    /// Start the cloud-relay push (an ffmpeg that copies local RTSP to the
-    /// cloud relay). Mirrors `start_cloud_push`. Returns `true` on spawn.
-    pub async fn start_cloud_push(&mut self) -> bool {
-        let Some(cloud_url) = self
-            .config
-            .cloud_relay_url
-            .clone()
-            .filter(|s| !s.is_empty())
-        else {
-            tracing::info!("cloud_push_disabled: no cloud_relay_url configured");
-            return false;
-        };
-        if self.state != PipelineState::Running {
-            tracing::warn!("cloud_push_skipped: pipeline not running");
-            return false;
-        }
-        if let Some(p) = self.cloud_push.as_mut() {
-            if p.is_running() {
-                return true;
-            }
-        }
-        let local_rtsp = format!("rtsp://localhost:{}/main", self.mediamtx.rtsp_port());
-        let push_url = format!("{cloud_url}/main");
-        let args: Vec<String> = vec![
-            "-rtsp_transport".into(),
-            "tcp".into(),
-            "-timeout".into(),
-            "5000000".into(),
-            "-i".into(),
-            local_rtsp,
-            "-c".into(),
-            "copy".into(),
-            "-f".into(),
-            "rtsp".into(),
-            "-rtsp_transport".into(),
-            "tcp".into(),
-            push_url.clone(),
-        ];
-        let mut push = match ManagedProcess::spawn("cloud_push", "ffmpeg", &args) {
-            Ok(p) => p,
-            Err(e) => {
-                tracing::error!(error = %e, "cloud_push_ffmpeg_spawn_failed");
-                return false;
-            }
-        };
-        if let Some(stderr) = push.take_stderr() {
-            tokio::spawn(crate::stderr_drain::drain_plain(stderr, "cloud_push"));
-        }
-        self.cloud_push = Some(push);
-        tracing::info!(destination = %push_url, "cloud_push_started");
-        true
-    }
-
-    /// Stop the cloud push. Mirrors `stop_cloud_push`.
-    pub async fn stop_cloud_push(&mut self) {
-        if let Some(mut p) = self.cloud_push.take() {
-            p.terminate(Duration::from_secs(5)).await;
-            tracing::info!("cloud_push_stopped");
-        }
-    }
-
-    /// Tear down the deferred GStreamer air-pipeline subprocess if one was ever
-    /// spawned. On the legacy bash path this slot is always empty; the teardown
-    /// is here so a future gated GST step inherits correct reaping for free.
-    async fn stop_gst_air(&mut self) {
-        if let Some(mut gst) = self.gst_air.take() {
-            gst.terminate(Duration::from_secs(5)).await;
-        }
-    }
-
-    /// Roll back a partial start: tear down anything spawned after
-    /// mediamtx.start(), then mark Error. Mirrors `_teardown_after_partial_start`.
-    async fn teardown_after_partial_start(&mut self) {
-        self.stop_gst_air().await;
-        self.stop_wfb_tee().await;
-        self.stop_vision_tap().await;
-        if let Some(mut tap) = self.sei_tap.take() {
-            tap.terminate(Duration::from_secs(2)).await;
-        }
-        if let Some(mut enc) = self.encoder.take() {
-            enc.terminate(Duration::from_secs(2)).await;
-        }
-        self.mediamtx.stop().await;
-        self.state = PipelineState::Error;
     }
 
     /// Stop the encoding pipeline and mediamtx. Teardown order: wfb_tee →
@@ -1296,195 +721,6 @@ async fn interruptible_sleep(
 mod tests {
     use super::*;
 
-    #[test]
-    fn backoff_ladder_matches_python_shape() {
-        // base 5s, cap 300s → 5,10,20,40,80,160,300(capped),300,...
-        assert_eq!(
-            backoff_delay(1, BASE_RESTART_DELAY, MAX_RESTART_DELAY),
-            Duration::from_secs(5)
-        );
-        assert_eq!(
-            backoff_delay(2, BASE_RESTART_DELAY, MAX_RESTART_DELAY),
-            Duration::from_secs(10)
-        );
-        assert_eq!(
-            backoff_delay(3, BASE_RESTART_DELAY, MAX_RESTART_DELAY),
-            Duration::from_secs(20)
-        );
-        assert_eq!(
-            backoff_delay(4, BASE_RESTART_DELAY, MAX_RESTART_DELAY),
-            Duration::from_secs(40)
-        );
-        assert_eq!(
-            backoff_delay(5, BASE_RESTART_DELAY, MAX_RESTART_DELAY),
-            Duration::from_secs(80)
-        );
-        assert_eq!(
-            backoff_delay(6, BASE_RESTART_DELAY, MAX_RESTART_DELAY),
-            Duration::from_secs(160)
-        );
-        // 7 → 320 capped to 300.
-        assert_eq!(
-            backoff_delay(7, BASE_RESTART_DELAY, MAX_RESTART_DELAY),
-            Duration::from_secs(300)
-        );
-        assert_eq!(
-            backoff_delay(20, BASE_RESTART_DELAY, MAX_RESTART_DELAY),
-            Duration::from_secs(300)
-        );
-        // attempt 0 is a no-op (defensive).
-        assert_eq!(
-            backoff_delay(0, BASE_RESTART_DELAY, MAX_RESTART_DELAY),
-            Duration::ZERO
-        );
-    }
-
-    #[test]
-    fn no_camera_cap_is_30s() {
-        // base 5s, cap 30s → 5,10,20,30(capped),30,...
-        assert_eq!(
-            backoff_delay(1, BASE_RESTART_DELAY, MAX_RESTART_DELAY_NO_CAMERA),
-            Duration::from_secs(5)
-        );
-        assert_eq!(
-            backoff_delay(2, BASE_RESTART_DELAY, MAX_RESTART_DELAY_NO_CAMERA),
-            Duration::from_secs(10)
-        );
-        assert_eq!(
-            backoff_delay(3, BASE_RESTART_DELAY, MAX_RESTART_DELAY_NO_CAMERA),
-            Duration::from_secs(20)
-        );
-        // 4 → 40 capped to 30.
-        assert_eq!(
-            backoff_delay(4, BASE_RESTART_DELAY, MAX_RESTART_DELAY_NO_CAMERA),
-            Duration::from_secs(30)
-        );
-        assert_eq!(
-            backoff_delay(10, BASE_RESTART_DELAY, MAX_RESTART_DELAY_NO_CAMERA),
-            Duration::from_secs(30)
-        );
-    }
-
-    #[test]
-    fn wfb_tee_ceiling_is_5s() {
-        // wfb tee backoff caps at 5s regardless of attempt.
-        assert_eq!(
-            backoff_delay(1, BASE_RESTART_DELAY, WFB_TEE_RESTART_CEILING),
-            Duration::from_secs(5)
-        );
-        assert_eq!(
-            backoff_delay(2, BASE_RESTART_DELAY, WFB_TEE_RESTART_CEILING),
-            Duration::from_secs(5)
-        );
-        assert_eq!(
-            backoff_delay(5, BASE_RESTART_DELAY, WFB_TEE_RESTART_CEILING),
-            Duration::from_secs(5)
-        );
-    }
-
-    #[test]
-    fn retry_cap_picks_by_error_class() {
-        assert_eq!(
-            retry_cap(StartError::NoPrimaryCamera),
-            MAX_RESTART_DELAY_NO_CAMERA
-        );
-        assert_eq!(retry_cap(StartError::NoEncoder), MAX_RESTART_DELAY);
-        assert_eq!(retry_cap(StartError::EncoderSpawnFailed), MAX_RESTART_DELAY);
-        assert_eq!(retry_cap(StartError::MediamtxFailed), MAX_RESTART_DELAY);
-        assert_eq!(retry_cap(StartError::None), MAX_RESTART_DELAY);
-    }
-
-    #[test]
-    fn circuit_breaker_trips_at_ten() {
-        assert!(!circuit_breaker_tripped(9));
-        assert!(circuit_breaker_tripped(10));
-        assert!(circuit_breaker_tripped(11));
-    }
-
-    #[test]
-    fn healthy_window_boundary_at_60s() {
-        let base = Instant::now();
-        // Strict `>` (the Python `now - last > window`): exactly 60s is NOT
-        // elapsed; just past 60s is.
-        assert!(!healthy_window_elapsed(
-            base,
-            base + Duration::from_millis(59_999)
-        ));
-        assert!(!healthy_window_elapsed(
-            base,
-            base + Duration::from_secs(60)
-        ));
-        assert!(healthy_window_elapsed(
-            base,
-            base + Duration::from_millis(60_001)
-        ));
-        assert!(healthy_window_elapsed(
-            base,
-            base + Duration::from_secs(120)
-        ));
-    }
-
-    #[test]
-    fn grace_decision_transitions() {
-        // Publisher present at any time → first packet.
-        assert_eq!(
-            grace_decision(true, Duration::ZERO),
-            GraceDecision::FirstPacket
-        );
-        assert_eq!(
-            grace_decision(true, Duration::from_secs(40)),
-            GraceDecision::FirstPacket
-        );
-        // No publisher inside the window → still waiting.
-        assert_eq!(
-            grace_decision(false, Duration::from_secs(5)),
-            GraceDecision::StillWaiting
-        );
-        assert_eq!(
-            grace_decision(false, Duration::from_millis(29_999)),
-            GraceDecision::StillWaiting
-        );
-        // No publisher past the window → expired.
-        assert_eq!(
-            grace_decision(false, Duration::from_secs(30)),
-            GraceDecision::Expired
-        );
-        assert_eq!(
-            grace_decision(false, Duration::from_secs(45)),
-            GraceDecision::Expired
-        );
-    }
-
-    #[test]
-    fn inbound_decision_seed_on_first_sample() {
-        assert_eq!(
-            inbound_decision(-1, 1000, Duration::ZERO, HEALTH_CHECK_INTERVAL),
-            InboundDecision::Seed
-        );
-    }
-
-    #[test]
-    fn inbound_decision_advanced_computes_rate() {
-        // 10000 bytes over a 5s floored interval → 2000 B/s.
-        let d = inbound_decision(0, 10_000, Duration::from_secs(5), HEALTH_CHECK_INTERVAL);
-        match d {
-            InboundDecision::Advanced { bytes_per_s } => {
-                assert!((bytes_per_s - 2000.0).abs() < 1e-6, "got {bytes_per_s}");
-            }
-            other => panic!("expected Advanced, got {other:?}"),
-        }
-        // A sub-interval elapsed is floored to the interval so the rate cannot
-        // spike artificially.
-        let d = inbound_decision(0, 5_000, Duration::from_millis(100), HEALTH_CHECK_INTERVAL);
-        match d {
-            InboundDecision::Advanced { bytes_per_s } => {
-                // floored to 5s → 1000 B/s, not 50000 B/s.
-                assert!((bytes_per_s - 1000.0).abs() < 1e-6, "got {bytes_per_s}");
-            }
-            other => panic!("expected Advanced, got {other:?}"),
-        }
-    }
-
     fn test_orch() -> VideoOrchestrator {
         VideoOrchestrator::new(
             AgentVideoConfig::default(),
@@ -1561,25 +797,5 @@ mod tests {
         o.note_healthy_tick();
         assert!(o.last_healthy_at.is_some());
         assert_eq!(o.restart_count, 2);
-    }
-
-    #[test]
-    fn inbound_decision_within_and_past_stall() {
-        // Flat counter inside the 12s stall window → still healthy.
-        assert_eq!(
-            inbound_decision(1000, 1000, Duration::from_secs(11), HEALTH_CHECK_INTERVAL),
-            InboundDecision::WithinStall
-        );
-        // Flat counter at exactly 12s → stalled.
-        assert_eq!(
-            inbound_decision(1000, 1000, Duration::from_secs(12), HEALTH_CHECK_INTERVAL),
-            InboundDecision::Stalled
-        );
-        // Counter went backwards (mediamtx path reset) is treated as flat →
-        // stall logic applies.
-        assert_eq!(
-            inbound_decision(2000, 1500, Duration::from_secs(20), HEALTH_CHECK_INTERVAL),
-            InboundDecision::Stalled
-        );
     }
 }
