@@ -1,7 +1,7 @@
-"""Tests for the display-presence probes consumed by the hardware-check
-wizard step and the cloud heartbeat assembler.
+"""Tests for the display-presence probe consumed by the hardware-check
+wizard step.
 
-The probes read /etc/ados/display.conf and /sys/class/graphics; both
+The probe reads /etc/ados/display.conf and /sys/class/graphics; both
 are mocked here to exercise every state the wizard surfaces without
 touching the real filesystem.
 """
@@ -199,77 +199,3 @@ class TestCheckDisplay:
         item = hc._check_display()
         assert item.state == "warning"
         assert "no SPI LCD framebuffer is bound" in item.detail
-
-
-# ---------------------------------------------------------------------------
-# cloud._collect_attached_display() — heartbeat-facing assembler
-# ---------------------------------------------------------------------------
-
-
-class TestCollectAttachedDisplay:
-    def test_no_conf_returns_none(self, monkeypatch, tmp_path: Path):
-        from ados.services.cloud import heartbeat as cloud_main
-
-        bogus = tmp_path / "absent.conf"
-        monkeypatch.setattr(cloud_main, "DISPLAY_CONF_PATH", bogus)
-        assert cloud_main.collect_attached_display() is None
-
-    def test_conf_present_returns_peripheral_dict(
-        self, monkeypatch, tmp_path: Path
-    ):
-        from ados.services.cloud import heartbeat as cloud_main
-
-        conf = tmp_path / "display.conf"
-        conf.write_text(
-            "display_id=waveshare35a\n"
-            "board=cubie-a7z\n"
-            "controller=ILI9486\n"
-            "touch_chip=ADS7846\n"
-            "has_touch=true\n"
-            "resolution=480x320\n"
-            "framebuffer_path=/dev/fb_test_fake_does_not_exist\n"
-            "framebuffer_name_expected=fb_ili9486\n"
-            "rotation=90\n"
-            "overlay_source=repo\n"
-            "overlay_ref=cubie-a7z-waveshare35a.dts\n"
-            "activated_via=extlinux\n"
-        )
-        monkeypatch.setattr(cloud_main, "DISPLAY_CONF_PATH", conf)
-
-        result = cloud_main.collect_attached_display()
-        assert result is not None
-        assert result["category"] == "display"
-        assert result["type"] == "spi-lcd"
-        assert result["id"] == "local-display"
-        assert result["name"] == 'Waveshare 3.5" SPI LCD'
-        assert result["address"] == "/dev/fb_test_fake_does_not_exist"
-        # No /sys binding for the fake fb path -> bound=False, status="warning"
-        assert result["status"] == "warning"
-        assert result["extra"]["controller"] == "ILI9486"
-        assert result["extra"]["has_touch"] is True
-        assert result["extra"]["resolution"] == "480x320"
-        assert result["extra"]["rotation"] == 90
-        assert result["extra"]["board"] == "cubie-a7z"
-        assert result["extra"]["overlay_source"] == "repo"
-        assert result["extra"]["activated_via"] == "extlinux"
-        assert result["extra"]["bound"] is False
-
-    def test_unknown_display_id_falls_through_to_id_string(
-        self, monkeypatch, tmp_path: Path
-    ):
-        from ados.services.cloud import heartbeat as cloud_main
-
-        conf = tmp_path / "display.conf"
-        conf.write_text("display_id=mystery_panel_v1\n")
-        monkeypatch.setattr(cloud_main, "DISPLAY_CONF_PATH", conf)
-        result = cloud_main.collect_attached_display()
-        assert result is not None
-        assert result["name"] == "mystery_panel_v1"
-
-    def test_empty_conf_returns_none(self, monkeypatch, tmp_path: Path):
-        from ados.services.cloud import heartbeat as cloud_main
-
-        conf = tmp_path / "display.conf"
-        conf.write_text("# only a comment\n\n")
-        monkeypatch.setattr(cloud_main, "DISPLAY_CONF_PATH", conf)
-        assert cloud_main.collect_attached_display() is None
