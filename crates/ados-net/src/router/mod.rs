@@ -196,9 +196,15 @@ impl UplinkRouter {
     }
 
     async fn is_usb_tether_up(&self) -> bool {
-        match std::fs::read_to_string(paths::USB0_CARRIER) {
-            Ok(text) => text.trim() == "1",
-            Err(_) => false,
+        // Read the carrier flag on the blocking thread pool: a stalled /sys read
+        // must never block the tokio reactor, especially since `tick` runs this
+        // while holding the router state lock.
+        let path = paths::USB0_CARRIER;
+        let res = tokio::task::spawn_blocking(move || std::fs::read_to_string(path)).await;
+        match res {
+            Ok(Ok(text)) => text.trim() == "1",
+            // A read error (iface absent) or a join error both mean "not up".
+            _ => false,
         }
     }
 
@@ -255,7 +261,11 @@ impl UplinkRouter {
         available: Vec<String>,
         reachable: bool,
     ) {
-        self.active_flag.lock().await.sync(active, reachable);
+        self.active_flag
+            .lock()
+            .await
+            .sync_async(active, reachable)
+            .await;
         self.bus.publish(UplinkEvent {
             kind: UplinkEventKind::HealthChanged,
             active_uplink: active.map(|s| s.to_string()),
@@ -295,7 +305,8 @@ impl UplinkRouter {
         self.active_flag
             .lock()
             .await
-            .sync(uplink.as_deref(), st.internet_reachable);
+            .sync_async(uplink.as_deref(), st.internet_reachable)
+            .await;
 
         info!(
             previous = ?previous,
@@ -329,7 +340,7 @@ impl UplinkRouter {
             } else {
                 // Even with no prior reachability, ensure the flag is gone when
                 // there is no uplink, so mesh election never sees a stale flag.
-                self.active_flag.lock().await.sync(None, false);
+                self.active_flag.lock().await.sync_async(None, false).await;
             }
             return;
         }
@@ -469,7 +480,7 @@ impl UplinkRouter {
         };
         let mut flag = self.active_flag.lock().await;
         if flag.set_data_cap_state(state) {
-            flag.sync(active.as_deref(), reachable);
+            flag.sync_async(active.as_deref(), reachable).await;
         }
     }
 

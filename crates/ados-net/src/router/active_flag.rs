@@ -66,6 +66,21 @@ pub struct ActiveFlagWriter {
     cap_state: String,
 }
 
+/// The disk op a [`sync`](ActiveFlagWriter::sync) decided on, computed without
+/// blocking so the actual write/unlink can be deferred to a blocking thread.
+enum FlagOp {
+    /// Nothing to do (dedup hit, or an encode error already logged).
+    None,
+    /// Atomically write `bytes`; on success record `key` as the new `last`.
+    Write {
+        bytes: Vec<u8>,
+        key: (String, bool, String),
+    },
+    /// Unlink the flag file. `was_present` is the return value when the file is
+    /// already gone (`NotFound`).
+    Unlink { was_present: bool },
+}
+
 impl ActiveFlagWriter {
     /// Writer targeting the canonical `UPLINK_ACTIVE_FLAG` path.
     pub fn new() -> Self {
@@ -105,13 +120,82 @@ impl ActiveFlagWriter {
     /// * `active_uplink = None` → unlink the file so the legacy `.is_file()`
     ///   reader sees no uplink.
     ///
-    /// Returns `true` if a write or unlink actually touched the disk.
+    /// Returns `true` if a write or unlink actually touched the disk. This
+    /// variant performs the disk op inline (blocking); on the tokio reactor
+    /// prefer [`sync_async`](ActiveFlagWriter::sync_async).
     pub fn sync(&mut self, active_uplink: Option<&str>, internet_reachable: bool) -> bool {
+        match self.plan(active_uplink, internet_reachable) {
+            FlagOp::None => false,
+            FlagOp::Write { bytes, key } => {
+                Self::run_write(&self.path, &bytes, &mut self.last, key)
+            }
+            FlagOp::Unlink { was_present } => Self::run_unlink(&self.path, was_present),
+        }
+    }
+
+    /// Async sync: do the in-memory bookkeeping + body encode on the caller's
+    /// task (sub-microsecond), then run the one blocking filesystem op
+    /// (`write_atomic` / `remove_file`) on the blocking thread pool so a stalled
+    /// `/run` or `/sys` op never blocks the tokio reactor. The dedup/`last`
+    /// bookkeeping is applied only when the disk op reports success, identical
+    /// to [`sync`](ActiveFlagWriter::sync).
+    ///
+    /// Returns `true` if a write or unlink actually touched the disk.
+    pub async fn sync_async(
+        &mut self,
+        active_uplink: Option<&str>,
+        internet_reachable: bool,
+    ) -> bool {
+        match self.plan(active_uplink, internet_reachable) {
+            FlagOp::None => false,
+            FlagOp::Write { bytes, key } => {
+                let path = self.path.clone();
+                let res =
+                    tokio::task::spawn_blocking(move || sidecar::write_atomic(&path, &bytes)).await;
+                match res {
+                    Ok(Ok(())) => {
+                        self.last = Some(key);
+                        true
+                    }
+                    Ok(Err(exc)) => {
+                        warn!(error = %exc, "uplink.active_flag_write_failed");
+                        false
+                    }
+                    Err(exc) => {
+                        warn!(error = %exc, "uplink.active_flag_write_task_failed");
+                        false
+                    }
+                }
+            }
+            FlagOp::Unlink { was_present } => {
+                let path = self.path.clone();
+                let res = tokio::task::spawn_blocking(move || std::fs::remove_file(&path)).await;
+                match res {
+                    Ok(Ok(())) => true,
+                    Ok(Err(exc)) if exc.kind() == std::io::ErrorKind::NotFound => was_present,
+                    Ok(Err(exc)) => {
+                        debug!(error = %exc, "uplink.active_flag_unlink_failed");
+                        false
+                    }
+                    Err(exc) => {
+                        warn!(error = %exc, "uplink.active_flag_unlink_task_failed");
+                        false
+                    }
+                }
+            }
+        }
+    }
+
+    /// Decide the disk op without touching the disk for the write case. For the
+    /// unlink case `self.last` is cleared here (it is pure in-memory state); the
+    /// caller then performs the unlink. The write case defers the `self.last`
+    /// update to after a successful write.
+    fn plan(&mut self, active_uplink: Option<&str>, internet_reachable: bool) -> FlagOp {
         match active_uplink {
             Some(name) => {
                 let key = (name.to_string(), internet_reachable, self.cap_state.clone());
                 if self.last.as_ref() == Some(&key) && self.path.is_file() {
-                    return false;
+                    return FlagOp::None;
                 }
                 let body = ActiveUplinkFlag {
                     active_uplink: name.to_string(),
@@ -120,33 +204,46 @@ impl ActiveFlagWriter {
                     data_cap_state: self.cap_state.clone(),
                 };
                 match serde_json::to_vec(&body) {
-                    Ok(bytes) => match sidecar::write_atomic(&self.path, &bytes) {
-                        Ok(()) => {
-                            self.last = Some(key);
-                            true
-                        }
-                        Err(exc) => {
-                            warn!(error = %exc, "uplink.active_flag_write_failed");
-                            false
-                        }
-                    },
+                    Ok(bytes) => FlagOp::Write { bytes, key },
                     Err(exc) => {
                         warn!(error = %exc, "uplink.active_flag_encode_failed");
-                        false
+                        FlagOp::None
                     }
                 }
             }
             None => {
                 let was_present = self.last.is_some();
                 self.last = None;
-                match std::fs::remove_file(&self.path) {
-                    Ok(()) => true,
-                    Err(exc) if exc.kind() == std::io::ErrorKind::NotFound => was_present,
-                    Err(exc) => {
-                        debug!(error = %exc, "uplink.active_flag_unlink_failed");
-                        false
-                    }
-                }
+                FlagOp::Unlink { was_present }
+            }
+        }
+    }
+
+    fn run_write(
+        path: &Path,
+        bytes: &[u8],
+        last: &mut Option<(String, bool, String)>,
+        key: (String, bool, String),
+    ) -> bool {
+        match sidecar::write_atomic(path, bytes) {
+            Ok(()) => {
+                *last = Some(key);
+                true
+            }
+            Err(exc) => {
+                warn!(error = %exc, "uplink.active_flag_write_failed");
+                false
+            }
+        }
+    }
+
+    fn run_unlink(path: &Path, was_present: bool) -> bool {
+        match std::fs::remove_file(path) {
+            Ok(()) => true,
+            Err(exc) if exc.kind() == std::io::ErrorKind::NotFound => was_present,
+            Err(exc) => {
+                debug!(error = %exc, "uplink.active_flag_unlink_failed");
+                false
             }
         }
     }
@@ -255,6 +352,40 @@ mod tests {
         let path = dir.path().join("uplink-active");
         let mut w = ActiveFlagWriter::with_path(path.clone());
         w.sync(Some("eth0"), true);
+        assert!(!dir.path().join("uplink-active.tmp").exists());
+    }
+
+    #[tokio::test]
+    async fn sync_async_matches_sync_semantics_with_offloaded_io() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("uplink-active");
+        let mut w = ActiveFlagWriter::with_path(path.clone());
+
+        // No uplink, absent file → no disk touch.
+        assert!(!w.sync_async(None, false).await);
+        assert!(!path.is_file());
+
+        // Active uplink → file written off-reactor, body parses.
+        assert!(w.sync_async(Some("eth0"), true).await);
+        assert!(path.is_file());
+        let body: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(body["active_uplink"], "eth0");
+        assert_eq!(body["internet_reachable"], true);
+
+        // Same state → dedup, no rewrite.
+        assert!(!w.sync_async(Some("eth0"), true).await);
+
+        // Reachability transition → rewrite.
+        assert!(w.sync_async(Some("eth0"), false).await);
+        let body: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(body["internet_reachable"], false);
+
+        // Drop to no-uplink → file unlinked off-reactor.
+        assert!(w.sync_async(None, false).await);
+        assert!(!path.is_file());
+        // No torn tmp left by the offloaded write.
         assert!(!dir.path().join("uplink-active.tmp").exists());
     }
 }

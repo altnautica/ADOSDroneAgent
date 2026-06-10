@@ -9,6 +9,7 @@
 use std::time::Duration;
 
 use async_trait::async_trait;
+use tokio::io::AsyncWriteExt;
 use tracing::warn;
 
 /// Result of a command: exit code, captured stdout, captured stderr (decoded
@@ -42,6 +43,17 @@ pub trait CmdRunner: Send + Sync {
     /// Run `argv` (program + args) with `timeout`. Never errors; failures are
     /// encoded in the returned [`CmdOut`].
     async fn run(&self, argv: &[&str], timeout: Duration) -> CmdOut;
+
+    /// Run `argv` with `stdin_data` piped to the child's stdin, with `timeout`.
+    /// This keeps a secret (a WiFi passphrase) out of the argv vector so it
+    /// never appears in `/proc/<pid>/cmdline`. The default forwards to
+    /// [`run`](CmdRunner::run) with the data discarded, so a test fake that only
+    /// records argv keeps working; the production runner overrides it to feed
+    /// the bytes on stdin.
+    async fn run_with_stdin(&self, argv: &[&str], stdin_data: &[u8], timeout: Duration) -> CmdOut {
+        let _ = stdin_data;
+        self.run(argv, timeout).await
+    }
 }
 
 /// Production runner over `tokio::process::Command`.
@@ -71,6 +83,48 @@ impl CmdRunner for TokioCmdRunner {
             Err(_) => CmdOut::failed(124, "timeout"),
         }
     }
+
+    async fn run_with_stdin(&self, argv: &[&str], stdin_data: &[u8], timeout: Duration) -> CmdOut {
+        let Some((program, args)) = argv.split_first() else {
+            return CmdOut::failed(1, "empty_argv");
+        };
+        let mut cmd = tokio::process::Command::new(program);
+        cmd.args(args);
+        cmd.stdin(std::process::Stdio::piped());
+        cmd.stdout(std::process::Stdio::piped());
+        cmd.stderr(std::process::Stdio::piped());
+
+        let mut child = match cmd.spawn() {
+            Ok(c) => c,
+            Err(exc) => {
+                warn!(program = program, error = %exc, "uplink.cmd_spawn_failed");
+                return CmdOut::failed(1, exc.to_string());
+            }
+        };
+
+        // Feed the secret on stdin (never in argv → never in /proc/<pid>/cmdline)
+        // then drop the handle so the child sees EOF. A broken-pipe write (the
+        // child exited before reading) is non-fatal; the wait below captures the
+        // real outcome.
+        if let Some(mut stdin) = child.stdin.take() {
+            let _ = stdin.write_all(stdin_data).await;
+            let _ = stdin.shutdown().await;
+            // `stdin` drops here, closing the pipe so the child sees EOF.
+        }
+
+        match tokio::time::timeout(timeout, child.wait_with_output()).await {
+            Ok(Ok(out)) => CmdOut {
+                rc: out.status.code().unwrap_or(-1),
+                stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+                stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+            },
+            Ok(Err(exc)) => {
+                warn!(program = program, error = %exc, "uplink.cmd_wait_failed");
+                CmdOut::failed(1, exc.to_string())
+            }
+            Err(_) => CmdOut::failed(124, "timeout"),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -83,11 +137,16 @@ pub mod testing {
 
     /// Records the argv of every call and replays queued responses in order.
     /// When the queue is empty it returns a zero-exit empty result so unmatched
-    /// calls do not panic.
+    /// calls do not panic. Calls made through [`CmdRunner::run_with_stdin`] also
+    /// record the stdin bytes they were handed so a test can assert a secret
+    /// travelled out of argv.
     #[derive(Default)]
     pub struct ScriptedRunner {
         responses: Mutex<VecDeque<CmdOut>>,
         pub calls: Mutex<Vec<Vec<String>>>,
+        /// stdin bytes per call, in call order; an empty `Vec` for an argv-only
+        /// `run` call.
+        pub stdins: Mutex<Vec<Vec<u8>>>,
     }
 
     impl ScriptedRunner {
@@ -104,15 +163,18 @@ pub mod testing {
         pub fn recorded(&self) -> Vec<Vec<String>> {
             self.calls.lock().unwrap().clone()
         }
-    }
 
-    #[async_trait]
-    impl CmdRunner for ScriptedRunner {
-        async fn run(&self, argv: &[&str], _timeout: Duration) -> CmdOut {
+        /// The recorded stdin payloads, in call order.
+        pub fn recorded_stdins(&self) -> Vec<Vec<u8>> {
+            self.stdins.lock().unwrap().clone()
+        }
+
+        fn record(&self, argv: &[&str], stdin_data: &[u8]) -> CmdOut {
             self.calls
                 .lock()
                 .unwrap()
                 .push(argv.iter().map(|s| s.to_string()).collect());
+            self.stdins.lock().unwrap().push(stdin_data.to_vec());
             self.responses
                 .lock()
                 .unwrap()
@@ -122,6 +184,22 @@ pub mod testing {
                     stdout: String::new(),
                     stderr: String::new(),
                 })
+        }
+    }
+
+    #[async_trait]
+    impl CmdRunner for ScriptedRunner {
+        async fn run(&self, argv: &[&str], _timeout: Duration) -> CmdOut {
+            self.record(argv, &[])
+        }
+
+        async fn run_with_stdin(
+            &self,
+            argv: &[&str],
+            stdin_data: &[u8],
+            _timeout: Duration,
+        ) -> CmdOut {
+            self.record(argv, stdin_data)
         }
     }
 }

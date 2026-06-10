@@ -394,29 +394,60 @@ impl ModemManager {
     /// layer. In AT fallback the daemon owns the only serial handle, so it polls
     /// AT here. Always reports iface liveness from sysfs.
     pub async fn status(&self) -> Value {
-        let mut st = self.state.lock().await;
+        // Snapshot the fast state fields and TAKE the held-open AT port out of
+        // the locked state, then DROP the guard before any slow I/O. Holding the
+        // async state mutex across the serial AT round-trip (and the D-Bus
+        // round-trip) would serialize enabled()/bring_up()/bring_down()/
+        // configure() behind a slow or hung poll. With the port taken out, those
+        // fast methods stay responsive while this poll runs lock-free; the port
+        // is re-stored under a brief re-lock at the end.
+        let (fallback_mode, brought_up, mut at_port) = {
+            let mut st = self.state.lock().await;
+            (
+                st.fallback_mode,
+                st.brought_up,
+                std::mem::take(&mut st.at_port),
+            )
+        };
+
+        // Lock released. The D-Bus liveness probe runs without the state lock.
         let present = self.dbus.modem_present().await.unwrap_or(false);
         let iface = self.current_iface();
         let up = self.iface_up();
-        let mode = if st.fallback_mode { "at" } else { "dbus" };
+        let mode = if fallback_mode { "at" } else { "dbus" };
 
         let mut out = json!({
             "mode": mode,
-            "modem_present": present || st.fallback_mode,
+            "modem_present": present || fallback_mode,
             "iface": iface,
             "iface_up": up,
-            "brought_up": st.brought_up,
-            "needs_at_fallback": st.fallback_mode,
+            "brought_up": brought_up,
+            "needs_at_fallback": fallback_mode,
         });
 
-        // In AT fallback, poll the held-open port for the rich fields.
-        if st.fallback_mode {
-            if let Some(port) = st.at_port.as_mut() {
+        // In AT fallback, poll the taken-out port for the rich fields. Still
+        // lock-free here, so a slow/hung serial exchange never blocks the other
+        // manager methods.
+        if fallback_mode {
+            if let Some(port) = at_port.as_mut() {
                 let at = modem_at::status_over(port.as_mut()).await;
                 if let (Value::Object(dst), Value::Object(src)) = (&mut out, at) {
                     dst.extend(src);
                 }
             }
+        }
+
+        // Re-store the port so the next poll reuses it. If a concurrent
+        // bring_down() ran while we held the port out, it set at_port = None;
+        // do not clobber that teardown with our stale handle. If a concurrent
+        // bring_up() re-opened a fresh port, prefer the fresh one and drop ours.
+        if let Some(port) = at_port {
+            let mut st = self.state.lock().await;
+            if st.at_port.is_none() && st.brought_up && st.fallback_mode {
+                st.at_port = Some(port);
+            }
+            // else: teardown or a fresh re-open won the race; our handle is
+            // stale, so let it drop (closing the serial fd cleanly).
         }
         out
     }
@@ -768,7 +799,9 @@ mod zbus_impl {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+    use std::time::Duration;
+    use tokio::sync::Notify;
 
     /// A scripted D-Bus fake: each `bring_up` consumes the next verdict from a
     /// fixed sequence (true = success, false = failure). `imsi` is fixed.
@@ -831,6 +864,40 @@ mod tests {
     impl AtPortOpener for NoAtPort {
         async fn open(&self) -> Option<Box<dyn SerialTransport>> {
             None
+        }
+    }
+
+    /// A serial transport whose AT `command` blocks until `release` is notified.
+    /// It signals `entered` the moment the first command begins, so a test can
+    /// prove `status()` reached the (slow) AT round-trip and then check that a
+    /// concurrent manager method still completed while the round-trip is parked.
+    struct BlockingAtPort {
+        entered: Arc<Notify>,
+        release: Arc<Notify>,
+        announced: AtomicBool,
+    }
+    #[async_trait]
+    impl SerialTransport for BlockingAtPort {
+        async fn command(&mut self, _cmd: &str, _timeout: Duration) -> String {
+            // Announce entry on the first command only, then block until the
+            // test releases us. Subsequent commands return immediately.
+            if !self.announced.swap(true, Ordering::SeqCst) {
+                self.entered.notify_one();
+                self.release.notified().await;
+            }
+            // A plausible AT reply so status_over parses without panicking.
+            "OK".to_string()
+        }
+    }
+
+    /// An AT opener that hands back one prepared blocking transport.
+    struct OneBlockingPort {
+        port: Mutex<Option<Box<dyn SerialTransport>>>,
+    }
+    #[async_trait]
+    impl AtPortOpener for OneBlockingPort {
+        async fn open(&self) -> Option<Box<dyn SerialTransport>> {
+            self.port.lock().await.take()
         }
     }
 
@@ -992,6 +1059,68 @@ mod tests {
         assert_eq!(s["iface_up"], true);
         assert_eq!(s["iface"], "wwan0");
         assert!(m.probe().await);
+    }
+
+    #[tokio::test]
+    async fn status_does_not_hold_state_lock_across_the_at_round_trip() {
+        // A manager seeded into AT-fallback with a held-open port whose AT
+        // exchange blocks. While status() is parked in that exchange, a
+        // concurrent enabled() (which takes the same state lock) must still
+        // complete promptly — proving status() released the lock before the
+        // slow serial I/O.
+        let dir = tempfile::tempdir().unwrap();
+        let entered = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let port = Box::new(BlockingAtPort {
+            entered: Arc::clone(&entered),
+            release: Arc::clone(&release),
+            announced: AtomicBool::new(false),
+        });
+
+        let m = Arc::new(ModemManager::with_parts_at(
+            Arc::new(DisabledDbus),
+            Arc::new(OneBlockingPort {
+                port: Mutex::new(None),
+            }),
+            dir.path().join("ground-station-modem.json"),
+            dir.path().join("net"),
+        ));
+        // Seed fallback + a cached blocking port.
+        {
+            let mut st = m.state.lock().await;
+            st.fallback_mode = true;
+            st.brought_up = true;
+            st.at_port = Some(port);
+        }
+
+        // Run status() concurrently; it will block inside the AT round-trip.
+        let m_status = Arc::clone(&m);
+        let status_task = tokio::spawn(async move { m_status.status().await });
+
+        // Wait until status() has entered the (parked) AT exchange.
+        tokio::time::timeout(Duration::from_secs(5), entered.notified())
+            .await
+            .expect("status() reached the AT round-trip");
+
+        // The state lock must be free now: enabled() returns without waiting on
+        // the parked AT exchange. A short timeout proves it is not serialized
+        // behind status().
+        let still_responsive = tokio::time::timeout(Duration::from_millis(200), m.enabled())
+            .await
+            .expect("enabled() must not block behind a parked AT poll");
+        assert!(still_responsive); // default (absent enabled key) → true.
+
+        // Release the AT exchange and let status() finish.
+        release.notify_one();
+        let out = tokio::time::timeout(Duration::from_secs(5), status_task)
+            .await
+            .expect("status() completes after release")
+            .expect("status task did not panic");
+        assert_eq!(out["mode"], "at");
+        assert_eq!(out["needs_at_fallback"], true);
+
+        // The port was re-stored for the next poll (no teardown raced).
+        assert!(m.state.lock().await.at_port.is_some());
     }
 
     #[tokio::test]

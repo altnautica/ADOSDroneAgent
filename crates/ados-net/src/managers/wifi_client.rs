@@ -220,15 +220,49 @@ impl WifiClientManager {
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
 
-        let mut cmd: Vec<&str> = vec!["nmcli", "device", "wifi", "connect", ssid];
-        if let Some(pw) = passphrase.filter(|p| !p.is_empty()) {
-            cmd.push("password");
-            cmd.push(pw);
-        }
-        cmd.push("ifname");
-        cmd.push(&self.interface);
-
-        let out = self.runner.run(&cmd, CONNECT_TIMEOUT).await;
+        // Keep the passphrase OUT of argv: a cleartext `password <pw>` argument
+        // would be visible in /proc/<pid>/cmdline to any local user for the life
+        // of the nmcli call. Instead, run nmcli in interactive-secret mode
+        // (`--ask`) which prompts for the secret and reads it from stdin, and
+        // feed the passphrase on stdin. With no secret needed (open network)
+        // the argv is unchanged and no stdin is sent.
+        let out = match passphrase.filter(|p| !p.is_empty()) {
+            Some(pw) => {
+                let cmd: Vec<&str> = vec![
+                    "nmcli",
+                    "--ask",
+                    "device",
+                    "wifi",
+                    "connect",
+                    ssid,
+                    "ifname",
+                    &self.interface,
+                ];
+                // nmcli --ask reads the WiFi secret as a line from stdin; the
+                // trailing newline terminates the prompt response.
+                let mut secret = pw.as_bytes().to_vec();
+                secret.push(b'\n');
+                let res = self
+                    .runner
+                    .run_with_stdin(&cmd, &secret, CONNECT_TIMEOUT)
+                    .await;
+                // Zeroize our copy of the secret promptly.
+                secret.fill(0);
+                res
+            }
+            None => {
+                let cmd: Vec<&str> = vec![
+                    "nmcli",
+                    "device",
+                    "wifi",
+                    "connect",
+                    ssid,
+                    "ifname",
+                    &self.interface,
+                ];
+                self.runner.run(&cmd, CONNECT_TIMEOUT).await
+            }
+        };
         if !out.ok() {
             warn!(ssid = ssid, "wifi_join_failed");
             // Restore the AP if we stole it, then release the lock.
@@ -248,7 +282,15 @@ impl WifiClientManager {
         }
 
         // Force power-save off so the radio never parks and drops the uplink.
-        self.disable_powersave(ssid).await;
+        // Resolve the real active connection name on this iface first, because
+        // NetworkManager may auto-name the connection differently from the SSID
+        // (so `connection modify <ssid>` would warn-and-no-op). Fall back to the
+        // SSID when no active connection is reported.
+        let conn = self
+            .active_connection_name()
+            .await
+            .unwrap_or_else(|| ssid.to_string());
+        self.disable_powersave(&conn).await;
 
         tokio::time::sleep(Duration::from_secs(2)).await;
         let st = self.status().await;
@@ -264,6 +306,40 @@ impl WifiClientManager {
             "ip": st.get("ip").cloned().unwrap_or(Value::Null),
             "gateway": st.get("gateway").cloned().unwrap_or(Value::Null),
         })
+    }
+
+    /// Resolve the NetworkManager connection name currently active on this
+    /// iface (`nmcli -t -f NAME,DEVICE connection show --active`). Returns the
+    /// first row whose DEVICE matches the managed interface. `None` when no
+    /// active connection is bound to the iface (or the query failed).
+    async fn active_connection_name(&self) -> Option<String> {
+        let out = self
+            .runner
+            .run(
+                &[
+                    "nmcli",
+                    "-t",
+                    "-f",
+                    "NAME,DEVICE",
+                    "connection",
+                    "show",
+                    "--active",
+                ],
+                STATUS_TIMEOUT,
+            )
+            .await;
+        if !out.ok() {
+            return None;
+        }
+        for row in nmcli::parse_terse(&out.stdout, 2) {
+            if row[1].trim() == self.interface {
+                let name = row[0].trim();
+                if !name.is_empty() {
+                    return Some(name.to_string());
+                }
+            }
+        }
+        None
     }
 
     async fn disable_powersave(&self, connection: &str) {
@@ -661,7 +737,12 @@ mod tests {
             stdout: String::new(),
             stderr: String::new(),
         }); // is-active → inactive
-        runner.push(CmdOut::failed(0, "")); // nmcli connect ok
+        runner.push(CmdOut::failed(0, "")); // nmcli --ask connect ok
+        runner.push(CmdOut {
+            rc: 0,
+            stdout: "MyAP:wlan0\n".to_string(),
+            stderr: String::new(),
+        }); // connection show --active → active conn name on wlan0
         runner.push(CmdOut::failed(0, "")); // powersave nmcli
         runner.push(CmdOut::failed(0, "")); // powersave iw
                                             // status(): wifi list + ip addr + ip route.
@@ -680,6 +761,7 @@ mod tests {
             stdout: "default via 192.168.5.1 dev wlan0\n".to_string(),
             stderr: String::new(),
         });
+        let m_runner = Arc::clone(&runner);
         let mut m = mgr(dir.path(), runner);
         let res = m.join("MyAP", Some("secret"), false).await;
         assert_eq!(res["joined"], true);
@@ -689,5 +771,128 @@ mod tests {
         // last_ssid persisted.
         let cfg = m.load_client_config();
         assert_eq!(cfg.last_ssid.as_deref(), Some("MyAP"));
+
+        // The passphrase is NEVER in any recorded argv (it would otherwise be
+        // readable in /proc/<pid>/cmdline). It travels on stdin instead.
+        let calls = m_runner.recorded();
+        assert!(
+            !calls.iter().any(|c| c.iter().any(|a| a == "secret")),
+            "passphrase leaked into argv: {calls:?}"
+        );
+        // The connect call used --ask (interactive-secret mode) and did NOT
+        // carry a `password` argument.
+        let connect = calls
+            .iter()
+            .find(|c| c.iter().any(|a| a == "connect"))
+            .expect("a connect call was recorded");
+        assert!(connect.iter().any(|a| a == "--ask"));
+        assert!(!connect.iter().any(|a| a == "password"));
+        // The secret WAS fed on stdin for that call (trailing newline included).
+        let stdins = m_runner.recorded_stdins();
+        assert!(
+            stdins.iter().any(|s| s == b"secret\n"),
+            "passphrase was not supplied on stdin"
+        );
+    }
+
+    #[tokio::test]
+    async fn open_network_join_sends_no_stdin_and_no_password_arg() {
+        let dir = tempfile::tempdir().unwrap();
+        let runner = Arc::new(ScriptedRunner::new());
+        runner.push(CmdOut {
+            rc: 3,
+            stdout: String::new(),
+            stderr: String::new(),
+        }); // is-active → inactive
+        runner.push(CmdOut::failed(0, "")); // nmcli connect ok (open, no secret)
+        runner.push(CmdOut {
+            rc: 0,
+            stdout: "OpenNet:wlan0\n".to_string(),
+            stderr: String::new(),
+        }); // connection show --active
+        runner.push(CmdOut::failed(0, "")); // powersave nmcli
+        runner.push(CmdOut::failed(0, "")); // powersave iw
+        runner.push(CmdOut {
+            rc: 0,
+            stdout: "yes:OpenNet:AA\\:BB\\:CC:70:\n".to_string(),
+            stderr: String::new(),
+        }); // wifi list
+        runner.push(CmdOut {
+            rc: 0,
+            stdout: "    inet 192.168.9.5/24 scope global wlan0\n".to_string(),
+            stderr: String::new(),
+        }); // ip addr
+        runner.push(CmdOut {
+            rc: 0,
+            stdout: "default via 192.168.9.1 dev wlan0\n".to_string(),
+            stderr: String::new(),
+        }); // ip route
+        let m_runner = Arc::clone(&runner);
+        let mut m = mgr(dir.path(), runner);
+        let res = m.join("OpenNet", None, false).await;
+        assert_eq!(res["joined"], true);
+        // No `--ask`, no `password`, and no stdin payload for an open network.
+        let connect = m_runner
+            .recorded()
+            .into_iter()
+            .find(|c| c.iter().any(|a| a == "connect"))
+            .expect("a connect call was recorded");
+        assert!(!connect.iter().any(|a| a == "--ask"));
+        assert!(!connect.iter().any(|a| a == "password"));
+        assert!(
+            m_runner.recorded_stdins().iter().all(|s| s.is_empty()),
+            "open-network join must not feed any stdin"
+        );
+    }
+
+    #[tokio::test]
+    async fn powersave_targets_resolved_active_connection_not_ssid() {
+        let dir = tempfile::tempdir().unwrap();
+        let runner = Arc::new(ScriptedRunner::new());
+        runner.push(CmdOut {
+            rc: 3,
+            stdout: String::new(),
+            stderr: String::new(),
+        }); // is-active → inactive
+        runner.push(CmdOut::failed(0, "")); // nmcli --ask connect ok
+        runner.push(CmdOut {
+            rc: 0,
+            // NM auto-named the connection differently from the SSID.
+            stdout: "MyAP 1:wlan0\nWired connection 1:eth0\n".to_string(),
+            stderr: String::new(),
+        }); // connection show --active
+        runner.push(CmdOut::failed(0, "")); // powersave nmcli
+        runner.push(CmdOut::failed(0, "")); // powersave iw
+        runner.push(CmdOut {
+            rc: 0,
+            stdout: "yes:MyAP:AA\\:BB\\:CC:70:WPA2\n".to_string(),
+            stderr: String::new(),
+        }); // wifi list
+        runner.push(CmdOut {
+            rc: 0,
+            stdout: "    inet 192.168.5.20/24 scope global wlan0\n".to_string(),
+            stderr: String::new(),
+        }); // ip addr
+        runner.push(CmdOut {
+            rc: 0,
+            stdout: "default via 192.168.5.1 dev wlan0\n".to_string(),
+            stderr: String::new(),
+        }); // ip route
+        let m_runner = Arc::clone(&runner);
+        let mut m = mgr(dir.path(), runner);
+        let res = m.join("MyAP", Some("secret"), false).await;
+        assert_eq!(res["joined"], true);
+        // The `connection modify` call targets the resolved active name
+        // ("MyAP 1"), not the SSID ("MyAP").
+        let modify = m_runner
+            .recorded()
+            .into_iter()
+            .find(|c| c.iter().any(|a| a == "modify"))
+            .expect("a connection modify call was recorded");
+        assert!(
+            modify.iter().any(|a| a == "MyAP 1"),
+            "powersave modify did not target the resolved connection name: {modify:?}"
+        );
+        assert!(!modify.iter().any(|a| a == "MyAP"));
     }
 }
