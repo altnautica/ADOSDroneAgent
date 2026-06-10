@@ -554,11 +554,21 @@ impl FcConnection {
                             st.update_from_message(&msg, &now)
                         };
                         if let Some((name, value, ptype)) = persist {
-                            let mut pc = self.params.lock().await;
-                            pc.set(&name, value as f64, ptype);
-                            if since_save.elapsed() >= Duration::from_secs(2) {
-                                let _ = pc.save();
-                                since_save = Instant::now();
+                            // Same off-reactor persistence as the live read loop:
+                            // snapshot the bytes under the lock, then write them
+                            // off the reactor.
+                            let snapshot = {
+                                let mut pc = self.params.lock().await;
+                                pc.set(&name, value as f64, ptype);
+                                if since_save.elapsed() >= Duration::from_secs(2) {
+                                    since_save = Instant::now();
+                                    pc.serialize().ok().map(|body| (pc.path().to_path_buf(), body))
+                                } else {
+                                    None
+                                }
+                            };
+                            if let Some((path, body)) = snapshot {
+                                persist_params(path, body);
                             }
                         }
                     }
@@ -608,12 +618,24 @@ impl FcConnection {
                         st.update_from_message(&msg, &now)
                     };
                     if let Some((name, value, ptype)) = persist {
-                        let mut pc = self.params.lock().await;
-                        pc.set(&name, value as f64, ptype);
                         // Persist periodically, not on every parameter, to bound IO.
-                        if since_save.elapsed() >= Duration::from_secs(2) {
-                            let _ = pc.save();
-                            since_save = Instant::now();
+                        // Serialise under the lock, release it, then do the disk
+                        // write off-reactor so neither the params lock nor a
+                        // worker thread is held across blocking I/O.
+                        let snapshot = {
+                            let mut pc = self.params.lock().await;
+                            pc.set(&name, value as f64, ptype);
+                            if since_save.elapsed() >= Duration::from_secs(2) {
+                                since_save = Instant::now();
+                                pc.serialize()
+                                    .ok()
+                                    .map(|body| (pc.path().to_path_buf(), body))
+                            } else {
+                                None
+                            }
+                        };
+                        if let Some((path, body)) = snapshot {
+                            persist_params(path, body);
                         }
                     }
                 }
@@ -706,19 +728,22 @@ impl FcConnection {
         match tokio_serial::available_ports() {
             Ok(ports) => ports
                 .into_iter()
-                .filter(|p| {
-                    // Prefer real USB/UART devices over virtual ports.
-                    matches!(p.port_type, SerialPortType::UsbPort(_))
-                        || SERIAL_PREFIXES
-                            .iter()
-                            .any(|pre| p.port_name.starts_with(pre))
-                })
+                .filter(|p| is_candidate_port(&p.port_type, &p.port_name))
                 .map(|p| p.port_name)
-                .filter(|name| SERIAL_PREFIXES.iter().any(|pre| name.starts_with(pre)))
                 .collect(),
             Err(_) => Vec::new(),
         }
     }
+}
+
+/// Whether an enumerated serial port is a candidate FC link: a USB device
+/// (regardless of its device-node name) OR a name matching a known serial
+/// prefix. A single gate, so a typed USB port whose name does not match a
+/// prefix (a USB gadget serial node, a vendor `ttymxc*`, a by-id symlink) is
+/// not silently dropped.
+fn is_candidate_port(port_type: &SerialPortType, name: &str) -> bool {
+    matches!(port_type, SerialPortType::UsbPort(_))
+        || SERIAL_PREFIXES.iter().any(|pre| name.starts_with(pre))
 }
 
 /// Write the full buffer and flush it, surfacing the first io error so the
@@ -727,6 +752,18 @@ impl FcConnection {
 async fn write_then_flush(w: &mut BoxedWriteHalf, data: &[u8]) -> std::io::Result<()> {
     w.write_all(data).await?;
     w.flush().await
+}
+
+/// Persist the serialised parameter bytes to disk off the reactor. The atomic
+/// temp-file + rename write is blocking disk I/O, so it runs on a blocking pool
+/// thread rather than stalling a tokio worker. Fire-and-forget: a write failure
+/// is logged, not awaited, so the read loop is never delayed by the disk.
+fn persist_params(path: std::path::PathBuf, body: Vec<u8>) {
+    tokio::task::spawn_blocking(move || {
+        if let Err(e) = crate::param_cache::write_atomic(&path, &body) {
+            tracing::warn!(error = %e, "param_cache_save_failed");
+        }
+    });
 }
 
 /// Open a serial port at the given baud as an async stream.
@@ -963,6 +1000,52 @@ mod tests {
             parse_net_spec("udp:localhost"),
             Some(NetSpec::Udp("localhost:14550".to_string()))
         );
+    }
+
+    /// A USB serial port whose device name does not match a known prefix. The
+    /// candidate gate must keep it on the strength of its USB type alone so a
+    /// non-standard-named FC is still auto-discovered.
+    fn usb_port_type() -> SerialPortType {
+        SerialPortType::UsbPort(tokio_serial::UsbPortInfo {
+            vid: 0x1209,
+            pid: 0x5741,
+            serial_number: None,
+            manufacturer: None,
+            product: None,
+        })
+    }
+
+    #[test]
+    fn candidate_gate_keeps_typed_usb_port_with_non_prefix_name() {
+        // A USB port enumerating under a name no SERIAL_PREFIX matches.
+        assert!(
+            is_candidate_port(&usb_port_type(), "/dev/ttyGS0"),
+            "a typed USB port must survive regardless of its device name"
+        );
+        assert!(
+            is_candidate_port(&usb_port_type(), "/dev/ttymxc3"),
+            "a vendor-named USB tty must survive"
+        );
+    }
+
+    #[test]
+    fn candidate_gate_keeps_prefix_named_non_usb_port() {
+        // A non-USB port whose name matches a prefix (e.g. an on-board UART).
+        assert!(is_candidate_port(&SerialPortType::Unknown, "/dev/ttyAMA0"));
+        assert!(is_candidate_port(&SerialPortType::PciPort, "/dev/ttyS0"));
+    }
+
+    #[test]
+    fn candidate_gate_rejects_non_usb_unprefixed_port() {
+        // Neither USB nor a known prefix: a virtual/Bluetooth port is skipped.
+        assert!(!is_candidate_port(
+            &SerialPortType::BluetoothPort,
+            "/dev/rfcomm0"
+        ));
+        assert!(!is_candidate_port(
+            &SerialPortType::Unknown,
+            "/dev/something-else"
+        ));
     }
 
     #[test]

@@ -82,12 +82,15 @@ impl ParamCache {
             .collect()
     }
 
-    /// Persist the cache to disk atomically (temp file + rename). Best-effort:
-    /// returns the IO error if the write fails so the caller can log it.
-    pub fn save(&self) -> std::io::Result<()> {
-        if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
+    /// The on-disk path this cache persists to.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Serialise the cache to the JSON bytes that [`write_atomic`] persists.
+    /// Cheap and synchronous; intended to be called under a lock so the bytes
+    /// can be snapshotted and the lock released before the (slow) disk write.
+    pub fn serialize(&self) -> std::io::Result<Vec<u8>> {
         let obj: Map<String, Value> = self
             .params
             .iter()
@@ -102,11 +105,19 @@ impl ParamCache {
                 )
             })
             .collect();
-        let body = serde_json::to_vec(&Value::Object(obj))?;
-        let tmp = self.path.with_extension("json.tmp");
-        std::fs::write(&tmp, &body)?;
-        std::fs::rename(&tmp, &self.path)?;
-        Ok(())
+        Ok(serde_json::to_vec(&Value::Object(obj))?)
+    }
+
+    /// Persist the cache to disk atomically (temp file + rename). Best-effort:
+    /// returns the IO error if the write fails so the caller can log it.
+    ///
+    /// This performs blocking disk I/O. On the async FC read loop, prefer
+    /// snapshotting the bytes with [`serialize`](Self::serialize) under the lock
+    /// and writing them off-reactor with [`write_atomic`]; this method remains
+    /// for synchronous callers and tests.
+    pub fn save(&self) -> std::io::Result<()> {
+        let body = self.serialize()?;
+        write_atomic(&self.path, &body)
     }
 
     /// Load the cache from disk. A missing file is not an error (returns an
@@ -142,6 +153,19 @@ impl ParamCache {
         }
         Ok(())
     }
+}
+
+/// Write `body` to `path` atomically (temp file + rename) creating the parent
+/// directory if needed. Blocking disk I/O: call from a synchronous context or
+/// from `tokio::task::spawn_blocking`, never directly on the reactor.
+pub fn write_atomic(path: &Path, body: &[u8]) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, body)?;
+    std::fs::rename(&tmp, path)?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -206,5 +230,34 @@ mod tests {
         c.set("X", 1.0, 9);
         c.save().unwrap();
         assert!(nested.exists());
+    }
+
+    #[test]
+    fn serialize_then_write_atomic_matches_save_and_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nested/params.json");
+        let mut c = ParamCache::new(&path);
+        c.set("FOO", 1.5, 9);
+        c.set("BAR", -2.0, 6);
+
+        // The off-reactor split (serialize under the lock, write later) must
+        // produce a file equivalent to the synchronous save() path.
+        let body = c.serialize().unwrap();
+        write_atomic(&path, &body).unwrap();
+        assert!(path.exists(), "write_atomic creates the parent dir");
+
+        let mut reloaded = ParamCache::new(&path);
+        reloaded.load().unwrap();
+        assert_eq!(reloaded.count(), 2);
+        assert_eq!(reloaded.get("FOO"), Some(1.5));
+        assert_eq!(reloaded.get("BAR"), Some(-2.0));
+    }
+
+    #[test]
+    fn path_accessor_returns_backing_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("params.json");
+        let c = ParamCache::new(&path);
+        assert_eq!(c.path(), path.as_path());
     }
 }
