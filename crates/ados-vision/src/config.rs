@@ -152,6 +152,18 @@ impl VisionConfig {
         }
     }
 
+    /// The slot count to size camera rings with, clamped to the range the ring
+    /// header can represent. The header records `slot_count` in two bytes, so a
+    /// configured value above that maximum would truncate and make the writer's
+    /// `seq % slot_count` math diverge from a header-deriving reader; clamping
+    /// here keeps the writer and every consumer in agreement. A value below 2 is
+    /// raised to 2 (the engine needs at least two slots to recycle without
+    /// every read racing the single live frame).
+    pub fn effective_slot_count(&self) -> u32 {
+        self.slot_count
+            .clamp(2, ados_protocol::framebus::MAX_SLOT_COUNT)
+    }
+
     /// The `vision.sock` path under the configured socket directory.
     pub fn vision_socket_path(&self) -> String {
         format!("{}/vision.sock", self.socket_dir.trim_end_matches('/'))
@@ -295,5 +307,30 @@ vision:
         let (_d, p) = write_tmp(yaml);
         let c = VisionConfig::load_from(&p);
         assert!(!c.enabled);
+    }
+
+    #[test]
+    fn effective_slot_count_clamps_to_the_header_range() {
+        // The default is in range and unchanged.
+        let c = VisionConfig::default();
+        assert_eq!(c.effective_slot_count(), default_slot_count());
+
+        // A misconfigured huge depth clamps to the header maximum instead of
+        // silently truncating the writer/reader slot math.
+        let huge = VisionConfig {
+            slot_count: 100_000,
+            ..VisionConfig::default()
+        };
+        assert_eq!(
+            huge.effective_slot_count(),
+            ados_protocol::framebus::MAX_SLOT_COUNT
+        );
+
+        // A too-small depth is raised to the two-slot floor.
+        let tiny = VisionConfig {
+            slot_count: 0,
+            ..VisionConfig::default()
+        };
+        assert_eq!(tiny.effective_slot_count(), 2);
     }
 }

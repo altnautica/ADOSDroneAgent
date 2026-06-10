@@ -25,12 +25,56 @@
 //! `vision.detection` topic and ride the plugin envelope directly; only frames
 //! need the ring.
 
+use std::sync::atomic::{compiler_fence, fence, Ordering};
+
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 /// Topic the vision engine publishes frame descriptors on. Reserved to the
 /// host: plugins subscribe (with `vision.frame.read`) but never publish here.
 pub const VISION_FRAME_TOPIC: &str = "vision.frame";
+
+/// The largest slot count a ring header can carry. The header records
+/// `slot_count` in two little-endian bytes, so a ring is capped here; a writer
+/// that asked for more would diverge from a reader that re-derives the layout
+/// from the truncated header field, so it is rejected at header-write time and
+/// validated at engine startup. Sane ring depths are single digits, so this
+/// cap is never approached in practice.
+pub const MAX_SLOT_COUNT: u32 = u16::MAX as u32;
+
+/// Write `value` into `region[off..off+8]` as a little-endian u64 through
+/// per-byte volatile stores. Volatile prevents the compiler from eliding or
+/// reordering the seq-guard stamps relative to the plain data copy, which the
+/// surrounding `fence`s then order across CPUs for a cross-process reader. The
+/// region is an `mmap` shared with a separate reader process, so a plain
+/// `copy_from_slice` of the guard is not sufficient on a weakly-ordered CPU.
+#[inline]
+fn store_seq_volatile(region: &mut [u8], off: usize, value: u64) {
+    let bytes = value.to_le_bytes();
+    let base = region.as_mut_ptr();
+    for (i, b) in bytes.iter().enumerate() {
+        // SAFETY: the caller validated `off + 8 <= region.len()` (every call
+        // site sizes the slot via `check_region` first), so `off + i` is in
+        // bounds for `i < 8`.
+        unsafe { base.add(off + i).write_volatile(*b) };
+    }
+}
+
+/// Read `region[off..off+8]` as a little-endian u64 through per-byte volatile
+/// loads. The counterpart to [`store_seq_volatile`]; volatile keeps the guard
+/// loads from being hoisted or fused with the data copy, and the caller pairs
+/// them with `fence(Acquire)`.
+#[inline]
+fn load_seq_volatile(region: &[u8], off: usize) -> u64 {
+    let mut bytes = [0u8; 8];
+    let base = region.as_ptr();
+    for (i, b) in bytes.iter_mut().enumerate() {
+        // SAFETY: the caller validated `off + 8 <= region.len()`, so `off + i`
+        // is in bounds for `i < 8`.
+        *b = unsafe { base.add(off + i).read_volatile() };
+    }
+    u64::from_le_bytes(bytes)
+}
 
 /// Topic detections are published on, labelled by model id.
 pub const VISION_DETECTION_TOPIC: &str = "vision.detection";
@@ -111,6 +155,8 @@ pub enum RingError {
     PayloadTooLarge { len: usize, cap: usize },
     #[error("shared region is {got} bytes, layout needs {need}")]
     RegionTooSmall { got: usize, need: usize },
+    #[error("slot_count {slot_count} exceeds the header maximum {max}")]
+    SlotCountTooLarge { slot_count: u32, max: u32 },
 }
 
 /// Memory layout of a single-writer, many-reader frame ring.
@@ -168,8 +214,28 @@ impl RingLayout {
         Self::HEADER_LEN + slot as usize * self.slot_stride()
     }
 
-    /// Write the ring header at the front of a freshly created region.
+    /// Validate the layout against the on-disk header's field widths. The
+    /// header stores `slot_count` in two bytes, so a layout above
+    /// [`MAX_SLOT_COUNT`] would truncate on write and the reader's
+    /// header-derived layout would name a different slot than the writer used.
+    /// Callers validate at ring-creation / engine startup so a misconfigured
+    /// depth is rejected loudly rather than silently truncated.
+    pub fn validate(&self) -> Result<(), RingError> {
+        if self.slot_count > MAX_SLOT_COUNT {
+            return Err(RingError::SlotCountTooLarge {
+                slot_count: self.slot_count,
+                max: MAX_SLOT_COUNT,
+            });
+        }
+        Ok(())
+    }
+
+    /// Write the ring header at the front of a freshly created region. Rejects a
+    /// `slot_count` the two-byte header field cannot represent so the writer's
+    /// slot math (`seq % slot_count`) can never diverge from a reader that
+    /// re-derives the layout from the header.
     pub fn write_header(&self, region: &mut [u8]) -> Result<(), RingError> {
+        self.validate()?;
         self.check_region(region.len())?;
         region[0..4].copy_from_slice(&Self::MAGIC.to_le_bytes());
         region[4..6].copy_from_slice(&Self::VERSION.to_le_bytes());
@@ -236,13 +302,23 @@ pub fn write_slot(
     let data_off = base + RingLayout::SLOT_HEADER_LEN;
     let trailer_off = data_off + cap;
 
-    // seq_begin first (marks the slot as being written for this seq).
-    region[base..base + 8].copy_from_slice(&seq.to_le_bytes());
+    // Seqlock write order (single writer, many cross-process readers):
+    //   1. stamp seq_begin
+    //   2. Release fence so the begin stamp is visible before the data copy
+    //   3. copy the pixel bytes + length
+    //   4. Release fence so the data is visible before seq_end commits
+    //   5. stamp seq_end
+    // The two fences keep a weakly-ordered CPU (the aarch64 SBC target) from
+    // reordering the data copy past either guard, so a reader that observes
+    // matching begin/end guards is guaranteed to have observed this frame's
+    // bytes, not a torn mix of two frames.
+    store_seq_volatile(region, base, seq);
     region[base + 8..base + 12].copy_from_slice(&(data.len() as u32).to_le_bytes());
     region[base + 12..base + 16].copy_from_slice(&0u32.to_le_bytes());
+    fence(Ordering::Release);
     region[data_off..data_off + data.len()].copy_from_slice(data);
-    // seq_end last (commits the write).
-    region[trailer_off..trailer_off + 8].copy_from_slice(&seq.to_le_bytes());
+    fence(Ordering::Release);
+    store_seq_volatile(region, trailer_off, seq);
     Ok(())
 }
 
@@ -269,8 +345,14 @@ pub fn read_slot(
     let data_off = base + RingLayout::SLOT_HEADER_LEN;
     let trailer_off = data_off + cap;
 
-    // Load the trailer (committed marker) first.
-    let seq_end = u64::from_le_bytes(region[trailer_off..trailer_off + 8].try_into().unwrap());
+    // Seqlock read order (mirrors the write fences in reverse):
+    //   1. load seq_end (the committed marker the writer stamps last)
+    //   2. Acquire fence so the data copy cannot be hoisted above the load
+    //   3. copy the pixel bytes
+    //   4. Acquire fence so the guard re-reads cannot be hoisted above the copy
+    //   5. re-read seq_begin + seq_end; a mismatch means the writer recycled
+    //      the slot mid-copy (the read was torn) and the frame is dropped.
+    let seq_end = load_seq_volatile(region, trailer_off);
     if seq_end != expected_seq {
         return Ok(None);
     }
@@ -278,11 +360,14 @@ pub fn read_slot(
     if byte_len > cap {
         return Ok(None);
     }
+    fence(Ordering::Acquire);
+    // The copy must not be reordered before the seq_end check above nor after
+    // the guard re-reads below; the volatile guard loads plus the fences pin it.
+    compiler_fence(Ordering::Acquire);
     let data = region[data_off..data_off + byte_len].to_vec();
-    // Re-check both guards: a writer that recycled this slot mid-copy moves the
-    // seq forward, so a stale begin or a changed end means the copy was torn.
-    let seq_begin = u64::from_le_bytes(region[base..base + 8].try_into().unwrap());
-    let seq_end2 = u64::from_le_bytes(region[trailer_off..trailer_off + 8].try_into().unwrap());
+    fence(Ordering::Acquire);
+    let seq_begin = load_seq_volatile(region, base);
+    let seq_end2 = load_seq_volatile(region, trailer_off);
     if seq_begin != expected_seq || seq_end2 != expected_seq {
         return Ok(None);
     }
@@ -580,5 +665,122 @@ mod tests {
             layout.write_header(&mut tiny),
             Err(RingError::RegionTooSmall { .. })
         ));
+    }
+
+    #[test]
+    fn slot_count_at_the_header_maximum_round_trips() {
+        // u16::MAX is the largest count the two-byte header field carries; it
+        // must validate and round-trip exactly (no truncation).
+        let layout = RingLayout {
+            slot_count: MAX_SLOT_COUNT,
+            slot_bytes: 4,
+        };
+        assert!(layout.validate().is_ok());
+        // The header is only HEADER_LEN bytes; write it into a region sized to
+        // just the header so the round-trip exercises the field, not the slots.
+        let mut header_region = vec![0u8; layout.total_len()];
+        layout.write_header(&mut header_region).unwrap();
+        let read = RingLayout::read_header(&header_region).unwrap();
+        assert_eq!(read.slot_count, MAX_SLOT_COUNT);
+    }
+
+    #[test]
+    fn slot_count_above_the_header_maximum_is_rejected() {
+        // A slot_count that the u16 header field would truncate is refused at
+        // header-write time rather than silently wrapping to a smaller ring.
+        let layout = RingLayout {
+            slot_count: MAX_SLOT_COUNT + 1,
+            slot_bytes: 4,
+        };
+        assert!(matches!(
+            layout.validate(),
+            Err(RingError::SlotCountTooLarge { .. })
+        ));
+        let mut region = vec![0u8; 64];
+        assert!(matches!(
+            layout.write_header(&mut region),
+            Err(RingError::SlotCountTooLarge { .. })
+        ));
+    }
+
+    #[test]
+    fn concurrent_writer_and_reader_never_yield_a_torn_frame() {
+        // A genuine cross-thread seqlock stress: one writer recycles a small
+        // ring as fast as it can while a reader copies the slot the latest
+        // descriptor named. Every successful read must be an internally
+        // consistent frame (all bytes equal the frame's marker), never a torn
+        // mix of two frames. The volatile guards + Acquire/Release fences are
+        // what make this hold on a weakly-ordered CPU.
+        use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as O};
+        use std::sync::Arc;
+
+        const SLOTS: u32 = 3;
+        const FRAME: usize = 256;
+        let layout = RingLayout {
+            slot_count: SLOTS,
+            slot_bytes: FRAME as u32,
+        };
+        let total = layout.total_len();
+
+        // The shared region behind an UnsafeCell-equivalent: a raw buffer the
+        // writer mutates and the reader reads, exactly the /dev/shm aliasing the
+        // seqlock is designed for. A Mutex would serialize the two and defeat
+        // the test, so a raw pointer wrapper carries the aliasing explicitly.
+        struct Shared(*mut u8, usize);
+        unsafe impl Send for Shared {}
+        unsafe impl Sync for Shared {}
+        let mut backing = vec![0u8; total];
+        layout.write_header(&mut backing).unwrap();
+        let ptr = backing.as_mut_ptr();
+        let shared = Arc::new(Shared(ptr, total));
+
+        // The latest committed seq the reader chases.
+        let latest = Arc::new(AtomicU64::new(0));
+        let stop = Arc::new(AtomicBool::new(false));
+
+        let w_shared = shared.clone();
+        let w_latest = latest.clone();
+        let w_stop = stop.clone();
+        let writer = std::thread::spawn(move || {
+            // SAFETY: the writer is the single mutator of the region for the
+            // test's lifetime; the reader only reads. This mirrors the
+            // single-writer / many-reader ring contract.
+            let region = unsafe { std::slice::from_raw_parts_mut(w_shared.0, w_shared.1) };
+            let mut seq = 1u64;
+            while !w_stop.load(O::Relaxed) {
+                let marker = (seq & 0xFF) as u8;
+                let frame = vec![marker; FRAME];
+                let slot = (seq % SLOTS as u64) as u32;
+                write_slot(region, &layout, slot, seq, &frame).unwrap();
+                w_latest.store(seq, O::Release);
+                seq += 1;
+            }
+        });
+
+        let r_shared = shared.clone();
+        let r_latest = latest.clone();
+        let mut reads = 0u64;
+        for _ in 0..200_000 {
+            let seq = r_latest.load(O::Acquire);
+            if seq == 0 {
+                continue;
+            }
+            let slot = (seq % SLOTS as u64) as u32;
+            // SAFETY: read-only view of the same region the writer mutates; the
+            // seqlock discards any read torn by a concurrent recycle.
+            let region = unsafe { std::slice::from_raw_parts(r_shared.0, r_shared.1) };
+            if let Some(data) = read_slot(region, &layout, slot, seq).unwrap() {
+                reads += 1;
+                let marker = (seq & 0xFF) as u8;
+                assert!(
+                    data.iter().all(|&b| b == marker),
+                    "torn read at seq {seq}: expected all {marker:#x}"
+                );
+            }
+        }
+        stop.store(true, O::Relaxed);
+        writer.join().unwrap();
+        // The reader saw at least some committed frames (not a vacuous pass).
+        assert!(reads > 0, "reader observed no committed frames");
     }
 }

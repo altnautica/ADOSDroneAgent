@@ -29,8 +29,9 @@ use std::sync::{Arc, Mutex};
 use rmpv::Value;
 use tokio::sync::broadcast;
 
-use crate::host::{HostError, HostResult, HostServices};
+use crate::host::{not_implemented, HostError, HostResult, HostServices};
 use crate::mavlink_client::MavlinkClient;
+use crate::vision_client::VisionClient;
 
 // ---------------------------------------------------------------------
 // MAVLink classification constants (host_services.py)
@@ -323,19 +324,82 @@ impl CameraClaimTracker {
 // Config store
 // ---------------------------------------------------------------------
 
-/// In-memory per-scope config store. Reads consult drone scope first, then
-/// global, then the request default. Mirrors `ConfigStore`. The `_MISSING`
-/// sentinel of the Python store is expressed here as `Option<Value>`: a stored
-/// `nil` is `Some(Value::Nil)` (a present value) and is distinct from absent
-/// (`None`), so a key explicitly set to nil shadows global and default exactly
-/// as the Python sentinel does.
+/// Per-scope config store with optional on-disk persistence. Reads consult
+/// drone scope first, then global, then the request default. Mirrors the Python
+/// `ConfigStore` plus its optional persistence hook. The `_MISSING` sentinel of
+/// the Python store is expressed here as `Option<Value>`: a stored `nil` is
+/// `Some(Value::Nil)` (a present value) and is distinct from absent (`None`),
+/// so a key explicitly set to nil shadows global and default exactly as the
+/// Python sentinel does.
+///
+/// When `persist_path` is set, every `set` flushes the whole store to a 0600
+/// JSON file (atomic temp-then-rename), and [`ConfigStore::load`] reads it back
+/// at startup so plugin config survives a plugin-host restart. Without a path
+/// the store is purely in-memory (the test/default posture).
 #[derive(Default)]
 struct ConfigStore {
     drone: BTreeMap<(String, String, String), Value>,
     global: BTreeMap<(String, String), Value>,
+    persist_path: Option<PathBuf>,
+}
+
+/// One persisted config record. The `value` is the msgpack encoding of the
+/// stored [`Value`], base64'd, so any rmpv value (nil, ints, maps, binary)
+/// round-trips losslessly through JSON. `agent_id` is `None` for global scope.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct ConfigRecord {
+    plugin_id: String,
+    key: String,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    agent_id: Option<String>,
+    /// base64(msgpack(value)).
+    value: String,
+}
+
+fn encode_value(value: &Value) -> Option<String> {
+    let bytes = rmp_serde::to_vec(value).ok()?;
+    use base64::Engine;
+    Some(base64::engine::general_purpose::STANDARD.encode(bytes))
+}
+
+fn decode_value(encoded: &str) -> Option<Value> {
+    use base64::Engine;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .ok()?;
+    rmp_serde::from_slice(&bytes).ok()
 }
 
 impl ConfigStore {
+    /// An in-memory store bound to a persistence path. Loads any existing
+    /// records so prior plugin config survives a restart; a missing or
+    /// unparseable file starts empty (config is best-effort durable, never a
+    /// startup blocker).
+    fn load(path: PathBuf) -> Self {
+        let mut store = ConfigStore {
+            persist_path: Some(path.clone()),
+            ..ConfigStore::default()
+        };
+        if let Ok(text) = std::fs::read_to_string(&path) {
+            if let Ok(records) = serde_json::from_str::<Vec<ConfigRecord>>(&text) {
+                for r in records {
+                    let Some(value) = decode_value(&r.value) else {
+                        continue;
+                    };
+                    match r.agent_id {
+                        Some(agent) => {
+                            store.drone.insert((r.plugin_id, agent, r.key), value);
+                        }
+                        None => {
+                            store.global.insert((r.plugin_id, r.key), value);
+                        }
+                    }
+                }
+            }
+        }
+        store
+    }
+
     fn get(&self, plugin_id: &str, key: &str, agent_id: &str, default: Value) -> Value {
         if !agent_id.is_empty() {
             if let Some(v) =
@@ -353,7 +417,8 @@ impl ConfigStore {
 
     fn set(&mut self, plugin_id: &str, key: &str, value: Value, scope: &str, agent_id: &str) {
         // drone scope with no bound agent degrades to global, matching the
-        // Python store.
+        // Python store. With a real agent-id lookup wired (build_host reads the
+        // paired device id), a drone-scoped write now isolates per drone.
         let effective_scope = if scope == "drone" && agent_id.is_empty() {
             "global"
         } else {
@@ -368,7 +433,79 @@ impl ConfigStore {
             self.global
                 .insert((plugin_id.to_string(), key.to_string()), value);
         }
+        self.persist();
     }
+
+    /// Flush the whole store to the persistence path (atomic temp-then-rename,
+    /// 0600). A write failure is logged and swallowed: durability is
+    /// best-effort and never fails a plugin's config.set. A no-op when no path
+    /// is bound.
+    fn persist(&self) {
+        let Some(path) = &self.persist_path else {
+            return;
+        };
+        let mut records: Vec<ConfigRecord> = Vec::new();
+        for ((plugin_id, agent_id, key), value) in &self.drone {
+            if let Some(encoded) = encode_value(value) {
+                records.push(ConfigRecord {
+                    plugin_id: plugin_id.clone(),
+                    key: key.clone(),
+                    agent_id: Some(agent_id.clone()),
+                    value: encoded,
+                });
+            }
+        }
+        for ((plugin_id, key), value) in &self.global {
+            if let Some(encoded) = encode_value(value) {
+                records.push(ConfigRecord {
+                    plugin_id: plugin_id.clone(),
+                    key: key.clone(),
+                    agent_id: None,
+                    value: encoded,
+                });
+            }
+        }
+        if let Err(e) = write_json_owner_only(path, &records) {
+            tracing::warn!(path = %path.display(), error = %e, "plugin config persist failed");
+        }
+    }
+}
+
+/// Serialize `records` to JSON and write `path` owner-only (0600) via an atomic
+/// temp-then-rename, enforcing the mode on every write (the open-time mode flag
+/// only applies on creation, so a reused looser-perm inode would otherwise keep
+/// its mode).
+fn write_json_owner_only(path: &std::path::Path, records: &[ConfigRecord]) -> std::io::Result<()> {
+    let json = serde_json::to_vec(records)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let tmp = path.with_extension("json.tmp");
+    write_bytes_owner_only(&tmp, &json)?;
+    std::fs::rename(&tmp, path)?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn write_bytes_owner_only(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)?;
+    f.write_all(bytes)?;
+    f.flush()?;
+    f.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn write_bytes_owner_only(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    std::fs::write(path, bytes)
 }
 
 // ---------------------------------------------------------------------
@@ -486,6 +623,7 @@ pub struct RealHost {
     cameras: Mutex<CameraClaimTracker>,
     config: Mutex<ConfigStore>,
     mavlink: Option<Arc<MavlinkClient>>,
+    vision: Option<Arc<VisionClient>>,
     plugin_runtime_lookup: Option<RuntimeLookup>,
     agent_id_lookup: Option<AgentIdLookup>,
 }
@@ -501,6 +639,7 @@ impl RealHost {
             cameras: Mutex::new(CameraClaimTracker::default()),
             config: Mutex::new(ConfigStore::default()),
             mavlink: None,
+            vision: None,
             plugin_runtime_lookup: None,
             agent_id_lookup: None,
         }
@@ -509,6 +648,17 @@ impl RealHost {
     /// Wire the MAVLink client (builder style).
     pub fn with_mavlink(mut self, mavlink: Arc<MavlinkClient>) -> Self {
         self.mavlink = Some(mavlink);
+        self
+    }
+
+    /// Wire the vision-engine client (builder style). When wired, the three
+    /// vision request methods proxy to the engine over its socket and
+    /// `vision_subscribe_stream` hands out the engine's frame-descriptor
+    /// fanout, mirroring the MAVLink wiring. When unwired the methods return the
+    /// `not_implemented` shape and the stream is `None`, matching the
+    /// MAVLink not-available posture.
+    pub fn with_vision(mut self, vision: Arc<VisionClient>) -> Self {
+        self.vision = Some(vision);
         self
     }
 
@@ -521,6 +671,15 @@ impl RealHost {
     /// Wire the agent-id lookup (builder style).
     pub fn with_agent_id_lookup(mut self, lookup: AgentIdLookup) -> Self {
         self.agent_id_lookup = Some(lookup);
+        self
+    }
+
+    /// Persist plugin config to a 0600 JSON file (builder style). Loads any
+    /// existing records so config survives a plugin-host restart, then writes
+    /// the whole store on every `config.set`. Without this the store is
+    /// in-memory only (config is lost on restart).
+    pub fn with_config_persistence(mut self, path: PathBuf) -> Self {
+        self.config = Mutex::new(ConfigStore::load(path));
         self
     }
 
@@ -1051,6 +1210,55 @@ impl HostServices for RealHost {
         _msg_name: &str,
     ) -> Option<broadcast::Receiver<Vec<u8>>> {
         self.mavlink.as_ref().map(|c| c.subscribe())
+    }
+
+    fn vision_subscribe_stream(
+        &self,
+        _plugin_id: &str,
+        _camera_id: &str,
+    ) -> Option<broadcast::Receiver<Vec<u8>>> {
+        // The engine fans every camera's descriptors out on one broadcast; the
+        // per-camera filter is applied plugin-side (the SDK subscribe_frames
+        // callback drops a non-matching camera). When the engine socket is not
+        // up the slot is None and no stream arms, matching the MAVLink posture.
+        self.vision.as_ref().map(|c| c.subscribe_frames())
+    }
+
+    async fn vision_register_model(
+        &self,
+        _plugin_id: &str,
+        args: &Value,
+    ) -> Result<HostResult, HostError> {
+        let Some(client) = self.vision.as_ref() else {
+            return Ok(not_implemented("vision.register_model"));
+        };
+        // A transport / engine error surfaces as the response envelope `error`
+        // (a soft failure), exactly like the engine's own reply error would.
+        client
+            .register_model(args)
+            .await
+            .map_err(|e| HostError::Rpc(e.0))
+    }
+
+    async fn vision_infer(&self, _plugin_id: &str, args: &Value) -> Result<HostResult, HostError> {
+        let Some(client) = self.vision.as_ref() else {
+            return Ok(not_implemented("vision.infer"));
+        };
+        client.infer(args).await.map_err(|e| HostError::Rpc(e.0))
+    }
+
+    async fn vision_publish_detection(
+        &self,
+        _plugin_id: &str,
+        args: &Value,
+    ) -> Result<HostResult, HostError> {
+        let Some(client) = self.vision.as_ref() else {
+            return Ok(not_implemented("vision.publish_detection"));
+        };
+        client
+            .publish_detection(args)
+            .await
+            .map_err(|e| HostError::Rpc(e.0))
     }
 }
 
@@ -1848,6 +2056,164 @@ mod tests {
         // Config survives the release.
         let g = ok_map(host.config_get("p", &map(&[("key", Value::from("k"))])));
         assert_eq!(field(&g, "value").and_then(Value::as_str), Some("v"));
+    }
+
+    #[test]
+    fn drone_scoped_config_isolates_per_agent_with_a_real_lookup() {
+        // With a real agent-id lookup wired, a drone-scoped write lands under
+        // that agent id and a different agent sees its own (or the default),
+        // instead of every drone write collapsing to one global bucket.
+        let host = RealHost::new().with_agent_id_lookup(Box::new(|_pid| "drone-A".to_string()));
+        host.config_set(
+            "p",
+            &map(&[
+                ("key", Value::from("k")),
+                ("value", Value::from("for-A")),
+                ("scope", Value::from("drone")),
+            ]),
+        )
+        .unwrap();
+        // The store keyed it under the resolved agent id, not global.
+        {
+            let cfg = host.config.lock().unwrap();
+            assert!(cfg.drone.contains_key(&(
+                "p".to_string(),
+                "drone-A".to_string(),
+                "k".to_string()
+            )));
+            assert!(cfg.global.is_empty());
+        }
+        // A host bound to a different drone falls through to its default.
+        let host_b = RealHost::new().with_agent_id_lookup(Box::new(|_pid| "drone-B".to_string()));
+        let g = ok_map(host_b.config_get(
+            "p",
+            &map(&[("key", Value::from("k")), ("default", Value::from("dflt"))]),
+        ));
+        assert_eq!(field(&g, "value").and_then(Value::as_str), Some("dflt"));
+    }
+
+    #[test]
+    fn config_persists_and_reloads_across_a_restart() {
+        // A persisted store flushes on set; a fresh store loaded from the same
+        // path sees the prior value, proving config survives a plugin-host
+        // restart (the in-memory-only store lost it).
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("plugin-config.json");
+
+        let host = RealHost::new()
+            .with_agent_id_lookup(Box::new(|_pid| "drone-A".to_string()))
+            .with_config_persistence(path.clone());
+        host.config_set(
+            "p",
+            &map(&[
+                ("key", Value::from("k")),
+                ("value", Value::from("kept")),
+                ("scope", Value::from("drone")),
+            ]),
+        )
+        .unwrap();
+        // A global write too, so both scopes round-trip.
+        host.config_set(
+            "p",
+            &map(&[
+                ("key", Value::from("g")),
+                ("value", Value::from("global-kept")),
+                ("scope", Value::from("global")),
+            ]),
+        )
+        .unwrap();
+        assert!(path.exists(), "config.set must flush the store to disk");
+
+        // A brand-new host loaded from the same path (a restart) sees both.
+        let reborn = RealHost::new()
+            .with_agent_id_lookup(Box::new(|_pid| "drone-A".to_string()))
+            .with_config_persistence(path.clone());
+        let drone = ok_map(reborn.config_get("p", &map(&[("key", Value::from("k"))])));
+        assert_eq!(field(&drone, "value").and_then(Value::as_str), Some("kept"));
+        let global = ok_map(reborn.config_get("p", &map(&[("key", Value::from("g"))])));
+        assert_eq!(
+            field(&global, "value").and_then(Value::as_str),
+            Some("global-kept")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn persisted_config_file_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("plugin-config.json");
+        let host = RealHost::new().with_config_persistence(path.clone());
+        host.config_set(
+            "p",
+            &map(&[("key", Value::from("k")), ("value", Value::from("v"))]),
+        )
+        .unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "persisted plugin config must be 0600");
+    }
+
+    #[tokio::test]
+    async fn vision_methods_proxy_to_a_wired_engine() {
+        // With a vision client wired to a fake engine socket, the three vision
+        // methods proxy to it and return its response instead of the
+        // not_implemented shape; without a client they stay not_implemented.
+        use ados_protocol::frame::{encode_frame, PLUGIN_MAX_FRAME};
+        use ados_protocol::ipc::IpcBroadcast;
+        use ados_protocol::plugin::{Envelope, PROTOCOL_VERSION};
+
+        // Unwired: returns the not_implemented shape (the slot is None).
+        let bare = RealHost::new();
+        let res = bare
+            .vision_register_model("p", &Value::Map(vec![]))
+            .await
+            .unwrap();
+        let m = match res {
+            Value::Map(m) => m,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(
+            field(&m, "error").and_then(Value::as_str),
+            Some("not_implemented")
+        );
+
+        // Wired: proxy to a fake engine that answers the next request.
+        let mut sock = std::env::temp_dir();
+        sock.push(format!("ados-realhost-vis-{}.sock", std::process::id()));
+        let _ = std::fs::remove_file(&sock);
+        let (server, _inbound) = IpcBroadcast::bind(&sock, 256, false, None).await.unwrap();
+        let client = std::sync::Arc::new(VisionClient::connect(&sock).await.unwrap());
+        let host = RealHost::new().with_vision(client);
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let reply = Envelope {
+            version: PROTOCOL_VERSION,
+            kind: "response".to_string(),
+            method: "response".to_string(),
+            capability: String::new(),
+            args: Value::Map(vec![(Value::from("registered"), Value::Boolean(true))]),
+            request_id: "vis-1".to_string(),
+            token: String::new(),
+            error: None,
+        };
+        let body = reply.to_msgpack().unwrap();
+        server
+            .broadcast(encode_frame(&body, PLUGIN_MAX_FRAME).unwrap())
+            .await;
+
+        let res = host
+            .vision_register_model(
+                "p",
+                &Value::Map(vec![(Value::from("model"), Value::from("m"))]),
+            )
+            .await
+            .unwrap();
+        let m = match res {
+            Value::Map(m) => m,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(field(&m, "registered").and_then(Value::as_bool), Some(true));
+        let _ = std::fs::remove_file(&sock);
     }
 
     #[test]

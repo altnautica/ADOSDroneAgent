@@ -117,14 +117,20 @@ pub fn write_token_env(
     Ok(token)
 }
 
-/// Write a file with owner-only (0600) permissions. On unix the mode is set at
-/// open time, before any group/other could read the secret; off unix the file
-/// is written without a mode set so the crate still builds and tests on a dev
-/// host that is not unix.
+/// Write a file with owner-only (0600) permissions, enforced on every write.
+///
+/// The `OpenOptions::mode(0o600)` flag is honored by the OS only when the file
+/// is *created*. Truncating an existing file reuses its inode and keeps its
+/// existing mode, so a looser-perm secret left by an interrupted or older write
+/// (e.g. 0644, group/other-readable) would survive a rewrite and leave the HMAC
+/// issuer secret readable — letting anyone mint capability tokens. So after
+/// writing, the mode is set explicitly to 0600 regardless of the pre-existing
+/// state. Off unix the file is written without a mode set so the crate still
+/// builds and tests on a non-unix dev host.
 #[cfg(unix)]
 fn write_owner_only(path: &Path, contents: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
     let mut f = std::fs::OpenOptions::new()
         .write(true)
         .create(true)
@@ -132,7 +138,11 @@ fn write_owner_only(path: &Path, contents: &[u8]) -> std::io::Result<()> {
         .mode(0o600)
         .open(path)?;
     f.write_all(contents)?;
-    f.flush()
+    f.flush()?;
+    // Enforce 0600 unconditionally: the open-time mode only applies on creation,
+    // so an existing looser-perm file would otherwise keep its old mode.
+    f.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    Ok(())
 }
 
 #[cfg(not(unix))]
@@ -244,6 +254,61 @@ mod tests {
         let env_path = token_env_path("com.example.x", Some(&env_dir));
         let mode = std::fs::metadata(&env_path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "token env file must be 0600");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn existing_looser_perm_secret_is_tightened_to_0600() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("plugin-token-secret");
+        // Seed a world-readable file at the secret path, as an interrupted or
+        // older buggy write could have left it. It is intentionally not a valid
+        // hex secret so load_or_create regenerates and rewrites in place.
+        std::fs::write(&path, b"stale-loose-secret").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o644
+        );
+
+        load_or_create_secret(&path).unwrap();
+        // The rewrite tightened the mode even though the inode was reused.
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600,
+            "an existing looser-perm secret must be re-tightened to 0600"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn existing_looser_perm_token_env_is_tightened_to_0600() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let secret_path = dir.path().join("plugin-token-secret");
+        let issuer = shared_issuer(&secret_path).unwrap();
+        let env_dir = dir.path().join("plugins");
+        std::fs::create_dir_all(&env_dir).unwrap();
+        // A pre-existing world-readable token env file at the target path.
+        let env_path = token_env_path("com.example.x", Some(&env_dir));
+        std::fs::write(&env_path, b"ADOS_PLUGIN_TOKEN=stale\n").unwrap();
+        std::fs::set_permissions(&env_path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let sock = dir.path().join("x.sock");
+        write_token_env(
+            &issuer,
+            "com.example.x",
+            &BTreeSet::new(),
+            &sock,
+            Some(&env_dir),
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::metadata(&env_path).unwrap().permissions().mode() & 0o777,
+            0o600,
+            "an existing looser-perm token env must be re-tightened to 0600"
+        );
     }
 
     #[test]

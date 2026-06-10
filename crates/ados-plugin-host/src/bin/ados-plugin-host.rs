@@ -30,6 +30,7 @@ use ados_plugin_host::mavlink_client::MavlinkClient;
 use ados_plugin_host::realhost::RealHost;
 use ados_plugin_host::server::DEFAULT_SOCKET_DIR;
 use ados_plugin_host::state::PluginStatus;
+use ados_plugin_host::vision_client::VisionClient;
 use ados_plugin_host::{EventBus, PluginIpcServer, PluginSupervisor};
 use ados_protocol::plugin::TokenIssuer;
 
@@ -161,7 +162,27 @@ async fn build_host(install_dir: PathBuf, run_dir: PathBuf) -> Arc<RealHost> {
         }
     }
 
-    // (b) Runtime lookup: plugin_id -> (install_dir, subprocess_spawn allowlist).
+    // (b) Vision client: best-effort connect to the engine's socket so the
+    //     three vision request methods proxy to it and the frame-descriptor
+    //     stream arms. When the engine is not up the slot stays None and the
+    //     vision methods return the not_implemented shape, matching the MAVLink
+    //     not_available posture.
+    let vision_sock = run_dir.join("vision.sock");
+    match VisionClient::connect(&vision_sock).await {
+        Ok(client) => {
+            tracing::info!(path = %vision_sock.display(), "vision client connected");
+            host = host.with_vision(Arc::new(client));
+        }
+        Err(e) => {
+            tracing::warn!(
+                path = %vision_sock.display(),
+                error = %e,
+                "vision engine socket unavailable; vision methods will report not_implemented"
+            );
+        }
+    }
+
+    // (c) Runtime lookup: plugin_id -> (install_dir, subprocess_spawn allowlist).
     //     The install dir is the unpacked plugin dir; the allowlist is read from
     //     that plugin's manifest agent.subprocess_spawn. A plugin with no
     //     manifest / no agent block resolves to None (the handler then returns
@@ -174,12 +195,49 @@ async fn build_host(install_dir: PathBuf, run_dir: PathBuf) -> Arc<RealHost> {
         Some((lookup_install_dir.join(plugin_id), allowlist))
     }));
 
-    // (c) Agent-id lookup: the empty string (unbound). A real drone-binding
-    //     source is a follow-on; the empty id degrades config writes to global
-    //     scope, matching the Python default.
-    host = host.with_agent_id_lookup(Box::new(|_plugin_id: &str| String::new()));
+    // (d) Agent-id lookup: the paired device id read once at startup from
+    //     /etc/ados/device-id (overridable for tests / non-default layouts).
+    //     This isolates a drone-scoped config write per drone instead of
+    //     silently collapsing every drone write to global. The id is the same
+    //     for every plugin on one drone, so it is resolved once and cloned.
+    let device_id = read_device_id();
+    if device_id.is_empty() {
+        tracing::warn!(
+            "device id not resolved; drone-scoped plugin config will fall back to global"
+        );
+    } else {
+        tracing::info!(device_id = %device_id, "plugin config drone scope bound to device id");
+    }
+    host = host.with_agent_id_lookup(Box::new(move |_plugin_id: &str| device_id.clone()));
+
+    // (e) Config persistence: a 0600 JSON store so plugin config survives a
+    //     plugin-host restart instead of living only in memory.
+    host = host.with_config_persistence(config_store_path());
 
     Arc::new(host)
+}
+
+/// The paired device id, read from `/etc/ados/device-id` (the persistent 12-char
+/// hex identity the agent writes on first boot). Overridable via
+/// `ADOS_DEVICE_ID_PATH` for tests / non-default layouts. Returns the empty
+/// string when the file is absent or unreadable (an unpaired / pre-first-boot
+/// drone), which degrades drone-scoped config to global, matching the prior
+/// behaviour without a device id.
+fn read_device_id() -> String {
+    let path =
+        std::env::var("ADOS_DEVICE_ID_PATH").unwrap_or_else(|_| "/etc/ados/device-id".to_string());
+    std::fs::read_to_string(path)
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default()
+}
+
+/// The plugin-config persistence file. Lives under the agent's etc dir so it
+/// survives a restart; overridable via `ADOS_PLUGIN_CONFIG_PATH` for tests.
+fn config_store_path() -> PathBuf {
+    PathBuf::from(
+        std::env::var("ADOS_PLUGIN_CONFIG_PATH")
+            .unwrap_or_else(|_| "/etc/ados/plugin-config.json".to_string()),
+    )
 }
 
 /// Wire the daemon: build the host from the (already-discovered) supervisor,

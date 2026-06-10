@@ -36,6 +36,14 @@ pub trait VisionBackend: Send + Sync {
     fn load(&self, meta: &ModelMetadata) -> Result<Box<dyn LoadedModel>>;
     /// Short backend name for logs and the registry (`mock`, `onnx`, `rknn`).
     fn name(&self) -> &str;
+    /// Whether this backend actually runs inference. The mock backend returns
+    /// no detections, so a vision engine wired to it produces a silently-empty
+    /// detection stream; a status surface should flag that to the operator
+    /// rather than presenting it as a working pipeline. Real backends override
+    /// to `true`.
+    fn is_inference_capable(&self) -> bool {
+        true
+    }
 }
 
 // --- mock -----------------------------------------------------------------
@@ -60,6 +68,9 @@ impl VisionBackend for MockBackend {
     }
     fn name(&self) -> &str {
         "mock"
+    }
+    fn is_inference_capable(&self) -> bool {
+        false
     }
 }
 
@@ -189,25 +200,36 @@ pub struct BackendPrefs<'a> {
     pub rknn_socket_path: String,
 }
 
+/// Whether the build carries the ONNX CPU backend.
+const ONNX_COMPILED: bool = cfg!(feature = "onnx");
+
 /// Pick the backend for a board.
 ///
 /// "auto" resolves by SoC family: a Rockchip part with an NPU (`rk3576`,
-/// `rk3588`, `rk3566`, ...) or a Jetson prefers the accelerator sidecar; an
-/// explicit preference is honoured. ONNX is only selectable when compiled in,
-/// otherwise the picker falls back to mock with a warning.
+/// `rk3588`, `rk3566`, ...) or a Jetson prefers the accelerator sidecar; a
+/// non-NPU board (a Pi-class CPU-only SoC) prefers the ONNX CPU backend when the
+/// binary was built with the `onnx` feature, and only falls back to the
+/// detection-less mock when no runtime is available. An explicit preference is
+/// honoured. The selection is logged at `warn` when it resolves to the mock so
+/// an operator who enabled vision is not left with a silently-empty detection
+/// stream and no signal that no real inference is running.
 pub fn select_backend(board_soc: &str, prefs: &BackendPrefs) -> Box<dyn VisionBackend> {
     let soc = board_soc.to_ascii_lowercase();
     let want = match prefs.preference {
         "auto" => {
             if soc.starts_with("rk") || soc.contains("tegra") || soc.contains("jetson") {
                 "rknn"
+            } else if ONNX_COMPILED {
+                // A non-NPU board with a real CPU runtime compiled in: use it
+                // rather than the detection-less mock.
+                "onnx"
             } else {
                 "mock"
             }
         }
         other => other,
     };
-    match want {
+    let backend: Box<dyn VisionBackend> = match want {
         "rknn" => Box::new(RknnSidecarBackend::new(prefs.rknn_socket_path.clone())),
         "onnx" => {
             #[cfg(feature = "onnx")]
@@ -225,7 +247,21 @@ pub fn select_backend(board_soc: &str, prefs: &BackendPrefs) -> Box<dyn VisionBa
             tracing::warn!(backend = unknown, "unknown vision backend; using mock");
             Box::new(MockBackend)
         }
+    };
+    if !backend.is_inference_capable() {
+        // Loud, not silent: the engine will run but inference is a no-op, so an
+        // enabled vision pipeline on this board produces no detections. The
+        // engine surfaces the same fact through `is_inference_capable` on its
+        // status so the GCS can show "no real inference running".
+        tracing::warn!(
+            soc = %soc,
+            preference = prefs.preference,
+            onnx_compiled = ONNX_COMPILED,
+            "vision backend resolved to the mock: no real inference will run; \
+             build with the onnx feature or attach an accelerator sidecar"
+        );
     }
+    backend
 }
 
 #[cfg(test)]
@@ -277,8 +313,30 @@ mod tests {
         assert_eq!(select_backend("rk3576", &prefs).name(), "rknn");
         assert_eq!(select_backend("RK3588S2", &prefs).name(), "rknn");
         assert_eq!(select_backend("tegra234", &prefs).name(), "rknn");
-        // A CPU-only SoC falls back to mock under auto.
-        assert_eq!(select_backend("bcm2711", &prefs).name(), "mock");
+        // A CPU-only SoC under auto prefers the real ONNX CPU backend when it is
+        // compiled in, and only falls back to the detection-less mock when no
+        // runtime is available. Either way it never silently picks mock when a
+        // real CPU backend exists.
+        let cpu = select_backend("bcm2711", &prefs);
+        #[cfg(feature = "onnx")]
+        {
+            assert_eq!(cpu.name(), "onnx");
+            assert!(cpu.is_inference_capable());
+        }
+        #[cfg(not(feature = "onnx"))]
+        {
+            assert_eq!(cpu.name(), "mock");
+            // The mock is honestly flagged as not running real inference.
+            assert!(!cpu.is_inference_capable());
+        }
+    }
+
+    #[test]
+    fn mock_backend_is_flagged_as_not_inference_capable() {
+        // The status surface keys on this to tell the operator no real inference
+        // runs; the real backends report capable.
+        assert!(!MockBackend.is_inference_capable());
+        assert!(RknnSidecarBackend::new("/x").is_inference_capable());
     }
 
     #[test]

@@ -38,6 +38,11 @@ use crate::manifest::PluginManifest;
 
 pub const ARCHIVE_MAX_BYTES: u64 = 50 * 1024 * 1024;
 pub const ENTRY_MAX_BYTES: u64 = 25 * 1024 * 1024;
+/// Cap on the sum of every entry's decompressed bytes. A zip can declare a
+/// small per-entry uncompressed size yet inflate to far more, and many small
+/// entries can each stay under the per-entry cap while their sum blows past
+/// memory, so the running total is capped independently of the per-entry bound.
+pub const TOTAL_DECOMPRESSED_MAX: u64 = 100 * 1024 * 1024;
 pub const SIGNATURE_FILENAME: &str = "SIGNATURE";
 pub const MANIFEST_FILENAME: &str = "manifest.yaml";
 
@@ -80,6 +85,30 @@ fn safe_member_path(name: &str) -> Result<&str, ArchiveError> {
 fn is_symlink_external_attr(external_attr: u32) -> bool {
     let mode = (external_attr >> 16) & 0xFFFF;
     (mode & S_IFMT) == S_IFLNK
+}
+
+/// Inflate one zip entry into memory under a hard byte cap, never trusting the
+/// archive-declared uncompressed size.
+///
+/// The declared `size()` is attacker-controlled, so a guard on it alone (and a
+/// `Vec::with_capacity(size)` from it) does not bound the real DEFLATE stream:
+/// a tiny declared size can inflate to gigabytes (a decompression bomb) and OOM
+/// the host. Reading through `take(ENTRY_MAX_BYTES + 1)` bounds the actual
+/// inflated bytes; the `+1` lets an overrun be detected (a full cap+1 read means
+/// the stream was larger than the cap). `name` only labels the error.
+fn read_entry_bounded<R: Read>(reader: &mut R, name: &str) -> Result<Vec<u8>, ArchiveError> {
+    let limit = ENTRY_MAX_BYTES + 1;
+    let mut buf = Vec::new();
+    reader
+        .take(limit)
+        .read_to_end(&mut buf)
+        .map_err(|e| ArchiveError(format!("read of {name} failed: {e}")))?;
+    if buf.len() as u64 > ENTRY_MAX_BYTES {
+        return Err(ArchiveError(format!(
+            "archive entry {name} decompresses past the per-entry cap {ENTRY_MAX_BYTES}"
+        )));
+    }
+    Ok(buf)
 }
 
 /// Compute the deterministic payload hash over manifest + assets.
@@ -171,9 +200,12 @@ fn read_entries(raw: &[u8]) -> Result<BTreeMap<String, Vec<u8>>, ArchiveError> {
         .map_err(|e| ArchiveError(format!("not a valid zip archive: {e}")))?;
 
     let mut entries: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+    let mut total_decompressed: u64 = 0;
     for i in 0..zf.len() {
         // Read the metadata first so the size + symlink checks run before any
-        // payload bytes are read into memory.
+        // payload bytes are read into memory. The declared `size()` is only used
+        // as an early reject; the real inflation is bounded separately because
+        // the declared size is attacker-controlled.
         let (name, file_size, external_attr, is_dir) = {
             let file = zf
                 .by_index(i)
@@ -195,19 +227,24 @@ fn read_entries(raw: &[u8]) -> Result<BTreeMap<String, Vec<u8>>, ArchiveError> {
                 "archive entry {safe} is a symlink; symlinks not allowed"
             )));
         }
+        // Early reject on the declared size (cheap), then the real, bounded read.
         if file_size > ENTRY_MAX_BYTES {
             return Err(ArchiveError(format!(
                 "archive entry {safe} is {file_size} bytes; per-entry cap is {ENTRY_MAX_BYTES}"
             )));
         }
 
-        let mut buf = Vec::with_capacity(file_size as usize);
-        {
+        let buf = {
             let mut file = zf
                 .by_index(i)
                 .map_err(|e| ArchiveError(format!("corrupt zip entry {i}: {e}")))?;
-            file.read_to_end(&mut buf)
-                .map_err(|e| ArchiveError(format!("read of {safe} failed: {e}")))?;
+            read_entry_bounded(&mut file, &safe)?
+        };
+        total_decompressed = total_decompressed.saturating_add(buf.len() as u64);
+        if total_decompressed > TOTAL_DECOMPRESSED_MAX {
+            return Err(ArchiveError(format!(
+                "archive decompresses past the total cap {TOTAL_DECOMPRESSED_MAX}"
+            )));
         }
         entries.insert(safe, buf);
     }
@@ -261,6 +298,7 @@ pub fn unpack_to(archive_bytes: &[u8], dest: &Path) -> Result<(), ArchiveError> 
         .map_err(|e| ArchiveError(format!("cannot create {}: {e}", dest.display())))?;
     let mut zf = zip::ZipArchive::new(Cursor::new(archive_bytes))
         .map_err(|e| ArchiveError(format!("not a valid zip archive: {e}")))?;
+    let mut total_decompressed: u64 = 0;
     for i in 0..zf.len() {
         let (name, unix_mode, is_dir) = {
             let file = zf
@@ -283,13 +321,20 @@ pub fn unpack_to(archive_bytes: &[u8], dest: &Path) -> Result<(), ArchiveError> 
             std::fs::create_dir_all(parent)
                 .map_err(|e| ArchiveError(format!("cannot create {}: {e}", parent.display())))?;
         }
-        let mut buf = Vec::new();
-        {
+        // Bound the inflated bytes the same way the in-memory parse does, so a
+        // caller that hands raw bytes straight to unpack is still protected from
+        // a decompression bomb (the prior read_to_end had no cap at all).
+        let buf = {
             let mut file = zf
                 .by_index(i)
                 .map_err(|e| ArchiveError(format!("corrupt zip entry {i}: {e}")))?;
-            file.read_to_end(&mut buf)
-                .map_err(|e| ArchiveError(format!("read of {safe} failed: {e}")))?;
+            read_entry_bounded(&mut file, &safe)?
+        };
+        total_decompressed = total_decompressed.saturating_add(buf.len() as u64);
+        if total_decompressed > TOTAL_DECOMPRESSED_MAX {
+            return Err(ArchiveError(format!(
+                "archive decompresses past the total cap {TOTAL_DECOMPRESSED_MAX}"
+            )));
         }
         std::fs::write(&target, &buf)
             .map_err(|e| ArchiveError(format!("write of {} failed: {e}", target.display())))?;
@@ -476,6 +521,56 @@ mod tests {
         unpack_to(&zip, dir.path()).unwrap();
         let got = std::fs::read(dir.path().join("agent/py/thermal.py")).unwrap();
         assert_eq!(got, b"print('hi')");
+    }
+
+    #[test]
+    fn oversized_decompressed_entry_is_rejected() {
+        // A deflated entry of highly-compressible zeros that inflates past the
+        // per-entry cap. The compressed bytes stay tiny (well under the archive
+        // cap), so the only thing standing between this and an OOM is the
+        // bounded-inflation guard, not the on-disk size checks.
+        let big = (ENTRY_MAX_BYTES + 4096) as usize;
+        let mut buf = Vec::new();
+        {
+            let mut w = zip::ZipWriter::new(Cursor::new(&mut buf));
+            let stored =
+                SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+            w.start_file("manifest.yaml", stored).unwrap();
+            w.write_all(manifest_yaml().as_bytes()).unwrap();
+            let deflated =
+                SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+            w.start_file("assets/bomb.bin", deflated).unwrap();
+            // Write in chunks so the test does not hold the full payload twice.
+            let chunk = vec![0u8; 1024 * 1024];
+            let mut written = 0usize;
+            while written < big {
+                let n = chunk.len().min(big - written);
+                w.write_all(&chunk[..n]).unwrap();
+                written += n;
+            }
+            w.finish().unwrap();
+        }
+        // The compressed archive is far smaller than the archive cap, yet the
+        // entry inflates past the per-entry cap, so the parse must refuse it.
+        assert!(
+            (buf.len() as u64) < ARCHIVE_MAX_BYTES,
+            "compressed archive should be small ({})",
+            buf.len()
+        );
+        let err = parse_archive_bytes(buf.clone()).unwrap_err();
+        assert!(
+            err.0.contains("per-entry cap"),
+            "expected a per-entry decompression cap error, got: {}",
+            err.0
+        );
+        // unpack_to must enforce the same bound (it had no cap at all before).
+        let dir = tempfile::tempdir().unwrap();
+        let err2 = unpack_to(&buf, dir.path()).unwrap_err();
+        assert!(
+            err2.0.contains("per-entry cap"),
+            "unpack must reject the bomb too, got: {}",
+            err2.0
+        );
     }
 
     #[cfg(unix)]

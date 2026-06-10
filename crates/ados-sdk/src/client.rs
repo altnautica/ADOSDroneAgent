@@ -83,10 +83,19 @@ pub struct PluginIpcClient {
     pending: PendingMap,
     event_callbacks: CallbackMap,
     mavlink_callbacks: CallbackMap,
+    /// Frame-descriptor callbacks for `vision.deliver` pushes, keyed by the
+    /// camera id a subscriber filtered on. The wildcard key `*` receives every
+    /// camera's frames. The reader loop routes a delivered descriptor by its
+    /// `camera_id` to the matching key plus the wildcard.
+    vision_callbacks: CallbackMap,
     reader_task: Mutex<Option<JoinHandle<()>>>,
     next_id: AtomicU64,
     request_timeout: Duration,
 }
+
+/// The wildcard vision-callback key: a subscriber that did not filter to a
+/// single camera registers here and receives every camera's frames.
+const VISION_ANY_CAMERA: &str = "*";
 
 impl PluginIpcClient {
     /// Build a client for one plugin, bound to a socket path and the capability
@@ -104,6 +113,7 @@ impl PluginIpcClient {
             pending: Arc::new(Mutex::new(HashMap::new())),
             event_callbacks: Arc::new(Mutex::new(HashMap::new())),
             mavlink_callbacks: Arc::new(Mutex::new(HashMap::new())),
+            vision_callbacks: Arc::new(Mutex::new(HashMap::new())),
             reader_task: Mutex::new(None),
             next_id: AtomicU64::new(0),
             request_timeout: DEFAULT_REQUEST_TIMEOUT,
@@ -398,13 +408,26 @@ impl PluginIpcClient {
 
     // ---- Vision -------------------------------------------------------
 
+    /// Register a callback for `vision.deliver` frame pushes, keyed by the
+    /// camera id the subscriber filtered on (`None` ⇒ every camera, the
+    /// wildcard key). The reader loop decodes each delivered descriptor and
+    /// invokes the callbacks whose key is the descriptor's `camera_id` or the
+    /// wildcard, passing the envelope `args` map (which carries the
+    /// `descriptor` binary). Unlike events, `vision.deliver` carries no `topic`,
+    /// so it routes on the decoded descriptor's camera id, not the event map.
+    pub fn register_vision_callback(&self, camera_id: Option<&str>, callback: EventCallback) {
+        let key = camera_id.unwrap_or(VISION_ANY_CAMERA);
+        register_callback(&self.vision_callbacks, key, callback);
+    }
+
     /// Subscribe to vision frame descriptors. The host starts (or widens) the
     /// engine's frame stream toward this plugin and then delivers descriptors
     /// as `vision.deliver` events. `camera_id` of `None` requests every
     /// camera's frames; `Some(id)` narrows the stream at the engine. The
     /// required cap is `vision.frame.read`. The caller registers the matching
-    /// event callback separately (the frame topic is the reserved
-    /// `vision.frame`).
+    /// frame callback via [`register_vision_callback`](Self::register_vision_callback);
+    /// `vision.deliver` pushes carry the descriptor directly (no topic), so they
+    /// do not ride the `event.subscribe` path.
     pub async fn vision_subscribe_frames(
         &self,
         camera_id: Option<&str>,
@@ -559,6 +582,7 @@ impl PluginIpcClient {
         let pending = self.pending.clone();
         let event_callbacks = self.event_callbacks.clone();
         let mavlink_callbacks = self.mavlink_callbacks.clone();
+        let vision_callbacks = self.vision_callbacks.clone();
         let plugin_id = self.plugin_id.clone();
         tokio::spawn(async move {
             let mut reader = read_half;
@@ -568,6 +592,9 @@ impl PluginIpcClient {
                         if env.kind == "event" {
                             if env.method == "mavlink.deliver" {
                                 dispatch_mavlink(&mavlink_callbacks, &env);
+                            } else if env.method == ados_protocol::framebus::methods::DELIVER_FRAME
+                            {
+                                dispatch_vision(&vision_callbacks, &env);
                             } else {
                                 dispatch_event(&event_callbacks, &env);
                             }
@@ -642,6 +669,40 @@ fn dispatch_mavlink(map: &CallbackMap, env: &Envelope) {
         return;
     };
     invoke_matching(map, msg_name, &env.args);
+}
+
+/// Dispatch a `vision.deliver` frame push. The envelope carries the encoded
+/// [`ados_protocol::framebus::FrameDescriptor`] in the `descriptor` binary arg
+/// (no `topic`), so routing is by the descriptor's decoded `camera_id`: every
+/// callback keyed on that camera id, plus the wildcard key, fires with the
+/// envelope `args` map (the vision client decodes the descriptor again to read
+/// the ring). A descriptor that cannot be decoded is dropped silently.
+fn dispatch_vision(map: &CallbackMap, env: &Envelope) {
+    let Some(Value::Binary(blob)) = map_get(&env.args, "descriptor") else {
+        return;
+    };
+    let Ok(descriptor) = ados_protocol::framebus::FrameDescriptor::from_msgpack(&blob) else {
+        return;
+    };
+    // Snapshot the matched callbacks (exact camera id + the wildcard) under the
+    // lock, then invoke outside it so a callback that re-subscribes cannot
+    // deadlock. The two keys are exact strings, not globs, so no fnmatch here.
+    let matched: Vec<EventCallback> = {
+        let guard = map.lock().expect("callback lock");
+        let mut out = Vec::new();
+        if let Some(cbs) = guard.get(&descriptor.camera_id) {
+            out.extend(cbs.iter().cloned());
+        }
+        if descriptor.camera_id != VISION_ANY_CAMERA {
+            if let Some(cbs) = guard.get(VISION_ANY_CAMERA) {
+                out.extend(cbs.iter().cloned());
+            }
+        }
+        out
+    };
+    for cb in matched {
+        cb(env.args.clone());
+    }
 }
 
 /// Invoke every callback whose registered pattern equals `subject` or matches
@@ -802,6 +863,71 @@ mod tests {
         dispatch_mavlink(&map, &env);
         assert_eq!(exact.load(O::Relaxed), 1);
         assert_eq!(glob.load(O::Relaxed), 1);
+    }
+
+    #[test]
+    fn vision_deliver_routes_by_camera_id_and_wildcard() {
+        use ados_protocol::framebus::{FrameDescriptor, FrameFormat};
+        use std::sync::atomic::{AtomicUsize, Ordering as O};
+        let map: CallbackMap = Arc::new(Mutex::new(HashMap::new()));
+        let exact = Arc::new(AtomicUsize::new(0));
+        let any = Arc::new(AtomicUsize::new(0));
+        let other = Arc::new(AtomicUsize::new(0));
+        let e = exact.clone();
+        let a = any.clone();
+        let o = other.clone();
+        register_callback(
+            &map,
+            "uvc-0",
+            Arc::new(move |_| {
+                e.fetch_add(1, O::Relaxed);
+            }),
+        );
+        register_callback(
+            &map,
+            VISION_ANY_CAMERA,
+            Arc::new(move |_| {
+                a.fetch_add(1, O::Relaxed);
+            }),
+        );
+        register_callback(
+            &map,
+            "uvc-1",
+            Arc::new(move |_| {
+                o.fetch_add(1, O::Relaxed);
+            }),
+        );
+
+        let descriptor = FrameDescriptor {
+            camera_id: "uvc-0".into(),
+            frame_id: 1,
+            ts_ms: 0,
+            width: 4,
+            height: 4,
+            format: FrameFormat::Rgb24,
+            shm_name: "ados-vision-uvc-0".into(),
+            slot: 0,
+            seq: 1,
+            byte_len: 48,
+        };
+        let env = Envelope {
+            version: PROTOCOL_VERSION,
+            kind: "event".into(),
+            method: ados_protocol::framebus::methods::DELIVER_FRAME.into(),
+            capability: "vision.frame.read".into(),
+            args: Value::Map(vec![(
+                Value::from("descriptor"),
+                Value::Binary(descriptor.to_msgpack().unwrap()),
+            )]),
+            request_id: "vis-1".into(),
+            token: String::new(),
+            error: None,
+        };
+        dispatch_vision(&map, &env);
+        // The exact camera key and the wildcard both fire; the other camera does not.
+        assert_eq!(exact.load(O::Relaxed), 1);
+        assert_eq!(any.load(O::Relaxed), 1);
+        assert_eq!(other.load(O::Relaxed), 0);
     }
 
     #[test]

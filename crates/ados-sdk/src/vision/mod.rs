@@ -24,7 +24,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use ados_protocol::framebus::{
-    self, Detection, DetectionBatch, FrameDescriptor, ModelMetadata, RingLayout, VISION_FRAME_TOPIC,
+    self, Detection, DetectionBatch, FrameDescriptor, ModelMetadata, RingLayout,
 };
 use rmpv::Value;
 
@@ -71,11 +71,13 @@ impl VisionClient {
     /// delivers matching frame descriptors as `vision.deliver` events; this
     /// client resolves each to pixels and invokes `callback` with the [`Frame`].
     ///
-    /// Sends the [`methods::SUBSCRIBE_FRAMES`] RPC (gated on `vision.frame.read`)
-    /// then registers an event subscriber on the `vision.frame` topic. A
+    /// Registers a frame callback on the client's `vision.deliver` path (keyed
+    /// on `camera_id`), then sends the [`methods::SUBSCRIBE_FRAMES`] RPC (gated
+    /// on `vision.frame.read`) so the engine starts or widens the stream. A
     /// `camera_id` of `None` receives every camera's frames; a `Some(id)` filter
-    /// is applied both in the RPC argument (so the host can narrow the stream)
-    /// and in the resolver (so a broader host stream is still filtered locally).
+    /// is applied at the engine and, as a backstop, in the resolver. The
+    /// `vision.deliver` push carries the descriptor in a `descriptor` binary arg
+    /// (no `topic`), so it does not use the `event.subscribe` topic path.
     pub async fn subscribe_frames(
         &self,
         camera_id: Option<&str>,
@@ -85,14 +87,12 @@ impl VisionClient {
         let rings = self.rings.clone();
         let filter = want_camera.clone();
 
-        // The host pushes a `vision.deliver` event carrying the descriptor in
-        // the event payload. Resolve it against the ring, drop torn/stale, and
-        // hand the typed Frame to the author's callback.
-        let on_event = move |args: Value| {
-            let Some(payload) = map_get(&args, "payload") else {
-                return;
-            };
-            let Some(descriptor) = decode_descriptor(&payload) else {
+        // The host pushes a `vision.deliver` event carrying the encoded
+        // descriptor in the `descriptor` arg. Decode it, drop a camera that
+        // does not match the filter, resolve it against the ring (dropping
+        // torn/stale), and hand the typed Frame to the author's callback.
+        let on_deliver = move |args: Value| {
+            let Some(descriptor) = decode_descriptor(&args) else {
                 return;
             };
             if let Some(want) = &filter {
@@ -105,13 +105,14 @@ impl VisionClient {
             }
         };
 
+        // Register the frame callback before arming the engine stream, so no
+        // descriptor that arrives between the RPC reply and registration is lost.
+        self.ipc
+            .register_vision_callback(camera_id, Arc::new(on_deliver));
+
         // Tell the engine to start (or widen) the stream toward this plugin.
         self.ipc.vision_subscribe_frames(camera_id).await?;
-
-        // Frame descriptors arrive as events on the reserved frame topic.
-        self.ipc
-            .event_subscribe(VISION_FRAME_TOPIC, Arc::new(on_event))
-            .await
+        Ok(())
     }
 
     /// Register an inference model with the engine. Sends
@@ -250,10 +251,10 @@ fn map_ring(shm_name: &str) -> Option<MappedRing> {
     Some(MappedRing { map, layout })
 }
 
-/// Decode a [`FrameDescriptor`] from a `vision.deliver` event payload. The host
-/// carries the descriptor either as a msgpack-named map (the descriptor's own
-/// fields) or as a `descriptor` binary blob; both decode through the framebus
-/// contract.
+/// Decode a [`FrameDescriptor`] from a `vision.deliver` envelope `args` map. The
+/// host carries the descriptor as a `descriptor` binary blob (the live path);
+/// for robustness a map that is itself the descriptor's own fields also decodes,
+/// both through the framebus contract.
 fn decode_descriptor(payload: &Value) -> Option<FrameDescriptor> {
     if let Some(Value::Binary(blob)) = map_get(payload, "descriptor") {
         return FrameDescriptor::from_msgpack(&blob).ok();

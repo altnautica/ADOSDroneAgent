@@ -125,7 +125,7 @@ async fn main() {
     );
     tracing::info!(soc = %soc, backend = backend.name(), "vision backend selected");
 
-    let slot_count = config.slot_count;
+    let slot_count = config.effective_slot_count();
     let engine = VisionEngine::new(backend, slot_count);
     let cancel = Arc::new(Notify::new());
 
