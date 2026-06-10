@@ -10,6 +10,18 @@ percent it drops everything except a minimal status heartbeat.
 
 This module does not rewrite the MQTT gateway or the MAVLink relay.
 It only orchestrates their lifecycle.
+
+Orphaned: no systemd unit launches this module anymore. The native
+cross-profile cloud service owns the ground-station bridge (gateway +
+MAVLink relay + the status heartbeat) on both profiles; running this
+Python bridge alongside it produced a second MQTT client with the same
+client id (a reconnect storm where the broker evicted whichever
+connected first) and a duplicate Convex status heartbeat for one device.
+The launching unit has been removed, so this file is now unreachable at
+runtime. It is retained only until a paired ground-station bench
+confirms the native bridge serves the full contract end to end
+(uplink-reactive reconnect, the data-cap throttle downshift, and the
+status heartbeat), after which it is deleted. Nothing imports it.
 """
 
 from __future__ import annotations
@@ -612,7 +624,11 @@ async def _run_service() -> None:
 
 
 def main() -> None:
-    """Systemd entry point for the future `ados-cloud-relay.service`."""
+    """Retired systemd entry point. No unit launches this anymore; the
+    native cross-profile cloud service owns the ground-station bridge.
+    Kept only until a paired ground-station bench confirms the native
+    bridge, after which this module is deleted.
+    """
     try:
         asyncio.run(_run_service())
     except KeyboardInterrupt:

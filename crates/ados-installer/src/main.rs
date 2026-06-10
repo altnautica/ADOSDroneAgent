@@ -190,24 +190,26 @@ fn write_pairing_material(code: &str) -> Result<()> {
     Ok(())
 }
 
-/// Restart whichever cloud-relay unit beacons the pair code so the new code is
-/// re-read immediately. Both the drone (`ados-cloud`) and the ground-station
-/// (`ados-cloud-relay`) unit are tried; only an installed-and-active one
-/// restarts, the rest are harmless no-ops. Best-effort by design — see
-/// [`run_pair_only`].
+/// Restart the cloud unit that beacons the pair code so the new code is re-read
+/// immediately. The single `ados-cloud` unit serves both profiles — it spawns
+/// the ground-station bridge when the role resolves to a ground station — so one
+/// unit covers every box. Only an installed-and-active unit restarts; otherwise
+/// this is a harmless no-op. Best-effort by design — see [`run_pair_only`].
 fn nudge_cloud_relay() {
-    for unit in ["ados-cloud", "ados-cloud-relay"] {
-        // Only restart a unit that is actually active so we never spuriously
-        // start a profile's unit that does not belong on this box.
-        if exec::run_ok("systemctl", &["is-active", "--quiet", unit]) {
-            if exec::run_ok("systemctl", &["restart", unit]) {
-                tracing::info!(unit, "restarted cloud relay to re-beacon the new pair code");
-            } else {
-                tracing::warn!(
-                    unit,
-                    "cloud relay restart failed; the agent will re-read pairing.json on its next reload"
-                );
-            }
+    const UNIT: &str = "ados-cloud";
+    // Only restart a unit that is actually active so we never spuriously start a
+    // unit that has not come up yet on this box.
+    if exec::run_ok("systemctl", &["is-active", "--quiet", UNIT]) {
+        if exec::run_ok("systemctl", &["restart", UNIT]) {
+            tracing::info!(
+                unit = UNIT,
+                "restarted cloud relay to re-beacon the new pair code"
+            );
+        } else {
+            tracing::warn!(
+                unit = UNIT,
+                "cloud relay restart failed; the agent will re-read pairing.json on its next reload"
+            );
         }
     }
 }

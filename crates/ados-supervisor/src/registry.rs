@@ -133,7 +133,6 @@ pub const SERVICE_REGISTRY: &[ServiceDef] = &[
     // join a home / bench WiFi instead of running off Ethernet.
     def("ados-wifi-client", Hardware, None, None),
     def("ados-ethernet", Hardware, Some("ground_station"), None),
-    def("ados-cloud-relay", Core, Some("ground_station"), None),
     // Distributed-receive role-gated services.
     def(
         "ados-batman",
@@ -226,8 +225,11 @@ mod tests {
     #[test]
     fn registry_has_expected_shape() {
         let specs = build_specs();
-        assert_eq!(specs.len(), 28, "service count drifted from the catalog");
-        // Core tier members.
+        assert_eq!(specs.len(), 27, "service count drifted from the catalog");
+        // Core tier members. The single cross-profile cloud unit serves the
+        // gateway + heartbeat on both profiles (it spawns the ground-station
+        // bridge when the role resolves to a ground station), so there is no
+        // second profile-gated cloud unit in the core set.
         let core: Vec<_> = specs
             .iter()
             .filter(|s| s.category == Category::Core)
@@ -235,13 +237,7 @@ mod tests {
             .collect();
         assert_eq!(
             core,
-            vec![
-                "ados-mavlink",
-                "ados-api",
-                "ados-cloud",
-                "ados-health",
-                "ados-cloud-relay"
-            ]
+            vec!["ados-mavlink", "ados-api", "ados-cloud", "ados-health"]
         );
         // The drone TX manager is drone-gated; the GS RX is role-gated to direct.
         let wfb = specs.iter().find(|s| s.name == "ados-wfb").unwrap();

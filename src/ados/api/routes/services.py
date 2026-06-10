@@ -291,7 +291,6 @@ async def restart_service(name: str):
         "ados-api",
         "ados-buttons",
         "ados-cloud",
-        "ados-cloud-relay",
         "ados-discovery",
         "ados-ethernet",
         "ados-health",

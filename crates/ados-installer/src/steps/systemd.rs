@@ -72,7 +72,6 @@ const GROUND_STATION_ENABLE_UNITS: &[&str] = &[
     "ados-modem.service",
     "ados-wifi-client.service",
     "ados-ethernet.service",
-    "ados-cloud-relay.service",
 ];
 
 /// Units the agent shipped in a prior release but has since deleted. The
@@ -84,7 +83,7 @@ const GROUND_STATION_ENABLE_UNITS: &[&str] = &[
 /// the source set" sweep: the runtime-written plugin slice (`ados-plugins.slice`)
 /// and the per-plugin subprocess units legitimately live outside `data/systemd`
 /// and must never be pruned.
-const RETIRED_UNITS: &[&str] = &["ados-scripting.service"];
+const RETIRED_UNITS: &[&str] = &["ados-scripting.service", "ados-cloud-relay.service"];
 
 /// Cutover marker files retired by a default sense flip. The plugin host moved
 /// from an opt-IN marker (`plugin-host-rust-enabled`, native only when present)
@@ -123,7 +122,6 @@ fn other_profile_units(profile: &str) -> &'static [&'static str] {
             "ados-modem.service",
             "ados-wifi-client.service",
             "ados-ethernet.service",
-            "ados-cloud-relay.service",
             "ados-batman.service",
             "ados-mesh-pairing.service",
         ],
@@ -1379,11 +1377,17 @@ mod tests {
                 );
             }
         }
-        // The retired set names the deliberately-removed unit, and never the
-        // runtime-written plugin slice or a core unit.
+        // The retired set names the deliberately-removed units, and never the
+        // runtime-written plugin slice or a core unit. The cloud-relay unit was
+        // the ground-station Python duplicate of the cross-profile cloud unit;
+        // the cross-profile cloud unit serves the gateway + heartbeat on both
+        // profiles, so the duplicate is retired and pruned on every upgrade.
         assert!(RETIRED_UNITS.contains(&"ados-scripting.service"));
+        assert!(RETIRED_UNITS.contains(&"ados-cloud-relay.service"));
         assert!(!RETIRED_UNITS.contains(&"ados-plugins.slice"));
         assert!(!RETIRED_UNITS.contains(&"ados-supervisor.service"));
+        // The retained cross-profile cloud unit must never be retired.
+        assert!(!RETIRED_UNITS.contains(&"ados-cloud.service"));
     }
 
     #[test]
