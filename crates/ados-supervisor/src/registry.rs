@@ -80,7 +80,12 @@ use Category::{Core, Hardware, OnDemand};
 
 /// Every service the supervisor knows about, in canonical order.
 pub const SERVICE_REGISTRY: &[ServiceDef] = &[
-    // Core (always running).
+    // Core (always running). ados-mavlink is the sole command-and-control path
+    // to the flight controller: it execs the native router binary and has no
+    // packaged fallback, so it must always be started (Core) on every profile
+    // (no profile gate). A missing router binary makes this unit crash-loop, so
+    // the installer Hard-gates the binary's fetch and re-checks its presence in
+    // the health gate before reporting the install OK.
     def("ados-mavlink", Core, None, None),
     def("ados-api", Core, None, None),
     def("ados-cloud", Core, None, None),
@@ -247,6 +252,20 @@ mod tests {
         // wifi-client stays cross-profile.
         let wc = specs.iter().find(|s| s.name == "ados-wifi-client").unwrap();
         assert_eq!(wc.profile_gate, None);
+    }
+
+    #[test]
+    fn mavlink_is_core_and_ungated_on_every_profile() {
+        // The MAVLink router is the sole C2 path with no packaged fallback, so
+        // it must always be started: Core tier, no profile gate, no role gate.
+        let specs = build_specs();
+        let mav = specs
+            .iter()
+            .find(|s| s.name == "ados-mavlink")
+            .expect("ados-mavlink must be in the registry");
+        assert_eq!(mav.category, Category::Core);
+        assert_eq!(mav.profile_gate, None);
+        assert_eq!(mav.role_gate, None);
     }
 
     #[test]

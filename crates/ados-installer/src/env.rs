@@ -54,6 +54,56 @@ pub fn resolve_source_dir(recorded: Option<&std::path::Path>) -> Option<std::pat
     candidates.into_iter().find(|p| p.is_dir())
 }
 
+/// The on-disk markers that, taken together, mean "the agent is already
+/// installed on this box". Used by the install-presence probe so a bare
+/// `--pair CODE` on an installed agent can run a fast re-pair instead of the
+/// full fresh-install chain.
+///
+/// All three must be present: the venv interpreter (the agent package lives
+/// there), the deployed supervisor unit (the install reached the systemd step),
+/// and the persisted device identity (the install reached config/identity). A
+/// partial install with only one or two of these is treated as NOT installed,
+/// so a re-pair never runs against a half-provisioned box.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InstallMarkers {
+    /// `/opt/ados/venv/bin/python` exists.
+    pub venv_python: bool,
+    /// A deployed `ados-supervisor.service` unit file is on disk.
+    pub supervisor_unit: bool,
+    /// `/etc/ados/device-id` exists and is non-empty.
+    pub device_id: bool,
+}
+
+/// Pure: are all the install markers present? Kept separate from the probe so a
+/// unit test can exercise the all-or-nothing rule without touching disk.
+pub fn install_present(markers: InstallMarkers) -> bool {
+    markers.venv_python && markers.supervisor_unit && markers.device_id
+}
+
+/// The unit-file locations a deployed supervisor unit may live in (the
+/// `/etc/systemd/system` drop-in the installer writes, or a packaged unit).
+const SUPERVISOR_UNIT_DIRS: &[&str] = &["/etc/systemd/system", "/usr/lib/systemd/system"];
+
+/// Probe the running box for an existing install. Reads only the on-disk
+/// markers ([`InstallMarkers`]); does NOT contact systemd or the agent, so it is
+/// cheap and safe to call before the run mode is resolved. Returns true only
+/// when every marker is present (see [`install_present`]).
+pub fn probe_install_present() -> bool {
+    use std::path::Path;
+    let venv_python = Path::new(&format!("{VENV_DIR}/bin/python")).exists();
+    let supervisor_unit = SUPERVISOR_UNIT_DIRS
+        .iter()
+        .any(|dir| Path::new(dir).join("ados-supervisor.service").is_file());
+    let device_id = std::fs::read_to_string(DEVICE_ID_FILE)
+        .map(|s| !s.trim().is_empty())
+        .unwrap_or(false);
+    install_present(InstallMarkers {
+        venv_python,
+        supervisor_unit,
+        device_id,
+    })
+}
+
 /// Resolved host facts the steps gate on. Kept tiny; richer HAL detection is a
 /// later phase that runs the dedicated probe crate.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -123,6 +173,37 @@ mod tests {
         assert_eq!(e.arch, arch());
         assert_eq!(e.supported_arch, is_supported_arch());
         assert_eq!(e.os, std::env::consts::OS);
+    }
+
+    #[test]
+    fn install_present_requires_all_markers() {
+        let all = InstallMarkers {
+            venv_python: true,
+            supervisor_unit: true,
+            device_id: true,
+        };
+        assert!(install_present(all));
+
+        // Any single marker missing → not installed (a partial install must
+        // never be treated as ready for a fast re-pair).
+        assert!(!install_present(InstallMarkers {
+            venv_python: false,
+            ..all
+        }));
+        assert!(!install_present(InstallMarkers {
+            supervisor_unit: false,
+            ..all
+        }));
+        assert!(!install_present(InstallMarkers {
+            device_id: false,
+            ..all
+        }));
+        // Nothing present → not installed.
+        assert!(!install_present(InstallMarkers {
+            venv_python: false,
+            supervisor_unit: false,
+            device_id: false,
+        }));
     }
 
     #[test]

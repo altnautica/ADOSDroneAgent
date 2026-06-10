@@ -16,7 +16,9 @@ USAGE:
 OPTIONS:
     --profile <drone|ground_station>   Agent profile to install
     --name <hostname>                  mDNS hostname to set
-    --pair <code>                      Pairing code (or pass it positionally)
+    --pair <code>                      Pairing code (or pass it positionally).
+                                       On an already-installed box a bare code
+                                       does a fast re-pair, not a reinstall.
     --upgrade                          Upgrade an existing install in place
     --force                            Clear checkpoints and reinstall
     --branch <name>                    Install from a git branch (dev)

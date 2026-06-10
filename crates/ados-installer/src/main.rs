@@ -41,10 +41,13 @@ async fn main() -> Result<ExitCode> {
         return Ok(ExitCode::SUCCESS);
     }
 
-    // "already installed" probing is a later phase; pass false so the
-    // flag-driven path resolves (a bare pair code on a fresh box installs).
-    let mode = RunMode::resolve(&args, false);
-    tracing::info!(?mode, "resolved install run-mode");
+    // Probe whether the agent is already installed on this box (venv + deployed
+    // supervisor unit + persisted identity). A bare `--pair CODE` against an
+    // existing install resolves to a fast re-pair; on a fresh box the same
+    // invocation runs the full install (which pairs at the end).
+    let already_installed = env::probe_install_present();
+    let mode = RunMode::resolve(&args, already_installed);
+    tracing::info!(?mode, already_installed, "resolved install run-mode");
 
     match mode {
         RunMode::Status => {
@@ -69,12 +72,13 @@ async fn main() -> Result<ExitCode> {
                 }
             }
         }
-        RunMode::PairOnly => {
-            // Stub: a later phase re-pairs against the running agent.
-            tracing::info!("pair-only is not yet implemented in this build");
-            println!("pair-only: not yet implemented");
-            Ok(ExitCode::SUCCESS)
-        }
+        RunMode::PairOnly => match run_pair_only(&args) {
+            Ok(()) => Ok(ExitCode::SUCCESS),
+            Err(e) => {
+                eprintln!("pair: {e}");
+                Ok(ExitCode::from(1))
+            }
+        },
         RunMode::FreshInstall | RunMode::Upgrade | RunMode::ForceReinstall => {
             run_install(args, mode)
         }
@@ -134,6 +138,97 @@ fn run_install(args: Args, mode: RunMode) -> Result<ExitCode> {
         Ok(ExitCode::SUCCESS)
     }
 }
+
+/// Fast re-pair against an already-installed, running agent: write fresh
+/// pairing material and nudge the agent to pick it up, without the full install
+/// chain (no re-fetch, no re-provision). Reached only when the install-presence
+/// probe confirmed the agent is on disk and a bare `--pair CODE` was given.
+///
+/// The agent auto-reloads `pairing.json` when its on-disk mtime is newer than
+/// the in-memory copy, so writing a fresh file is sufficient for correctness;
+/// restarting the cloud-relay unit forces an immediate re-read and re-beacon so
+/// the operator sees the new code take effect at once rather than on the next
+/// reload tick. The restart is best-effort: a write that lands but a restart
+/// that fails still re-pairs on the agent's own reload.
+fn run_pair_only(args: &Args) -> Result<()> {
+    let code = validate_pair_code(args.pair.as_deref())?;
+
+    write_pairing_material(&code)?;
+    nudge_cloud_relay();
+
+    println!(
+        "pair: re-paired the running agent with code {}",
+        code.to_ascii_uppercase()
+    );
+    Ok(())
+}
+
+/// Validate the supplied pairing code (pure): trim surrounding whitespace and
+/// reject an absent or blank code. Returns the trimmed code on success.
+fn validate_pair_code(pair: Option<&str>) -> Result<String> {
+    match pair.map(str::trim) {
+        Some(c) if !c.is_empty() => Ok(c.to_string()),
+        _ => anyhow::bail!("no pairing code supplied"),
+    }
+}
+
+/// Write `/etc/ados/pairing.json` with the supplied code (uppercased, stamped),
+/// reusing the same body builder the install's config step uses so the on-disk
+/// shape never drifts. Mode 0600 — the file carries pairing identity.
+fn write_pairing_material(code: &str) -> Result<()> {
+    use ados_installer::steps::config_identity::pairing_json;
+    let path = Path::new(env::PAIRING_JSON);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| anyhow::anyhow!("create {} failed: {e}", parent.display()))?;
+    }
+    let body = pairing_json(code, now_epoch());
+    std::fs::write(path, body)
+        .map_err(|e| anyhow::anyhow!("write {} failed: {e}", env::PAIRING_JSON))?;
+    set_pairing_mode(path);
+    tracing::info!(code = %code.to_ascii_uppercase(), "pairing material rewritten for re-pair");
+    Ok(())
+}
+
+/// Restart whichever cloud-relay unit beacons the pair code so the new code is
+/// re-read immediately. Both the drone (`ados-cloud`) and the ground-station
+/// (`ados-cloud-relay`) unit are tried; only an installed-and-active one
+/// restarts, the rest are harmless no-ops. Best-effort by design — see
+/// [`run_pair_only`].
+fn nudge_cloud_relay() {
+    for unit in ["ados-cloud", "ados-cloud-relay"] {
+        // Only restart a unit that is actually active so we never spuriously
+        // start a profile's unit that does not belong on this box.
+        if exec::run_ok("systemctl", &["is-active", "--quiet", unit]) {
+            if exec::run_ok("systemctl", &["restart", unit]) {
+                tracing::info!(unit, "restarted cloud relay to re-beacon the new pair code");
+            } else {
+                tracing::warn!(
+                    unit,
+                    "cloud relay restart failed; the agent will re-read pairing.json on its next reload"
+                );
+            }
+        }
+    }
+}
+
+/// Seconds since the Unix epoch (for the pairing stamp).
+fn now_epoch() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// chmod the pairing file to 0600 on Unix; a no-op on a non-Unix dev host.
+#[cfg(unix)]
+fn set_pairing_mode(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+}
+
+#[cfg(not(unix))]
+fn set_pairing_mode(_path: &Path) {}
 
 /// Assemble the renderer's closing-summary payload from the resolved context.
 fn build_summary(status: &str, ctx: &Ctx) -> ui::SummaryData {
@@ -349,4 +444,43 @@ fn print_status(args: &Args) {
 fn resolve_status_profile(args: &Args) -> String {
     let conf_body = std::fs::read_to_string(env::PROFILE_CONF).ok();
     ados_installer::steps::preflight::resolve_profile(args.profile.as_deref(), conf_body.as_deref())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validate_pair_code_trims_and_rejects_blank() {
+        // A real code is accepted, trimmed of surrounding whitespace.
+        assert_eq!(
+            validate_pair_code(Some("  ABCD-1234 ")).unwrap(),
+            "ABCD-1234"
+        );
+        assert_eq!(validate_pair_code(Some("code")).unwrap(), "code");
+        // Absent or blank → an error (a re-pair with no code must not proceed).
+        assert!(validate_pair_code(None).is_err());
+        assert!(validate_pair_code(Some("")).is_err());
+        assert!(validate_pair_code(Some("   ")).is_err());
+    }
+
+    #[test]
+    fn pair_only_resolves_only_for_an_installed_box_with_a_bare_code() {
+        // A bare pair code resolves to PairOnly only when the install probe says
+        // the agent is already on disk; on a fresh box the same code installs.
+        let a = Args {
+            pair: Some("ABCD-1234".to_string()),
+            ..Args::default()
+        };
+        assert_eq!(RunMode::resolve(&a, true), RunMode::PairOnly);
+        assert_eq!(RunMode::resolve(&a, false), RunMode::FreshInstall);
+        // --upgrade or --force never short-circuits to a re-pair.
+        let up = Args {
+            upgrade: true,
+            ..a.clone()
+        };
+        assert_eq!(RunMode::resolve(&up, true), RunMode::Upgrade);
+        let force = Args { force: true, ..a };
+        assert_eq!(RunMode::resolve(&force, true), RunMode::ForceReinstall);
+    }
 }

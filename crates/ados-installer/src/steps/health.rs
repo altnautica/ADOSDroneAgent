@@ -22,6 +22,12 @@
 //!      boot and keep Python only as a flag-guarded fallback, so a missing
 //!      native binary would crash-loop the unit; its on-disk presence is a
 //!      required precondition even though its prebuilt fetch gate is best-effort.
+//!      Also: the MAVLink router binary the Core MAVLink unit execs on both
+//!      profiles is present + executable. It is the sole C2 path with no
+//!      packaged fallback; its fetch gate is Hard, so this re-verification only
+//!      catches a binary that vanished/was truncated between fetch and health,
+//!      where the unit would crash-loop with no FC link while the install
+//!      otherwise looked healthy.
 //!   7. **NEW** — the native display binaries (`ados-display` +
 //!      `ados-display-probe`) the display units exec by DEFAULT are present +
 //!      executable, but ONLY when a panel was recognized (`display.enabled`
@@ -154,6 +160,28 @@ where
         .filter(|b| b.gate == Gate::Hard && !present(b.dest))
         .map(|b| b.service)
         .collect()
+}
+
+/// The MAVLink router binary the Core MAVLink unit execs on both profiles. It
+/// is the sole command-and-control path to the flight controller and has no
+/// packaged fallback, so its on-disk presence is a required precondition: a
+/// missing binary crash-loops the Core unit, leaving the drone with no FC
+/// telemetry, arming, or GCS link. Profile-independent — both a drone and a
+/// ground station run the router.
+const C2_ROUTER_BINARY: &str = "/opt/ados/bin/ados-mavlink-router";
+
+/// The MAVLink router binary if it is MISSING (absent or not executable), else
+/// `None`. Pure given a `present` predicate so a unit test can exercise it
+/// without touching the filesystem.
+pub fn missing_c2_router_binary<F>(present: F) -> Option<&'static str>
+where
+    F: Fn(&str) -> bool,
+{
+    if present(C2_ROUTER_BINARY) {
+        None
+    } else {
+        Some(C2_ROUTER_BINARY)
+    }
 }
 
 /// The native service binary each profile's WFB units now exec by DEFAULT (the
@@ -354,6 +382,21 @@ impl Step for Health {
             misses.push(format!("binary-missing:{svc}"));
         }
 
+        // 6b. The MAVLink router (the sole C2 path, no packaged fallback) must be
+        // present + executable on both profiles. Its fetch gate is Hard so a
+        // fetch miss already aborts the install before this point; re-verifying
+        // its on-disk presence here catches a binary that vanished or was
+        // truncated between fetch and health time, when the Core MAVLink unit
+        // would otherwise crash-loop with no FC link reported as a healthy
+        // install.
+        if let Some(dest) = missing_c2_router_binary(|d| is_executable(Path::new(d))) {
+            let svc = Path::new(dest)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(dest);
+            misses.push(format!("binary-missing:{svc}"));
+        }
+
         // 7. The native display binaries the display units now exec by DEFAULT
         // must be present + executable WHEN a panel was recognized. Their
         // prebuilt fetch gate is best-effort so a display-less rig still
@@ -482,6 +525,24 @@ mod tests {
 
         // An unknown profile has no default WFB unit binary to gate on.
         assert!(missing_default_radio_binary("compute", |_| false).is_none());
+    }
+
+    #[test]
+    fn c2_router_binary_is_required_on_both_profiles() {
+        // Present → no miss.
+        assert!(missing_c2_router_binary(|_| true).is_none());
+
+        // Absent → the router path is reported (the sole C2 path, no fallback).
+        let missing = missing_c2_router_binary(|dest| dest != "/opt/ados/bin/ados-mavlink-router");
+        assert_eq!(missing, Some("/opt/ados/bin/ados-mavlink-router"));
+
+        // The check is profile-independent: the predicate alone decides it, so
+        // a missing router fails the gate regardless of which profile is being
+        // installed (both a drone and a ground station run the router).
+        assert_eq!(
+            missing_c2_router_binary(|_| false),
+            Some("/opt/ados/bin/ados-mavlink-router")
+        );
     }
 
     #[test]

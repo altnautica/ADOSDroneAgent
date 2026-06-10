@@ -11,9 +11,12 @@ StartLimitBurst=5
 Slice=ados.slice
 Type=simple
 # The native router owns the FC link, the direct-GCS proxies, and the state
-# IPC publish. It is the only MAVLink path; if the binary is absent the unit
-# fails visibly (Restart=on-failure) so a broken install surfaces instead of
-# silently degrading.
+# IPC publish. It is the only MAVLink command-and-control path; there is no
+# packaged fallback. If the binary is absent the unit fails visibly
+# (Restart=on-failure). The installer Hard-gates the router's fetch and
+# re-checks its on-disk presence in the health gate, so a missing binary fails
+# the install rather than reporting OK while this unit crash-loops with no FC
+# link.
 ExecStart=/opt/ados/bin/ados-mavlink-router
 Restart=on-failure
 RestartSec=1

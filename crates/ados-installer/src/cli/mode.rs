@@ -1,10 +1,10 @@
 //! Resolve the install run-mode from parsed arguments.
 //!
-//! The mode picks which step chain the installer assembles. In this scaffold
-//! the resolution is purely flag-driven; the "already installed" probe that
-//! turns a bare pair code into a `PairOnly` (instead of a `FreshInstall`) lands
-//! in a later phase, so `PairOnly` is only reached via an explicit caller hook
-//! for now.
+//! The mode picks which step chain the installer assembles. The resolution
+//! combines the parsed flags with the caller's install-presence probe result: a
+//! bare pair code on an already-installed box resolves to `PairOnly` (a fast
+//! re-pair), while the same invocation on a fresh box resolves to
+//! `FreshInstall` (which pairs at the end of the chain).
 
 use super::args::Args;
 
@@ -30,10 +30,10 @@ impl RunMode {
     /// (status, uninstall) first, then force, then upgrade, else a fresh
     /// install.
     ///
-    /// `already_installed` is the result of the (later-phase) install probe.
-    /// A bare pair code against an existing install with no `--force` is a
-    /// `PairOnly`; in this phase the caller passes `false` so the flag-only
-    /// path is exercised, and `PairOnly` is opt-in via this argument.
+    /// `already_installed` is the result of the install-presence probe. A bare
+    /// pair code against an existing install with neither `--force` nor
+    /// `--upgrade` is a `PairOnly`; on a fresh box the same pair code falls
+    /// through to `FreshInstall` (which pairs at the end of the chain).
     pub fn resolve(args: &Args, already_installed: bool) -> RunMode {
         if args.status {
             return RunMode::Status;

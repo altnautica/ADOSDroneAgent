@@ -45,10 +45,15 @@ const GROUND: &[&str] = &["ground_station"];
 /// The full catalog of prebuilt service binaries.
 ///
 /// Gate rationale: the agent cannot do its job without the orchestrator
-/// (`ados-supervisor`), the video pipeline (`ados-video`), the cloud-relay
-/// transport (`ados-cloud`), or the vision host (`ados-vision`), so those four
-/// are `Hard`. Everything else degrades to best-effort: the agent still comes
-/// up and reports the missing capability via the install result.
+/// (`ados-supervisor`), the MAVLink router (`ados-mavlink-router`), the video
+/// pipeline (`ados-video`), the cloud-relay transport (`ados-cloud`), or the
+/// vision host (`ados-vision`), so those are `Hard`. The router is the sole
+/// command-and-control path to the flight controller — the packaged Python
+/// MAVLink service it replaced is gone, so a missing router leaves the Core
+/// MAVLink unit crash-looping with no FC telemetry, arming, or GCS link. A
+/// fetch miss must therefore FAIL the install rather than report it healthy.
+/// Everything else degrades to best-effort: the agent still comes up and
+/// reports the missing capability via the install result.
 pub const PREBUILT: &[PrebuiltBinary] = &[
     PrebuiltBinary {
         service: "ados-tui",
@@ -71,7 +76,11 @@ pub const PREBUILT: &[PrebuiltBinary] = &[
         asset: "ados-mavlink-router-aarch64",
         release_tag: "prebuilt-mavlink-router",
         dest: "/opt/ados/bin/ados-mavlink-router",
-        gate: Gate::BestEffort,
+        // The sole command-and-control path: the Core MAVLink unit execs this
+        // binary unconditionally and has no Python fallback. Hard on both
+        // profiles so a fetch miss aborts the install instead of shipping a
+        // unit that crash-loops with no FC link.
+        gate: Gate::Hard,
         profiles: BOTH,
     },
     PrebuiltBinary {
@@ -207,16 +216,40 @@ mod tests {
     }
 
     #[test]
-    fn exactly_four_hard_and_they_are_the_right_ones() {
+    fn exactly_five_hard_and_they_are_the_right_ones() {
         let hard: Vec<&str> = PREBUILT
             .iter()
             .filter(|b| b.gate == Gate::Hard)
             .map(|b| b.service)
             .collect();
-        assert_eq!(hard.len(), 4, "hard gates: {hard:?}");
-        for svc in ["ados-supervisor", "ados-video", "ados-cloud", "ados-vision"] {
+        assert_eq!(hard.len(), 5, "hard gates: {hard:?}");
+        for svc in [
+            "ados-supervisor",
+            "ados-mavlink-router",
+            "ados-video",
+            "ados-cloud",
+            "ados-vision",
+        ] {
             assert!(hard.contains(&svc), "{svc} must be a Hard gate");
         }
+    }
+
+    #[test]
+    fn mavlink_router_is_hard_on_both_profiles() {
+        // The router is the sole C2 path with no Python fallback; its absence
+        // must fail the install on either profile, so it is a Hard gate that
+        // ships on both.
+        let router = PREBUILT
+            .iter()
+            .find(|b| b.service == "ados-mavlink-router")
+            .expect("ados-mavlink-router must be in the catalog");
+        assert_eq!(router.gate, Gate::Hard);
+        assert!(for_profile("drone")
+            .iter()
+            .any(|b| b.service == "ados-mavlink-router"));
+        assert!(for_profile("ground_station")
+            .iter()
+            .any(|b| b.service == "ados-mavlink-router"));
     }
 
     #[test]

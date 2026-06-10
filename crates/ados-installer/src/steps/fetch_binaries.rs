@@ -311,7 +311,15 @@ mod tests {
 
     #[test]
     fn each_hard_gate_failing_means_fail_required() {
-        for svc in ["ados-supervisor", "ados-video", "ados-cloud", "ados-vision"] {
+        // The MAVLink router is the sole C2 path with no Python fallback, so it
+        // is a Hard gate alongside the orchestrator/video/cloud/vision set.
+        for svc in [
+            "ados-supervisor",
+            "ados-mavlink-router",
+            "ados-video",
+            "ados-cloud",
+            "ados-vision",
+        ] {
             let b = PREBUILT.iter().find(|b| b.service == svc).unwrap();
             assert_eq!(b.gate, Gate::Hard, "{svc} must be a Hard gate");
             assert_eq!(
@@ -327,7 +335,7 @@ mod tests {
     #[test]
     fn best_effort_failing_continues() {
         // Pick a couple of best-effort catalog entries.
-        for svc in ["ados-tui", "ados-mavlink-router", "ados-radio"] {
+        for svc in ["ados-tui", "ados-radio", "ados-groundlink"] {
             let b = PREBUILT.iter().find(|b| b.service == svc).unwrap();
             assert_eq!(b.gate, Gate::BestEffort);
             assert_eq!(
