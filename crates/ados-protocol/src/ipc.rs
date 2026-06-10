@@ -20,6 +20,7 @@
 use std::io;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -47,6 +48,12 @@ pub struct IpcBroadcast {
     last: Arc<Mutex<Option<Vec<u8>>>>,
     keep_last: bool,
     accept_task: JoinHandle<()>,
+    /// Monotonic count of clients evicted for falling behind (a full outbound
+    /// queue) or disconnecting mid-broadcast. A slow consumer is otherwise
+    /// pruned silently; surfacing this counter lets the owning service report
+    /// the eviction the same way the radio TX-liveness watchdog surfaces a
+    /// stalled link — a silent drop is itself the failure mode to detect.
+    dropped_clients: Arc<AtomicU64>,
 }
 
 impl IpcBroadcast {
@@ -77,6 +84,7 @@ impl IpcBroadcast {
 
         let clients: Arc<Mutex<Vec<ClientHandle>>> = Arc::new(Mutex::new(Vec::new()));
         let last: Arc<Mutex<Option<Vec<u8>>>> = Arc::new(Mutex::new(None));
+        let dropped_clients = Arc::new(AtomicU64::new(0));
 
         let (inbound_tx, inbound_rx) = match inbound {
             Some(cap) => {
@@ -114,6 +122,7 @@ impl IpcBroadcast {
                 last,
                 keep_last,
                 accept_task,
+                dropped_clients,
             },
             inbound_rx,
         ))
@@ -196,6 +205,7 @@ impl IpcBroadcast {
         }
         let mut clients = self.clients.lock().await;
         let mut keep = Vec::with_capacity(clients.len());
+        let mut dropped = 0u64;
         for client in clients.drain(..) {
             match client.tx.try_send(buf.clone()) {
                 Ok(()) => keep.push(client),
@@ -205,10 +215,16 @@ impl IpcBroadcast {
                 Err(_) => {
                     client.reader.abort();
                     client.writer.abort();
+                    dropped += 1;
                 }
             }
         }
         *clients = keep;
+        // One relaxed add for the whole broadcast rather than per pruned
+        // client; the owning service polls this and reports it.
+        if dropped > 0 {
+            self.dropped_clients.fetch_add(dropped, Ordering::Relaxed);
+        }
     }
 
     /// Number of currently connected clients.
@@ -219,6 +235,17 @@ impl IpcBroadcast {
     /// The per-client queue depth this server was bound with.
     pub fn queue_depth(&self) -> usize {
         self.queue_depth
+    }
+
+    /// Monotonic count of clients evicted for falling behind (a full outbound
+    /// queue) or disconnecting during a broadcast, since this server was bound.
+    ///
+    /// A slow consumer is pruned without an error reaching it, so this counter
+    /// is the producer-visible signal that an eviction happened. The owning
+    /// service folds it into the state snapshot it already publishes so the
+    /// eviction is observable remotely rather than silent. Lock-free.
+    pub fn dropped_clients(&self) -> u64 {
+        self.dropped_clients.load(Ordering::Relaxed)
     }
 }
 
@@ -414,7 +441,54 @@ mod tests {
 
         // The slow client has been pruned; the fast client remains.
         assert_eq!(server.client_count().await, 1);
+        // The eviction is observable: the drop counter advanced by exactly the
+        // one stalled consumer, not the fast one that kept draining.
+        assert_eq!(server.dropped_clients(), 1);
         fast_reader.abort();
+    }
+
+    #[tokio::test]
+    async fn dropped_client_counter_advances_when_a_consumer_stalls() {
+        let path = temp_sock("dropcount");
+        // Depth-2 queue so a non-draining client is evicted quickly once its
+        // kernel send buffer and then its queue fill.
+        let (server, _inbound) = IpcBroadcast::bind(&path, 2, false, None).await.unwrap();
+
+        // A counter starts at zero before any client exists.
+        assert_eq!(server.dropped_clients(), 0);
+
+        // One consumer connects and then never reads a single byte.
+        let _stalled = connect_with_retry(&path, 10, Duration::from_millis(20))
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(server.client_count().await, 1);
+
+        // Push large payloads until the stalled consumer's kernel buffer and
+        // queue fill and the next broadcast evicts it.
+        let big = vec![0x5Au8; 60_000];
+        for _ in 0..60u32 {
+            server
+                .broadcast(encode_frame(&big, MAVLINK_MAX_FRAME).unwrap())
+                .await;
+            tokio::time::sleep(Duration::from_millis(2)).await;
+            if server.client_count().await == 0 {
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // The stalled consumer was pruned, and the eviction is no longer
+        // silent: the producer-visible counter advanced.
+        assert_eq!(server.client_count().await, 0);
+        assert_eq!(server.dropped_clients(), 1);
+
+        // The counter is monotonic: it does not reset across further broadcasts
+        // once the client is gone (no remaining client to drop).
+        server
+            .broadcast(encode_frame(b"tail", MAVLINK_MAX_FRAME).unwrap())
+            .await;
+        assert_eq!(server.dropped_clients(), 1);
     }
 
     #[tokio::test]

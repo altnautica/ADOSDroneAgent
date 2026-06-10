@@ -244,14 +244,46 @@ async fn main() {
         let state = state.clone();
         let params = params.clone();
         let state_ipc = state_ipc.clone();
+        let mavlink_ipc_stats = mavlink_ipc.clone();
         let cancel = cancel.clone();
         let msgpack = use_msgpack();
         tasks.push(tokio::spawn(async move {
             let mut tick = tokio::time::interval(Duration::from_millis(100));
+            // Last reported eviction counts, so a fresh eviction logs once
+            // rather than every 100 ms tick while the count sits unchanged.
+            let mut last_mavlink_drops = 0u64;
+            let mut last_state_drops = 0u64;
             loop {
                 tokio::select! {
                     _ = tick.tick() => {
-                        let extras = build_extras(&fc, &state, &params, started).await;
+                        let mavlink_drops = mavlink_ipc_stats.dropped_clients();
+                        let state_drops = state_ipc.dropped_clients();
+                        // Surface a newly evicted slow consumer as a log line
+                        // (also shipped to the logging daemon) so the eviction
+                        // is not silent. The continuous signal rides the state
+                        // snapshot below for the GCS.
+                        if mavlink_drops > last_mavlink_drops {
+                            tracing::warn!(
+                                socket = "mavlink",
+                                evicted = mavlink_drops - last_mavlink_drops,
+                                total = mavlink_drops,
+                                "ipc_slow_client_evicted"
+                            );
+                            last_mavlink_drops = mavlink_drops;
+                        }
+                        if state_drops > last_state_drops {
+                            tracing::warn!(
+                                socket = "state",
+                                evicted = state_drops - last_state_drops,
+                                total = state_drops,
+                                "ipc_slow_client_evicted"
+                            );
+                            last_state_drops = state_drops;
+                        }
+                        let extras = build_extras(
+                            &fc, &state, &params, started, mavlink_drops, state_drops,
+                        )
+                        .await;
                         let wire = { state.lock().await.to_wire_with(&extras) };
                         let encoded = if msgpack { encode_v2(&wire) } else { encode_v1(&wire) };
                         match encoded {
@@ -301,13 +333,21 @@ async fn main() {
     tracing::info!("mavlink_router_stopped");
 }
 
-/// Build the 11 runtime extras the state snapshot carries on top of the vehicle
-/// fields (mirrors __main__.py:78-133).
+/// Build the runtime extras the state snapshot carries on top of the vehicle
+/// fields.
+///
+/// `mavlink_drops` / `state_drops` are the monotonic slow-consumer eviction
+/// counts from the two IPC servers, carried on the snapshot so a silently
+/// pruned client is observable to Mission Control (it never sees an error of
+/// its own when it is dropped for falling behind).
+#[allow(clippy::too_many_arguments)]
 async fn build_extras(
     fc: &Arc<FcConnection>,
     state: &Arc<Mutex<VehicleState>>,
     params: &Arc<Mutex<ParamCache>>,
     started: Instant,
+    mavlink_drops: u64,
+    state_drops: u64,
 ) -> Map<String, Value> {
     let cached = params.lock().await.count();
     let expected = state.lock().await.param_count;
@@ -331,6 +371,8 @@ async fn build_extras(
     );
     extras.insert("param_cached_count".into(), json!(cached));
     extras.insert("param_expected_count".into(), json!(expected));
+    extras.insert("ipc_mavlink_drops".into(), json!(mavlink_drops));
+    extras.insert("ipc_state_drops".into(), json!(state_drops));
     extras.insert("params".into(), Value::Object(params_blob));
     extras
 }
