@@ -42,6 +42,7 @@
 //! consumer constructs the controller with the real runner in production and a
 //! recorder in tests without touching systemd.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -143,6 +144,15 @@ pub struct PluginSupervisor {
     agent_version: String,
     systemctl: Arc<dyn SystemctlRunner>,
     installs: Vec<PluginInstall>,
+    /// Capabilities the active host runtime cannot back: their host method
+    /// returns the `not_implemented` shape no matter what, so granting one buys
+    /// the operator nothing but a surprise error at call time. The controller
+    /// refuses to grant these (an honest refuse-at-install). Populated from
+    /// [`RealHost::ungrantable_caps`](crate::realhost::RealHost::ungrantable_caps)
+    /// by the daemons that wire the default Rust host; empty by default so a
+    /// caller with a different host (e.g. tests, or a future fully-wired host)
+    /// imposes no refusal.
+    ungrantable_caps: BTreeSet<String>,
     /// Built-in plugin manifests keyed by id. The discovery of built-ins from
     /// Python entry-points stays in the Python loader; the Rust controller
     /// accepts them via [`PluginSupervisor::set_builtins`] so the lifecycle
@@ -169,12 +179,56 @@ impl PluginSupervisor {
             systemctl: Arc::new(RealSystemctl),
             installs: Vec::new(),
             builtin: std::collections::BTreeMap::new(),
+            ungrantable_caps: BTreeSet::new(),
         }
+    }
+
+    /// Build a controller for the live agent, with signature enforcement ON by
+    /// default. This is the safe constructor every daemon should use so a live
+    /// install path can never silently accept an unsigned archive: a caller
+    /// cannot accidentally pass `false`.
+    ///
+    /// The default is overridable for a deliberately-relaxed deployment via the
+    /// `ADOS_PLUGIN_REQUIRE_SIGNED` environment variable: any of `0`, `false`,
+    /// `no`, `off` (case-insensitive) turns enforcement OFF; everything else
+    /// (including the variable being absent) leaves it ON. The relaxed choice is
+    /// logged so it is never silent.
+    pub fn production(
+        paths: Paths,
+        current_board_id: Option<String>,
+        agent_version: impl Into<String>,
+    ) -> Self {
+        let require_signed = require_signed_default();
+        if !require_signed {
+            tracing::warn!(
+                "plugin signature enforcement DISABLED via ADOS_PLUGIN_REQUIRE_SIGNED; \
+                 unsigned plugin archives will be accepted"
+            );
+        }
+        PluginSupervisor::new(paths, require_signed, current_board_id, agent_version)
     }
 
     /// Inject a `systemctl` runner (tests use a no-op recorder).
     pub fn with_systemctl(mut self, runner: Arc<dyn SystemctlRunner>) -> Self {
         self.systemctl = runner;
+        self
+    }
+
+    /// True when this controller enforces a valid first-party signature before
+    /// installing an archive. Exposed so a caller / test can assert the live
+    /// wiring path is signed.
+    pub fn require_signed(&self) -> bool {
+        self.require_signed
+    }
+
+    /// Declare the capabilities the active host runtime cannot back, so the
+    /// controller refuses to grant them ([`grant_permission`](Self::grant_permission)
+    /// returns an error naming the cap). The daemons pass
+    /// [`RealHost::ungrantable_caps`](crate::realhost::RealHost::ungrantable_caps);
+    /// see that method for why a cap shared with a wired surface is never in the
+    /// set.
+    pub fn with_ungrantable_caps(mut self, caps: BTreeSet<String>) -> Self {
+        self.ungrantable_caps = caps;
         self
     }
 
@@ -329,7 +383,9 @@ impl PluginSupervisor {
     }
 
     /// Grant a declared permission. Rejects a permission the manifest does not
-    /// declare.
+    /// declare, and a permission whose capability the active host runtime cannot
+    /// back (see [`with_ungrantable_caps`](Self::with_ungrantable_caps)) so an
+    /// operator never grants a capability that can only error at call time.
     pub fn grant_permission(
         &mut self,
         plugin_id: &str,
@@ -340,6 +396,18 @@ impl PluginSupervisor {
         if !manifest.declared_permissions().contains(permission_id) {
             return Err(SupervisorError(format!(
                 "plugin {plugin_id} did not declare permission {permission_id}"
+            ))
+            .into());
+        }
+        // Refuse a capability the active host runtime cannot back: its host
+        // method returns not_implemented regardless of wiring, so granting it
+        // would only surface a surprise error when the plugin first calls the
+        // gated method. Refuse honestly at grant time instead.
+        if self.ungrantable_caps.contains(permission_id) {
+            return Err(SupervisorError(format!(
+                "plugin {plugin_id}: capability {permission_id} is not supported by this \
+                 agent runtime (its host method is not implemented); refusing to grant a \
+                 capability that can only error at call time"
             ))
             .into());
         }
@@ -596,6 +664,21 @@ impl PluginSupervisor {
     }
 }
 
+/// The default signature-enforcement policy for [`PluginSupervisor::production`]:
+/// ON unless `ADOS_PLUGIN_REQUIRE_SIGNED` is explicitly one of the falsey tokens
+/// (`0` / `false` / `no` / `off`, case-insensitive). An absent or unrecognized
+/// value keeps enforcement ON, so the secure posture is the default a misconfig
+/// cannot weaken.
+pub fn require_signed_default() -> bool {
+    match std::env::var("ADOS_PLUGIN_REQUIRE_SIGNED") {
+        Ok(v) => !matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "0" | "false" | "no" | "off"
+        ),
+        Err(_) => true,
+    }
+}
+
 /// Bounded semver-range parser for the constraint vocabulary.
 ///
 /// Supports comma-separated atoms each of the form `<op><semver>` where op is
@@ -701,6 +784,68 @@ mod tests {
     }
 
     const SUBPROC_MANIFEST: &str = "id: com.example.thermal\nversion: 1.0.0\nrisk: high\ncompatibility:\n  ados_version: \">=0.1.0,<2.0.0\"\nagent:\n  entrypoint: agent/py/x.py\n  permissions:\n    - hardware.spi\n";
+
+    #[test]
+    fn require_signed_default_is_on_unless_explicitly_falsey() {
+        // Serialized env mutation: this is the only test that touches
+        // ADOS_PLUGIN_REQUIRE_SIGNED, so it restores the prior value and runs
+        // alone within this module's concern.
+        let prev = std::env::var("ADOS_PLUGIN_REQUIRE_SIGNED").ok();
+
+        std::env::remove_var("ADOS_PLUGIN_REQUIRE_SIGNED");
+        assert!(require_signed_default(), "absent env keeps signing ON");
+
+        for falsey in ["0", "false", "FALSE", "no", "off", " off "] {
+            std::env::set_var("ADOS_PLUGIN_REQUIRE_SIGNED", falsey);
+            assert!(!require_signed_default(), "{falsey:?} must disable signing");
+        }
+        for truthy in ["1", "true", "yes", "on", "anything", ""] {
+            std::env::set_var("ADOS_PLUGIN_REQUIRE_SIGNED", truthy);
+            assert!(require_signed_default(), "{truthy:?} must keep signing ON");
+        }
+
+        match prev {
+            Some(v) => std::env::set_var("ADOS_PLUGIN_REQUIRE_SIGNED", v),
+            None => std::env::remove_var("ADOS_PLUGIN_REQUIRE_SIGNED"),
+        }
+    }
+
+    #[test]
+    fn production_supervisor_requires_signing_by_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let prev = std::env::var("ADOS_PLUGIN_REQUIRE_SIGNED").ok();
+        std::env::remove_var("ADOS_PLUGIN_REQUIRE_SIGNED");
+        let sup = PluginSupervisor::production(paths_in(dir.path()), None, "0.48.11");
+        assert!(sup.require_signed());
+        match prev {
+            Some(v) => std::env::set_var("ADOS_PLUGIN_REQUIRE_SIGNED", v),
+            None => std::env::remove_var("ADOS_PLUGIN_REQUIRE_SIGNED"),
+        }
+    }
+
+    #[test]
+    fn production_supervisor_rejects_unsigned_archive() {
+        // The end-to-end F3 guard at the supervisor layer: a production-built
+        // controller refuses an unsigned archive on install_contents.
+        let dir = tempfile::tempdir().unwrap();
+        let prev = std::env::var("ADOS_PLUGIN_REQUIRE_SIGNED").ok();
+        std::env::remove_var("ADOS_PLUGIN_REQUIRE_SIGNED");
+        let mut sup = PluginSupervisor::production(paths_in(dir.path()), None, "0.48.11")
+            .with_systemctl(Arc::new(RecordingSystemctl::default()));
+        let contents = parse_archive_bytes(build_unsigned_archive(SUBPROC_MANIFEST)).unwrap();
+        let err = sup
+            .install_contents(contents, Path::new("/tmp/x.adosplug"))
+            .unwrap_err();
+        assert!(
+            matches!(err, LifecycleError::Signature(_)),
+            "an unsigned archive must fail the signature gate: {err}"
+        );
+        assert!(format!("{err}").contains("unsigned"), "{err}");
+        match prev {
+            Some(v) => std::env::set_var("ADOS_PLUGIN_REQUIRE_SIGNED", v),
+            None => std::env::remove_var("ADOS_PLUGIN_REQUIRE_SIGNED"),
+        }
+    }
 
     #[test]
     fn semver_in_range_boundaries() {
@@ -832,6 +977,90 @@ mod tests {
             .grant_permission("com.example.thermal", "vehicle.command")
             .unwrap_err();
         assert!(matches!(err, LifecycleError::Supervisor(_)));
+    }
+
+    #[test]
+    fn grant_refuses_a_capability_the_host_cannot_back() {
+        // A plugin that declares mission.read can have it recorded as a requested
+        // permission, but the active Rust host does not implement mission.read,
+        // so the supervisor must refuse the grant rather than let the operator
+        // hand out a capability that can only error at call time.
+        let dir = tempfile::tempdir().unwrap();
+        let ungrantable: BTreeSet<String> = ["mission.read".to_string()].into_iter().collect();
+        let mut sup = PluginSupervisor::new(paths_in(dir.path()), false, None, "0.48.11")
+            .with_systemctl(Arc::new(RecordingSystemctl::default()))
+            .with_ungrantable_caps(ungrantable);
+        let manifest = "id: com.example.mission\nversion: 1.0.0\ncompatibility:\n  ados_version: \">=0.1.0,<2.0.0\"\nagent:\n  entrypoint: agent/py/x.py\n  permissions:\n    - mission.read\n    - hardware.spi\n";
+        let contents = parse_archive_bytes(build_unsigned_archive(manifest)).unwrap();
+        sup.install_contents(contents, Path::new("/tmp/mission.adosplug"))
+            .unwrap();
+
+        // The dead capability is refused with a clear message.
+        let err = sup
+            .grant_permission("com.example.mission", "mission.read")
+            .unwrap_err();
+        assert!(
+            format!("{err}").contains("not supported by this agent runtime"),
+            "{err}"
+        );
+        assert!(!state::is_permission_granted(
+            sup.find_install("com.example.mission").unwrap(),
+            "mission.read"
+        ));
+
+        // A still-backed capability the same plugin declares is granted normally.
+        sup.grant_permission("com.example.mission", "hardware.spi")
+            .unwrap();
+        assert!(state::is_permission_granted(
+            sup.find_install("com.example.mission").unwrap(),
+            "hardware.spi"
+        ));
+    }
+
+    #[test]
+    fn grant_allows_all_caps_when_none_are_marked_ungrantable() {
+        // With no ungrantable set declared (the default), a cap the host happens
+        // not to back is still grantable — the refusal is opt-in via
+        // with_ungrantable_caps, so a fully-wired host or a test imposes nothing.
+        let dir = tempfile::tempdir().unwrap();
+        let mut sup = PluginSupervisor::new(paths_in(dir.path()), false, None, "0.48.11")
+            .with_systemctl(Arc::new(RecordingSystemctl::default()));
+        let manifest = "id: com.example.mission\nversion: 1.0.0\ncompatibility:\n  ados_version: \">=0.1.0,<2.0.0\"\nagent:\n  entrypoint: agent/py/x.py\n  permissions:\n    - mission.read\n";
+        let contents = parse_archive_bytes(build_unsigned_archive(manifest)).unwrap();
+        sup.install_contents(contents, Path::new("/tmp/mission.adosplug"))
+            .unwrap();
+        sup.grant_permission("com.example.mission", "mission.read")
+            .unwrap();
+        assert!(state::is_permission_granted(
+            sup.find_install("com.example.mission").unwrap(),
+            "mission.read"
+        ));
+    }
+
+    #[test]
+    fn realhost_ungrantable_caps_flow_through_the_grant_gate() {
+        // End-to-end: feed the controller the exact set RealHost advertises and
+        // confirm a RealHost-dead cap is refused while a RealHost-backed cap the
+        // plugin declares is granted. This locks the wiring the daemons use.
+        use crate::realhost::RealHost;
+        let dir = tempfile::tempdir().unwrap();
+        let mut sup = PluginSupervisor::new(paths_in(dir.path()), false, None, "0.48.11")
+            .with_systemctl(Arc::new(RecordingSystemctl::default()))
+            .with_ungrantable_caps(RealHost::ungrantable_caps());
+        // recording.write is dead on RealHost; sensor.camera.register is backed.
+        let manifest = "id: com.example.rec\nversion: 1.0.0\ncompatibility:\n  ados_version: \">=0.1.0,<2.0.0\"\nagent:\n  entrypoint: agent/py/x.py\n  permissions:\n    - recording.write\n    - sensor.camera.register\n";
+        let contents = parse_archive_bytes(build_unsigned_archive(manifest)).unwrap();
+        sup.install_contents(contents, Path::new("/tmp/rec.adosplug"))
+            .unwrap();
+        assert!(sup
+            .grant_permission("com.example.rec", "recording.write")
+            .is_err());
+        sup.grant_permission("com.example.rec", "sensor.camera.register")
+            .unwrap();
+        assert!(state::is_permission_granted(
+            sup.find_install("com.example.rec").unwrap(),
+            "sensor.camera.register"
+        ));
     }
 
     #[test]

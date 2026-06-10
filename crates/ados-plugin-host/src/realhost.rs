@@ -710,7 +710,98 @@ impl RealHost {
             .expect("cameras mutex poisoned")
             .publish_frame(device_path, frame);
     }
+
+    /// Host-coupled methods this host does NOT override, so they fall to the
+    /// [`HostServices`] trait default and always return the `not_implemented`
+    /// shape regardless of runtime wiring.
+    ///
+    /// This is distinct from a method whose backing client is merely *not up
+    /// yet* (`mavlink.send`, the three vision request methods): those have real
+    /// bodies that degrade to a `not_available` / `not_implemented` response
+    /// only while their socket is absent, and become live the moment it is. The
+    /// methods listed here have no body at all on this host, so a capability that
+    /// gates only these can do nothing but error.
+    ///
+    /// `mavlink.subscribe` and `vision.subscribe_frames` are deliberately absent:
+    /// the server short-circuits both to the stream methods this host overrides
+    /// (`mavlink_subscribe_stream` / `vision_subscribe_stream`), so they never
+    /// reach the not_implemented trait default.
+    ///
+    /// A `#[cfg(test)]` test (`unimplemented_methods_match_reality`) asserts this
+    /// list is exactly the set of methods that return `not_implemented` from a
+    /// freshly-built host, so it cannot silently drift as methods are wired.
+    pub const UNIMPLEMENTED_HOST_METHODS: &'static [crate::dispatch::Method] = &[
+        crate::dispatch::Method::TelemetrySubscribe,
+        crate::dispatch::Method::MissionRead,
+        crate::dispatch::Method::MissionWrite,
+        crate::dispatch::Method::RecordingStart,
+        crate::dispatch::Method::RecordingStop,
+    ];
+
+    /// The capabilities that gate ONLY [`UNIMPLEMENTED_HOST_METHODS`](Self::UNIMPLEMENTED_HOST_METHODS)
+    /// on this host, so granting one of them buys the operator nothing but a
+    /// `not_implemented` error at call time.
+    ///
+    /// The lifecycle controller refuses to grant these (an honest refuse-at-
+    /// install rather than a surprise error-at-call). A capability that also
+    /// gates a wired method (e.g. a cap shared with an implemented surface) is
+    /// excluded, so a still-useful capability is never withheld.
+    pub fn ungrantable_caps() -> BTreeSet<String> {
+        // The caps gated by the unimplemented methods.
+        let unimplemented: BTreeSet<&'static str> = Self::UNIMPLEMENTED_HOST_METHODS
+            .iter()
+            .filter_map(|m| m.required_cap())
+            .collect();
+        // The caps gated by any IMPLEMENTED dispatch-level method, so a cap
+        // shared with a wired surface is never refused. A method is implemented
+        // here unless it is in the unimplemented list.
+        let implemented: BTreeSet<&'static str> = ALL_DISPATCH_METHODS
+            .iter()
+            .filter(|m| !Self::UNIMPLEMENTED_HOST_METHODS.contains(m))
+            .filter_map(|m| m.required_cap())
+            .collect();
+        unimplemented
+            .difference(&implemented)
+            .map(|c| c.to_string())
+            .collect()
+    }
 }
+
+/// Every dispatch-level [`Method`](crate::dispatch::Method), so
+/// [`RealHost::ungrantable_caps`] can subtract the caps gated by implemented
+/// methods. Kept exhaustive by the match in
+/// [`Method::wire_name`](crate::dispatch::Method::wire_name): a new variant
+/// forces an arm there, and the `all_dispatch_methods_is_exhaustive` test locks
+/// this list to the generated table's cardinality.
+const ALL_DISPATCH_METHODS: &[crate::dispatch::Method] = {
+    use crate::dispatch::Method::*;
+    &[
+        EventPublish,
+        EventSubscribe,
+        Ping,
+        TelemetrySubscribe,
+        TelemetryExtend,
+        MissionRead,
+        MissionWrite,
+        RecordingStart,
+        RecordingStop,
+        MavlinkSubscribe,
+        MavlinkSend,
+        MavlinkRegisterComponent,
+        PeripheralRegisterDriver,
+        PeripheralUnregisterDriver,
+        CameraClaim,
+        CameraRelease,
+        CameraGetFrame,
+        ConfigGet,
+        ConfigSet,
+        ProcessSpawn,
+        VisionSubscribeFrames,
+        VisionRegisterModel,
+        VisionInfer,
+        VisionPublishDetection,
+    ]
+};
 
 impl Default for RealHost {
     fn default() -> Self {
@@ -1375,6 +1466,134 @@ mod tests {
         m.iter()
             .find(|(k, _)| k.as_str() == Some(key))
             .map(|(_, v)| v)
+    }
+
+    // ---- unimplemented-method / ungrantable-cap invariants ----------
+
+    /// The method name carried in a `not_implemented` result, if it is one.
+    fn not_implemented_method(r: &Result<HostResult, HostError>) -> Option<String> {
+        let Ok(Value::Map(m)) = r else {
+            return None;
+        };
+        let is_ni = m
+            .iter()
+            .find(|(k, _)| k.as_str() == Some("error"))
+            .and_then(|(_, v)| v.as_str())
+            == Some("not_implemented");
+        if !is_ni {
+            return None;
+        }
+        m.iter()
+            .find(|(k, _)| k.as_str() == Some("method"))
+            .and_then(|(_, v)| v.as_str())
+            .map(str::to_string)
+    }
+
+    #[test]
+    fn all_dispatch_methods_is_exhaustive() {
+        // The local ALL_DISPATCH_METHODS list must cover every generated method
+        // and carry no extras, so ungrantable_caps() reasons over the full set.
+        use ados_protocol::dispatch::DISPATCH_METHODS;
+        assert_eq!(ALL_DISPATCH_METHODS.len(), DISPATCH_METHODS.len());
+        for row in DISPATCH_METHODS {
+            assert!(
+                ALL_DISPATCH_METHODS
+                    .iter()
+                    .any(|m| m.wire_name() == row.method),
+                "generated method {} missing from ALL_DISPATCH_METHODS",
+                row.method
+            );
+        }
+    }
+
+    #[test]
+    fn unimplemented_methods_match_reality() {
+        // Every method declared unimplemented must actually return the
+        // not_implemented shape (with its own method name) from a freshly-built
+        // host, with no MAVLink / vision client wired. The async vision methods
+        // are exercised in their own test (they need an executor); the five
+        // synchronous methods are checked directly here.
+        let host = RealHost::new();
+        let empty = Value::Map(vec![]);
+        for method in RealHost::UNIMPLEMENTED_HOST_METHODS {
+            use crate::dispatch::Method;
+            let r = match method {
+                Method::TelemetrySubscribe => host.telemetry_subscribe("p", &empty),
+                Method::MissionRead => host.mission_read("p", &empty),
+                Method::MissionWrite => host.mission_write("p", &empty),
+                Method::RecordingStart => host.recording_start("p", &empty),
+                Method::RecordingStop => host.recording_stop("p", &empty),
+                other => panic!("unexpected method in the unimplemented list: {other:?}"),
+            };
+            assert_eq!(
+                not_implemented_method(&r).as_deref(),
+                Some(method.wire_name()),
+                "{} must return not_implemented from a fresh host",
+                method.wire_name()
+            );
+        }
+    }
+
+    #[test]
+    fn implemented_methods_are_not_not_implemented() {
+        // A representative set of WIRED host methods must NOT report
+        // not_implemented even on a fresh host: telemetry.extend validates and
+        // succeeds, config.get reads the store, camera.claim claims, and
+        // process.spawn enforces the allowlist. If one of these regressed into a
+        // stub, this would catch it and the ungrantable set would need updating.
+        let host = RealHost::new();
+        let extend = map(&[("channel", Value::from("c")), ("data", map(&[]))]);
+        assert!(not_implemented_method(&host.telemetry_extend("p", &extend)).is_none());
+        let cfg = map(&[("key", Value::from("k"))]);
+        assert!(not_implemented_method(&host.config_get("p", &cfg)).is_none());
+        let claim = map(&[("device_path", Value::from("/dev/video0"))]);
+        assert!(not_implemented_method(&host.camera_claim("p", &claim)).is_none());
+    }
+
+    #[test]
+    fn ungrantable_caps_are_the_dead_capabilities() {
+        // The four caps that gate only the unimplemented methods, and nothing a
+        // wired surface needs.
+        let ungrantable = RealHost::ungrantable_caps();
+        let expected: BTreeSet<String> = [
+            "telemetry.read",
+            "mission.read",
+            "mission.write",
+            "recording.write",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        assert_eq!(ungrantable, expected);
+        // A cap that gates a wired method (config has no cap; pick a real one)
+        // must never be refused: mavlink.read gates mavlink.subscribe, which is
+        // served via the stream method, and sensor.camera.register gates the
+        // wired camera methods.
+        assert!(!ungrantable.contains("mavlink.read"));
+        assert!(!ungrantable.contains("sensor.camera.register"));
+        assert!(!ungrantable.contains("vision.frame.read"));
+    }
+
+    #[tokio::test]
+    async fn vision_methods_are_not_in_the_unimplemented_set() {
+        // The vision request methods return not_implemented only while the engine
+        // socket is down (a runtime availability state, like mavlink.send), so
+        // their caps are NOT permanently ungrantable. Confirm they are absent
+        // from the unimplemented list even though a fresh host (no engine) does
+        // return not_implemented for them.
+        use crate::dispatch::Method;
+        assert!(!RealHost::UNIMPLEMENTED_HOST_METHODS.contains(&Method::VisionRegisterModel));
+        assert!(!RealHost::UNIMPLEMENTED_HOST_METHODS.contains(&Method::VisionInfer));
+        assert!(!RealHost::UNIMPLEMENTED_HOST_METHODS.contains(&Method::VisionPublishDetection));
+        // And a fresh host does degrade them to not_implemented (the availability
+        // posture), which is why they must be excluded by availability, not by
+        // capability.
+        let host = RealHost::new();
+        let empty = Value::Map(vec![]);
+        assert_eq!(
+            not_implemented_method(&host.vision_infer("p", &empty).await).as_deref(),
+            Some("vision.infer")
+        );
     }
 
     // ---- ComponentRegistrar -----------------------------------------

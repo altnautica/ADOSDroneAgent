@@ -116,8 +116,14 @@ async fn main() -> Result<()> {
     // loads the on-disk install state; a failure here is non-fatal (a fresh box
     // simply has no installs), the supervisor still serves new installs.
     let supervisor: SharedSupervisor = {
+        // The cloud install path is live (the command poll drives install_archive
+        // for a remotely-relayed GCS), so signature enforcement MUST be on:
+        // `production()` bakes require_signed=true by default. The grant path
+        // refuses any capability the default Rust host cannot back so a remote
+        // operator never grants a capability that can only error.
         let mut sup =
-            PluginSupervisor::new(Paths::default(), false, None, env!("CARGO_PKG_VERSION"));
+            PluginSupervisor::production(Paths::default(), None, env!("CARGO_PKG_VERSION"))
+                .with_ungrantable_caps(ados_plugin_host::realhost::RealHost::ungrantable_caps());
         if let Err(e) = sup.discover() {
             tracing::warn!(error = %e, "plugin supervisor discover failed; continuing");
         }
@@ -616,6 +622,32 @@ mod tests {
         Arc::new(Mutex::new(PluginSupervisor::new(
             paths, false, None, "1.0.0",
         )))
+    }
+
+    #[test]
+    fn live_cloud_supervisor_enforces_signing() {
+        // The cloud install path is wired live (the command poll drives
+        // install_archive), so the process-wide supervisor MUST enforce
+        // signatures. Build it exactly as `main` does and assert the secure
+        // default holds with no env override.
+        let prev = std::env::var("ADOS_PLUGIN_REQUIRE_SIGNED").ok();
+        std::env::remove_var("ADOS_PLUGIN_REQUIRE_SIGNED");
+        let dir = std::env::temp_dir().join(format!("ados-cloud-signed-{}", std::process::id()));
+        let paths = Paths {
+            install_dir: dir.join("plugins"),
+            unit_dir: dir.join("units"),
+            state_path: dir.join("state/plugin-state.json"),
+            log_dir: dir.join("logs"),
+        };
+        let sup = PluginSupervisor::production(paths, None, env!("CARGO_PKG_VERSION"))
+            .with_ungrantable_caps(ados_plugin_host::realhost::RealHost::ungrantable_caps());
+        assert!(
+            sup.require_signed(),
+            "the live cloud install supervisor must require signed archives"
+        );
+        if let Some(v) = prev {
+            std::env::set_var("ADOS_PLUGIN_REQUIRE_SIGNED", v);
+        }
     }
 
     /// A one-shot local HTTP server that replies to a single request with the

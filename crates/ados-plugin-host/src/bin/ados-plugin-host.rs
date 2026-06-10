@@ -356,7 +356,13 @@ async fn main() -> Result<()> {
         "plugin host daemon starting"
     );
 
-    let mut supervisor = PluginSupervisor::new(paths, false, None, version);
+    // The lifecycle controller refuses to grant a capability the default Rust
+    // host cannot back (its host method returns not_implemented regardless of
+    // wiring) so an operator never hands out a capability that can only error at
+    // call time. `require_signed=true` is the safe production default for the
+    // live install path.
+    let mut supervisor = PluginSupervisor::production(paths, None, version)
+        .with_ungrantable_caps(RealHost::ungrantable_caps());
     if let Err(e) = supervisor.discover() {
         tracing::error!(error = %e, "plugin discovery failed");
     }

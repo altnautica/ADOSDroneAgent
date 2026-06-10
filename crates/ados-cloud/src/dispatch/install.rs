@@ -298,6 +298,18 @@ mod tests {
             .with_systemctl(Arc::new(RecordingSystemctl::default()))
     }
 
+    /// A signature-enforcing supervisor, matching the live cloud-relay posture
+    /// (`PluginSupervisor::production` bakes require_signed=true).
+    fn signed_supervisor(dir: &Path) -> PluginSupervisor {
+        let sup = PluginSupervisor::new(paths_in(dir), true, None, "1.0.0")
+            .with_systemctl(Arc::new(RecordingSystemctl::default()));
+        assert!(
+            sup.require_signed(),
+            "the cloud-install posture must enforce signing"
+        );
+        sup
+    }
+
     fn install_cmd(job: &str, url: &str) -> InstallCommand {
         InstallCommand {
             job_id: job.to_string(),
@@ -334,6 +346,48 @@ mod tests {
             &seen,
         );
         assert_eq!(r2.data.unwrap()["replay"], true);
+    }
+
+    #[test]
+    fn cloud_install_rejects_an_unsigned_archive_when_signing_is_required() {
+        // The live cloud-relay supervisor enforces signing. An unsigned
+        // `.adosplug` arriving over the cloud command queue must be rejected, not
+        // installed. This is the regression guard for the moment the cloud
+        // install path was wired live: it must carry require_signed=true.
+        let dir = tempfile::tempdir().unwrap();
+        let mut sup = signed_supervisor(dir.path());
+        let seen = dir.path().join("seen.json");
+        let src = FakeSource(build_archive()); // build_archive() is unsigned
+        let r = handle_install(
+            &mut sup,
+            &install_cmd("j-unsigned", "https://abc.convex.cloud/x"),
+            &src,
+            &seen,
+        );
+        assert_eq!(r.status, CommandStatus::Failed);
+        let data = r.data.unwrap();
+        assert_eq!(data["code"], "supervisor_error");
+        let message = r.result["message"].as_str().unwrap_or_default();
+        assert!(
+            message.contains("unsigned"),
+            "the failure must name the missing signature: {message}"
+        );
+        // The plugin must not be installed.
+        assert!(sup.find_install("com.example.thermal").is_none());
+        // And the job is NOT marked seen, so a re-send after the plugin is signed
+        // can still succeed rather than short-circuiting as already-processed.
+        let again = handle_install(
+            &mut sup,
+            &install_cmd("j-unsigned", "https://abc.convex.cloud/x"),
+            &src,
+            &seen,
+        );
+        assert_eq!(again.status, CommandStatus::Failed);
+        assert_ne!(
+            again.data.unwrap().get("replay"),
+            Some(&serde_json::Value::Bool(true)),
+            "a rejected unsigned install must not be recorded as a replayable success"
+        );
     }
 
     #[test]
