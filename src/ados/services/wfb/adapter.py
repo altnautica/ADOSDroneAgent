@@ -11,61 +11,24 @@ from pathlib import Path
 
 from ados.core.logging import get_logger
 from ados.hal.usb import UsbCategory, discover_usb_devices
+from ados.services.wfb._wfb_tables_generated import (
+    WFB_COMPATIBLE,
+    WFB_COMPATIBLE_DRIVERS,
+    WFB_DENY_DRIVER_PREFIXES,
+    WFB_DENY_USB_VENDORS,
+)
 
 log = get_logger("wfb.adapter")
 
-# Known WFB-ng compatible chipsets by VID:PID.
-# RTL8812AU family (0x8812, 0x881A-C), RTL8812EU / RTL8822E (0xB812 /
-# 0xA81A), and TP-Link rebadges all share the vendored DKMS driver and
-# support monitor mode with frame injection.
-WFB_COMPATIBLE: dict[tuple[int, int], str] = {
-    (0x0BDA, 0x8812): "RTL8812AU",
-    (0x0BDA, 0x881A): "RTL8812AU (alt)",
-    (0x0BDA, 0x881B): "RTL8812AU (alt)",
-    (0x0BDA, 0x881C): "RTL8812AU (alt)",
-    # Ambiguous PID: shipped on both RTL8812AU rebadges and RTL8812EU /
-    # RTL8822EU dongles. Default label is the AU variant; the detection
-    # path below promotes it to "RTL8812EU (a81a)" when the bound kernel
-    # driver is rtl88x2eu, which is the authoritative disambiguator.
-    (0x0BDA, 0xA81A): "RTL8812AU (a81a)",
-    (0x0BDA, 0xB812): "RTL8812EU",
-    (0x2357, 0x0120): "RTL8812AU (TP-Link)",
-    (0x2357, 0x0101): "RTL8812AU (TP-Link alt)",
-}
-
-# Driver-name fallback for boards whose VID:PID is not yet in the table
-# above. The DKMS module exposes itself under one of these names; if
-# any matches, treat the adapter as WFB-ng compatible regardless of
-# the USB ID lookup. Future Realtek rebadges automatically work.
-WFB_COMPATIBLE_DRIVERS: set[str] = {
-    "8812au",
-    "8812eu",
-    "rtl8812au",
-    "rtl8812eu",
-    "rtl88x2eu",
-    "rtl88xxau",
-}
-
-# Management-WiFi deny-set. These are onboard / management station radios
-# that CANNOT inject 802.11 frames in monitor mode, so wfb_tx/wfb_rx on
-# them produces zero link even when `iw set monitor` reports success.
-# They must never be tagged WFB-compatible, even as a fallback. The
-# Rock 5C ships an AIC8800 (USB vendor 0xa69c, driver `aic8800*`) as its
-# management WiFi; Broadcom `brcmfmac` is the same class on Pi-family
-# boards. We deny by USB vendor AND by driver-name prefix because the
-# USB sysfs walk on a hub layout can reach a parent that does not expose
-# the AIC8800's idVendor, leaving only the driver string to go on — the
-# original live failure was the manager auto-picking the AIC8800 because
-# it slipped the filter and sorted first by bus order.
-WFB_DENY_USB_VENDORS: frozenset[int] = frozenset(
-    {
-        0xA69C,  # AIcSemi AIC8800 family (Rock 5C management WiFi)
-    }
-)
-WFB_DENY_DRIVER_PREFIXES: tuple[str, ...] = (
-    "aic8800",   # AIC8800 / AIC8800DC / AIC8800D80 variants
-    "brcmfmac",  # Broadcom FullMAC (Pi onboard WiFi)
-)
+# The WFB-ng compatible chipset table (by VID:PID), the driver-name fallback,
+# and the management-WiFi deny-sets are the generated
+# ``ados.services.wfb._wfb_tables_generated`` module, the single source of
+# truth shared with the Rust radio service (whose generated copy is
+# ``crates/ados-protocol/src/wfb_tables.rs``). The source file is
+# ``crates/ados-protocol/wfb-adapters.toml``; regenerate with
+# ``cargo run -p ados-capabilities-codegen``. Re-exported here so the FastAPI
+# read route and the mesh relay/receiver adapters keep importing the names
+# from this module unchanged.
 
 
 def _is_denied_management_wifi(usb_vid: int, driver: str) -> bool:

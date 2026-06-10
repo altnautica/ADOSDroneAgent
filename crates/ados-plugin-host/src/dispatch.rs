@@ -1,9 +1,16 @@
 //! Method dispatch table and the capability gate.
 //!
-//! Ports `src/ados/plugins/ipc/dispatch.py` (the `method -> (handler,
-//! required_cap)` table) and the gate from the Python server's dispatch loop
+//! Mirrors the gate from the Python server's dispatch loop
 //! (`src/ados/plugins/ipc_server.py`): re-check token expiry, look up the
 //! method, then refuse an ungranted caller before the handler runs.
+//!
+//! The `method -> required_cap` mapping is NOT carried here. It is the
+//! generated [`ados_protocol::dispatch::DISPATCH_METHODS`] const, the single
+//! source of truth shared with the Python host (whose generated copy is
+//! `src/ados/plugins/_dispatch_generated.py`). The enum below is the typed
+//! handler handle the host routes on; [`Method::required_cap`] resolves through
+//! the generated table by wire name so the two can never drift, and a test in
+//! this module locks the enum's wire-name coverage to the generated set.
 //!
 //! `None` for the required cap means the method is either ungated (the event
 //! surface and `ping`) or gated inline by the handler itself (the
@@ -15,12 +22,13 @@
 
 use std::collections::BTreeSet;
 
+use ados_protocol::dispatch::required_cap_for;
 use ados_protocol::framebus::methods as vision_methods;
 
-/// One dispatchable method. The variant set is exhaustive over the 12 surfaces
-/// the Python dispatch table covers (`build_dispatch_table`):
-/// event publish/subscribe, ping, telemetry, mission, recording, mavlink,
-/// peripheral/driver/camera, config, and process spawn.
+/// One dispatchable method. The variant set is exhaustive over the surfaces the
+/// generated dispatch table covers: event publish/subscribe, ping, telemetry,
+/// mission, recording, mavlink, peripheral/driver/camera, config, process
+/// spawn, and the four vision methods.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Method {
     // Ungated event surface (per-topic check is inline in the handler).
@@ -103,38 +111,50 @@ impl Method {
         })
     }
 
-    /// The capability the dispatch loop requires before routing, or `None` for
-    /// the ungated / inline-gated methods. Mirrors the second tuple element of
-    /// every row in `build_dispatch_table`.
-    pub fn required_cap(self) -> Option<&'static str> {
+    /// The exact wire string for this method, the inverse of [`Self::from_wire`].
+    /// Used to resolve the dispatch-level cap through the generated table.
+    pub fn wire_name(self) -> &'static str {
         match self {
-            // Ungated: per-topic check is inline; ping is open.
-            Self::EventPublish | Self::EventSubscribe | Self::Ping => None,
-            Self::TelemetrySubscribe => Some("telemetry.read"),
-            Self::TelemetryExtend => Some("telemetry.extend"),
-            Self::MissionRead => Some("mission.read"),
-            Self::MissionWrite => Some("mission.write"),
-            Self::RecordingStart | Self::RecordingStop => Some("recording.write"),
-            Self::MavlinkSubscribe => Some("mavlink.read"),
-            Self::MavlinkSend => Some("mavlink.write"),
-            // Component kind cap is decided inline from the requested kind.
-            Self::MavlinkRegisterComponent => None,
-            // Sensor.*.register cap is decided inline from the driver kind.
-            Self::PeripheralRegisterDriver => None,
-            Self::PeripheralUnregisterDriver => None,
-            Self::CameraClaim | Self::CameraRelease | Self::CameraGetFrame => {
-                Some("sensor.camera.register")
-            }
-            // Per-drone / global config kv is ungated at the dispatch level.
-            Self::ConfigGet | Self::ConfigSet => None,
-            Self::ProcessSpawn => Some("process.spawn"),
-            // Vision: reading frames needs the frame-read cap; registering a
-            // model and running inference both need the model-register cap;
-            // publishing a detection needs the detection-publish cap.
-            Self::VisionSubscribeFrames => Some("vision.frame.read"),
-            Self::VisionRegisterModel | Self::VisionInfer => Some("vision.model.register"),
-            Self::VisionPublishDetection => Some("vision.detection.publish"),
+            Self::EventPublish => "event.publish",
+            Self::EventSubscribe => "event.subscribe",
+            Self::Ping => "ping",
+            Self::TelemetrySubscribe => "telemetry.subscribe",
+            Self::TelemetryExtend => "telemetry.extend",
+            Self::MissionRead => "mission.read",
+            Self::MissionWrite => "mission.write",
+            Self::RecordingStart => "recording.start",
+            Self::RecordingStop => "recording.stop",
+            Self::MavlinkSubscribe => "mavlink.subscribe",
+            Self::MavlinkSend => "mavlink.send",
+            Self::MavlinkRegisterComponent => "mavlink.register_component",
+            Self::PeripheralRegisterDriver => "peripheral.register_driver",
+            Self::PeripheralUnregisterDriver => "peripheral.unregister_driver",
+            Self::CameraClaim => "camera.claim",
+            Self::CameraRelease => "camera.release",
+            Self::CameraGetFrame => "camera.get_frame",
+            Self::ConfigGet => "config.get",
+            Self::ConfigSet => "config.set",
+            Self::ProcessSpawn => "process.spawn",
+            Self::VisionSubscribeFrames => vision_methods::SUBSCRIBE_FRAMES,
+            Self::VisionRegisterModel => vision_methods::REGISTER_MODEL,
+            Self::VisionInfer => vision_methods::INFER,
+            Self::VisionPublishDetection => vision_methods::PUBLISH_DETECTION,
         }
+    }
+
+    /// The capability the dispatch loop requires before routing, or `None` for
+    /// the ungated / inline-gated methods. Resolved through the generated
+    /// [`ados_protocol::dispatch::DISPATCH_METHODS`] table by wire name, so the
+    /// Rust and Python hosts share one source of truth.
+    ///
+    /// Every [`Method`] is a known generated method (locked by
+    /// `enum_matches_generated_table`), so the outer lookup never misses; the
+    /// `.flatten()` collapses a (theoretical, test-prevented) miss to `None` —
+    /// the same value the live [`gate`] reads, with no runtime panic. The gate
+    /// itself rejects unknown wire methods before this is ever reached, so a
+    /// `None` here only ever means "no dispatch-level gate".
+    pub fn required_cap(self) -> Option<&'static str> {
+        required_cap_for(self.wire_name()).flatten()
     }
 }
 
@@ -256,38 +276,96 @@ mod tests {
         );
     }
 
+    /// Every variant the enum can produce. Kept exhaustive by the match in
+    /// [`Method::wire_name`] (a new variant forces an arm there), so this list
+    /// plus the wire-name mapping is the enum's full surface.
+    const ALL_METHODS: &[Method] = &[
+        Method::EventPublish,
+        Method::EventSubscribe,
+        Method::Ping,
+        Method::TelemetrySubscribe,
+        Method::TelemetryExtend,
+        Method::MissionRead,
+        Method::MissionWrite,
+        Method::RecordingStart,
+        Method::RecordingStop,
+        Method::MavlinkSubscribe,
+        Method::MavlinkSend,
+        Method::MavlinkRegisterComponent,
+        Method::PeripheralRegisterDriver,
+        Method::PeripheralUnregisterDriver,
+        Method::CameraClaim,
+        Method::CameraRelease,
+        Method::CameraGetFrame,
+        Method::ConfigGet,
+        Method::ConfigSet,
+        Method::ProcessSpawn,
+        Method::VisionSubscribeFrames,
+        Method::VisionRegisterModel,
+        Method::VisionInfer,
+        Method::VisionPublishDetection,
+    ];
+
     #[test]
-    fn dispatch_table_matches_the_python_required_caps() {
-        // Lock the (method, required_cap) table to the Python source of truth.
-        let expected: &[(&str, Option<&str>)] = &[
-            ("event.publish", None),
-            ("event.subscribe", None),
-            ("ping", None),
-            ("telemetry.subscribe", Some("telemetry.read")),
-            ("telemetry.extend", Some("telemetry.extend")),
-            ("mission.read", Some("mission.read")),
-            ("mission.write", Some("mission.write")),
-            ("recording.start", Some("recording.write")),
-            ("recording.stop", Some("recording.write")),
-            ("mavlink.subscribe", Some("mavlink.read")),
-            ("mavlink.send", Some("mavlink.write")),
-            ("mavlink.register_component", None),
-            ("peripheral.register_driver", None),
-            ("peripheral.unregister_driver", None),
-            ("camera.claim", Some("sensor.camera.register")),
-            ("camera.release", Some("sensor.camera.register")),
-            ("camera.get_frame", Some("sensor.camera.register")),
-            ("config.get", None),
-            ("config.set", None),
-            ("process.spawn", Some("process.spawn")),
-            ("vision.subscribe_frames", Some("vision.frame.read")),
-            ("vision.register_model", Some("vision.model.register")),
-            ("vision.infer", Some("vision.model.register")),
-            ("vision.publish_detection", Some("vision.detection.publish")),
-        ];
-        for (name, cap) in expected {
-            let method = Method::from_wire(name).expect("method in table");
-            assert_eq!(method.required_cap(), *cap, "required cap for {name}");
+    fn enum_matches_generated_table() {
+        use ados_protocol::dispatch::DISPATCH_METHODS;
+
+        // 1. Every enum variant round-trips through the wire name and resolves
+        //    to a generated row whose required_cap matches. This is the
+        //    security-critical direction: a Method present here but absent from
+        //    the generated table would gate on None (open) silently — caught.
+        for m in ALL_METHODS {
+            let name = m.wire_name();
+            assert_eq!(
+                Method::from_wire(name),
+                Some(*m),
+                "wire name {name} does not round-trip to its variant"
+            );
+            let row = DISPATCH_METHODS
+                .iter()
+                .find(|r| r.method == name)
+                .unwrap_or_else(|| panic!("method {name} missing from the generated table"));
+            assert_eq!(
+                m.required_cap(),
+                row.required_cap,
+                "required cap for {name} disagrees with the generated table"
+            );
+        }
+
+        // 2. Every generated method is a known enum variant. A generated row the
+        //    enum does not cover would be unroutable by the Rust host.
+        for row in DISPATCH_METHODS {
+            assert!(
+                Method::from_wire(row.method).is_some(),
+                "generated method {} has no enum variant",
+                row.method
+            );
+        }
+
+        // 3. Same cardinality, so neither side carries an extra row.
+        assert_eq!(ALL_METHODS.len(), DISPATCH_METHODS.len());
+    }
+
+    #[test]
+    fn vision_methods_are_gated_in_the_generated_table() {
+        use ados_protocol::dispatch::DISPATCH_METHODS;
+        // The exact gap this work closes: the four vision methods must carry a
+        // non-None dispatch-level cap so no host (Rust or Python) can route them
+        // ungated.
+        for (name, cap) in [
+            (vision_methods::SUBSCRIBE_FRAMES, "vision.frame.read"),
+            (vision_methods::REGISTER_MODEL, "vision.model.register"),
+            (vision_methods::INFER, "vision.model.register"),
+            (
+                vision_methods::PUBLISH_DETECTION,
+                "vision.detection.publish",
+            ),
+        ] {
+            let row = DISPATCH_METHODS
+                .iter()
+                .find(|r| r.method == name)
+                .expect("vision method present in the generated table");
+            assert_eq!(row.required_cap, Some(cap), "gate for {name}");
         }
     }
 

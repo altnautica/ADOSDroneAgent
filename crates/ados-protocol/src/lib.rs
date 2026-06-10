@@ -20,8 +20,14 @@
 //!   response envelope, and the secret-field redaction shared at ingest.
 //! - [`capabilities`] — the generated agent capability catalog (the single
 //!   source of truth is `capabilities.toml`; do not edit the generated file).
+//! - [`dispatch`] — the generated plugin RPC dispatch table mapping each wire
+//!   method to its dispatch-level required capability (source of truth is the
+//!   `[[method]]` section of `capabilities.toml`).
+//! - [`wfb_tables`] — the generated WFB adapter classification and
+//!   management-WiFi deny-set tables (source of truth is `wfb-adapters.toml`).
 
 pub mod capabilities;
+pub mod dispatch;
 pub mod frame;
 pub mod framebus;
 pub mod hwcaps;
@@ -32,3 +38,4 @@ pub mod mavlink;
 pub mod plugin;
 pub mod rest;
 pub mod state;
+pub mod wfb_tables;

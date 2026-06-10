@@ -9,51 +9,17 @@
 
 use serde::Serialize;
 
-/// Known WFB-ng compatible chipsets by (VID, PID) → label. The RTL8812AU
-/// family (0x8812, 0x881A-C), RTL8812EU / RTL8822E (0xB812 / 0xA81A), and the
-/// TP-Link rebadges all share the same vendored DKMS driver and support
-/// monitor mode with frame injection. PID 0xA81A is ambiguous — it ships on
-/// both AU rebadges and EU dongles, so the bound kernel driver disambiguates
-/// (the `classify` path promotes it to the EU label when the driver is the EU
-/// module). This is the single canonical copy; it must match the Python
-/// `WFB_COMPATIBLE` table byte-for-byte.
+// The WFB adapter classification table, the driver-name fallback, and the
+// management-WiFi deny-sets are the generated `ados_protocol::wfb_tables`
+// const, the single source of truth shared with the Python adapter (whose
+// generated copy is `services/wfb/_wfb_tables_generated.py`). The source file
+// is `crates/ados-protocol/wfb-adapters.toml`; regenerate with
+// `cargo run -p ados-capabilities-codegen`. The local aliases below keep the
+// rest of this module reading against the short names.
 #[cfg(any(target_os = "linux", test))]
-const WFB_COMPATIBLE: &[(u16, u16, &str)] = &[
-    (0x0BDA, 0x8812, "RTL8812AU"),
-    (0x0BDA, 0x881A, "RTL8812AU (alt)"),
-    (0x0BDA, 0x881B, "RTL8812AU (alt)"),
-    (0x0BDA, 0x881C, "RTL8812AU (alt)"),
-    (0x0BDA, 0xA81A, "RTL8812AU (a81a)"),
-    (0x0BDA, 0xB812, "RTL8812EU"),
-    (0x2357, 0x0120, "RTL8812AU (TP-Link)"),
-    (0x2357, 0x0101, "RTL8812AU (TP-Link alt)"),
-];
-
-/// Driver-name fallback for boards whose VID:PID is not yet in the table
-/// above. The DKMS module exposes itself under one of these names; if any
-/// matches, the adapter is treated as WFB-ng compatible regardless of the USB
-/// ID lookup, so future Realtek rebadges work without a table edit.
-#[cfg(any(target_os = "linux", test))]
-const WFB_COMPATIBLE_DRIVERS: &[&str] = &[
-    "8812au",
-    "8812eu",
-    "rtl8812au",
-    "rtl8812eu",
-    "rtl88x2eu",
-    "rtl88xxau",
-];
-
-/// VID deny-set: AIC8800 management-only adapters must never be used. They
-/// advertise monitor mode but cannot inject 802.11 frames, so wfb_tx/wfb_rx on
-/// them produces zero link even when `iw set monitor` reports success.
-#[cfg(any(target_os = "linux", test))]
-const DENY_VID: &[u16] = &[0xA69C];
-
-/// Driver prefix deny-set: AIC8800 (Rock 5C onboard management WiFi) and
-/// Broadcom FullMAC (Pi-family onboard). Denied first so neither the USB-ID
-/// match nor the driver-name fallback can flip them WFB-compatible.
-#[cfg(any(target_os = "linux", test))]
-const DENY_DRIVER_PREFIXES: &[&str] = &["aic8800", "brcmfmac"];
+use ados_protocol::wfb_tables::{
+    DENY_DRIVER_PREFIXES, DENY_VID, WFB_COMPATIBLE, WFB_COMPATIBLE_DRIVERS,
+};
 
 /// The result returned to the radio manager.
 #[derive(Debug, Clone)]

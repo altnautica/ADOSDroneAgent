@@ -498,3 +498,128 @@ description = "Lets the plugin write fleet data to the cloud backend. Used by pl
 category = "data_network"
 risk = "medium"
 risk_reason = "Cloud writes can affect other operators on the same fleet."
+
+# ===========================================================================
+# Plugin RPC dispatch table (24): wire method -> dispatch-level required cap.
+#
+# The single source of truth for the gate the plugin IPC server applies BEFORE
+# routing a request. Codegen emits this into both the Rust host
+# (crates/ados-protocol/src/dispatch.rs, consumed by ados-plugin-host) and the
+# Python host (src/ados/plugins/_dispatch_generated.py, consumed by
+# ipc/dispatch.py) so the two copies cannot drift.
+#
+# required_cap absent  -> the method is ungated at the dispatch level (the event
+#                         surface and ping are open; per-topic checks run inline
+#                         in the handler).
+# inline = true        -> the method's cap is decided inline by the handler from
+#                         the request payload (the component-kind / driver-kind
+#                         classification), so the dispatch gate is None but the
+#                         method is NOT open — codegen emits None and the marker
+#                         documents that an inline gate exists.
+#
+# Every method id here is the exact wire string. Edit here, then run codegen.
+# ===========================================================================
+
+# ---- ungated event surface (per-topic check inline) ----
+[[method]]
+id = "event.publish"
+
+[[method]]
+id = "event.subscribe"
+
+[[method]]
+id = "ping"
+
+# ---- telemetry ----
+[[method]]
+id = "telemetry.subscribe"
+required_cap = "telemetry.read"
+
+[[method]]
+id = "telemetry.extend"
+required_cap = "telemetry.extend"
+
+# ---- mission / recording ----
+[[method]]
+id = "mission.read"
+required_cap = "mission.read"
+
+[[method]]
+id = "mission.write"
+required_cap = "mission.write"
+
+[[method]]
+id = "recording.start"
+required_cap = "recording.write"
+
+[[method]]
+id = "recording.stop"
+required_cap = "recording.write"
+
+# ---- mavlink ----
+[[method]]
+id = "mavlink.subscribe"
+required_cap = "mavlink.read"
+
+[[method]]
+id = "mavlink.send"
+required_cap = "mavlink.write"
+
+[[method]]
+id = "mavlink.register_component"
+# The matching component-kind cap is decided inline from the requested kind.
+inline = true
+
+# ---- peripheral / driver / camera ----
+[[method]]
+id = "peripheral.register_driver"
+# The exact sensor.*.register cap depends on the driver kind; handler enforces.
+inline = true
+
+[[method]]
+id = "peripheral.unregister_driver"
+inline = true
+
+[[method]]
+id = "camera.claim"
+required_cap = "sensor.camera.register"
+
+[[method]]
+id = "camera.release"
+required_cap = "sensor.camera.register"
+
+[[method]]
+id = "camera.get_frame"
+required_cap = "sensor.camera.register"
+
+# ---- config kv (per-drone / global) ----
+[[method]]
+id = "config.get"
+
+[[method]]
+id = "config.set"
+
+# ---- vendor binary spawn ----
+[[method]]
+id = "process.spawn"
+required_cap = "process.spawn"
+
+# ---- vision: frame subscribe, model register, inference, detection publish ----
+# The host proxies these to the vision engine, which owns the cameras and the
+# inference backend. Every row carries a dispatch-level cap so a vision method
+# can never reach a host (Rust or Python) ungated.
+[[method]]
+id = "vision.subscribe_frames"
+required_cap = "vision.frame.read"
+
+[[method]]
+id = "vision.register_model"
+required_cap = "vision.model.register"
+
+[[method]]
+id = "vision.infer"
+required_cap = "vision.model.register"
+
+[[method]]
+id = "vision.publish_detection"
+required_cap = "vision.detection.publish"

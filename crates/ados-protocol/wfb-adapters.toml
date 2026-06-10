@@ -1,0 +1,118 @@
+# ADOS WFB adapter tables — single source of truth.
+#
+# Codegen (`cargo run -p ados-capabilities-codegen`) emits, from this file:
+#   - Rust:   crates/ados-protocol/src/wfb_tables.rs                (consumed by ados-radio)
+#   - Python: src/ados/services/wfb/_wfb_tables_generated.py        (consumed by services/wfb/adapter.py)
+#
+# Four tables, kept in lockstep across the Rust radio service and the Python
+# iw-fallback / mesh relay+receiver adapters so the deny-set can never drift:
+#
+#   [[compatible]]  — WFB-ng compatible chipsets by VID:PID, with a label.
+#                     RTL8812AU family (0x8812, 0x881A-C), RTL8812EU /
+#                     RTL8822E (0xB812 / 0xA81A), and the TP-Link rebadges all
+#                     share the vendored DKMS driver and support monitor mode
+#                     with frame injection. PID 0xA81A is ambiguous (ships on
+#                     both AU rebadges and EU dongles); the bound kernel driver
+#                     disambiguates downstream.
+#   [[driver]]      — driver-name fallback. The DKMS module exposes itself under
+#                     one of these names; any match treats the adapter as
+#                     WFB-ng compatible regardless of the USB ID lookup, so
+#                     future Realtek rebadges work without a table edit.
+#   [[deny_vendor]] — management-WiFi USB vendor deny-set. These radios cannot
+#                     inject 802.11 frames in monitor mode, so wfb_tx/wfb_rx on
+#                     them produces zero link even when `iw set monitor` reports
+#                     success. They must never be tagged WFB-compatible.
+#   [[deny_driver]] — management-WiFi driver-prefix deny-set. Denied first so
+#                     neither the USB-ID match nor the driver-name fallback can
+#                     flip them WFB-compatible. We deny by vendor AND prefix
+#                     because a USB sysfs walk on a hub layout can reach a parent
+#                     that does not expose the AIC8800's idVendor, leaving only
+#                     the driver string to go on.
+#
+# Edit here, then run codegen. Do not edit the generated files by hand.
+
+# ---------------------------------------------------------------------------
+# WFB-ng compatible chipsets by VID:PID
+# ---------------------------------------------------------------------------
+[[compatible]]
+vid = 0x0BDA
+pid = 0x8812
+label = "RTL8812AU"
+
+[[compatible]]
+vid = 0x0BDA
+pid = 0x881A
+label = "RTL8812AU (alt)"
+
+[[compatible]]
+vid = 0x0BDA
+pid = 0x881B
+label = "RTL8812AU (alt)"
+
+[[compatible]]
+vid = 0x0BDA
+pid = 0x881C
+label = "RTL8812AU (alt)"
+
+# Ambiguous PID: shipped on both RTL8812AU rebadges and RTL8812EU /
+# RTL8822EU dongles. Default label is the AU variant; the detection
+# path promotes it to the EU label when the bound kernel driver is the EU
+# module, which is the authoritative disambiguator.
+[[compatible]]
+vid = 0x0BDA
+pid = 0xA81A
+label = "RTL8812AU (a81a)"
+
+[[compatible]]
+vid = 0x0BDA
+pid = 0xB812
+label = "RTL8812EU"
+
+[[compatible]]
+vid = 0x2357
+pid = 0x0120
+label = "RTL8812AU (TP-Link)"
+
+[[compatible]]
+vid = 0x2357
+pid = 0x0101
+label = "RTL8812AU (TP-Link alt)"
+
+# ---------------------------------------------------------------------------
+# Driver-name fallback (lower-case)
+# ---------------------------------------------------------------------------
+[[driver]]
+name = "8812au"
+
+[[driver]]
+name = "8812eu"
+
+[[driver]]
+name = "rtl8812au"
+
+[[driver]]
+name = "rtl8812eu"
+
+[[driver]]
+name = "rtl88x2eu"
+
+[[driver]]
+name = "rtl88xxau"
+
+# ---------------------------------------------------------------------------
+# Management-WiFi USB vendor deny-set
+# ---------------------------------------------------------------------------
+[[deny_vendor]]
+vid = 0xA69C
+note = "AIcSemi AIC8800 family (Rock 5C management WiFi)"
+
+# ---------------------------------------------------------------------------
+# Management-WiFi driver-prefix deny-set
+# ---------------------------------------------------------------------------
+[[deny_driver]]
+prefix = "aic8800"
+note = "AIC8800 / AIC8800DC / AIC8800D80 variants"
+
+[[deny_driver]]
+prefix = "brcmfmac"
+note = "Broadcom FullMAC (Pi onboard WiFi)"
