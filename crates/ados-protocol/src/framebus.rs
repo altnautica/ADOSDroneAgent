@@ -760,9 +760,17 @@ mod tests {
         let r_shared = shared.clone();
         let r_latest = latest.clone();
         let mut reads = 0u64;
-        for _ in 0..200_000 {
+        // Read until a healthy number of committed frames have been observed,
+        // bounded so a wedged writer cannot spin forever. A fixed iteration
+        // budget is flaky under loaded CI scheduling: a fast reader can drain
+        // its whole budget before a starved writer commits its first frame,
+        // a test-timing artifact rather than a seqlock failure.
+        let mut iters = 0u64;
+        while reads < 10_000 && iters < 50_000_000 {
+            iters += 1;
             let seq = r_latest.load(O::Acquire);
             if seq == 0 {
+                std::hint::spin_loop();
                 continue;
             }
             let slot = (seq % SLOTS as u64) as u32;
