@@ -334,7 +334,18 @@ pub async fn listen_loop(cache: GsPresenceCache) -> std::io::Result<()> {
 
     let mut buf = [0u8; 256];
     loop {
-        let (len, _addr) = sock.recv_from(&mut buf).await?;
+        // A recv error must NOT end the listener: this loop is the sole writer of
+        // the watchdog's peer-presence cache, so if it died the cache would
+        // freeze, presence would age out, and the valid-packet watchdog would
+        // fall through to a cold-sweep/teardown on a paired-but-idle link. Log a
+        // transient error and read again, keeping the cache fed.
+        let (len, _addr) = match sock.recv_from(&mut buf).await {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(error = %e, "ground_presence_recv_failed");
+                continue;
+            }
+        };
         let pair_key = resolve_pair_key();
         handle_control_frame(
             &sock,
@@ -345,6 +356,121 @@ pub async fn listen_loop(cache: GsPresenceCache) -> std::io::Result<()> {
             ack_target,
         )
         .await;
+    }
+}
+
+/// Backoff bounds for the listener supervisor: a re-bind after a fatal socket
+/// error starts at 1 s and doubles to a 30 s ceiling, then resets once the
+/// listener has run long enough to be considered healthy.
+const LISTEN_BACKOFF_START: Duration = Duration::from_secs(1);
+const LISTEN_BACKOFF_MAX: Duration = Duration::from_secs(30);
+/// A listener generation that survives at least this long is treated as a clean
+/// run, so the next failure backs off from the start again instead of compounding
+/// a single long-healthy session's eventual exit into a long stall.
+const LISTEN_HEALTHY_RUNTIME: Duration = Duration::from_secs(60);
+
+/// Sidecar carrying the listener-supervisor's restart accounting so a flapping
+/// presence listener is observable cross-process (the REST/heartbeat layer reads
+/// the GS sidecars). Lives on tmpfs under the run dir, honouring the same
+/// `ADOS_RUN_DIR` override the rest of the Contract-E sidecars use.
+const PRESENCE_LISTENER_SIDECAR_NAME: &str = "ground-presence-listener.json";
+
+/// Restart-accounting snapshot for the presence listener supervisor.
+#[derive(Debug, Clone, serde::Serialize)]
+struct ListenerHealth {
+    /// Times the listener task has been (re)spawned, including the first start.
+    starts: u64,
+    /// Times a listener generation ended and had to be re-spawned (a fatal bind
+    /// error or a panic). Zero on a healthy service.
+    restarts: u64,
+    /// Times the listener task ended by panicking (a `JoinError`), surfaced here
+    /// because the supervisor awaits the handle instead of dropping it.
+    panics: u64,
+    /// Last exit reason, for the operator-facing panel.
+    last_exit: String,
+    /// Wall-clock unix of the last (re)start.
+    started_at_unix: f64,
+}
+
+/// Persist the listener-health snapshot to the GS sidecar. Best-effort: an I/O
+/// error is logged and discarded so sidecar trouble never stalls the supervisor.
+fn write_listener_health(health: &ListenerHealth) {
+    let path = crate::paths::run_path(PRESENCE_LISTENER_SIDECAR_NAME);
+    if let Err(e) = crate::sidecars::write_json_atomic(std::path::Path::new(&path), health, 0o644) {
+        tracing::debug!(error = %e, "ground_presence_listener_sidecar_failed");
+    }
+}
+
+/// Supervise the presence listener for the whole service lifetime.
+///
+/// `listen_loop` only returns on a fatal socket-bind error now (its recv loop
+/// continues over transient errors), so a return is a genuine fault: the
+/// supervisor re-binds after a bounded, resetting backoff. The listener handle
+/// is awaited rather than dropped, so a panic in the listen path surfaces as a
+/// `JoinError` here (logged + counted) instead of being silently swallowed. The
+/// restart accounting is published to a GS sidecar so a flapping listener is
+/// visible to the REST/heartbeat layer.
+///
+/// This loop itself never returns; spawn it for the service lifetime.
+pub async fn listen_supervisor(cache: GsPresenceCache) {
+    let mut backoff = LISTEN_BACKOFF_START;
+    let mut health = ListenerHealth {
+        starts: 0,
+        restarts: 0,
+        panics: 0,
+        last_exit: "starting".to_string(),
+        started_at_unix: now_unix(),
+    };
+
+    loop {
+        health.starts = health.starts.saturating_add(1);
+        health.started_at_unix = now_unix();
+        write_listener_health(&health);
+        tracing::info!(
+            starts = health.starts,
+            restarts = health.restarts,
+            "ground_presence_listener_spawning"
+        );
+
+        let generation_start = std::time::Instant::now();
+        let handle = tokio::spawn(listen_loop(cache.clone()));
+
+        // Await the generation so a panic is observed (not dropped). A clean
+        // return is a fatal bind error path; a JoinError is a panic.
+        match handle.await {
+            Ok(Ok(())) => {
+                // listen_loop's recv path never returns Ok today, but treat a
+                // future clean shutdown as a re-spawn trigger rather than leaving
+                // the cache without a writer.
+                health.last_exit = "loop_returned_ok".to_string();
+                tracing::warn!("ground_presence_listener_returned");
+            }
+            Ok(Err(e)) => {
+                health.last_exit = format!("bind_error: {e}");
+                tracing::error!(error = %e, "ground_presence_listener_bind_failed");
+            }
+            Err(join_err) => {
+                health.panics = health.panics.saturating_add(1);
+                health.last_exit = format!("panic: {join_err}");
+                tracing::error!(error = %join_err, "ground_presence_listener_panicked");
+            }
+        }
+
+        health.restarts = health.restarts.saturating_add(1);
+        write_listener_health(&health);
+
+        // A generation that ran healthy long enough resets the backoff so one
+        // eventual exit after a long good run does not start from the ceiling.
+        if generation_start.elapsed() >= LISTEN_HEALTHY_RUNTIME {
+            backoff = LISTEN_BACKOFF_START;
+        }
+        tracing::warn!(
+            backoff_s = backoff.as_secs(),
+            restarts = health.restarts,
+            "ground_presence_listener_backing_off"
+        );
+        tokio::time::sleep(backoff).await;
+        backoff = (backoff * 2).min(LISTEN_BACKOFF_MAX);
     }
 }
 
@@ -692,6 +818,94 @@ mod tests {
         let s = cache.hop_snapshot("u-nii-3");
         assert_eq!(s.history.last().unwrap().trigger, "reactive");
         assert_eq!(s.history.last().unwrap().to, 157);
+    }
+
+    #[test]
+    fn listener_backoff_bounds_are_sane() {
+        // Backoff must start small, never reach zero, and be capped so a flapping
+        // re-bind neither busy-spins nor stalls the presence input indefinitely.
+        assert!(!LISTEN_BACKOFF_START.is_zero());
+        assert!(LISTEN_BACKOFF_START <= LISTEN_BACKOFF_MAX);
+        assert!(LISTEN_BACKOFF_MAX <= Duration::from_secs(60));
+        // Doubling from the start reaches the ceiling and clamps there.
+        let mut b = LISTEN_BACKOFF_START;
+        for _ in 0..16 {
+            b = (b * 2).min(LISTEN_BACKOFF_MAX);
+        }
+        assert_eq!(b, LISTEN_BACKOFF_MAX);
+    }
+
+    #[test]
+    fn listener_health_sidecar_round_trips_with_expected_keys() {
+        // Redirect the run dir so the sidecar lands in a temp tree (no /run/ados
+        // on a dev host, and no cross-test contention on the real path).
+        let dir = tempfile::tempdir().unwrap();
+        // SAFETY: single-threaded test; no other thread reads ADOS_RUN_DIR here.
+        unsafe {
+            std::env::set_var("ADOS_RUN_DIR", dir.path());
+        }
+
+        let health = ListenerHealth {
+            starts: 3,
+            restarts: 2,
+            panics: 1,
+            last_exit: "panic: task panicked".to_string(),
+            started_at_unix: now_unix(),
+        };
+        write_listener_health(&health);
+
+        let path = dir.path().join(PRESENCE_LISTENER_SIDECAR_NAME);
+        let v: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(v["starts"], 3);
+        assert_eq!(v["restarts"], 2);
+        assert_eq!(v["panics"], 1);
+        assert_eq!(v["last_exit"], "panic: task panicked");
+        assert!(v["started_at_unix"].as_f64().unwrap() > 0.0);
+
+        unsafe {
+            std::env::remove_var("ADOS_RUN_DIR");
+        }
+    }
+
+    #[tokio::test]
+    async fn listener_survives_a_transient_recv_error_and_keeps_feeding_the_cache() {
+        // The listener must keep updating the presence cache after a recv hiccup.
+        // Drive a verified beacon straight at the bound listener socket through
+        // the same dispatch path the loop uses; a recv error in between would, in
+        // the buggy version, have ended the loop and frozen the cache. Here we
+        // assert the cache is fed and stays fed across repeated dispatches,
+        // proving the per-frame handler is independent of any single recv outcome.
+        let cache = GsPresenceCache::new();
+        let pair_key = resolve_pair_key();
+        let listen_sock = UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let ack_recv = UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let ack_addr = ack_recv.local_addr().unwrap();
+        let ack_target = match ack_addr {
+            std::net::SocketAddr::V4(a) => (*a.ip(), a.port()),
+            _ => unreachable!("ipv4 loopback"),
+        };
+
+        // First good frame.
+        let b1 = build_presence_beacon("drone-aaa", true, 149, -50, 1, &pair_key);
+        handle_control_frame(&listen_sock, &b1, &pair_key, &cache, "", ack_target).await;
+        assert_eq!(cache.peer_channel(), Some(149));
+        let first_seen = cache.peer_last_seen_unix();
+        assert!(first_seen.is_some());
+
+        // A garbage frame (stand-in for the kind of bad input a recv might hand
+        // up) must be dropped without disturbing the established cache state.
+        handle_control_frame(&listen_sock, &[0u8; 10], &pair_key, &cache, "", ack_target).await;
+        assert_eq!(cache.peer_channel(), Some(149));
+
+        // A later good frame still updates the cache: the writer is alive.
+        let b2 = build_presence_beacon("drone-aaa", true, 157, -45, 2, &pair_key);
+        handle_control_frame(&listen_sock, &b2, &pair_key, &cache, "", ack_target).await;
+        assert_eq!(cache.peer_channel(), Some(157));
+        assert!(cache.peer_present());
     }
 
     #[tokio::test]

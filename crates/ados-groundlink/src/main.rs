@@ -179,8 +179,12 @@ async fn run_direct(
     // The presence listen loop + cache run for the whole service lifetime (the
     // listener feeds the per-generation watchdog its peer-presence signal). The
     // emit loop runs service-wide too; both survive receive-plane restarts.
+    //
+    // The listener runs under a supervisor that re-binds with bounded backoff on
+    // a fatal socket error and surfaces a restart counter on a GS sidecar, so a
+    // listener fault never permanently freezes the watchdog's presence input.
     let presence_cache = GsPresenceCache::new();
-    tokio::spawn(presence::listen_loop(presence_cache.clone()));
+    tokio::spawn(presence::listen_supervisor(presence_cache.clone()));
     {
         // The beacon's channel is a hint; the configured channel is a safe
         // service-wide source (the live channel the watchdog locks is surfaced
