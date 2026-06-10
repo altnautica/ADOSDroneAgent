@@ -1102,8 +1102,13 @@ async fn run_service(cfg: &WfbConfig, cancel: Arc<Notify>) {
         let tx_cancel = task_cancel.clone();
         let tx_iface = iface_str.clone();
         let tx_counters = counters.clone();
+        // Hand the watchdog the shared process handle, not a captured PID: the
+        // data plane is respawned (new PID) on every FEC/MCS/tier/adaptive
+        // change, so the watchdog must resolve the live data-tx PID each poll to
+        // keep its ingress (`rchar`) signal pinned to the running process.
+        let tx_proc = proc.clone();
         let mut watchdog1 = tokio::spawn(async move {
-            tx_health_watchdog(&tx_iface, pid, tx_counters, tx_cancel).await
+            tx_health_watchdog(&tx_iface, tx_proc, tx_counters, tx_cancel).await
         });
 
         let recvq_cancel = task_cancel.clone();
@@ -1269,8 +1274,9 @@ async fn run_service(cfg: &WfbConfig, cancel: Arc<Notify>) {
                                 let tx_cancel = task_cancel.clone();
                                 let tx_iface = iface_str.clone();
                                 let tx_counters = counters.clone();
+                                let tx_proc = proc.clone();
                                 watchdog1 = tokio::spawn(async move {
-                                    tx_health_watchdog(&tx_iface, pid, tx_counters, tx_cancel).await
+                                    tx_health_watchdog(&tx_iface, tx_proc, tx_counters, tx_cancel).await
                                 });
                                 continue;
                             }

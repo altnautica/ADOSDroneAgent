@@ -18,6 +18,8 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::Mutex;
 
+use crate::process::RadioProcesses;
+
 const POLL_INTERVAL: Duration = Duration::from_secs(5);
 const TX_SILENCE_THRESHOLD: Duration = Duration::from_secs(30);
 const RECVQ_BACKLOG_THRESHOLD_BYTES: u64 = 256 * 1024;
@@ -61,12 +63,41 @@ pub fn new_counters() -> CounterHandle {
     Arc::new(Mutex::new(WatchdogCounters::default()))
 }
 
+/// Resolves the **currently-running** data-plane `wfb_tx` PID.
+///
+/// The data-tx process is killed and respawned (with a NEW PID) whenever an
+/// FEC/MCS/manual-tier change or the adaptive controller retunes the radio. If
+/// the watchdog kept reading `/proc/<old_pid>/io` it would either read `None`
+/// on a dead PID (freezing the `rchar` ingress signal) or, worse, read garbage
+/// from an unrelated process that the OS recycled the old PID onto. Resolving
+/// the live PID each poll keeps the ingress signal pinned to the live process.
+pub trait LivePid: Send + Sync {
+    /// The live data-tx PID, or `None` when it cannot be determined (the process
+    /// has exited and not yet respawned). The watchdog treats `None`/`0` as
+    /// "skip the `rchar` read this tick" rather than freezing the previous value.
+    fn data_tx_pid(&self) -> impl std::future::Future<Output = Option<u32>> + Send;
+}
+
+impl LivePid for Arc<Mutex<RadioProcesses>> {
+    async fn data_tx_pid(&self) -> Option<u32> {
+        self.lock().await.data_tx_pid()
+    }
+}
+
 /// Watch `wfb_tx` TX liveness. Returns when `wfb_tx` should be killed (the
 /// caller then kills it via `WfbTxProcess::kill()` and respawns).
 /// Also returns when `cancel` is notified.
-pub async fn tx_health_watchdog(
+///
+/// `pid_source` resolves the **live** data-tx PID each poll rather than a
+/// captured constant: the data plane is respawned with a new PID on every
+/// FEC/MCS/tier change, so a one-shot PID would aim the `rchar` ingress read at
+/// a dead (or OS-recycled) process. The dual-check contract is unchanged — an
+/// advancing iface `tx_bytes` (the TX side) is necessary but never sufficient;
+/// the `rchar`/UDP receive-queue ingress signal stays the independent
+/// confirmation that the encoder is actually feeding `wfb_tx`.
+pub async fn tx_health_watchdog<P: LivePid>(
     iface: &str,
-    pid: u32,
+    pid_source: P,
     counters: CounterHandle,
     cancel: std::sync::Arc<tokio::sync::Notify>,
 ) -> WatchdogFired {
@@ -80,8 +111,22 @@ pub async fn tx_health_watchdog(
             _ = cancel.notified() => return WatchdogFired::Cancelled,
         }
 
+        // Resolve the live data-tx PID for THIS tick. A respawn (FEC/MCS/tier/
+        // adaptive) hands the data plane a new PID; reading the old one would
+        // freeze `rchar` (dead PID → `None`) or read an unrelated recycled
+        // process. A `None`/`0` PID (data plane exited, not yet respawned)
+        // means we skip the `rchar` read entirely and carry the previous value
+        // forward unchanged, so the PID-recycle window can never inject garbage
+        // into the ingress signal.
+        let pid = pid_source.data_tx_pid().await.unwrap_or(0);
+
         let tx_bytes = read_tx_bytes(iface).await.unwrap_or(prev.tx_bytes);
-        let rchar = read_rchar(pid).await.unwrap_or(prev.rchar);
+        let live_rchar = if pid == 0 {
+            None
+        } else {
+            read_rchar(pid).await
+        };
+        let rchar = select_rchar(live_rchar, prev.rchar);
         let udp_rx = read_udp_recvq(5600).await.unwrap_or(prev.udp_rx_queue);
 
         let tx_advancing = tx_bytes > prev.tx_bytes;
@@ -192,6 +237,18 @@ async fn read_tx_bytes(iface: &str) -> Option<u64> {
     raw.trim().parse().ok()
 }
 
+/// Pick the `rchar` value to carry into this tick's snapshot.
+///
+/// `live` is `Some` only when the live data-tx PID was known AND its
+/// `/proc/<pid>/io` read succeeded. When the PID is unknown/recycling-risk
+/// (the data plane just respawned and we resolved `None`/`0`) or the read
+/// failed, fall back to the previous value rather than treating a missing read
+/// as ingress progress — this keeps the recycle window from injecting garbage
+/// and never *manufactures* an advancing ingress signal.
+fn select_rchar(live: Option<u64>, prev: u64) -> u64 {
+    live.unwrap_or(prev)
+}
+
 /// Read the `rchar` field from `/proc/<pid>/io` (cumulative bytes read by the
 /// process — the primary signal that the video encoder is feeding `wfb_tx`).
 async fn read_rchar(pid: u32) -> Option<u64> {
@@ -270,5 +327,82 @@ mod tests {
         let c = *counters.lock().await;
         assert_eq!(c.tx_zombie_kills, 1);
         assert!(c.tx_video_stalled);
+    }
+
+    #[test]
+    fn select_rchar_carries_prev_when_pid_unknown() {
+        // A respawn (or a recycle-risk) resolves `None` for the live read: the
+        // watchdog must carry the previous value forward, NOT treat a missing
+        // read as zero or as progress.
+        assert_eq!(select_rchar(None, 42), 42);
+        assert_eq!(select_rchar(None, 0), 0);
+    }
+
+    #[test]
+    fn select_rchar_uses_live_read_when_available() {
+        // A successful read of the live PID overrides the previous snapshot,
+        // including a higher value (real ingress progress).
+        assert_eq!(select_rchar(Some(100), 42), 100);
+        // A live read lower than prev (a respawn reset the per-process counter)
+        // is taken as-is — the advancing check (`rchar > prev.rchar`) then sees
+        // no progress this tick, which is correct: the new process has not yet
+        // read anything, so ingress is genuinely not advancing on its `rchar`.
+        assert_eq!(select_rchar(Some(5), 42), 5);
+    }
+
+    /// A `LivePid` whose value can change mid-run, simulating a data-tx respawn
+    /// handing the data plane a new PID under the watchdog.
+    struct FakePid {
+        pid: std::sync::atomic::AtomicU32,
+    }
+
+    impl FakePid {
+        fn new(pid: u32) -> Self {
+            Self {
+                pid: std::sync::atomic::AtomicU32::new(pid),
+            }
+        }
+        fn respawn_to(&self, pid: u32) {
+            self.pid.store(pid, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    impl LivePid for std::sync::Arc<FakePid> {
+        async fn data_tx_pid(&self) -> Option<u32> {
+            match self.pid.load(std::sync::atomic::Ordering::SeqCst) {
+                0 => None,
+                p => Some(p),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn live_pid_reflects_a_respawn() {
+        // The watchdog resolves the PID per poll through this trait, so a
+        // respawn that changes the underlying PID is picked up on the next tick
+        // instead of the watchdog being stuck on the original (now dead) PID.
+        let src = std::sync::Arc::new(FakePid::new(1234));
+        assert_eq!(LivePid::data_tx_pid(&src).await, Some(1234));
+        src.respawn_to(5678);
+        assert_eq!(LivePid::data_tx_pid(&src).await, Some(5678));
+        // A respawn-in-progress window (no live process yet) resolves None, which
+        // the watchdog maps to the rchar-skip path via select_rchar.
+        src.respawn_to(0);
+        assert_eq!(LivePid::data_tx_pid(&src).await, None);
+    }
+
+    #[tokio::test]
+    async fn tx_health_watchdog_cancels_promptly_with_live_pid_source() {
+        // Drive the real watchdog with a fake live-PID source and an immediate
+        // cancel: it must honor the cancel arm and return `Cancelled` without
+        // panicking, proving the generic `LivePid` plumbing compiles and runs
+        // end-to-end. (The full stall/kill paths read real /proc + /sys and are
+        // covered on-rig; this guards the wiring + the cancel contract.)
+        let src = std::sync::Arc::new(FakePid::new(1));
+        let counters = new_counters();
+        let cancel = std::sync::Arc::new(tokio::sync::Notify::new());
+        cancel.notify_one();
+        let fired = tx_health_watchdog("ados-test-nonexistent-iface", src, counters, cancel).await;
+        assert_eq!(fired, WatchdogFired::Cancelled);
     }
 }
