@@ -22,125 +22,30 @@
 //! tmpfs runtime hint at `/run/ados/wfb-locked-channel` so a restart can try it
 //! first; the home channel where both sides deterministically meet is never
 //! auto-overwritten.
+//!
+//! Module layout:
+//! - `seams`: the timing constants + the injected `Clock` / `RxProcess` /
+//!   `PresenceCache` / `LockedChannelHint` seams.
+//! - `health`: the live receive-health publish seam (`SharedRxHealth`).
+//! - `hint`: the default Contract-E hint sink (`FileLockedChannelHint`).
+//! - this module root: the `ValidPacketWatchdog` FSM + its golden scenarios.
 
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::sync::Mutex;
-
 use crate::acquire::ChannelAcquirer;
 
-/// Live receive-health counters the valid-packet watchdog produces and the
-/// stats reader publishes on the sidecar. Shared so the stats loop reports the
-/// real `reacquire_kills` + `rx_silent_seconds` instead of hardcoded zeros.
-/// The watchdog is the sole writer; the stats reader only reads.
-#[derive(Debug, Clone, Default)]
-pub struct SharedRxHealth {
-    reacquire_kills: Arc<AtomicU32>,
-    /// Seconds the valid-decode stream has been silent at the last poll. `None`
-    /// until the watchdog has run one poll. Stored behind a mutex because the
-    /// value is a float and the cadence is slow (one write per poll interval).
-    silent_seconds: Arc<Mutex<Option<f64>>>,
-}
+pub mod health;
+pub mod hint;
+pub mod seams;
 
-impl SharedRxHealth {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// The cumulative reacquire-failure kill count.
-    pub fn reacquire_kills(&self) -> u32 {
-        self.reacquire_kills.load(Ordering::SeqCst)
-    }
-
-    /// The valid-decode silence at the last watchdog poll, if one has run.
-    pub async fn silent_seconds(&self) -> Option<f64> {
-        *self.silent_seconds.lock().await
-    }
-
-    /// Writer seam (watchdog side): record the kill total.
-    fn set_reacquire_kills(&self, n: u32) {
-        self.reacquire_kills.store(n, Ordering::SeqCst);
-    }
-
-    /// Writer seam (watchdog side): record the current valid-decode silence.
-    async fn set_silent_seconds(&self, secs: f64) {
-        *self.silent_seconds.lock().await = Some(secs);
-    }
-}
-
-/// Valid-packet watchdog tunables. The valid-decode counter is the trustworthy
-/// receive signal; a flat delta while the process is alive means we are tuned to
-/// the wrong channel or the transmitter went away.
-pub const VALID_RX_POLL_INTERVAL_S: f64 = 5.0;
-pub const VALID_RX_SILENCE_THRESHOLD_S: f64 = 12.0;
-
-/// Peer-presence freshness window. A paired peer emits a presence beacon on the
-/// control plane every ~10 s. If we heard one within this window the link is up
-/// and the peer is simply not sending video (idle-but-paired), so the watchdog
-/// must NOT sweep or kill. Sized to tolerate one missed beacon.
-pub const PEER_PRESENCE_FRESH_S: f64 = 30.0;
-
-/// Cold-start home-hold budget. On a cold boot the receiver homes on the
-/// configured rendezvous channel and waits there, because the transmitter
-/// broadcasts on that same home channel until linked. But if the home channels
-/// are mismatched an indefinite hold would deadlock forever, so after this long
-/// unlinked at cold start with zero valid RX and no peer presence the receiver
-/// performs ONE acquire sweep to self-heal, then returns to holding home if the
-/// sweep finds nothing.
-pub const COLD_START_HOME_HOLD_S: f64 = 75.0;
-
-/// Peer-presence loss window. Between the fresh window and this one the peer was
-/// seen recently but a marginal control-plane link is dropping beacons for tens
-/// of seconds at a time. That is still a paired, idle link: hold the home
-/// channel, do NOT sweep or restart. Only once presence has been absent longer
-/// than this is the link treated as genuinely lost and the reacquisition sweep
-/// allowed to run.
-pub const PEER_PRESENCE_LOST_S: f64 = 120.0;
-
-/// Secondary stdout-zombie net: the receive process is considered wedged if its
-/// stats stream is silent this long, independent of the valid-decode path.
-pub const RX_HEALTH_SILENCE_THRESHOLD_S: f64 = 30.0;
-
-/// Monotonic clock seam. Tests inject a fake that returns scripted instants.
-pub trait Clock: Send + Sync {
-    /// Seconds on a monotonic timeline (only deltas are meaningful).
-    fn monotonic(&self) -> f64;
-}
-
-/// The receive subprocess seam: liveness + terminate. Tests inject a fake.
-pub trait RxProcess: Send + Sync {
-    /// `true` while the subprocess is alive (mirrors `returncode is None`).
-    fn is_running(&self) -> bool;
-    /// Request termination; the run loop respawns the process. Best-effort.
-    fn terminate(&self);
-    /// Count of terminate requests, used by the genuine-loss kill path.
-    fn terminate_count(&self) -> u32;
-}
-
-/// The peer-presence cache seam: presence age, freshness, and announced channel.
-pub trait PresenceCache: Send + Sync {
-    /// Seconds since the last presence beacon, or `None` when none decoded.
-    fn presence_age_s(&self) -> Option<f64>;
-    /// The channel the peer most recently advertised, if known.
-    fn announced_channel(&self) -> Option<u8>;
-    /// Convenience freshness gate (age present and within the fresh window).
-    fn peer_present(&self) -> bool {
-        match self.presence_age_s() {
-            Some(age) => age <= PEER_PRESENCE_FRESH_S,
-            None => false,
-        }
-    }
-}
-
-/// Persists the last-locked channel as a tmpfs runtime hint. Default
-/// implementation writes the Contract-E hint file atomically; tests inject a
-/// recording fake. NEVER writes the config home channel (see the module-level
-/// invariant).
-pub trait LockedChannelHint: Send + Sync {
-    fn persist(&self, channel: u8);
-}
+pub use health::SharedRxHealth;
+pub use hint::FileLockedChannelHint;
+pub use seams::{
+    Clock, LockedChannelHint, PresenceCache, RxProcess, COLD_START_HOME_HOLD_S,
+    PEER_PRESENCE_FRESH_S, PEER_PRESENCE_LOST_S, RX_HEALTH_SILENCE_THRESHOLD_S,
+    VALID_RX_POLL_INTERVAL_S, VALID_RX_SILENCE_THRESHOLD_S,
+};
 
 /// Mutable watchdog state + injected seams. Owning the state in one struct keeps
 /// the FSM transcription a 1:1 mirror of the Python method body.
@@ -458,42 +363,6 @@ impl ValidPacketWatchdog {
             return;
         }
     }
-}
-
-/// Default `LockedChannelHint`: atomic tmp-write + rename of a single integer
-/// channel followed by a newline to the Contract-E hint file. A failure is not
-/// fatal to the live link (a restart just sweeps from the home channel again).
-/// NEVER writes the operator's config home channel (see the module invariant).
-pub struct FileLockedChannelHint;
-
-impl LockedChannelHint for FileLockedChannelHint {
-    fn persist(&self, channel: u8) {
-        let path = std::path::Path::new(crate::paths::WFB_LOCKED_CHANNEL_HINT);
-        if let Err(e) = persist_hint(path, channel) {
-            tracing::warn!(channel, error = %e, "ground_wfb_channel_hint_persist_failed");
-        } else {
-            tracing::info!(channel, "ground_wfb_channel_hint_persisted");
-        }
-    }
-}
-
-/// Atomic single-int + newline write to `path` (tmp sibling + rename). Mirrors
-/// the Python `tmp.write_text(f"{int(channel)}\n"); tmp.replace(path)`.
-fn persist_hint(path: &std::path::Path, channel: u8) -> std::io::Result<()> {
-    use std::io::Write;
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    // Python uses `with_suffix(suffix + ".tmp")` → `wfb-locked-channel.tmp`.
-    let tmp = path.with_extension("tmp");
-    {
-        let mut f = std::fs::File::create(&tmp)?;
-        // Single integer + trailing newline (mirrors the Python `f"{int}\n"`).
-        writeln!(f, "{channel}")?;
-        f.sync_all()?;
-    }
-    std::fs::rename(&tmp, path)?;
-    Ok(())
 }
 
 #[cfg(test)]
@@ -946,18 +815,6 @@ mod tests {
         assert_eq!(wd.channel, 157);
     }
 
-    // ---- constants ---------------------------------------------------------
-
-    #[test]
-    fn watchdog_constants_match_python() {
-        assert_eq!(VALID_RX_SILENCE_THRESHOLD_S, 12.0);
-        assert_eq!(PEER_PRESENCE_FRESH_S, 30.0);
-        assert_eq!(COLD_START_HOME_HOLD_S, 75.0);
-        assert_eq!(PEER_PRESENCE_LOST_S, 120.0);
-        assert_eq!(VALID_RX_POLL_INTERVAL_S, 5.0);
-        assert_eq!(RX_HEALTH_SILENCE_THRESHOLD_S, 30.0);
-    }
-
     // ---- update_rx_rates ---------------------------------------------------
 
     #[test]
@@ -1085,24 +942,5 @@ mod tests {
 
         // The seam was written at least once with a concrete (non-None) value.
         assert!(health.silent_seconds().await.is_some());
-    }
-
-    #[test]
-    fn shared_rx_health_defaults_to_zero_and_none() {
-        let h = SharedRxHealth::new();
-        assert_eq!(h.reacquire_kills(), 0);
-    }
-
-    // ---- the invariant: hint write is a single int + newline ---------------
-
-    #[test]
-    fn persist_hint_writes_single_int_newline_atomically() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("wfb-locked-channel");
-        persist_hint(&path, 157).unwrap();
-        let body = std::fs::read_to_string(&path).unwrap();
-        assert_eq!(body, "157\n");
-        // No leftover tmp sibling.
-        assert!(!dir.path().join("wfb-locked-channel.tmp").exists());
     }
 }
