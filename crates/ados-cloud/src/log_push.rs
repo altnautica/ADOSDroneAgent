@@ -57,6 +57,18 @@ pub const WATCH_INTERVAL: Duration = Duration::from_secs(2);
 /// this is refused before any upload so a constrained uplink is never flooded.
 pub const MAX_WINDOW_BYTES: usize = 32 * 1024 * 1024;
 
+/// Slack over [`MAX_WINDOW_BYTES`] for the response framing (status line,
+/// headers, and chunk-size lines) when bounding the socket read. The export body
+/// is the bulk; this keeps a legitimate at-cap window from being rejected by the
+/// few hundred bytes of HTTP framing while still bounding the read well before a
+/// runaway body can exhaust memory on a small board.
+const READ_SLACK_BYTES: usize = 64 * 1024;
+
+/// The hard ceiling on bytes read from the local socket for one request, so a
+/// multi-day unsynced backlog cannot be buffered into memory before the cap is
+/// checked. The read is aborted the moment this is exceeded.
+const MAX_READ_BYTES: usize = MAX_WINDOW_BYTES + READ_SLACK_BYTES;
+
 /// The valid export kinds. One kind maps to one logging-store table; a push of
 /// several kinds is several windows.
 const ALL_KINDS: [&str; 4] = ["logs", "metrics", "events", "hw"];
@@ -208,6 +220,36 @@ impl IngestDecision {
 pub fn window_hash(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     hex::encode(Sha256::digest(bytes))
+}
+
+/// Count the rows in a `jsonl.zst` window: the export writes one record per line
+/// terminated by `\n`, so the number of newlines in the decompressed stream is
+/// the exact row count. The decode streams through a fixed buffer so the count
+/// uses constant memory regardless of the decompressed size, and a corrupt /
+/// truncated stream yields the count of whatever decoded cleanly rather than a
+/// failure (the count is metadata, never a gate on the upload).
+pub fn count_jsonl_rows(zst: &[u8]) -> u64 {
+    use std::io::Read;
+    let mut decoder = match zstd::stream::read::Decoder::new(zst) {
+        Ok(d) => d,
+        Err(_) => return 0,
+    };
+    let mut rows: u64 = 0;
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        match decoder.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => rows += bytecount_newlines(&buf[..n]),
+            // A partial / corrupt frame ends the count at what decoded so far.
+            Err(_) => break,
+        }
+    }
+    rows
+}
+
+/// Count `\n` bytes in a slice.
+fn bytecount_newlines(slice: &[u8]) -> u64 {
+    slice.iter().filter(|&&b| b == b'\n').count() as u64
 }
 
 /// Current wall-clock in epoch-microseconds. Used as the closed upper bound of
@@ -366,10 +408,18 @@ async fn push_one_kind(
     since_us: Option<i64>,
     to_us: i64,
 ) -> Result<KindOutcome, String> {
-    // 1. Export the unsynced window over the trusted local socket.
+    // 1. Export the unsynced window over the trusted local socket. The read is
+    //    bounded; an over-cap window surfaces its own code rather than masking as
+    //    an unreachable store.
     let bytes = export_window(Path::new(LOGD_QUERY_SOCK), kind, session, since_us, to_us)
         .await
-        .map_err(|_| "store_unreachable".to_string())?;
+        .map_err(|e| {
+            if e.to_string().contains("window_too_large") {
+                "window_too_large".to_string()
+            } else {
+                "store_unreachable".to_string()
+            }
+        })?;
     if bytes.is_empty() {
         return Err("empty_window".to_string());
     }
@@ -378,6 +428,9 @@ async fn push_one_kind(
     }
     let content_hash = window_hash(&bytes);
     let size = bytes.len();
+    // The window is `jsonl.zst`: one record per line. Decode locally to count
+    // the rows so the cloud window-list records the real count, not a placeholder.
+    let row_count = count_jsonl_rows(&bytes);
 
     // 2. Upload to the cloud ingest route in one authenticated binary POST. The
     //    cloud recomputes the hash server-side; the local hash only labels the
@@ -395,7 +448,7 @@ async fn push_one_kind(
         .header("X-ADOS-Format", "jsonl.zst")
         .header("X-ADOS-Window-Start-Us", since_us.unwrap_or(0).to_string())
         .header("X-ADOS-Window-End-Us", to_us.to_string())
-        .header("X-ADOS-Row-Count", "0")
+        .header("X-ADOS-Row-Count", row_count.to_string())
         .header("Content-Type", "application/zstd")
         .body(bytes)
         .send()
@@ -413,7 +466,7 @@ async fn push_one_kind(
     let decision = IngestDecision::from_status(&status_field);
     tracing::info!(
         kind = %kind, deduped = decision.deduped, hash = %content_hash, bytes = size,
-        "log window uploaded"
+        rows = row_count, "log window uploaded"
     );
 
     // 3. Mark the exact window synced over the local socket — only on a stored
@@ -513,8 +566,23 @@ async fn uds_request(
     }
     stream.flush().await?;
 
+    // Read the response with a hard memory ceiling. A bare `read_to_end` would
+    // buffer the whole body before any size check, so a no-`from` window over a
+    // multi-day backlog could exhaust memory on a small board before the cap was
+    // ever consulted. Read in a loop and abort the moment the accumulated bytes
+    // exceed [`MAX_READ_BYTES`], dropping the connection instead.
     let mut raw = Vec::new();
-    stream.read_to_end(&mut raw).await?;
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let n = stream.read(&mut buf).await?;
+        if n == 0 {
+            break; // EOF (Connection: close).
+        }
+        if raw.len() + n > MAX_READ_BYTES {
+            return Err(std::io::Error::other("window_too_large"));
+        }
+        raw.extend_from_slice(&buf[..n]);
+    }
     parse_http_response(&raw)
 }
 
@@ -895,5 +963,52 @@ mod tests {
         let (status, body) = parse_http_response(raw).unwrap();
         assert_eq!(status, 403);
         assert_eq!(body, b"no");
+    }
+
+    // ── jsonl.zst row count (the real X-ADOS-Row-Count source) ──────────────
+
+    #[test]
+    fn count_jsonl_rows_counts_records_in_a_compressed_window() {
+        // Three records, one JSON object per newline-terminated line, exactly the
+        // export's line format.
+        let jsonl = b"{\"a\":1}\n{\"b\":2}\n{\"c\":3}\n";
+        let zst = zstd::encode_all(&jsonl[..], 3).unwrap();
+        assert_eq!(count_jsonl_rows(&zst), 3);
+    }
+
+    #[test]
+    fn count_jsonl_rows_is_zero_for_an_empty_window() {
+        let zst = zstd::encode_all(&b""[..], 3).unwrap();
+        assert_eq!(count_jsonl_rows(&zst), 0);
+    }
+
+    #[test]
+    fn count_jsonl_rows_is_zero_not_a_panic_on_garbage() {
+        // A non-zstd buffer must not panic; the count is metadata, never a gate.
+        assert_eq!(count_jsonl_rows(b"not a zstd frame at all"), 0);
+        assert_eq!(count_jsonl_rows(&[]), 0);
+    }
+
+    #[test]
+    fn count_jsonl_rows_streams_a_large_window_in_constant_memory() {
+        // A window larger than the internal read buffer exercises the streaming
+        // loop, not a single read.
+        let mut jsonl = Vec::new();
+        for i in 0..50_000u32 {
+            jsonl.extend_from_slice(format!("{{\"i\":{i}}}\n").as_bytes());
+        }
+        let zst = zstd::encode_all(&jsonl[..], 3).unwrap();
+        assert_eq!(count_jsonl_rows(&zst), 50_000);
+    }
+
+    // ── bounded socket read (the OOM guard) ─────────────────────────────────
+
+    #[test]
+    fn read_cap_leaves_slack_above_the_window_cap() {
+        // The read ceiling sits just above the upload window cap so a legitimate
+        // at-cap window plus its HTTP framing is not rejected, while a runaway
+        // body is still bounded well before it can exhaust memory.
+        const { assert!(MAX_READ_BYTES > MAX_WINDOW_BYTES) };
+        const { assert!(MAX_READ_BYTES - MAX_WINDOW_BYTES == READ_SLACK_BYTES) };
     }
 }

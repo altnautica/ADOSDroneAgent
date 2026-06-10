@@ -28,6 +28,11 @@ serde_norway = { workspace = true }
 # SHA256 verify of the downloaded update wheel.
 sha2 = { workspace = true }
 hex = { workspace = true }
+# Decode a `jsonl.zst` log window locally to count its rows for the cloud
+# window-list metadata. The decode streams through a fixed buffer (constant
+# memory) and runs only on the explicit, infrequent log-push path, never on the
+# hot telemetry path.
+zstd = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
