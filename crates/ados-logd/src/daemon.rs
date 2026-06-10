@@ -139,8 +139,32 @@ fn sd_watchdog() {}
 /// signals readiness. `quick_check` still catches the gross structural
 /// corruption that warrants a recreate, fast enough to keep startup bounded.
 fn open_and_verify(path: &Path) -> Result<()> {
-    // A first open also runs migrations and creates the file + parent dir.
-    let conn = db::open(path).with_context(|| format!("open store at {}", path.display()))?;
+    // A first open also runs migrations and creates the file + parent dir. A
+    // structurally broken file (truncated or a non-SQLite header) fails here,
+    // before any query runs: the connection opens but the first PRAGMA against a
+    // bad header errors. Treat that the same as a failed structure check below —
+    // quarantine the file and recreate — so a broken store self-heals in-process
+    // instead of crash-looping the daemon onto the same bad file every restart.
+    let conn = match db::open(path) {
+        Ok(conn) => conn,
+        Err(e) => {
+            // Nothing to quarantine if the file does not exist: the open error
+            // is then a real environmental fault (a bad parent dir, no space, a
+            // permission problem) that a recreate would only hit again. Surface
+            // it so the operator sees the true cause.
+            if !path.exists() {
+                return Err(anyhow::Error::new(e))
+                    .with_context(|| format!("open store at {}", path.display()));
+            }
+            tracing::error!(
+                error = %e,
+                path = %path.display(),
+                "store failed to open; quarantining and recreating"
+            );
+            quarantine_and_recreate(path)?;
+            return Ok(());
+        }
+    };
     match db::quick_check(&conn) {
         Ok(()) => {
             tracing::info!(path = %path.display(), "store integrity check passed");
@@ -148,19 +172,33 @@ fn open_and_verify(path: &Path) -> Result<()> {
         }
         Err(e) => {
             drop(conn);
-            let quarantine = path.with_extension(format!("db.corrupt-{}", now_us()));
             tracing::error!(
                 error = %e,
-                quarantine = %quarantine.display(),
+                path = %path.display(),
                 "store failed structure check; quarantining and recreating"
             );
-            std::fs::rename(path, &quarantine)
-                .with_context(|| format!("quarantine {}", path.display()))?;
-            // Recreate from the embedded schema.
-            let _ = db::open(path).with_context(|| "recreate store after quarantine")?;
+            quarantine_and_recreate(path)?;
             Ok(())
         }
     }
+}
+
+/// Rename a broken store aside with a timestamped suffix and create a fresh one
+/// from the embedded schema. The caller has already established the file at
+/// `path` exists and is unusable.
+fn quarantine_and_recreate(path: &Path) -> Result<()> {
+    let quarantine = path.with_extension(format!("db.corrupt-{}", now_us()));
+    std::fs::rename(path, &quarantine).with_context(|| format!("quarantine {}", path.display()))?;
+    tracing::warn!(
+        quarantine = %quarantine.display(),
+        path = %path.display(),
+        "quarantined broken store; recreating from the embedded schema"
+    );
+    // Recreate from the embedded schema. Drop the fresh connection: the writer
+    // reopens its own read-write handle, and the verify path only needs the
+    // store to exist and be healthy.
+    let _ = db::open(path).with_context(|| "recreate store after quarantine")?;
+    Ok(())
 }
 
 /// Run the daemon to completion: bring everything up, wait for a stop signal,
@@ -527,28 +565,47 @@ mod tests {
     }
 
     #[test]
-    fn open_and_verify_quarantines_a_corrupt_store() {
+    fn open_and_verify_quarantines_a_non_sqlite_file() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("logs.db");
-        // Write a file that is not a valid SQLite database.
+        // Write a file that is not a valid SQLite database. This is the
+        // realistic failure: a truncated or garbage header makes db::open()
+        // error on its first PRAGMA, before any query runs.
         std::fs::write(&path, b"this is not a sqlite database, it is garbage bytes").unwrap();
-        // open() may fail outright (not a database) or pass open and fail the
-        // integrity check; either way the recovery path must yield a healthy
-        // store with no error bubbling up to the caller.
-        let r = open_and_verify(&path);
-        // If the bytes were rejected at open, open_and_verify surfaces the error
-        // (the caller would then exit and systemd restarts onto a clean file via
-        // the unit's recovery); in the common corruption case it recreates. We
-        // accept either, but when it returns Ok the store must be usable.
-        if r.is_ok() {
-            let conn = db::open(&path).unwrap();
-            db::integrity_check(&conn).unwrap();
-            // A quarantine copy was left behind.
-            let quarantined = std::fs::read_dir(dir.path())
-                .unwrap()
-                .filter_map(|e| e.ok())
-                .any(|e| e.file_name().to_string_lossy().contains("db.corrupt-"));
-            assert!(quarantined, "a quarantine copy should be left behind");
-        }
+        // The broken store must self-heal in-process: no error bubbles up, the
+        // file is quarantined, and a fresh healthy store is recreated in place.
+        open_and_verify(&path).expect("a broken store must be recreated, not propagated as fatal");
+
+        let conn = db::open(&path).unwrap();
+        db::integrity_check(&conn).unwrap();
+
+        // A quarantine copy was left behind, and it still holds the garbage.
+        let quarantined: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains("db.corrupt-"))
+            .collect();
+        assert_eq!(quarantined.len(), 1, "exactly one quarantine copy expected");
+        let saved = std::fs::read(quarantined[0].path()).unwrap();
+        assert_eq!(saved, b"this is not a sqlite database, it is garbage bytes");
+    }
+
+    #[test]
+    fn open_and_verify_creates_a_fresh_store_when_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("logs.db");
+        // No file present: open_and_verify creates a healthy store and leaves no
+        // quarantine copy (there was nothing to move aside).
+        open_and_verify(&path).expect("an absent store should be created cleanly");
+        let conn = db::open(&path).unwrap();
+        db::integrity_check(&conn).unwrap();
+        let quarantined = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .any(|e| e.file_name().to_string_lossy().contains("db.corrupt-"));
+        assert!(
+            !quarantined,
+            "no quarantine copy when there was no prior file"
+        );
     }
 }

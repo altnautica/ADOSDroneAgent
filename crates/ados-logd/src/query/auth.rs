@@ -95,9 +95,30 @@ impl PairingState {
         }
         match self.current() {
             Pairing::Unpaired => true,
-            Pairing::Paired(expected) => presented_key == Some(expected.as_str()),
+            Pairing::Paired(expected) => match presented_key {
+                Some(presented) => constant_time_eq(presented.as_bytes(), expected.as_bytes()),
+                None => false,
+            },
         }
     }
+}
+
+/// Compare two byte slices in time independent of where they first differ, so
+/// the bearer-secret check on the LAN edge leaks no timing signal about a
+/// partial match. A length mismatch is rejected up front (the length of the
+/// stored key is not itself a secret); equal-length slices are then folded
+/// together with a running difference accumulator that always visits every
+/// byte. The compiler is told via `std::hint::black_box` not to short-circuit
+/// the loop once a difference is seen.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff: u8 = 0;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    std::hint::black_box(diff) == 0
 }
 
 impl Default for PairingState {
@@ -244,6 +265,34 @@ mod tests {
         let path = write_pairing(dir.path(), "this is not json");
         let state = PairingState::with_path(path);
         assert_eq!(state.current(), Pairing::Unpaired);
+    }
+
+    #[test]
+    fn constant_time_eq_matches_byte_equality() {
+        // Equal slices compare equal; any single-byte or length difference is
+        // rejected, exactly as `==` would, only without the early exit.
+        assert!(constant_time_eq(b"ados_secret", b"ados_secret"));
+        assert!(!constant_time_eq(b"ados_secret", b"ados_secre1"));
+        assert!(!constant_time_eq(b"ados_secret", b"xdos_secret"));
+        assert!(!constant_time_eq(b"ados_secret", b"ados_secret_longer"));
+        assert!(!constant_time_eq(b"ados_secret", b"short"));
+        assert!(constant_time_eq(b"", b""));
+        assert!(!constant_time_eq(b"", b"x"));
+    }
+
+    #[test]
+    fn paired_key_check_is_a_constant_time_comparison() {
+        // The authorize() Paired branch goes through the constant-time compare:
+        // the exact key passes, a same-length wrong key and a prefix match both
+        // fail, and an absent key fails.
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_pairing(dir.path(), r#"{"paired": true, "api_key": "ados_secret"}"#);
+        let state = PairingState::with_path(path);
+        assert!(state.authorize("/v1/query", Some("ados_secret")));
+        assert!(!state.authorize("/v1/query", Some("ados_secre1")));
+        assert!(!state.authorize("/v1/query", Some("ados_secret_with_more")));
+        assert!(!state.authorize("/v1/query", Some("ados")));
+        assert!(!state.authorize("/v1/query", None));
     }
 
     #[test]
