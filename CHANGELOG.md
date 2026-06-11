@@ -4,6 +4,30 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.59.0] - 2026-06-11
+
+### Changed
+
+- The agent reaches the cloud backend only when configured for an explicit
+  cloud posture. The status heartbeat, the command poll, and the pairing
+  beacon emit to Convex only when `server.mode` is `cloud` or `self_hosted`;
+  an absent, `local`, or unrecognized mode stays silent rather than beaconing,
+  so a local-first or mistyped configuration never reaches out to the cloud.
+  Local pairing over the LAN is unaffected.
+
+### Fixed
+
+- A ground station restores its receive adapter to a NetworkManager-managed
+  state when the receive plane stops, complementing the restore done before a
+  bind, so a shutdown never leaves the adapter in monitor mode for the next
+  bind to trip over.
+
+### Removed
+
+- The superseded in-process Python ground-station cloud-relay bridge. The
+  native cross-profile cloud relay owns the uplink-reactive reconnect, the
+  data-cap downshift, and the status heartbeat on both profiles.
+
 ## [0.58.0] - 2026-06-11
 
 ### Fixed
