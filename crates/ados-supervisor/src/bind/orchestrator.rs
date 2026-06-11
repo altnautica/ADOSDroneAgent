@@ -367,6 +367,16 @@ impl BindOrchestrator {
             .await
             .ok();
 
+        // Restore the WFB injection adapter to a clean NetworkManager-managed
+        // state before the bind unit starts. The vendored wfb-ng `wfb-server`
+        // aborts its init when `nmcli device show <iface>` cannot find the
+        // device — exactly the case when the ground-station receive plane left
+        // the RTL in monitor mode on stop (monitor-type interfaces are not
+        // enumerated by NetworkManager). The drone radio restores managed on its
+        // own shutdown; the GS receive plane does not, so heal it here at the
+        // single bind choke point (idempotent and harmless on the drone).
+        restore_injection_iface_managed().await;
+
         self.set_state(BindState::OpeningTunnel).await;
 
         // Start the bind profile (brings up the L3 tunnel).
@@ -714,6 +724,49 @@ pub fn read_sentinel_active() -> bool {
         .and_then(|t| serde_json::from_str::<Value>(&t).ok())
         .and_then(|v| v.get("active").and_then(Value::as_bool))
         .unwrap_or(false)
+}
+
+/// Restore the WFB injection adapter(s) to NetworkManager-managed mode so the
+/// vendored wfb-ng `wfb-server` (the bind unit) can enumerate the device via
+/// `nmcli device show` instead of aborting. Mirrors the drone radio's
+/// shutdown-time `set_managed_mode`, but applied at the bind choke point so it
+/// also heals the ground-station receive plane, which does not restore managed
+/// on its own stop and would otherwise leave the RTL in monitor mode (a state
+/// NetworkManager does not enumerate, so wfb-server's pre-check aborts).
+/// Best-effort: each step may fail (already managed, or a tool absent), and a
+/// missing adapter is a no-op.
+#[cfg(target_os = "linux")]
+async fn restore_injection_iface_managed() {
+    let candidates = crate::mgmt_link_guardian::detection::collect_candidates().await;
+    for c in candidates
+        .iter()
+        .filter(|c| c.is_injection && !c.is_virtual)
+    {
+        let iface = c.name.as_str();
+        let _ = run_iface_cmd("ip", &["link", "set", iface, "down"]).await;
+        let _ = run_iface_cmd("iw", &[iface, "set", "type", "managed"]).await;
+        let _ = run_iface_cmd("ip", &["link", "set", iface, "up"]).await;
+        let _ = run_iface_cmd("nmcli", &["dev", "set", iface, "managed", "yes"]).await;
+        tracing::info!(iface, "bind_restored_injection_iface_managed");
+    }
+}
+
+/// Off-Linux dev hosts have no injection adapter to restore.
+#[cfg(not(target_os = "linux"))]
+async fn restore_injection_iface_managed() {}
+
+/// Run a short interface-management command, bounded so a hung tool never stalls
+/// the bind. Returns whether it exited successfully.
+#[cfg(target_os = "linux")]
+async fn run_iface_cmd(bin: &str, args: &[&str]) -> bool {
+    matches!(
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            tokio::process::Command::new(bin).args(args).output(),
+        )
+        .await,
+        Ok(Ok(o)) if o.status.success()
+    )
 }
 
 #[cfg(test)]
