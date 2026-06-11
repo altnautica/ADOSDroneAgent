@@ -103,6 +103,10 @@ pub const SERVICE_REGISTRY: &[ServiceDef] = &[
     // On-demand.
     def("ados-ota", OnDemand, None, None),
     def("ados-discovery", OnDemand, None, None),
+    // The native HTTP control surface. Cross-profile and on-demand: it ships
+    // disabled (the GCS uses the FastAPI surface) and only runs when the operator
+    // enables it, so the supervisor never auto-starts it on boot.
+    def("ados-control", OnDemand, None, None),
     // Peripheral Manager registry. Cross-profile.
     def("ados-peripherals", Hardware, None, None),
     // Ground-station-only services. ados-wfb-rx is the single-node RX path,
@@ -225,7 +229,7 @@ mod tests {
     #[test]
     fn registry_has_expected_shape() {
         let specs = build_specs();
-        assert_eq!(specs.len(), 27, "service count drifted from the catalog");
+        assert_eq!(specs.len(), 28, "service count drifted from the catalog");
         // Core tier members. The single cross-profile cloud unit serves the
         // gateway + heartbeat on both profiles (it spawns the ground-station
         // bridge when the role resolves to a ground station), so there is no

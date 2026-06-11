@@ -117,6 +117,17 @@ _SERVICES: dict[str, _Service] = {
         note="local logging and telemetry store (default; fallback marker pins it off)",
         opt_out=True,
     ),
+    "control": _Service(
+        # Opt-in, off by default: the GCS uses the FastAPI surface (:8080), and
+        # the native control surface is a net-new dual-listener (LAN :8082 +
+        # /run/ados/control.sock) with no packaged counterpart, so it is an extra
+        # unit enabled+started on and masked off. `enable` writes the marker and
+        # starts it; `disable` removes the marker and masks the unit.
+        flag="control-rust-enabled",
+        binaries=("/opt/ados/bin/ados-control",),
+        extra_units=("ados-control",),
+        note="native HTTP control surface (LAN :8082 + /run/ados/control.sock); off by default",
+    ),
 }
 
 _SVC_NAMES = tuple(_SERVICES)

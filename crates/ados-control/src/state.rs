@@ -4,10 +4,11 @@
 //! because the axum router clones it per connection. It holds the pairing reader
 //! (also consulted by the LAN-edge auth), the agent version string, the
 //! vehicle-state IPC client the status/telemetry routes project, the MAVLink
-//! command-send client the command route writes frames through, and the process
-//! start instant used as the status route's uptime fallback. The surface is fully
-//! wired but ships dark — no systemd unit or supervisor registration launches the
-//! daemon yet, so it has no effect until that wiring lands (see `main.rs`).
+//! command-send client the command route writes frames through, the logging-store
+//! query client + the board sidecar path the status route sources health + board
+//! from, and the process start instant used as the status route's uptime
+//! fallback. The surface is wired but ships disabled: the systemd unit is deployed
+//! off by default and only `ados rust enable control` starts the daemon.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -17,14 +18,55 @@ use crate::auth::PairingState;
 use crate::ipc::{LogdQueryClient, MavlinkIpcClient, StateIpcClient};
 use crate::routes::status::process_uptime_seconds;
 
-/// The agent version string, resolved once at startup. The systemd unit sets
-/// `ADOS_AGENT_VERSION` from the Python `ados.__version__` source so the native
-/// surface reports the exact same version the FastAPI surface does; the crate
-/// version is the inert fallback when the env is unset (a dev host, or this
-/// crate's pre-wiring state where no unit injects the env yet). Mirrors the
-/// `agent_version()` helper the plugin-host binary uses.
+/// The agent version string, resolved once at startup, so the native surface
+/// reports the exact same version the FastAPI surface does (`/api/version`,
+/// `/healthz`, `/api/status`). Resolution order:
+/// 1. `ADOS_AGENT_VERSION` env, when a caller/unit pins it explicitly;
+/// 2. the `version` the installer records in the install-result contract
+///    (`/var/lib/ados/install-result.json`), the real on-box agent version;
+/// 3. the crate version, the inert fallback on a dev host or before an install.
 pub fn agent_version() -> String {
-    std::env::var("ADOS_AGENT_VERSION").unwrap_or_else(|_| env!("CARGO_PKG_VERSION").to_string())
+    if let Ok(v) = std::env::var("ADOS_AGENT_VERSION") {
+        if !v.is_empty() {
+            return v;
+        }
+    }
+    if let Some(v) = version_from_install_result() {
+        return v;
+    }
+    env!("CARGO_PKG_VERSION").to_string()
+}
+
+/// The agent version the installer recorded in the install-result contract, or
+/// `None` when the file is absent / unreadable / carries no usable version (a
+/// dev host, or before the first install). The path honours `ADOS_INSTALL_RESULT`
+/// so a test can redirect it. The `"unknown"` placeholder the installer writes
+/// when it could not probe the version is treated as no version.
+fn version_from_install_result() -> Option<String> {
+    let path = std::env::var("ADOS_INSTALL_RESULT")
+        .unwrap_or_else(|_| "/var/lib/ados/install-result.json".to_string());
+    version_from_install_result_at(std::path::Path::new(&path))
+}
+
+/// Read the `version` field out of an install-result contract file, or `None`
+/// when the file is absent / unreadable / not JSON / carries no usable version.
+/// The `"unknown"` placeholder the installer writes when it could not probe the
+/// version is treated as no version. Pure (path in), so it is unit-testable
+/// without mutating the process environment.
+fn version_from_install_result_at(path: &std::path::Path) -> Option<String> {
+    // The contract is a few hundred bytes; bound the read so a corrupt or
+    // tampered file can never balloon memory at startup.
+    const MAX_BYTES: u64 = 1024 * 1024;
+    if std::fs::metadata(path).ok()?.len() > MAX_BYTES {
+        return None;
+    }
+    let bytes = std::fs::read(path).ok()?;
+    let value: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    value
+        .get("version")
+        .and_then(serde_json::Value::as_str)
+        .filter(|s| !s.is_empty() && *s != "unknown")
+        .map(str::to_string)
 }
 
 /// The HAL-detected board name the pairing-info route reports. Read from
@@ -148,5 +190,41 @@ impl AppState {
             .and_then(|m| m.get("fc_connected"))
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(false)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn version_reads_the_install_result_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("install-result.json");
+        std::fs::write(
+            &path,
+            r#"{"status":"ok","version":"0.63.0","board":"rpi4b"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            version_from_install_result_at(&path),
+            Some("0.63.0".to_string())
+        );
+    }
+
+    #[test]
+    fn version_ignores_the_unknown_placeholder_and_missing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let unknown = dir.path().join("unknown.json");
+        std::fs::write(&unknown, r#"{"version":"unknown"}"#).unwrap();
+        assert_eq!(version_from_install_result_at(&unknown), None);
+        // Absent file and a non-JSON body both degrade to None.
+        assert_eq!(
+            version_from_install_result_at(&dir.path().join("absent.json")),
+            None
+        );
+        let garbage = dir.path().join("garbage.json");
+        std::fs::write(&garbage, "not json").unwrap();
+        assert_eq!(version_from_install_result_at(&garbage), None);
     }
 }
