@@ -210,20 +210,34 @@ fn key_is_complete(path: &Path) -> bool {
 }
 
 /// Run the auto-pair loop until `shutdown` flips. Drives the bind in-process via
-/// the shared orchestrator.
-pub async fn run(orch: Arc<BindOrchestrator>, role: BindRole, mut shutdown: watch::Receiver<bool>) {
-    run_with_failover(orch, role, &mut shutdown, FailoverWriter::new()).await
+/// the shared orchestrator. `cloud_relay_enabled` reflects `server.mode`: in
+/// local-first mode the loop never gives up on the local bind.
+pub async fn run(
+    orch: Arc<BindOrchestrator>,
+    role: BindRole,
+    mut shutdown: watch::Receiver<bool>,
+    cloud_relay_enabled: bool,
+) {
+    run_with_failover(
+        orch,
+        role,
+        &mut shutdown,
+        FailoverWriter::new(),
+        cloud_relay_enabled,
+    )
+    .await
 }
 
 /// The loop body with an injectable failover writer (so a test can target a temp
 /// path). Resets the failover sidecar to `local` on start, drives one bind per
-/// armed+unpaired tick, flips to `cloud_relay` after the attempt cap, and persists
-/// `local` again on a successful pair.
+/// armed+unpaired tick, flips to `cloud_relay` after the attempt cap *only when
+/// a cloud relay is configured*, and persists `local` again on a successful pair.
 async fn run_with_failover(
     orch: Arc<BindOrchestrator>,
     role: BindRole,
     shutdown: &mut watch::Receiver<bool>,
     mut failover: FailoverWriter,
+    cloud_relay_enabled: bool,
 ) {
     tracing::info!(role = role.as_str(), "auto_pair_supervisor_started");
     // Settle before the first attempt.
@@ -273,14 +287,20 @@ async fn run_with_failover(
                         tracing::info!(role = role.as_str(), state, "auto_pair_aborted");
                         break;
                     }
-                    attempt += 1;
+                    attempt = attempt.saturating_add(1);
                     tracing::info!(
                         role = role.as_str(),
                         state,
                         attempt,
                         "auto_pair_attempt_unpaired"
                     );
-                    if failover_reached(attempt) {
+                    // Fail over to the cloud relay only when it is actually
+                    // configured (`server.mode` = cloud / self_hosted). In
+                    // local-first / offline operation WFB is the only link, so
+                    // the loop keeps retrying the local bind forever instead of
+                    // giving up at the attempt cap and stranding the rig with no
+                    // link at all.
+                    if cloud_relay_enabled && failover_reached(attempt) {
                         failover.sync(FailoverState::CloudRelay);
                         tracing::warn!(attempts = attempt, "wfb_failover_to_cloud_relay");
                         break;
@@ -390,6 +410,36 @@ mod tests {
         // At and past the cap, fall back to the cloud relay.
         assert!(failover_reached(MAX_LOCAL_BIND_ATTEMPTS));
         assert!(failover_reached(MAX_LOCAL_BIND_ATTEMPTS + 1));
+    }
+
+    #[test]
+    fn local_mode_never_fails_over_to_cloud_relay() {
+        // In local-first mode (server.mode = local → cloud_relay_enabled =
+        // false) the loop's failover gate never fires past the cap, so an
+        // offline rig keeps retrying the local bind instead of giving up.
+        let cloud_relay_enabled = false;
+        let mut flipped = false;
+        for attempt in 1..=(MAX_LOCAL_BIND_ATTEMPTS + 5) {
+            if cloud_relay_enabled && failover_reached(attempt) {
+                flipped = true;
+                break;
+            }
+        }
+        assert!(!flipped, "local mode must never give up the WFB bind");
+    }
+
+    #[test]
+    fn cloud_mode_fails_over_at_the_cap() {
+        // With a cloud relay configured, the same gate flips at the cap.
+        let cloud_relay_enabled = true;
+        let mut flipped_at = None;
+        for attempt in 1..=(MAX_LOCAL_BIND_ATTEMPTS + 5) {
+            if cloud_relay_enabled && failover_reached(attempt) {
+                flipped_at = Some(attempt);
+                break;
+            }
+        }
+        assert_eq!(flipped_at, Some(MAX_LOCAL_BIND_ATTEMPTS));
     }
 
     #[test]

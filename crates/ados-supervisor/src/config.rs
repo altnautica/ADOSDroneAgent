@@ -26,6 +26,8 @@ struct RawConfig {
     video: VideoSection,
     #[serde(default)]
     ground_station: GroundStationSection,
+    #[serde(default)]
+    server: ServerSection,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -46,6 +48,14 @@ struct GroundStationSection {
     role: Option<String>,
 }
 
+#[derive(Debug, Default, Deserialize)]
+struct ServerSection {
+    /// `server.mode`: `local` (default) reaches the agent only over the LAN;
+    /// `cloud` / `self_hosted` enable the cloud relay.
+    #[serde(default)]
+    mode: Option<String>,
+}
+
 /// The resolved agent identity the orchestrator gates on.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentConfig {
@@ -59,6 +69,11 @@ pub struct AgentConfig {
     pub role: Option<String>,
     /// `video.mode` is set and not `"disabled"`.
     pub video_enabled: bool,
+    /// `server.mode` is a cloud posture (`cloud` / `self_hosted`), i.e. the
+    /// cloud relay is configured. Default `local` → false. The WFB auto-pair
+    /// loop only fails over to the cloud relay when this is true; a local-first
+    /// rig keeps retrying the local bind forever instead of giving up.
+    pub cloud_relay_enabled: bool,
     /// `ground_station.role` from config (default `direct`); the role to apply on boot.
     pub configured_gs_role: String,
     /// The raw, unresolved `config.agent.profile` literal (or `None`). The
@@ -104,6 +119,11 @@ impl AgentConfig {
             .map(|m| m != "disabled")
             .unwrap_or(false);
 
+        let cloud_relay_enabled = matches!(
+            raw.server.mode.as_deref(),
+            Some("cloud") | Some("self_hosted")
+        );
+
         let configured_gs_role = raw
             .ground_station
             .role
@@ -114,6 +134,7 @@ impl AgentConfig {
             profile_wire,
             role,
             video_enabled,
+            cloud_relay_enabled,
             configured_gs_role,
             raw_agent_profile,
             mesh_role_path: mesh_role.to_path_buf(),
@@ -252,6 +273,26 @@ mod tests {
         assert_eq!(ac.profile_gate(), "ground_station");
         // Explicit config profile → raw gate also true (boot helpers fire).
         assert!(ac.raw_is_ground_station());
+    }
+
+    #[test]
+    fn cloud_relay_enabled_follows_server_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let pc = dir.path().join("profile.conf");
+        let role = dir.path().join("mesh/role");
+        let load = |body: &str| {
+            let cfg = dir.path().join("config.yaml");
+            write(&cfg, body);
+            AgentConfig::load_from(&cfg, &pc, &role).cloud_relay_enabled
+        };
+        // Local-first default (absent or explicit `local`) keeps the relay off.
+        assert!(!load("agent:\n  profile: drone\n"));
+        assert!(!load("server:\n  mode: local\n"));
+        // Cloud / self-hosted postures enable it.
+        assert!(load("server:\n  mode: cloud\n"));
+        assert!(load("server:\n  mode: self_hosted\n"));
+        // An unknown mode stays off (local-first).
+        assert!(!load("server:\n  mode: weird\n"));
     }
 
     #[test]

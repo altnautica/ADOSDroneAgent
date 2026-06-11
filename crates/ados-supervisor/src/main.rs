@@ -57,9 +57,11 @@ async fn main() -> Result<()> {
         "resolved agent profile"
     );
 
-    // Capture the bindable role before `config` is moved into the supervisor,
-    // and a shutdown signal for the background tasks (auto-pair).
+    // Capture the bindable role + cloud-relay posture before `config` is moved
+    // into the supervisor, and a shutdown signal for the background tasks
+    // (auto-pair).
     let auto_pair_role = bind::BindRole::parse(&config.profile_wire);
+    let cloud_relay_enabled = config.cloud_relay_enabled;
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
 
     // The bind orchestrator is shared between the monitor (which gates radio
@@ -99,7 +101,7 @@ async fn main() -> Result<()> {
     if let Some(role) = auto_pair_role {
         let orch = bind_orch.clone();
         let shutdown = shutdown_rx.clone();
-        tokio::spawn(auto_pair::run(orch, role, shutdown));
+        tokio::spawn(auto_pair::run(orch, role, shutdown, cloud_relay_enabled));
     }
 
     // Stable-MAC reconciler: pin a deterministic MAC on any onboard adapter

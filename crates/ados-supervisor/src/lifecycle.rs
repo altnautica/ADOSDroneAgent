@@ -530,6 +530,7 @@ mod tests {
             profile_wire: profile_wire.to_string(),
             role: boot_role,
             video_enabled: true,
+            cloud_relay_enabled: false,
             configured_gs_role: "direct".to_string(),
             raw_agent_profile: Some(profile_wire.replace('-', "_")),
             mesh_role_path: role_path.to_path_buf(),
