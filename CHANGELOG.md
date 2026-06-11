@@ -4,6 +4,32 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.58.0] - 2026-06-11
+
+### Fixed
+
+- The management-link reach-back no longer flaps into WiFi-heartbeat mode on a
+  rig managed over onboard WiFi with an unplugged Ethernet port. A wired
+  interface is treated as a management primary only once it has carried a link,
+  so a port unplugged from boot is ignored while a real cable pull still fails
+  over. The WFB injection adapter is also classified as wireless by interface
+  name, so a transiently-unreadable sysfs entry during monitor-mode bring-up can
+  never misclassify it as a wired primary.
+- A drone in local mode keeps retrying the local WFB bind instead of giving up
+  after a fixed number of attempts. The cloud-relay fallback now fires only when
+  a cloud relay is configured (`server.mode` is `cloud` or `self_hosted`), so a
+  local-first rig never strands itself with no link.
+- The WFB injection adapter is restored to a NetworkManager-managed state before
+  the bind receiver starts, so a ground-station bind no longer aborts when the
+  adapter was left in monitor mode by the receive plane.
+
+### Changed
+
+- The on-box agent CLI authenticates over loopback on a paired agent. A request
+  from the host's own loopback interface, not relayed by a proxy or tunnel, is
+  trusted, so commands like `ados radio status` work on the box without the
+  root-owned pairing key.
+
 ## [0.51.0] - 2026-06-04
 
 ### Changed
