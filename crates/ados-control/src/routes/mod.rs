@@ -2,15 +2,16 @@
 //!
 //! The native control surface answers the same `/api/*` (+ `/healthz`) routes
 //! the FastAPI surface does, byte-identically, so the same GCS works against
-//! either. This chunk registers `/healthz`, `/api/version`, `/api/status`,
-//! `/api/telemetry`, `/api/time`, and the four `/api/pairing/*` routes; the
-//! command routes land in a later chunk.
+//! either. This surface registers `/healthz`, `/api/version`, `/api/status`,
+//! `/api/telemetry`, `/api/time`, the four `/api/pairing/*` routes, and the two
+//! `/api/command{,s}` routes.
 //!
 //! Error bodies use FastAPI's `{"detail": "..."}` shape on 4xx/5xx, NOT the
 //! logd read-API's `{"error": {...}}` envelope, because the GCS already parses
 //! the agent's `{"detail"}` errors. The 404 fallback and the [`detail`] helper
 //! enforce that one shape everywhere on this surface.
 
+pub mod command;
 pub mod pairing;
 pub mod status;
 pub mod system;
@@ -53,6 +54,11 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/pairing/code", get(pairing::get_pairing_code))
         .route("/api/pairing/claim", post(pairing::claim_pairing))
         .route("/api/pairing/unpair", post(pairing::unpair))
+        // Command: the fire-and-forget text-command executor (auth-gated when
+        // paired) + the catalog. The executor builds a MAVLink frame and writes
+        // it to the mavlink socket; the catalog is the static command list.
+        .route("/api/command", post(command::execute_command))
+        .route("/api/commands", get(command::list_commands))
         .fallback(not_found)
         .with_state(state)
 }

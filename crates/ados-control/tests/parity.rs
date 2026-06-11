@@ -56,11 +56,30 @@ async fn start(dir: &Path, pairing_body: Option<&str>) -> Harness {
 }
 
 /// Bring the server up with an explicit state-socket path so a test can point it
-/// at a live mock-IPC server (or at an absent path for the degraded shape).
+/// at a live mock-IPC server (or at an absent path for the degraded shape). The
+/// MAVLink command socket points at an absent path (no command test here).
 async fn start_with_state(
     dir: &Path,
     pairing_body: Option<&str>,
     state_socket: PathBuf,
+) -> Harness {
+    start_full(
+        dir,
+        pairing_body,
+        state_socket,
+        dir.join("absent-mavlink.sock"),
+    )
+    .await
+}
+
+/// Bring the server up with explicit state + MAVLink socket paths so a command
+/// test can point the MAVLink socket at a live mock server (or an absent path for
+/// the no-socket 503 case).
+async fn start_full(
+    dir: &Path,
+    pairing_body: Option<&str>,
+    state_socket: PathBuf,
+    mavlink_socket: PathBuf,
 ) -> Harness {
     let socket = dir.join("control.sock");
     let pairing_path = dir.join("pairing.json");
@@ -78,6 +97,7 @@ async fn start_with_state(
         control_tcp_port: port,
         pairing_path: pairing_path.clone(),
         state_socket,
+        mavlink_socket,
         // Point the pairing-route reads at the same temp dir so a test can seed a
         // config / wfb key / bind-state sidecar; absent files degrade to the
         // documented defaults (board "unknown", empty device id, null bind_state).
@@ -326,10 +346,10 @@ async fn loopback_tcp_is_trusted_when_paired_without_a_key() {
     // 127.0.0.1 (the test connects to 127.0.0.1:port), so the on-box loopback
     // shortcut must let it past the pairing gate.
     //
-    // Use a route that is still unregistered through this chunk
-    // (`/api/command`, which lands later) so a 404 (NOT a 401) cleanly proves the
-    // gate was bypassed rather than the route answering.
-    let (status, body) = tcp_get(h.port, "/api/command", &[]).await;
+    // Use a genuinely-unregistered path so a 404 (NOT a 401) cleanly proves the
+    // gate was bypassed rather than the route answering. (The path is non-public
+    // and non-existent, so the only way to a 404 is past the pairing gate.)
+    let (status, body) = tcp_get(h.port, "/api/unregistered-probe", &[]).await;
     assert!(
         status.contains("404"),
         "loopback should bypass the key gate (expect a 404 pass-through, not 401): {status}"
@@ -1108,6 +1128,415 @@ async fn pairing_unpair_is_gated_by_the_key_when_paired_over_tcp() {
     assert!(
         status.contains("401"),
         "keyless unpair must be gated: {status}"
+    );
+    h.stop().await;
+}
+
+// --- command parity (R2: the MAVLink bytes / R3: target_system) ---
+
+use ados_protocol::frame::{decode_len, HEADER_SIZE, MAVLINK_MAX_FRAME};
+use ados_protocol::mavlink::ardupilotmega::{MavCmd, MavMessage, COMMAND_LONG_DATA};
+use std::sync::Arc;
+use tokio::sync::Mutex;
+
+/// A mock MAVLink command socket. Accepts one connection, reads exactly one
+/// length-prefixed frame, decodes it with `parse_v2`, and stores the decoded
+/// `COMMAND_LONG` for the test to assert. Mirrors the real router's read side
+/// (which forwards a client-written frame to the FC).
+struct MockMavlinkServer {
+    path: PathBuf,
+    received: Arc<Mutex<Option<COMMAND_LONG_DATA>>>,
+    stop: Option<oneshot::Sender<()>>,
+    join: tokio::task::JoinHandle<()>,
+}
+
+impl MockMavlinkServer {
+    async fn start(dir: &Path) -> Self {
+        let path = dir.join("mavlink.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        let received: Arc<Mutex<Option<COMMAND_LONG_DATA>>> = Arc::new(Mutex::new(None));
+        let received_w = Arc::clone(&received);
+        let (stop_tx, mut stop_rx) = oneshot::channel::<()>();
+        let join = tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = &mut stop_rx => return,
+                    accepted = listener.accept() => {
+                        if let Ok((mut conn, _addr)) = accepted {
+                            // Read one framed command: 4-byte length, then the body.
+                            let mut header = [0u8; HEADER_SIZE];
+                            if conn.read_exact(&mut header).await.is_err() {
+                                continue;
+                            }
+                            let len = match decode_len(header, MAVLINK_MAX_FRAME, false) {
+                                Ok(n) => n,
+                                Err(_) => continue,
+                            };
+                            let mut body = vec![0u8; len];
+                            if conn.read_exact(&mut body).await.is_err() {
+                                continue;
+                            }
+                            if let Ok((_h, MavMessage::COMMAND_LONG(d))) =
+                                ados_protocol::mavlink::parse_v2(&body)
+                            {
+                                *received_w.lock().await = Some(d);
+                            }
+                            // Hold the connection open so the client's lazy
+                            // connection stays valid for the assertion window.
+                            tokio::spawn(async move {
+                                let mut sink = [0u8; 64];
+                                loop {
+                                    match conn.read(&mut sink).await {
+                                        Ok(0) | Err(_) => return,
+                                        Ok(_) => {}
+                                    }
+                                }
+                            });
+                        }
+                    }
+                }
+            }
+        });
+        Self {
+            path,
+            received,
+            stop: Some(stop_tx),
+            join,
+        }
+    }
+
+    /// Wait until a command frame has been received + decoded, returning it.
+    async fn await_command(&self) -> COMMAND_LONG_DATA {
+        for _ in 0..100 {
+            if let Some(d) = self.received.lock().await.clone() {
+                return d;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("mock mavlink server never received a command frame");
+    }
+
+    async fn stop(mut self) {
+        if let Some(tx) = self.stop.take() {
+            let _ = tx.send(());
+        }
+        let _ = self.join.await;
+    }
+}
+
+/// The canned snapshot the command tests use: FC connected, so the route passes
+/// its `fc_connected` gate.
+fn fc_up_snapshot() -> Value {
+    serde_json::json!({
+        "fc_connected": true,
+        "fc_port": "/dev/ttyACM0",
+        "fc_baud": 115200,
+    })
+}
+
+/// POST a command and return (status_line, body) over the unix socket.
+async fn post_command(socket: &Path, json_body: &str) -> (String, String) {
+    unix_post(socket, "/api/command", None, json_body).await
+}
+
+/// Bring up the surface with an FC-connected state snapshot AND a live mock
+/// MAVLink socket. Returns the harness + the mock so a command test can assert
+/// the exact frame the route wrote.
+async fn start_with_fc_and_mavlink(dir: &Path) -> (Harness, MockStateServer, MockMavlinkServer) {
+    let state_mock = MockStateServer::start(dir, fc_up_snapshot(), Wire::V1Json).await;
+    let mav_mock = MockMavlinkServer::start(dir).await;
+    let h = start_full(dir, None, state_mock.path.clone(), mav_mock.path.clone()).await;
+    // Wait for the state client to read fc_connected=true so the command gate
+    // passes deterministically.
+    poll_info_until_fc_connected(&h.socket).await;
+    (h, state_mock, mav_mock)
+}
+
+#[tokio::test]
+async fn command_arm_writes_a_component_arm_disarm_frame() {
+    let dir = tempfile::tempdir().unwrap();
+    let (h, state_mock, mav_mock) = start_with_fc_and_mavlink(dir.path()).await;
+
+    let (status, body) = post_command(&h.socket, r#"{"cmd":"arm"}"#).await;
+    assert!(status.contains("200"), "arm must be 200, was {status}");
+    let got: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(got["status"], serde_json::json!("ok"));
+    assert_eq!(got["cmd"], serde_json::json!("arm"));
+
+    let d = mav_mock.await_command().await;
+    assert_eq!(d.command, MavCmd::MAV_CMD_COMPONENT_ARM_DISARM);
+    assert_eq!(d.param1, 1.0);
+    // R3: single-vehicle target.
+    assert_eq!(d.target_system, 1);
+    assert_eq!(d.target_component, 1);
+
+    h.stop().await;
+    state_mock.stop().await;
+    mav_mock.stop().await;
+}
+
+#[tokio::test]
+async fn command_disarm_writes_param1_zero() {
+    let dir = tempfile::tempdir().unwrap();
+    let (h, state_mock, mav_mock) = start_with_fc_and_mavlink(dir.path()).await;
+
+    let (status, _b) = post_command(&h.socket, r#"{"cmd":"disarm"}"#).await;
+    assert!(status.contains("200"), "{status}");
+    let d = mav_mock.await_command().await;
+    assert_eq!(d.command, MavCmd::MAV_CMD_COMPONENT_ARM_DISARM);
+    assert_eq!(d.param1, 0.0);
+
+    h.stop().await;
+    state_mock.stop().await;
+    mav_mock.stop().await;
+}
+
+#[tokio::test]
+async fn command_takeoff_default_altitude_is_ten_in_param7() {
+    let dir = tempfile::tempdir().unwrap();
+    let (h, state_mock, mav_mock) = start_with_fc_and_mavlink(dir.path()).await;
+
+    let (status, body) = post_command(&h.socket, r#"{"cmd":"takeoff"}"#).await;
+    assert!(status.contains("200"), "{status}");
+    let got: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(got["altitude"], serde_json::json!(10.0));
+    let d = mav_mock.await_command().await;
+    assert_eq!(d.command, MavCmd::MAV_CMD_NAV_TAKEOFF);
+    assert_eq!(d.param7, 10.0);
+
+    h.stop().await;
+    state_mock.stop().await;
+    mav_mock.stop().await;
+}
+
+#[tokio::test]
+async fn command_takeoff_reads_the_altitude_arg() {
+    let dir = tempfile::tempdir().unwrap();
+    let (h, state_mock, mav_mock) = start_with_fc_and_mavlink(dir.path()).await;
+
+    let (status, _b) = post_command(&h.socket, r#"{"cmd":"takeoff","args":[25]}"#).await;
+    assert!(status.contains("200"), "{status}");
+    let d = mav_mock.await_command().await;
+    assert_eq!(d.param7, 25.0);
+
+    h.stop().await;
+    state_mock.stop().await;
+    mav_mock.stop().await;
+}
+
+#[tokio::test]
+async fn command_land_writes_nav_land_all_zero() {
+    let dir = tempfile::tempdir().unwrap();
+    let (h, state_mock, mav_mock) = start_with_fc_and_mavlink(dir.path()).await;
+
+    let (status, _b) = post_command(&h.socket, r#"{"cmd":"land"}"#).await;
+    assert!(status.contains("200"), "{status}");
+    let d = mav_mock.await_command().await;
+    assert_eq!(d.command, MavCmd::MAV_CMD_NAV_LAND);
+    for p in [
+        d.param1, d.param2, d.param3, d.param4, d.param5, d.param6, d.param7,
+    ] {
+        assert_eq!(p, 0.0);
+    }
+
+    h.stop().await;
+    state_mock.stop().await;
+    mav_mock.stop().await;
+}
+
+#[tokio::test]
+async fn command_rtl_writes_do_set_mode_param2_six() {
+    let dir = tempfile::tempdir().unwrap();
+    let (h, state_mock, mav_mock) = start_with_fc_and_mavlink(dir.path()).await;
+
+    let (status, _b) = post_command(&h.socket, r#"{"cmd":"rtl"}"#).await;
+    assert!(status.contains("200"), "{status}");
+    let d = mav_mock.await_command().await;
+    // The `rtl` shortcut commands Return-to-Launch: DO_SET_MODE p1=1, p2=6 (RTL).
+    assert_eq!(d.command, MavCmd::MAV_CMD_DO_SET_MODE);
+    assert_eq!(d.param1, 1.0);
+    assert_eq!(d.param2, 6.0);
+
+    h.stop().await;
+    state_mock.stop().await;
+    mav_mock.stop().await;
+}
+
+#[tokio::test]
+async fn command_mode_rtl_writes_do_set_mode_param2_six() {
+    let dir = tempfile::tempdir().unwrap();
+    let (h, state_mock, mav_mock) = start_with_fc_and_mavlink(dir.path()).await;
+
+    let (status, body) = post_command(&h.socket, r#"{"cmd":"mode","args":["RTL"]}"#).await;
+    assert!(status.contains("200"), "{status}");
+    let got: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(got["mode"], serde_json::json!("RTL"));
+    let d = mav_mock.await_command().await;
+    assert_eq!(d.command, MavCmd::MAV_CMD_DO_SET_MODE);
+    assert_eq!(d.param1, 1.0);
+    assert_eq!(d.param2, 6.0);
+
+    h.stop().await;
+    state_mock.stop().await;
+    mav_mock.stop().await;
+}
+
+#[tokio::test]
+async fn command_503_when_fc_not_connected() {
+    let dir = tempfile::tempdir().unwrap();
+    // FC-down snapshot → the command gate fails before any send. The MAVLink
+    // socket is live, proving the 503 is the FC gate, not a send failure.
+    let state_mock = MockStateServer::start(
+        dir.path(),
+        serde_json::json!({"fc_connected": false}),
+        Wire::V1Json,
+    )
+    .await;
+    let mav_mock = MockMavlinkServer::start(dir.path()).await;
+    let h = start_full(
+        dir.path(),
+        None,
+        state_mock.path.clone(),
+        mav_mock.path.clone(),
+    )
+    .await;
+    // Let the state client read the (false) snapshot.
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    let (status, body) = post_command(&h.socket, r#"{"cmd":"arm"}"#).await;
+    assert!(
+        status.contains("503"),
+        "FC-down command must be 503: {status}"
+    );
+    let j: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(j["detail"], serde_json::json!("FC not connected"));
+    assert!(j.get("error").is_none(), "must be the {{detail}} shape");
+
+    h.stop().await;
+    state_mock.stop().await;
+    mav_mock.stop().await;
+}
+
+#[tokio::test]
+async fn command_503_when_the_mavlink_socket_is_absent() {
+    let dir = tempfile::tempdir().unwrap();
+    // FC connected (so the gate passes) but NO MAVLink socket → the send fails →
+    // 503 "No MAVLink connection".
+    let state_mock = MockStateServer::start(dir.path(), fc_up_snapshot(), Wire::V1Json).await;
+    let h = start_full(
+        dir.path(),
+        None,
+        state_mock.path.clone(),
+        dir.path().join("absent-mavlink.sock"),
+    )
+    .await;
+    poll_info_until_fc_connected(&h.socket).await;
+
+    let (status, body) = post_command(&h.socket, r#"{"cmd":"arm"}"#).await;
+    assert!(
+        status.contains("503"),
+        "an absent mavlink socket must 503: {status}"
+    );
+    let j: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(j["detail"], serde_json::json!("No MAVLink connection"));
+
+    h.stop().await;
+    state_mock.stop().await;
+}
+
+#[tokio::test]
+async fn command_400_on_unknown_command() {
+    let dir = tempfile::tempdir().unwrap();
+    let (h, state_mock, mav_mock) = start_with_fc_and_mavlink(dir.path()).await;
+
+    let (status, body) = post_command(&h.socket, r#"{"cmd":"warp-speed"}"#).await;
+    assert!(
+        status.contains("400"),
+        "unknown command must be 400: {status}"
+    );
+    let j: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(
+        j["detail"],
+        serde_json::json!("Unknown command: warp-speed")
+    );
+
+    h.stop().await;
+    state_mock.stop().await;
+    mav_mock.stop().await;
+}
+
+#[tokio::test]
+async fn command_400_on_unknown_mode_and_missing_mode_name() {
+    let dir = tempfile::tempdir().unwrap();
+    let (h, state_mock, mav_mock) = start_with_fc_and_mavlink(dir.path()).await;
+
+    // Unknown mode name.
+    let (status, body) = post_command(&h.socket, r#"{"cmd":"mode","args":["NOPE"]}"#).await;
+    assert!(status.contains("400"), "unknown mode must be 400: {status}");
+    let j: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(j["detail"], serde_json::json!("Unknown mode: NOPE"));
+
+    // Missing mode name.
+    let (status2, body2) = post_command(&h.socket, r#"{"cmd":"mode"}"#).await;
+    assert!(
+        status2.contains("400"),
+        "missing mode name must be 400: {status2}"
+    );
+    let j2: Value = serde_json::from_str(&body2).unwrap();
+    assert_eq!(j2["detail"], serde_json::json!("Mode name required"));
+
+    h.stop().await;
+    state_mock.stop().await;
+    mav_mock.stop().await;
+}
+
+#[tokio::test]
+async fn commands_catalog_matches_the_simple_commands() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = start(dir.path(), None).await;
+    let (status, body) = unix_get(&h.socket, "/api/commands", None).await;
+    assert!(status.contains("200"), "{status}");
+    let got: Value = serde_json::from_str(&body).unwrap();
+    let commands = got["commands"].as_object().expect("commands object");
+    // The six SIMPLE_COMMANDS, verbatim, with their descriptions.
+    let want = serde_json::json!({
+        "arm": "Arm the vehicle",
+        "disarm": "Disarm the vehicle",
+        "takeoff": "Takeoff to altitude (args: [altitude_m])",
+        "land": "Land at current position",
+        "rtl": "Return to launch",
+        "mode": "Set flight mode (args: [mode_name])",
+    });
+    assert_eq!(
+        &Value::Object(commands.clone()),
+        &want,
+        "the catalog must match SIMPLE_COMMANDS verbatim"
+    );
+    h.stop().await;
+}
+
+#[tokio::test]
+async fn command_is_gated_by_the_key_when_paired_over_tcp() {
+    let dir = tempfile::tempdir().unwrap();
+    // /api/command is NOT public, so a keyless TCP request (with a forwarding
+    // header to drop the loopback shortcut) is rejected at the gate.
+    let h = start(dir.path(), Some(r#"{"paired": true, "api_key": "ados_K"}"#)).await;
+    let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", h.port))
+        .await
+        .unwrap();
+    let body = r#"{"cmd":"arm"}"#;
+    let req = format!(
+        "POST /api/command HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {}\r\nX-Forwarded-For: 203.0.113.7\r\n\r\n{body}",
+        body.len()
+    );
+    stream.write_all(req.as_bytes()).await.unwrap();
+    stream.flush().await.unwrap();
+    let mut buf = Vec::new();
+    stream.read_to_end(&mut buf).await.unwrap();
+    let (status, _b) = split_http(&buf);
+    assert!(
+        status.contains("401"),
+        "keyless command must be gated: {status}"
     );
     h.stop().await;
 }

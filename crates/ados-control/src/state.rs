@@ -3,17 +3,18 @@
 //! The state is cheap to clone (every field is an `Arc` or a small owned value),
 //! because the axum router clones it per connection. It holds the pairing reader
 //! (also consulted by the LAN-edge auth), the agent version string, the
-//! vehicle-state IPC client the status/telemetry routes project, and the process
-//! start instant used as the status route's uptime fallback. The command/pairing
-//! IPC handles that land in later chunks add their fields here; they are
-//! deliberately absent rather than stubbed.
+//! vehicle-state IPC client the status/telemetry routes project, the MAVLink
+//! command-send client the command route writes frames through, and the process
+//! start instant used as the status route's uptime fallback. The surface is fully
+//! wired but ships dark — no systemd unit or supervisor registration launches the
+//! daemon yet, so it has no effect until that wiring lands (see `main.rs`).
 
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
 use crate::auth::PairingState;
-use crate::ipc::StateIpcClient;
+use crate::ipc::{MavlinkIpcClient, StateIpcClient};
 use crate::routes::status::process_uptime_seconds;
 
 /// The agent version string, resolved once at startup. The systemd unit sets
@@ -81,6 +82,11 @@ pub struct AppState {
     /// The vehicle-state IPC client the status + telemetry routes project. Cheap
     /// to clone (the snapshot is held behind an `Arc`).
     pub state: StateIpcClient,
+    /// The MAVLink command-send client the command route writes frames through.
+    /// Cheap to clone (the held connection is behind an `Arc<Mutex>`); the route
+    /// builds a frame and hands it to this client, which length-prefixes it onto
+    /// `/run/ados/mavlink.sock` for the router to forward to the FC.
+    pub mavlink: MavlinkIpcClient,
     /// The on-disk paths the pairing routes read + write.
     pub pairing_paths: PairingPaths,
     /// When this daemon started, the status route's uptime fallback when the
@@ -89,19 +95,20 @@ pub struct AppState {
 }
 
 impl AppState {
-    /// Build the state from a pairing reader, a vehicle-state client, and the
-    /// pairing route paths, resolving the agent version from the environment and
-    /// stamping the process start instant. The command IPC handle a later chunk
-    /// needs is added to this struct then, not faked here.
+    /// Build the state from a pairing reader, a vehicle-state client, the MAVLink
+    /// command client, and the pairing route paths, resolving the agent version
+    /// from the environment and stamping the process start instant.
     pub fn new(
         pairing: Arc<PairingState>,
         state: StateIpcClient,
+        mavlink: MavlinkIpcClient,
         pairing_paths: PairingPaths,
     ) -> Self {
         Self {
             agent_version: agent_version(),
             pairing,
             state,
+            mavlink,
             pairing_paths,
             started: Instant::now(),
         }
@@ -110,5 +117,20 @@ impl AppState {
     /// Seconds since this daemon started. The status route's uptime fallback.
     pub fn process_uptime_seconds(&self) -> f64 {
         process_uptime_seconds(self.started)
+    }
+
+    /// Whether the FC is connected, read from the live state snapshot's
+    /// `fc_connected` runtime extra (the same field the status + pairing-info
+    /// routes read). The command route gates on this: an absent snapshot or a
+    /// `false` flag means no FC link, which the route answers with a 503 — the
+    /// same posture the FastAPI command route takes when `fc.connected` is false.
+    pub fn fc_connected(&self) -> bool {
+        self.state
+            .snapshot()
+            .as_ref()
+            .and_then(serde_json::Value::as_object)
+            .and_then(|m| m.get("fc_connected"))
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
     }
 }

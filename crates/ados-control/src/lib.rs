@@ -30,6 +30,7 @@ use anyhow::{Context, Result};
 use tokio::sync::oneshot;
 
 use crate::auth::PairingState;
+use crate::ipc::mavlink_client::{default_mavlink_socket, MavlinkIpcClient};
 use crate::ipc::state_client::{default_state_socket, StateIpcClient};
 use crate::routes::build_router;
 use crate::serve::{bind_tcp, bind_unix, serve_tcp, serve_unix, tcp_app, unix_app};
@@ -68,6 +69,10 @@ pub struct DaemonPaths {
     /// The vehicle-state socket the status + telemetry routes read. Injectable so
     /// a test points it at a mock-IPC socket in a tempdir.
     pub state_socket: PathBuf,
+    /// The MAVLink command socket the command route writes frames to (the router
+    /// forwards them to the FC). Injectable so a test points it at a mock-IPC
+    /// socket in a tempdir.
+    pub mavlink_socket: PathBuf,
     /// The agent config (`/etc/ados/config.yaml`) the pairing-info route projects
     /// for device identity, profile, and the radio peer. Injectable for tests.
     pub config_path: PathBuf,
@@ -98,6 +103,9 @@ impl Default for DaemonPaths {
         // The state socket resolves under `ADOS_RUN_DIR` (the same override the
         // Python `ados.core.ipc` honours), defaulting to `/run/ados/state.sock`.
         let state_socket = default_state_socket();
+        // The MAVLink command socket resolves under `ADOS_RUN_DIR` the same way,
+        // defaulting to `/run/ados/mavlink.sock`.
+        let mavlink_socket = default_mavlink_socket();
         // The config path honours `ADOS_CONFIG` (the same override the sibling
         // crates use), defaulting to `/etc/ados/config.yaml`.
         let config_path = std::env::var("ADOS_CONFIG")
@@ -115,6 +123,7 @@ impl Default for DaemonPaths {
             control_tcp_port,
             pairing_path,
             state_socket,
+            mavlink_socket,
             config_path,
             wfb_key_dir,
             bind_state_path,
@@ -180,6 +189,10 @@ where
     // absent socket; an idle agent (no socket) leaves the snapshot empty, which
     // the routes degrade to rather than fail. The handle stops it on shutdown.
     let (state_client, state_handle) = StateIpcClient::spawn(paths.state_socket.clone());
+    // The MAVLink command client the command route writes frames through. It
+    // connects lazily on the first command and reuses the connection; an absent
+    // socket (an idle agent) surfaces as a 503 at command time, not here.
+    let mavlink_client = MavlinkIpcClient::new(paths.mavlink_socket.clone());
     // The on-disk paths the pairing routes read + write. The pairing-state file
     // is the same one the LAN-edge auth reader watches, so the gate and the
     // claim/unpair writers agree on one file.
@@ -189,7 +202,12 @@ where
         wfb_key_dir: paths.wfb_key_dir.clone(),
         bind_state: paths.bind_state_path.clone(),
     };
-    let state = AppState::new(Arc::clone(&pairing), state_client, pairing_paths);
+    let state = AppState::new(
+        Arc::clone(&pairing),
+        state_client,
+        mavlink_client,
+        pairing_paths,
+    );
 
     // The Unix edge: the bare Router, no auth. The LAN edge: the same Router
     // wrapped with the rate-limit + auth layer keyed on the shared pairing
