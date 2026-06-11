@@ -1,0 +1,49 @@
+[package]
+name = "ados-control"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Native HTTP control surface: the same status/pairing/command API the GCS speaks, served on the trusted local socket and the LAN port, with no Python runtime."
+
+# lib + a daemon binary. The lib carries the dual-listener serve loop, the
+# LAN-edge auth, the shared app state, and the route Router; the binary inits
+# logging + systemd notify and runs the lifecycle. The binary ships dark — no
+# supervisor registration and no systemd unit enable it yet, so it has no effect
+# at the install layer until the wiring chunk lands. The crate is inert.
+[[bin]]
+name = "ados-control"
+path = "src/main.rs"
+
+[dependencies]
+# Shared wire contracts: the versioned IPC frames the later status/command
+# chunks decode, reused so the native surface speaks the exact same seams the
+# Python API does.
+ados-protocol = { path = "../ados-protocol" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+# HTTP framework + per-connection serving. The same axum Router is served on the
+# trusted unix socket and the LAN TCP port; hyper + the tokio glue carry the
+# per-connection accept loop, http the request/response types.
+axum = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+hyper = { workspace = true }
+hyper-util = { workspace = true }
+http = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
+
+# Linux-only edge: systemd readiness/watchdog notify + journald log layer for
+# the daemon, and the nix group-ownership helper for the trusted socket. Confined
+# to a target section so the pure surface still builds and tests on a non-Linux
+# dev host.
+[target.'cfg(target_os = "linux")'.dependencies]
+sd-notify = { workspace = true }
+tracing-journald = { workspace = true }
+nix = { workspace = true }

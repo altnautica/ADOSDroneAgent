@@ -1,0 +1,22 @@
+{
+  "api_version": "1",
+  "agent_version": "0.62.0",
+  "capabilities": [
+    "status.full",
+    "version.endpoint",
+    "services.control",
+    "video.pipeline",
+    "wfb.link",
+    "scripts.runtime",
+    "ota.updater",
+    "pairing.mnemonic",
+    "pairing.bind_state",
+    "peripherals.registry",
+    "fleet.roster",
+    "features.catalog",
+    "ground_station.profile",
+    "signing.mavlink",
+    "webrtc.signaling.last_error",
+    "can.passthrough"
+  ]
+}
