@@ -29,7 +29,10 @@ async def cloud_beacon_loop(app: AgentApp) -> None:
     import httpx
 
     interval = app.config.pairing.beacon_interval
-    convex_url = app.config.pairing.convex_url
+    mode = getattr(app.config.server, "mode", "local")
+    convex_url = (
+        app.config.pairing.convex_url if mode in ("cloud", "self_hosted") else ""
+    )
 
     while not app._shutdown.is_set():
         if not app.pairing_manager.is_paired and convex_url:
@@ -69,7 +72,10 @@ async def cloud_heartbeat_loop(app: AgentApp) -> None:
     """When paired, periodically POST full status to Convex."""
     import httpx
 
-    convex_url = app.config.pairing.convex_url
+    mode = getattr(app.config.server, "mode", "local")
+    convex_url = (
+        app.config.pairing.convex_url if mode in ("cloud", "self_hosted") else ""
+    )
 
     while not app._shutdown.is_set():
         if app.pairing_manager.is_paired and convex_url:
@@ -91,7 +97,10 @@ async def cloud_command_poll_loop(app: AgentApp) -> None:  # noqa: C901
     """When paired, poll Convex for pending commands and execute them."""
     import httpx
 
-    convex_url = app.config.pairing.convex_url
+    mode = getattr(app.config.server, "mode", "local")
+    convex_url = (
+        app.config.pairing.convex_url if mode in ("cloud", "self_hosted") else ""
+    )
 
     while not app._shutdown.is_set():
         if app.pairing_manager.is_paired and convex_url:

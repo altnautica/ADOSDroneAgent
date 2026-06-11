@@ -92,6 +92,14 @@ fn auto_pair_role(config: &CloudConfig) -> String {
     }
 }
 
+/// Whether a per-tick relay POST may fire: the agent must be paired (have an api
+/// key) AND have a live cloud URL (non-empty, i.e. an explicit cloud posture).
+/// The single gate shared by the heartbeat + command-poll loops, so a LAN-only /
+/// unpaired agent stays off the cloud relay.
+fn should_emit(api_key: Option<&str>, convex_url: &str) -> bool {
+    api_key.is_some() && !convex_url.is_empty()
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     init_logging();
@@ -236,9 +244,11 @@ fn spawn_heartbeat(
                 }
                 _ = tick.tick() => {
                     let pairing = PairingState::load();
-                    let (Some(api_key), false) = (pairing.api_key(), convex_url.is_empty()) else {
+                    let api_key = pairing.api_key();
+                    if !should_emit(api_key, &convex_url) {
                         continue;
-                    };
+                    }
+                    let api_key = api_key.expect("should_emit gates on api_key being Some");
                     let base = heartbeat::HeartbeatBase {
                         device_id: config.agent.device_id.clone(),
                         version: env!("CARGO_PKG_VERSION").to_string(),
@@ -282,9 +292,11 @@ fn spawn_command_poll(
                 }
                 _ = tick.tick() => {
                     let pairing = PairingState::load();
-                    let (Some(api_key), false) = (pairing.api_key(), convex_url.is_empty()) else {
+                    let api_key = pairing.api_key();
+                    if !should_emit(api_key, &convex_url) {
                         continue;
-                    };
+                    }
+                    let api_key = api_key.expect("should_emit gates on api_key being Some");
                     poll_commands_once(
                         &http,
                         &convex_url,
@@ -758,5 +770,15 @@ mod tests {
         let r = dispatch_command(&http, "plugin.enable", &cmd, &sup, &no_source()).await;
         assert_eq!(r.status, CommandStatus::Failed);
         let _ = std::fs::remove_dir_all(Path::new("/var/lib/ados/plugins/.jobs"));
+    }
+
+    #[test]
+    fn should_emit_requires_both_an_api_key_and_a_cloud_url() {
+        // Paired but no cloud URL (local mode) → off.
+        assert!(!should_emit(Some("k"), ""));
+        // Cloud URL but unpaired → off.
+        assert!(!should_emit(None, "https://relay.example/convex"));
+        // Paired AND a live cloud URL → on.
+        assert!(should_emit(Some("k"), "https://relay.example/convex"));
     }
 }

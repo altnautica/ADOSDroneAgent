@@ -208,15 +208,24 @@ pub struct CloudConfig {
 }
 
 impl CloudConfig {
-    /// The convex URL the loops POST to, or empty when the relay is disabled
-    /// (`server.mode == "local"`). Mirrors `cloud_enabled` gating in the Python
-    /// `__main__`: local-mode operators stay off the cloud relay.
+    /// The convex URL the loops POST to, or empty when the relay is disabled.
+    /// Cloud relay is on only for an explicit cloud posture; absent, "local",
+    /// or an unknown/typo mode all stay local-first and silent. An allowlist
+    /// (not a denylist) so a typo'd mode fails CLOSED — it never beacons.
     pub fn effective_convex_url(&self) -> String {
-        if self.server.mode == "local" {
-            String::new()
-        } else {
+        if self.cloud_relay_enabled() {
             self.pairing.convex_url.clone()
+        } else {
+            String::new()
         }
+    }
+
+    /// Whether the configured server mode is an explicit cloud-relay posture.
+    /// Matches the supervisor's cloud-relay gate: only `cloud` / `self_hosted`
+    /// turn the relay on; everything else (absent default, `local`, unknown)
+    /// stays local-first.
+    pub fn cloud_relay_enabled(&self) -> bool {
+        matches!(self.server.mode.as_str(), "cloud" | "self_hosted")
     }
 
     /// Whether the operator has opted in to explicit log-window cloud export.
@@ -328,6 +337,65 @@ video:
         let path = temp_yaml("wfb", yaml);
         let cfg = CloudConfig::load_from(&path);
         assert!(cfg.video.wfb.auto_pair_enabled);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn effective_convex_url_is_an_allowlist_failing_closed() {
+        // The convex URL is loaded from `pairing.convex_url`; the mode decides
+        // whether it is surfaced. Build a config body that carries a URL and a
+        // chosen mode, then assert the gate per mode.
+        let with_mode = |mode: &str| {
+            let yaml = format!(
+                "\
+server:
+  mode: {mode}
+pairing:
+  convex_url: https://relay.example/convex
+"
+            );
+            let path = temp_yaml(&format!("mode-{mode}"), &yaml);
+            let cfg = CloudConfig::load_from(&path);
+            let url = cfg.effective_convex_url();
+            let enabled = cfg.cloud_relay_enabled();
+            let _ = std::fs::remove_file(&path);
+            (url, enabled)
+        };
+
+        // Explicit cloud posture → the URL is surfaced and the relay is on.
+        let (url, enabled) = with_mode("cloud");
+        assert_eq!(url, "https://relay.example/convex");
+        assert!(enabled);
+
+        let (url, enabled) = with_mode("self_hosted");
+        assert_eq!(url, "https://relay.example/convex");
+        assert!(enabled);
+
+        // Local mode → empty, relay off.
+        let (url, enabled) = with_mode("local");
+        assert!(url.is_empty());
+        assert!(!enabled);
+
+        // An unknown / typo'd mode fails CLOSED — empty, relay off (the
+        // allowlist's whole point: a typo never beacons to the cloud).
+        let (url, enabled) = with_mode("weird");
+        assert!(url.is_empty());
+        assert!(!enabled);
+
+        // Absent mode (the all-defaults config defaults the mode to "local")
+        // → empty, relay off.
+        let cfg = CloudConfig::default();
+        assert!(cfg.effective_convex_url().is_empty());
+        assert!(!cfg.cloud_relay_enabled());
+
+        // A config with NO server section at all also defaults to off.
+        let path = temp_yaml(
+            "no-server",
+            "pairing:\n  convex_url: https://relay.example/convex\n",
+        );
+        let cfg = CloudConfig::load_from(&path);
+        assert!(cfg.effective_convex_url().is_empty());
+        assert!(!cfg.cloud_relay_enabled());
         let _ = std::fs::remove_file(&path);
     }
 }
