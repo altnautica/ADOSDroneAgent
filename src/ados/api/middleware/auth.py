@@ -53,6 +53,15 @@ SAME_ORIGIN_SETUP_PREFIXES = (
 # discovered listener IPs in setup/service.py.
 LOCAL_HOST_DEFAULTS = {"localhost", "127.0.0.1", "192.168.4.1", "192.168.7.1"}
 
+# Loopback peer addresses that identify an on-box caller (the local CLI).
+_LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost"}
+
+# Proxy / tunnel relay headers. Their presence means the request was forwarded
+# by a reverse proxy or tunnel (e.g. a Cloudflare Tunnel terminating on
+# 127.0.0.1) rather than originating on this host, so it must NOT qualify for
+# on-box loopback trust.
+_FORWARDED_HEADERS = ("x-forwarded-for", "x-real-ip", "forwarded", "cf-connecting-ip")
+
 
 def is_exempt(path: str) -> bool:
     """Check if a path is exempt from authentication."""
@@ -91,6 +100,29 @@ def _is_same_origin(request: Request) -> bool:
     return bool(request_host) and host == request_host
 
 
+def _is_on_box(request: Request) -> bool:
+    """True when the request originates on this host's loopback interface and
+    was not relayed by a proxy or tunnel.
+
+    An on-box caller (the local ``ados`` CLI, a root-owned job) already holds
+    shell-level privilege on the machine, which strictly exceeds API
+    authentication. Trusting loopback lets the on-box CLI reach authenticated
+    routes (``ados radio status`` and friends) on a *paired* agent without
+    reading the root-owned pairing key file (``/etc/ados/pairing.json`` is
+    ``0600 root``, so a non-root CLI process cannot load the key and would
+    otherwise 401). A proxy or tunnel that terminates on 127.0.0.1 is excluded
+    by the forwarding-header check, so it can never impersonate an on-box
+    caller to bypass authentication.
+
+    The future native control surface must mirror this exact contract: the
+    peer socket address is loopback AND no proxy-forwarding header is present.
+    """
+    client = request.client
+    if client is None or client.host not in _LOOPBACK_HOSTS:
+        return False
+    return not any(h in request.headers for h in _FORWARDED_HEADERS)
+
+
 class ApiKeyAuthMiddleware(BaseHTTPMiddleware):
     """Middleware that enforces API key authentication when the agent is paired."""
 
@@ -101,6 +133,15 @@ class ApiKeyAuthMiddleware(BaseHTTPMiddleware):
 
         # Skip auth for OPTIONS (CORS preflight)
         if request.method == "OPTIONS":
+            return await call_next(request)
+
+        # On-box loopback trust: a request from this host's own loopback
+        # interface is the local operator, who already holds shell-level
+        # privilege that exceeds API auth. This lets the on-box CLI work on a
+        # paired agent without the root-owned pairing key. Proxy-forwarded
+        # requests are excluded so a tunnel terminating on 127.0.0.1 cannot
+        # bypass authentication.
+        if _is_on_box(request):
             return await call_next(request)
 
         app = get_agent_app()
