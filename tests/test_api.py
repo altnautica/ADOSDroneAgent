@@ -84,6 +84,46 @@ def test_get_services(client):
     assert "services" in data
 
 
+def test_get_services_includes_per_service_memory(agent_app, monkeypatch):
+    """Every service entry carries a numeric ``memory_mb`` and the process
+    block carries ``process.memory_mb``.
+
+    The GCS Memory panel's per-service breakdown reads ``memory_mb`` off each
+    entry; if the route ever stops attaching it the panel collapses to its
+    "needs agent accounting" empty state. The plain shape check in
+    ``test_get_services`` did not catch that, so this guard pins the field.
+    """
+    from ados.core import systemd_memory as sm
+    from ados.core.service_tracker import ServiceState
+
+    # Force one tracked, running service so the route does not fall through
+    # to the systemd inventory (which would be empty in the test env). The
+    # name resolves to a real unit via ``unit_for_service``.
+    agent_app.services.set_state("health-monitor", ServiceState.RUNNING)
+
+    # Pin a non-zero cgroup-accounted value for that unit so the per-entry
+    # assertion exercises a real number, not an all-zero vacuous pass.
+    monkeypatch.setattr(
+        sm, "_pss_map", lambda: {"ados-health.service": 42.5}
+    )
+
+    fastapi_app = create_app(agent_app)
+    resp = TestClient(fastapi_app).get("/api/services")
+    assert resp.status_code == 200
+    data = resp.json()
+
+    assert data["services"], "expected at least one service entry"
+    saw_nonzero = False
+    for svc in data["services"]:
+        assert "memory_mb" in svc, f"service entry missing memory_mb: {svc}"
+        assert isinstance(svc["memory_mb"], (int, float))
+        if svc["memory_mb"]:
+            saw_nonzero = True
+    assert saw_nonzero, "per-service memory_mb never populated (regression)"
+
+    assert isinstance(data["process"]["memory_mb"], (int, float))
+
+
 def test_get_params_empty(client):
     resp = client.get("/api/params")
     assert resp.status_code == 200
