@@ -164,13 +164,17 @@ pub(crate) fn read_public_fingerprint(path: &Path) -> Option<String> {
     Some(hex::encode(out))
 }
 
-/// Write the `wfb-stats.json` Contract E sidecar (full schema the REST handler
+/// Build the `wfb-stats.json` Contract E body (the full schema the REST handler
 /// at `api/routes/wfb.py` merges over its base, so the GCS/LCD/dashboard radio
 /// panel renders correctly). The link-quality fields (rssi/snr/packets/loss/
 /// bitrate) are left to the REST base defaults until the link-quality monitor
 /// lands; `adapter_chipset`/`adapter_injection_ok`/`tx_power_dbm` must be
-/// present here or the panel shows a false "stranded radio" warning. Re-written
-/// on a 2 s cadence so the handler's `mtime > 10 s → state="stale"` never trips.
+/// present here or the panel shows a false "stranded radio" warning.
+///
+/// Split out from the file writer so the same body can be shipped to the logging
+/// store as a single full-snapshot event (the durable read source) without a
+/// second assembly pass: the sidecar file and the store row carry byte-identical
+/// content.
 ///
 /// Carries the pair block (`paired` + identity) read from the same on-disk
 /// sources the Python `get_status` reads — the TX key for `paired` +
@@ -178,7 +182,7 @@ pub(crate) fn read_public_fingerprint(path: &Path) -> Option<String> {
 /// / auto-pair flag — plus the watchdog kill/stall counters. All key names match
 /// `manager.get_status` exactly.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn write_stats_sidecar(
+pub(crate) fn build_stats_value(
     state: &str,
     channels: &ChannelTruth,
     reg: &RegSnapshot,
@@ -190,7 +194,7 @@ pub(crate) fn write_stats_sidecar(
     counters: &WatchdogCounters,
     rates: &TxRates,
     bitrate: &BitrateSnapshot,
-) {
+) -> serde_json::Value {
     let (interface, chipset, injection_ok) = match adapter {
         Some(a) => (a.interface.as_str(), a.chipset.as_str(), a.injection_ok),
         None => ("", "", false),
@@ -311,8 +315,103 @@ pub(crate) fn write_stats_sidecar(
         "loss_percent": link.loss_percent,
         "timestamp": link.timestamp,
     });
+    v
+}
+
+/// Write the `wfb-stats.json` Contract E sidecar (atomic tmp+rename). Re-written
+/// on a 2 s cadence so the handler's `mtime > 10 s → state="stale"` never trips.
+/// Thin wrapper over [`build_stats_value`]; the heartbeat builds the body once
+/// and ships the same value to the logging store alongside this file write.
+///
+/// When an `IngestEmitter` is passed, the SAME body is shipped to the logging
+/// store as a single full-snapshot `link.wfb_status` event right after the file
+/// write, so the durable read source and the on-disk sidecar stay in lockstep on
+/// EVERY write — not just the heartbeat tick. A store-first read therefore never
+/// returns a body older than the degraded-state file (bind-in-progress,
+/// reg-blocked, no-adapter, unpaired, respawn-transient). Best-effort: an absent
+/// or saturated logging daemon drops the event without disturbing the radio loop.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn write_stats_sidecar(
+    state: &str,
+    channels: &ChannelTruth,
+    reg: &RegSnapshot,
+    effective_tx_dbm: i8,
+    adapter: Option<&AdapterInfo>,
+    link: &LinkStats,
+    cfg: &WfbConfig,
+    restart_count: u64,
+    counters: &WatchdogCounters,
+    rates: &TxRates,
+    bitrate: &BitrateSnapshot,
+    metrics: Option<&ados_protocol::logd::emitter::IngestEmitter>,
+) {
+    let v = build_stats_value(
+        state,
+        channels,
+        reg,
+        effective_tx_dbm,
+        adapter,
+        link,
+        cfg,
+        restart_count,
+        counters,
+        rates,
+        bitrate,
+    );
     let path = run_path("wfb-stats.json");
     let _ = write_sidecar(&path, &v);
+    if let Some(metrics) = metrics {
+        metrics.emit_event(
+            "link.wfb_status",
+            ados_protocol::logd::Level::Info,
+            json_object_to_fields(&v),
+        );
+    }
+}
+
+/// Convert a JSON object into the logging store's open detail map (`Fields`), so
+/// the full wfb-status body can ride a single `link.wfb_status` event. Recurses
+/// through nested arrays / objects; numbers preserve their integer-vs-float kind,
+/// and JSON null round-trips to msgpack nil. A non-object input yields an empty
+/// map (the body is always an object, so this only guards against a future
+/// change). The map decodes back to the identical JSON in the query path, so the
+/// store row is a faithful copy of the sidecar.
+pub(crate) fn json_object_to_fields(value: &serde_json::Value) -> ados_protocol::logd::Fields {
+    match value {
+        serde_json::Value::Object(map) => map
+            .iter()
+            .map(|(k, v)| (k.clone(), json_to_mpv(v)))
+            .collect(),
+        _ => ados_protocol::logd::Fields::new(),
+    }
+}
+
+/// Recursively map a `serde_json::Value` onto the msgpack value the detail map
+/// carries. Integers stay integers (signed when negative), floats stay floats,
+/// and null becomes nil, so the round-trip through the store preserves the exact
+/// JSON shape the REST base merges over.
+fn json_to_mpv(value: &serde_json::Value) -> ados_protocol::logd::Value {
+    use ados_protocol::logd::Value as MpVal;
+    match value {
+        serde_json::Value::Null => MpVal::Nil,
+        serde_json::Value::Bool(b) => MpVal::from(*b),
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                MpVal::from(i)
+            } else if let Some(u) = n.as_u64() {
+                MpVal::from(u)
+            } else {
+                MpVal::from(n.as_f64().unwrap_or(0.0))
+            }
+        }
+        serde_json::Value::String(s) => MpVal::from(s.as_str()),
+        serde_json::Value::Array(items) => MpVal::Array(items.iter().map(json_to_mpv).collect()),
+        serde_json::Value::Object(map) => MpVal::Map(
+            map.iter()
+                .map(|(k, v)| (MpVal::from(k.as_str()), json_to_mpv(v)))
+                .collect(),
+        ),
+    }
 }
 
 /// Read the device-id from the canonical agent location (`/etc/ados/device-id`,
@@ -437,6 +536,7 @@ mod tests {
             &WatchdogCounters::default(),
             &TxRates::default(),
             &BitrateSnapshot::default(),
+            None,
         );
         let v = read_sidecar(dir.path());
 
@@ -489,11 +589,172 @@ mod tests {
             &WatchdogCounters::default(),
             &TxRates::default(),
             &BitrateSnapshot::default(),
+            None,
         );
         let v = read_sidecar(dir.path());
         assert_eq!(v["regPosture"], "region");
         assert_eq!(v["pinnedRegion"], "DE");
         assert_eq!(v["regVerified"], true);
+
+        std::env::remove_var("ADOS_RUN_DIR");
+    }
+
+    #[test]
+    fn json_object_to_fields_round_trips_nulls_arrays_and_number_kinds() {
+        // The store decodes the detail map back to JSON via `Fields` ->
+        // serde_json, so a value built here must equal the original after the
+        // round-trip: null stays null, the channel array stays an array, an int
+        // stays an int (not a float), and a negative reading keeps its sign.
+        let body = serde_json::json!({
+            "pinnedRegion": serde_json::Value::Null,
+            "enabled_channels": [149, 153, 157, 161, 165],
+            "channel": 161,
+            "rssi_dbm": -53.0,
+            "paired": true,
+            "adapter_chipset": "RTL8812EU",
+        });
+        let fields = json_object_to_fields(&body);
+        // Round-trip the detail map through the real wire path: frame it as an
+        // event, encode it (the length-prefixed msgpack the store ingests), strip
+        // the 4-byte length header the same way the ingest reader does, decode,
+        // then map the decoded detail back to JSON the way the query layer does
+        // (`serde_json::to_value` over the decoded `Fields`).
+        use ados_protocol::frame::{decode_len, HEADER_SIZE};
+        use ados_protocol::logd::{EventFrame, IngestFrame, Level, LOGD_MAX_FRAME};
+        let mut frame = EventFrame::new(0, "link.wfb_status", "ados-radio", Level::Info);
+        frame.detail = fields;
+        let bytes = IngestFrame::Event(frame).encode().unwrap();
+        let header: [u8; HEADER_SIZE] = bytes[..HEADER_SIZE].try_into().unwrap();
+        let len = decode_len(header, LOGD_MAX_FRAME, true).unwrap();
+        let decoded = match IngestFrame::decode(&bytes[HEADER_SIZE..HEADER_SIZE + len]).unwrap() {
+            IngestFrame::Event(e) => e,
+            other => panic!("expected an event frame, got {other:?}"),
+        };
+        let back = serde_json::to_value(decoded.detail).unwrap();
+        assert_eq!(back, body);
+        // The null channel must survive as a JSON null, not be dropped.
+        assert!(back["pinnedRegion"].is_null());
+        // The array round-trips as an array.
+        assert_eq!(
+            back["enabled_channels"],
+            serde_json::json!([149, 153, 157, 161, 165])
+        );
+        // The integer channel stays an integer (a float would render 161.0).
+        assert_eq!(back["channel"], serde_json::json!(161));
+    }
+
+    #[test]
+    fn build_stats_value_matches_the_sidecar_file_body() {
+        // The body shipped to the store must be the exact value written to the
+        // sidecar file, so the durable read source is byte-identical to the live
+        // fallback.
+        let _guard = SIDECAR_ENV_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("ADOS_RUN_DIR", dir.path());
+        let channels = ChannelTruth {
+            actual: 161,
+            rendezvous: 149,
+            operating: 157,
+            locked: true,
+            rf_unverified: false,
+        };
+        let reg = RegSnapshot {
+            domain: Some("US".to_string()),
+            verified: true,
+            enabled_channels: vec![149, 153, 157, 161, 165],
+            ..RegSnapshot::default()
+        };
+        let built = build_stats_value(
+            "connected",
+            &channels,
+            &reg,
+            5,
+            None,
+            &LinkStats::default(),
+            &WfbConfig::default(),
+            0,
+            &WatchdogCounters::default(),
+            &TxRates::default(),
+            &BitrateSnapshot::default(),
+        );
+        write_stats_sidecar(
+            "connected",
+            &channels,
+            &reg,
+            5,
+            None,
+            &LinkStats::default(),
+            &WfbConfig::default(),
+            0,
+            &WatchdogCounters::default(),
+            &TxRates::default(),
+            &BitrateSnapshot::default(),
+            None,
+        );
+        let on_disk = read_sidecar(dir.path());
+        assert_eq!(built, on_disk);
+        std::env::remove_var("ADOS_RUN_DIR");
+    }
+
+    #[tokio::test]
+    async fn write_stats_sidecar_emits_the_status_event_on_a_degraded_write() {
+        // A degraded-state write (here `reg_blocked`, the bind/error class of
+        // call site, not the heartbeat) must ship the same body to the store as a
+        // `link.wfb_status` event so a store-first read never lags the file. The
+        // emitter records every enqueue, so a single write with an emitter present
+        // increments the enqueued counter by exactly one regardless of whether a
+        // logging daemon is listening on the socket.
+        let _guard = SIDECAR_ENV_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("ADOS_RUN_DIR", dir.path());
+
+        let emitter = ados_protocol::logd::emitter::IngestEmitter::with_socket(
+            "ados-radio",
+            dir.path().join("ingest.sock"),
+        );
+        let stats = emitter.stats();
+        let before = stats.enqueued();
+        write_stats_sidecar(
+            STATE_REG_BLOCKED,
+            &ChannelTruth::configured(149),
+            &RegSnapshot::default(),
+            5,
+            None,
+            &LinkStats::default(),
+            &WfbConfig::default(),
+            0,
+            &WatchdogCounters::default(),
+            &TxRates::default(),
+            &BitrateSnapshot::default(),
+            Some(&emitter),
+        );
+        // Exactly one event was enqueued by the degraded-state write.
+        assert_eq!(stats.enqueued(), before + 1);
+        // The file write is still byte-identical to the build (the live fallback).
+        let on_disk = read_sidecar(dir.path());
+        assert_eq!(on_disk["state"], "reg_blocked");
+
+        // With no emitter the write still produces the file but enqueues nothing.
+        let none_emitter = ados_protocol::logd::emitter::IngestEmitter::with_socket(
+            "ados-radio",
+            dir.path().join("ingest2.sock"),
+        );
+        let none_stats = none_emitter.stats();
+        write_stats_sidecar(
+            STATE_REG_BLOCKED,
+            &ChannelTruth::configured(149),
+            &RegSnapshot::default(),
+            5,
+            None,
+            &LinkStats::default(),
+            &WfbConfig::default(),
+            0,
+            &WatchdogCounters::default(),
+            &TxRates::default(),
+            &BitrateSnapshot::default(),
+            None,
+        );
+        assert_eq!(none_stats.enqueued(), 0);
 
         std::env::remove_var("ADOS_RUN_DIR");
     }
@@ -531,6 +792,7 @@ mod tests {
             &WatchdogCounters::default(),
             &TxRates::default(),
             &BitrateSnapshot::default(),
+            None,
         );
         let v = read_sidecar(dir.path());
         assert_eq!(v["channel_locked"], false);

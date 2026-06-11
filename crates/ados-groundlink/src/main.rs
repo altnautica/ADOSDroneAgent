@@ -368,6 +368,7 @@ async fn receive_loop(
                 config,
                 &reg,
                 e.reason_code(),
+                Some(&ingest),
             );
             tokio::time::sleep(Duration::from_secs(backoff as u64)).await;
             backoff = (backoff * 2.0).min(30.0);
@@ -469,6 +470,7 @@ async fn receive_loop(
                 true,
                 Some(rx_health.clone()),
                 zombie_kills.clone(),
+                Some(ingest.clone()),
             ))
         });
 

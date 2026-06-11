@@ -13,6 +13,7 @@ use std::sync::Arc;
 
 use tokio::sync::Mutex;
 
+use ados_protocol::logd::emitter::IngestEmitter;
 use ados_radio::config::WfbConfig;
 use ados_radio::link_quality::{LinkQualityMonitor, LinkStats};
 
@@ -20,7 +21,7 @@ use crate::watchdog::{Clock, SharedRxHealth, RX_HEALTH_SILENCE_THRESHOLD_S};
 
 use super::args::{RX_HEALTH_POLL_INTERVAL_S, STATE_ACTIVE};
 use super::seams::{live_channel, DataRxHandle, SharedValidCounter};
-use super::stats::{build_gs_stats, GsChannelTruth, GsRegSnapshot};
+use super::stats::{build_gs_stats, json_object_to_fields, GsChannelTruth, GsRegSnapshot};
 
 /// Read `wfb_rx` stdout line-by-line, feed the link monitor, update the shared
 /// counter + LinkStats + the stdout-liveness stamp, and write the ground
@@ -42,6 +43,7 @@ pub async fn stats_reader_loop(
     injection_ok: bool,
     health: Option<SharedRxHealth>,
     zombie_kills: Arc<AtomicU32>,
+    ingest: Option<IngestEmitter>,
 ) {
     use tokio::io::AsyncBufReadExt;
     let mut lines = tokio::io::BufReader::new(stdout).lines();
@@ -113,6 +115,23 @@ pub async fn stats_reader_loop(
             let path = Path::new(crate::paths::WFB_STATS_JSON);
             if let Err(e) = crate::sidecars::write_json_atomic(path, &payload, 0o644) {
                 tracing::debug!(error = %e, "ground_wfb_stats_persist_failed");
+            }
+            // Ship the same body to the logging store as a single full-snapshot
+            // event (the durable read source) plus the loss + bitrate samples
+            // that round out the link-history series. Best-effort; an absent
+            // logging daemon drops these without disturbing receive.
+            if let Some(em) = &ingest {
+                use ados_protocol::logd::{Fields, Level, Value};
+                em.emit_event(
+                    "link.wfb_status",
+                    Level::Info,
+                    json_object_to_fields(&payload),
+                );
+                let mut tags = Fields::new();
+                tags.insert("direction".to_string(), Value::from("uplink"));
+                tags.insert("link".to_string(), Value::from("command"));
+                em.emit_metric("link.loss_percent", snap.loss_percent, tags.clone());
+                em.emit_metric("link.bitrate_kbps", snap.bitrate_kbps as f64, tags);
             }
         }
     }

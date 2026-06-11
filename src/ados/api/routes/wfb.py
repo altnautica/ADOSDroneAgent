@@ -131,32 +131,24 @@ def _read_regulatory_domain() -> str:
         return "unknown"
 
 
-def _build_status_from_stats_file(wfb_cfg: object) -> dict:
-    """Compose a /api/wfb response from /run/ados/wfb-stats.json.
+def _base_block(wfb_cfg: object) -> dict:
+    """The config-seeded zero-default block both the live sidecar read and the
+    durable store read merge the actual values over.
 
-    Used on the GS profile (and any other profile where ``app.wfb_manager()``
-    is None) because the wfb stats live in a sibling process. The file
-    is written ~once per second by whichever manager owns the radio;
-    if it's stale (mtime > 10 s) we mark state="stale" so the LCD can
-    render a degraded badge instead of presenting old data as live.
-
-    Falls back to a zero-default block if the file doesn't exist yet
-    (fresh boot, before the first PKT line has arrived).
+    Shared between ``_build_status_from_stats_file`` (the live fallback) and the
+    store-derived path (``ados.api.sources.wfb.derive_wfb_status``) so the two
+    read paths start from a byte-identical base and any divergence can only come
+    from the payload, never from a drifted default. ``regulatory_domain`` is the
+    LIVE ``iw reg get`` value, re-asserted by both paths so the file/store body
+    can never overwrite it.
     """
-    import json as _json
-    import time as _time
-
-    from ados.core.paths import WFB_STATS_JSON
-
-    # Static config defaults (used regardless of whether the file is
-    # readable so the API response shape stays stable).
     cfg_channel = getattr(wfb_cfg, "channel", 0) if wfb_cfg is not None else 0
     cfg_tx_power = getattr(wfb_cfg, "tx_power_dbm", None) if wfb_cfg is not None else None
     cfg_tx_power_max = getattr(wfb_cfg, "tx_power_max_dbm", None) if wfb_cfg is not None else None
     cfg_topology = getattr(wfb_cfg, "topology", None) if wfb_cfg is not None else None
     cfg_mcs = getattr(wfb_cfg, "mcs_index", None) if wfb_cfg is not None else None
 
-    base = {
+    return {
         "state": "disabled",
         "interface": "",
         "channel": cfg_channel,
@@ -188,6 +180,48 @@ def _build_status_from_stats_file(wfb_cfg: object) -> dict:
         "regulatory_domain": _read_regulatory_domain(),
     }
 
+
+def _finalize_status(merged: dict) -> dict:
+    """Apply the route-computed legs on top of a base+payload merge.
+
+    Re-derives ``frequency_mhz`` / ``bandwidth_mhz`` from the channel number and
+    adds the ``bitrate_mbps`` forward-compat shim. Shared by the live and the
+    store-derived path so both produce the identical computed fields; the
+    ``regulatory_domain`` override and any staleness flip are applied by each
+    caller before this (they differ: file mtime vs event age).
+    """
+    ch_info = get_channel(int(merged.get("channel") or 0))
+    if ch_info:
+        merged["frequency_mhz"] = ch_info.frequency_mhz
+        merged["bandwidth_mhz"] = ch_info.bandwidth_mhz
+    bk = merged.get("bitrate_kbps")
+    merged["bitrate_mbps"] = (
+        round(float(bk) / 1000.0, 3)
+        if isinstance(bk, (int, float)) and bk > 0
+        else 0.0
+    )
+    return merged
+
+
+def _build_status_from_stats_file(wfb_cfg: object) -> dict:
+    """Compose a /api/wfb response from /run/ados/wfb-stats.json.
+
+    Used on the GS profile (and any other profile where ``app.wfb_manager()``
+    is None) because the wfb stats live in a sibling process. The file
+    is written ~once per second by whichever manager owns the radio;
+    if it's stale (mtime > 10 s) we mark state="stale" so the LCD can
+    render a degraded badge instead of presenting old data as live.
+
+    Falls back to a zero-default block if the file doesn't exist yet
+    (fresh boot, before the first PKT line has arrived).
+    """
+    import json as _json
+    import time as _time
+
+    from ados.core.paths import WFB_STATS_JSON
+
+    base = _base_block(wfb_cfg)
+
     try:
         st = WFB_STATS_JSON.stat()
         age_s = _time.time() - st.st_mtime
@@ -209,23 +243,10 @@ def _build_status_from_stats_file(wfb_cfg: object) -> dict:
         if age_s > 10.0:
             merged["state"] = "stale"
         merged["regulatory_domain"] = base["regulatory_domain"]
-        # Re-derive frequency/bandwidth from the channel number using
-        # the channel module's lookup so consumers get a consistent
-        # shape regardless of who wrote the file.
-        ch_info = get_channel(int(merged.get("channel") or 0))
-        if ch_info:
-            merged["frequency_mhz"] = ch_info.frequency_mhz
-            merged["bandwidth_mhz"] = ch_info.bandwidth_mhz
-        # Emit bitrate_mbps alongside the canonical bitrate_kbps so a
-        # consumer that knows only the heartbeat-style key still gets
-        # a populated value. Cheap forward-compat shim.
-        bk = merged.get("bitrate_kbps")
-        merged["bitrate_mbps"] = (
-            round(float(bk) / 1000.0, 3)
-            if isinstance(bk, (int, float)) and bk > 0
-            else 0.0
-        )
-        return merged
+        # Re-derive frequency/bandwidth from the channel number and add the
+        # bitrate_mbps shim, shared with the store-derived path so both reads
+        # compute these identically.
+        return _finalize_status(merged)
     except (FileNotFoundError, ValueError, OSError):
         return base
 
@@ -299,13 +320,20 @@ async def get_wfb_status():
     wfb_cfg = getattr(cfg.video, "wfb", None) if cfg is not None else None
 
     if wfb is None:
-        # GS profile path: the WfbRxManager lives in ados-wfb-rx (a
-        # different systemd unit than this api process), so we can't
-        # call its stats() directly. The manager mirrors its current
-        # snapshot to /run/ados/wfb-stats.json once per stats interval;
-        # read that file as the canonical source. Falls through to a
-        # zero-default block on a fresh boot before the file is
-        # written, or after a long wfb_rx outage where mtime > 10 s.
+        # Native path: the radio runs in a sibling process (ados-radio /
+        # ados-groundlink), so there is no in-process manager to call. The
+        # radio ships the full status body to the durable logging store each
+        # heartbeat; read that first. When the store is unreachable or has no
+        # status event yet, fall back to the /run/ados/wfb-stats.json sidecar
+        # the radio also writes (a fresh boot before the first write, or a long
+        # outage where mtime > 10 s, degrades through the same path it always
+        # did).
+        from ados.api.sources.wfb import derive_wfb_status, latest_wfb_status
+
+        snapshot = await latest_wfb_status()
+        if snapshot is not None:
+            detail, ts_us = snapshot
+            return derive_wfb_status(detail, ts_us, wfb_cfg)
         return _build_status_from_stats_file(wfb_cfg)
     status = wfb.get_status()
 
@@ -390,6 +418,15 @@ async def get_wfb_history(seconds: int = 60):
     app = get_agent_app()
     wfb = app.wfb_manager()
     if wfb is None:
+        # Native path: there is no in-process monitor. The radio's per-heartbeat
+        # link samples flow to the durable store as link.* metrics, so serve the
+        # history from there. When the store is unreachable, fall back to the
+        # native empty history (the prior behavior on this path).
+        from ados.api.sources.wfb import latest_wfb_history
+
+        hist = await latest_wfb_history(seconds)
+        if hist is not None:
+            return hist
         return {"samples": [], "count": 0}
 
     seconds = min(max(seconds, 1), 300)
@@ -709,11 +746,19 @@ async def put_wfb_pair_auto_pair(request: AutoPairToggleRequest) -> dict[str, An
 async def get_failover_status() -> dict[str, str]:
     """Return the current local-bind to cloud-relay failover state.
 
-    Reads the sidecar at ``/run/ados/wfb_failover.json`` written by the
-    auto_pair supervisor in the ados-cloud process. Default is ``local``
-    when the sidecar is missing or unreadable, which matches the
-    supervisor's startup state.
+    Reads the most-recent failover transition from the durable logging store
+    (the supervisor emits each transition as an event). When the store is
+    unreachable or has captured no transition yet, falls back to the sidecar at
+    ``/run/ados/wfb_failover.json`` written by the auto-pair supervisor. Default
+    is ``local`` when neither source has a value, matching the supervisor's
+    startup state.
     """
+    from ados.api.sources.wfb import latest_wfb_failover
+
+    state = await latest_wfb_failover()
+    if state is not None:
+        return {"failover_state": state}
+
     path = Path(str(FAILOVER_STATE_PATH))
     if not path.exists():
         return {"failover_state": "local"}

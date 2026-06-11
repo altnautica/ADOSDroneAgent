@@ -46,8 +46,8 @@ use bringup::{channel_from_iface, ensure_monitor_and_channel, ensure_radiating};
 use hop_supervisor::{emit_presence_beacons, proof_only_listener, run_hop_supervisor};
 use reg_gate::{decide_reg_gate, RegGateDecision, REG_BLOCKED_RETRY_SECS, STATE_REG_BLOCKED};
 use sidecar::{
-    read_device_id, write_adapters_sidecar, write_stats_sidecar, AdapterInfo, ChannelTruth,
-    RegPosture, RegSnapshot,
+    build_stats_value, json_object_to_fields, read_device_id, write_adapters_sidecar,
+    write_stats_sidecar, AdapterInfo, ChannelTruth, RegPosture, RegSnapshot,
 };
 use txrate::{read_tx_bytes, TxLiveness, TxRates};
 
@@ -208,6 +208,7 @@ async fn run_service(cfg: &WfbConfig, cancel: Arc<Notify>) {
                 &WatchdogCounters::default(),
                 &TxRates::default(),
                 &bitrate_snapshot.lock().await.clone(),
+                Some(&metrics),
             );
             tokio::select! {
                 _ = tokio::time::sleep(KEY_WAIT_INTERVAL) => continue,
@@ -318,6 +319,7 @@ async fn run_service(cfg: &WfbConfig, cancel: Arc<Notify>) {
                         &WatchdogCounters::default(),
                         &TxRates::default(),
                         &bitrate_snapshot.lock().await.clone(),
+                        Some(&metrics),
                     );
                     tokio::select! {
                         _ = tokio::time::sleep(Duration::from_secs(REG_BLOCKED_RETRY_SECS)) => continue,
@@ -362,6 +364,7 @@ async fn run_service(cfg: &WfbConfig, cancel: Arc<Notify>) {
                 &WatchdogCounters::default(),
                 &TxRates::default(),
                 &bitrate_snapshot.lock().await.clone(),
+                Some(&metrics),
             );
             tokio::select! {
                 _ = tokio::time::sleep(Duration::from_secs(10)) => continue,
@@ -485,6 +488,7 @@ async fn run_service(cfg: &WfbConfig, cancel: Arc<Notify>) {
                         &WatchdogCounters::default(),
                         &TxRates::default(),
                         &bitrate_snapshot.lock().await.clone(),
+                        Some(&metrics),
                     );
                     tokio::select! {
                         _ = tokio::time::sleep(Duration::from_secs(REG_BLOCKED_RETRY_SECS)) => continue,
@@ -687,6 +691,7 @@ async fn run_service(cfg: &WfbConfig, cancel: Arc<Notify>) {
             &WatchdogCounters::default(),
             &TxRates::default(),
             &bitrate_snapshot.lock().await.clone(),
+            Some(&metrics),
         );
         tracing::info!(iface, channel = cfg.channel, pid, "wfb_service_ready");
 
@@ -786,6 +791,19 @@ async fn run_service(cfg: &WfbConfig, cancel: Arc<Notify>) {
                             hb_metrics.emit_metric(
                                 "link.fec_uncorrected",
                                 stats.fec_failed as f64,
+                                tags.clone(),
+                            );
+                            // Loss + bitrate round out the link-history sample so
+                            // the durable `/api/wfb/history` series is a faithful
+                            // superset of the live monitor sample shape.
+                            hb_metrics.emit_metric(
+                                "link.loss_percent",
+                                stats.loss_percent,
+                                tags.clone(),
+                            );
+                            hb_metrics.emit_metric(
+                                "link.bitrate_kbps",
+                                stats.bitrate_kbps as f64,
                                 tags,
                             );
                             let locked = state.is_locked();
@@ -923,7 +941,13 @@ async fn run_service(cfg: &WfbConfig, cancel: Arc<Notify>) {
                             posture: hb_reg_posture.clone(),
                         };
 
-                        write_stats_sidecar(
+                        // Build the full body once, write the sidecar (the live
+                        // fallback the REST route reads), and ship the SAME body
+                        // to the logging store as a single full-snapshot event
+                        // (the durable read source). Best-effort: an absent
+                        // logging daemon drops the event without disturbing the
+                        // radio loop.
+                        let body = build_stats_value(
                             state.as_str(),
                             &channels,
                             &reg,
@@ -935,6 +959,16 @@ async fn run_service(cfg: &WfbConfig, cancel: Arc<Notify>) {
                             &wd,
                             &rates,
                             &bsnap,
+                        );
+                        ados_radio::paths::write_sidecar(
+                            &ados_radio::paths::run_path("wfb-stats.json"),
+                            &body,
+                        )
+                        .ok();
+                        hb_metrics.emit_event(
+                            "link.wfb_status",
+                            ados_protocol::logd::Level::Info,
+                            json_object_to_fields(&body),
                         );
                     }
                     _ = hb_cancel.notified() => break,
@@ -1198,6 +1232,7 @@ async fn run_service(cfg: &WfbConfig, cancel: Arc<Notify>) {
             &wd,
             &TxRates::default(),
             &bitrate_snapshot.lock().await.clone(),
+            Some(&metrics),
         );
         tokio::select! {
             _ = tokio::time::sleep(Duration::from_secs(1)) => {}

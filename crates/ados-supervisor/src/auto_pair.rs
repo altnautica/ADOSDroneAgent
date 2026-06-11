@@ -20,6 +20,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use ados_protocol::logd::emitter::EventEmitter;
+use ados_protocol::logd::{Fields, Level, Value};
 use tokio::sync::watch;
 
 use crate::bind::orchestrator::{BindOrchestrator, BindStartError};
@@ -90,6 +92,22 @@ impl FailoverState {
             FailoverState::CloudRelay => "cloud_relay",
         }
     }
+}
+
+/// Ship one local-bind to cloud-relay failover transition to the logging store
+/// as a discrete event, so an RCA can query the transition boundaries the same
+/// way it queries the sidecar's current value. Called only when the sidecar
+/// actually changed (a deduped no-op write emits nothing). A cloud-relay fallback
+/// is a degraded condition (`Warn`); returning to local bind is informational
+/// (`Info`). Best-effort: an absent logging daemon drops the event.
+fn emit_failover(events: &EventEmitter, state: FailoverState) {
+    let mut detail = Fields::new();
+    detail.insert("state".to_string(), Value::from(state.as_str()));
+    let level = match state {
+        FailoverState::CloudRelay => Level::Warn,
+        FailoverState::Local => Level::Info,
+    };
+    events.emit("wfb.pair.failover", level, detail);
 }
 
 /// Stateful writer for the failover sidecar. Dedups identical syncs (writes on a
@@ -224,6 +242,7 @@ pub async fn run(
         &mut shutdown,
         FailoverWriter::new(),
         cloud_relay_enabled,
+        EventEmitter::new("ados-supervisor"),
     )
     .await
 }
@@ -238,6 +257,7 @@ async fn run_with_failover(
     shutdown: &mut watch::Receiver<bool>,
     mut failover: FailoverWriter,
     cloud_relay_enabled: bool,
+    events: EventEmitter,
 ) {
     tracing::info!(role = role.as_str(), "auto_pair_supervisor_started");
     // Settle before the first attempt.
@@ -247,7 +267,11 @@ async fn run_with_failover(
     }
     // A fresh run resets the failover sidecar to `local`: an operator who re-armed
     // auto-pair from the cloud-relay fallback should see the rig retry local bind.
-    failover.sync(FailoverState::Local);
+    // Emit the transition only when the sidecar actually changed (a deduped no-op
+    // write does not spam the store).
+    if failover.sync(FailoverState::Local) {
+        emit_failover(&events, FailoverState::Local);
+    }
     // Cumulative count of bind attempts; reaching the cap flips to cloud_relay.
     let mut attempt: u32 = 0;
     loop {
@@ -277,7 +301,9 @@ async fn run_with_failover(
                         tracing::info!(role = role.as_str(), "auto_pair_bind_completed");
                         // Stay on the local path; the key-apply step also disarms
                         // auto-pair so the next tick sees the rig as paired.
-                        failover.sync(FailoverState::Local);
+                        if failover.sync(FailoverState::Local) {
+                            emit_failover(&events, FailoverState::Local);
+                        }
                         break;
                     }
                     // A non-paired terminal. An external shutdown aborts the bind
@@ -301,7 +327,9 @@ async fn run_with_failover(
                     // giving up at the attempt cap and stranding the rig with no
                     // link at all.
                     if cloud_relay_enabled && failover_reached(attempt) {
-                        failover.sync(FailoverState::CloudRelay);
+                        if failover.sync(FailoverState::CloudRelay) {
+                            emit_failover(&events, FailoverState::CloudRelay);
+                        }
                         tracing::warn!(attempts = attempt, "wfb_failover_to_cloud_relay");
                         break;
                     }
@@ -446,6 +474,77 @@ mod tests {
     fn failover_state_wire_strings() {
         assert_eq!(FailoverState::Local.as_str(), "local");
         assert_eq!(FailoverState::CloudRelay.as_str(), "cloud_relay");
+    }
+
+    #[tokio::test]
+    async fn failover_emit_ships_state_and_severity_per_transition() {
+        use ados_protocol::frame::{decode_len, HEADER_SIZE};
+        use ados_protocol::logd::{IngestFrame, Level, LOGD_MAX_FRAME};
+        use tokio::io::AsyncReadExt;
+        use tokio::net::{UnixListener, UnixStream};
+
+        async fn read_one(stream: &mut UnixStream) -> IngestFrame {
+            let mut header = [0u8; HEADER_SIZE];
+            stream.read_exact(&mut header).await.unwrap();
+            let len = decode_len(header, LOGD_MAX_FRAME, true).unwrap();
+            let mut body = vec![0u8; len];
+            stream.read_exact(&mut body).await.unwrap();
+            IngestFrame::decode(&body).unwrap()
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("logd.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        let accept = {
+            let listener = listener;
+            tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut frames = Vec::new();
+                for _ in 0..3 {
+                    frames.push(read_one(&mut stream).await);
+                }
+                frames
+            })
+        };
+
+        let events = EventEmitter::with_socket("ados-supervisor", &path);
+        // A fresh-run reset to local, the cap-driven fallback to cloud_relay, and
+        // a later return to local on a successful pair: the exact transition
+        // sequence the loop emits.
+        emit_failover(&events, FailoverState::Local);
+        emit_failover(&events, FailoverState::CloudRelay);
+        emit_failover(&events, FailoverState::Local);
+
+        let frames = tokio::time::timeout(std::time::Duration::from_secs(5), accept)
+            .await
+            .expect("the three failover events arrived within the deadline")
+            .expect("accept task ok");
+
+        let states_levels: Vec<(String, Level)> = frames
+            .into_iter()
+            .map(|f| match f {
+                IngestFrame::Event(e) => {
+                    assert_eq!(e.kind, "wfb.pair.failover");
+                    assert_eq!(e.source, "ados-supervisor");
+                    let state = e
+                        .detail
+                        .get("state")
+                        .and_then(|v| v.as_str())
+                        .unwrap()
+                        .to_string();
+                    (state, e.severity)
+                }
+                other => panic!("expected an event frame, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            states_levels,
+            vec![
+                ("local".to_string(), Level::Info),
+                ("cloud_relay".to_string(), Level::Warn),
+                ("local".to_string(), Level::Info),
+            ]
+        );
     }
 
     #[test]

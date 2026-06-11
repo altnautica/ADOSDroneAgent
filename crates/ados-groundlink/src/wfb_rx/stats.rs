@@ -39,6 +39,14 @@ pub struct GsChannelTruth {
 /// regulatory conflict while the run loop retries the gate. Carries the reason
 /// code and the rendezvous channel under inspection; no receive chain is running,
 /// so the link-quality block defaults. Atomic via the Contract E writer.
+///
+/// When an `IngestEmitter` is passed, the SAME body is shipped to the logging
+/// store as a single full-snapshot `link.wfb_status` event right after the file
+/// write, so the durable read source and the on-disk sidecar stay in lockstep on
+/// this degraded-state write too — not only on the per-line active writes in the
+/// stats reader. A store-first read therefore never lags the `reg_blocked` file.
+/// Best-effort: an absent logging daemon drops the event without disturbing the
+/// retry loop.
 pub fn write_reg_blocked_sidecar(
     interface: &str,
     chipset: Option<&str>,
@@ -46,6 +54,7 @@ pub fn write_reg_blocked_sidecar(
     cfg: &WfbConfig,
     reg: &GsRegSnapshot,
     reason: &str,
+    ingest: Option<&ados_protocol::logd::emitter::IngestEmitter>,
 ) {
     let snap = LinkStats::default();
     // The chain is not running, so the live channel cannot be read; report the
@@ -83,6 +92,13 @@ pub fn write_reg_blocked_sidecar(
         &v,
         0o644,
     );
+    if let Some(em) = ingest {
+        em.emit_event(
+            "link.wfb_status",
+            ados_protocol::logd::Level::Info,
+            json_object_to_fields(&v),
+        );
+    }
 }
 
 /// Build the ground `wfb-stats.json` sidecar payload (the GS-extras the
@@ -155,6 +171,49 @@ pub fn build_gs_stats(
         "loss_percent": snap.loss_percent,
         "timestamp": snap.timestamp,
     })
+}
+
+/// Convert a JSON object into the logging store's open detail map (`Fields`), so
+/// the full ground wfb-status body can ride a single `link.wfb_status` event,
+/// symmetric with the air-side producer. Recurses through nested arrays /
+/// objects; numbers preserve their integer-vs-float kind and JSON null
+/// round-trips to msgpack nil, so the store row decodes back to the identical
+/// JSON the REST base merges over.
+pub fn json_object_to_fields(value: &serde_json::Value) -> ados_protocol::logd::Fields {
+    match value {
+        serde_json::Value::Object(map) => map
+            .iter()
+            .map(|(k, v)| (k.clone(), json_to_mpv(v)))
+            .collect(),
+        _ => ados_protocol::logd::Fields::new(),
+    }
+}
+
+/// Recursively map a `serde_json::Value` onto the msgpack value the detail map
+/// carries. Integers stay integers (signed when negative), floats stay floats,
+/// and null becomes nil.
+fn json_to_mpv(value: &serde_json::Value) -> ados_protocol::logd::Value {
+    use ados_protocol::logd::Value as MpVal;
+    match value {
+        serde_json::Value::Null => MpVal::Nil,
+        serde_json::Value::Bool(b) => MpVal::from(*b),
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                MpVal::from(i)
+            } else if let Some(u) = n.as_u64() {
+                MpVal::from(u)
+            } else {
+                MpVal::from(n.as_f64().unwrap_or(0.0))
+            }
+        }
+        serde_json::Value::String(s) => MpVal::from(s.as_str()),
+        serde_json::Value::Array(items) => MpVal::Array(items.iter().map(json_to_mpv).collect()),
+        serde_json::Value::Object(map) => MpVal::Map(
+            map.iter()
+                .map(|(k, v)| (MpVal::from(k.as_str()), json_to_mpv(v)))
+                .collect(),
+        ),
+    }
 }
 
 #[cfg(test)]
@@ -276,6 +335,57 @@ mod tests {
     }
 
     #[test]
+    fn json_object_to_fields_round_trips_the_gs_body() {
+        // The GS body shipped to the store must decode back to identical JSON, so
+        // the durable read source matches the live sidecar fallback. Null domain,
+        // the channel array, and integer-vs-float number kinds are the at-risk
+        // legs.
+        let cfg = WfbConfig::default();
+        let snap = LinkStats::default();
+        let channels = GsChannelTruth {
+            actual: 157,
+            rendezvous: 149,
+            operating: 149,
+        };
+        let body = build_gs_stats(
+            &snap,
+            "wlan1",
+            Some("rtl88x2eu"),
+            true,
+            channels,
+            &GsRegSnapshot::default(),
+            &cfg,
+            STATE_ACTIVE,
+            "searching",
+            false,
+            0.0,
+            0,
+            0,
+            None,
+            0.0,
+        );
+        let fields = json_object_to_fields(&body);
+        use ados_protocol::frame::{decode_len, HEADER_SIZE};
+        use ados_protocol::logd::{EventFrame, IngestFrame, Level, LOGD_MAX_FRAME};
+        let mut frame = EventFrame::new(0, "link.wfb_status", "ados-groundlink", Level::Info);
+        frame.detail = fields;
+        let bytes = IngestFrame::Event(frame).encode().unwrap();
+        let header: [u8; HEADER_SIZE] = bytes[..HEADER_SIZE].try_into().unwrap();
+        let len = decode_len(header, LOGD_MAX_FRAME, true).unwrap();
+        let decoded = match IngestFrame::decode(&bytes[HEADER_SIZE..HEADER_SIZE + len]).unwrap() {
+            IngestFrame::Event(e) => e,
+            other => panic!("expected an event frame, got {other:?}"),
+        };
+        let back = serde_json::to_value(decoded.detail).unwrap();
+        assert_eq!(back, body);
+        // The unknown domain is a JSON null on the wire (not dropped), the empty
+        // enabled set is an array, and the GS profile string survives.
+        assert!(back["reg_domain"].is_null());
+        assert_eq!(back["enabled_channels"], serde_json::json!([]));
+        assert_eq!(back["profile"], "ground_station");
+    }
+
+    #[test]
     fn reg_blocked_state_string_is_bland_and_stable() {
         // The sidecar surfaces this verbatim; keep it stable and tag-free.
         assert_eq!(STATE_REG_BLOCKED, "reg_blocked");
@@ -332,5 +442,49 @@ mod tests {
         // The live conflict is visible in the reg block sidecar.
         assert_eq!(v["reg_domain"], "BO");
         assert_eq!(v["reg_verified"], false);
+    }
+
+    #[tokio::test]
+    async fn reg_blocked_sidecar_emits_the_status_event_when_given_an_emitter() {
+        // The reg-blocked write is the GS degraded-state path: passing an emitter
+        // must ship the same body to the store as a `link.wfb_status` event so a
+        // store-first read never lags the on-disk reg-blocked sidecar. The emitter
+        // records every enqueue regardless of whether a daemon is listening, so one
+        // write enqueues exactly one event. The unconditional emit fires after the
+        // best-effort file write, so the assertion holds whether or not the runtime
+        // sidecar path is writable in the test environment.
+        let dir = tempfile::tempdir().unwrap();
+        let emitter = ados_protocol::logd::emitter::IngestEmitter::with_socket(
+            "ados-groundlink",
+            dir.path().join("ingest.sock"),
+        );
+        let stats = emitter.stats();
+        write_reg_blocked_sidecar(
+            "wlan1",
+            Some("rtl88x2eu"),
+            149,
+            &WfbConfig::default(),
+            &GsRegSnapshot::default(),
+            "phy_override",
+            Some(&emitter),
+        );
+        assert_eq!(stats.enqueued(), 1);
+
+        // With no emitter the write enqueues nothing.
+        let none_emitter = ados_protocol::logd::emitter::IngestEmitter::with_socket(
+            "ados-groundlink",
+            dir.path().join("ingest2.sock"),
+        );
+        let none_stats = none_emitter.stats();
+        write_reg_blocked_sidecar(
+            "wlan1",
+            Some("rtl88x2eu"),
+            149,
+            &WfbConfig::default(),
+            &GsRegSnapshot::default(),
+            "phy_override",
+            None,
+        );
+        assert_eq!(none_stats.enqueued(), 0);
     }
 }
