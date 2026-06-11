@@ -184,6 +184,18 @@ pub const PREBUILT: &[PrebuiltBinary] = &[
         gate: Gate::BestEffort,
         profiles: BOTH,
     },
+    // The native HTTP control surface. Best-effort and opt-in: it ships disabled
+    // (the GCS uses the FastAPI surface), so a missing binary degrades nothing.
+    // It is fetched and placed so `ados rust enable control` works on demand; the
+    // unit stays disabled until the operator turns it on.
+    PrebuiltBinary {
+        service: "ados-control",
+        asset: "ados-control-aarch64",
+        release_tag: "prebuilt-control",
+        dest: "/opt/ados/bin/ados-control",
+        gate: Gate::BestEffort,
+        profiles: BOTH,
+    },
     // The video relay the pipeline streams through. It is a mirrored
     // third-party binary rather than an `ados-*` service, so it lands in the
     // system bin dir. Best-effort: a missing relay degrades video without
@@ -211,8 +223,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn catalog_has_sixteen_entries() {
-        assert_eq!(PREBUILT.len(), 16);
+    fn catalog_has_seventeen_entries() {
+        assert_eq!(PREBUILT.len(), 17);
     }
 
     #[test]
@@ -269,6 +281,25 @@ mod tests {
         assert!(for_profile("ground_station")
             .iter()
             .any(|b| b.service == "ados-logd"));
+    }
+
+    #[test]
+    fn control_is_best_effort_on_both_profiles() {
+        let control = PREBUILT
+            .iter()
+            .find(|b| b.service == "ados-control")
+            .expect("ados-control must be in the catalog");
+        // The control surface ships disabled (the GCS uses the FastAPI surface),
+        // so a missing binary degrades nothing and must never abort the install.
+        assert_eq!(control.gate, Gate::BestEffort);
+        assert_eq!(control.release_tag, "prebuilt-control");
+        // Cross-profile: it serves both the drone and ground-station agents.
+        assert!(for_profile("drone")
+            .iter()
+            .any(|b| b.service == "ados-control"));
+        assert!(for_profile("ground_station")
+            .iter()
+            .any(|b| b.service == "ados-control"));
     }
 
     #[test]

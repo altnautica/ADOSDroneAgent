@@ -751,6 +751,26 @@ fn reconcile_logd_unit() {
     }
 }
 
+/// Reconcile the native control surface unit against its opt-in marker. The
+/// surface is OFF by default (the GCS uses the FastAPI surface on :8080), so a
+/// fresh box writes no marker and the unit stays disabled — the binary is still
+/// fetched + placed so `ados rust enable control` works on demand. The marker
+/// (`control-rust-enabled`) is written by `ados rust enable control` and removed
+/// by `ados rust disable control`; the next install pins the unit to match.
+/// Idempotent; runs on every install so a partial state self-heals. The START
+/// half is the start step's job (the unit is PartOf the supervisor).
+fn reconcile_control_unit() {
+    const UNIT: &str = "ados-control.service";
+    let pinned_on = Path::new(CONFIG_DIR).join("control-rust-enabled").exists();
+    if pinned_on {
+        enable_if_present(UNIT);
+    } else {
+        let _ = exec::run("systemctl", &["stop", UNIT]);
+        let _ = exec::run("systemctl", &["disable", UNIT]);
+        let _ = exec::run("systemctl", &["reset-failed", UNIT]);
+    }
+}
+
 /// Remove cutover marker files retired by a default sense flip so an
 /// `--upgrade` from an older release leaves no stale marker behind. The plugin
 /// host moved from an opt-IN marker (native only when the marker was present) to
@@ -1250,6 +1270,11 @@ impl Step for Systemd {
         //     endpoints read it). Enable it unless the fallback marker pins it
         //     off; the start step brings it up after the supervisor.
         reconcile_logd_unit();
+
+        // 5b-bis. The native control surface is off by default (the GCS uses the
+        //     FastAPI surface). Enable it only when the operator pinned it on via
+        //     `ados rust enable control`; otherwise it stays disabled.
+        reconcile_control_unit();
 
         // 5c. Drop marker files retired by a default sense flip (the plugin
         //     host moved from an opt-in to an opt-out marker). A fresh install
