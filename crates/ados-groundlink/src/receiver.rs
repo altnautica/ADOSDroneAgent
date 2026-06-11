@@ -38,7 +38,9 @@ const AGGREGATOR_GRACE: Duration = Duration::from_secs(3);
 
 /// The receiver's published state (the `wfb-receiver.json` shape, byte-identical
 /// to the Python `_write_state`). Relays are flattened to a list on write.
-#[derive(Debug, Clone, serde::Serialize)]
+/// `Deserialize` round-trips the on-disk file shape for parity assertions and
+/// any reader that loads the sidecar back.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ReceiverState {
     pub role: String,
     pub drone_iface: String,
@@ -53,7 +55,7 @@ pub struct ReceiverState {
 }
 
 /// Per-relay fragment stats (one entry in the `relays` list).
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct RelayStats {
     pub mac: String,
     pub last_seen_ms: i64,
@@ -226,6 +228,21 @@ async fn neighbor_macs(_mesh_iface: &str) -> Vec<String> {
         .collect()
 }
 
+/// One churn step over the relay map: upsert the neighbor MACs seen this poll
+/// (refreshing existing, adding new) and age out the silent ones. Returns the
+/// `(newly_connected, disconnected)` MACs the caller emits. Pure over the
+/// serialized state, so the upsert→emit decision is unit-testable without a
+/// running mesh or the cross-process event seam.
+fn churn_step(
+    state: &mut ReceiverState,
+    macs: &[String],
+    now_ms: i64,
+) -> (Vec<String>, Vec<String>) {
+    let newly = upsert_relays(state, macs, now_ms);
+    let removed = age_out_relays(state, now_ms);
+    (newly, removed)
+}
+
 /// The relay-churn watcher: each `POLL_INTERVAL`, read mesh neighbor MACs,
 /// upsert them into the relay map (emit `relay_connected` for new), and age out
 /// the silent ones (emit `relay_disconnected`). Runs until cancelled.
@@ -236,9 +253,7 @@ async fn watch_relay_churn(state: Arc<Mutex<ReceiverState>>, mesh_iface: String)
         let now = mesh_events::now_ms();
         let (newly, removed) = {
             let mut s = state.lock().await;
-            let newly = upsert_relays(&mut s, &macs, now);
-            let removed = age_out_relays(&mut s, now);
-            (newly, removed)
+            churn_step(&mut s, &macs, now)
         };
         for mac in newly {
             mesh_events::emit(
@@ -386,6 +401,14 @@ pub async fn run(shutdown: Arc<tokio::sync::Notify>) {
         s.up = false;
     }
     let _ = state.lock().await.write();
+    // Restore the local monitor adapter to managed mode when one was resolved
+    // (only with local-NIC aggregation). Empty when the receiver trusts relay
+    // forwards alone, so there is nothing to restore in that case (the mirror of
+    // the drone-side teardown).
+    if !drone_iface.is_empty() {
+        tracing::info!(interface = %drone_iface, "restoring local monitor adapter to managed mode");
+        ados_radio::adapter::set_managed_mode(&drone_iface).await;
+    }
     tracing::info!("wfb_receiver_stopped");
 }
 
@@ -505,6 +528,41 @@ mod tests {
     }
 
     #[test]
+    fn churn_step_drives_connect_then_disconnect() {
+        // Drive the exact decision the churn watcher emits on: first sight of two
+        // relays reports both as newly connected (→ relay_connected); a later
+        // poll seeing only one ages the other out past the grace window (→
+        // relay_disconnected) while the still-present one is neither.
+        let mut s = ReceiverState::default();
+
+        let (newly, removed) = churn_step(&mut s, &["aa".into(), "bb".into()], 1_000);
+        assert_eq!(newly, vec!["aa".to_string(), "bb".to_string()]);
+        assert!(removed.is_empty());
+
+        // Re-poll past "bb"'s grace window seeing only "aa".
+        let later = 1_000 + RELAY_GRACE_MS + 1;
+        let (newly, removed) = churn_step(&mut s, &["aa".into()], later);
+        assert!(newly.is_empty(), "aa already known → not newly connected");
+        assert_eq!(removed, vec!["bb".to_string()]);
+        // Only the live relay remains in the map.
+        assert_eq!(s.relays.len(), 1);
+        assert_eq!(s.relays[0].mac, "aa");
+    }
+
+    #[test]
+    fn churn_step_no_neighbors_ages_out_all() {
+        // An empty neighbor list past the grace window disconnects every relay.
+        let mut s = ReceiverState::default();
+        churn_step(&mut s, &["aa".into(), "bb".into()], 0);
+        let (newly, removed) = churn_step(&mut s, &[], RELAY_GRACE_MS + 1);
+        assert!(newly.is_empty());
+        assert_eq!(removed.len(), 2);
+        assert!(removed.contains(&"aa".to_string()));
+        assert!(removed.contains(&"bb".to_string()));
+        assert!(s.relays.is_empty());
+    }
+
+    #[test]
     fn age_out_then_reconnect_emits_again() {
         // A relay that ages out and later reappears is reported new again.
         let mut s = ReceiverState::default();
@@ -538,6 +596,71 @@ mod tests {
             let mut s = ReceiverState::default();
             let _ = upsert_relays(&mut s, &[], 0);
         }
+    }
+
+    #[test]
+    fn receiver_fixture_round_trips_with_python_shape() {
+        // The exact JSON the Python `_write_state` produced for a receiver
+        // aggregating the local NIC plus one relay forward. Deserialize into the
+        // Rust struct, then re-serialize and assert the key set + values are
+        // preserved (no field drift), including the nested relay entry.
+        let fixture = r#"{
+            "role": "receiver",
+            "drone_iface": "wlan1",
+            "listen_port": 5800,
+            "accept_local_nic": true,
+            "mesh_iface": "bat0",
+            "relays": [
+                {"mac": "aa:bb:cc:dd:ee:ff", "last_seen_ms": 1717000000000, "fragments": 4096}
+            ],
+            "fragments_after_dedup": 8000,
+            "fec_repaired": 24,
+            "output_kbps": 4200,
+            "up": true
+        }"#;
+        let s: ReceiverState = serde_json::from_str(fixture).expect("deserialize receiver fixture");
+        assert_eq!(s.role, "receiver");
+        assert_eq!(s.drone_iface, "wlan1");
+        assert_eq!(s.listen_port, 5800);
+        assert!(s.accept_local_nic);
+        assert_eq!(s.mesh_iface, "bat0");
+        assert_eq!(s.relays.len(), 1);
+        assert_eq!(s.relays[0].mac, "aa:bb:cc:dd:ee:ff");
+        assert_eq!(s.relays[0].last_seen_ms, 1_717_000_000_000);
+        assert_eq!(s.relays[0].fragments, 4096);
+        assert_eq!(s.fragments_after_dedup, 8000);
+        assert_eq!(s.fec_repaired, 24);
+        assert_eq!(s.output_kbps, 4200);
+        assert!(s.up);
+
+        // Round-trip back to the same key set + values as the fixture.
+        let re = serde_json::to_value(&s).unwrap();
+        let orig: serde_json::Value = serde_json::from_str(fixture).unwrap();
+        assert_eq!(re, orig);
+    }
+
+    #[test]
+    fn receiver_fixture_empty_relays_locks_list() {
+        // A receiver with no relays seen yet writes `relays: []`; the Rust
+        // `Vec<RelayStats>` must accept it as an empty list (not an error).
+        let fixture = r#"{
+            "role": "receiver",
+            "drone_iface": "",
+            "listen_port": 5800,
+            "accept_local_nic": false,
+            "mesh_iface": "bat0",
+            "relays": [],
+            "fragments_after_dedup": 0,
+            "fec_repaired": 0,
+            "output_kbps": 0,
+            "up": false
+        }"#;
+        let s: ReceiverState = serde_json::from_str(fixture).expect("deserialize empty relays");
+        assert!(s.relays.is_empty());
+        assert!(!s.accept_local_nic);
+        assert!(!s.up);
+        let re = serde_json::to_value(&s).unwrap();
+        assert!(re["relays"].as_array().unwrap().is_empty());
     }
 
     #[test]

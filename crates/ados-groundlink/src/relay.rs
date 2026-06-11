@@ -41,8 +41,9 @@ const RESOLVE_TIMEOUT: Duration = Duration::from_secs(3);
 const FORWARDER_GRACE: Duration = Duration::from_secs(3);
 
 /// The relay's published state (the `wfb-relay.json` shape, byte-identical to
-/// the Python `_write_state`).
-#[derive(Debug, Clone, serde::Serialize)]
+/// the Python `_write_state`). `Deserialize` round-trips the on-disk file shape
+/// for parity assertions and any reader that loads the sidecar back.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct RelayState {
     pub role: String,
     pub drone_iface: String,
@@ -321,6 +322,11 @@ pub async fn run(shutdown: Arc<tokio::sync::Notify>) {
         s.up = false;
     }
     let _ = state.lock().await.write();
+    // Restore the drone-facing adapter to managed mode so the kernel /
+    // NetworkManager can re-enumerate it instead of finding it stranded in
+    // monitor mode after the unit stops (the mirror of the drone-side teardown).
+    tracing::info!(interface = %drone_iface, "restoring drone-facing adapter to managed mode");
+    ados_radio::adapter::set_managed_mode(&drone_iface).await;
     tracing::info!("wfb_relay_stopped");
 }
 
@@ -456,6 +462,62 @@ mod tests {
         {
             let _ = receiver_is_stale(0, false, 0);
         }
+    }
+
+    #[test]
+    fn relay_fixture_round_trips_with_python_shape() {
+        // The exact JSON the Python `_write_state` produced for a relay forwarding
+        // to a live receiver. Deserialize into the Rust struct, then re-serialize
+        // and assert the key set + values are preserved (no field drift).
+        let fixture = r#"{
+            "role": "relay",
+            "drone_iface": "wlan1",
+            "receiver_ip": "10.42.0.5",
+            "receiver_port": 5800,
+            "receiver_last_seen_ms": 1717000000000,
+            "fragments_seen": 12345,
+            "fragments_forwarded": 12000,
+            "up": true,
+            "mesh_iface": "bat0"
+        }"#;
+        let s: RelayState = serde_json::from_str(fixture).expect("deserialize relay fixture");
+        assert_eq!(s.role, "relay");
+        assert_eq!(s.drone_iface, "wlan1");
+        assert_eq!(s.receiver_ip.as_deref(), Some("10.42.0.5"));
+        assert_eq!(s.receiver_port, 5800);
+        assert_eq!(s.receiver_last_seen_ms, 1_717_000_000_000);
+        assert_eq!(s.fragments_seen, 12345);
+        assert_eq!(s.fragments_forwarded, 12000);
+        assert!(s.up);
+        assert_eq!(s.mesh_iface, "bat0");
+
+        // Round-trip back to the same key set + values as the fixture.
+        let re = serde_json::to_value(&s).unwrap();
+        let orig: serde_json::Value = serde_json::from_str(fixture).unwrap();
+        assert_eq!(re, orig);
+    }
+
+    #[test]
+    fn relay_fixture_null_receiver_ip_locks_option() {
+        // A relay with no resolved receiver writes `receiver_ip: null`; the Rust
+        // `Option<String>` must accept it as `None` (not a deserialize error).
+        let fixture = r#"{
+            "role": "relay",
+            "drone_iface": "wlan1",
+            "receiver_ip": null,
+            "receiver_port": 5800,
+            "receiver_last_seen_ms": 0,
+            "fragments_seen": 0,
+            "fragments_forwarded": 0,
+            "up": false,
+            "mesh_iface": "bat0"
+        }"#;
+        let s: RelayState = serde_json::from_str(fixture).expect("deserialize null receiver_ip");
+        assert!(s.receiver_ip.is_none());
+        assert!(!s.up);
+        // Re-serializing keeps `receiver_ip: null`.
+        let re = serde_json::to_value(&s).unwrap();
+        assert!(re["receiver_ip"].is_null());
     }
 
     #[test]

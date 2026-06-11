@@ -41,26 +41,59 @@ use ados_groundlink::{fanout, mesh, presence, receiver, relay, GsPresenceCache};
 const CONFIG_YAML: &str = "/etc/ados/config.yaml";
 const RX_KEY: &str = ados_radio::paths::WFB_RX_KEY;
 
+/// The run role the service dispatches on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Role {
+    Direct,
+    Relay,
+    Receiver,
+}
+
+impl Role {
+    /// Parse a role token, returning `None` for anything that is not one of the
+    /// three known values (so the caller can distinguish "unknown" from a real
+    /// role and log accordingly).
+    fn from_token(token: &str) -> Option<Self> {
+        match token {
+            "direct" => Some(Self::Direct),
+            "relay" => Some(Self::Relay),
+            "receiver" => Some(Self::Receiver),
+            _ => None,
+        }
+    }
+}
+
 /// Resolve the run role: an explicit `--role <value>` argument wins, else the
 /// on-disk sentinel. Unknown values fall back to `direct`.
-fn resolve_role() -> String {
-    let mut args = std::env::args().skip(1);
-    while let Some(arg) = args.next() {
+fn resolve_role() -> Role {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let sentinel = mesh::get_current_role();
+    resolve_role_from(&args, Some(sentinel.as_str()))
+}
+
+/// Pure role-resolution core (test seam, mirroring the `emit`/`emit_to` split in
+/// the mesh-event module). An explicit `--role <value>` / `--role=<value>`
+/// argument wins; an unknown explicit value is warned and the resolution falls
+/// through to the sentinel; with no argument the on-disk sentinel decides; with
+/// neither a usable argument nor a usable sentinel the role is `direct`.
+fn resolve_role_from(args: &[String], sentinel: Option<&str>) -> Role {
+    let mut it = args.iter();
+    while let Some(arg) = it.next() {
         if arg == "--role" {
-            if let Some(v) = args.next() {
-                if matches!(v.as_str(), "direct" | "relay" | "receiver") {
-                    return v;
+            if let Some(v) = it.next() {
+                if let Some(role) = Role::from_token(v) {
+                    return role;
                 }
                 tracing::warn!(value = %v, "unknown_role_arg_falling_back");
             }
         } else if let Some(v) = arg.strip_prefix("--role=") {
-            if matches!(v, "direct" | "relay" | "receiver") {
-                return v.to_string();
+            if let Some(role) = Role::from_token(v) {
+                return role;
             }
             tracing::warn!(value = %v, "unknown_role_arg_falling_back");
         }
     }
-    mesh::get_current_role()
+    sentinel.and_then(Role::from_token).unwrap_or(Role::Direct)
 }
 
 fn init_logging() {
@@ -102,16 +135,16 @@ async fn main() -> Result<()> {
     let mut sigint = signal(SignalKind::interrupt())?;
 
     let role = resolve_role();
-    match role.as_str() {
-        "relay" => {
+    match role {
+        Role::Relay => {
             tracing::info!("ground-station relay role starting");
             run_relay_or_receiver(true, &mut sigterm, &mut sigint).await;
         }
-        "receiver" => {
+        Role::Receiver => {
             tracing::info!("ground-station receiver role starting");
             run_relay_or_receiver(false, &mut sigterm, &mut sigint).await;
         }
-        _ => {
+        Role::Direct => {
             run_direct(&mut sigterm, &mut sigint).await?;
         }
     }
@@ -202,9 +235,17 @@ async fn run_direct(
         tokio::spawn(presence::hop_supervisor_persist_loop(hop_cache, band));
     }
 
+    // The receive adapter is auto-detected inside the receive loop (config's
+    // interface is often empty), so it is not in scope here. Share a cell the
+    // loop writes once it resolves the injection adapter; on a shutdown signal
+    // this side restores that adapter to managed mode, the mirror of the
+    // drone-side teardown, so the kernel/NetworkManager can re-enumerate the
+    // RTL instead of finding it stranded in monitor mode after the unit stops.
+    let resolved_iface: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+
     // Run the receive loop until a shutdown signal arrives.
     tokio::select! {
-        _ = receive_loop(&config, presence_cache) => {}
+        _ = receive_loop(&config, presence_cache, resolved_iface.clone()) => {}
         _ = sigterm.recv() => {
             tracing::info!("received SIGTERM");
         }
@@ -212,13 +253,39 @@ async fn run_direct(
             tracing::info!("received SIGINT");
         }
     }
+
+    // Restore the resolved injection adapter to managed mode on the way out.
+    restore_managed_if_resolved(&resolved_iface).await;
     Ok(())
+}
+
+/// Restore the receive-plane adapter to managed mode on shutdown when one was
+/// resolved this run. A no-op when the loop never selected an adapter (nothing
+/// to restore). The read decision is split into [`iface_to_restore`] so the
+/// capture-then-restore path is unit-testable without a real NIC.
+async fn restore_managed_if_resolved(resolved: &Arc<Mutex<Option<String>>>) {
+    if let Some(iface) = iface_to_restore(resolved).await {
+        tracing::info!(interface = %iface, "restoring receive adapter to managed mode");
+        ados_radio::adapter::set_managed_mode(&iface).await;
+    }
+}
+
+/// Read the shared "last resolved iface" cell and return the interface to
+/// restore (`Some`) or nothing to do (`None`). Pure over the cell, so the
+/// capture (write from the receive loop) and the read (shutdown side) can be
+/// asserted in a unit test without touching a NIC.
+async fn iface_to_restore(resolved: &Arc<Mutex<Option<String>>>) -> Option<String> {
+    resolved.lock().await.clone()
 }
 
 /// The receive manager's main loop: spawn a generation, run it to completion,
 /// restart with bounded backoff. Mirrors the Python `WfbRxManager.run` structure
 /// (sans the Python-owned adapter-detect/pairing gate).
-async fn receive_loop(config: &WfbConfig, presence_cache: GsPresenceCache) {
+async fn receive_loop(
+    config: &WfbConfig,
+    presence_cache: GsPresenceCache,
+    resolved_iface: Arc<Mutex<Option<String>>>,
+) {
     let mut manager = WfbRxManager::new(config.clone());
     let clock: Arc<dyn ados_groundlink::watchdog::Clock> = Arc::new(SystemClock::default());
     let setter: Arc<dyn ados_groundlink::acquire::ChannelSetter> = Arc::new(IwChannelSetter);
@@ -249,6 +316,9 @@ async fn receive_loop(config: &WfbConfig, presence_cache: GsPresenceCache) {
                 Some(sel) if sel.injection_ok => {
                     manager.set_adapter(Some(sel.chipset.clone()), true);
                     manager.set_interface(sel.ifname.clone());
+                    // Record the resolved injection adapter so the shutdown path
+                    // (in `run_direct`) can restore it to managed mode.
+                    *resolved_iface.lock().await = Some(sel.ifname.clone());
                     (sel.ifname, Some(sel.chipset))
                 }
                 Some(sel) => {
@@ -460,5 +530,80 @@ async fn wait_for_exit(rx: Arc<DataRxHandle>) {
             return;
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn explicit_role_relay_wins() {
+        let role = resolve_role_from(&args(&["--role", "relay"]), Some("direct"));
+        assert_eq!(role, Role::Relay);
+    }
+
+    #[test]
+    fn explicit_role_eq_form_receiver() {
+        let role = resolve_role_from(&args(&["--role=receiver"]), Some("direct"));
+        assert_eq!(role, Role::Receiver);
+    }
+
+    #[test]
+    fn sentinel_decides_with_no_argument() {
+        let role = resolve_role_from(&[], Some("relay"));
+        assert_eq!(role, Role::Relay);
+    }
+
+    #[test]
+    fn unknown_explicit_value_falls_through_to_direct() {
+        let role = resolve_role_from(&args(&["--role", "bogus"]), None);
+        assert_eq!(role, Role::Direct);
+    }
+
+    #[test]
+    fn unknown_explicit_value_falls_through_to_sentinel() {
+        // An unknown explicit arg is warned but does not strand the resolution:
+        // it falls through to the sentinel, which here selects receiver.
+        let role = resolve_role_from(&args(&["--role", "bogus"]), Some("receiver"));
+        assert_eq!(role, Role::Receiver);
+    }
+
+    #[test]
+    fn no_argument_and_no_sentinel_is_direct() {
+        assert_eq!(resolve_role_from(&[], None), Role::Direct);
+    }
+
+    #[test]
+    fn unknown_sentinel_is_direct() {
+        assert_eq!(resolve_role_from(&[], Some("bogus")), Role::Direct);
+    }
+
+    #[tokio::test]
+    async fn resolved_cell_holds_iface_after_capture() {
+        // Mirror what the receive loop does after it resolves the injection
+        // adapter: write the iface into the shared cell. The shutdown side reads
+        // it back via the same helper it uses to decide whether to restore.
+        let cell: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        // Nothing resolved yet → nothing to restore.
+        assert_eq!(iface_to_restore(&cell).await, None);
+
+        // Receive-loop capture point.
+        *cell.lock().await = Some("wlan1".to_string());
+
+        // Shutdown side reads the captured iface and would restore exactly it.
+        assert_eq!(iface_to_restore(&cell).await, Some("wlan1".to_string()));
+    }
+
+    #[tokio::test]
+    async fn restore_is_noop_when_no_iface_resolved() {
+        // With an empty cell the restore decision yields None, so the shutdown
+        // path performs no managed-mode restore (the no-adapter run).
+        let cell: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        assert!(iface_to_restore(&cell).await.is_none());
     }
 }
