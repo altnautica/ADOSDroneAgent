@@ -7,11 +7,11 @@ def test_initial_set_has_the_expected_routes():
     names = [r.name for r in initial_routes()]
     assert names == [
         "logs",
-        "link-metrics",
-        "video-metrics",
         "hw-summary",
         "hw-snapshot",
         "service-events",
+        "link-metrics",
+        "video-metrics",
     ]
 
 

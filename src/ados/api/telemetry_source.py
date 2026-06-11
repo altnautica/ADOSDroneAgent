@@ -100,6 +100,62 @@ async def latest_hw_signals() -> dict[str, Any] | None:
     return merged or None
 
 
+async def query_rows(
+    kind: str, limit: int, **params: Any
+) -> list[dict[str, Any]] | None:
+    """Page the store's /v1/query for one row kind. None on any gap.
+
+    The single try/except ladder every domain reuses, so a missing store
+    degrades each route to its live fallback rather than to a 500.
+    """
+    client = _get_client()
+    q = {"kind": kind, "limit": limit, **params}
+    try:
+        resp = await client.get("/v1/query", params=q)
+    except (
+        httpx.ConnectError,
+        httpx.ConnectTimeout,
+        FileNotFoundError,
+        OSError,
+        httpx.HTTPError,
+    ):
+        return None
+    if resp.status_code >= 400:
+        return None
+    try:
+        body = resp.json()
+    except ValueError:
+        return None
+    rows = body.get("data") if isinstance(body, dict) else None
+    return rows if isinstance(rows, list) else None
+
+
+async def latest_metrics(
+    names: set[str], limit: int = 200
+) -> dict[str, dict[str, Any]] | None:
+    """Newest value (+ tags + ts) per named metric from recent ``metrics`` rows.
+
+    Returns a {metric_name: {"value": float, "tags": {...}, "ts_us": int}} map,
+    newest-wins. ``None`` when the store is unreachable. Names not seen in the
+    window are simply absent from the map (caller decides if that is a gap).
+    """
+    rows = await query_rows("metrics", limit)
+    if rows is None:
+        return None
+    out: dict[str, dict[str, Any]] = {}
+    for row in rows:  # newest-first
+        if not isinstance(row, dict):
+            continue
+        m = row.get("metric")
+        if m in names and m not in out:
+            out[m] = {
+                "value": row.get("value"),
+                "tags": row.get("tags") or {},
+                "ts_us": row.get("ts_us"),
+            }
+    return out or None
+
+
 def _num(signals: dict[str, Any], key: str) -> float | None:
     """Return a numeric signal value, or ``None`` if absent / non-numeric.
 
@@ -179,4 +235,10 @@ def derive_resources(signals: dict[str, Any]) -> dict[str, Any] | None:
     }
 
 
-__all__ = ["latest_hw_signals", "derive_resources", "aclose"]
+__all__ = [
+    "latest_hw_signals",
+    "derive_resources",
+    "aclose",
+    "query_rows",
+    "latest_metrics",
+]
