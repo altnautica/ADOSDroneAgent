@@ -19,6 +19,11 @@ def test_initial_set_has_the_expected_routes():
         "air-pipeline-metrics",
         "air-pipeline-state",
         "video-latency",
+        "mesh-state",
+        "gs-relay-state",
+        "gs-receiver-state",
+        "net-uplink-active",
+        "net-modem-usage",
     ]
 
 
@@ -116,6 +121,37 @@ def test_service_events_route_filters_on_kind():
     assert route.row_match == {"kind": "service.transition"}
     assert {f.field for f in route.fields} == {"from_state", "to_state", "reason"}
     assert all(f.locator == Locator.DETAIL_KEY for f in route.fields)
+
+
+def test_mesh_state_route_filters_on_kind_and_source():
+    route = route_by_name("mesh-state")
+    assert route is not None
+    assert route.kind == "events"
+    assert route.row_match == {"kind": "mesh.state", "source": "ados-groundlink"}
+    assert all(f.locator == Locator.DETAIL_KEY for f in route.fields)
+    fields = {f.field for f in route.fields}
+    # The snapshot spine the four mesh slice routes read back.
+    assert {"role", "neighbors", "gateways", "selected_gateway"} <= fields
+
+
+def test_gs_relay_and_receiver_state_routes_filter_on_kind_and_source():
+    for name, kind in (
+        ("gs-relay-state", "gs.relay_state"),
+        ("gs-receiver-state", "gs.receiver_state"),
+    ):
+        route = route_by_name(name)
+        assert route is not None
+        assert route.kind == "events"
+        assert route.row_match == {"kind": kind, "source": "ados-groundlink"}
+        assert all(f.locator == Locator.DETAIL_KEY for f in route.fields)
+    relay = route_by_name("gs-relay-state")
+    assert {"role", "receiver_ip", "fragments_forwarded", "up"} <= {
+        f.field for f in relay.fields
+    }
+    receiver = route_by_name("gs-receiver-state")
+    assert {"relays", "fragments_after_dedup", "output_kbps", "up"} <= {
+        f.field for f in receiver.fields
+    }
 
 
 def test_unknown_route_is_none():

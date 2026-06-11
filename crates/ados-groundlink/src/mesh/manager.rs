@@ -238,12 +238,21 @@ pub fn now_ms() -> i64 {
 
 /// The mesh poll loop: refresh + persist every `POLL_INTERVAL` until cancelled.
 /// The caller spawns this after a successful `setup` on a relay/receiver node.
-pub async fn run_poll_loop(mut snap: MeshSnapshot) {
+///
+/// After each persist the same snapshot body is shipped to the logging store as
+/// a `mesh.state` event (when an emitter is supplied) so a store-first read
+/// never lags the on-disk sidecar. Best-effort: an absent logging daemon drops
+/// the event without disturbing the poll loop.
+pub async fn run_poll_loop(
+    mut snap: MeshSnapshot,
+    ingest: Option<ados_protocol::logd::emitter::IngestEmitter>,
+) {
     loop {
         poll_once(&mut snap).await;
         if let Err(e) = snap.write() {
             tracing::debug!(error = %e, "mesh_state_write_failed");
         }
+        snap.emit(ingest.as_ref());
         tokio::time::sleep(POLL_INTERVAL).await;
     }
 }

@@ -11,14 +11,17 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from ..routes import RouteSpec
-from . import baseline, link, video  # one import line per domain (serialized)
+from . import baseline, gs, link, mesh, network, video  # one line per domain
 
 # The ordered registry. A domain provider is a zero-arg callable returning its
 # RouteSpecs. Order here is report order.
 _REGISTRY: list[Callable[[], list[RouteSpec]]] = [
     baseline.routes,  # logs + hw-summary + hw-snapshot + service-events
-    link.routes,  # link-metrics
-    video.routes,  # video-metrics
+    link.routes,  # link-metrics + wfb status/history/failover
+    video.routes,  # video-metrics + pipeline/air-pipeline/latency
+    mesh.routes,  # mesh state/neighbors/routes/gateways
+    gs.routes,  # ground-station status + relay/receiver
+    network.routes,  # uplink-active + modem-usage
     # <one line per new domain — the only serialized edit>
 ]
 

@@ -146,6 +146,28 @@ impl UplinkRouter {
         )
     }
 
+    /// Like [`new`](Self::new) but attaches a durable-store emitter to the
+    /// active-uplink flag writer, so each flag change also ships a
+    /// `net.uplink_active` event to the logging store. The daemon wires this so a
+    /// store-first reader sees the router's truth instead of a dead
+    /// in-FastAPI-process singleton. The emitter is best-effort and never gates
+    /// the disk write.
+    pub fn new_with_emitter(
+        managers: HashMap<String, Arc<dyn UplinkManager>>,
+        priority: Option<Vec<String>>,
+        priority_config_path: Option<std::path::PathBuf>,
+        emitter: ados_protocol::logd::emitter::IngestEmitter,
+    ) -> Self {
+        Self::with_seams(
+            managers,
+            priority,
+            priority_config_path,
+            Arc::new(CloudProber),
+            Arc::new(IpRouteApplier),
+            ActiveFlagWriter::new().with_emitter(emitter),
+        )
+    }
+
     /// Full constructor with injectable probe / route / active-flag seams (tests).
     #[allow(clippy::too_many_arguments)]
     pub fn with_seams(

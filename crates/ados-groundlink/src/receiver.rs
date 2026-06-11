@@ -86,6 +86,30 @@ impl ReceiverState {
         let path = crate::paths::run_path("wfb-receiver.json");
         crate::sidecars::write_json_atomic(Path::new(&path), self, 0o644)
     }
+
+    /// Write the state file AND ship the same body to the logging store as a
+    /// single `gs.receiver_state` event. The struct is persisted to disk
+    /// directly, so the on-disk sidecar stays byte-identical to `write()`; the
+    /// JSON value is built only for the store event (the nested `relays` array
+    /// round-trips through `json_object_to_fields`). Best-effort: an absent
+    /// logging daemon drops the event without disturbing the poll loop; an I/O
+    /// error on the file write is surfaced to the caller exactly as `write()`.
+    pub fn write_and_emit(
+        &self,
+        ingest: Option<&ados_protocol::logd::emitter::IngestEmitter>,
+    ) -> std::io::Result<()> {
+        let path = crate::paths::run_path("wfb-receiver.json");
+        let res = crate::sidecars::write_json_atomic(Path::new(&path), self, 0o644);
+        if let Some(em) = ingest {
+            let v = serde_json::to_value(self).unwrap_or(serde_json::Value::Null);
+            em.emit_event(
+                "gs.receiver_state",
+                ados_protocol::logd::Level::Info,
+                crate::wfb_rx::stats::json_object_to_fields(&v),
+            );
+        }
+        res
+    }
 }
 
 /// Build the `wfb_rx -a` aggregator args. With `accept_local_nic` the local
@@ -278,7 +302,10 @@ async fn watch_relay_churn(state: Arc<Mutex<ReceiverState>>, mesh_iface: String)
 /// concurrently. On shutdown (or aggregator exit) all tasks are cancelled, the
 /// aggregator is terminated gracefully, the mDNS record is unregistered, and
 /// `up=false` is persisted.
-pub async fn run(shutdown: Arc<tokio::sync::Notify>) {
+pub async fn run(
+    shutdown: Arc<tokio::sync::Notify>,
+    ingest: Option<ados_protocol::logd::emitter::IngestEmitter>,
+) {
     let cfg = GroundStationConfig::load_from(Path::new("/etc/ados/config.yaml"));
     let mesh_iface = cfg.mesh.bat_iface.clone();
     let service_type = cfg.wfb_relay.receiver_mdns_service.clone();
@@ -348,7 +375,7 @@ pub async fn run(shutdown: Arc<tokio::sync::Notify>) {
             }
             let mut s = state.lock().await;
             s.up = false;
-            let _ = s.write();
+            let _ = s.write_and_emit(ingest.as_ref());
             return;
         }
     };
@@ -356,7 +383,7 @@ pub async fn run(shutdown: Arc<tokio::sync::Notify>) {
         let mut s = state.lock().await;
         s.up = true;
     }
-    let _ = state.lock().await.write();
+    let _ = state.lock().await.write_and_emit(ingest.as_ref());
 
     let tail_task = aggregator
         .take_stderr()
@@ -365,9 +392,10 @@ pub async fn run(shutdown: Arc<tokio::sync::Notify>) {
     let writer_task = {
         let state = state.clone();
         let shutdown = shutdown.clone();
+        let ingest = ingest.clone();
         tokio::spawn(async move {
             loop {
-                if let Err(e) = state.lock().await.write() {
+                if let Err(e) = state.lock().await.write_and_emit(ingest.as_ref()) {
                     tracing::debug!(error = %e, "receiver_state_write_failed");
                 }
                 tokio::select! {
@@ -400,7 +428,7 @@ pub async fn run(shutdown: Arc<tokio::sync::Notify>) {
         let mut s = state.lock().await;
         s.up = false;
     }
-    let _ = state.lock().await.write();
+    let _ = state.lock().await.write_and_emit(ingest.as_ref());
     // Restore the local monitor adapter to managed mode when one was resolved
     // (only with local-NIC aggregation). Empty when the receiver trusts relay
     // forwards alone, so there is nothing to restore in that case (the mirror of
@@ -684,5 +712,38 @@ mod tests {
         unsafe {
             std::env::remove_var("ADOS_RUN_DIR");
         }
+    }
+
+    #[tokio::test]
+    async fn write_and_emit_enqueues_one_event_with_an_emitter_and_none_without() {
+        // The emitting write ships exactly one gs.receiver_state event with an
+        // emitter and nothing with None, regardless of the best-effort file
+        // write result. The on-disk file path is covered by
+        // `receiver_state_write_honours_run_dir_override`; this test avoids the
+        // process-wide ADOS_RUN_DIR mutation so it never races the other run-dir
+        // test under the parallel runner.
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = ReceiverState {
+            listen_port: 5800,
+            up: true,
+            ..Default::default()
+        };
+        upsert_relays(&mut s, &["aa:bb:cc:dd:ee:ff".into()], 42);
+
+        let emitter = ados_protocol::logd::emitter::IngestEmitter::with_socket(
+            "ados-groundlink",
+            dir.path().join("ingest.sock"),
+        );
+        let stats = emitter.stats();
+        let _ = s.write_and_emit(Some(&emitter));
+        assert_eq!(stats.enqueued(), 1);
+
+        let none_emitter = ados_protocol::logd::emitter::IngestEmitter::with_socket(
+            "ados-groundlink",
+            dir.path().join("ingest2.sock"),
+        );
+        let none_stats = none_emitter.stats();
+        let _ = s.write_and_emit(None);
+        assert_eq!(none_stats.enqueued(), 0);
     }
 }

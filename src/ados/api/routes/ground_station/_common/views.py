@@ -216,6 +216,7 @@ async def _ethernet_view() -> dict[str, Any]:
 
 async def _modem_view() -> dict[str, Any]:
     try:
+        from ados.api.sources.network import latest_modem_usage
         from ados.services.ground_station.modem_manager import (
             get_modem_manager,
         )
@@ -232,7 +233,23 @@ async def _modem_view() -> dict[str, Any]:
             cap_mb = 0
         total_bytes = int(usage.get("total_bytes", 0) or 0)
         data_used_mb = int(total_bytes / (1024 * 1024)) if total_bytes else 0
-        percent = (data_used_mb / cap_mb * 100.0) if cap_mb else 0.0
+        percent = round((data_used_mb / cap_mb * 100.0) if cap_mb else 0.0, 2)
+
+        # The cumulative-usage figures come from the native `ados-net` daemon's
+        # data-cap tracker, which it ships as a `net.modem_usage` event. The
+        # FastAPI box may not even see the modem iface, so a store hit carries
+        # the daemon's truth; a store gap falls back to the live `data_usage()`
+        # figures above. The connectivity `state` / iface / signal legs stay
+        # live (the store body's `state` is the cap classification, a different
+        # field that is not surfaced here, so it is never read).
+        store = await latest_modem_usage()
+        if store is not None:
+            if isinstance(store.get("data_used_mb"), (int, float)):
+                data_used_mb = int(store["data_used_mb"])
+            if isinstance(store.get("cap_mb"), (int, float)):
+                cap_mb = int(store["cap_mb"])
+            if isinstance(store.get("percent"), (int, float)):
+                percent = round(float(store["percent"]), 2)
 
         return {
             "enabled": bool(cfg.get("enabled", False)),
@@ -245,7 +262,7 @@ async def _modem_view() -> dict[str, Any]:
             "operator": st.get("operator"),
             "data_used_mb": data_used_mb,
             "cap_mb": cap_mb,
-            "percent": round(percent, 2),
+            "percent": percent,
             "state": "connected" if st.get("connected") else "disconnected",
         }
     except Exception:

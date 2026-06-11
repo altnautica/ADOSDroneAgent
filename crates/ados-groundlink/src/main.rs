@@ -163,21 +163,29 @@ async fn run_relay_or_receiver(
 ) {
     let shutdown = Arc::new(Notify::new());
 
+    // Telemetry emitter for the relay/receiver branch: ships the mesh snapshot
+    // and the relay/receiver state to the logging daemon as the durable read
+    // source the REST layer reads back. Best-effort and non-blocking; the direct
+    // path constructs its own inside the receive loop. A second instance in this
+    // process is fine.
+    let ingest = ados_protocol::logd::emitter::IngestEmitter::new("ados-groundlink");
+
     // Observability: publish the mesh snapshot (neighbors / gateways /
     // selected-gateway) so the REST layer + OLED see the fabric. This is the
     // same poll the direct path skips; the relay/receiver FEC supervision below
     // is independent of it.
     let role_label = if is_relay { "relay" } else { "receiver" };
     let snap = mesh::MeshSnapshot::new(role_label, "bat0", "802.11s");
-    tokio::spawn(mesh::run_poll_loop(snap));
+    tokio::spawn(mesh::run_poll_loop(snap, Some(ingest.clone())));
 
     let role_task = {
         let shutdown = shutdown.clone();
+        let ingest = Some(ingest.clone());
         tokio::spawn(async move {
             if is_relay {
-                relay::run(shutdown).await;
+                relay::run(shutdown, ingest).await;
             } else {
-                receiver::run(shutdown).await;
+                receiver::run(shutdown, ingest).await;
             }
         })
     };

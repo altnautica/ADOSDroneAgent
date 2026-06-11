@@ -79,6 +79,29 @@ impl RelayState {
         let path = crate::paths::run_path("wfb-relay.json");
         crate::sidecars::write_json_atomic(Path::new(&path), self, 0o644)
     }
+
+    /// Write the state file AND ship the same body to the logging store as a
+    /// single `gs.relay_state` event. The struct is persisted to disk directly,
+    /// so the on-disk sidecar stays byte-identical to `write()`; the JSON value
+    /// is built only for the store event. Best-effort: an absent logging daemon
+    /// drops the event without disturbing the poll loop, and an I/O error on the
+    /// file write is surfaced to the caller exactly as `write()` does.
+    pub fn write_and_emit(
+        &self,
+        ingest: Option<&ados_protocol::logd::emitter::IngestEmitter>,
+    ) -> std::io::Result<()> {
+        let path = crate::paths::run_path("wfb-relay.json");
+        let res = crate::sidecars::write_json_atomic(Path::new(&path), self, 0o644);
+        if let Some(em) = ingest {
+            let v = serde_json::to_value(self).unwrap_or(serde_json::Value::Null);
+            em.emit_event(
+                "gs.relay_state",
+                ados_protocol::logd::Level::Info,
+                crate::wfb_rx::stats::json_object_to_fields(&v),
+            );
+        }
+        res
+    }
 }
 
 /// Build the `wfb_rx -f` FEC-forward args for the drone-facing adapter. Uses the
@@ -175,7 +198,10 @@ async fn tail_forwarder_stats(stderr: tokio::process::ChildStderr, state: Arc<Mu
 /// `relay_connected`); on receiver loss past the grace window mark the link
 /// down and emit `receiver_unreachable`; write `wfb-relay.json` every poll. On
 /// shutdown the forwarder is terminated gracefully and `up=false` is persisted.
-pub async fn run(shutdown: Arc<tokio::sync::Notify>) {
+pub async fn run(
+    shutdown: Arc<tokio::sync::Notify>,
+    ingest: Option<ados_protocol::logd::emitter::IngestEmitter>,
+) {
     let cfg = GroundStationConfig::load_from(Path::new("/etc/ados/config.yaml"));
     let mesh_iface = cfg.mesh.bat_iface.clone();
     let service_type = cfg.wfb_relay.receiver_mdns_service.clone();
@@ -206,7 +232,7 @@ pub async fn run(shutdown: Arc<tokio::sync::Notify>) {
                 let mut s = state.lock().await;
                 s.up = false;
             }
-            let _ = state.lock().await.write();
+            let _ = state.lock().await.write_and_emit(ingest.as_ref());
             shutdown.notified().await;
             return;
         }
@@ -300,7 +326,7 @@ pub async fn run(shutdown: Arc<tokio::sync::Notify>) {
             }
         }
 
-        if let Err(e) = state.lock().await.write() {
+        if let Err(e) = state.lock().await.write_and_emit(ingest.as_ref()) {
             tracing::debug!(error = %e, "relay_state_write_failed");
         }
 
@@ -321,7 +347,7 @@ pub async fn run(shutdown: Arc<tokio::sync::Notify>) {
         let mut s = state.lock().await;
         s.up = false;
     }
-    let _ = state.lock().await.write();
+    let _ = state.lock().await.write_and_emit(ingest.as_ref());
     // Restore the drone-facing adapter to managed mode so the kernel /
     // NetworkManager can re-enumerate it instead of finding it stranded in
     // monitor mode after the unit stops (the mirror of the drone-side teardown).
@@ -540,5 +566,39 @@ mod tests {
         unsafe {
             std::env::remove_var("ADOS_RUN_DIR");
         }
+    }
+
+    #[tokio::test]
+    async fn write_and_emit_enqueues_one_event_with_an_emitter_and_none_without() {
+        // The emitting write ships exactly one gs.relay_state event when an
+        // emitter is supplied and nothing with None, regardless of whether the
+        // file write succeeds (it is best-effort). The emitter records every
+        // enqueue independent of a listening daemon. The on-disk file path is
+        // covered by `relay_state_write_honours_run_dir_override`; this test
+        // avoids the process-wide ADOS_RUN_DIR mutation so it never races the
+        // other run-dir test under the parallel runner.
+        let dir = tempfile::tempdir().unwrap();
+        let s = RelayState {
+            drone_iface: "wlan1".into(),
+            receiver_ip: Some("10.42.0.5".into()),
+            up: true,
+            ..Default::default()
+        };
+
+        let emitter = ados_protocol::logd::emitter::IngestEmitter::with_socket(
+            "ados-groundlink",
+            dir.path().join("ingest.sock"),
+        );
+        let stats = emitter.stats();
+        let _ = s.write_and_emit(Some(&emitter));
+        assert_eq!(stats.enqueued(), 1);
+
+        let none_emitter = ados_protocol::logd::emitter::IngestEmitter::with_socket(
+            "ados-groundlink",
+            dir.path().join("ingest2.sock"),
+        );
+        let none_stats = none_emitter.stats();
+        let _ = s.write_and_emit(None);
+        assert_eq!(none_stats.enqueued(), 0);
     }
 }

@@ -141,7 +141,13 @@ async def put_role(req: RoleChangeRequest) -> dict[str, Any]:
 
 @router.get("/mesh")
 async def get_mesh_health() -> dict[str, Any]:
-    """Snapshot of batman-adv state. 404 with E_NOT_IN_MESH on direct nodes."""
+    """Snapshot of batman-adv state. 404 with E_NOT_IN_MESH on direct nodes.
+
+    Reads the durable store's most-recent mesh snapshot first (the
+    relay/receiver poll loop ships the same body it writes to the sidecar), and
+    falls back to the sidecar file when the store is unreachable, so a losable
+    store degrades to the old behavior, never to a 500.
+    """
     _gs._require_ground_profile()
     from ados.services.ground_station.role_manager import get_current_role
     if get_current_role() == "direct":
@@ -149,6 +155,10 @@ async def get_mesh_health() -> dict[str, Any]:
             status_code=404,
             detail={"error": {"code": "E_NOT_IN_MESH"}},
         )
+    from ados.api.sources.mesh import latest_mesh_snapshot
+    detail = await latest_mesh_snapshot()
+    if detail is not None:
+        return detail
     return _gs._read_json_or_empty(_gs._MESH_STATE_JSON)
 
 
@@ -161,6 +171,10 @@ async def get_mesh_neighbors() -> dict[str, Any]:
             status_code=404,
             detail={"error": {"code": "E_NOT_IN_MESH"}},
         )
+    from ados.api.sources.mesh import latest_mesh_snapshot, slice_neighbors
+    detail = await latest_mesh_snapshot()
+    if detail is not None:
+        return slice_neighbors(detail)
     snap = _gs._read_json_or_empty(_gs._MESH_STATE_JSON)
     return {"neighbors": snap.get("neighbors", [])}
 
@@ -176,6 +190,10 @@ async def get_mesh_routes() -> dict[str, Any]:
         )
     # Routes are derived from neighbors today; mesh_manager can expand
     # this to `batctl o -H` when multi-hop visibility is needed.
+    from ados.api.sources.mesh import latest_mesh_snapshot, slice_routes
+    detail = await latest_mesh_snapshot()
+    if detail is not None:
+        return slice_routes(detail)
     snap = _gs._read_json_or_empty(_gs._MESH_STATE_JSON)
     return {"routes": snap.get("neighbors", [])}
 
@@ -189,6 +207,10 @@ async def get_mesh_gateways() -> dict[str, Any]:
             status_code=404,
             detail={"error": {"code": "E_NOT_IN_MESH"}},
         )
+    from ados.api.sources.mesh import latest_mesh_snapshot, slice_gateways
+    detail = await latest_mesh_snapshot()
+    if detail is not None:
+        return slice_gateways(detail)
     snap = _gs._read_json_or_empty(_gs._MESH_STATE_JSON)
     return {
         "gateways": snap.get("gateways", []),

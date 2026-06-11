@@ -16,6 +16,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use ados_protocol::logd::emitter::IngestEmitter;
+use ados_protocol::logd::Level;
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::Value;
@@ -23,6 +25,7 @@ use tracing::{debug, info, warn};
 
 use crate::router::events::{DataCapState, UplinkEvent, UplinkEventBus, UplinkEventKind};
 use crate::sidecar;
+use crate::sidecar::json_object_to_fields;
 
 /// Poll cadence.
 pub const DATA_CAP_INTERVAL: Duration = Duration::from_secs(60);
@@ -148,6 +151,13 @@ pub struct DataCapTracker {
     state_path: PathBuf,
     state: UsageState,
     last_threshold: Option<DataCapState>,
+    /// Best-effort durable-store emitter. When set, each poll's persisted usage
+    /// snapshot also ships to the logging store as a `net.modem_usage` event, so
+    /// a store-first reader sees the daemon's cumulative figures even when the
+    /// FastAPI box cannot see the modem iface. Absent in tests and on a board
+    /// with no logd; a saturated channel drops the event without disturbing the
+    /// poll loop.
+    emitter: Option<IngestEmitter>,
 }
 
 impl DataCapTracker {
@@ -172,7 +182,17 @@ impl DataCapTracker {
             state_path,
             state,
             last_threshold: None,
+            emitter: None,
         }
+    }
+
+    /// Attach a durable-store emitter. Builder-style so the daemon can opt in to
+    /// shipping each poll's usage block as a `net.modem_usage` event while tests
+    /// keep the default (no emitter). The emitter is best-effort and never gates
+    /// the poll's persist.
+    pub fn with_emitter(mut self, emitter: IngestEmitter) -> Self {
+        self.emitter = Some(emitter);
+        self
     }
 
     /// Reset the monthly cap.
@@ -239,6 +259,11 @@ impl DataCapTracker {
         self.state.cumulative_bytes += drx + dtx;
         self.save_state();
 
+        // Ship the just-persisted usage snapshot to the store. The body is the
+        // exact `get_usage()` block the modem view serves, so a store-first
+        // reader gets byte-identical cumulative figures. Best-effort.
+        self.emit_usage();
+
         let new_state = self.classify();
         if Some(new_state) != self.last_threshold {
             self.last_threshold = Some(new_state);
@@ -276,6 +301,18 @@ impl DataCapTracker {
             "window_reset_at": self.state.window_started_at,
             "last_reset_month": self.state.last_reset_month,
         })
+    }
+
+    /// Emit the current usage snapshot to the store as a `net.modem_usage`
+    /// event. Best-effort: an absent or saturated emitter drops it silently and
+    /// never disturbs the poll. The body is `get_usage()` so the stored row is a
+    /// faithful copy of what the modem view serves.
+    fn emit_usage(&self) {
+        let Some(emitter) = self.emitter.as_ref() else {
+            return;
+        };
+        let body = self.get_usage();
+        emitter.emit_event("net.modem_usage", Level::Info, json_object_to_fields(&body));
     }
 
     /// Flush the latest counter to disk (clean-shutdown hook).
@@ -745,5 +782,54 @@ mod tests {
         assert_eq!(&m[4..5], "-");
         assert!(m[0..4].chars().all(|c| c.is_ascii_digit()));
         assert!(m[5..7].chars().all(|c| c.is_ascii_digit()));
+    }
+
+    #[tokio::test]
+    async fn poll_emits_a_modem_usage_event_when_an_emitter_is_attached() {
+        // Each poll ships one `net.modem_usage` event carrying the same usage
+        // body the modem view serves, regardless of whether the threshold
+        // changed. The emitter counts every enqueue, so the stats are the proof.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("modem-usage.json");
+        let bus = Arc::new(UplinkEventBus::new());
+        let emitter = IngestEmitter::with_socket("ados-net", dir.path().join("ingest.sock"));
+        let stats = emitter.stats();
+        let mut t = DataCapTracker::with_config(
+            Arc::new(FixedSource(UsageBytes {
+                rx_bytes: 1000,
+                tx_bytes: 500,
+            })),
+            Arc::clone(&bus),
+            5.0,
+            path,
+        )
+        .with_emitter(emitter);
+
+        t.poll_once().await;
+        assert_eq!(stats.enqueued(), 1);
+        // A second poll (same state, no threshold transition) still emits the
+        // fresh usage snapshot.
+        t.poll_once().await;
+        assert_eq!(stats.enqueued(), 2);
+    }
+
+    #[tokio::test]
+    async fn poll_without_an_emitter_enqueues_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("modem-usage.json");
+        let bus = Arc::new(UplinkEventBus::new());
+        let probe = IngestEmitter::with_socket("ados-net", dir.path().join("probe.sock"));
+        let stats = probe.stats();
+        let mut t = DataCapTracker::with_config(
+            Arc::new(FixedSource(UsageBytes {
+                rx_bytes: 1000,
+                tx_bytes: 500,
+            })),
+            bus,
+            5.0,
+            path,
+        );
+        t.poll_once().await;
+        assert_eq!(stats.enqueued(), 0);
     }
 }

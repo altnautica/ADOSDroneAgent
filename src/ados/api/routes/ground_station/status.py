@@ -71,18 +71,30 @@ async def get_ground_station_status() -> dict[str, Any]:
     # Mesh snapshot. Populated only when a relay or receiver node has an
     # active mesh. Direct nodes get an empty dict so the OLED and GCS can
     # feature-detect without extra round-trips.
+    #
+    # Reads the durable store's most-recent mesh snapshot first (the
+    # relay/receiver poll loop ships the same body it writes to the sidecar) and
+    # falls back to the sidecar file, so a losable store degrades to the old
+    # behavior, never to a 500. The role gate stays live: only a relay/receiver
+    # node shows a mesh block (a direct node has no mesh.state event anyway).
     mesh_block: dict[str, Any] = {}
     try:
-        snap_path = MESH_STATE_JSON
-        if role_block["current"] in ("relay", "receiver") and snap_path.is_file():
-            snap = json.loads(snap_path.read_text(encoding="utf-8"))
-            mesh_block = {
-                "up": bool(snap.get("up", False)),
-                "peer_count": len(snap.get("neighbors", [])),
-                "selected_gateway": snap.get("selected_gateway"),
-                "partition": bool(snap.get("partition", False)),
-                "mesh_id": snap.get("mesh_id"),
-            }
+        if role_block["current"] in ("relay", "receiver"):
+            from ados.api.sources.gs import latest_status_mesh_block
+            stored = await latest_status_mesh_block()
+            if stored is not None:
+                mesh_block = stored
+            else:
+                snap_path = MESH_STATE_JSON
+                if snap_path.is_file():
+                    snap = json.loads(snap_path.read_text(encoding="utf-8"))
+                    mesh_block = {
+                        "up": bool(snap.get("up", False)),
+                        "peer_count": len(snap.get("neighbors", [])),
+                        "selected_gateway": snap.get("selected_gateway"),
+                        "partition": bool(snap.get("partition", False)),
+                        "mesh_id": snap.get("mesh_id"),
+                    }
     except Exception:
         pass
 

@@ -19,6 +19,7 @@ from ados.api.routes.ground_station._common import (
     UplinkPriorityUpdate,
     WifiJoinRequest,
 )
+from ados.api.sources.network import latest_uplink_active
 
 router = APIRouter(prefix="/v1/ground-station", tags=["ground-station"])
 
@@ -30,15 +31,29 @@ async def get_ground_station_network() -> dict[str, Any]:
     Covers all four uplinks (wifi_client, ethernet, modem_4g) plus the
     active_uplink + priority surfaced by UplinkRouter and the
     share_uplink flag.
+
+    The active_uplink leg reads the durable store first: the native
+    ``ados-net`` daemon owns the failover loop and ships its selected uplink as
+    a ``net.uplink_active`` event, while the in-FastAPI-process router singleton
+    never ticks (its ``active_uplink`` is dead-on-read). On a store gap this
+    falls back to the live in-process view, so the leg never 500s. The priority
+    list stays the live config-file read, and the ap / wifi_client / ethernet /
+    modem_4g / share_uplink legs are unchanged live probes.
     """
     app = _gs._require_ground_profile()
     router_view = _gs._router_state_view()
+    store = await latest_uplink_active()
+    active_uplink = (
+        store.get("active_uplink")
+        if store is not None
+        else router_view["active_uplink"]
+    )
     return {
         "ap": _gs._ap_view(app),
         "wifi_client": await _gs._wifi_client_view(),
         "ethernet": await _gs._ethernet_view(),
         "modem_4g": await _gs._modem_view(),
-        "active_uplink": router_view["active_uplink"],
+        "active_uplink": active_uplink,
         "priority": router_view["priority"],
         "share_uplink": _gs._load_share_uplink_flag(),
     }

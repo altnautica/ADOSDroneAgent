@@ -242,12 +242,130 @@ _WFB_FAILOVER_EVENT = {
     "detail": {"state": "local"},
 }
 
+# The full mesh snapshot body the relay/receiver poll loop ships: every key the
+# mesh-state route checks (the four mesh slice routes read this back).
+_MESH_STATE_EVENT = {
+    "id": 6,
+    "ts_us": 8,
+    "kind": "mesh.state",
+    "source": "ados-groundlink",
+    "severity": "info",
+    "detail": {
+        "role": "receiver",
+        "bat_iface": "bat0",
+        "mesh_iface": "wlan1",
+        "carrier": "802.11s",
+        "mesh_id": "ados-abc",
+        "up": True,
+        "neighbors": [
+            {"mac": "aa:bb:cc:dd:ee:ff", "iface": "wlan1", "tq": 240, "last_seen_ms": 1234},
+        ],
+        "gateways": [
+            {
+                "mac": "11:22:33:44:55:66",
+                "class_up_kbps": 10000,
+                "class_down_kbps": 2000,
+                "tq": 255,
+                "selected": True,
+            },
+        ],
+        "selected_gateway": "11:22:33:44:55:66",
+        "partition": False,
+        "started_at_ms": 0,
+        "last_poll_ms": 1_700_000_000_000,
+    },
+}
+
+# The full relay state body the relay loop ships: every key the gs-relay-state
+# route checks (the /wfb/relay/status route reads this back verbatim).
+_GS_RELAY_STATE_EVENT = {
+    "id": 7,
+    "ts_us": 9,
+    "kind": "gs.relay_state",
+    "source": "ados-groundlink",
+    "severity": "info",
+    "detail": {
+        "role": "relay",
+        "drone_iface": "wlan1",
+        "receiver_ip": "10.42.0.5",
+        "receiver_port": 5800,
+        "receiver_last_seen_ms": 1_717_000_000_000,
+        "fragments_seen": 12345,
+        "fragments_forwarded": 12000,
+        "up": True,
+        "mesh_iface": "bat0",
+    },
+}
+
+# The full receiver state body the receiver loop ships: every key the
+# gs-receiver-state route checks (the relays + combined routes project subsets).
+_GS_RECEIVER_STATE_EVENT = {
+    "id": 8,
+    "ts_us": 10,
+    "kind": "gs.receiver_state",
+    "source": "ados-groundlink",
+    "severity": "info",
+    "detail": {
+        "role": "receiver",
+        "drone_iface": "wlan1",
+        "listen_port": 5800,
+        "accept_local_nic": True,
+        "mesh_iface": "bat0",
+        "relays": [
+            {"mac": "aa:bb:cc:dd:ee:ff", "last_seen_ms": 1_717_000_000_000, "fragments": 4096},
+        ],
+        "fragments_after_dedup": 8000,
+        "fec_repaired": 24,
+        "output_kbps": 4200,
+        "up": True,
+    },
+}
+
+# The full active-uplink snapshot the network daemon ships: every key the
+# net-uplink-active route checks.
+_NET_UPLINK_ACTIVE_EVENT = {
+    "id": 9,
+    "ts_us": 11,
+    "kind": "net.uplink_active",
+    "source": "ados-net",
+    "severity": "info",
+    "detail": {
+        "active_uplink": "wifi",
+        "internet_reachable": True,
+        "timestamp_ms": 1_717_000_000_000,
+        "data_cap_state": "ok",
+    },
+}
+
+# The full data-cap usage block the network daemon ships: every key the
+# net-modem-usage route checks.
+_NET_MODEM_USAGE_EVENT = {
+    "id": 10,
+    "ts_us": 12,
+    "kind": "net.modem_usage",
+    "source": "ados-net",
+    "severity": "info",
+    "detail": {
+        "data_used_mb": 512,
+        "cap_mb": 10240,
+        "percent": 5.0,
+        "state": "ok",
+        "window_reset_at": "2026-07-01T00:00:00Z",
+        "last_reset_month": "2026-06",
+    },
+}
+
 _FULL_EVENTS = [
     _SERVICE_EVENT,
     _AIR_STATE_EVENT,
     _WFB_STATUS_DRONE_EVENT,
     _WFB_STATUS_GS_EVENT,
     _WFB_FAILOVER_EVENT,
+    _MESH_STATE_EVENT,
+    _GS_RELAY_STATE_EVENT,
+    _GS_RECEIVER_STATE_EVENT,
+    _NET_UPLINK_ACTIVE_EVENT,
+    _NET_MODEM_USAGE_EVENT,
 ]
 
 _LEGACY_LOGS = [

@@ -22,12 +22,16 @@
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use ados_protocol::logd::emitter::IngestEmitter;
+use ados_protocol::logd::Level;
 use serde::Serialize;
+use serde_json::json;
 use tracing::{debug, warn};
 
 use crate::paths;
 use crate::router::events::DataCapState;
 use crate::sidecar;
+use crate::sidecar::json_object_to_fields;
 
 /// The JSON body written to `/run/ados/uplink-active`.
 ///
@@ -54,7 +58,6 @@ pub struct ActiveUplinkFlag {
 /// decision. The router holds one of these and calls [`sync`] from the FSM.
 ///
 /// [`sync`]: ActiveFlagWriter::sync
-#[derive(Debug)]
 pub struct ActiveFlagWriter {
     path: PathBuf,
     /// Last `(active_uplink, internet_reachable, data_cap_state)` we persisted,
@@ -64,6 +67,25 @@ pub struct ActiveFlagWriter {
     /// Current cellular data-cap throttle level, mirrored into the body on every
     /// write. Defaults to `ok`; the data-cap throttle consumer updates it.
     cap_state: String,
+    /// Best-effort durable-store emitter. When set, every disk write/unlink also
+    /// ships the same body to the logging store as a `net.uplink_active` event,
+    /// so a store-first reader sees the daemon's truth instead of a dead
+    /// in-FastAPI-process router singleton. Absent in tests and on a board with
+    /// no logd; a saturated channel drops the event without disturbing the loop.
+    emitter: Option<IngestEmitter>,
+}
+
+// Hand-written so the struct keeps a `Debug` impl while the `IngestEmitter` (no
+// `Debug`) is reported only as present/absent.
+impl std::fmt::Debug for ActiveFlagWriter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ActiveFlagWriter")
+            .field("path", &self.path)
+            .field("last", &self.last)
+            .field("cap_state", &self.cap_state)
+            .field("emitter", &self.emitter.is_some())
+            .finish()
+    }
 }
 
 /// The disk op a [`sync`](ActiveFlagWriter::sync) decided on, computed without
@@ -93,7 +115,41 @@ impl ActiveFlagWriter {
             path,
             last: None,
             cap_state: DataCapState::Ok.as_str().to_string(),
+            emitter: None,
         }
+    }
+
+    /// Attach a durable-store emitter. Builder-style so the daemon can opt in to
+    /// shipping each flag change as a `net.uplink_active` event while tests keep
+    /// the default (no emitter). The emitter is best-effort and never gates a
+    /// disk write.
+    pub fn with_emitter(mut self, emitter: IngestEmitter) -> Self {
+        self.emitter = Some(emitter);
+        self
+    }
+
+    /// Emit the current flag body to the store as a `net.uplink_active` event.
+    /// Called only after a disk op actually touched the sidecar, so the store
+    /// and the file move in lockstep. `active` is the just-written uplink name,
+    /// or `None` for the unlink (no-uplink) form. Best-effort: an absent or
+    /// saturated emitter drops the event silently.
+    fn emit_active(&self, active: Option<&str>, internet_reachable: bool) {
+        let Some(emitter) = self.emitter.as_ref() else {
+            return;
+        };
+        // The unlink form carries the same keys with a null uplink, so a
+        // store-first reader learns "no uplink" without a separate file probe.
+        let body = json!({
+            "active_uplink": active,
+            "internet_reachable": internet_reachable,
+            "timestamp_ms": now_ms(),
+            "data_cap_state": self.cap_state,
+        });
+        emitter.emit_event(
+            "net.uplink_active",
+            Level::Info,
+            json_object_to_fields(&body),
+        );
     }
 
     /// Update the data-cap throttle level reflected in the body. Returns `true`
@@ -124,13 +180,20 @@ impl ActiveFlagWriter {
     /// variant performs the disk op inline (blocking); on the tokio reactor
     /// prefer [`sync_async`](ActiveFlagWriter::sync_async).
     pub fn sync(&mut self, active_uplink: Option<&str>, internet_reachable: bool) -> bool {
-        match self.plan(active_uplink, internet_reachable) {
+        let touched = match self.plan(active_uplink, internet_reachable) {
             FlagOp::None => false,
             FlagOp::Write { bytes, key } => {
                 Self::run_write(&self.path, &bytes, &mut self.last, key)
             }
             FlagOp::Unlink { was_present } => Self::run_unlink(&self.path, was_present),
+        };
+        // Ship the change to the store only when the disk was actually touched,
+        // so the event stream and the sidecar move together (no event on a dedup
+        // hit). `cap_state` is read after `plan`, which never mutates it here.
+        if touched {
+            self.emit_active(active_uplink, internet_reachable);
         }
+        touched
     }
 
     /// Async sync: do the in-memory bookkeeping + body encode on the caller's
@@ -146,7 +209,7 @@ impl ActiveFlagWriter {
         active_uplink: Option<&str>,
         internet_reachable: bool,
     ) -> bool {
-        match self.plan(active_uplink, internet_reachable) {
+        let touched = match self.plan(active_uplink, internet_reachable) {
             FlagOp::None => false,
             FlagOp::Write { bytes, key } => {
                 let path = self.path.clone();
@@ -183,7 +246,12 @@ impl ActiveFlagWriter {
                     }
                 }
             }
+        };
+        // Mirror the sidecar change to the store, only on a real disk touch.
+        if touched {
+            self.emit_active(active_uplink, internet_reachable);
         }
+        touched
     }
 
     /// Decide the disk op without touching the disk for the write case. For the
@@ -387,5 +455,51 @@ mod tests {
         assert!(!path.is_file());
         // No torn tmp left by the offloaded write.
         assert!(!dir.path().join("uplink-active.tmp").exists());
+    }
+
+    #[tokio::test]
+    async fn an_emitter_ships_one_event_per_disk_touch_and_none_on_dedup() {
+        // Each real write/unlink ships exactly one `net.uplink_active` event; a
+        // dedup hit (no disk touch) ships nothing, so the store stream and the
+        // sidecar move together. The emitter records every enqueue regardless of
+        // whether a daemon listens, so the stats counter is the assertion.
+        let dir = tempfile::tempdir().unwrap();
+        let emitter = IngestEmitter::with_socket("ados-net", dir.path().join("ingest.sock"));
+        let stats = emitter.stats();
+        let mut w =
+            ActiveFlagWriter::with_path(dir.path().join("uplink-active")).with_emitter(emitter);
+
+        // First active write → one event.
+        assert!(w.sync(Some("eth0"), true));
+        assert_eq!(stats.enqueued(), 1);
+
+        // Same state → dedup, no disk touch, no event.
+        assert!(!w.sync(Some("eth0"), true));
+        assert_eq!(stats.enqueued(), 1);
+
+        // Reachability transition → rewrite → one more event.
+        assert!(w.sync(Some("eth0"), false));
+        assert_eq!(stats.enqueued(), 2);
+
+        // Drop to no-uplink → unlink → one more event (the null-uplink form).
+        assert!(w.sync(None, false));
+        assert_eq!(stats.enqueued(), 3);
+
+        // Unlink of an already-absent file → no disk touch, no event.
+        assert!(!w.sync(None, false));
+        assert_eq!(stats.enqueued(), 3);
+    }
+
+    #[tokio::test]
+    async fn without_an_emitter_no_event_is_enqueued() {
+        // The default (no emitter) writer touches the disk but ships nothing,
+        // proving the emit is gated on an attached emitter.
+        let dir = tempfile::tempdir().unwrap();
+        let probe = IngestEmitter::with_socket("ados-net", dir.path().join("probe.sock"));
+        let stats = probe.stats();
+        let mut w = ActiveFlagWriter::with_path(dir.path().join("uplink-active"));
+        assert!(w.sync(Some("eth0"), true));
+        // The unrelated probe emitter saw nothing (the writer has no emitter).
+        assert_eq!(stats.enqueued(), 0);
     }
 }

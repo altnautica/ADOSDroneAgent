@@ -17,6 +17,50 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+/// Convert a JSON object into the logging store's open detail map (`Fields`), so
+/// a full uplink / data-cap snapshot can ride a single event. Recurses through
+/// nested arrays / objects; numbers preserve their integer-vs-float kind, and
+/// JSON null round-trips to msgpack nil. A non-object input yields an empty map
+/// (every body here is an object). The map decodes back to the identical JSON in
+/// the query path, so the store row is a faithful copy of the sidecar body.
+pub(crate) fn json_object_to_fields(value: &serde_json::Value) -> ados_protocol::logd::Fields {
+    match value {
+        serde_json::Value::Object(map) => map
+            .iter()
+            .map(|(k, v)| (k.clone(), json_to_mpv(v)))
+            .collect(),
+        _ => ados_protocol::logd::Fields::new(),
+    }
+}
+
+/// Recursively map a `serde_json::Value` onto the msgpack value the detail map
+/// carries. Integers stay integers (signed when negative), floats stay floats,
+/// and null becomes nil, so the round-trip through the store preserves the exact
+/// JSON shape the REST base merges over.
+fn json_to_mpv(value: &serde_json::Value) -> ados_protocol::logd::Value {
+    use ados_protocol::logd::Value as MpVal;
+    match value {
+        serde_json::Value::Null => MpVal::Nil,
+        serde_json::Value::Bool(b) => MpVal::from(*b),
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                MpVal::from(i)
+            } else if let Some(u) = n.as_u64() {
+                MpVal::from(u)
+            } else {
+                MpVal::from(n.as_f64().unwrap_or(0.0))
+            }
+        }
+        serde_json::Value::String(s) => MpVal::from(s.as_str()),
+        serde_json::Value::Array(items) => MpVal::Array(items.iter().map(json_to_mpv).collect()),
+        serde_json::Value::Object(map) => MpVal::Map(
+            map.iter()
+                .map(|(k, v)| (MpVal::from(k.as_str()), json_to_mpv(v)))
+                .collect(),
+        ),
+    }
+}
+
 /// Compute the tmp sibling for `path` the way Python `with_suffix(".json.tmp")`
 /// does: replace a trailing `.json` extension with `.json.tmp`. For any other
 /// (or absent) extension, append `.tmp` to the file name. The tmp file lives
@@ -103,5 +147,42 @@ mod tests {
         let path = dir.path().join("uplink-active");
         write_atomic_fsync(&path, b"hello").unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), b"hello".to_vec());
+    }
+
+    #[test]
+    fn json_object_to_fields_round_trips_through_an_event_frame() {
+        use ados_protocol::frame::{decode_len, HEADER_SIZE};
+        use ados_protocol::logd::{EventFrame, IngestFrame, Level, LOGD_MAX_FRAME};
+
+        // A body shaped like the uplink-active flag: a string, a bool, a u64, a
+        // null, and a nested object — every kind the detail map carries.
+        let body = serde_json::json!({
+            "active_uplink": "eth0",
+            "internet_reachable": true,
+            "timestamp_ms": 1_700_000_000_000u64,
+            "data_cap_state": "ok",
+            "missing": serde_json::Value::Null,
+            "nested": {"percent": 12.5, "used": 42},
+        });
+        let fields = json_object_to_fields(&body);
+        let mut frame = EventFrame::new(0, "net.uplink_active", "ados-net", Level::Info);
+        frame.detail = fields;
+        let bytes = IngestFrame::Event(frame).encode().unwrap();
+        let header: [u8; HEADER_SIZE] = bytes[..HEADER_SIZE].try_into().unwrap();
+        let len = decode_len(header, LOGD_MAX_FRAME, true).unwrap();
+        let decoded = match IngestFrame::decode(&bytes[HEADER_SIZE..HEADER_SIZE + len]).unwrap() {
+            IngestFrame::Event(e) => e,
+            other => panic!("expected an event frame, got {other:?}"),
+        };
+        let back = serde_json::to_value(decoded.detail).unwrap();
+        assert_eq!(back, body);
+        assert!(back["missing"].is_null());
+        assert_eq!(back["nested"]["percent"], 12.5);
+    }
+
+    #[test]
+    fn json_object_to_fields_of_a_non_object_is_empty() {
+        assert!(json_object_to_fields(&serde_json::json!([1, 2, 3])).is_empty());
+        assert!(json_object_to_fields(&serde_json::Value::Null).is_empty());
     }
 }

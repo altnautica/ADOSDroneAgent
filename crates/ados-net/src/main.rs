@@ -111,11 +111,20 @@ async fn main() -> Result<()> {
         "uplink router starting"
     );
 
+    // Durable-store emitter: ships the active-uplink + data-cap snapshots to the
+    // logging daemon's ingest socket alongside their sidecars, so a store-first
+    // reader sees the daemon's truth even when the in-FastAPI-process view is
+    // degraded. Best-effort; spawned on this runtime (must be in a runtime
+    // context, which #[tokio::main] guarantees). Cloned freely — every clone
+    // shares the one shipper channel.
+    let emitter = ados_protocol::logd::emitter::IngestEmitter::new("ados-net");
+
     let modem = Arc::new(ModemManager::new());
-    let router = Arc::new(UplinkRouter::new(
+    let router = Arc::new(UplinkRouter::new_with_emitter(
         build_managers(runner.clone(), Arc::clone(&modem)),
         Some(priority),
         None,
+        emitter.clone(),
     ));
 
     // Share-uplink firewall + the data-cap throttle bridge. Subscribe to the
@@ -132,10 +141,10 @@ async fn main() -> Result<()> {
     // Cellular data-cap tracker: polls sysfs counters at 60 s and publishes
     // `data_cap_threshold` events on the router's bus (consumed by the throttle
     // bridge above). The active-flag writer runs inside the router's own tick.
-    let data_cap = Arc::new(Mutex::new(DataCapTracker::new(
-        Arc::new(SysfsUsageSource::new()),
-        router.bus(),
-    )));
+    let data_cap = Arc::new(Mutex::new(
+        DataCapTracker::new(Arc::new(SysfsUsageSource::new()), router.bus())
+            .with_emitter(emitter.clone()),
+    ));
     let data_cap_task = {
         let data_cap = Arc::clone(&data_cap);
         tokio::spawn(async move {
