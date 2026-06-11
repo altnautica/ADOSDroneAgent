@@ -4,6 +4,21 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.61.0] - 2026-06-11
+
+### Added
+
+- The ground-station mesh reads (`/mesh`, `/mesh/neighbors`, `/mesh/routes`,
+  `/mesh/gateways`), the relay and receiver status reads, and the aggregate
+  `/network` active-uplink leg plus the `/network/modem` cumulative-usage block
+  are now backed by the durable logging store: each reads the store first and
+  falls back to the live read unchanged, never a 500. The mesh, relay, receiver,
+  and uplink/data-cap writers ship their snapshot bodies to the store on every
+  write, so these reads keep serving when the live in-process source is degraded
+  or briefly unavailable. The live read stays the default and the fallback;
+  response shapes are byte-identical. The `/role`, `/mesh/config`, live Wi-Fi
+  scan/status, and configuration reads stay served from their live sources.
+
 ## [0.60.0] - 2026-06-11
 
 ### Added
