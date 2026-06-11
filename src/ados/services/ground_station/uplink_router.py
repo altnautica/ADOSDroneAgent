@@ -2,8 +2,8 @@
 
 The implementation now lives under `ados.services.ground_station.uplink`.
 This module preserves the historical import path so downstream callers
-(`cloud_relay_bridge`, `share_uplink_firewall`, REST routes, the test
-suite) keep working without edits.
+(`share_uplink_firewall`, REST routes, the test suite) keep working
+without edits.
 """
 
 from __future__ import annotations

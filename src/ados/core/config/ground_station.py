@@ -107,9 +107,9 @@ class GroundStationConfig(BaseModel):
     paired_drone_id: str | None = None
     paired_at: str | None = None  # iso timestamp
     ui: GroundStationUiConfig = Field(default_factory=GroundStationUiConfig)
-    # gate the cloud_relay_bridge live state IPC read so a quick rollback
-    # to the stub VehicleState is possible if the wiring causes regressions
-    # in the field. Default True.
+    # gate the ground-station cloud relay's live state IPC read so a quick
+    # rollback to the stub VehicleState is possible if the wiring causes
+    # regressions in the field. Default True.
     use_live_state_ipc: bool = True
 
     # distributed receive role. `direct` is the single-node path and runs

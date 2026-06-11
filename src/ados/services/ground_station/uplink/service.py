@@ -221,8 +221,8 @@ async def _run_service() -> None:
 
     # Wire data-cap throttle consumer. Subscribes to the router's own
     # bus and calls share_uplink_firewall.apply_throttle on each
-    # DataCapState transition. Direct bus subscribe matches the pattern
-    # used by CloudRelayBridge and the manager-event bridges.
+    # DataCapState transition. Direct bus subscribe matches the
+    # in-process manager-event bridge pattern.
     throttle_task: asyncio.Task | None = None
     try:
         throttle_task = asyncio.create_task(

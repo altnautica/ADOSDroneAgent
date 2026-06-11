@@ -1,6 +1,6 @@
 //! The uplink-aware cloud relay bridge.
 //!
-//! Lifecycle + decision logic ported from `cloud_relay_bridge.py`. The decision
+//! Lifecycle + decision logic for the ground-station cloud relay. The decision
 //! surface (what to tear down / bring up / forward on each uplink, health, and
 //! data-cap transition) is factored into pure methods so it is unit-testable
 //! with no MQTT and no network; the live supervision (`start`/`run`) drives the
@@ -711,6 +711,50 @@ mod tests {
     }
 
     #[test]
+    fn throttle_string_round_trips_and_full_forwarding_truth_table() {
+        // `as_str()` is the wire string carried on the GS heartbeat; it must be
+        // the exact inverse of `from_cap_str()` for every level so a level that
+        // rides in on the active-flag file round-trips back out on the heartbeat.
+        for (cap, level) in [
+            ("ok", ThrottleState::None),
+            ("warn_80", ThrottleState::Warn),
+            ("throttle_95", ThrottleState::VideoOff),
+            ("blocked_100", ThrottleState::Blocked),
+        ] {
+            assert_eq!(ThrottleState::from_cap_str(cap), level);
+        }
+        // `as_str()` emits the canonical cap string for each non-default level,
+        // and `from_cap_str(as_str())` is the identity (the default level emits
+        // "none", which parses back to None).
+        assert_eq!(ThrottleState::None.as_str(), "none");
+        assert_eq!(ThrottleState::Warn.as_str(), "warn_80");
+        assert_eq!(ThrottleState::VideoOff.as_str(), "throttle_95");
+        assert_eq!(ThrottleState::Blocked.as_str(), "blocked_100");
+        for level in [
+            ThrottleState::None,
+            ThrottleState::Warn,
+            ThrottleState::VideoOff,
+            ThrottleState::Blocked,
+        ] {
+            assert_eq!(
+                ThrottleState::from_cap_str(level.as_str()),
+                level,
+                "as_str() round-trips through from_cap_str()"
+            );
+        }
+
+        // The full forward truth table across every level.
+        assert!(ThrottleState::None.forward_video());
+        assert!(ThrottleState::None.forward_telemetry());
+        assert!(ThrottleState::Warn.forward_video());
+        assert!(ThrottleState::Warn.forward_telemetry());
+        assert!(!ThrottleState::VideoOff.forward_video());
+        assert!(ThrottleState::VideoOff.forward_telemetry());
+        assert!(!ThrottleState::Blocked.forward_video());
+        assert!(!ThrottleState::Blocked.forward_telemetry());
+    }
+
+    #[test]
     fn throttle_maps_cap_strings_and_forwarding_rules() {
         assert_eq!(ThrottleState::from_cap_str("ok"), ThrottleState::None);
         assert_eq!(ThrottleState::from_cap_str("warn_80"), ThrottleState::Warn);
@@ -838,6 +882,39 @@ mod tests {
         // Recover to ok.
         assert!(!br.apply_data_cap(ThrottleState::None));
         assert!(br.forwarding_video());
+        assert!(br.forwarding_telemetry());
+    }
+
+    #[test]
+    fn cap_only_change_on_a_stable_uplink_is_noop_but_updates_the_throttle() {
+        let mut br = bridge();
+        // Establish a stable, reachable uplink at "ok".
+        let ok = UplinkSnapshot {
+            active_uplink: "eth0".to_string(),
+            internet_reachable: true,
+            data_cap_state: "ok".to_string(),
+        };
+        br.reconcile_uplink(Some(&ok));
+        assert_eq!(br.throttle_state(), ThrottleState::None);
+        // The SAME uplink + reachability, only the cap level rises: no MQTT
+        // action (the uplink did not change), but the throttle is folded in so
+        // the next heartbeat + the forwarding decisions track the cap.
+        let warn = UplinkSnapshot {
+            active_uplink: "eth0".to_string(),
+            internet_reachable: true,
+            data_cap_state: "warn_80".to_string(),
+        };
+        assert_eq!(br.reconcile_uplink(Some(&warn)), MqttAction::Noop);
+        assert_eq!(br.throttle_state(), ThrottleState::Warn);
+        // Rise further to the video-off threshold on the same stable uplink.
+        let throttle95 = UplinkSnapshot {
+            active_uplink: "eth0".to_string(),
+            internet_reachable: true,
+            data_cap_state: "throttle_95".to_string(),
+        };
+        assert_eq!(br.reconcile_uplink(Some(&throttle95)), MqttAction::Noop);
+        assert_eq!(br.throttle_state(), ThrottleState::VideoOff);
+        assert!(!br.forwarding_video());
         assert!(br.forwarding_telemetry());
     }
 
