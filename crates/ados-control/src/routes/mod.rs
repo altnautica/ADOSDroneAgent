@@ -2,14 +2,16 @@
 //!
 //! The native control surface answers the same `/api/*` (+ `/healthz`) routes
 //! the FastAPI surface does, byte-identically, so the same GCS works against
-//! either. This foundation chunk registers only `/healthz` and `/api/version`;
-//! the pairing/status/command routes land in later chunks.
+//! either. This chunk registers `/healthz`, `/api/version`, `/api/status`,
+//! `/api/telemetry`, and `/api/time`; the pairing/command routes land in later
+//! chunks.
 //!
 //! Error bodies use FastAPI's `{"detail": "..."}` shape on 4xx/5xx, NOT the
 //! logd read-API's `{"error": {...}}` envelope, because the GCS already parses
 //! the agent's `{"detail"}` errors. The 404 fallback and the [`detail`] helper
 //! enforce that one shape everywhere on this surface.
 
+pub mod status;
 pub mod system;
 
 use axum::http::StatusCode;
@@ -41,6 +43,9 @@ pub fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(system::healthz))
         .route("/api/version", get(system::get_version))
+        .route("/api/status", get(status::get_status))
+        .route("/api/telemetry", get(status::get_telemetry))
+        .route("/api/time", get(system::get_time))
         .fallback(not_found)
         .with_state(state)
 }

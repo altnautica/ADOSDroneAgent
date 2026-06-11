@@ -14,6 +14,7 @@
 //! enable it yet — until the install layer wires it.
 
 pub mod auth;
+pub mod ipc;
 pub mod routes;
 pub mod serve;
 pub mod state;
@@ -26,6 +27,7 @@ use anyhow::{Context, Result};
 use tokio::sync::oneshot;
 
 use crate::auth::PairingState;
+use crate::ipc::state_client::{default_state_socket, StateIpcClient};
 use crate::routes::build_router;
 use crate::serve::{bind_tcp, bind_unix, serve_tcp, serve_unix, tcp_app, unix_app};
 use crate::state::AppState;
@@ -48,8 +50,9 @@ pub mod paths {
 /// runtime does. Mirrors the sibling daemons.
 pub const WATCHDOG_PING_INTERVAL: Duration = Duration::from_secs(10);
 
-/// Resolved paths a daemon run needs: the two listener addresses it owns and the
-/// pairing-state file the LAN-edge auth reads.
+/// Resolved paths a daemon run needs: the two listener addresses it owns, the
+/// pairing-state file the LAN-edge auth reads, and the vehicle-state socket the
+/// status/telemetry routes read.
 #[derive(Debug, Clone)]
 pub struct DaemonPaths {
     /// The control socket the trusted local plane binds.
@@ -59,6 +62,9 @@ pub struct DaemonPaths {
     /// The agent pairing-state file the LAN-edge auth reads. Injectable so a
     /// test points it at a tempdir.
     pub pairing_path: PathBuf,
+    /// The vehicle-state socket the status + telemetry routes read. Injectable so
+    /// a test points it at a mock-IPC socket in a tempdir.
+    pub state_socket: PathBuf,
 }
 
 impl Default for DaemonPaths {
@@ -77,10 +83,14 @@ impl Default for DaemonPaths {
         let pairing_path = std::env::var("ADOS_PAIRING_JSON")
             .map(PathBuf::from)
             .unwrap_or_else(|_| PathBuf::from(auth::DEFAULT_PAIRING_PATH));
+        // The state socket resolves under `ADOS_RUN_DIR` (the same override the
+        // Python `ados.core.ipc` honours), defaulting to `/run/ados/state.sock`.
+        let state_socket = default_state_socket();
         Self {
             control_socket,
             control_tcp_port,
             pairing_path,
+            state_socket,
         }
     }
 }
@@ -137,7 +147,13 @@ where
     F: std::future::Future<Output = ()> + Send + 'static,
 {
     let pairing = Arc::new(PairingState::with_path(paths.pairing_path.clone()));
-    let state = AppState::new(Arc::clone(&pairing));
+
+    // The vehicle-state reader the status + telemetry routes project. Its
+    // background task connects to the state socket and reconnects on EOF / an
+    // absent socket; an idle agent (no socket) leaves the snapshot empty, which
+    // the routes degrade to rather than fail. The handle stops it on shutdown.
+    let (state_client, state_handle) = StateIpcClient::spawn(paths.state_socket.clone());
+    let state = AppState::new(Arc::clone(&pairing), state_client);
 
     // The Unix edge: the bare Router, no auth. The LAN edge: the same Router
     // wrapped with the rate-limit + auth layer keyed on the shared pairing
@@ -189,6 +205,9 @@ where
         }
     }
     sd_stopping();
+
+    // Stop the state reader before exiting so its task does not outlive the run.
+    state_handle.shutdown().await;
 
     // tmpfs cleanup: a stale socket path confuses a probing reader on restart.
     let _ = std::fs::remove_file(&paths.control_socket);

@@ -1,0 +1,32 @@
+{
+  "board": {
+    "arch": "aarch64",
+    "cpu_cores": 10,
+    "hw_video_codecs": [],
+    "model": "Darwin arm64",
+    "name": "macOS (dev)",
+    "ram_mb": 32768,
+    "soc": "unknown",
+    "tier": 4,
+    "vendor": "unknown"
+  },
+  "dependencies": {
+    "ffmpeg": true,
+    "gst-launch-1.0": true,
+    "mediamtx": true,
+    "rpicam-vid": false,
+    "v4l2-ctl": false
+  },
+  "fc_baud": 0,
+  "fc_connected": false,
+  "fc_port": "",
+  "health": {
+    "cpu_percent": 0.0,
+    "disk_percent": 3.0,
+    "memory_percent": 52.4,
+    "temperature": null,
+    "timestamp": "2026-06-11T15:58:44.801085+00:00"
+  },
+  "uptime_seconds": 42.0,
+  "version": "0.62.0"
+}

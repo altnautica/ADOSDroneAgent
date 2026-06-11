@@ -19,9 +19,10 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use ados_control::{run_with_paths, DaemonPaths};
+use ados_protocol::state::{encode_v1, encode_v2};
 use serde_json::Value;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, UnixStream};
+use tokio::net::{TcpListener, UnixListener, UnixStream};
 use tokio::sync::oneshot;
 
 /// Read a captured golden fixture as a JSON value.
@@ -51,6 +52,16 @@ impl Harness {
 
 /// Bring the server up against a temp dir, optionally seeding `pairing.json`.
 async fn start(dir: &Path, pairing_body: Option<&str>) -> Harness {
+    start_with_state(dir, pairing_body, dir.join("state.sock")).await
+}
+
+/// Bring the server up with an explicit state-socket path so a test can point it
+/// at a live mock-IPC server (or at an absent path for the degraded shape).
+async fn start_with_state(
+    dir: &Path,
+    pairing_body: Option<&str>,
+    state_socket: PathBuf,
+) -> Harness {
     let socket = dir.join("control.sock");
     let pairing_path = dir.join("pairing.json");
     if let Some(body) = pairing_body {
@@ -66,6 +77,7 @@ async fn start(dir: &Path, pairing_body: Option<&str>) -> Harness {
         control_socket: socket.clone(),
         control_tcp_port: port,
         pairing_path,
+        state_socket,
     };
     let (stop_tx, stop_rx) = oneshot::channel::<()>();
     let join = tokio::spawn(run_with_paths(paths, async move {
@@ -306,9 +318,12 @@ async fn loopback_tcp_is_trusted_when_paired_without_a_key() {
     let h = start(dir.path(), Some(r#"{"paired": true, "api_key": "k"}"#)).await;
     // A non-public route, no key, no forwarding header: the connection peer is
     // 127.0.0.1 (the test connects to 127.0.0.1:port), so the on-box loopback
-    // shortcut must let it past the pairing gate. The route is unregistered this
-    // chunk, so a 404 (NOT a 401) proves the gate was bypassed.
-    let (status, body) = tcp_get(h.port, "/api/time", &[]).await;
+    // shortcut must let it past the pairing gate.
+    //
+    // Use a route that is still unregistered through this chunk
+    // (`/api/command`, which lands later) so a 404 (NOT a 401) cleanly proves the
+    // gate was bypassed rather than the route answering.
+    let (status, body) = tcp_get(h.port, "/api/command", &[]).await;
     assert!(
         status.contains("404"),
         "loopback should bypass the key gate (expect a 404 pass-through, not 401): {status}"
@@ -317,6 +332,13 @@ async fn loopback_tcp_is_trusted_when_paired_without_a_key() {
     assert!(
         json.get("detail").is_some() && json.get("error").is_none(),
         "404 body must be the {{\"detail\"}} shape: {body}"
+    );
+    // And the now-live, non-exempt /api/time answers 200 over the same trusted
+    // loopback path without a key, confirming the gate bypass reaches a real route.
+    let (live, _b) = tcp_get(h.port, "/api/time", &[]).await;
+    assert!(
+        live.contains("200"),
+        "loopback trust should reach the live /api/time without a key: {live}"
     );
     h.stop().await;
 }
@@ -346,5 +368,324 @@ async fn unknown_path_is_a_clean_detail_404() {
         json.get("detail").is_some() && json.get("error").is_none(),
         "404 must be the {{\"detail\"}} shape, not the logd envelope: {body}"
     );
+    h.stop().await;
+}
+
+// --- mock state-socket IPC server ---
+
+/// A discriminator for the value type at a JSON leaf, used to compare a response
+/// against a golden fixture by shape (key set + value types) rather than by
+/// scalar value (the live status/telemetry/time values change per run).
+fn json_kind(v: &Value) -> &'static str {
+    match v {
+        Value::Null => "null",
+        Value::Bool(_) => "bool",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
+}
+
+/// Assert that two JSON values have the same shape: identical key sets at every
+/// object level and the same value kind at every leaf. Numbers are not split into
+/// int/float since serde_json unifies them and the wire does too.
+fn assert_same_shape(got: &Value, want: &Value, path: &str) {
+    assert_eq!(
+        json_kind(got),
+        json_kind(want),
+        "{path}: kind differs (got {}, want {})",
+        json_kind(got),
+        json_kind(want)
+    );
+    match (got, want) {
+        (Value::Object(g), Value::Object(w)) => {
+            let gk: std::collections::BTreeSet<_> = g.keys().collect();
+            let wk: std::collections::BTreeSet<_> = w.keys().collect();
+            assert_eq!(gk, wk, "{path}: object key set differs");
+            for (k, wv) in w {
+                assert_same_shape(&g[k], wv, &format!("{path}.{k}"));
+            }
+        }
+        (Value::Array(g), Value::Array(w)) => {
+            // Compare element kinds against the fixture's first element (the
+            // arrays here are homogeneous: rc.channels ints, cell_voltages).
+            if let Some(w0) = w.first() {
+                for (i, gv) in g.iter().enumerate() {
+                    assert_same_shape(gv, w0, &format!("{path}[{i}]"));
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// A mock state-socket server that accepts one connection, pushes a single canned
+/// snapshot frame in the requested wire format, then idles (holding the
+/// connection open) until the test drops it. Mirrors the real producer's
+/// push-on-connect behaviour.
+struct MockStateServer {
+    path: PathBuf,
+    stop: Option<oneshot::Sender<()>>,
+    join: tokio::task::JoinHandle<()>,
+}
+
+/// The wire format the mock pushes its canned snapshot in.
+#[derive(Clone, Copy)]
+enum Wire {
+    V1Json,
+    V2Msgpack,
+}
+
+impl MockStateServer {
+    /// Bind a state socket in `dir` and start serving the canned `snapshot` in
+    /// the chosen wire format. The first accepted client gets the frame on
+    /// connect.
+    async fn start(dir: &Path, snapshot: Value, wire: Wire) -> Self {
+        let path = dir.join("mock-state.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        let frame = match wire {
+            Wire::V1Json => encode_v1(&snapshot).unwrap(),
+            Wire::V2Msgpack => encode_v2(&snapshot).unwrap(),
+        };
+        let (stop_tx, mut stop_rx) = oneshot::channel::<()>();
+        let join = tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = &mut stop_rx => return,
+                    accepted = listener.accept() => {
+                        if let Ok((mut conn, _addr)) = accepted {
+                            let _ = conn.write_all(&frame).await;
+                            let _ = conn.flush().await;
+                            // Hold the connection open so the client keeps the
+                            // snapshot; a fresh accept loop serves a reconnect.
+                            tokio::spawn(async move {
+                                let mut sink = [0u8; 64];
+                                loop {
+                                    match conn.read(&mut sink).await {
+                                        Ok(0) | Err(_) => return,
+                                        Ok(_) => {}
+                                    }
+                                }
+                            });
+                        }
+                    }
+                }
+            }
+        });
+        Self {
+            path,
+            stop: Some(stop_tx),
+            join,
+        }
+    }
+
+    async fn stop(mut self) {
+        if let Some(tx) = self.stop.take() {
+            let _ = tx.send(());
+        }
+        let _ = self.join.await;
+    }
+}
+
+/// The canned snapshot the mock pushes: the vehicle-state keys (the `to_wire`
+/// shape) plus the four runtime-only extras the producer merges on top.
+fn canned_snapshot() -> Value {
+    fixture("state_snapshot.json")
+}
+
+/// Poll a route until it returns a snapshot-sourced body (the FC triple reflects
+/// the canned snapshot), riding out the brief window before the state client has
+/// connected and decoded the first frame.
+async fn poll_status_until_connected(socket: &Path) -> Value {
+    for _ in 0..100 {
+        let (status, body) = unix_get(socket, "/api/status", None).await;
+        if status.contains("200") {
+            if let Ok(v) = serde_json::from_str::<Value>(&body) {
+                if v.get("fc_connected") == Some(&Value::Bool(true)) {
+                    return v;
+                }
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!("status never reflected the canned snapshot");
+}
+
+// --- /api/time parity ---
+
+#[tokio::test]
+async fn time_matches_the_golden_shape_over_unix() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = start(dir.path(), None).await;
+    let (status, body) = unix_get(&h.socket, "/api/time", None).await;
+    assert!(status.contains("200"), "status was {status}");
+    let got: Value = serde_json::from_str(&body).unwrap_or_else(|_| panic!("body: {body}"));
+    let want = fixture("time.json");
+    assert_same_keys(&got, &want, "/api/time");
+    // The clock values are live (they differ per call); assert by type. time_ns
+    // and monotonic_ns are numbers, ntp_synced is a bool.
+    assert!(got["time_ns"].is_number(), "time_ns must be a number");
+    assert!(
+        got["monotonic_ns"].is_number(),
+        "monotonic_ns must be a number"
+    );
+    assert!(got["ntp_synced"].is_boolean(), "ntp_synced must be a bool");
+    h.stop().await;
+}
+
+// --- /api/status parity (degraded: no state socket) ---
+
+#[tokio::test]
+async fn status_matches_the_golden_shape_with_no_state_socket() {
+    let dir = tempfile::tempdir().unwrap();
+    // Point the state socket at an absent path: the snapshot stays empty and the
+    // route degrades to the disconnected shape (never a 500).
+    let h = start_with_state(dir.path(), None, dir.path().join("absent-state.sock")).await;
+    let (status, body) = unix_get(&h.socket, "/api/status", None).await;
+    assert!(status.contains("200"), "status must be 200, was {status}");
+    let got: Value = serde_json::from_str(&body).unwrap_or_else(|_| panic!("body: {body}"));
+    let want = fixture("status.json");
+    // The optional cameraState / cameraUsbRecovery keys are only-if-fresh; the
+    // golden fixture has neither (no sidecars on the capture host), so the key
+    // sets match exactly here.
+    assert_same_keys(&got, &want, "/api/status");
+    // Static + degraded value assertions.
+    assert!(got["version"].is_string() && !got["version"].as_str().unwrap().is_empty());
+    assert!(got["uptime_seconds"].is_number(), "uptime is a number");
+    assert!(got["board"].is_object(), "board is an object");
+    assert!(got["health"].is_object(), "health is an object");
+    assert_eq!(
+        got["fc_connected"],
+        Value::Bool(false),
+        "no snapshot → disconnected"
+    );
+    assert_eq!(got["fc_port"], Value::String(String::new()), "default port");
+    assert_eq!(got["fc_baud"], serde_json::json!(0), "default baud");
+    // The dependency map is a {name: bool} object with the five video binaries.
+    let deps = got["dependencies"]
+        .as_object()
+        .expect("dependencies object");
+    for name in [
+        "mediamtx",
+        "ffmpeg",
+        "rpicam-vid",
+        "v4l2-ctl",
+        "gst-launch-1.0",
+    ] {
+        assert!(
+            deps.get(name).map(Value::is_boolean).unwrap_or(false),
+            "dependency {name} must be a bool"
+        );
+    }
+    h.stop().await;
+}
+
+// --- /api/status parity (live mock state socket, v1 JSON) ---
+
+#[tokio::test]
+async fn status_reads_the_fc_triple_from_a_v1_snapshot() {
+    let dir = tempfile::tempdir().unwrap();
+    let mock = MockStateServer::start(dir.path(), canned_snapshot(), Wire::V1Json).await;
+    let h = start_with_state(dir.path(), None, mock.path.clone()).await;
+
+    let got = poll_status_until_connected(&h.socket).await;
+    // The FC triple + uptime now come from the snapshot extras.
+    assert_eq!(got["fc_connected"], Value::Bool(true));
+    assert_eq!(got["fc_port"], serde_json::json!("/dev/ttyACM0"));
+    assert_eq!(got["fc_baud"], serde_json::json!(115200));
+    assert_eq!(got["uptime_seconds"], serde_json::json!(99.0));
+    // The full key set still matches the golden fixture.
+    assert_same_keys(&got, &fixture("status.json"), "/api/status (snapshot)");
+
+    h.stop().await;
+    mock.stop().await;
+}
+
+// --- /api/telemetry parity (live mock, v1 + v2) ---
+
+#[tokio::test]
+async fn telemetry_projects_a_v1_snapshot_minus_the_four_extras() {
+    telemetry_projection_for_wire(Wire::V1Json).await;
+}
+
+#[tokio::test]
+async fn telemetry_projects_a_v2_msgpack_snapshot_minus_the_four_extras() {
+    telemetry_projection_for_wire(Wire::V2Msgpack).await;
+}
+
+/// Shared body for the v1/v2 telemetry projection tests: bring up a mock pushing
+/// the canned snapshot in the given wire format, poll telemetry until it reflects
+/// the snapshot, and assert it equals the projected golden fixture (the four
+/// extras stripped) by shape, with the four extras provably absent.
+async fn telemetry_projection_for_wire(wire: Wire) {
+    let dir = tempfile::tempdir().unwrap();
+    let mock = MockStateServer::start(dir.path(), canned_snapshot(), wire).await;
+    let h = start_with_state(dir.path(), None, mock.path.clone()).await;
+
+    // Poll until the snapshot has propagated (telemetry is non-empty).
+    let mut got = Value::Null;
+    for _ in 0..100 {
+        let (status, body) = unix_get(&h.socket, "/api/telemetry", None).await;
+        if status.contains("200") {
+            if let Ok(v) = serde_json::from_str::<Value>(&body) {
+                if v.as_object().map(|m| !m.is_empty()).unwrap_or(false) {
+                    got = v;
+                    break;
+                }
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(
+        got.is_object() && !got.as_object().unwrap().is_empty(),
+        "telemetry never reflected the snapshot"
+    );
+
+    let want = fixture("telemetry_from_snapshot.json");
+    assert_same_keys(&got, &want, "/api/telemetry");
+    assert_same_shape(&got, &want, "/api/telemetry");
+    // The four runtime-only extras are provably absent from telemetry.
+    let obj = got.as_object().unwrap();
+    for k in ["fc_connected", "fc_port", "fc_baud", "service_uptime"] {
+        assert!(!obj.contains_key(k), "{k} must be stripped from telemetry");
+    }
+    // The vehicle values survive verbatim.
+    assert_eq!(got["mode"], serde_json::json!("GUIDED"));
+    assert_eq!(got["armed"], Value::Bool(true));
+    assert_eq!(got["battery"]["voltage"], serde_json::json!(16.4));
+
+    h.stop().await;
+    mock.stop().await;
+}
+
+// --- /api/telemetry parity (degraded: no state socket → {}) ---
+
+#[tokio::test]
+async fn telemetry_is_an_empty_object_with_no_state_socket() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = start_with_state(dir.path(), None, dir.path().join("absent-state.sock")).await;
+    let (status, body) = unix_get(&h.socket, "/api/telemetry", None).await;
+    assert!(status.contains("200"), "status must be 200, was {status}");
+    let got: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(got, serde_json::json!({}), "no snapshot → empty telemetry");
+    h.stop().await;
+}
+
+// --- /api/time auth gate (NOT exempt) ---
+
+#[tokio::test]
+async fn time_is_gated_when_paired_but_answers_with_a_key() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = start(dir.path(), Some(r#"{"paired": true, "api_key": "k"}"#)).await;
+    let fwd = ("X-Forwarded-For", "203.0.113.7");
+    // No key → 401 (proving /api/time is NOT in the exempt set).
+    let (no_key, _b) = tcp_get(h.port, "/api/time", &[fwd]).await;
+    assert!(no_key.contains("401"), "/api/time must be gated: {no_key}");
+    // Right key → 200 with the time shape.
+    let (ok, body) = tcp_get(h.port, "/api/time", &[fwd, ("X-ADOS-Key", "k")]).await;
+    assert!(ok.contains("200"), "keyed /api/time should answer: {ok}");
+    let got: Value = serde_json::from_str(&body).unwrap();
+    assert!(got["time_ns"].is_number() && got["ntp_synced"].is_boolean());
     h.stop().await;
 }

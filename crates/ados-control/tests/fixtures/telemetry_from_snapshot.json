@@ -1,0 +1,54 @@
+{
+  "armed": true,
+  "attitude": {
+    "pitch": -0.02,
+    "roll": 0.01,
+    "yaw": 1.57
+  },
+  "autopilot": 3,
+  "battery": {
+    "cell_voltages": [
+      4.1,
+      4.1
+    ],
+    "current": 12.1,
+    "remaining": 87,
+    "temperature": 25.0,
+    "voltage": 16.4
+  },
+  "gps": {
+    "eph": 1.0,
+    "epv": 1.2,
+    "fix_type": 3,
+    "satellites": 14
+  },
+  "last_heartbeat": "2026-01-01T00:00:00Z",
+  "last_update": "2026-01-01T00:00:01Z",
+  "mav_type": 2,
+  "mode": "GUIDED",
+  "position": {
+    "alt_msl": 100.0,
+    "alt_rel": 50.0,
+    "heading": 90.0,
+    "lat": 12.97,
+    "lon": 77.59
+  },
+  "rc": {
+    "channels": [
+      1500,
+      1500,
+      1500,
+      1500
+    ],
+    "rssi": 100
+  },
+  "throttle": 30,
+  "velocity": {
+    "airspeed": 2.5,
+    "climb": 0.5,
+    "groundspeed": 2.2,
+    "vx": 1.0,
+    "vy": 2.0,
+    "vz": 0.5
+  }
+}

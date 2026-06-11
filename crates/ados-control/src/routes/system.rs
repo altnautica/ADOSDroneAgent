@@ -1,10 +1,13 @@
-//! System routes: liveness and version/capability negotiation.
+//! System routes: liveness, version/capability negotiation, and the clock probe.
 //!
-//! These two routes are static (no IPC): `/healthz` is the liveness probe and
-//! `/api/version` is the wire-protocol version + capability flag list the GCS
-//! reads on first connect to decide which features it can rely on. The native
-//! surface must answer both byte-identically to the FastAPI surface so the same
-//! GCS works against either.
+//! `/healthz` is the liveness probe and `/api/version` is the wire-protocol
+//! version + capability flag list the GCS reads on first connect to decide which
+//! features it can rely on. `/api/time` reports the wall-clock + monotonic
+//! timestamps the GCS uses to estimate the drone↔browser clock offset for
+//! glass-to-glass latency. The native surface must answer all three
+//! byte-identically to the FastAPI surface so the same GCS works against either.
+
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::extract::State;
 use axum::Json;
@@ -80,4 +83,149 @@ pub async fn healthz(State(state): State<AppState>) -> Json<Value> {
         "status": "ok",
         "version": state.agent_version,
     }))
+}
+
+/// `GET /api/time` → `{time_ns, monotonic_ns, ntp_synced}`. The GCS browser uses
+/// Cristian's algorithm against this to estimate the drone↔browser clock offset.
+/// Mirrors `system.py:get_time`: a wall-clock nanosecond stamp, a monotonic
+/// nanosecond counter, and the best-effort NTP-synced flag. These are live clock
+/// reads, so the values change per call; the contract is the shape + types +
+/// the `ntp_synced` semantics. This route is NOT in the auth-exempt set.
+pub async fn get_time() -> Json<Value> {
+    Json(json!({
+        "time_ns": wall_clock_ns(),
+        "monotonic_ns": monotonic_ns(),
+        "ntp_synced": ntp_synced(),
+    }))
+}
+
+/// Wall-clock time in nanoseconds since the Unix epoch, matching Python
+/// `time.time_ns()`. A clock before the epoch (never expected on a sane host)
+/// clamps to zero rather than panicking.
+fn wall_clock_ns() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0)
+}
+
+/// A monotonic nanosecond counter, matching Python `time.monotonic_ns()`
+/// semantics: never goes backwards, used only for delta/offset estimation. On
+/// Linux this reads `CLOCK_MONOTONIC` for parity with the Python source; on a
+/// non-Linux dev host it derives a monotonic count from a process-static base
+/// `Instant`, which is monotonic and non-negative (the absolute value is not part
+/// of the contract — the GCS uses only deltas).
+#[cfg(target_os = "linux")]
+fn monotonic_ns() -> u128 {
+    let mut ts = nix::libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // Safety: `clock_gettime` writes into the provided timespec; the pointer is
+    // valid for the duration of the call. CLOCK_MONOTONIC is always available on
+    // Linux. A non-zero return leaves the timespec zeroed, which still yields a
+    // valid (if degraded) monotonic-style value.
+    let rc = unsafe { nix::libc::clock_gettime(nix::libc::CLOCK_MONOTONIC, &mut ts) };
+    if rc != 0 {
+        return 0;
+    }
+    (ts.tv_sec as u128) * 1_000_000_000 + (ts.tv_nsec as u128)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn monotonic_ns() -> u128 {
+    use std::sync::OnceLock;
+    use std::time::Instant;
+    static BASE: OnceLock<Instant> = OnceLock::new();
+    let base = BASE.get_or_init(Instant::now);
+    base.elapsed().as_nanos()
+}
+
+/// Best-effort NTP-synced flag, mirroring `system.py:_is_ntp_synced`. On Linux it
+/// probes chrony, then `timedatectl`, then the systemd-timesyncd marker file,
+/// failing closed to `false`. Off Linux there is no such daemon convention, so it
+/// is `false` (the dev-host / off-rig answer).
+#[cfg(target_os = "linux")]
+fn ntp_synced() -> bool {
+    use std::path::Path;
+    use std::process::Command;
+
+    // chrony (preferred): a successful `chronyc -c tracking` with a non-empty row
+    // means chrony has a reference.
+    if which_on_path("chronyc") {
+        if let Ok(out) = Command::new("chronyc").args(["-c", "tracking"]).output() {
+            if out.status.success() && !out.stdout.is_empty() {
+                let s = String::from_utf8_lossy(&out.stdout);
+                if !s.trim().is_empty() {
+                    return true;
+                }
+            }
+        }
+    }
+
+    // timedatectl fallback: NTPSynchronized=yes.
+    if which_on_path("timedatectl") {
+        if let Ok(out) = Command::new("timedatectl")
+            .args(["show", "-p", "NTPSynchronized", "--value"])
+            .output()
+        {
+            if String::from_utf8_lossy(&out.stdout)
+                .trim()
+                .eq_ignore_ascii_case("yes")
+            {
+                return true;
+            }
+        }
+    }
+
+    // systemd-timesyncd marker file: written once a reference is acquired.
+    Path::new("/run/systemd/timesync/synchronized").is_file()
+}
+
+#[cfg(not(target_os = "linux"))]
+fn ntp_synced() -> bool {
+    false
+}
+
+/// True when `name` is found as an executable on `PATH`. A bare-command lookup
+/// matching `shutil.which`, used to gate the chrony / timedatectl probes so a
+/// fresh rootfs without either tool fails closed. Linux-only (the call sites are
+/// Linux-gated).
+#[cfg(target_os = "linux")]
+fn which_on_path(name: &str) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    let Ok(path_var) = std::env::var("PATH") else {
+        return false;
+    };
+    std::env::split_paths(&path_var).any(|dir| {
+        let candidate = dir.join(name);
+        std::fs::metadata(&candidate)
+            .map(|m| m.is_file() && (m.permissions().mode() & 0o111 != 0))
+            .unwrap_or(false)
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wall_clock_ns_is_after_the_epoch() {
+        // Any sane host is well past 2020 (~1.6e18 ns since the epoch).
+        assert!(wall_clock_ns() > 1_600_000_000_000_000_000);
+    }
+
+    #[test]
+    fn monotonic_ns_never_goes_backwards() {
+        let a = monotonic_ns();
+        let b = monotonic_ns();
+        assert!(b >= a, "monotonic clock went backwards: {a} -> {b}");
+    }
+
+    #[test]
+    fn ntp_synced_returns_a_bool_without_panicking() {
+        // Off Linux this is false; on Linux it is a best-effort probe. Either way
+        // the call must not panic.
+        let _ = ntp_synced();
+    }
 }

@@ -1,0 +1,65 @@
+{
+  "armed": false,
+  "attitude": {
+    "pitch": 0.0,
+    "roll": 0.0,
+    "yaw": 0.0
+  },
+  "autopilot": 0,
+  "battery": {
+    "cell_voltages": [],
+    "current": 0.0,
+    "remaining": -1,
+    "temperature": 0.0,
+    "voltage": 0.0
+  },
+  "gps": {
+    "eph": 0.0,
+    "epv": 0.0,
+    "fix_type": 0,
+    "satellites": 0
+  },
+  "last_heartbeat": "",
+  "last_update": "",
+  "mav_type": 0,
+  "mode": "",
+  "position": {
+    "alt_msl": 0.0,
+    "alt_rel": 0.0,
+    "heading": 0.0,
+    "lat": 0.0,
+    "lon": 0.0
+  },
+  "rc": {
+    "channels": [
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0
+    ],
+    "rssi": 0
+  },
+  "throttle": 0,
+  "velocity": {
+    "airspeed": 0.0,
+    "climb": 0.0,
+    "groundspeed": 0.0,
+    "vx": 0.0,
+    "vy": 0.0,
+    "vz": 0.0
+  }
+}
