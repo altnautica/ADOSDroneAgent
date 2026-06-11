@@ -13,6 +13,7 @@ use std::sync::Arc;
 
 use ados_supervisor::{
     auto_pair, bind, config::AgentConfig, hotplug, lifecycle::Supervisor, mac_pin, sdnotify,
+    service_memory,
 };
 
 const MONITOR_INTERVAL: Duration = Duration::from_secs(5);
@@ -109,6 +110,13 @@ async fn main() -> Result<()> {
     // churning its IP. Runs on every profile; inert when no such adapter exists.
     // Writes a next-boot .link only — never touches the live interface.
     tokio::spawn(mac_pin::run(shutdown_rx.clone()));
+
+    // Per-service memory sampler: scan /proc on a steady cadence, group PSS by
+    // each ados unit's cgroup, and ship one metric per unit to the logging
+    // daemon so the durable store carries the per-service memory series. The API
+    // route reads the latest sample back from the store with its own live scan
+    // as the fallback. Best-effort; never touches service orchestration.
+    tokio::spawn(service_memory::run(shutdown_rx.clone()));
 
     // Hot-plug poller runs on its own task and only forwards device-class
     // transitions; the supervisor state stays owned by this loop.

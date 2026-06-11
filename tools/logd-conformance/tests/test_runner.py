@@ -71,6 +71,11 @@ _FULL_METRICS = [
     {"metric": "mem.available_pct", "value": 75.0},
     {"metric": "disk.used_pct", "value": 40.0},
     {"metric": "thermal.primary_c", "value": 48.0},
+    {
+        "metric": "service.memory_pss_bytes",
+        "value": 83046400.0,
+        "tags": {"unit": "ados-api.service"},
+    },
 ]
 
 _FULL_LOGS = [

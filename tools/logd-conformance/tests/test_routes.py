@@ -10,6 +10,7 @@ def test_initial_set_has_the_expected_routes():
         "hw-summary",
         "hw-snapshot",
         "service-events",
+        "service-memory",
         "link-metrics",
         "wfb-status-drone",
         "wfb-status-gs",

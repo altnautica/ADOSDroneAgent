@@ -12,6 +12,7 @@ def routes() -> list[RouteSpec]:
         _hw_summary_route(),
         _hw_snapshot_route(),
         _service_events_route(),
+        _service_memory_route(),
     ]
 
 
@@ -140,6 +141,33 @@ def _hw_snapshot_route() -> RouteSpec:
                 producer="ados-logd",
             )
             for name in names
+        ],
+    )
+
+
+def _service_memory_route() -> RouteSpec:
+    """Per-service memory the services route reads back (store-only).
+
+    The supervisor samples each ``ados-*.service`` unit's grouped PSS from
+    ``/proc`` continuously and ships one ``service.memory_pss_bytes`` metric per
+    unit, tagged with the owning unit, so the services route serves per-service
+    memory from history instead of scanning on every request. Every unit shares
+    the one metric name and is distinguished by its ``unit`` tag, so the field
+    here is the metric itself; absence of any row means the producer is not
+    running (the route then falls back to its live scan).
+    """
+    return RouteSpec(
+        name="service-memory",
+        kind="metrics",
+        logd_params={"kind": "metrics", "limit": 200},
+        observability_path="/api/v2/observability/metrics",
+        fields=[
+            FieldSpec(
+                field="service.memory_pss_bytes",
+                locator=Locator.METRIC,
+                classification="live",
+                producer="ados-supervisor",
+            ),
         ],
     )
 
