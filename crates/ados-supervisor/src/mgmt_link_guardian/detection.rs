@@ -170,6 +170,19 @@ pub fn is_injection_driver(driver: &str) -> bool {
     INJECTION_DRIVERS.contains(&d.as_str())
 }
 
+/// True when an interface NAME denotes a wireless device by the conventional
+/// kernel prefixes (`wlan*`, the predictable `wlp*` / `wlx*`, and `wwan*`).
+/// Pure. Used as the authoritative first signal for wireless classification so
+/// the WFB injection radio is never misclassified as a wired management primary
+/// when its `wireless` / `phy80211` sysfs nodes are transiently unreadable
+/// during monitor-mode bring-up and regulatory-domain churn.
+pub fn is_wireless_name(iface: &str) -> bool {
+    iface.starts_with("wlan")
+        || iface.starts_with("wlp")
+        || iface.starts_with("wlx")
+        || iface.starts_with("wwan")
+}
+
 /// True when an interface name denotes a virtual / loopback / mesh-carrier
 /// device that is never the operator's management link. The USB-tether `usb*`
 /// netdev is deliberately NOT excluded (it is a real management path on the
@@ -323,13 +336,16 @@ async fn driver_name(iface: &str) -> String {
         .unwrap_or_default()
 }
 
-/// True when an interface is wireless (`/sys/class/net/<if>/wireless` or
-/// `.../phy80211` exists).
+/// True when an interface is wireless. The interface name is the authoritative
+/// first signal (so a transiently-unreadable sysfs during monitor-mode churn
+/// can never demote the injection radio to "wired"); the `wireless` /
+/// `phy80211` sysfs nodes are the fallback for non-conventionally-named NICs.
 #[cfg(target_os = "linux")]
 async fn is_wireless(iface: &str) -> bool {
-    tokio::fs::metadata(format!("/sys/class/net/{}/wireless", iface))
-        .await
-        .is_ok()
+    is_wireless_name(iface)
+        || tokio::fs::metadata(format!("/sys/class/net/{}/wireless", iface))
+            .await
+            .is_ok()
         || tokio::fs::metadata(format!("/sys/class/net/{}/phy80211", iface))
             .await
             .is_ok()
@@ -439,6 +455,22 @@ mod tests {
         assert!(!is_virtual_or_loopback("end1"));
         assert!(!is_virtual_or_loopback("wlan0"));
         assert!(!is_virtual_or_loopback("usb0"));
+    }
+
+    #[test]
+    fn wireless_name_detection() {
+        // The injection radio and onboard WiFi are wireless by name, so a
+        // transiently-unreadable sysfs can never classify them as wired.
+        assert!(is_wireless_name("wlan0"));
+        assert!(is_wireless_name("wlan1"));
+        assert!(is_wireless_name("wlp2s0"));
+        assert!(is_wireless_name("wlx00c0caaa1111"));
+        assert!(is_wireless_name("wwan0"));
+        // Wired and other interfaces are not wireless by name.
+        assert!(!is_wireless_name("eth0"));
+        assert!(!is_wireless_name("end1"));
+        assert!(!is_wireless_name("usb0"));
+        assert!(!is_wireless_name("lo"));
     }
 
     fn cand(name: &str, transport: Transport, inj: bool, virt: bool) -> IfaceCandidate {

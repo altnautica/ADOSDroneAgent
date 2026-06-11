@@ -156,6 +156,37 @@ fn read_config() -> MgmtFailoverConfig {
     }
 }
 
+/// Fold this tick's wired-interface carrier readings into the sticky ever-up
+/// set, then decide whether a management primary exists and whether it is up.
+///
+/// A wired interface counts as a primary only once it has carried a link at
+/// least once (`ever_up`): a built-in Ethernet port that is unplugged from boot
+/// (no carrier, no lease) is ignored, so a WiFi-managed rig does not read its
+/// dead `eth0` as a "down primary" and flap into the heartbeat reach-back. A
+/// was-up-now-down wired link stays a primary (sticky), so a real cable pull
+/// still fails over. Pure (the set is mutated in place) so the stickiness is
+/// unit-tested without a clock or sysfs.
+#[cfg(any(target_os = "linux", test))]
+fn resolve_primary(
+    wired: &[(String, bool)],
+    ever_up: &mut std::collections::HashSet<String>,
+) -> (bool, bool) {
+    let mut has_primary = false;
+    let mut primary_up = false;
+    for (name, up) in wired {
+        if *up {
+            ever_up.insert(name.clone());
+        }
+        if ever_up.contains(name) {
+            has_primary = true;
+            if *up {
+                primary_up = true;
+            }
+        }
+    }
+    (has_primary, primary_up)
+}
+
 /// The reach-back reconciler. Holds the current mode + the two-edge debounce
 /// instants. Read only on the Linux tick (and in tests).
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
@@ -165,6 +196,11 @@ pub struct MgmtFailover {
     healthy_since: Option<Instant>,
     last_tick: Option<Instant>,
     failover_iface: Option<String>,
+    /// Wired interfaces that have carried a link at least once this process
+    /// lifetime. Only such an interface is treated as a management *primary*,
+    /// so a port that is unplugged from boot is never read as a "down primary"
+    /// (which would strand a WiFi-managed rig in the heartbeat reach-back).
+    ever_up: std::collections::HashSet<String>,
     events: EventEmitter,
 }
 
@@ -176,6 +212,7 @@ impl MgmtFailover {
             healthy_since: None,
             last_tick: None,
             failover_iface: None,
+            ever_up: std::collections::HashSet::new(),
             events,
         }
     }
@@ -261,22 +298,24 @@ impl MgmtFailover {
             .filter(|c| c.transport == Transport::Ethernet && !c.is_injection && !c.is_virtual)
             .collect();
 
+        // Read each wired interface's carrier, fold it into the sticky ever-up
+        // set, and decide whether a real management primary exists and is up. A
+        // port unplugged from boot (no carrier ever) never becomes a primary,
+        // so a WiFi-managed rig does not flap into the heartbeat reach-back.
+        let mut wired_carriers: Vec<(String, bool)> = Vec::with_capacity(wired.len());
+        for c in &wired {
+            wired_carriers.push((c.name.clone(), iface_carrier(&c.name).await));
+        }
+        let (has_primary, primary_up) = resolve_primary(&wired_carriers, &mut self.ever_up);
+
         // No wired primary → management is over WiFi normally; there is no
         // reach-back concept. Stay Primary and surface it.
-        if wired.is_empty() {
+        if !has_primary {
             self.set_mode_primary_if_needed(now, cfg);
             self.write_sidecar();
             return;
         }
 
-        // Primary is up when any wired interface has carrier.
-        let mut primary_up = false;
-        for c in &wired {
-            if iface_carrier(&c.name).await {
-                primary_up = true;
-                break;
-            }
-        }
         let primary_down = !primary_up;
 
         // Only probe the WiFi fallback when the primary is down (keeps the
@@ -464,6 +503,48 @@ mod tests {
             "ados-test",
             "/nonexistent/ados/logd.sock",
         ))
+    }
+
+    #[test]
+    fn unplugged_wired_from_boot_is_never_a_primary() {
+        // A built-in eth0 unplugged from boot (no carrier ever) must not be read
+        // as a management primary, or a WiFi-managed rig would flap into the
+        // heartbeat reach-back forever.
+        let mut ever = std::collections::HashSet::new();
+        for _ in 0..5 {
+            let (has_primary, primary_up) =
+                resolve_primary(&[("eth0".to_string(), false)], &mut ever);
+            assert!(!has_primary);
+            assert!(!primary_up);
+        }
+        assert!(ever.is_empty());
+    }
+
+    #[test]
+    fn wired_that_was_up_stays_a_primary_when_it_drops() {
+        // A real cable: up on boot, then unplugged. It stays a primary (sticky)
+        // so the drop still triggers failover.
+        let mut ever = std::collections::HashSet::new();
+        let (has_primary, primary_up) = resolve_primary(&[("eth0".to_string(), true)], &mut ever);
+        assert!(has_primary && primary_up);
+        let (has_primary, primary_up) = resolve_primary(&[("eth0".to_string(), false)], &mut ever);
+        assert!(has_primary && !primary_up);
+    }
+
+    #[test]
+    fn misclassified_injection_iface_does_not_strand_a_dead_primary() {
+        // Even if the injection radio is briefly misclassified as a wired iface
+        // (with carrier), once it is correctly classified out of the wired set
+        // the only remaining wired iface (eth0, never up) is not a primary — so
+        // there is no false "down primary".
+        let mut ever = std::collections::HashSet::new();
+        let (has_primary, primary_up) = resolve_primary(
+            &[("eth0".to_string(), false), ("wlan1".to_string(), true)],
+            &mut ever,
+        );
+        assert!(has_primary && primary_up);
+        let (has_primary, _) = resolve_primary(&[("eth0".to_string(), false)], &mut ever);
+        assert!(!has_primary);
     }
 
     #[test]
