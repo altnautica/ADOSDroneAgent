@@ -4,6 +4,17 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.62.0] - 2026-06-11
+
+### Added
+
+- Per-service memory on `/api/services` is now backed by the durable logging
+  store. The supervisor samples each service's PSS continuously (the same
+  cgroup-grouped sum the on-demand scan does) and ships it to the store, so the
+  route reads the latest value from history first and falls back to the live
+  `/proc` scan on any gap. Values are identical to the live scan; the live scan
+  stays the default and the fallback.
+
 ## [0.61.0] - 2026-06-11
 
 ### Added
