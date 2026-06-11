@@ -4,6 +4,19 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.60.0] - 2026-06-11
+
+### Added
+
+- The radio status and history reads (`/api/wfb`, `/api/wfb/history`,
+  `/api/wfb/pair/failover-status`) and the video air-pipeline and latency reads
+  (`/api/v1/video/air-pipeline`, `/api/video/latency`) are now backed by the
+  durable logging store: each reads the store first and falls back to the live
+  read unchanged, never a 500. On a native-radio rig `/api/wfb/history` returns
+  durable link history (previously empty on that path), and the reads keep
+  serving when the live source is briefly unavailable. The live read stays the
+  default and the fallback; response shapes are byte-identical.
+
 ## [0.59.0] - 2026-06-11
 
 ### Changed
