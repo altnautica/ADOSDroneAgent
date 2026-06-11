@@ -13,9 +13,17 @@
 //! `/run/ados/mavlink.sock`, which the router forwards to the FC. An absent
 //! socket returns an error the route maps to a 503 (no FC link), so a command is
 //! never silently dropped.
+//!
+//! [`logd_client`] is the read side of the hardware-store seam: the status route
+//! reads the most-recent CPU / memory / disk / temperature snapshots back from
+//! the logging store's query socket (the continuous collector samples them), so
+//! the surface never probes the host itself. A missing store degrades the route
+//! to its zero-valued health default rather than failing it.
 
+pub mod logd_client;
 pub mod mavlink_client;
 pub mod state_client;
 
+pub use logd_client::LogdQueryClient;
 pub use mavlink_client::MavlinkIpcClient;
 pub use state_client::StateIpcClient;

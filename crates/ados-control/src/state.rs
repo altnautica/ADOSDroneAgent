@@ -14,7 +14,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use crate::auth::PairingState;
-use crate::ipc::{MavlinkIpcClient, StateIpcClient};
+use crate::ipc::{LogdQueryClient, MavlinkIpcClient, StateIpcClient};
 use crate::routes::status::process_uptime_seconds;
 
 /// The agent version string, resolved once at startup. The systemd unit sets
@@ -87,6 +87,16 @@ pub struct AppState {
     /// builds a frame and hands it to this client, which length-prefixes it onto
     /// `/run/ados/mavlink.sock` for the router to forward to the FC.
     pub mavlink: MavlinkIpcClient,
+    /// The logging-store query client the status route reads system health from
+    /// (CPU / memory / disk / temperature). The continuous collector samples those
+    /// into the store; an unreachable store degrades health to its zero default.
+    pub logd: LogdQueryClient,
+    /// The HAL board sidecar (`/run/ados/board.json`) the status route reads the
+    /// full board dict from. The detector persists it; when absent (a fresh boot
+    /// before the first write, or a host with no detector running), the status
+    /// route reports an empty board object — the same shape the FastAPI route
+    /// emits when its own HAL detect raises.
+    pub board_path: PathBuf,
     /// The on-disk paths the pairing routes read + write.
     pub pairing_paths: PairingPaths,
     /// When this daemon started, the status route's uptime fallback when the
@@ -96,12 +106,16 @@ pub struct AppState {
 
 impl AppState {
     /// Build the state from a pairing reader, a vehicle-state client, the MAVLink
-    /// command client, and the pairing route paths, resolving the agent version
-    /// from the environment and stamping the process start instant.
+    /// command client, the logging-store query client, the board sidecar path, and
+    /// the pairing route paths, resolving the agent version from the environment
+    /// and stamping the process start instant.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         pairing: Arc<PairingState>,
         state: StateIpcClient,
         mavlink: MavlinkIpcClient,
+        logd: LogdQueryClient,
+        board_path: PathBuf,
         pairing_paths: PairingPaths,
     ) -> Self {
         Self {
@@ -109,6 +123,8 @@ impl AppState {
             pairing,
             state,
             mavlink,
+            logd,
+            board_path,
             pairing_paths,
             started: Instant::now(),
         }

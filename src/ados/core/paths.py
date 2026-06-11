@@ -64,6 +64,10 @@ LOGD_PUSH_RESULT_PATH = ADOS_RUN_DIR / "logd-push-result.json"
 
 # Live JSON state snapshots
 HEALTH_JSON = ADOS_RUN_DIR / "health.json"
+# The detected HAL board dict, persisted once at status time so a separate
+# on-box reader (the native control surface) can serve the full board block
+# without an in-process HAL-detect port of its own.
+BOARD_JSON = ADOS_RUN_DIR / "board.json"
 MESH_STATE_JSON = ADOS_RUN_DIR / "mesh-state.json"
 WFB_RELAY_JSON = ADOS_RUN_DIR / "wfb-relay.json"
 WFB_RECEIVER_JSON = ADOS_RUN_DIR / "wfb-receiver.json"

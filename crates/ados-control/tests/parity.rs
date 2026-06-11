@@ -104,6 +104,12 @@ async fn start_full(
         config_path: dir.join("config.yaml"),
         wfb_key_dir: dir.join("wfb"),
         bind_state_path: dir.join("bind-state.json"),
+        // The status route's health source + board sidecar, in the same temp dir.
+        // Absent by default → health degrades to the zero default, board to `{}`;
+        // a test seeds a mock query server / a board.json to exercise the present
+        // paths.
+        logd_query_socket: dir.join("logd-query.sock"),
+        board_path: dir.join("board.json"),
     };
     let (stop_tx, stop_rx) = oneshot::channel::<()>();
     let join = tokio::spawn(run_with_paths(paths, async move {
@@ -605,6 +611,118 @@ async fn status_matches_the_golden_shape_with_no_state_socket() {
         );
     }
     h.stop().await;
+}
+
+// --- /api/status board + health sourcing (mock store + seeded sidecar) ---
+
+/// A mock logd query server: answers every `GET /v1/query?kind=hw` with a canned
+/// hardware-snapshot envelope so the status route's health block can be asserted.
+/// Accepts repeatedly (the client opens a fresh `Connection: close` per request).
+struct MockLogdServer {
+    stop: Option<oneshot::Sender<()>>,
+    join: tokio::task::JoinHandle<()>,
+}
+
+impl MockLogdServer {
+    async fn start(dir: &Path, hw_body: String) -> Self {
+        let path = dir.join("logd-query.sock");
+        let _ = std::fs::remove_file(&path);
+        let listener = UnixListener::bind(&path).unwrap();
+        let (stop_tx, mut stop_rx) = oneshot::channel::<()>();
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            hw_body.len(),
+            hw_body
+        );
+        let join = tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = &mut stop_rx => break,
+                    accepted = listener.accept() => {
+                        if let Ok((mut conn, _addr)) = accepted {
+                            let r = resp.clone();
+                            tokio::spawn(async move {
+                                let mut buf = [0u8; 1024];
+                                let _ = conn.read(&mut buf).await;
+                                let _ = conn.write_all(r.as_bytes()).await;
+                                let _ = conn.flush().await;
+                            });
+                        }
+                    }
+                }
+            }
+        });
+        for _ in 0..100 {
+            if path.exists() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        Self {
+            stop: Some(stop_tx),
+            join,
+        }
+    }
+
+    async fn stop(mut self) {
+        if let Some(tx) = self.stop.take() {
+            let _ = tx.send(());
+        }
+        let _ = self.join.await;
+    }
+}
+
+#[tokio::test]
+async fn status_sources_health_and_board_from_the_store_and_sidecar() {
+    let dir = tempfile::tempdir().unwrap();
+    // Seed the board sidecar the status route reads the full HAL dict from.
+    std::fs::write(
+        dir.path().join("board.json"),
+        r#"{"name":"rpi4b","soc":"BCM2711","arch":"aarch64","ram_mb":4096}"#,
+    )
+    .unwrap();
+    // A mock store returning one hardware snapshot with the health-spine signals.
+    let hw = serde_json::json!({
+        "data": [{
+            "id": 1, "ts_us": 1000, "signals": {
+                "cpu.util.all": 23.4,
+                "mem.total_bytes": 4_000_000_000.0_f64,
+                "mem.avail_bytes": 1_000_000_000.0_f64,
+                "disk.fs_total_bytes": 100_000_000_000.0_f64,
+                "disk.fs_used_bytes": 40_000_000_000.0_f64,
+                "thermal.primary_c": 51.2
+            }
+        }]
+    })
+    .to_string();
+    let logd = MockLogdServer::start(dir.path(), hw).await;
+
+    let h = start_with_state(dir.path(), None, dir.path().join("absent-state.sock")).await;
+    let (status, body) = unix_get(&h.socket, "/api/status", None).await;
+    assert!(status.contains("200"), "{status}");
+    let got: Value = serde_json::from_str(&body).unwrap_or_else(|_| panic!("body: {body}"));
+
+    // Board is the full sidecar dict, not the degraded empty object.
+    assert_eq!(got["board"]["name"], serde_json::json!("rpi4b"));
+    assert_eq!(got["board"]["soc"], serde_json::json!("BCM2711"));
+    assert_eq!(got["board"]["ram_mb"], serde_json::json!(4096));
+
+    // Health derives from the store signals: cpu passthrough, used/total ratios.
+    let health = &got["health"];
+    assert_eq!(health["cpu_percent"], serde_json::json!(23.4));
+    assert_eq!(health["memory_percent"], serde_json::json!(75.0)); // 3e9/4e9
+    assert_eq!(health["disk_percent"], serde_json::json!(40.0)); // 40e9/100e9
+    assert_eq!(health["temperature"], serde_json::json!(51.2));
+    assert!(
+        health["timestamp"]
+            .as_str()
+            .map(|t| t.ends_with("+00:00") && t.contains('T'))
+            .unwrap_or(false),
+        "health timestamp must be an ISO-8601 UTC string"
+    );
+
+    h.stop().await;
+    logd.stop().await;
 }
 
 // --- /api/status parity (live mock state socket, v1 JSON) ---

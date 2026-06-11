@@ -30,6 +30,7 @@ use anyhow::{Context, Result};
 use tokio::sync::oneshot;
 
 use crate::auth::PairingState;
+use crate::ipc::logd_client::{default_logd_socket, LogdQueryClient};
 use crate::ipc::mavlink_client::{default_mavlink_socket, MavlinkIpcClient};
 use crate::ipc::state_client::{default_state_socket, StateIpcClient};
 use crate::routes::build_router;
@@ -73,6 +74,12 @@ pub struct DaemonPaths {
     /// forwards them to the FC). Injectable so a test points it at a mock-IPC
     /// socket in a tempdir.
     pub mavlink_socket: PathBuf,
+    /// The logging-store query socket the status route reads system health from.
+    /// Injectable so a test points it at a mock query server in a tempdir.
+    pub logd_query_socket: PathBuf,
+    /// The HAL board sidecar (`/run/ados/board.json`) the status route reads the
+    /// full board dict from. Injectable for tests.
+    pub board_path: PathBuf,
     /// The agent config (`/etc/ados/config.yaml`) the pairing-info route projects
     /// for device identity, profile, and the radio peer. Injectable for tests.
     pub config_path: PathBuf,
@@ -106,6 +113,9 @@ impl Default for DaemonPaths {
         // The MAVLink command socket resolves under `ADOS_RUN_DIR` the same way,
         // defaulting to `/run/ados/mavlink.sock`.
         let mavlink_socket = default_mavlink_socket();
+        // The logging-store query socket resolves under `ADOS_RUN_DIR` the same
+        // way, defaulting to `/run/ados/logd-query.sock`.
+        let logd_query_socket = default_logd_socket();
         // The config path honours `ADOS_CONFIG` (the same override the sibling
         // crates use), defaulting to `/etc/ados/config.yaml`.
         let config_path = std::env::var("ADOS_CONFIG")
@@ -118,12 +128,17 @@ impl Default for DaemonPaths {
         // `/run/ados/bind-state.json` (matching the Python `BIND_STATE_SENTINEL`).
         let run_dir = std::env::var("ADOS_RUN_DIR").unwrap_or_else(|_| "/run/ados".to_string());
         let bind_state_path = Path::new(&run_dir).join("bind-state.json");
+        // The board sidecar resolves under `ADOS_RUN_DIR`, defaulting to
+        // `/run/ados/board.json` (the detector persists the HAL board dict there).
+        let board_path = Path::new(&run_dir).join("board.json");
         Self {
             control_socket,
             control_tcp_port,
             pairing_path,
             state_socket,
             mavlink_socket,
+            logd_query_socket,
+            board_path,
             config_path,
             wfb_key_dir,
             bind_state_path,
@@ -193,6 +208,10 @@ where
     // connects lazily on the first command and reuses the connection; an absent
     // socket (an idle agent) surfaces as a 503 at command time, not here.
     let mavlink_client = MavlinkIpcClient::new(paths.mavlink_socket.clone());
+    // The logging-store query client the status route reads system health from.
+    // Each call opens a short-lived connection; an unreachable store degrades the
+    // health block to its zero default rather than failing the route.
+    let logd_client = LogdQueryClient::new(paths.logd_query_socket.clone());
     // The on-disk paths the pairing routes read + write. The pairing-state file
     // is the same one the LAN-edge auth reader watches, so the gate and the
     // claim/unpair writers agree on one file.
@@ -206,6 +225,8 @@ where
         Arc::clone(&pairing),
         state_client,
         mavlink_client,
+        logd_client,
+        paths.board_path.clone(),
         pairing_paths,
     );
 

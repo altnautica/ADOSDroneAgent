@@ -14,9 +14,35 @@ from fastapi.responses import JSONResponse, Response
 from ados import __version__
 from ados.api.deps import get_agent_app
 from ados.core.cache import status_cache
-from ados.core.paths import MESH_STATE_JSON, PROFILE_CONF
+from ados.core.paths import BOARD_JSON, MESH_STATE_JSON, PROFILE_CONF
 
 router = APIRouter()
+
+# Whether the detected board dict has been persisted to its sidecar this process.
+# The board is static per boot, so the write-through runs once on the first status
+# read that produces a non-empty board, not on every poll.
+_board_persisted = False
+
+
+def _persist_board_once(board_info: dict) -> None:
+    """Persist the detected board dict to its sidecar once per process.
+
+    A separate on-box reader (the native control surface) serves the full board
+    block from this file rather than running HAL detect itself. Best-effort and
+    atomic (temp sibling + rename), and a no-op for an empty board (a detect that
+    raised) or once already written — a failed write never affects the response.
+    """
+    global _board_persisted
+    if _board_persisted or not board_info:
+        return
+    try:
+        BOARD_JSON.parent.mkdir(parents=True, exist_ok=True)
+        tmp = BOARD_JSON.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(board_info, sort_keys=True))
+        tmp.replace(BOARD_JSON)
+        _board_persisted = True
+    except OSError:
+        pass
 
 
 def _radio_to_camel(block: dict | None) -> dict | None:
@@ -326,6 +352,10 @@ async def get_status():
     except Exception:
         pass
 
+    # Persist the board dict once so the native control surface can serve the same
+    # block from the sidecar without its own HAL-detect port.
+    _persist_board_once(board_info)
+
     health_info = app.health_dict()
 
     deps_map = await status_cache.get(
@@ -375,6 +405,10 @@ async def get_full_status(request: Request):
         board_info = board.to_dict()
     except Exception:
         pass
+
+    # Persist the board dict once so the native control surface can serve the same
+    # block from the sidecar without its own HAL-detect port.
+    _persist_board_once(board_info)
 
     health_info = app.health_dict()
 
