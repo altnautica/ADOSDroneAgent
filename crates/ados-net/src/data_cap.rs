@@ -582,6 +582,162 @@ mod tests {
     }
 
     #[test]
+    fn get_usage_payload_values_match_python() {
+        // 1 GiB cap, 100 MiB used → 100 MB used, 1024 MB cap, ~10 percent, ok.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("modem-usage.json");
+        let (mut t, _bus) = tracker(1.0, path, 0, 0);
+        t.state.cumulative_bytes = 100 * 1024 * 1024;
+        let u = t.get_usage();
+        assert_eq!(u["data_used_mb"], 100);
+        assert_eq!(u["cap_mb"], 1024);
+        let pct = u["percent"].as_f64().unwrap();
+        assert!((9.0..11.0).contains(&pct), "percent out of band: {pct}");
+        assert_eq!(u["state"], "ok");
+    }
+
+    #[test]
+    fn set_cap_updates_cap_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("modem-usage.json");
+        let (mut t, _bus) = tracker(1.0, path, 0, 0);
+        assert_eq!(t.cap_bytes, cap_to_bytes(1.0));
+        t.set_cap(2.0);
+        assert_eq!(t.cap_bytes, (2.0 * 1024.0 * 1024.0 * 1024.0) as u64);
+    }
+
+    #[test]
+    fn load_state_tolerates_missing_fields() {
+        // An empty JSON object loads as a fresh window: zeros + empty month,
+        // never a parse error. Mirrors `_UsageState.from_json({})`.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("modem-usage.json");
+        std::fs::write(&path, b"{}").unwrap();
+        let st = load_state(&path);
+        assert_eq!(st.cumulative_bytes, 0);
+        assert_eq!(st.last_rx, 0);
+        assert_eq!(st.last_tx, 0);
+        assert_eq!(st.last_reset_month, "");
+    }
+
+    #[test]
+    fn load_state_round_trips_all_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("modem-usage.json");
+        let written = UsageState {
+            window_started_at: 1_700_000_000.0,
+            cumulative_bytes: 12345,
+            last_rx: 100,
+            last_tx: 200,
+            last_reset_month: "2026-04".to_string(),
+        };
+        std::fs::write(&path, written.render_json()).unwrap();
+        let st = load_state(&path);
+        assert_eq!(st.window_started_at, 1_700_000_000.0);
+        assert_eq!(st.cumulative_bytes, 12345);
+        assert_eq!(st.last_rx, 100);
+        assert_eq!(st.last_tx, 200);
+        assert_eq!(st.last_reset_month, "2026-04");
+    }
+
+    #[tokio::test]
+    async fn two_polls_accumulate_against_the_previous_sample() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("modem-usage.json");
+        // First poll baselines against zero → +1500.
+        let bus = Arc::new(UplinkEventBus::new());
+        let mut t = DataCapTracker::with_config(
+            Arc::new(FixedSource(UsageBytes {
+                rx_bytes: 1000,
+                tx_bytes: 500,
+            })),
+            Arc::clone(&bus),
+            1.0,
+            path,
+        );
+        t.poll_once().await;
+        assert_eq!(t.state.cumulative_bytes, 1500);
+        // Second poll: rx 1000→1700 (+700), tx 500→800 (+300) → +1000.
+        t.source = Arc::new(FixedSource(UsageBytes {
+            rx_bytes: 1700,
+            tx_bytes: 800,
+        }));
+        t.poll_once().await;
+        assert_eq!(t.state.cumulative_bytes, 2500);
+    }
+
+    #[tokio::test]
+    async fn poll_warn_80_emits_warn_threshold_event() {
+        // A sample at 81 percent of the cap trips warn_80 on the first crossing.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("modem-usage.json");
+        let bus = Arc::new(UplinkEventBus::new());
+        let mut rx = bus.subscribe();
+        let cap = cap_to_bytes(1.0);
+        let at_81 = ((cap as f64) * 0.81) as u64;
+        let mut t = DataCapTracker::with_config(
+            Arc::new(FixedSource(UsageBytes {
+                rx_bytes: at_81,
+                tx_bytes: 0,
+            })),
+            Arc::clone(&bus),
+            1.0,
+            path,
+        );
+        t.poll_once().await;
+        let evt = rx.try_recv().expect("a warn_80 threshold event");
+        assert_eq!(evt.kind, UplinkEventKind::DataCapThreshold);
+        assert_eq!(evt.data_cap_state, Some(DataCapState::Warn80));
+    }
+
+    #[test]
+    fn flush_persists_bytes_accumulated_since_the_last_poll() {
+        // A clean stop must persist the latest counter, not lose the bytes
+        // observed mid-window. Mutate state without going through save_state,
+        // then flush() must write them to disk.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("modem-usage.json");
+        let (mut t, _bus) = tracker(1.0, path.clone(), 0, 0);
+        t.state.cumulative_bytes = 9_999_999;
+        // The on-disk file does not yet reflect this (no save happened).
+        assert!(!path.exists());
+        t.flush();
+        let persisted = load_state(&path);
+        assert_eq!(persisted.cumulative_bytes, 9_999_999);
+    }
+
+    #[test]
+    fn flush_is_safe_before_any_poll() {
+        // flush() must be callable even when poll_once was never run (a service
+        // that crashes before its task is scheduled still flushes its counter).
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("modem-usage.json");
+        let (mut t, _bus) = tracker(1.0, path.clone(), 0, 0);
+        t.state.cumulative_bytes = 7;
+        t.flush();
+        assert_eq!(load_state(&path).cumulative_bytes, 7);
+    }
+
+    #[test]
+    fn flush_failure_is_swallowed_and_does_not_panic() {
+        // A flush failure during shutdown must never propagate: the save logs
+        // and returns. Force the failure by rooting the state file under a
+        // PARENT that is a regular file, so create_dir_all errors and the
+        // atomic write cannot proceed.
+        let dir = tempfile::tempdir().unwrap();
+        let blocker = dir.path().join("blocker");
+        std::fs::write(&blocker, b"i am a file, not a directory").unwrap();
+        // `blocker/sub/modem-usage.json` cannot be created: `blocker` is a file.
+        let path = blocker.join("sub").join("modem-usage.json");
+        let (mut t, _bus) = tracker(1.0, path.clone(), 0, 0);
+        t.state.cumulative_bytes = 1234;
+        // Must not panic; the error is logged inside save_state.
+        t.flush();
+        // And the unwritable target was indeed never created.
+        assert!(!path.exists());
+    }
+
+    #[test]
     fn current_month_is_year_dash_month() {
         let m = current_month();
         // YYYY-MM shape.

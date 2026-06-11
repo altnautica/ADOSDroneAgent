@@ -846,6 +846,154 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn powersave_runs_both_toggles_after_a_successful_connect() {
+        let dir = tempfile::tempdir().unwrap();
+        let runner = Arc::new(ScriptedRunner::new());
+        runner.push(CmdOut {
+            rc: 3,
+            stdout: String::new(),
+            stderr: String::new(),
+        }); // is-active → inactive
+        runner.push(CmdOut::failed(0, "")); // nmcli --ask connect ok
+        runner.push(CmdOut {
+            rc: 0,
+            stdout: "HomeWifi:wlan0\n".to_string(),
+            stderr: String::new(),
+        }); // connection show --active
+        runner.push(CmdOut::failed(0, "")); // powersave nmcli modify
+        runner.push(CmdOut::failed(0, "")); // powersave iw
+        runner.push(CmdOut {
+            rc: 0,
+            stdout: "yes:HomeWifi:AA\\:BB\\:CC:70:WPA2\n".to_string(),
+            stderr: String::new(),
+        }); // wifi list
+        runner.push(CmdOut {
+            rc: 0,
+            stdout: "    inet 192.168.1.50/24 scope global wlan0\n".to_string(),
+            stderr: String::new(),
+        }); // ip addr
+        runner.push(CmdOut {
+            rc: 0,
+            stdout: "default via 192.168.1.1 dev wlan0\n".to_string(),
+            stderr: String::new(),
+        }); // ip route
+        let m_runner = Arc::clone(&runner);
+        let mut m = mgr(dir.path(), runner);
+        let res = m.join("HomeWifi", Some("secret"), false).await;
+        assert_eq!(res["joined"], true);
+
+        let calls = m_runner.recorded();
+        // Both the connection-level (nmcli) and the runtime (iw) power-save
+        // toggles fired.
+        let nm_ps = vec![
+            "nmcli".to_string(),
+            "connection".to_string(),
+            "modify".to_string(),
+            "HomeWifi".to_string(),
+            "802-11-wireless.powersave".to_string(),
+            "2".to_string(),
+        ];
+        let iw_ps = vec![
+            "iw".to_string(),
+            "dev".to_string(),
+            "wlan0".to_string(),
+            "set".to_string(),
+            "power_save".to_string(),
+            "off".to_string(),
+        ];
+        assert!(calls.contains(&nm_ps), "nmcli powersave toggle missing");
+        assert!(calls.contains(&iw_ps), "iw powersave toggle missing");
+
+        // Both toggles come AFTER the connect (the radio must be associated
+        // before NM has a connection to modify).
+        let connect_idx = calls
+            .iter()
+            .position(|c| c.iter().any(|a| a == "connect"))
+            .expect("a connect call");
+        let iw_idx = calls.iter().position(|c| *c == iw_ps).expect("iw toggle");
+        let nm_idx = calls.iter().position(|c| *c == nm_ps).expect("nm toggle");
+        assert!(iw_idx > connect_idx, "iw toggle ran before connect");
+        assert!(nm_idx > connect_idx, "nmcli toggle ran before connect");
+    }
+
+    #[tokio::test]
+    async fn powersave_toggle_failure_is_nonfatal_to_the_join() {
+        // A power-save toggle that fails (driver does not support it) must not
+        // fail an otherwise-good join.
+        let dir = tempfile::tempdir().unwrap();
+        let runner = Arc::new(ScriptedRunner::new());
+        runner.push(CmdOut {
+            rc: 3,
+            stdout: String::new(),
+            stderr: String::new(),
+        }); // is-active → inactive
+        runner.push(CmdOut::failed(0, "")); // nmcli --ask connect ok
+        runner.push(CmdOut {
+            rc: 0,
+            stdout: "HomeWifi:wlan0\n".to_string(),
+            stderr: String::new(),
+        }); // connection show --active
+        runner.push(CmdOut::failed(1, "not supported")); // powersave nmcli FAILS
+        runner.push(CmdOut::failed(1, "not supported")); // powersave iw FAILS
+        runner.push(CmdOut {
+            rc: 0,
+            stdout: "yes:HomeWifi:AA\\:BB\\:CC:70:WPA2\n".to_string(),
+            stderr: String::new(),
+        }); // wifi list
+        runner.push(CmdOut {
+            rc: 0,
+            stdout: "    inet 192.168.1.50/24 scope global wlan0\n".to_string(),
+            stderr: String::new(),
+        }); // ip addr
+        runner.push(CmdOut {
+            rc: 0,
+            stdout: "default via 192.168.1.1 dev wlan0\n".to_string(),
+            stderr: String::new(),
+        }); // ip route
+        let mut m = mgr(dir.path(), runner);
+        let res = m.join("HomeWifi", Some("secret"), false).await;
+        // The join still succeeds and the lock is held.
+        assert_eq!(res["joined"], true);
+        assert_eq!(res["ip"], "192.168.1.50");
+        assert!(m.holds_lock());
+    }
+
+    #[tokio::test]
+    async fn failed_connect_skips_powersave_entirely() {
+        // When the connect itself fails, no power-save toggle is attempted (the
+        // failure path restores any AP and releases the lock before returning).
+        let dir = tempfile::tempdir().unwrap();
+        let runner = Arc::new(ScriptedRunner::new());
+        runner.push(CmdOut {
+            rc: 3,
+            stdout: String::new(),
+            stderr: String::new(),
+        }); // is-active → inactive (no AP to restore)
+        runner.push(CmdOut::failed(1, "No network with SSID 'HomeWifi' found")); // connect FAILS
+        let m_runner = Arc::clone(&runner);
+        let mut m = mgr(dir.path(), runner);
+        let res = m.join("HomeWifi", Some("secret"), false).await;
+        assert_eq!(res["joined"], false);
+        // Neither power-save toggle was issued.
+        let calls = m_runner.recorded();
+        assert!(
+            !calls
+                .iter()
+                .any(|c| c.iter().any(|a| a == "802-11-wireless.powersave")),
+            "nmcli powersave was issued after a failed connect"
+        );
+        assert!(
+            !calls.iter().any(|c| c.iter().any(|a| a == "power_save")),
+            "iw powersave was issued after a failed connect"
+        );
+        // And no status() probe ran either (no wifi list call recorded).
+        assert!(
+            !calls.iter().any(|c| c.iter().any(|a| a == "list")),
+            "status() ran after a failed connect"
+        );
+    }
+
+    #[tokio::test]
     async fn powersave_targets_resolved_active_connection_not_ssid() {
         let dir = tempfile::tempdir().unwrap();
         let runner = Arc::new(ScriptedRunner::new());

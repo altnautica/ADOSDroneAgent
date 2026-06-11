@@ -158,4 +158,36 @@ mod tests {
         let bus = UplinkEventBus::new();
         assert_eq!(bus.publish(evt(UplinkEventKind::HealthChanged, None)), 0);
     }
+
+    #[tokio::test]
+    async fn publish_fans_out_to_multiple_subscribers() {
+        let bus = UplinkEventBus::new();
+        let mut a = bus.subscribe();
+        let mut b = bus.subscribe();
+        let reached = bus.publish(evt(UplinkEventKind::UplinkChanged, Some("eth0")));
+        assert_eq!(reached, 2);
+        let ga = a.recv().await.unwrap();
+        let gb = b.recv().await.unwrap();
+        // Both subscribers see the same event.
+        assert_eq!(ga.active_uplink, gb.active_uplink);
+        assert_eq!(ga.active_uplink.as_deref(), Some("eth0"));
+    }
+
+    #[tokio::test]
+    async fn dropping_the_bus_terminates_subscribers() {
+        // A subscriber's stream ends (recv → Closed) once the bus (the sole
+        // sender) is dropped, mirroring the Python `close()` that terminates
+        // every subscriber's async iterator.
+        let bus = UplinkEventBus::new();
+        let mut rx = bus.subscribe();
+        bus.publish(evt(UplinkEventKind::HealthChanged, Some("eth0")));
+        // The already-queued event drains first.
+        assert!(rx.recv().await.is_ok());
+        // Now drop the bus: the channel closes and the next recv yields Closed.
+        drop(bus);
+        assert!(matches!(
+            rx.recv().await,
+            Err(broadcast::error::RecvError::Closed)
+        ));
+    }
 }
