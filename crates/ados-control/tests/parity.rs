@@ -76,8 +76,14 @@ async fn start_with_state(
     let paths = DaemonPaths {
         control_socket: socket.clone(),
         control_tcp_port: port,
-        pairing_path,
+        pairing_path: pairing_path.clone(),
         state_socket,
+        // Point the pairing-route reads at the same temp dir so a test can seed a
+        // config / wfb key / bind-state sidecar; absent files degrade to the
+        // documented defaults (board "unknown", empty device id, null bind_state).
+        config_path: dir.join("config.yaml"),
+        wfb_key_dir: dir.join("wfb"),
+        bind_state_path: dir.join("bind-state.json"),
     };
     let (stop_tx, stop_rx) = oneshot::channel::<()>();
     let join = tokio::spawn(run_with_paths(paths, async move {
@@ -687,5 +693,421 @@ async fn time_is_gated_when_paired_but_answers_with_a_key() {
     assert!(ok.contains("200"), "keyed /api/time should answer: {ok}");
     let got: Value = serde_json::from_str(&body).unwrap();
     assert!(got["time_ns"].is_number() && got["ntp_synced"].is_boolean());
+    h.stop().await;
+}
+
+// --- pairing parity (R1: the highest-risk surface) ---
+
+/// Minimal HTTP/1.1 POST over the unix socket with a JSON body: write the
+/// request, read the whole response, return (status_line, body).
+async fn unix_post(
+    socket: &Path,
+    path: &str,
+    header: Option<(&str, &str)>,
+    json_body: &str,
+) -> (String, String) {
+    let mut stream = connect_unix(socket).await;
+    let mut req = format!(
+        "POST {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {}\r\n",
+        json_body.len()
+    );
+    if let Some((k, v)) = header {
+        req.push_str(&format!("{k}: {v}\r\n"));
+    }
+    req.push_str("\r\n");
+    req.push_str(json_body);
+    stream.write_all(req.as_bytes()).await.unwrap();
+    stream.flush().await.unwrap();
+    let mut buf = Vec::new();
+    stream.read_to_end(&mut buf).await.unwrap();
+    split_http(&buf)
+}
+
+/// Seed a `config.yaml` in the harness dir with a pinned device identity so the
+/// pairing-info route reads a deterministic device_id / name / profile.
+fn seed_config(dir: &Path, device_id: &str, name: &str, profile: &str) {
+    let yaml = format!("agent:\n  device_id: {device_id}\n  name: {name}\n  profile: {profile}\n");
+    std::fs::write(dir.join("config.yaml"), yaml).unwrap();
+}
+
+/// The canned snapshot with the FC connected (for the fc_* fields in info).
+fn fc_connected_snapshot() -> Value {
+    serde_json::json!({
+        "fc_connected": true,
+        "fc_port": "/dev/ttyACM0",
+        "fc_baud": 115200,
+    })
+}
+
+/// Poll `/api/pairing/info` until the FC triple reflects the canned snapshot.
+async fn poll_info_until_fc_connected(socket: &Path) -> Value {
+    for _ in 0..100 {
+        let (status, body) = unix_get(socket, "/api/pairing/info", None).await;
+        if status.contains("200") {
+            if let Ok(v) = serde_json::from_str::<Value>(&body) {
+                if v.get("fc_connected") == Some(&Value::Bool(true)) {
+                    return v;
+                }
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!("pairing info never reflected the connected FC");
+}
+
+#[tokio::test]
+async fn pairing_info_unpaired_matches_the_golden_shape() {
+    let dir = tempfile::tempdir().unwrap();
+    seed_config(dir.path(), "abcdef1234567890", "test-drone", "drone");
+    // Seed an unpaired pairing.json with a fixed code so pairing_code is stable.
+    let h = start_with_state(
+        dir.path(),
+        Some(r#"{"pairing_code": "ABC234", "code_created_at": 9999999999.0}"#),
+        dir.path().join("absent-state.sock"),
+    )
+    .await;
+
+    let (status, body) = unix_get(&h.socket, "/api/pairing/info", None).await;
+    assert!(
+        status.contains("200"),
+        "pairing info must be 200, was {status}"
+    );
+    let got: Value = serde_json::from_str(&body).unwrap_or_else(|_| panic!("body: {body}"));
+    let want = fixture("pairing_info_unpaired.json");
+
+    // R1: the exact 19-field key set, no field omitted.
+    assert_same_keys(&got, &want, "/api/pairing/info (unpaired)");
+    assert_eq!(
+        got.as_object().unwrap().len(),
+        19,
+        "must emit all 19 fields"
+    );
+    // Same shape: every value's kind matches the golden fixture, so a field that
+    // is null in the fixture is null here (not omitted, not a different type).
+    assert_same_shape(&got, &want, "/api/pairing/info (unpaired)");
+
+    // The seven nullable fields are provably JSON null on a degraded/unpaired
+    // agent (not omitted) — the Rule-39 invariant the GCS depends on.
+    for k in [
+        "bind_state",
+        "radio",
+        "owner_id",
+        "paired_at",
+        "radio_peer_device_id",
+        "fc_port",
+        "fc_baud",
+    ] {
+        assert_eq!(got[k], Value::Null, "{k} must serialize as JSON null");
+    }
+
+    // Static scalars the native surface CAN match byte-for-byte.
+    assert_eq!(got["device_id"], want["device_id"]);
+    assert_eq!(got["name"], want["name"]);
+    assert_eq!(got["mdns_host"], want["mdns_host"], "mdns_host format");
+    assert_eq!(got["profile"], want["profile"]);
+    assert_eq!(got["role"], want["role"]); // null for a drone
+    assert_eq!(got["runtime_mode"], serde_json::json!("packaged"));
+    assert_eq!(got["paired"], Value::Bool(false));
+    assert_eq!(got["radio_paired"], Value::Bool(false));
+    assert_eq!(got["pairing_code"], serde_json::json!("ABC234"));
+    assert_eq!(got["fc_connected"], Value::Bool(false));
+    // version is a non-empty string (differs from the fixture's capture-time pin).
+    assert!(got["version"].is_string() && !got["version"].as_str().unwrap().is_empty());
+    // board is a non-empty string; its VALUE differs (native reports "unknown",
+    // no HAL-detect port — a documented gap).
+    assert!(got["board"].is_string() && !got["board"].as_str().unwrap().is_empty());
+    assert_eq!(got["board"], serde_json::json!("unknown"));
+
+    h.stop().await;
+}
+
+#[tokio::test]
+async fn pairing_info_paired_matches_the_golden_shape() {
+    let dir = tempfile::tempdir().unwrap();
+    seed_config(dir.path(), "abcdef1234567890", "test-drone", "drone");
+    let h = start_with_state(
+        dir.path(),
+        Some(r#"{"paired": true, "api_key": "ados_K", "owner_id": "user-42", "paired_at": 1700000000.0}"#),
+        dir.path().join("absent-state.sock"),
+    )
+    .await;
+
+    let (status, body) = unix_get(&h.socket, "/api/pairing/info", None).await;
+    assert!(
+        status.contains("200"),
+        "paired info must be 200, was {status}"
+    );
+    let got: Value = serde_json::from_str(&body).unwrap();
+    let want = fixture("pairing_info_paired.json");
+
+    assert_same_keys(&got, &want, "/api/pairing/info (paired)");
+    assert_same_shape(&got, &want, "/api/pairing/info (paired)");
+    // Paired → owner/paired_at populated, code null.
+    assert_eq!(got["paired"], Value::Bool(true));
+    assert_eq!(got["owner_id"], serde_json::json!("user-42"));
+    assert_eq!(got["paired_at"], serde_json::json!(1700000000.0));
+    assert_eq!(got["pairing_code"], Value::Null, "paired → no code in info");
+
+    h.stop().await;
+}
+
+#[tokio::test]
+async fn pairing_info_reads_the_fc_triple_radio_peer_and_bind_state() {
+    let dir = tempfile::tempdir().unwrap();
+    seed_config(dir.path(), "abcdef1234567890", "test-drone", "drone");
+    // Append the radio peer to the seeded config.
+    std::fs::write(
+        dir.path().join("config.yaml"),
+        "agent:\n  device_id: abcdef1234567890\n  name: test-drone\n  profile: drone\nvideo:\n  wfb:\n    paired_with_device_id: peer-9876543210\n",
+    )
+    .unwrap();
+    // Seed a wfb key (radio_paired) + a bind-state sentinel.
+    std::fs::create_dir_all(dir.path().join("wfb")).unwrap();
+    std::fs::write(dir.path().join("wfb").join("tx.key"), b"k").unwrap();
+    std::fs::write(
+        dir.path().join("bind-state.json"),
+        r#"{"state":"binding","phase":"key_transfer","active":true,"error":null,"finished_at":12.0,"fingerprint":"ab"}"#,
+    )
+    .unwrap();
+
+    let mock = MockStateServer::start(dir.path(), fc_connected_snapshot(), Wire::V1Json).await;
+    let h = start_with_state(dir.path(), None, mock.path.clone()).await;
+
+    let got = poll_info_until_fc_connected(&h.socket).await;
+    // FC triple from the live snapshot.
+    assert_eq!(got["fc_connected"], Value::Bool(true));
+    assert_eq!(got["fc_port"], serde_json::json!("/dev/ttyACM0"));
+    assert_eq!(got["fc_baud"], serde_json::json!(115200));
+    // Radio peer + radio_paired from config + the wfb key file.
+    assert_eq!(
+        got["radio_peer_device_id"],
+        serde_json::json!("peer-9876543210")
+    );
+    assert_eq!(got["radio_paired"], Value::Bool(true));
+    // bind_state folds the six fields.
+    let bs = got["bind_state"].as_object().expect("bind_state object");
+    assert_eq!(bs["state"], serde_json::json!("binding"));
+    assert_eq!(bs["active"], Value::Bool(true));
+    // The full key set still matches the golden fixture (19 fields).
+    assert_same_keys(
+        &got,
+        &fixture("pairing_info_unpaired.json"),
+        "/api/pairing/info (rich)",
+    );
+
+    h.stop().await;
+    mock.stop().await;
+}
+
+#[tokio::test]
+async fn pairing_info_ground_station_reports_the_profile_and_role() {
+    let dir = tempfile::tempdir().unwrap();
+    seed_config(dir.path(), "abcdef1234567890", "gs-node", "ground_station");
+    // A ground-station agent reads its role from the mesh role sentinel. The
+    // pairing route resolves it via ADOS_MESH_ROLE; point it at a temp file.
+    let role_path = dir.path().join("mesh-role");
+    std::fs::write(&role_path, "relay\n").unwrap();
+    // SAFETY: the test sets a process-global env var the profile resolver reads.
+    // It is restored before the assertions that depend on it run within this
+    // single-threaded test.
+    std::env::set_var("ADOS_MESH_ROLE", &role_path);
+
+    let h = start_with_state(
+        dir.path(),
+        Some(r#"{"pairing_code": "ABC234", "code_created_at": 9999999999.0}"#),
+        dir.path().join("absent-state.sock"),
+    )
+    .await;
+
+    let (status, body) = unix_get(&h.socket, "/api/pairing/info", None).await;
+    assert!(status.contains("200"), "{status}");
+    let got: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(got["profile"], serde_json::json!("ground-station"));
+    assert_eq!(got["role"], serde_json::json!("relay"));
+
+    std::env::remove_var("ADOS_MESH_ROLE");
+    h.stop().await;
+}
+
+#[tokio::test]
+async fn pairing_code_returns_the_code_unpaired_and_409s_paired() {
+    let dir = tempfile::tempdir().unwrap();
+    // Unpaired with a seeded code.
+    let h = start(
+        dir.path(),
+        Some(r#"{"pairing_code": "ABC234", "code_created_at": 9999999999.0}"#),
+    )
+    .await;
+    let (status, body) = unix_get(&h.socket, "/api/pairing/code", None).await;
+    assert!(status.contains("200"), "{status}");
+    let got: Value = serde_json::from_str(&body).unwrap();
+    let want = fixture("pairing_code.json");
+    assert_same_keys(&got, &want, "/api/pairing/code");
+    assert_eq!(got["code"], serde_json::json!("ABC234"));
+    h.stop().await;
+
+    // Paired → 409 with the {"detail"} body.
+    let dir2 = tempfile::tempdir().unwrap();
+    let h2 = start(dir2.path(), Some(r#"{"paired": true, "api_key": "k"}"#)).await;
+    let (status2, body2) = unix_get(&h2.socket, "/api/pairing/code", None).await;
+    assert!(
+        status2.contains("409"),
+        "paired code must be 409: {status2}"
+    );
+    let j: Value = serde_json::from_str(&body2).unwrap();
+    assert_eq!(j["detail"], serde_json::json!("Already paired"));
+    assert!(j.get("error").is_none(), "must be the {{detail}} shape");
+    h2.stop().await;
+}
+
+#[tokio::test]
+async fn pairing_claim_writes_pairing_json_like_the_pairing_manager() {
+    let dir = tempfile::tempdir().unwrap();
+    seed_config(dir.path(), "abcdef1234567890", "test-drone", "drone");
+    // Unpaired, with a pending key the claim must prefer (PairingManager.claim).
+    let h = start(
+        dir.path(),
+        Some(r#"{"pairing_code": "ABC234", "code_created_at": 1.0, "pending_api_key": "ados_PENDING"}"#),
+    )
+    .await;
+
+    let (status, body) = unix_post(
+        &h.socket,
+        "/api/pairing/claim",
+        None,
+        r#"{"user_id":"user-7"}"#,
+    )
+    .await;
+    assert!(status.contains("200"), "claim must be 200, was {status}");
+    let got: Value = serde_json::from_str(&body).unwrap();
+    let want = fixture("pairing_claim_response.json");
+
+    // The 4-key response shape.
+    assert_same_keys(&got, &want, "/api/pairing/claim");
+    assert_eq!(got["device_id"], want["device_id"]);
+    assert_eq!(got["name"], want["name"]);
+    assert_eq!(got["mdns_host"], want["mdns_host"]);
+    // The pending key is preferred verbatim (the PairingManager contract).
+    assert_eq!(got["api_key"], serde_json::json!("ados_PENDING"));
+
+    // The pairing.json AFTER the write matches PairingManager.claim: exactly the
+    // four keys, code + pending dropped.
+    let pairing_path = dir.path().join("pairing.json");
+    let on_disk: Value =
+        serde_json::from_str(&std::fs::read_to_string(&pairing_path).unwrap()).unwrap();
+    let keys: std::collections::BTreeSet<_> =
+        on_disk.as_object().unwrap().keys().cloned().collect();
+    let want_keys: std::collections::BTreeSet<_> = ["paired", "api_key", "owner_id", "paired_at"]
+        .into_iter()
+        .map(String::from)
+        .collect();
+    assert_eq!(
+        keys, want_keys,
+        "claimed pairing.json keys must equal PairingManager.claim"
+    );
+    assert_eq!(on_disk["paired"], Value::Bool(true));
+    assert_eq!(on_disk["api_key"], serde_json::json!("ados_PENDING"));
+    assert_eq!(on_disk["owner_id"], serde_json::json!("user-7"));
+    assert!(on_disk["paired_at"].is_number());
+    assert!(on_disk.get("pairing_code").is_none());
+    assert!(on_disk.get("pending_api_key").is_none());
+
+    // A second claim is now a 409.
+    let (status2, body2) =
+        unix_post(&h.socket, "/api/pairing/claim", None, r#"{"user_id":"x"}"#).await;
+    assert!(status2.contains("409"), "re-claim must be 409: {status2}");
+    let j: Value = serde_json::from_str(&body2).unwrap();
+    assert_eq!(
+        j["detail"],
+        serde_json::json!("Already paired. Unpair first.")
+    );
+
+    h.stop().await;
+}
+
+#[tokio::test]
+async fn pairing_unpair_clears_pairing_json_and_mints_a_code() {
+    let dir = tempfile::tempdir().unwrap();
+    seed_config(dir.path(), "abcdef1234567890", "test-drone", "drone");
+    // Paired with a key; unpair is gated, so present the key (over the unix
+    // socket the on-box trust would bypass it anyway, but presenting it proves
+    // the keyed path works end to end).
+    let h = start(
+        dir.path(),
+        Some(r#"{"paired": true, "api_key": "ados_K", "owner_id": "u", "paired_at": 1.0}"#),
+    )
+    .await;
+
+    let (status, body) = unix_post(
+        &h.socket,
+        "/api/pairing/unpair",
+        Some(("X-ADOS-Key", "ados_K")),
+        "",
+    )
+    .await;
+    assert!(status.contains("200"), "unpair must be 200, was {status}");
+    let got: Value = serde_json::from_str(&body).unwrap();
+    let want = fixture("pairing_unpair_response.json");
+    assert_same_keys(&got, &want, "/api/pairing/unpair");
+    assert_eq!(got["status"], serde_json::json!("unpaired"));
+    // new_code is a fresh 6-char code (random per call).
+    let new_code = got["new_code"].as_str().expect("new_code string");
+    assert_eq!(new_code.len(), 6, "new_code must be 6 chars: {new_code}");
+
+    // The pairing.json now carries only the fresh code state (paired cleared) —
+    // the PairingManager.unpair → get_or_create_code sequence.
+    let pairing_path = dir.path().join("pairing.json");
+    let on_disk: Value =
+        serde_json::from_str(&std::fs::read_to_string(&pairing_path).unwrap()).unwrap();
+    assert!(
+        on_disk.get("paired").is_none() || on_disk["paired"] == Value::Bool(false),
+        "unpaired pairing.json must not be paired: {on_disk}"
+    );
+    assert!(
+        on_disk.get("api_key").is_none(),
+        "unpaired must drop the api_key"
+    );
+    assert_eq!(on_disk["pairing_code"], serde_json::json!(new_code));
+
+    h.stop().await;
+}
+
+#[tokio::test]
+async fn pairing_unpair_is_409_when_not_paired() {
+    let dir = tempfile::tempdir().unwrap();
+    // No pairing file → unpaired.
+    let h = start(dir.path(), None).await;
+    let (status, body) = unix_post(&h.socket, "/api/pairing/unpair", None, "").await;
+    assert!(
+        status.contains("409"),
+        "unpair while unpaired must be 409: {status}"
+    );
+    let j: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(j["detail"], serde_json::json!("Not paired"));
+    assert!(j.get("error").is_none());
+    h.stop().await;
+}
+
+#[tokio::test]
+async fn pairing_unpair_is_gated_by_the_key_when_paired_over_tcp() {
+    let dir = tempfile::tempdir().unwrap();
+    // Paired: unpair is NOT in the public set, so a keyless TCP request (with a
+    // forwarding header to drop the loopback shortcut) must be rejected at the
+    // gate, never reaching the handler's not-paired check.
+    let h = start(dir.path(), Some(r#"{"paired": true, "api_key": "ados_K"}"#)).await;
+    // tcp POST without a key, with a forwarding header.
+    let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", h.port))
+        .await
+        .unwrap();
+    let req = "POST /api/pairing/unpair HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Length: 0\r\nX-Forwarded-For: 203.0.113.7\r\n\r\n";
+    stream.write_all(req.as_bytes()).await.unwrap();
+    stream.flush().await.unwrap();
+    let mut buf = Vec::new();
+    stream.read_to_end(&mut buf).await.unwrap();
+    let (status, _b) = split_http(&buf);
+    assert!(
+        status.contains("401"),
+        "keyless unpair must be gated: {status}"
+    );
     h.stop().await;
 }

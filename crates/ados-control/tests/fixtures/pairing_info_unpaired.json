@@ -1,0 +1,21 @@
+{
+  "bind_state": null,
+  "board": "rpi4b",
+  "device_id": "abcdef1234567890",
+  "fc_baud": null,
+  "fc_connected": false,
+  "fc_port": null,
+  "mdns_host": "ados-abcdef.local",
+  "name": "test-drone",
+  "owner_id": null,
+  "paired": false,
+  "paired_at": null,
+  "pairing_code": "ABC234",
+  "profile": "drone",
+  "radio": null,
+  "radio_paired": false,
+  "radio_peer_device_id": null,
+  "role": null,
+  "runtime_mode": "packaged",
+  "version": "0.62.0"
+}

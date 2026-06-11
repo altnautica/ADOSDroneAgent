@@ -14,7 +14,10 @@
 //! enable it yet — until the install layer wires it.
 
 pub mod auth;
+pub mod config;
 pub mod ipc;
+pub mod pairing_store;
+pub mod profile;
 pub mod routes;
 pub mod serve;
 pub mod state;
@@ -30,7 +33,7 @@ use crate::auth::PairingState;
 use crate::ipc::state_client::{default_state_socket, StateIpcClient};
 use crate::routes::build_router;
 use crate::serve::{bind_tcp, bind_unix, serve_tcp, serve_unix, tcp_app, unix_app};
-use crate::state::AppState;
+use crate::state::{AppState, PairingPaths};
 
 /// Canonical runtime paths. The control socket lives under `/run/ados` (tmpfs);
 /// the pairing-state file lives under `/etc/ados` (persistent). The TCP port is
@@ -59,12 +62,21 @@ pub struct DaemonPaths {
     pub control_socket: PathBuf,
     /// The TCP port the LAN plane binds.
     pub control_tcp_port: u16,
-    /// The agent pairing-state file the LAN-edge auth reads. Injectable so a
-    /// test points it at a tempdir.
+    /// The agent pairing-state file the LAN-edge auth reads AND the pairing
+    /// routes read + write. Injectable so a test points it at a tempdir.
     pub pairing_path: PathBuf,
     /// The vehicle-state socket the status + telemetry routes read. Injectable so
     /// a test points it at a mock-IPC socket in a tempdir.
     pub state_socket: PathBuf,
+    /// The agent config (`/etc/ados/config.yaml`) the pairing-info route projects
+    /// for device identity, profile, and the radio peer. Injectable for tests.
+    pub config_path: PathBuf,
+    /// The WFB key directory (`/etc/ados/wfb`); the presence of `tx.key`/`rx.key`
+    /// is the pairing-info `radio_paired` signal. Injectable for tests.
+    pub wfb_key_dir: PathBuf,
+    /// The WFB bind-session sentinel (`/run/ados/bind-state.json`) the
+    /// pairing-info route folds into `bind_state`. Injectable for tests.
+    pub bind_state_path: PathBuf,
 }
 
 impl Default for DaemonPaths {
@@ -86,11 +98,26 @@ impl Default for DaemonPaths {
         // The state socket resolves under `ADOS_RUN_DIR` (the same override the
         // Python `ados.core.ipc` honours), defaulting to `/run/ados/state.sock`.
         let state_socket = default_state_socket();
+        // The config path honours `ADOS_CONFIG` (the same override the sibling
+        // crates use), defaulting to `/etc/ados/config.yaml`.
+        let config_path = std::env::var("ADOS_CONFIG")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from(config::CONFIG_YAML));
+        // The WFB key dir is fixed at `/etc/ados/wfb` (no env override in the
+        // Python source); injectable directly on `DaemonPaths` for tests.
+        let wfb_key_dir = PathBuf::from("/etc/ados/wfb");
+        // The bind-state sentinel resolves under `ADOS_RUN_DIR`, defaulting to
+        // `/run/ados/bind-state.json` (matching the Python `BIND_STATE_SENTINEL`).
+        let run_dir = std::env::var("ADOS_RUN_DIR").unwrap_or_else(|_| "/run/ados".to_string());
+        let bind_state_path = Path::new(&run_dir).join("bind-state.json");
         Self {
             control_socket,
             control_tcp_port,
             pairing_path,
             state_socket,
+            config_path,
+            wfb_key_dir,
+            bind_state_path,
         }
     }
 }
@@ -153,7 +180,16 @@ where
     // absent socket; an idle agent (no socket) leaves the snapshot empty, which
     // the routes degrade to rather than fail. The handle stops it on shutdown.
     let (state_client, state_handle) = StateIpcClient::spawn(paths.state_socket.clone());
-    let state = AppState::new(Arc::clone(&pairing), state_client);
+    // The on-disk paths the pairing routes read + write. The pairing-state file
+    // is the same one the LAN-edge auth reader watches, so the gate and the
+    // claim/unpair writers agree on one file.
+    let pairing_paths = PairingPaths {
+        config: paths.config_path.clone(),
+        pairing_json: paths.pairing_path.clone(),
+        wfb_key_dir: paths.wfb_key_dir.clone(),
+        bind_state: paths.bind_state_path.clone(),
+    };
+    let state = AppState::new(Arc::clone(&pairing), state_client, pairing_paths);
 
     // The Unix edge: the bare Router, no auth. The LAN edge: the same Router
     // wrapped with the rate-limit + auth layer keyed on the shared pairing

@@ -22,6 +22,17 @@ path = "src/main.rs"
 ados-protocol = { path = "../ados-protocol" }
 serde = { workspace = true }
 serde_json = { workspace = true }
+# YAML reader for the slice of /etc/ados/config.yaml the pairing-info route
+# projects (device identity, profile, the radio peer). The same reader the cloud
+# relay uses, so a config the Python agent wrote reads identically here.
+serde_norway = { workspace = true }
+# Random bytes for the pairing API key + pairing code the claim/unpair writers
+# mint, matching the Python `secrets` source in format (the bytes are random
+# either way; the encoding + length + charset match byte-for-byte).
+getrandom = { workspace = true }
+# URL-safe base64 (no padding) for the API key body, mirroring Python
+# `secrets.token_urlsafe`.
+base64 = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }

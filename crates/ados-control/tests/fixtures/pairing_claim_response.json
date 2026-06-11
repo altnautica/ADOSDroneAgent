@@ -1,0 +1,6 @@
+{
+  "api_key": "ados_PLACEHOLDER_RANDOM_PER_CLAIM",
+  "device_id": "abcdef1234567890",
+  "mdns_host": "ados-abcdef.local",
+  "name": "test-drone"
+}

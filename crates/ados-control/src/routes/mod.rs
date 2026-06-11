@@ -3,20 +3,21 @@
 //! The native control surface answers the same `/api/*` (+ `/healthz`) routes
 //! the FastAPI surface does, byte-identically, so the same GCS works against
 //! either. This chunk registers `/healthz`, `/api/version`, `/api/status`,
-//! `/api/telemetry`, and `/api/time`; the pairing/command routes land in later
-//! chunks.
+//! `/api/telemetry`, `/api/time`, and the four `/api/pairing/*` routes; the
+//! command routes land in a later chunk.
 //!
 //! Error bodies use FastAPI's `{"detail": "..."}` shape on 4xx/5xx, NOT the
 //! logd read-API's `{"error": {...}}` envelope, because the GCS already parses
 //! the agent's `{"detail"}` errors. The 404 fallback and the [`detail`] helper
 //! enforce that one shape everywhere on this surface.
 
+pub mod pairing;
 pub mod status;
 pub mod system;
 
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde_json::json;
 
@@ -46,6 +47,12 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/status", get(status::get_status))
         .route("/api/telemetry", get(status::get_telemetry))
         .route("/api/time", get(system::get_time))
+        // Pairing: the node-identity probe + the local pairing handshake. info /
+        // code / claim are public (the auth-exempt set); unpair requires the key.
+        .route("/api/pairing/info", get(pairing::get_pairing_info))
+        .route("/api/pairing/code", get(pairing::get_pairing_code))
+        .route("/api/pairing/claim", post(pairing::claim_pairing))
+        .route("/api/pairing/unpair", post(pairing::unpair))
         .fallback(not_found)
         .with_state(state)
 }
