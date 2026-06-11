@@ -4,6 +4,13 @@ Returns the camera list, recorder state, mediamtx state, and the
 derived WHEP URL. Two execution paths exist depending on whether the
 VideoPipeline lives in this process (single-process / bench dev) or
 in the dedicated ``ados-video`` service (production multi-process).
+
+Most of the payload is irreducibly live (a fresh HAL camera discovery, a
+mediamtx HTTP probe, a binary-dependency filesystem check, the request-Host
+URLs, in-process recorder state). The one store-backed slice is the nested
+``air_pipeline`` block on the single-process path: the store's sidecar tailer
+samples the same ``air-pipeline.json`` the block comes from, so the route reads
+that block from the store first and falls back to the live pipeline snapshot.
 """
 
 from __future__ import annotations
@@ -11,6 +18,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Request
 
 from ados.api.deps import get_agent_app
+from ados.api.sources.video import latest_air_pipeline
 
 from ._common import (
     _MEDIAMTX_HLS_PORT,
@@ -100,6 +108,24 @@ async def get_video_status(request: Request):
         }
 
     status = pipeline.get_status()
+
+    # Source the nested air_pipeline block from the store first. The store's
+    # sidecar tailer samples the same air-pipeline.json the live block is built
+    # from, so the store carries every field but the three monotonic-clock floats
+    # (started_at / last_state_change_at / last_buffer_at, which have no
+    # cross-process meaning) and the file-only updated_at_ms. Normalize the store
+    # block back to the in-process to_dict() shape: drop updated_at_ms and merge
+    # the three floats from the live block, so the substituted block is identical
+    # in shape to what the live pipeline returned. Falls back to the live block
+    # when the store is unreachable or the air pipeline is not running.
+    live_air = status.get("air_pipeline")
+    if isinstance(live_air, dict):
+        derived_air = await latest_air_pipeline()
+        if derived_air is not None:
+            derived_air.pop("updated_at_ms", None)
+            for key in ("started_at", "last_state_change_at", "last_buffer_at"):
+                derived_air[key] = live_air.get(key)
+            status["air_pipeline"] = derived_air
 
     # Construct WHEP + HLS URLs from mediamtx state. The dashboard
     # picks between them based on profile; ground prefers HLS to
