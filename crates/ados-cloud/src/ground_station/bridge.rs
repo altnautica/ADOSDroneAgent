@@ -116,12 +116,17 @@ impl UplinkSnapshot {
 
 /// The 30 s GS status payload posted to `{convex}/agent/status`. This is a
 /// SEPARATE, smaller document from the frozen agent heartbeat: it reports the
-/// relay's own forwarding state, not the full board/service enrichment. Fields
-/// mirror the Python `_convex_heartbeat_loop` payload (snake_case), with an
-/// optional `telemetry` block folded from the live vehicle state.
+/// relay's own forwarding state, not the full board/service enrichment.
+///
+/// `device_id` serializes as `deviceId` to match the `/agent/status` auth
+/// contract (the handler keys on top-level `body.deviceId`, the same key the
+/// drone heartbeat sends) and is the ground station's OWN device id — NOT the
+/// cloud owner id, which a prior cut wrongly put in a `drone_id` field the
+/// handler never read.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct GsHeartbeat {
-    pub drone_id: Option<String>,
+    #[serde(rename = "deviceId")]
+    pub device_id: String,
     pub uplink: String,
     pub mqtt_connected: bool,
     pub throttle_state: String,
@@ -397,7 +402,7 @@ impl CloudRelayBridge {
             .and_then(|s| s.latest())
             .map(fold_telemetry);
         Some(GsHeartbeat {
-            drone_id: self.drone_id.clone(),
+            device_id: self.device_id.clone(),
             uplink,
             mqtt_connected: self.mqtt_connected,
             throttle_state: self.throttle.as_str().to_string(),
@@ -947,13 +952,21 @@ mod tests {
         br.reconcile_uplink(Some(&snap));
         let hb = br.build_heartbeat(1234).unwrap();
         assert_eq!(hb.uplink, "eth0");
-        assert_eq!(hb.drone_id.as_deref(), Some("paired-drone"));
+        // The heartbeat carries the ground station's OWN device id, serialized
+        // as `deviceId` to match the /agent/status auth contract (not the cloud
+        // owner id the prior cut wrongly sent).
+        assert_eq!(hb.device_id, "dev1");
         assert_eq!(hb.throttle_state, "throttle_95");
         assert!(!hb.forwarding_video);
         assert!(hb.forwarding_telemetry);
         assert_eq!(hb.ts_ms, 1234);
         // No state source → no telemetry block.
         assert!(hb.telemetry.is_none());
+        // The wire payload keys the device on `deviceId` (the /agent/status auth
+        // contract the handler reads), never the old unread `drone_id`.
+        let wire = serde_json::to_value(&hb).unwrap();
+        assert_eq!(wire["deviceId"], "dev1");
+        assert!(wire.get("drone_id").is_none());
     }
 
     #[test]
