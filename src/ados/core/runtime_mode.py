@@ -97,9 +97,9 @@ _FLAG_GATED: dict[str, _FlagGated] = {
         profiles=("drone", "ground-station"),
     ),
     "groundlink": _FlagGated(
-        # Native-only: the packaged direct-role receive plane was deleted.
-        # The mesh relay/receiver roles keep a packaged module behind the
-        # groundlink-python-fallback marker, but that is not toggled here.
+        # Native-only on every role: the packaged direct-role receive plane and
+        # the mesh relay/receiver modules were all deleted, so there is no
+        # Python fallback to toggle.
         flag=None,
         binaries=("ados-groundlink",),
         profiles=("ground-station",),

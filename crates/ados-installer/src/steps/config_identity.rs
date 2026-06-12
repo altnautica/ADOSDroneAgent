@@ -393,25 +393,16 @@ fn provision_overlays(ctx: &Ctx, source: Option<&Path>) {
 /// packaged Python implementations. Deployed at `/etc/ados/CUTOVER`.
 const CUTOVER_NOTE_PATH: &str = "/etc/ados/CUTOVER";
 
-/// The body of the CUTOVER note (pure). The WFB transmit plane and the
-/// ground direct-role receive plane are native-only (their packaged
-/// predecessor was deleted). Only the mesh relay and receiver roles keep a
-/// packaged fallback behind a flag file; the note tells an operator how to
-/// flip those back.
+/// The body of the CUTOVER note (pure). Every WFB plane — the drone transmit
+/// plane, the ground direct-role receive plane, and the mesh relay/receiver
+/// roles — is native-only; the packaged Python predecessors were deleted.
 pub fn cutover_note_body() -> &'static str {
     "ADOS radio services run native binaries.\n\
 \n\
-The drone transmit plane and the ground direct-role receive plane are\n\
-native-only — there is no Python fallback for them.\n\
-\n\
-The mesh relay and receiver roles keep a packaged Python implementation as\n\
-an emergency fallback. To revert a mesh role to Python, create the fallback\n\
-flag and restart its unit:\n\
-\n\
-  touch /etc/ados/groundlink-python-fallback\n\
-  systemctl restart ados-wfb-relay ados-wfb-receiver\n\
-\n\
-Remove the flag file and restart the unit to return to the native binary.\n"
+The drone transmit plane, the ground direct-role receive plane, and the mesh\n\
+relay and receiver roles are all native-only — there is no Python fallback\n\
+for any of them. A missing or broken binary fails loud rather than silently\n\
+running a stale implementation.\n"
 }
 
 /// Deploy the operator CUTOVER note at `/etc/ados/CUTOVER`. Idempotent overwrite
@@ -682,16 +673,15 @@ mod tests {
     }
 
     #[test]
-    fn cutover_note_documents_only_the_mesh_fallback() {
+    fn cutover_note_is_native_only_for_every_plane() {
         let body = cutover_note_body();
-        // The drone transmit plane and the ground direct-role receive plane
-        // are native-only: their fallback flag and unit must NOT appear.
+        // Every plane is native-only now: no fallback flag of any kind may
+        // appear in the operator note (the mesh relay/receiver fallback was
+        // the last one, and it is gone).
         assert!(!body.contains("/etc/ados/wfb-python-fallback"));
+        assert!(!body.contains("/etc/ados/groundlink-python-fallback"));
+        assert!(!body.contains("python-fallback"));
         assert!(!body.contains("ados-wfb-rx"));
-        // The mesh relay/receiver roles keep their packaged fallback.
-        assert!(body.contains("/etc/ados/groundlink-python-fallback"));
-        assert!(body.contains("ados-wfb-relay"));
-        assert!(body.contains("ados-wfb-receiver"));
         // It must state the services run native binaries.
         assert!(body.to_lowercase().contains("native"));
         // No stale rust-enabled opt-in flag should leak into the operator note.

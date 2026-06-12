@@ -24,8 +24,8 @@ User=root
 # the binary is present before this unit starts, so a normal boot runs it
 # directly. There is no packaged fallback — the Python direct-role receive
 # plane was removed; a missing or broken binary fails loud. (The mesh
-# relay/receiver roles keep a packaged module behind
-# /etc/ados/groundlink-python-fallback; this direct unit does not.)
+# relay/receiver roles are native-only too; their packaged modules were
+# deleted, so no role keeps a Python fallback.)
 ExecStart=/opt/ados/bin/ados-groundlink
 Restart=on-failure
 RestartSec=5

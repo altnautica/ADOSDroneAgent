@@ -85,14 +85,17 @@ const GROUND_STATION_ENABLE_UNITS: &[&str] = &[
 /// and must never be pruned.
 const RETIRED_UNITS: &[&str] = &["ados-scripting.service", "ados-cloud-relay.service"];
 
-/// Cutover marker files retired by a default sense flip. The plugin host moved
-/// from an opt-IN marker (`plugin-host-rust-enabled`, native only when present)
-/// to an opt-OUT marker (`plugin-host-python-fallback`, native by default), so
-/// the old opt-in marker carries no meaning — the installer deletes it on every
+/// Cutover marker files retired by a default sense flip or a fallback deletion.
+/// The plugin host moved from an opt-IN marker (`plugin-host-rust-enabled`,
+/// native only when present) to an opt-OUT marker (`plugin-host-python-fallback`,
+/// native by default), so the old opt-in marker carries no meaning. The mesh
+/// relay/receiver `groundlink-python-fallback` marker is retired outright — its
+/// packaged Python implementation was deleted, so the roles are native-only and
+/// the marker no longer selects anything. The installer deletes these on every
 /// run (`prune_legacy_cutover_flags`). This list must never name an active
-/// marker (e.g. the fallback marker), or the installer would erase an operator's
-/// pinned choice on each upgrade.
-const RETIRED_CUTOVER_FLAGS: &[&str] = &["plugin-host-rust-enabled"];
+/// marker (e.g. an in-use fallback marker), or the installer would erase an
+/// operator's pinned choice on each upgrade.
+const RETIRED_CUTOVER_FLAGS: &[&str] = &["plugin-host-rust-enabled", "groundlink-python-fallback"];
 
 /// The other-profile teardown list, keyed by the profile being installed
 /// (`disable_other_profile_units`). On a GS rig the drone TX unit must not run;
