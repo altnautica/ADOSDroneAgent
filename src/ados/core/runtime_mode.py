@@ -37,16 +37,32 @@ _DEFAULT_BIN_DIR = Path("/opt/ados/bin")
 _DEFAULT_ETC_DIR = Path("/etc/ados")
 
 # Core services that run the native binary whenever it is present (no
-# flag gate). The first three fail loud when the binary is missing; the
-# router falls back to the packaged Python service. Either way the branch
-# is "native iff the binary is on disk", so the same presence check
-# decides the mode for all of them.
-_CORE_BINARIES: tuple[str, ...] = (
+# flag gate). "native iff the binary is on disk", so the same presence
+# check decides the mode for all of them. These are profile-scoped to match
+# the installer's per-profile binary catalog (crates/ados-installer/binaries.rs):
+# counting a binary the installer never fetches for this profile would pin the
+# aggregate at "hybrid" forever (ados-video is drone-only; a ground station that
+# is otherwise fully native would never report "native").
+_CORE_BINARIES_UNIVERSAL: tuple[str, ...] = (
     "ados-supervisor",
-    "ados-video",
     "ados-cloud",
     "ados-mavlink-router",
 )
+# Drone-only core (the air-side encode pipeline; a ground station receives
+# video through ados-mediamtx-gs, never ados-video).
+_CORE_BINARIES_DRONE: tuple[str, ...] = ("ados-video",)
+
+
+def _core_binaries_for(profile: str) -> tuple[str, ...]:
+    """The core binaries the installer fetches for ``profile``."""
+    if profile == "drone":
+        return _CORE_BINARIES_UNIVERSAL + _CORE_BINARIES_DRONE
+    return _CORE_BINARIES_UNIVERSAL
+
+
+# Every core binary across all profiles — used only by the
+# "is ANY native binary present" pre-cutover discriminator.
+_CORE_BINARIES: tuple[str, ...] = _CORE_BINARIES_UNIVERSAL + _CORE_BINARIES_DRONE
 
 
 class _FlagGated:
@@ -96,9 +112,13 @@ _FLAG_GATED: dict[str, _FlagGated] = {
         # deleted, so there is no Python fallback to toggle. The native ados-net
         # daemon always runs; the REST WiFi write paths forward to its command
         # socket. The manager classes stay (the REST read paths use them).
+        # Ground-station only — the installer fetches ados-net for GROUND only
+        # and the drone profile masks ados-uplink-router.service, so counting it
+        # on a drone (where the binary is never installed) would pin the drone's
+        # aggregate at "hybrid".
         flag=None,
         binaries=("ados-net",),
-        profiles=("drone", "ground-station"),
+        profiles=("ground-station",),
     ),
     "groundlink": _FlagGated(
         # Native-only on every role: the packaged direct-role receive plane and
@@ -225,8 +245,10 @@ def compute_runtime_mode(
         return "packaged"
 
     # Every applicable service contributes one native/not-native verdict.
-    # Core services are native iff their binary is present.
-    verdicts: list[bool] = [_bin_present(bdir, b) for b in _CORE_BINARIES]
+    # Core services are native iff their binary is present — scoped to the
+    # binaries the installer actually fetches for this profile (a binary it
+    # never fetches must not count as a non-native verdict).
+    verdicts: list[bool] = [_bin_present(bdir, b) for b in _core_binaries_for(profile)]
 
     for svc in _FLAG_GATED.values():
         if profile not in svc.profiles:

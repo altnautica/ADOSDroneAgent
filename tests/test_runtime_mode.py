@@ -17,6 +17,10 @@ from ados.core.runtime_mode import compute_runtime_mode, is_service_native
 
 # Core binaries that run native whenever present (no flag gate).
 _CORE = ("ados-supervisor", "ados-video", "ados-cloud", "ados-mavlink-router")
+# The core binaries the installer fetches for a ground station — ados-video is
+# drone-only (a GS receives video through ados-mediamtx-gs), so a GS that never
+# installs it must still be able to reach "native".
+_CORE_GS = ("ados-supervisor", "ados-cloud", "ados-mavlink-router")
 
 
 def _make_bin(bin_dir: Path, name: str) -> None:
@@ -87,21 +91,23 @@ def test_hybrid_when_flag_set_but_binary_missing(roots: tuple[Path, Path]) -> No
 
 
 def test_native_drone_all_applicable(roots: tuple[Path, Path]) -> None:
-    """Drone: core + radio + net + plugin-host + display native → native.
+    """Drone: core + radio + plugin-host + display native → native.
 
-    The drone profile excludes the GS-only services (groundlink, hid), so
-    they must not hold the drone back.
+    The drone profile excludes the GS-only services (net, groundlink, hid), so
+    they must not hold the drone back — and crucially ados-net is NOT present
+    here (the installer fetches it for the ground profile only), which must not
+    pin the drone at hybrid.
     """
     bin_dir, etc_dir = roots
     for b in _CORE:
         _make_bin(bin_dir, b)
-    for b in ("ados-radio", "ados-net", "ados-plugin-host",
+    for b in ("ados-radio", "ados-plugin-host",
               "ados-display", "ados-display-probe"):
         _make_bin(bin_dir, b)
-    # radio + net are native-only and display + plugin-host are opt-out: all
-    # native once their binaries are present, so none of them needs a marker.
-    # groundlink + hid binaries deliberately absent — they are not in the
-    # drone applicable set, so the drone is still native.
+    # radio is native-only and display + plugin-host are opt-out: all native once
+    # their binaries are present, so none of them needs a marker. net/groundlink/
+    # hid binaries deliberately absent — they are not in the drone applicable set,
+    # so the drone is still native.
     assert compute_runtime_mode("drone", bin_dir=bin_dir, etc_dir=etc_dir) == "native"
 
 
@@ -109,7 +115,9 @@ def test_gs_needs_groundlink_and_hid(roots: tuple[Path, Path]) -> None:
     """Ground station: the drone-native layout above is still hybrid for a
     GS because groundlink + hid are applicable there and not yet native."""
     bin_dir, etc_dir = roots
-    for b in _CORE:
+    # GS core does NOT include ados-video (drone-only) — a GS that never installs
+    # it must still be able to reach native.
+    for b in _CORE_GS:
         _make_bin(bin_dir, b)
     for b in ("ados-net", "ados-plugin-host", "ados-display", "ados-display-probe"):
         _make_bin(bin_dir, b)

@@ -603,10 +603,19 @@ async fn teardown_relay(
     if let Some(tx) = relay_shutdown.take() {
         let _ = tx.send(true);
     }
-    if let Some(handle) = relay_task.take() {
-        match tokio::time::timeout(Duration::from_secs(5), handle).await {
-            Ok(_) => {}
-            Err(_) => debug!("cloud_relay.relay_teardown_timeout"),
+    if let Some(mut handle) = relay_task.take() {
+        // Await by &mut so a timeout still leaves us owning the handle to abort
+        // it. `timeout(_, handle)` would consume the JoinHandle and merely DROP
+        // it on timeout — and dropping a JoinHandle detaches the task, it does
+        // not stop it, so a stalled relay (publisher wedged on a dead broker)
+        // would leak and could keep writing to the FC socket alongside its
+        // replacement.
+        if tokio::time::timeout(Duration::from_secs(5), &mut handle)
+            .await
+            .is_err()
+        {
+            handle.abort();
+            debug!("cloud_relay.relay_teardown_timeout_aborted");
         }
     }
 }

@@ -215,19 +215,23 @@ impl MavlinkMqttRelay {
             tracing::warn!(error = %e, "mavlink relay: rx subscribe failed");
         }
 
-        // FC->GCS: a bounded queue between the IPC frame stream and the
-        // publisher. The IPC reader pushes (drop-oldest on full); the publisher
-        // drains under the in-flight gate.
-        let (frame_tx, mut frame_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+        // FC->GCS: a BOUNDED channel between the IPC frame stream and the
+        // publisher. If the publisher stalls (a wedged broker / a teardown that
+        // has not yet aborted), an unbounded channel here would buffer FC frames
+        // without limit and OOM the process — the downstream BoundedPublishQueue
+        // only caps what the publisher has already pulled. The reader drops the
+        // NEWEST frame when the channel is full (recency is preserved by the
+        // drop-oldest BoundedPublishQueue the publisher drains into).
+        let (frame_tx, mut frame_rx) = mpsc::channel::<Vec<u8>>(QUEUE_MAXSIZE);
         let mut fc_frames = ipc.subscribe();
         let reader = tokio::spawn(async move {
             loop {
                 match fc_frames.recv().await {
-                    Ok(frame) => {
-                        if frame_tx.send(frame).is_err() {
-                            break;
-                        }
-                    }
+                    Ok(frame) => match frame_tx.try_send(frame) {
+                        Ok(()) => {}
+                        Err(mpsc::error::TrySendError::Full(_)) => {} // drop newest
+                        Err(mpsc::error::TrySendError::Closed(_)) => break,
+                    },
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 }
