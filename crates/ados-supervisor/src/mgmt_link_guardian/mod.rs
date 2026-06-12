@@ -349,9 +349,13 @@ impl MgmtLinkGuardian {
 
         let rungs = ladder::ladder_for(verdict, managed.transport);
         if self.rung_cursor >= rungs.len() {
-            // Every rung tried this episode, still unhealthy → exhausted.
-            self.emit_exhausted(&managed.iface, repairs_in_window);
-            return;
+            // Every rung was tried this pass. We only got here because the cap
+            // check above PASSED — the rolling window has headroom — so re-arm
+            // the ladder for another pass rather than staying exhausted forever.
+            // The `repairs_per_window` cap (handled above) is the real bound; as
+            // old repairs age out of the window, the guardian keeps re-attempting
+            // at the capped rate instead of going silent until the next reboot.
+            self.rung_cursor = 0;
         }
 
         // Run exactly ONE rung this tick. The next tick re-checks health and
@@ -389,6 +393,13 @@ impl MgmtLinkGuardian {
 
     #[cfg(target_os = "linux")]
     fn emit_exhausted(&mut self, iface: &str, repairs_in_window: u32) {
+        // Emit ONCE on entering the exhausted state, not on every 5 s tick for
+        // the life of the outage. `last_rung == Exhausted` means the previous
+        // tick already announced it and nothing has run since (a real repair
+        // rung resets `last_rung`, which re-arms a fresh announcement).
+        if self.last_rung == Some(RepairRung::Exhausted) {
+            return;
+        }
         self.events.emit(
             ladder::LINK_EXHAUSTED_KIND,
             ados_protocol::logd::Level::Warn,

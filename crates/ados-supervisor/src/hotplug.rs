@@ -92,7 +92,13 @@ struct Presence {
 
 /// RTL8812-family PIDs the hot-plug path treats as the WFB radio (the wider
 /// set the Python hot-plug router matched, a superset of the boot-detect set).
-const RTL_PIDS: [u16; 5] = [0x8812, 0x881A, 0x881B, 0x881C, 0xB812];
+/// MUST include every PID the boot-detect set (`hardware::WFB_IDS`) and the
+/// bootstrap probe (`profile_detect.PY`) match, or a hot-plug edge on an adapter
+/// the agent otherwise recognizes silently does nothing. `0xA81A` is the
+/// production RTL8812EU (the `0bda:a81a` shipped on the dev rigs); it was the
+/// missing one — present in `WFB_IDS` but dropped here, so unplug/replug of the
+/// primary adapter never triggered recovery.
+const RTL_PIDS: [u16; 6] = [0xA81A, 0x8812, 0x881A, 0x881B, 0x881C, 0xB812];
 const REALTEK_VID: u16 = 0x0BDA;
 
 fn radio_present() -> bool {
@@ -170,6 +176,21 @@ pub async fn run(tx: Sender<DevKind>, interval: Duration) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rtl_pids_include_every_boot_detect_pid() {
+        // The hot-plug radio match must be a SUPERSET of the boot-detect set
+        // (hardware::has_wfb_adapter's WFB_IDS) and the bootstrap probe, or an
+        // adapter the agent recognizes at boot is invisible to hot-plug
+        // recovery. 0xA81A is the production RTL8812EU (0bda:a81a) that was the
+        // dropped one. Pin the whole boot-detect PID set here.
+        for pid in [0xA81A, 0x8812, 0x881A] {
+            assert!(
+                RTL_PIDS.contains(&pid),
+                "RTL_PIDS must contain boot-detect PID {pid:#06x}"
+            );
+        }
+    }
 
     #[test]
     fn first_edge_restarts_repeats_within_window_coalesce() {

@@ -56,6 +56,14 @@ const REHOME_REENUM_STEP: Duration = Duration::from_millis(200);
 const SIDECAR_PATH: &str = "/run/ados/usb-rehome.json";
 #[cfg(target_os = "linux")]
 const WFB_STATS_PATH: &str = "/run/ados/wfb-stats.json";
+/// Max age of `wfb-stats.json` before its signals are treated as stale. The
+/// radio rewrites the sidecar on every ~1 Hz stats cycle, so a file older than
+/// this means the writer (the radio service) is stopped or crashed — its last
+/// `usb_degraded` / `rf_unverified` flags are frozen, and acting on them would
+/// keep authorizing USB rebinds against a radio that is no longer running. A
+/// stale sidecar reads as "no signals" (no rehome) rather than frozen-degraded.
+#[cfg(target_os = "linux")]
+const WFB_STATS_FRESH_CEILING: Duration = Duration::from_secs(30);
 /// The USB core driver's bind/unbind sysfs attributes.
 #[cfg(target_os = "linux")]
 const USB_UNBIND_PATH: &str = "/sys/bus/usb/drivers/usb/unbind";
@@ -461,9 +469,23 @@ async fn sysfs_write(path: &str, val: &str) -> std::io::Result<()> {
     tokio::fs::write(path, val).await
 }
 
-/// Read the rehome signals from the radio's `wfb-stats.json` sidecar.
+/// Read the rehome signals from the radio's `wfb-stats.json` sidecar. Returns
+/// `None` when the sidecar is absent, malformed, or STALE (older than
+/// [`WFB_STATS_FRESH_CEILING`]) — a frozen sidecar from a stopped/crashed radio
+/// must not keep authorizing USB rebinds with its last-written degraded flags.
 #[cfg(target_os = "linux")]
 async fn read_wfb_signals() -> Option<WfbSignals> {
+    // Freshness gate first: a writer that has stopped leaves the file's content
+    // frozen but its mtime fixed, so an mtime past the ceiling means "no live
+    // signals", not "the last signals are still true".
+    let age = tokio::fs::metadata(WFB_STATS_PATH)
+        .await
+        .ok()
+        .and_then(|m| m.modified().ok())
+        .and_then(|t| std::time::SystemTime::now().duration_since(t).ok());
+    if age.map(|a| a > WFB_STATS_FRESH_CEILING).unwrap_or(true) {
+        return None;
+    }
     let txt = tokio::fs::read_to_string(WFB_STATS_PATH).await.ok()?;
     let v: serde_json::Value = serde_json::from_str(&txt).ok()?;
     let iface = v.get("interface")?.as_str()?.to_string();

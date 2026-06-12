@@ -492,12 +492,21 @@ impl Supervisor {
         // supervisor quiesces the radio unit, rebinds the USB device, and brings
         // the unit back (its startup re-probes the adapter). The next decide()
         // re-checks the fresh stats to confirm. Cheap when the adapter is fine.
-        if let Some(plan) = self.usb_rehome.decide().await {
-            let unit = plan.unit;
-            self.stop_service(unit).await;
-            self.wait_for_stop(&[unit], Duration::from_secs(5)).await;
-            crate::usb_rehome::execute_rebind(&plan).await;
-            self.start_service(unit).await;
+        //
+        // Never rehome during a bind: the bind sequence owns the adapter (it
+        // stops the normal wfb unit and drives monitor mode + the key-transfer
+        // tunnel), so yanking the USB device or restarting the wfb unit under it
+        // would corrupt the handshake — the same exclusion `restart_blocked_by_bind`
+        // applies to ordinary restarts. Gating the whole stop/rebind/start
+        // sequence here also keeps the post-rebind start out of the bind window.
+        if !self.bind.is_active().await {
+            if let Some(plan) = self.usb_rehome.decide().await {
+                let unit = plan.unit;
+                self.stop_service(unit).await;
+                self.wait_for_stop(&[unit], Duration::from_secs(5)).await;
+                crate::usb_rehome::execute_rebind(&plan).await;
+                self.start_service(unit).await;
+            }
         }
 
         // Camera USB-recovery (force re-enumeration of an absent/wedged camera
