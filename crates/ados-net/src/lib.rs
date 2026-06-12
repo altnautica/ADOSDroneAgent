@@ -6,6 +6,7 @@
 //! (ModemManager1) and delegates its AT fallback to the Python service.
 
 pub mod cmd;
+pub mod cmdsock;
 pub mod data_cap;
 pub mod firewall;
 pub mod managers;
@@ -19,6 +20,7 @@ pub mod throttle;
 
 // Re-export the surface a consumer (or the daemon) reaches for.
 pub use cmd::{CmdOut, CmdRunner, TokioCmdRunner};
+pub use cmdsock::CmdState;
 pub use data_cap::{DataCapTracker, SysfsUsageSource, UsageSource};
 pub use firewall::{FirewallBackend, ShareUplinkFirewall};
 pub use managers::{

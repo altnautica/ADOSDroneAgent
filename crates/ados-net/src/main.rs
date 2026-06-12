@@ -158,6 +158,27 @@ async fn main() -> Result<()> {
         })
     };
 
+    // Operator WiFi-join/forget command socket. The REST `/network/client/*`
+    // handlers forward to this when the native daemon owns the uplink, so they
+    // never drive `nmcli` on `wlan0` in-process and race this daemon's WiFi
+    // manager for the radio. A dedicated manager instance owns the operator
+    // actions; at steady state it is idle (holds no lock, touches no nmcli), so
+    // it adds no management-link risk, and it shares the `wlan0` advisory file
+    // lock + the real system state with the router's WiFi manager so the two
+    // never both transition the radio.
+    let wifi_cmd = Arc::new(Mutex::new(WifiClientManager::new(runner.clone())));
+    let cmdsock_task = {
+        let state = ados_net::CmdState {
+            wifi: Arc::clone(&wifi_cmd),
+        };
+        tokio::spawn(async move {
+            if let Err(e) = ados_net::cmdsock::serve(state, ados_net::paths::wifi_cmd_sock()).await
+            {
+                tracing::warn!(error = %e, "wifi command socket exited");
+            }
+        })
+    };
+
     // Bring up the LAN-side AP and the USB-gadget tether. Both are best-effort:
     // a board with no wlan0 or no configfs logs and continues.
     let mut hostapd = HostapdManager::new(&device_id, None, 6, String::new(), runner.clone());
@@ -226,6 +247,7 @@ async fn main() -> Result<()> {
     usb_gadget.teardown().await;
     hostapd.stop().await;
     throttle.abort();
+    cmdsock_task.abort();
 
     Ok(())
 }

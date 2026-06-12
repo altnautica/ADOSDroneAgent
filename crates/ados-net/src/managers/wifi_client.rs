@@ -415,6 +415,29 @@ impl WifiClientManager {
         json!({"left": true, "previous_ssid": prev_ssid})
     }
 
+    /// Delete a saved NetworkManager connection profile by name. Removes the
+    /// stored credentials + the autoconnect profile so the agent never silently
+    /// rejoins on reboot; the active link drops as a side effect when the deleted
+    /// profile is the currently-active one. Mirrors `forget`. Stateless (`&self`,
+    /// no lock): deleting a saved profile does not change AP/STA radio ownership.
+    pub async fn forget(&self, connection_name: &str) -> Value {
+        if connection_name.is_empty() {
+            return json!({"forgot": false, "name": "", "error": "name_required"});
+        }
+        let out = self
+            .runner
+            .run(
+                &["nmcli", "connection", "delete", connection_name],
+                SYSTEMCTL_TIMEOUT,
+            )
+            .await;
+        if out.ok() {
+            json!({"forgot": true, "name": connection_name, "error": null})
+        } else {
+            json!({"forgot": false, "name": connection_name, "error": "nmcli_failed"})
+        }
+    }
+
     /// Current station status. Mirrors `status`.
     pub async fn status(&self) -> serde_json::Map<String, Value> {
         let list = self

@@ -196,20 +196,43 @@ async def get_network_client_scan() -> dict[str, Any]:
 
 @router.put("/network/client/join")
 async def put_network_client_join(req: WifiJoinRequest) -> dict[str, Any]:
-    """Join a WiFi network. 409 on AP mutex conflict without force."""
+    """Join a WiFi network. 409 on AP mutex conflict without force.
+
+    Forwards to the native uplink daemon's command socket when it owns net so
+    the REST process never drives nmcli on wlan0 and races the daemon's WiFi
+    manager for the radio.
+    """
     _gs._require_ground_profile()
 
-    try:
-        result = await _gs._wifi_client_manager().join(
-            ssid=req.ssid,
-            passphrase=req.passphrase,
-            force=bool(req.force),
-        )
-    except Exception as exc:
-        raise HTTPException(
-            status_code=500,
-            detail={"error": {"code": "E_WIFI_JOIN_FAILED", "message": str(exc)}},
-        ) from exc
+    from ados.core.runtime_mode import is_service_native
+
+    async def _join_via_manager() -> dict[str, Any]:
+        try:
+            return await _gs._wifi_client_manager().join(
+                ssid=req.ssid,
+                passphrase=req.passphrase,
+                force=bool(req.force),
+            )
+        except Exception as exc:
+            raise HTTPException(
+                status_code=500,
+                detail={"error": {"code": "E_WIFI_JOIN_FAILED", "message": str(exc)}},
+            ) from exc
+
+    if is_service_native("net"):
+        from ados.services.network import wifi_cmd_client
+
+        try:
+            result = await wifi_cmd_client.join(req.ssid, req.passphrase, bool(req.force))
+        except wifi_cmd_client.NetCmdUnavailableError:
+            result = await _join_via_manager()
+        except wifi_cmd_client.NetCmdError as exc:
+            raise HTTPException(
+                status_code=500,
+                detail={"error": {"code": "E_WIFI_JOIN_FAILED", "message": str(exc)}},
+            ) from exc
+    else:
+        result = await _join_via_manager()
 
     if isinstance(result, dict) and not result.get("joined"):
         err = str(result.get("error") or "")
@@ -236,8 +259,26 @@ async def put_network_client_join(req: WifiJoinRequest) -> dict[str, Any]:
 
 @router.delete("/network/client")
 async def delete_network_client() -> dict[str, Any]:
-    """Disconnect the current WiFi client connection."""
+    """Disconnect the current WiFi client connection.
+
+    Forwards to the native uplink daemon's command socket when it owns net.
+    """
     _gs._require_ground_profile()
+
+    from ados.core.runtime_mode import is_service_native
+
+    if is_service_native("net"):
+        from ados.services.network import wifi_cmd_client
+
+        try:
+            return await wifi_cmd_client.leave()
+        except wifi_cmd_client.NetCmdUnavailableError:
+            pass  # native flag set but socket down → packaged fallback below
+        except wifi_cmd_client.NetCmdError as exc:
+            raise HTTPException(
+                status_code=500,
+                detail={"error": {"code": "E_WIFI_LEAVE_FAILED", "message": str(exc)}},
+            ) from exc
     try:
         return await _gs._wifi_client_manager().leave()
     except Exception as exc:

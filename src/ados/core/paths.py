@@ -36,6 +36,12 @@ PAIRING_SOCK = ADOS_RUN_DIR / "pairing.sock"
 # Python manager owns the same knobs in-process otherwise.
 WFB_CMD_SOCK = ADOS_RUN_DIR / "wfb-cmd.sock"
 
+# Operator WiFi-join/forget command socket served by the native ``ados-net``
+# uplink daemon. The REST `/network/client/*` handlers forward to this when the
+# native daemon owns the uplink, so they never drive `nmcli` on `wlan0`
+# in-process and race the daemon's WiFi manager for the radio.
+WIFI_CMD_SOCK = ADOS_RUN_DIR / "wifi-cmd.sock"
+
 # Ingest socket for the local logging and telemetry store. The store's
 # writer process binds this; every producer (the native services and this
 # Python agent) connects and ships length-prefixed msgpack frames. The

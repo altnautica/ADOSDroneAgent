@@ -58,3 +58,14 @@ pub fn gs_uplink_json() -> &'static Path {
 pub fn uplink_active_flag() -> &'static Path {
     Path::new(UPLINK_ACTIVE_FLAG)
 }
+
+/// Operator command socket for the WiFi-client uplink (`WIFI_CMD_SOCK`). The
+/// REST `/network/client/join`/`forget` handlers forward to this when the native
+/// daemon owns the uplink, so they never drive `nmcli` on `wlan0` in-process and
+/// race the daemon's WiFi manager. Mirrors the radio's `wfb-cmd.sock`.
+pub const WIFI_CMD_SOCK: &str = "/run/ados/wifi-cmd.sock";
+
+/// Build the canonical `WIFI_CMD_SOCK` path.
+pub fn wifi_cmd_sock() -> &'static Path {
+    Path::new(WIFI_CMD_SOCK)
+}
