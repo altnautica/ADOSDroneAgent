@@ -367,15 +367,15 @@ impl BindOrchestrator {
             .await
             .ok();
 
-        // Restore the WFB injection adapter to a clean NetworkManager-managed
-        // state before the bind unit starts. The vendored wfb-ng `wfb-server`
-        // aborts its init when `nmcli device show <iface>` cannot find the
-        // device — exactly the case when the ground-station receive plane left
-        // the RTL in monitor mode on stop (monitor-type interfaces are not
-        // enumerated by NetworkManager). The drone radio restores managed on its
-        // own shutdown; the GS receive plane does not, so heal it here at the
-        // single bind choke point (idempotent and harmless on the drone).
-        restore_injection_iface_managed().await;
+        // Put the WFB injection adapter into NetworkManager-enumerable monitor
+        // mode before the bind unit starts. The vendored wfb-ng `wfb-server`
+        // aborts its init when `nmcli device show <iface>` cannot find the device
+        // — the case when the adapter is in managed mode, up with no carrier,
+        // which NetworkManager does not enumerate. A monitor-type iface is listed
+        // as `(unmanaged)` regardless of carrier, the state the bind unit needs
+        // and sets next anyway, so this prepares both the drone and the ground
+        // node alike (idempotent).
+        prepare_injection_iface_for_bind().await;
 
         self.set_state(BindState::OpeningTunnel).await;
 
@@ -726,34 +726,45 @@ pub fn read_sentinel_active() -> bool {
         .unwrap_or(false)
 }
 
-/// Restore the WFB injection adapter(s) to NetworkManager-managed mode so the
-/// vendored wfb-ng `wfb-server` (the bind unit) can enumerate the device via
-/// `nmcli device show` instead of aborting. Mirrors the drone radio's
-/// shutdown-time `set_managed_mode`, but applied at the bind choke point so it
-/// also heals the ground-station receive plane, which does not restore managed
-/// on its own stop and would otherwise leave the RTL in monitor mode (a state
-/// NetworkManager does not enumerate, so wfb-server's pre-check aborts).
-/// Best-effort: each step may fail (already managed, or a tool absent), and a
-/// missing adapter is a no-op.
+/// Put the WFB injection adapter(s) into NetworkManager-enumerable MONITOR mode
+/// so the vendored wfb-ng `wfb-server` (the bind unit) can find the device via
+/// its `nmcli device show <iface>` init pre-check instead of aborting.
+///
+/// NetworkManager does NOT enumerate a managed-mode wifi iface that is up with no
+/// carrier (no AP to associate to) — it is absent from `nmcli device show`, so
+/// the pre-check returns "not found" and aborts. NM DOES list a monitor-type
+/// iface as `(unmanaged)` regardless of carrier, and monitor is the mode the bind
+/// unit sets next anyway, so the drone and the ground-station receive plane both
+/// reach the pre-check identically NM-visible. Mirrors the radio's proven
+/// non-muting form: `iw dev <if> set monitor none` initialises the PHY so it
+/// radiates, unlike `iw <if> set type monitor`, which leaves the RTL8812EU pinned
+/// at the muted txpower floor (-100 dBm, carrier down). Best-effort + idempotent;
+/// a missing adapter is a no-op, and the `is_injection` filter never touches the
+/// operator's management link.
 #[cfg(target_os = "linux")]
-async fn restore_injection_iface_managed() {
+async fn prepare_injection_iface_for_bind() {
     let candidates = crate::mgmt_link_guardian::detection::collect_candidates().await;
     for c in candidates
         .iter()
         .filter(|c| c.is_injection && !c.is_virtual)
     {
         let iface = c.name.as_str();
+        // Release from NetworkManager, then bring the iface into monitor mode.
+        let _ = run_iface_cmd("nmcli", &["dev", "set", iface, "managed", "no"]).await;
         let _ = run_iface_cmd("ip", &["link", "set", iface, "down"]).await;
-        let _ = run_iface_cmd("iw", &[iface, "set", "type", "managed"]).await;
+        // `set monitor none` is primary (it initialises the PHY un-muted); the
+        // `set type monitor` form is the fallback for any adapter that rejects it.
+        if !run_iface_cmd("iw", &["dev", iface, "set", "monitor", "none"]).await {
+            let _ = run_iface_cmd("iw", &[iface, "set", "type", "monitor"]).await;
+        }
         let _ = run_iface_cmd("ip", &["link", "set", iface, "up"]).await;
-        let _ = run_iface_cmd("nmcli", &["dev", "set", iface, "managed", "yes"]).await;
-        tracing::info!(iface, "bind_restored_injection_iface_managed");
+        tracing::info!(iface, "bind_prepared_injection_iface");
     }
 }
 
-/// Off-Linux dev hosts have no injection adapter to restore.
+/// Off-Linux dev hosts have no injection adapter to prepare.
 #[cfg(not(target_os = "linux"))]
-async fn restore_injection_iface_managed() {}
+async fn prepare_injection_iface_for_bind() {}
 
 /// Run a short interface-management command, bounded so a hung tool never stalls
 /// the bind. Returns whether it exited successfully.
