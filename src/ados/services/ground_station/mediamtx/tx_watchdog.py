@@ -102,6 +102,24 @@ async def monitor_ffmpeg(
         except TimeoutError:
             pass
         if not manager.ffmpeg_alive():
+            # Mediamtx-core liveness FIRST: this loop only ever supervised the
+            # ffmpeg ingest sidecar, never the mediamtx core that owns the RTSP
+            # port. If the core crashed/OOMed, ffmpeg's push socket breaks and
+            # restart_ffmpeg() can never re-bind (nothing rebinds 8554), so the
+            # loop respawns ffmpeg forever and the ground path stays dark. Bring
+            # the core back before the ffmpeg restart so the publisher has a
+            # port to push to.
+            if not manager._core.is_running():
+                slog.warning("ground_mediamtx_core_dead_restarting")
+                await manager._core.stop()
+                if not await manager._core.start():
+                    slog.error(
+                        "ground_mediamtx_core_restart_failed",
+                        backoff_seconds=backoff,
+                    )
+                    backoff = min(backoff * 2, max_backoff)
+                    continue
+                slog.info("ground_mediamtx_core_restarted")
             # Cold-boot gate: ffmpeg's SDP probe exits with "Output
             # file does not contain any stream" the moment its probe
             # window ends with zero inbound packets. If wfb_rx hasn't
