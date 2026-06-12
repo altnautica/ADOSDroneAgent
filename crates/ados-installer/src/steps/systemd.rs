@@ -1441,13 +1441,15 @@ mod tests {
 
     #[test]
     fn retired_cutover_flags_name_the_opt_in_marker_not_an_active_one() {
-        // The legacy opt-in marker is pruned on upgrade.
+        // The legacy opt-in markers are pruned on upgrade — their services flipped
+        // to opt-out, so the old enable flag carries no meaning.
         assert!(RETIRED_CUTOVER_FLAGS.contains(&"plugin-host-rust-enabled"));
-        // An active marker must never be in the retired set, or the installer
-        // would erase an operator's pinned choice on each run.
+        assert!(RETIRED_CUTOVER_FLAGS.contains(&"net-rust-enabled"));
+        // An active fallback marker must never be in the retired set, or the
+        // installer would erase an operator's pinned choice on each run.
         assert!(!RETIRED_CUTOVER_FLAGS.contains(&"plugin-host-python-fallback"));
         assert!(!RETIRED_CUTOVER_FLAGS.contains(&"display-python-fallback"));
-        assert!(!RETIRED_CUTOVER_FLAGS.contains(&"net-rust-enabled"));
+        assert!(!RETIRED_CUTOVER_FLAGS.contains(&"net-python-fallback"));
     }
 
     #[test]
