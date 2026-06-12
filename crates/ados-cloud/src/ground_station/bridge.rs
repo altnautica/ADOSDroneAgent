@@ -114,19 +114,36 @@ impl UplinkSnapshot {
     }
 }
 
-/// The 30 s GS status payload posted to `{convex}/agent/status`. This is a
-/// SEPARATE, smaller document from the frozen agent heartbeat: it reports the
-/// relay's own forwarding state, not the full board/service enrichment.
+/// The 30 s GS status payload posted to `{convex}/agent/status`. A smaller
+/// document than the drone heartbeat: it adds the relay's own forwarding state
+/// on top of the minimum status-mutation contract, not the full board/service
+/// enrichment.
 ///
-/// `device_id` serializes as `deviceId` to match the `/agent/status` auth
-/// contract (the handler keys on top-level `body.deviceId`, the same key the
-/// drone heartbeat sends) and is the ground station's OWN device id — NOT the
-/// cloud owner id, which a prior cut wrongly put in a `drone_id` field the
-/// handler never read.
+/// The whole struct serializes `camelCase` so every field lands in the status
+/// mutation in its canonical shape (`mqttConnected`, `throttleState`,
+/// `uptimeSeconds`, …) — the `/agent/status` handler passes top-level fields
+/// through un-remapped, so a snake_case field would be rejected by the
+/// validator. `device_id` → `deviceId` is the auth key the handler reads (the
+/// ground station's OWN device id, never the cloud owner id a prior cut wrongly
+/// put in an unread `drone_id` field). `version`, `uptimeSeconds`, and `profile`
+/// satisfy the same status-mutation contract a drone meets, so the ground
+/// station registers as a first-class `ground-station` node in the fleet.
 #[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct GsHeartbeat {
-    #[serde(rename = "deviceId")]
     pub device_id: String,
+    /// The agent version (this crate's package version), so the GS row carries
+    /// an agent version like a drone. Required by the status mutation.
+    pub version: String,
+    /// Seconds since the bridge started. Required by the status mutation.
+    pub uptime_seconds: i64,
+    /// Wire-contract profile (`ground-station`) so the fleet discriminates this
+    /// row as a ground-station node. The GS bridge runs only on that profile.
+    pub profile: String,
+    /// The mesh role (`direct` | `relay` | `receiver`) when known; omitted while
+    /// the bridge has no role to report (the receive plane owns that signal).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
     pub uplink: String,
     pub mqtt_connected: bool,
     pub throttle_state: String,
@@ -218,6 +235,9 @@ pub struct CloudRelayBridge {
     // The earliest time a fresh relay may be spawned. Set from the backoff ladder
     // after a fast exit so a broken seam does not hot-loop the respawn.
     relay_retry_at: Option<std::time::Instant>,
+    // When this bridge was constructed, the source of the heartbeat's
+    // `uptimeSeconds` (the status mutation requires it, the same as a drone).
+    started: std::time::Instant,
 }
 
 impl CloudRelayBridge {
@@ -248,6 +268,7 @@ impl CloudRelayBridge {
             backoff: Backoff::new(),
             relay_started_at: None,
             relay_retry_at: None,
+            started: std::time::Instant::now(),
         }
     }
 
@@ -403,6 +424,10 @@ impl CloudRelayBridge {
             .map(fold_telemetry);
         Some(GsHeartbeat {
             device_id: self.device_id.clone(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            uptime_seconds: self.started.elapsed().as_secs() as i64,
+            profile: "ground-station".to_string(),
+            role: None,
             uplink,
             mqtt_connected: self.mqtt_connected,
             throttle_state: self.throttle.as_str().to_string(),
@@ -963,10 +988,23 @@ mod tests {
         // No state source → no telemetry block.
         assert!(hb.telemetry.is_none());
         // The wire payload keys the device on `deviceId` (the /agent/status auth
-        // contract the handler reads), never the old unread `drone_id`.
+        // contract the handler reads), never the old unread `drone_id`, and the
+        // whole document is camelCase so it lands in the status mutation in its
+        // canonical shape (the handler does not remap top-level fields).
         let wire = serde_json::to_value(&hb).unwrap();
         assert_eq!(wire["deviceId"], "dev1");
         assert!(wire.get("drone_id").is_none());
+        assert_eq!(wire["throttleState"], "throttle_95");
+        assert_eq!(wire["forwardingVideo"], false);
+        assert_eq!(wire["forwardingTelemetry"], true);
+        assert!(wire.get("mqtt_connected").is_none());
+        // The status-mutation contract a drone meets: version + uptimeSeconds +
+        // a discriminating profile, so the GS registers as a ground-station node.
+        assert_eq!(wire["profile"], "ground-station");
+        assert!(wire.get("version").and_then(|v| v.as_str()).is_some());
+        assert!(wire.get("uptimeSeconds").and_then(|v| v.as_i64()).is_some());
+        // No role to report yet → the field is omitted, not null.
+        assert!(wire.get("role").is_none());
     }
 
     #[test]
