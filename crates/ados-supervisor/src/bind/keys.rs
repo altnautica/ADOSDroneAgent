@@ -274,12 +274,36 @@ pub async fn apply_keypair(
 ) -> Result<PairResult, String> {
     validate_blob(blob)?;
 
+    // Stop the consumer unit BEFORE writing the key, and confirm it actually
+    // went inactive. The prior write-then-restart order raced the supervisor's
+    // own service-recovery loop: a `systemctl restart` issued while a start job
+    // is already in flight coalesces into it, leaving a process that loaded the
+    // OLD key running — bench-observed as a ground station whose wfb_rx started
+    // one second before the new rx.key landed and silently decoded nothing.
+    // stop → confirm-inactive → write → start guarantees any process running
+    // after the start read the new key.
+    let unit = role.normal_unit();
+    let _ = crate::systemctl::stop(unit).await;
+    let mut confirmed_inactive = false;
+    for _ in 0..10 {
+        if !crate::systemctl::is_active(unit).await {
+            confirmed_inactive = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+    if !confirmed_inactive {
+        tracing::warn!(unit, "wfb_unit_still_active_before_key_write");
+    }
+
     let target = Path::new(role.key_path());
     atomic_write(target, blob, 0o600).map_err(|e| format!("key write failed: {e}"))?;
     let fingerprint = read_public_fingerprint(target).ok();
     let paired_at = iso_now();
 
     // Disarm auto_pair UNCONDITIONALLY (see module doc) — never gate on peer id.
+    // Safe now that the orchestrator's peer-evidence gate keeps an unverified
+    // (solo/phantom) bind from ever reaching this apply.
     persist_pair_state(
         Path::new(super::CONFIG_YAML),
         Path::new(super::CONFIG_LOCK_PATH),
@@ -299,11 +323,12 @@ pub async fn apply_keypair(
         tracing::warn!(error = %e, "setup_complete_sentinel_failed");
     }
 
-    // restart over reload: the prompt path to a spawn cycle that loads the key.
-    if !crate::systemctl::restart(role.normal_unit()).await {
+    // Start (not restart): the unit was stopped above, so this always spawns a
+    // fresh process tree that reads the key written this session.
+    if !crate::systemctl::start(unit).await {
         tracing::info!(
-            unit = role.normal_unit(),
-            "wfb_unit_restart_skipped (unit may not be active yet)"
+            unit,
+            "wfb_unit_start_skipped (unit may not be installed yet)"
         );
     }
 

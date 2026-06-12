@@ -449,6 +449,12 @@ impl BindOrchestrator {
             bind_iface.to_string(),
         )));
 
+        // Reference point for the drone-side key-freshness gate: the upstream
+        // key must have been deposited AFTER this instant to count as this
+        // session's transfer (a leftover from any earlier bind has an older
+        // mtime and must not satisfy the success check).
+        let session_start = std::time::SystemTime::now();
+
         // Stages 4+5 share ONE budget (matches Python: splitting them would
         // change the failure phase the GCS badge reports on timeout).
         let blob = match tokio::time::timeout(KEY_TRANSFER_TIMEOUT, async {
@@ -457,9 +463,50 @@ impl BindOrchestrator {
             } else {
                 self.run_gs_client().await?;
             }
+
+            // ── Peer-evidence gate ──────────────────────────────────────────
+            // The wire protocol exiting 0 is NOT proof a peer participated
+            // (Rule 37: setting a state is not proof of the state). Two
+            // observed phantoms: a stale roaming client EOFs the drone's
+            // listener conversation (socat exits 0, the stale upstream key
+            // passes a bare existence check), and a stale local listener lets
+            // a client complete the handshake against its own box without a
+            // single frame crossing the radio. Two independent proofs:
+            //
+            // 1. Decoded peer traffic on the bind TUN this session — the TUN RX
+            //    counter only advances for frames that passed FEC + decryption
+            //    in wfb_rx, and a local TCP loopback never traverses the TUN.
+            let frames_seen = {
+                let g = self.session.lock().await;
+                g.as_ref().and_then(|s| s.last_frame_at).is_some()
+            };
+            if !frames_seen {
+                self.set_peer_verified(Some(false)).await;
+                return Err(BindError::with_phase(
+                    "bind protocol completed but no peer traffic was decoded on \
+                     the bind tunnel — refusing to pair without a real peer",
+                    "transferring_keys",
+                ));
+            }
+
+            // 2. Drone only: the upstream key file must have been deposited by
+            //    THIS session's transfer (the wire protocol copies it fresh on
+            //    a real exchange). A pre-existing file from an earlier bind
+            //    means the conversation ended without a key transfer.
+            let upstream = role.upstream_key();
+            if role == BindRole::Drone && !upstream_key_fresh(Path::new(upstream), session_start) {
+                self.set_peer_verified(Some(false)).await;
+                return Err(BindError::with_phase(
+                    format!(
+                        "bind protocol completed but {upstream} was not \
+                         refreshed by this session — no key was transferred"
+                    ),
+                    "transferring_keys",
+                ));
+            }
+            self.set_peer_verified(Some(true)).await;
             self.set_state(BindState::ApplyingKeys).await;
 
-            let upstream = role.upstream_key();
             if !Path::new(upstream).is_file() {
                 return Err(BindError::with_phase(
                     format!(
@@ -700,6 +747,16 @@ impl BindOrchestrator {
         }
     }
 
+    async fn set_peer_verified(&self, verified: Option<bool>) {
+        {
+            let mut g = self.session.lock().await;
+            if let Some(s) = g.as_mut() {
+                s.peer_verified = verified;
+            }
+        }
+        self.write_sentinel().await;
+    }
+
     async fn set_finished(&self) {
         let mut g = self.session.lock().await;
         if let Some(s) = g.as_mut() {
@@ -720,6 +777,16 @@ impl BindOrchestrator {
 /// Background poller: stamp `last_frame_at` when the bind TUN RX counter
 /// advances; self-exits when the session leaves the active set. Mirrors
 /// `_poll_peer_presence_forever`.
+/// True when `path` exists and its mtime is at or after `since` — i.e. the
+/// upstream key was deposited by THIS bind session's wire transfer, not left
+/// over from an earlier one. Total: any metadata error reads as not-fresh.
+fn upstream_key_fresh(path: &Path, since: std::time::SystemTime) -> bool {
+    std::fs::metadata(path)
+        .and_then(|m| m.modified())
+        .map(|t| t >= since)
+        .unwrap_or(false)
+}
+
 async fn peer_poll(session: Arc<Mutex<Option<BindSession>>>, iface: String) {
     let mut last: Option<u64> = None;
     loop {
@@ -949,6 +1016,26 @@ async fn iface_nm_enumerable(iface: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn upstream_key_fresh_rejects_stale_missing_and_accepts_fresh() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = dir.path().join("drone.key");
+
+        // Missing → not fresh (a conversation that never transferred a key).
+        let t0 = std::time::SystemTime::now();
+        assert!(!upstream_key_fresh(&key, t0));
+
+        // Written BEFORE the session start → stale leftover, not fresh.
+        std::fs::write(&key, b"old").unwrap();
+        let after_write = std::time::SystemTime::now() + std::time::Duration::from_secs(2);
+        assert!(!upstream_key_fresh(&key, after_write));
+
+        // Written AFTER the session start → this session's transfer.
+        let before_write = std::time::SystemTime::now() - std::time::Duration::from_secs(2);
+        std::fs::write(&key, b"new").unwrap();
+        assert!(upstream_key_fresh(&key, before_write));
+    }
 
     #[test]
     fn parse_iface_mode_reads_the_type_line() {

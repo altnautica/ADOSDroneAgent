@@ -108,7 +108,18 @@ provision_wfb_bind_artifacts() {
     # straight to its own down/monitor/up. Point the bind profiles at it (the
     # vendored env files default WIFIBROADCAST_CFG to /dev/null, which would
     # otherwise mask this file). Idempotent.
-    printf '%s\n' '[common]' 'set_nm_unmanaged = False' > /etc/wifibroadcast.cfg
+    #
+    # wifi_region pins the regulatory domain wfb-server asserts when a bind
+    # profile starts. The vendored master.cfg default is 'BO', and init_wlans
+    # runs `iw reg set <region>` unconditionally — so every bind start would
+    # set the GLOBAL cfg80211 domain to BO, which kills the onboard management
+    # WiFi's data path (associated + leased but gateway ARP INCOMPLETE) until
+    # the agent's regulatory reconciler wins the domain back. US permits both
+    # the ch149/165 operating/rendezvous channels and matches the reconciler's
+    # pinned domain, so the bind no longer fights it. Note: a successful bind
+    # pushes this file from the ground station to the drone (the wire protocol
+    # transfers wifibroadcast.cfg), so both rigs converge on it by design.
+    printf '%s\n' '[common]' 'set_nm_unmanaged = False' "wifi_region = 'US'" > /etc/wifibroadcast.cfg
     chmod 0644 /etc/wifibroadcast.cfg
     for _be in /etc/default/wifibroadcast.drone_bind /etc/default/wifibroadcast.gs_bind; do
         if [ -f "${_be}" ] && grep -q 'WIFIBROADCAST_CFG=/dev/null' "${_be}" 2>/dev/null; then

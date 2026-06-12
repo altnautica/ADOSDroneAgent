@@ -122,6 +122,12 @@ pub struct BindSession {
     /// The injection-iface monitor-mode preparation result for this session,
     /// stamped once the prep runs (None until then). Additive on the sentinel.
     pub bind_precheck: Option<BindPrecheck>,
+    /// Whether the success path proved a real peer participated (decoded
+    /// traffic on the bind tunnel, and for the drone a key file freshly
+    /// deposited this session). None until the gate runs; false is stamped on
+    /// the no-peer failure so the UI can name the cause. Additive on the
+    /// sentinel.
+    pub peer_verified: Option<bool>,
 }
 
 impl BindSession {
@@ -142,6 +148,7 @@ impl BindSession {
             last_frame_at: None,
             last_rssi_dbm: None,
             bind_precheck: None,
+            peer_verified: None,
         }
     }
 
@@ -181,6 +188,11 @@ impl BindSession {
             "bind_precheck_reason": self.bind_precheck.as_ref().and_then(|p| p.reason),
             "injection_mode": self.bind_precheck.as_ref().map(|p| p.injection_mode.clone()),
             "nm_enumerable": self.bind_precheck.as_ref().map(|p| p.nm_enumerable),
+            // Whether the success gate proved a real peer (additive; null until
+            // the gate runs). A Paired session always carries true; a failed
+            // session carries false when the wire protocol completed without
+            // evidence of a peer (the solo/self-bind case).
+            "peer_verified": self.peer_verified,
         })
     }
 }
@@ -284,6 +296,18 @@ mod tests {
         assert!(v.get("bind_precheck_ok").is_some());
         assert!(v["bind_precheck_ok"].is_null());
         assert!(v["injection_mode"].is_null());
+        // peer_verified is present and null until the success gate runs.
+        assert!(v.get("peer_verified").is_some());
+        assert!(v["peer_verified"].is_null());
+    }
+
+    #[test]
+    fn to_json_renders_peer_verified_when_stamped() {
+        let mut s = BindSession::new(BindRole::Gs, "auto", None);
+        s.peer_verified = Some(false);
+        assert_eq!(s.to_json()["peer_verified"], serde_json::json!(false));
+        s.peer_verified = Some(true);
+        assert_eq!(s.to_json()["peer_verified"], serde_json::json!(true));
     }
 
     #[test]

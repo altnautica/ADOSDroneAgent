@@ -25,13 +25,17 @@ pub fn drone_server_args() -> Vec<String> {
     ]
 }
 
-/// GS-side socat: connect to the drone's listener with an effectively-infinite
-/// retry (24h), handing off to the upstream client wrapper. Mirrors
-/// `_run_gs_client`'s command exactly.
+/// GS-side socat: connect to the drone's listener, handing off to the upstream
+/// client wrapper. The connect retry is bounded to the key-transfer budget
+/// (95 ≳ 90 s) rather than the predecessor's 24 h: a client that leaks past its
+/// session (a missed process-group kill, an aborted window) must die on its own
+/// instead of roaming for a day and phantom-connecting into a LATER drone bind
+/// window — a half-dead connection EOFs the drone's listener conversation,
+/// which exits 0 and used to mark that unrelated session Paired.
 pub fn gs_client_args() -> Vec<String> {
     vec![
         "-d".into(),
-        format!("TCP4:{DRONE_BIND_PEER_IP}:{BIND_TCP_PORT},crlf,retry=86400,interval=1"),
+        format!("TCP4:{DRONE_BIND_PEER_IP}:{BIND_TCP_PORT},crlf,retry=95,interval=1"),
         format!("EXEC:{WFB_BIND_CLIENT_SH}"),
     ]
 }
@@ -156,12 +160,12 @@ mod tests {
     }
 
     #[test]
-    fn gs_client_args_match_python() {
+    fn gs_client_retry_is_bounded_to_the_session_budget() {
         assert_eq!(
             gs_client_args(),
             vec![
                 "-d".to_string(),
-                "TCP4:10.5.99.2:5555,crlf,retry=86400,interval=1".to_string(),
+                "TCP4:10.5.99.2:5555,crlf,retry=95,interval=1".to_string(),
                 "EXEC:/usr/bin/wfb_bind_client.sh".to_string(),
             ]
         );
