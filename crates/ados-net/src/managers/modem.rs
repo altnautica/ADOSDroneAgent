@@ -104,6 +104,15 @@ pub struct ModemConfig {
 }
 
 impl ModemConfig {
+    /// Load the persisted modem config from `path`, falling back to defaults on
+    /// any read/parse error (an absent sidecar is the no-modem-configured case).
+    pub fn load(path: &std::path::Path) -> Self {
+        match std::fs::read(path) {
+            Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_default(),
+            Err(_) => Self::default(),
+        }
+    }
+
     /// Render byte-identically to Python `json.dumps({apn, cap_gb, enabled})`
     /// (default `", "` / `": "` separators, key order apn → cap_gb → enabled,
     /// floats rendered the same way serde and Python both render them, no
@@ -607,10 +616,7 @@ fn now_secs() -> f64 {
 }
 
 fn load_config(path: &Path) -> ModemConfig {
-    match std::fs::read(path) {
-        Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_default(),
-        Err(_) => ModemConfig::default(),
-    }
+    ModemConfig::load(path)
 }
 
 fn config_to_json(cfg: &ModemConfig) -> Value {

@@ -23,7 +23,7 @@ use tokio::sync::Mutex;
 use ados_net::cmd::TokioCmdRunner;
 use ados_net::data_cap::{DataCapTracker, SysfsUsageSource, DATA_CAP_INTERVAL};
 use ados_net::managers::{
-    EthernetManager, HostapdManager, ModemManager, UsbGadgetManager, WifiClientManager,
+    EthernetManager, HostapdManager, ModemConfig, ModemManager, UsbGadgetManager, WifiClientManager,
 };
 use ados_net::router::failover;
 use ados_net::sysfs::detect_ethernet_iface;
@@ -141,17 +141,42 @@ async fn main() -> Result<()> {
     // Cellular data-cap tracker: polls sysfs counters at 60 s and publishes
     // `data_cap_threshold` events on the router's bus (consumed by the throttle
     // bridge above). The active-flag writer runs inside the router's own tick.
+    // The cap is the OPERATOR's configured cellular limit from the modem
+    // sidecar, not the build default — PUT /network/modem persists cap_gb there,
+    // so a daemon that ignored it enforced 5 GB regardless of what the operator
+    // set. Read it at startup; the poll task below re-reads it so a later change
+    // takes effect within one cycle without a restart.
+    let modem_cfg_path = std::path::PathBuf::from(ados_net::paths::GS_MODEM_JSON);
+    let startup_cap_gb = ModemConfig::load(&modem_cfg_path)
+        .cap_gb
+        .unwrap_or(ados_net::data_cap::DEFAULT_CAP_GB);
     let data_cap = Arc::new(Mutex::new(
-        DataCapTracker::new(Arc::new(SysfsUsageSource::new()), router.bus())
-            .with_emitter(emitter.clone()),
+        DataCapTracker::with_config(
+            Arc::new(SysfsUsageSource::new()),
+            router.bus(),
+            startup_cap_gb,
+            std::path::PathBuf::from(ados_net::data_cap::USAGE_STATE_PATH),
+        )
+        .with_emitter(emitter.clone()),
     ));
     let data_cap_task = {
         let data_cap = Arc::clone(&data_cap);
+        let modem_cfg_path = modem_cfg_path.clone();
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(DATA_CAP_INTERVAL);
+            let mut applied_cap_gb = startup_cap_gb;
             loop {
                 tick.tick().await;
+                // Pick up an operator cap change (PUT /network/modem) without a
+                // daemon restart. Cheap: a small JSON read once per minute.
+                let cap_gb = ModemConfig::load(&modem_cfg_path)
+                    .cap_gb
+                    .unwrap_or(ados_net::data_cap::DEFAULT_CAP_GB);
                 let mut t = data_cap.lock().await;
+                if cap_gb != applied_cap_gb {
+                    t.set_cap(cap_gb);
+                    applied_cap_gb = cap_gb;
+                }
                 t.check_month_reset();
                 t.poll_once().await;
             }
