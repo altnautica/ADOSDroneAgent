@@ -93,6 +93,29 @@ provision_wfb_bind_artifacts() {
         sed -i 's@wfb-server --version | head@wfb-server --version </dev/null | head@' \
             /usr/bin/wfb_bind_server.sh
     fi
+
+    # Stop wfb-server from running its own NetworkManager dance on the injection
+    # adapter. wfb-server's init (set_nm_unmanaged=True in master.cfg) runs a
+    # `nmcli device show <iface>` pre-check and ABORTS on a non-zero rc. On a
+    # stock NetworkManager box, NM does not reliably enumerate a monitor-mode RTL
+    # injection iface (it never created a device object for it), so the pre-check
+    # returns RC 10 "device not found" and the bind aborts every cycle (observed
+    # on a drone where the ground node, whose NM happened to enumerate the same
+    # adapter, bound fine). The agent already owns the adapter's NM + monitor-mode
+    # lifecycle (it releases it from NM and sets verified monitor before starting
+    # the bind unit), so wfb-ng must not duplicate that. A site config that pins
+    # set_nm_unmanaged = False makes wfb-server skip the pre-check and proceed
+    # straight to its own down/monitor/up. Point the bind profiles at it (the
+    # vendored env files default WIFIBROADCAST_CFG to /dev/null, which would
+    # otherwise mask this file). Idempotent.
+    printf '%s\n' '[common]' 'set_nm_unmanaged = False' > /etc/wifibroadcast.cfg
+    chmod 0644 /etc/wifibroadcast.cfg
+    for _be in /etc/default/wifibroadcast.drone_bind /etc/default/wifibroadcast.gs_bind; do
+        if [ -f "${_be}" ] && grep -q 'WIFIBROADCAST_CFG=/dev/null' "${_be}" 2>/dev/null; then
+            log "Pointing $(basename "${_be}") at /etc/wifibroadcast.cfg (skip the nmcli pre-check)"
+            sed -i 's|WIFIBROADCAST_CFG=/dev/null|WIFIBROADCAST_CFG=/etc/wifibroadcast.cfg|' "${_be}"
+        fi
+    done
 }
 
 # Build + install the wfb-ng userspace from the vendored source.
