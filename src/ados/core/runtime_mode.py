@@ -92,9 +92,13 @@ class _FlagGated:
 # ``plugin-host`` and ``display`` apply to both profiles.
 _FLAG_GATED: dict[str, _FlagGated] = {
     "net": _FlagGated(
-        flag="net-rust-enabled",
+        # Cut over: native is the default; the fallback marker pins the packaged
+        # uplink managers. The REST WiFi write paths forward to the native
+        # daemon's command socket when this resolves native.
+        flag="net-python-fallback",
         binaries=("ados-net",),
         profiles=("drone", "ground-station"),
+        opt_out=True,
     ),
     "groundlink": _FlagGated(
         # Native-only on every role: the packaged direct-role receive plane and

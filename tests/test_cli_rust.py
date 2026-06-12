@@ -105,11 +105,11 @@ def test_status_reports_python_when_no_flags(tmp_path, monkeypatch):
         assert name in result.output
 
 
-def test_status_reports_rust_when_flag_and_binary_present(tmp_path, monkeypatch):
-    """A set flag plus an installed binary makes the unit take the native
-    branch, and status must reflect that as ``rust``."""
+def test_status_reports_rust_when_binary_present_and_no_fallback(tmp_path, monkeypatch):
+    """Net is opt-out: an installed binary with no fallback marker makes the unit
+    take the native branch, and status must reflect that as ``rust``."""
     monkeypatch.setattr(rust_mod, "ADOS_ETC_DIR", tmp_path)
-    (tmp_path / _SERVICES["net"].flag).touch()
+    # No net-python-fallback marker → native default.
     monkeypatch.setattr(rust_mod, "_binaries_present", lambda svc: svc is _SERVICES["net"])
     monkeypatch.setattr(rust_mod, "_unit_active", lambda unit: True)
     result = CliRunner().invoke(rust_group, ["status"])
@@ -129,35 +129,38 @@ def test_enable_requires_root(tmp_path, monkeypatch):
     assert not (tmp_path / _SERVICES["net"].flag).exists()
 
 
-def test_enable_writes_flag_and_reconciles_subsumed(tmp_path, monkeypatch):
-    """enabling net writes the flag, restarts the swap unit, and masks the
-    three packaged units the native uplink daemon absorbs."""
+def test_enable_removes_fallback_and_reconciles_subsumed(tmp_path, monkeypatch):
+    """Net is opt-out: enabling it REMOVES the fallback marker (native default),
+    restarts the swap unit, and masks the three packaged units the native uplink
+    daemon absorbs."""
     monkeypatch.setattr(rust_mod, "ADOS_ETC_DIR", tmp_path)
     monkeypatch.setattr(rust_mod.os, "geteuid", lambda: 0)
     monkeypatch.setattr(rust_mod, "_binaries_present", lambda svc: True)
     monkeypatch.setattr(rust_mod, "_unit_active", lambda unit: True)
+    # Start pinned to the packaged path, then enable to clear it.
+    (tmp_path / _SERVICES["net"].flag).touch()
     calls: list[tuple[str, ...]] = []
     monkeypatch.setattr(rust_mod, "_systemctl", lambda *a, **k: calls.append(a) or 0)
     result = CliRunner().invoke(rust_group, ["enable", "net"])
     assert result.exit_code == 0, result.output
-    assert (tmp_path / _SERVICES["net"].flag).exists()
+    assert not (tmp_path / _SERVICES["net"].flag).exists()
     assert ("restart", "ados-uplink-router") in calls
     for unit in _SERVICES["net"].subsumes:
         assert ("disable", unit) in calls
 
 
-def test_disable_removes_flag_and_restores_subsumed(tmp_path, monkeypatch):
-    """disabling net removes the flag and re-enables the packaged units."""
+def test_disable_writes_fallback_and_restores_subsumed(tmp_path, monkeypatch):
+    """Net is opt-out: disabling it WRITES the fallback marker (packaged path) and
+    re-enables the packaged units."""
     monkeypatch.setattr(rust_mod, "ADOS_ETC_DIR", tmp_path)
     monkeypatch.setattr(rust_mod.os, "geteuid", lambda: 0)
     monkeypatch.setattr(rust_mod, "_binaries_present", lambda svc: True)
     monkeypatch.setattr(rust_mod, "_unit_active", lambda unit: False)
-    (tmp_path / _SERVICES["net"].flag).touch()
     calls: list[tuple[str, ...]] = []
     monkeypatch.setattr(rust_mod, "_systemctl", lambda *a, **k: calls.append(a) or 0)
     result = CliRunner().invoke(rust_group, ["disable", "net"])
     assert result.exit_code == 0, result.output
-    assert not (tmp_path / _SERVICES["net"].flag).exists()
+    assert (tmp_path / _SERVICES["net"].flag).exists()
     for unit in _SERVICES["net"].subsumes:
         assert ("enable", unit) in calls
 

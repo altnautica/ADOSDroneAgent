@@ -278,16 +278,31 @@ def test_is_service_native_radio_native_only(roots: tuple[Path, Path]) -> None:
 
 
 def test_is_service_native_opt_in(roots: tuple[Path, Path]) -> None:
-    """An opt-in service (net) is native only when BOTH the binary and the
+    """An opt-in service (hid) is native only when BOTH its binaries and the
     enable flag are present."""
     bin_dir, etc_dir = roots
     bin_dir.mkdir(parents=True, exist_ok=True)
     etc_dir.mkdir(parents=True, exist_ok=True)
+    _make_bin(bin_dir, "ados-pic")
+    _make_bin(bin_dir, "ados-input")
+    # Binaries present but no enable flag → not native (opt-in).
+    assert not is_service_native("hid", bin_dir=bin_dir, etc_dir=etc_dir)
+    _touch_flag(etc_dir, "hid-rust-enabled")
+    assert is_service_native("hid", bin_dir=bin_dir, etc_dir=etc_dir)
+
+
+def test_is_service_native_opt_out_net(roots: tuple[Path, Path]) -> None:
+    """Net is cut over to opt-out: native once its binary is present, with no
+    marker; the ``net-python-fallback`` marker pins the packaged uplink path."""
+    bin_dir, etc_dir = roots
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    etc_dir.mkdir(parents=True, exist_ok=True)
     _make_bin(bin_dir, "ados-net")
-    # Binary present but no enable flag → not native (opt-in).
-    assert not is_service_native("net", bin_dir=bin_dir, etc_dir=etc_dir)
-    _touch_flag(etc_dir, "net-rust-enabled")
+    # Binary present, no fallback marker → native by default.
     assert is_service_native("net", bin_dir=bin_dir, etc_dir=etc_dir)
+    # The fallback marker pins the packaged path → not native.
+    _touch_flag(etc_dir, "net-python-fallback")
+    assert not is_service_native("net", bin_dir=bin_dir, etc_dir=etc_dir)
 
 
 def test_is_service_native_unknown_is_false(roots: tuple[Path, Path]) -> None:

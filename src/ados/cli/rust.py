@@ -66,7 +66,7 @@ class _Service:
 # deleted) and so are not listed here — there is nothing to fall back to.
 _SERVICES: dict[str, _Service] = {
     "net": _Service(
-        flag="net-rust-enabled",
+        flag="net-python-fallback",
         binaries=("/opt/ados/bin/ados-net",),
         swap_units=("ados-uplink-router",),
         subsumes=(
@@ -74,7 +74,8 @@ _SERVICES: dict[str, _Service] = {
             "ados-wifi-client",
             "ados-usb-gadget",
         ),
-        note="native uplink matrix; absorbs ethernet/wifi-client/usb-gadget",
+        note="native uplink matrix (default); absorbs ethernet/wifi-client/usb-gadget",
+        opt_out=True,
     ),
     "plugin-host": _Service(
         # Cut over: native is the default. The unit's ExecStart runs the

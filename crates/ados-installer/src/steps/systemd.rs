@@ -86,16 +86,20 @@ const GROUND_STATION_ENABLE_UNITS: &[&str] = &[
 const RETIRED_UNITS: &[&str] = &["ados-scripting.service", "ados-cloud-relay.service"];
 
 /// Cutover marker files retired by a default sense flip or a fallback deletion.
-/// The plugin host moved from an opt-IN marker (`plugin-host-rust-enabled`,
-/// native only when present) to an opt-OUT marker (`plugin-host-python-fallback`,
-/// native by default), so the old opt-in marker carries no meaning. The mesh
-/// relay/receiver `groundlink-python-fallback` marker is retired outright — its
-/// packaged Python implementation was deleted, so the roles are native-only and
-/// the marker no longer selects anything. The installer deletes these on every
-/// run (`prune_legacy_cutover_flags`). This list must never name an active
-/// marker (e.g. an in-use fallback marker), or the installer would erase an
-/// operator's pinned choice on each upgrade.
-const RETIRED_CUTOVER_FLAGS: &[&str] = &["plugin-host-rust-enabled", "groundlink-python-fallback"];
+/// The plugin host and the net uplink matrix each moved from an opt-IN marker
+/// (`plugin-host-rust-enabled` / `net-rust-enabled`, native only when present) to
+/// an opt-OUT marker (`*-python-fallback`, native by default), so the old opt-in
+/// markers carry no meaning. The mesh relay/receiver `groundlink-python-fallback`
+/// marker is retired outright — its packaged Python implementation was deleted, so
+/// the roles are native-only and the marker no longer selects anything. The
+/// installer deletes these on every run (`prune_legacy_cutover_flags`). This list
+/// must never name an active marker (e.g. an in-use fallback marker), or the
+/// installer would erase an operator's pinned choice on each upgrade.
+const RETIRED_CUTOVER_FLAGS: &[&str] = &[
+    "plugin-host-rust-enabled",
+    "groundlink-python-fallback",
+    "net-rust-enabled",
+];
 
 /// The other-profile teardown list, keyed by the profile being installed
 /// (`disable_other_profile_units`). On a GS rig the drone TX unit must not run;
@@ -699,9 +703,10 @@ fn mask_conflicting_standalone_services() {
 
 /// Reconcile the packaged units a native consolidator daemon subsumes against
 /// the cutover flags (`reconcile_rust_cutover_units`). GROUND-STATION ONLY.
-/// When `net-rust-enabled` is set, disable the units the native uplink daemon
-/// owns; when `hid-rust-enabled` is set, disable the unit the native arbiter
-/// owns; otherwise re-enable them (default posture leaves the packaged units live).
+/// Net is native by DEFAULT (the cutover): when the `net-python-fallback` marker
+/// is absent the native uplink daemon owns ethernet/wifi-client/usb-gadget
+/// in-process, so their packaged units are masked; the marker re-enables the
+/// packaged path. `hid-rust-enabled` stays opt-IN (disable its unit only when set).
 fn reconcile_rust_cutover_units() {
     let net_subsumed = [
         "ados-ethernet.service",
@@ -710,15 +715,15 @@ fn reconcile_rust_cutover_units() {
     ];
     let hid_subsumed = ["ados-buttons.service"];
 
-    if Path::new(CONFIG_DIR).join("net-rust-enabled").exists() {
+    if Path::new(CONFIG_DIR).join("net-python-fallback").exists() {
+        for unit in net_subsumed {
+            let _ = exec::run("systemctl", &["enable", unit]);
+        }
+    } else {
         for unit in net_subsumed {
             let _ = exec::run("systemctl", &["stop", unit]);
             let _ = exec::run("systemctl", &["disable", unit]);
             let _ = exec::run("systemctl", &["reset-failed", unit]);
-        }
-    } else {
-        for unit in net_subsumed {
-            let _ = exec::run("systemctl", &["enable", unit]);
         }
     }
 
