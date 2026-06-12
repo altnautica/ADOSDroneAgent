@@ -20,9 +20,10 @@ use serde_json::{json, Value};
 use tokio::sync::Mutex;
 
 use super::bind_event::{
-    bind_failed_detail, bind_started_detail, BindFailReason, BIND_FAILED_KIND, BIND_STARTED_KIND,
+    bind_failed_detail, bind_precheck_detail, bind_started_detail, BindFailReason,
+    BIND_FAILED_KIND, BIND_PRECHECK_KIND, BIND_STARTED_KIND,
 };
-use super::fsm::{now_monotonic, BindSession, BindState};
+use super::fsm::{now_monotonic, BindPrecheck, BindSession, BindState};
 use super::{
     iface, keys, socat, BindRole, BIND_REG_RECONCILE_INTERVAL, KEY_TRANSFER_TIMEOUT,
     LOCK_RECLAIM_TIMEOUT, RESTART_TIMEOUT, TUNNEL_POLL_INTERVAL, TUNNEL_WAIT_TIMEOUT,
@@ -374,8 +375,12 @@ impl BindOrchestrator {
         // which NetworkManager does not enumerate. A monitor-type iface is listed
         // as `(unmanaged)` regardless of carrier, the state the bind unit needs
         // and sets next anyway, so this prepares both the drone and the ground
-        // node alike (idempotent).
-        prepare_injection_iface_for_bind().await;
+        // node alike (idempotent). The prep now verifies the iface reached
+        // monitor mode (readback + retry) and the result is stamped on the
+        // sentinel + emitted as a durable event, so a stuck bind is diagnosable
+        // without a wfb-server stderr trace.
+        let prep = prepare_injection_iface_for_bind().await;
+        self.record_bind_precheck(role, &prep).await;
 
         self.set_state(BindState::OpeningTunnel).await;
 
@@ -616,6 +621,42 @@ impl BindOrchestrator {
         crate::reg_reconciler::reconcile_global_domain(&self.events).await;
     }
 
+    /// Stamp the injection-iface prep result onto the session sentinel and ship a
+    /// durable `radio.bind_precheck` event. Run once per session, right after the
+    /// iface is prepared for monitor mode. A `managed`/`unknown` injection mode
+    /// here is the early warning that the bind will time out radiating nothing.
+    async fn record_bind_precheck(&self, role: BindRole, outcomes: &[InjectionPrepOutcome]) {
+        let summary = summarize_precheck(outcomes);
+        if !summary.ok {
+            tracing::warn!(
+                role = role.as_str(),
+                reason = summary.reason.unwrap_or("unknown"),
+                injection_mode = %summary.injection_mode,
+                nm_enumerable = summary.nm_enumerable,
+                "bind_precheck_not_ready"
+            );
+        }
+        self.events.emit(
+            BIND_PRECHECK_KIND,
+            if summary.ok { Level::Info } else { Level::Warn },
+            bind_precheck_detail(
+                role.as_str(),
+                summary.ok,
+                summary.reason,
+                &summary.injection_mode,
+                summary.nm_enumerable,
+                summary.iface.as_deref(),
+            ),
+        );
+        {
+            let mut g = self.session.lock().await;
+            if let Some(s) = g.as_mut() {
+                s.bind_precheck = Some(summary);
+            }
+        }
+        self.write_sentinel().await;
+    }
+
     /// Ship a `radio.bind_failed` lifecycle event. A thin wrapper so each
     /// failure branch reads as one call. Best-effort + non-blocking.
     fn emit_failed(
@@ -726,45 +767,125 @@ pub fn read_sentinel_active() -> bool {
         .unwrap_or(false)
 }
 
-/// Put the WFB injection adapter(s) into NetworkManager-enumerable MONITOR mode
-/// so the vendored wfb-ng `wfb-server` (the bind unit) can find the device via
-/// its `nmcli device show <iface>` init pre-check instead of aborting.
-///
-/// NetworkManager does NOT enumerate a managed-mode wifi iface that is up with no
-/// carrier (no AP to associate to) — it is absent from `nmcli device show`, so
-/// the pre-check returns "not found" and aborts. NM DOES list a monitor-type
-/// iface as `(unmanaged)` regardless of carrier, and monitor is the mode the bind
-/// unit sets next anyway, so the drone and the ground-station receive plane both
-/// reach the pre-check identically NM-visible. Mirrors the radio's proven
-/// non-muting form: `iw dev <if> set monitor none` initialises the PHY so it
-/// radiates, unlike `iw <if> set type monitor`, which leaves the RTL8812EU pinned
-/// at the muted txpower floor (-100 dBm, carrier down). Best-effort + idempotent;
-/// a missing adapter is a no-op, and the `is_injection` filter never touches the
-/// operator's management link.
+/// The per-iface result of preparing one injection adapter for monitor mode.
+/// (Constructed only on the linux prep path + in tests; the host lib build sees
+/// it solely through `summarize_precheck`'s slice param.)
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[derive(Debug, Clone)]
+struct InjectionPrepOutcome {
+    iface: String,
+    /// The readback operating mode after prep (`monitor` | `managed` | `unknown`).
+    injection_mode: String,
+    /// Whether the readback confirmed `type monitor` within the retry budget.
+    monitor_verified: bool,
+    /// Whether NetworkManager enumerates the iface (the legacy precheck condition).
+    nm_enumerable: bool,
+}
+
+/// Max times to run the monitor-mode prep before giving up on a verified readback.
 #[cfg(target_os = "linux")]
-async fn prepare_injection_iface_for_bind() {
+const BIND_PREP_MAX_ATTEMPTS: u32 = 3;
+
+/// Put the WFB injection adapter(s) into MONITOR mode before the bind unit starts,
+/// and VERIFY the iface actually reached it (readback + retry) rather than firing
+/// the commands and hoping.
+///
+/// History: the vendored wfb-ng `wfb-server` aborted its init when its
+/// `nmcli device show <iface>` pre-check could not find the device — the case for
+/// a managed-mode iface up with no carrier, which NetworkManager does not
+/// enumerate. That pre-check is now skipped at the wfb-server config layer, so the
+/// load-bearing job here is simply that the iface reaches a radiating monitor PHY:
+/// `iw dev <if> set monitor none` initialises the PHY un-muted, unlike
+/// `iw <if> set type monitor`, which leaves the RTL8812EU pinned at the muted
+/// txpower floor (-100 dBm, carrier down). A command "succeeding" does not prove
+/// the mode took, so each candidate is read back via `iw <if> info` and the prep
+/// retried with backoff until `type monitor` is observed. Best-effort + idempotent;
+/// the `is_injection && !is_virtual` filter never touches the management link.
+/// Returns one outcome per injection candidate for the caller to record + emit.
+#[cfg(target_os = "linux")]
+async fn prepare_injection_iface_for_bind() -> Vec<InjectionPrepOutcome> {
     let candidates = crate::mgmt_link_guardian::detection::collect_candidates().await;
+    let mut outcomes = Vec::new();
     for c in candidates
         .iter()
         .filter(|c| c.is_injection && !c.is_virtual)
     {
         let iface = c.name.as_str();
-        // Release from NetworkManager, then bring the iface into monitor mode.
-        let _ = run_iface_cmd("nmcli", &["dev", "set", iface, "managed", "no"]).await;
-        let _ = run_iface_cmd("ip", &["link", "set", iface, "down"]).await;
-        // `set monitor none` is primary (it initialises the PHY un-muted); the
-        // `set type monitor` form is the fallback for any adapter that rejects it.
-        if !run_iface_cmd("iw", &["dev", iface, "set", "monitor", "none"]).await {
-            let _ = run_iface_cmd("iw", &[iface, "set", "type", "monitor"]).await;
+        let mut injection_mode = "unknown".to_string();
+        let mut monitor_verified = false;
+        for attempt in 0..BIND_PREP_MAX_ATTEMPTS {
+            if attempt > 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(500 * attempt as u64)).await;
+            }
+            // Release from NetworkManager, then bring the iface into monitor mode.
+            let _ = run_iface_cmd("nmcli", &["dev", "set", iface, "managed", "no"]).await;
+            let _ = run_iface_cmd("ip", &["link", "set", iface, "down"]).await;
+            // `set monitor none` is primary (it initialises the PHY un-muted); the
+            // `set type monitor` form is the fallback for any adapter that rejects it.
+            if !run_iface_cmd("iw", &["dev", iface, "set", "monitor", "none"]).await {
+                let _ = run_iface_cmd("iw", &[iface, "set", "type", "monitor"]).await;
+            }
+            let _ = run_iface_cmd("ip", &["link", "set", iface, "up"]).await;
+            injection_mode = read_injection_iface_mode(iface)
+                .await
+                .unwrap_or_else(|| "unknown".to_string());
+            if injection_mode == "monitor" {
+                monitor_verified = true;
+                break;
+            }
         }
-        let _ = run_iface_cmd("ip", &["link", "set", iface, "up"]).await;
-        tracing::info!(iface, "bind_prepared_injection_iface");
+        let nm_enumerable = iface_nm_enumerable(iface).await;
+        tracing::info!(
+            iface,
+            injection_mode = %injection_mode,
+            monitor_verified,
+            nm_enumerable,
+            "bind_prepared_injection_iface"
+        );
+        outcomes.push(InjectionPrepOutcome {
+            iface: iface.to_string(),
+            injection_mode,
+            monitor_verified,
+            nm_enumerable,
+        });
     }
+    outcomes
 }
 
 /// Off-Linux dev hosts have no injection adapter to prepare.
 #[cfg(not(target_os = "linux"))]
-async fn prepare_injection_iface_for_bind() {}
+async fn prepare_injection_iface_for_bind() -> Vec<InjectionPrepOutcome> {
+    Vec::new()
+}
+
+/// Reduce the per-iface prep outcomes to one session-level summary. `ok` requires
+/// every candidate to have reached verified monitor mode (a managed-mode adapter
+/// radiates nothing); the representative `injection_mode`/`iface` prefer a failing
+/// candidate so the surfaced reason points at the actual problem.
+fn summarize_precheck(outcomes: &[InjectionPrepOutcome]) -> BindPrecheck {
+    if outcomes.is_empty() {
+        return BindPrecheck {
+            ok: false,
+            reason: Some("iface_not_found"),
+            injection_mode: "unknown".to_string(),
+            nm_enumerable: false,
+            iface: None,
+        };
+    }
+    let ok = outcomes.iter().all(|o| o.monitor_verified);
+    let nm_enumerable = outcomes.iter().all(|o| o.nm_enumerable);
+    let representative = outcomes
+        .iter()
+        .find(|o| !o.monitor_verified)
+        .unwrap_or(&outcomes[0]);
+    BindPrecheck {
+        ok,
+        reason: if ok { None } else { Some("monitor_unverified") },
+        injection_mode: representative.injection_mode.clone(),
+        nm_enumerable,
+        iface: Some(representative.iface.clone()),
+    }
+}
 
 /// Run a short interface-management command, bounded so a hung tool never stalls
 /// the bind. Returns whether it exited successfully.
@@ -780,9 +901,105 @@ async fn run_iface_cmd(bin: &str, args: &[&str]) -> bool {
     )
 }
 
+/// Read the operating mode (`monitor` | `managed` | …) of an injection iface from
+/// `iw <if> info`, or `None` when it cannot be read. The parse mirrors the radio's
+/// `set_monitor_mode_verified` readback (the `type ` line) without taking a crate
+/// dependency on `ados-radio` (which would be heavy + cyclic from the supervisor).
+#[cfg(target_os = "linux")]
+async fn read_injection_iface_mode(iface: &str) -> Option<String> {
+    let out = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        tokio::process::Command::new("iw")
+            .args([iface, "info"])
+            .output(),
+    )
+    .await
+    .ok()?
+    .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    parse_iface_mode(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// Pure parse of the `type <mode>` line out of `iw <iface> info`. Unit-tested
+/// independently of `iw`. (Only the linux reader calls it outside tests.)
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn parse_iface_mode(info: &str) -> Option<String> {
+    for line in info.lines() {
+        if let Some(rest) = line.trim().strip_prefix("type ") {
+            let mode = rest.trim();
+            if !mode.is_empty() {
+                return Some(mode.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Whether NetworkManager enumerates the iface: `nmcli device show <iface>` exits
+/// 0 when NM knows the device and non-zero (RC 10) when it does not. Informational
+/// now the wfb-server precheck is skipped, but it is exactly the condition that
+/// precheck tested, so it predicts that abort if the skip is ever reverted.
+#[cfg(target_os = "linux")]
+async fn iface_nm_enumerable(iface: &str) -> bool {
+    run_iface_cmd("nmcli", &["-t", "device", "show", iface]).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_iface_mode_reads_the_type_line() {
+        let monitor = "Interface wlan1\n\tifindex 5\n\ttype monitor\n\twiphy 0\n";
+        assert_eq!(parse_iface_mode(monitor).as_deref(), Some("monitor"));
+        let managed = "Interface wlan1\n\ttype managed\n";
+        assert_eq!(parse_iface_mode(managed).as_deref(), Some("managed"));
+        assert!(parse_iface_mode("Interface wlan1\n\tifindex 5\n").is_none());
+        assert!(parse_iface_mode("").is_none());
+    }
+
+    #[test]
+    fn summarize_precheck_classifies_outcomes() {
+        // No injection candidate found at all.
+        let empty = summarize_precheck(&[]);
+        assert!(!empty.ok);
+        assert_eq!(empty.reason, Some("iface_not_found"));
+        assert!(empty.iface.is_none());
+
+        // A verified-monitor candidate is ok with no reason.
+        let good = summarize_precheck(&[InjectionPrepOutcome {
+            iface: "wlan1".to_string(),
+            injection_mode: "monitor".to_string(),
+            monitor_verified: true,
+            nm_enumerable: true,
+        }]);
+        assert!(good.ok);
+        assert!(good.reason.is_none());
+        assert_eq!(good.injection_mode, "monitor");
+
+        // A managed (unverified) candidate surfaces the failing iface + mode.
+        let bad = summarize_precheck(&[
+            InjectionPrepOutcome {
+                iface: "wlan2".to_string(),
+                injection_mode: "monitor".to_string(),
+                monitor_verified: true,
+                nm_enumerable: true,
+            },
+            InjectionPrepOutcome {
+                iface: "wlan1".to_string(),
+                injection_mode: "managed".to_string(),
+                monitor_verified: false,
+                nm_enumerable: false,
+            },
+        ]);
+        assert!(!bad.ok);
+        assert_eq!(bad.reason, Some("monitor_unverified"));
+        assert_eq!(bad.injection_mode, "managed");
+        assert_eq!(bad.iface.as_deref(), Some("wlan1"));
+        assert!(!bad.nm_enumerable);
+    }
 
     #[tokio::test]
     async fn preflight_missing_artifacts_fails_fast_to_failed() {

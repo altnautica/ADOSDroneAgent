@@ -79,6 +79,29 @@ pub fn iso_now() -> String {
         .unwrap_or_default()
 }
 
+/// Outcome of preparing the injection interface(s) for monitor mode just before
+/// the bind unit starts. Surfaced on the bind sentinel so the pairing UI can show
+/// *why* a bind is failing (a managed-mode injection iface radiates nothing, so
+/// the peer never appears) instead of a bare timeout, and mirrored to the logging
+/// store as a durable `radio.bind_precheck` event for offline RCA.
+#[derive(Debug, Clone)]
+pub struct BindPrecheck {
+    /// True when every injection candidate reached verified monitor mode.
+    pub ok: bool,
+    /// Bland reason code when not ok: `iface_not_found` | `monitor_unverified`.
+    pub reason: Option<&'static str>,
+    /// The readback operating mode of the injection iface (`monitor` | `managed`
+    /// | `unknown`). The single most diagnostic field — `managed` means no RF.
+    pub injection_mode: String,
+    /// Whether NetworkManager enumerates the injection iface. The legacy
+    /// wfb-server `nmcli device show` precheck aborted when this was false;
+    /// informational now the precheck is skipped, but it predicts that failure
+    /// mode if the skip is ever reverted.
+    pub nm_enumerable: bool,
+    /// The injection interface the summary describes, when one was found.
+    pub iface: Option<String>,
+}
+
 /// One bind attempt. Cloned cheaply for status snapshots + the sentinel write.
 #[derive(Debug, Clone)]
 pub struct BindSession {
@@ -96,6 +119,9 @@ pub struct BindSession {
     /// Monotonic float stamped when the bind TUN RX counter last advanced.
     pub last_frame_at: Option<f64>,
     pub last_rssi_dbm: Option<i32>,
+    /// The injection-iface monitor-mode preparation result for this session,
+    /// stamped once the prep runs (None until then). Additive on the sentinel.
+    pub bind_precheck: Option<BindPrecheck>,
 }
 
 impl BindSession {
@@ -115,6 +141,7 @@ impl BindSession {
             phase_entered_at: None,
             last_frame_at: None,
             last_rssi_dbm: None,
+            bind_precheck: None,
         }
     }
 
@@ -148,6 +175,12 @@ impl BindSession {
             "last_frame_at_s": self.last_frame_at,
             "last_rssi_dbm": self.last_rssi_dbm,
             "last_frame_age_s": last_frame_age_s,
+            // Injection-iface monitor-mode prep result (additive; null until the
+            // prep runs). Lets the pairing UI explain a stuck bind at a glance.
+            "bind_precheck_ok": self.bind_precheck.as_ref().map(|p| p.ok),
+            "bind_precheck_reason": self.bind_precheck.as_ref().and_then(|p| p.reason),
+            "injection_mode": self.bind_precheck.as_ref().map(|p| p.injection_mode.clone()),
+            "nm_enumerable": self.bind_precheck.as_ref().map(|p| p.nm_enumerable),
         })
     }
 }
@@ -247,6 +280,27 @@ mod tests {
         assert_eq!(v["state"], "opening_tunnel");
         assert_eq!(v["source"], "operator");
         assert!(v["phase_age_s"].as_f64().unwrap() >= 0.0);
+        // The precheck fields are present and null until the prep stamps them.
+        assert!(v.get("bind_precheck_ok").is_some());
+        assert!(v["bind_precheck_ok"].is_null());
+        assert!(v["injection_mode"].is_null());
+    }
+
+    #[test]
+    fn to_json_renders_bind_precheck_when_set() {
+        let mut s = BindSession::new(BindRole::Drone, "auto", None);
+        s.bind_precheck = Some(BindPrecheck {
+            ok: false,
+            reason: Some("monitor_unverified"),
+            injection_mode: "managed".to_string(),
+            nm_enumerable: true,
+            iface: Some("wlan1".to_string()),
+        });
+        let v = s.to_json();
+        assert_eq!(v["bind_precheck_ok"], serde_json::json!(false));
+        assert_eq!(v["bind_precheck_reason"], "monitor_unverified");
+        assert_eq!(v["injection_mode"], "managed");
+        assert_eq!(v["nm_enumerable"], serde_json::json!(true));
     }
 
     #[test]

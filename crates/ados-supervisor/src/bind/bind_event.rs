@@ -19,6 +19,13 @@ pub const BIND_STARTED_KIND: &str = "radio.bind";
 /// The event kind emitted when a bind session ends without pairing.
 pub const BIND_FAILED_KIND: &str = "radio.bind_failed";
 
+/// The event kind emitted once per session after the injection interface is
+/// prepared for monitor mode, recording whether the iface is ready to radiate.
+/// A durable breadcrumb: "did the injection iface reach monitor mode, and was it
+/// NM-enumerable" is then a single event query rather than a wfb-server stderr
+/// scrape — the failure mode that needed a multi-process trace to diagnose.
+pub const BIND_PRECHECK_KIND: &str = "radio.bind_precheck";
+
 /// Why a bind session ended without pairing. A bounded set so a consumer can
 /// branch on the cause without parsing the free-text message.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -117,6 +124,36 @@ pub fn bind_failed_detail(
     d
 }
 
+/// Build the `radio.bind_precheck` detail map.
+///
+/// - `role` — `drone` | `gs`;
+/// - `ok` — every injection candidate reached verified monitor mode;
+/// - `reason` — bland code when not ok (`iface_not_found` | `monitor_unverified`);
+/// - `injection_mode` — the readback mode (`monitor` | `managed` | `unknown`);
+/// - `nm_enumerable` — whether NetworkManager lists the injection iface;
+/// - `iface` — the injection interface the result describes, when one was found.
+pub fn bind_precheck_detail(
+    role: &str,
+    ok: bool,
+    reason: Option<&str>,
+    injection_mode: &str,
+    nm_enumerable: bool,
+    iface: Option<&str>,
+) -> Fields {
+    let mut d = Fields::new();
+    d.insert("role".to_string(), MpVal::from(role));
+    d.insert("ok".to_string(), MpVal::from(ok));
+    if let Some(reason) = reason {
+        d.insert("reason".to_string(), MpVal::from(reason));
+    }
+    d.insert("injection_mode".to_string(), MpVal::from(injection_mode));
+    d.insert("nm_enumerable".to_string(), MpVal::from(nm_enumerable));
+    if let Some(iface) = iface {
+        d.insert("iface".to_string(), MpVal::from(iface));
+    }
+    d
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -167,6 +204,37 @@ mod tests {
             with_peer.get("peer_device_id").and_then(|v| v.as_str()),
             Some("dev-7")
         );
+    }
+
+    #[test]
+    fn precheck_detail_carries_mode_and_omits_absent_optionals() {
+        let ok = bind_precheck_detail("drone", true, None, "monitor", true, Some("wlan1"));
+        assert_eq!(ok.get("ok").and_then(|v| v.as_bool()), Some(true));
+        assert_eq!(
+            ok.get("injection_mode").and_then(|v| v.as_str()),
+            Some("monitor")
+        );
+        assert_eq!(ok.get("iface").and_then(|v| v.as_str()), Some("wlan1"));
+        assert!(!ok.contains_key("reason"));
+
+        let bad = bind_precheck_detail(
+            "gs",
+            false,
+            Some("monitor_unverified"),
+            "managed",
+            false,
+            None,
+        );
+        assert_eq!(bad.get("ok").and_then(|v| v.as_bool()), Some(false));
+        assert_eq!(
+            bad.get("reason").and_then(|v| v.as_str()),
+            Some("monitor_unverified")
+        );
+        assert_eq!(
+            bad.get("nm_enumerable").and_then(|v| v.as_bool()),
+            Some(false)
+        );
+        assert!(!bad.contains_key("iface"));
     }
 
     #[test]
