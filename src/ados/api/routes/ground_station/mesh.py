@@ -349,8 +349,8 @@ async def ws_uplink_events(websocket: WebSocket) -> None:
         return
 
     app = get_agent_app()
-    profile = getattr(app.config.agent, "profile", "auto")
-    if profile != "ground_station":
+    from ados.api.routes.ground_station._common.profile import is_ground_station
+    if not is_ground_station(app):
         await websocket.close(code=1008, reason="E_PROFILE_MISMATCH")
         return
 
@@ -419,8 +419,8 @@ async def ws_mesh_events(websocket: WebSocket) -> None:
         return
 
     app = get_agent_app()
-    profile = getattr(app.config.agent, "profile", "auto")
-    if profile != "ground_station":
+    from ados.api.routes.ground_station._common.profile import is_ground_station
+    if not is_ground_station(app):
         # Profile-mismatch path: accept briefly so the JSON error reaches
         # the client, then close. Matches the prior behaviour.
         if accept_subprotocol:
