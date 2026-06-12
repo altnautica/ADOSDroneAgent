@@ -20,8 +20,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import re
-import signal
-import sys
 import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
@@ -507,42 +505,3 @@ def get_ethernet_manager() -> EthernetManager:
     if _INSTANCE is None:
         _INSTANCE = EthernetManager()
     return _INSTANCE
-
-
-# -------------------- optional standalone entry --------------------
-
-
-async def main() -> None:
-    """Optional standalone entry. Normal deployment embeds this manager
-    inside the uplink_router process; this entry is for bench testing or
-    when a dedicated systemd unit is preferred."""
-    import structlog
-
-    from ados.core.config import load_config
-    from ados.core.logging import configure_logging
-
-    cfg = load_config()
-    configure_logging(cfg.logging.level)
-    slog = structlog.get_logger()
-    slog.info("ethernet_service_starting")
-
-    mgr = get_ethernet_manager()
-    mgr.start_polling()
-
-    shutdown = asyncio.Event()
-    loop = asyncio.get_event_loop()
-    for sig in (signal.SIGTERM, signal.SIGINT):
-        loop.add_signal_handler(sig, shutdown.set)
-
-    await shutdown.wait()
-    mgr.stop_polling()
-    await mgr.bus.close()
-    slog.info("ethernet_service_stopped")
-
-
-if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        pass
-    sys.exit(0)

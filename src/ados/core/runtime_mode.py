@@ -92,13 +92,13 @@ class _FlagGated:
 # ``plugin-host`` and ``display`` apply to both profiles.
 _FLAG_GATED: dict[str, _FlagGated] = {
     "net": _FlagGated(
-        # Cut over: native is the default; the fallback marker pins the packaged
-        # uplink managers. The REST WiFi write paths forward to the native
-        # daemon's command socket when this resolves native.
-        flag="net-python-fallback",
+        # Native-only: the packaged uplink-router + manager entrypoints were
+        # deleted, so there is no Python fallback to toggle. The native ados-net
+        # daemon always runs; the REST WiFi write paths forward to its command
+        # socket. The manager classes stay (the REST read paths use them).
+        flag=None,
         binaries=("ados-net",),
         profiles=("drone", "ground-station"),
-        opt_out=True,
     ),
     "groundlink": _FlagGated(
         # Native-only on every role: the packaged direct-role receive plane and

@@ -33,18 +33,12 @@ surfaces this as a hint on the landing page.
 
 from __future__ import annotations
 
-import asyncio
 import os
 import shutil
-import signal
 import subprocess
-import sys
 from pathlib import Path
 
-import structlog
-
-from ados.core.config import load_config
-from ados.core.logging import configure_logging, get_logger
+from ados.core.logging import get_logger
 from ados.core.paths import DNSMASQ_USB0_CONF, DNSMASQ_USB0_PID
 
 log = get_logger("ground_station.usb_gadget")
@@ -369,41 +363,3 @@ class UsbGadgetManager:
         self._bound = False
 
 
-async def main() -> None:
-    """Service entry point. Sets up the gadget, then sleeps for signals.
-
-    systemd keeps this process alive so teardown runs on stop. The work
-    is synchronous, but we still run under asyncio for consistency with
-    the other ground-station services and to use asyncio signal handling.
-    """
-    config = load_config()
-    configure_logging(config.logging.level)
-    slog = structlog.get_logger()
-    slog.info("usb_gadget_service_starting")
-
-    shutdown = asyncio.Event()
-    loop = asyncio.get_event_loop()
-    for sig in (signal.SIGTERM, signal.SIGINT):
-        loop.add_signal_handler(sig, shutdown.set)
-
-    manager = UsbGadgetManager()
-    ok = manager.setup()
-    if not ok:
-        slog.error("usb_gadget_setup_failed")
-        sys.exit(2)
-
-    slog.info("usb_gadget_service_ready", ip=USB_IP, interface=USB_INTERFACE)
-
-    await shutdown.wait()
-
-    slog.info("usb_gadget_service_stopping")
-    manager.teardown()
-    slog.info("usb_gadget_service_stopped")
-
-
-if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        pass
-    sys.exit(0)

@@ -285,7 +285,7 @@ async def _modem_view() -> dict[str, Any]:
 def _router_state_view() -> dict[str, Any]:
     """Active uplink + priority list from UplinkRouter singleton."""
     try:
-        from ados.services.ground_station.uplink_router import get_uplink_router
+        from ados.services.ground_station.uplink import get_uplink_router
 
         router = get_uplink_router()
         return {

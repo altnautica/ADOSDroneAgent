@@ -32,7 +32,6 @@ import asyncio
 import json
 import os
 import re
-import signal
 import time
 from pathlib import Path
 from typing import Any
@@ -48,7 +47,6 @@ log = structlog.get_logger(__name__)
 __all__ = [
     "GroundStationModemManager",
     "get_modem_manager",
-    "main",
 ]
 
 
@@ -656,83 +654,3 @@ def get_modem_manager() -> GroundStationModemManager:
     if _instance is None:
         _instance = GroundStationModemManager()
     return _instance
-
-
-# ----------------------------------------------------------------------
-# Service entry point
-# ----------------------------------------------------------------------
-async def _run_service() -> None:
-    manager = get_modem_manager()
-    stop_event = asyncio.Event()
-
-    loop = asyncio.get_running_loop()
-
-    def _handle_signal(signame: str) -> None:
-        log.info("modem.signal_received", signal=signame)
-        stop_event.set()
-
-    for signame in ("SIGINT", "SIGTERM"):
-        try:
-            loop.add_signal_handler(
-                getattr(signal, signame), _handle_signal, signame
-            )
-        except NotImplementedError:
-            pass
-
-    probe_result = await manager.probe()
-    log.info("modem.service_probe", **probe_result)
-
-    # The unit starts on any /dev/ttyUSB* (the systemd ConditionPathExistsGlob),
-    # which a non-modem USB serial adapter also matches. When the probe finds
-    # no actual cellular modem, exit cleanly so the unit goes inactive rather
-    # than idling a 30 s status loop forever against hardware that is not a
-    # modem. A real modem hot-plug re-fires the unit via the udev rule.
-    if not probe_result.get("detected"):
-        log.info(
-            "modem.service_skipped_no_modem",
-            reason="no cellular modem detected behind the matched serial device",
-        )
-        return
-
-    if manager._config.get("enabled", True) and probe_result.get("detected"):
-        try:
-            await manager.bring_up(manager._config.get("apn", "auto"))
-        except Exception as exc:
-            log.warning("modem.initial_bring_up_failed", error=str(exc))
-
-    log.info("modem.service_ready")
-
-    # Periodic status refresh every 30 s while alive. Keeps the
-    # `_last_status` cache warm for cheap reads.
-    while not stop_event.is_set():
-        try:
-            await manager.status()
-        except Exception as exc:
-            log.warning("modem.status_refresh_error", error=str(exc))
-        try:
-            await asyncio.wait_for(stop_event.wait(), timeout=30.0)
-            break
-        except TimeoutError:
-            pass
-
-    try:
-        await manager.bring_down()
-    except Exception as exc:
-        log.warning("modem.shutdown_bring_down_failed", error=str(exc))
-    try:
-        await manager.close()
-    except Exception as exc:
-        log.warning("modem.shutdown_close_failed", error=str(exc))
-    log.info("modem.service_stopped")
-
-
-def main() -> None:
-    """Systemd entry point for `ados-modem.service`."""
-    try:
-        asyncio.run(_run_service())
-    except KeyboardInterrupt:
-        pass
-
-
-if __name__ == "__main__":
-    main()

@@ -15,7 +15,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from ados.services.ground_station.uplink_router import (
+from ados.services.ground_station.uplink import (
     DataCapTracker,
     UplinkEventBus,
 )

@@ -61,29 +61,29 @@ def test_hybrid_core_only(roots: tuple[Path, Path]) -> None:
     bin_dir, etc_dir = roots
     for b in _CORE:
         _make_bin(bin_dir, b)
-    # Drone: radio is native-only and display + plugin-host are opt-out (all
-    # native once their binaries are present), net is opt-in. With no
-    # flag-gated binaries on disk none of them are native, so the aggregate
-    # stays hybrid.
+    # Drone: radio + net are native-only and display + plugin-host are opt-out
+    # (all native once their binaries are present). With no flag-gated binaries
+    # on disk none of them are native, so the aggregate stays hybrid.
     assert compute_runtime_mode("drone", bin_dir=bin_dir, etc_dir=etc_dir) == "hybrid"
 
 
 def test_hybrid_when_flag_set_but_binary_missing(roots: tuple[Path, Path]) -> None:
-    """A flag with no binary stays packaged for that service → hybrid.
+    """An opt-in flag with no binary stays packaged for that service → hybrid.
 
-    Native-only radio and opt-out display/plugin-host are native once their
-    binaries are present: with no binaries on disk they are still not native, so
-    the aggregate is hybrid regardless of any marker.
+    The remaining opt-in service is hid (ground-station only): with its enable
+    marker set but its binaries absent it is still not native, so a GS otherwise
+    holding only core binaries stays hybrid.
     """
     bin_dir, etc_dir = roots
     for b in _CORE:
         _make_bin(bin_dir, b)
-    # The drone opt-in flag is set but its binary is absent. Native-only radio
-    # and opt-out display/plugin-host need no opt-in marker; their binaries being
-    # absent already keeps them non-native.
-    for flag in ("net-rust-enabled",):
-        _touch_flag(etc_dir, flag)
-    assert compute_runtime_mode("drone", bin_dir=bin_dir, etc_dir=etc_dir) == "hybrid"
+    # The opt-in enable flag is set but its binaries are absent, so hid stays
+    # packaged and the aggregate is hybrid.
+    _touch_flag(etc_dir, "hid-rust-enabled")
+    assert (
+        compute_runtime_mode("ground-station", bin_dir=bin_dir, etc_dir=etc_dir)
+        == "hybrid"
+    )
 
 
 def test_native_drone_all_applicable(roots: tuple[Path, Path]) -> None:
@@ -98,11 +98,8 @@ def test_native_drone_all_applicable(roots: tuple[Path, Path]) -> None:
     for b in ("ados-radio", "ados-net", "ados-plugin-host",
               "ados-display", "ados-display-probe"):
         _make_bin(bin_dir, b)
-    # radio is native-only and display + plugin-host are opt-out: all native once
-    # their binaries are present, so they need no marker — only the opt-in net
-    # service does.
-    for flag in ("net-rust-enabled",):
-        _touch_flag(etc_dir, flag)
+    # radio + net are native-only and display + plugin-host are opt-out: all
+    # native once their binaries are present, so none of them needs a marker.
     # groundlink + hid binaries deliberately absent — they are not in the
     # drone applicable set, so the drone is still native.
     assert compute_runtime_mode("drone", bin_dir=bin_dir, etc_dir=etc_dir) == "native"
@@ -116,10 +113,8 @@ def test_gs_needs_groundlink_and_hid(roots: tuple[Path, Path]) -> None:
         _make_bin(bin_dir, b)
     for b in ("ados-net", "ados-plugin-host", "ados-display", "ados-display-probe"):
         _make_bin(bin_dir, b)
-    # Display + plugin-host are opt-out (native once their binaries are present);
-    # only the opt-in net service needs a marker.
-    for flag in ("net-rust-enabled",):
-        _touch_flag(etc_dir, flag)
+    # net is native-only and display + plugin-host are opt-out: all native once
+    # their binaries are present, none needs a marker.
     # groundlink + hid not present → GS is hybrid.
     assert (
         compute_runtime_mode("ground-station", bin_dir=bin_dir, etc_dir=etc_dir)
@@ -158,8 +153,6 @@ def test_display_opt_out_native_by_default_fallback_marker_forces_hybrid(
     for b in ("ados-radio", "ados-net", "ados-plugin-host",
               "ados-display", "ados-display-probe"):
         _make_bin(bin_dir, b)
-    for flag in ("net-rust-enabled",):
-        _touch_flag(etc_dir, flag)
 
     # Default: no fallback marker → display native → drone native.
     assert compute_runtime_mode("drone", bin_dir=bin_dir, etc_dir=etc_dir) == "native"
@@ -181,8 +174,8 @@ def test_plugin_host_opt_out_native_by_default_fallback_marker_forces_hybrid(
     for b in ("ados-radio", "ados-net", "ados-plugin-host",
               "ados-display", "ados-display-probe"):
         _make_bin(bin_dir, b)
-    # Only net is opt-in; display + plugin-host are opt-out (native by default).
-    _touch_flag(etc_dir, "net-rust-enabled")
+    # radio + net are native-only; display + plugin-host are opt-out (native by
+    # default). None needs a marker.
 
     # Default: no fallback marker → plugin host native → drone native.
     assert compute_runtime_mode("drone", bin_dir=bin_dir, etc_dir=etc_dir) == "native"
@@ -223,8 +216,6 @@ def test_radio_native_only_ignores_fallback_marker(
     for b in ("ados-radio", "ados-net", "ados-plugin-host",
               "ados-display", "ados-display-probe"):
         _make_bin(bin_dir, b)
-    for flag in ("net-rust-enabled",):
-        _touch_flag(etc_dir, flag)
 
     # Radio native once its binary is present → drone native.
     assert compute_runtime_mode("drone", bin_dir=bin_dir, etc_dir=etc_dir) == "native"
@@ -291,18 +282,23 @@ def test_is_service_native_opt_in(roots: tuple[Path, Path]) -> None:
     assert is_service_native("hid", bin_dir=bin_dir, etc_dir=etc_dir)
 
 
-def test_is_service_native_opt_out_net(roots: tuple[Path, Path]) -> None:
-    """Net is cut over to opt-out: native once its binary is present, with no
-    marker; the ``net-python-fallback`` marker pins the packaged uplink path."""
+def test_is_service_native_net_native_only(roots: tuple[Path, Path]) -> None:
+    """Net is native-only (the packaged uplink entrypoints were deleted): the
+    per-service resolver the REST layer uses to decide whether to forward an
+    operator radio knob to the native command socket returns native once the
+    binary is present, and a stray legacy fallback marker is ignored."""
     bin_dir, etc_dir = roots
     bin_dir.mkdir(parents=True, exist_ok=True)
     etc_dir.mkdir(parents=True, exist_ok=True)
-    _make_bin(bin_dir, "ados-net")
-    # Binary present, no fallback marker → native by default.
-    assert is_service_native("net", bin_dir=bin_dir, etc_dir=etc_dir)
-    # The fallback marker pins the packaged path → not native.
-    _touch_flag(etc_dir, "net-python-fallback")
+    # No binary → not native (the REST write paths then drive the in-process
+    # managers directly rather than forwarding to the native socket).
     assert not is_service_native("net", bin_dir=bin_dir, etc_dir=etc_dir)
+    # Binary present → native.
+    _make_bin(bin_dir, "ados-net")
+    assert is_service_native("net", bin_dir=bin_dir, etc_dir=etc_dir)
+    # A stray legacy fallback marker is ignored — net stays native.
+    _touch_flag(etc_dir, "net-python-fallback")
+    assert is_service_native("net", bin_dir=bin_dir, etc_dir=etc_dir)
 
 
 def test_is_service_native_unknown_is_false(roots: tuple[Path, Path]) -> None:

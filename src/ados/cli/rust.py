@@ -65,18 +65,9 @@ class _Service:
 # ground-receive planes are native-only (their packaged predecessor was
 # deleted) and so are not listed here — there is nothing to fall back to.
 _SERVICES: dict[str, _Service] = {
-    "net": _Service(
-        flag="net-python-fallback",
-        binaries=("/opt/ados/bin/ados-net",),
-        swap_units=("ados-uplink-router",),
-        subsumes=(
-            "ados-ethernet",
-            "ados-wifi-client",
-            "ados-usb-gadget",
-        ),
-        note="native uplink matrix (default); absorbs ethernet/wifi-client/usb-gadget",
-        opt_out=True,
-    ),
+    # net is native-only (like radio + groundlink): the native ados-net daemon
+    # always runs and the packaged Python entrypoints were deleted, so there is
+    # no flag to toggle — it is intentionally absent from this toggle registry.
     "plugin-host": _Service(
         # Cut over: native is the default. The unit's ExecStart runs the
         # native binary unless the fallback marker pins the packaged host

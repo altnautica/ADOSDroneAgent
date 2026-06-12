@@ -360,7 +360,7 @@ async def ws_uplink_events(websocket: WebSocket) -> None:
         await websocket.accept()
 
     try:
-        from ados.services.ground_station.uplink_router import get_uplink_router
+        from ados.services.ground_station.uplink import get_uplink_router
     except Exception:
         await websocket.send_json({"event": "error", "code": "E_UPLINK_ROUTER_UNAVAILABLE"})
         await websocket.close()

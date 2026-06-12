@@ -78,7 +78,7 @@ def _modem_mgr() -> Any:
 
 
 def _uplink_router() -> Any:
-    from ados.services.ground_station.uplink_router import get_uplink_router
+    from ados.services.ground_station.uplink import get_uplink_router
 
     return get_uplink_router()
 

@@ -12,17 +12,12 @@ StartLimitBurst=5
 Slice=ados.slice
 Type=simple
 User=root
-# Cut over: the native uplink matrix is the DEFAULT. The install verifies the
-# binary is present before this unit starts. The packaged Python uplink service
-# stays on disk as an emergency fallback: create the fallback flag and the unit
-# reverts to Python on restart. The native daemon also owns the AP, USB-gadget
-# tether, and the ethernet/wifi/modem managers in-process, so its subsumed
-# packaged units are masked while it is the default (handled by the installer).
-# To revert the native matrix to Python for a bench:
-#   touch /etc/ados/net-python-fallback && systemctl restart ados-uplink-router
-# `exec` replaces the shell image so the CAP_NET_ADMIN/CAP_NET_RAW ambient caps
-# below carry to the chosen binary unchanged.
-ExecStart=/bin/sh -c 'if [ -e /etc/ados/net-python-fallback ]; then exec /opt/ados/venv/bin/python -m ados.services.ground_station.uplink_router; else exec /opt/ados/bin/ados-net; fi'
+# The native uplink matrix is the only implementation; the install verifies the
+# binary is present before this unit starts. The native daemon also owns the AP,
+# USB-gadget tether, and the ethernet/wifi/modem managers in-process, so its
+# subsumed packaged units are masked (handled by the installer). The packaged
+# Python uplink entrypoints were deleted, so there is no fallback branch.
+ExecStart=/opt/ados/bin/ados-net
 Restart=on-failure
 RestartSec=10
 Environment=ADOS_CONFIG=/etc/ados/config.yaml

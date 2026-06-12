@@ -1,8 +1,9 @@
 """Uplink router package.
 
-Re-exports the public surface that callers historically imported from
-`ados.services.ground_station.uplink_router`. The legacy module is
-preserved as a thin re-export shim so existing imports keep working.
+Exposes the public surface (the `UplinkRouter` FSM, the `get_uplink_router`
+factory the REST routes call in-process, the data-cap tracker, and the event
+bus). The native `ados-net` daemon is the only runtime that drives the router;
+there is no standalone Python entrypoint.
 """
 
 from __future__ import annotations
@@ -12,7 +13,7 @@ from .data_cap import DataCapTracker, _UsageState
 from .events import DataCapState, UplinkEvent, UplinkEventBus, UplinkEventKind
 from .protocols import UplinkManagerProto, _StubManager
 from .router import UplinkRouter
-from .service import get_uplink_router, main
+from .service import get_uplink_router
 
 __all__ = [
     "UplinkEvent",
@@ -28,5 +29,4 @@ __all__ = [
     "DataCapTracker",
     "UplinkRouter",
     "get_uplink_router",
-    "main",
 ]

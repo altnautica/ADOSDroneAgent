@@ -105,69 +105,23 @@ def test_status_reports_python_when_no_flags(tmp_path, monkeypatch):
         assert name in result.output
 
 
-def test_status_reports_rust_when_binary_present_and_no_fallback(tmp_path, monkeypatch):
-    """Net is opt-out: an installed binary with no fallback marker makes the unit
-    take the native branch, and status must reflect that as ``rust``."""
-    monkeypatch.setattr(rust_mod, "ADOS_ETC_DIR", tmp_path)
-    # No net-python-fallback marker → native default.
-    monkeypatch.setattr(rust_mod, "_binaries_present", lambda svc: svc is _SERVICES["net"])
-    monkeypatch.setattr(rust_mod, "_unit_active", lambda unit: True)
-    result = CliRunner().invoke(rust_group, ["status"])
-    assert result.exit_code == 0, result.output
-    assert "rust" in result.output
-
-
 def test_enable_requires_root(tmp_path, monkeypatch):
     """enable touches /etc/ados and drives systemctl, so a non-root caller
     is refused before anything is written."""
     monkeypatch.setattr(rust_mod, "ADOS_ETC_DIR", tmp_path)
     monkeypatch.setattr(rust_mod.os, "geteuid", lambda: 1000)
     monkeypatch.setattr(rust_mod, "_binaries_present", lambda svc: True)
-    result = CliRunner().invoke(rust_group, ["enable", "net"])
+    result = CliRunner().invoke(rust_group, ["enable", "control"])
     assert result.exit_code != 0
     assert "sudo" in result.output.lower()
-    assert not (tmp_path / _SERVICES["net"].flag).exists()
-
-
-def test_enable_removes_fallback_and_reconciles_subsumed(tmp_path, monkeypatch):
-    """Net is opt-out: enabling it REMOVES the fallback marker (native default),
-    restarts the swap unit, and masks the three packaged units the native uplink
-    daemon absorbs."""
-    monkeypatch.setattr(rust_mod, "ADOS_ETC_DIR", tmp_path)
-    monkeypatch.setattr(rust_mod.os, "geteuid", lambda: 0)
-    monkeypatch.setattr(rust_mod, "_binaries_present", lambda svc: True)
-    monkeypatch.setattr(rust_mod, "_unit_active", lambda unit: True)
-    # Start pinned to the packaged path, then enable to clear it.
-    (tmp_path / _SERVICES["net"].flag).touch()
-    calls: list[tuple[str, ...]] = []
-    monkeypatch.setattr(rust_mod, "_systemctl", lambda *a, **k: calls.append(a) or 0)
-    result = CliRunner().invoke(rust_group, ["enable", "net"])
-    assert result.exit_code == 0, result.output
-    assert not (tmp_path / _SERVICES["net"].flag).exists()
-    assert ("restart", "ados-uplink-router") in calls
-    for unit in _SERVICES["net"].subsumes:
-        assert ("disable", unit) in calls
-
-
-def test_disable_writes_fallback_and_restores_subsumed(tmp_path, monkeypatch):
-    """Net is opt-out: disabling it WRITES the fallback marker (packaged path) and
-    re-enables the packaged units."""
-    monkeypatch.setattr(rust_mod, "ADOS_ETC_DIR", tmp_path)
-    monkeypatch.setattr(rust_mod.os, "geteuid", lambda: 0)
-    monkeypatch.setattr(rust_mod, "_binaries_present", lambda svc: True)
-    monkeypatch.setattr(rust_mod, "_unit_active", lambda unit: False)
-    calls: list[tuple[str, ...]] = []
-    monkeypatch.setattr(rust_mod, "_systemctl", lambda *a, **k: calls.append(a) or 0)
-    result = CliRunner().invoke(rust_group, ["disable", "net"])
-    assert result.exit_code == 0, result.output
-    assert (tmp_path / _SERVICES["net"].flag).exists()
-    for unit in _SERVICES["net"].subsumes:
-        assert ("enable", unit) in calls
+    assert not (tmp_path / _SERVICES["control"].flag).exists()
 
 
 def test_enable_kills_subsumed_unit_that_will_not_stop(tmp_path, monkeypatch):
     """A subsumed unit slow to honor SIGTERM is SIGKILLed and reset-failed so
-    it ends cleanly inactive instead of lingering as failed."""
+    it ends cleanly inactive instead of lingering as failed. The native input
+    arbiter (hid) absorbs the packaged button service, so enabling it exercises
+    the mask path."""
     monkeypatch.setattr(rust_mod, "ADOS_ETC_DIR", tmp_path)
     monkeypatch.setattr(rust_mod.os, "geteuid", lambda: 0)
     monkeypatch.setattr(rust_mod, "_binaries_present", lambda svc: True)
@@ -180,8 +134,9 @@ def test_enable_kills_subsumed_unit_that_will_not_stop(tmp_path, monkeypatch):
         return 124 if a and a[0] == "stop" else 0
 
     monkeypatch.setattr(rust_mod, "_systemctl", fake)
-    result = CliRunner().invoke(rust_group, ["enable", "net"])
+    result = CliRunner().invoke(rust_group, ["enable", "hid"])
     assert result.exit_code == 0, result.output
-    for unit in _SERVICES["net"].subsumes:
+    assert _SERVICES["hid"].subsumes  # guard: the test relies on hid masking a unit
+    for unit in _SERVICES["hid"].subsumes:
         assert ("kill", "-s", "SIGKILL", unit) in calls
         assert ("reset-failed", unit) in calls

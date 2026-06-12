@@ -15,7 +15,7 @@ persistence:
 - Idempotent reconcile-on-start that brings runtime state into agreement
   with the persisted `ground_station.share_uplink` flag.
 
-Called by `uplink_router._run_service()` at startup and by the
+Applied at startup by the native uplink daemon and re-applied by the
 `PUT /network/share_uplink` route on transitions.
 """
 
@@ -459,7 +459,7 @@ async def reconcile_on_start() -> dict:
     # Discover the active uplink iface. Best-effort only.
     active_iface: str | None = None
     try:
-        from ados.services.ground_station.uplink_router import get_uplink_router
+        from ados.services.ground_station.uplink import get_uplink_router
         router = get_uplink_router()
         active_name = router.active_uplink
         if active_name:

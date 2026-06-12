@@ -32,8 +32,6 @@ import fcntl
 import json
 import os
 import re
-import signal
-import sys
 import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
@@ -659,54 +657,3 @@ def get_wifi_client_manager() -> WifiClientManager:
     if _INSTANCE is None:
         _INSTANCE = WifiClientManager()
     return _INSTANCE
-
-
-# -------------------- service entry --------------------
-
-
-async def main() -> None:
-    """Entry point for a future ados-wifi-client.service unit."""
-    import structlog
-
-    from ados.core.config import load_config
-    from ados.core.logging import configure_logging
-
-    cfg = load_config()
-    configure_logging(cfg.logging.level)
-    slog = structlog.get_logger()
-    slog.info("wifi_client_service_starting")
-
-    mgr = get_wifi_client_manager()
-
-    # Startup check: if a prior session left AP disabled but hostapd is
-    # not running, surface the decision to the router (do not auto-start).
-    if mgr._read_ap_flag() and not mgr._is_hostapd_active():
-        slog.info(
-            "wifi_client_startup_ap_flag_lingering",
-            hint="uplink_router decides whether to restore AP or keep client",
-        )
-
-    cfg_data = mgr._load_client_config()
-    if cfg_data.get("enabled_on_boot") and cfg_data.get("last_ssid"):
-        slog.info("wifi_client_auto_rejoin_requested", ssid=cfg_data["last_ssid"])
-
-    mgr.start_polling()
-
-    shutdown = asyncio.Event()
-    loop = asyncio.get_event_loop()
-    for sig in (signal.SIGTERM, signal.SIGINT):
-        loop.add_signal_handler(sig, shutdown.set)
-
-    await shutdown.wait()
-
-    mgr.stop_polling()
-    await mgr.bus.close()
-    slog.info("wifi_client_service_stopped")
-
-
-if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        pass
-    sys.exit(0)
