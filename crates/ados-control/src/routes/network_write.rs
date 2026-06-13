@@ -377,7 +377,7 @@ mod tests {
     /// temp `ADOS_RUN_DIR`) that reads one request line and replies with `reply`,
     /// then runs the handler `run`. Returns `{request, status, body}` so the test
     /// can assert both the op forwarded and the response. Callers serialize behind
-    /// `ENV_LOCK` because the `ADOS_RUN_DIR` override is process-wide.
+    /// the crate-wide env lock because the `ADOS_RUN_DIR` override is process-wide.
     async fn with_socket<F>(reply: Value, run: F) -> Value
     where
         F: std::future::Future<Output = Response>,
@@ -515,16 +515,12 @@ mod tests {
 
     // ── the handlers against a no-socket seam (the 503 path) ─────────────────
     //
-    // These set the process-wide ADOS_RUN_DIR, so they serialize behind ENV_LOCK.
-    // An async-aware mutex is used because the guard is held across the handler's
-    // await (the env override must hold for the whole handler run).
-
-    use tokio::sync::Mutex;
-    static ENV_LOCK: Mutex<()> = Mutex::const_new(());
+    // These set the process-wide ADOS_RUN_DIR, so they serialize behind the
+    // crate-wide env lock (held across the handler's await for the whole run).
 
     #[tokio::test]
     async fn join_with_no_socket_is_a_503() {
-        let _guard = ENV_LOCK.lock().await;
+        let _guard = crate::lock_env().await;
         // Point ADOS_RUN_DIR at an empty dir → the connect fails fast → 503.
         let dir = tempfile::tempdir().unwrap();
         std::env::set_var("ADOS_RUN_DIR", dir.path());
@@ -542,7 +538,7 @@ mod tests {
 
     #[tokio::test]
     async fn leave_with_no_socket_is_a_503() {
-        let _guard = ENV_LOCK.lock().await;
+        let _guard = crate::lock_env().await;
         let dir = tempfile::tempdir().unwrap();
         std::env::set_var("ADOS_RUN_DIR", dir.path());
         let resp = delete_client().await;
@@ -557,7 +553,7 @@ mod tests {
 
     #[tokio::test]
     async fn forget_with_no_socket_is_a_503() {
-        let _guard = ENV_LOCK.lock().await;
+        let _guard = crate::lock_env().await;
         let dir = tempfile::tempdir().unwrap();
         std::env::set_var("ADOS_RUN_DIR", dir.path());
         let resp = delete_client_configured(Path("Net".to_string())).await;
@@ -574,7 +570,7 @@ mod tests {
 
     #[tokio::test]
     async fn join_forwards_a_wifi_join_op_and_returns_the_success_body() {
-        let _guard = ENV_LOCK.lock().await;
+        let _guard = crate::lock_env().await;
         let out = with_socket(
             json!({"ok": true, "joined": true, "ip": "10.0.0.5", "gateway": "10.0.0.1", "error": null}),
             put_client_join(Json(WifiJoinRequest {
@@ -599,7 +595,7 @@ mod tests {
 
     #[tokio::test]
     async fn join_maps_the_ap_busy_result_to_a_409() {
-        let _guard = ENV_LOCK.lock().await;
+        let _guard = crate::lock_env().await;
         let out = with_socket(
             json!({"ok": true, "joined": false, "error": "wlan0_busy_ap_active"}),
             put_client_join(Json(WifiJoinRequest {
@@ -626,7 +622,7 @@ mod tests {
 
     #[tokio::test]
     async fn join_surfaces_an_ok_false_reply_as_a_500() {
-        let _guard = ENV_LOCK.lock().await;
+        let _guard = crate::lock_env().await;
         let out = with_socket(
             json!({"ok": false, "error": "E_MISSING_SSID"}),
             put_client_join(Json(WifiJoinRequest {
@@ -649,7 +645,7 @@ mod tests {
 
     #[tokio::test]
     async fn leave_forwards_a_wifi_leave_op_and_returns_the_reply() {
-        let _guard = ENV_LOCK.lock().await;
+        let _guard = crate::lock_env().await;
         let out = with_socket(
             json!({"ok": true, "left": true, "previous_ssid": "HomeNet"}),
             delete_client(),
@@ -666,7 +662,7 @@ mod tests {
 
     #[tokio::test]
     async fn forget_forwards_a_wifi_forget_op_and_returns_the_reply() {
-        let _guard = ENV_LOCK.lock().await;
+        let _guard = crate::lock_env().await;
         let out = with_socket(
             json!({"ok": true, "forgot": true, "name": "HomeNet", "error": null}),
             delete_client_configured(Path("HomeNet".to_string())),
@@ -683,7 +679,7 @@ mod tests {
 
     #[tokio::test]
     async fn forget_maps_a_failed_forget_to_a_400() {
-        let _guard = ENV_LOCK.lock().await;
+        let _guard = crate::lock_env().await;
         let out = with_socket(
             json!({"ok": true, "forgot": false, "name": "HomeNet", "error": "nmcli_failed"}),
             delete_client_configured(Path("HomeNet".to_string())),

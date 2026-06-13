@@ -1311,7 +1311,9 @@ mod tests {
     fn build_status_from_an_absent_sidecar_is_the_finalized_base() {
         // With no wfb-stats.json the route returns the base block (the FastAPI
         // `except: return base` path returns the bare base, no finalize). Point
-        // the run dir at an empty tempdir so the file is absent.
+        // the run dir at an empty tempdir so the file is absent. ADOS_RUN_DIR is
+        // process-global, so hold the crate-wide env lock for the set→clear span.
+        let _env = crate::lock_env_blocking();
         let dir = tempfile::tempdir().unwrap();
         std::env::set_var("ADOS_RUN_DIR", dir.path());
         let cfg = StatusConfig::default();

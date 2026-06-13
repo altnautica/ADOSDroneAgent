@@ -614,19 +614,13 @@ fn percent_encode(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
-
-    /// The config/role/run-dir seams resolve through process-global env vars, so the
-    /// env-mutating tests below serialize on this lock to avoid one test's vars
-    /// clobbering another's under the parallel test runner.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     /// Point the config + role + run-dir seams at a tempdir so the gating helpers
     /// read fixtures, not the live host. Holds the env lock + the tempdir for the
     /// test's lifetime; dropping it clears the env vars.
     struct Env {
         _dir: tempfile::TempDir,
-        _guard: std::sync::MutexGuard<'static, ()>,
+        _guard: tokio::sync::MutexGuard<'static, ()>,
     }
 
     impl Drop for Env {
@@ -639,8 +633,8 @@ mod tests {
     }
 
     fn with_env(role: Option<&str>, config_body: &str) -> Env {
-        // Recover the lock even if a prior test panicked while holding it.
-        let guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // The crate-wide env lock, recovered even if a prior test panicked.
+        let guard = crate::lock_env_blocking();
         let dir = tempfile::tempdir().unwrap();
         let cfg = dir.path().join("config.yaml");
         std::fs::write(&cfg, config_body).unwrap();

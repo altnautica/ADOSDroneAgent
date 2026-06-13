@@ -770,11 +770,20 @@ mod tests {
 
     #[tokio::test]
     async fn wait_for_tcp_port_times_out_on_closed_port() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port();
-        drop(listener);
-        let ok = wait_for_tcp_port("127.0.0.1", port, Duration::from_millis(300)).await;
-        assert!(!ok);
+        // Bind an ephemeral port, then drop the listener so the port is closed.
+        // Under the parallel test runner a concurrent bind can momentarily reuse
+        // that just-freed port number inside the probe window, so retry on a fresh
+        // port rather than flaking — five independent ports all being reused at
+        // once is not a real outcome.
+        for _ in 0..5 {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            drop(listener);
+            if !wait_for_tcp_port("127.0.0.1", port, Duration::from_millis(300)).await {
+                return; // closed as expected
+            }
+        }
+        panic!("every freed ephemeral port probed as open — port reuse, not a real reachable port");
     }
 
     #[test]

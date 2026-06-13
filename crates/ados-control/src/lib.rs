@@ -24,6 +24,31 @@ pub mod routing;
 pub mod serve;
 pub mod state;
 
+/// Serializes tests that mutate process-global env vars (`ADOS_CONFIG`,
+/// `ADOS_RUN_DIR`, `ADOS_MESH_ROLE`, `ADOS_PROFILE_CONF`, ...). The process
+/// environment is shared by every test thread in the binary, and these tests set
+/// a var, run a handler, then clear it; with only per-module locks a parallel
+/// test in another module clobbers the var mid-flight. A `tokio` Mutex so the
+/// guard is held cleanly across an `.await` in the async tests, and dropped in a
+/// sync RAII `Drop` to clear the vars; the sync (no-runtime) `#[test]` sites lock
+/// it with [`lock_env_blocking`].
+#[cfg(test)]
+pub(crate) static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Acquire [`ENV_LOCK`] from an async test, holding it across the handler await.
+#[cfg(test)]
+pub(crate) async fn lock_env() -> tokio::sync::MutexGuard<'static, ()> {
+    ENV_LOCK.lock().await
+}
+
+/// Acquire [`ENV_LOCK`] from a synchronous `#[test]` with no runtime active
+/// (`blocking_lock` panics if called inside a runtime, so this is for the plain
+/// `#[test]` env sites only — never an async test).
+#[cfg(test)]
+pub(crate) fn lock_env_blocking() -> tokio::sync::MutexGuard<'static, ()> {
+    ENV_LOCK.blocking_lock()
+}
+
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;

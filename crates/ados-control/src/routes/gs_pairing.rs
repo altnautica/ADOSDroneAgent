@@ -446,9 +446,11 @@ mod tests {
 
     /// Drive the real handler with `ADOS_CONFIG` pointed at a config that carries
     /// an explicit `agent.profile`, which resolves straight to the wire profile
-    /// without consulting profile.conf. `ADOS_CONFIG` is read by no other test in
-    /// this module, so the set/remove pair does not collide with a parallel test.
+    /// without consulting profile.conf. `ADOS_CONFIG` is process-global and set by
+    /// other modules' tests too, so hold the crate-wide env lock across the
+    /// set→await→clear span.
     async fn captive_token_with_profile(profile: &str) -> (StatusCode, Value) {
+        let _env = crate::lock_env().await;
         let dir = tempfile::tempdir().unwrap();
         let cfg = config_with_profile(dir.path(), profile);
         std::env::set_var("ADOS_CONFIG", &cfg);
@@ -484,6 +486,7 @@ mod tests {
 
     #[test]
     fn truthy_env_reads_the_python_truthy_set() {
+        let _env = crate::lock_env_blocking();
         std::env::set_var("ADOS_TEST_TRUTHY", "yes");
         assert!(truthy_env("ADOS_TEST_TRUTHY"));
         std::env::set_var("ADOS_TEST_TRUTHY", "TRUE");
