@@ -51,6 +51,8 @@ DEFAULT_VOLATILE_KEYS: frozenset[str] = frozenset(
         "now_us",
         "now_ms",
         "wall_ns",
+        "wall_time",
+        "wall_time_unix",
         "uptime",
         "uptime_seconds",
         "uptime_s",
@@ -74,6 +76,10 @@ DEFAULT_VOLATILE_KEYS: frozenset[str] = frozenset(
         "elapsed_ms",
         "elapsed_us",
         "monotonic_ns",
+        # the IPC state-drop tally rides the telemetry projection (standalone and
+        # embedded in the consolidated status) and ticks whenever a state frame is
+        # dropped between two reads
+        "ipc_state_drops",
     }
 )
 

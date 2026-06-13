@@ -210,6 +210,9 @@ REGISTRY: list[RouteCase] = [
             "bitrate_mbps",
             "rx_silent_seconds",
             "restart_count",
+            # Per-second rate counters off the live link, recomputed every read.
+            "valid_rx_packets_per_s",
+            "video_inbound_bytes_per_s",
             "samples",
             "state",
         ),
@@ -294,6 +297,12 @@ REGISTRY: list[RouteCase] = [
             "adapterUsbSpeedMbps",
             # The radio + WFB-receive link state can flip between two reads.
             "state",
+            # The video WHEP URL is liveness-derived (present only while the
+            # downlink delivers): the native front reads the WFB link from the
+            # buffered logging store while the residual reads it live, so the
+            # delivering boolean — keyed on the per-instant valid-decode rate —
+            # can flip between the two reads, exactly like the `state` above it.
+            "whep_url",
             # Camera USB-recovery attempt counters.
             "attempts",
             "maxAttempts",

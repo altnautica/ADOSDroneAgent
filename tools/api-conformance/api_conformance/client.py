@@ -32,8 +32,11 @@ from dataclasses import dataclass, field
 import httpx
 
 # Per-request bound. The harness is a deterministic dry check, never a soak; a
-# slow or absent endpoint must surface as a reachability miss, not a hang.
-DEFAULT_TIMEOUT_S = 5.0
+# slow or absent endpoint must surface as a reachability miss, not a hang. The
+# bound is generous enough to cover the residual handlers that do real on-radio
+# work (the Wi-Fi client scan can take several seconds), so an honest-but-slow
+# response is not misread as unreachable; the native front answers these in ms.
+DEFAULT_TIMEOUT_S = 10.0
 
 # How many SSE frames a streaming read collects before it returns, and the hard
 # wall-clock deadline for collecting them (so a quiet stream returns what it has
@@ -44,6 +47,13 @@ DEFAULT_SSE_DEADLINE_S = 5.0
 # A stand-in authority for unix-socket requests: httpx needs a syntactically
 # valid http URL even though the socket transport ignores the host.
 _UDS_BASE = "http://api.local"
+
+# A fixed Host header forced on every request so the two transports (TCP front
+# port and the unix socket) present the SAME authority. Host-derived response
+# fields (the video stream URLs the handler builds from the request Host) are
+# then identical by construction, while a genuine host-derivation divergence
+# between the two handlers would still surface as a body mismatch.
+_FIXED_HOST = "api.local"
 
 
 @dataclass(frozen=True)
@@ -79,6 +89,7 @@ def _do_request(
     an error status); only an unreachable transport yields ``ok=False``.
     """
     req_headers = dict(headers or {})
+    req_headers.setdefault("host", _FIXED_HOST)
     if content_type and body is not None:
         req_headers.setdefault("content-type", content_type)
     try:
@@ -111,6 +122,7 @@ def _do_stream(
     not a frame sequence), so the comparator sees the status mismatch directly.
     """
     req_headers = dict(headers or {})
+    req_headers.setdefault("host", _FIXED_HOST)
     req_headers.setdefault("accept", "text/event-stream")
     if content_type and body is not None:
         req_headers.setdefault("content-type", content_type)
