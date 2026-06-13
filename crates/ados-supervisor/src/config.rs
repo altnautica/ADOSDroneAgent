@@ -34,6 +34,11 @@ struct RawConfig {
 struct AgentSection {
     #[serde(default)]
     profile: Option<String>,
+    /// `agent.headless`: when true, the supervisor boots only the lean KEEP set
+    /// (the Rust core), blocking FastAPI / cloud / health / GS units. Absent or
+    /// false → the full agent. The zero-Python flight profile (DEC-180).
+    #[serde(default)]
+    headless: Option<bool>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -81,6 +86,11 @@ pub struct AgentConfig {
     /// resolved one, to match the Python supervisor exactly. See
     /// `raw_is_ground_station`.
     pub raw_agent_profile: Option<String>,
+    /// `agent.headless` is true: boot only the lean headless KEEP set. The
+    /// service gate blocks every non-KEEP unit when this is set, so a zero-Python
+    /// flight node runs just the Rust core (MAVLink / camera / radio / HTTP
+    /// front). A boot-time flag — the supervisor reads it once at config load.
+    pub headless_mode: bool,
     /// Where the on-disk role sentinel lives. The role gate re-reads this on
     /// every check so an operator-driven role switch (which flips the sentinel
     /// and stops/starts units without restarting this process) is reflected in
@@ -130,6 +140,8 @@ impl AgentConfig {
             .filter(|r| VALID_ROLES.contains(&r.as_str()))
             .unwrap_or_else(|| "direct".to_string());
 
+        let headless_mode = raw.agent.headless.unwrap_or(false);
+
         AgentConfig {
             profile_wire,
             role,
@@ -137,6 +149,7 @@ impl AgentConfig {
             cloud_relay_enabled,
             configured_gs_role,
             raw_agent_profile,
+            headless_mode,
             mesh_role_path: mesh_role.to_path_buf(),
         }
     }
@@ -330,6 +343,26 @@ mod tests {
         assert_eq!(ac.role, None);
         assert!(!ac.video_enabled);
         assert_eq!(ac.configured_gs_role, "direct");
+        // The full agent is the default: headless must be opt-in.
+        assert!(!ac.headless_mode);
+    }
+
+    #[test]
+    fn headless_mode_follows_agent_headless() {
+        let dir = tempfile::tempdir().unwrap();
+        let pc = dir.path().join("profile.conf");
+        let role = dir.path().join("mesh/role");
+        let load = |body: &str| {
+            let cfg = dir.path().join("config.yaml");
+            write(&cfg, body);
+            AgentConfig::load_from(&cfg, &pc, &role).headless_mode
+        };
+        // Absent → full agent.
+        assert!(!load("agent:\n  profile: drone\n"));
+        // Explicit false → full agent.
+        assert!(!load("agent:\n  profile: drone\n  headless: false\n"));
+        // Explicit true → lean headless.
+        assert!(load("agent:\n  profile: drone\n  headless: true\n"));
     }
 
     #[test]

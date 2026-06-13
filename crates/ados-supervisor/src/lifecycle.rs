@@ -32,6 +32,14 @@ const BIND_GATED_UNITS: [&str; 2] = ["ados-wfb", "ados-wfb-rx"];
 /// direct unit). Reading the sentinel here keeps the gate in lock-step with the
 /// live role, matching the Python `start_service` semantics.
 pub fn gate_allows(spec: &ServiceSpec, config: &AgentConfig) -> bool {
+    // The lean headless gate runs first and is purely subtractive: when the
+    // agent is headless, only the KEEP set (MAVLink / camera / radio / HTTP
+    // front) may run; every other unit gates off so the box boots zero-Python.
+    // A complete no-op on the full agent (`headless_mode` false), so the profile
+    // and role gates below are unchanged for every non-headless rig.
+    if config.headless_mode && !spec.headless_keep {
+        return false;
+    }
     if let Some(gate) = spec.profile_gate {
         // The registry gates are the underscore form; the resolved profile is
         // the hyphen wire form. Normalise once for the comparison.
@@ -549,8 +557,17 @@ mod tests {
             cloud_relay_enabled: false,
             configured_gs_role: "direct".to_string(),
             raw_agent_profile: Some(profile_wire.replace('-', "_")),
+            headless_mode: false,
             mesh_role_path: role_path.to_path_buf(),
         }
+    }
+
+    /// A headless drone config (the lean KEEP-set gate active), pointed at a
+    /// nonexistent sentinel (role irrelevant on a drone).
+    fn cfg_headless() -> AgentConfig {
+        let mut c = cfg("drone");
+        c.headless_mode = true;
+        c
     }
 
     /// A config pointed at a nonexistent sentinel (gate sees `direct`). Used by
@@ -580,6 +597,25 @@ mod tests {
         assert!(!gate_allows(&spec("ados-wfb-rx"), &c)); // ground_station-gated
         assert!(!gate_allows(&spec("ados-oled"), &c));
         assert!(gate_allows(&spec("ados-wifi-client"), &c)); // cross-profile
+    }
+
+    #[test]
+    fn headless_gate_keeps_only_the_lean_core() {
+        let c = cfg_headless();
+        // The KEEP set runs (radio TX is drone-gated, which the drone profile
+        // also permits, so it stays up).
+        assert!(gate_allows(&spec("ados-mavlink"), &c));
+        assert!(gate_allows(&spec("ados-video"), &c));
+        assert!(gate_allows(&spec("ados-wfb"), &c));
+        assert!(gate_allows(&spec("ados-control"), &c));
+        // Everything else gates off even though the profile/role gates alone
+        // would permit it on a full drone: FastAPI, cloud, health, wifi-client.
+        assert!(!gate_allows(&spec("ados-api"), &c));
+        assert!(!gate_allows(&spec("ados-cloud"), &c));
+        assert!(!gate_allows(&spec("ados-health"), &c));
+        assert!(!gate_allows(&spec("ados-wifi-client"), &c));
+        // The full-agent gate is unchanged: with headless off, ados-api runs.
+        assert!(gate_allows(&spec("ados-api"), &cfg("drone")));
     }
 
     #[test]

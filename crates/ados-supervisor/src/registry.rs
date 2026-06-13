@@ -60,6 +60,13 @@ pub struct ServiceDef {
     pub category: Category,
     pub profile_gate: Option<&'static str>,
     pub role_gate: Option<&'static str>,
+    /// True for the lean headless KEEP set: the minimal services a zero-Python
+    /// flight node runs (the MAVLink router, the camera encode, the radio TX,
+    /// and the native HTTP front). When the agent is in headless mode, the gate
+    /// blocks every service that is NOT in this set, so the box boots only the
+    /// Rust core. `false` for all other services (the default via `def`); the
+    /// KEEP set is marked with `def_keep`.
+    pub headless_keep: bool,
 }
 
 const fn def(
@@ -73,6 +80,25 @@ const fn def(
         category,
         profile_gate,
         role_gate,
+        headless_keep: false,
+    }
+}
+
+/// A registry entry in the lean headless KEEP set (`headless_keep = true`): the
+/// minimal services a zero-Python flight node keeps running. Identical to `def`
+/// in every other respect.
+const fn def_keep(
+    name: &'static str,
+    category: Category,
+    profile_gate: Option<&'static str>,
+    role_gate: Option<&'static str>,
+) -> ServiceDef {
+    ServiceDef {
+        name,
+        category,
+        profile_gate,
+        role_gate,
+        headless_keep: true,
     }
 }
 
@@ -86,7 +112,7 @@ pub const SERVICE_REGISTRY: &[ServiceDef] = &[
     // (no profile gate). A missing router binary makes this unit crash-loop, so
     // the installer Hard-gates the binary's fetch and re-checks its presence in
     // the health gate before reporting the install OK.
-    def("ados-mavlink", Core, None, None),
+    def_keep("ados-mavlink", Core, None, None),
     def("ados-api", Core, None, None),
     def("ados-cloud", Core, None, None),
     def("ados-health", Core, None, None),
@@ -96,17 +122,19 @@ pub const SERVICE_REGISTRY: &[ServiceDef] = &[
     // ados-video binary on the drone profile only, so leaving this ungated made
     // a ground station start a unit whose binary is (correctly) absent — an
     // endless restart loop. Gate it to drone to match the catalog.
-    def("ados-video", Hardware, Some("drone"), None),
+    def_keep("ados-video", Hardware, Some("drone"), None),
     // Drone-side WFB-ng TX manager. Profile-gated to drone so a ground station
     // does not bring up wfb_tx and fight the GS wfb_rx for the same adapter.
-    def("ados-wfb", Hardware, Some("drone"), None),
+    def_keep("ados-wfb", Hardware, Some("drone"), None),
     // On-demand.
     def("ados-ota", OnDemand, None, None),
     def("ados-discovery", OnDemand, None, None),
     // The native HTTP control surface. Cross-profile and on-demand: it ships
     // disabled (the GCS uses the FastAPI surface) and only runs when the operator
-    // enables it, so the supervisor never auto-starts it on boot.
-    def("ados-control", OnDemand, None, None),
+    // enables it, so the supervisor never auto-starts it on boot. In the KEEP set
+    // because the lean headless profile binds it on `:8080` in place of FastAPI;
+    // the headless gate must permit it while blocking the rest.
+    def_keep("ados-control", OnDemand, None, None),
     // Peripheral Manager registry. Cross-profile.
     def("ados-peripherals", Hardware, None, None),
     // Ground-station-only services. ados-wfb-rx is the single-node RX path,
@@ -165,6 +193,9 @@ pub struct ServiceSpec {
     pub category: Category,
     pub profile_gate: Option<&'static str>,
     pub role_gate: Option<&'static str>,
+    /// Mirrors `ServiceDef::headless_keep`: whether this unit is in the lean
+    /// headless KEEP set the gate permits when the agent runs headless.
+    pub headless_keep: bool,
     pub state: ServiceState,
     /// Failure timestamps inside the circuit-breaker window.
     pub failure_times: VecDeque<Instant>,
@@ -179,6 +210,7 @@ impl ServiceSpec {
             category: d.category,
             profile_gate: d.profile_gate,
             role_gate: d.role_gate,
+            headless_keep: d.headless_keep,
             state: ServiceState::Stopped,
             failure_times: VecDeque::new(),
             last_retry_at: None,
@@ -252,6 +284,28 @@ mod tests {
         // wifi-client stays cross-profile.
         let wc = specs.iter().find(|s| s.name == "ados-wifi-client").unwrap();
         assert_eq!(wc.profile_gate, None);
+    }
+
+    #[test]
+    fn headless_keep_set_is_exactly_the_lean_core() {
+        // The lean headless profile boots only the Rust core: the MAVLink
+        // router, the camera encode, the radio TX, and the native HTTP front.
+        // Everything else (FastAPI, cloud, health, GS units, on-demand) is NOT
+        // in the KEEP set, so the headless gate blocks it.
+        let specs = build_specs();
+        let kept: Vec<_> = specs
+            .iter()
+            .filter(|s| s.headless_keep)
+            .map(|s| s.name)
+            .collect();
+        assert_eq!(
+            kept,
+            vec!["ados-mavlink", "ados-video", "ados-wfb", "ados-control"],
+            "headless KEEP set drifted"
+        );
+        // ados-api (FastAPI) is explicitly NOT kept: headless is zero-Python.
+        let api = specs.iter().find(|s| s.name == "ados-api").unwrap();
+        assert!(!api.headless_keep);
     }
 
     #[test]
