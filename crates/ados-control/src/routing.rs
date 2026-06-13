@@ -147,14 +147,39 @@ pub fn classify(method: &Method, path: &str) -> RouteMode {
 
 /// True iff the front serves this exact `(method, path)` itself. The auth edge
 /// keeps its native posture for these and proxies everything else; the proxy
-/// fallback never fires for a native route (axum routes it first). An exact path
-/// match (the native routes have no params) and an exact method match — a `POST`
-/// to a `GET`-only native path is NOT native, so it falls through to the proxy,
-/// which lets the residual surface answer with its own `405`/`404`.
+/// fallback never fires for a native route (axum routes it first). The method
+/// must match exactly — a `POST` to a `GET`-only native path is NOT native, so it
+/// falls through to the proxy, which lets the residual surface answer with its
+/// own `405`/`404`. The path matches against the native template: a `{param}`
+/// segment matches any single non-empty segment, every other segment literally
+/// (see [`path_matches_template`]), so a path-param route like
+/// `/api/services/{name}/restart` is recognized as native and keeps its auth.
 pub fn is_native(method: &Method, path: &str) -> bool {
     native_routes()
         .iter()
-        .any(|r| r.method == method && r.path == path)
+        .any(|r| r.method == method && path_matches_template(r.path, path))
+}
+
+/// Match a request path against a native-route template. A segment wrapped in
+/// `{...}` matches any single non-empty segment; every other segment must match
+/// literally, and both must have the same number of segments. A param-free
+/// template reduces to literal equality, so the existing exact routes are
+/// unaffected. Mirrors how axum's router matches `{param}` placeholders, so the
+/// auth gate and the router agree on what is native.
+fn path_matches_template(template: &str, actual: &str) -> bool {
+    let t = template.split('/');
+    let a = actual.split('/');
+    let (tc, ac): (Vec<&str>, Vec<&str>) = (t.collect(), a.collect());
+    if tc.len() != ac.len() {
+        return false;
+    }
+    tc.iter().zip(ac.iter()).all(|(ts, seg)| {
+        if ts.starts_with('{') && ts.ends_with('}') && ts.len() >= 2 {
+            !seg.is_empty()
+        } else {
+            ts == seg
+        }
+    })
 }
 
 /// True when a path sits under a known permanent-Python prefix. Used only to pick
@@ -217,6 +242,25 @@ mod tests {
             classify(&Method::GET, "/api/flights"),
             RouteMode::Proxied { permanent: false }
         );
+    }
+
+    #[test]
+    fn path_param_templates_match_a_single_segment() {
+        // A param-free template still matches only its exact path.
+        assert!(path_matches_template("/api/status", "/api/status"));
+        assert!(!path_matches_template("/api/status", "/api/status/full"));
+        // A {param} segment matches any single non-empty segment.
+        assert!(path_matches_template("/api/params/{name}", "/api/params/RC1_MIN"));
+        assert!(path_matches_template(
+            "/api/services/{name}/restart",
+            "/api/services/ados-mavlink/restart"
+        ));
+        // Same segment count required; an empty placeholder segment does not match.
+        assert!(!path_matches_template("/api/params/{name}", "/api/params"));
+        assert!(!path_matches_template("/api/params/{name}", "/api/params/"));
+        assert!(!path_matches_template("/api/params/{name}", "/api/params/a/b"));
+        // A literal segment must still match literally.
+        assert!(!path_matches_template("/api/params/{name}", "/api/other/x"));
     }
 
     #[test]
