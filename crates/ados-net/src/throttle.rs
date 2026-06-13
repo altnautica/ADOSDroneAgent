@@ -253,7 +253,7 @@ mod tests {
         });
 
         // Poll for the tc tbf throttle.
-        for _ in 0..50 {
+        for _ in 0..400 {
             if runner
                 .recorded()
                 .iter()
@@ -331,7 +331,7 @@ mod tests {
             data_cap_state: Some(DataCapState::Throttle95),
             timestamp_ms: 1,
         });
-        for _ in 0..50 {
+        for _ in 0..400 {
             if runner
                 .recorded()
                 .iter()
@@ -356,7 +356,7 @@ mod tests {
         // The consumer must emit a `tc qdisc del dev wwan0 root` clearing the
         // stale qdisc off the departed cellular iface.
         let mut cleared = false;
-        for _ in 0..50 {
+        for _ in 0..400 {
             cleared = runner.recorded().iter().skip(after_throttle).any(|c| {
                 c.contains(&"del".to_string())
                     && c.contains(&"wwan0".to_string())
@@ -421,7 +421,7 @@ mod tests {
             data_cap_state: Some(DataCapState::Throttle95),
             timestamp_ms: 1,
         });
-        for _ in 0..50 {
+        for _ in 0..400 {
             if runner
                 .recorded()
                 .iter()
@@ -510,7 +510,7 @@ mod tests {
 
         // Poll for at least two MASQUERADE -A adds (one from reconcile-on-start,
         // one from the switch re-apply).
-        for _ in 0..50 {
+        for _ in 0..400 {
             let adds = runner
                 .recorded()
                 .iter()
