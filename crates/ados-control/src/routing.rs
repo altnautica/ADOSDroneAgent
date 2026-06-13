@@ -82,6 +82,36 @@ fn native_routes() -> Vec<NativeRoute> {
         get("/api/wfb/history"),
         get("/api/wfb/pair"),
         get("/api/wfb/pair/failover-status"),
+        // Consolidated status.
+        get("/api/status/full"),
+        // Video reads.
+        get("/api/video/latency"),
+        get("/api/v1/video/air-pipeline"),
+        get("/api/video/config"),
+        // Ground-station status + radio (profile-gated).
+        get("/api/v1/ground-station/status"),
+        get("/api/v1/ground-station/wfb"),
+        get("/api/v1/ground-station/wfb/relay/status"),
+        get("/api/v1/ground-station/wfb/receiver/relays"),
+        get("/api/v1/ground-station/wfb/receiver/combined"),
+        // Ground-station mesh (profile-gated).
+        get("/api/v1/ground-station/role"),
+        get("/api/v1/ground-station/mesh"),
+        get("/api/v1/ground-station/mesh/neighbors"),
+        get("/api/v1/ground-station/mesh/routes"),
+        get("/api/v1/ground-station/mesh/gateways"),
+        get("/api/v1/ground-station/mesh/config"),
+        // Ground-station network uplink (profile-gated).
+        get("/api/v1/ground-station/network"),
+        get("/api/v1/ground-station/network/ethernet"),
+        get("/api/v1/ground-station/network/client/scan"),
+        get("/api/v1/ground-station/network/modem"),
+        get("/api/v1/ground-station/network/priority"),
+        get("/api/v1/ground-station/modem-status"),
+        // Ground-station pairing / PIC / captive token (profile-gated).
+        get("/api/v1/ground-station/pair/pending"),
+        get("/api/v1/ground-station/pic"),
+        get("/api/v1/ground-station/captive-token"),
     ]
 }
 
@@ -210,11 +240,11 @@ mod tests {
         let routes = native_routes();
         assert_eq!(
             routes.len(),
-            22,
+            46,
             "native route count drifted from build_router"
         );
         let has = |m: Method, p: &str| routes.iter().any(|r| r.method == m && r.path == p);
-        // The wave-1 read routes must all be native (else auth-skipped on a paired
+        // Every ported read route must be native (else auth-skipped on a paired
         // agent).
         for p in [
             "/api/params",
@@ -228,6 +258,30 @@ mod tests {
             "/api/wfb/history",
             "/api/wfb/pair",
             "/api/wfb/pair/failover-status",
+            "/api/status/full",
+            "/api/video/latency",
+            "/api/v1/video/air-pipeline",
+            "/api/video/config",
+            "/api/v1/ground-station/status",
+            "/api/v1/ground-station/wfb",
+            "/api/v1/ground-station/wfb/relay/status",
+            "/api/v1/ground-station/wfb/receiver/relays",
+            "/api/v1/ground-station/wfb/receiver/combined",
+            "/api/v1/ground-station/role",
+            "/api/v1/ground-station/mesh",
+            "/api/v1/ground-station/mesh/neighbors",
+            "/api/v1/ground-station/mesh/routes",
+            "/api/v1/ground-station/mesh/gateways",
+            "/api/v1/ground-station/mesh/config",
+            "/api/v1/ground-station/network",
+            "/api/v1/ground-station/network/ethernet",
+            "/api/v1/ground-station/network/client/scan",
+            "/api/v1/ground-station/network/modem",
+            "/api/v1/ground-station/network/priority",
+            "/api/v1/ground-station/modem-status",
+            "/api/v1/ground-station/pair/pending",
+            "/api/v1/ground-station/pic",
+            "/api/v1/ground-station/captive-token",
         ] {
             assert!(has(Method::GET, p), "{p} must be in the native set");
         }

@@ -112,7 +112,10 @@ pub async fn get_telemetry(State(state): State<AppState>) -> Json<Value> {
 /// store unreachable) — or an individual missing signal — degrades that field to
 /// the `SystemHealth` default: `0.0` for the percentages, `null` for temperature.
 /// The timestamp is stamped at request time, as the Python `check_system()` does.
-fn derive_health(signals: Option<&Map<String, Value>>) -> Value {
+///
+/// Shared with the consolidated `/api/status/full` route, which carries the same
+/// `health` block sourced from the same store signals.
+pub(crate) fn derive_health(signals: Option<&Map<String, Value>>) -> Value {
     let cpu = signals.and_then(|s| signal_num(s, "cpu.util.all"));
     let mem = signals.and_then(memory_percent);
     let disk = signals.and_then(disk_percent);
@@ -131,7 +134,10 @@ fn derive_health(signals: Option<&Map<String, Value>>) -> Value {
 /// present, well-formed JSON object is returned verbatim; an absent file, a read
 /// error, or a non-object body degrades to `{}` — the same shape the FastAPI
 /// route emits when its own `detect_board()` raises.
-fn read_board(path: &Path) -> Value {
+///
+/// Shared with the consolidated `/api/status/full` route, which serves the same
+/// board block from the same sidecar.
+pub(crate) fn read_board(path: &Path) -> Value {
     match std::fs::read(path) {
         Ok(bytes) => match serde_json::from_slice::<Value>(&bytes) {
             Ok(value) if value.is_object() => value,
@@ -217,7 +223,10 @@ fn iso8601_from_unix_secs(secs: i64) -> String {
 
 /// Strip the four runtime-only extras from a snapshot, leaving the vehicle-state
 /// dict. An absent or non-object snapshot projects to `{}`.
-fn project_telemetry(snapshot: Option<Value>) -> Value {
+///
+/// Shared with the consolidated `/api/status/full` route, whose `telemetry` block
+/// is the same vehicle-state projection.
+pub(crate) fn project_telemetry(snapshot: Option<Value>) -> Value {
     match snapshot {
         Some(Value::Object(map)) => {
             let projected: Map<String, Value> = map
@@ -235,7 +244,10 @@ fn project_telemetry(snapshot: Option<Value>) -> Value {
 /// or absent fields fall back to the FastAPI defaults: `fc_connected:false`,
 /// `fc_port:""`, `fc_baud:0`, and no uptime (the caller substitutes the process
 /// uptime).
-fn fc_from_snapshot(snapshot: Option<&Value>) -> (Value, Value, Value, Option<Value>) {
+///
+/// Shared with the consolidated `/api/status/full` route, which reads the same FC
+/// triple + uptime from the same snapshot extras.
+pub(crate) fn fc_from_snapshot(snapshot: Option<&Value>) -> (Value, Value, Value, Option<Value>) {
     let obj = snapshot.and_then(Value::as_object);
     let connected = obj
         .and_then(|m| m.get("fc_connected"))

@@ -21,12 +21,18 @@
 
 pub mod command;
 pub mod fleet;
+pub mod gs_mesh;
+pub mod gs_network;
+pub mod gs_pairing;
+pub mod gs_status;
 pub mod pairing;
 pub mod params;
 pub mod services;
 pub mod signing;
 pub mod status;
+pub mod status_full;
 pub mod system;
+pub mod video;
 pub mod wfb;
 
 use axum::http::StatusCode;
@@ -95,6 +101,43 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/wfb/history", get(wfb::get_wfb_history))
         .route("/api/wfb/pair", get(wfb::get_wfb_pair_status))
         .route("/api/wfb/pair/failover-status", get(wfb::get_failover_status))
+        // The consolidated status: agent info, services, resources, video,
+        // telemetry, radio, and mesh in one round-trip.
+        .route("/api/status/full", get(status_full::get_full_status))
+        // Video reads: glass-to-glass latency, the air-side pipeline snapshot, and
+        // the encoder/radio config (the snapshot/record/switch writes + the
+        // camera-enumeration route stay proxied).
+        .route("/api/video/latency", get(video::get_video_latency))
+        .route("/api/v1/video/air-pipeline", get(video::get_air_pipeline_status))
+        .route("/api/video/config", get(video::get_video_config))
+        // Ground-station profile reads (404 off a drone): the status snapshot, the
+        // stored radio config, and the three distributed-receive role reads.
+        .route("/api/v1/ground-station/status", get(gs_status::get_status))
+        .route("/api/v1/ground-station/wfb", get(gs_status::get_wfb))
+        .route("/api/v1/ground-station/wfb/relay/status", get(gs_status::get_wfb_relay_status))
+        .route("/api/v1/ground-station/wfb/receiver/relays", get(gs_status::get_wfb_receiver_relays))
+        .route("/api/v1/ground-station/wfb/receiver/combined", get(gs_status::get_wfb_receiver_combined))
+        // Ground-station mesh reads (profile-gated): the role + capability hint,
+        // the batman-adv state + its three slices, and the configured transport.
+        .route("/api/v1/ground-station/role", get(gs_mesh::get_role))
+        .route("/api/v1/ground-station/mesh", get(gs_mesh::get_mesh_health))
+        .route("/api/v1/ground-station/mesh/neighbors", get(gs_mesh::get_mesh_neighbors))
+        .route("/api/v1/ground-station/mesh/routes", get(gs_mesh::get_mesh_routes))
+        .route("/api/v1/ground-station/mesh/gateways", get(gs_mesh::get_mesh_gateways))
+        .route("/api/v1/ground-station/mesh/config", get(gs_mesh::get_mesh_config))
+        // Ground-station network uplink reads (404 off a drone): the aggregate
+        // view, ethernet, client scan, modem, the priority list, and cellular.
+        .route("/api/v1/ground-station/network", get(gs_network::get_ground_station_network))
+        .route("/api/v1/ground-station/network/ethernet", get(gs_network::get_network_ethernet))
+        .route("/api/v1/ground-station/network/client/scan", get(gs_network::get_network_client_scan))
+        .route("/api/v1/ground-station/network/modem", get(gs_network::get_network_modem))
+        .route("/api/v1/ground-station/network/priority", get(gs_network::get_network_priority))
+        .route("/api/v1/ground-station/modem-status", get(gs_network::get_modem_status))
+        // Ground-station reads (profile-gated): the mesh pairing snapshot, the PIC
+        // arbiter state, and the captive-portal token mint.
+        .route("/api/v1/ground-station/pair/pending", get(gs_pairing::get_pair_pending))
+        .route("/api/v1/ground-station/pic", get(gs_pairing::get_pic_state))
+        .route("/api/v1/ground-station/captive-token", get(gs_pairing::get_captive_token))
         // Everything else: reverse-proxy to the residual Python.
         .fallback(proxy_to_residual)
         .with_state(state)
