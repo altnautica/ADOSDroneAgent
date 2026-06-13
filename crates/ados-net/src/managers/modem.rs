@@ -37,6 +37,11 @@ const WWAN_IFACE: &str = "wwan0";
 const USB_IFACE: &str = "usb0";
 const DBUS_FAIL_THRESHOLD: u32 = 3;
 const DEFAULT_APN_FALLBACK: &str = "internet";
+/// configfs root + gadget name the daemon provisions the USB tether under. A
+/// present gadget dir means `usb0` belongs to the tether, not the modem, so the
+/// modem must NOT claim it as its cellular iface (mirrors `data_cap`'s carve-out
+/// so a modem-less board with a tether never reports a cellular link up).
+const USB_GADGET_DIR: &str = "/sys/kernel/config/usb_gadget/ados_gs";
 
 // D-Bus-only constants. Referenced solely by the Linux `zbus_impl` module, so
 // they are gated to the Linux target to stay dead-code-free on a dev host.
@@ -243,6 +248,9 @@ pub struct ModemManager {
     at_opener: Arc<dyn AtPortOpener>,
     config_path: PathBuf,
     net_dir: PathBuf,
+    /// The provisioned-gadget marker dir. When it exists, `usb0` is the USB
+    /// tether NIC the daemon created, not the modem, so the modem skips it.
+    gadget_dir: PathBuf,
     state: Mutex<ModemState>,
 }
 
@@ -290,11 +298,19 @@ impl ModemManager {
             at_opener,
             config_path,
             net_dir,
+            gadget_dir: PathBuf::from(USB_GADGET_DIR),
             state: Mutex::new(ModemState {
                 config,
                 ..Default::default()
             }),
         }
+    }
+
+    /// Override the provisioned-gadget marker dir (tests point it at a tempdir
+    /// to exercise the `usb0`-is-the-tether carve-out without touching configfs).
+    pub fn with_gadget_dir(mut self, gadget_dir: PathBuf) -> Self {
+        self.gadget_dir = gadget_dir;
+        self
     }
 
     /// True when the manager has flipped to AT fallback (the Python AT service
@@ -609,15 +625,36 @@ impl ModemManager {
     }
 
     /// The active cellular iface: wwan0 (MBIM/QMI) preferred, else usb0
-    /// (RNDIS/AT), else wwan0. Mirrors `_current_iface`.
+    /// (RNDIS/AT) ONLY when the USB-gadget tether is not provisioned, else
+    /// wwan0. Mirrors `_current_iface` and applies the same `usb0`-is-the-tether
+    /// carve-out the data-cap source uses: when the gadget owns `usb0`, the
+    /// modem must not claim it, or a modem-less board with a provisioned tether
+    /// would report the cellular slot up + routable. Falling back to `wwan0` (an
+    /// absent iface on that board) keeps `is_up`/`iface_up` false.
     fn current_iface(&self) -> String {
         if self.net_dir.join(WWAN_IFACE).exists() {
             return WWAN_IFACE.to_string();
         }
-        if self.net_dir.join(USB_IFACE).exists() {
+        if self.net_dir.join(USB_IFACE).exists() && !self.gadget_dir.exists() {
             return USB_IFACE.to_string();
         }
         WWAN_IFACE.to_string()
+    }
+
+    /// The resolved cellular iface, but ONLY when it is actually present in
+    /// sysfs (and not the USB-gadget tether) — `None` otherwise. This is the
+    /// metering iface: the data-cap source counts bytes on it, so the data-cap
+    /// throttle must shape THIS iface, not whatever the router currently routes
+    /// through. Returning `None` when no modem iface exists lets the throttle
+    /// consumer no-op rather than shape a wired primary by mistake.
+    pub fn cellular_iface(&self) -> Option<String> {
+        if self.net_dir.join(WWAN_IFACE).exists() {
+            return Some(WWAN_IFACE.to_string());
+        }
+        if self.net_dir.join(USB_IFACE).exists() && !self.gadget_dir.exists() {
+            return Some(USB_IFACE.to_string());
+        }
+        None
     }
 
     /// Iface operstate == "up" (HW-gated liveness; reading sysfs never
@@ -1196,6 +1233,52 @@ mod tests {
         assert_eq!(s["iface_up"], true);
         assert_eq!(s["iface"], "wwan0");
         assert!(m.probe().await);
+    }
+
+    #[tokio::test]
+    async fn usb0_is_the_tether_not_the_modem_when_the_gadget_is_provisioned() {
+        // A modem-less ground station that has provisioned the USB-gadget tether
+        // owns `usb0` for the tether, not a cellular modem. The modem manager
+        // must NOT claim `usb0` as its cellular iface, or `is_up()`/`get_iface()`
+        // would report the cellular slot up + routable when there is no modem.
+        let dir = tempfile::tempdir().unwrap();
+        let net = dir.path().join("net");
+        let gadget = dir.path().join("usb_gadget").join("ados_gs");
+
+        // Bring `usb0` up in sysfs (the tether NIC) but NO `wwan0`.
+        let usb = net.join(USB_IFACE);
+        std::fs::create_dir_all(&usb).unwrap();
+        std::fs::write(usb.join("operstate"), "up\n").unwrap();
+
+        // DisabledDbus → modem_present is false, so liveness depends purely on
+        // the resolved iface. Point the gadget marker at the (present) tempdir.
+        let m = ModemManager::with_parts_at(
+            Arc::new(DisabledDbus),
+            Arc::new(NoAtPort),
+            dir.path().join("ground-station-modem.json"),
+            net.clone(),
+        )
+        .with_gadget_dir(gadget.clone());
+
+        // Gadget present → `usb0` is the tether → the modem falls back to the
+        // (absent) `wwan0`, so the cellular slot reads down + not routable.
+        std::fs::create_dir_all(&gadget).unwrap();
+        assert_eq!(m.get_iface(), WWAN_IFACE);
+        assert!(!m.is_up().await);
+        assert!(!m.probe().await);
+        let s = m.status().await;
+        assert_eq!(s["iface"], WWAN_IFACE);
+        assert_eq!(s["iface_up"], false);
+
+        // Remove the gadget marker → a real modem owns `usb0` (RNDIS/AT) → the
+        // same up `usb0` now counts as the cellular link.
+        std::fs::remove_dir_all(&gadget).unwrap();
+        assert_eq!(m.get_iface(), USB_IFACE);
+        assert!(m.is_up().await);
+        assert!(m.probe().await);
+        let s = m.status().await;
+        assert_eq!(s["iface"], USB_IFACE);
+        assert_eq!(s["iface_up"], true);
     }
 
     #[tokio::test]

@@ -136,10 +136,16 @@ async fn main() -> Result<()> {
     // after the spawn is not lost to the broadcast channel.
     let firewall = Arc::new(ShareUplinkFirewall::new(runner.clone()));
     let throttle_rx = router.bus().subscribe();
+    // Shape the metered CELLULAR iface, not the active uplink: the data-cap only
+    // counts the cellular link, so the throttle must follow the modem's iface
+    // (re-resolved each event), and the consumer clears the stale qdisc when a
+    // failover moves the active uplink off it.
+    let throttle_modem = Arc::clone(&modem);
     let throttle = tokio::spawn(run_throttle_consumer(
         throttle_rx,
         Arc::clone(&router),
         Arc::clone(&firewall),
+        move || throttle_modem.cellular_iface(),
     ));
 
     // Share-uplink NAT reconcile: apply the persisted share_uplink flag on the

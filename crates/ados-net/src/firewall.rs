@@ -471,6 +471,21 @@ impl ShareUplinkFirewall {
         None
     }
 
+    /// Remove the root qdisc (the data-cap throttle) from a single iface without
+    /// touching NAT. Used when the active uplink fails over OFF the metered
+    /// cellular iface: the throttle qdisc was applied to the cellular iface, so
+    /// when that iface stops carrying the uplink the stale qdisc must be cleared
+    /// from it (NAT is owned by the share-uplink consumer and follows the active
+    /// uplink on its own). Absent qdisc is not an error.
+    pub async fn clear_throttle(&self, iface: &str) -> Value {
+        let tc_err = self.tc_remove_throttle(iface).await;
+        json!({
+            "cleared": tc_err.is_none(),
+            "iface": iface,
+            "tc_error": tc_err,
+        })
+    }
+
     /// Apply bandwidth throttle or hard block on the active uplink. Mirrors
     /// `apply_throttle`. The blocked_100 path removes the qdisc THEN drops the
     /// MASQUERADE rule (ordering matters: the qdisc must go before NAT stops so
