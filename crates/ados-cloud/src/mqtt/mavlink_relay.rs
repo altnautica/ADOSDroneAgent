@@ -18,9 +18,11 @@
 //! ([`BoundedPublishQueue`]); they are the parity crown jewel.
 
 use std::collections::VecDeque;
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 
 use ados_plugin_host::mavlink_client::MavlinkClient;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 
 use super::transport::RumqttcTransport;
 use super::{relay_username, topic_mavlink_rx, topic_mavlink_tx};
@@ -189,7 +191,28 @@ impl MavlinkMqttRelay {
         ipc_sock: impl AsRef<std::path::Path>,
         shutdown: tokio::sync::watch::Receiver<bool>,
     ) -> anyhow::Result<()> {
+        self.run_observed(ipc_sock, shutdown, None).await
+    }
+
+    /// Run the relay, publishing the transport's CONFIRMED broker-connection
+    /// flag to `connected_out` once the transport is dialed. A supervisor reads
+    /// that flag to report whether the broker session is actually up — the relay
+    /// task staying alive is NOT proof of a connection (rumqttc dials lazily and
+    /// retries a down broker forever), so a supervisor that wants a truthful
+    /// `mqttConnected` must observe this flag, not the task handle.
+    pub async fn run_observed(
+        &self,
+        ipc_sock: impl AsRef<std::path::Path>,
+        shutdown: tokio::sync::watch::Receiver<bool>,
+        connected_out: Option<&watch::Sender<Option<Arc<AtomicBool>>>>,
+    ) -> anyhow::Result<()> {
         let transport = RumqttcTransport::connect(&self.transport_config);
+        // Hand the supervisor the live connection flag (set on ConnAck, cleared
+        // on Disconnect/error). Until ConnAck the flag reads false, so the
+        // supervisor never reports a connection the broker has not granted.
+        if let Some(sink) = connected_out {
+            let _ = sink.send(Some(transport.connected_handle()));
+        }
         let mut incoming = transport
             .take_incoming()
             .await

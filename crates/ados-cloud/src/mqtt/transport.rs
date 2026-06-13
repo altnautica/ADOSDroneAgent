@@ -10,12 +10,14 @@
 //! directly (see [`super::mavlink_relay`]). The trait covers the
 //! request/response-shaped surfaces where a test fake is the most useful.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use rumqttc::{
-    AsyncClient, Event, Incoming, MqttOptions, QoS as RumqttcQoS, TlsConfiguration, Transport,
+    AsyncClient, ConnectReturnCode, Event, Incoming, MqttOptions, QoS as RumqttcQoS,
+    TlsConfiguration, Transport,
 };
 use tokio::sync::mpsc;
 
@@ -105,6 +107,13 @@ impl TransportConfig {
 pub struct RumqttcTransport {
     client: AsyncClient,
     incoming: tokio::sync::Mutex<Option<mpsc::Receiver<IncomingMessage>>>,
+    /// The CONFIRMED broker connection state, driven by the event loop: set
+    /// `true` only on a successful `ConnAck` and back to `false` on a
+    /// `Disconnect`, a poll error, or the loop ending. A consumer must read this
+    /// to know the link is live — `connect()` returns immediately because
+    /// rumqttc dials lazily and retries a down broker forever, so the existence
+    /// of this transport (or of its event-loop task) is NOT proof of a session.
+    connected: Arc<AtomicBool>,
     _eventloop: tokio::task::JoinHandle<()>,
 }
 
@@ -116,6 +125,8 @@ impl RumqttcTransport {
         let opts = config.build_options();
         let (client, mut eventloop) = AsyncClient::builder(opts).build();
         let (tx, rx) = mpsc::channel::<IncomingMessage>(256);
+        let connected = Arc::new(AtomicBool::new(false));
+        let connected_task = connected.clone();
         let eventloop = tokio::spawn(async move {
             loop {
                 match eventloop.poll().await {
@@ -128,22 +139,60 @@ impl RumqttcTransport {
                             break; // consumer gone
                         }
                     }
+                    // A successful ConnAck is the only signal the broker accepted
+                    // the session; a refusal code (bad auth, service unavailable)
+                    // is NOT connected.
+                    Ok(Event::Incoming(Incoming::ConnAck(ack))) => {
+                        let up = ack.code == ConnectReturnCode::Success;
+                        connected_task.store(up, Ordering::Release);
+                        if up {
+                            tracing::debug!("mqtt broker connack success");
+                        } else {
+                            tracing::warn!(code = ?ack.code, "mqtt broker connack refused");
+                        }
+                    }
+                    // A broker-initiated disconnect drops the session.
+                    Ok(Event::Incoming(Incoming::Disconnect(_))) => {
+                        connected_task.store(false, Ordering::Release);
+                        tracing::debug!("mqtt broker disconnect");
+                    }
                     Ok(_) => {}
                     // A connection error is transient; rumqttc reconnects on the
-                    // next poll. Back off briefly so a hard-down broker does not
-                    // spin the loop.
+                    // next poll. The session is down until the next ConnAck, so
+                    // clear the flag. Back off briefly so a hard-down broker does
+                    // not spin the loop.
                     Err(e) => {
+                        connected_task.store(false, Ordering::Release);
                         tracing::debug!(error = %e, "mqtt event loop poll error");
                         tokio::time::sleep(Duration::from_millis(500)).await;
                     }
                 }
             }
+            // The loop has ended (consumer dropped): the link is no longer live.
+            connected_task.store(false, Ordering::Release);
         });
         Arc::new(RumqttcTransport {
             client,
             incoming: tokio::sync::Mutex::new(Some(rx)),
+            connected,
             _eventloop: eventloop,
         })
+    }
+
+    /// Whether the broker session is currently CONFIRMED up (a successful
+    /// `ConnAck` was seen and no `Disconnect`/error has since dropped it). This
+    /// is the truthful liveness signal — not the existence of the transport or
+    /// its event-loop task, which persist across a hard-down broker because
+    /// rumqttc retries forever.
+    pub fn connected(&self) -> bool {
+        self.connected.load(Ordering::Acquire)
+    }
+
+    /// A clonable handle to the confirmed-connection flag, so a consumer that
+    /// outlives a borrow of the transport (the relay task hands it to its
+    /// supervisor) can observe the live state without holding the transport.
+    pub fn connected_handle(&self) -> Arc<AtomicBool> {
+        self.connected.clone()
     }
 
     /// Take the incoming-message receiver. Returns `None` after the first call
@@ -226,6 +275,7 @@ pub(crate) mod test_support {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::Ordering;
 
     #[test]
     fn qos_maps_to_rumqttc() {
@@ -237,5 +287,34 @@ mod tests {
             RumqttcQoS::from(MqttQos::AtLeastOnce),
             RumqttcQoS::AtLeastOnce
         );
+    }
+
+    #[tokio::test]
+    async fn fresh_transport_is_not_connected_until_the_broker_acks() {
+        // rumqttc dials lazily and retries a down broker forever, so a freshly
+        // built transport (pointing at an unroutable broker) must report
+        // connected() == false. This is the truth the GS bridge relies on to
+        // avoid the connect-lie: the existence of the transport (and its
+        // event-loop task) is NOT proof of a broker session.
+        let cfg = TransportConfig {
+            client_id: "ados-test".to_string(),
+            // An unroutable host so no ConnAck can ever arrive in the test.
+            host: "127.0.0.1".to_string(),
+            port: 1, // nothing listens here
+            ws_path: "/mqtt".to_string(),
+            username: "ados-test".to_string(),
+            password: "k".to_string(),
+            inflight: 1000,
+            keep_alive: Duration::from_secs(30),
+        };
+        let transport = RumqttcTransport::connect(&cfg);
+        // Immediately after connect there can be no ConnAck.
+        assert!(!transport.connected());
+        // The shared handle observes the same state, and after a brief spin the
+        // down broker still yields no confirmed connection.
+        let handle = transport.connected_handle();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!handle.load(Ordering::Acquire));
+        assert!(!transport.connected());
     }
 }

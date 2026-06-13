@@ -7,6 +7,8 @@
 //! MQTT gateway + MAVLink relay tasks and the 30 s GS status heartbeat.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -227,7 +229,20 @@ pub struct CloudRelayBridge {
     current_uplink: Option<String>,
     internet_reachable: bool,
     throttle: ThrottleState,
+    /// The CONFIRMED broker connection state reported on the heartbeat. Driven
+    /// only from the relay transport's confirmed-connection flag (set on a
+    /// successful broker ConnAck, cleared on disconnect/teardown) — never set
+    /// optimistically on spawn, because the relay task surviving is not proof
+    /// the broker session is up (rumqttc retries a down broker forever).
     mqtt_connected: bool,
+    /// The live confirmed-connection flag published by the current relay run.
+    /// `None` while no relay is up; `Some(flag)` carries the transport's atomic
+    /// that the event loop drives. The poll loop folds it into `mqtt_connected`.
+    relay_connected_flag: Option<Arc<AtomicBool>>,
+    /// The receiver the current relay run publishes its transport connection
+    /// flag onto. The relay sets it once the transport is dialed (the flag then
+    /// flips to true on the broker ConnAck). `None` between relay runs.
+    relay_conn_rx: Option<watch::Receiver<Option<Arc<AtomicBool>>>>,
     backoff: Backoff,
     // When the current relay task was spawned, used to tell a healthy run from a
     // fast exit when the task is reaped.
@@ -265,6 +280,8 @@ impl CloudRelayBridge {
             internet_reachable: false,
             throttle: ThrottleState::None,
             mqtt_connected: false,
+            relay_connected_flag: None,
+            relay_conn_rx: None,
             backoff: Backoff::new(),
             relay_started_at: None,
             relay_retry_at: None,
@@ -381,7 +398,9 @@ impl CloudRelayBridge {
     /// run). Pure over the bridge's own state so the ladder is unit-testable
     /// without driving real MQTT.
     fn on_relay_exit(&mut self, ran_for: Duration, now: std::time::Instant) -> Duration {
-        self.mqtt_connected = false;
+        // A dead relay carries no broker session; drop the confirmed-connection
+        // state so a stale flag cannot keep mqtt_connected true after the exit.
+        self.mark_relay_down();
         self.relay_started_at = None;
         if ran_for < RELAY_HEALTHY_AFTER {
             let delay = self.backoff.delay();
@@ -491,7 +510,7 @@ impl CloudRelayBridge {
                     match action {
                         MqttAction::TeardownThenReconnect => {
                             teardown_relay(&mut relay_task, &mut relay_shutdown).await;
-                            self.mqtt_connected = false;
+                            self.mark_relay_down();
                             self.relay_started_at = None;
                             // A deliberate uplink switch is not a relay failure;
                             // do not penalise the next connect with the backoff.
@@ -502,7 +521,7 @@ impl CloudRelayBridge {
                         }
                         MqttAction::TeardownIdle => {
                             teardown_relay(&mut relay_task, &mut relay_shutdown).await;
-                            self.mqtt_connected = false;
+                            self.mark_relay_down();
                             self.relay_started_at = None;
                             self.relay_retry_at = None;
                         }
@@ -523,13 +542,23 @@ impl CloudRelayBridge {
                             // At 100 % drop the relay, keep the heartbeat.
                             if self.throttle == ThrottleState::Blocked {
                                 teardown_relay(&mut relay_task, &mut relay_shutdown).await;
-                                self.mqtt_connected = false;
+                                self.mark_relay_down();
                                 self.relay_started_at = None;
                             }
                         }
                     }
+
+                    // Fold the live relay connection flag into mqtt_connected so
+                    // the heartbeat reports a broker session only once the
+                    // transport has confirmed a ConnAck (and drops it on a
+                    // disconnect the relay's own loop has not yet reaped).
+                    self.refresh_mqtt_connected();
                 }
                 _ = heartbeat.tick() => {
+                    // Read the live connection state at post time so the
+                    // mqttConnected the GS reports tracks the broker session
+                    // even if the relay flipped between poll ticks.
+                    self.refresh_mqtt_connected();
                     let ts_ms = now_ms();
                     if let Some(body) = self.build_heartbeat(ts_ms) {
                         self.post_status(&http, &body).await;
@@ -564,18 +593,55 @@ impl CloudRelayBridge {
             return;
         }
         let (tx, rx) = watch::channel(false);
+        // The connection-flag channel: the relay publishes the transport's
+        // confirmed-connection atomic onto this; the poll loop reads it to set
+        // mqtt_connected. Until the broker ConnAck arrives the flag is false.
+        let (conn_tx, conn_rx) = watch::channel::<Option<Arc<AtomicBool>>>(None);
         let relay = MavlinkMqttRelay::new(self.device_id.clone(), self.relay_transport.clone());
         let sock = self.mavlink_sock.clone();
         let handle = tokio::spawn(async move {
-            if let Err(e) = relay.run(&sock, rx).await {
+            if let Err(e) = relay.run_observed(&sock, rx, Some(&conn_tx)).await {
                 warn!(error = %e, "cloud_relay.relay_exited");
             }
         });
         *relay_task = Some(handle);
         *relay_shutdown = Some(tx);
-        self.mqtt_connected = true;
+        // The relay is starting but the broker is NOT confirmed connected yet;
+        // mqtt_connected stays false until the transport reports a ConnAck (read
+        // each poll tick from the connection flag).
+        self.mqtt_connected = false;
+        self.relay_connected_flag = None;
+        self.relay_conn_rx = Some(conn_rx);
         self.relay_started_at = Some(std::time::Instant::now());
         info!("cloud_relay.mavlink_relay_started");
+    }
+
+    /// Fold the live relay connection flag into `mqtt_connected`. Reads the
+    /// transport's confirmed-connection atomic (published by the current relay
+    /// run) so the heartbeat reports a broker session only when one is actually
+    /// up. With no relay/flag the link is down.
+    fn refresh_mqtt_connected(&mut self) {
+        // Pull the latest published flag handle (the relay sets it once dialed).
+        if self.relay_connected_flag.is_none() {
+            if let Some(rx) = &self.relay_conn_rx {
+                if let Some(flag) = rx.borrow().clone() {
+                    self.relay_connected_flag = Some(flag);
+                }
+            }
+        }
+        self.mqtt_connected = self
+            .relay_connected_flag
+            .as_ref()
+            .map(|f| f.load(Ordering::Acquire))
+            .unwrap_or(false);
+    }
+
+    /// Mark the relay down: clear the confirmed-connection state so the next
+    /// heartbeat cannot report a stale broker session after a teardown/reap.
+    fn mark_relay_down(&mut self) {
+        self.mqtt_connected = false;
+        self.relay_connected_flag = None;
+        self.relay_conn_rx = None;
     }
 
     /// POST the GS status heartbeat. Best-effort; a non-2xx / transport error is
@@ -1129,5 +1195,124 @@ mod tests {
         .unwrap();
         let s = UplinkSnapshot::read(&path).unwrap();
         assert_eq!(s.data_cap_state, "ok");
+    }
+
+    /// Publish a connection flag onto a bridge as if a relay run just dialed,
+    /// returning the atomic the (fake) transport event loop would drive. The
+    /// flag starts `false` exactly like a freshly-dialed rumqttc transport that
+    /// has not yet seen a ConnAck.
+    fn arm_relay_flag(br: &mut CloudRelayBridge) -> Arc<AtomicBool> {
+        let flag = Arc::new(AtomicBool::new(false));
+        let (tx, rx) = watch::channel::<Option<Arc<AtomicBool>>>(Some(flag.clone()));
+        // Keep the sender alive for the channel's lifetime (the real relay task
+        // holds it); leaking it here mirrors that ownership in a unit test.
+        std::mem::forget(tx);
+        br.relay_conn_rx = Some(rx);
+        flag
+    }
+
+    #[test]
+    fn dialing_relay_does_not_report_connected_until_the_broker_acks() {
+        // The core connect-lie fix: a relay that has spawned and is DIALING a
+        // down / never-acking broker must NOT report mqtt_connected:true. The
+        // transport's confirmed-connection flag stays false (no ConnAck), so the
+        // bridge keeps mqtt_connected false.
+        let mut br = bridge();
+        let flag = arm_relay_flag(&mut br); // flag == false (broker not acked)
+
+        br.refresh_mqtt_connected();
+        assert!(
+            !br.mqtt_connected,
+            "a dialing relay with no broker ConnAck is not connected"
+        );
+
+        // The broker finally accepts the session (ConnAck → flag true): now the
+        // bridge reports connected.
+        flag.store(true, Ordering::Release);
+        br.refresh_mqtt_connected();
+        assert!(br.mqtt_connected, "a confirmed ConnAck reports connected");
+
+        // The broker drops the session (Disconnect/poll-error → flag false):
+        // the bridge stops reporting connected on the next refresh.
+        flag.store(false, Ordering::Release);
+        br.refresh_mqtt_connected();
+        assert!(
+            !br.mqtt_connected,
+            "a dropped broker session is no longer connected"
+        );
+    }
+
+    #[test]
+    fn no_relay_flag_means_not_connected() {
+        // With no relay run at all there is no flag; the link is down.
+        let mut br = bridge();
+        assert!(br.relay_conn_rx.is_none());
+        br.refresh_mqtt_connected();
+        assert!(!br.mqtt_connected);
+    }
+
+    #[test]
+    fn mark_relay_down_clears_a_confirmed_connection() {
+        // A previously-confirmed connection must be cleared on teardown/reap so
+        // the next heartbeat cannot report a stale broker session.
+        let mut br = bridge();
+        let flag = arm_relay_flag(&mut br);
+        flag.store(true, Ordering::Release);
+        br.refresh_mqtt_connected();
+        assert!(br.mqtt_connected, "confirmed connection before teardown");
+
+        br.mark_relay_down();
+        assert!(!br.mqtt_connected, "teardown clears the connection");
+        assert!(br.relay_connected_flag.is_none());
+        assert!(br.relay_conn_rx.is_none());
+        // Even if the (now-detached) flag is still true, a refresh stays down:
+        // the bridge no longer holds a handle to it.
+        flag.store(true, Ordering::Release);
+        br.refresh_mqtt_connected();
+        assert!(
+            !br.mqtt_connected,
+            "a detached flag cannot revive the report"
+        );
+    }
+
+    #[test]
+    fn relay_exit_reports_disconnected_even_if_the_stale_flag_lingers() {
+        // A relay task that exits (fast or clean) must report disconnected. The
+        // transport's flag may briefly linger true after the task ends, but the
+        // bridge drops its handle on exit, so the heartbeat goes false.
+        let mut br = bridge();
+        let flag = arm_relay_flag(&mut br);
+        flag.store(true, Ordering::Release);
+        br.refresh_mqtt_connected();
+        assert!(br.mqtt_connected);
+
+        // The relay task is reaped; the flag is still (stale) true.
+        let now = std::time::Instant::now();
+        br.on_relay_exit(Duration::from_millis(5), now);
+        assert!(!br.mqtt_connected, "a reaped relay is not connected");
+        // A subsequent refresh cannot resurrect the report from the stale flag.
+        br.refresh_mqtt_connected();
+        assert!(!br.mqtt_connected);
+    }
+
+    #[test]
+    fn heartbeat_reports_mqtt_disconnected_while_the_broker_is_down() {
+        // End to end on the payload: a dialing relay over a down broker yields a
+        // heartbeat carrying mqttConnected:false, never a connect-lie.
+        let mut br = bridge();
+        let snap = UplinkSnapshot {
+            active_uplink: "eth0".to_string(),
+            internet_reachable: true,
+            data_cap_state: "ok".to_string(),
+        };
+        br.reconcile_uplink(Some(&snap));
+        // Relay dialing a down broker: flag present but false (no ConnAck).
+        arm_relay_flag(&mut br);
+        br.refresh_mqtt_connected();
+
+        let hb = br.build_heartbeat(1).unwrap();
+        assert!(!hb.mqtt_connected);
+        let wire = serde_json::to_value(&hb).unwrap();
+        assert_eq!(wire["mqttConnected"], false);
     }
 }
