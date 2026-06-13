@@ -178,19 +178,14 @@ class ApiKeyAuthMiddleware(BaseHTTPMiddleware):
         if not pm.is_paired:
             return await call_next(request)
 
-        # Same-origin browser trust: any request whose Origin/Referer
-        # matches this agent's own listener is treated as authenticated.
-        # The browser dashboard the agent itself serves needs to call its
-        # own API without sticking an X-ADOS-Key on every fetch, and the
-        # operator's physical presence on the LAN is the same gate that
-        # already covers setup mutations above. The opt-in
-        # ``security.setup_token_required`` knob still escalates that
-        # gate to require an explicit token header.
-        require_token = bool(
-            getattr(app.config.security, "setup_token_required", False)
-        )
-        if not require_token and _is_same_origin(request):
-            return await call_next(request)
+        # Same-origin trust is scoped to the setup-mutation surface only (handled
+        # above). It is NOT extended to general paired routes: an attacker can set
+        # any Origin/Referer to match the agent's own Host, so a blanket
+        # same-origin bypass would let a forged header reach an authenticated
+        # route without the key. The dashboard the agent serves carries
+        # ``X-ADOS-Key`` (from localStorage after pairing) on every authenticated
+        # fetch, so it does not rely on a header-only bypass. Paired non-setup
+        # routes therefore require the key unconditionally below.
 
         # Check for manually configured API key first (security.api.api_key)
         configured_key = app.config.security.api.api_key

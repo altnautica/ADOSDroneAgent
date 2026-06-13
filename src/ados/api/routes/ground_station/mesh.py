@@ -329,13 +329,44 @@ async def put_mesh_config(update: MeshConfigUpdate) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
+# How long to sleep between durable-store polls for the uplink WS. The
+# router daemon emits net.uplink_active / net.modem_usage at a low rate, so a
+# short poll keeps latency low without busy-waiting the store query socket.
+_UPLINK_POLL_INTERVAL_S = 1.0
+
+
+def _uplink_ws_payload(uplink: dict[str, Any], usage: dict[str, Any] | None) -> dict[str, Any]:
+    """Shape a stored net.uplink_active body into the uplink WS event payload.
+
+    The data-cap state prefers the live modem-usage block (net.modem_usage),
+    falling back to the data_cap_state the uplink event itself carries.
+    """
+    data_cap_state = None
+    if isinstance(usage, dict):
+        data_cap_state = usage.get("state")
+    if data_cap_state is None:
+        data_cap_state = uplink.get("data_cap_state")
+    return {
+        "kind": "health_changed",
+        "active_uplink": uplink.get("active_uplink"),
+        "available": uplink.get("available") or [],
+        "internet_reachable": bool(uplink.get("internet_reachable")),
+        "data_cap_state": data_cap_state,
+        "timestamp_ms": uplink.get("timestamp_ms"),
+    }
+
+
 @router.websocket("/ws/uplink")
 async def ws_uplink_events(websocket: WebSocket) -> None:
-    """Stream UplinkRouter events as JSON until the client disconnects.
+    """Stream uplink-matrix change events as JSON until the client disconnects.
 
     Mirrors the `/pic/events` pattern: profile-gate before accept so
-    wrong-profile callers close with 1008; subscribe to the async
-    iterator `UplinkEventBus.subscribe()`; JSON-serialize each event.
+    wrong-profile callers close with 1008. The uplink health loop runs in
+    the native ``ados-net`` daemon, which ships net.uplink_active /
+    net.modem_usage to the durable store; this WS polls those events back
+    and emits when the snapshot changes (the in-process ``UplinkRouter``
+    singleton never ticks in the API process, so its bus is permanently
+    silent).
 
     Native clients pass ``X-ADOS-Key`` on the handshake; browsers
     exchange the pairing key for a one-shot ticket via
@@ -359,38 +390,23 @@ async def ws_uplink_events(websocket: WebSocket) -> None:
     else:
         await websocket.accept()
 
-    try:
-        from ados.services.ground_station.uplink import get_uplink_router
-    except Exception:
-        await websocket.send_json({"event": "error", "code": "E_UPLINK_ROUTER_UNAVAILABLE"})
-        await websocket.close()
-        return
+    from ados.api.sources.network import latest_modem_usage, latest_uplink_active
 
+    last_sent: dict[str, Any] | None = None
     try:
-        bus = get_uplink_router().bus
-    except Exception:
-        await websocket.send_json({"event": "error", "code": "E_UPLINK_BUS_UNAVAILABLE"})
-        await websocket.close()
-        return
-
-    try:
-        async for evt in bus.subscribe():
-            try:
-                payload = {
-                    "kind": evt.kind,
-                    "active_uplink": evt.active_uplink,
-                    "available": list(evt.available) if evt.available is not None else [],
-                    "internet_reachable": bool(evt.internet_reachable),
-                    "data_cap_state": evt.data_cap_state,
-                    "timestamp_ms": evt.timestamp_ms,
-                }
-                await websocket.send_json(payload)
-            except (WebSocketDisconnect, RuntimeError):
-                break
-    except WebSocketDisconnect:
+        while True:
+            uplink = await latest_uplink_active()
+            if uplink is not None:
+                usage = await latest_modem_usage()
+                payload = _uplink_ws_payload(uplink, usage)
+                if payload != last_sent:
+                    last_sent = payload
+                    await websocket.send_json(payload)
+            await asyncio.sleep(_UPLINK_POLL_INTERVAL_S)
+    except (WebSocketDisconnect, RuntimeError):
         pass
     except Exception:
-        # Bus closed or subscriber removed under us.
+        # Store unreachable or socket dropped under us.
         pass
 
 
