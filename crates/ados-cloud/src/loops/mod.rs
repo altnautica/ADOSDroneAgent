@@ -5,10 +5,10 @@
 
 pub mod beacon;
 pub mod command_poll;
+pub mod enrichment;
 pub mod heartbeat;
 
 pub use beacon::{beacon_enabled, build_beacon_body, BeaconInputs, DEFAULT_BEACON_INTERVAL};
 pub use command_poll::{build_ack, parse_commands, POLL_INTERVAL};
-pub use heartbeat::{
-    build_payload, post_heartbeat, read_enrichment, HeartbeatBase, HEARTBEAT_INTERVAL,
-};
+pub use enrichment::{build_native_enrichment, CpuSample};
+pub use heartbeat::{build_payload, post_heartbeat, HeartbeatBase, HEARTBEAT_INTERVAL};

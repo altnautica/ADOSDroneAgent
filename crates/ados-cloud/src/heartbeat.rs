@@ -197,9 +197,16 @@ pub struct HeartbeatPayload {
     pub board_arch: String,
 
     // --- health ---
-    pub cpu_percent: f64,
-    pub memory_percent: f64,
-    pub disk_percent: f64,
+    // CPU/memory/disk are measured by the Python enrichment producer, not the
+    // native loop. Optional + skip so a heartbeat with no fresh enrichment OMITS
+    // them (honest "unknown") instead of asserting 0.0 as a live reading
+    // (operating rule 37). The producer folds the real values over the base.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cpu_percent: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub memory_percent: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub disk_percent: Option<f64>,
     // temperature is deleted when None (Convex v.float64() rejects null).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f64>,
@@ -213,12 +220,21 @@ pub struct HeartbeatPayload {
     pub memory_history: Vec<f64>,
 
     // --- FC link ---
-    pub fc_connected: bool,
+    // The FC connection is observed by the enrichment producer (it reads the
+    // state-socket snapshot). Optional + skip so absence reads as "unknown" on
+    // the GCS rather than the native loop asserting a hard `false` for a drone
+    // whose FC is actually up (operating rule 37).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fc_connected: Option<bool>,
     pub fc_port: String,
     pub fc_baud: i64,
 
     // --- services + URLs ---
-    pub services: Vec<ServiceEntry>,
+    // The service list comes from the enrichment producer (the API process owns
+    // the tracker + systemd view). Optional + skip so a no-enrichment heartbeat
+    // omits it instead of asserting an empty fleet.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub services: Option<Vec<ServiceEntry>>,
     pub last_ip: String,
     pub mdns_host: String,
     pub setup_url: String,
@@ -226,7 +242,10 @@ pub struct HeartbeatPayload {
     pub agent_version: String,
 
     // --- video / mavlink discovery ---
-    pub video_state: String,
+    // The pipeline state is the enrichment producer's to report; absent reads as
+    // "unknown" rather than the native loop asserting "stopped" over a live feed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub video_state: Option<String>,
     pub video_whep_port: i64,
     pub mavlink_ws_port: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -387,9 +406,9 @@ mod tests {
             board_tier: 0,
             board_soc: String::new(),
             board_arch: String::new(),
-            cpu_percent: 0.0,
-            memory_percent: 0.0,
-            disk_percent: 0.0,
+            cpu_percent: Some(0.0),
+            memory_percent: Some(0.0),
+            disk_percent: Some(0.0),
             temperature: None,
             memory_used_mb: 0,
             memory_total_mb: 0,
@@ -399,16 +418,16 @@ mod tests {
             board_ram_mb: 0,
             cpu_history: vec![],
             memory_history: vec![],
-            fc_connected: false,
+            fc_connected: Some(false),
             fc_port: String::new(),
             fc_baud: 0,
-            services: vec![],
+            services: Some(vec![]),
             last_ip: "127.0.0.1".to_string(),
             mdns_host: String::new(),
             setup_url: "http://127.0.0.1:8080".to_string(),
             api_url: "http://127.0.0.1:8080/api".to_string(),
             agent_version: "0.1.0".to_string(),
-            video_state: "stopped".to_string(),
+            video_state: Some("stopped".to_string()),
             video_whep_port: 0,
             mavlink_ws_port: 0,
             mavlink_ws_url: None,

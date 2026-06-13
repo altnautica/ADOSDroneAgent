@@ -4,34 +4,26 @@
 //! `{convex}/agent/status` with `X-ADOS-Key` auth. Ports
 //! `src/ados/services/cloud/heartbeat_loop.py`.
 //!
-//! ## Enrichment seam (the 748-LOC judgment call)
+//! ## Native enrichment
 //!
-//! The Python payload folds in psutil/systemctl/board enrichment
-//! (`heartbeat.py` + `core/main/heartbeat_payload.py`): CPU/mem/disk samples,
-//! per-service status, the radio block, LCD/display fields, CAN buses, etc.
-//! Porting that probing into Rust is high-risk and high-churn (it shells
-//! systemctl, reads many sidecars, computes psutil deltas).
+//! The Python payload folds in psutil/systemctl/board enrichment: CPU/mem/disk
+//! samples, per-service status, the radio block, LCD/display fields, CAN buses,
+//! etc. The live status the GCS needs (resources + FC link + service fleet) is
+//! built natively in Rust by the [`crate::loops::enrichment`] producer each tick
+//! and folded over the deterministic native base here via [`build_payload`].
 //!
-//! The seam chosen here is the **lowest-risk faithful one**: the enrichment
-//! stays the Python agent's job, written to an OPTIONAL JSON sidecar at
-//! `/run/ados/cloud-enrichment.json` (a thin producer the agent already has the
-//! plumbing for). The Rust loop reads that sidecar each tick and folds its keys
-//! over the deterministic native fields, then null-strips and POSTs. When the
-//! sidecar is absent or stale the loop still emits a valid heartbeat with the
-//! required fields (`deviceId`/`version`/`uptimeSeconds`) plus whatever native
-//! fields it has — every enrichment field is `Option` + skip-if-none on the
-//! frozen payload, so absence is wire-valid and the GCS degrades gracefully.
-//! No subprocess is spawned from Rust, no psutil is reimplemented, and the wire
+//! The base itself ([`HeartbeatBase`] → [`native_payload`]) carries only the
+//! fields the loop always has without probing (device identity, version, board),
+//! with every enrichment field left `Option` + skip-if-none on the frozen
+//! payload. So even if the enrichment producer returns nothing, the loop emits a
+//! valid heartbeat with the required fields (`deviceId`/`version`/
+//! `uptimeSeconds`) and absence reads as honest "unknown" rather than a
+//! fabricated `0` / `false` / `"stopped"` (operating rule 37). The wire
 //! `HeartbeatPayload` (frozen + golden-tested) stays byte-identical.
 
-use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::heartbeat::{HeartbeatPayload, RadioBlock, RemoteAccess};
-
-/// The enrichment sidecar the Python producer writes. Read each tick; absent or
-/// stale → the loop emits the native-only payload.
-pub const ENRICHMENT_SIDECAR: &str = "/run/ados/cloud-enrichment.json";
 
 /// Heartbeat cadence. Mirrors the Python loop's 5 s base sleep.
 pub const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
@@ -111,9 +103,13 @@ fn native_payload(base: &HeartbeatBase) -> HeartbeatPayload {
         board_tier: base.board_tier,
         board_soc: base.board_soc.clone(),
         board_arch: base.board_arch.clone(),
-        cpu_percent: 0.0,
-        memory_percent: 0.0,
-        disk_percent: 0.0,
+        // Unmeasured by the native loop: omitted (None) so the wire says
+        // "unknown" rather than asserting a 0 / false / "stopped" reading the
+        // loop never took (operating rule 37). The Python enrichment producer
+        // folds the real values over these absences each tick.
+        cpu_percent: None,
+        memory_percent: None,
+        disk_percent: None,
         temperature: None,
         memory_used_mb: 0,
         memory_total_mb: 0,
@@ -123,16 +119,16 @@ fn native_payload(base: &HeartbeatBase) -> HeartbeatPayload {
         board_ram_mb: 0,
         cpu_history: vec![],
         memory_history: vec![],
-        fc_connected: false,
+        fc_connected: None,
         fc_port: String::new(),
         fc_baud: 0,
-        services: vec![],
+        services: None,
         last_ip: String::new(),
         mdns_host: String::new(),
         setup_url: String::new(),
         api_url: String::new(),
         agent_version: base.version.clone(),
-        video_state: "stopped".to_string(),
+        video_state: None,
         video_whep_port: 0,
         mavlink_ws_port: 0,
         mavlink_ws_url: None,
@@ -165,26 +161,6 @@ fn native_payload(base: &HeartbeatBase) -> HeartbeatPayload {
         video_pipeline_state: None,
         display_type: None,
         can_buses: None,
-    }
-}
-
-/// Read the enrichment sidecar, returning its JSON object or `None` when absent
-/// / unparseable. The path is overridable via `ADOS_CLOUD_ENRICHMENT` for tests.
-pub fn read_enrichment() -> Option<serde_json::Value> {
-    let path = std::env::var("ADOS_CLOUD_ENRICHMENT")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from(ENRICHMENT_SIDECAR));
-    read_enrichment_from(&path)
-}
-
-/// Read the enrichment sidecar from an explicit path.
-pub fn read_enrichment_from(path: &Path) -> Option<serde_json::Value> {
-    let text = std::fs::read_to_string(path).ok()?;
-    let v: serde_json::Value = serde_json::from_str(&text).ok()?;
-    if v.is_object() {
-        Some(v)
-    } else {
-        None
     }
 }
 
@@ -248,6 +224,14 @@ mod tests {
         assert!(!obj.contains_key("role"));
         assert!(!obj.contains_key("temperature"));
         assert!(!obj.contains_key("peripherals"));
+        // The unmeasured-by-native fields are OMITTED, not asserted as 0/false/
+        // "stopped"/[] (operating rule 37). They reappear only via the producer.
+        assert!(!obj.contains_key("cpuPercent"));
+        assert!(!obj.contains_key("memoryPercent"));
+        assert!(!obj.contains_key("diskPercent"));
+        assert!(!obj.contains_key("fcConnected"));
+        assert!(!obj.contains_key("services"));
+        assert!(!obj.contains_key("videoState"));
         // No top-level key is JSON null.
         for (k, val) in obj {
             assert!(!val.is_null(), "{k} must not be null on the wire");
@@ -286,19 +270,5 @@ mod tests {
         assert_eq!(obj["radio"]["freq_mhz"], 5745);
         assert_eq!(obj["radio"]["state"], "connected");
         assert_eq!(obj["wfbAdapterInjectionOk"], true);
-    }
-
-    #[test]
-    fn read_enrichment_absent_is_none() {
-        assert!(read_enrichment_from(Path::new("/nonexistent/ados/enrich.json")).is_none());
-    }
-
-    #[test]
-    fn read_enrichment_malformed_is_none() {
-        let mut p = std::env::temp_dir();
-        p.push(format!("ados-enrich-bad-{}.json", std::process::id()));
-        std::fs::write(&p, b"not json").unwrap();
-        assert!(read_enrichment_from(&p).is_none());
-        let _ = std::fs::remove_file(&p);
     }
 }

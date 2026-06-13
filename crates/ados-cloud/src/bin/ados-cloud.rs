@@ -2,8 +2,9 @@
 //!
 //! The runnable cloud relay. Wires the relay tasks into one tokio runtime:
 //! the MQTT telemetry/status gateway, the MAVLink-over-MQTT relay, the WebRTC
-//! signaling relay, the heartbeat / command-poll / pairing-beacon loops, and
-//! the WFB auto-pair supervisor. Modeled on `ados-supervisor/src/main.rs`:
+//! signaling relay, the heartbeat / command-poll loops, and the WFB auto-pair
+//! supervisor. The pairing beacon is hosted in the API process (it owns the
+//! pairing code + api key + claim). Modeled on `ados-supervisor/src/main.rs`:
 //! journald logging on Linux with an fmt fallback, sd-notify readiness, and a
 //! single select over the shutdown signals.
 //!
@@ -25,7 +26,7 @@ use ados_plugin_host::{Paths, PluginSupervisor};
 use ados_cloud::config::CloudConfig;
 use ados_cloud::dispatch::install::DownloadSource;
 use ados_cloud::ground_station::{bridge as gs_bridge, CloudRelayBridge};
-use ados_cloud::loops::{beacon, command_poll, heartbeat};
+use ados_cloud::loops::{beacon, command_poll, enrichment, heartbeat};
 use ados_cloud::mqtt::transport::TransportConfig;
 use ados_cloud::mqtt::{MavlinkMqttRelay, WS_PATH};
 use ados_cloud::{dispatch, pairing::PairingState};
@@ -138,7 +139,7 @@ async fn main() -> Result<()> {
         Arc::new(Mutex::new(sup))
     };
 
-    // The HTTPS client for the heartbeat / command-poll / beacon loops, on the
+    // The HTTPS client for the heartbeat / command-poll loops, on the
     // shared pure-Rust rustls path.
     let http = reqwest::Client::builder()
         .use_preconfigured_tls(ados_cloud::tls::client_config())
@@ -166,7 +167,11 @@ async fn main() -> Result<()> {
             supervisor.clone(),
             shutdown_rx.clone(),
         ),
-        // ── Pairing-beacon loop (default gated off in local mode) ─
+        // ── Pairing beacon ─────────────────────────────────────
+        // While unpaired and only when the beacon is enabled + a cloud URL is
+        // set, register the pairing code with the cloud so a remote GCS can claim
+        // by code. On a claim, the local API process owns the paired transition
+        // (over loopback). Default-gated: a LAN-only agent never beacons.
         spawn_beacon(
             config.clone(),
             http.clone(),
@@ -227,6 +232,37 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+/// The HAL board sidecar the API process persists once per boot. Read here so the
+/// native base carries the real board identity (name/tier/soc/arch) instead of
+/// "unknown", even before the Python enrichment producer's first write.
+const BOARD_SIDECAR: &str = "/run/ados/board.json";
+
+/// Board identity for the heartbeat base, read from [`BOARD_SIDECAR`]. Falls back
+/// to "unknown"/0/"" when the file is absent or malformed — the same degraded
+/// shape the loop emitted before, but truthful whenever the board has been
+/// detected (the normal case once the API service has served one status).
+fn board_base() -> (String, i64, String, String) {
+    let parsed: Option<serde_json::Value> = std::fs::read_to_string(BOARD_SIDECAR)
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok());
+    let obj = parsed.as_ref().and_then(|v| v.as_object());
+    let s = |k: &str| {
+        obj.and_then(|o| o.get(k))
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+    };
+    let tier = obj
+        .and_then(|o| o.get("tier"))
+        .and_then(serde_json::Value::as_i64)
+        .unwrap_or(0);
+    (
+        s("name").unwrap_or_else(|| "unknown".to_string()),
+        tier,
+        s("soc").unwrap_or_default(),
+        s("arch").unwrap_or_default(),
+    )
+}
+
 /// Spawn the heartbeat loop: when paired, POST the enriched payload every 5 s.
 fn spawn_heartbeat(
     config: Arc<CloudConfig>,
@@ -237,6 +273,10 @@ fn spawn_heartbeat(
     let started = std::time::Instant::now();
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(heartbeat::HEARTBEAT_INTERVAL);
+        // The previous tick's /proc/stat sample, kept across ticks so the native
+        // enrichment producer reports a true inter-tick CPU delta (omitted on the
+        // first tick, which has no prior sample to delta against).
+        let mut prev_cpu: Option<enrichment::CpuSample> = None;
         loop {
             tokio::select! {
                 _ = shutdown.changed() => {
@@ -249,24 +289,174 @@ fn spawn_heartbeat(
                         continue;
                     }
                     let api_key = api_key.expect("should_emit gates on api_key being Some");
+                    let (board_name, board_tier, board_soc, board_arch) = board_base();
                     let base = heartbeat::HeartbeatBase {
                         device_id: config.agent.device_id.clone(),
                         version: env!("CARGO_PKG_VERSION").to_string(),
                         profile: Some(config.agent.profile.clone()),
                         role: None,
                         uptime_seconds: started.elapsed().as_secs() as i64,
-                        board_name: "unknown".to_string(),
-                        board_tier: 0,
-                        board_soc: String::new(),
-                        board_arch: String::new(),
+                        board_name,
+                        board_tier,
+                        board_soc,
+                        board_arch,
                     };
-                    let enrichment = heartbeat::read_enrichment();
-                    let body = heartbeat::build_payload(&base, enrichment.as_ref());
+                    // Live status (resources + FC link + service fleet) built in
+                    // Rust from the real sources each tick, folded over the base.
+                    // A blocking call (reads /proc, the state socket, shells
+                    // systemctl) — keep it off the async reactor on the blocking
+                    // pool, carrying the CPU sample in and back out.
+                    let (enrich, next_cpu) = tokio::task::spawn_blocking(move || {
+                        let mut cpu = prev_cpu;
+                        let enrich = enrichment::build_native_enrichment(&mut cpu);
+                        (enrich, cpu)
+                    })
+                    .await
+                    .unwrap_or((serde_json::Value::Null, prev_cpu));
+                    prev_cpu = next_cpu;
+                    let body = heartbeat::build_payload(&base, Some(&enrich));
                     heartbeat::post_heartbeat(&http, &convex_url, api_key, &body).await;
                 }
             }
         }
     })
+}
+
+/// The local API base the beacon posts the paired transition to over loopback.
+/// The API process owns `pairing.json` writes (its `PairingManager.claim` uses
+/// the same `pending_api_key` the beacon registered), so the relay never writes
+/// the pairing file itself.
+const LOCAL_API_BASE: &str = dispatch::loopback::LOCAL_API_BASE;
+
+/// Spawn the pairing beacon: while UNPAIRED and only when the beacon is enabled
+/// and a cloud URL is set, POST the pairing code to `{convex}/pairing/register`
+/// every `beacon_interval` seconds. On a claim, persist the paired transition by
+/// asking the local API process to claim (loopback `POST /api/pairing/claim`),
+/// which writes `pairing.json` with the same `pending_api_key` the beacon
+/// registered — so the cloud-frozen key matches the persisted key and no
+/// heartbeat 401s after the claim. Best-effort throughout: a missing code, an
+/// empty cloud response, or a loopback failure simply means the next tick
+/// retries while still unpaired.
+fn spawn_beacon(
+    config: Arc<CloudConfig>,
+    http: Arc<reqwest::Client>,
+    convex_url: String,
+    mut shutdown: watch::Receiver<bool>,
+) -> tokio::task::JoinHandle<()> {
+    let interval = Duration::from_secs(config.pairing.beacon_interval.max(1) as u64);
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(interval);
+        loop {
+            tokio::select! {
+                _ = shutdown.changed() => {
+                    if *shutdown.borrow() { break; }
+                }
+                _ = tick.tick() => {
+                    // Gate: the beacon runs only when enabled, a cloud URL is set,
+                    // and the agent is still unpaired. Each re-checked per tick so
+                    // a pair transition (or an operator toggle) stops it.
+                    if !beacon::beacon_enabled(config.pairing.beacon_enabled)
+                        || convex_url.is_empty()
+                    {
+                        continue;
+                    }
+                    let pairing = PairingState::load();
+                    if pairing.is_paired() {
+                        continue;
+                    }
+                    // The code + the stable pending key must both be present; skip
+                    // the POST otherwise (the Convex handler 400s on an empty
+                    // code, and an empty key would break the later claim).
+                    let (Some(code), Some(api_key)) =
+                        (pairing.pairing_code(), pairing.pending_api_key())
+                    else {
+                        continue;
+                    };
+                    beacon_register_once(
+                        &http,
+                        &convex_url,
+                        &config,
+                        code,
+                        api_key,
+                        pairing.code_expires_at_ms(),
+                    )
+                    .await;
+                }
+            }
+        }
+    })
+}
+
+/// One beacon registration pass: build + POST the `/pairing/register` body, and
+/// on a claimed response, drive the local claim over loopback. Best-effort.
+async fn beacon_register_once(
+    http: &reqwest::Client,
+    convex_url: &str,
+    config: &CloudConfig,
+    code: &str,
+    api_key: &str,
+    code_expires_at: Option<i64>,
+) {
+    let (board_name, board_tier, _soc, _arch) = board_base();
+    let inputs = beacon::BeaconInputs {
+        device_id: config.agent.device_id.clone(),
+        pairing_code: code.to_string(),
+        api_key: api_key.to_string(),
+        name: config.agent.name.clone(),
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        board_name,
+        board_tier,
+        local_ip: String::new(),
+        code_expires_at,
+    };
+    let body = beacon::build_beacon_body(&inputs);
+    let url = format!("{}/pairing/register", convex_url.trim_end_matches('/'));
+    let resp = match http.post(&url).json(&body).send().await {
+        Ok(r) if r.status().is_success() => r,
+        Ok(r) => {
+            tracing::debug!(status = r.status().as_u16(), "pairing beacon rejected");
+            return;
+        }
+        Err(e) => {
+            tracing::debug!(error = %e, "pairing beacon failed");
+            return;
+        }
+    };
+    let reply: serde_json::Value = match resp.json().await {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+    if !beacon::response_claimed(&reply) {
+        return;
+    }
+    // The cloud auto-matched / already-claimed this code. Persist the paired
+    // transition through the API process so it owns the pairing.json write (it
+    // claims with the same pending_api_key we just registered).
+    let owner = reply
+        .get("userId")
+        .and_then(|v| v.as_str())
+        .or_else(|| reply.get("ownerId").and_then(|v| v.as_str()))
+        .unwrap_or("cloud")
+        .to_string();
+    let claim_url = format!("{LOCAL_API_BASE}/api/pairing/claim");
+    match http
+        .post(&claim_url)
+        .json(&serde_json::json!({ "user_id": owner }))
+        .send()
+        .await
+    {
+        Ok(r) if r.status().is_success() => {
+            tracing::info!(owner = %owner, "beacon_claimed");
+        }
+        Ok(r) => {
+            // A non-2xx (e.g. a 409 already-paired race) is benign: the next tick
+            // re-reads the pair state and stops beaconing once it is paired.
+            tracing::debug!(status = r.status().as_u16(), "beacon local claim non-2xx");
+        }
+        Err(e) => {
+            tracing::debug!(error = %e, "beacon local claim failed");
+        }
+    }
 }
 
 /// Spawn the command-poll loop: when paired, GET + dispatch + ACK every 5 s.
@@ -443,56 +633,6 @@ fn dispatch_plugin_blocking(
         Some(pc) => plugin_commands::dispatch(&mut sup, &pc, &seen),
         None => dispatch::CommandResult::failed(format!("malformed plugin command: {name}")),
     }
-}
-
-/// Spawn the pairing-beacon loop: when UNPAIRED and beacon-enabled, POST the
-/// pairing code every `beacon_interval`. Gated off in local mode (empty convex
-/// URL) and when `beacon_enabled` is false.
-fn spawn_beacon(
-    config: Arc<CloudConfig>,
-    http: Arc<reqwest::Client>,
-    convex_url: String,
-    mut shutdown: watch::Receiver<bool>,
-) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
-        if !beacon::beacon_enabled(config.pairing.beacon_enabled) || convex_url.is_empty() {
-            tracing::info!("pairing beacon disabled");
-            return;
-        }
-        let interval = Duration::from_secs(config.pairing.beacon_interval.max(1) as u64);
-        let mut tick = tokio::time::interval(interval);
-        loop {
-            tokio::select! {
-                _ = shutdown.changed() => {
-                    if *shutdown.borrow() { break; }
-                }
-                _ = tick.tick() => {
-                    let pairing = PairingState::load();
-                    if pairing.is_paired() {
-                        continue; // only beacons while unpaired
-                    }
-                    // The pairing code + api key are owned by the API process;
-                    // the beacon body assembly is exercised, with the code read
-                    // from the pairing state when present.
-                    let inputs = beacon::BeaconInputs {
-                        device_id: config.agent.device_id.clone(),
-                        pairing_code: String::new(),
-                        api_key: String::new(),
-                        name: config.agent.name.clone(),
-                        version: env!("CARGO_PKG_VERSION").to_string(),
-                        board_name: "unknown".to_string(),
-                        board_tier: 0,
-                        local_ip: String::new(),
-                        code_expires_at: None,
-                    };
-                    let beacon_body = beacon::build_beacon_body(&inputs);
-                    let url = format!("{}/pairing/register", convex_url.trim_end_matches('/'));
-                    let _ = http.post(&url).json(&beacon_body).send().await;
-                    tracing::debug!("pairing beacon sent");
-                }
-            }
-        }
-    })
 }
 
 /// Build the MAVLink-relay broker dial config from the agent config + the live
