@@ -12,6 +12,7 @@
 
 use std::future::Future;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -80,6 +81,21 @@ impl Drop for AbortOnDrop {
     }
 }
 
+/// RAII clear of the orchestrator's session-in-progress flag. Set to `true` the
+/// moment `start_local_bind` commits to a session and dropped (back to `false`)
+/// when the function returns — including every early-return and any unwind — so
+/// the flag tracks the WHOLE `start_local_bind` body, not just the data-plane-
+/// active sub-states. This is what the supervisor gate reads: a bind owns the
+/// radio from the instant it stops the normal unit (in `Idle`, before the first
+/// `OpeningTunnel` transition) until the function unwinds its cleanup.
+struct InProgressGuard(Arc<AtomicBool>);
+
+impl Drop for InProgressGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
+}
+
 /// Re-assert the configured global regulatory domain at a fast cadence for the
 /// life of a bind window. Spawned at the top of
 /// [`BindOrchestrator::start_local_bind`] and aborted via an [`AbortOnDrop`]
@@ -108,6 +124,14 @@ pub struct BindOrchestrator {
     /// on a different connection than the blocked `start_bind`) notifies this so
     /// the in-flight session aborts. `start_local_bind` races it in its select.
     cancel: Arc<tokio::sync::Notify>,
+    /// Whole-session-in-progress flag. `true` for the entire body of an in-flight
+    /// `start_local_bind` — set the instant it commits to a session (while still
+    /// in `Idle`, BEFORE the normal unit is stopped and the radio prepared) and
+    /// cleared when the function returns. Distinct from [`is_active`], which is
+    /// driven by the session's data-plane sub-state and is `false` during the
+    /// `Idle` stop→`OpeningTunnel` setup window. The supervisor's radio-restart /
+    /// usb-rehome gate reads THIS so it never re-claims the adapter mid-setup.
+    session_in_progress: Arc<AtomicBool>,
     /// Ships the bind-session lifecycle events to the logging daemon. Best-effort
     /// and non-blocking; an absent daemon socket is dropped quietly. The log
     /// lines remain the always-on fallback.
@@ -129,14 +153,46 @@ impl BindOrchestrator {
             lock: Mutex::new(()),
             session: Arc::new(Mutex::new(None)),
             cancel: Arc::new(tokio::sync::Notify::new()),
+            session_in_progress: Arc::new(AtomicBool::new(false)),
             events: EventEmitter::new("ados-supervisor"),
         }
     }
 
     /// In-process bind-liveness (the supervisor monitor reads this directly).
     /// Out-of-process callers use [`read_sentinel_active`].
+    ///
+    /// Reflects the session's data-plane sub-state — `false` while a bind is
+    /// still in its `Idle` setup window (before the first `OpeningTunnel`
+    /// transition) even though the radio is already being torn down for the bind
+    /// profile. Use [`session_active`](Self::session_active) for the
+    /// radio-ownership gate; keep this for consumers that need the data-plane
+    /// distinction.
     pub async fn is_active(&self) -> bool {
         matches!(self.session.lock().await.as_ref(), Some(s) if s.state.is_active())
+    }
+
+    /// Whether a bind session is in progress anywhere in `start_local_bind` —
+    /// `true` from the moment a session is committed (still `Idle`, before the
+    /// normal radio unit is stopped) until the function returns. This closes the
+    /// gap [`is_active`](Self::is_active) leaves open during the `Idle`
+    /// stop→`OpeningTunnel` setup window, where the radio is already claimed for
+    /// the bind but the data-plane state has not advanced. The supervisor's
+    /// radio auto-restart and usb-rehome gates read THIS so they never re-claim
+    /// the adapter out from under a bind that is mid-setup.
+    pub fn session_active(&self) -> bool {
+        self.session_in_progress.load(Ordering::SeqCst)
+    }
+
+    /// Test seam: reproduce the `Idle` bind setup window — an `Idle`
+    /// (terminal-state) session installed and the in-progress flag raised,
+    /// exactly the state `start_local_bind` holds after committing a session but
+    /// before the first `OpeningTunnel` transition. Used by the supervisor gate
+    /// regression test, which lives in a sibling module that cannot reach the
+    /// private fields directly.
+    #[cfg(test)]
+    pub async fn enter_idle_setup_window_for_test(&self) {
+        *self.session.lock().await = Some(BindSession::new(BindRole::Drone, "test", None));
+        self.session_in_progress.store(true, Ordering::SeqCst);
     }
 
     /// Abort the in-flight bind session, if any. Idempotent + safe when idle
@@ -201,6 +257,15 @@ impl BindOrchestrator {
                 }
             }
         };
+
+        // Mark the whole session in progress the instant the single-flight guard
+        // is held — BEFORE the radio is touched, so the supervisor's radio-restart
+        // / usb-rehome gate (`session_active`) blocks across the `Idle`
+        // stop→`OpeningTunnel` setup window too, not just once the data-plane state
+        // advances. The RAII drop clears it on every return path (including an
+        // early error, the watchdog/cancel branch, or an unwind).
+        self.session_in_progress.store(true, Ordering::SeqCst);
+        let _in_progress = InProgressGuard(self.session_in_progress.clone());
 
         // Sweep stragglers before touching the radio (cheap + idempotent).
         socat::kill_stale_bind_socats().await;
@@ -1201,5 +1266,77 @@ mod tests {
         // The real sentinel path almost certainly does not exist in the test
         // env; a missing/garbled file reads as not-active.
         let _ = read_sentinel_active();
+    }
+
+    #[tokio::test]
+    async fn session_active_is_true_during_idle_setup_window_while_is_active_is_false() {
+        // The exact race the supervisor gate must cover: a bind has committed to
+        // a session and is mid-setup (the normal radio unit stopped, the
+        // injection iface re-prepared) but the FSM is still in `Idle`, which is a
+        // terminal state. `is_active` (driven by the session sub-state) reads
+        // FALSE here, so a gate on it would NOT block — and a monitor pass would
+        // auto-restart the radio unit out from under the bind. `session_active`
+        // (the whole-body in-progress flag) must read TRUE for this window.
+        let orch = BindOrchestrator::new();
+
+        // Reproduce the window: install an `Idle` session (as `start_local_bind`
+        // does at commit) and raise the in-progress flag (as it does right
+        // before touching the radio).
+        *orch.session.lock().await = Some(BindSession::new(BindRole::Drone, "operator", None));
+        orch.session_in_progress.store(true, Ordering::SeqCst);
+
+        // The data-plane liveness is FALSE (Idle is terminal) ...
+        assert!(
+            !orch.is_active().await,
+            "an Idle session is terminal so is_active must be false"
+        );
+        // ... but the radio-ownership gate must still hold the adapter.
+        assert!(
+            orch.session_active(),
+            "session_active must be true across the Idle stop→opening_tunnel setup window"
+        );
+    }
+
+    #[tokio::test]
+    async fn in_progress_guard_clears_the_flag_on_drop() {
+        // The RAII guard must release the flag on every return path so a finished
+        // (or panicking) bind never leaves the gate stuck blocking restarts.
+        let orch = BindOrchestrator::new();
+        assert!(!orch.session_active(), "flag starts clear");
+        {
+            orch.session_in_progress.store(true, Ordering::SeqCst);
+            let _g = InProgressGuard(orch.session_in_progress.clone());
+            assert!(
+                orch.session_active(),
+                "flag is raised inside the guard scope"
+            );
+        }
+        assert!(
+            !orch.session_active(),
+            "dropping the InProgressGuard must clear the in-progress flag"
+        );
+    }
+
+    #[tokio::test]
+    async fn start_local_bind_clears_session_active_when_it_returns() {
+        // A full fail-fast bind (no artifacts on the dev host) runs the whole
+        // `start_local_bind` body, which raises the flag at commit and drops the
+        // RAII guard on return. After it returns the gate must be released.
+        let orch = BindOrchestrator::new();
+        assert!(!orch.session_active(), "clear before any bind");
+        let result = orch
+            .start_local_bind(
+                BindRole::Drone,
+                None,
+                "operator",
+                std::future::pending::<()>(),
+            )
+            .await
+            .expect("start should not report Busy");
+        assert_eq!(result["state"], "failed");
+        assert!(
+            !orch.session_active(),
+            "session_active must be false once start_local_bind returns"
+        );
     }
 }

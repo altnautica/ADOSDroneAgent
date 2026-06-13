@@ -394,7 +394,12 @@ impl Supervisor {
     /// handshake owns the radio adapter. Real now that the FSM is in-process:
     /// only the radio units are gated, and only while a bind is live.
     async fn restart_blocked_by_bind(&self, name: &str) -> bool {
-        BIND_GATED_UNITS.contains(&name) && self.bind.is_active().await
+        // `session_active` (not `is_active`) so the gate also holds during the
+        // bind's `Idle` stop→`OpeningTunnel` setup window: the normal radio unit
+        // is stopped + the injection iface re-prepared there, and a monitor pass
+        // landing in that window would otherwise see the unit inactive-but-tracked-
+        // Running and auto-restart it, re-claiming the adapter mid-bind.
+        BIND_GATED_UNITS.contains(&name) && self.bind.session_active()
     }
 
     /// One monitor pass: detect deaths + auto-restart, retry parked services.
@@ -499,7 +504,9 @@ impl Supervisor {
         // would corrupt the handshake — the same exclusion `restart_blocked_by_bind`
         // applies to ordinary restarts. Gating the whole stop/rebind/start
         // sequence here also keeps the post-rebind start out of the bind window.
-        if !self.bind.is_active().await {
+        // `session_active` (not `is_active`) so the rehome is also held off during
+        // the bind's `Idle` setup window, before the data-plane state advances.
+        if !self.bind.session_active() {
             if let Some(plan) = self.usb_rehome.decide().await {
                 let unit = plan.unit;
                 self.stop_service(unit).await;
@@ -634,5 +641,39 @@ mod tests {
         assert!(gate_allows(&spec("ados-wfb-receiver"), &config));
         assert!(!gate_allows(&spec("ados-wfb-relay"), &config));
         assert!(gate_allows(&spec("ados-batman"), &config));
+    }
+
+    #[tokio::test]
+    async fn radio_restart_gate_holds_during_the_idle_bind_setup_window() {
+        // Regression: during the bind's `Idle` setup window (normal radio unit
+        // stopped, injection iface re-prepared, FSM not yet at `opening_tunnel`)
+        // the session's data-plane `is_active` reads false. If the restart gate
+        // keyed on that, a monitor pass landing in this window would auto-restart
+        // a gated radio unit and re-claim the adapter mid-bind. The gate keys on
+        // `session_active` (the whole-body in-progress flag) instead, so it holds.
+        let bind = Arc::new(BindOrchestrator::new());
+        let sup = Supervisor::new(cfg("drone"), bind.clone());
+
+        // No bind in progress → the gate permits restarts of every unit.
+        assert!(!sup.restart_blocked_by_bind("ados-wfb").await);
+        assert!(!sup.restart_blocked_by_bind("ados-mavlink").await);
+
+        // Enter the `Idle` setup window exactly as `start_local_bind` does: an
+        // `Idle` (terminal-state) session installed + the in-progress flag raised.
+        bind.enter_idle_setup_window_for_test().await;
+
+        // Data-plane liveness is false here (Idle is terminal) ...
+        assert!(!bind.is_active().await);
+        // ... yet the radio-unit gate must block the bind-gated units ...
+        assert!(
+            sup.restart_blocked_by_bind("ados-wfb").await,
+            "ados-wfb restart must be blocked across the Idle bind setup window"
+        );
+        assert!(
+            sup.restart_blocked_by_bind("ados-wfb-rx").await,
+            "ados-wfb-rx restart must be blocked across the Idle bind setup window"
+        );
+        // ... while non-radio units are never gated.
+        assert!(!sup.restart_blocked_by_bind("ados-mavlink").await);
     }
 }

@@ -82,6 +82,14 @@ async fn main() -> Result<()> {
     // Tell systemd we are up (no-op off Linux / outside a notify unit).
     sdnotify::ready();
 
+    // Keep the systemd watchdog fed on its OWN timer, independent of the monitor
+    // pass. A single `monitor_pass` can chain `systemctl`/`nmcli` recovery calls
+    // that legitimately exceed WatchdogSec; pinging only after the pass would let
+    // one slow-but-healthy pass starve the watchdog and trigger a SIGKILL
+    // mid-recovery. Liveness = the process alive + the runtime scheduling, which
+    // this dedicated ticker proves.
+    sdnotify::spawn_watchdog_pinger();
+
     // Cross-process bind trigger seam: the FastAPI pairing route + the cloud
     // auto-pair supervisor forward start/cancel/status here over the control
     // socket. Always served (cheap); the Python side connects when it wants a
@@ -131,8 +139,10 @@ async fn main() -> Result<()> {
     loop {
         tokio::select! {
             _ = tick.tick() => {
+                // The watchdog is fed by the independent `spawn_watchdog_pinger`
+                // ticker, NOT here — so a slow monitor pass (a long recovery
+                // chain) can never starve it.
                 supervisor.monitor_pass().await;
-                sdnotify::watchdog();
             }
             Some(kind) = rx.recv() => {
                 supervisor.handle_hotplug(kind).await;
