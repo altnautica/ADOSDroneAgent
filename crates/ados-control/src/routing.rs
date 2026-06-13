@@ -55,6 +55,10 @@ fn native_routes() -> Vec<NativeRoute> {
         method: Method::PUT,
         path,
     };
+    let delete = |path| NativeRoute {
+        method: Method::DELETE,
+        path,
+    };
     vec![
         // Status + identity.
         get("/healthz"),
@@ -124,6 +128,17 @@ fn native_routes() -> Vec<NativeRoute> {
         post("/api/mavlink/signing/enroll-fc"),
         post("/api/mavlink/signing/disable-on-fc"),
         put("/api/mavlink/signing/require"),
+        // Wi-Fi client writes: join (PUT) + leave (DELETE) + forget (DELETE, a
+        // {name} template). Each forwards to the native uplink daemon's command
+        // socket; the autoconnect toggle stays proxied.
+        put("/api/v1/network/client/join"),
+        delete("/api/v1/network/client"),
+        delete("/api/v1/network/client/configured/{name}"),
+        // WFB radio writes.
+        post("/api/wfb/channel"),
+        put("/api/wfb/tx-power"),
+        // Ground-station network priority write (PUT on the priority read's path).
+        put("/api/v1/ground-station/network/priority"),
     ]
 }
 
@@ -296,7 +311,7 @@ mod tests {
         let routes = native_routes();
         assert_eq!(
             routes.len(),
-            52,
+            58,
             "native route count drifted from build_router"
         );
         let has = |m: Method, p: &str| routes.iter().any(|r| r.method == m && r.path == p);
@@ -349,6 +364,15 @@ mod tests {
         assert!(has(Method::POST, "/api/mavlink/signing/enroll-fc"));
         assert!(has(Method::POST, "/api/mavlink/signing/disable-on-fc"));
         assert!(has(Method::PUT, "/api/mavlink/signing/require"));
+        // The Wi-Fi client writes: a PUT join + two DELETEs (leave + the {name}
+        // forget template).
+        assert!(has(Method::PUT, "/api/v1/network/client/join"));
+        assert!(has(Method::DELETE, "/api/v1/network/client"));
+        assert!(has(Method::DELETE, "/api/v1/network/client/configured/{name}"));
+        // The WFB radio writes + the GS network priority write.
+        assert!(has(Method::POST, "/api/wfb/channel"));
+        assert!(has(Method::PUT, "/api/wfb/tx-power"));
+        assert!(has(Method::PUT, "/api/v1/ground-station/network/priority"));
         // The original surface stays native.
         assert!(has(Method::GET, "/healthz"));
         assert!(has(Method::POST, "/api/command"));

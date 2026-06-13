@@ -23,8 +23,10 @@ pub mod command;
 pub mod fleet;
 pub mod gs_mesh;
 pub mod gs_network;
+pub mod gs_network_write;
 pub mod gs_pairing;
 pub mod gs_status;
+pub mod network_write;
 pub mod pairing;
 pub mod params;
 pub mod params_write;
@@ -37,10 +39,11 @@ pub mod status_full;
 pub mod system;
 pub mod video;
 pub mod wfb;
+pub mod wfb_write;
 
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
 use serde_json::json;
 
@@ -115,6 +118,10 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/wfb/history", get(wfb::get_wfb_history))
         .route("/api/wfb/pair", get(wfb::get_wfb_pair_status))
         .route("/api/wfb/pair/failover-status", get(wfb::get_failover_status))
+        // WFB radio writes: the channel change (a coordinated hop to the radio
+        // command socket) and the runtime TX-power (set + persist).
+        .route("/api/wfb/channel", post(wfb_write::set_wfb_channel))
+        .route("/api/wfb/tx-power", put(wfb_write::set_wfb_tx_power))
         // The consolidated status: agent info, services, resources, video,
         // telemetry, radio, and mesh in one round-trip.
         .route("/api/status/full", get(status_full::get_full_status))
@@ -145,13 +152,25 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/v1/ground-station/network/ethernet", get(gs_network::get_network_ethernet))
         .route("/api/v1/ground-station/network/client/scan", get(gs_network::get_network_client_scan))
         .route("/api/v1/ground-station/network/modem", get(gs_network::get_network_modem))
-        .route("/api/v1/ground-station/network/priority", get(gs_network::get_network_priority))
+        .route(
+            "/api/v1/ground-station/network/priority",
+            get(gs_network::get_network_priority).put(gs_network_write::put_network_priority),
+        )
         .route("/api/v1/ground-station/modem-status", get(gs_network::get_modem_status))
         // Ground-station reads (profile-gated): the mesh pairing snapshot, the PIC
         // arbiter state, and the captive-portal token mint.
         .route("/api/v1/ground-station/pair/pending", get(gs_pairing::get_pair_pending))
         .route("/api/v1/ground-station/pic", get(gs_pairing::get_pic_state))
         .route("/api/v1/ground-station/captive-token", get(gs_pairing::get_captive_token))
+        // Wi-Fi client writes (profile-agnostic): join / leave / forget, each
+        // forwarded to the native uplink daemon's command socket. The autoconnect
+        // toggle stays proxied (the daemon socket has no autoconnect op).
+        .route("/api/v1/network/client/join", put(network_write::put_client_join))
+        .route("/api/v1/network/client", delete(network_write::delete_client))
+        .route(
+            "/api/v1/network/client/configured/{name}",
+            delete(network_write::delete_client_configured),
+        )
         // Everything else: reverse-proxy to the residual Python.
         .fallback(proxy_to_residual)
         .with_state(state)

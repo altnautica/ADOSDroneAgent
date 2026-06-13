@@ -681,6 +681,89 @@ REGISTRY: list[RouteCase] = [
         content_type="application/json",
         require_sandbox=True,
     ),
+    # Join a Wi-Fi network. A side effect (it stops hostapd, transitions wlan0 to
+    # STA, and waits for an IP through the uplink daemon), so sandboxed and skipped
+    # by default; the bench opts in against a live wlan0. The body is the
+    # {ssid, passphrase, force} the route forwards as a wifi_join op. The ip /
+    # gateway move with the join outcome, so they are masked; the {joined, error}
+    # shape is the contract.
+    RouteCase(
+        name="network-client-join",
+        method="PUT",
+        path="/api/v1/network/client/join",
+        body=b'{"ssid": "BenchNet", "passphrase": "benchpass", "force": false}',
+        content_type="application/json",
+        paired_headers={"authorization": PAIRED_AUTH_PLACEHOLDER},
+        require_sandbox=True,
+        extra_volatile=("ip", "gateway"),
+    ),
+    # Disconnect the current Wi-Fi-client link. A side effect (it drops wlan0 and
+    # may restore hostapd), so sandboxed. No request body; the response carries the
+    # previous SSID, which depends on the live link, so it is masked; the {left}
+    # shape is the contract.
+    RouteCase(
+        name="network-client-leave",
+        method="DELETE",
+        path="/api/v1/network/client",
+        paired_headers={"authorization": PAIRED_AUTH_PLACEHOLDER},
+        require_sandbox=True,
+        extra_volatile=("previous_ssid",),
+    ),
+    # Forget a saved Wi-Fi profile by name. A side effect (it deletes the NM
+    # connection), so sandboxed. The {name} segment carries a representative saved
+    # profile; the response echoes it in {forgot, name, error}, the contract shape.
+    RouteCase(
+        name="network-client-forget",
+        method="DELETE",
+        path="/api/v1/network/client/configured/BenchNet",
+        paired_headers={"authorization": PAIRED_AUTH_PLACEHOLDER},
+        require_sandbox=True,
+    ),
+    # Change the WFB-ng channel. A side effect (it forwards a coordinated hop to
+    # the radio command socket), so sandboxed and skipped by default; the bench
+    # opts in against a live radio. The body is the {"channel": N} the route
+    # validates and forwards. The success body is the static
+    # {status, channel, frequency_mhz} shape (the echoed channel is the radio's,
+    # so it is masked); the deterministic diff is the invalid-channel rejection.
+    RouteCase(
+        name="wfb-channel-write",
+        method="POST",
+        path="/api/wfb/channel",
+        body=b'{"channel": 149}',
+        content_type="application/json",
+        paired_headers={"authorization": PAIRED_AUTH_PLACEHOLDER},
+        require_sandbox=True,
+        extra_volatile=("channel",),
+    ),
+    # Set the WFB-ng TX power at runtime. A side effect (it forwards to the radio
+    # command socket + persists to config), so sandboxed by default. The body is
+    # the {"tx_power_dbm": N} the route bounds and forwards; the response carries
+    # an `effective_dbm` the driver reports (volatile, masked), and the
+    # deterministic {requested_dbm, tx_power_max_dbm} legs are the contract.
+    RouteCase(
+        name="wfb-tx-power-write",
+        method="PUT",
+        path="/api/wfb/tx-power",
+        body=b'{"tx_power_dbm": 10}',
+        content_type="application/json",
+        paired_headers={"authorization": PAIRED_AUTH_PLACEHOLDER},
+        require_sandbox=True,
+        extra_volatile=("effective_dbm",),
+    ),
+    # Set the ground-station uplink priority list. A write with side effects (it
+    # persists the priority file the failover daemon reads), so it is sandboxed
+    # and skipped by default; the bench opts in on a ground-station rig. The body
+    # is the {"priority": [...]} list; the response echoes the persisted order in
+    # {"priority": [...]}. Profile-gated: a drone node returns the nested
+    # E_PROFILE_MISMATCH 404 on both transports.
+    RouteCase(
+        name="gs-network-priority-set",
+        method="PUT",
+        path="/api/v1/ground-station/network/priority",
+        body=b'{"priority": ["eth0", "wlan0_client", "wwan0", "usb0"]}',
+        content_type="application/json",
+        require_sandbox=True,
+    ),
     # <append a RouteCase line per route as it migrates — the only shared edit>
 ]
 
