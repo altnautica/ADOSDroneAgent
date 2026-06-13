@@ -14,7 +14,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from ados.api.deps import get_agent_app
-from ados.core.paths import CONFIG_YAML, WFB_FAILOVER_STATE_JSON
+from ados.core.paths import ADOS_RUN_DIR, CONFIG_YAML, WFB_FAILOVER_STATE_JSON
 from ados.services.wfb.channel import STANDARD_CHANNELS, get_channel
 
 # Local-bind to cloud-relay failover sidecar, written by the always-on
@@ -23,6 +23,59 @@ from ados.services.wfb.channel import STANDARD_CHANNELS, get_channel
 # the path patchable in tests and decouples this route from the
 # supervisor module's lifecycle.
 FAILOVER_STATE_PATH = WFB_FAILOVER_STATE_JSON
+
+# The native radio's operator command socket. POST /api/wfb/channel forwards a
+# coordinated-hop request to it when the native transmit plane owns the radio
+# (there is no in-process Python WFB manager to call). Module-level alias so the
+# path is patchable in tests. Mirrors the Rust `RADIO_CMD_SOCK` constant.
+RADIO_CMD_SOCK = ADOS_RUN_DIR / "radio-cmd.sock"
+
+# Connecting to the local socket is near-instant; the hop reply is sent before
+# the multi-second air announce, so a short cap is plenty and a missing/refused
+# socket fails fast instead of stalling the request.
+_RADIO_CMD_CONNECT_TIMEOUT_S = 2.0
+_RADIO_CMD_REPLY_TIMEOUT_S = 5.0
+
+
+async def _radio_hop_via_socket(channel: int) -> dict[str, Any] | None:
+    """Forward a coordinated channel hop to the native radio command socket.
+
+    Speaks the radio's wire protocol: one newline-terminated JSON request
+    ``{"op":"hop","channel":N}`` in, one newline-terminated JSON reply
+    ``{"ok":bool, ...}`` out, then the server closes. Returns the parsed reply
+    dict, or ``None`` when the socket is unreachable (the native radio is not
+    serving it) so the caller can fall back to the demo path.
+    """
+    try:
+        reader, writer = await asyncio.wait_for(
+            asyncio.open_unix_connection(str(RADIO_CMD_SOCK)),
+            timeout=_RADIO_CMD_CONNECT_TIMEOUT_S,
+        )
+    except (TimeoutError, OSError):
+        return None
+    try:
+        req = json.dumps({"op": "hop", "channel": int(channel)}) + "\n"
+        writer.write(req.encode("utf-8"))
+        await writer.drain()
+        try:
+            line = await asyncio.wait_for(
+                reader.readline(), timeout=_RADIO_CMD_REPLY_TIMEOUT_S
+            )
+        except (TimeoutError, OSError):
+            return None
+    finally:
+        writer.close()
+        try:
+            await writer.wait_closed()
+        except Exception:  # noqa: BLE001 — teardown is best-effort
+            pass
+    if not line:
+        return None
+    try:
+        reply = json.loads(line.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return None
+    return reply if isinstance(reply, dict) else None
 
 # HTTP-level cap on the local-bind endpoint. The bind rendezvous itself
 # is unbounded; this just prevents browsers and reverse proxies from
@@ -451,6 +504,29 @@ async def set_wfb_channel(request: ChannelRequest):
             status_code=400,
             detail=f"Invalid channel {request.channel}. Valid channels: {valid}",
         )
+
+    # Native transmit plane: there is no in-process Python manager to call, so
+    # forward a coordinated hop to the radio's command socket. The radio
+    # announces, waits for the GS ack, then commits — so the ground station
+    # follows instead of the link going one-sided. A reachable socket's reply
+    # is authoritative; an unreachable socket falls through to the demo /
+    # packaged path below (the native binary may not be up yet on a fresh boot).
+    if _native_radio_running():
+        reply = await _radio_hop_via_socket(request.channel)
+        if reply is not None:
+            if reply.get("ok") is True:
+                return {
+                    "status": "ok",
+                    "channel": int(reply.get("channel", request.channel)),
+                    "frequency_mhz": ch.frequency_mhz,
+                }
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": "hop_refused",
+                    "message": str(reply.get("error") or "hop refused"),
+                },
+            )
 
     app = get_agent_app()
     wfb = app.wfb_manager()

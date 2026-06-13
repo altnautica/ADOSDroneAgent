@@ -1,8 +1,6 @@
 """share_uplink firewall and sysctl persistence.
 
-Earlier code wired runtime sysctl + iptables MASQUERADE for
-`share_uplink` through `api/routes/ground_station.py:_apply_share_uplink`.
-Those settings did NOT survive reboot. This module adds proper
+Runtime sysctl + iptables MASQUERADE for `share_uplink` with reboot-survival
 persistence:
 
 - Atomic write of `/etc/sysctl.d/99-ados-share-uplink.conf` for
@@ -12,11 +10,10 @@ persistence:
 - nftables fallback that rewrites `/etc/nftables.conf` from
   `nft list ruleset`.
 - Refuse-and-log when neither iptables nor nftables is available.
-- Idempotent reconcile-on-start that brings runtime state into agreement
-  with the persisted `ground_station.share_uplink` flag.
 
-Applied at startup by the native uplink daemon and re-applied by the
-`PUT /network/share_uplink` route on transitions.
+The native `ados-net` daemon owns the start-up reconcile + the data-cap
+throttle ladder in Rust; this module exposes only `apply_share_uplink`, used by
+the `PUT /network/share_uplink` route's non-native fallback path.
 """
 
 from __future__ import annotations
@@ -337,149 +334,4 @@ async def apply_share_uplink(enabled: bool, active_iface: str | None) -> dict:
         "applied": apply_error is None,
         "backend": backend,
         "apply_error": apply_error,
-    }
-
-
-# ----------------------------------------------------------------------
-# Data-cap throttle (H9)
-# ----------------------------------------------------------------------
-# Maps DataCapState -> action on the active uplink interface.
-#
-#   "ok"          : remove throttle qdisc, keep MASQUERADE rule
-#   "warn_80"     : remove throttle qdisc, keep MASQUERADE rule, log only
-#   "throttle_95" : tc tbf 256 kbit on the active iface
-#   "blocked_100" : drop MASQUERADE rule so NAT stops forwarding traffic
-#
-# The tc approach is interface-scoped and idempotent. An existing root
-# qdisc is deleted before a new one is added so repeated calls converge.
-
-
-async def _tc_add_throttle(iface: str, rate_kbps: int) -> str | None:
-    """Install a `tbf` root qdisc on `iface` at `rate_kbps` kbit."""
-    # Delete any existing root qdisc first. Ignore failures (absence is fine).
-    await _run("tc", "qdisc", "del", "dev", iface, "root")
-    rc, _out, err = await _run(
-        "tc", "qdisc", "add", "dev", iface, "root",
-        "tbf", "rate", f"{rate_kbps}kbit",
-        "burst", "32kbit", "latency", "400ms",
-    )
-    if rc != 0:
-        return err or "tc_add_failed"
-    return None
-
-
-async def _tc_remove_throttle(iface: str) -> str | None:
-    """Remove the root qdisc on `iface`. No-op when absent."""
-    rc, _out, err = await _run("tc", "qdisc", "del", "dev", iface, "root")
-    if rc != 0 and "no such" not in err.lower() and "cannot find" not in err.lower():
-        return err or "tc_remove_failed"
-    return None
-
-
-async def apply_throttle(
-    active_iface: str | None,
-    state: str,
-    rate_kbps_95: int = 256,
-) -> dict:
-    """Apply bandwidth throttle or hard block on the active uplink.
-
-    Called on DataCapState transitions from `uplink_router`. States:
-    - "ok" / "warn_80": remove any throttle qdisc, keep NAT rule.
-    - "throttle_95": install tbf qdisc at `rate_kbps_95` (default 256 kbit).
-    - "blocked_100": remove qdisc AND drop the MASQUERADE rule so NAT
-      stops forwarding. Re-applied by the 80 or ok transition.
-
-    Best-effort: never raises. Returns a small dict for logging.
-    """
-    if active_iface is None or not active_iface:
-        return {"applied": False, "state": state, "reason": "no_active_iface"}
-
-    result: dict = {"state": state, "iface": active_iface, "applied": False}
-
-    if state in ("ok", "warn_80"):
-        err = await _tc_remove_throttle(active_iface)
-        result["tc_error"] = err
-        # Re-add NAT in case a previous blocked_100 removed it.
-        backend = detect_firewall_backend()
-        if backend in ("iptables-persistent", "iptables-runtime"):
-            if not await _iptables_rule_present(active_iface):
-                add_err = await _iptables_add_rule(active_iface)
-                result["nat_restore_error"] = add_err
-                if backend == "iptables-persistent":
-                    await _iptables_save()
-        elif backend == "nftables":
-            add_err = await _nft_add_rule(active_iface)
-            result["nat_restore_error"] = add_err
-            await _nft_save()
-        result["applied"] = err is None
-        return result
-
-    if state == "throttle_95":
-        err = await _tc_add_throttle(active_iface, rate_kbps_95)
-        result["tc_error"] = err
-        result["rate_kbps"] = rate_kbps_95
-        result["applied"] = err is None
-        return result
-
-    if state == "blocked_100":
-        # Remove throttle (block supersedes it) and drop the MASQUERADE rule.
-        await _tc_remove_throttle(active_iface)
-        backend = detect_firewall_backend()
-        nat_err: str | None = None
-        if backend in ("iptables-persistent", "iptables-runtime"):
-            nat_err = await _iptables_remove_rule(active_iface)
-            if backend == "iptables-persistent":
-                await _iptables_save()
-        elif backend == "nftables":
-            nat_err = await _nft_remove_rule(active_iface)
-            await _nft_save()
-        result["nat_remove_error"] = nat_err
-        result["applied"] = nat_err is None
-        return result
-
-    result["reason"] = "unknown_state"
-    return result
-
-
-async def reconcile_on_start() -> dict:
-    """Reconcile firewall state against the persisted share_uplink flag.
-
-    Called by `ados-uplink-router.service` on start. Reads the current
-    `ground_station.share_uplink` value and verifies sysctl + NAT match.
-    Drift triggers a re-apply.
-    """
-    try:
-        from ados.core.config import load_config
-        cfg = load_config()
-        enabled = bool(getattr(cfg.ground_station, "share_uplink", False))
-    except Exception as exc:
-        log.warning("share_uplink.reconcile_config_load_failed", error=str(exc))
-        return {"reconciled": False, "error": str(exc)}
-
-    # Discover the active uplink iface. Best-effort only.
-    active_iface: str | None = None
-    try:
-        from ados.services.ground_station.uplink import get_uplink_router
-        router = get_uplink_router()
-        active_name = router.active_uplink
-        if active_name:
-            mgr = await router._manager_for(active_name)  # type: ignore[attr-defined]
-            if mgr is not None:
-                get_iface = getattr(mgr, "get_iface", None)
-                if callable(get_iface):
-                    active_iface = get_iface()
-    except Exception as exc:
-        log.debug("share_uplink.reconcile_iface_lookup_failed", error=str(exc))
-
-    log.info(
-        "share_uplink.reconcile_start",
-        configured=enabled,
-        iface=active_iface,
-    )
-    result = await apply_share_uplink(enabled, active_iface)
-    return {
-        "reconciled": True,
-        "configured_enabled": enabled,
-        "iface": active_iface,
-        **result,
     }

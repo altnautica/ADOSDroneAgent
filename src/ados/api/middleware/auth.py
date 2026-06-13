@@ -22,23 +22,29 @@ EXEMPT_PATHS = {
     "/api/v1/setup/status",
 }
 
-# Setup mutation endpoints that follow the same-origin trust model.
+# Cosmetic setup-wizard mutations that follow the same-origin trust model.
 # Reachable without an API key when the request originates from a browser
 # served the agent's own static webapp (same-origin). Treated as a
-# physical-presence-on-the-LAN gate, not full authentication. The
-# `security.setup_token_required` flag escalates to a token requirement.
+# physical-presence-on-the-LAN gate, not full authentication. These only move
+# the wizard's progress state; they do not change cloud posture or write a
+# credential. The `security.setup_token_required` flag escalates to a token
+# requirement.
 SAME_ORIGIN_SETUP_PATHS = {
-    "/api/v1/setup/remote-access/cloudflare",
-    "/api/v1/setup/cloud-choice",
     "/api/v1/setup/finish",
     "/api/v1/setup/skip",
     "/api/v1/setup/reset",
-    "/api/v1/setup/navigation/capabilities",
-    "/api/v1/setup/navigation/cameras",
-    "/api/v1/setup/navigation/assign-camera",
-    "/api/v1/setup/navigation/calibration",
-    "/api/v1/setup/navigation/config",
-    "/api/v1/setup/navigation/preflight",
+}
+
+# Cloud-posture-mutating setup routes. These are NOT covered by the bare
+# same-origin gate: cloud-choice flips the agent's cloud posture and
+# remote-access/cloudflare writes a root-owned tunnel token, so a forged-Origin
+# LAN caller must NOT reach them with no credential. On a paired agent they
+# require the API key (handled by the general paired-route path below); the
+# setup-token escalation still applies on an unpaired agent. The unpaired-
+# default is the same key-or-token gate, never bare same-origin.
+SAME_ORIGIN_SETUP_CLOUD_PATHS = {
+    "/api/v1/setup/remote-access/cloudflare",
+    "/api/v1/setup/cloud-choice",
 }
 
 # Path prefixes that follow the same same-origin trust model. Used for
@@ -147,8 +153,29 @@ class ApiKeyAuthMiddleware(BaseHTTPMiddleware):
         app = get_agent_app()
         pm = app.pairing_manager
 
-        # Same-origin trust path for setup mutations. The default posture
-        # accepts a same-origin browser without an API key. The
+        # Cloud-posture-mutating setup routes (cloud-choice, the cloudflare
+        # tunnel-token write). A bare same-origin browser is NOT enough here:
+        # an attacker can forge Origin/Referer/Host to match the agent, so these
+        # impactful routes always require a real credential. A valid API key
+        # always passes; otherwise a valid setup token passes; otherwise 401.
+        # This gate runs BEFORE the unpaired open-pass so a fresh agent cannot
+        # have its cloud posture flipped by a forged-Origin LAN caller.
+        if request.url.path in SAME_ORIGIN_SETUP_CLOUD_PATHS:
+            if _valid_api_key(app, pm, request):
+                return await call_next(request)
+            if _valid_setup_token(request):
+                return await call_next(request)
+            return JSONResponse(
+                status_code=401,
+                content={
+                    "detail": "This setup route changes cloud posture and "
+                    "requires the API key (X-ADOS-Key) or the setup token "
+                    "(X-ADOS-Setup-Token, printed by `ados status`).",
+                },
+            )
+
+        # Same-origin trust path for the cosmetic setup-wizard mutations. The
+        # default posture accepts a same-origin browser without an API key. The
         # ``security.setup_token_required`` knob escalates to requiring
         # ``X-ADOS-Setup-Token`` instead.
         is_setup_mutation = request.url.path in SAME_ORIGIN_SETUP_PATHS or any(
@@ -161,11 +188,8 @@ class ApiKeyAuthMiddleware(BaseHTTPMiddleware):
             if not require_token and _is_same_origin(request):
                 return await call_next(request)
             if require_token:
-                provided = request.headers.get("X-ADOS-Setup-Token")
-                if provided:
-                    expected = _load_setup_token()
-                    if expected and provided == expected:
-                        return await call_next(request)
+                if _valid_setup_token(request):
+                    return await call_next(request)
                 return JSONResponse(
                     status_code=401,
                     content={
@@ -187,30 +211,57 @@ class ApiKeyAuthMiddleware(BaseHTTPMiddleware):
         # fetch, so it does not rely on a header-only bypass. Paired non-setup
         # routes therefore require the key unconditionally below.
 
-        # Check for manually configured API key first (security.api.api_key)
-        configured_key = app.config.security.api.api_key
         api_key = request.headers.get("X-ADOS-Key")
 
         if not api_key:
+            # No key on a direct LAN visit to the served dashboard: tell the
+            # operator exactly where to get it (`ados status` prints the key)
+            # so a direct visit shows an actionable message, not a blank/hung
+            # UI. The same-origin shortcut is deliberately NOT reintroduced for
+            # general routes.
             return JSONResponse(
                 status_code=401,
                 content={
-                    "detail": "Missing X-ADOS-Key header. "
-                    "This agent is paired and requires authentication.",
+                    "detail": "Missing X-ADOS-Key header. This agent is paired "
+                    "and requires authentication. Run `ados status` on the "
+                    "agent to print the API key, then enter it in the "
+                    "dashboard.",
                 },
             )
 
-        # Validate against pairing-generated key, or manually configured key
-        if configured_key and api_key == configured_key:
-            return await call_next(request)
-
-        if not pm.validate_key(api_key):
+        if not _valid_api_key(app, pm, request):
             return JSONResponse(
                 status_code=401,
                 content={"detail": "Invalid API key"},
             )
 
         return await call_next(request)
+
+
+def _valid_api_key(app, pm, request: Request) -> bool:
+    """True when the request carries a valid API key.
+
+    Matches the manually-configured ``security.api.api_key`` or a
+    pairing-generated key. A missing header is not valid. Shared by the
+    cloud-posture gate and the general paired-route check so both validate the
+    key identically.
+    """
+    api_key = request.headers.get("X-ADOS-Key")
+    if not api_key:
+        return False
+    configured_key = app.config.security.api.api_key
+    if configured_key and api_key == configured_key:
+        return True
+    return bool(pm.validate_key(api_key))
+
+
+def _valid_setup_token(request: Request) -> bool:
+    """True when the request carries the valid ``X-ADOS-Setup-Token``."""
+    provided = request.headers.get("X-ADOS-Setup-Token")
+    if not provided:
+        return False
+    expected = _load_setup_token()
+    return bool(expected and provided == expected)
 
 
 def _load_setup_token() -> str | None:

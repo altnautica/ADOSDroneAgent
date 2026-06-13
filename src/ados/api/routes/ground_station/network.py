@@ -297,12 +297,20 @@ async def get_network_modem() -> dict[str, Any]:
 
 @router.put("/network/modem")
 async def put_network_modem(update: ModemConfigUpdate) -> dict[str, Any]:
-    """Update modem config (apn, cap_gb, enabled). Returns refreshed view."""
+    """Update modem config (apn, cap_gb / cap_mb, enabled). Returns refreshed view.
+
+    The manager persists the cap in GB. When the client sends ``cap_mb`` (the
+    unit the GET view reports) and no ``cap_gb``, convert it here so a view
+    round-trip lands the right cap instead of being silently dropped.
+    """
     _gs._require_ground_profile()
+    cap_gb = update.cap_gb
+    if cap_gb is None and update.cap_mb is not None:
+        cap_gb = update.cap_mb / 1024.0
     try:
         await _gs._modem_mgr().configure(
             apn=update.apn,
-            cap_gb=update.cap_gb,
+            cap_gb=cap_gb,
             enabled=update.enabled,
         )
     except Exception as exc:
@@ -350,10 +358,13 @@ async def put_network_priority(update: UplinkPriorityUpdate) -> dict[str, Any]:
 async def put_network_share_uplink(update: ShareUplinkUpdate) -> dict[str, Any]:
     """Toggle IPv4 forwarding + NAT masquerade for AP clients.
 
-    POC implementation: writes net.ipv4.ip_forward via sysctl and adds
-    a MASQUERADE rule on the active uplink. On failure the flag is
-    still persisted and the error is surfaced in the response. Full
-    firewall management comes in a later phase.
+    Persists the flag, then applies sysctl + a MASQUERADE rule on the active
+    uplink. When the native ``ados-net`` daemon owns the network surface it also
+    owns the sysctl + firewall reconciliation, so the in-process apply here would
+    be a second writer racing the daemon for the same iptables rule. So, mirroring
+    the sibling priority / modem routes, the apply is gated on
+    ``is_service_native(net)``: native persists the flag only and lets the daemon
+    reconcile; the non-native fallback runs the Python apply.
     """
     _gs._require_ground_profile()
     try:
@@ -363,6 +374,18 @@ async def put_network_share_uplink(update: ShareUplinkUpdate) -> dict[str, Any]:
             status_code=500,
             detail={"error": {"code": "E_UI_SAVE_FAILED", "message": str(exc)}},
         ) from exc
+
+    from ados.core.runtime_mode import is_service_native
+
+    if is_service_native("net"):
+        # The native daemon reconciles the persisted flag itself; do NOT run a
+        # second in-process sysctl / iptables apply that would race it.
+        return {
+            "enabled": bool(update.enabled),
+            "applied": True,
+            "apply_error": None,
+            "backend": "native",
+        }
 
     applied = await _gs._apply_share_uplink(bool(update.enabled))
     result = {

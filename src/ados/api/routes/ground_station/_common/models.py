@@ -134,10 +134,17 @@ class WifiJoinRequest(BaseModel):
 
 
 class ModemConfigUpdate(BaseModel):
-    """PUT body for /network/modem."""
+    """PUT body for /network/modem.
+
+    The GET view reports the cap as ``cap_mb`` (megabytes), so a client that
+    round-trips the view sends ``cap_mb`` back. The route accepts either:
+    ``cap_gb`` wins when both are present, otherwise ``cap_mb`` is converted to
+    ``cap_gb`` before it reaches the manager (which persists in GB).
+    """
 
     apn: str | None = None
     cap_gb: float | None = Field(default=None, gt=0, le=9223372036.0)
+    cap_mb: int | None = Field(default=None, gt=0)
     enabled: bool | None = None
 
 

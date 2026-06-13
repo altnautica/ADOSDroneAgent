@@ -46,14 +46,19 @@ _TARGET_COMP = 1
 # set_mode_apm sets so param2 carries a custom_mode.
 _CUSTOM_MODE_ENABLED = 1.0
 
-# RTL's custom_mode in the ArduCopter mode table (COPTER_MODE_NUMBERS RTL → 6).
-_RTL_CUSTOM_MODE = 6
-
 # Default takeoff altitude in metres when the request carries no args[0].
 _DEFAULT_TAKEOFF_ALT_M = 10.0
 
-# ArduCopter flight-mode name → custom_mode. The route resolves a mode name to
-# its custom mode here; an unknown name is a 400.
+# ArduPilot vehicle classes the route resolves modes against. The same mode
+# NAME maps to a different custom_mode per class (e.g. RTL is 6 on Copter but
+# 11 on Plane), so the route MUST know the live vehicle type before it can
+# encode a DO_SET_MODE / RTL frame. Resolved from the FC heartbeat's mav_type.
+_VEHICLE_COPTER = "copter"
+_VEHICLE_PLANE = "plane"
+_VEHICLE_ROVER = "rover"
+_VEHICLE_SUB = "sub"
+
+# ArduCopter flight-mode name → custom_mode.
 _COPTER_MODE_NUMBERS = {
     "STABILIZE": 0,
     "ACRO": 1,
@@ -81,6 +86,150 @@ _COPTER_MODE_NUMBERS = {
     "AUTOROTATE": 26,
     "AUTO_RTL": 27,
 }
+
+# ArduPlane flight-mode name → custom_mode (RTL is 11 here, not 6).
+_PLANE_MODE_NUMBERS = {
+    "MANUAL": 0,
+    "CIRCLE": 1,
+    "STABILIZE": 2,
+    "TRAINING": 3,
+    "ACRO": 4,
+    "FBWA": 5,
+    "FBWB": 6,
+    "CRUISE": 7,
+    "AUTOTUNE": 8,
+    "AUTO": 10,
+    "RTL": 11,
+    "LOITER": 12,
+    "TAKEOFF": 13,
+    "AVOID_ADSB": 14,
+    "GUIDED": 15,
+    "QSTABILIZE": 17,
+    "QHOVER": 18,
+    "QLOITER": 19,
+    "QLAND": 20,
+    "QRTL": 21,
+    "QAUTOTUNE": 22,
+    "QACRO": 23,
+    "THERMAL": 24,
+    "LOITER_TO_QLAND": 25,
+}
+
+# ArduRover flight-mode name → custom_mode.
+_ROVER_MODE_NUMBERS = {
+    "MANUAL": 0,
+    "ACRO": 1,
+    "STEERING": 3,
+    "HOLD": 4,
+    "LOITER": 5,
+    "FOLLOW": 6,
+    "SIMPLE": 7,
+    "AUTO": 10,
+    "RTL": 11,
+    "SMART_RTL": 12,
+    "GUIDED": 15,
+    "INITIALISING": 16,
+}
+
+# ArduSub flight-mode name → custom_mode (no RTL).
+_SUB_MODE_NUMBERS = {
+    "STABILIZE": 0,
+    "ACRO": 1,
+    "ALT_HOLD": 2,
+    "AUTO": 3,
+    "GUIDED": 4,
+    "CIRCLE": 7,
+    "SURFACE": 9,
+    "POSHOLD": 16,
+    "MANUAL": 19,
+    "MOTOR_DETECT": 20,
+}
+
+_MODE_TABLES: dict[str, dict[str, int]] = {
+    _VEHICLE_COPTER: _COPTER_MODE_NUMBERS,
+    _VEHICLE_PLANE: _PLANE_MODE_NUMBERS,
+    _VEHICLE_ROVER: _ROVER_MODE_NUMBERS,
+    _VEHICLE_SUB: _SUB_MODE_NUMBERS,
+}
+
+# MAV_TYPE (FC heartbeat) → ArduPilot vehicle class. Anything not mapped is an
+# unknown vehicle, for which mode/rtl are refused rather than guessed as Copter.
+_MAV_TYPE_TO_VEHICLE: dict[int, str] = {
+    mavlink2.MAV_TYPE_QUADROTOR: _VEHICLE_COPTER,
+    mavlink2.MAV_TYPE_HEXAROTOR: _VEHICLE_COPTER,
+    mavlink2.MAV_TYPE_OCTOROTOR: _VEHICLE_COPTER,
+    mavlink2.MAV_TYPE_TRICOPTER: _VEHICLE_COPTER,
+    mavlink2.MAV_TYPE_HELICOPTER: _VEHICLE_COPTER,
+    mavlink2.MAV_TYPE_COAXIAL: _VEHICLE_COPTER,
+    mavlink2.MAV_TYPE_DODECAROTOR: _VEHICLE_COPTER,
+    mavlink2.MAV_TYPE_FIXED_WING: _VEHICLE_PLANE,
+    mavlink2.MAV_TYPE_VTOL_TILTROTOR: _VEHICLE_PLANE,
+    mavlink2.MAV_TYPE_VTOL_QUADROTOR: _VEHICLE_PLANE,
+    mavlink2.MAV_TYPE_VTOL_DUOROTOR: _VEHICLE_PLANE,
+    mavlink2.MAV_TYPE_VTOL_RESERVED2: _VEHICLE_PLANE,
+    mavlink2.MAV_TYPE_VTOL_RESERVED3: _VEHICLE_PLANE,
+    mavlink2.MAV_TYPE_VTOL_RESERVED4: _VEHICLE_PLANE,
+    mavlink2.MAV_TYPE_VTOL_RESERVED5: _VEHICLE_PLANE,
+    mavlink2.MAV_TYPE_GROUND_ROVER: _VEHICLE_ROVER,
+    mavlink2.MAV_TYPE_SURFACE_BOAT: _VEHICLE_ROVER,
+    mavlink2.MAV_TYPE_SUBMARINE: _VEHICLE_SUB,
+}
+
+
+def _vehicle_class(mav_type: int) -> str | None:
+    """Resolve the FC heartbeat ``mav_type`` to an ArduPilot vehicle class.
+
+    Returns ``None`` for an unmapped / unknown type (mav_type 0 on a fresh
+    snapshot before the first heartbeat, or a class the route has no mode table
+    for) so the caller refuses mode/rtl rather than guessing Copter.
+    """
+    return _MAV_TYPE_TO_VEHICLE.get(int(mav_type))
+
+
+def _resolve_rtl_custom_mode(vehicle: str | None) -> int:
+    """The RTL custom_mode for the given vehicle class.
+
+    Refuses with HTTPException(400) when the vehicle is unknown (so RTL is never
+    sent as the Copter number against a Plane/Rover) or when the class has no
+    RTL mode (Sub). Copter RTL=6, Plane RTL=11, Rover RTL=11.
+    """
+    if vehicle is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot resolve RTL: FC vehicle type unknown. "
+            "Wait for a heartbeat from the flight controller.",
+        )
+    table = _MODE_TABLES.get(vehicle, {})
+    rtl = table.get("RTL")
+    if rtl is None:
+        raise HTTPException(
+            status_code=400,
+            detail=f"RTL is not available on this vehicle ({vehicle}).",
+        )
+    return int(rtl)
+
+
+def _resolve_mode_number(vehicle: str | None, mode_name: str) -> int:
+    """Resolve a mode NAME to its custom_mode for the live vehicle class.
+
+    Refuses with HTTPException(400) when the vehicle is unknown (so a mode is
+    never sent against the wrong vehicle's numbering) or when the name is not a
+    mode of that vehicle.
+    """
+    if vehicle is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot set mode: FC vehicle type unknown. "
+            "Wait for a heartbeat from the flight controller.",
+        )
+    table = _MODE_TABLES.get(vehicle, {})
+    custom_mode = table.get(mode_name)
+    if custom_mode is None:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown mode {mode_name!r} for vehicle {vehicle}.",
+        )
+    return int(custom_mode)
 
 
 def _encode_command_long(
@@ -110,12 +259,18 @@ def _encode_command_long(
     return msg.pack(encoder)
 
 
-def _build_command_frame(cmd: str, args: list[float | str]) -> tuple[bytes, dict]:
+def _build_command_frame(
+    cmd: str, args: list[float | str], vehicle: str | None
+) -> tuple[bytes, dict]:
     """Build the COMMAND_LONG wire frame + the success body for a named command.
 
-    Raises HTTPException(400) for an unknown command or a bad mode argument. Every
-    command maps to a COMMAND_LONG; arm/disarm/land emit {"status","cmd"}, takeoff
-    adds "altitude", mode adds "mode".
+    ``vehicle`` is the live ArduPilot vehicle class (from the FC heartbeat's
+    mav_type); ``rtl`` and ``mode`` resolve their custom_mode against it so the
+    same mode name maps to the correct number per vehicle (RTL=6 Copter, 11
+    Plane/Rover). Raises HTTPException(400) for an unknown command, a bad mode
+    argument, or an unknown vehicle on a mode/rtl request. Every command maps to
+    a COMMAND_LONG; arm/disarm/land emit {"status","cmd"}, takeoff adds
+    "altitude", mode adds "mode".
     """
     if cmd == "arm":
         frame = _encode_command_long(
@@ -147,11 +302,13 @@ def _build_command_frame(cmd: str, args: list[float | str]) -> tuple[bytes, dict
         return frame, {"status": "ok", "cmd": "land"}
 
     if cmd == "rtl":
-        # DO_SET_MODE with the RTL custom_mode (6), the same frame the `mode RTL`
-        # path sends, so the shortcut commands Return-to-Launch.
+        # DO_SET_MODE with the RTL custom_mode resolved for the live vehicle, the
+        # same frame the `mode RTL` path sends, so the shortcut commands
+        # Return-to-Launch on a Plane/Rover (RTL=11) just as on a Copter (RTL=6).
+        rtl_custom_mode = _resolve_rtl_custom_mode(vehicle)
         frame = _encode_command_long(
             mavlink2.MAV_CMD_DO_SET_MODE,
-            (_CUSTOM_MODE_ENABLED, float(_RTL_CUSTOM_MODE), 0.0, 0.0, 0.0, 0.0, 0.0),
+            (_CUSTOM_MODE_ENABLED, float(rtl_custom_mode), 0.0, 0.0, 0.0, 0.0, 0.0),
         )
         return frame, {"status": "ok", "cmd": "rtl"}
 
@@ -159,9 +316,7 @@ def _build_command_frame(cmd: str, args: list[float | str]) -> tuple[bytes, dict
         if not args:
             raise HTTPException(status_code=400, detail="Mode name required")
         mode_name = str(args[0]).upper()
-        custom_mode = _COPTER_MODE_NUMBERS.get(mode_name)
-        if custom_mode is None:
-            raise HTTPException(status_code=400, detail=f"Unknown mode: {mode_name}")
+        custom_mode = _resolve_mode_number(vehicle, mode_name)
         frame = _encode_command_long(
             mavlink2.MAV_CMD_DO_SET_MODE,
             (_CUSTOM_MODE_ENABLED, float(custom_mode), 0.0, 0.0, 0.0, 0.0, 0.0),
@@ -227,7 +382,15 @@ async def execute_command(req: CommandRequest):
     cmd = req.cmd.lower()
     log.info("command_received", cmd=cmd, args=req.args)
 
-    frame, body = _build_command_frame(cmd, req.args)
+    # Resolve the live vehicle class from the router's state snapshot so the
+    # mode/rtl frames carry the correct custom_mode for this FC (Copter vs
+    # Plane vs Rover vs Sub differ); mav_type 0 (no heartbeat yet) resolves to
+    # None and the mode/rtl paths refuse rather than guess Copter.
+    snapshot = app.state_ipc_state()
+    mav_type = int(snapshot.get("mav_type", 0) or 0)
+    vehicle = _vehicle_class(mav_type)
+
+    frame, body = _build_command_frame(cmd, req.args, vehicle)
     await _send_via_mavlink_ipc(frame)
     return body
 

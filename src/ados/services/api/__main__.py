@@ -23,6 +23,51 @@ _PROFILE_SEED_DELAY_S = 5.0
 _PROFILE_SEED_RETRY_GAP_S = 30.0
 _PROFILE_SEED_MAX_RETRIES = 4
 
+# State IPC reconnect cadence. The native router publishes the snapshot; this
+# process subscribes and keeps the connection live across router restarts and
+# the cold-start race where the API service comes up before the router has
+# created /run/ados/state.sock.
+_STATE_IPC_CONNECT_RETRIES = 5
+_STATE_IPC_CONNECT_DELAY_S = 1.0
+_STATE_IPC_RECONNECT_BACKOFF_S = 2.0
+
+
+async def _state_ipc_reader(
+    state_client: StateIPCClient, shutdown: asyncio.Event, log
+) -> None:
+    """Keep the state IPC snapshot fresh, reconnecting across router restarts.
+
+    A one-shot connect + read_loop dies permanently the first time the router
+    is restarted (read_loop returns, the client is left disconnected) or when
+    the API service wins the cold-start race against the router and the socket
+    does not exist yet. Either case strands the FC-status snapshot empty, so
+    ``/api/command`` 503s forever and ``/api/telemetry`` freezes. This loop
+    reconnects with a short backoff and re-drives ``read_loop`` until shutdown.
+    """
+    while not shutdown.is_set():
+        try:
+            if not state_client.connected:
+                await state_client.connect(
+                    retries=_STATE_IPC_CONNECT_RETRIES,
+                    delay=_STATE_IPC_CONNECT_DELAY_S,
+                )
+            await state_client.read_loop()
+        except ConnectionError as exc:
+            log.debug("state_ipc_connect_failed", error=str(exc))
+        except asyncio.CancelledError:
+            break
+        except Exception as exc:  # noqa: BLE001 — a read error must not kill the reader
+            log.warning("state_ipc_read_failed", error=str(exc))
+        if shutdown.is_set():
+            break
+        try:
+            await asyncio.wait_for(
+                shutdown.wait(), timeout=_STATE_IPC_RECONNECT_BACKOFF_S
+            )
+            break
+        except TimeoutError:
+            pass
+
 
 async def _seed_profile_conf_if_unset(config, log) -> None:
     """Auto-detect the agent profile and persist to profile.conf at boot.
@@ -104,12 +149,10 @@ async def main() -> None:
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, shutdown.set)
 
-    # Connect to state IPC for telemetry data
+    # Connect to state IPC for telemetry data. The connect + read is owned by a
+    # reconnecting reader task started below so the snapshot survives a router
+    # restart or the cold-start race instead of stranding the FC-status surface.
     state_client = StateIPCClient()
-    try:
-        await state_client.connect()
-    except ConnectionError:
-        log.warning("state_ipc_unavailable", msg="Running without live telemetry")
 
     from ados.api.runtime import StandaloneApiRuntime
     from ados.api.server import create_app
@@ -144,10 +187,11 @@ async def main() -> None:
 
     tasks = [
         asyncio.create_task(server.serve(sockets=sockets), name="uvicorn"),
+        asyncio.create_task(
+            _state_ipc_reader(state_client, shutdown, log),
+            name="state-reader",
+        ),
     ]
-
-    if state_client.connected:
-        tasks.append(asyncio.create_task(state_client.read_loop(), name="state-reader"))
 
     log.info("api_service_ready", host=api_config.host, port=api_config.port)
 

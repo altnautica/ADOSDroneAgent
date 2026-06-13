@@ -169,6 +169,129 @@ def test_network_get_returns_uplink_matrix(client, monkeypatch):
         assert key in data
 
 
+def test_network_modem_put_converts_cap_mb_to_cap_gb(client, monkeypatch):
+    """PUT /network/modem with cap_mb (the unit the GET view reports) converts to
+    cap_gb before the manager persists it, instead of dropping the cap."""
+    from ados.api.routes import ground_station as gs
+
+    captured: dict[str, Any] = {}
+
+    fake_mgr = MagicMock()
+
+    async def _configure(*, apn=None, cap_gb=None, enabled=None):
+        captured["apn"] = apn
+        captured["cap_gb"] = cap_gb
+        captured["enabled"] = enabled
+        return {}
+
+    fake_mgr.configure = _configure
+    monkeypatch.setattr(gs, "_modem_mgr", lambda: fake_mgr)
+    monkeypatch.setattr(gs, "_modem_view", AsyncMock(return_value={"connected": False}))
+
+    # 2048 MB → 2.0 GB.
+    resp = client.put(f"{GS_PREFIX}/network/modem", json={"cap_mb": 2048})
+    assert resp.status_code == 200, resp.text
+    assert captured["cap_gb"] == pytest.approx(2.0)
+
+
+def test_network_modem_put_cap_gb_wins_over_cap_mb(client, monkeypatch):
+    """When both cap_gb and cap_mb are present, cap_gb is authoritative."""
+    from ados.api.routes import ground_station as gs
+
+    captured: dict[str, Any] = {}
+
+    fake_mgr = MagicMock()
+
+    async def _configure(*, apn=None, cap_gb=None, enabled=None):
+        captured["cap_gb"] = cap_gb
+        return {}
+
+    fake_mgr.configure = _configure
+    monkeypatch.setattr(gs, "_modem_mgr", lambda: fake_mgr)
+    monkeypatch.setattr(gs, "_modem_view", AsyncMock(return_value={"connected": False}))
+
+    resp = client.put(
+        f"{GS_PREFIX}/network/modem", json={"cap_gb": 5.0, "cap_mb": 1024}
+    )
+    assert resp.status_code == 200, resp.text
+    assert captured["cap_gb"] == pytest.approx(5.0)
+
+
+def test_network_modem_put_cap_gb_only_unchanged(client, monkeypatch):
+    """A cap_gb-only PUT (no cap_mb) passes cap_gb through unmodified."""
+    from ados.api.routes import ground_station as gs
+
+    captured: dict[str, Any] = {}
+
+    fake_mgr = MagicMock()
+
+    async def _configure(*, apn=None, cap_gb=None, enabled=None):
+        captured["cap_gb"] = cap_gb
+        return {}
+
+    fake_mgr.configure = _configure
+    monkeypatch.setattr(gs, "_modem_mgr", lambda: fake_mgr)
+    monkeypatch.setattr(gs, "_modem_view", AsyncMock(return_value={"connected": False}))
+
+    resp = client.put(f"{GS_PREFIX}/network/modem", json={"cap_gb": 3.0})
+    assert resp.status_code == 200, resp.text
+    assert captured["cap_gb"] == pytest.approx(3.0)
+
+
+def test_share_uplink_native_persists_only_no_python_apply(client, monkeypatch):
+    """When ados-net owns net, PUT /network/share_uplink persists the flag and
+    does NOT run the Python sysctl/iptables apply (the daemon reconciles)."""
+    from ados.api.routes import ground_station as gs
+    from ados.core import runtime_mode
+
+    persisted: dict[str, Any] = {}
+    monkeypatch.setattr(
+        gs, "_persist_share_uplink_flag", lambda enabled: persisted.update(v=enabled)
+    )
+    monkeypatch.setattr(
+        runtime_mode, "is_service_native", lambda name: name == "net"
+    )
+
+    apply_called = {"hit": False}
+
+    async def _should_not_run(_enabled):
+        apply_called["hit"] = True
+        return {"applied": True, "apply_error": None, "backend": "iptables"}
+
+    monkeypatch.setattr(gs, "_apply_share_uplink", _should_not_run)
+
+    resp = client.put(f"{GS_PREFIX}/network/share_uplink", json={"enabled": True})
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["enabled"] is True
+    assert body["applied"] is True
+    assert body["backend"] == "native"
+    assert persisted["v"] is True
+    assert apply_called["hit"] is False  # the in-process apply never ran
+
+
+def test_share_uplink_non_native_runs_python_apply(client, monkeypatch):
+    """When ados-net does NOT own net, the Python apply still runs (fallback)."""
+    from ados.api.routes import ground_station as gs
+    from ados.core import runtime_mode
+
+    monkeypatch.setattr(gs, "_persist_share_uplink_flag", lambda enabled: None)
+    monkeypatch.setattr(runtime_mode, "is_service_native", lambda name: False)
+
+    apply_called = {"hit": False}
+
+    async def _apply(_enabled):
+        apply_called["hit"] = True
+        return {"applied": True, "apply_error": None, "backend": "iptables-runtime"}
+
+    monkeypatch.setattr(gs, "_apply_share_uplink", _apply)
+
+    resp = client.put(f"{GS_PREFIX}/network/share_uplink", json={"enabled": True})
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["backend"] == "iptables-runtime"
+    assert apply_called["hit"] is True
+
+
 def test_network_ethernet_get(client, monkeypatch):
     """GET /network/ethernet returns a view from the ethernet manager."""
     from ados.api.routes import ground_station as gs

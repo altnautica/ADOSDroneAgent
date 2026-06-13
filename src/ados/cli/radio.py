@@ -285,6 +285,53 @@ def radio_set_tx_power(dbm: int) -> None:
     click.echo(f"Set TX power: requested={requested} effective={eff_str}")
 
 
+@radio_group.command(
+    "hop",
+    help="Coordinated hop to a WFB channel (the GS follows via the announce).",
+)
+@click.argument("channel", type=int)
+def radio_hop(channel: int) -> None:
+    """Request a coordinated channel hop to CHANNEL.
+
+    Drives ``POST /api/wfb/channel``, which forwards to the native radio's
+    command socket so the announce + dwell-sync brings the ground station with
+    it. A refused hop (not paired / no peer / mid-bind / invalid channel)
+    reports the reason and exits non-zero.
+    """
+    status, body = _request(
+        "POST",
+        "/api/wfb/channel",
+        json={"channel": channel},
+        raise_for_status=False,
+    )
+    if status == 400:
+        detail = body.get("detail") if isinstance(body, dict) else None
+        click.echo(click.style(f"Refused: {detail or body}", fg="red"))
+        raise click.exceptions.Exit(code=1)
+    if status == 409:
+        detail = body.get("detail") if isinstance(body, dict) else None
+        reason = detail.get("message") if isinstance(detail, dict) else (detail or body)
+        click.echo(click.style(f"Hop refused: {reason}", fg="yellow"))
+        raise click.exceptions.Exit(code=2)
+    if status == 503:
+        click.echo(
+            click.style(
+                "WFB-ng service not running. Start the supervisor first.",
+                fg="red",
+            )
+        )
+        raise click.exceptions.Exit(code=1)
+    if status >= 400:
+        click.echo(click.style(f"Hop failed: HTTP {status}: {body}", fg="red"))
+        raise click.exceptions.Exit(code=1)
+
+    ch = body.get("channel")
+    freq = body.get("frequency_mhz")
+    click.echo(
+        click.style(f"Hop initiated → channel {ch} ({freq} MHz).", fg="green")
+    )
+
+
 def _read_kernel_log_tail() -> list[str]:
     """Best-effort grab the last 10 kernel log lines for the test sweep."""
     try:
