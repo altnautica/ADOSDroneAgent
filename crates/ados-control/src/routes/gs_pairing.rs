@@ -20,13 +20,17 @@
 //!   and is never persisted, so this front (a separate process with no in-process
 //!   arbiter and no on-disk PIC state to read) reports the same unclaimed default
 //!   a freshly-started agent reports before any client claims PIC.
-//! - **`GET /api/v1/ground-station/captive-token`** — mint a single-use captive-
-//!   portal token for the setup webapp. Gated on the request coming from the AP
-//!   hotspot subnet (or loopback): an on-box loopback caller gets a fresh
-//!   `{"token": "<32 hex>"}`, any other caller gets `403` with `E_CAPTIVE_ONLY`,
-//!   matching the FastAPI subnet gate. The token is a fresh `token_hex(16)` (16
-//!   random bytes rendered as 32 hex chars), the same format the FastAPI route
-//!   mints.
+//! - **`GET /api/v1/ground-station/captive-token`** — the captive-portal token
+//!   mint for the setup webapp. The FastAPI handler gates on the request peer
+//!   being on the AP hotspot subnet (`192.168.4.0/24`) or loopback, and otherwise
+//!   raises `403 E_CAPTIVE_ONLY`. When this front owns the LAN port the residual
+//!   FastAPI is bound to an internal Unix socket, where a request has no peer IP
+//!   (`request.client` is `None`), so that AP-subnet/loopback gate can never pass
+//!   and the residual handler raises `403 E_CAPTIVE_ONLY` for every caller. The
+//!   real `192.168.4.x` hotspot client reaches the token mint through the setup
+//!   webapp, which stays on the residual Python. So this front matches the
+//!   residual's observable behavior exactly: a ground station always answers
+//!   `403 E_CAPTIVE_ONLY` here, and never mints a token of its own.
 //!
 //! Every read is fault-tolerant: an absent daemon socket / config degrades to the
 //! same status + body the FastAPI route returns when its own source is
@@ -42,7 +46,7 @@
 
 use std::path::{Path, PathBuf};
 
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde_json::{json, Value};
@@ -53,14 +57,6 @@ use crate::profile::current_profile_and_role;
 /// The pairing daemon's Unix socket basename under the runtime dir. Mirrors the
 /// Python `PAIRING_SOCK` (`ADOS_RUN_DIR / "pairing.sock"`).
 const PAIRING_SOCK_NAME: &str = "pairing.sock";
-
-/// The header the TCP edge stamps `1` on a request whose peer is loopback and
-/// that carries no proxy-forwarding header (the local operator). It is stripped
-/// from every inbound request first and set only when the front's own on-box
-/// check passes, so a value arriving from off-box can never be spoofed in. The
-/// captive-token route reads it as the loopback signal the FastAPI subnet gate's
-/// `127.0.0.1`/`::1` branch covers.
-const ONBOX_HEADER: &str = "x-ados-onbox";
 
 // ---------------------------------------------------------------------------
 // Path / flag seams (env-resolved at request time, injectable in tests).
@@ -267,59 +263,29 @@ fn pic_default_state() -> Value {
 // GET /api/v1/ground-station/captive-token
 // ---------------------------------------------------------------------------
 
-/// Mint a single-use captive-portal token for the setup webapp. Ground-station
-/// only; a drone-profile node gets `404 E_PROFILE_MISMATCH`.
+/// The captive-portal token mint. Ground-station only; a drone-profile node gets
+/// `404 E_PROFILE_MISMATCH`, and a ground station always gets `403
+/// E_CAPTIVE_ONLY`.
 ///
-/// Gated on the request coming from the AP hotspot subnet (`192.168.4.0/24`) or
-/// loopback, exactly as the FastAPI `_is_ap_subnet_client` check: an on-box
-/// loopback caller (the front stamps `X-ADOS-Onbox: 1` on it) gets a fresh
-/// `{"token": "<32 hex>"}`; any other caller gets `403 E_CAPTIVE_ONLY`. The TCP
-/// peer's raw address is owned by the serve edge (not this route module), so the
-/// AP-subnet branch resolves to the trustworthy on-box signal here; a real
-/// `192.168.4.x` hotspot client reaches the captive surface through the setup
-/// webapp, which stays on the residual Python.
-///
-/// The token is `token_hex(16)`: 16 random bytes rendered as 32 lowercase hex
-/// chars, the same format the FastAPI store mints. A `getrandom` failure fails
-/// closed to a `500` rather than emitting a predictable token.
-pub async fn get_captive_token(headers: HeaderMap) -> Response {
+/// The FastAPI handler gates on the request peer being on the AP hotspot subnet
+/// (`192.168.4.0/24`) or loopback (`_is_ap_subnet_client`), and raises `403
+/// E_CAPTIVE_ONLY` for anything else. When this front owns the LAN port, the
+/// residual FastAPI is bound to an internal Unix socket where a request carries
+/// no peer IP (`request.client` is `None`), so that gate can never pass and the
+/// residual handler raises `403 E_CAPTIVE_ONLY` for every caller. The real
+/// `192.168.4.x` hotspot client reaches the token mint through the setup webapp,
+/// which stays on the residual Python. So this front never mints a token itself:
+/// after the profile gate it returns the same `403 E_CAPTIVE_ONLY` the residual
+/// returns for every request reaching it over its Unix socket.
+pub async fn get_captive_token() -> Response {
     if !is_ground_station() {
         return profile_mismatch();
     }
 
-    if !is_ap_subnet_caller(&headers) {
-        return gs_error(StatusCode::FORBIDDEN, "E_CAPTIVE_ONLY");
-    }
-
-    match mint_captive_token() {
-        Ok(token) => (StatusCode::OK, Json(json!({ "token": token }))).into_response(),
-        // A predictable token would let an off-subnet caller forge the captive
-        // header, so a randomness failure 500s rather than shipping a guessable
-        // value.
-        Err(_) => gs_error(StatusCode::INTERNAL_SERVER_ERROR, "E_CAPTIVE_TOKEN_FAILED"),
-    }
-}
-
-/// Whether the caller is on the AP subnet (or loopback), the eligibility the
-/// FastAPI `_is_ap_subnet_client` gates on. The TCP peer address is threaded into
-/// the request as a private serve-edge extension, so the loopback branch is read
-/// from the trustworthy `X-ADOS-Onbox` header the front stamps for a loopback
-/// peer with no forwarding header.
-fn is_ap_subnet_caller(headers: &HeaderMap) -> bool {
-    headers
-        .get(ONBOX_HEADER)
-        .and_then(|v| v.to_str().ok())
-        .map(|v| v == "1")
-        .unwrap_or(false)
-}
-
-/// Mint a `token_hex(16)` token: 16 random bytes rendered as 32 lowercase hex
-/// chars. Mirrors the Python `secrets.token_hex(16)` format byte-for-byte (the
-/// random bytes differ between any two calls, as they do in Python).
-fn mint_captive_token() -> Result<String, getrandom::Error> {
-    let mut bytes = [0u8; 16];
-    getrandom::getrandom(&mut bytes)?;
-    Ok(hex::encode(bytes))
+    // The residual FastAPI is reached over its internal Unix socket, where a
+    // request has no peer IP, so its AP-subnet/loopback gate never passes and it
+    // raises `403 E_CAPTIVE_ONLY` for every caller. Match that exactly.
+    gs_error(StatusCode::FORBIDDEN, "E_CAPTIVE_ONLY")
 }
 
 #[cfg(test)]
@@ -343,13 +309,6 @@ mod tests {
         let bytes = to_bytes(resp.into_body(), 1024 * 1024).await.unwrap();
         let value: Value = serde_json::from_slice(&bytes).unwrap();
         (status, value)
-    }
-
-    // The captive-token loopback signal: an on-box request carries this header.
-    fn onbox_headers() -> HeaderMap {
-        let mut h = HeaderMap::new();
-        h.insert(ONBOX_HEADER, "1".parse().unwrap());
-        h
     }
 
     // -------------------------------------------------------------------
@@ -477,33 +436,49 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn captive_token_mints_a_32_hex_token_for_an_on_box_caller() {
-        // The handler's randomness + body shape; the profile gate is exercised by
-        // its own test. Call the mint + shape directly to stay env-free.
-        assert!(is_ap_subnet_caller(&onbox_headers()));
-        let token = mint_captive_token().unwrap();
-        // GOLDEN FIXTURE: a 32-lowercase-hex token, wrapped `{"token": <token>}`.
-        // The token value is volatile (masked in conformance); the SHAPE is the
-        // contract.
-        assert_eq!(token.len(), 32);
-        assert!(token
-            .chars()
-            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
-        let body = json!({ "token": token });
-        assert_eq!(body.as_object().unwrap().len(), 1);
-        assert!(body.get("token").and_then(Value::as_str).is_some());
+    // -------------------------------------------------------------------
+    // Captive-token: the residual FastAPI is reached over its internal Unix
+    // socket, where a request has no peer IP, so its AP-subnet/loopback gate
+    // never passes and it raises 403 E_CAPTIVE_ONLY for every caller. The native
+    // handler must match that exactly: a ground station always answers 403, never
+    // mints a token of its own.
+    // -------------------------------------------------------------------
+
+    /// Drive the real handler with `ADOS_CONFIG` pointed at a config that carries
+    /// an explicit `agent.profile`, which resolves straight to the wire profile
+    /// without consulting profile.conf. `ADOS_CONFIG` is read by no other test in
+    /// this module, so the set/remove pair does not collide with a parallel test.
+    async fn captive_token_with_profile(profile: &str) -> (StatusCode, Value) {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = config_with_profile(dir.path(), profile);
+        std::env::set_var("ADOS_CONFIG", &cfg);
+        let resp = get_captive_token().await;
+        std::env::remove_var("ADOS_CONFIG");
+        body_json(resp).await
     }
 
     #[tokio::test]
-    async fn captive_token_403s_for_an_off_subnet_caller() {
-        // No on-box header → not loopback / AP-subnet → 403.
-        assert!(!is_ap_subnet_caller(&HeaderMap::new()));
-        let (status, body) = body_json(gs_error(StatusCode::FORBIDDEN, "E_CAPTIVE_ONLY")).await;
+    async fn captive_token_403s_on_a_ground_station() {
+        // GOLDEN FIXTURE: a ground station always answers 403 E_CAPTIVE_ONLY here
+        // (the residual Python's Unix-socket behavior — no peer IP, gate never
+        // passes), with the nested ground-station error body.
+        let (status, body) = captive_token_with_profile("ground_station").await;
         assert_eq!(status, StatusCode::FORBIDDEN);
         assert_eq!(
             body,
             json!({ "detail": { "error": { "code": "E_CAPTIVE_ONLY" } } })
+        );
+    }
+
+    #[tokio::test]
+    async fn captive_token_404s_on_a_drone_profile() {
+        // The profile gate runs first: a drone-profile node gets the nested 404
+        // E_PROFILE_MISMATCH every ground-station route returns, never the 403.
+        let (status, body) = captive_token_with_profile("drone").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(
+            body,
+            json!({ "detail": { "error": { "code": "E_PROFILE_MISMATCH" } } })
         );
     }
 

@@ -87,10 +87,11 @@ pub async fn get_pairing_info(State(state): State<AppState>) -> Json<Value> {
         "version": state.agent_version,
         // Board is HAL-detected at runtime in the Python (the FastAPI route reads
         // `app.board_name`); the native surface has no in-process HAL-detect port,
-        // so it reads ADOS_BOARD_NAME, which the systemd unit injects from the
-        // Python detect_board(). Defaults to "unknown" when the env is unset (this
-        // surface is pre-cutover/inert, with no unit injecting it yet).
-        "board": crate::state::board_name(),
+        // so it reads the `name` field live off the board sidecar
+        // (`/run/ados/board.json`) the detector persists — the same on-disk source
+        // the status route's board block reads. Defaults to "unknown" when the
+        // sidecar is absent (a fresh boot before the first status write).
+        "board": crate::state::board_name(&state.board_path),
         "paired": doc.is_paired(),
         "radio_paired": radio_paired,
         "radio_peer_device_id": radio_peer_device_id,
@@ -100,11 +101,12 @@ pub async fn get_pairing_info(State(state): State<AppState>) -> Json<Value> {
         "mdns_host": mdns_host,
         "profile": profile,
         "role": role,
-        // Native-vs-packaged badge. The native runtime_mode resolver is not ported
-        // here; the route reads ADOS_RUNTIME_MODE, which the systemd unit injects
-        // from the Python compute_runtime_mode(profile). Defaults to "packaged"
-        // when the env is unset, which is the correct value for any agent that has
-        // not cut over (and this surface is itself pre-cutover/inert).
+        // Native-vs-packaged badge. The native surface has no in-process port of
+        // the Python compute_runtime_mode(profile), so the Python API writes the
+        // computed value to the `runtime-mode` sidecar at startup and this reads it
+        // live (then the ADOS_RUNTIME_MODE env, then "packaged"). Defaults to
+        // "packaged" when neither is present, the correct value for any agent that
+        // has not cut over.
         "runtime_mode": crate::state::runtime_mode(),
         "bind_state": bind_state,
         // Reserved for a future in-process radio reader; null today, exactly as

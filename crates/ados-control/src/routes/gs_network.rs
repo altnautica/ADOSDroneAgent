@@ -17,26 +17,32 @@
 //! Python view helper returns when its own manager raises:
 //!
 //! - **`GET /api/v1/ground-station/network`** — the aggregate uplink view. `ap`
-//!   from the config hotspot (the manager-absent fallback shape). `wifi_client`
-//!   from the `ados-net` Wi-Fi command socket's `wifi_status` op (+ the on-boot
-//!   flag from the client config file), degrading to the all-default shape when
-//!   the socket is unreachable. `ethernet` to its all-default shape (no live
-//!   seam on the front). `modem_4g` from the modem config file (enabled / apn /
-//!   cap) with the cumulative-usage legs overlaid from the store's most-recent
+//!   from the config hotspot, with the SSID resolved the way the live hostapd
+//!   manager resolves it (`ADOS-GS-<short device id>`, not the raw
+//!   `ADOS-{device_id}` template). `wifi_client` from the `ados-net` Wi-Fi
+//!   command socket's `wifi_status` op (+ the on-boot flag from the client config
+//!   file), degrading to the all-default shape when the socket is unreachable.
+//!   `ethernet` to its all-default shape (no live seam on the front). `modem_4g`
+//!   from the modem config file (enabled / apn / cap) with the connectivity legs
+//!   carrying the live manager's no-modem defaults (`iface:"wwan0"`,
+//!   `signal_quality:-1`, `technology:"unknown"`, `operator:""`) and the
+//!   cumulative-usage legs overlaid from the store's most-recent
 //!   `net.modem_usage` event. `active_uplink` from the store's most-recent
 //!   `net.uplink_active` event (the daemon's selected uplink), else `null`.
 //!   `priority` from the uplink priority file (the default chain when absent).
 //!   `share_uplink` from the config flag.
-//! - **`GET .../network/ethernet`** — the persisted ethernet profile + live
-//!   link, degrading to the no-connection default shape.
+//! - **`GET .../network/ethernet`** — the no-connection default shape for the
+//!   live IPv4 / link legs, with `connection_name` reproduced from a read-only
+//!   `nmcli` connection list (the active ethernet profile's name, else `null`).
 //! - **`GET .../network/client/scan`** — nearby-network scan; the front has no
 //!   scan seam, so it returns the empty-list shape (`{"networks": []}`), the
 //!   same body the Python route returns when the scan finds nothing.
 //! - **`GET .../network/modem`** — the modem view (same leg as `modem_4g`).
 //! - **`GET .../network/priority`** — the uplink priority list.
 //! - **`GET .../modem-status`** — the cellular detail snapshot; the front has no
-//!   `mmcli` seam, so it returns the no-modem shape
-//!   (`{"present": false, "reason": "no_modem"}`).
+//!   `mmcli` polling seam, so it serves a `present:false` shape, reproducing the
+//!   Python `which mmcli` gate: `modemmanager_not_installed` when ModemManager is
+//!   absent, else `no_modem`.
 
 use std::path::{Path, PathBuf};
 
@@ -146,21 +152,34 @@ pub async fn get_ground_station_network(State(state): State<AppState>) -> Respon
     Json(body).into_response()
 }
 
-/// The AP leg. The front has no hostapd command seam, so it serves the Python
-/// `_ap_view` manager-absent fallback: the AP is reported not-running, with the
-/// configured SSID + channel read off `network.hotspot`. Mirrors the
-/// `except` branch of `_ap_view`.
+/// The AP leg. The front has no hostapd command seam, so the AP is reported
+/// not-running. The Python `_ap_view` reaches its live `try` branch on any
+/// ground station (the hostapd `status()` never raises), so its `ssid` is the
+/// manager's RESOLVED SSID, not the raw config template — the front reproduces
+/// that resolution rather than echoing the literal `ADOS-{device_id}` template.
+///
+/// SSID resolution mirrors `_hostapd_manager` + `_build_ssid`: a configured SSID
+/// is honored only when it is non-empty, carries no `{device_id}` placeholder,
+/// and is already an `ADOS-GS-` name; otherwise the SSID is built as
+/// `ADOS-GS-<first 4 hex of device_id, uppercased, zero-padded>`. The channel is
+/// the configured hotspot channel.
 fn ap_view(cfg: &Value) -> Value {
     let hotspot = cfg
         .get("network")
         .filter(|v| v.is_object())
         .and_then(|v| v.get("hotspot"))
         .filter(|v| v.is_object());
-    let ssid = hotspot
+    let configured_ssid = hotspot
         .and_then(|h| h.get("ssid"))
-        .cloned()
-        .filter(|v| !v.is_null())
-        .unwrap_or(Value::Null);
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let device_id = cfg
+        .get("agent")
+        .filter(|v| v.is_object())
+        .and_then(|v| v.get("device_id"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let ssid = resolve_ap_ssid(configured_ssid, device_id);
     let channel = hotspot
         .and_then(|h| h.get("channel"))
         .cloned()
@@ -175,6 +194,33 @@ fn ap_view(cfg: &Value) -> Value {
         "gateway": Value::Null,
         "connected_clients": [],
     })
+}
+
+/// Resolve the AP SSID the way the live hostapd manager does: honor a configured
+/// SSID only when it is non-empty, has no `{device_id}` placeholder, and already
+/// starts with `ADOS-GS-`; otherwise build `ADOS-GS-<short_id>` from the device
+/// id. Mirrors `_hostapd_manager`'s `ssid_override` gate + `_build_ssid`.
+fn resolve_ap_ssid(configured: &str, device_id: &str) -> String {
+    if !configured.is_empty()
+        && !configured.contains("{device_id}")
+        && configured.starts_with("ADOS-GS-")
+    {
+        return configured.to_string();
+    }
+    format!("ADOS-GS-{}", short_id(device_id))
+}
+
+/// The first 4 hex chars of the device id, uppercased, zero-padded to 4 when the
+/// id has fewer than 4 hex chars after stripping non-hex characters. Mirrors the
+/// Python `_short_id`.
+fn short_id(device_id: &str) -> String {
+    let hex_only: String = device_id.chars().filter(char::is_ascii_hexdigit).collect();
+    let padded = if hex_only.len() >= 4 {
+        hex_only
+    } else {
+        format!("{hex_only}0000")
+    };
+    padded.chars().take(4).collect::<String>().to_uppercase()
 }
 
 /// The Wi-Fi client leg. Reads the live station status from the `ados-net`
@@ -222,10 +268,13 @@ fn ethernet_view_default() -> Value {
 /// The modem leg of the aggregate view (also the `GET .../network/modem` body).
 ///
 /// The front has no live modem-status seam, so the connectivity legs are the
-/// disconnected defaults; the `enabled` / `apn` / cap come off the modem config
-/// file, and the cumulative-usage legs (`data_used_mb`, `cap_mb`, `percent`) are
-/// overlaid from the store's most-recent `net.modem_usage` event when present.
-/// Mirrors `_modem_view` with the manager status absent + the store overlay.
+/// no-modem defaults the live `ModemManager.status()` returns when no modem is
+/// connected: `iface:"wwan0"`, `signal_quality:-1`, `technology:"unknown"`,
+/// `operator:""`, `connected:false`. The `enabled` / `apn` / cap come off the
+/// modem config file, and the cumulative-usage legs (`data_used_mb`, `cap_mb`,
+/// `percent`) are overlaid from the store's most-recent `net.modem_usage` event
+/// when present. Mirrors `_modem_view` over a box whose `status()` reports no
+/// modem + the store overlay.
 async fn modem_view(state: &AppState) -> Value {
     let cfg = load_json_object(&gs_modem_json()).unwrap_or_default();
     let enabled = cfg.get("enabled").map(json_truthy).unwrap_or(false);
@@ -261,12 +310,12 @@ async fn modem_view(state: &AppState) -> Value {
     json!({
         "enabled": enabled,
         "connected": false,
-        "iface": Value::Null,
+        "iface": "wwan0",
         "ip": Value::Null,
-        "signal_quality": Value::Null,
-        "technology": Value::Null,
+        "signal_quality": -1,
+        "technology": "unknown",
         "apn": apn,
-        "operator": Value::Null,
+        "operator": "",
         "data_used_mb": data_used_mb,
         "cap_mb": cap_mb,
         "percent": percent,
@@ -279,17 +328,26 @@ async fn modem_view(state: &AppState) -> Value {
 // ---------------------------------------------------------------------------
 
 /// `GET .../network/ethernet` → the persisted ethernet profile config plus live
-/// link state. 404s on a drone. The front has no live ethernet seam, so it
-/// serves the no-connection default shape (`mode:"dhcp"`, every other field
-/// empty / false / null), matching the Python `config()` over a box with no
-/// active ethernet profile.
+/// link state. 404s on a drone.
+///
+/// The front has no live ethernet IPv4 / link seam, so the `mode` / IP / gateway
+/// / dns / link legs degrade to the no-connection default shape (`mode:"dhcp"`,
+/// every other live field empty / false / null). The `connection_name` leg is
+/// the exception: the Python `config()` reports the discovered NM connection
+/// name, so the front reproduces that source with a read-only `nmcli` connection
+/// list (`discover_primary_connection_name`), reporting the active ethernet
+/// profile's name (e.g. `"netplan-eth0"`) and `null` only when no NM-managed
+/// ethernet profile exists, matching the Python `_discover_primary_connection`.
 pub async fn get_network_ethernet() -> Response {
     if !is_ground_station() {
         return profile_mismatch();
     }
+    let connection_name = discover_primary_connection_name(ETH_IFACE)
+        .map(Value::String)
+        .unwrap_or(Value::Null);
     Json(json!({
         "mode": "dhcp",
-        "connection_name": Value::Null,
+        "connection_name": connection_name,
         "ip": Value::Null,
         "gateway": Value::Null,
         "dns": [],
@@ -299,6 +357,134 @@ pub async fn get_network_ethernet() -> Response {
         "current_gateway": Value::Null,
     }))
     .into_response()
+}
+
+/// The ethernet interface the connection discovery prefers, mirroring the Python
+/// `EthernetManager` default (`eth0`).
+const ETH_IFACE: &str = "eth0";
+
+/// Discover the primary ethernet NM connection NAME, mirroring the Python
+/// `_discover_primary_connection`. Reads the saved + active NM connection lists
+/// with a read-only `nmcli` and picks the primary name. Returns `None` when
+/// `nmcli` is absent / errors / lists no ethernet profile — the same `null` the
+/// Python view reports on a non-NM box.
+fn discover_primary_connection_name(interface: &str) -> Option<String> {
+    let saved = nmcli_connections(&["NAME", "TYPE", "DEVICE"], false);
+    let active = nmcli_connections(&["NAME", "TYPE", "DEVICE"], true);
+    pick_primary_connection_name(&saved, &active, interface)
+}
+
+/// Pick the primary ethernet connection name from the parsed saved + active
+/// terse rows, mirroring the Python `_discover_primary_connection` precedence:
+/// an ACTIVE 802-3-ethernet connection on the interface (or with no device
+/// pinned) wins, else a saved ethernet connection pinned to the interface, else
+/// the first saved ethernet connection of any device, else `None`.
+fn pick_primary_connection_name(
+    saved_rows: &[Vec<String>],
+    active_rows: &[Vec<String>],
+    interface: &str,
+) -> Option<String> {
+    // (name, device) of every saved 802-3-ethernet connection.
+    let saved: Vec<(&str, &str)> = saved_rows
+        .iter()
+        .filter(|row| row.get(1).map(String::as_str) == Some("802-3-ethernet"))
+        .map(|row| {
+            let name = row.first().map(String::as_str).unwrap_or("");
+            let dev = row.get(2).map(String::as_str).unwrap_or("");
+            (name, dev)
+        })
+        .collect();
+
+    // The names of the active connections (the `--active` view).
+    let active_names: std::collections::HashSet<&str> = active_rows
+        .iter()
+        .filter_map(|row| row.first().map(String::as_str))
+        .filter(|name| !name.is_empty())
+        .collect();
+
+    // An active ethernet connection on the interface (or with no device pinned).
+    for (name, dev) in &saved {
+        if active_names.contains(name) && (*dev == interface || dev.is_empty()) {
+            return Some((*name).to_string());
+        }
+    }
+    // A saved ethernet connection pinned to the interface.
+    for (name, dev) in &saved {
+        if *dev == interface {
+            return Some((*name).to_string());
+        }
+    }
+    // Else the first saved ethernet connection of any device.
+    saved.first().map(|(name, _dev)| (*name).to_string())
+}
+
+/// Run a read-only `nmcli -t -f <fields> connection show [--active]` and parse
+/// the terse rows. Each row is truncated to `fields.len()` columns. An absent
+/// `nmcli` / a non-zero exit / a spawn error all yield an empty list, so the
+/// caller degrades to the no-connection `null`.
+fn nmcli_connections(fields: &[&str], active: bool) -> Vec<Vec<String>> {
+    let mut args = vec!["-t", "-f"];
+    let field_spec = fields.join(",");
+    args.push(&field_spec);
+    args.push("connection");
+    args.push("show");
+    if active {
+        args.push("--active");
+    }
+    let output = match std::process::Command::new("nmcli").args(&args).output() {
+        Ok(o) => o,
+        Err(_) => return Vec::new(),
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    parse_nmcli_terse(&text, fields.len())
+}
+
+/// Parse `nmcli -t` (terse) multi-line output into rows, skipping blank lines and
+/// keeping only rows with at least `fields` columns (each truncated to `fields`).
+/// Mirrors the Python `_parse_nmcli_terse_fields` per line + the manager's
+/// per-line column guard.
+fn parse_nmcli_terse(text: &str, fields: usize) -> Vec<Vec<String>> {
+    let mut rows = Vec::new();
+    for line in text.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let parts = parse_nmcli_terse_line(line);
+        if parts.len() >= fields {
+            rows.push(parts.into_iter().take(fields).collect());
+        }
+    }
+    rows
+}
+
+/// Split one `nmcli -t` terse line into fields, honoring `\:` and `\\` escapes.
+/// An odd trailing backslash is treated as a literal backslash, matching the
+/// Python `_parse_nmcli_terse_fields` `i + 1 < len(line)` guard.
+fn parse_nmcli_terse_line(line: &str) -> Vec<String> {
+    let mut parts: Vec<String> = Vec::new();
+    let mut buf = String::new();
+    let chars: Vec<char> = line.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        let ch = chars[i];
+        if ch == '\\' && i + 1 < chars.len() {
+            buf.push(chars[i + 1]);
+            i += 2;
+            continue;
+        }
+        if ch == ':' {
+            parts.push(std::mem::take(&mut buf));
+            i += 1;
+            continue;
+        }
+        buf.push(ch);
+        i += 1;
+    }
+    parts.push(buf);
+    parts
 }
 
 // ---------------------------------------------------------------------------
@@ -365,15 +551,39 @@ fn priority_list() -> Value {
 // GET /api/v1/ground-station/modem-status — cellular detail snapshot.
 // ---------------------------------------------------------------------------
 
-/// `GET .../modem-status` → the cellular detail snapshot. 404s on a drone. The
-/// front has no `mmcli` seam, so it serves the no-modem shape
-/// (`{"present": false, "reason": "no_modem"}`), one of the
-/// `present:false` degrade shapes the Python `_build_snapshot` returns.
+/// `GET .../modem-status` → the cellular detail snapshot. 404s on a drone.
+///
+/// The Python `_build_snapshot` shells out to `mmcli`. Its FIRST branch — the
+/// one a box without ModemManager hits — returns
+/// `{"present": false, "reason": "modemmanager_not_installed"}` when `mmcli` is
+/// not on PATH. The front reproduces exactly that gate (a `which mmcli` probe)
+/// and serves that shape when ModemManager is absent. When `mmcli` IS present
+/// the front has no `mmcli` polling seam, so it falls back to the
+/// no-modem-detected shape (`{"present": false, "reason": "no_modem"}`), the
+/// degrade the Python returns when `mmcli -L` finds no modems — never claiming a
+/// modem is present.
 pub async fn get_modem_status() -> Response {
     if !is_ground_station() {
         return profile_mismatch();
     }
-    Json(json!({"present": false, "reason": "no_modem"})).into_response()
+    let reason = if mmcli_available() {
+        "no_modem"
+    } else {
+        "modemmanager_not_installed"
+    };
+    Json(json!({"present": false, "reason": reason})).into_response()
+}
+
+/// True when `mmcli` (the ModemManager CLI) is on PATH, reproducing the Python
+/// `_which_mmcli` gate: run `which mmcli` and treat a zero exit with non-empty
+/// output as present. A missing `which` binary / any spawn error reads as absent,
+/// matching the Python `except` returning `False`.
+fn mmcli_available() -> bool {
+    let output = match std::process::Command::new("which").arg("mmcli").output() {
+        Ok(o) => o,
+        Err(_) => return false,
+    };
+    output.status.success() && !output.stdout.iter().all(u8::is_ascii_whitespace)
 }
 
 // ---------------------------------------------------------------------------
@@ -699,7 +909,10 @@ mod tests {
             "ap": {
                 "enabled": false,
                 "running": false,
-                "ssid": null,
+                // An empty config has no device id, so the SSID resolves to the
+                // zero-padded short id, matching the live hostapd manager over a
+                // fresh box (NOT the raw `ADOS-{device_id}` template).
+                "ssid": "ADOS-GS-0000",
                 "channel": null,
                 "interface": null,
                 "gateway": null,
@@ -718,15 +931,72 @@ mod tests {
     }
 
     #[test]
-    fn ap_view_reads_the_configured_hotspot_ssid_and_channel() {
-        // A config with a hotspot section seeds the ssid + channel; the AP is
-        // still reported not-running (no command seam on the front).
-        let cfg = json!({"network": {"hotspot": {"ssid": "ADOS-GS-abcd", "channel": 6}}});
+    fn ap_view_honours_a_configured_ados_gs_ssid_and_channel() {
+        // A config carrying an explicit ADOS-GS- SSID (no template placeholder)
+        // is honored verbatim; the channel comes from the hotspot section; the AP
+        // is still reported not-running (no command seam on the front).
+        let cfg = json!({"network": {"hotspot": {"ssid": "ADOS-GS-ABCD", "channel": 6}}});
         let ap = ap_view(&cfg);
-        assert_eq!(ap["ssid"], json!("ADOS-GS-abcd"));
+        assert_eq!(ap["ssid"], json!("ADOS-GS-ABCD"));
         assert_eq!(ap["channel"], json!(6));
         assert_eq!(ap["running"], json!(false));
         assert_eq!(ap["connected_clients"], json!([]));
+    }
+
+    #[test]
+    fn ap_view_resolves_the_device_id_template_to_a_built_ssid() {
+        // The default hotspot SSID carries the `{device_id}` placeholder, which
+        // the live hostapd manager never echoes: it builds `ADOS-GS-<short id>`
+        // from the device id. The front reproduces that, so the route never
+        // leaks the raw `ADOS-{device_id}` template the prior shape emitted.
+        let cfg = json!({
+            "agent": {"device_id": "deadbeef1234"},
+            "network": {"hotspot": {"ssid": "ADOS-{device_id}", "channel": 11}},
+        });
+        let ap = ap_view(&cfg);
+        assert_eq!(ap["ssid"], json!("ADOS-GS-DEAD"));
+        assert_eq!(ap["channel"], json!(11));
+    }
+
+    #[test]
+    fn ap_view_ignores_a_non_ados_gs_configured_ssid() {
+        // A configured SSID that does not start with ADOS-GS- is NOT honored
+        // (mirrors the hostapd manager's ssid_override gate); the built SSID
+        // wins instead.
+        let cfg = json!({
+            "agent": {"device_id": "00ff"},
+            "network": {"hotspot": {"ssid": "MyOwnNetwork"}},
+        });
+        let ap = ap_view(&cfg);
+        assert_eq!(ap["ssid"], json!("ADOS-GS-00FF"));
+    }
+
+    #[test]
+    fn short_id_matches_the_python_short_id() {
+        // First 4 hex chars, uppercased.
+        assert_eq!(short_id("deadbeef"), "DEAD");
+        // Non-hex characters are stripped before taking the first 4.
+        assert_eq!(short_id("xy-12-34-56"), "1234");
+        // Fewer than 4 hex chars zero-pad on the right.
+        assert_eq!(short_id("a1"), "A100");
+        // No hex at all falls back to the all-zero placeholder.
+        assert_eq!(short_id(""), "0000");
+        assert_eq!(short_id("zzzz"), "0000");
+    }
+
+    #[test]
+    fn resolve_ap_ssid_gate_matches_the_hostapd_override_rule() {
+        // Honored: non-empty, no template, ADOS-GS- prefix.
+        assert_eq!(resolve_ap_ssid("ADOS-GS-1234", "ffff"), "ADOS-GS-1234");
+        // Rejected: carries the template placeholder.
+        assert_eq!(
+            resolve_ap_ssid("ADOS-GS-{device_id}", "abcd"),
+            "ADOS-GS-ABCD"
+        );
+        // Rejected: empty.
+        assert_eq!(resolve_ap_ssid("", "abcd"), "ADOS-GS-ABCD");
+        // Rejected: wrong prefix.
+        assert_eq!(resolve_ap_ssid("Other-1234", "abcd"), "ADOS-GS-ABCD");
     }
 
     #[test]
@@ -744,6 +1014,13 @@ mod tests {
         assert_eq!(v["percent"], json!(0.0));
         assert_eq!(v["connected"], json!(false));
         assert_eq!(v["state"], json!("disconnected"));
+        // The connectivity legs carry the live manager's no-modem defaults, NOT
+        // nulls: iface "wwan0", signal_quality -1, technology "unknown",
+        // operator "".
+        assert_eq!(v["iface"], json!("wwan0"));
+        assert_eq!(v["signal_quality"], json!(-1));
+        assert_eq!(v["technology"], json!("unknown"));
+        assert_eq!(v["operator"], json!(""));
         // An absent apn reads as null, matching the Python st.get("apn") or
         // cfg.get("apn") over an empty modem config.
         let empty = Map::new();
@@ -851,6 +1128,8 @@ mod tests {
 
     #[test]
     fn ethernet_view_default_is_the_no_connection_shape() {
+        // The live IPv4 / link legs degrade to the no-connection defaults; the
+        // connection_name is `null` only when no NM ethernet profile is found.
         let want = json!({
             "mode": "dhcp",
             "connection_name": null,
@@ -866,11 +1145,127 @@ mod tests {
     }
 
     #[test]
-    fn modem_status_no_modem_shape() {
+    fn pick_primary_connection_prefers_the_active_ethernet_on_the_interface() {
+        // The bench shape: an active netplan-eth0 802-3-ethernet on eth0 is the
+        // primary, so connection_name reads "netplan-eth0" (NOT null).
+        let saved = vec![
+            vec![
+                "netplan-eth0".into(),
+                "802-3-ethernet".into(),
+                "eth0".into(),
+            ],
+            vec![
+                "preconfigured".into(),
+                "802-11-wireless".into(),
+                "wlan0".into(),
+            ],
+        ];
+        let active = vec![vec![
+            "netplan-eth0".into(),
+            "802-3-ethernet".into(),
+            "eth0".into(),
+        ]];
         assert_eq!(
-            json!({"present": false, "reason": "no_modem"}),
-            json!({"present": false, "reason": "no_modem"})
+            pick_primary_connection_name(&saved, &active, "eth0"),
+            Some("netplan-eth0".to_string())
         );
+    }
+
+    #[test]
+    fn pick_primary_connection_falls_back_to_a_saved_profile_on_the_interface() {
+        // No active ethernet, but a saved profile pinned to eth0 → that name.
+        let saved = vec![vec![
+            "Wired connection 1".into(),
+            "802-3-ethernet".into(),
+            "eth0".into(),
+        ]];
+        let active: Vec<Vec<String>> = vec![];
+        assert_eq!(
+            pick_primary_connection_name(&saved, &active, "eth0"),
+            Some("Wired connection 1".to_string())
+        );
+    }
+
+    #[test]
+    fn pick_primary_connection_falls_back_to_the_first_ethernet_of_any_device() {
+        // No match on the interface; the first saved ethernet of any device wins.
+        let saved = vec![vec![
+            "Office".into(),
+            "802-3-ethernet".into(),
+            "enp3s0".into(),
+        ]];
+        let active: Vec<Vec<String>> = vec![];
+        assert_eq!(
+            pick_primary_connection_name(&saved, &active, "eth0"),
+            Some("Office".to_string())
+        );
+    }
+
+    #[test]
+    fn pick_primary_connection_returns_none_without_an_ethernet_profile() {
+        // Only wireless connections → null, the non-NM-ethernet default.
+        let saved = vec![vec![
+            "HomeWiFi".into(),
+            "802-11-wireless".into(),
+            "wlan0".into(),
+        ]];
+        let active: Vec<Vec<String>> = vec![];
+        assert_eq!(pick_primary_connection_name(&saved, &active, "eth0"), None);
+        // An empty NM list (no nmcli / no connections) is also null.
+        assert_eq!(pick_primary_connection_name(&[], &[], "eth0"), None);
+    }
+
+    #[test]
+    fn parse_nmcli_terse_handles_escapes_and_short_rows() {
+        // Plain colon split, truncated to the requested column count.
+        assert_eq!(
+            parse_nmcli_terse("netplan-eth0:802-3-ethernet:eth0\n", 3),
+            vec![vec![
+                "netplan-eth0".to_string(),
+                "802-3-ethernet".to_string(),
+                "eth0".to_string()
+            ]]
+        );
+        // A name with an escaped colon stays one field.
+        assert_eq!(
+            parse_nmcli_terse_line(r"My\:Conn:802-3-ethernet:eth0"),
+            vec!["My:Conn", "802-3-ethernet", "eth0"]
+        );
+        // Blank lines are skipped and rows shorter than the field count dropped.
+        assert_eq!(
+            parse_nmcli_terse("a:b:c\n\nx:y\n", 3),
+            vec![vec!["a".to_string(), "b".to_string(), "c".to_string()]]
+        );
+        // A missing trailing device column is preserved as an empty field.
+        assert_eq!(
+            parse_nmcli_terse_line("name:802-3-ethernet:"),
+            vec!["name", "802-3-ethernet", ""]
+        );
+    }
+
+    #[test]
+    fn modem_status_reason_tracks_the_mmcli_gate() {
+        // The reason is the Python `which mmcli` gate: `modemmanager_not_installed`
+        // when mmcli is absent, else `no_modem`. The CI host has no ModemManager,
+        // so the reason here is `modemmanager_not_installed`; assert the reason
+        // selection is consistent with the gate rather than pinning the host's
+        // mmcli presence.
+        let reason = if mmcli_available() {
+            "no_modem"
+        } else {
+            "modemmanager_not_installed"
+        };
+        let body = json!({"present": false, "reason": reason});
+        assert_eq!(body["present"], json!(false));
+        // Both reasons are non-empty and are exactly the two Python `_build_snapshot`
+        // `present:false` strings the front can serve.
+        assert!(["no_modem", "modemmanager_not_installed"].contains(&reason));
+        // On the CI host (no ModemManager) the gate resolves to the
+        // not-installed reason — the shape the bench observed against the live
+        // Python, NOT the prior hard-coded `no_modem`.
+        if !mmcli_available() {
+            assert_eq!(body["reason"], json!("modemmanager_not_installed"));
+        }
     }
 
     #[test]
@@ -958,12 +1353,12 @@ mod tests {
         json!({
             "enabled": enabled,
             "connected": false,
-            "iface": Value::Null,
+            "iface": "wwan0",
             "ip": Value::Null,
-            "signal_quality": Value::Null,
-            "technology": Value::Null,
+            "signal_quality": -1,
+            "technology": "unknown",
             "apn": apn,
-            "operator": Value::Null,
+            "operator": "",
             "data_used_mb": data_used_mb,
             "cap_mb": cap_mb,
             "percent": percent,

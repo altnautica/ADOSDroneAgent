@@ -549,7 +549,11 @@ pub async fn get_wfb_pair_status(State(state): State<AppState>) -> Json<Value> {
 
     // Peer / paired-at / auto-pair off the raw config dict, mirroring the Python
     // `_load_config_dict()` read (a present-but-non-string peer/paired-at reads as
-    // null, an absent auto-pair flag defaults to true).
+    // null, an absent auto-pair flag defaults to true). `paired_at` is read through
+    // `paired_at_string`: an unquoted ISO timestamp in the YAML is a `datetime` to
+    // PyYAML's loader (so the Python read demotes it to null via `isinstance(str)`),
+    // while this YAML parser flattens it back to a string, so the timestamp-shaped
+    // string is demoted to null here too to keep the two reads byte-identical.
     let raw = load_config_value(&paths.config);
     let wfb_section = raw
         .get("video")
@@ -564,8 +568,7 @@ pub async fn get_wfb_pair_status(State(state): State<AppState>) -> Json<Value> {
         .unwrap_or(Value::Null);
     let mut paired_at = wfb_section
         .and_then(|w| w.get("paired_at"))
-        .filter(|v| v.is_string())
-        .cloned()
+        .map(paired_at_string)
         .unwrap_or(Value::Null);
     let auto_pair_enabled = wfb_section
         .and_then(|w| w.get("auto_pair_enabled"))
@@ -584,8 +587,7 @@ pub async fn get_wfb_pair_status(State(state): State<AppState>) -> Json<Value> {
         if paired_at.is_null() {
             paired_at = gs
                 .and_then(|g| g.get("paired_at"))
-                .filter(|v| v.is_string())
-                .cloned()
+                .map(paired_at_string)
                 .unwrap_or(Value::Null);
         }
     }
@@ -887,6 +889,141 @@ fn json_truthy(v: &Value) -> bool {
 /// `bitrate_mbps` shim uses.
 fn round3(v: f64) -> f64 {
     (v * 1000.0).round() / 1000.0
+}
+
+/// The `paired_at` field value the route reports, mirroring the Python pair-status
+/// read's `paired_at if isinstance(paired_at, str) else None`.
+///
+/// The Python handler loads the config with a YAML loader whose implicit resolver
+/// turns an *unquoted* ISO timestamp scalar into a `datetime` (so its
+/// `isinstance(str)` guard demotes it to `null`); the bind path that persists this
+/// field writes the timestamp unquoted, so the live Python read returns `null`. This
+/// YAML parser instead flattens both quoted and unquoted timestamps back to a
+/// string, so a string that the Python loader would have resolved to a timestamp is
+/// demoted to `null` here too. A non-string value is `null`; a non-timestamp string
+/// passes through unchanged.
+fn paired_at_string(v: &Value) -> Value {
+    match v.as_str() {
+        Some(s) if !is_yaml_timestamp(s) => json!(s),
+        _ => Value::Null,
+    }
+}
+
+/// True when `s` matches the YAML implicit timestamp grammar a standard YAML loader
+/// resolves to a date/datetime (and therefore not a plain string). Reproduces the
+/// loader's implicit resolver: either a bare `YYYY-MM-DD` date, or a full datetime
+/// `YYYY-M-D` (single- or double-digit month/day) followed by a `T`/whitespace
+/// separator, `H:MM:SS`, an optional fractional second, and an optional `Z` or
+/// numeric timezone offset.
+fn is_yaml_timestamp(s: &str) -> bool {
+    let b = s.as_bytes();
+
+    // Helper: read a run of ASCII digits from `i`, returning the count consumed.
+    fn digits(b: &[u8], i: usize) -> usize {
+        let mut j = i;
+        while j < b.len() && b[j].is_ascii_digit() {
+            j += 1;
+        }
+        j - i
+    }
+
+    // The date head is mandatory: four digits, `-`, then month/day groups. A bare
+    // `YYYY-MM-DD` (each group exactly two digits) is a date on its own; the
+    // datetime form allows 1- or 2-digit month/day and requires a time tail.
+    if digits(b, 0) != 4 {
+        return false;
+    }
+    let mut i = 4;
+    if b.get(i) != Some(&b'-') {
+        return false;
+    }
+    i += 1;
+    let month = digits(b, i);
+    if month == 0 || month > 2 {
+        return false;
+    }
+    i += month;
+    if b.get(i) != Some(&b'-') {
+        return false;
+    }
+    i += 1;
+    let day = digits(b, i);
+    if day == 0 || day > 2 {
+        return false;
+    }
+    i += day;
+
+    // Bare date: exactly `YYYY-MM-DD` (both groups two digits) with nothing trailing.
+    if i == s.len() {
+        return month == 2 && day == 2;
+    }
+
+    // Datetime: a `T`/`t` or whitespace separator, then `H:MM:SS`.
+    match b.get(i) {
+        Some(b'T') | Some(b't') => i += 1,
+        Some(b' ') | Some(b'\t') => {
+            while matches!(b.get(i), Some(b' ') | Some(b'\t')) {
+                i += 1;
+            }
+        }
+        _ => return false,
+    }
+    let hour = digits(b, i);
+    if hour == 0 || hour > 2 {
+        return false;
+    }
+    i += hour;
+    if b.get(i) != Some(&b':') {
+        return false;
+    }
+    i += 1;
+    if digits(b, i) != 2 {
+        return false;
+    }
+    i += 2;
+    if b.get(i) != Some(&b':') {
+        return false;
+    }
+    i += 1;
+    if digits(b, i) != 2 {
+        return false;
+    }
+    i += 2;
+
+    // Optional fractional second: `.` followed by zero or more digits.
+    if b.get(i) == Some(&b'.') {
+        i += 1;
+        i += digits(b, i);
+    }
+
+    // Optional timezone, possibly preceded by whitespace: `Z`/`z`, or a signed
+    // `HH` / `HH:MM` offset.
+    while matches!(b.get(i), Some(b' ') | Some(b'\t')) {
+        i += 1;
+    }
+    match b.get(i) {
+        None => return true,
+        Some(b'Z') | Some(b'z') => {
+            i += 1;
+        }
+        Some(b'+') | Some(b'-') => {
+            i += 1;
+            let tz_hour = digits(b, i);
+            if tz_hour == 0 || tz_hour > 2 {
+                return false;
+            }
+            i += tz_hour;
+            if b.get(i) == Some(&b':') {
+                i += 1;
+                if digits(b, i) != 2 {
+                    return false;
+                }
+                i += 2;
+            }
+        }
+        _ => return false,
+    }
+    i == s.len()
 }
 
 /// The current wall-clock time in microseconds since the Unix epoch, for the
@@ -1232,6 +1369,80 @@ mod tests {
             "role": "drone",
         });
         assert_eq!(snapshot, want);
+    }
+
+    #[test]
+    fn paired_at_demotes_an_unquoted_timestamp_to_null() {
+        // The bind path persists `paired_at` as an unquoted ISO timestamp, which a
+        // standard YAML loader resolves to a `datetime`, so the Python read returns
+        // null (`isinstance(str)` fails). This YAML parser flattens it back to a
+        // string, so the route must demote the timestamp-shaped string to null to
+        // match the live Python read byte-for-byte. A genuine non-timestamp peer-id
+        // string still passes through.
+        let yaml = "video:\n  wfb:\n    paired_at: 2026-06-13T07:59:59+00:00\n    paired_with_device_id: drone-abc\n";
+        let raw: Value = serde_norway::from_str(yaml).unwrap();
+        let wfb = raw
+            .get("video")
+            .filter(|v| v.is_object())
+            .and_then(|v| v.get("wfb"))
+            .filter(|v| v.is_object());
+
+        // The parser does flatten the unquoted timestamp into a string, which is the
+        // exact condition that made the native read diverge from the Python read.
+        let raw_paired_at = wfb.and_then(|w| w.get("paired_at")).unwrap();
+        assert!(raw_paired_at.is_string());
+
+        // The route demotes it to null, matching Python; the device-id passes through.
+        let paired_at = wfb
+            .and_then(|w| w.get("paired_at"))
+            .map(paired_at_string)
+            .unwrap_or(Value::Null);
+        assert_eq!(paired_at, Value::Null);
+        let peer = wfb
+            .and_then(|w| w.get("paired_with_device_id"))
+            .filter(|v| v.is_string())
+            .cloned()
+            .unwrap_or(Value::Null);
+        assert_eq!(peer, json!("drone-abc"));
+    }
+
+    #[test]
+    fn is_yaml_timestamp_matches_the_loader_resolution() {
+        // The strings the standard YAML loader resolves to a date/datetime (so the
+        // Python read demotes them to null). The canonical bind-written form is the
+        // first case.
+        assert!(is_yaml_timestamp("2026-06-13T07:59:59+00:00"));
+        assert!(is_yaml_timestamp("2026-06-13")); // bare date
+        assert!(is_yaml_timestamp("2026-06-13 07:59:59")); // space separator
+        assert!(is_yaml_timestamp("2026-06-13T07:59:59")); // no timezone
+        assert!(is_yaml_timestamp("2026-06-13T07:59:59.123456+05:30")); // fraction + offset
+        assert!(is_yaml_timestamp("2026-06-13t07:59:59z")); // lowercase t/z
+
+        // Plain strings the loader keeps as `str` (so the Python read returns them).
+        assert!(!is_yaml_timestamp("not-a-date"));
+        assert!(!is_yaml_timestamp("unknown"));
+        assert!(!is_yaml_timestamp("drone-abc"));
+        assert!(!is_yaml_timestamp("07:59:59")); // bare time is not a timestamp
+        assert!(!is_yaml_timestamp("2026-06-13X07:59:59")); // bad separator
+        assert!(!is_yaml_timestamp("2026-06-13T07:59")); // missing seconds
+        assert!(!is_yaml_timestamp("")); // empty
+    }
+
+    #[test]
+    fn paired_at_string_passes_a_non_timestamp_and_nulls_non_strings() {
+        // A non-timestamp string is kept (the field can legitimately hold one); a
+        // number/bool/null is demoted to null, mirroring `isinstance(str)`.
+        assert_eq!(
+            paired_at_string(&json!("custom-label")),
+            json!("custom-label")
+        );
+        assert_eq!(
+            paired_at_string(&json!("2026-06-13T07:59:59+00:00")),
+            Value::Null
+        );
+        assert_eq!(paired_at_string(&json!(123)), Value::Null);
+        assert_eq!(paired_at_string(&json!(true)), Value::Null);
+        assert_eq!(paired_at_string(&Value::Null), Value::Null);
     }
 
     #[test]

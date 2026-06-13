@@ -87,12 +87,20 @@ REGISTRY: list[RouteCase] = [
     ),
     # The composite status body. Carries timestamps and counters masked by the
     # default volatile set; the rest (profile, capabilities, link state) is the
-    # contract the two handlers must agree on.
+    # contract the two handlers must agree on. The nested health block's live
+    # system readings (cpu/temperature/memory/disk) move every read, so they are
+    # masked too.
     RouteCase(
         name="status",
         method="GET",
         path="/api/status",
         paired_headers={"authorization": PAIRED_AUTH_PLACEHOLDER},
+        extra_volatile=(
+            "cpu_percent",
+            "temperature",
+            "memory_percent",
+            "disk_percent",
+        ),
     ),
     # The live telemetry snapshot. The numeric values move every read, so the
     # case masks the snapshot's own timestamp and leaves the shape to compare.

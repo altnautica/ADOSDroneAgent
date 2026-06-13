@@ -40,6 +40,22 @@ def test_normalize_body_masks_default_volatile_keys():
     )
 
 
+def test_normalize_body_masks_wall_clock_time_ns():
+    # The /api/time body is {time_ns, monotonic_ns, ntp_synced}. Both clock
+    # readings advance by the inter-request delta and must collapse to the
+    # sentinel; only the stable sync flag survives.
+    early = normalize_body(b'{"time_ns":111,"monotonic_ns":222,"ntp_synced":true}')
+    later = normalize_body(b'{"time_ns":999,"monotonic_ns":888,"ntp_synced":true}')
+    assert early == later
+    assert early == canonical_json(
+        {
+            "time_ns": VOLATILE_SENTINEL,
+            "monotonic_ns": VOLATILE_SENTINEL,
+            "ntp_synced": True,
+        }
+    )
+
+
 def test_normalize_body_masks_nested_and_listed_volatile_keys():
     body = b'{"items":[{"id":1,"started_at":7},{"id":2,"started_at":8}],"v":5}'
     out = normalize_body(body, extra_volatile=("id",))
@@ -111,11 +127,22 @@ def test_compare_headers_reports_allowlisted_value_difference():
 
 
 def test_compare_headers_reports_missing_side():
-    native = {"etag": "abc"}
+    native = {"cache-control": "no-store"}
     python = {}
     diffs = compare_headers(native, python)
     assert len(diffs) == 1
     assert "missing on python" in diffs[0]
+
+
+def test_compare_headers_ignores_etag():
+    # etag is a content-hash cache validator that one front emits and another
+    # may omit; it moves with the masked volatile body and is never a parity
+    # contract, so a difference (or one-sided presence) is not a diff.
+    native = {"etag": '"abc"', "content-type": "application/json"}
+    python = {"content-type": "application/json"}
+    assert compare_headers(native, python) == []
+    differing = compare_headers({"etag": '"abc"'}, {"etag": '"xyz"'})
+    assert differing == []
 
 
 def test_compare_headers_never_compares_blocked_headers():

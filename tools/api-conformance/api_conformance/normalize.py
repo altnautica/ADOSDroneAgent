@@ -41,6 +41,16 @@ DEFAULT_VOLATILE_KEYS: frozenset[str] = frozenset(
         "timestamp_ms",
         "time",
         "now",
+        # absolute clock readings in nanoseconds/micros/millis: the wall-clock
+        # `time_ns` (and its siblings) advances by the inter-request delta and
+        # would otherwise diverge between the native and Python reads.
+        "time_ns",
+        "time_us",
+        "time_ms",
+        "now_ns",
+        "now_us",
+        "now_ms",
+        "wall_ns",
         "uptime",
         "uptime_seconds",
         "uptime_s",
@@ -70,6 +80,11 @@ DEFAULT_VOLATILE_KEYS: frozenset[str] = frozenset(
 # Response headers whose values are stable and meaningful enough to compare. Any
 # header outside this set (``date``, ``server``, the hop-by-hop set) is dropped
 # before comparison so a per-front-door difference is never a false fail.
+#
+# ``etag`` is deliberately absent: it is a cache validator derived from a content
+# hash, not a parity contract. One front emits it and another may not, and the
+# value moves with the very volatile fields the body comparison already masks, so
+# comparing it would be a false fail.
 DEFAULT_HEADER_ALLOWLIST: frozenset[str] = frozenset(
     {
         "content-type",
@@ -77,7 +92,6 @@ DEFAULT_HEADER_ALLOWLIST: frozenset[str] = frozenset(
         "content-encoding",
         "content-language",
         "vary",
-        "etag",
         "www-authenticate",
         "allow",
         "x-ados-profile",
@@ -100,6 +114,7 @@ _NEVER_COMPARE_HEADERS: frozenset[str] = frozenset(
         "transfer-encoding",
         "upgrade",
         "content-length",  # may differ purely from the volatile masking above
+        "etag",  # a content-hash cache validator, not a parity contract
     }
 )
 

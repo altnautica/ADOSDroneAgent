@@ -639,9 +639,12 @@ impl VideoConfig {
 // ---------------------------------------------------------------------------
 
 /// The newest value (as a JSON value) per named metric from a recent `metrics`
-/// page, newest-wins. Returns `None` when the store is unreachable; a name not seen
-/// in the window is simply absent from the map. Mirrors the Python `latest_metrics`
-/// over the named set (the route only reads the value, so tags/ts are dropped).
+/// page, newest-wins. Returns `None` when the store is unreachable OR when none of
+/// the named metrics is in the window; a name not seen is simply absent from a
+/// non-empty map. Mirrors the Python `latest_metrics`, whose `return out or None`
+/// collapses an empty result to `None` — the air-pipeline route relies on that
+/// `None` to fall through to the live read's 204 (no data) contract rather than
+/// synthesizing a default snapshot from an empty store window.
 async fn latest_metrics(state: &AppState, names: &[&str]) -> Option<Map<String, Value>> {
     let rows = logd_query_rows(state, "metrics", 200, None).await?;
     let mut out: Map<String, Value> = Map::new();
@@ -657,7 +660,21 @@ async fn latest_metrics(state: &AppState, names: &[&str]) -> Option<Map<String, 
             );
         }
     }
-    Some(out)
+    // `out or None`: an empty map reads as "no data", matching the Python helper.
+    collapse_empty_metrics(out)
+}
+
+/// Collapse an empty metric map to `None`, mirroring the Python helper's final
+/// `return out or None`. A non-empty map passes through as `Some(map)`. The
+/// air-pipeline route depends on the `None` so it falls through to the live read's
+/// 204 (no data) contract instead of synthesizing a default snapshot from a store
+/// window that held no air metrics.
+fn collapse_empty_metrics(out: Map<String, Value>) -> Option<Map<String, Value>> {
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
 }
 
 /// The newest numeric value for `name` from a merged metric map, or `None` if the
@@ -1059,6 +1076,25 @@ mod tests {
         std::fs::write(&path, "42").unwrap();
         let resp = project_air_pipeline_live(&path);
         assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    }
+
+    #[test]
+    fn empty_metrics_window_collapses_to_none() {
+        // The Python `latest_metrics` ends with `return out or None`, so a reachable
+        // store whose window held none of the named metrics reads as `None` (no
+        // data), NOT an empty snapshot. The air-pipeline route relies on that `None`:
+        // with `metrics is None and air is None` it falls through to the live read,
+        // which is a 204 when air-pipeline.json is absent. An empty map collapsing to
+        // `Some({})` instead would let the route synthesize a default snapshot and
+        // wrongly answer 200.
+        assert_eq!(collapse_empty_metrics(Map::new()), None);
+
+        // A non-empty map passes through unchanged so the route still builds a
+        // snapshot when the store does carry air metrics.
+        let mut m = Map::new();
+        m.insert("video.air.encoder_fps".to_string(), json!(30.0));
+        let collapsed = collapse_empty_metrics(m.clone());
+        assert_eq!(collapsed, Some(m));
     }
 
     // ----- shared helpers -----

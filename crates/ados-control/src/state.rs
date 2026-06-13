@@ -69,25 +69,77 @@ fn version_from_install_result_at(path: &std::path::Path) -> Option<String> {
         .map(str::to_string)
 }
 
-/// The HAL-detected board name the pairing-info route reports. Read from
-/// `ADOS_BOARD_NAME`, which the systemd unit injects from the Python HAL
-/// `detect_board()` (the native surface has no in-process HAL-detect port). The
-/// `"unknown"` fallback is correct when the env is unset (a dev host, or this
-/// crate's pre-wiring/inert state where no unit injects the env yet), matching
-/// the FastAPI route's `app.board_name or "unknown"` fallback shape. Follows the
-/// same env-resolution pattern as `agent_version()`.
-pub fn board_name() -> String {
-    std::env::var("ADOS_BOARD_NAME").unwrap_or_else(|_| "unknown".to_string())
+/// The HAL-detected board name the pairing-info route reports. Read live from the
+/// `name` field of the board sidecar (`/run/ados/board.json`) the detector
+/// persists — the same on-disk source the status route's board block reads. The
+/// FastAPI route reports `app.board_name or "unknown"`, where `app.board_name` is
+/// the HAL `board.name` (e.g. `"Raspberry Pi 4B"`); reading the sidecar's `name`
+/// field matches that exactly. Falls back to `"unknown"` only when the sidecar is
+/// absent / unreadable / carries no usable `name` (a fresh boot before the first
+/// status write, or a host with no detector running).
+pub fn board_name(board_path: &std::path::Path) -> String {
+    board_name_at(board_path).unwrap_or_else(|| "unknown".to_string())
 }
 
-/// The native-vs-packaged runtime badge the pairing-info route reports. Read from
-/// `ADOS_RUNTIME_MODE`, which the systemd unit injects from the Python
-/// `compute_runtime_mode(profile)`. The `"packaged"` fallback is correct when the
-/// env is unset (a pre-cutover agent, and this surface is itself inert until the
-/// cutover), matching the FastAPI route's default. Follows the same
-/// env-resolution pattern as `agent_version()`.
+/// Read the `name` field out of a board sidecar file, or `None` when the file is
+/// absent / unreadable / not a JSON object / carries no non-empty `name`. Pure
+/// (path in), so it is unit-testable without mutating the process environment.
+fn board_name_at(path: &std::path::Path) -> Option<String> {
+    // The sidecar is a small board dict; bound the read so a corrupt or tampered
+    // file can never balloon memory on the pairing-info hot path.
+    const MAX_BYTES: u64 = 1024 * 1024;
+    if std::fs::metadata(path).ok()?.len() > MAX_BYTES {
+        return None;
+    }
+    let bytes = std::fs::read(path).ok()?;
+    let value: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    value
+        .get("name")
+        .and_then(serde_json::Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+/// The native-vs-packaged runtime badge the pairing-info route reports. The
+/// native surface has no in-process port of the Python `compute_runtime_mode`, so
+/// the Python API writes the computed value to the `runtime-mode` sidecar at
+/// startup and this reads it live. Resolution order:
+/// 1. the `runtime-mode` sidecar under `ADOS_RUN_DIR` (`/run/ados/runtime-mode`),
+///    the value the Python API computed for this node's profile;
+/// 2. the `ADOS_RUNTIME_MODE` env, when a caller/unit pins it explicitly;
+/// 3. the `"packaged"` fallback, correct for a pre-cutover agent (and this
+///    surface is itself inert until the cutover), matching the FastAPI default.
 pub fn runtime_mode() -> String {
-    std::env::var("ADOS_RUNTIME_MODE").unwrap_or_else(|_| "packaged".to_string())
+    let run_dir = std::env::var("ADOS_RUN_DIR").unwrap_or_else(|_| "/run/ados".to_string());
+    if let Some(mode) = runtime_mode_at(&std::path::Path::new(&run_dir).join("runtime-mode")) {
+        return mode;
+    }
+    if let Ok(v) = std::env::var("ADOS_RUNTIME_MODE") {
+        if !v.is_empty() {
+            return v;
+        }
+    }
+    "packaged".to_string()
+}
+
+/// Read the runtime-mode string out of the sidecar file, or `None` when the file
+/// is absent / unreadable / empty. The Python API writes a single line of plain
+/// text (no trailing structure), so the body is trimmed and taken whole. Pure
+/// (path in), so it is unit-testable without mutating the process environment.
+fn runtime_mode_at(path: &std::path::Path) -> Option<String> {
+    // The sidecar is one short word; bound the read so a corrupt file can never
+    // balloon memory on the pairing-info hot path.
+    const MAX_BYTES: u64 = 4096;
+    if std::fs::metadata(path).ok()?.len() > MAX_BYTES {
+        return None;
+    }
+    let text = std::fs::read_to_string(path).ok()?;
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
 }
 
 /// The on-disk paths the pairing routes read and write. Cloned per connection
@@ -226,5 +278,67 @@ mod tests {
         let garbage = dir.path().join("garbage.json");
         std::fs::write(&garbage, "not json").unwrap();
         assert_eq!(version_from_install_result_at(&garbage), None);
+    }
+
+    #[test]
+    fn board_name_reads_the_sidecar_name_field() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("board.json");
+        // The on-rig sidecar shape: a full board dict whose `name` field is the
+        // friendly HAL board name the FastAPI route reports as `app.board_name`.
+        std::fs::write(
+            &path,
+            r#"{"arch":"aarch64","cpu_cores":4,"model":"Raspberry Pi 4 Model B Rev 1.5","name":"Raspberry Pi 4B"}"#,
+        )
+        .unwrap();
+        assert_eq!(board_name_at(&path), Some("Raspberry Pi 4B".to_string()));
+        // The public helper resolves the same value.
+        assert_eq!(board_name(&path), "Raspberry Pi 4B");
+    }
+
+    #[test]
+    fn board_name_falls_back_to_unknown_when_absent_or_unusable() {
+        let dir = tempfile::tempdir().unwrap();
+        // Absent file → None → "unknown".
+        let absent = dir.path().join("absent.json");
+        assert_eq!(board_name_at(&absent), None);
+        assert_eq!(board_name(&absent), "unknown");
+        // An empty `name` is treated as no name.
+        let empty = dir.path().join("empty-name.json");
+        std::fs::write(&empty, r#"{"name":""}"#).unwrap();
+        assert_eq!(board_name_at(&empty), None);
+        // A dict with no `name`, a non-object body, and non-JSON all degrade.
+        let no_name = dir.path().join("no-name.json");
+        std::fs::write(&no_name, r#"{"arch":"aarch64"}"#).unwrap();
+        assert_eq!(board_name_at(&no_name), None);
+        let arr = dir.path().join("array.json");
+        std::fs::write(&arr, "[1,2,3]").unwrap();
+        assert_eq!(board_name_at(&arr), None);
+        let garbage = dir.path().join("garbage.json");
+        std::fs::write(&garbage, "not json").unwrap();
+        assert_eq!(board_name_at(&garbage), None);
+    }
+
+    #[test]
+    fn runtime_mode_reads_the_sidecar_value() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("runtime-mode");
+        // The Python API writes one line of plain text; a trailing newline is
+        // trimmed so the value matches `compute_runtime_mode` exactly.
+        std::fs::write(&path, "hybrid\n").unwrap();
+        assert_eq!(runtime_mode_at(&path), Some("hybrid".to_string()));
+        std::fs::write(&path, "native").unwrap();
+        assert_eq!(runtime_mode_at(&path), Some("native".to_string()));
+    }
+
+    #[test]
+    fn runtime_mode_sidecar_is_none_when_absent_or_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        // Absent file degrades to None (the caller then tries the env / default).
+        assert_eq!(runtime_mode_at(&dir.path().join("absent")), None);
+        // An empty / whitespace-only body is treated as no value.
+        let empty = dir.path().join("empty");
+        std::fs::write(&empty, "   \n").unwrap();
+        assert_eq!(runtime_mode_at(&empty), None);
     }
 }

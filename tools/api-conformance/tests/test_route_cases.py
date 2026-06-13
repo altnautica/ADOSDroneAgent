@@ -60,6 +60,16 @@ def test_pairing_code_masks_the_regenerated_code():
     assert "code" in case.extra_volatile
 
 
+def test_status_masks_the_health_block_numerics():
+    # /api/status carries a nested health block whose cpu/temperature/memory/disk
+    # readings move every read; the case must mask them so the structural shape is
+    # what the two handlers are compared on.
+    case = case_by_name("status")
+    assert case is not None
+    for key in ("cpu_percent", "temperature", "memory_percent", "disk_percent"):
+        assert key in case.extra_volatile
+
+
 def test_paired_variant_routes_carry_an_authorization_header():
     for name in ("status", "telemetry", "commands"):
         case = case_by_name(name)
