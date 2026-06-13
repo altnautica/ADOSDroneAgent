@@ -12,14 +12,16 @@ StartLimitBurst=5
 # Join the shared accounting slice so MemoryCurrent/CPUUsage are observable.
 Slice=ados.slice
 # Opt-in, off by default: the unit runs the native binary only when the operator
-# has enabled it (`ados rust enable control`, which writes the marker) AND the
-# binary is present. Otherwise it execs /bin/true — a clean no-op — so the unit
-# is inert and the GCS keeps using the FastAPI surface on :8080. The native
-# surface binds the LAN port (default :8082) + /run/ados/control.sock only when
-# enabled. Type=simple (not notify) because the /bin/true branch never signals
-# readiness; this matches the other opt-in guarded units.
+# has enabled it AND the binary is present. Otherwise it execs /bin/true — a
+# clean no-op — so the unit is inert and the GCS keeps using the FastAPI surface
+# on :8080. Two markers select the native branch: `control-rust-enabled` runs the
+# surface on the alternate LAN port (default :8082) alongside FastAPI; the
+# `front-rust-enabled` marker runs it as the LAN front (a drop-in sets
+# ADOS_CONTROL_PORT=8080 and the FastAPI unit moves to the internal socket). Both
+# also bind /run/ados/control.sock. Type=simple (not notify) because the
+# /bin/true branch never signals readiness; this matches the other guarded units.
 Type=simple
-ExecStart=/bin/sh -c 'if [ -e /etc/ados/control-rust-enabled ] && [ -x /opt/ados/bin/ados-control ]; then exec /opt/ados/bin/ados-control; else exec /bin/true; fi'
+ExecStart=/bin/sh -c 'if { [ -e /etc/ados/control-rust-enabled ] || [ -e /etc/ados/front-rust-enabled ]; } && [ -x /opt/ados/bin/ados-control ]; then exec /opt/ados/bin/ados-control; else exec /bin/true; fi'
 Restart=on-failure
 RestartSec=5
 Environment=RUST_LOG=info

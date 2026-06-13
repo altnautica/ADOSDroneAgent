@@ -124,6 +124,26 @@ _SERVICES: dict[str, _Service] = {
 
 _SVC_NAMES = tuple(_SERVICES)
 
+# The LAN-front cutover. Not an ordinary cutover-capable service (it does not
+# swap one unit between two implementations); it rebinds the native control
+# surface to the LAN port and moves FastAPI behind it onto an internal socket,
+# via two systemd drop-ins + a marker the installer reconciles on every upgrade.
+# Handled specially below, but offered alongside the service names so the UX is
+# one `ados rust enable front` / `ados rust disable front`.
+_FRONT = "front"
+_FRONT_MARKER = "front-rust-enabled"
+_CONTROL_MARKER = "control-rust-enabled"
+_CONTROL_BIN = "/opt/ados/bin/ados-control"
+_SYSTEMD_DIR = "/etc/systemd/system"
+_FRONT_CONTROL_DROPIN = f"{_SYSTEMD_DIR}/ados-control.service.d/front.conf"
+_FRONT_API_DROPIN = f"{_SYSTEMD_DIR}/ados-api.service.d/front.conf"
+_FRONT_CONTROL_DROPIN_BODY = "[Service]\nEnvironment=ADOS_CONTROL_PORT=8080\n"
+_FRONT_API_DROPIN_BODY = (
+    "[Service]\nEnvironment=ADOS_API_INTERNAL_SOCKET=/run/ados/api-internal.sock\n"
+)
+
+_FLIP_NAMES = _SVC_NAMES + (_FRONT,)
+
 
 def _require_root() -> None:
     if os.geteuid() != 0:
@@ -227,6 +247,11 @@ def rust_status() -> None:
         colour = "green" if mode == "rust" else None
         line = f"  {name:<{name_w}}  {mode:<22}  {flag:<8}  {binp:<7}  {units}"
         click.echo(click.style(line, fg=colour) if colour else line)
+    # The LAN-front cutover is not an ordinary service row; show it on its own
+    # line so `ados rust status` reflects whether the native surface owns :8080.
+    front_on = (ADOS_ETC_DIR / _FRONT_MARKER).exists()
+    front_line = _front_status_line()
+    click.echo(click.style(front_line, fg="green") if front_on else front_line)
 
 
 def _set_marker(svc: _Service, *, native: bool) -> None:
@@ -244,6 +269,76 @@ def _set_marker(svc: _Service, *, native: bool) -> None:
         path.touch()
     elif path.exists():
         path.unlink()
+
+
+def _write_dropin(path: str, body: str) -> None:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as fh:
+        fh.write(body)
+
+
+def _remove_dropin(path: str) -> None:
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        pass
+    # Best-effort rmdir of the (now possibly empty) drop-in dir; a non-empty dir
+    # raises OSError, which we ignore so other drop-ins are preserved.
+    try:
+        os.rmdir(os.path.dirname(path))
+    except OSError:
+        pass
+
+
+def _front_apply(*, enable: bool) -> None:
+    """Flip the LAN front on or off.
+
+    ON: write the marker + both drop-ins, daemon-reload, move FastAPI to the
+    internal socket (frees the LAN port), then bring the native surface up on the
+    LAN port. OFF: remove the marker + drop-ins, daemon-reload, then restart
+    FastAPI back onto the LAN port; the native surface is masked unless the plain
+    control marker keeps it on the alternate port.
+    """
+    marker = ADOS_ETC_DIR / _FRONT_MARKER
+    if enable:
+        ADOS_ETC_DIR.mkdir(parents=True, exist_ok=True)
+        marker.touch()
+        _write_dropin(_FRONT_CONTROL_DROPIN, _FRONT_CONTROL_DROPIN_BODY)
+        _write_dropin(_FRONT_API_DROPIN, _FRONT_API_DROPIN_BODY)
+        _systemctl("daemon-reload")
+        # FastAPI moves to the internal socket (different bind target, no port
+        # contention), then the native surface takes the LAN port.
+        _systemctl("restart", "ados-api")
+        _systemctl("enable", "ados-control")
+        _systemctl("restart", "ados-control")
+    else:
+        if marker.exists():
+            marker.unlink()
+        _remove_dropin(_FRONT_CONTROL_DROPIN)
+        _remove_dropin(_FRONT_API_DROPIN)
+        _systemctl("daemon-reload")
+        # The native surface stays only if the plain control marker pins it to the
+        # alternate port; otherwise it is masked. Either way FastAPI reclaims the
+        # LAN port.
+        if (ADOS_ETC_DIR / _CONTROL_MARKER).exists():
+            _systemctl("restart", "ados-control")
+        else:
+            _mask_unit("ados-control")
+        _systemctl("restart", "ados-api")
+
+
+def _front_status_line() -> str:
+    """One status line describing the LAN-front cutover state."""
+    on = (ADOS_ETC_DIR / _FRONT_MARKER).exists()
+    binp = "present" if os.access(_CONTROL_BIN, os.X_OK) else "absent"
+    if on and binp == "present":
+        mode = "rust (LAN :8080)"
+    elif on:
+        mode = "on (binary missing)"
+    else:
+        mode = "off (FastAPI :8080)"
+    flag = "set" if on else "—"
+    return f"  {_FRONT:<11}  {mode:<22}  {flag:<8}  {binp:<7}  —"
 
 
 def _apply(svc: _Service, *, enable: bool) -> None:
@@ -273,10 +368,25 @@ def _apply(svc: _Service, *, enable: bool) -> None:
 
 
 @rust_group.command("enable", help="Run the native implementation for one or more services.")
-@click.argument("services", nargs=-1, required=True, type=click.Choice(_SVC_NAMES))
+@click.argument("services", nargs=-1, required=True, type=click.Choice(_FLIP_NAMES))
 def rust_enable(services: tuple[str, ...]) -> None:
     _require_root()
     for name in services:
+        if name == _FRONT:
+            if not os.access(_CONTROL_BIN, os.X_OK):
+                click.echo(
+                    click.style(
+                        "  front: native control binary not installed — run "
+                        "install.sh --upgrade first.",
+                        fg="yellow",
+                    )
+                )
+                continue
+            _front_apply(enable=True)
+            click.echo(
+                click.style("  front: native surface now owns the LAN port (:8080).", fg="green")
+            )
+            continue
         svc = _SERVICES[name]
         if not _binaries_present(svc):
             click.echo(
@@ -292,10 +402,14 @@ def rust_enable(services: tuple[str, ...]) -> None:
 
 
 @rust_group.command("disable", help="Fall back to the packaged service for one or more services.")
-@click.argument("services", nargs=-1, required=True, type=click.Choice(_SVC_NAMES))
+@click.argument("services", nargs=-1, required=True, type=click.Choice(_FLIP_NAMES))
 def rust_disable(services: tuple[str, ...]) -> None:
     _require_root()
     for name in services:
+        if name == _FRONT:
+            _front_apply(enable=False)
+            click.echo("  front: FastAPI reclaimed the LAN port (:8080).")
+            continue
         _apply(_SERVICES[name], enable=False)
         click.echo(f"  {name}: reverted to the packaged service.")
     rust_status.callback()  # type: ignore[misc]

@@ -767,13 +767,73 @@ fn reconcile_logd_unit() {
 /// half is the start step's job (the unit is PartOf the supervisor).
 fn reconcile_control_unit() {
     const UNIT: &str = "ados-control.service";
-    let pinned_on = Path::new(CONFIG_DIR).join("control-rust-enabled").exists();
+    // Either marker selects the native control surface: `control-rust-enabled`
+    // runs it on the alternate LAN port alongside FastAPI; `front-rust-enabled`
+    // runs it as the LAN front (the drop-in reconciled below binds it to :8080).
+    let pinned_on = Path::new(CONFIG_DIR).join("control-rust-enabled").exists()
+        || Path::new(CONFIG_DIR).join("front-rust-enabled").exists();
     if pinned_on {
         enable_if_present(UNIT);
     } else {
         let _ = exec::run("systemctl", &["stop", UNIT]);
         let _ = exec::run("systemctl", &["disable", UNIT]);
         let _ = exec::run("systemctl", &["reset-failed", UNIT]);
+    }
+}
+
+/// The systemd drop-in directory + body that bind the native control surface to
+/// the LAN port as the front. Pure so the body is unit-testable.
+const FRONT_CONTROL_DROPIN_DIR: &str = "/etc/systemd/system/ados-control.service.d";
+const FRONT_API_DROPIN_DIR: &str = "/etc/systemd/system/ados-api.service.d";
+const FRONT_DROPIN_NAME: &str = "front.conf";
+/// The residual API's internal socket path the front reverse-proxies to. Must
+/// match the Rust proxy default + the Python `make_listen_sockets` reader.
+const FRONT_API_INTERNAL_SOCKET: &str = "/run/ados/api-internal.sock";
+
+/// The control drop-in body: bind the native surface to the LAN port the GCS
+/// uses, in place of FastAPI.
+fn front_control_dropin_body() -> &'static str {
+    "[Service]\nEnvironment=ADOS_CONTROL_PORT=8080\n"
+}
+
+/// The api drop-in body: move FastAPI off the LAN port onto the internal Unix
+/// socket the front proxies to.
+fn front_api_dropin_body() -> String {
+    format!("[Service]\nEnvironment=ADOS_API_INTERNAL_SOCKET={FRONT_API_INTERNAL_SOCKET}\n")
+}
+
+/// Reconcile the LAN-front cutover against its opt-in marker. When
+/// `front-rust-enabled` is present, the native control surface owns the LAN port
+/// (:8080) and FastAPI moves behind it onto an internal Unix socket; the two
+/// systemd drop-ins carry that env split. Absent, the drop-ins are removed so
+/// FastAPI owns the LAN port again. Writes/removes the drop-ins and runs its own
+/// `daemon-reload` (the flow's earlier reload predates these files); the actual
+/// unit restart is the start step's supervisor cycle (both units are PartOf it),
+/// matching the sibling reconciles. Idempotent; a partial state self-heals on the
+/// next install. The marker is written by `ados rust front enable`.
+fn reconcile_front_unit() {
+    let front_on = Path::new(CONFIG_DIR).join("front-rust-enabled").exists();
+    let control_dropin = Path::new(FRONT_CONTROL_DROPIN_DIR).join(FRONT_DROPIN_NAME);
+    let api_dropin = Path::new(FRONT_API_DROPIN_DIR).join(FRONT_DROPIN_NAME);
+    if front_on {
+        let _ = std::fs::create_dir_all(FRONT_CONTROL_DROPIN_DIR);
+        let _ = std::fs::write(&control_dropin, front_control_dropin_body());
+        let _ = std::fs::create_dir_all(FRONT_API_DROPIN_DIR);
+        let _ = std::fs::write(&api_dropin, front_api_dropin_body());
+        let _ = exec::run("systemctl", &["daemon-reload"]);
+        tracing::info!("front cutover: native control surface bound to the LAN port");
+    } else {
+        // Remove only our own drop-in file (the dir may hold other drop-ins);
+        // rmdir the dir best-effort when it is now empty.
+        let removed = control_dropin.exists() || api_dropin.exists();
+        let _ = std::fs::remove_file(&control_dropin);
+        let _ = std::fs::remove_file(&api_dropin);
+        let _ = std::fs::remove_dir(FRONT_CONTROL_DROPIN_DIR);
+        let _ = std::fs::remove_dir(FRONT_API_DROPIN_DIR);
+        if removed {
+            let _ = exec::run("systemctl", &["daemon-reload"]);
+            tracing::info!("front cutover reverted: FastAPI owns the LAN port");
+        }
     }
 }
 
@@ -1279,8 +1339,14 @@ impl Step for Systemd {
 
         // 5b-bis. The native control surface is off by default (the GCS uses the
         //     FastAPI surface). Enable it only when the operator pinned it on via
-        //     `ados rust enable control`; otherwise it stays disabled.
+        //     `ados rust enable control` (or the LAN-front marker); otherwise it
+        //     stays disabled.
         reconcile_control_unit();
+
+        // 5b-ter. The LAN-front cutover is off by default. When pinned on, the
+        //     drop-ins bind the native surface to the LAN port and move FastAPI
+        //     onto the internal socket behind it; absent, FastAPI owns the port.
+        reconcile_front_unit();
 
         // 5c. Drop marker files retired by a default sense flip (the plugin
         //     host moved from an opt-in to an opt-out marker). A fresh install
@@ -1450,6 +1516,34 @@ mod tests {
         // the retired set, or the installer would erase the operator's pinned choice.
         assert!(!RETIRED_CUTOVER_FLAGS.contains(&"plugin-host-python-fallback"));
         assert!(!RETIRED_CUTOVER_FLAGS.contains(&"display-python-fallback"));
+    }
+
+    #[test]
+    fn front_dropins_set_the_lan_port_split() {
+        // The control drop-in binds the native surface to the LAN port; the api
+        // drop-in moves FastAPI onto the internal socket the front proxies to.
+        let control = front_control_dropin_body();
+        assert!(control.contains("ADOS_CONTROL_PORT=8080"), "{control}");
+        assert!(control.starts_with("[Service]"));
+        let api = front_api_dropin_body();
+        assert!(
+            api.contains("ADOS_API_INTERNAL_SOCKET=/run/ados/api-internal.sock"),
+            "{api}"
+        );
+        assert!(api.starts_with("[Service]"));
+    }
+
+    #[test]
+    fn control_unit_runs_native_for_either_marker() {
+        // The shipped unit must exec the native binary when EITHER the plain
+        // control marker or the LAN-front marker is present, else /bin/true.
+        let unit = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../data/systemd/ados-control.service");
+        let body = std::fs::read_to_string(unit).unwrap();
+        assert!(body.contains("control-rust-enabled"));
+        assert!(body.contains("front-rust-enabled"));
+        assert!(body.contains("exec /opt/ados/bin/ados-control"));
+        assert!(body.contains("exec /bin/true"));
     }
 
     #[test]
