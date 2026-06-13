@@ -16,6 +16,6 @@ pub mod wifi_client;
 
 pub use ethernet::EthernetManager;
 pub use hostapd::{build_ssid, HostapdManager};
-pub use modem::{apn_for_imsi, ModemConfig, ModemManager};
+pub use modem::{apn_for_imsi, desired_modem_session, ModemConfig, ModemManager, ModemSession};
 pub use usb_gadget::UsbGadgetManager;
 pub use wifi_client::{ClientConfig, WifiClientManager};

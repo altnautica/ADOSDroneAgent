@@ -56,25 +56,65 @@ def _persist_share_uplink_flag(enabled: bool) -> None:
         raise OSError("failed to persist share_uplink to /etc/ados/config.yaml")
 
 
+async def _resolve_active_iface() -> str | None:
+    """Resolve the kernel iface of the active uplink, store-first.
+
+    The failover loop runs in the native ``ados-net`` daemon, so the
+    in-FastAPI-process ``UplinkRouter`` singleton is dead-on-read (its
+    ``active_uplink`` is always ``None``). The daemon ships its selected uplink
+    name as a ``net.uplink_active`` event; read that and map the uplink NAME to
+    its kernel iface via the router's stateless name→iface helper (which only
+    constructs the managers and reads their iface, it does not depend on the
+    live failover loop). ``None`` means no active uplink could be resolved.
+    """
+    from ados.api.sources.network import latest_uplink_active
+
+    active_name: str | None = None
+    store = await latest_uplink_active()
+    if isinstance(store, dict):
+        candidate = store.get("active_uplink")
+        if isinstance(candidate, str) and candidate:
+            active_name = candidate
+
+    if not active_name:
+        return None
+
+    try:
+        router_ = _uplink_router()
+        iface = await router_._uplink_iface(active_name)  # type: ignore[attr-defined]
+        if isinstance(iface, str) and iface:
+            return iface
+    except Exception:
+        return None
+    return None
+
+
 async def _apply_share_uplink(enabled: bool) -> dict[str, Any]:
     """Apply sysctl + NAT and persist firewall state across reboots.
 
     Delegates to ``services/ground_station/share_uplink_firewall.apply_share_uplink``
     which handles distro detection, iptables-persistent vs nftables
     fallback, atomic sysctl drop-in, and persistence of the rule set.
+
+    The NAT MASQUERADE rule is scoped to the active uplink's kernel iface. When
+    no active uplink can be resolved there is no iface to MASQUERADE on, so the
+    helper returns ``applied: False`` with a short ``reason`` instead of
+    reporting success against a missing iface. The contract is stable: the
+    response always carries a boolean ``applied`` and, when ``applied`` is
+    ``False``, a short string ``reason`` the GCS surfaces to the operator.
     """
-    active_iface: str | None = None
-    try:
-        router_ = _uplink_router()
-        active_name = router_.active_uplink
-        if active_name:
-            mgr = await router_._manager_for(active_name)  # type: ignore[attr-defined]
-            if mgr is not None:
-                get_iface = getattr(mgr, "get_iface", None)
-                if callable(get_iface):
-                    active_iface = get_iface()
-    except Exception:
-        active_iface = None
+    active_iface = await _resolve_active_iface()
+    if not active_iface:
+        # No active uplink → there is no iface to MASQUERADE on. Report the
+        # honest not-applied result with the reason carried in both the explicit
+        # `reason` field and `apply_error` (the latter is what older GCS builds
+        # render as the not-applied cause).
+        return {
+            "applied": False,
+            "reason": "no_active_uplink",
+            "apply_error": "no_active_uplink",
+            "backend": None,
+        }
 
     try:
         from ados.services.ground_station.share_uplink_firewall import (
@@ -82,13 +122,22 @@ async def _apply_share_uplink(enabled: bool) -> dict[str, Any]:
         )
         result = await _apply(bool(enabled), active_iface)
     except Exception as exc:
-        return {"applied": False, "apply_error": f"firewall_helper_failed: {exc}"}
+        return {
+            "applied": False,
+            "reason": "firewall_helper_failed",
+            "apply_error": f"firewall_helper_failed: {exc}",
+            "backend": None,
+        }
 
-    return {
-        "applied": bool(result.get("applied", False)),
+    applied = bool(result.get("applied", False))
+    out: dict[str, Any] = {
+        "applied": applied,
         "apply_error": result.get("apply_error"),
         "backend": result.get("backend"),
     }
+    if not applied:
+        out["reason"] = result.get("apply_error") or "apply_failed"
+    return out
 
 
 __all__ = [

@@ -252,6 +252,16 @@ class GroundStationModemManager:
         cap_gb: float | None = None,
         enabled: bool | None = None,
     ) -> dict:
+        """Persist the modem config sidecar. Does NOT drive the link.
+
+        The native ``ados-net`` daemon owns the live cellular session: it
+        re-reads this sidecar each poll and reconciles the modem up/down to the
+        persisted ``enabled``/``apn`` itself. Driving ``bring_up``/``bring_down``
+        from this REST write path too would race the daemon for the modem (two
+        owners dialing/hanging up the same device). So this stays a pure
+        persist; the manager is read-only with respect to the link for the REST
+        surface (status / data-usage views only).
+        """
         async with self._lock:
             current = dict(self._config)
             changed = False
@@ -268,19 +278,6 @@ class GroundStationModemManager:
                 _atomic_write_json(_CONFIG_PATH, current)
                 self._config = current
                 log.info("modem.config_updated", **current)
-
-        # Apply side effects outside the lock to avoid nesting.
-        if changed and (apn is not None or enabled is not None):
-            if self._config.get("enabled", True):
-                try:
-                    await self.bring_up(self._config.get("apn", "auto"))
-                except Exception as exc:
-                    log.warning("modem.reapply_failed", error=str(exc))
-            else:
-                try:
-                    await self.bring_down()
-                except Exception as exc:
-                    log.warning("modem.bring_down_failed", error=str(exc))
 
         return dict(self._config)
 

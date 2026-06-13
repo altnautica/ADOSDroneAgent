@@ -6,11 +6,15 @@
 //! Ports `uplink/data_cap.py`.
 //!
 //! In the all-Python agent the byte counters came from the modem manager's
-//! `data_usage()` coroutine. Here the modem manager is HW-gated and lands in a
-//! later chunk, so the default [`SysfsUsageSource`] reads the kernel counters
-//! at `/sys/class/net/{wwan0,usb0}/statistics/{rx,tx}_bytes` directly. Those
-//! reads return 0 when the iface is absent, so the tracker is bench-runnable on
-//! a board with no modem.
+//! `data_usage()` coroutine. Here the default [`SysfsUsageSource`] reads the
+//! kernel counters at `/sys/class/net/<iface>/statistics/{rx,tx}_bytes`
+//! directly, but only for the modem's CURRENT interface, resolved the same way
+//! the modem manager resolves it: `wwan0` (MBIM/QMI) when present, else `usb0`
+//! (RNDIS/AT) ONLY when the USB-gadget tether is not provisioned. `usb0` is
+//! also the gadget tether NIC the daemon itself creates, so counting it against
+//! the cellular cap would falsely throttle a board that has no modem at all.
+//! The reads return 0 when the resolved iface is absent, so the tracker is
+//! bench-runnable on a board with no modem.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -48,29 +52,64 @@ pub trait UsageSource: Send + Sync {
     async fn data_usage(&self) -> UsageBytes;
 }
 
-/// Reads `/sys/class/net/<iface>/statistics/{rx,tx}_bytes` for the cellular /
-/// USB-tether ifaces. Returns 0 for any counter whose iface is absent, so a
-/// bench board with no modem reports zero usage rather than failing.
+/// Cellular MBIM/QMI iface.
+const WWAN_IFACE: &str = "wwan0";
+/// Cellular RNDIS/AT iface, ALSO the USB-gadget tether NIC the daemon creates.
+const USB_IFACE: &str = "usb0";
+/// configfs root + gadget name the daemon provisions the tether under. A
+/// present gadget dir means `usb0` belongs to the tether, not the modem.
+const USB_GADGET_DIR: &str = "/sys/kernel/config/usb_gadget/ados_gs";
+
+/// Reads `/sys/class/net/<iface>/statistics/{rx,tx}_bytes` for the modem's
+/// CURRENT interface only. Returns 0 when that iface is absent, so a bench
+/// board with no modem reports zero usage rather than failing.
+///
+/// The iface is resolved on every read (interfaces appear/disappear with the
+/// modem and the gadget): `wwan0` when present, else `usb0` ONLY when the
+/// USB-gadget tether is not provisioned. When the gadget owns `usb0`, nothing
+/// is counted — so a board with no modem accrues nothing against the cellular
+/// cap even while a laptop is tethered over the gadget.
 #[derive(Debug, Clone)]
 pub struct SysfsUsageSource {
-    ifaces: Vec<String>,
+    /// `/sys/class/net`, overridable for tests.
+    net_dir: PathBuf,
+    /// The provisioned-gadget marker dir, overridable for tests.
+    gadget_dir: PathBuf,
 }
 
 impl SysfsUsageSource {
-    /// Default cellular + USB-tether ifaces (`wwan0`, `usb0`).
+    /// Default sysfs net dir + the canonical provisioned-gadget marker.
     pub fn new() -> Self {
         Self {
-            ifaces: vec!["wwan0".to_string(), "usb0".to_string()],
+            net_dir: PathBuf::from("/sys/class/net"),
+            gadget_dir: PathBuf::from(USB_GADGET_DIR),
         }
     }
 
-    /// Explicit iface list (tests).
-    pub fn with_ifaces(ifaces: Vec<String>) -> Self {
-        Self { ifaces }
+    /// Explicit roots (tests point these at a tempdir).
+    pub fn with_roots(net_dir: PathBuf, gadget_dir: PathBuf) -> Self {
+        Self {
+            net_dir,
+            gadget_dir,
+        }
     }
 
-    fn read_counter(iface: &str, counter: &str) -> u64 {
-        let path = format!("/sys/class/net/{iface}/statistics/{counter}");
+    /// Resolve the modem's current interface, mirroring
+    /// `ModemManager::current_iface` but with the tether carve-out: `wwan0`
+    /// preferred, else `usb0` only when the USB gadget is NOT provisioned.
+    /// `None` means "count nothing" (no modem iface, or `usb0` is the tether).
+    fn modem_iface(&self) -> Option<String> {
+        if self.net_dir.join(WWAN_IFACE).exists() {
+            return Some(WWAN_IFACE.to_string());
+        }
+        if self.net_dir.join(USB_IFACE).exists() && !self.gadget_dir.exists() {
+            return Some(USB_IFACE.to_string());
+        }
+        None
+    }
+
+    fn read_counter(&self, iface: &str, counter: &str) -> u64 {
+        let path = self.net_dir.join(iface).join("statistics").join(counter);
         std::fs::read_to_string(path)
             .ok()
             .and_then(|s| s.trim().parse::<u64>().ok())
@@ -87,12 +126,13 @@ impl Default for SysfsUsageSource {
 #[async_trait]
 impl UsageSource for SysfsUsageSource {
     async fn data_usage(&self) -> UsageBytes {
-        let mut total = UsageBytes::default();
-        for iface in &self.ifaces {
-            total.rx_bytes += Self::read_counter(iface, "rx_bytes");
-            total.tx_bytes += Self::read_counter(iface, "tx_bytes");
+        match self.modem_iface() {
+            Some(iface) => UsageBytes {
+                rx_bytes: self.read_counter(&iface, "rx_bytes"),
+                tx_bytes: self.read_counter(&iface, "tx_bytes"),
+            },
+            None => UsageBytes::default(),
         }
-        total
     }
 }
 
@@ -811,6 +851,92 @@ mod tests {
         // fresh usage snapshot.
         t.poll_once().await;
         assert_eq!(stats.enqueued(), 2);
+    }
+
+    #[tokio::test]
+    async fn sysfs_source_counts_only_wwan0_when_present() {
+        // wwan0 present → count wwan0, never usb0 (even if usb0 also exists).
+        let dir = tempfile::tempdir().unwrap();
+        let net = dir.path().join("net");
+        for (iface, rx, tx) in [("wwan0", "100", "200"), ("usb0", "9000", "9000")] {
+            let stats = net.join(iface).join("statistics");
+            std::fs::create_dir_all(&stats).unwrap();
+            std::fs::write(stats.join("rx_bytes"), rx).unwrap();
+            std::fs::write(stats.join("tx_bytes"), tx).unwrap();
+        }
+        let src = SysfsUsageSource::with_roots(net, dir.path().join("no-gadget"));
+        let u = src.data_usage().await;
+        assert_eq!(u.rx_bytes, 100);
+        assert_eq!(u.tx_bytes, 200);
+    }
+
+    #[tokio::test]
+    async fn sysfs_source_counts_usb0_as_modem_only_when_no_gadget() {
+        // No wwan0, usb0 present, no provisioned gadget → usb0 IS the modem
+        // RNDIS iface, so its counters are the cellular usage.
+        let dir = tempfile::tempdir().unwrap();
+        let net = dir.path().join("net");
+        let stats = net.join("usb0").join("statistics");
+        std::fs::create_dir_all(&stats).unwrap();
+        std::fs::write(stats.join("rx_bytes"), "300").unwrap();
+        std::fs::write(stats.join("tx_bytes"), "400").unwrap();
+        let src = SysfsUsageSource::with_roots(net, dir.path().join("no-gadget"));
+        let u = src.data_usage().await;
+        assert_eq!(u.rx_bytes, 300);
+        assert_eq!(u.tx_bytes, 400);
+    }
+
+    #[tokio::test]
+    async fn usb0_only_board_with_no_modem_accrues_nothing_against_the_cap() {
+        // The headline bug: usb0 is the USB-gadget tether NIC (a provisioned
+        // gadget dir exists) and there is no modem. usb0 carries gigabytes of
+        // a tethered laptop's traffic, but NONE of it is cellular, so the cap
+        // tracker must see zero usage and never falsely throttle.
+        let dir = tempfile::tempdir().unwrap();
+        let net = dir.path().join("net");
+        let stats = net.join("usb0").join("statistics");
+        std::fs::create_dir_all(&stats).unwrap();
+        std::fs::write(stats.join("rx_bytes"), "5000000000").unwrap();
+        std::fs::write(stats.join("tx_bytes"), "5000000000").unwrap();
+        // A provisioned gadget marker → usb0 belongs to the tether, not a modem.
+        let gadget = dir.path().join("gadget");
+        std::fs::create_dir_all(&gadget).unwrap();
+        let src = SysfsUsageSource::with_roots(net, gadget);
+        let u = src.data_usage().await;
+        assert_eq!(u, UsageBytes::default(), "tether traffic must not count");
+
+        // And drive it through a poll: a 1 KiB cap stays OK because nothing
+        // accrued, so the cap never crosses a throttle threshold.
+        let bus = Arc::new(UplinkEventBus::new());
+        let mut rx = bus.subscribe();
+        let mut t = DataCapTracker::with_config(
+            Arc::new(src),
+            Arc::clone(&bus),
+            1.0 / (1024.0 * 1024.0), // 1 KiB cap
+            dir.path().join("modem-usage.json"),
+        );
+        t.poll_once().await;
+        assert_eq!(t.state.cumulative_bytes, 0, "no cellular bytes accrued");
+        assert_eq!(t.classify(), DataCapState::Ok);
+        // The only state the cap ever reaches is `ok` (the first-poll baseline
+        // transition), never a throttle/block, because nothing was counted.
+        if let Ok(evt) = rx.try_recv() {
+            assert_eq!(
+                evt.data_cap_state,
+                Some(DataCapState::Ok),
+                "a no-modem box must never throttle"
+            );
+        }
+        // A second poll at the same (still-zero) usage emits no further event.
+        t.poll_once().await;
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn sysfs_source_with_no_ifaces_reads_zero() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = SysfsUsageSource::with_roots(dir.path().join("net"), dir.path().join("gadget"));
+        assert_eq!(src.data_usage().await, UsageBytes::default());
     }
 
     #[tokio::test]

@@ -92,6 +92,35 @@ pub fn apn_for_imsi(imsi: &str) -> Option<&'static str> {
         .map(|(_, apn)| *apn)
 }
 
+/// The cellular session the daemon should drive given the persisted config.
+/// The daemon owns the modem (the REST modem write path only persists the
+/// config file), so it re-reads the file each poll and reconciles the live
+/// session to this desired state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModemSession {
+    /// Dial the data session (config file present AND `enabled` not false).
+    Up,
+    /// Tear the data session down (config file present AND `enabled` is false).
+    Down,
+    /// Leave the modem untouched (no config file → never auto-dial a bare board).
+    Leave,
+}
+
+/// Decide the desired cellular session from the persisted config. A board with
+/// no config file is left alone (`Leave`), so a bench box never auto-dials. With
+/// a config file present, `enabled` (default true when the key is absent, to
+/// match the Python `config.get("enabled", True)`) decides up vs down.
+pub fn desired_modem_session(config_present: bool, cfg: &ModemConfig) -> ModemSession {
+    if !config_present {
+        return ModemSession::Leave;
+    }
+    if cfg.enabled.unwrap_or(true) {
+        ModemSession::Up
+    } else {
+        ModemSession::Down
+    }
+}
+
 /// Persisted modem config sidecar (`{apn, cap_gb, enabled}`).
 #[derive(Debug, Clone, PartialEq, Default, Deserialize)]
 pub struct ModemConfig {
@@ -543,6 +572,30 @@ impl ModemManager {
         config_to_json(&st.config)
     }
 
+    /// Re-read the persisted config sidecar into the manager's live config, so
+    /// `enabled()` and the dialed APN reflect a file the REST modem write path
+    /// rewrote out-of-process. Returns the freshly-loaded config. The daemon
+    /// calls this each poll before reconciling the session, the same
+    /// per-tick-reread contract the data-cap tracker uses for the cellular cap.
+    pub async fn reload_config(&self) -> ModemConfig {
+        let cfg = load_config(&self.config_path);
+        let mut st = self.state.lock().await;
+        st.config = cfg.clone();
+        cfg
+    }
+
+    /// The configured APN for a dial, or `"auto"` when none is set (so carrier
+    /// detection runs). Reads the live config.
+    pub async fn configured_apn(&self) -> String {
+        self.state
+            .lock()
+            .await
+            .config
+            .apn
+            .clone()
+            .unwrap_or_else(|| "auto".to_string())
+    }
+
     /// Read the live SIM IMSI for carrier-APN auto-detection. Prefers the D-Bus
     /// 3GPP property; if the bus has none (D-Bus absent or no SIM) returns
     /// `None` and the AT fallback reads `AT+CIMI` itself during bring-up. Used
@@ -954,6 +1007,84 @@ mod tests {
             partial.render_json(),
             r#"{"apn": "internet", "enabled": false}"#
         );
+    }
+
+    #[test]
+    fn desired_session_decides_up_down_leave() {
+        // No config file → leave the modem alone (a bare board never auto-dials).
+        assert_eq!(
+            desired_modem_session(false, &ModemConfig::default()),
+            ModemSession::Leave
+        );
+        // Config present, enabled absent → default-enabled → Up.
+        assert_eq!(
+            desired_modem_session(true, &ModemConfig::default()),
+            ModemSession::Up
+        );
+        // Config present, enabled true → Up.
+        let on = ModemConfig {
+            enabled: Some(true),
+            ..Default::default()
+        };
+        assert_eq!(desired_modem_session(true, &on), ModemSession::Up);
+        // Config present, enabled false → Down.
+        let off = ModemConfig {
+            enabled: Some(false),
+            ..Default::default()
+        };
+        assert_eq!(desired_modem_session(true, &off), ModemSession::Down);
+        // A disabled config with no file still leaves the modem alone.
+        assert_eq!(desired_modem_session(false, &off), ModemSession::Leave);
+    }
+
+    #[tokio::test]
+    async fn reload_config_picks_up_a_rewritten_file_and_flips_enabled() {
+        // The daemon owns the session: the REST write path only rewrites the
+        // file, so the manager must re-read it to learn enabled/apn changes.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ground-station-modem.json");
+        // Seed a disabled config and load it into a fresh manager.
+        std::fs::write(
+            &path,
+            ModemConfig {
+                apn: Some("internet".into()),
+                cap_gb: Some(2.0),
+                enabled: Some(false),
+            }
+            .render_json(),
+        )
+        .unwrap();
+        let m = mgr(Arc::new(DisabledDbus), dir.path());
+        // Initial reload sees the disabled config → desired session is Down.
+        let cfg = m.reload_config().await;
+        assert_eq!(cfg.enabled, Some(false));
+        assert_eq!(desired_modem_session(true, &cfg), ModemSession::Down);
+        assert!(!m.enabled().await);
+
+        // Operator rewrites the file to enable + a new APN (out of process).
+        std::fs::write(
+            &path,
+            ModemConfig {
+                apn: Some("jionet".into()),
+                cap_gb: Some(2.0),
+                enabled: Some(true),
+            }
+            .render_json(),
+        )
+        .unwrap();
+        let cfg = m.reload_config().await;
+        assert_eq!(cfg.enabled, Some(true));
+        assert_eq!(desired_modem_session(true, &cfg), ModemSession::Up);
+        assert!(m.enabled().await);
+        // The dialed APN follows the file too.
+        assert_eq!(m.configured_apn().await, "jionet");
+    }
+
+    #[tokio::test]
+    async fn configured_apn_defaults_to_auto_when_unset() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = mgr(Arc::new(DisabledDbus), dir.path());
+        assert_eq!(m.configured_apn().await, "auto");
     }
 
     #[tokio::test]

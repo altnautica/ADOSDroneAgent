@@ -7,6 +7,7 @@
 
 pub mod cmd;
 pub mod cmdsock;
+pub mod config;
 pub mod data_cap;
 pub mod firewall;
 pub mod managers;
@@ -21,6 +22,7 @@ pub mod throttle;
 // Re-export the surface a consumer (or the daemon) reaches for.
 pub use cmd::{CmdOut, CmdRunner, TokioCmdRunner};
 pub use cmdsock::CmdState;
+pub use config::UplinkConfig;
 pub use data_cap::{DataCapTracker, SysfsUsageSource, UsageSource};
 pub use firewall::{FirewallBackend, ShareUplinkFirewall};
 pub use managers::{
@@ -34,4 +36,4 @@ pub use router::failover;
 pub use router::health;
 pub use router::{CloudProber, IpRouteApplier, StubManager, UplinkManager, UplinkRouter};
 pub use sysfs::detect_ethernet_iface;
-pub use throttle::run_throttle_consumer;
+pub use throttle::{run_share_uplink_consumer, run_throttle_consumer};

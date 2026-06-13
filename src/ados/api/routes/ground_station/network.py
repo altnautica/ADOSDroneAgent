@@ -365,9 +365,14 @@ async def put_network_share_uplink(update: ShareUplinkUpdate) -> dict[str, Any]:
         ) from exc
 
     applied = await _gs._apply_share_uplink(bool(update.enabled))
-    return {
+    result = {
         "enabled": bool(update.enabled),
         "applied": applied["applied"],
-        "apply_error": applied["apply_error"],
+        "apply_error": applied.get("apply_error"),
         "backend": applied.get("backend"),
     }
+    # When the apply did not land (e.g. no active uplink to MASQUERADE on),
+    # surface the short reason so the GCS can tell the operator why.
+    if not applied["applied"] and applied.get("reason"):
+        result["reason"] = applied["reason"]
+    return result

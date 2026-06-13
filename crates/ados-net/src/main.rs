@@ -23,11 +23,15 @@ use tokio::sync::Mutex;
 use ados_net::cmd::TokioCmdRunner;
 use ados_net::data_cap::{DataCapTracker, SysfsUsageSource, DATA_CAP_INTERVAL};
 use ados_net::managers::{
-    EthernetManager, HostapdManager, ModemConfig, ModemManager, UsbGadgetManager, WifiClientManager,
+    desired_modem_session, EthernetManager, HostapdManager, ModemConfig, ModemManager,
+    ModemSession, UsbGadgetManager, WifiClientManager,
 };
 use ados_net::router::failover;
 use ados_net::sysfs::detect_ethernet_iface;
-use ados_net::{run_throttle_consumer, ShareUplinkFirewall, UplinkManager, UplinkRouter};
+use ados_net::{
+    run_share_uplink_consumer, run_throttle_consumer, ShareUplinkFirewall, UplinkManager,
+    UplinkRouter,
+};
 
 fn init_logging() {
     use ados_protocol::logd::layer::LogdLayer;
@@ -128,14 +132,28 @@ async fn main() -> Result<()> {
     ));
 
     // Share-uplink firewall + the data-cap throttle bridge. Subscribe to the
-    // router's bus BEFORE spawning the consumer so a threshold event published
-    // right after the spawn is not lost to the broadcast channel.
+    // router's bus BEFORE spawning the consumers so an event published right
+    // after the spawn is not lost to the broadcast channel.
     let firewall = Arc::new(ShareUplinkFirewall::new(runner.clone()));
     let throttle_rx = router.bus().subscribe();
     let throttle = tokio::spawn(run_throttle_consumer(
         throttle_rx,
         Arc::clone(&router),
         Arc::clone(&firewall),
+    ));
+
+    // Share-uplink NAT reconcile: apply the persisted share_uplink flag on the
+    // active iface at start, then re-apply on every uplink switch so the NAT
+    // MASQUERADE rule follows the active uplink. The daemon owns this (the REST
+    // share-uplink write path only persists the flag), and the flag is re-read
+    // from the agent config on each event so an operator toggle lands without a
+    // restart.
+    let share_uplink_rx = router.bus().subscribe();
+    let share_uplink_task = tokio::spawn(run_share_uplink_consumer(
+        share_uplink_rx,
+        Arc::clone(&router),
+        Arc::clone(&firewall),
+        || ados_net::UplinkConfig::load().share_uplink(),
     ));
 
     // Cellular data-cap tracker: polls sysfs counters at 60 s and publishes
@@ -159,9 +177,38 @@ async fn main() -> Result<()> {
         )
         .with_emitter(emitter.clone()),
     ));
+    // Cellular modem is HW-gated and DISABLED by default: only bring it up when
+    // the operator has written the config sidecar AND left `enabled` set. A
+    // bare board with no modem config never auto-dials. The data session uses
+    // the persisted APN (or "auto"); IMSI-based APN auto-detect over D-Bus is
+    // resolved inside the modem manager's bring-up. The REST modem write path
+    // only PERSISTS the config file now; the daemon owns the live session, so
+    // the poll loop below re-reads the file and reconciles up/down without a
+    // restart (the same per-tick-reread contract as the cap).
+    let modem_config_present = std::path::Path::new(ados_net::paths::GS_MODEM_JSON).is_file();
+    let mut applied_session =
+        desired_modem_session(modem_config_present, &ModemConfig::load(&modem_cfg_path));
+    match applied_session {
+        ModemSession::Up => {
+            // Read the live SIM IMSI so carrier-APN auto-detection works on the
+            // D-Bus path; the AT fallback reads AT+CIMI itself if D-Bus has none.
+            let imsi = modem.read_imsi().await;
+            let apn = modem.configured_apn().await;
+            let result = modem.bring_up(&apn, imsi.as_deref()).await;
+            tracing::info!(imsi_known = imsi.is_some(), result = %result, "modem_bring_up");
+        }
+        ModemSession::Down | ModemSession::Leave => {
+            tracing::info!(
+                config = modem_config_present,
+                "modem_disabled_by_default_not_dialing"
+            );
+        }
+    }
+
     let data_cap_task = {
         let data_cap = Arc::clone(&data_cap);
         let modem_cfg_path = modem_cfg_path.clone();
+        let modem = Arc::clone(&modem);
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(DATA_CAP_INTERVAL);
             let mut applied_cap_gb = startup_cap_gb;
@@ -169,16 +216,40 @@ async fn main() -> Result<()> {
                 tick.tick().await;
                 // Pick up an operator cap change (PUT /network/modem) without a
                 // daemon restart. Cheap: a small JSON read once per minute.
-                let cap_gb = ModemConfig::load(&modem_cfg_path)
-                    .cap_gb
-                    .unwrap_or(ados_net::data_cap::DEFAULT_CAP_GB);
-                let mut t = data_cap.lock().await;
-                if cap_gb != applied_cap_gb {
-                    t.set_cap(cap_gb);
-                    applied_cap_gb = cap_gb;
+                let config_present = modem_cfg_path.is_file();
+                let cfg = modem.reload_config().await;
+                let cap_gb = cfg.cap_gb.unwrap_or(ados_net::data_cap::DEFAULT_CAP_GB);
+                {
+                    let mut t = data_cap.lock().await;
+                    if cap_gb != applied_cap_gb {
+                        t.set_cap(cap_gb);
+                        applied_cap_gb = cap_gb;
+                    }
+                    t.check_month_reset();
+                    t.poll_once().await;
                 }
-                t.check_month_reset();
-                t.poll_once().await;
+
+                // Reconcile the cellular session to the persisted config. The
+                // REST modem write path no longer drives the modem in-process,
+                // so an operator enabling/disabling it lands here within one
+                // poll. Only act on a transition so a steady state never re-dials.
+                let desired = desired_modem_session(config_present, &cfg);
+                if desired != applied_session {
+                    match desired {
+                        ModemSession::Up => {
+                            let imsi = modem.read_imsi().await;
+                            let apn = modem.configured_apn().await;
+                            let result = modem.bring_up(&apn, imsi.as_deref()).await;
+                            tracing::info!(result = %result, "modem.reconcile_bring_up");
+                        }
+                        ModemSession::Down => {
+                            let _ = modem.bring_down().await;
+                            tracing::info!("modem.reconcile_bring_down");
+                        }
+                        ModemSession::Leave => {}
+                    }
+                    applied_session = desired;
+                }
             }
         })
     };
@@ -221,25 +292,6 @@ async fn main() -> Result<()> {
         tracing::info!("usb_gadget_configfs_absent_skipping");
     }
 
-    // Cellular modem is HW-gated and DISABLED by default: only bring it up when
-    // the operator has written the config sidecar AND left `enabled` set. A
-    // bare board with no modem config never auto-dials. The data session uses
-    // the persisted APN (or "auto"); IMSI-based APN auto-detect over D-Bus is
-    // resolved inside the modem manager's bring-up.
-    let modem_config_present = std::path::Path::new(ados_net::paths::GS_MODEM_JSON).is_file();
-    if modem_config_present && modem.enabled().await {
-        // Read the live SIM IMSI so carrier-APN auto-detection works on the
-        // D-Bus path; the AT fallback reads AT+CIMI itself if D-Bus has none.
-        let imsi = modem.read_imsi().await;
-        let result = modem.bring_up("auto", imsi.as_deref()).await;
-        tracing::info!(imsi_known = imsi.is_some(), result = %result, "modem_bring_up");
-    } else {
-        tracing::info!(
-            config = modem_config_present,
-            "modem_disabled_by_default_not_dialing"
-        );
-    }
-
     notify_ready();
 
     // Health loop: tick now, then every HEALTH_INTERVAL, until SIGTERM/SIGINT.
@@ -272,6 +324,7 @@ async fn main() -> Result<()> {
     usb_gadget.teardown().await;
     hostapd.stop().await;
     throttle.abort();
+    share_uplink_task.abort();
     cmdsock_task.abort();
 
     Ok(())

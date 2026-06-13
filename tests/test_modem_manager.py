@@ -213,6 +213,33 @@ async def test_configure_cap_gb_only(tmp_config_path: Path) -> None:
     assert on_disk["cap_gb"] == 10.0
 
 
+async def test_configure_persists_without_driving_the_modem(
+    tmp_config_path: Path,
+) -> None:
+    # The native daemon owns the live session, so the REST write path must only
+    # persist the sidecar — never call bring_up / bring_down in-process (that
+    # would race the daemon for the modem). Enabling the modem persists
+    # enabled:true but does NOT dial.
+    manager = GroundStationModemManager()
+    manager.bring_up = AsyncMock()  # type: ignore[method-assign]
+    manager.bring_down = AsyncMock()  # type: ignore[method-assign]
+
+    result = await manager.configure(apn="jionet", enabled=True)
+    assert result["enabled"] is True
+    assert result["apn"] == "jionet"
+    on_disk = json.loads(tmp_config_path.read_text(encoding="utf-8"))
+    assert on_disk["enabled"] is True
+    assert on_disk["apn"] == "jionet"
+    manager.bring_up.assert_not_called()
+    manager.bring_down.assert_not_called()
+
+    # Disabling likewise only persists; it does not hang up the link in-process.
+    result = await manager.configure(enabled=False)
+    assert result["enabled"] is False
+    manager.bring_up.assert_not_called()
+    manager.bring_down.assert_not_called()
+
+
 # ---------------------------------------------------------------------------
 # status() / data_usage()
 # ---------------------------------------------------------------------------

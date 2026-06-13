@@ -119,7 +119,13 @@ struct RouterState {
 /// Priority-based uplink failover with hysteresis and health probing.
 pub struct UplinkRouter {
     managers: HashMap<String, Arc<dyn UplinkManager>>,
-    priority: Vec<String>,
+    /// The live failover order. Interior-mutable because the operator can edit
+    /// the priority file (`PUT /network/priority`) while the daemon runs and the
+    /// daemon owns the router behind an `Arc`; [`tick`](Self::tick) reloads it
+    /// from disk each iteration so the change takes effect without a restart.
+    /// A `std::sync::Mutex` (not the async one) because the critical sections
+    /// are a quick clone / swap that never spans an `.await`.
+    priority: std::sync::Mutex<Vec<String>>,
     priority_config_path: std::path::PathBuf,
     prober: Arc<dyn Prober>,
     route: Arc<dyn RouteApplier>,
@@ -183,7 +189,7 @@ impl UplinkRouter {
         let priority = priority.unwrap_or_else(|| failover::load_priority(&cfg_path));
         Self {
             managers,
-            priority,
+            priority: std::sync::Mutex::new(priority),
             priority_config_path: cfg_path,
             prober,
             route,
@@ -198,17 +204,52 @@ impl UplinkRouter {
         Arc::clone(&self.bus)
     }
 
+    /// A snapshot of the live failover order.
     pub fn get_priority(&self) -> Vec<String> {
-        self.priority.clone()
+        self.priority_snapshot()
     }
 
-    /// Validate, store, and atomically persist a new priority list.
-    pub fn set_priority(&mut self, priority_list: Vec<String>) -> Result<(), String> {
+    /// Clone the current priority list out of its lock. The lock is held only
+    /// for the clone, never across an `.await`.
+    fn priority_snapshot(&self) -> Vec<String> {
+        self.priority
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// Validate, store, and atomically persist a new priority list. Takes
+    /// `&self` (the list is interior-mutable) so the daemon, which owns the
+    /// router behind an `Arc`, can also drive it.
+    pub fn set_priority(&self, priority_list: Vec<String>) -> Result<(), String> {
         failover::validate_priority(&priority_list)?;
-        self.priority = priority_list;
-        failover::save_priority(&self.priority_config_path, &self.priority);
-        info!(priority = ?self.priority, "uplink.priority_updated");
+        {
+            let mut p = self.priority.lock().unwrap_or_else(|e| e.into_inner());
+            *p = priority_list;
+        }
+        let snapshot = self.priority_snapshot();
+        failover::save_priority(&self.priority_config_path, &snapshot);
+        info!(priority = ?snapshot, "uplink.priority_updated");
         Ok(())
+    }
+
+    /// Re-read the priority file from disk and adopt it when it differs from the
+    /// live order. Returns `true` when the order changed. Called at the top of
+    /// each [`tick`](Self::tick) so a `PUT /network/priority` that rewrote the
+    /// file takes effect within one health cycle without a daemon restart, the
+    /// same per-tick-reread contract the data-cap tracker uses for the cellular
+    /// cap. Best-effort: a missing / malformed file resolves to the default,
+    /// which is the loader's documented behavior, so a transient read error
+    /// never wedges the failover order.
+    pub fn reload_priority(&self) -> bool {
+        let on_disk = failover::load_priority(&self.priority_config_path);
+        let mut p = self.priority.lock().unwrap_or_else(|e| e.into_inner());
+        if *p == on_disk {
+            return false;
+        }
+        info!(from = ?*p, to = ?on_disk, "uplink.priority_reloaded");
+        *p = on_disk;
+        true
     }
 
     fn manager_for(&self, name: &str) -> Option<&Arc<dyn UplinkManager>> {
@@ -257,9 +298,9 @@ impl UplinkRouter {
         }
     }
 
-    async fn viable_uplinks(&self) -> Vec<String> {
+    async fn viable_uplinks(&self, priority: &[String]) -> Vec<String> {
         let mut viable = Vec::new();
-        for name in &self.priority {
+        for name in priority {
             if self.uplink_up(name).await {
                 viable.push(name.clone());
             }
@@ -348,8 +389,16 @@ impl UplinkRouter {
 
     /// One control-loop iteration. Ports `_tick`.
     pub async fn tick(&self) {
+        // Pick up an operator priority change (`PUT /network/priority` rewrote
+        // the file) before evaluating viability, so a new failover order takes
+        // effect this very tick. Then snapshot the order once so this whole
+        // iteration sees a consistent list even if the file is rewritten again
+        // mid-tick.
+        self.reload_priority();
+        let priority = self.priority_snapshot();
+
         let mut st = self.state.lock().await;
-        let available = self.viable_uplinks().await;
+        let available = self.viable_uplinks(&priority).await;
 
         // No viable uplink at all. Clear state if we had one.
         if available.is_empty() {
@@ -385,10 +434,10 @@ impl UplinkRouter {
         };
 
         if ok {
-            self.handle_probe_success(&mut st, available, cooldown_ok)
+            self.handle_probe_success(&mut st, &priority, available, cooldown_ok)
                 .await;
         } else {
-            self.handle_probe_failure(&mut st, available, cooldown_ok)
+            self.handle_probe_failure(&mut st, &priority, available, cooldown_ok)
                 .await;
         }
     }
@@ -397,6 +446,7 @@ impl UplinkRouter {
     async fn handle_probe_success(
         &self,
         st: &mut RouterState,
+        priority: &[String],
         available: Vec<String>,
         cooldown_ok: bool,
     ) {
@@ -414,7 +464,7 @@ impl UplinkRouter {
             _ => return,
         };
 
-        let higher = failover::select_higher_priority(&self.priority, &available, Some(&active));
+        let higher = failover::select_higher_priority(priority, &available, Some(&active));
         if higher.is_empty() {
             st.success_streak = 0;
             return;
@@ -441,6 +491,7 @@ impl UplinkRouter {
     async fn handle_probe_failure(
         &self,
         st: &mut RouterState,
+        priority: &[String],
         available: Vec<String>,
         cooldown_ok: bool,
     ) {
@@ -453,11 +504,8 @@ impl UplinkRouter {
             return;
         }
 
-        let next_uplink = failover::select_failover_target(
-            &self.priority,
-            &available,
-            st.active_uplink.as_deref(),
-        );
+        let next_uplink =
+            failover::select_failover_target(priority, &available, st.active_uplink.as_deref());
         let next_uplink = match next_uplink {
             Some(n) => n,
             None => {
@@ -509,11 +557,12 @@ impl UplinkRouter {
     /// A snapshot of the live router state. Key names match the Python
     /// `get_state` dict (data-cap usage lands with the modem chunk).
     pub async fn get_state(&self) -> serde_json::Value {
+        let priority = self.priority_snapshot();
         let st = self.state.lock().await;
         serde_json::json!({
             "active_uplink": st.active_uplink,
             "internet_reachable": st.internet_reachable,
-            "priority": self.priority,
+            "priority": priority,
             "fail_streak": st.fail_streak,
             "success_streak": st.success_streak,
             "last_switch_monotonic": st.last_switch_at.map(|t| t.elapsed().as_secs_f64()),
@@ -650,7 +699,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let flag = dir.path().join("uplink-active");
         // eth0 + wlan0_client both up; probe always fails.
-        let (mut r, _p) = router(
+        let (r, _p) = router(
             &[("eth0", true), ("wlan0_client", true)],
             false,
             flag.clone(),
@@ -739,5 +788,85 @@ mod tests {
         ] {
             assert!(st.get(k).is_some(), "missing key {k}");
         }
+    }
+
+    /// Build a router with an explicit priority-config path so a test can rewrite
+    /// the file and prove the per-tick reload adopts it.
+    fn router_with_cfg(
+        specs: &[(&str, bool)],
+        verdict: bool,
+        cfg_path: std::path::PathBuf,
+        flag_path: std::path::PathBuf,
+    ) -> UplinkRouter {
+        let prober = Arc::new(ScriptedProber {
+            verdict,
+            calls: AtomicUsize::new(0),
+        });
+        UplinkRouter::with_seams(
+            managers(specs),
+            // Load the order from the cfg file (None forces the loader).
+            None,
+            Some(cfg_path),
+            prober as Arc<dyn Prober>,
+            Arc::new(RecordingRoute::default()),
+            ActiveFlagWriter::with_path(flag_path),
+        )
+    }
+
+    #[tokio::test]
+    async fn reload_priority_adopts_a_rewritten_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("ground-station-uplink.json");
+        // Seed the file with a non-default order so the initial load picks it up.
+        failover::save_priority(&cfg, &s(&["wlan0_client", "eth0"]));
+        let r = router_with_cfg(
+            &[("eth0", true), ("wlan0_client", true)],
+            true,
+            cfg.clone(),
+            dir.path().join("uplink-active"),
+        );
+        assert_eq!(r.get_priority(), s(&["wlan0_client", "eth0"]));
+        // An unchanged file → reload is a no-op.
+        assert!(!r.reload_priority());
+        // Operator rewrites the file (the REST PUT does this) → reload adopts it.
+        failover::save_priority(&cfg, &s(&["eth0", "wlan0_client", "wwan0"]));
+        assert!(r.reload_priority());
+        assert_eq!(r.get_priority(), s(&["eth0", "wlan0_client", "wwan0"]));
+        // A second reload with no further change → no-op.
+        assert!(!r.reload_priority());
+    }
+
+    #[tokio::test]
+    async fn tick_picks_up_a_priority_change_without_a_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("ground-station-uplink.json");
+        // Order puts wlan0_client first; both ifaces are up but the probe FAILS,
+        // so a failover walks the live priority order.
+        failover::save_priority(&cfg, &s(&["wlan0_client", "eth0"]));
+        let r = router_with_cfg(
+            &[("eth0", true), ("wlan0_client", true)],
+            false,
+            cfg.clone(),
+            dir.path().join("uplink-active"),
+        );
+        // First tick picks the highest-priority viable uplink = wlan0_client and
+        // probes it (fails → fail_streak 1, no switch this tick).
+        r.tick().await;
+        assert_eq!(r.get_state().await["active_uplink"], "wlan0_client");
+
+        // Operator rewrites the file to prefer eth0; the daemon never restarts.
+        // The reloaded order means the next failover target below the failing
+        // wlan0_client is eth0. Drive the fail streak past threshold + cooldown.
+        failover::save_priority(&cfg, &s(&["eth0", "wlan0_client"]));
+        arm_cooldown(&r).await;
+        r.tick().await; // reloads the order, fail_streak 2.
+                        // The live order now leads with eth0 (proves the reload reached state).
+        assert_eq!(
+            r.get_state().await["priority"],
+            serde_json::json!(["eth0", "wlan0_client"])
+        );
+        arm_cooldown(&r).await;
+        r.tick().await; // fail_streak 3 + cooldown → fail over to eth0.
+        assert_eq!(r.get_state().await["active_uplink"], "eth0");
     }
 }
