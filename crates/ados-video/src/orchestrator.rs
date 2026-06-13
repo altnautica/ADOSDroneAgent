@@ -360,12 +360,20 @@ impl VideoOrchestrator {
     /// supervised here; the raw_tap split rides the encoder's own health.
     async fn check_vision_tap_health(&mut self) -> bool {
         let Some(p) = self.vision_tap.as_mut() else {
-            return true;
+            // No tap yet: the first spawn is deferred until the RTSP source is
+            // ready, so report unhealthy WHILE THE PIPELINE IS RUNNING and let
+            // the run-loop ladder bring it up. When the pipeline is not running
+            // the tap is correctly absent and this is healthy. Without this, a
+            // tap that was deferred at stream start stays None forever (healthy
+            // by the old rule) so the ladder never starts it.
+            return self.state != PipelineState::Running;
         };
         if !p.is_running() {
             tracing::warn!("vision_tap_process_exited");
             self.vision_tap = None;
-            return true; // the run loop will respawn via the vision ladder
+            // Unhealthy: route into the run-loop vision ladder so the tap gets
+            // respawned (the ladder defers when the RTSP source is down).
+            return false;
         }
         let last = self.vision_tap_progress.last_progress_at().await;
         if wfb_tee_progress_is_stale(last, Instant::now()) {
@@ -758,10 +766,43 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn vision_tap_health_true_when_not_started() {
+    async fn vision_tap_health_true_when_not_started_and_not_running() {
         let mut o = test_orch();
-        // No tap spawned → health is vacuously true (nothing to supervise).
+        // No tap spawned and the pipeline is not running → healthy (nothing to
+        // supervise; the default state is Stopped).
+        assert_ne!(o.state, PipelineState::Running);
         assert!(o.check_vision_tap_health().await);
+    }
+
+    #[tokio::test]
+    async fn vision_tap_health_unhealthy_when_none_but_running() {
+        let mut o = test_orch();
+        // No tap spawned but the pipeline is running → unhealthy, so the
+        // run-loop ladder starts the deferred tap instead of leaving it None
+        // forever.
+        o.state = PipelineState::Running;
+        assert!(o.vision_tap.is_none());
+        assert!(!o.check_vision_tap_health().await);
+    }
+
+    #[tokio::test]
+    async fn vision_tap_health_unhealthy_after_exit() {
+        let mut o = test_orch();
+        o.state = PipelineState::Running;
+        // A tap that has already exited must read unhealthy so the ladder
+        // respawns it. `true` exits immediately; wait for it to be reaped.
+        let mut p = ManagedProcess::spawn("test-vision-tap", "true", &[]).unwrap();
+        for _ in 0..50 {
+            if !p.is_running() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(!p.is_running(), "test process should have exited");
+        o.vision_tap = Some(p);
+        assert!(!o.check_vision_tap_health().await);
+        // The exited slot is cleared so the ladder can re-spawn cleanly.
+        assert!(o.vision_tap.is_none());
     }
 
     #[tokio::test]
