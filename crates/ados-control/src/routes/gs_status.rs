@@ -8,9 +8,11 @@
 //!
 //! - **`GET /api/v1/ground-station/status`** — the OLED-aligned composite
 //!   snapshot: profile, the paired-drone identity (device id + key fingerprint),
-//!   the live radio link view, an empty GCS-client block, the AP network view, the
-//!   system snapshot (CPU/RAM/temp/uptime/version), the recorder flag mirrored into
-//!   a `video` block, the role block, and (for a relay/receiver) the mesh block.
+//!   the live radio link view, an empty GCS-client block, the AP network view
+//!   (`ap_ssid` resolved off config, `ap_ip` the `192.168.4.1` gateway while the
+//!   hostapd unit is active), the system snapshot (CPU/RAM/temp/uptime/version),
+//!   the recorder flag mirrored into a `video` block, the role block, and (for a
+//!   relay/receiver) the mesh block.
 //! - **`GET /api/v1/ground-station/wfb`** — the stored radio config
 //!   `{channel, bitrate_profile, fec}` from `video.wfb` (Python defaults
 //!   `0`/`"default"`/`"8/12"` when unset).
@@ -153,9 +155,10 @@ fn read_json_or_empty(path: &Path) -> Map<String, Value> {
 /// Composes the OLED-aligned blocks the GS UI + the GCS Hardware tab poll at 1 Hz.
 /// Each leg is fault-tolerant and degrades to the FastAPI fallback shape rather
 /// than failing: the pair read defaults to no peer, the link view to the
-/// disconnected base, the AP view to the empty defaults, the system snapshot to
-/// the zero default, the recorder to inactive, and the mesh block to `{}`.
-/// Guaranteed 200 on a ground-station node, `404` on a drone.
+/// disconnected base, the AP view to the not-running shape (resolved SSID,
+/// `ap_ip` null) when the hostapd unit is down, the system snapshot to the zero
+/// default, the recorder to inactive, and the mesh block to `{}`. Guaranteed 200
+/// on a ground-station node, `404` on a drone.
 pub async fn get_status(State(state): State<AppState>) -> Response {
     let role = match ground_station_role(&state) {
         Some(r) => r,
@@ -212,7 +215,7 @@ pub async fn get_status(State(state): State<AppState>) -> Response {
         },
         "link": link_view(),
         "gcs": {"clients": [], "pic_id": Value::Null},
-        "network": network_view(),
+        "network": network_view(&state),
         "system": system_snapshot(&state).await,
         "recording": recording_active,
         "video": {
@@ -466,18 +469,109 @@ fn link_view_from(path: &Path) -> Value {
 // The `network` sub-block (AP-only view).
 // ---------------------------------------------------------------------------
 
-/// The AP-only network view the `/status` route carries. The native front has no
-/// in-process hostapd manager (the AP runs in a sibling service), so the probe
-/// degrades to the FastAPI fallback shape — the same body the Python `_network_view`
-/// returns when `_hostapd_manager(app).status()` raises. Mirrors that fallback.
-fn network_view() -> Value {
+/// The hostapd systemd unit the live AP runs as (`_HOSTAPD_UNIT`), the
+/// `systemctl is-active` source for the AP `running` state.
+const HOSTAPD_UNIT: &str = "ados-hostapd.service";
+
+/// The AP gateway address the hostapd manager assigns (`_AP_ADDR`), reported as
+/// `ap_ip` while the AP is running.
+const AP_GATEWAY_IP: &str = "192.168.4.1";
+
+/// The AP-only network view the `/status` route carries, reproducing the Python
+/// `_network_view` over the live hostapd state.
+///
+/// The Python `_network_view` reads the live hostapd manager's `status()`:
+/// `ap_ssid` from `status()["ssid"]` (the manager's resolved SSID, present
+/// regardless of the unit state) and `ap_ip` from `status()["gateway"]`. The front
+/// has no in-process manager but reads the same live seams: the resolved SSID off
+/// config (the way `_hostapd_manager` + `_build_ssid` resolve it) and the
+/// `192.168.4.1` gateway while the AP unit is active. `usb_ip` / `uplink_type` /
+/// `uplink_reachable` are the same static legs the Python view carries. When the
+/// AP unit is down, `ap_ip` is null (the manager's status reports the gateway only
+/// while up), while `ap_ssid` still resolves off config.
+fn network_view(state: &AppState) -> Value {
+    let cfg = load_config_value(&state.pairing_paths.config);
+    let running = hostapd_running();
+    network_view_compose(&ap_ssid_from_config(&cfg), running)
+}
+
+/// Compose the `_network_view` body from the resolved SSID + the live running
+/// flag. Split out so the shape + the running-vs-not-running gating are unit
+/// tested without the `systemctl` IO. `ap_ip` is the gateway while running, else
+/// null; `ap_ssid` is the resolved SSID either way; the rest are the static legs.
+fn network_view_compose(ap_ssid: &str, running: bool) -> Value {
     json!({
-        "ap_ssid": Value::Null,
-        "ap_ip": Value::Null,
+        "ap_ssid": ap_ssid,
+        "ap_ip": if running { Value::String(AP_GATEWAY_IP.to_string()) } else { Value::Null },
         "usb_ip": Value::Null,
         "uplink_type": Value::Null,
         "uplink_reachable": false,
     })
+}
+
+/// The resolved AP SSID from config, the way `_hostapd_manager` + `_build_ssid`
+/// resolve it: honour a configured `network.hotspot.ssid` only when it is
+/// non-empty, carries no `{device_id}` placeholder, and already starts with
+/// `ADOS-GS-`; otherwise build `ADOS-GS-<first 4 hex of device_id, uppercased,
+/// zero-padded>`.
+fn ap_ssid_from_config(cfg: &Value) -> String {
+    let configured = cfg
+        .get("network")
+        .filter(|v| v.is_object())
+        .and_then(|v| v.get("hotspot"))
+        .filter(|v| v.is_object())
+        .and_then(|h| h.get("ssid"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let device_id = cfg
+        .get("agent")
+        .filter(|v| v.is_object())
+        .and_then(|v| v.get("device_id"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    resolve_ap_ssid(configured, device_id)
+}
+
+/// Resolve the AP SSID exactly as the live hostapd manager does (the
+/// `_hostapd_manager` `ssid_override` gate + `_build_ssid`): a configured SSID is
+/// honoured only when it is non-empty, has no `{device_id}` placeholder, and
+/// already starts with `ADOS-GS-`; otherwise build `ADOS-GS-<short_id>`.
+fn resolve_ap_ssid(configured: &str, device_id: &str) -> String {
+    if !configured.is_empty()
+        && !configured.contains("{device_id}")
+        && configured.starts_with("ADOS-GS-")
+    {
+        return configured.to_string();
+    }
+    format!("ADOS-GS-{}", short_id(device_id))
+}
+
+/// The first 4 hex chars of the device id, uppercased, zero-padded to 4 when the
+/// id has fewer than 4 hex chars after stripping non-hex characters. Mirrors the
+/// Python `_short_id`.
+fn short_id(device_id: &str) -> String {
+    let hex_only: String = device_id.chars().filter(char::is_ascii_hexdigit).collect();
+    let padded = if hex_only.len() >= 4 {
+        hex_only
+    } else {
+        format!("{hex_only}0000")
+    };
+    padded.chars().take(4).collect::<String>().to_uppercase()
+}
+
+/// True when the hostapd unit is active, reproducing the manager's
+/// `_is_unit_active`: run `systemctl is-active ados-hostapd.service` and treat a
+/// trimmed `active` stdout as running. A missing `systemctl` / spawn error reads
+/// as not running.
+fn hostapd_running() -> bool {
+    let output = match std::process::Command::new("systemctl")
+        .args(["is-active", HOSTAPD_UNIT])
+        .output()
+    {
+        Ok(o) => o,
+        Err(_) => return false,
+    };
+    String::from_utf8_lossy(&output.stdout).trim() == "active"
 }
 
 // ---------------------------------------------------------------------------
@@ -1065,16 +1159,69 @@ mod tests {
     }
 
     #[test]
-    fn network_view_is_the_empty_ap_default() {
-        // The native front has no in-process hostapd; the view is the fallback shape.
+    fn network_view_compose_running_carries_ssid_and_gateway() {
+        // The live shape the bench observed: a running AP reports the resolved
+        // SSID + the 192.168.4.1 gateway; the static legs are null/false.
         let want = json!({
-            "ap_ssid": null,
-            "ap_ip": null,
+            "ap_ssid": "ADOS-GS-D9DB",
+            "ap_ip": "192.168.4.1",
             "usb_ip": null,
             "uplink_type": null,
             "uplink_reachable": false,
         });
-        assert_eq!(network_view(), want);
+        assert_eq!(network_view_compose("ADOS-GS-D9DB", true), want);
+    }
+
+    #[test]
+    fn network_view_compose_not_running_gates_the_gateway() {
+        // A down AP keeps the resolved SSID but reports ap_ip null (the manager's
+        // status reports the gateway only while up).
+        let v = network_view_compose("ADOS-GS-0000", false);
+        assert_eq!(v["ap_ssid"], json!("ADOS-GS-0000"));
+        assert_eq!(v["ap_ip"], Value::Null);
+        assert_eq!(v["usb_ip"], Value::Null);
+        assert_eq!(v["uplink_type"], Value::Null);
+        assert_eq!(v["uplink_reachable"], json!(false));
+    }
+
+    #[test]
+    fn ap_ssid_from_config_resolves_the_template_and_honours_an_explicit_name() {
+        // The default hotspot SSID carries the `{device_id}` template, which
+        // resolves to the built ADOS-GS-<short id> name off the device id.
+        let cfg = json!({
+            "agent": {"device_id": "d9dbcafe"},
+            "network": {"hotspot": {"ssid": "ADOS-{device_id}"}},
+        });
+        assert_eq!(ap_ssid_from_config(&cfg), "ADOS-GS-D9DB");
+        // An explicit ADOS-GS- name is honoured verbatim.
+        let cfg2 = json!({"network": {"hotspot": {"ssid": "ADOS-GS-ABCD"}}});
+        assert_eq!(ap_ssid_from_config(&cfg2), "ADOS-GS-ABCD");
+        // No config at all → the zero-padded short id.
+        assert_eq!(ap_ssid_from_config(&json!({})), "ADOS-GS-0000");
+    }
+
+    #[test]
+    fn resolve_ap_ssid_gate_matches_the_hostapd_override_rule() {
+        // Honoured: non-empty, no template, ADOS-GS- prefix.
+        assert_eq!(resolve_ap_ssid("ADOS-GS-1234", "ffff"), "ADOS-GS-1234");
+        // Rejected: carries the template placeholder.
+        assert_eq!(
+            resolve_ap_ssid("ADOS-GS-{device_id}", "abcd"),
+            "ADOS-GS-ABCD"
+        );
+        // Rejected: empty.
+        assert_eq!(resolve_ap_ssid("", "abcd"), "ADOS-GS-ABCD");
+        // Rejected: wrong prefix.
+        assert_eq!(resolve_ap_ssid("Other-1234", "abcd"), "ADOS-GS-ABCD");
+    }
+
+    #[test]
+    fn short_id_matches_the_python_short_id() {
+        assert_eq!(short_id("deadbeef"), "DEAD");
+        assert_eq!(short_id("xy-12-34-56"), "1234");
+        assert_eq!(short_id("a1"), "A100");
+        assert_eq!(short_id(""), "0000");
+        assert_eq!(short_id("zzzz"), "0000");
     }
 
     #[test]
@@ -1378,7 +1525,10 @@ mod tests {
             },
             "link": link_view_from(&absent_stats),
             "gcs": {"clients": [], "pic_id": Value::Null},
-            "network": network_view(),
+            // The idle-GS network view: the resolved SSID with the AP unit down
+            // (ap_ip gated to null), composed from the pure seam so the fixture
+            // does not depend on the host's `systemctl` answer.
+            "network": network_view_compose("ADOS-GS-0000", false),
             "recording": false,
             "video": {"recording": false, "recording_filename": Value::Null},
             "role": role_block,

@@ -1682,6 +1682,68 @@ mod tests {
         assert_eq!(r["swap_percent"], json!(0.0)); // no swap signals → 0
     }
 
+    #[test]
+    fn resources_populate_from_a_representative_merged_signal_map() {
+        // The merged hardware-signal map a live board produces carries the canonical
+        // resource keys (`cpu.util.all`, `mem.*_bytes`, `disk.fs_*_bytes`,
+        // `thermal.primary_c`) alongside a tail of per-core / per-sensor / scheduler /
+        // pressure signals the consolidated route does not consume. The block must
+        // read the canonical keys out of that noisy map and come back fully
+        // populated, NOT the most-degraded empty object — the regression guard for a
+        // read keyed on the wrong signal names finding nothing.
+        let s = signals(&[
+            // Canonical keys the subset reads.
+            ("cpu.util.all", json!(23.7)),
+            ("mem.total_bytes", json!(8.0 * BYTES_PER_GB)),
+            ("mem.avail_bytes", json!(6.0 * BYTES_PER_GB)),
+            ("mem.cache_bytes", json!(2.0 * BYTES_PER_GB)),
+            ("mem.swap_total_bytes", json!(4.0 * BYTES_PER_GB)),
+            ("mem.swap_free_bytes", json!(3.0 * BYTES_PER_GB)),
+            ("disk.fs_total_bytes", json!(64.0 * BYTES_PER_GB)),
+            ("disk.fs_used_bytes", json!(16.0 * BYTES_PER_GB)),
+            ("thermal.primary_c", json!(52.4)),
+            // The non-consumed tail a real merged map also carries: per-core CPU, an
+            // alternate thermal-zone name, load averages, and a pressure-stall line.
+            ("cpu.util.0", json!(20.1)),
+            ("cpu.util.1", json!(25.0)),
+            ("cpu.util.2", json!(22.6)),
+            ("cpu.util.3", json!(27.0)),
+            ("thermal.cpu_thermal_c", json!(52.4)),
+            ("sched.loadavg_1", json!(0.42)),
+            ("sched.loadavg_5", json!(0.31)),
+            ("sched.loadavg_15", json!(0.27)),
+            ("mem.psi.cpu.some.avg10", json!(0.0)),
+        ]);
+        let r = derive_resources_subset(Some(&s));
+        let obj = r.as_object().unwrap();
+
+        // Populated, not the degraded empty object.
+        assert!(
+            !obj.is_empty(),
+            "resources must populate from a live signal map"
+        );
+
+        // Exactly the 13 consolidated keys — the per-core / load / pressure tail and
+        // the `temperatures` / `load_avg` Python-only fields are not carried.
+        assert_eq!(obj.len(), 13);
+
+        // Each canonical key reads its real value from the merged map (the read is
+        // keyed on the correct signal names), not a default / null.
+        assert_eq!(obj["cpu_percent"], json!(23.7));
+        assert_eq!(obj["memory_total_mb"], json!(8192)); // 8 GiB in MiB
+        assert_eq!(obj["memory_used_mb"], json!(2048)); // (8 - 6) GiB avail
+        assert_eq!(obj["memory_available_mb"], json!(6144));
+        assert_eq!(obj["memory_cache_mb"], json!(2048));
+        assert_eq!(obj["memory_percent"], json!(25.0)); // (8-6)/8 * 100
+        assert_eq!(obj["swap_total_mb"], json!(4096));
+        assert_eq!(obj["swap_used_mb"], json!(1024)); // (4 - 3) GiB used
+        assert_eq!(obj["swap_percent"], json!(25.0)); // 1/4 * 100
+        assert_eq!(obj["disk_total_gb"], json!(64.0));
+        assert_eq!(obj["disk_used_gb"], json!(16.0));
+        assert_eq!(obj["disk_percent"], json!(25.0)); // 16/64 * 100
+        assert_eq!(obj["temperature"], json!(52.4));
+    }
+
     // -------- services --------
 
     #[test]

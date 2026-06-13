@@ -17,9 +17,12 @@
 //! Python view helper returns when its own manager raises:
 //!
 //! - **`GET /api/v1/ground-station/network`** — the aggregate uplink view. `ap`
-//!   from the config hotspot, with the SSID resolved the way the live hostapd
-//!   manager resolves it (`ADOS-GS-<short device id>`, not the raw
-//!   `ADOS-{device_id}` template). `wifi_client` from the `ados-net` Wi-Fi
+//!   from the live hostapd state: `running` / `enabled` from
+//!   `systemctl is-active ados-hostapd`, the SSID resolved the way the live
+//!   hostapd manager resolves it (`ADOS-GS-<short device id>`, not the raw
+//!   `ADOS-{device_id}` template), the channel + interface from config (defaults
+//!   `6` / `wlan0`), the `192.168.4.1` gateway + the associated station MACs
+//!   (`iw dev <iface> station dump`) while running. `wifi_client` from the `ados-net` Wi-Fi
 //!   command socket's `wifi_status` op (+ the on-boot flag from the client config
 //!   file), degrading to the all-default shape when the socket is unreachable.
 //!   `ethernet` to its all-default shape (no live seam on the front). `modem_4g`
@@ -124,6 +127,24 @@ fn gs_wifi_client_json() -> PathBuf {
 /// `DEFAULT_PRIORITY`.
 const DEFAULT_PRIORITY: [&str; 4] = ["eth0", "wlan0_client", "wwan0", "usb0"];
 
+/// The hostapd systemd unit the live AP runs as. `systemctl is-active` on this
+/// unit is the front's `running` source, matching the hostapd manager's
+/// `_HOSTAPD_UNIT`.
+const HOSTAPD_UNIT: &str = "ados-hostapd.service";
+
+/// The default AP interface the hostapd manager binds (`_AP_IFACE`). The front
+/// honours a configured `network.hotspot.interface` when present, else this.
+const AP_IFACE: &str = "wlan0";
+
+/// The AP gateway address the hostapd manager assigns to the AP interface
+/// (`_AP_ADDR`), reported as the AP `gateway` while the AP is running.
+const AP_GATEWAY_IP: &str = "192.168.4.1";
+
+/// The hostapd manager's default channel (`_hostapd_manager` falls back to `6`
+/// when `network.hotspot.channel` is absent), so the AP channel is always an
+/// integer, never null.
+const AP_DEFAULT_CHANNEL: i64 = 6;
+
 // ---------------------------------------------------------------------------
 // GET /api/v1/ground-station/network — aggregate uplink view.
 // ---------------------------------------------------------------------------
@@ -152,17 +173,28 @@ pub async fn get_ground_station_network(State(state): State<AppState>) -> Respon
     Json(body).into_response()
 }
 
-/// The AP leg. The front has no hostapd command seam, so the AP is reported
-/// not-running. The Python `_ap_view` reaches its live `try` branch on any
-/// ground station (the hostapd `status()` never raises), so its `ssid` is the
-/// manager's RESOLVED SSID, not the raw config template — the front reproduces
-/// that resolution rather than echoing the literal `ADOS-{device_id}` template.
+/// The AP leg, reproducing the Python `_ap_view` over the live hostapd state.
 ///
-/// SSID resolution mirrors `_hostapd_manager` + `_build_ssid`: a configured SSID
-/// is honored only when it is non-empty, carries no `{device_id}` placeholder,
-/// and is already an `ADOS-GS-` name; otherwise the SSID is built as
-/// `ADOS-GS-<first 4 hex of device_id, uppercased, zero-padded>`. The channel is
-/// the configured hotspot channel.
+/// The Python `_ap_view` reaches its live `try` branch on any ground station (the
+/// hostapd `status()` never raises) and returns that manager's live status:
+/// `running` from `systemctl is-active ados-hostapd`, the resolved SSID, the
+/// channel, the AP interface, the `192.168.4.1` gateway, and the associated
+/// station MACs. The front has no in-process hostapd manager, but every one of
+/// those legs reads off the same live seams the manager reads, so the front
+/// probes them directly instead of reporting a static not-running shape.
+///
+/// - `running` / `enabled` — `systemctl is-active ados-hostapd.service == active`.
+/// - `ssid` — resolved the way `_hostapd_manager` + `_build_ssid` resolve it: a
+///   configured SSID is honoured only when it is non-empty, carries no
+///   `{device_id}` placeholder, and is already an `ADOS-GS-` name; otherwise it
+///   is built as `ADOS-GS-<first 4 hex of device_id, uppercased, zero-padded>`.
+/// - `channel` — the configured hotspot channel, defaulting to `6` (the manager's
+///   default), so the channel is always an integer.
+/// - `interface` — the configured AP interface, defaulting to `wlan0`.
+/// - `gateway` — `192.168.4.1` while the AP is running, else null (the manager's
+///   `status()` reports the gateway only when the unit is up).
+/// - `connected_clients` — the associated station MACs from
+///   `iw dev <iface> station dump` while running, else the empty list.
 fn ap_view(cfg: &Value) -> Value {
     let hotspot = cfg
         .get("network")
@@ -182,18 +214,106 @@ fn ap_view(cfg: &Value) -> Value {
     let ssid = resolve_ap_ssid(configured_ssid, device_id);
     let channel = hotspot
         .and_then(|h| h.get("channel"))
-        .cloned()
-        .filter(|v| !v.is_null())
-        .unwrap_or(Value::Null);
+        .and_then(json_to_i64)
+        .unwrap_or(AP_DEFAULT_CHANNEL);
+    let interface = ap_interface(cfg);
+
+    let running = hostapd_running();
+    let clients = if running {
+        station_dump_macs(&interface)
+    } else {
+        Vec::new()
+    };
+    ap_view_compose(&ssid, channel, &interface, running, clients)
+}
+
+/// Compose the `_ap_view` body from already-probed pieces: the resolved SSID, the
+/// channel, the AP interface, the live running flag, and the associated station
+/// MACs. Split out so the shape + the running-vs-not-running gating are unit
+/// tested without the `systemctl` / `iw` IO. Mirrors the Python `_ap_view` live
+/// branch field-for-field, gating the gateway + clients on `running`.
+fn ap_view_compose(
+    ssid: &str,
+    channel: i64,
+    interface: &str,
+    running: bool,
+    clients: Vec<String>,
+) -> Value {
     json!({
-        "enabled": false,
-        "running": false,
+        "enabled": running,
+        "running": running,
         "ssid": ssid,
         "channel": channel,
-        "interface": Value::Null,
-        "gateway": Value::Null,
-        "connected_clients": [],
+        "interface": interface,
+        "gateway": if running { Value::String(AP_GATEWAY_IP.to_string()) } else { Value::Null },
+        "connected_clients": clients,
     })
+}
+
+/// The configured AP interface (`network.hotspot.interface`), defaulting to
+/// `wlan0` (`_AP_IFACE`) when absent / blank / non-string. Mirrors the hostapd
+/// manager's `interface` default.
+fn ap_interface(cfg: &Value) -> String {
+    cfg.get("network")
+        .filter(|v| v.is_object())
+        .and_then(|v| v.get("hotspot"))
+        .filter(|v| v.is_object())
+        .and_then(|h| h.get("interface"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(AP_IFACE)
+        .to_string()
+}
+
+/// True when the hostapd unit is active, reproducing the manager's
+/// `_is_unit_active`: run `systemctl is-active ados-hostapd.service` and treat a
+/// trimmed `active` stdout as running. A missing `systemctl` / spawn error reads
+/// as not running, matching the manager's `except` returning `False`.
+fn hostapd_running() -> bool {
+    let output = match std::process::Command::new("systemctl")
+        .args(["is-active", HOSTAPD_UNIT])
+        .output()
+    {
+        Ok(o) => o,
+        Err(_) => return false,
+    };
+    String::from_utf8_lossy(&output.stdout).trim() == "active"
+}
+
+/// The associated station MACs from `iw dev <iface> station dump`, parsing the
+/// `Station <mac> (on <iface>)` header lines and lowercasing each MAC, reproducing
+/// the manager's `_connected_clients`. A missing `iw` / a non-zero exit / a spawn
+/// error all yield the empty list, matching the manager's `except` / `not ok`
+/// returns.
+fn station_dump_macs(interface: &str) -> Vec<String> {
+    let output = match std::process::Command::new("iw")
+        .args(["dev", interface, "station", "dump"])
+        .output()
+    {
+        Ok(o) => o,
+        Err(_) => return Vec::new(),
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    parse_station_dump(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// Parse the MAC addresses out of `iw … station dump` output: each associated
+/// station begins with a `Station <mac> …` line whose second whitespace token is
+/// the MAC, lowercased. Mirrors the manager's `_connected_clients` line scan.
+fn parse_station_dump(text: &str) -> Vec<String> {
+    let mut macs = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix("Station ") {
+            if let Some(mac) = rest.split_whitespace().next() {
+                macs.push(mac.to_lowercase());
+            }
+        }
+    }
+    macs
 }
 
 /// Resolve the AP SSID the way the live hostapd manager does: honor a configured
@@ -875,6 +995,16 @@ fn json_to_f64(v: &Value) -> Option<f64> {
     }
 }
 
+/// Coerce a JSON number value to `i64`, accepting an integer or a float (a float
+/// truncates toward zero). `None` for a non-number, mirroring the Python
+/// `int(getattr(hotspot, "channel", 6))` channel read over a numeric value.
+fn json_to_i64(v: &Value) -> Option<i64> {
+    match v {
+        Value::Number(n) => n.as_i64().or_else(|| n.as_f64().map(|f| f as i64)),
+        _ => None,
+    }
+}
+
 /// Round to two decimal places, matching the Python `round(x, 2)` the `percent`
 /// leg uses.
 fn round2(v: f64) -> f64 {
@@ -887,11 +1017,22 @@ mod tests {
 
     /// The exact aggregate-view shape the FastAPI `/network` route returns on a
     /// fresh ground station with no config, no command socket, and no store: the
-    /// manager-absent defaults for every leg.
+    /// manager-absent defaults for every leg. The AP leg's running flag is the
+    /// live probe, so the fixture composes the static legs over an explicit
+    /// not-running AP rather than calling the `systemctl`/`iw` probe.
     #[test]
     fn network_aggregate_default_shape_is_the_golden_fixture() {
         let cfg = json!({});
-        let ap = ap_view(&cfg);
+        // The AP leg as composed when the live probe reports the unit down: the
+        // resolved SSID + default channel + default interface, with the gateway +
+        // clients gated off.
+        let ap = ap_view_compose(
+            "ADOS-GS-0000",
+            AP_DEFAULT_CHANNEL,
+            AP_IFACE,
+            false,
+            Vec::new(),
+        );
         let ethernet = ethernet_view_default();
         let priority = priority_list_from(None);
         let share = share_uplink_flag(&cfg);
@@ -913,8 +1054,11 @@ mod tests {
                 // zero-padded short id, matching the live hostapd manager over a
                 // fresh box (NOT the raw `ADOS-{device_id}` template).
                 "ssid": "ADOS-GS-0000",
-                "channel": null,
-                "interface": null,
+                // The channel is the manager's default (6), never null.
+                "channel": 6,
+                // The interface is the manager's default AP interface, never null.
+                "interface": "wlan0",
+                // The gateway + clients are gated off while the AP is down.
                 "gateway": null,
                 "connected_clients": [],
             },
@@ -931,16 +1075,64 @@ mod tests {
     }
 
     #[test]
-    fn ap_view_honours_a_configured_ados_gs_ssid_and_channel() {
-        // A config carrying an explicit ADOS-GS- SSID (no template placeholder)
-        // is honored verbatim; the channel comes from the hotspot section; the AP
-        // is still reported not-running (no command seam on the front).
+    fn ap_view_compose_running_shape_carries_gateway_and_clients() {
+        // The live shape the bench observed: a running AP reports enabled +
+        // running true, the resolved SSID, channel, interface, the 192.168.4.1
+        // gateway, and the associated station MAC.
+        let view = ap_view_compose(
+            "ADOS-GS-D9DB",
+            6,
+            "wlan0",
+            true,
+            vec!["dc:ea:e7:30:74:a6".to_string()],
+        );
+        let want = json!({
+            "enabled": true,
+            "running": true,
+            "ssid": "ADOS-GS-D9DB",
+            "channel": 6,
+            "interface": "wlan0",
+            "gateway": "192.168.4.1",
+            "connected_clients": ["dc:ea:e7:30:74:a6"],
+        });
+        assert_eq!(view, want);
+    }
+
+    #[test]
+    fn ap_view_compose_not_running_gates_the_gateway_and_clients() {
+        // A down AP reports enabled + running false, keeps the resolved SSID +
+        // channel + interface, and gates the gateway to null + the clients to the
+        // empty list (the manager's status reports the gateway only when up).
+        let view = ap_view_compose("ADOS-GS-ABCD", 11, "wlan0", false, Vec::new());
+        assert_eq!(view["enabled"], json!(false));
+        assert_eq!(view["running"], json!(false));
+        assert_eq!(view["ssid"], json!("ADOS-GS-ABCD"));
+        assert_eq!(view["channel"], json!(11));
+        assert_eq!(view["interface"], json!("wlan0"));
+        assert_eq!(view["gateway"], Value::Null);
+        assert_eq!(view["connected_clients"], json!([]));
+    }
+
+    #[test]
+    fn ap_view_resolves_the_ssid_channel_and_interface_from_config() {
+        // The SSID / channel / interface legs are sourced from config. A configured
+        // ADOS-GS- SSID is honoured verbatim; the channel + interface come from the
+        // hotspot section. The running flag itself is the live probe (asserted
+        // separately via ap_view_compose), so this test pins only the config-sourced
+        // legs.
         let cfg = json!({"network": {"hotspot": {"ssid": "ADOS-GS-ABCD", "channel": 6}}});
-        let ap = ap_view(&cfg);
-        assert_eq!(ap["ssid"], json!("ADOS-GS-ABCD"));
-        assert_eq!(ap["channel"], json!(6));
-        assert_eq!(ap["running"], json!(false));
-        assert_eq!(ap["connected_clients"], json!([]));
+        let hotspot = cfg.get("network").and_then(|n| n.get("hotspot")).unwrap();
+        let ssid = resolve_ap_ssid(
+            hotspot.get("ssid").and_then(Value::as_str).unwrap_or(""),
+            "",
+        );
+        let channel = hotspot
+            .get("channel")
+            .and_then(json_to_i64)
+            .unwrap_or(AP_DEFAULT_CHANNEL);
+        assert_eq!(ssid, "ADOS-GS-ABCD");
+        assert_eq!(channel, 6);
+        assert_eq!(ap_interface(&cfg), "wlan0");
     }
 
     #[test]
@@ -953,9 +1145,22 @@ mod tests {
             "agent": {"device_id": "deadbeef1234"},
             "network": {"hotspot": {"ssid": "ADOS-{device_id}", "channel": 11}},
         });
-        let ap = ap_view(&cfg);
-        assert_eq!(ap["ssid"], json!("ADOS-GS-DEAD"));
-        assert_eq!(ap["channel"], json!(11));
+        let hotspot = cfg.get("network").and_then(|n| n.get("hotspot")).unwrap();
+        let device_id = cfg
+            .get("agent")
+            .and_then(|a| a.get("device_id"))
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let ssid = resolve_ap_ssid(
+            hotspot.get("ssid").and_then(Value::as_str).unwrap_or(""),
+            device_id,
+        );
+        let channel = hotspot
+            .get("channel")
+            .and_then(json_to_i64)
+            .unwrap_or(AP_DEFAULT_CHANNEL);
+        assert_eq!(ssid, "ADOS-GS-DEAD");
+        assert_eq!(channel, 11);
     }
 
     #[test]
@@ -963,12 +1168,63 @@ mod tests {
         // A configured SSID that does not start with ADOS-GS- is NOT honored
         // (mirrors the hostapd manager's ssid_override gate); the built SSID
         // wins instead.
-        let cfg = json!({
-            "agent": {"device_id": "00ff"},
-            "network": {"hotspot": {"ssid": "MyOwnNetwork"}},
-        });
-        let ap = ap_view(&cfg);
-        assert_eq!(ap["ssid"], json!("ADOS-GS-00FF"));
+        let ssid = resolve_ap_ssid("MyOwnNetwork", "00ff");
+        assert_eq!(ssid, "ADOS-GS-00FF");
+    }
+
+    #[test]
+    fn ap_interface_defaults_to_wlan0_and_honours_an_override() {
+        // No hotspot section → the default AP interface.
+        assert_eq!(ap_interface(&json!({})), "wlan0");
+        // A blank interface falls back to the default.
+        assert_eq!(
+            ap_interface(&json!({"network": {"hotspot": {"interface": "  "}}})),
+            "wlan0"
+        );
+        // A configured interface is honoured verbatim.
+        assert_eq!(
+            ap_interface(&json!({"network": {"hotspot": {"interface": "ap0"}}})),
+            "ap0"
+        );
+    }
+
+    #[test]
+    fn ap_view_default_channel_is_six_when_unset() {
+        // No channel field → the manager's default 6, never null.
+        let cfg = json!({"network": {"hotspot": {}}});
+        let channel = cfg
+            .get("network")
+            .and_then(|n| n.get("hotspot"))
+            .and_then(|h| h.get("channel"))
+            .and_then(json_to_i64)
+            .unwrap_or(AP_DEFAULT_CHANNEL);
+        assert_eq!(channel, 6);
+    }
+
+    #[test]
+    fn parse_station_dump_extracts_lowercased_macs() {
+        // The `iw … station dump` output: each station starts with a
+        // `Station <mac> (on <iface>)` line; the MAC is the second token,
+        // lowercased. Indented detail lines (tx bytes, signal, etc.) are ignored.
+        let dump = "Station DC:EA:E7:30:74:A6 (on wlan0)\n\
+                    \tinactive time:\t40 ms\n\
+                    \trx bytes:\t12345\n\
+                    \tsignal:  \t-42 dBm\n\
+                    Station aa:bb:cc:dd:ee:ff (on wlan0)\n\
+                    \ttx bytes:\t67890\n";
+        assert_eq!(
+            parse_station_dump(dump),
+            vec![
+                "dc:ea:e7:30:74:a6".to_string(),
+                "aa:bb:cc:dd:ee:ff".to_string(),
+            ]
+        );
+        // No stations → the empty list.
+        assert_eq!(parse_station_dump(""), Vec::<String>::new());
+        assert_eq!(
+            parse_station_dump("Some unrelated output\n"),
+            Vec::<String>::new()
+        );
     }
 
     #[test]
