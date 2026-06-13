@@ -3,9 +3,12 @@
 from api_conformance.route_cases import case_by_name, registered_cases
 
 
-def test_initial_set_has_the_expected_routes():
-    names = [c.name for c in registered_cases()]
-    assert names == [
+def test_registry_covers_the_migrated_routes():
+    # The registry grows by a one-line append per migrated route, so this is a
+    # subset check (not exact equality) — it pins that the seeded surface and the
+    # wave-1 reads are all present without breaking on every future append.
+    names = {c.name for c in registered_cases()}
+    seeded = {
         "healthz",
         "version",
         "time",
@@ -14,7 +17,22 @@ def test_initial_set_has_the_expected_routes():
         "pairing-info",
         "pairing-code",
         "commands",
-    ]
+    }
+    wave1 = {
+        "fleet-enrollment",
+        "fleet-peers",
+        "params",
+        "services",
+        "signing-capability",
+        "signing-require",
+        "signing-counters",
+        "wfb",
+        "wfb-history",
+        "wfb-pair",
+        "wfb-pair-failover-status",
+    }
+    assert seeded <= names, f"missing seeded routes: {seeded - names}"
+    assert wave1 <= names, f"missing wave-1 routes: {wave1 - names}"
 
 
 def test_seeded_routes_are_all_read_only_and_not_sandboxed():

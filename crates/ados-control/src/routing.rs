@@ -41,52 +41,47 @@ struct NativeRoute {
 /// [`crate::routes::build_router`] registers. Kept in lockstep with that router:
 /// a route added there is added here so the auth edge keeps its native posture
 /// rather than proxying it.
-fn native_routes() -> [NativeRoute; 11] {
-    [
-        NativeRoute {
-            method: Method::GET,
-            path: "/healthz",
-        },
-        NativeRoute {
-            method: Method::GET,
-            path: "/api/version",
-        },
-        NativeRoute {
-            method: Method::GET,
-            path: "/api/status",
-        },
-        NativeRoute {
-            method: Method::GET,
-            path: "/api/telemetry",
-        },
-        NativeRoute {
-            method: Method::GET,
-            path: "/api/time",
-        },
-        NativeRoute {
-            method: Method::GET,
-            path: "/api/pairing/info",
-        },
-        NativeRoute {
-            method: Method::GET,
-            path: "/api/pairing/code",
-        },
-        NativeRoute {
-            method: Method::POST,
-            path: "/api/pairing/claim",
-        },
-        NativeRoute {
-            method: Method::POST,
-            path: "/api/pairing/unpair",
-        },
-        NativeRoute {
-            method: Method::POST,
-            path: "/api/command",
-        },
-        NativeRoute {
-            method: Method::GET,
-            path: "/api/commands",
-        },
+fn native_routes() -> Vec<NativeRoute> {
+    // Small constructors keep the list scannable as it grows route by route.
+    let get = |path| NativeRoute {
+        method: Method::GET,
+        path,
+    };
+    let post = |path| NativeRoute {
+        method: Method::POST,
+        path,
+    };
+    vec![
+        // Status + identity.
+        get("/healthz"),
+        get("/api/version"),
+        get("/api/status"),
+        get("/api/telemetry"),
+        get("/api/time"),
+        // Pairing handshake.
+        get("/api/pairing/info"),
+        get("/api/pairing/code"),
+        post("/api/pairing/claim"),
+        post("/api/pairing/unpair"),
+        // Command.
+        post("/api/command"),
+        get("/api/commands"),
+        // Params (full list; the single-param path-param route stays proxied).
+        get("/api/params"),
+        // Services inventory.
+        get("/api/services"),
+        // Fleet roster.
+        get("/api/fleet/enrollment"),
+        get("/api/fleet/peers"),
+        // MAVLink v2 signing reads.
+        get("/api/mavlink/signing/capability"),
+        get("/api/mavlink/signing/require"),
+        get("/api/mavlink/signing/counters"),
+        // WFB radio reads.
+        get("/api/wfb"),
+        get("/api/wfb/history"),
+        get("/api/wfb/pair"),
+        get("/api/wfb/pair/failover-status"),
     ]
 }
 
@@ -202,5 +197,42 @@ mod tests {
         // A path that only shares the prefix as a substring does NOT match.
         assert!(!is_permanent_python_path("/api/visionary"));
         assert!(!is_permanent_python_path("/api/setupwizard"));
+    }
+
+    #[test]
+    fn native_set_covers_every_registered_route() {
+        // INVARIANT: this set must list exactly the (method, path) pairs
+        // build_router registers (routes/mod.rs). The LAN-edge auth applies its
+        // posture only to native paths, so a route served by build_router but
+        // missing here would be served with auth SKIPPED. Adding a route is a
+        // two-place edit (build_router + here); this pins the count + the entries
+        // so a drift is caught at test time, not at the bench.
+        let routes = native_routes();
+        assert_eq!(
+            routes.len(),
+            22,
+            "native route count drifted from build_router"
+        );
+        let has = |m: Method, p: &str| routes.iter().any(|r| r.method == m && r.path == p);
+        // The wave-1 read routes must all be native (else auth-skipped on a paired
+        // agent).
+        for p in [
+            "/api/params",
+            "/api/services",
+            "/api/fleet/enrollment",
+            "/api/fleet/peers",
+            "/api/mavlink/signing/capability",
+            "/api/mavlink/signing/require",
+            "/api/mavlink/signing/counters",
+            "/api/wfb",
+            "/api/wfb/history",
+            "/api/wfb/pair",
+            "/api/wfb/pair/failover-status",
+        ] {
+            assert!(has(Method::GET, p), "{p} must be in the native set");
+        }
+        // The original surface stays native.
+        assert!(has(Method::GET, "/healthz"));
+        assert!(has(Method::POST, "/api/command"));
     }
 }

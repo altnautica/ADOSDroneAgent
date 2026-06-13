@@ -126,6 +126,118 @@ REGISTRY: list[RouteCase] = [
         paired_headers={"authorization": PAIRED_AUTH_PLACEHOLDER},
         extra_volatile=("id", "enqueued_at"),
     ),
+    # Fleet enrollment: the opt-in mesh awareness flag. Static not-enrolled
+    # object on this device, identical paired or not, no volatile fields.
+    RouteCase(
+        name="fleet-enrollment",
+        method="GET",
+        path="/api/fleet/enrollment",
+    ),
+    # Fleet peers: the roster the agent has discovered. Empty list with
+    # enrollment off — a bare array, the steady-state response.
+    RouteCase(
+        name="fleet-peers",
+        method="GET",
+        path="/api/fleet/peers",
+    ),
+    # The full cached FC parameter list + the sweep-progress envelope. The values
+    # and the cached/expected counts move as the sweep fills the cache, so they
+    # are masked; the envelope shape (params/count/cached/priming flags/progress)
+    # is the contract.
+    RouteCase(
+        name="params",
+        method="GET",
+        path="/api/params",
+        paired_headers={"authorization": PAIRED_AUTH_PLACEHOLDER},
+        extra_volatile=("count", "cached", "got", "expected"),
+    ),
+    # The live `ados-*.service` unit inventory. The per-service memory and the
+    # serving process's own pid/cpu/memory move between reads, so they are masked;
+    # the unit shape (name/state/sub_state/load_state/active) is the contract.
+    RouteCase(
+        name="services",
+        method="GET",
+        path="/api/services",
+        paired_headers={"authorization": PAIRED_AUTH_PLACEHOLDER},
+        extra_volatile=("memory_mb", "pid", "cpu_percent"),
+    ),
+    # MAVLink signing capability: whether the connected FC supports v2 signing.
+    # Read from the snapshot's FC flag + autopilot id + param tree; stable shape.
+    RouteCase(
+        name="signing-capability",
+        method="GET",
+        path="/api/mavlink/signing/capability",
+    ),
+    # The current SIGNING_REQUIRE param value from the cached param blob. Stable.
+    RouteCase(
+        name="signing-require",
+        method="GET",
+        path="/api/mavlink/signing/require",
+    ),
+    # The observational signed-frame counters. The last-signed timestamp moves
+    # when an observer is present, so it is masked.
+    RouteCase(
+        name="signing-counters",
+        method="GET",
+        path="/api/mavlink/signing/counters",
+        extra_volatile=("last_signed_rx_at",),
+    ),
+    # WFB link status: state, channel, adapter, and the link-quality numbers. The
+    # signal/packet fields move every read, so they are masked; the shape +
+    # channel-derived frequency/bandwidth + adapter block are the contract.
+    RouteCase(
+        name="wfb",
+        method="GET",
+        path="/api/wfb",
+        extra_volatile=(
+            "rssi_dbm",
+            "noise_dbm",
+            "snr_db",
+            "packets_received",
+            "packets_lost",
+            "loss_percent",
+            "fec_recovered",
+            "fec_failed",
+            "bitrate_kbps",
+            "bitrate_mbps",
+            "rx_silent_seconds",
+            "restart_count",
+            "samples",
+            "state",
+        ),
+    ),
+    # WFB link-quality history: a list of per-bucket samples. The timestamps + the
+    # numeric readings move every read, so they are masked; the {samples, count}
+    # shape is the contract.
+    RouteCase(
+        name="wfb-history",
+        method="GET",
+        path="/api/wfb/history",
+        extra_volatile=(
+            "samples",
+            "count",
+            "timestamp",
+            "rssi_dbm",
+            "snr_db",
+            "loss_percent",
+            "bitrate_kbps",
+        ),
+    ),
+    # WFB pair-state snapshot: paired flag, peer device-id, fingerprint, auto-pair,
+    # role. Stable between two reads (the fingerprint is a digest of the on-disk
+    # key, the peer/role come off config).
+    RouteCase(
+        name="wfb-pair",
+        method="GET",
+        path="/api/wfb/pair",
+    ),
+    # WFB local-bind to cloud-relay failover state. A single {failover_state}
+    # field, stable between two reads of the same agent.
+    RouteCase(
+        name="wfb-pair-failover-status",
+        method="GET",
+        path="/api/wfb/pair/failover-status",
+    ),
     # <append a RouteCase line per route as it migrates — the only shared edit>
 ]
 
