@@ -237,11 +237,7 @@ pub async fn put_client_join(Json(req): Json<WifiJoinRequest>) -> Response {
     let reply = match wifi_cmd(&request).await {
         NetCmd::Reply(r) => r,
         NetCmd::Error(msg) => {
-            return wifi_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "E_WIFI_JOIN_FAILED",
-                msg,
-            );
+            return wifi_error(StatusCode::INTERNAL_SERVER_ERROR, "E_WIFI_JOIN_FAILED", msg);
         }
         NetCmd::Unavailable => return socket_unavailable("E_WIFI_JOIN_FAILED"),
     };
@@ -297,9 +293,11 @@ fn join_response(reply: &Map<String, Value>) -> Value {
 pub async fn delete_client() -> Response {
     match wifi_cmd(&json!({"op": "wifi_leave"})).await {
         NetCmd::Reply(r) => Json(Value::Object(r)).into_response(),
-        NetCmd::Error(msg) => {
-            wifi_error(StatusCode::INTERNAL_SERVER_ERROR, "E_WIFI_LEAVE_FAILED", msg)
-        }
+        NetCmd::Error(msg) => wifi_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "E_WIFI_LEAVE_FAILED",
+            msg,
+        ),
         NetCmd::Unavailable => socket_unavailable("E_WIFI_LEAVE_FAILED"),
     }
 }
@@ -551,7 +549,10 @@ mod tests {
         std::env::remove_var("ADOS_RUN_DIR");
         assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
         let body = body_json(resp).await;
-        assert_eq!(body["detail"]["error"]["code"], json!("E_WIFI_LEAVE_FAILED"));
+        assert_eq!(
+            body["detail"]["error"]["code"],
+            json!("E_WIFI_LEAVE_FAILED")
+        );
     }
 
     #[tokio::test]
@@ -657,7 +658,10 @@ mod tests {
         assert_eq!(out["request"]["op"], json!("wifi_leave"));
         assert_eq!(out["status"], json!(200));
         // The ok flag is stripped; the manager body is returned verbatim.
-        assert_eq!(out["body"], json!({"left": true, "previous_ssid": "HomeNet"}));
+        assert_eq!(
+            out["body"],
+            json!({"left": true, "previous_ssid": "HomeNet"})
+        );
     }
 
     #[tokio::test]

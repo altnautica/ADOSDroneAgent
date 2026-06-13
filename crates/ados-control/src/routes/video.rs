@@ -621,8 +621,8 @@ impl VideoConfig {
     /// file yields the all-defaults slice, so the route still answers a usable body
     /// with every field at its Python default.
     fn load() -> Self {
-        let path = std::env::var("ADOS_CONFIG")
-            .unwrap_or_else(|_| crate::config::CONFIG_YAML.to_string());
+        let path =
+            std::env::var("ADOS_CONFIG").unwrap_or_else(|_| crate::config::CONFIG_YAML.to_string());
         Self::load_from(Path::new(&path))
     }
 
@@ -720,10 +720,8 @@ async fn logd_query_rows(
     limit: i64,
     event_kind: Option<&str>,
 ) -> Option<Vec<Value>> {
-    let mut params: Vec<(&str, String)> = vec![
-        ("kind", kind.to_string()),
-        ("limit", limit.to_string()),
-    ];
+    let mut params: Vec<(&str, String)> =
+        vec![("kind", kind.to_string()), ("limit", limit.to_string())];
     if let Some(ek) = event_kind {
         params.push(("event_kind", ek.to_string()));
     }
@@ -923,7 +921,10 @@ mod tests {
         let path = dir.path().join("lcd-latency.json");
         std::fs::write(&path, "[1,2,3]").unwrap();
         let out = project_latency_live(&path);
-        assert_eq!(out, json!({"latency_ms": null, "source": "unexpected_shape"}));
+        assert_eq!(
+            out,
+            json!({"latency_ms": null, "source": "unexpected_shape"})
+        );
     }
 
     // ----- /api/video/config -----
@@ -1102,7 +1103,10 @@ mod tests {
 
     #[test]
     fn percent_encode_escapes_reserved_chars() {
-        assert_eq!(percent_encode("video.air.encoder_fps"), "video.air.encoder_fps");
+        assert_eq!(
+            percent_encode("video.air.encoder_fps"),
+            "video.air.encoder_fps"
+        );
         assert_eq!(percent_encode("metrics"), "metrics");
         assert_eq!(percent_encode("a b"), "a%20b");
     }

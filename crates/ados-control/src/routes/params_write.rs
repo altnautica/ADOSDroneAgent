@@ -347,7 +347,11 @@ mod tests {
 
     /// The 16-byte param_id, trimmed of its null padding, as a string.
     fn param_name(d: &PARAM_SET_DATA) -> String {
-        let end = d.param_id.iter().position(|&b| b == 0).unwrap_or(PARAM_ID_LEN);
+        let end = d
+            .param_id
+            .iter()
+            .position(|&b| b == 0)
+            .unwrap_or(PARAM_ID_LEN);
         String::from_utf8_lossy(&d.param_id[..end]).to_string()
     }
 
@@ -376,7 +380,10 @@ mod tests {
         let frame = mavlink::serialize_v2(header, &msg).unwrap();
         let (h, _msg) = mavlink::parse_v2(&frame).unwrap();
         assert_eq!(h.system_id, 1, "source system is the companion identity");
-        assert_eq!(h.component_id, 191, "source component is the companion identity");
+        assert_eq!(
+            h.component_id, 191,
+            "source component is the companion identity"
+        );
     }
 
     #[test]
@@ -429,7 +436,10 @@ mod tests {
         // Absent snapshot / absent or non-object blob all read as not-known.
         assert!(!param_known(None, "WPNAV_SPEED"));
         assert!(!param_known(Some(&json!({})), "WPNAV_SPEED"));
-        assert!(!param_known(Some(&json!({ "params": "nope" })), "WPNAV_SPEED"));
+        assert!(!param_known(
+            Some(&json!({ "params": "nope" })),
+            "WPNAV_SPEED"
+        ));
     }
 
     #[test]
@@ -461,10 +471,7 @@ mod tests {
         )
         .await;
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-        assert_eq!(
-            body_detail(resp).await,
-            "value must be a finite number"
-        );
+        assert_eq!(body_detail(resp).await, "value must be a finite number");
     }
 
     /// A param absent from the snapshot's `params` blob is a 404 with the FastAPI
@@ -611,7 +618,10 @@ mod tests {
 
     /// Read the `{"detail"}` string out of a response body.
     async fn body_detail(resp: Response) -> String {
-        body_json(resp).await["detail"].as_str().unwrap().to_string()
+        body_json(resp).await["detail"]
+            .as_str()
+            .unwrap()
+            .to_string()
     }
 
     /// Read a response body as JSON.

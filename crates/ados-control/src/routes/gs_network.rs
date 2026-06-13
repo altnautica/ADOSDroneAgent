@@ -133,9 +133,7 @@ pub async fn get_ground_station_network(State(state): State<AppState>) -> Respon
         return profile_mismatch();
     }
     let cfg = load_config_value();
-    let active_uplink = latest_uplink_active(&state)
-        .await
-        .unwrap_or(Value::Null);
+    let active_uplink = latest_uplink_active(&state).await.unwrap_or(Value::Null);
     let body = json!({
         "ap": ap_view(&cfg),
         "wifi_client": wifi_client_view().await,
@@ -407,7 +405,9 @@ async fn wifi_cmd_roundtrip(request: &str) -> Option<Value> {
     /// A status reply is a few hundred bytes; bound the read to guard a runaway.
     const MAX_REPLY_BYTES: usize = 64 * 1024;
 
-    let mut stream = tokio::net::UnixStream::connect(wifi_cmd_sock()).await.ok()?;
+    let mut stream = tokio::net::UnixStream::connect(wifi_cmd_sock())
+        .await
+        .ok()?;
     let line = format!("{request}\n");
     stream.write_all(line.as_bytes()).await.ok()?;
     stream.flush().await.ok()?;
@@ -533,7 +533,11 @@ fn parse_http_response(raw: &[u8]) -> std::io::Result<(u16, Vec<u8>)> {
     let chunked = head_str
         .to_ascii_lowercase()
         .contains("transfer-encoding: chunked");
-    let body = if chunked { de_chunk(body) } else { body.to_vec() };
+    let body = if chunked {
+        de_chunk(body)
+    } else {
+        body.to_vec()
+    };
     Ok((status, body))
 }
 
@@ -555,7 +559,11 @@ fn de_chunk(body: &[u8]) -> Vec<u8> {
         }
         out.extend_from_slice(&rest[data_start..data_start + len]);
         let next = data_start + len;
-        rest = if rest.len() >= next + 2 { &rest[next + 2..] } else { &[] };
+        rest = if rest.len() >= next + 2 {
+            &rest[next + 2..]
+        } else {
+            &[]
+        };
     }
     out
 }
@@ -568,8 +576,8 @@ fn de_chunk(body: &[u8]) -> Vec<u8> {
 /// value, tolerating absence / a parse error / a non-object root with an empty
 /// object. Used for the `ap` (hotspot) and `share_uplink` legs.
 fn load_config_value() -> Value {
-    let path = std::env::var("ADOS_CONFIG")
-        .unwrap_or_else(|_| crate::config::CONFIG_YAML.to_string());
+    let path =
+        std::env::var("ADOS_CONFIG").unwrap_or_else(|_| crate::config::CONFIG_YAML.to_string());
     load_yaml_object(Path::new(&path))
 }
 
@@ -749,10 +757,9 @@ mod tests {
     fn modem_view_overlays_the_store_usage_block() {
         let cfg: Map<String, Value> =
             serde_json::from_value(json!({"enabled": true, "cap_gb": 1.0})).unwrap();
-        let store: Map<String, Value> = serde_json::from_value(
-            json!({"data_used_mb": 512, "cap_mb": 1000, "percent": 51.234}),
-        )
-        .unwrap();
+        let store: Map<String, Value> =
+            serde_json::from_value(json!({"data_used_mb": 512, "cap_mb": 1000, "percent": 51.234}))
+                .unwrap();
         let v = modem_view_from(&cfg, Some(&store));
         assert_eq!(v["data_used_mb"], json!(512));
         assert_eq!(v["cap_mb"], json!(1000)); // store cap wins over the config cap
@@ -806,8 +813,7 @@ mod tests {
             json!(["eth0", "wlan0_client", "wwan0", "usb0"])
         );
         // An empty list → the default chain.
-        let empty: Map<String, Value> =
-            serde_json::from_value(json!({"priority": []})).unwrap();
+        let empty: Map<String, Value> = serde_json::from_value(json!({"priority": []})).unwrap();
         assert_eq!(
             priority_list_from(Some(&empty)),
             json!(["eth0", "wlan0_client", "wwan0", "usb0"])
@@ -835,7 +841,9 @@ mod tests {
     fn share_uplink_flag_reads_the_config_and_defaults_false() {
         assert!(!share_uplink_flag(&json!({})));
         assert!(!share_uplink_flag(&json!({"ground_station": {}})));
-        assert!(share_uplink_flag(&json!({"ground_station": {"share_uplink": true}})));
+        assert!(share_uplink_flag(
+            &json!({"ground_station": {"share_uplink": true}})
+        ));
         assert!(!share_uplink_flag(
             &json!({"ground_station": {"share_uplink": false}})
         ));

@@ -56,15 +56,51 @@ struct WfbChannel {
 /// U-NII-1 sub-band (36/40/44/48) and the U-NII-3 sub-band (149/153/157/161/165).
 /// Mirrors the Python `STANDARD_CHANNELS` list exactly (each 20 MHz wide).
 const STANDARD_CHANNELS: [WfbChannel; 9] = [
-    WfbChannel { channel_number: 36, frequency_mhz: 5180, bandwidth_mhz: 20 },
-    WfbChannel { channel_number: 40, frequency_mhz: 5200, bandwidth_mhz: 20 },
-    WfbChannel { channel_number: 44, frequency_mhz: 5220, bandwidth_mhz: 20 },
-    WfbChannel { channel_number: 48, frequency_mhz: 5240, bandwidth_mhz: 20 },
-    WfbChannel { channel_number: 149, frequency_mhz: 5745, bandwidth_mhz: 20 },
-    WfbChannel { channel_number: 153, frequency_mhz: 5765, bandwidth_mhz: 20 },
-    WfbChannel { channel_number: 157, frequency_mhz: 5785, bandwidth_mhz: 20 },
-    WfbChannel { channel_number: 161, frequency_mhz: 5805, bandwidth_mhz: 20 },
-    WfbChannel { channel_number: 165, frequency_mhz: 5825, bandwidth_mhz: 20 },
+    WfbChannel {
+        channel_number: 36,
+        frequency_mhz: 5180,
+        bandwidth_mhz: 20,
+    },
+    WfbChannel {
+        channel_number: 40,
+        frequency_mhz: 5200,
+        bandwidth_mhz: 20,
+    },
+    WfbChannel {
+        channel_number: 44,
+        frequency_mhz: 5220,
+        bandwidth_mhz: 20,
+    },
+    WfbChannel {
+        channel_number: 48,
+        frequency_mhz: 5240,
+        bandwidth_mhz: 20,
+    },
+    WfbChannel {
+        channel_number: 149,
+        frequency_mhz: 5745,
+        bandwidth_mhz: 20,
+    },
+    WfbChannel {
+        channel_number: 153,
+        frequency_mhz: 5765,
+        bandwidth_mhz: 20,
+    },
+    WfbChannel {
+        channel_number: 157,
+        frequency_mhz: 5785,
+        bandwidth_mhz: 20,
+    },
+    WfbChannel {
+        channel_number: 161,
+        frequency_mhz: 5805,
+        bandwidth_mhz: 20,
+    },
+    WfbChannel {
+        channel_number: 165,
+        frequency_mhz: 5825,
+        bandwidth_mhz: 20,
+    },
 ];
 
 /// Look up a channel by number, or `None` for an unknown number. Mirrors the
@@ -115,8 +151,8 @@ impl StatusConfig {
     /// `/etc/ados/config.yaml`). A missing or unparseable file yields the
     /// all-defaults slice, so the status route still answers a usable body.
     fn load() -> Self {
-        let path = std::env::var("ADOS_CONFIG")
-            .unwrap_or_else(|_| crate::config::CONFIG_YAML.to_string());
+        let path =
+            std::env::var("ADOS_CONFIG").unwrap_or_else(|_| crate::config::CONFIG_YAML.to_string());
         Self::load_from(Path::new(&path))
     }
 
@@ -235,10 +271,7 @@ fn build_status_from_stats_file(cfg: &StatusConfig) -> Value {
 
     // The mtime drives the staleness flip; compute the file age in seconds.
     let age_s = match std::fs::metadata(&path).and_then(|m| m.modified()) {
-        Ok(mtime) => mtime
-            .elapsed()
-            .map(|d| d.as_secs_f64())
-            .unwrap_or(0.0),
+        Ok(mtime) => mtime.elapsed().map(|d| d.as_secs_f64()).unwrap_or(0.0),
         Err(_) => return finalize_base(base),
     };
 
@@ -314,10 +347,7 @@ fn base_block(cfg: &StatusConfig) -> Map<String, Value> {
     block.insert("tx_power_max_dbm".to_string(), tx_power_max);
     block.insert("topology".to_string(), topology);
     block.insert("mcs_index".to_string(), mcs);
-    block.insert(
-        "regulatory_domain".to_string(),
-        json!(regulatory_domain()),
-    );
+    block.insert("regulatory_domain".to_string(), json!(regulatory_domain()));
     block
 }
 
@@ -325,10 +355,7 @@ fn base_block(cfg: &StatusConfig) -> Map<String, Value> {
 /// `frequency_mhz` / `bandwidth_mhz` from the channel number and add the
 /// `bitrate_mbps` forward-compat shim. Mirrors the Python `_finalize_status`.
 fn finalize_status(mut merged: Map<String, Value>) -> Value {
-    let channel = merged
-        .get("channel")
-        .and_then(json_to_i64)
-        .unwrap_or(0);
+    let channel = merged.get("channel").and_then(json_to_i64).unwrap_or(0);
     if let Some(ch) = get_channel(channel) {
         merged.insert("frequency_mhz".to_string(), json!(ch.frequency_mhz));
         merged.insert("bandwidth_mhz".to_string(), json!(ch.bandwidth_mhz));
@@ -837,9 +864,7 @@ fn percent_encode(s: &str) -> String {
 /// Python `int(merged.get("channel") or 0)` over a numeric value.
 fn json_to_i64(v: &Value) -> Option<i64> {
     match v {
-        Value::Number(n) => n
-            .as_i64()
-            .or_else(|| n.as_f64().map(|f| f as i64)),
+        Value::Number(n) => n.as_i64().or_else(|| n.as_f64().map(|f| f as i64)),
         _ => None,
     }
 }
@@ -1022,7 +1047,7 @@ mod tests {
         detail.insert("rssi_dbm".to_string(), json!(-55.0));
         detail.insert("bitrate_kbps".to_string(), json!(8000));
         detail.insert("reg_domain".to_string(), json!("XX")); // different key, ignored
-        // A fresh ts_us so the staleness flip does not fire.
+                                                              // A fresh ts_us so the staleness flip does not fire.
         let ts_us = now_unix_micros();
         let out = derive_wfb_status(&detail, ts_us, &cfg);
         assert_eq!(out["state"], json!("active"));
@@ -1082,7 +1107,10 @@ mod tests {
         let path = dir.path().join("rx.key");
         std::fs::write(&path, vec![0u8; 32]).unwrap(); // half-size
         assert_eq!(read_public_fingerprint(&path), None);
-        assert_eq!(read_public_fingerprint(&dir.path().join("absent.key")), None);
+        assert_eq!(
+            read_public_fingerprint(&dir.path().join("absent.key")),
+            None
+        );
     }
 
     #[test]

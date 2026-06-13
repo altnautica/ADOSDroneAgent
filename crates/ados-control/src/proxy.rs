@@ -154,7 +154,11 @@ fn is_websocket_upgrade(headers: &http::HeaderMap) -> bool {
     let connection_has_upgrade = headers
         .get(http::header::CONNECTION)
         .and_then(|v| v.to_str().ok())
-        .map(|v| v.to_ascii_lowercase().split(',').any(|t| t.trim() == "upgrade"))
+        .map(|v| {
+            v.to_ascii_lowercase()
+                .split(',')
+                .any(|t| t.trim() == "upgrade")
+        })
         .unwrap_or(false);
     let upgrade_is_websocket = headers
         .get(http::header::UPGRADE)
@@ -393,7 +397,10 @@ mod tests {
     #[test]
     fn websocket_upgrade_is_detected() {
         let mut headers = http::HeaderMap::new();
-        headers.insert(http::header::CONNECTION, HeaderValue::from_static("Upgrade"));
+        headers.insert(
+            http::header::CONNECTION,
+            HeaderValue::from_static("Upgrade"),
+        );
         headers.insert(http::header::UPGRADE, HeaderValue::from_static("websocket"));
         assert!(is_websocket_upgrade(&headers));
 

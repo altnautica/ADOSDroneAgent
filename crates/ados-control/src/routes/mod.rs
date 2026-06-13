@@ -95,8 +95,14 @@ pub fn build_router(state: AppState) -> Router {
         // (allowlist-guarded to ados-* units) and the supervisor restart that
         // cycles the whole agent process tree.
         .route("/api/services", get(services::list_services))
-        .route("/api/services/{name}/restart", post(service_control::restart_service))
-        .route("/api/v1/system/restart-supervisor", post(service_control::restart_supervisor))
+        .route(
+            "/api/services/{name}/restart",
+            post(service_control::restart_service),
+        )
+        .route(
+            "/api/v1/system/restart-supervisor",
+            post(service_control::restart_supervisor),
+        )
         // Fleet roster: the opt-in mesh awareness surface. Both static on this
         // device — enrollment reports not-enrolled, peers is the empty list.
         .route("/api/fleet/enrollment", get(fleet::get_enrollment))
@@ -110,14 +116,23 @@ pub fn build_router(state: AppState) -> Router {
             get(signing::require).put(signing_write::require),
         )
         .route("/api/mavlink/signing/counters", get(signing::counters))
-        .route("/api/mavlink/signing/enroll-fc", post(signing_write::enroll_fc))
-        .route("/api/mavlink/signing/disable-on-fc", post(signing_write::disable_on_fc))
+        .route(
+            "/api/mavlink/signing/enroll-fc",
+            post(signing_write::enroll_fc),
+        )
+        .route(
+            "/api/mavlink/signing/disable-on-fc",
+            post(signing_write::disable_on_fc),
+        )
         // WFB radio reads: link status, link-quality history, pair-state, and the
         // failover state (the channel / tx-power writes stay proxied).
         .route("/api/wfb", get(wfb::get_wfb_status))
         .route("/api/wfb/history", get(wfb::get_wfb_history))
         .route("/api/wfb/pair", get(wfb::get_wfb_pair_status))
-        .route("/api/wfb/pair/failover-status", get(wfb::get_failover_status))
+        .route(
+            "/api/wfb/pair/failover-status",
+            get(wfb::get_failover_status),
+        )
         // WFB radio writes: the channel change (a coordinated hop to the radio
         // command socket) and the runtime TX-power (set + persist).
         .route("/api/wfb/channel", post(wfb_write::set_wfb_channel))
@@ -129,44 +144,95 @@ pub fn build_router(state: AppState) -> Router {
         // the encoder/radio config (the snapshot/record/switch writes + the
         // camera-enumeration route stay proxied).
         .route("/api/video/latency", get(video::get_video_latency))
-        .route("/api/v1/video/air-pipeline", get(video::get_air_pipeline_status))
+        .route(
+            "/api/v1/video/air-pipeline",
+            get(video::get_air_pipeline_status),
+        )
         .route("/api/video/config", get(video::get_video_config))
         // Ground-station profile reads (404 off a drone): the status snapshot, the
         // stored radio config, and the three distributed-receive role reads.
         .route("/api/v1/ground-station/status", get(gs_status::get_status))
         .route("/api/v1/ground-station/wfb", get(gs_status::get_wfb))
-        .route("/api/v1/ground-station/wfb/relay/status", get(gs_status::get_wfb_relay_status))
-        .route("/api/v1/ground-station/wfb/receiver/relays", get(gs_status::get_wfb_receiver_relays))
-        .route("/api/v1/ground-station/wfb/receiver/combined", get(gs_status::get_wfb_receiver_combined))
+        .route(
+            "/api/v1/ground-station/wfb/relay/status",
+            get(gs_status::get_wfb_relay_status),
+        )
+        .route(
+            "/api/v1/ground-station/wfb/receiver/relays",
+            get(gs_status::get_wfb_receiver_relays),
+        )
+        .route(
+            "/api/v1/ground-station/wfb/receiver/combined",
+            get(gs_status::get_wfb_receiver_combined),
+        )
         // Ground-station mesh reads (profile-gated): the role + capability hint,
         // the batman-adv state + its three slices, and the configured transport.
         .route("/api/v1/ground-station/role", get(gs_mesh::get_role))
         .route("/api/v1/ground-station/mesh", get(gs_mesh::get_mesh_health))
-        .route("/api/v1/ground-station/mesh/neighbors", get(gs_mesh::get_mesh_neighbors))
-        .route("/api/v1/ground-station/mesh/routes", get(gs_mesh::get_mesh_routes))
-        .route("/api/v1/ground-station/mesh/gateways", get(gs_mesh::get_mesh_gateways))
-        .route("/api/v1/ground-station/mesh/config", get(gs_mesh::get_mesh_config))
+        .route(
+            "/api/v1/ground-station/mesh/neighbors",
+            get(gs_mesh::get_mesh_neighbors),
+        )
+        .route(
+            "/api/v1/ground-station/mesh/routes",
+            get(gs_mesh::get_mesh_routes),
+        )
+        .route(
+            "/api/v1/ground-station/mesh/gateways",
+            get(gs_mesh::get_mesh_gateways),
+        )
+        .route(
+            "/api/v1/ground-station/mesh/config",
+            get(gs_mesh::get_mesh_config),
+        )
         // Ground-station network uplink reads (404 off a drone): the aggregate
         // view, ethernet, client scan, modem, the priority list, and cellular.
-        .route("/api/v1/ground-station/network", get(gs_network::get_ground_station_network))
-        .route("/api/v1/ground-station/network/ethernet", get(gs_network::get_network_ethernet))
-        .route("/api/v1/ground-station/network/client/scan", get(gs_network::get_network_client_scan))
-        .route("/api/v1/ground-station/network/modem", get(gs_network::get_network_modem))
+        .route(
+            "/api/v1/ground-station/network",
+            get(gs_network::get_ground_station_network),
+        )
+        .route(
+            "/api/v1/ground-station/network/ethernet",
+            get(gs_network::get_network_ethernet),
+        )
+        .route(
+            "/api/v1/ground-station/network/client/scan",
+            get(gs_network::get_network_client_scan),
+        )
+        .route(
+            "/api/v1/ground-station/network/modem",
+            get(gs_network::get_network_modem),
+        )
         .route(
             "/api/v1/ground-station/network/priority",
             get(gs_network::get_network_priority).put(gs_network_write::put_network_priority),
         )
-        .route("/api/v1/ground-station/modem-status", get(gs_network::get_modem_status))
+        .route(
+            "/api/v1/ground-station/modem-status",
+            get(gs_network::get_modem_status),
+        )
         // Ground-station reads (profile-gated): the mesh pairing snapshot, the PIC
         // arbiter state, and the captive-portal token mint.
-        .route("/api/v1/ground-station/pair/pending", get(gs_pairing::get_pair_pending))
+        .route(
+            "/api/v1/ground-station/pair/pending",
+            get(gs_pairing::get_pair_pending),
+        )
         .route("/api/v1/ground-station/pic", get(gs_pairing::get_pic_state))
-        .route("/api/v1/ground-station/captive-token", get(gs_pairing::get_captive_token))
+        .route(
+            "/api/v1/ground-station/captive-token",
+            get(gs_pairing::get_captive_token),
+        )
         // Wi-Fi client writes (profile-agnostic): join / leave / forget, each
         // forwarded to the native uplink daemon's command socket. The autoconnect
         // toggle stays proxied (the daemon socket has no autoconnect op).
-        .route("/api/v1/network/client/join", put(network_write::put_client_join))
-        .route("/api/v1/network/client", delete(network_write::delete_client))
+        .route(
+            "/api/v1/network/client/join",
+            put(network_write::put_client_join),
+        )
+        .route(
+            "/api/v1/network/client",
+            delete(network_write::delete_client),
+        )
         .route(
             "/api/v1/network/client/configured/{name}",
             delete(network_write::delete_client_configured),

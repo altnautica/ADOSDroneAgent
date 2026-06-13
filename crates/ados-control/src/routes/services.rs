@@ -606,10 +606,11 @@ mod tests {
         // the route uses, and assert it against the golden entry shape (the live
         // list may be empty on a dev host with no ados units running, so the
         // per-entry shape is pinned here deterministically).
-        let mut entry = vec![parse_unit_line(
-            "ados-mavlink.service loaded active running ADOS MAVLink router",
-        )
-        .expect("a parseable row")];
+        let mut entry =
+            vec![
+                parse_unit_line("ados-mavlink.service loaded active running ADOS MAVLink router")
+                    .expect("a parseable row"),
+            ];
         attach_service_memory(&mut entry);
         let golden = entry[0].as_object().unwrap();
         let mut ekeys: Vec<&str> = golden.keys().map(String::as_str).collect();

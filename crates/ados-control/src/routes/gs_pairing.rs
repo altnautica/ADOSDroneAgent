@@ -69,7 +69,9 @@ const ONBOX_HEADER: &str = "x-ados-onbox";
 /// The agent config path the profile gate reads (`ADOS_CONFIG`, default
 /// `/etc/ados/config.yaml`). The same override the pairing-info route honours.
 fn config_path() -> PathBuf {
-    PathBuf::from(std::env::var("ADOS_CONFIG").unwrap_or_else(|_| crate::config::CONFIG_YAML.to_string()))
+    PathBuf::from(
+        std::env::var("ADOS_CONFIG").unwrap_or_else(|_| crate::config::CONFIG_YAML.to_string()),
+    )
 }
 
 /// The runtime dir (`ADOS_RUN_DIR`, default `/run/ados`), the same override the
@@ -89,7 +91,10 @@ fn pairing_via_daemon() -> bool {
 /// case-insensitive), matching the Python `use_daemon` membership check.
 fn truthy_env(name: &str) -> bool {
     matches!(
-        std::env::var(name).unwrap_or_default().to_ascii_lowercase().as_str(),
+        std::env::var(name)
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+            .as_str(),
         "1" | "true" | "yes"
     )
 }
@@ -201,7 +206,9 @@ async fn pairing_daemon_snapshot(socket: &Path) -> std::io::Result<Value> {
         }
     }
     if raw.is_empty() {
-        return Err(std::io::Error::other("pairing daemon closed connection early"));
+        return Err(std::io::Error::other(
+            "pairing daemon closed connection early",
+        ));
     }
 
     let line_end = raw.iter().position(|b| *b == b'\n').unwrap_or(raw.len());
@@ -368,7 +375,9 @@ mod tests {
     fn an_absent_config_is_not_a_ground_station() {
         // A missing config loads the all-defaults (`profile: auto`); with no
         // profile.conf, `auto` falls back to the drone default → not a GS.
-        assert!(!is_ground_station_at(Path::new("/nonexistent/ados/config.yaml")));
+        assert!(!is_ground_station_at(Path::new(
+            "/nonexistent/ados/config.yaml"
+        )));
     }
 
     // -------------------------------------------------------------------
@@ -478,7 +487,9 @@ mod tests {
         // The token value is volatile (masked in conformance); the SHAPE is the
         // contract.
         assert_eq!(token.len(), 32);
-        assert!(token.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+        assert!(token
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
         let body = json!({ "token": token });
         assert_eq!(body.as_object().unwrap().len(), 1);
         assert!(body.get("token").and_then(Value::as_str).is_some());
@@ -488,8 +499,7 @@ mod tests {
     async fn captive_token_403s_for_an_off_subnet_caller() {
         // No on-box header → not loopback / AP-subnet → 403.
         assert!(!is_ap_subnet_caller(&HeaderMap::new()));
-        let (status, body) =
-            body_json(gs_error(StatusCode::FORBIDDEN, "E_CAPTIVE_ONLY")).await;
+        let (status, body) = body_json(gs_error(StatusCode::FORBIDDEN, "E_CAPTIVE_ONLY")).await;
         assert_eq!(status, StatusCode::FORBIDDEN);
         assert_eq!(
             body,

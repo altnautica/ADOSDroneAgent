@@ -553,7 +553,11 @@ fn parse_http_response(raw: &[u8]) -> std::io::Result<(u16, Vec<u8>)> {
     let chunked = head_str
         .to_ascii_lowercase()
         .contains("transfer-encoding: chunked");
-    let body = if chunked { de_chunk(body) } else { body.to_vec() };
+    let body = if chunked {
+        de_chunk(body)
+    } else {
+        body.to_vec()
+    };
     Ok((status, body))
 }
 

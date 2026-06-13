@@ -377,16 +377,10 @@ fn link_view_from(path: &Path) -> Value {
     let rssi = payload.get("rssi_dbm").filter(|v| v.is_number()).cloned();
     let bitrate_kbps = payload.get("bitrate_kbps").and_then(Value::as_f64);
     let bitrate_mbps = bitrate_kbps.map(|k| round2(k / 1000.0));
-    let fec_failed = payload
-        .get("fec_failed")
-        .and_then(json_to_i64)
-        .unwrap_or(0);
+    let fec_failed = payload.get("fec_failed").and_then(json_to_i64).unwrap_or(0);
 
     let mut merged = base;
-    merged.insert(
-        "rssi_dbm".to_string(),
-        rssi.unwrap_or(Value::Null),
-    );
+    merged.insert("rssi_dbm".to_string(), rssi.unwrap_or(Value::Null));
     merged.insert(
         "bitrate_mbps".to_string(),
         bitrate_mbps.map(Value::from).unwrap_or(Value::Null),
@@ -400,7 +394,10 @@ fn link_view_from(path: &Path) -> Value {
     );
     merged.insert(
         "fec_recovered".to_string(),
-        json!(payload.get("fec_recovered").and_then(json_to_i64).unwrap_or(0)),
+        json!(payload
+            .get("fec_recovered")
+            .and_then(json_to_i64)
+            .unwrap_or(0)),
     );
     merged.insert("fec_lost".to_string(), json!(fec_failed));
     merged.insert("fec_failed".to_string(), json!(fec_failed));
@@ -424,11 +421,17 @@ fn link_view_from(path: &Path) -> Value {
     );
     merged.insert(
         "packets_received".to_string(),
-        json!(payload.get("packets_received").and_then(json_to_i64).unwrap_or(0)),
+        json!(payload
+            .get("packets_received")
+            .and_then(json_to_i64)
+            .unwrap_or(0)),
     );
     merged.insert(
         "packets_lost".to_string(),
-        json!(payload.get("packets_lost").and_then(json_to_i64).unwrap_or(0)),
+        json!(payload
+            .get("packets_lost")
+            .and_then(json_to_i64)
+            .unwrap_or(0)),
     );
     merged.insert(
         "loss_percent".to_string(),
@@ -497,10 +500,7 @@ async fn system_snapshot(state: &AppState) -> Value {
         .as_ref()
         .and_then(|s| signal_num(s, "cpu.util.all"))
         .unwrap_or(0.0);
-    let (ram_used_mb, ram_total_mb) = signals
-        .as_ref()
-        .and_then(ram_mb)
-        .unwrap_or((0, 0));
+    let (ram_used_mb, ram_total_mb) = signals.as_ref().and_then(ram_mb).unwrap_or((0, 0));
     let temp_c = signals
         .as_ref()
         .and_then(|s| signal_num(s, "thermal.primary_c"))
@@ -1235,11 +1235,7 @@ mod tests {
         let cfg_path = dir.path().join("config.yaml");
         std::fs::write(&cfg_path, "agent:\n  profile: ground_station\n").unwrap();
         assert_eq!(ground_station_config_role(&cfg_path), "direct");
-        std::fs::write(
-            &cfg_path,
-            "ground_station:\n  role: relay\n",
-        )
-        .unwrap();
+        std::fs::write(&cfg_path, "ground_station:\n  role: relay\n").unwrap();
         assert_eq!(ground_station_config_role(&cfg_path), "relay");
     }
 
@@ -1255,11 +1251,7 @@ mod tests {
         .unwrap();
         assert_eq!(config_gs_peer(&cfg_path), json!("drone-abc"));
         // Legacy fallback when the canonical spot is absent.
-        std::fs::write(
-            &cfg_path,
-            "ground_station:\n  paired_drone_id: drone-old\n",
-        )
-        .unwrap();
+        std::fs::write(&cfg_path, "ground_station:\n  paired_drone_id: drone-old\n").unwrap();
         assert_eq!(config_gs_peer(&cfg_path), json!("drone-old"));
         // Neither present → null.
         std::fs::write(&cfg_path, "agent:\n  profile: ground_station\n").unwrap();

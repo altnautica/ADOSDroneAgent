@@ -80,15 +80,42 @@ struct WfbChannel {
 /// Mirrors the Python `STANDARD_CHANNELS` list exactly; the order is the order the
 /// invalid-channel error lists the valid set in.
 const STANDARD_CHANNELS: [WfbChannel; 9] = [
-    WfbChannel { channel_number: 36, frequency_mhz: 5180 },
-    WfbChannel { channel_number: 40, frequency_mhz: 5200 },
-    WfbChannel { channel_number: 44, frequency_mhz: 5220 },
-    WfbChannel { channel_number: 48, frequency_mhz: 5240 },
-    WfbChannel { channel_number: 149, frequency_mhz: 5745 },
-    WfbChannel { channel_number: 153, frequency_mhz: 5765 },
-    WfbChannel { channel_number: 157, frequency_mhz: 5785 },
-    WfbChannel { channel_number: 161, frequency_mhz: 5805 },
-    WfbChannel { channel_number: 165, frequency_mhz: 5825 },
+    WfbChannel {
+        channel_number: 36,
+        frequency_mhz: 5180,
+    },
+    WfbChannel {
+        channel_number: 40,
+        frequency_mhz: 5200,
+    },
+    WfbChannel {
+        channel_number: 44,
+        frequency_mhz: 5220,
+    },
+    WfbChannel {
+        channel_number: 48,
+        frequency_mhz: 5240,
+    },
+    WfbChannel {
+        channel_number: 149,
+        frequency_mhz: 5745,
+    },
+    WfbChannel {
+        channel_number: 153,
+        frequency_mhz: 5765,
+    },
+    WfbChannel {
+        channel_number: 157,
+        frequency_mhz: 5785,
+    },
+    WfbChannel {
+        channel_number: 161,
+        frequency_mhz: 5805,
+    },
+    WfbChannel {
+        channel_number: 165,
+        frequency_mhz: 5825,
+    },
 ];
 
 /// Look up a channel by number, or `None` for an unknown number. Mirrors the
@@ -225,7 +252,10 @@ async fn set_wfb_channel_at(socket: &Path, channel: i64) -> Response {
             // Unreachable socket: the FastAPI route would fall through to the
             // in-process manager, which on this front is absent → the no-manager
             // 503, the same terminal posture as the FastAPI `wfb is None` branch.
-            return detail(StatusCode::SERVICE_UNAVAILABLE, "WFB-ng service not running");
+            return detail(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "WFB-ng service not running",
+            );
         }
     };
 
@@ -340,7 +370,10 @@ async fn set_wfb_tx_power_at(socket: &Path, config_path: &Path, requested: i64) 
         None => {
             // Unreachable socket: the FastAPI route falls back to the in-process
             // manager, which on this front is absent → the no-manager 503.
-            return detail(StatusCode::SERVICE_UNAVAILABLE, "WFB-ng service not running");
+            return detail(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "WFB-ng service not running",
+            );
         }
     };
 
@@ -496,7 +529,10 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> bool {
         }
     }
     let tmp = {
-        let mut ext = path.extension().map(|e| e.to_os_string()).unwrap_or_default();
+        let mut ext = path
+            .extension()
+            .map(|e| e.to_os_string())
+            .unwrap_or_default();
         ext.push(".tmp");
         path.with_extension(ext)
     };
@@ -626,10 +662,8 @@ mod tests {
             let (mut conn, _addr) = listener.accept().await.unwrap();
             let mut buf = [0u8; 1024];
             let n = conn.read(&mut buf).await.unwrap();
-            let req: Value = serde_json::from_str(
-                std::str::from_utf8(&buf[..n]).unwrap().trim(),
-            )
-            .unwrap();
+            let req: Value =
+                serde_json::from_str(std::str::from_utf8(&buf[..n]).unwrap().trim()).unwrap();
             conn.write_all(b"{\"ok\": true, \"channel\": 149}\n")
                 .await
                 .unwrap();
@@ -670,7 +704,10 @@ mod tests {
         let resp = set_wfb_tx_power_at(&sock, &cfg, 20).await;
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
         let body = body_json(resp).await;
-        assert_eq!(body, json!({"detail": {"error": "above_ceiling", "max": 15}}));
+        assert_eq!(
+            body,
+            json!({"detail": {"error": "above_ceiling", "max": 15}})
+        );
     }
 
     #[test]
@@ -688,7 +725,10 @@ mod tests {
         std::fs::write(&cfg, "video:\n  wfb:\n    channel: 149\n").unwrap();
         assert_eq!(configured_tx_power_ceiling(&cfg), 15);
         // An absent file also reads the default.
-        assert_eq!(configured_tx_power_ceiling(&dir.path().join("absent.yaml")), 15);
+        assert_eq!(
+            configured_tx_power_ceiling(&dir.path().join("absent.yaml")),
+            15
+        );
     }
 
     // ── tx-power: the effective-dbm reply mapping ─────────────────────────────
@@ -765,10 +805,8 @@ mod tests {
             let (mut conn, _addr) = listener.accept().await.unwrap();
             let mut buf = [0u8; 1024];
             let n = conn.read(&mut buf).await.unwrap();
-            let req: Value = serde_json::from_str(
-                std::str::from_utf8(&buf[..n]).unwrap().trim(),
-            )
-            .unwrap();
+            let req: Value =
+                serde_json::from_str(std::str::from_utf8(&buf[..n]).unwrap().trim()).unwrap();
             conn.write_all(b"{\"ok\": true, \"effective_dbm\": 10}\n")
                 .await
                 .unwrap();
@@ -792,7 +830,10 @@ mod tests {
         let wfb = parsed.get("video").and_then(|v| v.get("wfb")).unwrap();
         assert_eq!(wfb.get("tx_power_dbm").and_then(norway_to_i64), Some(10));
         assert_eq!(wfb.get("channel").and_then(norway_to_i64), Some(149));
-        assert_eq!(wfb.get("tx_power_max_dbm").and_then(norway_to_i64), Some(18));
+        assert_eq!(
+            wfb.get("tx_power_max_dbm").and_then(norway_to_i64),
+            Some(18)
+        );
         // The unrelated agent.name survived.
         assert_eq!(
             parsed
@@ -847,7 +888,10 @@ mod tests {
 
     /// Read the `{"detail": "<string>"}` body off a response.
     async fn body_detail_string(resp: Response) -> String {
-        body_json(resp).await["detail"].as_str().unwrap().to_string()
+        body_json(resp).await["detail"]
+            .as_str()
+            .unwrap()
+            .to_string()
     }
 
     /// Read a response body as JSON.

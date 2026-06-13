@@ -277,7 +277,10 @@ mod tests {
         assert!(path_matches_template("/api/status", "/api/status"));
         assert!(!path_matches_template("/api/status", "/api/status/full"));
         // A {param} segment matches any single non-empty segment.
-        assert!(path_matches_template("/api/params/{name}", "/api/params/RC1_MIN"));
+        assert!(path_matches_template(
+            "/api/params/{name}",
+            "/api/params/RC1_MIN"
+        ));
         assert!(path_matches_template(
             "/api/services/{name}/restart",
             "/api/services/ados-mavlink/restart"
@@ -285,7 +288,10 @@ mod tests {
         // Same segment count required; an empty placeholder segment does not match.
         assert!(!path_matches_template("/api/params/{name}", "/api/params"));
         assert!(!path_matches_template("/api/params/{name}", "/api/params/"));
-        assert!(!path_matches_template("/api/params/{name}", "/api/params/a/b"));
+        assert!(!path_matches_template(
+            "/api/params/{name}",
+            "/api/params/a/b"
+        ));
         // A literal segment must still match literally.
         assert!(!path_matches_template("/api/params/{name}", "/api/other/x"));
     }
@@ -368,7 +374,10 @@ mod tests {
         // forget template).
         assert!(has(Method::PUT, "/api/v1/network/client/join"));
         assert!(has(Method::DELETE, "/api/v1/network/client"));
-        assert!(has(Method::DELETE, "/api/v1/network/client/configured/{name}"));
+        assert!(has(
+            Method::DELETE,
+            "/api/v1/network/client/configured/{name}"
+        ));
         // The WFB radio writes + the GS network priority write.
         assert!(has(Method::POST, "/api/wfb/channel"));
         assert!(has(Method::PUT, "/api/wfb/tx-power"));

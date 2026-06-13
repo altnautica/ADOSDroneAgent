@@ -49,7 +49,7 @@ use sha2::{Digest, Sha256};
 use time::OffsetDateTime;
 
 use ados_protocol::mavlink::ardupilotmega::{
-    MavParamType, MavMessage, PARAM_SET_DATA, SETUP_SIGNING_DATA,
+    MavMessage, MavParamType, PARAM_SET_DATA, SETUP_SIGNING_DATA,
 };
 use ados_protocol::mavlink::{self, MavHeader};
 
@@ -244,7 +244,10 @@ pub async fn disable_on_fc(State(state): State<AppState>) -> Response {
         );
     }
 
-    tracing::info!(target_system = DEFAULT_TARGET_SYSTEM, "signing disabled on fc");
+    tracing::info!(
+        target_system = DEFAULT_TARGET_SYSTEM,
+        "signing disabled on fc"
+    );
     (StatusCode::OK, Json(json!({ "success": true }))).into_response()
 }
 
@@ -293,7 +296,10 @@ pub async fn require(State(state): State<AppState>, Json(req): Json<RequireReque
 /// input is `key_hex is not valid hex: <reason>`.
 fn parse_key_hex(key_hex: &str) -> Result<Vec<u8>, String> {
     if key_hex.len() != 64 {
-        return Err(format!("key_hex must be 64 hex chars, got {}", key_hex.len()));
+        return Err(format!(
+            "key_hex must be 64 hex chars, got {}",
+            key_hex.len()
+        ));
     }
     decode_hex(key_hex).map_err(|reason| format!("key_hex is not valid hex: {reason}"))
 }
@@ -623,10 +629,7 @@ mod tests {
     /// Build an AppState whose mavlink client points at the given socket path and
     /// whose state snapshot reports the FC connected (so the gate passes). The
     /// other seams are inert defaults the signing-write routes never touch.
-    fn state_with_mavlink(
-        sock: std::path::PathBuf,
-        fc_connected: bool,
-    ) -> AppState {
+    fn state_with_mavlink(sock: std::path::PathBuf, fc_connected: bool) -> AppState {
         use crate::auth::PairingState;
         use crate::ipc::{LogdQueryClient, MavlinkIpcClient, StateIpcClient};
         use crate::state::PairingPaths;
@@ -666,10 +669,7 @@ mod tests {
     /// length-prefixed frames on that single connection, returning each frame's
     /// raw bytes. The MAVLink client reuses one held connection for back-to-back
     /// sends, so both enroll frames arrive on the same stream.
-    fn accept_n_frames(
-        listener: UnixListener,
-        n: usize,
-    ) -> tokio::task::JoinHandle<Vec<Vec<u8>>> {
+    fn accept_n_frames(listener: UnixListener, n: usize) -> tokio::task::JoinHandle<Vec<Vec<u8>>> {
         tokio::spawn(async move {
             let (mut conn, _addr) = listener.accept().await.unwrap();
             let mut frames = Vec::with_capacity(n);
@@ -833,7 +833,10 @@ mod tests {
         let state = state_with_mavlink(sock, false);
         let resp = disable_on_fc(State(state)).await;
         assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
-        assert_eq!(body_json(resp).await, json!({ "detail": "FC not connected" }));
+        assert_eq!(
+            body_json(resp).await,
+            json!({ "detail": "FC not connected" })
+        );
     }
 
     #[tokio::test]
@@ -880,7 +883,10 @@ mod tests {
         let state = state_with_mavlink(sock, false);
         let resp = require(State(state), Json(RequireRequest { require: false })).await;
         assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
-        assert_eq!(body_json(resp).await, json!({ "detail": "FC not connected" }));
+        assert_eq!(
+            body_json(resp).await,
+            json!({ "detail": "FC not connected" })
+        );
     }
 
     #[tokio::test]

@@ -1537,8 +1537,8 @@ mod tests {
     fn control_unit_runs_native_for_either_marker() {
         // The shipped unit must exec the native binary when EITHER the plain
         // control marker or the LAN-front marker is present, else /bin/true.
-        let unit = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../data/systemd/ados-control.service");
+        let unit =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/systemd/ados-control.service");
         let body = std::fs::read_to_string(unit).unwrap();
         assert!(body.contains("control-rust-enabled"));
         assert!(body.contains("front-rust-enabled"));

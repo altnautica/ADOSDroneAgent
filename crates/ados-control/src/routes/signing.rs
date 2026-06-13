@@ -377,7 +377,10 @@ mod tests {
         // Absent snapshot / absent key / a null value all default to 0.
         assert_eq!(autopilot_from_snapshot(None), 0);
         assert_eq!(autopilot_from_snapshot(Some(&json!({}))), 0);
-        assert_eq!(autopilot_from_snapshot(Some(&json!({"autopilot": null}))), 0);
+        assert_eq!(
+            autopilot_from_snapshot(Some(&json!({"autopilot": null}))),
+            0
+        );
     }
 
     #[test]

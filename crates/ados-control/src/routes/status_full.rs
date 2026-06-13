@@ -124,7 +124,10 @@ pub async fn get_full_status(State(state): State<AppState>, headers: HeaderMap) 
         "role".to_string(),
         resolved_role.map(Value::from).unwrap_or(Value::Null),
     );
-    payload.insert("runtimeMode".to_string(), json!(crate::state::runtime_mode()));
+    payload.insert(
+        "runtimeMode".to_string(),
+        json!(crate::state::runtime_mode()),
+    );
 
     // Camera presence + USB-recovery, folded in only when the sidecars are fresh.
     for (k, v) in read_camera_status() {
@@ -443,8 +446,7 @@ fn unit_for_service(name: &str) -> Option<String> {
 /// permission contributes nothing. On a non-Linux host there is no `/proc`, so the
 /// map is empty and every unit lands at `0.0`. Mirrors `_scan_pss_by_unit`.
 fn scan_pss_by_unit() -> std::collections::BTreeMap<String, f64> {
-    let mut totals_kib: std::collections::BTreeMap<String, u64> =
-        std::collections::BTreeMap::new();
+    let mut totals_kib: std::collections::BTreeMap<String, u64> = std::collections::BTreeMap::new();
 
     let dir = match std::fs::read_dir("/proc") {
         Ok(d) => d,
@@ -665,10 +667,7 @@ fn build_status_from_stats_file(cfg: &WfbStatusConfig) -> Value {
     if age_s > 10.0 {
         merged.insert("state".to_string(), json!("stale"));
     }
-    merged.insert(
-        "regulatory_domain".to_string(),
-        json!(regulatory_domain()),
-    );
+    merged.insert("regulatory_domain".to_string(), json!(regulatory_domain()));
     finalize_wfb_status(merged)
 }
 
@@ -704,10 +703,7 @@ fn wfb_base_block(cfg: &WfbStatusConfig) -> Map<String, Value> {
     block.insert("tx_power_max_dbm".to_string(), cfg.tx_power_max_dbm.clone());
     block.insert("topology".to_string(), cfg.topology.clone());
     block.insert("mcs_index".to_string(), cfg.mcs_index.clone());
-    block.insert(
-        "regulatory_domain".to_string(),
-        json!(regulatory_domain()),
-    );
+    block.insert("regulatory_domain".to_string(), json!(regulatory_domain()));
     block
 }
 
@@ -1180,9 +1176,7 @@ async fn http_get_local(url: &str) -> std::io::Result<(u16, Vec<u8>)> {
 
     let fut = async {
         let mut stream = tokio::net::TcpStream::connect(authority).await?;
-        let head = format!(
-            "GET {path} HTTP/1.1\r\nHost: {authority}\r\nConnection: close\r\n\r\n"
-        );
+        let head = format!("GET {path} HTTP/1.1\r\nHost: {authority}\r\nConnection: close\r\n\r\n");
         stream.write_all(head.as_bytes()).await?;
         stream.flush().await?;
 
@@ -1245,7 +1239,10 @@ fn build_mesh_block_at(
     let mut mesh = Map::new();
     let role = read_mesh_role_at(role_path);
     mesh.insert("role".to_string(), json!(role));
-    mesh.insert("mesh_capable".to_string(), json!(read_mesh_capable_at(profile_conf)));
+    mesh.insert(
+        "mesh_capable".to_string(),
+        json!(read_mesh_capable_at(profile_conf)),
+    );
 
     if role == "relay" || role == "receiver" {
         if let Some(snap) = read_sidecar_object(mesh_state_path) {
@@ -1317,10 +1314,7 @@ fn read_mesh_capable_at(path: &Path) -> bool {
         Ok(v) => v,
         Err(_) => return false,
     };
-    parsed
-        .get("mesh_capable")
-        .map(json_truthy)
-        .unwrap_or(false)
+    parsed.get("mesh_capable").map(json_truthy).unwrap_or(false)
 }
 
 // ---------------------------------------------------------------------------
@@ -1477,7 +1471,11 @@ fn parse_http_response(raw: &[u8]) -> std::io::Result<(u16, Vec<u8>)> {
     let chunked = head_str
         .to_ascii_lowercase()
         .contains("transfer-encoding: chunked");
-    let body = if chunked { de_chunk(body) } else { body.to_vec() };
+    let body = if chunked {
+        de_chunk(body)
+    } else {
+        body.to_vec()
+    };
     Ok((status, body))
 }
 
@@ -1712,19 +1710,17 @@ mod tests {
     fn fallback_line_skips_short_and_non_service_rows() {
         assert!(parse_fallback_line("").is_none());
         assert!(parse_fallback_line("ados-x.service loaded").is_none());
-        assert!(
-            parse_fallback_line("ados-thing.timer loaded active waiting A timer").is_none()
-        );
+        assert!(parse_fallback_line("ados-thing.timer loaded active waiting A timer").is_none());
     }
 
     #[test]
     fn consolidated_service_entry_carries_memory_mb() {
         // Build a representative entry through the same code the route runs and
         // assert the full six-key consolidated shape.
-        let mut entry = vec![parse_fallback_line(
-            "ados-video.service loaded active running ADOS Video",
-        )
-        .unwrap()];
+        let mut entry =
+            vec![
+                parse_fallback_line("ados-video.service loaded active running ADOS Video").unwrap(),
+            ];
         attach_service_memory(&mut entry);
         let obj = entry[0].as_object().unwrap();
         let mut keys: Vec<&str> = obj.keys().map(String::as_str).collect();

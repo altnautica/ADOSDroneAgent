@@ -58,6 +58,9 @@ mod tests {
         // It is an array (not an object) and it is empty.
         let arr = body.as_array().expect("peers body is an array");
         assert!(arr.is_empty());
-        assert!(!body.is_object(), "peers must be a bare array, not an object");
+        assert!(
+            !body.is_object(),
+            "peers must be a bare array, not an object"
+        );
     }
 }
