@@ -31,6 +31,32 @@ def test_generate_code_persists_with_0o600_mode(state_file: Path) -> None:
     assert on_disk["pairing_code"] == code
 
 
+def test_get_or_create_code_seeds_both_code_and_pending_key(state_file: Path) -> None:
+    """A fresh manager's first code seeds the stable pending API key too.
+
+    The Rust pairing beacon reads ``pending_api_key`` straight from
+    ``pairing.json``; it must be present the moment a code exists so the key the
+    beacon registers is the same key ``claim()`` later persists (no key drift,
+    no permanent 401 after the claim).
+    """
+    mgr = PairingManager(state_path=str(state_file))
+    code = mgr.get_or_create_code()
+    on_disk = json.loads(state_file.read_text())
+    assert on_disk["pairing_code"] == code
+    assert on_disk["pending_api_key"].startswith("ados_")
+
+
+def test_get_or_create_code_keeps_one_stable_pending_key(state_file: Path) -> None:
+    """Re-reading the code does not rotate the pending key."""
+    mgr = PairingManager(state_path=str(state_file))
+    mgr.get_or_create_code()
+    first_key = json.loads(state_file.read_text())["pending_api_key"]
+    # A second read returns the same code (within the TTL) and the same key.
+    mgr.get_or_create_code()
+    second_key = json.loads(state_file.read_text())["pending_api_key"]
+    assert first_key == second_key
+
+
 def test_claim_persists_with_0o600_mode(state_file: Path) -> None:
     mgr = PairingManager(state_path=str(state_file))
     mgr.get_or_create_code()

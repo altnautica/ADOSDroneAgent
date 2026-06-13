@@ -124,6 +124,11 @@ class PairingManager:
         code = self._state.get("pairing_code")
         created_at = self._state.get("code_created_at", 0)
         if code and (time.time() - created_at) < CODE_TTL:
+            # Seed the stable pending API key alongside the existing code so any
+            # reader of the unpaired state (``/api/pairing/info``, ``ados
+            # status``, mDNS, the Rust pairing beacon) sees BOTH the code and the
+            # key. Idempotent: returns the cached key when one already exists.
+            self.get_or_create_api_key()
             return code
         # Generate new code
         code = self.generate_code()
@@ -132,6 +137,9 @@ class PairingManager:
         self._state.pop("paired", None)
         self._save_state()
         log.info("pairing_code_generated", code=code)
+        # Seed the stable pending API key in the same unpaired state so the code
+        # and the key always travel together (see the note above).
+        self.get_or_create_api_key()
         return code
 
     def get_or_create_api_key(self) -> str:
