@@ -104,6 +104,15 @@ pub struct VideoOrchestrator {
     pub(crate) vision_tap_restart_count: u32,
     pub(crate) last_start_error: StartError,
 
+    /// Earliest instant the cloud-push branch may retry, or `None` when it may
+    /// retry now. The cloud relay is the SECONDARY path; its backoff/park must
+    /// never block the whole tick body and starve primary-radio (wfb-tee)
+    /// recovery. So instead of sleeping the tick on the cloud backoff, the
+    /// cloud branch stamps a deadline here and the tick falls through to the
+    /// wfb / vision branches; the cloud branch is skipped until the deadline
+    /// elapses.
+    pub(crate) cloud_retry_after: Option<Instant>,
+
     /// Serializes teardown+respawn across the cold start and the health-check
     /// restart (held only around the bounded region, never across a backoff
     /// sleep). A runtime camera change is not a distinct operation: a fresh
@@ -117,6 +126,11 @@ pub struct VideoOrchestrator {
 
     pub(crate) python_executable: String,
     pub(crate) env: EncoderEnv,
+
+    /// Override for the camera-state sidecar path. `None` ⇒ the canonical
+    /// `/run/ados/camera-state.json` contract path. Set only in tests so the
+    /// wedge/park re-persist can be asserted against a temp file.
+    pub(crate) camera_state_path: Option<std::path::PathBuf>,
 }
 
 impl VideoOrchestrator {
@@ -154,10 +168,24 @@ impl VideoOrchestrator {
             wfb_tee_restart_count: 0,
             vision_tap_restart_count: 0,
             last_start_error: StartError::None,
+            cloud_retry_after: None,
             restart_lock: Arc::new(Mutex::new(())),
             camera_plugged: Arc::new(Notify::new()),
             python_executable: discover::python_executable(),
             env: EncoderEnv::detect(),
+            camera_state_path: None,
+        }
+    }
+
+    /// Re-persist the camera-state sidecar from the last-known discovery
+    /// snapshot. Used both on a healthy tick and across the wedge/park backoff
+    /// sleeps so a present-but-wedged camera does not read as `unknown` to the
+    /// staleness gate while the orchestrator is stuck. Honors
+    /// [`Self::camera_state_path`] (canonical path when `None`).
+    fn refresh_camera_state(&self) {
+        match self.camera_state_path.as_deref() {
+            Some(p) => discover::persist_camera_state_to(&self.last_cameras, p),
+            None => discover::persist_camera_state(&self.last_cameras),
         }
     }
 
@@ -306,11 +334,20 @@ impl VideoOrchestrator {
         }
     }
 
-    /// Is the cloud push still alive? `true` when healthy or not configured.
-    /// Mirrors `_check_cloud_push_health`.
+    /// Is the cloud push still alive? `true` when healthy or — for the absent
+    /// slot — only when cloud relay is NOT configured to be running here.
+    ///
+    /// The None branch is the same shape as the wfb-tee None-branch: a full
+    /// pipeline restart (`stop_stream` → `start_stream`) clears `cloud_push`
+    /// and `start_stream` does NOT re-arm it, so reporting healthy for None
+    /// would leave a configured cloud push dead for the rest of the process
+    /// lifetime. Report unhealthy for the absent slot WHILE cloud is enabled
+    /// AND the pipeline is Running so the run-loop ladder re-arms it; when
+    /// cloud is disabled, or the pipeline is not running, the absent slot is
+    /// correct and healthy. Mirrors `_check_cloud_push_health`.
     fn check_cloud_push_health(&mut self) -> bool {
         match self.cloud_push.as_mut() {
-            None => true,
+            None => !(self.config.cloud_enabled() && self.state == PipelineState::Running),
             Some(p) => {
                 if p.is_running() {
                     true
@@ -438,11 +475,12 @@ impl VideoOrchestrator {
     /// Emitted only while the pipeline is `Running` (an idle / errored pipeline
     /// has no encoder, so reporting a bitrate / frame rate would be a lie).
     /// `encoder_bitrate_kbps` and `framerate_hz` are the active encoder's
-    /// configured output values; `queue_depth_frames` and
-    /// `dropped_frames_cumulative` do not yet have a live source in the
-    /// streaming-copy path, so they are emitted as a floor the metric series can
-    /// later be backed by a real measurement. Tagged with the agent `profile`
-    /// and the `main` stream name.
+    /// configured output values. `queue_depth_frames` and
+    /// `dropped_frames_cumulative` are NOT emitted: the streaming-copy path
+    /// (`-c:v copy`) has no source for them, so emitting a constant `0.0` would
+    /// be a measured-looking placeholder. They return only when a real
+    /// measurement backs them. Tagged with the agent `profile` and the `main`
+    /// stream name.
     fn emit_telemetry(&self, emitter: &ados_protocol::logd::emitter::IngestEmitter) {
         use ados_protocol::logd::{Fields, Value};
         if self.state != PipelineState::Running {
@@ -461,13 +499,7 @@ impl VideoOrchestrator {
             self.camera_cfg.bitrate_kbps as f64,
             tags.clone(),
         );
-        emitter.emit_metric(
-            "video.framerate_hz",
-            self.camera_cfg.fps as f64,
-            tags.clone(),
-        );
-        emitter.emit_metric("video.queue_depth_frames", 0.0, tags.clone());
-        emitter.emit_metric("video.dropped_frames_cumulative", 0.0, tags);
+        emitter.emit_metric("video.framerate_hz", self.camera_cfg.fps as f64, tags);
     }
 
     /// One iteration of the run loop's body, factored out so the `select!`
@@ -492,7 +524,7 @@ impl VideoOrchestrator {
         let health_ok = self.check_health().await;
         if health_ok {
             self.note_healthy_tick();
-            discover::persist_camera_state(&self.last_cameras);
+            self.refresh_camera_state();
         } else {
             self.note_unhealthy_tick();
         }
@@ -505,6 +537,10 @@ impl VideoOrchestrator {
                     "pipeline_circuit_breaker: too many failures, waiting 5 minutes"
                 );
                 self.state = PipelineState::Error;
+                // Keep the camera-state sidecar fresh across the long park so a
+                // present camera does not read as `unknown` to the staleness
+                // gate while the orchestrator is wedged.
+                self.refresh_camera_state();
                 interruptible_sleep(MAX_RESTART_DELAY, shutdown, &self.camera_plugged, false).await;
                 self.restart_count = 0;
                 return;
@@ -516,7 +552,10 @@ impl VideoOrchestrator {
                 "pipeline_health_check_failed: restarting"
             );
             // Back off BEFORE taking the restart lock (the Python discipline:
-            // the lock is never held across the long sleep).
+            // the lock is never held across the long sleep). Refresh the
+            // camera-state sidecar before the sleep so it stays fresh while the
+            // pipeline is unhealthy.
+            self.refresh_camera_state();
             let pre = delay.saturating_sub(HEALTH_CHECK_INTERVAL);
             interruptible_sleep(pre, shutdown, &self.camera_plugged, false).await;
             let _guard = self.restart_lock.clone().lock_owned().await;
@@ -529,35 +568,21 @@ impl VideoOrchestrator {
             return;
         }
 
-        // Encoder healthy — check the cloud push ladder.
-        if !self.check_cloud_push_health() {
-            self.cloud_restart_count += 1;
-            let delay = backoff_delay(
-                self.cloud_restart_count,
-                BASE_RESTART_DELAY,
-                MAX_RESTART_DELAY,
-            );
-            if circuit_breaker_tripped(self.cloud_restart_count) {
-                tracing::error!(
-                    attempts = self.cloud_restart_count,
-                    "cloud_push_circuit_breaker: waiting 5 minutes"
-                );
-                interruptible_sleep(MAX_RESTART_DELAY, shutdown, &self.camera_plugged, false).await;
-                self.cloud_restart_count = 0;
-            } else {
-                tracing::warn!(
-                    attempt = self.cloud_restart_count,
-                    backoff_s = delay.as_secs_f64(),
-                    "cloud_push_restarting"
-                );
-                self.stop_cloud_push().await;
-                let pre = delay.saturating_sub(HEALTH_CHECK_INTERVAL);
-                interruptible_sleep(pre, shutdown, &self.camera_plugged, false).await;
-                if self.start_cloud_push().await {
-                    self.cloud_restart_count = 0;
-                }
-            }
-            return;
+        // Encoder healthy — check the cloud push ladder. The cloud relay is the
+        // SECONDARY path: its backoff/park is a non-blocking deadline, never an
+        // in-tick sleep, so a configured-but-unreachable relay can never starve
+        // the wfb-tee recovery below. A pending `cloud_retry_after` deadline in
+        // the future suppresses the branch (the tick falls through to wfb /
+        // vision); once the deadline elapses the branch runs, attempts the
+        // re-arm, and either succeeds or stamps a fresh deadline. This branch
+        // never `return`s, so an unhealthy cloud push no longer short-circuits
+        // the radio fan-out.
+        let cloud_due = self
+            .cloud_retry_after
+            .map(|deadline| Instant::now() >= deadline)
+            .unwrap_or(true);
+        if cloud_due {
+            self.tick_cloud_push().await;
         }
 
         // Encoder + cloud fine — check the wfb tee ladder (no circuit breaker;
@@ -640,12 +665,71 @@ impl VideoOrchestrator {
         }
     }
 
+    /// The non-blocking cloud-push re-arm step, run from `tick_running` only
+    /// when any pending `cloud_retry_after` deadline has elapsed.
+    ///
+    /// Unlike the encoder/wfb ladders this NEVER sleeps the tick: a configured
+    /// cloud relay that is unreachable must not stall the primary-radio (wfb)
+    /// recovery that runs after it. On an unhealthy push it tears down the
+    /// stale process, then either parks for the circuit-breaker window or stamps
+    /// a backoff deadline and tries the re-arm immediately (so a transient
+    /// outage recovers on the first due tick); a persistent failure re-stamps
+    /// the deadline on the following due tick. On a healthy push it clears the
+    /// deadline and the counter.
+    async fn tick_cloud_push(&mut self) {
+        if self.check_cloud_push_health() {
+            // Healthy (or not configured / not running) — nothing to do; clear
+            // any leftover backoff state.
+            self.cloud_retry_after = None;
+            self.cloud_restart_count = 0;
+            return;
+        }
+        // Unhealthy: the slot is absent (full-restart re-arm needed) or the
+        // process exited. Reap any stale process first.
+        self.stop_cloud_push().await;
+        self.cloud_restart_count += 1;
+        if circuit_breaker_tripped(self.cloud_restart_count) {
+            tracing::error!(
+                attempts = self.cloud_restart_count,
+                "cloud_push_circuit_breaker: parking cloud push 5 minutes (radio recovery continues)"
+            );
+            self.cloud_retry_after = Some(Instant::now() + MAX_RESTART_DELAY);
+            self.cloud_restart_count = 0;
+            return;
+        }
+        let delay = backoff_delay(
+            self.cloud_restart_count,
+            BASE_RESTART_DELAY,
+            MAX_RESTART_DELAY,
+        );
+        tracing::warn!(
+            attempt = self.cloud_restart_count,
+            backoff_s = delay.as_secs_f64(),
+            "cloud_push_restarting"
+        );
+        if self.start_cloud_push().await {
+            // Re-armed — clear the backoff state.
+            self.cloud_retry_after = None;
+            self.cloud_restart_count = 0;
+        } else {
+            // Failed to re-arm — defer the next attempt by the backoff window
+            // WITHOUT blocking the tick, so the wfb branch keeps running.
+            self.cloud_retry_after = Some(Instant::now() + delay);
+        }
+    }
+
     /// The Error/Stopped retry-from-error path: exponential backoff with the
     /// no-camera-vs-real-wedge cap split and a SIGUSR1-woken sleep.
     async fn tick_retry_from_error(&mut self, shutdown: &Shutdown) {
         self.restart_count += 1;
         let cap = retry_cap(self.last_start_error);
         let wake_on_camera = self.last_start_error == StartError::NoPrimaryCamera;
+        // Keep the camera-state sidecar fresh across the retry backoff sleep so
+        // a present-but-wedged camera (the last-known snapshot) does not read as
+        // `unknown` to the staleness gate while the pipeline is parked in the
+        // Error state. `start_stream` re-discovers + re-persists on the actual
+        // retry; this only covers the long sleep windows.
+        self.refresh_camera_state();
         if circuit_breaker_tripped(self.restart_count) {
             tracing::warn!(
                 attempts = self.restart_count,
@@ -812,6 +896,233 @@ mod tests {
         o.state = PipelineState::Running;
         o.start_vision_tap().await;
         assert!(o.vision_tap.is_none());
+    }
+
+    fn cloud_orch() -> VideoOrchestrator {
+        let cfg = AgentVideoConfig {
+            cloud_relay_url: Some("rtsp://relay.example.com:8554".into()),
+            ..AgentVideoConfig::default()
+        };
+        assert!(cfg.cloud_enabled());
+        VideoOrchestrator::new(cfg, CameraConfig::default(), std::path::Path::new("/tmp"))
+    }
+
+    // --- cloud push must re-arm after a full pipeline restart ---------------
+
+    #[test]
+    fn cloud_push_health_none_unhealthy_when_enabled_and_running() {
+        // After a full restart cloud_push is None; with cloud configured and the
+        // pipeline Running the absent slot must read UNHEALTHY so the run-loop
+        // ladder re-arms it (the bug: it read healthy and stayed dead).
+        let mut o = cloud_orch();
+        o.state = PipelineState::Running;
+        assert!(o.cloud_push.is_none());
+        assert!(!o.check_cloud_push_health());
+    }
+
+    #[test]
+    fn cloud_push_health_none_healthy_when_not_running() {
+        // Absent slot + pipeline not running → correct + healthy (nothing to
+        // supervise; e.g. between stop_stream and start_stream).
+        let mut o = cloud_orch();
+        o.state = PipelineState::Stopped;
+        assert!(o.check_cloud_push_health());
+    }
+
+    #[test]
+    fn cloud_push_health_none_healthy_when_cloud_disabled() {
+        // No cloud_relay_url configured → the absent slot is always healthy,
+        // even while Running (the local-only default must not loop re-arming).
+        let mut o = test_orch();
+        assert!(!o.config.cloud_enabled());
+        o.state = PipelineState::Running;
+        assert!(o.cloud_push.is_none());
+        assert!(o.check_cloud_push_health());
+    }
+
+    // --- a down cloud relay must not starve wfb recovery --------------------
+
+    #[tokio::test]
+    async fn tick_cloud_push_parks_without_blocking_on_breaker_trip() {
+        // With the cloud restart counter at the breaker edge, the next
+        // unhealthy step must PARK via a future deadline (not sleep the tick)
+        // so the wfb branch keeps running. The whole call must return in well
+        // under the 300 s park window.
+        let mut o = cloud_orch();
+        o.state = PipelineState::Running;
+        // An exited cloud_push reads unhealthy (reaped in tick_cloud_push).
+        let mut p = ManagedProcess::spawn("test-cloud-push", "true", &[]).unwrap();
+        for _ in 0..50 {
+            if !p.is_running() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(!p.is_running(), "test process should have exited");
+        o.cloud_push = Some(p);
+        // One increment away from tripping the breaker.
+        o.cloud_restart_count = CIRCUIT_BREAKER_ATTEMPTS - 1;
+
+        let before = Instant::now();
+        o.tick_cloud_push().await;
+        let elapsed = before.elapsed();
+
+        // Returned promptly — it did NOT sleep the 300 s park window.
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "tick_cloud_push blocked for {elapsed:?}; it must never sleep the tick"
+        );
+        // Parked: a future retry deadline is stamped and the counter reset.
+        let deadline = o.cloud_retry_after.expect("a park deadline was stamped");
+        assert!(
+            deadline > Instant::now(),
+            "the deadline must be in the future"
+        );
+        assert_eq!(o.cloud_restart_count, 0);
+        // The stale process slot was reaped.
+        assert!(o.cloud_push.is_none());
+    }
+
+    #[tokio::test]
+    async fn parked_cloud_deadline_suppresses_branch_so_wfb_runs() {
+        // The cloud branch is gated on `cloud_due`. A park deadline in the
+        // future makes the branch NOT due, so the tick falls through to the wfb
+        // / vision branches — the anti-starvation invariant. This asserts the
+        // exact gate the run loop uses.
+        let mut o = cloud_orch();
+        o.cloud_retry_after = Some(Instant::now() + Duration::from_secs(300));
+        let cloud_due = o
+            .cloud_retry_after
+            .map(|deadline| Instant::now() >= deadline)
+            .unwrap_or(true);
+        assert!(
+            !cloud_due,
+            "a future park deadline must suppress the cloud branch"
+        );
+
+        // Once the deadline has elapsed the branch becomes due again.
+        o.cloud_retry_after = Some(Instant::now() - Duration::from_secs(1));
+        let cloud_due = o
+            .cloud_retry_after
+            .map(|deadline| Instant::now() >= deadline)
+            .unwrap_or(true);
+        assert!(
+            cloud_due,
+            "an elapsed park deadline must re-open the cloud branch"
+        );
+    }
+
+    #[tokio::test]
+    async fn tick_cloud_push_clears_state_when_healthy() {
+        // When cloud is disabled the absent slot is healthy; tick_cloud_push
+        // must clear any leftover backoff state and not park.
+        let mut o = test_orch();
+        o.state = PipelineState::Running;
+        o.cloud_restart_count = 3;
+        o.cloud_retry_after = Some(Instant::now() + Duration::from_secs(10));
+        o.tick_cloud_push().await;
+        assert!(o.cloud_retry_after.is_none());
+        assert_eq!(o.cloud_restart_count, 0);
+    }
+
+    // --- camera-state sidecar stays fresh while wedged ----------------------
+
+    fn present_camera_discovery() -> DiscoveryResult {
+        DiscoveryResult {
+            cameras: vec![crate::discover::DiscoveredCamera {
+                name: "HZ USB Camera".into(),
+                camera_type: "usb".into(),
+                device_path: "/dev/video0".into(),
+                width: 1280,
+                height: 720,
+                capabilities: vec!["h264".into()],
+                hardware_role: String::new(),
+            }],
+            primary: Some(crate::discover::Primary {
+                device_path: "/dev/video0".into(),
+                name: "HZ USB Camera".into(),
+            }),
+            total_cameras: 1,
+        }
+    }
+
+    #[test]
+    fn refresh_camera_state_writes_fresh_ready_snapshot_while_wedged() {
+        // The wedge/park paths call refresh_camera_state(). With a present
+        // camera cached in last_cameras it must (re)write a `ready` snapshot so
+        // the staleness gate never drops the camera pill to `unknown` while the
+        // orchestrator is stuck. Target a temp path so the write is observable.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("camera-state.json");
+        let mut o = test_orch();
+        o.last_cameras = present_camera_discovery();
+        o.camera_state_path = Some(path.clone());
+
+        // No sidecar yet.
+        assert!(!path.exists());
+        o.refresh_camera_state();
+        assert!(path.exists(), "the wedge re-persist must write the sidecar");
+
+        let v: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(
+            v["state"], "ready",
+            "a present camera must read ready, not unknown"
+        );
+        assert_eq!(v["primary_path"], "/dev/video0");
+        assert_eq!(v["total_cameras"], 1);
+        let first_ts = v["updated_at_unix"].as_f64().unwrap();
+        assert!(first_ts > 0.0);
+
+        // A second refresh (a later wedge tick) advances the timestamp — the
+        // freshness the staleness gate keys on.
+        std::thread::sleep(Duration::from_millis(20));
+        o.refresh_camera_state();
+        let v2: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert!(
+            v2["updated_at_unix"].as_f64().unwrap() >= first_ts,
+            "each wedge re-persist must refresh the timestamp"
+        );
+    }
+
+    // --- no placeholder telemetry -------------------------------------------
+
+    #[tokio::test]
+    async fn emit_telemetry_emits_only_the_two_real_metrics() {
+        // The streaming-copy path has no source for queue depth / dropped
+        // frames, so emit_telemetry must NOT emit them as constant-0.0
+        // placeholders. The emitter's enqueue counter is the capture seam: each
+        // emit_metric call enqueues exactly one frame, so the count proves the
+        // emitted set. After the fix only two metrics (bitrate + framerate) flow
+        // per pass, not four.
+        use ados_protocol::logd::emitter::IngestEmitter;
+
+        let mut o = test_orch();
+        o.state = PipelineState::Running;
+        // A bogus socket path means no live daemon; frames still enqueue into
+        // the channel buffer so the enqueue count is exact for a single pass
+        // (the channel capacity dwarfs two sends, so nothing drops here).
+        let emitter =
+            IngestEmitter::with_socket("ados-video-test", "/nonexistent/ados/ingest.sock");
+        let stats = emitter.stats();
+        o.emit_telemetry(&emitter);
+        assert_eq!(
+            stats.enqueued() + stats.dropped(),
+            2,
+            "exactly two metrics must be produced (bitrate + framerate); the two placeholders are gone"
+        );
+    }
+
+    #[tokio::test]
+    async fn emit_telemetry_silent_when_not_running() {
+        // An idle / errored pipeline has no encoder, so no telemetry is emitted.
+        use ados_protocol::logd::emitter::IngestEmitter;
+        let o = test_orch();
+        assert_ne!(o.state, PipelineState::Running);
+        let emitter =
+            IngestEmitter::with_socket("ados-video-test", "/nonexistent/ados/ingest.sock");
+        let stats = emitter.stats();
+        o.emit_telemetry(&emitter);
+        assert_eq!(stats.enqueued() + stats.dropped(), 0);
     }
 
     #[test]

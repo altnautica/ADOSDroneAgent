@@ -16,7 +16,12 @@ def routes() -> list[RouteSpec]:
 
 
 def _video_metrics_route() -> RouteSpec:
-    """Air-side video encoder telemetry (live telemetry, store-only)."""
+    """Air-side video encoder telemetry (live telemetry, store-only).
+
+    `queue_depth_frames` / `dropped_frames_cumulative` are intentionally absent:
+    the streaming-copy path has no live source for them, so the producer no
+    longer emits a placeholder and the conformance surface does not require one.
+    """
     return RouteSpec(
         name="video-metrics",
         kind="metrics",
@@ -31,18 +36,6 @@ def _video_metrics_route() -> RouteSpec:
             ),
             FieldSpec(
                 field="video.framerate_hz",
-                locator=Locator.METRIC,
-                classification="live",
-                producer="ados-video",
-            ),
-            FieldSpec(
-                field="video.queue_depth_frames",
-                locator=Locator.METRIC,
-                classification="live",
-                producer="ados-video",
-            ),
-            FieldSpec(
-                field="video.dropped_frames_cumulative",
                 locator=Locator.METRIC,
                 classification="live",
                 producer="ados-video",

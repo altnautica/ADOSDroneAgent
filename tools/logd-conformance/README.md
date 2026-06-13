@@ -37,7 +37,7 @@ one-for-one: `seq←id`, `timestamp←ts_us`, `level←level`, `logger←target|
 |-------|-------|----------------|--------|
 | `logs` | logs | `/api/logs` | id, ts_us, level, source, msg |
 | `link-metrics` | metrics | — | link.rssi_dbm, link.snr_db, link.fec_uncorrected |
-| `video-metrics` | metrics | — | video.encoder_bitrate_kbps, video.framerate_hz, video.queue_depth_frames, video.dropped_frames_cumulative |
+| `video-metrics` | metrics | — | video.encoder_bitrate_kbps, video.framerate_hz |
 | `hw-summary` | metrics | — | cpu.utilization_pct, mem.available_pct, disk.used_pct, thermal.primary_c |
 | `service-events` | events | — | from_state, to_state, reason (on `service.transition`) |
 

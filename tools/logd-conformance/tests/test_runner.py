@@ -51,8 +51,6 @@ _FULL_METRICS = [
     {"metric": "link.bitrate_kbps", "value": 5700.0},
     {"metric": "video.encoder_bitrate_kbps", "value": 4000.0},
     {"metric": "video.framerate_hz", "value": 30.0},
-    {"metric": "video.queue_depth_frames", "value": 0.0},
-    {"metric": "video.dropped_frames_cumulative", "value": 0.0},
     {"metric": "video.air.encoder_fps", "value": 30.0},
     {"metric": "video.air.encoded_kbps", "value": 6000.0},
     {"metric": "video.air.sei_injected_count", "value": 12.0},
