@@ -35,10 +35,23 @@ def test_registry_covers_the_migrated_routes():
     assert wave1 <= names, f"missing wave-1 routes: {wave1 - names}"
 
 
-def test_seeded_routes_are_all_read_only_and_not_sandboxed():
+def test_non_sandboxed_routes_are_read_only_gets():
+    # The default-run set (everything not sandboxed) must be side-effect-free GET
+    # reads, so a routine conformance run never mutates a live agent. Write routes
+    # are present but carry require_sandbox=True (POST/PUT), skipped by default.
     for case in registered_cases():
-        assert case.method == "GET"
-        assert case.require_sandbox is False
+        if case.require_sandbox:
+            assert case.method in ("POST", "PUT", "DELETE")
+        else:
+            assert case.method == "GET"
+
+
+def test_write_routes_are_sandboxed():
+    # Every mutating route the front has taken over is registered for the bench
+    # but sandboxed so it is not fired against a live agent by default.
+    for name in ("params-write", "signing-enroll-fc", "service-restart"):
+        case = case_by_name(name)
+        assert case is not None and case.require_sandbox is True
 
 
 def test_pairing_code_masks_the_regenerated_code():

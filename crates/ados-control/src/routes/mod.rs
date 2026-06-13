@@ -27,8 +27,11 @@ pub mod gs_pairing;
 pub mod gs_status;
 pub mod pairing;
 pub mod params;
+pub mod params_write;
+pub mod service_control;
 pub mod services;
 pub mod signing;
+pub mod signing_write;
 pub mod status;
 pub mod status_full;
 pub mod system;
@@ -80,21 +83,32 @@ pub fn build_router(state: AppState) -> Router {
         // it to the mavlink socket; the catalog is the static command list.
         .route("/api/command", post(command::execute_command))
         .route("/api/commands", get(command::list_commands))
-        // Params: the full cached FC parameter list (the single-param route is a
-        // path-param path and stays proxied until the matcher lands).
+        // Params: the full cached FC parameter list + the single-param write (a
+        // path-param route that builds a PARAM_SET frame and sends it to the FC;
+        // the single-param read stays proxied).
         .route("/api/params", get(params::get_all_params))
-        // Services: the live `ados-*.service` unit inventory with per-service
-        // memory + the serving process's own metrics.
+        .route("/api/params/{name}", post(params_write::set_param))
+        // Services: the live `ados-*.service` unit inventory + the per-unit restart
+        // (allowlist-guarded to ados-* units) and the supervisor restart that
+        // cycles the whole agent process tree.
         .route("/api/services", get(services::list_services))
+        .route("/api/services/{name}/restart", post(service_control::restart_service))
+        .route("/api/v1/system/restart-supervisor", post(service_control::restart_supervisor))
         // Fleet roster: the opt-in mesh awareness surface. Both static on this
         // device — enrollment reports not-enrolled, peers is the empty list.
         .route("/api/fleet/enrollment", get(fleet::get_enrollment))
         .route("/api/fleet/peers", get(fleet::list_peers))
-        // MAVLink v2 signing reads: FC capability, the require-flag value, and the
-        // observational signed-frame counters (the write routes stay proxied).
+        // MAVLink v2 signing: FC capability, the require-flag value (GET) + toggle
+        // (PUT, on the same path the read uses), the observational counters, and
+        // the enroll/disable writes that push a key to the FC and clear its store.
         .route("/api/mavlink/signing/capability", get(signing::capability))
-        .route("/api/mavlink/signing/require", get(signing::require))
+        .route(
+            "/api/mavlink/signing/require",
+            get(signing::require).put(signing_write::require),
+        )
         .route("/api/mavlink/signing/counters", get(signing::counters))
+        .route("/api/mavlink/signing/enroll-fc", post(signing_write::enroll_fc))
+        .route("/api/mavlink/signing/disable-on-fc", post(signing_write::disable_on_fc))
         // WFB radio reads: link status, link-quality history, pair-state, and the
         // failover state (the channel / tx-power writes stay proxied).
         .route("/api/wfb", get(wfb::get_wfb_status))

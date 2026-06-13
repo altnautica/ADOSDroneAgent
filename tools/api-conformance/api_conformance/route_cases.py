@@ -593,6 +593,94 @@ REGISTRY: list[RouteCase] = [
         path="/api/v1/ground-station/captive-token",
         extra_volatile=("token",),
     ),
+    # Write a single FC parameter. A side effect (it sends a PARAM_SET to the FC),
+    # so it is sandboxed and skipped by default; the bench opts in against a live
+    # FC. The body is the {"value": <number>} the route reshapes into the frame.
+    # The `ack` flag and `cached_value` depend on whether the FC echoes the new
+    # value within the poll window, so they are masked; the {name, value, message}
+    # shape is the contract.
+    RouteCase(
+        name="params-write",
+        method="POST",
+        path="/api/params/WPNAV_SPEED",
+        body=b'{"value": 500.0}',
+        content_type="application/json",
+        paired_headers={"authorization": PAIRED_AUTH_PLACEHOLDER},
+        require_sandbox=True,
+        extra_volatile=("ack", "cached_value", "message"),
+    ),
+    # Push a 32-byte signing key to the FC (one-shot SETUP_SIGNING). A side effect
+    # (it writes to the FC), so sandboxed by default. The body is a 64-hex-char
+    # key + the target/link fields; the response carries a volatile `enrolled_at`
+    # timestamp + a per-key `key_id` fingerprint, masked when the bench opts in.
+    RouteCase(
+        name="signing-enroll-fc",
+        method="POST",
+        path="/api/mavlink/signing/enroll-fc",
+        paired_headers={"authorization": PAIRED_AUTH_PLACEHOLDER},
+        body=(
+            b'{"key_hex":'
+            b'"0000000000000000000000000000000000000000000000000000000000000000",'
+            b'"link_id":0,"target_system":1,"target_component":1}'
+        ),
+        content_type="application/json",
+        require_sandbox=True,
+        extra_volatile=("enrolled_at", "key_id"),
+    ),
+    # Clear the FC's signing store (SETUP_SIGNING with an all-zero key). A side
+    # effect, so sandboxed. No request body; the response is the static
+    # {"success": true}.
+    RouteCase(
+        name="signing-disable-on-fc",
+        method="POST",
+        path="/api/mavlink/signing/disable-on-fc",
+        paired_headers={"authorization": PAIRED_AUTH_PLACEHOLDER},
+        require_sandbox=True,
+    ),
+    # Toggle SIGNING_REQUIRE on the FC (PARAM_SET). A side effect, so sandboxed.
+    # The body is the {require} flag; the response echoes it in
+    # {"success": true, "require": <bool>}.
+    RouteCase(
+        name="signing-require-set",
+        method="PUT",
+        path="/api/mavlink/signing/require",
+        paired_headers={"authorization": PAIRED_AUTH_PLACEHOLDER},
+        body=b'{"require":true}',
+        content_type="application/json",
+        require_sandbox=True,
+    ),
+    # Restart a single agent unit. A write with side effects, so it is sandboxed
+    # (skipped by default). The path carries a concrete allowlisted unit name; the
+    # body is unused by the handler (the unit comes from the path), but a
+    # representative empty JSON object is sent. The success body's pid/timestamp
+    # before/after fields move with the live restart, so they are masked; the
+    # deterministic diff is the unknown-service rejection shape.
+    RouteCase(
+        name="service-restart",
+        method="POST",
+        path="/api/services/ados-mavlink/restart",
+        body=b"{}",
+        content_type="application/json",
+        require_sandbox=True,
+        extra_volatile=(
+            "pid_before",
+            "pid_after",
+            "active_enter_before",
+            "active_enter_after",
+        ),
+    ),
+    # Restart the supervisor (the whole agent process tree). A write with side
+    # effects, so it is sandboxed (skipped by default). The handler takes no body;
+    # a representative empty JSON object is sent. The {ok, message} shape is the
+    # contract.
+    RouteCase(
+        name="system-restart-supervisor",
+        method="POST",
+        path="/api/v1/system/restart-supervisor",
+        body=b"{}",
+        content_type="application/json",
+        require_sandbox=True,
+    ),
     # <append a RouteCase line per route as it migrates — the only shared edit>
 ]
 

@@ -40,6 +40,13 @@ base64 = { workspace = true }
 # the pair-status read reports, matching the radio manager's fingerprint exactly.
 blake2 = { workspace = true }
 hex = { workspace = true }
+# sha256 for the signing-enroll key fingerprint (the first 8 hex of sha256(key)
+# the route returns; the raw key never leaves the route, only this digest does).
+sha2 = { workspace = true }
+# UTC clock for the signing-enroll `enrolled_at` ISO-8601 timestamp and the
+# MAVLink signing initial-timestamp (10us units since the 2015 signing epoch).
+# Matches the sibling crates' `time` usage.
+time = { version = "0.3", features = ["std", "formatting"] }
 tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }

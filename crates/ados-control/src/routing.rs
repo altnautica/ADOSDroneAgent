@@ -51,6 +51,10 @@ fn native_routes() -> Vec<NativeRoute> {
         method: Method::POST,
         path,
     };
+    let put = |path| NativeRoute {
+        method: Method::PUT,
+        path,
+    };
     vec![
         // Status + identity.
         get("/healthz"),
@@ -112,6 +116,14 @@ fn native_routes() -> Vec<NativeRoute> {
         get("/api/v1/ground-station/pair/pending"),
         get("/api/v1/ground-station/pic"),
         get("/api/v1/ground-station/captive-token"),
+        // Writes. The path-param routes use the {name} template the matcher
+        // recognises; the require PUT shares its path with the require GET read.
+        post("/api/params/{name}"),
+        post("/api/services/{name}/restart"),
+        post("/api/v1/system/restart-supervisor"),
+        post("/api/mavlink/signing/enroll-fc"),
+        post("/api/mavlink/signing/disable-on-fc"),
+        put("/api/mavlink/signing/require"),
     ]
 }
 
@@ -284,7 +296,7 @@ mod tests {
         let routes = native_routes();
         assert_eq!(
             routes.len(),
-            46,
+            52,
             "native route count drifted from build_router"
         );
         let has = |m: Method, p: &str| routes.iter().any(|r| r.method == m && r.path == p);
@@ -329,6 +341,14 @@ mod tests {
         ] {
             assert!(has(Method::GET, p), "{p} must be in the native set");
         }
+        // The write routes must be native under their own methods (else
+        // auth-skipped). The path-param routes are templates the matcher resolves.
+        assert!(has(Method::POST, "/api/params/{name}"));
+        assert!(has(Method::POST, "/api/services/{name}/restart"));
+        assert!(has(Method::POST, "/api/v1/system/restart-supervisor"));
+        assert!(has(Method::POST, "/api/mavlink/signing/enroll-fc"));
+        assert!(has(Method::POST, "/api/mavlink/signing/disable-on-fc"));
+        assert!(has(Method::PUT, "/api/mavlink/signing/require"));
         // The original surface stays native.
         assert!(has(Method::GET, "/healthz"));
         assert!(has(Method::POST, "/api/command"));
