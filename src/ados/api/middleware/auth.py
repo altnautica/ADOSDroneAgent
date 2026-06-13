@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from urllib.parse import urlparse
 
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -68,6 +69,23 @@ _LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost"}
 # on-box loopback trust.
 _FORWARDED_HEADERS = ("x-forwarded-for", "x-real-ip", "forwarded", "cf-connecting-ip")
 
+# The trustworthy on-box signal the native front stamps when this API runs
+# behind it (bound to the internal Unix socket). The front strips any
+# client-supplied copy and sets it only on a genuine loopback request, so it is
+# authoritative — but ONLY behind the front (see `_behind_front`).
+_ONBOX_HEADER = "x-ados-onbox"
+
+
+def _behind_front() -> bool:
+    """True when this API is served behind the native front (bound to the
+    internal Unix socket rather than the LAN TCP port).
+
+    Signalled by ``ADOS_API_INTERNAL_SOCKET`` being set, which is exactly the
+    env the front unit injects at cutover. Read live (not cached) so a test can
+    toggle it; the unit restarts on a real flip, so the cost is irrelevant.
+    """
+    return bool(os.environ.get("ADOS_API_INTERNAL_SOCKET", "").strip())
+
 
 def is_exempt(path: str) -> bool:
     """Check if a path is exempt from authentication."""
@@ -120,9 +138,20 @@ def _is_on_box(request: Request) -> bool:
     by the forwarding-header check, so it can never impersonate an on-box
     caller to bypass authentication.
 
-    The future native control surface must mirror this exact contract: the
-    peer socket address is loopback AND no proxy-forwarding header is present.
+    The native control surface mirrors this exact contract: the peer socket
+    address is loopback AND no proxy-forwarding header is present.
+
+    When this API is served BEHIND the native front (bound to an internal Unix
+    socket, signalled by ``ADOS_API_INTERNAL_SOCKET``), the real TCP peer is the
+    socket, so ``request.client`` is unreliable. The front then conveys on-box
+    trust explicitly: it STRIPS any client-supplied ``X-ADOS-Onbox`` and sets it
+    to ``1`` only when its own loopback check passes, so the header is
+    authoritative in that mode. The header is trusted ONLY behind the front —
+    when FastAPI owns the TCP port directly an off-box client could spoof it, so
+    it is ignored unless the internal-socket env is set.
     """
+    if _behind_front():
+        return request.headers.get(_ONBOX_HEADER) == "1"
     client = request.client
     if client is None or client.host not in _LOOPBACK_HOSTS:
         return False

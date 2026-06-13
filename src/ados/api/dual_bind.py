@@ -17,9 +17,79 @@ for clients that pick the matching family.
 
 from __future__ import annotations
 
+import grp
+import os
 import socket
 
-__all__ = ["make_dual_stack_sockets"]
+__all__ = [
+    "make_dual_stack_sockets",
+    "make_listen_sockets",
+    "API_INTERNAL_SOCKET_ENV",
+]
+
+#: When this env var holds a path, the API binds that Unix socket instead of the
+#: dual-stack TCP pair. The native HTTP front (ados-control) then owns the LAN
+#: port and reverse-proxies the routes it has not yet taken over to this socket,
+#: so a single CPython + FastAPI process serves behind the front while the
+#: migration is in flight. Empty/unset → the default TCP listeners.
+API_INTERNAL_SOCKET_ENV = "ADOS_API_INTERNAL_SOCKET"
+
+
+def make_listen_sockets(
+    ipv4_host: str,
+    port: int,
+    backlog: int = 2048,
+) -> list[socket.socket]:
+    """Resolve the API listener sockets for the current front posture.
+
+    The default is the dual-stack TCP pair on ``port`` (see
+    :func:`make_dual_stack_sockets`). When ``ADOS_API_INTERNAL_SOCKET`` is set,
+    FastAPI serves behind the native front instead: this returns a single
+    ``AF_UNIX`` listener bound at that path, so the residual Python API never
+    touches the TCP port and the front reverse-proxies to it. uvicorn serves a
+    pre-bound ``SOCK_STREAM`` socket of any family via its ``sockets=`` argument,
+    so the call site stays unchanged.
+    """
+    internal = os.environ.get(API_INTERNAL_SOCKET_ENV, "").strip()
+    if internal:
+        return [_make_unix_socket(internal, backlog)]
+    return make_dual_stack_sockets(ipv4_host, port, backlog)
+
+
+def _make_unix_socket(path: str, backlog: int = 2048) -> socket.socket:
+    """Bind a stream ``AF_UNIX`` listener at ``path``, 0o660 + the ``ados`` group.
+
+    Removes a stale socket first so a restart does not fail with ``EADDRINUSE``,
+    and group-owns to ``ados`` so the front (running as the ``ados`` user) can
+    reach it while a stray local user cannot. The chmod/chown are best-effort: a
+    dev host without the group still binds, just without the group grant.
+    """
+    parent = os.path.dirname(path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        pass
+
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    sock.setblocking(False)
+    sock.bind(path)
+    sock.listen(backlog)
+
+    # Group-own to ados first, then tighten the mode: the 0o660 grant only
+    # reaches the front once the group owns the socket. Mirrors the native
+    # control socket's bind in crates/ados-control/src/serve.rs::bind_unix.
+    try:
+        gid = grp.getgrnam("ados").gr_gid
+        os.chown(path, -1, gid)
+    except (KeyError, OSError):
+        pass
+    try:
+        os.chmod(path, 0o660)
+    except OSError:
+        pass
+    return sock
 
 
 def make_dual_stack_sockets(

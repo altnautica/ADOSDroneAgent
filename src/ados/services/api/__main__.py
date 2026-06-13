@@ -175,9 +175,11 @@ async def main() -> None:
     # Bind explicit AF_INET + AF_INET6 sockets so both IPv4 and IPv6
     # clients reach the agent regardless of which family the browser's
     # mDNS resolver returns first. uvicorn alone with `host="::"` did
-    # not produce a working IPv4 listener on some Pi kernels.
-    from ados.api.dual_bind import make_dual_stack_sockets
-    sockets = make_dual_stack_sockets(api_config.host, api_config.port)
+    # not produce a working IPv4 listener on some Pi kernels. When the
+    # native front owns the LAN port, ADOS_API_INTERNAL_SOCKET redirects
+    # this to a single Unix socket the front proxies to instead.
+    from ados.api.dual_bind import make_listen_sockets
+    sockets = make_listen_sockets(api_config.host, api_config.port)
     uvi_config = uvicorn.Config(
         app,
         log_level="warning",

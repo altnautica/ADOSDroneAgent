@@ -53,3 +53,41 @@ def test_proxied_loopback_is_not_on_box():
     # header — it must not be trusted as an on-box caller.
     for header in ("X-Forwarded-For", "CF-Connecting-IP", "Forwarded", "X-Real-IP"):
         assert _is_on_box(_req(("127.0.0.1", 50321), {header: "203.0.113.7"})) is False
+
+
+class _GetHeaders(_Headers):
+    """Header container that also supports ``.get`` (case-insensitive), used by
+    the behind-front path that honours the trustworthy ``X-ADOS-Onbox`` header."""
+
+    def __init__(self, data: dict[str, str]):
+        super().__init__(data)
+        self._map = {k.lower(): v for k, v in data.items()}
+
+    def get(self, key: str, default=None):
+        return self._map.get(key.lower(), default)
+
+
+def _front_req(client, headers: dict[str, str] | None = None):
+    host = SimpleNamespace(host=client[0]) if client else None
+    return SimpleNamespace(client=host, headers=_GetHeaders(headers or {}))
+
+
+def test_behind_front_honours_the_trustworthy_onbox_header(monkeypatch):
+    # When served behind the native front (internal socket), request.client is
+    # the socket (unreliable), so on-box trust comes from the X-ADOS-Onbox the
+    # front stamps. The front already validated loopback, so even a non-loopback
+    # client.host is trusted when the header says 1.
+    monkeypatch.setenv("ADOS_API_INTERNAL_SOCKET", "/run/ados/api-internal.sock")
+    assert _is_on_box(_front_req(("192.168.1.50", 1), {"X-ADOS-Onbox": "1"})) is True
+    # Absent or non-"1" header behind the front means not on-box.
+    assert _is_on_box(_front_req(("127.0.0.1", 1), {})) is False
+    assert _is_on_box(_front_req(("127.0.0.1", 1), {"X-ADOS-Onbox": "0"})) is False
+
+
+def test_onbox_header_is_ignored_when_not_behind_the_front(monkeypatch):
+    # Without the internal-socket env, FastAPI owns the TCP port directly, so an
+    # off-box client could spoof the header — it must NOT grant trust. Only the
+    # real loopback peer does.
+    monkeypatch.delenv("ADOS_API_INTERNAL_SOCKET", raising=False)
+    assert _is_on_box(_front_req(("192.168.1.50", 1), {"X-ADOS-Onbox": "1"})) is False
+    assert _is_on_box(_front_req(("127.0.0.1", 1), {"X-ADOS-Onbox": "1"})) is True

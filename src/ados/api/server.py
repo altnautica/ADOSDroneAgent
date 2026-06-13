@@ -240,8 +240,10 @@ async def create_api_task(agent: Any) -> None:
     app = create_app(api_runtime)
     api_config = api_runtime.config.api.rest
 
-    from ados.api.dual_bind import make_dual_stack_sockets
-    sockets = make_dual_stack_sockets(api_config.host, api_config.port)
+    # ADOS_API_INTERNAL_SOCKET redirects this to a single Unix socket behind the
+    # native front when it owns the LAN port; otherwise the dual-stack TCP pair.
+    from ados.api.dual_bind import make_listen_sockets
+    sockets = make_listen_sockets(api_config.host, api_config.port)
     config = uvicorn.Config(
         app,
         log_level="warning",
