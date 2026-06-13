@@ -24,7 +24,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use tokio::sync::Notify;
+use tokio::sync::{watch, Notify};
 
 use ados_radio::adapter;
 use ados_radio::bitrate::{
@@ -111,18 +111,23 @@ async fn main() {
         return;
     }
 
-    let cancel = Arc::new(Notify::new());
+    // Shutdown is a latching watch flag, not a one-shot `Notify`: once SIGTERM
+    // flips it to `true` the value STAYS set, so a select arm that loses a race
+    // on the first signal (e.g. a watchdog task finishing in the same poll) still
+    // sees the shutdown on the next loop iteration, and any later SIGTERM is a
+    // no-op rather than a lost edge. The same latching-watch pattern the auto-pair
+    // supervisor uses for its own shutdown.
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
     // ── Signal handler ────────────────────────────────────────────────────
-    {
-        let cancel = cancel.clone();
-        tokio::spawn(async move {
-            wait_for_shutdown().await;
-            cancel.notify_waiters();
-        });
-    }
+    tokio::spawn(async move {
+        wait_for_shutdown().await;
+        // Send always succeeds while the receiver lives; if the service already
+        // returned there is nothing left to signal.
+        let _ = shutdown_tx.send(true);
+    });
 
-    run_service(&cfg, cancel).await;
+    run_service(&cfg, shutdown_rx).await;
     tracing::info!("wfb_service_stopped");
 }
 
@@ -140,7 +145,7 @@ async fn run_list_adapters() {
     }
 }
 
-async fn run_service(cfg: &WfbConfig, cancel: Arc<Notify>) {
+async fn run_service(cfg: &WfbConfig, mut shutdown: watch::Receiver<bool>) {
     // Operating-region posture, read once at service start. The default is
     // unrestricted: the radio brings up + TX-enables on the home channel without
     // a verified operating region, and the operator is responsible for local RF
@@ -190,6 +195,12 @@ async fn run_service(cfg: &WfbConfig, cancel: Arc<Notify>) {
     // auto/manual link-tier toggle survives a watchdog kill or a channel hop.
     let adaptive_enabled: EnabledHandle = new_enabled(cfg);
     loop {
+        // Latched shutdown gate at the top of the respawn loop: if SIGTERM flipped
+        // the watch while we were tearing down a radio group below, never start
+        // another bring-up — return before re-spawning into a stopping service.
+        if *shutdown.borrow() {
+            return;
+        }
         // ── Key guard — block while unpaired ─────────────────────────────
         if !Path::new(WFB_TX_KEY).exists() {
             tracing::info!(key = WFB_TX_KEY, "wfb_blocked_unpaired");
@@ -211,8 +222,9 @@ async fn run_service(cfg: &WfbConfig, cancel: Arc<Notify>) {
                 Some(&metrics),
             );
             tokio::select! {
+                biased;
+                _ = wait_for_shutdown_flag(&mut shutdown) => return,
                 _ = tokio::time::sleep(KEY_WAIT_INTERVAL) => continue,
-                _ = cancel.notified() => return,
             }
         }
 
@@ -322,8 +334,9 @@ async fn run_service(cfg: &WfbConfig, cancel: Arc<Notify>) {
                         Some(&metrics),
                     );
                     tokio::select! {
+                        biased;
+                        _ = wait_for_shutdown_flag(&mut shutdown) => return,
                         _ = tokio::time::sleep(Duration::from_secs(REG_BLOCKED_RETRY_SECS)) => continue,
-                        _ = cancel.notified() => return,
                     }
                 }
             }
@@ -367,8 +380,9 @@ async fn run_service(cfg: &WfbConfig, cancel: Arc<Notify>) {
                 Some(&metrics),
             );
             tokio::select! {
+                biased;
+                _ = wait_for_shutdown_flag(&mut shutdown) => return,
                 _ = tokio::time::sleep(Duration::from_secs(10)) => continue,
-                _ = cancel.notified() => return,
             }
         };
 
@@ -491,8 +505,9 @@ async fn run_service(cfg: &WfbConfig, cancel: Arc<Notify>) {
                         Some(&metrics),
                     );
                     tokio::select! {
+                        biased;
+                        _ = wait_for_shutdown_flag(&mut shutdown) => return,
                         _ = tokio::time::sleep(Duration::from_secs(REG_BLOCKED_RETRY_SECS)) => continue,
-                        _ = cancel.notified() => return,
                     }
                 }
             }
@@ -514,8 +529,9 @@ async fn run_service(cfg: &WfbConfig, cancel: Arc<Notify>) {
                 "wfb_channel_set_unrecovered"
             );
             tokio::select! {
+                biased;
+                _ = wait_for_shutdown_flag(&mut shutdown) => return,
                 _ = tokio::time::sleep(Duration::from_secs(REG_BLOCKED_RETRY_SECS)) => continue,
-                _ = cancel.notified() => return,
             }
         }
 
@@ -593,8 +609,9 @@ async fn run_service(cfg: &WfbConfig, cancel: Arc<Notify>) {
                     "wfb_phy_muted_unrecovered"
                 );
                 tokio::select! {
+                    biased;
+                    _ = wait_for_shutdown_flag(&mut shutdown) => return,
                     _ = tokio::time::sleep(Duration::from_secs(REG_BLOCKED_RETRY_SECS)) => continue,
-                    _ = cancel.notified() => return,
                 }
             }
         };
@@ -655,8 +672,9 @@ async fn run_service(cfg: &WfbConfig, cancel: Arc<Notify>) {
             Err(e) => {
                 tracing::warn!(error = %e, "wfb_spawn_failed");
                 tokio::select! {
+                    biased;
+                    _ = wait_for_shutdown_flag(&mut shutdown) => return,
                     _ = tokio::time::sleep(Duration::from_secs(5)) => continue,
-                    _ = cancel.notified() => return,
                 }
             }
         };
@@ -696,7 +714,20 @@ async fn run_service(cfg: &WfbConfig, cancel: Arc<Notify>) {
         tracing::info!(iface, channel = cfg.channel, pid, "wfb_service_ready");
 
         // ── Run watchdogs + hop supervisor concurrently ──────────────────
-        let task_cancel = cancel.clone();
+        // Per-bring-up cancel for the worker tasks. Each worker is also aborted
+        // explicitly on respawn/shutdown below, so this `Notify` is the graceful
+        // wake; a small bridge task fires it once the latched shutdown watch flips
+        // so a worker's own `cancel.notified()` arm wins promptly. The bridge is
+        // aborted alongside the workers, never outliving the bring-up.
+        let task_cancel = Arc::new(Notify::new());
+        let cancel_bridge = {
+            let task_cancel = task_cancel.clone();
+            let mut bridge_shutdown = shutdown.clone();
+            tokio::spawn(async move {
+                let _ = bridge_shutdown.wait_for(|s| *s).await;
+                task_cancel.notify_waiters();
+            })
+        };
         let iface_str = iface.clone();
 
         // 2 s sidecar heartbeat — reads the live link stats + the tx_bytes
@@ -1138,8 +1169,33 @@ async fn run_service(cfg: &WfbConfig, cancel: Arc<Notify>) {
         // looped forever. On a successful in-place recovery we re-arm the TX
         // watchdog and `continue` to keep watching the live radio group.
         loop {
+            // `biased` + the shutdown arm FIRST: a latched SIGTERM must win the
+            // poll even when a watchdog / data-tx-exit task is simultaneously ready,
+            // so a real shutdown is never mistaken for a respawn trigger.
             tokio::select! {
+                biased;
+                _ = wait_for_shutdown_flag(&mut shutdown) => {
+                    // Clean shutdown: stop the tasks, the radio group, then restore
+                    // the adapter to managed mode so it isn't left stuck in monitor.
+                    cancel_bridge.abort();
+                    heartbeat.abort();
+                    watchdog1.abort();
+                    watchdog2.abort();
+                    data_tx_exit.abort();
+                    bitrate_ctrl.abort();
+                    cmd_server.abort();
+                    hop.abort();
+                    beacon.abort();
+                    proc.lock().await.kill_all().await;
+                    ados_radio::adapter::set_managed_mode(iface).await;
+                    tracing::info!("wfb_service_stopping");
+                    return;
+                }
                 result = &mut watchdog1 => {
+                    // A finished watchdog could win this poll in the same instant a
+                    // SIGTERM arrives; the latched-watch re-check after the select
+                    // (and the top-of-respawn-loop gate) catches that ordering so we
+                    // never respawn into a stopping service.
                     match result {
                         Ok(WatchdogFired::PhyMuted) => {
                             tracing::warn!(iface, "watchdog_phy_muted: attempting in-place PHY recovery");
@@ -1177,29 +1233,34 @@ async fn run_service(cfg: &WfbConfig, cancel: Arc<Notify>) {
                 _ = &mut hop => {}
                 _ = &mut beacon => {}
                 _ = &mut heartbeat => {}
-                _ = cancel.notified() => {
-                    // Clean shutdown: stop the tasks, the radio group, then restore
-                    // the adapter to managed mode so it isn't left stuck in monitor.
-                    heartbeat.abort();
-                    watchdog1.abort();
-                    watchdog2.abort();
-                    data_tx_exit.abort();
-                    bitrate_ctrl.abort();
-                    cmd_server.abort();
-                    hop.abort();
-                    beacon.abort();
-                    proc.lock().await.kill_all().await;
-                    ados_radio::adapter::set_managed_mode(iface).await;
-                    tracing::info!("wfb_service_stopping");
-                    return;
-                }
             }
             break;
+        }
+
+        // Latched shutdown re-check: a watchdog / exit-poll arm can legitimately
+        // win the select in the same instant SIGTERM flips the watch. Honor the
+        // shutdown here rather than falling into the respawn path below, then run
+        // the same clean teardown the shutdown arm runs.
+        if *shutdown.borrow() {
+            cancel_bridge.abort();
+            heartbeat.abort();
+            watchdog1.abort();
+            watchdog2.abort();
+            data_tx_exit.abort();
+            bitrate_ctrl.abort();
+            cmd_server.abort();
+            hop.abort();
+            beacon.abort();
+            proc.lock().await.kill_all().await;
+            ados_radio::adapter::set_managed_mode(iface).await;
+            tracing::info!("wfb_service_stopping");
+            return;
         }
 
         // A task exited (watchdog fired / hop ended / data-tx self-crashed) —
         // abort the siblings so they don't accumulate, kill the whole radio
         // group, and respawn.
+        cancel_bridge.abort();
         heartbeat.abort();
         watchdog1.abort();
         watchdog2.abort();
@@ -1235,10 +1296,23 @@ async fn run_service(cfg: &WfbConfig, cancel: Arc<Notify>) {
             Some(&metrics),
         );
         tokio::select! {
+            biased;
+            _ = wait_for_shutdown_flag(&mut shutdown) => return,
             _ = tokio::time::sleep(Duration::from_secs(1)) => {}
-            _ = cancel.notified() => return,
         }
     }
+}
+
+/// Wait until the latched shutdown watch flips to `true`. Returns immediately if
+/// it is already set (the latch never loses an edge) and on a closed channel
+/// (the sender dropped — treat as shutdown). The single owner of the `&mut`
+/// receiver for the run-loop's own shutdown checks; worker tasks get their wake
+/// via the per-bring-up `Notify` bridge.
+async fn wait_for_shutdown_flag(shutdown: &mut watch::Receiver<bool>) {
+    // `wait_for` resolves as soon as the predicate holds — including on the
+    // current value — and on sender-drop it returns `Err`, which we also treat as
+    // a shutdown signal so a vanished sender never strands the loop.
+    let _ = shutdown.wait_for(|s| *s).await;
 }
 
 /// Resolve when SIGTERM or SIGINT is received.
@@ -1256,5 +1330,64 @@ async fn wait_for_shutdown() {
     #[cfg(not(unix))]
     {
         let _ = tokio::signal::ctrl_c().await;
+    }
+}
+
+#[cfg(test)]
+mod shutdown_tests {
+    use super::*;
+
+    /// A latched shutdown watch that is already `true` resolves
+    /// `wait_for_shutdown_flag` immediately — the latch never loses the edge, so
+    /// a SIGTERM that flipped the watch while a select arm was busy is still seen
+    /// on the next poll.
+    #[tokio::test]
+    async fn shutdown_flag_already_set_resolves_immediately() {
+        let (tx, rx) = watch::channel(false);
+        tx.send(true).unwrap();
+        let mut rx = rx;
+        // No timeout needed: if the latch were lost this would hang and the test
+        // harness would catch it, but on a correct latch it returns at once.
+        wait_for_shutdown_flag(&mut rx).await;
+    }
+
+    /// With `biased;` and the shutdown arm FIRST, a latched shutdown wins the
+    /// poll even when a competing arm (a finished "watchdog" task) is also ready
+    /// in the same instant — so a real shutdown is never mistaken for a respawn
+    /// trigger.
+    #[tokio::test]
+    async fn shutdown_arm_wins_over_a_ready_competitor() {
+        let (tx, rx) = watch::channel(false);
+        tx.send(true).unwrap();
+        let mut rx = rx;
+        // A competing future that is immediately ready (stands in for a watchdog
+        // task that finished and would otherwise route into the respawn path).
+        let competitor = std::future::ready(());
+
+        #[derive(Debug, PartialEq)]
+        enum Won {
+            Shutdown,
+            Competitor,
+        }
+        let won = tokio::select! {
+            biased;
+            _ = wait_for_shutdown_flag(&mut rx) => Won::Shutdown,
+            _ = competitor => Won::Competitor,
+        };
+        assert_eq!(
+            won,
+            Won::Shutdown,
+            "the biased shutdown-first arm must win over a ready competitor"
+        );
+    }
+
+    /// A dropped sender (no more shutdown signal possible) also resolves the
+    /// wait, so a vanished signaller never strands the run loop forever.
+    #[tokio::test]
+    async fn shutdown_flag_resolves_on_sender_drop() {
+        let (tx, rx) = watch::channel(false);
+        let mut rx = rx;
+        drop(tx);
+        wait_for_shutdown_flag(&mut rx).await;
     }
 }

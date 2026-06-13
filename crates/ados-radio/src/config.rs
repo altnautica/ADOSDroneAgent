@@ -221,6 +221,14 @@ pub struct WfbConfig {
     pub band: String,
     #[serde(default = "default_true")]
     pub auto_hop_enabled: bool,
+    /// Explicit opt-in for the time-based periodic channel hop. Off by default:
+    /// the periodic scan locks the radio and drops `wfb_tx` frames, and a
+    /// coordinated time-based hop needs the GS to follow the announce — proven on
+    /// a two-node rig before it is trusted in the field. The reactive
+    /// (link-degradation) hop + the GS-coordinated follow stay enabled regardless;
+    /// only the unattended periodic-execution path is gated here.
+    #[serde(default)]
+    pub periodic_hop_enabled: bool,
     #[serde(default = "default_hop_period")]
     pub hop_period_seconds: u32,
     #[serde(default = "default_hop_loss_threshold")]
@@ -291,6 +299,7 @@ impl Default for WfbConfig {
             interface: String::new(),
             band: default_band(),
             auto_hop_enabled: true,
+            periodic_hop_enabled: false,
             hop_period_seconds: default_hop_period(),
             hop_loss_threshold_percent: default_hop_loss_threshold(),
             hop_rssi_threshold_dbm: default_hop_rssi_threshold(),

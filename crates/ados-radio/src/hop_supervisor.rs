@@ -22,17 +22,22 @@ use ados_radio::hop::{
     HOP_CONTROL_PORT, PRESENCE_INTERVAL,
 };
 use ados_radio::link_quality::LinkStats;
-use ados_radio::paths::{read_bind_sentinel_active, run_path, write_sidecar, WFB_TX_KEY};
+use ados_radio::paths::{read_bind_sentinel_active, run_path, write_sidecar};
 use ados_radio::process::RadioProcesses;
-use std::path::Path;
 
 use ados_radio::config::WfbConfig;
 
 use crate::bringup::{channel_from_iface, set_channel};
 
 /// Peer-beacon freshness window: skip the periodic scan when the peer was heard
-/// within this many seconds (the scan locks the radio and drops TX frames).
-pub(crate) const PEER_FRESH_SKIP_SECS: f64 = 60.0;
+/// within this many seconds (the scan locks the radio and drops TX frames). Kept
+/// below `PEER_STALE_SECS` (25 s) so a real periodic-scan window exists: a scan
+/// only runs when the peer is going quiet (heard between this window and the
+/// stale threshold) but the link is still considered up by `can_hop`. With this
+/// at or above the stale threshold the periodic path was unreachable — `can_hop`
+/// already required a non-stale peer, which is always fresher than the skip
+/// window, so every tick hit the skip and the periodic hop never executed.
+pub(crate) const PEER_FRESH_SKIP_SECS: f64 = 12.0;
 
 /// Decide whether a reactive hop should fire from the live link stats.
 ///
@@ -162,6 +167,10 @@ pub(crate) async fn run_hop_supervisor(
     cancel: Arc<Notify>,
 ) {
     let state = Arc::new(tokio::sync::Mutex::new(HopState::new(cfg.channel)));
+    // The unattended periodic-execution path is opt-in (off by default). The
+    // reactive hop + the GS-coordinated follow run regardless; this only gates the
+    // time-based periodic scan+hop and drives the honest sidecar `enabled` flag.
+    let periodic_hop_enabled = cfg.auto_hop_enabled && cfg.periodic_hop_enabled;
     let pair_key = *pair_key; // [u8;32] is Copy — move into tasks freely.
                               // None when the adapter's reg domain could not be read (do not restrict);
                               // Some(&set) drives the hop-target intersection + the sidecar field.
@@ -242,7 +251,12 @@ pub(crate) async fn run_hop_supervisor(
         let mut t = tokio::time::interval(Duration::from_secs(5));
         loop {
             tokio::select! {
-                _ = t.tick() => write_hop_supervisor_json(&hb_state, &hb_cfg, &hb_enabled).await,
+                _ = t.tick() => write_hop_supervisor_json(
+                    &hb_state,
+                    &hb_cfg,
+                    &hb_enabled,
+                    periodic_hop_enabled,
+                ).await,
                 _ = hb_cancel.notified() => break,
             }
         }
@@ -279,13 +293,19 @@ pub(crate) async fn run_hop_supervisor(
                 if read_bind_sentinel_active() {
                     continue;
                 }
+                // The unattended periodic-execution path is opt-in: it stays off
+                // until the GS-coordinated follow is proven on a two-node rig. The
+                // reactive hop + the GS follow are unaffected by this gate.
+                if !periodic_hop_enabled {
+                    continue;
+                }
                 if !state.lock().await.can_hop() {
                     continue;
                 }
-                // Skip the periodic scan while the peer is fresh (<60 s): the
-                // scan locks the radio for several seconds and drops wfb_tx
-                // frames, so on a healthy link the rescan is pure waste. A
-                // reactive scan (handled in the other arm) always runs.
+                // Skip the periodic scan while the peer is fresh: the scan locks
+                // the radio for several seconds and drops wfb_tx frames, so on a
+                // healthy link the rescan is pure waste. A reactive scan (the
+                // other arm) always runs.
                 if state.lock().await.peer_fresh_within(PEER_FRESH_SKIP_SECS) {
                     continue;
                 }
@@ -348,22 +368,23 @@ pub(crate) async fn run_hop_supervisor(
                 };
                 if return_home {
                     tracing::info!(home, "hop_return_home");
-                    proc.lock().await.kill_all().await;
                     // Always attempt the channel set AND the respawn (never leave
                     // the radio group dead), but a silent `iw set channel` failure
                     // makes the recorded outcome false: respawning the radio on
-                    // the wrong channel is not a successful return home.
+                    // the wrong channel is not a successful return home. The
+                    // group respawn reuses the live data-plane tunables (manual
+                    // tier / adaptive FEC), so a return home never reverts the
+                    // operator's pinned link rate back to the boot-time config.
                     let channel_ok = set_channel(iface, home).await;
-                    let spawn_ok = match RadioProcesses::spawn(iface, cfg, Path::new(WFB_TX_KEY), link.clone()).await {
-                        Ok(new_proc) => {
-                            *proc.lock().await = new_proc;
+                    let spawn_ok = {
+                        let mut p = proc.lock().await;
+                        let ok = p.respawn_group(cfg, link.clone()).await;
+                        if ok {
                             restart_count.fetch_add(1, Ordering::Relaxed);
-                            true
+                        } else {
+                            tracing::warn!("return_home_restart_failed");
                         }
-                        Err(e) => {
-                            tracing::warn!(error = %e, "return_home_restart_failed");
-                            false
-                        }
+                        ok
                     };
                     state.lock().await.record_hop(home, "return_home", channel_ok && spawn_ok);
                 }
@@ -424,32 +445,35 @@ async fn try_execute_hop(
         return;
     }
     sleep_to_epoch(epoch).await;
-    proc.lock().await.kill_all().await;
     // A silent `iw set channel` failure makes the hop outcome false even when
     // the radio respawns cleanly: a hop that landed on the old channel is not a
     // successful hop. The radio is always respawned so the link is never left
-    // dead.
+    // dead. The group respawn reuses the live data-plane tunables (manual tier /
+    // adaptive FEC) so a hop never silently reverts the operator's link rate.
     let channel_ok = set_channel(iface, target).await;
-    match RadioProcesses::spawn(iface, cfg, Path::new(WFB_TX_KEY), link.clone()).await {
-        Ok(new_proc) => {
-            *proc.lock().await = new_proc;
+    let spawn_ok = {
+        let mut p = proc.lock().await;
+        let ok = p.respawn_group(cfg, link.clone()).await;
+        if ok {
             restart_count.fetch_add(1, Ordering::Relaxed);
-            state.lock().await.record_hop(target, label, channel_ok);
-            if channel_ok {
-                tracing::info!(iface, channel = target, trigger = label, "hop_executed");
-            } else {
-                tracing::warn!(
-                    iface,
-                    channel = target,
-                    trigger = label,
-                    "hop_channel_unverified"
-                );
-            }
         }
-        Err(e) => {
-            state.lock().await.record_hop(target, label, false);
-            tracing::warn!(error = %e, "hop_wfb_restart_failed");
+        ok
+    };
+    if spawn_ok {
+        state.lock().await.record_hop(target, label, channel_ok);
+        if channel_ok {
+            tracing::info!(iface, channel = target, trigger = label, "hop_executed");
+        } else {
+            tracing::warn!(
+                iface,
+                channel = target,
+                trigger = label,
+                "hop_channel_unverified"
+            );
         }
+    } else {
+        state.lock().await.record_hop(target, label, false);
+        tracing::warn!(iface, channel = target, "hop_wfb_restart_failed");
     }
 }
 
@@ -517,18 +541,40 @@ async fn write_peer_presence_json(state: &Arc<tokio::sync::Mutex<HopState>>) {
 /// Write `hop-supervisor.json` (Contract E) from the shared hop state + config.
 /// `enabled_channels` is the regulatory-permitted channel set used to intersect
 /// hop candidates; surfacing it lets the panel show why a hop was refused.
+/// The honest reason the time-based periodic hop is not executing, or `None`
+/// when it is active. Reported in the hop sidecar so the panel never shows
+/// `enabled:true` for a path that cannot fire (the prior sidecar always reported
+/// `auto_hop_enabled`, which masked the suppressed periodic path).
+pub(crate) fn periodic_hop_suppression_reason(cfg: &WfbConfig) -> Option<&'static str> {
+    if !cfg.auto_hop_enabled {
+        Some("auto_hop_disabled")
+    } else if !cfg.periodic_hop_enabled {
+        Some("periodic_hop_opt_in_off")
+    } else {
+        None
+    }
+}
+
 async fn write_hop_supervisor_json(
     state: &Arc<tokio::sync::Mutex<HopState>>,
     cfg: &WfbConfig,
     enabled_channels: &std::collections::BTreeSet<u8>,
+    periodic_hop_enabled: bool,
 ) {
+    let suppression = periodic_hop_suppression_reason(cfg);
     let v = {
         let s = state.lock().await;
         let history =
             serde_json::to_value(s.history()).unwrap_or_else(|_| serde_json::Value::Array(vec![]));
         let enabled: Vec<u8> = enabled_channels.iter().copied().collect();
         json!({
-            "enabled": cfg.auto_hop_enabled,
+            // `enabled` is the honest periodic-execution state, not the bare
+            // `auto_hop_enabled`: a suppressed periodic path reports false plus a
+            // reason. The reactive hop + the GS-coordinated follow run regardless.
+            "enabled": periodic_hop_enabled,
+            "auto_hop_enabled": cfg.auto_hop_enabled,
+            "periodic_hop_enabled": cfg.periodic_hop_enabled,
+            "periodic_suppression_reason": suppression,
             "band": cfg.band,
             "hop_period_seconds": cfg.hop_period_seconds,
             "loss_threshold_percent": cfg.hop_loss_threshold_percent as f64,
@@ -672,5 +718,62 @@ mod tests {
         // An empty own id can never self-collide.
         assert!(!is_self_beacon("", ""));
         assert!(!is_self_beacon("", "anything"));
+    }
+
+    #[test]
+    fn periodic_hop_is_opt_in_and_defaults_off() {
+        // A default rig has auto_hop_enabled but periodic_hop_enabled off: the
+        // unattended periodic-execution path is suppressed with the opt-in reason,
+        // and the effective gate the supervisor reads is false.
+        let cfg = WfbConfig::default();
+        assert!(cfg.auto_hop_enabled);
+        assert!(!cfg.periodic_hop_enabled);
+        assert_eq!(
+            periodic_hop_suppression_reason(&cfg),
+            Some("periodic_hop_opt_in_off")
+        );
+        // The effective gate (auto_hop_enabled && periodic_hop_enabled) is false.
+        assert!(!(cfg.auto_hop_enabled && cfg.periodic_hop_enabled));
+    }
+
+    #[test]
+    fn periodic_hop_suppression_names_the_real_reason() {
+        // auto_hop off → the auto-hop reason wins (the whole supervisor is off).
+        let auto_off = WfbConfig {
+            auto_hop_enabled: false,
+            periodic_hop_enabled: true,
+            ..WfbConfig::default()
+        };
+        assert_eq!(
+            periodic_hop_suppression_reason(&auto_off),
+            Some("auto_hop_disabled")
+        );
+        // Both on → no suppression (the periodic path is active).
+        let both_on = WfbConfig {
+            auto_hop_enabled: true,
+            periodic_hop_enabled: true,
+            ..WfbConfig::default()
+        };
+        assert_eq!(periodic_hop_suppression_reason(&both_on), None);
+    }
+
+    #[test]
+    fn periodic_skip_window_is_below_stale_so_the_path_is_reachable() {
+        // The periodic hop requires `can_hop()` (peer fresh < PEER_STALE_SECS) AND
+        // NOT `peer_fresh_within(PEER_FRESH_SKIP_SECS)`. With the skip window below
+        // the stale window there is a real window where both hold: a peer last
+        // seen between the skip window and the stale threshold passes can_hop yet
+        // is no longer "fresh", so the periodic scan runs (when opted in). If the
+        // skip window were >= the stale threshold the path would be unreachable,
+        // because a non-stale peer is always inside the (larger) skip window.
+        const {
+            assert!(
+                PEER_FRESH_SKIP_SECS < ados_radio::hop::PEER_STALE_SECS,
+                "skip window must be below the stale threshold for the periodic path to be reachable"
+            );
+        }
+        // The reachable in-window peer state (skip < age < stale) is exercised
+        // over the public HopState surface in `hop::tests`, which can backdate the
+        // peer-seen clock; here the constant ordering is the load-bearing invariant.
     }
 }

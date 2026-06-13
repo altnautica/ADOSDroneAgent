@@ -35,6 +35,22 @@ pub fn mcs_index_valid(mcs: u8) -> bool {
     mcs <= 7
 }
 
+/// Build the data-plane config for a whole-group respawn: the boot-time `cfg`
+/// with the data-plane FEC/MCS trio overlaid from the live retained tunables
+/// (`data_fec_k`/`data_fec_n`/`data_mcs_index`). Keeps every other field (iface,
+/// band, channel, ports, power) from the boot config so only the data tier is
+/// preserved across a hop — the operator's pinned manual tier or the adaptive
+/// FEC/MCS is not reverted to the boot defaults. Pure so a respawn can assert the
+/// retained trio reaches the data-plane args without spawning a real process.
+fn data_cfg_from_retained(cfg: &WfbConfig, fec_k: u8, fec_n: u8, mcs_index: u8) -> WfbConfig {
+    WfbConfig {
+        fec_k,
+        fec_n,
+        mcs_index,
+        ..cfg.clone()
+    }
+}
+
 fn key_str(key_path: &Path) -> String {
     key_path
         .to_str()
@@ -480,6 +496,73 @@ impl RadioProcesses {
         crate::adapter::set_tx_power(&self.iface, dbm).await
     }
 
+    /// Kill the whole radio group and respawn it, REUSING the live data-plane
+    /// tunables (`data_fec_k`/`data_fec_n`/`data_mcs_index`) rather than the
+    /// boot-time `cfg` values. A channel hop / return-home restarts the entire
+    /// group (data + both control planes follow the channel), and the naive path
+    /// spawned from `cfg` alone — silently reverting any operator-pinned manual
+    /// link tier or adaptive FEC/MCS the data plane had applied. This rebuilds the
+    /// data plane from the retained trio and keeps the control planes on the
+    /// boot-time control rate, so a hop preserves the running data tier.
+    ///
+    /// Returns `false` if the group respawn fails (the radio group is then dead;
+    /// the supervisor's outer loop respawns from scratch).
+    pub async fn respawn_group(
+        &mut self,
+        cfg: &WfbConfig,
+        link: std::sync::Arc<tokio::sync::Mutex<crate::link_quality::LinkStats>>,
+    ) -> bool {
+        self.kill_all().await;
+        // The data plane spawns from the retained trio; the control planes keep
+        // the boot-time control rate (their own fixed FEC + the management MCS).
+        let data_cfg =
+            data_cfg_from_retained(cfg, self.data_fec_k, self.data_fec_n, self.data_mcs_index);
+        let key_path = self.tx_key_path.clone();
+        let data_tx = match WfbProcess::spawn_data_tx(&self.iface, &data_cfg, &key_path).await {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!(error = %e, "respawn_group_data_tx_failed");
+                return false;
+            }
+        };
+        let tx_control = match WfbProcess::spawn_tx_control(&self.iface, cfg, &key_path).await {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!(error = %e, "respawn_group_tx_control_failed");
+                return false;
+            }
+        };
+        let rx_control = match WfbProcess::spawn_rx_control(&self.iface, &key_path).await {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!(error = %e, "respawn_group_rx_control_failed");
+                return false;
+            }
+        };
+        let (stats_rx, stats_reader) = if Path::new(crate::paths::WFB_RX_KEY).exists() {
+            match WfbProcess::spawn_stats_rx(&self.iface, Path::new(crate::paths::WFB_RX_KEY)).await
+            {
+                Ok(mut p) => {
+                    let stdout = p.take_stdout();
+                    let reader = stdout.map(|out| tokio::spawn(stats_reader_loop(out, link)));
+                    (Some(p), reader)
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "respawn_group_stats_rx_failed");
+                    (None, None)
+                }
+            }
+        } else {
+            (None, None)
+        };
+        self.data_tx = data_tx;
+        self.tx_control = tx_control;
+        self.rx_control = rx_control;
+        self.stats_rx = stats_rx;
+        self.stats_reader = stats_reader;
+        true
+    }
+
     /// Kill ONLY the data-tx process and respawn it from the retained iface/key
     /// and current data tunables. Leaves the control planes + stats RX running.
     /// Returns `false` if the respawn fails (the data plane is then dead).
@@ -545,6 +628,38 @@ fn now_iso() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn respawn_data_cfg_reuses_retained_tunables_not_boot_config() {
+        // Boot config carries the default tier (k=8, n=12, mcs=1). The live data
+        // plane has since moved to a manual / adaptive tier (k=4, n=8, mcs=5). A
+        // whole-group respawn (a channel hop) must spawn the data plane from the
+        // RETAINED tier, not silently revert it to the boot config.
+        let boot = WfbConfig {
+            fec_k: 8,
+            fec_n: 12,
+            mcs_index: 1,
+            channel: 149,
+            ..WfbConfig::default()
+        };
+        let data_cfg = data_cfg_from_retained(&boot, 4, 8, 5);
+        // The data tier is the retained trio.
+        assert_eq!(data_cfg.fec_k, 4);
+        assert_eq!(data_cfg.fec_n, 8);
+        assert_eq!(data_cfg.mcs_index, 5);
+        // Everything else still comes from the boot config (channel preserved).
+        assert_eq!(data_cfg.channel, 149);
+        // The data-plane args carry the retained trio, not the boot defaults.
+        let args = data_tx_args("wlan1", &data_cfg, Path::new("/etc/ados/wfb/tx.key"));
+        let pos = |flag: &str| {
+            args.iter()
+                .position(|a| a == flag)
+                .map(|i| args[i + 1].clone())
+        };
+        assert_eq!(pos("-k").as_deref(), Some("4"));
+        assert_eq!(pos("-n").as_deref(), Some("8"));
+        assert_eq!(pos("-M").as_deref(), Some("5"));
+    }
 
     #[test]
     fn data_tx_args_match_python() {

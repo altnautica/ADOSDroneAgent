@@ -235,7 +235,7 @@ impl BindOrchestrator {
         enum Outcome {
             Done(Result<(), BindError>),
             Cancelled,
-            Watchdog,
+            Watchdog(BindState, f64),
         }
 
         // Arm order is load-bearing: `run` is polled first, so a session that
@@ -244,13 +244,15 @@ impl BindOrchestrator {
         // Python `session_task in done` guard. Do NOT reorder these arms.
         // Two cancel sources: the caller-supplied `cancel` future (e.g. auto-
         // pair's stop signal) and the out-of-band `cancel_current()` notify
-        // (the control socket's `cancel_bind` op). Either aborts.
+        // (the control socket's `cancel_bind` op). Either aborts. The watchdog is
+        // a no-progress detector that re-arms each phase, so a healthy bind whose
+        // phases sum past any single budget no longer trips a fixed global timer.
         let outcome = tokio::select! {
             biased;
             r = run => Outcome::Done(r),
             _ = &mut cancel => Outcome::Cancelled,
             _ = internal_cancel.notified() => Outcome::Cancelled,
-            _ = tokio::time::sleep(WAITING_PEER_WATCHDOG) => Outcome::Watchdog,
+            (phase, parked_s) = self.watch_no_progress() => Outcome::Watchdog(phase, parked_s),
         };
 
         let elapsed_s = started_at.elapsed().as_secs();
@@ -269,21 +271,25 @@ impl BindOrchestrator {
                 );
                 self.cleanup(role).await;
             }
-            Outcome::Watchdog => {
+            Outcome::Watchdog(wedged_phase, parked_s) => {
                 let msg = format!(
-                    "watchdog fired after {}s with no progress",
-                    WAITING_PEER_WATCHDOG.as_secs()
+                    "watchdog fired: phase {} made no progress for {:.0}s",
+                    wedged_phase.as_str(),
+                    parked_s
                 );
-                // Capture the phase the session was parked in (typically
-                // `waiting_peer`) BEFORE transitioning to FAILED.
-                let phase = self.current_state().await.map(|s| s.as_str());
+                // The watchdog names the phase it found parked past budget, so
+                // the GCS badge reports the real wedge, not a generic timeout.
                 self.set_state(BindState::Failed).await;
                 self.set_error(msg.clone()).await;
-                tracing::warn!("bind_session_watchdog_fired");
+                tracing::warn!(
+                    phase = wedged_phase.as_str(),
+                    parked_s,
+                    "bind_session_watchdog_fired"
+                );
                 self.emit_failed(
                     role,
                     BindFailReason::Timeout,
-                    phase,
+                    Some(wedged_phase.as_str()),
                     &msg,
                     &session_id,
                     elapsed_s,
@@ -766,6 +772,36 @@ impl BindOrchestrator {
 
     async fn current_state(&self) -> Option<BindState> {
         self.session.lock().await.as_ref().map(|s| s.state)
+    }
+
+    /// No-progress watchdog: re-arms on every phase transition rather than racing
+    /// one fixed global timer. It polls the live `(state, phase_entered_at)` on a
+    /// short cadence and resolves the moment the current phase has been parked
+    /// past its own budget (a true wedge) — a healthy bind whose phases
+    /// legitimately sum past any single budget never trips, because each
+    /// transition restamps `phase_entered_at` and re-derives the deadline.
+    /// Resolves with the wedged phase + how long it was parked; an idle session
+    /// (no record, or a terminal/budget-less state) parks forever so the other
+    /// select arms own that path.
+    async fn watch_no_progress(&self) -> (BindState, f64) {
+        // Tight cadence so the wedge surfaces close to its budget without busy
+        // spinning; the phase budgets are tens of seconds, so 1 s is ample.
+        const POLL: std::time::Duration = std::time::Duration::from_secs(1);
+        loop {
+            let snapshot = {
+                let g = self.session.lock().await;
+                g.as_ref().map(|s| (s.state, s.phase_entered_at))
+            };
+            if let Some((state, phase_entered_at)) = snapshot {
+                if let (Some(budget), Some(entered)) = (state.watchdog_budget(), phase_entered_at) {
+                    let parked = (now_monotonic() - entered).max(0.0);
+                    if parked >= budget.as_secs_f64() {
+                        return (state, parked);
+                    }
+                }
+            }
+            tokio::time::sleep(POLL).await;
+        }
     }
 
     async fn write_sentinel(&self) {

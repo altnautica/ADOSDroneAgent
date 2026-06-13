@@ -267,6 +267,13 @@ pub fn persist_pair_state(
 /// unit to pick it up. The async surface mirrors `PairManager.apply_keypair`;
 /// the `Err(String)` path is what the orchestrator wraps into a phase-tagged
 /// `BindError` at `RESTARTING_SERVICES`.
+///
+/// The stop → confirm-inactive → write → start sequence runs inside a spawned
+/// task that this function JOINS rather than awaiting inline. A `JoinHandle`
+/// await is cancellation-safe: if the caller's future is dropped mid-apply (a
+/// bind cancel / watchdog firing on the outer select), the spawned task keeps
+/// running to completion on the runtime, so the key is never left half-applied
+/// with the unit stopped. Once the blob has arrived here the apply is atomic.
 pub async fn apply_keypair(
     blob: &[u8],
     role: BindRole,
@@ -274,6 +281,30 @@ pub async fn apply_keypair(
 ) -> Result<PairResult, String> {
     validate_blob(blob)?;
 
+    // Own the inputs so the apply task is self-contained (no borrow can be
+    // invalidated by a dropped caller future).
+    let blob = blob.to_vec();
+    let peer_device_id = peer_device_id.map(|s| s.to_string());
+    let handle =
+        tokio::spawn(
+            async move { apply_keypair_inner(&blob, role, peer_device_id.as_deref()).await },
+        );
+    // Joining propagates the inner result; a JoinError (the task panicked) is the
+    // only way to land here without a result, surfaced as a write failure.
+    match handle.await {
+        Ok(inner) => inner,
+        Err(e) => Err(format!("key apply task failed: {e}")),
+    }
+}
+
+/// The atomic stop → confirm-inactive → write → start body of [`apply_keypair`],
+/// run inside the spawned, joined task so a dropped caller cannot interrupt it
+/// mid-sequence.
+async fn apply_keypair_inner(
+    blob: &[u8],
+    role: BindRole,
+    peer_device_id: Option<&str>,
+) -> Result<PairResult, String> {
     // Stop the consumer unit BEFORE writing the key, and confirm it actually
     // went inactive. The prior write-then-restart order raced the supervisor's
     // own service-recovery loop: a `systemctl restart` issued while a start job
@@ -360,6 +391,21 @@ mod tests {
         assert!(validate_blob(&[0u8; 63]).is_err());
         assert!(validate_blob(&[0u8; 65]).is_err());
         assert!(validate_blob(&[]).is_err());
+    }
+
+    #[tokio::test]
+    async fn apply_keypair_rejects_a_bad_blob_before_touching_any_unit() {
+        // The blob is validated up front, before the apply task is spawned: a
+        // bad-length blob returns Err without ever stopping a unit or writing a
+        // key, so the atomic stop→write→start sequence only runs once a real key
+        // blob has arrived (the precondition the cancellation-safe spawn relies on).
+        let err = apply_keypair(&[0u8; 10], BindRole::Drone, None)
+            .await
+            .expect_err("a 10-byte blob must be rejected");
+        assert!(
+            err.contains("expected"),
+            "error names the size mismatch: {err}"
+        );
     }
 
     #[test]

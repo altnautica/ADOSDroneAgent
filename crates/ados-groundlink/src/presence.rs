@@ -28,6 +28,7 @@ use ados_radio::hop::{
     build_presence_beacon, derive_pair_key, now_unix, parse_hop_announce, parse_presence_beacon,
 };
 
+use crate::acquire::ChannelSetter;
 use crate::watchdog::PresenceCache;
 
 /// Beacon cadence (10 s, matching the air side).
@@ -323,7 +324,10 @@ where
 ///   device-id (the self-pair guard), then record the peer.
 ///
 /// Returns only on a fatal bind error or cancellation.
-pub async fn listen_loop(cache: GsPresenceCache) -> std::io::Result<()> {
+pub async fn listen_loop(
+    cache: GsPresenceCache,
+    follower: Option<HopFollower>,
+) -> std::io::Result<()> {
     let own_device_id = read_device_id();
     let sock = UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, PRESENCE_LISTEN_PORT)).await?;
     let ack_target = (std::net::Ipv4Addr::LOCALHOST, HOP_ACK_ECHO_PORT);
@@ -354,6 +358,7 @@ pub async fn listen_loop(cache: GsPresenceCache) -> std::io::Result<()> {
             &cache,
             &own_device_id,
             ack_target,
+            follower.as_ref(),
         )
         .await;
     }
@@ -412,7 +417,7 @@ fn write_listener_health(health: &ListenerHealth) {
 /// visible to the REST/heartbeat layer.
 ///
 /// This loop itself never returns; spawn it for the service lifetime.
-pub async fn listen_supervisor(cache: GsPresenceCache) {
+pub async fn listen_supervisor(cache: GsPresenceCache, follower: Option<HopFollower>) {
     let mut backoff = LISTEN_BACKOFF_START;
     let mut health = ListenerHealth {
         starts: 0,
@@ -433,7 +438,7 @@ pub async fn listen_supervisor(cache: GsPresenceCache) {
         );
 
         let generation_start = std::time::Instant::now();
-        let handle = tokio::spawn(listen_loop(cache.clone()));
+        let handle = tokio::spawn(listen_loop(cache.clone(), follower.clone()));
 
         // Await the generation so a panic is observed (not dropped). A clean
         // return is a fatal bind error path; a JoinError is a panic.
@@ -474,11 +479,88 @@ pub async fn listen_supervisor(cache: GsPresenceCache) {
     }
 }
 
+/// Extract the big-endian `epoch_ms` a HopAnnounce frame carries at bytes
+/// `[9..17]`. The frame must already have passed `parse_hop_announce` (the
+/// length + magic + HMAC verify); this only reads the field that parser
+/// discards. Returns `None` if the slice is too short to hold the field.
+fn hop_announce_epoch_ms(frame: &[u8]) -> Option<u64> {
+    frame
+        .get(9..17)
+        .map(|b| u64::from_be_bytes(b.try_into().expect("9..17 is exactly 8 bytes")))
+}
+
+/// Sleep until the wall-clock `epoch_ms`, capped so a far-future or malformed
+/// epoch can never park the follow indefinitely. A past epoch returns at once,
+/// so the GS still retunes (just without the coordinated dwell-sync) rather than
+/// missing the hop entirely.
+async fn sleep_to_epoch_ms(epoch_ms: u64) {
+    // Hard cap: a HopAnnounce epoch is always within a couple of seconds (the
+    // drone announces, the GS acks, the flip fires). Anything beyond this is a
+    // stale/forged frame — retune now rather than wait it out.
+    const MAX_FOLLOW_WAIT: Duration = Duration::from_secs(3);
+    let now_ms = (now_unix() * 1000.0) as u64;
+    if epoch_ms <= now_ms {
+        return;
+    }
+    let wait = Duration::from_millis(epoch_ms - now_ms).min(MAX_FOLLOW_WAIT);
+    tokio::time::sleep(wait).await;
+}
+
+/// Drives the GS receive radio to follow a drone-announced channel hop. Holds the
+/// same `ChannelSetter` the acquirer uses plus the resolved-iface cell the
+/// receive loop writes, so on a verified HopAnnounce the listener retunes the
+/// live receive interface to the announced channel at the announce epoch — the
+/// reactive, coordinated counterpart to the drone's epoch-synced flip. Without
+/// this the GS only learned the new channel into its cache and waited for the
+/// valid-packet watchdog to notice the blackout and sweep, costing a guaranteed
+/// gap on every hop.
+#[derive(Clone)]
+pub struct HopFollower {
+    setter: Arc<dyn ChannelSetter>,
+    resolved_iface: Arc<tokio::sync::Mutex<Option<String>>>,
+}
+
+impl HopFollower {
+    pub fn new(
+        setter: Arc<dyn ChannelSetter>,
+        resolved_iface: Arc<tokio::sync::Mutex<Option<String>>>,
+    ) -> Self {
+        Self {
+            setter,
+            resolved_iface,
+        }
+    }
+
+    /// Retune the live receive interface to `channel` at `epoch_ms`. Resolves the
+    /// interface from the shared cell (the receive loop's auto-detect writes it);
+    /// a `None` cell (no adapter resolved yet) is a no-op. The single retune is
+    /// serialized only by the setter, so a concurrent acquirer sweep cannot fight
+    /// it mid-flight on the same `&mut` acquirer (the acquirer is the watchdog's;
+    /// this is the listener's independent follow). Returns whether the retune
+    /// landed (for the test seam).
+    async fn follow_at_epoch(&self, channel: u8, epoch_ms: u64) -> bool {
+        let Some(iface) = self.resolved_iface.lock().await.clone() else {
+            tracing::debug!(channel, "ground_hop_follow_no_iface");
+            return false;
+        };
+        sleep_to_epoch_ms(epoch_ms).await;
+        let ok = self.setter.set_channel(&iface, channel).await;
+        if ok {
+            tracing::info!(interface = %iface, channel, "ground_hop_follow_retuned");
+        } else {
+            tracing::warn!(interface = %iface, channel, "ground_hop_follow_retune_failed");
+        }
+        ok
+    }
+}
+
 /// Dispatch one inbound control frame: length-gate, verify, then either echo a
 /// HopAck (51-byte HopAnnounce) or record the peer (68-byte PresenceBeacon).
 /// Extracted from `listen_loop` so the dispatch is unit-testable over real
 /// loopback sockets. `sock` is the listener socket the HopAck echo is sent
-/// from; `ack_target` is `wfb_tx_control`'s loopback ingress.
+/// from; `ack_target` is `wfb_tx_control`'s loopback ingress. `follower`, when
+/// present, retunes the GS receive radio to the announced channel at the hop
+/// epoch (the coordinated channel follow).
 async fn handle_control_frame(
     sock: &UdpSocket,
     frame: &[u8],
@@ -486,6 +568,7 @@ async fn handle_control_frame(
     cache: &GsPresenceCache,
     own_device_id: &str,
     ack_target: (std::net::Ipv4Addr, u16),
+    follower: Option<&HopFollower>,
 ) {
     // Length gate first: a 51-byte frame is a HopAnnounce/HopAck, a 68-byte
     // frame is a PresenceBeacon. The magic + HMAC verify inside each parser is
@@ -501,7 +584,21 @@ async fn handle_control_frame(
                 } else {
                     tracing::info!(channel, trigger, "ground_hop_ack_echoed");
                 }
+                // Update the watchdog's channel hint (the cache the acquirer
+                // reads) so the receive loop knows where the peer is going.
                 cache.record_hop_announce(channel, trigger);
+                // Schedule the coordinated GS retune at the announce epoch. The
+                // retune is spawned so the listener's recv loop keeps feeding the
+                // presence cache instead of blocking on the epoch sleep; the
+                // setter is the only serialization the single retune needs.
+                if let Some(follower) = follower {
+                    if let Some(epoch_ms) = hop_announce_epoch_ms(frame) {
+                        let follower = follower.clone();
+                        tokio::spawn(async move {
+                            follower.follow_at_epoch(channel, epoch_ms).await;
+                        });
+                    }
+                }
             }
         }
         PRESENCE_FRAME_LEN => {
@@ -803,6 +900,7 @@ mod tests {
             &cache,
             "", // own device id irrelevant to the hop path
             ack_target,
+            None, // no follower: this test asserts the ack-echo + cache record
         )
         .await;
 
@@ -891,19 +989,28 @@ mod tests {
 
         // First good frame.
         let b1 = build_presence_beacon("drone-aaa", true, 149, -50, 1, &pair_key);
-        handle_control_frame(&listen_sock, &b1, &pair_key, &cache, "", ack_target).await;
+        handle_control_frame(&listen_sock, &b1, &pair_key, &cache, "", ack_target, None).await;
         assert_eq!(cache.peer_channel(), Some(149));
         let first_seen = cache.peer_last_seen_unix();
         assert!(first_seen.is_some());
 
         // A garbage frame (stand-in for the kind of bad input a recv might hand
         // up) must be dropped without disturbing the established cache state.
-        handle_control_frame(&listen_sock, &[0u8; 10], &pair_key, &cache, "", ack_target).await;
+        handle_control_frame(
+            &listen_sock,
+            &[0u8; 10],
+            &pair_key,
+            &cache,
+            "",
+            ack_target,
+            None,
+        )
+        .await;
         assert_eq!(cache.peer_channel(), Some(149));
 
         // A later good frame still updates the cache: the writer is alive.
         let b2 = build_presence_beacon("drone-aaa", true, 157, -45, 2, &pair_key);
-        handle_control_frame(&listen_sock, &b2, &pair_key, &cache, "", ack_target).await;
+        handle_control_frame(&listen_sock, &b2, &pair_key, &cache, "", ack_target, None).await;
         assert_eq!(cache.peer_channel(), Some(157));
         assert!(cache.peer_present());
     }
@@ -928,7 +1035,16 @@ mod tests {
         };
 
         let beacon = build_presence_beacon("drone-xyz", true, 161, -55, 9, &pair_key);
-        handle_control_frame(&listen_sock, &beacon, &pair_key, &cache, "", ack_target).await;
+        handle_control_frame(
+            &listen_sock,
+            &beacon,
+            &pair_key,
+            &cache,
+            "",
+            ack_target,
+            None,
+        )
+        .await;
 
         // The presence path ran: the peer is recorded.
         assert_eq!(cache.peer_channel(), Some(161));
@@ -938,5 +1054,132 @@ mod tests {
         let echoed =
             tokio::time::timeout(Duration::from_millis(200), ack_recv.recv_from(&mut buf)).await;
         assert!(echoed.is_err(), "a presence beacon must not echo a hop ack");
+    }
+
+    /// Records the channel each retune requested, for the hop-follow assertions.
+    #[derive(Default)]
+    struct RecordingSetter {
+        calls: std::sync::Mutex<Vec<(String, u8)>>,
+        result: bool,
+    }
+
+    impl RecordingSetter {
+        fn ok() -> Arc<Self> {
+            Arc::new(Self {
+                calls: std::sync::Mutex::new(Vec::new()),
+                result: true,
+            })
+        }
+        fn calls(&self) -> Vec<(String, u8)> {
+            self.calls.lock().unwrap().clone()
+        }
+    }
+
+    impl ChannelSetter for RecordingSetter {
+        fn set_channel<'a>(
+            &'a self,
+            interface: &'a str,
+            channel: u8,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + 'a>> {
+            Box::pin(async move {
+                self.calls
+                    .lock()
+                    .unwrap()
+                    .push((interface.to_string(), channel));
+                self.result
+            })
+        }
+    }
+
+    #[test]
+    fn hop_announce_epoch_is_read_from_bytes_9_to_17() {
+        use ados_radio::hop::{build_hop_announce, HopTrigger};
+        let pair_key = resolve_pair_key();
+        let epoch_ms = 1_700_000_000_123_u64;
+        let announce = build_hop_announce(epoch_ms, 157, HopTrigger::Reactive, &pair_key);
+        // The follower reads the epoch the parser discards, straight from the frame.
+        assert_eq!(hop_announce_epoch_ms(&announce), Some(epoch_ms));
+        // A frame too short to hold the field reads as None rather than panicking.
+        assert_eq!(hop_announce_epoch_ms(&announce[..8]), None);
+    }
+
+    #[tokio::test]
+    async fn hop_follower_retunes_the_resolved_iface_to_the_announced_channel() {
+        // The follower retunes the live receive interface to the announced channel
+        // (a past epoch returns at once, so no real wait in the test).
+        let setter = RecordingSetter::ok();
+        let iface = Arc::new(tokio::sync::Mutex::new(Some("wlan1".to_string())));
+        let follower = HopFollower::new(setter.clone(), iface);
+        let landed = follower.follow_at_epoch(157, 1).await; // epoch in the past
+        assert!(landed, "the retune must report success");
+        assert_eq!(setter.calls(), vec![("wlan1".to_string(), 157)]);
+    }
+
+    #[tokio::test]
+    async fn hop_follower_no_iface_is_a_noop() {
+        // No resolved receive adapter yet → the follow is a no-op (no retune), so a
+        // pre-adapter HopAnnounce never drives `iw` against a nonexistent iface.
+        let setter = RecordingSetter::ok();
+        let iface = Arc::new(tokio::sync::Mutex::new(None));
+        let follower = HopFollower::new(setter.clone(), iface);
+        let landed = follower.follow_at_epoch(157, 1).await;
+        assert!(!landed);
+        assert!(setter.calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn hop_announce_drives_the_coordinated_follow() {
+        // End-to-end through the dispatch: a verified HopAnnounce echoes the ack,
+        // records the channel into the cache (the watchdog's hint), AND drives the
+        // follower to retune the receive iface to the announced channel.
+        use ados_radio::hop::{build_hop_announce, HopTrigger};
+        let cache = GsPresenceCache::new();
+        let pair_key = resolve_pair_key();
+
+        let listen_sock = UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let ack_recv = UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let ack_addr = ack_recv.local_addr().unwrap();
+        let ack_target = match ack_addr {
+            std::net::SocketAddr::V4(a) => (*a.ip(), a.port()),
+            _ => unreachable!("ipv4 loopback"),
+        };
+
+        let setter = RecordingSetter::ok();
+        let iface = Arc::new(tokio::sync::Mutex::new(Some("wlan1".to_string())));
+        let follower = HopFollower::new(setter.clone(), iface);
+
+        // A past epoch so the spawned retune fires immediately.
+        let announce = build_hop_announce(1, 161, HopTrigger::Reactive, &pair_key);
+        handle_control_frame(
+            &listen_sock,
+            &announce,
+            &pair_key,
+            &cache,
+            "",
+            ack_target,
+            Some(&follower),
+        )
+        .await;
+
+        // The watchdog's channel hint was updated.
+        assert_eq!(cache.peer_channel(), Some(161));
+
+        // The retune is spawned, so give it a moment to land, then assert it tuned
+        // the resolved iface to the announced channel.
+        for _ in 0..50 {
+            if !setter.calls().is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            setter.calls(),
+            vec![("wlan1".to_string(), 161)],
+            "the coordinated follow must retune the receive iface to the announced channel"
+        );
     }
 }

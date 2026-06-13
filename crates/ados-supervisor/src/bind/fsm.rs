@@ -59,6 +59,30 @@ impl BindState {
     pub fn is_active(&self) -> bool {
         !self.is_terminal()
     }
+
+    /// The no-progress budget for THIS phase, in seconds. The session watchdog is
+    /// a no-progress detector, not one fixed global timer: it re-arms on every
+    /// transition to `phase_entered_at + budget(state)`, so a healthy bind whose
+    /// phases legitimately sum past any single budget never trips, while a phase
+    /// parked past its own budget (a genuine wedge) fires with the real phase
+    /// named. Terminal states return `None` (nothing left to watch).
+    ///
+    /// Budgets mirror the per-phase timeouts: tunnel bring-up
+    /// (`TUNNEL_WAIT_TIMEOUT`), the unanswered-rendezvous wedge window
+    /// (`WAITING_PEER_WATCHDOG`), the key transfer + apply window
+    /// (`KEY_TRANSFER_TIMEOUT` each — once a peer connects the exchange completes
+    /// in seconds), and the service-restart budget (`RESTART_TIMEOUT`).
+    pub fn watchdog_budget(&self) -> Option<std::time::Duration> {
+        match self {
+            BindState::OpeningTunnel => Some(super::TUNNEL_WAIT_TIMEOUT),
+            BindState::WaitingPeer => Some(super::WAITING_PEER_WATCHDOG),
+            BindState::TransferringKeys | BindState::ApplyingKeys => {
+                Some(super::KEY_TRANSFER_TIMEOUT)
+            }
+            BindState::RestartingServices => Some(super::RESTART_TIMEOUT),
+            BindState::Idle | BindState::Paired | BindState::Failed | BindState::Aborted => None,
+        }
+    }
 }
 
 /// Monotonic seconds since the first call (process start). Matches Python's
@@ -259,6 +283,60 @@ mod tests {
             assert!(!s.is_terminal());
             assert!(s.is_active());
         }
+    }
+
+    #[test]
+    fn each_active_phase_has_a_watchdog_budget_terminal_phases_have_none() {
+        // The no-progress detector re-arms on every transition using this per-phase
+        // budget; every active phase must have one so a wedge in any phase fires,
+        // and terminal phases must have None so a finished session is never watched.
+        assert_eq!(
+            BindState::OpeningTunnel.watchdog_budget(),
+            Some(super::super::TUNNEL_WAIT_TIMEOUT)
+        );
+        assert_eq!(
+            BindState::WaitingPeer.watchdog_budget(),
+            Some(super::super::WAITING_PEER_WATCHDOG)
+        );
+        assert_eq!(
+            BindState::TransferringKeys.watchdog_budget(),
+            Some(super::super::KEY_TRANSFER_TIMEOUT)
+        );
+        assert_eq!(
+            BindState::ApplyingKeys.watchdog_budget(),
+            Some(super::super::KEY_TRANSFER_TIMEOUT)
+        );
+        assert_eq!(
+            BindState::RestartingServices.watchdog_budget(),
+            Some(super::super::RESTART_TIMEOUT)
+        );
+        for terminal in [
+            BindState::Idle,
+            BindState::Paired,
+            BindState::Failed,
+            BindState::Aborted,
+        ] {
+            assert_eq!(terminal.watchdog_budget(), None);
+        }
+    }
+
+    #[test]
+    fn re_armed_watchdog_does_not_fire_on_a_phase_within_its_budget() {
+        // A transition restamps `phase_entered_at` to now, so a freshly entered
+        // phase is nowhere near its budget — the deadline-derived detector must not
+        // consider it wedged. (The deadline = phase_entered_at + budget(state).)
+        let mut s = BindSession::new(BindRole::Drone, "operator", None);
+        s.transition(BindState::TransferringKeys);
+        let entered = s.phase_entered_at.expect("transition stamps the clock");
+        let budget = BindState::TransferringKeys
+            .watchdog_budget()
+            .unwrap()
+            .as_secs_f64();
+        let parked = (now_monotonic() - entered).max(0.0);
+        assert!(
+            parked < budget,
+            "a just-entered phase must be within its budget (parked {parked}s < {budget}s)"
+        );
     }
 
     #[test]

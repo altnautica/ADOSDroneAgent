@@ -225,7 +225,20 @@ async fn run_direct(
     // a fatal socket error and surfaces a restart counter on a GS sidecar, so a
     // listener fault never permanently freezes the watchdog's presence input.
     let presence_cache = GsPresenceCache::new();
-    tokio::spawn(presence::listen_supervisor(presence_cache.clone()));
+    // Shared resolved-iface cell, written by the receive loop once it auto-detects
+    // the injection adapter. Created here (before the listener spawn) so the hop
+    // follower can read the live receive interface to retune it on a drone hop;
+    // the shutdown path below also restores that adapter to managed mode.
+    let resolved_iface: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    // The hop follower retunes the GS receive radio to a drone-announced channel
+    // at the announce epoch, so a coordinated hop is a brief dwell-synced retune
+    // rather than a blackout the valid-packet watchdog has to sweep out of.
+    let hop_follower =
+        presence::HopFollower::new(Arc::new(IwChannelSetter), resolved_iface.clone());
+    tokio::spawn(presence::listen_supervisor(
+        presence_cache.clone(),
+        Some(hop_follower),
+    ));
     {
         // The beacon's channel is a hint; the configured channel is a safe
         // service-wide source (the live channel the watchdog locks is surfaced
@@ -244,12 +257,12 @@ async fn run_direct(
     }
 
     // The receive adapter is auto-detected inside the receive loop (config's
-    // interface is often empty), so it is not in scope here. Share a cell the
-    // loop writes once it resolves the injection adapter; on a shutdown signal
-    // this side restores that adapter to managed mode, the mirror of the
-    // drone-side teardown, so the kernel/NetworkManager can re-enumerate the
-    // RTL instead of finding it stranded in monitor mode after the unit stops.
-    let resolved_iface: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    // interface is often empty). The shared `resolved_iface` cell (created above
+    // for the hop follower) is the seam the loop writes once it resolves the
+    // injection adapter; on a shutdown signal this side restores that adapter to
+    // managed mode, the mirror of the drone-side teardown, so the
+    // kernel/NetworkManager can re-enumerate the RTL instead of finding it
+    // stranded in monitor mode after the unit stops.
 
     // Run the receive loop until a shutdown signal arrives.
     tokio::select! {
@@ -483,7 +496,7 @@ async fn receive_loop(
         });
 
         // Zombie watchdog (stdout-silence).
-        let zombie_task = tokio::spawn(wfb_rx::zombie_watchdog(
+        let mut zombie_task = tokio::spawn(wfb_rx::zombie_watchdog(
             rx_handle.clone(),
             last_stdout_at.clone(),
             clock.clone(),
@@ -505,21 +518,32 @@ async fn receive_loop(
                 hint.clone(),
             )
             .with_health(rx_health.clone());
-        let watchdog_task = tokio::spawn(async move {
+        let mut watchdog_task = tokio::spawn(async move {
             watchdog.run().await;
         });
 
         // The generation ends when any of: the data RX exits, the zombie
         // watchdog kills it, or the valid-packet watchdog terminates it.
+        // `&mut` the watchdog handles so the arm that did NOT win is not
+        // dropped-and-detached here — a dropped JoinHandle leaves the task
+        // running, so the zombie + valid-packet watchdogs would pile up across
+        // generations, each holding an acquirer + driving `iw` retunes against
+        // the next generation's radio. They are aborted explicitly below.
         tokio::select! {
             _ = wait_for_exit(rx_handle.clone()) => {
                 tracing::warn!("ground_wfb_rx_exited");
             }
-            _ = zombie_task => {}
-            _ = watchdog_task => {}
+            _ = &mut zombie_task => {}
+            _ = &mut watchdog_task => {}
         }
 
-        // Tear down the generation's sub-tasks before respawning.
+        // Tear down the generation's sub-tasks before respawning. The two
+        // watchdog handles are aborted alongside the fan-out / telemetry / stats
+        // tasks (an already-finished task's abort is a no-op), so no generation's
+        // watchdog survives into the next, mirroring the air-side abort-siblings
+        // discipline.
+        zombie_task.abort();
+        watchdog_task.abort();
         fanout_task.abort();
         telemetry_task.abort();
         if let Some(t) = stats_task {

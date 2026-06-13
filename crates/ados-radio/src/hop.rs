@@ -534,6 +534,26 @@ mod tests {
     }
 
     #[test]
+    fn periodic_hop_window_is_reachable_when_skip_is_below_stale() {
+        // The periodic-hop arm fires only when `can_hop()` holds (peer NOT stale,
+        // i.e. seen within PEER_STALE_SECS) AND the peer is NOT fresh within the
+        // supervisor's skip window. For that intersection to be non-empty the skip
+        // window must be below PEER_STALE_SECS. Model a skip window at half the
+        // stale threshold and a peer aged into the gap (skip < age < stale): the
+        // peer passes can_hop yet is no longer "fresh", so the scan is reachable.
+        let skip = PEER_STALE_SECS / 2.0;
+        let age = (skip + PEER_STALE_SECS) / 2.0; // strictly between skip and stale
+        let mut state = HopState::new(149);
+        state.on_peer_seen();
+        state.peer_last_seen = Some(Instant::now() - Duration::from_secs_f64(age));
+        // Not stale → can_hop holds (was_linked set by on_peer_seen, no prior hop).
+        assert!(!state.peer_is_stale());
+        assert!(state.can_hop());
+        // Past the skip window → the periodic scan is NOT skipped.
+        assert!(!state.peer_fresh_within(skip));
+    }
+
+    #[test]
     fn hop_announce_roundtrip_constants() {
         assert_eq!(hop_announce_rounds(), 30);
         assert_eq!(hop_announce_interval(), Duration::from_millis(100));
