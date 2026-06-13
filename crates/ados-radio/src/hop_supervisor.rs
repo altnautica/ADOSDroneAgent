@@ -9,6 +9,7 @@
 //! `auto_hop_enabled: false` case so the received-side lock proof works
 //! regardless of hop config.
 
+use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -22,8 +23,9 @@ use ados_radio::hop::{
     HOP_CONTROL_PORT, PRESENCE_INTERVAL,
 };
 use ados_radio::link_quality::LinkStats;
-use ados_radio::paths::{read_bind_sentinel_active, run_path, write_sidecar};
+use ados_radio::paths::{read_bind_sentinel_active, run_path, write_sidecar, WFB_TX_KEY};
 use ados_radio::process::RadioProcesses;
+use ados_radio::radio_cmd::{HopVerdict, ManualHopRequest};
 
 use ados_radio::config::WfbConfig;
 
@@ -59,6 +61,46 @@ pub(crate) fn reactive_should_fire(
     }
     let has_real = !link.timestamp.is_empty() && link.packets_received > 0;
     has_real && (link.loss_percent > loss_threshold_percent || link.rssi_dbm < rssi_threshold_dbm)
+}
+
+/// Decide an operator-initiated manual hop request's verdict. Pure (no I/O), so
+/// every rejection path is unit-testable without standing up the supervisor.
+///
+/// Order matches the contract: not paired → no peer → mid-bind → channel not in
+/// the regulatory-enabled set → accepted. `peer_ready` is "a peer has been seen
+/// and is not stale" (the GS must be reachable to ACK + follow the announce).
+/// `enabled` is the regulatory-permitted set the supervisor holds; `None` (or an
+/// empty set) means "could not determine" → do not restrict (the same gate the
+/// reactive/periodic hop target filter uses).
+pub(crate) fn manual_hop_verdict(
+    target: u8,
+    paired: bool,
+    mid_bind: bool,
+    peer_ready: bool,
+    enabled: Option<&std::collections::BTreeSet<u8>>,
+) -> HopVerdict {
+    if !paired {
+        return HopVerdict::Rejected {
+            reason: "not paired",
+        };
+    }
+    if !peer_ready {
+        return HopVerdict::Rejected { reason: "no peer" };
+    }
+    if mid_bind {
+        return HopVerdict::Rejected { reason: "mid-bind" };
+    }
+    // The regulatory-enabled set forbids channels that would split the pair onto
+    // divergent frequencies (`iw set channel` -22). An empty/None set means the
+    // wiphy list was unreadable → do not restrict.
+    if let Some(set) = enabled {
+        if !set.is_empty() && !set.contains(&target) {
+            return HopVerdict::Rejected {
+                reason: "invalid channel",
+            };
+        }
+    }
+    HopVerdict::Accepted { channel: target }
 }
 
 /// Emit a periodic PresenceBeacon on the control plane so the peer hears this
@@ -164,6 +206,7 @@ pub(crate) async fn run_hop_supervisor(
     rx_proof: ados_radio::link_proof::RxProof,
     proof_reference: Instant,
     operating_channel: Arc<AtomicU64>,
+    mut manual_rx: tokio::sync::mpsc::Receiver<ManualHopRequest>,
     cancel: Arc<Notify>,
 ) {
     let state = Arc::new(tokio::sync::Mutex::new(HopState::new(cfg.channel)));
@@ -395,6 +438,50 @@ pub(crate) async fn run_hop_supervisor(
                 // hop changes it (and returns to home on the return-home path).
                 operating_channel.store(state.lock().await.channel as u64, Ordering::Relaxed);
             }
+            // Operator-initiated coordinated hop from the radio command socket.
+            // Validate (paired / peer present / not mid-bind / channel in the
+            // enabled set), REPLY to the requester immediately, then on
+            // acceptance drive the hop through the EXISTING announce path so the
+            // GS follows. The reply is sent before the multi-second announce so
+            // the socket connection never blocks on the air handshake.
+            maybe_req = manual_rx.recv() => {
+                let Some(req) = maybe_req else {
+                    // The sender dropped (the command socket task ended). Stop
+                    // polling this arm by swapping in a never-ready receiver so
+                    // the select keeps serving the other arms.
+                    let (_tx, never) = tokio::sync::mpsc::channel::<ManualHopRequest>(1);
+                    manual_rx = never;
+                    continue;
+                };
+                let target = req.channel;
+                let verdict = {
+                    let s = state.lock().await;
+                    manual_hop_verdict(
+                        target,
+                        Path::new(WFB_TX_KEY).exists(),
+                        read_bind_sentinel_active(),
+                        s.peer().is_some() && !s.peer_is_stale(),
+                        enabled_opt,
+                    )
+                };
+                // Reply BEFORE the announce so the socket returns promptly. A
+                // dropped receiver (the client hung up) is fine — the hop still
+                // runs on acceptance.
+                let accepted = matches!(verdict, HopVerdict::Accepted { .. });
+                let _ = req.reply.send(verdict);
+                if accepted {
+                    tracing::info!(target, "hop_manual_trigger");
+                    // Re-assert monitor + retune is folded into try_execute_hop's
+                    // set_channel; the manual path uses the SAME announce + ACK +
+                    // dwell-sync as the periodic/reactive paths (never bypassed).
+                    try_execute_hop(
+                        iface, cfg, &proc, &state, &announce_sock, &mut ack_rx, &pair_key,
+                        target, HopTrigger::Manual, "manual", &link, &restart_count,
+                    )
+                    .await;
+                    operating_channel.store(state.lock().await.channel as u64, Ordering::Relaxed);
+                }
+            }
             _ = cancel.notified() => {
                 listener.abort();
                 hb_writer.abort();
@@ -591,7 +678,100 @@ async fn write_hop_supervisor_json(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ados_radio::hop::HopState;
+    use ados_radio::hop::{build_hop_announce, derive_pair_key, parse_hop_announce, HopState};
+
+    /// The enabled-channel set helper for the verdict tests: the U-NII-3 home
+    /// band so a request for 153 is in-set and a request for 36 is out-of-set.
+    fn unii3_set() -> std::collections::BTreeSet<u8> {
+        [149u8, 153, 157, 161, 165].into_iter().collect()
+    }
+
+    #[test]
+    fn manual_hop_rejected_when_not_paired() {
+        // Not paired wins first, regardless of peer/bind/channel.
+        let v = manual_hop_verdict(153, false, false, true, Some(&unii3_set()));
+        assert_eq!(
+            v,
+            HopVerdict::Rejected {
+                reason: "not paired"
+            }
+        );
+    }
+
+    #[test]
+    fn manual_hop_rejected_when_no_peer_or_stale_peer() {
+        // Paired but no live peer → no peer (the GS can't ACK the announce).
+        let v = manual_hop_verdict(153, true, false, false, Some(&unii3_set()));
+        assert_eq!(v, HopVerdict::Rejected { reason: "no peer" });
+    }
+
+    #[test]
+    fn manual_hop_rejected_mid_bind() {
+        // Paired + peer ready but a bind owns the adapter → mid-bind.
+        let v = manual_hop_verdict(153, true, true, true, Some(&unii3_set()));
+        assert_eq!(v, HopVerdict::Rejected { reason: "mid-bind" });
+    }
+
+    #[test]
+    fn manual_hop_rejected_channel_not_in_enabled_set() {
+        // 36 is a valid WFB channel (the socket accepts the format) but it is not
+        // in the U-NII-3 enabled set this rig holds, so the supervisor refuses it
+        // to avoid splitting the pair onto a forbidden frequency.
+        let v = manual_hop_verdict(36, true, false, true, Some(&unii3_set()));
+        assert_eq!(
+            v,
+            HopVerdict::Rejected {
+                reason: "invalid channel"
+            }
+        );
+    }
+
+    #[test]
+    fn manual_hop_accepted_when_paired_peer_ready_in_band() {
+        let v = manual_hop_verdict(157, true, false, true, Some(&unii3_set()));
+        assert_eq!(v, HopVerdict::Accepted { channel: 157 });
+    }
+
+    #[test]
+    fn manual_hop_unknown_enabled_set_does_not_restrict() {
+        // A None or empty enabled set means the wiphy list was unreadable → do
+        // not restrict (the same gate the periodic/reactive target filter uses).
+        let v = manual_hop_verdict(36, true, false, true, None);
+        assert_eq!(v, HopVerdict::Accepted { channel: 36 });
+        let empty = std::collections::BTreeSet::new();
+        let v = manual_hop_verdict(36, true, false, true, Some(&empty));
+        assert_eq!(v, HopVerdict::Accepted { channel: 36 });
+    }
+
+    /// The manual-hop path drives `try_execute_hop` through the SAME announce
+    /// path the periodic/reactive triggers use, so the GS follows. Rather than
+    /// stand up the radio (set_channel/respawn fork real binaries), this asserts
+    /// the exact announce `try_execute_hop` sends for a manual hop — built with
+    /// `HopTrigger::Manual` — decodes on the GS-side `parse_hop_announce` as the
+    /// "manual" trigger on the announce wire. The announce is what the GS hears
+    /// and ACKs; a coordinated follow is impossible if the trigger byte is wrong.
+    #[tokio::test]
+    async fn manual_trigger_announce_is_decodable_by_the_gs_follow_path() {
+        let key = derive_pair_key(None);
+        // The drone-side announce socket and a loopback listener standing in for
+        // the GS follow path's control-plane reader (the real GS binds 5803 via
+        // wfb_rx; here a plain UDP socket proves the wire).
+        let announce = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let gs = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let gs_addr = gs.local_addr().unwrap();
+
+        // Exactly what try_execute_hop builds + sends for a manual hop.
+        let epoch = ados_radio::hop::hop_epoch_ms();
+        let pkt = build_hop_announce(epoch, 153, HopTrigger::Manual, &key);
+        announce.send_to(&pkt, gs_addr).await.unwrap();
+
+        let mut buf = [0u8; 128];
+        let (n, _) = gs.recv_from(&mut buf).await.unwrap();
+        // The GS follow path decodes the announce; a manual trigger must surface
+        // as "manual" (so the follow is recorded honestly) on the requested
+        // channel.
+        assert_eq!(parse_hop_announce(&buf[..n], &key), Some((153, "manual")));
+    }
 
     fn tripping_link() -> LinkStats {
         // Real data: non-empty timestamp + packets flowing, with loss/RSSI past

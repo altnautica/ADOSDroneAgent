@@ -35,11 +35,16 @@ const HOP_VERSION: u8 = 2;
 const PRESENCE_VERSION: u8 = 1;
 
 /// Trigger byte values (hop_supervisor.py:119-130).
+///
+/// `Manual` is an operator-initiated coordinated hop (the radio command socket):
+/// it announces + dwell-syncs exactly like a periodic/reactive hop so the ground
+/// station follows, and is recorded in the hop history under the "manual" label.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum HopTrigger {
     Periodic = 0,
     Reactive = 1,
+    Manual = 2,
 }
 
 /// Build the 32-byte pair key by SHA-256 of the HMAC derivation string + the
@@ -210,6 +215,7 @@ pub fn parse_hop_announce(pkt: &[u8], pair_key: &[u8; 32]) -> Option<(u8, &'stat
     let channel = pkt[17];
     let trigger = match pkt[18] {
         x if x == HopTrigger::Reactive as u8 => "reactive",
+        x if x == HopTrigger::Manual as u8 => "manual",
         _ => "periodic",
     };
     Some((channel, trigger))
@@ -596,6 +602,10 @@ mod tests {
         // Reactive trigger byte → "reactive" label.
         let reactive = build_hop_announce(0, 161, HopTrigger::Reactive, &key);
         assert_eq!(parse_hop_announce(&reactive, &key), Some((161, "reactive")));
+        // Manual (operator-initiated) trigger byte → "manual" label, so the GS
+        // records the coordinated follow honestly rather than as "periodic".
+        let manual = build_hop_announce(0, 153, HopTrigger::Manual, &key);
+        assert_eq!(parse_hop_announce(&manual, &key), Some((153, "manual")));
         // Wrong key → no parse.
         let other = derive_pair_key(Some(&[2u8; 64]));
         assert_eq!(parse_hop_announce(&periodic, &other), None);

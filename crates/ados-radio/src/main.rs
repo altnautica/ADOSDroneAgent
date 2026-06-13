@@ -1089,6 +1089,37 @@ async fn run_service(cfg: &WfbConfig, mut shutdown: watch::Receiver<bool>) {
             }
         });
 
+        // Radio command socket: an operator (the REST layer) can trigger a
+        // coordinated channel hop on demand. Validated requests flow over this
+        // bounded mpsc to the hop supervisor's select loop, which runs the
+        // paired/peer/bind checks and drives the EXISTING announce path so the
+        // GS follows. Spawned per bring-up alongside the sibling tasks (aborted +
+        // re-served on every respawn). The receiver is handed to the hop
+        // supervisor below; when auto-hop is fully disabled (the else branch runs
+        // proof_only_listener) no receiver drains it, so the socket reports
+        // `unavailable` for hop requests rather than hanging.
+        let (manual_hop_tx, manual_hop_rx) =
+            tokio::sync::mpsc::channel::<ados_radio::radio_cmd::ManualHopRequest>(8);
+        let radio_cmd_state = ados_radio::radio_cmd::CmdState {
+            hop_tx: manual_hop_tx,
+            operating_channel: operating_channel.clone(),
+        };
+        let radio_cmd_cancel = task_cancel.clone();
+        let radio_cmd_sock_path = ados_radio::paths::run_path("radio-cmd.sock");
+        let radio_cmd_server = tokio::spawn(async move {
+            tokio::select! {
+                r = ados_radio::radio_cmd::serve(
+                    radio_cmd_state,
+                    Path::new(&radio_cmd_sock_path),
+                ) => {
+                    if let Err(e) = r {
+                        tracing::warn!(error = %e, "radio_command_socket_serve_ended");
+                    }
+                }
+                _ = radio_cmd_cancel.notified() => {}
+            }
+        });
+
         let hop_cancel = task_cancel.clone();
         let hop_iface = iface_str.clone();
         let hop_proc = proc.clone();
@@ -1143,10 +1174,16 @@ async fn run_service(cfg: &WfbConfig, mut shutdown: watch::Receiver<bool>) {
                     hop_proof,
                     hop_proof_reference,
                     hop_operating,
+                    manual_hop_rx,
                     hop_cancel,
                 )
                 .await;
             } else {
+                // Auto-hop fully disabled: drain (and reject) the manual-hop
+                // channel so the command socket's `try_send` reports `unavailable`
+                // promptly instead of filling the buffer. Dropping the receiver
+                // here closes the channel, which the socket reads as unavailable.
+                drop(manual_hop_rx);
                 proof_only_listener(
                     &hop_key,
                     &device_id,
@@ -1184,6 +1221,7 @@ async fn run_service(cfg: &WfbConfig, mut shutdown: watch::Receiver<bool>) {
                     data_tx_exit.abort();
                     bitrate_ctrl.abort();
                     cmd_server.abort();
+                    radio_cmd_server.abort();
                     hop.abort();
                     beacon.abort();
                     proc.lock().await.kill_all().await;
@@ -1249,6 +1287,7 @@ async fn run_service(cfg: &WfbConfig, mut shutdown: watch::Receiver<bool>) {
             data_tx_exit.abort();
             bitrate_ctrl.abort();
             cmd_server.abort();
+            radio_cmd_server.abort();
             hop.abort();
             beacon.abort();
             proc.lock().await.kill_all().await;
@@ -1267,6 +1306,7 @@ async fn run_service(cfg: &WfbConfig, mut shutdown: watch::Receiver<bool>) {
         data_tx_exit.abort();
         bitrate_ctrl.abort();
         cmd_server.abort();
+        radio_cmd_server.abort();
         hop.abort();
         beacon.abort();
         proc.lock().await.kill_all().await;
